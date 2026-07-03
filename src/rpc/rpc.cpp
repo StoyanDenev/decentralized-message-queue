@@ -182,6 +182,32 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
                 if (!auth_err.empty()) {
                     response["result"] = nullptr;
                     response["error"]  = auth_err;
+                } else if (req.value("method", "") == "dapp_subscribe") {
+                    // v2.20 streaming takeover. Ordering matters:
+                    //   1. rate-limit (line-level consume above) — done
+                    //   2. HMAC auth — done (auth_err empty here)
+                    //   3. subscription weight: a long-lived connection
+                    //      is priced as ~100 requests up front so one
+                    //      client can't cheaply hoard subscriber slots
+                    //      (S-014 extension; 99 more on top of the one
+                    //      token already consumed for this line).
+                    //   4. hand the socket to the node; on success the
+                    //      subscriber's writer thread owns it and this
+                    //      session loop must never touch it again.
+                    // Validation failures reply through the normal
+                    // one-line error envelope and the session survives.
+                    std::string sub_err;
+                    if (!rate_limiter_.consume(peer_ip, 99.0)) {
+                        response["result"] = nullptr;
+                        response["error"]  = "rate_limited";
+                    } else if (node_.rpc_dapp_subscribe(
+                                   socket, req.value("params", json::object()),
+                                   sub_err)) {
+                        return;  // socket taken over — streaming
+                    } else {
+                        response["result"] = nullptr;
+                        response["error"]  = sub_err;
+                    }
                 } else {
                     response["result"] = dispatch(req);
                     response["error"]  = nullptr;

@@ -83,8 +83,15 @@ public:
 
     // Consume one token for `key`. Returns true on success; false if the
     // bucket is empty (caller should drop / reject the request).
-    bool consume(const std::string& key) {
-        if (!enabled()) return true;
+    bool consume(const std::string& key) { return consume(key, 1.0); }
+
+    // v2.20: weighted consume. A long-lived subscription is priced as
+    // `cost` tokens up front (RpcServer charges dapp_subscribe extra so
+    // one client can't cheaply exhaust SUBSCRIBER_MAX_PER_NODE slots).
+    // cost <= 0 is a no-op success. If the bucket holds fewer than
+    // `cost` tokens the call fails WITHOUT partial deduction.
+    bool consume(const std::string& key, double cost) {
+        if (!enabled() || cost <= 0.0) return true;
         std::lock_guard<std::mutex> lk(mu_);
         auto now = std::chrono::steady_clock::now();
 
@@ -111,8 +118,8 @@ public:
             b.tokens = std::min(burst_, b.tokens + elapsed_sec * rate_per_sec_);
             b.last   = now;
         }
-        if (b.tokens < 1.0) return false;
-        b.tokens -= 1.0;
+        if (b.tokens < cost) return false;
+        b.tokens -= cost;
         return true;
     }
 

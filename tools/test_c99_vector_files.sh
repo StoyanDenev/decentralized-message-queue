@@ -59,6 +59,7 @@ EXPECTED = {
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
+    "base64_strict.json",
 }
 
 try:
@@ -276,6 +277,73 @@ def chk_ed25519_verify_strict(vec, label):
         if not verified: return "PASS vector rejected by the strict oracle"
     elif vec["result"] == "FAIL":
         if verified: return "FAIL vector ACCEPTED by the strict oracle (not genuinely non-canonical)"
+    else:
+        return "unknown result %r" % vec["result"]
+
+def chk_base64_strict(vec, label):
+    # Independent strict RFC 4648 s4 decode oracle (no external dep — a
+    # from-scratch decoder, distinct from the C module the binary side
+    # tests and stricter than python's binascii, which tolerates non-
+    # canonical trailing bits). PASS must decode to decoded_hex; FAIL must
+    # be rejected. Pins the exact determ_base64_decode contract: standard
+    # alphabet only, len % 4 == 0, correct '=' padding, no mid-string '=',
+    # zero non-canonical trailing bits, no embedded whitespace/newline.
+    need(vec, ["result", "b64"], label)
+    ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    REV = {c: i for i, c in enumerate(ALPHABET)}
+    def strict_decode(s):
+        if len(s) % 4 != 0:
+            raise ValueError("length not a multiple of 4")
+        out = bytearray()
+        for i in range(0, len(s), 4):
+            quad = s[i:i+4]
+            pad = 0
+            if quad[3] == '=':
+                pad += 1
+                if quad[2] == '=':
+                    pad += 1
+            # '=' only allowed in the final quantum, tail positions
+            for j, ch in enumerate(quad):
+                is_last_quad = (i + 4 == len(s))
+                if ch == '=':
+                    if not is_last_quad:
+                        raise ValueError("'=' before final quantum")
+                    if j < 2:
+                        raise ValueError("'=' in position 0/1")
+                    if j == 2 and pad != 2:
+                        raise ValueError("'=' padding shape invalid")
+                elif ch not in REV:
+                    raise ValueError("non-alphabet char %r" % ch)
+            v = 0
+            for ch in quad:
+                v = (v << 6) | (0 if ch == '=' else REV[ch])
+            if pad == 0:
+                out += bytes([(v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF])
+            elif pad == 1:
+                if v & 0xFF:
+                    raise ValueError("non-canonical trailing bits (pad=1)")
+                out += bytes([(v >> 16) & 0xFF, (v >> 8) & 0xFF])
+            else:  # pad == 2
+                if v & 0xFFFF:
+                    raise ValueError("non-canonical trailing bits (pad=2)")
+                out += bytes([(v >> 16) & 0xFF])
+        return bytes(out)
+    b64 = vec["b64"]
+    try:
+        decoded = strict_decode(b64)
+        rejected = False
+    except ValueError:
+        decoded = None
+        rejected = True
+    if vec["result"] == "PASS":
+        if rejected:
+            return "PASS vector rejected by the strict oracle"
+        exp = unhex(vec["decoded_hex"], label + " decoded_hex")
+        if decoded != exp:
+            return "oracle decode %r != decoded_hex" % decoded.hex()
+    elif vec["result"] == "FAIL":
+        if not rejected:
+            return "FAIL vector ACCEPTED by the strict oracle (not malformed)"
     else:
         return "unknown result %r" % vec["result"]
 
@@ -766,6 +834,7 @@ CHECKERS = {
     "argon2id": chk_argon2id,
     "xchacha20_poly1305_decrypt": chk_xchacha20_poly1305_decrypt,
     "ed25519_verify_strict": chk_ed25519_verify_strict,
+    "base64_strict": chk_base64_strict,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

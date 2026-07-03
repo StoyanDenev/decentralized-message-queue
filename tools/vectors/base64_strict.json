@@ -1,0 +1,132 @@
+{
+  "primitive": "base64_strict",
+  "description": "two-sided gate corpus for the strict RFC 4648 SS4 base64 codec shipped in R50 at src/crypto/base64/base64.c (determ_base64_decode / determ_base64_encode): PASS b64 strings are mechanically generated from the raw bytes via python base64.b64encode (decoded_hex = those bytes); FAIL vectors pin one strictness class each - non-alphabet char, base64url chars, embedded whitespace/newline, missing padding, excess padding, '=' mid-string, NON-CANONICAL TRAILING BITS (the module rejects nonzero dirty bits in the final padded quantum, both pad=1 and pad=2 shapes - stricter than python binascii, which accepts QR==/QUF=), and length == 1 mod 4",
+  "source": "strict RFC 4648 s4 base64 decode corpus pinning determ_base64_decode (include/determ/crypto/base64/base64.h): PASS vectors mechanically generated via base64.b64encode; FAIL vectors are the strict-reject classes (non-alphabet, base64url chars, embedded whitespace/newline, missing/excess padding, mid-string '=', non-canonical trailing bits, len % 4). Oracle: gen_base64_strict.py 2026-07-03: from-scratch strict python decoder + binascii.a2b_base64 cross-check + compiled src/crypto/base64/base64.c harness (mingw gcc 13.2.0) - all three agree on all 18 vectors",
+  "generated": "2026-07-03",
+  "oracle": "gen_base64_strict.py 2026-07-03: from-scratch strict python decoder + binascii.a2b_base64 cross-check + compiled src/crypto/base64/base64.c harness (mingw gcc 13.2.0) - all three agree on all 18 vectors",
+  "_meta": {
+    "oracle": "gen_base64_strict.py (generating session scratchpad): from-scratch strict python decoder (alphabet table, length%4, padding placement, dirty-bit check) cross-checked against binascii.a2b_base64 on every PASS, PLUS the compiled C module itself (mingw gcc 13.2.0 harness over src/crypto/base64/base64.c) run over all 18 vectors - all three agree",
+    "oracle_version": "python 3.12.6 binascii + determ base64.c @ HEAD",
+    "oracle_note": "every PASS decodes identically under strict-python, binascii and the C module; every FAIL is rejected by strict-python (reason recorded in note) and returns -1 from determ_base64_decode; binascii ACCEPTS the two non-canonical vectors (QR== -> 41, QUF= -> 4141) - the C module is strictly stricter there, which is the contract this corpus pins",
+    "generated": "2026-07-03",
+    "results": "PASS = determ_base64_decode must return the byte count and bytes of decoded_hex (empty string -> 0 bytes); FAIL = determ_base64_decode must return -1 (reject)"
+  },
+  "vectors": [
+    {
+      "id": "pass-empty",
+      "note": "empty string decodes to zero bytes",
+      "result": "PASS",
+      "b64": "",
+      "decoded_hex": ""
+    },
+    {
+      "id": "pass-tail-1byte",
+      "note": "1-byte input, '==' padding shape",
+      "result": "PASS",
+      "b64": "Zg==",
+      "decoded_hex": "66"
+    },
+    {
+      "id": "pass-tail-2byte",
+      "note": "2-byte input, '=' padding shape",
+      "result": "PASS",
+      "b64": "Zm8=",
+      "decoded_hex": "666f"
+    },
+    {
+      "id": "pass-tail-3byte",
+      "note": "3-byte input, unpadded full quantum",
+      "result": "PASS",
+      "b64": "Zm9v",
+      "decoded_hex": "666f6f"
+    },
+    {
+      "id": "pass-multiblock",
+      "note": "31-byte multi-quantum value with 1-byte tail",
+      "result": "PASS",
+      "b64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pg==",
+      "decoded_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e"
+    },
+    {
+      "id": "pass-plus-slash",
+      "note": "value whose encoding exercises '+' and '/' alphabet chars",
+      "result": "PASS",
+      "b64": "+/+/",
+      "decoded_hex": "fbffbf"
+    },
+    {
+      "id": "pass-all-ff",
+      "note": "six 0xFF bytes (encodes to all '/')",
+      "result": "PASS",
+      "b64": "////////",
+      "decoded_hex": "ffffffffffff"
+    },
+    {
+      "id": "pass-all-00",
+      "note": "six 0x00 bytes (encodes to all 'A')",
+      "result": "PASS",
+      "b64": "AAAAAAAA",
+      "decoded_hex": "000000000000"
+    },
+    {
+      "id": "fail-non-alphabet",
+      "note": "non-alphabet character '*' (length still 0 mod 4)",
+      "result": "FAIL",
+      "b64": "Zm*v"
+    },
+    {
+      "id": "fail-base64url-chars",
+      "note": "base64url chars '-' and '_' rejected in standard mode",
+      "result": "FAIL",
+      "b64": "PDw_Pz8-"
+    },
+    {
+      "id": "fail-embedded-space",
+      "note": "whitespace (space) embedded, length still 0 mod 4",
+      "result": "FAIL",
+      "b64": "Zm9 vYg="
+    },
+    {
+      "id": "fail-embedded-newline",
+      "note": "newline embedded, length still 0 mod 4",
+      "result": "FAIL",
+      "b64": "Zm9v\nmFy"
+    },
+    {
+      "id": "fail-missing-padding",
+      "note": "missing '=' padding (canonical form is 'Zm8=')",
+      "result": "FAIL",
+      "b64": "Zm8"
+    },
+    {
+      "id": "fail-excess-padding",
+      "note": "excess padding: three '=' in one quantum",
+      "result": "FAIL",
+      "b64": "Q==="
+    },
+    {
+      "id": "fail-pad-mid-string",
+      "note": "'=' padding terminating a non-final quantum",
+      "result": "FAIL",
+      "b64": "Zg==Zg=="
+    },
+    {
+      "id": "fail-noncanon-pad2",
+      "note": "non-canonical trailing bits, pad=2: 'QR==' has nonzero low 4 bits of 'R' ('QQ==' is the canonical encoding of 0x41)",
+      "result": "FAIL",
+      "b64": "QR=="
+    },
+    {
+      "id": "fail-noncanon-pad1",
+      "note": "non-canonical trailing bits, pad=1: 'QUF=' has nonzero low 2 bits of 'F' ('QUE=' is the canonical encoding of 0x4141)",
+      "result": "FAIL",
+      "b64": "QUF="
+    },
+    {
+      "id": "fail-len-1-mod-4",
+      "note": "length 5 == 1 mod 4 (one leftover symbol)",
+      "result": "FAIL",
+      "b64": "Zm9vA"
+    }
+  ]
+}

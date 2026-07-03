@@ -14,6 +14,8 @@
 #include <shared_mutex>
 #include <optional>
 #include <map>
+#include <deque>
+#include <memory>
 #include <nlohmann/json.hpp>
 
 namespace determ::node {
@@ -300,6 +302,45 @@ public:
                                         uint64_t           from_height,
                                         uint64_t           to_height,
                                         const std::string& topic)   const;
+
+    // v2.20 Theme 7 Phase 7.4 (streaming subset): push-based DAPP_CALL
+    // delivery over a long-lived connection. Called by RpcServer AFTER
+    // the S-014 rate-limit + S-001 HMAC gates pass on a
+    // `dapp_subscribe` request.
+    //
+    // On success: takes over `socket` (spawns a dedicated writer
+    // thread; the RPC session loop must stop touching the socket and
+    // return), emits the newline-JSON frame stream (subscribed →
+    // catch-up dapp_call* → live → live-tail dapp_call/heartbeat*,
+    // every frame carrying a per-connection strictly-monotonic `seq`
+    // stamped by the single writer thread), returns true.
+    //
+    // On validation failure (unknown domain, since out of the
+    // [head-SUBSCRIBE_BACKLOG_MAX_BLOCKS, head] window, subscriber
+    // capacity reached): returns false with `error_out` set; the RPC
+    // session replies with the normal one-line error envelope and the
+    // connection stays a plain RPC session.
+    //
+    // Backpressure contract: per-subscriber queue is bounded
+    // (queue_max frames, SUBSCRIBER_BYTES_MAX bytes); on overflow the
+    // subscriber is KILLED (error{code=backpressure} then close) —
+    // never silently dropped-from, so a live connection's seq stream
+    // is gapless by construction (FB71 SubscriberBackpressure.tla
+    // machine-checks this; StreamingSubscriptionSoundness.md SS-1/SS-3).
+    bool rpc_dapp_subscribe(std::shared_ptr<asio::ip::tcp::socket> socket,
+                              const nlohmann::json& params,
+                              std::string& error_out);
+
+    // v2.20 operational limits (node-local RPC-layer knobs, NOT
+    // consensus constants — no genesis pinning).
+    static constexpr uint64_t SUBSCRIBER_QUEUE_MAX          = 1024;
+    static constexpr uint64_t SUBSCRIBER_QUEUE_MIN          = 4;
+    static constexpr uint64_t SUBSCRIBER_BYTES_MAX          = 16ull * 1024 * 1024;
+    static constexpr size_t   SUBSCRIBER_MAX_PER_NODE       = 256;
+    static constexpr uint64_t SUBSCRIBE_BACKLOG_MAX_BLOCKS  = 10000;
+    static constexpr uint64_t HEARTBEAT_INTERVAL_BLOCKS     = 50;
+    static constexpr uint64_t HEARTBEAT_MAX_BLOCKS          = 10000;
+    static constexpr int      SUBSCRIBER_IDLE_HEARTBEAT_SECS = 30;
 
     // Rev. 4: accept a fully-signed Transaction JSON (built externally, e.g.
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
@@ -651,6 +692,65 @@ private:
     std::atomic<bool>               save_stop_{false};
     void save_worker_loop();
     void enqueue_save();
+
+    // ── v2.20 streaming subscription state ─────────────────────────────
+    //
+    // One Subscriber per live `dapp_subscribe` connection. The block
+    // hook (on_block_finalized_for_subscribers, called inside
+    // apply_block_locked under state_mutex_'s unique_lock) enqueues
+    // frames; the per-subscriber writer thread (subscriber_session)
+    // drains them with synchronous socket writes and stamps `seq` —
+    // single writer, so per-connection seq is structurally monotonic.
+    //
+    // Lock ordering (must never be violated):
+    //   state_mutex_  →  subscribers_mutex_  →  Subscriber::mu
+    // The hook holds state_mutex_ and takes the other two briefly;
+    // the writer thread takes Subscriber::mu (and, for its idle
+    // heartbeat head read, state_mutex_ shared — never while holding
+    // Subscriber::mu).
+    struct Subscriber {
+        uint64_t                    id{0};
+        std::string                 sid_hex;          // random 16-byte token
+        std::string                 domain;
+        std::string                 topic;            // empty = all topics
+        uint64_t                    since{0};
+        uint64_t                    queue_max{SUBSCRIBER_QUEUE_MAX};
+        uint64_t                    heartbeat_blocks{HEARTBEAT_INTERVAL_BLOCKS};
+        // Guarded by mu: queue holds frames WITHOUT seq/sid (stamped at
+        // write time by the single writer). bytes_buffered is an
+        // approximation (payload size + fixed overhead per frame) —
+        // the cap is an operational bound, not an exact accounting.
+        std::deque<nlohmann::json>  queue;
+        uint64_t                    bytes_buffered{0};
+        uint64_t                    blocks_since_frame{0};
+        bool                        killed{false};
+        std::string                 kill_reason;
+        std::mutex                  mu;
+        std::condition_variable     cv;
+        // True while the writer thread is inside a blocking socket
+        // write; a killer closes the socket in that case to break the
+        // write (the stuck-writer release — FB71 liveness property).
+        std::atomic<bool>           in_write{false};
+        std::atomic<bool>           done{false};
+        std::shared_ptr<asio::ip::tcp::socket> socket;
+        std::thread                 thread;
+    };
+    std::map<uint64_t, std::shared_ptr<Subscriber>> subscribers_;
+    std::mutex                      subscribers_mutex_;
+    uint64_t                        next_subscriber_id_{1};
+    // Writer thread body. head_at_register is the chain height captured
+    // atomically with the map insert (under state_mutex_ shared — the
+    // hook holds unique, so capture+register cannot interleave with an
+    // apply): catch-up replays [since, head_at_register), the live queue
+    // covers [head_at_register, ∞) — a partition, no gap, no overlap.
+    void subscriber_session(std::shared_ptr<Subscriber> sub,
+                              uint64_t head_at_register);
+    // Per-block fan-out hook. Caller must hold state_mutex_ (unique).
+    void on_block_finalized_for_subscribers(const chain::Block& b);
+    // Marks every live subscriber killed with `reason`, notifies, and
+    // breaks in-flight writes; then joins all writer threads. Called
+    // from stop().
+    void shutdown_subscribers(const std::string& reason);
 };
 
 } // namespace determ::node

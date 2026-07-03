@@ -24,6 +24,7 @@
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
+#include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
 #include <determ/crypto.hpp>                  // §3.11: determ::c99 C++ wrapper over the C99 stack
 #include <determ/chain/genesis.hpp>
@@ -300,6 +301,9 @@ DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ doma
   determ dapp-info --domain <D>               Per-DApp record
   determ dapp-messages --domain <D> [--from H] [--to H] [--topic T]
                                               Retrospective DAPP_CALL poll (256 / page)
+  determ dapp-subscribe --domain <D> [--topic T] [--since H] [--heartbeat-blocks B]
+                        [--queue-max Q] [--max-frames N]
+                                              v2.20 streaming push (newline-JSON frames)
 
 )" << R"(Governance + sharded operation:
   determ submit-param-change ...              A5 PARAM_CHANGE tx (see CLI-REFERENCE.md §Governance)
@@ -5783,6 +5787,126 @@ int main(int argc, char** argv) {
             return 0;
         } catch (std::exception& e) {
             std::cerr << "dapp-messages query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    // v2.20 Theme 7 Phase 7.4 (streaming subset): push-based DAPP_CALL
+    // subscription. Opens a long-lived connection; the node streams
+    // newline-JSON frames (subscribed → catch-up dapp_call* → live →
+    // dapp_call/heartbeat*...) which this client prints one per line to
+    // stdout. Frames carry a per-connection monotonic `seq`; on an
+    // error frame (backpressure/shutdown/...) the client exits 2 —
+    // redial with --since <last observed block_index> to resume.
+    // Usage: determ dapp-subscribe --domain D [--topic T] [--since H]
+    //        [--heartbeat-blocks B] [--queue-max Q] [--max-frames N]
+    //        [--rpc-port N]
+    // --max-frames N: exit 0 after printing N frames (regression tests
+    // and bounded captures); default 0 = stream until the server closes.
+    // Auth: DETERM_RPC_AUTH_SECRET env var, same HMAC scheme as every
+    // other RPC verb (computed over the subscribe request only; the
+    // pushed frames ride the authenticated connection).
+    if (cmd == "dapp-subscribe") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        std::string domain, topic;
+        uint64_t since = UINT64_MAX, hb = 0, qmax = 0, max_frames = 0;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if      (a == "--domain" && i + 1 < sub_argc) domain = sub_argv[++i];
+            else if (a == "--topic"  && i + 1 < sub_argc) topic  = sub_argv[++i];
+            else if (a == "--since"  && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--since", sub_argv[++i], since)) return 1;
+            }
+            else if (a == "--heartbeat-blocks" && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--heartbeat-blocks", sub_argv[++i], hb)) return 1;
+            }
+            else if (a == "--queue-max" && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--queue-max", sub_argv[++i], qmax)) return 1;
+            }
+            else if (a == "--max-frames" && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--max-frames", sub_argv[++i], max_frames)) return 1;
+            }
+        }
+        if (domain.empty()) {
+            std::cerr << "dapp-subscribe requires --domain\n";
+            return 1;
+        }
+        try {
+            json params = {{"domain", domain}};
+            if (!topic.empty())       params["topic"] = topic;
+            if (since != UINT64_MAX)  params["since"] = since;
+            if (hb   > 0)             params["heartbeat_blocks"] = hb;
+            if (qmax > 0)             params["queue_max"] = qmax;
+            json req = {{"method", "dapp_subscribe"}, {"params", params}};
+            // Same HMAC scheme as rpc::rpc_call (v2.16): hex(HMAC-SHA-256(
+            // secret, method || "|" || params.dump())).
+            if (const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
+                env && *env) {
+                std::string sh = env;
+                std::vector<uint8_t> key;
+                for (size_t i = 0; i + 1 < sh.size(); i += 2) {
+                    unsigned b;
+                    if (std::sscanf(sh.c_str() + i, "%02x", &b) != 1) {
+                        std::cerr << "dapp-subscribe: DETERM_RPC_AUTH_SECRET "
+                                     "is not valid hex\n";
+                        return 1;
+                    }
+                    key.push_back(static_cast<uint8_t>(b));
+                }
+                std::string msg = std::string("dapp_subscribe") + "|" +
+                                  params.dump();
+                uint8_t mac[32];
+                if (determ_hmac_sha256(key.data(), key.size(),
+                        reinterpret_cast<const uint8_t*>(msg.data()),
+                        msg.size(), mac) != 0) {
+                    std::cerr << "dapp-subscribe: HMAC failure\n";
+                    return 1;
+                }
+                std::ostringstream mh;
+                mh << std::hex << std::setfill('0');
+                for (int i = 0; i < 32; ++i) mh << std::setw(2) << int(mac[i]);
+                req["auth"] = mh.str();
+            }
+
+            asio::io_context io;
+            asio::ip::tcp::socket sock(io);
+            asio::connect(sock, asio::ip::tcp::resolver(io).resolve(
+                                    "127.0.0.1", std::to_string(port)));
+            std::string line = req.dump() + "\n";
+            asio::write(sock, asio::buffer(line));
+
+            asio::streambuf buf;
+            std::error_code ec;
+            uint64_t printed = 0;
+            while (!ec) {
+                asio::read_until(sock, buf, '\n', ec);
+                if (ec) break;
+                std::istream is(&buf);
+                std::string frame;
+                while (std::getline(is, frame)) {
+                    if (frame.empty()) continue;
+                    std::cout << frame << "\n" << std::flush;
+                    ++printed;
+                    // A plain RPC error envelope (validation failure —
+                    // the socket was never taken over) or an error
+                    // frame (kill) both terminate with exit 2.
+                    auto j = json::parse(frame, nullptr, false);
+                    if (!j.is_discarded()) {
+                        if (j.contains("error") && !j["error"].is_null()) {
+                            std::cerr << "dapp-subscribe rejected: "
+                                      << j["error"] << "\n";
+                            return 2;
+                        }
+                        if (j.value("event", "") == "error") return 2;
+                    }
+                    if (max_frames > 0 && printed >= max_frames) return 0;
+                }
+            }
+            // Server closed (node shutdown without error frame reaching
+            // us, or network drop). Redial with --since to resume.
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "dapp-subscribe failed: " << e.what() << "\n";
             return 1;
         }
     }
@@ -13292,7 +13416,8 @@ int main(int argc, char** argv) {
                                 "chacha20_poly1305_decrypt.json",
                                 "argon2id.json",
                                 "xchacha20_poly1305_decrypt.json",
-                                "ed25519_verify_strict.json" };
+                                "ed25519_verify_strict.json",
+                                "base64_strict.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13496,6 +13621,29 @@ int main(int argc, char** argv) {
                                         dptr(salt), salt.size(),
                                         t_cost, m_cost, par) != 0
                         || out != tag) { ok=false; bad=name; break; }
+                } else if (prim == "base64_strict") {
+                    // R53: the strict RFC 4648 §4 decode contract of
+                    // determ_base64_decode. PASS = decodes to decoded_hex;
+                    // FAIL = the module MUST reject (non-alphabet, base64url
+                    // chars, embedded whitespace/newline, bad/excess padding,
+                    // mid-string '=', non-canonical trailing bits, len % 4).
+                    // The b64 input is carried literally (may embed a space
+                    // or newline for the whitespace FAIL classes).
+                    std::string b64 = v.value("b64", std::string{});
+                    std::string res = v.value("result", "");
+                    std::vector<uint8_t> out(b64.size() / 4 * 3 + 3);
+                    long n = determ_base64_decode(b64.data(), b64.size(),
+                                                  out.empty()?nullptr:out.data());
+                    if (res == "PASS") {
+                        if (n < 0) { ok=false; bad=name + " (valid base64 REJECTED)"; break; }
+                        if (hx(out.data(), (size_t)n)
+                            != v["decoded_hex"].get<std::string>()) {
+                            ok=false; bad=name + " (decoded bytes mismatch)"; break; }
+                    } else if (res == "FAIL") {
+                        if (n >= 0) { ok=false;
+                            bad=name + " (malformed base64 ACCEPTED — strict "
+                                       "decode contract broken)"; break; }
+                    } else { ok=false; bad=name + " (unknown result field)"; break; }
                 } else if (prim == "ed25519") {
                     auto seed = unhex(v["seed_hex"]); auto msg = unhex(v["msg_hex"]);
                     if (seed.size() != 32) { ok=false; bad=name + " (bad seed len)"; break; }

@@ -637,6 +637,11 @@ void Node::stop() {
         save_cv_.notify_all();
         if (save_thread_.joinable()) save_thread_.join();
 
+        // v2.20: wind down streaming subscribers — parked writers wake,
+        // deliver a final error{code=shutdown} frame, close; in-flight
+        // writes are broken by a socket close so the joins are bounded.
+        shutdown_subscribers("shutdown");
+
         // Final synchronous save covers two cases:
         //  1. save_pending_ was set when stop fired — worker exits
         //     loop before processing the flag.
@@ -1899,6 +1904,14 @@ void Node::apply_block_locked(const chain::Block& b) {
     // on restart — same correctness as pre-fix.
     enqueue_save();
 
+    // v2.20: fan out this block's DAPP_CALLs (+ heartbeat cadence) to
+    // streaming subscribers. Enqueue-and-notify only — no socket I/O on
+    // the apply hot path; the per-subscriber writer threads do the
+    // sending. Fires on ALL apply paths (self-produced, gossiped,
+    // sync), synchronously with the logical state change — subscribers
+    // see the chain's logical head, decoupled from disk persistence.
+    on_block_finalized_for_subscribers(b);
+
     // S-027: gate the per-block accept line behind log_quiet=false. Block
     // index + creator-count is chain-public state but the line dominates
     // log volume on a healthy chain (one per ~tx_commit_ms). Operators
@@ -3118,6 +3131,41 @@ json Node::rpc_dapp_info(const std::string& domain) const {
 // the last returned block_height and re-queries.
 namespace {
 constexpr size_t DAPP_MESSAGES_PAGE_LIMIT = 256;
+
+// v2.20 (S-043 one-formula rule): the DAPP_CALL payload topic decode
+// ([topic_len:u8][topic][ct_len:u32 LE][ct]) now has three consumers —
+// rpc_dapp_messages, the subscriber catch-up replay, and the per-block
+// subscriber fan-out hook. One helper; a formula fork here would make
+// polling and streaming disagree on which events match a topic filter.
+std::string dapp_payload_topic(const chain::Transaction& tx) {
+    if (tx.payload.empty()) return {};
+    uint8_t tl = tx.payload[0];
+    if (size_t(1) + tl > tx.payload.size()) return {};
+    return std::string(
+        reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+}
+
+// v2.20: the dapp_call frame body shared by catch-up replay and the
+// live fan-out hook (seq + sid are stamped by the single writer thread
+// at send time). block_index + tx_index are the client's idempotent
+// dedup key across reconnects.
+nlohmann::json make_dapp_call_frame(uint64_t block_index, size_t tx_index,
+                                       const chain::Transaction& tx,
+                                       const std::string& tx_topic) {
+    return {
+        {"event",       "dapp_call"},
+        {"block_index", block_index},
+        {"tx_index",    tx_index},
+        {"tx_hash",     to_hex(tx.hash)},
+        {"from",        tx.from},
+        {"to",          tx.to},
+        {"amount",      tx.amount},
+        {"fee",         tx.fee},
+        {"nonce",       tx.nonce},
+        {"topic",       tx_topic},
+        {"payload_hex", to_hex(tx.payload.data(), tx.payload.size())},
+    };
+}
 } // namespace
 
 json Node::rpc_dapp_messages(const std::string& domain,
@@ -3135,16 +3183,7 @@ json Node::rpc_dapp_messages(const std::string& domain,
         for (auto& tx : b.transactions) {
             if (tx.type != chain::TxType::DAPP_CALL) continue;
             if (tx.to != domain) continue;
-            // Optional topic filter: decode the payload header
-            // ([topic_len:u8][topic][ct_len:u32 LE][ct]).
-            std::string tx_topic;
-            if (!tx.payload.empty()) {
-                uint8_t tl = tx.payload[0];
-                if (size_t(1) + tl <= tx.payload.size()) {
-                    tx_topic.assign(
-                        reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
-                }
-            }
+            std::string tx_topic = dapp_payload_topic(tx);
             if (!topic.empty() && tx_topic != topic) continue;
             events.push_back({
                 {"block_height", h},
@@ -3174,6 +3213,324 @@ json Node::rpc_dapp_messages(const std::string& domain,
         {"count",        events.size()},
         {"events",       events},
     };
+}
+
+// ─── v2.20 streaming subscription ────────────────────────────────────────
+//
+// Design contract (StreamingSubscriptionSoundness.md; FB71 machine-checks
+// the backpressure protocol):
+//   SS-1: one dedicated writer thread per subscriber stamps `seq` at send
+//         time — per-connection seq is monotonic by construction.
+//   SS-2: head H is captured under state_mutex_ (shared) in the same
+//         critical section as the map insert; the hook holds unique, so
+//         no block can apply between capture and register. Catch-up scans
+//         [since, H); the queue covers [H, ∞). Partition — no gap/overlap.
+//   SS-3: queue overflow KILLS the subscriber (error frame + close),
+//         never drops frames — a live connection's stream is gapless.
+
+bool Node::rpc_dapp_subscribe(std::shared_ptr<asio::ip::tcp::socket> socket,
+                                 const json& params,
+                                 std::string& error_out) {
+    const std::string domain = params.value("domain", std::string{});
+    const std::string topic  = params.value("topic",  std::string{});
+    if (domain.empty()) {
+        error_out = "invalid_arg: domain is required";
+        return false;
+    }
+    uint64_t hb = params.value("heartbeat_blocks", HEARTBEAT_INTERVAL_BLOCKS);
+    if (hb < 1) hb = 1;
+    if (hb > HEARTBEAT_MAX_BLOCKS) hb = HEARTBEAT_MAX_BLOCKS;
+    // The client may request a SMALLER queue than the server cap (it
+    // declares its own read capacity); it can never raise the cap.
+    uint64_t qmax = params.value("queue_max", SUBSCRIBER_QUEUE_MAX);
+    if (qmax < SUBSCRIBER_QUEUE_MIN) qmax = SUBSCRIBER_QUEUE_MIN;
+    if (qmax > SUBSCRIBER_QUEUE_MAX) qmax = SUBSCRIBER_QUEUE_MAX;
+
+    auto sub = std::make_shared<Subscriber>();
+    uint64_t head_at_register = 0;
+    {
+        // Shared lock excludes the applying writer: the head we read and
+        // the map insert below are atomic w.r.t. apply_block_locked (SS-2).
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        uint64_t head = chain_.height();
+        if (chain_.dapp_registry().find(domain) ==
+            chain_.dapp_registry().end()) {
+            error_out = "invalid_arg: unknown DApp domain '" + domain + "'";
+            return false;
+        }
+        uint64_t since = params.value("since", head);
+        if (since > head) {
+            error_out = "invalid_arg: since=" + std::to_string(since) +
+                        " is beyond head=" + std::to_string(head);
+            return false;
+        }
+        if (head - since > SUBSCRIBE_BACKLOG_MAX_BLOCKS) {
+            error_out = "invalid_arg: since is more than " +
+                        std::to_string(SUBSCRIBE_BACKLOG_MAX_BLOCKS) +
+                        " blocks behind head — backfill via dapp_messages "
+                        "polling first";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        // Reap finished writer threads before the capacity check so a
+        // churny client can't wedge the slot count with dead entries.
+        for (auto it = subscribers_.begin(); it != subscribers_.end(); ) {
+            if (it->second->done.load()) {
+                if (it->second->thread.joinable()) it->second->thread.join();
+                it = subscribers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (subscribers_.size() >= SUBSCRIBER_MAX_PER_NODE) {
+            error_out = "rate_limited: subscriber capacity (" +
+                        std::to_string(SUBSCRIBER_MAX_PER_NODE) + ") reached";
+            return false;
+        }
+
+        uint8_t sid[16];
+        if (determ_rng_bytes(sid, sizeof sid) != 0) {
+            error_out = "internal: entropy unavailable";  // fail closed
+            return false;
+        }
+        sub->id               = next_subscriber_id_++;
+        sub->sid_hex          = to_hex(sid, sizeof sid);
+        sub->domain           = domain;
+        sub->topic            = topic;
+        sub->since            = since;
+        sub->queue_max        = qmax;
+        sub->heartbeat_blocks = hb;
+        sub->socket           = std::move(socket);
+        head_at_register      = head;
+        subscribers_[sub->id] = sub;
+    }
+    // Thread starts after the insert; the queue may already be
+    // accumulating (hook fires for blocks ≥ head_at_register) — the
+    // writer drains it only after catch-up, preserving order.
+    sub->thread = std::thread(
+        [this, sub, head_at_register] {
+            subscriber_session(sub, head_at_register);
+        });
+    return true;
+}
+
+void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
+                                 uint64_t head_at_register) {
+    // Bound every synchronous write: a client that stops reading stalls
+    // us at most this long before the write errors and the session dies
+    // (client redials with since=last_observed). Complements the
+    // backpressure kill, which handles queue growth while we're stalled.
+    {
+        const int timeout_ms = 5000;
+#ifdef _WIN32
+        DWORD tv = timeout_ms;
+        setsockopt(sub->socket->native_handle(), SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&tv), sizeof tv);
+#else
+        struct timeval tv{};
+        tv.tv_sec  = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(sub->socket->native_handle(), SOL_SOCKET, SO_SNDTIMEO,
+                   &tv, sizeof tv);
+#endif
+    }
+
+    uint64_t seq = 0;
+    // The ONLY place frames are written and seq is stamped (SS-1).
+    auto write_frame = [&](json f) -> bool {
+        f["seq"] = seq++;
+        f["sid"] = sub->sid_hex;
+        std::string line = f.dump() + "\n";
+        std::error_code ec;
+        sub->in_write.store(true);
+        asio::write(*sub->socket, asio::buffer(line), ec);
+        sub->in_write.store(false);
+        return !ec;
+    };
+    auto finish = [&](bool emit_error) {
+        if (emit_error) {
+            std::string reason;
+            {
+                std::lock_guard<std::mutex> lk(sub->mu);
+                reason = sub->kill_reason.empty() ? "shutdown"
+                                                    : sub->kill_reason;
+            }
+            // Best-effort: the socket may already be closed/broken.
+            write_frame({{"event", "error"}, {"code", reason}});
+        }
+        std::error_code ec;
+        sub->socket->close(ec);
+        sub->done.store(true);
+        sub->cv.notify_all();
+    };
+
+    // queue_max / heartbeat_blocks are echoed post-clamp so clients can
+    // see the effective values the server actually applied.
+    bool ok = write_frame({{"event", "subscribed"},
+                            {"domain", sub->domain},
+                            {"topic",  sub->topic},
+                            {"since",  sub->since},
+                            {"head",   head_at_register},
+                            {"queue_max", sub->queue_max},
+                            {"heartbeat_blocks", sub->heartbeat_blocks}});
+    if (!ok) { finish(false); return; }
+
+    // Catch-up replay: [since, head_at_register), chunked so the shared
+    // state lock is never held across socket writes.
+    constexpr uint64_t CHUNK = 256;
+    for (uint64_t h = sub->since; h < head_at_register; h += CHUNK) {
+        uint64_t end = std::min(head_at_register, h + CHUNK);
+        std::vector<json> frames;
+        {
+            std::shared_lock<std::shared_mutex> lk(state_mutex_);
+            for (uint64_t i = h; i < end; ++i) {
+                const auto& b = chain_.at(i);
+                for (size_t t = 0; t < b.transactions.size(); ++t) {
+                    const auto& tx = b.transactions[t];
+                    if (tx.type != chain::TxType::DAPP_CALL) continue;
+                    if (tx.to != sub->domain) continue;
+                    std::string tx_topic = dapp_payload_topic(tx);
+                    if (!sub->topic.empty() && tx_topic != sub->topic)
+                        continue;
+                    frames.push_back(make_dapp_call_frame(i, t, tx, tx_topic));
+                }
+            }
+        }
+        for (auto& f : frames)
+            if (!write_frame(std::move(f))) { finish(false); return; }
+        // A kill can land mid-catch-up (shutdown); honor it promptly.
+        {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (sub->killed) break;
+        }
+    }
+
+    if (!write_frame({{"event", "live"},
+                       {"block_index", head_at_register}})) {
+        finish(false);
+        return;
+    }
+
+    // Live tail: drain the hook-fed queue; idle-timeout heartbeat keeps
+    // dead-connection detection working on a chain that stopped moving.
+    for (;;) {
+        std::vector<json> batch;
+        bool killed = false;
+        {
+            std::unique_lock<std::mutex> lk(sub->mu);
+            sub->cv.wait_for(
+                lk, std::chrono::seconds(SUBSCRIBER_IDLE_HEARTBEAT_SECS),
+                [&] { return sub->killed || !sub->queue.empty(); });
+            killed = sub->killed;
+            while (!sub->queue.empty() && batch.size() < 64) {
+                batch.push_back(std::move(sub->queue.front()));
+                sub->queue.pop_front();
+            }
+            if (sub->bytes_buffered > 0 && sub->queue.empty())
+                sub->bytes_buffered = 0;
+        }
+        for (auto& f : batch)
+            if (!write_frame(std::move(f))) { finish(false); return; }
+        if (killed) { finish(true); return; }
+        if (batch.empty()) {
+            // Idle timeout. Head read takes the state lock — never held
+            // together with sub->mu (lock ordering).
+            uint64_t head;
+            {
+                std::shared_lock<std::shared_mutex> lk(state_mutex_);
+                head = chain_.height();
+            }
+            if (!write_frame({{"event", "heartbeat"},
+                               {"block_index", head},
+                               {"ts", now_unix()}})) {
+                finish(false);
+                return;
+            }
+        }
+    }
+}
+
+void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
+    // Caller holds state_mutex_ unique (apply_block_locked). Keep this
+    // cheap: no socket I/O, no blocking — enqueue + notify only.
+    std::lock_guard<std::mutex> sl(subscribers_mutex_);
+    if (subscribers_.empty()) return;
+    for (auto& [id, sub] : subscribers_) {
+        std::lock_guard<std::mutex> lk(sub->mu);
+        if (sub->killed || sub->done.load()) continue;
+        bool enqueued = false;
+        auto enqueue = [&](json f, uint64_t approx_bytes) -> bool {
+            if (sub->queue.size() + 1 > sub->queue_max ||
+                sub->bytes_buffered + approx_bytes > SUBSCRIBER_BYTES_MAX) {
+                // Kill-on-overflow (SS-3): never drop frames from a live
+                // stream. Clear the queue (the client must redial with
+                // since=last_observed anyway), break a stuck write.
+                sub->killed      = true;
+                sub->kill_reason = "backpressure";
+                sub->queue.clear();
+                sub->bytes_buffered = 0;
+                if (sub->in_write.load()) {
+                    std::error_code ec;
+                    sub->socket->close(ec);
+                }
+                return false;
+            }
+            sub->queue.push_back(std::move(f));
+            sub->bytes_buffered += approx_bytes;
+            enqueued = true;
+            return true;
+        };
+        for (size_t t = 0; t < b.transactions.size() && !sub->killed; ++t) {
+            const auto& tx = b.transactions[t];
+            if (tx.type != chain::TxType::DAPP_CALL) continue;
+            if (tx.to != sub->domain) continue;
+            std::string tx_topic = dapp_payload_topic(tx);
+            if (!sub->topic.empty() && tx_topic != sub->topic) continue;
+            enqueue(make_dapp_call_frame(b.index, t, tx, tx_topic),
+                    tx.payload.size() * 2 + 256);
+        }
+        if (!sub->killed) {
+            if (enqueued) {
+                sub->blocks_since_frame = 0;
+            } else if (++sub->blocks_since_frame >= sub->heartbeat_blocks) {
+                enqueue({{"event", "heartbeat"},
+                          {"block_index", b.index},
+                          {"ts", now_unix()}}, 256);
+                sub->blocks_since_frame = 0;
+            }
+        }
+        if (enqueued || sub->killed) sub->cv.notify_one();
+    }
+}
+
+void Node::shutdown_subscribers(const std::string& reason) {
+    std::vector<std::shared_ptr<Subscriber>> subs;
+    {
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        for (auto& [id, sub] : subscribers_) subs.push_back(sub);
+    }
+    for (auto& sub : subs) {
+        {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (!sub->killed) {
+                sub->killed      = true;
+                sub->kill_reason = reason;
+            }
+            // Break an in-flight write so the join below is bounded;
+            // parked writers wake via the notify and still deliver the
+            // final error frame.
+            if (sub->in_write.load()) {
+                std::error_code ec;
+                sub->socket->close(ec);
+            }
+        }
+        sub->cv.notify_all();
+    }
+    for (auto& sub : subs)
+        if (sub->thread.joinable()) sub->thread.join();
+    std::lock_guard<std::mutex> sl(subscribers_mutex_);
+    subscribers_.clear();
 }
 
 json Node::rpc_dapp_list(const std::string& prefix,
