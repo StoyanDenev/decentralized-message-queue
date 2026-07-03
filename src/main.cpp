@@ -13288,7 +13288,9 @@ int main(int argc, char** argv) {
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
-                                "aes_gcm_decrypt.json" };
+                                "aes_gcm_decrypt.json",
+                                "chacha20_poly1305_decrypt.json",
+                                "argon2id.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13407,6 +13409,48 @@ int main(int argc, char** argv) {
                     } else if (res == "FAIL") {
                         if (rc == 0) { ok=false; bad=name + " (tampered vector ACCEPTED)"; break; }
                     } else { ok=false; bad=name + " (unknown result field)"; break; }
+                } else if (prim == "chacha20_poly1305_decrypt") {
+                    // R51 decrypt-direction corpus (python cryptography
+                    // ChaCha20Poly1305 oracle + a from-scratch RFC 8439
+                    // second oracle at verification): PASS must decrypt to
+                    // plaintext_hex; FAIL (tampered tag/ct/aad, wrong key)
+                    // must be REJECTED.
+                    auto key = unhex(v["key_hex"]); auto nonce = unhex(v["nonce_hex"]);
+                    auto aad = unhex(v["aad_hex"]); auto ct = unhex(v["ciphertext_hex"]);
+                    auto tag = unhex(v["tag_hex"]);
+                    if (key.size() != 32 || nonce.size() != 12 || tag.size() != 16) {
+                        ok=false; bad=name + " (bad key/nonce/tag len)"; break; }
+                    std::string res = v.value("result", "");
+                    std::vector<uint8_t> pt(ct.size());
+                    int rc = determ_chacha20_poly1305_decrypt(key.data(), nonce.data(),
+                                dptr(aad), aad.size(), dptr(ct), ct.size(),
+                                tag.data(), pt.empty()?nullptr:pt.data());
+                    if (res == "PASS") {
+                        if (rc != 0
+                            || hx(dptr(pt), pt.size()) != v["plaintext_hex"].get<std::string>()) {
+                            ok=false; bad=name + " (expected decrypt success)"; break; }
+                    } else if (res == "FAIL") {
+                        if (rc == 0) { ok=false; bad=name + " (tampered vector ACCEPTED)"; break; }
+                    } else { ok=false; bad=name + " (unknown result field)"; break; }
+                } else if (prim == "argon2id") {
+                    // R51 Argon2id corpus (argon2-cffi oracle, itself proven
+                    // byte-equal to the 4 libsodium KATs test-argon2id-c99
+                    // pins): recompute the tag with the shipped C99
+                    // implementation and byte-compare.
+                    auto pwd  = unhex(v["password_hex"]);
+                    auto salt = unhex(v["salt_hex"]);
+                    auto tag  = unhex(v["tag_hex"]);
+                    uint32_t t_cost = v["t_cost"].get<uint32_t>();
+                    uint32_t m_cost = v["m_cost_kib"].get<uint32_t>();
+                    uint32_t par    = v["parallelism"].get<uint32_t>();
+                    size_t   outlen = v["outlen"].get<size_t>();
+                    if (tag.size() != outlen) { ok=false; bad=name + " (tag/outlen mismatch)"; break; }
+                    std::vector<uint8_t> out(outlen);
+                    if (determ_argon2id(out.data(), outlen,
+                                        dptr(pwd), pwd.size(),
+                                        dptr(salt), salt.size(),
+                                        t_cost, m_cost, par) != 0
+                        || out != tag) { ok=false; bad=name; break; }
                 } else if (prim == "ed25519") {
                     auto seed = unhex(v["seed_hex"]); auto msg = unhex(v["msg_hex"]);
                     if (seed.size() != 32) { ok=false; bad=name + " (bad seed len)"; break; }
@@ -26863,6 +26907,40 @@ int main(int argc, char** argv) {
                   && p1->leaf_count == p2->leaf_count
                   && p1->proof == p2->proof,
                   "determinism: 2 proofs for s:-key are byte-identical");
+        }
+
+        // === R51: counter-accessor <-> c: leaf correspondence ===
+
+        // 10. For each of the five A1 supply counters, the PUBLIC accessor
+        //     (chain.hpp genesis_total()/accumulated_*()) hashed as
+        //     SHA256(u64_be(v)) must equal the committed "k:c:"+name leaf's
+        //     value_hash. This is the exact correspondence the R51
+        //     rpc_state_proof `value_hex` field relies on (the RPC serves
+        //     the accessor value atomically with the proof, self-checking
+        //     the same equality server-side) — if const_leaf's encoding or
+        //     an accessor ever drifts, this pins it at unit-test time.
+        {
+            struct { const char* name; uint64_t v; } counters[5] = {
+                {"genesis_total",        c.genesis_total()},
+                {"accumulated_subsidy",  c.accumulated_subsidy()},
+                {"accumulated_slashed",  c.accumulated_slashed()},
+                {"accumulated_inbound",  c.accumulated_inbound()},
+                {"accumulated_outbound", c.accumulated_outbound()},
+            };
+            bool all = true; std::string bad;
+            for (auto& ct : counters) {
+                std::string full = std::string("k:c:") + ct.name;
+                std::vector<uint8_t> key(full.begin(), full.end());
+                auto p = c.state_proof(key);
+                crypto::SHA256Builder b;
+                b.append(ct.v);
+                if (!p.has_value() || p->value_hash != b.finalize()) {
+                    all = false; bad = ct.name; break;
+                }
+            }
+            check(all, all ? "R51: all 5 counter accessors hash to their committed k:c: leaf value_hash"
+                           : (std::string("R51: counter accessor '") + bad
+                              + "' does NOT match its k:c: leaf value_hash").c_str());
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

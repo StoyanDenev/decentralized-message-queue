@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install python cryptography (vector-gate oracle)
-        run: python3 -m pip install --user cryptography
+        run: python3 -m pip install --user cryptography argon2-cffi
       - name: Build + FAST + guards
         run: bash tools/ci_local.sh --jobs 4
 
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install python cryptography (vector-gate oracle)
-        run: python -m pip install cryptography
+        run: python -m pip install cryptography argon2-cffi
       - name: Build + FAST + guards
         shell: bash
         run: bash tools/ci_local.sh --jobs 4
@@ -45,6 +45,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install python cryptography (vector-gate oracle)
-        run: python3 -m pip install --user cryptography
+        run: python3 -m pip install --user cryptography argon2-cffi
       - name: UBSan build + run consensus subcommands
         run: bash tools/ci_local.sh --sanitize --jobs 4

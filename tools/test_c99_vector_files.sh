@@ -57,6 +57,7 @@ EXPECTED = {
     "p256_h2c.json", "p256_oprf.json",
     "sha2_cavp_sha256.json", "sha2_cavp_sha512.json", "aes_gcm_cavp.json",
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
+    "chacha20_poly1305_decrypt.json", "argon2id.json",
 }
 
 try:
@@ -190,6 +191,57 @@ def chk_aes256_gcm_decrypt(vec, label):
         if decrypted: return "FAIL vector DECRYPTED under the oracle (not genuinely tampered)"
     else:
         return "unknown result %r" % vec["result"]
+
+def chk_chacha20_poly1305_decrypt(vec, label):
+    # Decrypt-direction corpus, same contract as aes256_gcm_decrypt: PASS
+    # must decrypt to plaintext_hex under the oracle; FAIL must be rejected
+    # (proving the vector is genuinely tampered, not merely C99-rejected).
+    need(vec, ["result", "key_hex", "nonce_hex", "aad_hex",
+               "ciphertext_hex", "tag_hex"], label)
+    key   = unhex(vec["key_hex"], label + " key_hex")
+    nonce = unhex(vec["nonce_hex"], label + " nonce_hex")
+    aad   = unhex(vec["aad_hex"], label + " aad_hex")
+    ct    = unhex(vec["ciphertext_hex"], label + " ciphertext_hex")
+    tag   = unhex(vec["tag_hex"], label + " tag_hex")
+    if len(tag) != 16: return "tag_hex is not 16 bytes"
+    try:
+        got = ChaCha20Poly1305(key).decrypt(nonce, ct + tag, aad if aad else None)
+        decrypted = True
+    except Exception:
+        decrypted = False
+    if vec["result"] == "PASS":
+        if not decrypted: return "PASS vector failed to decrypt under the oracle"
+        pt = unhex(vec["plaintext_hex"], label + " plaintext_hex")
+        if got != pt: return "oracle plaintext != vector plaintext_hex"
+    elif vec["result"] == "FAIL":
+        if decrypted: return "FAIL vector DECRYPTED under the oracle (not genuinely tampered)"
+    else:
+        return "unknown result %r" % vec["result"]
+
+def chk_argon2id(vec, label):
+    # Recompute the Argon2id tag with argon2-cffi (the P-H-C reference
+    # bindings — the corpus oracle, itself proven byte-equal to the four
+    # libsodium KATs pinned in `determ test-argon2id-c99`). Missing
+    # argon2-cffi is a FAILURE, not a skip (same fail-closed posture as the
+    # `cryptography` dependency): a silently-skipped primitive would read
+    # as coverage. Install: pip install argon2-cffi.
+    need(vec, ["password_hex", "salt_hex", "t_cost", "m_cost_kib",
+               "parallelism", "outlen", "tag_hex"], label)
+    try:
+        from argon2.low_level import hash_secret_raw, Type
+    except Exception as e:
+        return "argon2-cffi not importable (%s) — pip install argon2-cffi" % e
+    pwd  = unhex(vec["password_hex"], label + " password_hex")
+    salt = unhex(vec["salt_hex"], label + " salt_hex")
+    tag  = unhex(vec["tag_hex"], label + " tag_hex")
+    got = hash_secret_raw(secret=pwd, salt=salt,
+                          time_cost=int(vec["t_cost"]),
+                          memory_cost=int(vec["m_cost_kib"]),
+                          parallelism=int(vec["parallelism"]),
+                          hash_len=int(vec["outlen"]),
+                          type=Type.ID)
+    if got != tag:
+        return "recomputed tag %s != vector %s" % (got.hex(), tag.hex())
 
 def chk_ed25519(vec, label):
     need(vec, ["seed_hex", "public_key_hex", "msg_hex", "signature_hex"], label)
@@ -649,6 +701,8 @@ CHECKERS = {
     "p256_oprf":          chk_p256_oprf,
     "frost_ed25519_rfc9591": chk_frost_ed25519_rfc9591,
     "aes256_gcm_decrypt": chk_aes256_gcm_decrypt,
+    "chacha20_poly1305_decrypt": chk_chacha20_poly1305_decrypt,
+    "argon2id": chk_argon2id,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

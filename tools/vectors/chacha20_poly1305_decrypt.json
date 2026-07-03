@@ -1,0 +1,108 @@
+{
+  "primitive": "chacha20_poly1305_decrypt",
+  "source": "generated decrypt-direction vectors for the C99 ChaCha20-Poly1305 AEAD (RFC 8439); every ciphertext/tag byte mechanically produced on 2026-07-03 by the independent oracle cryptography.hazmat.primitives.ciphers.aead.ChaCha20Poly1305 (python 'cryptography' 48.0.0) \u2014 keys/nonces/plaintexts/AAD are deterministic SHA-256 label streams (domain 'determ chacha20_poly1305_decrypt v1|<label>|<ctr32be>', see gen_chacha20_poly1305_decrypt.py provenance in the generating session), so the file is reproducible; every result=PASS vector was round-tripped through ChaCha20Poly1305.decrypt and every result=FAIL vector confirmed to raise InvalidTag before writing. Classes: 6 PASS decrypt with 12-byte nonce spanning ptlen {0,1,16,17,64,100} x AAD present/absent; 4 FAIL (tag 1-bit flip, ciphertext 1-bit flip, AAD 1-bit flip, wrong key \u2014 FAIL vectors omit plaintext_hex per the CAVP decrypt .rsp convention, a verifier must reject and release NO plaintext)",
+  "_meta": {
+    "oracle": "python cryptography.hazmat.primitives.ciphers.aead.ChaCha20Poly1305",
+    "oracle_version": "48.0.0",
+    "generated": "2026-07-03",
+    "results": "PASS = decrypt must return plaintext_hex; FAIL = decrypt must reject (no plaintext_hex field present)"
+  },
+  "vectors": [
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=0 aadlen=0",
+      "result": "PASS",
+      "key_hex": "b04f48ac1ce9dbce0005b6848c8b8795614ce1432655194939e73e0df7d7b3e9",
+      "nonce_hex": "83af88032b94becb2f9f02f6",
+      "aad_hex": "",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "b7e56d9b01bad1000de4fa672160a77d"
+    },
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=1 aadlen=16",
+      "result": "PASS",
+      "key_hex": "f4b4e5674ff04ee4133b91ead44f1efaee6aa04669066fe260ed31d8a41be6da",
+      "nonce_hex": "1d51cac7dbbe9a6f482c1d32",
+      "aad_hex": "85d40e6ed2a6a69504c52b0827a5070d",
+      "plaintext_hex": "8f",
+      "ciphertext_hex": "78",
+      "tag_hex": "dd1971bcdbf5fce321f151020651a61f"
+    },
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=16 aadlen=0",
+      "result": "PASS",
+      "key_hex": "d0fcef3bd75200d7d079e9735ea669e2fb06818357011959019acaf86eaa3dca",
+      "nonce_hex": "29a965d1a562b2531fa03132",
+      "aad_hex": "",
+      "plaintext_hex": "821461669f87b70bac2dbf4ed76e45ef",
+      "ciphertext_hex": "173e0d90cc6a6f05959b10b44de9912a",
+      "tag_hex": "26a77921162894fc3202bcbc188404b1"
+    },
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=17 aadlen=20",
+      "result": "PASS",
+      "key_hex": "83d38c16a32611898f06929a2d051a395c58f9eb231f0fcdf08e577ea3415acc",
+      "nonce_hex": "b645dd8e6f19f83b95773832",
+      "aad_hex": "3b7d87b8ac9141deff9744de897e336e22d2d69d",
+      "plaintext_hex": "60cab9706e01d9065a8e744b544f842a4f",
+      "ciphertext_hex": "80425369e5254fec30a149463b78757202",
+      "tag_hex": "a3f237454a334759fd1ac452b7d7bac9"
+    },
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=64 aadlen=32",
+      "result": "PASS",
+      "key_hex": "6f68c498fa2400a3c041287b680b29a0f4e46d69c6e9f014f496ff451a1f3524",
+      "nonce_hex": "3af5e2b7b58ae6cc3be0c13a",
+      "aad_hex": "fae8a12eabe55fb7775043119a76720d1be1e588f58060fa93c71458ea118785",
+      "plaintext_hex": "2d78cebcddb4adbfe69eab5e8f6f11b132d8ad6e144c7397dd6e4e8939fdd2376a747796b338481b66ed6a7f3652496edc32cb64813d8bc933edb320abd30cc3",
+      "ciphertext_hex": "69c986fe46b6116870e4dfc0daa79d3bfffd906c25eefae20e7cebe01627739cfe7fc09711cf866d5ed4d94c1a56c397933eeab70951b1a849d3d403c0537824",
+      "tag_hex": "ae38032d0db582cf44d2aaf83c38835d"
+    },
+    {
+      "name": "decrypt PASS noncelen=12 ptlen=100 aadlen=0",
+      "result": "PASS",
+      "key_hex": "dc4032955c2f5ccd7dbdd7c2d9f8446b2f7a77917be0fa4eeeea25d65b2bff00",
+      "nonce_hex": "d7bf009a05e69cdaf218b4c1",
+      "aad_hex": "",
+      "plaintext_hex": "8fbfd51bde4298887b164759a695aa2226bdfd7c00324460e3f57c4d1b2fece56a26038e1c7ceb6c665cd2e8058946facd10afb2a8a8001f65efca1ddae788474c02930ea8aa1369d35e65924c430db619f6e17fe6134d2c7c4f751e546029e56b2d7877",
+      "ciphertext_hex": "b157d84951cefe5a83d63eeaee976470805df39533bf0e7d1858a9819eea7fc412e4a385af5d48461891aeaec88969edeb8e432926e1b0411ff269f6bbae7026a924823fc3fc4c7b90aa2ac76a2e799ce323e33ec9e8b4952e5cdf3f37e31ce1e53ac7bb",
+      "tag_hex": "a8fbab760efaa379438ec69ac474678e"
+    },
+    {
+      "name": "decrypt FAIL tag tampered (bit 0 of tag[0] flipped; base noncelen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "95cef293df41cea5979108d9611cd9e610a943bc9570271d2e50c8d32e95feb8",
+      "nonce_hex": "d4f6b52a679a322e69bb998c",
+      "aad_hex": "e8a909b73427b1d5c20f79bcfd5b7ea9fc37ae07a006d967",
+      "ciphertext_hex": "efc3a9f3ee4e88797c1d1e890a996312b0af5a90fabe187e4ee01590c98d1659",
+      "tag_hex": "ddde70f78a015070c5d51a2d5c44ecc3"
+    },
+    {
+      "name": "decrypt FAIL ciphertext tampered (bit 7 of ct[0] flipped; base noncelen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "95cef293df41cea5979108d9611cd9e610a943bc9570271d2e50c8d32e95feb8",
+      "nonce_hex": "d4f6b52a679a322e69bb998c",
+      "aad_hex": "e8a909b73427b1d5c20f79bcfd5b7ea9fc37ae07a006d967",
+      "ciphertext_hex": "6fc3a9f3ee4e88797c1d1e890a996312b0af5a90fabe187e4ee01590c98d1659",
+      "tag_hex": "dcde70f78a015070c5d51a2d5c44ecc3"
+    },
+    {
+      "name": "decrypt FAIL AAD tampered (bit 0 of aad[0] flipped; base noncelen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "95cef293df41cea5979108d9611cd9e610a943bc9570271d2e50c8d32e95feb8",
+      "nonce_hex": "d4f6b52a679a322e69bb998c",
+      "aad_hex": "e9a909b73427b1d5c20f79bcfd5b7ea9fc37ae07a006d967",
+      "ciphertext_hex": "efc3a9f3ee4e88797c1d1e890a996312b0af5a90fabe187e4ee01590c98d1659",
+      "tag_hex": "dcde70f78a015070c5d51a2d5c44ecc3"
+    },
+    {
+      "name": "decrypt FAIL wrong key (bit 0 of key[31] flipped; ct/tag valid under the original key; base noncelen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "95cef293df41cea5979108d9611cd9e610a943bc9570271d2e50c8d32e95feb9",
+      "nonce_hex": "d4f6b52a679a322e69bb998c",
+      "aad_hex": "e8a909b73427b1d5c20f79bcfd5b7ea9fc37ae07a006d967",
+      "ciphertext_hex": "efc3a9f3ee4e88797c1d1e890a996312b0af5a90fabe187e4ee01590c98d1659",
+      "tag_hex": "dcde70f78a015070c5d51a2d5c44ecc3"
+    }
+  ]
+}
