@@ -12597,6 +12597,24 @@ int main(int argc, char** argv) {
               { "fix-msg", "rnd-msg" }, 1 },
             { "p256-sc-mul",    "determ_p256_scalar_mul_mod_n (secret = both operands)",
               { "fix-ops", "rnd-ops" }, 16 },
+            // ── tranche 4 (the design-§4 targets not yet registered; ghash
+            //    stays internal-only — exercised via gcm-tag-verify/aes-core) ──
+            { "x25519-base",    "determ_x25519_base (secret = scalar; inventory target 8)",
+              { "fix-scalar", "rnd-scalar" }, 1 },
+            { "sc-muladd",      "determ_ed25519_sc_muladd — the FROST z_i core (secret = all 3 operands; target 9)",
+              { "fix-ops", "rnd-ops" }, 64 },
+            { "hmac-sha512",    "determ_hmac_sha512 fixed msg (secret = 32B key; target 12)",
+              { "fix-key", "rnd-key" }, 8 },
+            { "blake2b-keyed",  "determ_blake2b keyed, 64B out (secret = 32B key; target 12)",
+              { "fix-key", "rnd-key" }, 8 },
+            { "pbkdf2",         "determ_pbkdf2_hmac_sha256, 8 iters (secret = 32B password; target 12)",
+              { "fix-pwd", "rnd-pwd" }, 1 },
+            { "frost-reconstruct", "determ_frost_reconstruct t=3 (secret = the shares; target 9)",
+              { "fix-shares", "rnd-shares" }, 8 },
+            { "frost-dkg",      "determ_frost_dkg_commit t=3 (secret = the polynomial; target 9)",
+              { "fix-poly", "rnd-poly" }, 1 },
+            { "frost-sign-partial", "determ_frost_sign_partial t=3 pos=0 (secret = share + nonces; target 9)",
+              { "fix-secrets", "rnd-secrets" }, 1 },
         };
 
         if (sub == "--list") {
@@ -12682,6 +12700,26 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 32; i++) if (s[i]) return;      // nonzero
             }
         };
+        // Ed25519-domain scalar for the FROST targets: LE, top nibble masked
+        // so the value stays < L (2^252 < L); pinned FIX values derive from
+        // fixseed/fixscalar under the same mask.
+        auto ed_rnd_scalar = [&](uint8_t* s) { rnd_fill(s, 32); s[31] &= 0x0f; };
+        // FROST fixtures: t=3 signer set {1,2,3}; signers 1..2 hold PINNED
+        // nonces (their D/E commitments are public protocol inputs); the
+        // probed secrets are signer 0's share + nonces. group_pk = any valid
+        // point (basemul of a pinned scalar) — the probe measures timing, not
+        // signature validity.
+        const int frost_xs[3] = { 1, 2, 3 };
+        uint8_t frost_fix3[3][32], frost_D[96], frost_E[96], frost_gpk[32];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 32; j++)
+                frost_fix3[i][j] = (uint8_t)(0x30 + 0x17 * i + j) & (j == 31 ? 0x0f : 0xff);
+        for (int i = 1; i < 3; i++) {                    // signers 1..2 pinned
+            determ_ed25519_point_basemul(frost_D + 32*i, frost_fix3[i]);
+            uint8_t etmp[32]; std::memcpy(etmp, frost_fix3[i], 32); etmp[0] ^= 0x55;
+            determ_ed25519_point_basemul(frost_E + 32*i, etmp);
+        }
+        determ_ed25519_point_basemul(frost_gpk, frost_fix3[0]);
         // Ed25519 group order L (little-endian) + the §5 target-7 boundary
         // scalars: L-1 (canonical max), L and 2L-1 (non-canonical).
         uint8_t Lle[32] = {0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
@@ -12701,6 +12739,7 @@ int main(int argc, char** argv) {
         // region (design §3.3), then `batch` back-to-back target calls inside.
         auto run_one = [&](size_t c) -> double {
             uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64], key[32];
+            uint8_t big96[96], Dl[96], El[96];   // FROST shares/poly/(share,d,e) + commitment lists
             // ---- setup (untimed) ----
             if (id == "ct-memcmp") {
                 std::memcpy(bufB, bufA, 32);
@@ -12712,13 +12751,32 @@ int main(int argc, char** argv) {
                 else rnd_fill(tag, 16);
             } else if (id == "ed25519-sign" || id == "ed25519-pubkey") {
                 if (c == 0) std::memcpy(seed, fixseed, 32); else rnd_fill(seed, 32);
-            } else if (id == "x25519") {
+            } else if (id == "x25519" || id == "x25519-base") {
                 if (c == 0) std::memcpy(scalar, fixscalar, 32); else rnd_fill(scalar, 32);
             } else if (id == "sha256-content") {
                 if (c == 0) std::memcpy(msg, fixmsg, 64); else rnd_fill(msg, 64);
             } else if (id == "aes-core" || id == "chacha20-core" || id == "poly1305-key"
-                       || id == "hmac-key") {
+                       || id == "hmac-key" || id == "hmac-sha512"
+                       || id == "blake2b-keyed" || id == "pbkdf2") {
                 if (c == 0) std::memcpy(key, key32, 32); else rnd_fill(key, 32);
+            } else if (id == "sc-muladd") {
+                if (c == 0) { std::memcpy(scalar, fixscalar, 32); scalar[31] &= 0x0f;
+                              std::memcpy(seed, fixseed, 32);     seed[31]   &= 0x0f;
+                              std::memcpy(key, key32, 32);        key[31]    &= 0x0f; }
+                else { ed_rnd_scalar(scalar); ed_rnd_scalar(seed); ed_rnd_scalar(key); }
+            } else if (id == "frost-reconstruct" || id == "frost-dkg") {
+                if (c == 0) for (int i = 0; i < 3; i++) std::memcpy(big96 + 32*i, frost_fix3[i], 32);
+                else        for (int i = 0; i < 3; i++) ed_rnd_scalar(big96 + 32*i);
+            } else if (id == "frost-sign-partial") {
+                // big96 = signer 0's (share, d, e); its public D[0]/E[0]
+                // commitments are recomputed here, OUTSIDE the timed region.
+                if (c == 0) { std::memcpy(big96, frost_fix3[0], 32);
+                              std::memcpy(big96 + 32, frost_fix3[0], 32); big96[34] ^= 0x3c;
+                              std::memcpy(big96 + 64, frost_fix3[0], 32); big96[67] ^= 0xc3; }
+                else { ed_rnd_scalar(big96); ed_rnd_scalar(big96 + 32); ed_rnd_scalar(big96 + 64); }
+                std::memcpy(Dl, frost_D, 96); std::memcpy(El, frost_E, 96);
+                determ_ed25519_point_basemul(Dl, big96 + 32);
+                determ_ed25519_point_basemul(El, big96 + 64);
             } else if (id == "sc-canonical") {
                 if (c == 0)      std::memset(scalar, 0, 32);
                 else if (c == 1) std::memcpy(scalar, Lm1, 32);
@@ -12766,6 +12824,17 @@ int main(int argc, char** argv) {
                                                     sink += determ_p256_hash_to_curve(p65, msg, 64,
                                                         (const uint8_t*)"DETERM-PROBE-DST", 16); }
                 else if (id == "p256-sc-mul")     { sink += determ_p256_scalar_mul_mod_n(o32, scalar, seed); }
+                else if (id == "x25519-base")       sink += determ_x25519_base(o32, scalar);
+                else if (id == "sc-muladd")       { determ_ed25519_sc_muladd(o32, scalar, seed, key); sink += o32[0]; }
+                else if (id == "hmac-sha512")     { sink += determ_hmac_sha512(key, 32, pt64, 64, out64); }
+                else if (id == "blake2b-keyed")   { sink += determ_blake2b(out64, 64, key, 32, pt64, 64); }
+                else if (id == "pbkdf2")          { sink += determ_pbkdf2_hmac_sha256(key, 32, aad, 8, 8, o32, 32); }
+                else if (id == "frost-reconstruct") sink += determ_frost_reconstruct(frost_xs, big96, 3, o32);
+                else if (id == "frost-dkg")       { uint8_t comm[96], pop[64];
+                                                    sink += determ_frost_dkg_commit(big96, 3, 1, comm, pop); }
+                else if (id == "frost-sign-partial") sink += determ_frost_sign_partial(
+                                                        frost_xs, 3, 0, big96, big96 + 32, big96 + 64,
+                                                        Dl, El, fixmsg, 64, frost_gpk, o32);
             }
             uint64_t t1 = now_ticks();
             return (double)(t1 - t0) / (double)batch;
