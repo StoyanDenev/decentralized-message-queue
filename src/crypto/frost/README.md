@@ -17,9 +17,15 @@ this directory is retained as an **additive C99 library** (CRYPTO-C99-SPEC §3.8
   v1.x commit-reveal protocol; block authentication uses K individual Ed25519
   signatures).
 - NOT part of the v1.1-locked formal-verification surface or any substrate bundle.
-- Post-launch DApp-layer use as a library is permitted (NOTICE §6); re-introduction
-  into the chain consensus path requires Stoyan Denev's explicit written sign-off
-  satisfying NOTICE §3.
+- **FROZEN as of 2026-07-03** (NOTICE §6 amendment, authority: Stoyan Denev):
+  retained for audit history + test-infrastructure coverage ONLY. The existing
+  tests/gates/probes stay green; no further feature, validation, vector, probe,
+  or documentation investment. The prospective-DApp-usefulness rationale was
+  withdrawn — DApp-layer use stays *permitted* (outside no-migrations scope)
+  but is not a retention reason.
+- Re-introduction into the chain consensus path requires Stoyan Denev's explicit
+  written sign-off satisfying NOTICE §3; un-freezing library investment requires
+  his explicit re-scoping.
 - `tools/test_frost_chain_guard.sh` is a doc-coherence ratchet that turns RED if
   any T1-authoritative doc re-asserts FROST as a chain-consensus primitive.
 
@@ -157,9 +163,11 @@ directory.
   `csize = 64 + msglen`, 256 MiB message cap) was audited exact-fit,
   `size_t`-overflow-safe, and freed on every path (audit §7).
 
-## 5. Known limitations / future work
+## 5. Known limitations / future work — ALL CLOSED BY FREEZE
 
-Only items the spec or audit actually records:
+**The module is FROZEN (2026-07-03, NOTICE §6 amendment).** The items below are
+retained as an accurate record of what the module does NOT do, but none is
+planned work — each is closed as WONTFIX-while-frozen rather than pending:
 
 - **RFC 9591 binding-factor interop** (spec §3.8; audit §7 documented
   non-goal): the binding-factor/H1..H5 derivation is self-consistent and the
@@ -172,8 +180,9 @@ Only items the spec or audit actually records:
   determ_frost_sign fed the RFC's own nonces yields a valid group-key
   signature. Byte-exact R/sig-share interop needs an RFC-mode binding-factor
   transcript (replacing the deliberate DETERM-FROST-RHO separation of §2) —
-  a protocol change that stays authorization-gated; the zcash/frost-ed25519
-  (Rust) cross-check remains open with it.
+  a protocol change that stays authorization-gated. CLOSED BY FREEZE: neither
+  the RFC-mode transcript nor the zcash/frost-ed25519 (Rust) cross-check is
+  planned.
 - **DKG complaint-phase / ceremony orchestration** (spec §3.8): this module ships
   the per-message verification predicates; broadcast, complaint handling, and
   epoch plumbing are caller-side. The previously tracked "wiring into

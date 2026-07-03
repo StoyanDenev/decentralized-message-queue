@@ -74,13 +74,16 @@ The FROST removal applied 2026-06-07 affects (changes recorded in `DECISION-LOG.
 - `CRYPTO-C99-SPEC.md` — FROST sections (§3.8+) marked NOT IN v1.1 CONSENSUS PATH; implementation retained for historical reference + audit completeness
 - Memory `dlt-no-migrations-constraint` — DSSO mechanism updated to DLT-A; FROST_DEVIATION_NOTICE referenced
 
-## 6. What remains of FROST in the repo
+## 6. What remains of FROST in the repo — **FROZEN** (amended 2026-07-03)
 
-The FROST C99 implementation under `src/crypto/frost/` (including DKG, threshold signing, PSS refresh, all audit findings remediated per `C99CryptoStackAudit.md`) is **retained in the codebase** for three reasons:
+The FROST C99 implementation under `src/crypto/frost/` (including DKG, threshold signing, PSS refresh, all audit findings remediated per `C99CryptoStackAudit.md`) is **retained FROZEN** for two reasons:
 
 1. The code shipped and was audited; deleting it would erase audit history.
-2. Future post-launch DApps may choose to use FROST as a DApp-layer primitive (DApp-level use is outside the no-migrations constraint — DApps can use whatever crypto they want, including FROST as a library; this NOTICE only constrains the *chain consensus path*).
-3. Removing the implementation would invalidate the test infrastructure (`test-frost-c99`) which exercises useful negative paths for the broader C99 crypto stack.
+2. Removing the implementation would invalidate test infrastructure (`test-frost-c99`, the RFC 9591 E.1 vector gate in both §3.13 halves, the frost timing-probe targets) which exercises useful negative paths for the broader C99 crypto stack.
+
+**Amendment (2026-07-03, authority: Stoyan Denev):** the original §6 cited a third retention reason — prospective DApp-layer usefulness ("future post-launch DApps may choose to use FROST as a DApp-layer primitive"). On review under §4 of this NOTICE, that claim was itself AI-introduced optionality with no existing consumer, and it is **withdrawn as a retention justification**. DApp-layer use remains *permitted* as a matter of scope (DApp-level code is outside the no-migrations constraint; this NOTICE constrains only the chain consensus path), but a hypothetical future consumer is not a reason to keep — or grow — the module; such a consumer could equally vendor an external implementation.
+
+**FROZEN means:** the existing tests, vector gates, probe targets, and coherence guards stay green (retention reasons 1-2 require a verified artifact, not a rotting one), and **no further feature, validation, vector, probe, or documentation investment** goes into the module. Specifically NOT planned: the RFC-mode binding-factor transcript (byte-exact RFC 9591 R/sig-share interop), the zcash/frost-ed25519 cross-check, RFC 9591 Appendix C vector expansion, and DKG ceremony orchestration. Un-freezing requires Stoyan Denev's explicit re-scoping; a DApp-layer consumer materializing does not by itself un-freeze it.
 
 **The clear separation:** FROST is available as a *library* under `src/crypto/frost/`. It is NOT part of the chain consensus path, NOT part of the v1.1-locked formal-verification surface, NOT part of any v1.1 substrate bundle. Any DApp post-launch wanting to use it as a library does so under DApp-layer authority, not chain authority.
 
