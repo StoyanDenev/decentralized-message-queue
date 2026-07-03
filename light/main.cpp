@@ -6279,18 +6279,42 @@ int cmd_supply_trustless(int argc, char** argv) {
             }
             std::string local_key_hex = to_hex(local_key.data(), local_key.size());
 
-            // Committed value for a counter is SHA256(u64_be(value)).
-            // Recompute it from the daemon's CLEARTEXT claim; the binding
-            // is the comparison against the proof's verified value_hash.
-            determ::crypto::SHA256Builder mb;
-            mb.append(claimed[ci]);
-            Hash expected_value_hash = mb.finalize();
-
             // Fetch the `c:` state-proof. The `c:` namespace is a SIMPLE
             // (ASCII-key) namespace: the daemon takes the bare counter
             // name as `key` and rebuilds "k:c:" + name internally.
             auto proof = rpc.call("state_proof",
                 {{"namespace", "c"}, {"key", name}});
+
+            // R51: prefer the proof's ATOMIC raw value (value_hex — served
+            // from the SAME locked snapshot as the proof + root) over the
+            // earlier chain_summary claim. This closes the height race that
+            // made the per-block counters (accumulated_subsidy advances
+            // every block) mismatch an HONEST daemon's later proof. Trust
+            // is UNCHANGED: the value below must still hash to the
+            // Merkle-verified value_hash — a daemon lying in value_hex is
+            // caught by exactly the same check as a lying chain_summary.
+            bool value_from_proof = false;
+            if (proof.contains("value_hex") && proof["value_hex"].is_string()) {
+                std::string vh = proof["value_hex"].get<std::string>();
+                if (vh.size() == 16) {
+                    try {
+                        auto vb = from_hex(vh);
+                        uint64_t v = 0;
+                        for (int i = 0; i < 8; i++) v = (v << 8) | vb[(size_t)i];
+                        claimed[ci] = v;
+                        value_from_proof = true;
+                    } catch (const std::exception&) { /* fall back to summary */ }
+                }
+            }
+
+            // Committed value for a counter is SHA256(u64_be(value)).
+            // Recompute it from the claimed value (atomic value_hex when the
+            // daemon serves it, chain_summary cleartext otherwise); the
+            // binding is the comparison against the proof's verified
+            // value_hash.
+            determ::crypto::SHA256Builder mb;
+            mb.append(claimed[ci]);
+            Hash expected_value_hash = mb.finalize();
 
             if (proof.contains("error") && !proof["error"].is_null()) {
                 std::string err = proof["error"].is_string()
@@ -6327,12 +6351,19 @@ int cmd_supply_trustless(int argc, char** argv) {
                 proof.value("value_hash", std::string{}));
             if (proof_value_hash != expected_value_hash) {
                 verdict = SupplyVerdict::UNVERIFIABLE;
-                detail  = "TAMPERED — daemon's chain_summary counter '" + name
+                detail  = std::string("TAMPERED — daemon's ")
+                        + (value_from_proof ? "atomic value_hex"
+                                            : "chain_summary cleartext")
+                        + " for counter '" + name
                         + "'=" + std::to_string(claimed[ci])
                         + " hashes to " + to_hex(expected_value_hash)
                         + " but the c: state-proof's value_hash is "
                         + to_hex(proof_value_hash)
-                        + " — daemon is lying about the counter OR the proof";
+                        + " — daemon is lying about the counter OR the proof"
+                        + (value_from_proof ? "" :
+                           " (or the chain advanced between chain_summary and"
+                           " the proof — a daemon serving the R51 atomic"
+                           " value_hex field does not have this race)");
                 all_ok = false;
                 break;
             }
@@ -6421,6 +6452,32 @@ int cmd_supply_trustless(int argc, char** argv) {
         }
 
         if (all_ok) {
+            // R51: the claimed_total comparison below is only SOUND when the
+            // daemon's total_supply cleartext is from the SAME height the
+            // five counters anchored at — on a live chain the pre-loop
+            // chain_summary is stale by the time the proofs anchor. Re-fetch
+            // and height-gate: compare only if the fresh summary's height
+            // equals the anchored height; otherwise skip the (optional)
+            // total cross-check rather than report a false VIOLATED. The
+            // five-counter A1 identity itself is computed purely from the
+            // committee-committed values and is unaffected.
+            if (have_claimed_total) {
+                auto summary2 = rpc.call("chain_summary",
+                                         {{"last_n", uint32_t{1}}});
+                bool fresh_ok = !(summary2.contains("error")
+                                  && !summary2["error"].is_null());
+                uint64_t h2 = fresh_ok ? summary2.value("height", uint64_t{0})
+                                       : 0;
+                if (fresh_ok && h2 == anchor_at
+                    && summary2.contains("total_supply")) {
+                    claimed_total = summary2.value("total_supply", uint64_t{0});
+                } else if (summary.value("height", uint64_t{0}) != anchor_at) {
+                    // Neither summary aligns with the anchored height —
+                    // the total cross-check would compare across heights.
+                    have_claimed_total = false;
+                }
+            }
+
             // All five counters verified against the same committee-anchored
             // root. Recompute the A1 closed-form identity entirely from the
             // committed values (chain.hpp expected_total). Underflow-safe:

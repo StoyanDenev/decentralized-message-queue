@@ -3371,7 +3371,12 @@ json Node::rpc_state_root() const {
 //   "leaf_count": <number>,          // total leaves at this height
 //   "proof": ["<hex-32>", ...],      // sibling hashes bottom-up
 //   "state_root": "<hex-32>",        // recomputed at the same instant
-//   "height": <number>               // current chain height
+//   "height": <number>,              // current chain height
+//   "value_hex": "<hex-8>",          // c: namespace only (R51): the raw
+//   "value_u64": <number>            //   u64_be counter value, ATOMIC with
+//                                    //   the proof (same state_mutex_ hold);
+//                                    //   present iff SHA256(value) matches
+//                                    //   value_hash (fail-closed self-check)
 // }
 //
 // state_root and height are returned together so the light client can
@@ -3459,7 +3464,7 @@ json Node::rpc_state_proof(const std::string& ns,
     json proof_arr = json::array();
     for (auto& h : p.proof) proof_arr.push_back(to_hex(h));
 
-    return {
+    json resp = {
         {"namespace",    ns},
         {"key",          key},
         {"key_bytes",    to_hex(p.key.data(), p.key.size())},
@@ -3470,6 +3475,43 @@ json Node::rpc_state_proof(const std::string& ns,
         {"state_root",   to_hex(chain_.compute_state_root())},
         {"height",       chain_.height()},
     };
+
+    // R51: ATOMIC raw value for the c: (supply-counter) namespace. The whole
+    // call holds state_mutex_, so the counter value below, the proof, the
+    // state_root, and the height are ONE snapshot — this closes the
+    // cleartext/proof height race that made a trustless supply read report
+    // TAMPERED against an HONEST daemon (the per-block-incrementing
+    // accumulated_subsidy advanced between a chain_summary fetch and the
+    // proof fetch; SupplyProofSoundness.md "Implementation status (R41)"
+    // names exactly this fix: "the state_proof RPC returning the raw value
+    // bytes alongside value_hash so cleartext and proof are atomic").
+    // FAIL-CLOSED: value_hex/value_u64 are attached only if the recomputed
+    // SHA256(u64_be(value)) equals the proof's value_hash — an encoding
+    // drift (S-043 class) silently turns the field OFF (clients fall back
+    // to the legacy chain_summary path) rather than ever serving a value
+    // inconsistent with the committed leaf.
+    if (ns == "c") {
+        uint64_t v = 0;
+        bool known = true;
+        if      (key == "genesis_total")        v = chain_.genesis_total();
+        else if (key == "accumulated_subsidy")  v = chain_.accumulated_subsidy();
+        else if (key == "accumulated_slashed")  v = chain_.accumulated_slashed();
+        else if (key == "accumulated_inbound")  v = chain_.accumulated_inbound();
+        else if (key == "accumulated_outbound") v = chain_.accumulated_outbound();
+        else known = false;
+        if (known) {
+            crypto::SHA256Builder b;
+            b.append(v);                       // u64 big-endian, = const_leaf
+            if (b.finalize() == p.value_hash) {
+                uint8_t be[8];
+                uint64_t t = v;
+                for (int i = 7; i >= 0; --i) { be[i] = (uint8_t)(t & 0xff); t >>= 8; }
+                resp["value_hex"] = to_hex(be, 8);
+                resp["value_u64"] = v;
+            }
+        }
+    }
+    return resp;
 }
 
 json Node::rpc_register() {
