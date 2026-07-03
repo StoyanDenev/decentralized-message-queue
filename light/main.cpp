@@ -149,7 +149,16 @@ void print_usage() {
         "\n"
         "Composite trustless reads (--genesis required):\n"
         "  verify-chain --rpc-port <N> --genesis <file> [--resume] [--persist [--state <path>]]\n"
+        "               [--track-registry]\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
+        "      --track-registry (R52) replays mid-chain REGISTER/DEREGISTER txs\n"
+        "      into the committee map (full blocks re-fetched pinned to the\n"
+        "      chained block_hash; activation heights via the SAME shared\n"
+        "      derive_registration_delay formula the full node applies) and\n"
+        "      makes the per-block committee check activity-window-aware —\n"
+        "      closing the genesis-frozen-committee limitation for chains with\n"
+        "      mid-chain registrations. Full from-genesis walk only\n"
+        "      (incompatible with --resume/--persist).\n"
         "      --persist caches the verified anchor (genesis pin + head height /\n"
         "      block_hash / state_root) to <path> (default: $DETERM_LIGHT_STATE,\n"
         "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
@@ -1446,6 +1455,7 @@ int cmd_verify_chain(int argc, char** argv) {
     bool have_port = false;
     bool persist = false;
     bool resume = false;
+    bool track_registry = false;   // R52: replay REGISTER/DEREGISTER txs
     std::string state_path;  // empty → default_state_path()
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -1454,6 +1464,7 @@ int cmd_verify_chain(int argc, char** argv) {
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if (a == "--persist") persist = true;
         else if (a == "--resume") resume = true;
+        else if (a == "--track-registry") track_registry = true;
         else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
         else {
             std::cerr << "verify-chain: unknown arg '" << a << "'\n";
@@ -1464,6 +1475,16 @@ int cmd_verify_chain(int argc, char** argv) {
         std::cerr << "verify-chain: --rpc-port and --genesis are required\n";
         return 1;
     }
+    // R52: registry replay reconstructs the registrant set from block 0 —
+    // a resumed suffix would skip the prefix's REGISTER txs, and the
+    // persisted anchor does not capture registry state, so a later --resume
+    // would silently lose it. Both are refused rather than degraded.
+    if (track_registry && (resume || persist)) {
+        std::cerr << "verify-chain: --track-registry requires the full "
+                     "from-genesis walk and is incompatible with "
+                     "--resume/--persist\n";
+        return 1;
+    }
     try {
         auto genesis = load_genesis(genesis_path);
         auto committee_seed = build_genesis_committee(genesis);
@@ -1471,6 +1492,29 @@ int cmd_verify_chain(int argc, char** argv) {
         if (!rpc.open()) {
             std::cerr << "verify-chain: " << rpc.last_error() << "\n";
             return 1;
+        }
+
+        if (track_registry) {
+            // Full from-genesis walk with REGISTER/DEREGISTER replay (see
+            // trustless_read.hpp for the trust model). The committee check
+            // becomes activity-window-aware: a creator is accepted only when
+            // the block index falls inside its [active_from, inactive_from).
+            std::string gh = anchor_genesis(rpc, genesis);
+            VerifiedChain vc =
+                verify_chain_to_head(rpc, committee_seed, gh,
+                                     /*track_registry=*/true);
+            std::cout << "OK\n"
+                      << "  genesis pin:        matches (" << gh << ")\n"
+                      << "  height:             " << vc.height << "\n"
+                      << "  headers verified:   " << vc.headers_verified << "\n"
+                      << "  block sigs:         " << vc.blocks_with_sigs_verified
+                      << " verified\n"
+                      << "  registry events:    " << vc.registry_events
+                      << " REGISTER/DEREGISTER tx(s) replayed\n"
+                      << "  head block_hash:    " << vc.head_block_hash << "\n";
+            if (!vc.head_state_root.empty())
+                std::cout << "  head state_root:    " << vc.head_state_root << "\n";
+            return 0;
         }
         // Anchor genesis + verify to head — full from genesis, or (--resume,
         // LSP-6) only the suffix above a cached anchor. anchored_head is the

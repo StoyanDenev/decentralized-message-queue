@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/chain/chain.hpp>
+#include <determ/chain/registration_delay.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -20,10 +21,12 @@ namespace fs = std::filesystem;
 using determ::crypto::sha256;
 using determ::util::json_require_array;
 
-// Registration / deregistration randomized delay window. Kept in sync with
-// node/registry.hpp REGISTRATION_DELAY_WINDOW; we duplicate the constant here
-// to avoid a circular include.
-static constexpr uint64_t REGISTRATION_DELAY_WINDOW = 10;
+// Registration / deregistration randomized delay: the formula + window now
+// live in include/determ/chain/registration_delay.hpp (R52 — extracted so
+// the light client's --track-registry replay shares the ONE definition;
+// S-043 single-formula discipline). Byte-identical to the former static
+// derive_delay here; the state-root goldens (test-consensus-vectors) and
+// test-randomized-delay pin it.
 
 // S-007: portable checked u64 addition. Returns false on overflow.
 // Used at every balance/counter mutation site that could realistically
@@ -34,16 +37,6 @@ static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
     if (a > UINT64_MAX - b) return false;
     *out = a + b;
     return true;
-}
-
-// Compute the randomized 1..REGISTRATION_DELAY_WINDOW delay, deterministically
-// derived from the block's cumulative_rand and the tx hash so all nodes agree
-// and the operator can't pick their own activation height.
-static uint64_t derive_delay(const Hash& cumulative_rand, const Hash& tx_hash) {
-    Hash seed = sha256(tx_hash, cumulative_rand);
-    uint64_t v = 0;
-    for (int b = 0; b < 8; ++b) v = (v << 8) | seed[b];
-    return 1 + (v % REGISTRATION_DELAY_WINDOW);
 }
 
 Chain::Chain(Block genesis) {
@@ -806,7 +799,7 @@ void Chain::apply_transactions(const Block& b) {
             RegistryEntry e;
             std::copy_n(tx.payload.begin(), 32, e.ed_pub.begin());
             e.registered_at = height;
-            e.active_from   = height + derive_delay(b.cumulative_rand, tx.hash);
+            e.active_from   = height + derive_registration_delay(b.cumulative_rand, tx.hash);
             e.inactive_from = UINT64_MAX;
             e.region        = std::move(region);
             __ensure_registrants();
@@ -849,7 +842,7 @@ void Chain::apply_transactions(const Block& b) {
             auto rit = registrants_.find(tx.from);
             if (rit == registrants_.end()) { sender.next_nonce++; break; }
 
-            uint64_t inactive_from = height + derive_delay(b.cumulative_rand, tx.hash);
+            uint64_t inactive_from = height + derive_registration_delay(b.cumulative_rand, tx.hash);
             __ensure_registrants();
             rit->second.inactive_from = inactive_from;
 

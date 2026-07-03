@@ -51,6 +51,30 @@ assert() {
   else echo "  FAIL: $2"; fail_count=$((fail_count + 1)); fi
 }
 
+echo "=== 0. R52 --track-registry offline CLI contract (no daemon needed) ==="
+# The registry replay reconstructs registrant state from block 0, so a
+# resumed suffix (or a persisted anchor that doesn't capture registry
+# state) is refused rather than degraded.
+OUT=$($DETERM_LIGHT verify-chain --rpc-port 1 --genesis /nonexistent.json \
+      --track-registry --resume 2>&1); RC=$?
+if [ $RC -ne 0 ] && echo "$OUT" | grep -q "incompatible with"; then
+  assert "true" "--track-registry + --resume refused (exit $RC)"
+else
+  assert "false" "--track-registry + --resume refused (rc=$RC out=$OUT)"
+fi
+OUT=$($DETERM_LIGHT verify-chain --rpc-port 1 --genesis /nonexistent.json \
+      --track-registry --persist 2>&1); RC=$?
+if [ $RC -ne 0 ] && echo "$OUT" | grep -q "incompatible with"; then
+  assert "true" "--track-registry + --persist refused (exit $RC)"
+else
+  assert "false" "--track-registry + --persist refused (rc=$RC out=$OUT)"
+fi
+if $DETERM_LIGHT 2>&1 | grep -q -- "--track-registry"; then
+  assert "true" "help text documents --track-registry"
+else
+  assert "false" "help text documents --track-registry"
+fi
+
 echo "=== 1. Init 3-node cluster ==="
 for n in 1 2 3; do
   $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1

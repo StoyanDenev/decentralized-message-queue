@@ -80,12 +80,34 @@ struct VerifiedChain {
                                   // if the chain hasn't activated S-033)
     size_t      headers_verified{0};
     size_t      blocks_with_sigs_verified{0};
+    size_t      registry_events{0};   // R52: REGISTER/DEREGISTER txs replayed
+                                      // (0 unless track_registry was on)
 };
 
+// R52 --track-registry: when `track_registry` is true the walk REPLAYS
+// mid-chain REGISTER/DEREGISTER transactions into a working registry map
+// (seeded from committee_seed with an always-active window), computing each
+// entry's active_from/inactive_from with the SAME shared formula the full
+// node's apply uses (include/determ/chain/registration_delay.hpp — one
+// definition, no mirrored reimplementation), and the per-block committee
+// check accepts a creator only when the block's index falls inside the
+// domain's [active_from, inactive_from) window. Tx bodies are not in the
+// stripped header stream, so every tx-bearing block (non-zero tx_root) is
+// re-fetched as a FULL block pinned to the already-chained block_hash (the
+// same trust step as the F-7 full-block fallback — a doctored body changes
+// the hash and fails closed). TRUST MODEL / caveat: the replay mirrors the
+// full node's structural application (payload >= 32 for REGISTER; unknown
+// domains ignored for DEREGISTER) but NOT its apply-time fee gate — a tx
+// that a full node skipped for apply-time fee failure would still enter the
+// light map (widening the known-registrant set, never forging a signature:
+// acceptance still requires a valid Ed25519 sig under the registered
+// pubkey). Default false = the pre-R52 genesis-frozen behavior, byte-for-
+// byte (existing callers unaffected).
 VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
-    const std::string& genesis_hash_hex);
+    const std::string& genesis_hash_hex,
+    bool track_registry = false);
 
 // LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
 // a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),

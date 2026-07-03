@@ -11,6 +11,7 @@
 #include "persist.hpp"          // anchored_head's LSP-6 resume path
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
+#include <determ/chain/registration_delay.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/types.hpp>
 #include <chrono>
@@ -108,7 +109,8 @@ VerifiedChain verify_chain_walk(
     const std::string& genesis_hash_hex,
     uint64_t start_from,
     const std::string& initial_prev_anchor,
-    uint64_t head_height) {
+    uint64_t head_height,
+    bool track_registry = false) {
 
     VerifiedChain vc;
 
@@ -118,6 +120,30 @@ VerifiedChain verify_chain_walk(
         committee_arr.push_back({{"domain", domain}, {"ed_pub", to_hex(pk)}});
     }
     json committee_json = json{{"members", committee_arr}};
+
+    // R52 --track-registry: a working registry map REPLAYED from the chain's
+    // REGISTER/DEREGISTER txs (see trustless_read.hpp for the trust model).
+    // Seeded from committee_seed with an always-active window — genesis
+    // creators carry inactive_from = UINT64_MAX on the full node too, so the
+    // seed matches the chain's initial registry state.
+    struct RegEntry { PubKey pub; uint64_t active_from; uint64_t inactive_from; };
+    std::map<std::string, RegEntry> registry;
+    if (track_registry) {
+        for (auto& [domain, pk] : committee_seed)
+            registry[domain] = RegEntry{pk, 0, UINT64_MAX};
+    }
+    // The committee a block at `idx` may draw creators from: the domains
+    // ACTIVE at idx (active_from <= idx < inactive_from). Without tracking,
+    // the static genesis-seeded committee_json (pre-R52 behavior, byte-
+    // for-byte).
+    auto committee_at = [&](uint64_t idx) -> json {
+        if (!track_registry) return committee_json;
+        json arr = json::array();
+        for (auto& [domain, e] : registry)
+            if (e.active_from <= idx && idx < e.inactive_from)
+                arr.push_back({{"domain", domain}, {"ed_pub", to_hex(e.pub)}});
+        return json{{"members", arr}};
+    };
 
     // Walk headers in pages of 256 (the daemon's HEADERS_PAGE_MAX).
     constexpr uint32_t PAGE = 256;
@@ -188,12 +214,13 @@ VerifiedChain verify_chain_walk(
             // but gating on `from` here makes the suffix walk's never-skip
             // property explicit and independent of that gate (defense in depth).
             if (idx == 0 && from == 0) continue;
-            auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
+            json cj = committee_at(idx);   // static unless --track-registry
+            auto vbs = verify_block_sigs(h, cj, /*bft=*/false);
             if (!vbs.ok) {
                 // BFT mode fallback: a BFT-escalated block has at most
                 // K - ceil(2K/3) sentinel-zero slots. Retry once with
                 // bft_mode=true and accept if it passes.
-                vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
+                vbs = verify_block_sigs(h, cj, /*bft=*/true);
             }
             if (!vbs.ok) {
                 // F-7 FULL-BLOCK FALLBACK. A cross-shard / reconciled (F2)
@@ -226,10 +253,10 @@ VerifiedChain verify_chain_walk(
                                 determ::chain::Block::from_json(full);
                             if (to_hex(fb.compute_hash()) == chained_hash) {
                                 auto fvbs = verify_block_sigs(
-                                    full, committee_json, /*bft=*/false);
+                                    full, cj, /*bft=*/false);
                                 if (!fvbs.ok)
                                     fvbs = verify_block_sigs(
-                                        full, committee_json, /*bft=*/true);
+                                        full, cj, /*bft=*/true);
                                 if (fvbs.ok) { vbs = fvbs; recovered = true; }
                             }
                         } catch (const std::exception&) {
@@ -247,6 +274,60 @@ VerifiedChain verify_chain_walk(
                 }
             }
             sigs_verified++;
+
+            // R52 --track-registry: replay this block's REGISTER/DEREGISTER
+            // txs into the working registry AFTER its sigs verified. Ordering
+            // is safe either way (the delay is >= 1, so an activation is
+            // strictly future-of-idx), but apply-after-verify matches the
+            // full node's produce-then-apply order. Tx bodies are stripped
+            // from the header stream, so a tx-bearing block (non-zero
+            // tx_root) is re-fetched FULL and pinned to the already-chained
+            // block_hash — a doctored body changes the hash, fail-closed.
+            if (track_registry && !(idx == 0 && from == 0)) {
+                std::string troot = h.value("tx_root", std::string{});
+                bool has_txs = !troot.empty()
+                               && troot.find_first_not_of('0') != std::string::npos;
+                if (has_txs) {
+                    std::string chained = h.value("block_hash", std::string{});
+                    json full = rpc.call("block", {{"index", idx}});
+                    if (chained.empty() || !full.is_object()
+                        || (full.contains("error") && !full["error"].is_null())) {
+                        throw std::runtime_error(
+                            "verify-chain --track-registry: cannot fetch full "
+                            "block " + std::to_string(idx)
+                            + " for registry replay (daemon refused)");
+                    }
+                    determ::chain::Block fb =
+                        determ::chain::Block::from_json(full);
+                    if (to_hex(fb.compute_hash()) != chained) {
+                        throw std::runtime_error(
+                            "verify-chain --track-registry: full block "
+                            + std::to_string(idx)
+                            + " does not hash to the chained block_hash "
+                              "(daemon served a doctored body)");
+                    }
+                    for (auto& tx : fb.transactions) {
+                        if (tx.type == determ::chain::TxType::REGISTER
+                            && tx.payload.size() >= 32) {
+                            PubKey pub{};
+                            std::copy_n(tx.payload.begin(), 32, pub.begin());
+                            uint64_t af = idx
+                                + determ::chain::derive_registration_delay(
+                                      fb.cumulative_rand, tx.hash);
+                            registry[tx.from] = RegEntry{pub, af, UINT64_MAX};
+                            vc.registry_events++;
+                        } else if (tx.type == determ::chain::TxType::DEREGISTER) {
+                            auto rit = registry.find(tx.from);
+                            if (rit != registry.end()) {
+                                rit->second.inactive_from = idx
+                                    + determ::chain::derive_registration_delay(
+                                          fb.cumulative_rand, tx.hash);
+                                vc.registry_events++;
+                            }
+                        }
+                    }
+                }
+            }
             if (!vbs.state_root_hex.empty()) {
                 last_state_root = vbs.state_root_hex;
             }
@@ -279,7 +360,8 @@ VerifiedChain verify_chain_walk(
 VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
-    const std::string& genesis_hash_hex) {
+    const std::string& genesis_hash_hex,
+    bool track_registry) {
 
     uint64_t head_height = fetch_head_height(rpc);
     if (head_height == 0) {
@@ -289,7 +371,7 @@ VerifiedChain verify_chain_to_head(
     }
     return verify_chain_walk(rpc, committee_seed, genesis_hash_hex,
                              /*start_from=*/0, /*initial_prev_anchor=*/"",
-                             head_height);
+                             head_height, track_registry);
 }
 
 ResumeResult verify_chain_from_anchor(
