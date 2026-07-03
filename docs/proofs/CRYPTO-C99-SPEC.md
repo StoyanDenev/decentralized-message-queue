@@ -478,9 +478,13 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 Shipped: `src/crypto/ed25519/ed25519.c` — constant-time table-free `gf[16]`
 (radix-2^16) field + cswap ladder, RFC 8032 sign/verify with the §5.1.3/§5.1.7
 canonicality gates, plus the exposed scalar/group primitives in
-`ed25519_group.h` that FROST builds on. Validated by `determ test-ed25519-c99`
-(byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1) and
-`determ test-ed25519-vectors`. See the status-header note for why the original
+`ed25519_group.h` that FROST builds on. Also shipped:
+`determ_ed25519_seed_to_x25519_sk` + `determ_ed25519_pk_to_x25519_pk` — the
+RFC 7748 birational Ed25519→X25519 key conversions, byte-equal to libsodium's
+`crypto_sign_ed25519_{sk,pk}_to_curve25519` (`tools/c99_libsodium_xval.c`), so
+a wallet can reuse one Ed25519 identity for X25519 ECDH. Validated by
+`determ test-ed25519-c99` (byte-equal vs OpenSSL `EVP_PKEY_ED25519` +
+RFC 8032 §7.1) and `determ test-ed25519-vectors`. See the status-header note for why the original
 plan below was deviated from (the ~30 KB ref10 base table is infeasible to
 vendor by hand; ref10/radix-2^51 remains a future throughput variant).
 Original plan (retained for the deviation record):
@@ -563,10 +567,11 @@ Original plan (retained for the deviation record):
   first-half data-independent (RFC 9106 §3.4). The intended consumer is the
   passphrase keyfile KDF. (Call-site reality: the v2.17/S-004 envelope today
   derives via OpenSSL `PKCS5_PBKDF2_HMAC` (`wallet/envelope.cpp::derive_key`);
-  the tree's only libsodium `crypto_pwhash` caller is the wallet OPAQUE stub
-  (`wallet/opaque_primitives.cpp::argon2id`) — `determ_argon2id` is the
-  byte-equal drop-in THERE, while an envelope PBKDF2→Argon2id switch is an
-  on-disk format change. See `src/crypto/argon2/README.md` §5.)
+  the tree's former only libsodium `crypto_pwhash` caller was the wallet OPAQUE
+  stub (`wallet/opaque_primitives.cpp::argon2id`), which was DELETED with the
+  liboprf track (DECISION-LOG.md 2026-07-03) — so `determ_argon2id` now has no
+  live caller, and its one prospective consumer is the envelope PBKDF2→Argon2id
+  switch, an on-disk format change. See `src/crypto/argon2/README.md` §5.)
 
 ### 3.7 secp256k1 + libsecp256k1-zkp — **DE-SCOPED** (2026-07-03)
 
@@ -812,20 +817,48 @@ Original plan (retained):
   any consumer gets the umbrella `determ/crypto.h` + header-only
   `determ/crypto.hpp` by linking. `determ` links it; the full c99 battery is
   validated against the lib-linked binary.
+- **libsodium drop — DONE (2026-07-03):** no Determ binary links libsodium.
+  The daemon (`determ`) and `determ-light` never did; the last consumer,
+  `determ-wallet`, migrated its ~200 call sites across `wallet/main.cpp`
+  (Ed25519 sign/verify/derive, X25519, `sodium_memzero`) to `determ::c99`
+  via an API-compatible shim (§3.15), and the OPAQUE stub — the tree's only
+  `crypto_pwhash` caller — was DELETED with the liboprf track (DECISION-LOG.md
+  2026-07-03). libsodium is no longer in any link line; `libsodium.a` is
+  retained only as the byte-equal cross-validation oracle
+  (`tools/c99_libsodium_xval.c`, §Q9 step 3).
 - Remaining: the per-module sub-library split (one aggregate target today —
   splitting buys nothing until a second consumer with a partial-module need
   exists); the cross-compilation matrix (x86-64 / ARM64, Linux/Windows/MINIX
-  — only MSVC x64 exercised so far); the libsodium drop (gated on §3.15: the
-  wallet links sodium — ~200 call sites across wallet/main.cpp
-  (Ed25519 sign/verify/derive, X25519, sodium_memzero) plus the OPAQUE stub;
-  the daemon and determ-light do NOT link sodium).
+  — only MSVC x64 exercised so far).
 
-### 3.15 Migration of existing callers (~5 days)
+### 3.15 Migration of existing callers — **SUBSTANTIALLY DONE for the wallet** (2026-07-03)
 
-- Refactor every libsodium call site to `determ::crypto::` API
-- Existing 152 in-process test subcommands continue passing
-- New `determ test-crypto-*` subcommands added per primitive
-- libsodium removed from build
+- **`determ-wallet` migrated off libsodium.** The daemon (`determ`) and
+  `determ-light` never linked sodium; the wallet was the last consumer, and
+  its libsodium call sites now run entirely on `determ::c99` via an
+  API-compatible shim in `wallet/main.cpp` (the shim re-exposes the libsodium
+  names the wallet used, 1:1, over the C99 primitives): Ed25519
+  sign/verify/pubkey (`determ_ed25519_sign` / `_verify` /
+  `_pubkey_from_seed`), X25519 (`determ_x25519`), the two new
+  Ed25519→X25519 conversions (`determ_ed25519_seed_to_x25519_sk` /
+  `_pk_to_x25519_pk`, §3.2), the Argon2id path, and `secure_zero`
+  (`determ_secure_zero`). Base64 moved to OpenSSL `EVP_Encode`/`EVP_Decode`.
+  `libsodium` is removed from the `determ-wallet` link line (`CMakeLists.txt`).
+- **OPAQUE / liboprf track DE-SCOPED (DECISION-LOG.md 2026-07-03).** The wallet
+  OPAQUE recovery stub + liboprf scaffolding were DELETED rather than migrated
+  (they were the tree's only `crypto_pwhash` caller); `create-recovery` /
+  `recover` now support only `--scheme passphrase` (Shamir + OpenSSL PBKDF2 +
+  AES-256-GCM envelope). This removes the last migration obligation that would
+  otherwise have needed the §3.9 OPRF path.
+- Every shim path is byte-equal to the libsodium behaviour it replaced
+  (`tools/c99_libsodium_xval.c` + the per-primitive `determ test-*-c99` gates);
+  existing in-process `determ test-*` subcommands and the wallet test suite
+  continue passing.
+- Remaining: no daemon/light migration is owed (they were never sodium
+  consumers); the only residual is opportunistic — the v2.17/S-004 keyfile
+  envelope still derives via OpenSSL PBKDF2 rather than the shipped
+  `determ_argon2id` (an on-disk format change, §3.6), independent of any
+  libsodium dependency.
 
 ### 3.16 Documentation (~3 days)
 

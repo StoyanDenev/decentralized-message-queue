@@ -1,15 +1,14 @@
 # FA12 — Wallet recovery soundness (A2)
 
-This document proves that Determ's wallet recovery primitive — distributed Shamir secret sharing layered with AEAD envelopes and (optionally) password-authenticated key exchange — preserves the user's Ed25519 seed under composable adversary models. The argument has four layers:
+This document proves that Determ's wallet recovery primitive — distributed Shamir secret sharing layered with passphrase-derived AEAD envelopes — preserves the user's Ed25519 seed under composable adversary models. The argument has three layers:
 
 1. **Shamir** — below-threshold compromise leaks zero information about the secret.
 2. **AEAD envelope** — per-share tampering is cryptographically detectable.
-3. **OPAQUE adapter** — password grind requires online interaction with at least `threshold` guardians.
-4. **Compositional** — the four-layer stack inherits the strongest of each layer's bounds.
+3. **Compositional** — the two-layer stack inherits the strongest of each layer's bounds, gated by passphrase entropy.
 
-The wallet ships in two modes: passphrase-direct (Phase 3) and OPAQUE-adapter-routed (Phase 7). Real OPAQUE (Phase 6, pending) replaces only the adapter's implementation; the recovery flow's structural argument is identical under stub and real OPAQUE.
+The wallet ships in a single recovery mode: **passphrase-direct**. Each share envelope is unwrapped with a key derived from the user's passphrase via PBKDF2-HMAC-SHA-256, using a per-envelope random salt, and sealed under AES-256-GCM with a guardian-bound AAD.
 
-**Phase numbering note.** This document uses the wallet's internal `wallet/PHASE6_PORTING_NOTES.md` phase numbers (3 = passphrase-direct, 5 = stub OPAQUE adapter, 6 = real `libopaque` integration pending MSVC porting, 7 = OPAQUE-adapter-routed assembly). The Phase-6 work item maps to **v2.14 (Real OPAQUE wallet recovery)** in `docs/V2-DESIGN.md`. The two naming schemes coexist because the Phase-N numbering is stable across the wallet refactor history and is referenced throughout this proof, while the v2.N numbering is the project's overall roadmap surface. A reader looking at the V2-DESIGN.md status table should read "v2.14 = WalletRecovery.md Phase 6 = real `libopaque`-vendored adapter."
+**De-scope note.** Earlier drafts of this proof documented a four-layer stack whose third layer was an OPAQUE guardian-AKE adapter (password-authenticated key exchange offering online-only, rate-limited password grind). That path — the `--scheme opaque` branch, `recovery::create_opaque`, `RecoverySetup.opaque_records`, the `opaque_adapter` interface, and the suite-tag mismatch gate — was **de-scoped and deleted** per `DECISION-LOG.md` (2026-07-03). Recovery is now passphrase-only. The soundness argument below covers exactly the shipped passphrase path.
 
 **Companion documents:** `Preliminaries.md` (F0); `EconomicSoundness.md` (FA11) for the chain-side seed-protection context.
 
@@ -17,29 +16,24 @@ The wallet ships in two modes: passphrase-direct (Phase 3) and OPAQUE-adapter-ro
 
 ## 1. Mechanism summary
 
-### Setup (`create-recovery` / `create_opaque`)
+### Setup (`create-recovery` → `recovery::create`)
 
-Inputs: 32-byte Ed25519 seed `s`, password `P`, threshold `T`, share count `N`, optional pubkey checksum `c_pub`.
+Inputs: 32-byte Ed25519 seed `s`, passphrase `P`, threshold `T`, share count `N`, optional pubkey checksum `c_pub`.
 
 1. Compute Shamir shares `(x_i, y_i)` for `i ∈ {1..N}` with threshold `T` over GF(2⁸) such that any `T` shares reconstruct `s` and any `T-1` reveal zero information.
-2. For each `i`:
-   - Derive an unwrap key `k_i`:
-     - **Passphrase scheme:** `k_i = PBKDF2-HMAC-SHA-256(P, salt_i, iters)` where `salt_i` is fresh per envelope.
-     - **OPAQUE scheme (stub):** `(record_i, export_key_i) = opaque_register(P, i)`; `k_i = export_key_i`.
-     - **OPAQUE scheme (real, Phase 6):** `(record_i, export_key_i) = OPAQUE_Register(P, gid=i)` per RFC 9807.
-   - Encrypt `env_i = AES-256-GCM(key=k_i, nonce=fresh, aad=DWR1‖i‖v, pt=y_i)`.
-3. Output `RecoverySetup{version, scheme, T, N, |s|, [x_i], [env_i], [record_i], c_pub}`.
+2. For each `i ∈ {0..N-1}`:
+   - Draw a fresh random salt `salt_i` and derive an unwrap key `k_i = PBKDF2-HMAC-SHA-256(P, salt_i, iters)`.
+   - Encrypt `env_i = AES-256-GCM(key=k_i, nonce=fresh, aad=DWR1‖i‖v, pt=y_i)`, where `v` is the setup version and `i` is the guardian id.
+3. Output `RecoverySetup{version, scheme="shamir-aead-passphrase", T, N, |s|, [x_i], [env_i], c_pub}`. Each `env_i` carries its own `salt_i`, `nonce`, `iters`, and `aad` inline (see `envelope::serialize`).
 
-### Recovery (`recover`)
+### Recovery (`recover` → `recovery::recover`)
 
-Inputs: `RecoverySetup`, password `P`, guardian indices `G ⊆ {0..N-1}` with `|G| ≥ T`.
+Inputs: `RecoverySetup`, passphrase `P`, guardian indices `G ⊆ {0..N-1}` with `|G| ≥ T`.
 
-1. Dispatch by scheme tag:
-   - Passphrase: `k'_i = PBKDF2(P, env_i.salt, iters)` for each `i ∈ G`.
-   - OPAQUE: `k'_i = opaque_authenticate(P, record_i, i)` for each `i ∈ G`; abort that slot if authentication fails.
-2. For each successful slot, decrypt `y'_i = AES-256-GCM-Decrypt(env_i, k'_i, aad)`. Abort that slot if AEAD tag check fails.
+1. For each `i ∈ G`, recompute `aad = DWR1‖i‖v` and derive `k'_i = PBKDF2(P, env_i.salt, env_i.iters)`.
+2. Decrypt `y'_i = AES-256-GCM-Decrypt(env_i, k'_i, aad)`. Skip that slot if the passed AAD does not match the envelope's stored AAD, or if the AEAD tag check fails (wrong passphrase or tampered slot).
 3. If `|{successful slots}| < T`, return failure.
-4. Apply Shamir Lagrange interpolation at `x = 0` over `T` recovered `(x_i, y'_i)` pairs to obtain candidate secret `s'`.
+4. Apply Shamir Lagrange interpolation at `x = 0` over the recovered `(x_i, y'_i)` pairs to obtain candidate secret `s'`.
 5. Optional: if `c_pub ≠ ∅` and `|s'| = 32`, recompute `c'_pub = SHA-256(Ed25519_pubkey(s'))`; reject if `c'_pub ≠ c_pub`.
 6. Return `s'`.
 
@@ -66,39 +60,24 @@ In plain terms: any `T-1` shares — even with cryptographic keys cleanly recove
 
 For any envelope `env_i` with `k_i` unknown to the adversary, any modification to the ciphertext, AAD, nonce, or tag causes `decrypt(env_i, k_i, aad)` to return failure with probability `≥ 1 - 2⁻¹²⁸`. Equivalently: a bit-flip on a share survives at most negligibly often.
 
-**Theorem T-17 (OPAQUE adapter substitution invariance).** Let `A_stub` (Phase 5) and `A_real` (Phase 6) denote two implementations of the `opaque_adapter` interface satisfying:
+**Theorem T-17 (End-to-end recovery soundness under composite adversary).** Let an adversary `A` simultaneously:
 
-- `register_password(P, i) → (record_i, export_key_i)` such that `export_key_i ∈ {0,1}²⁵⁶`.
-- `authenticate_password(P, record_i, i) → export_key_i` iff `P` matches the registration password.
+1. Compromise up to `T-1` guardians (recover their stored `(env_i, x_i)` data).
+2. Obtain the remaining `N-(T-1)` envelopes' ciphertext (e.g. from a leaked setup blob) but **not** the passphrase `P`.
 
-Then any RecoverySetup created with `A_stub` is recoverable under `A_stub` iff under `A_real` (i.e., the recovery flow does not depend on the adapter's *implementation*, only its API contract). The suite-tag mismatch gate prevents cross-adapter recovery (different suite IDs are not interchangeable).
+Under T-15, T-16, and:
 
-**Theorem T-18 (End-to-end recovery soundness under composite adversary).** Let an adversary `A` simultaneously:
-
-1. Compromise up to `T-1` guardians (recover their stored `(env_i, record_i)` data).
-2. Mount up to `Q` online authentication attempts against any single uncompromised guardian.
-
-Under T-15, T-16, T-17, and:
-
-- **(OPAQUE-soundness)** Real OPAQUE prevents offline password grind: an adversary holding `record_i` from a single guardian cannot test password guesses without interacting with that guardian (RFC 9807, Theorem 4.1).
+- **(PW-entropy)** The passphrase `P` is drawn from a distribution with `bits_password` bits of min-entropy.
 
 The probability of `A` recovering the Ed25519 seed satisfies:
 
 ```
-Pr[A recovers s] ≤ Q · 2^(-bits_password) + |G_active| · 2⁻¹²⁸
+Pr[A recovers s] ≤ Q · 2^(-bits_password) / KDF_cost  +  N · 2⁻¹²⁸
 ```
 
-where `bits_password` is the password entropy and `|G_active|` is the count of uncompromised guardians `A` attempted against.
+where `Q` is the adversary's offline PBKDF2 guess budget, `KDF_cost` is the per-guess PBKDF2-HMAC-SHA-256 work factor (`iters` HMAC evaluations), and `N` is the total envelope count.
 
-For a high-entropy password (`≥ 60 bits`) and modest `Q = 2^16` (rate-limited guardians), the bound is dominated by `2⁻⁴⁴` — strongly negligible for realistic adversary budgets.
-
-**Corollary T-18.1 (Stub-mode degradation).** Under the Phase 5 stub adapter, OPAQUE-soundness does **not** hold: a single compromised guardian who knows `record_i` can offline-grind the password by recomputing `Argon2id(P || i, salt, 32)` for each candidate `P`. The stub's bound degrades to:
-
-```
-Pr[A recovers s with 1 compromised guardian] ≤ Q · 2^(-bits_password) / Argon2id_cost
-```
-
-where `Q` here is the adversary's offline-attempt budget (no longer rate-limited by an online guardian). The wallet's `is_stub()` flag MUST be checked before deployment; the stub is a development scaffold, not a production cryptosystem.
+For a high-entropy passphrase (`≥ 80 bits`) the bound is dominated by `Q · 2⁻⁸⁰ / KDF_cost` — strongly negligible for any realistic offline adversary budget. Because recovery is passphrase-only, the passphrase entropy is the sole gate on the dominant attack path; there is no online guardian rate-limit backstop. Operators MUST provision the passphrase accordingly (see §7).
 
 ---
 
@@ -129,110 +108,83 @@ Direct from AES-256-GCM's strong unforgeability (SUF-CMA). The envelope's tag co
 
 Therefore `decrypt(modified_env, k_i, aad) = ⊥` with probability `≥ 1 - 2⁻¹²⁸`. ∎
 
-The wallet's apply-side guards add a second layer: AAD binding includes guardian_id + scheme version. A share modified by re-encrypting under a different (guardian_id, version) tuple has AAD mismatch on decrypt and fails T-16's binding check immediately.
+The wallet's recover-side guards add a second layer: the AAD binds `DWR1‖guardian_id‖version` (`recovery::make_aad`), and `envelope::decrypt` explicitly rejects any envelope whose stored AAD does not match the AAD recomputed for its slot. A share re-encrypted under a different `(guardian_id, version)` tuple therefore fails the AAD equality check before the GCM tag is even consulted, and fails T-16's binding check regardless.
 
 ---
 
-## 5. Proof of T-17 (adapter substitution)
-
-By the adapter API contract:
-
-- `register_password(P, i)` returns `(record, key)` where `key ∈ {0,1}²⁵⁶`.
-- `authenticate_password(P', record, i)` returns `key` iff `P' = P` (the registration password) **and** the linked adapter implementation matches the one that produced `record`.
-
-The recovery flow's only interaction with the adapter is via these two calls. The flow holds no internal state about the adapter's implementation; it consumes only the returned `key` bytes. Therefore swapping `A_stub` for `A_real` (or vice versa) is invisible to the recovery flow *provided the registration record was produced by the currently-linked adapter*.
-
-The suite-tag gate (`setup.scheme == "shamir-aead-opaque-" + opaque_adapter::suite_name()`) at recover-time enforces "registration adapter must match recovery adapter". Setups created under one adapter cannot recover under another, by design.
-
-Therefore the recovery flow is implementation-substitution invariant under matched suite tags. ∎
-
----
-
-## 6. Proof of T-18 (end-to-end composite)
+## 5. Proof of T-17 (end-to-end composite)
 
 Adversary `A` has access to:
 
-- `T-1` triples `{(env_i, record_i, x_i)} for compromised guardians.
-- `Q` total online authentication attempts against uncompromised guardians.
+- `T-1` pairs `{(env_i, x_i)}` for compromised guardians.
+- The remaining envelopes' ciphertext, but not the passphrase `P`.
 
-To recover `s`, `A` must obtain `T` valid shares. With `T-1` from compromise, `A` needs at least one more share from an uncompromised guardian. This requires either:
+To recover `s`, `A` must obtain `T` valid shares. With `T-1` from compromise, `A` needs at least one more share. This requires either:
 
-**Path 1: Brute-force the password.** Each guardian rate-limits authentication attempts, so `A` is bounded by `Q` attempts total. Each attempt succeeds with probability `1 / 2^{bits_password}` for a uniform random password. Probability of any success: `≤ Q / 2^{bits_password}`.
+**Path 1: Recover the passphrase.** Every envelope's unwrap key is `k_i = PBKDF2-HMAC-SHA-256(P, salt_i, iters)`. There is no online oracle to gate guessing — `A` may grind offline. Each guess costs one PBKDF2 evaluation (`iters` HMAC calls) and succeeds with probability `1 / 2^{bits_password}` for a passphrase of `bits_password` bits of min-entropy. Over an offline budget of `Q` guesses, the probability of any success is `≤ Q · 2^{-bits_password} / KDF_cost` when the budget is expressed in raw HMAC operations, i.e. the PBKDF2 iteration count multiplies the attacker's cost per guess.
 
-**Path 2: Forge an AEAD tag on an existing envelope.** By T-16, probability `≤ 2⁻¹²⁸` per envelope, `≤ |G_active| · 2⁻¹²⁸` over all active envelopes.
+**Path 2: Forge an AEAD tag on an existing envelope.** By T-16, probability `≤ 2⁻¹²⁸` per envelope, `≤ N · 2⁻¹²⁸` over all `N` envelopes.
 
 **Path 3: Break the Shamir bound (below-threshold leak).** By T-15, probability `= 0` (information-theoretic).
 
-Combined: `Pr[A recovers s] ≤ Q · 2^{-bits_password} + |G_active| · 2⁻¹²⁸`. ∎
+Combined: `Pr[A recovers s] ≤ Q · 2^{-bits_password} / KDF_cost + N · 2⁻¹²⁸`. ∎
 
-The dominant term is the brute-force path against the password; this is exactly where OPAQUE-soundness matters. Under real OPAQUE, the adversary cannot accelerate the brute-force via offline computation — every guess requires a fresh online interaction with a rate-limited guardian. Under the stub, this property collapses (T-18.1).
-
----
-
-## 7. What the proof does NOT cover
-
-- **Side-channel attacks on the wallet binary.** Memory dumps, swap-file leakage, malware-instrumented user input. Mitigation is operational (the wallet binary should use `sodium_mlock`, secure deletion, hardware-backed key storage) not protocol-level.
-- **Password equivocation against the user.** A phishing attacker who tricks the user into typing the password into a fake wallet binary can capture it. Mitigation is operational (software signing, distribution channel hygiene).
-- **Guardian collusion above threshold.** If `T` or more guardians collude AND know the user's password, they can reconstruct the seed without the user's involvement. This is a deployment-decision: pick `T` such that the cost of bribing `T` independent guardians is greater than the wallet's protected value.
-- **Recovery transcripts.** A passive network observer of the recovery flow learns which guardians participated (via timing) but, under real OPAQUE, learns nothing about the password or the shares. The stub provides this only inasmuch as TLS-style transport security wraps each guardian interaction (the adapter is transport-agnostic).
-- **Long-term forward secrecy.** Recovery setups are durable; their compromise at any future time enables (rate-limited) password grind against the surviving guardians. This is intrinsic to password-based recovery; the only mitigation is high password entropy.
+The dominant term is the passphrase-grind path. Because the recovery scheme is passphrase-only, the sole defenses on that path are (a) the passphrase's min-entropy and (b) the PBKDF2 iteration count, which linearly inflates the attacker's per-guess cost. There is no rate-limited online guardian to cap `Q`; `Q` is bounded only by the adversary's compute budget. This is intrinsic to offline passphrase-based recovery (see §6, forward secrecy).
 
 ---
 
-## 8. Concrete-security summary
+## 6. What the proof does NOT cover
 
-Under real OPAQUE (Phase 6) with default parameters:
+- **Side-channel attacks on the wallet binary.** Memory dumps, swap-file leakage, malware-instrumented user input. Mitigation is operational (secure deletion, hardware-backed key storage) not protocol-level.
+- **Passphrase equivocation against the user.** A phishing attacker who tricks the user into typing the passphrase into a fake wallet binary can capture it. Mitigation is operational (software signing, distribution channel hygiene).
+- **Guardian collusion above threshold.** If `T` or more guardians collude AND know the user's passphrase, they can reconstruct the seed without the user's involvement. This is a deployment decision: pick `T` such that the cost of colluding `T` independent guardians is greater than the wallet's protected value.
+- **Low-entropy passphrases.** The entire T-17 bound collapses toward `1` as `bits_password → 0`. Because recovery is passphrase-only with offline grinding, a weak passphrase is the dominant risk and there is no online rate-limit to compensate. The PBKDF2 iteration count is the only per-guess cost multiplier; high passphrase entropy is mandatory.
+- **Long-term forward secrecy.** Recovery setups are durable; their compromise at any future time enables offline passphrase grind against the leaked envelopes. This is intrinsic to passphrase-based recovery; the only mitigations are high passphrase entropy and a large PBKDF2 iteration count.
+
+---
+
+## 7. Concrete-security summary
+
+Under the shipped passphrase scheme with default parameters:
 
 | Adversary capability | Bound |
 |---|---|
-| `T-1` guardian compromise + `Q = 2¹⁶` online attempts vs. 1 guardian, password entropy 60 bits | `2^{-44}` |
-| `T-1` guardian compromise + `Q = 2¹⁶` online attempts vs. 1 guardian, password entropy 80 bits | `2^{-64}` |
+| `T-1` guardian compromise + offline grind, passphrase entropy 60 bits, `Q = 2⁴⁰` PBKDF2 guesses, `iters` normalized | `≈ 2^{-20}` (dominated by `Q · 2⁻⁶⁰`) |
+| `T-1` guardian compromise + offline grind, passphrase entropy 80 bits, `Q = 2⁴⁰` PBKDF2 guesses, `iters` normalized | `≈ 2^{-40}` |
 | AEAD tag forge on any single envelope | `2⁻¹²⁸` per attempt |
 | Below-threshold information leak | `0` (information-theoretic) |
 
-Under the Phase 5 stub adapter:
-
-| Adversary capability | Bound |
-|---|---|
-| 1 guardian compromise + offline Argon2id grind, password entropy 60 bits, attacker has 1000 GPU-years | `≈ 2^{-30}` |
-| 1 guardian compromise + offline grind, password entropy 80 bits, 1000 GPU-years | `≈ 2^{-50}` |
-
-The stub's bound is genuinely worse than real OPAQUE; the wallet's `is_stub()` flag MUST be checked before any deployment that protects value above `~ $10K USD-equivalent`.
+The bound is dominated by the passphrase-grind path in every row; the PBKDF2 iteration count `iters` multiplies the attacker's per-guess cost and so effectively shifts `Q` downward by `log₂(iters)` bits. A passphrase of `≥ 80` bits of min-entropy keeps the seed strongly protected against any realistic offline adversary budget.
 
 ---
 
-## 9. Implementation cross-reference
+## 8. Implementation cross-reference
 
 | Component | Source |
 |---|---|
 | Shamir SSS over GF(2⁸) | `wallet/shamir.cpp` |
-| AEAD envelope (AES-256-GCM via OpenSSL EVP) | `wallet/envelope.cpp` |
+| AEAD envelope (AES-256-GCM + PBKDF2-HMAC-SHA-256 via OpenSSL EVP) | `wallet/envelope.cpp` |
 | Recovery setup composition + serialization | `wallet/recovery.cpp` |
-| OPAQUE adapter interface | `wallet/opaque_adapter.hpp` |
-| Phase 5 stub implementation | `wallet/opaque_adapter.cpp` |
-| libsodium primitives wrapper | `wallet/opaque_primitives.{hpp,cpp}` |
-| CLI surface | `wallet/main.cpp` |
-| Regression tests | `tools/test_wallet_*.sh` (6 suites, 56 assertions) |
+| CLI surface (`create-recovery` / `recover`, `--scheme passphrase`) | `wallet/main.cpp` |
+| Regression tests | `tools/test_wallet_*.sh` |
 
 A reviewer can confirm soundness by:
 
-1. Reading `shamir::split` and `combine` — confirm GF(2⁸) coefficient generation uses `RAND_bytes` and the Lagrange interpolation is correct (single-byte arithmetic; the entire module is ~120 lines).
-2. Reading `envelope::encrypt` / `decrypt` — confirm the OpenSSL EVP calls use AES-256-GCM with 12-byte nonce, 16-byte tag, AAD bound correctly.
-3. Reading `recovery::create_opaque` — confirm the adapter's `export_key` is used as the AEAD password input verbatim.
-4. Reading `opaque_adapter.hpp` — confirm the API contract is stable across Phase 5 (stub) and Phase 6 (real libopaque).
-5. Confirming `is_stub()` returns true today; the wallet's deployment documentation should refuse to advance until it flips false.
+1. Reading `shamir::split` and `combine` — confirm GF(2⁸) coefficient generation uses `RAND_bytes` and the Lagrange interpolation is correct (single-byte arithmetic; the entire module is compact).
+2. Reading `envelope::encrypt` / `decrypt` — confirm the OpenSSL EVP calls use AES-256-GCM with 12-byte nonce, 16-byte tag, per-envelope random salt, `PKCS5_PBKDF2_HMAC` key derivation, and AAD bound correctly (including the recover-side AAD equality check).
+3. Reading `recovery::create` — confirm the passphrase is threaded verbatim into `envelope::encrypt` as the KDF input, and that `RecoverySetup` carries only `{version, scheme, threshold, share_count, secret_len, guardian_x, envelopes, pubkey_checksum}`.
+4. Confirming `recovery::recover` skips (does not abort) individual slots on AAD/tag failure and reconstructs only when `≥ T` slots succeed, with the optional pubkey-checksum gate as a final defense-in-depth check.
 
 ---
 
-## 10. Conclusion
+## 9. Conclusion
 
-T-15 + T-16 + T-17 + T-18 establish that Determ's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
+T-15 + T-16 + T-17 establish that Determ's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
 
 - Below-threshold compromise leaks **zero** information about the seed.
-- AEAD prevents undetected share tampering (`2⁻¹²⁸` per attempt).
-- Recovery flow is implementation-invariant under the OPAQUE adapter substitution.
-- The dominant attack path is password brute-force, gated by OPAQUE's online rate-limited interaction property under real Phase 6 OPAQUE.
+- AEAD prevents undetected share tampering (`2⁻¹²⁸` per attempt), with guardian-bound AAD blocking cross-slot substitution.
+- The dominant attack path is offline passphrase grind, gated solely by passphrase min-entropy and the PBKDF2 iteration count.
 
-The Phase 5 stub adapter is a development scaffold; the formal bounds tighten substantially once Phase 6 vendors real libopaque. The wallet's `is_stub()` API surface is explicitly designed to gate against accidental production use of the stub.
+The OPAQUE guardian-AKE path was de-scoped and deleted (`DECISION-LOG.md`, 2026-07-03); recovery is passphrase-only. Deployments MUST provision high-entropy passphrases, because there is no online rate-limit backstop on the grind path.
 
-This completes formal coverage of every v1.x safety-critical mechanism in Determ, chain and wallet alike.
+This completes formal coverage of the wallet recovery mechanism in Determ.

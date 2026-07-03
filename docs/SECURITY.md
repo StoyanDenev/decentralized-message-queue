@@ -231,7 +231,7 @@ Test infrastructure updated: `tools/test_bearer.sh` and `tools/test_adversarial.
 
 **Option 2 mitigation landed in-session.** `account create --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) wraps the keyfile in an AES-256-GCM envelope keyed via PBKDF2-HMAC-SHA-256 (600k iterations, 16-byte salt, 96-bit nonce). The encrypted file format is a header line (`DETERM-ACCOUNT-V1 <address>`) followed by the canonical envelope blob (dot-separated hex fields). AAD binds the public address so a tampered envelope cannot be substituted with another account's encrypted blob.
 
-The envelope crypto (`wallet/envelope.cpp`, originally for the wallet binary's recovery-share encryption) is now also linked into the main `determ` binary. The cross-binary scope is limited to the symmetric-crypto primitive — no wallet-state (recovery shares, OPAQUE state) crosses the boundary; the daemon's address space isolation from wallet-secret material is preserved.
+The envelope crypto (`wallet/envelope.cpp`, originally for the wallet binary's recovery-share encryption) is now also linked into the main `determ` binary. The cross-binary scope is limited to the symmetric-crypto primitive — no wallet-state (recovery shares, decrypted seed material) crosses the boundary; the daemon's address space isolation from wallet-secret material is preserved.
 
 Read-back: `determ account decrypt --in <file> --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) decrypts and emits the plaintext JSON (privkey + address) to stdout. AEAD tag verification fails clean (clear error message) on wrong passphrase or tampered file.
 
@@ -1458,13 +1458,13 @@ The SHA-256^T delay-hash function has been removed from the protocol. The select
 
 ### M-I — Wallet recovery primitive shipped (A2)
 
-**New in this session.** Greenfield `determ-wallet` binary providing distributed seed recovery via T-of-N Shamir SSS layered with AES-256-GCM AEAD envelopes. Two schemes: `passphrase` (default; PBKDF2 directly off the password) and `opaque` (routes through an OPAQUE adapter). The Phase 5 stub adapter (default v1.x) uses libsodium Argon2id directly — gated by `is_stub()` against production use until Phase 6 real libopaque vendoring lands. Pubkey-checksum gate prevents silent reconstruction corruption.
+**New in this session.** Greenfield `determ-wallet` binary providing distributed seed recovery via T-of-N Shamir SSS layered with AES-256-GCM AEAD envelopes. Single scheme: `passphrase` (`shamir-aead-passphrase`) — each share envelope's unwrap key is derived from the user's passphrase via PBKDF2-HMAC-SHA-256 with a per-envelope random salt, sealed under AES-256-GCM with a guardian-bound AAD. All wallet crypto runs on `determ-crypto-c99` (the libsodium-free C99 primitive layer) with OpenSSL EVP for the AEAD/KDF envelope; the wallet links **no libsodium** — like the daemon and `determ-light`, it links OpenSSL + `determ-crypto-c99` only. Pubkey-checksum gate prevents silent reconstruction corruption. (An earlier `--scheme opaque` OPAQUE-adapter branch — non-production, self-flagged as an offline-grindable stub — was de-scoped and deleted per `DECISION-LOG.md` 2026-07-03, along with the `oprf`/`opaque` CLI commands; recovery is now passphrase-only.)
 
 **Binary isolation:** the wallet handles secret material; the chain daemon never has access to user seeds.
 
-**Soundness proof:** `docs/proofs/WalletRecovery.md` (FA12). Real-OPAQUE bound: `Q · 2^-bits_password + N · 2⁻¹²⁸` (rate-limited online grind). Stub bound: offline-grindable per compromised guardian — NOT for production.
+**Soundness proof:** `docs/proofs/WalletRecovery.md` (FA12). The dominant attack path is offline passphrase grind, bounded by `Q · 2^-bits_password / KDF_cost`; the PBKDF2 iteration count inflates per-guess cost and passphrase min-entropy is the sole gate (no online guardian rate-limit backstop) — operators must provision passphrase entropy accordingly.
 
-**Integration tests:** 6 wallet test suites (56/56 assertions PASS): shamir, envelope, recovery, oprf-smoke, opaque-adapter, opaque-recovery.
+**Integration tests:** 3 wallet recovery test suites (shamir, envelope, recovery) plus the broader wallet suite.
 
 ### M-J — Full formal-verification track shipped
 

@@ -25113,11 +25113,9 @@ void print_usage() {
         "                                             1 args/parse error, 2 verify MISMATCH.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
-        "                  [--scheme {passphrase|opaque}]\n"
+        "                  [--scheme passphrase]\n"
         "  recover --in <file> --password <str>       Reconstruct the secret\n"
         "          [--guardians <i,j,k,...>]\n"
-        "                   --password <str> --guardian-id <0..255> [--record <hex>]\n"
-        "                                             Exercise the OPAQUE adapter (stub in Phase 5)\n"
         "  version                                    Print version banner\n"
         "\n"
         "Pending (Phase 4):\n"
@@ -25200,10 +25198,9 @@ int main(int argc, char** argv) {
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "version") {
-        std::cout << "determ-wallet v1.x Phase 5 (Shamir + AEAD envelope + "
-                     "passphrase recovery + libsodium primitives + "
-                     "OPAQUE adapter interface [stub]; libopaque vendoring "
-                     "pending Phase 6)\n";
+        std::cout << "determ-wallet v1.x (Shamir + OpenSSL AEAD envelope + "
+                     "passphrase recovery; crypto via determ::c99, "
+                     "libsodium-free)\n";
         return 0;
     }
     if (cmd == "help" || cmd == "--help" || cmd == "-h") {

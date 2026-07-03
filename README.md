@@ -683,7 +683,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.json [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.json --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block JSON minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.json [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a JSON array of `{domain, ed_pub}` (same shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
 
-**Distributed identity provider (DSSO).** The K-of-K committee is structurally a mutual-distrust operator group — a natural fit for distributed-IdP designs in the literature. v2.25 + v2.26 (V2-DESIGN.md Theme 9) specify a "Sign-In With Determ" substrate using **T-OPAQUE** (threshold-OPAQUE, replacing the original SRP in PAKE-as-black-box framework designs) over the committee, paired with on-chain key rotation. RPs register via the existing v2.18 DAPP_REGISTER channel; challenges and signed assertions ride v2.19 DAPP_CALL. The framework's authentication ceremony depends on v2.10 (threshold randomness / BLS infrastructure) and v2.14 (single-server OPAQUE wallet recovery) shipping first. See `docs/V2-DESIGN.md` Theme 9 for the full architecture.
+**Distributed identity provider (DSSO).** The K-of-K committee is structurally a mutual-distrust operator group — a natural fit for distributed-IdP designs in the literature. v2.25 + v2.26 (V2-DESIGN.md Theme 9) specify a "Sign-In With Determ" substrate using **T-OPAQUE** (threshold-OPAQUE, replacing the original SRP in PAKE-as-black-box framework designs) over the committee, paired with on-chain key rotation. RPs register via the existing v2.18 DAPP_REGISTER channel; challenges and signed assertions ride v2.19 DAPP_CALL. The framework's authentication ceremony depends on v2.10 (threshold randomness / BLS infrastructure) shipping first. See `docs/V2-DESIGN.md` Theme 9 for the full architecture.
 
 **Equivocation handling — fully closed-loop:**
 
@@ -922,33 +922,32 @@ Soundness is proven in `docs/proofs/Governance.md` (FA10).
 
 ## 18.5. Wallet recovery (A2)
 
-A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing, AEAD envelopes, and an OPAQUE adapter — solving key loss without weakening on-chain trust.
+A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing and passphrase-derived AEAD envelopes — solving key loss without weakening on-chain trust. The wallet is libsodium-free: all its crypto runs on the daemon's `determ::c99` stack plus OpenSSL (base64 / PBKDF2 / AES-256-GCM), exactly like the `determ` daemon.
 
 **Threat model.** The wallet's recovery flow protects against:
 
 - Loss of any (N − T) of N guardians (threshold reconstruction survives partial unavailability).
 - Compromise of any (T − 1) guardians (information-theoretic: zero bits of the seed leak below threshold).
 - Tampering with any individual envelope (AEAD detects single-bit modifications with probability ≥ 1 − 2⁻¹²⁸).
-- Offline password grind against an isolated record (real OPAQUE only — gated to v2.14; the development-stub adapter is offline-grindable and is `is_stub()`-flagged against production use).
+- Casual inspection of a captured envelope (the PBKDF2 work factor raises the cost of an offline password grind; note that with the passphrase scheme an isolated record remains offline-grindable, so passwords must carry real entropy).
 
 **Layered design.** Each layer addresses a distinct threat:
 
 1. **Shamir SSS over GF(2⁸)** — splits the Ed25519 seed into N shares; any T reconstruct, any T − 1 reveal nothing.
 2. **AEAD envelope (AES-256-GCM)** — wraps each share with a per-envelope salt + nonce; AAD binds guardian index + scheme version.
-3. **OPAQUE adapter (interface)** — under the `opaque` scheme, each envelope's unwrap key is the export key from an OPAQUE registration/authentication round with the corresponding guardian. Under the `passphrase` scheme (default in v1.x while libopaque vendoring is pending), keys are PBKDF2-derived from the user's password directly.
+3. **Passphrase key derivation (PBKDF2)** — under the `passphrase` scheme, each envelope's unwrap key is PBKDF2-derived (HMAC-SHA-256) from the user's password and the per-envelope salt.
 
 **Wire format.** A recovery setup is a single self-contained JSON document:
 
 ```json
 {
   "version": 1,
-  "scheme": "shamir-aead-opaque-stub-argon2id-v1",
+  "scheme": "shamir-aead-passphrase-pbkdf2-v1",
   "threshold": 3,
   "share_count": 5,
   "secret_len": 32,
   "guardian_x": [1, 2, 3, 4, 5],
   "envelopes": ["DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>", ...],
-  "opaque_records": ["<hex>", ...],
   "pubkey_checksum": "<sha256(ed25519_pubkey(seed))>"
 }
 ```
@@ -967,18 +966,13 @@ determ-wallet envelope decrypt --envelope <blob>   Unwrap an envelope
 determ-wallet create-recovery --seed <hex>         Persist a T-of-N recovery setup
                               --password <str>
                               -t T -n N --out <file>
-                              [--scheme {passphrase|opaque}]
+                              [--scheme passphrase]
 determ-wallet recover --in <file>                  Reconstruct the seed
                       --password <str>
                       [--guardians <i,j,k,...>]
-determ-wallet opaque-handshake --mode {register|authenticate}
-                                --password <str>
-                                --guardian-id <0..255>
-                                [--record <hex>]
-determ-wallet oprf-smoke                           Verify libsodium primitives wired
 ```
 
-**Wallet adapter status.** v1.x ships Phases 1–5 + 7 of the wallet's internal phase plan (greenfield wallet binary, all crypto layers wired against libsodium, OPAQUE adapter interface locked, recovery flow routed through the adapter). The Phase-6 work item — vendor real `libopaque` + `liboprf` to replace the stub adapter implementation, multi-cycle Windows MSVC porting work — is tracked as **v2.14 (Real OPAQUE wallet recovery)** in `docs/V2-DESIGN.md`; the wallet's `is_stub()` flag gates production deployment until v2.14 lands. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis covering both stub and real-OPAQUE bounds, plus the Phase-numbering-↔-v2.14 mapping note at the top of that file.
+**Wallet crypto status.** `determ-wallet` is libsodium-free: every crypto layer runs on the daemon's `determ::c99` stack (Ed25519, X25519, SHA-256, Argon2id) plus OpenSSL for base64 (EVP), the PBKDF2 KDF, and the AES-256-GCM envelope — the same library posture as the `determ` daemon and `determ-light`, neither of which ever linked libsodium. Recovery ships the `passphrase` scheme only (Shamir SSS + PBKDF2-derived AEAD envelopes); there is no OPAQUE adapter or threshold-guardian handshake in the wallet. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis of the passphrase scheme.
 
 **Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
 
