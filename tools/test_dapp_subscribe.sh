@@ -69,6 +69,15 @@ if [ $RC -ne 0 ] && echo "$OUT" | grep -q "requires --domain"; then
 else
   assert false "dapp-subscribe without --domain refused (rc=$RC)"
 fi
+if $DETERM 2>&1 | grep -q -- "dapp-subscribers"; then
+  assert true "help text documents dapp-subscribers"
+else
+  assert false "help text documents dapp-subscribers"
+fi
+$DETERM dapp-subscribers --rpc-port 1 >/dev/null 2>&1; RC=$?
+[ "$RC" = "1" ] \
+  && assert true "dapp-subscribers unreachable daemon exits 1" \
+  || assert false "dapp-subscribers unreachable exit ($RC, expected 1)"
 
 echo
 echo "=== 1. Init + start 3-node cluster ==="
@@ -295,6 +304,44 @@ else
   echo "  SKIP: DAPP_CALL did not apply within window (known multi-node"
   echo "        timing flake, see test_dapp_e2e.sh §9) — replay + filter"
   echo "        assertions skipped; streaming machinery asserted by 0-5."
+fi
+
+echo
+echo "=== 7. dapp-subscribers observability reflects a live subscriber ==="
+# Start a background streaming subscriber (no --max-frames, stays connected),
+# then query the read-only fleet snapshot and assert it sees exactly this one.
+$DETERM dapp-subscribe --rpc-port 8791 --domain node1 --heartbeat-blocks 1 \
+  > $T/bg.frames 2>/dev/null &
+BG_PID=$!
+NODE_PIDS+=("$BG_PID")   # ensure cleanup kills it too
+sleep 2
+SNAP=$($DETERM dapp-subscribers --rpc-port 8791 2>/dev/null)
+echo "$SNAP" > $T/subscribers.json
+CHECK=$(python -c "
+import json
+j = json.loads(open('$T/subscribers.json').read())
+ok = []
+ok.append(('count>=1', j.get('count',0) >= 1))
+ok.append(('max==256', j.get('max') == 256))
+ok.append(('kills_backpressure present', isinstance(j.get('kills_backpressure'), int)))
+subs = j.get('subscribers', [])
+mine = [s for s in subs if s.get('domain') == 'node1']
+ok.append(('node1 subscriber present', len(mine) >= 1))
+if mine:
+    s = mine[0]
+    ok.append(('sid is 32-hex', isinstance(s.get('sid'),str) and len(s['sid'])==32))
+    ok.append(('queue_max==1024 (default)', s.get('queue_max')==1024))
+    ok.append(('has queue_depth/seq/killed',
+               all(k in s for k in ('queue_depth','seq','killed'))))
+    ok.append(('not killed', s.get('killed') is False))
+for name,v in ok: print(('OK ' if v else 'BAD ')+name)
+print('ALL' if all(v for _,v in ok) else 'FAILED')" 2>/dev/null)
+echo "$CHECK" | sed 's/^/    /'
+kill "$BG_PID" 2>/dev/null
+if echo "$CHECK" | grep -q "^ALL$"; then
+  assert true "dapp-subscribers snapshot reflects the live subscriber fleet"
+else
+  assert false "dapp-subscribers observability"
 fi
 
 echo

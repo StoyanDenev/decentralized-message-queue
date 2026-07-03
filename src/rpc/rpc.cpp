@@ -277,6 +277,8 @@ json RpcServer::dispatch(const json& req) {
             params.value("from_height", uint64_t{0}),
             params.value("to_height",   uint64_t{0}),
             params.value("topic",       std::string{}));
+    if (method == "dapp_subscribers")   // v2.20 observability (R54)
+        return node_.rpc_dapp_subscribers();
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
     if (method == "headers")

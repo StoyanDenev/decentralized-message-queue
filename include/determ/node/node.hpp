@@ -303,6 +303,17 @@ public:
                                         uint64_t           to_height,
                                         const std::string& topic)   const;
 
+    // v2.20 observability (R54): read-only snapshot of the streaming
+    // subscriber fleet. Reports {count, max, kills_backpressure,
+    // subscribers:[{sid, domain, topic, queue_depth, bytes_buffered,
+    // seq, killed}]}. Takes subscribers_mutex_ (+ each Subscriber::mu
+    // briefly) — NEVER state_mutex_ — and mutates nothing, so it neither
+    // touches chain state nor perturbs any live stream (the writer thread
+    // stays the sole mutator of each queue + the sole seq assigner).
+    // Cross-subscriber the report is a best-effort scan, not a
+    // linearizable global instant. StreamingObservabilityReadOnly.md.
+    nlohmann::json rpc_dapp_subscribers()                           const;
+
     // v2.20 Theme 7 Phase 7.4 (streaming subset): push-based DAPP_CALL
     // delivery over a long-lived connection. Called by RpcServer AFTER
     // the S-014 rate-limit + S-001 HMAC gates pass on a
@@ -725,6 +736,10 @@ private:
         uint64_t                    blocks_since_frame{0};
         bool                        killed{false};
         std::string                 kill_reason;
+        // Highest wire seq stamped so far by the writer thread (= frames
+        // delivered - 1). Atomic so the read-only rpc_dapp_subscribers
+        // accessor reads it without the writer's stack-local `seq`.
+        std::atomic<uint64_t>       last_seq{0};
         std::mutex                  mu;
         std::condition_variable     cv;
         // True while the writer thread is inside a blocking socket
@@ -736,8 +751,15 @@ private:
         std::thread                 thread;
     };
     std::map<uint64_t, std::shared_ptr<Subscriber>> subscribers_;
-    std::mutex                      subscribers_mutex_;
+    // mutable so the const read-only accessor rpc_dapp_subscribers() can
+    // lock it (same rationale as state_mutex_ being mutable).
+    mutable std::mutex              subscribers_mutex_;
     uint64_t                        next_subscriber_id_{1};
+    // v2.20 observability (R54): cumulative count of subscribers killed
+    // for queue/byte overflow since node start. Atomic so the read-only
+    // rpc_dapp_subscribers accessor never needs subscribers_mutex_ just
+    // for this scalar.
+    std::atomic<uint64_t>           subscriber_kills_backpressure_{0};
     // Writer thread body. head_at_register is the chain height captured
     // atomically with the map insert (under state_mutex_ shared — the
     // hook holds unique, so capture+register cannot interleave with an

@@ -303,7 +303,9 @@ DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ doma
                                               Retrospective DAPP_CALL poll (256 / page)
   determ dapp-subscribe --domain <D> [--topic T] [--since H] [--heartbeat-blocks B]
                         [--queue-max Q] [--max-frames N]
+                        [--reconnect [--max-reconnects N] [--backoff-ms M]]
                                               v2.20 streaming push (newline-JSON frames)
+  determ dapp-subscribers                     v2.20 read-only subscriber-fleet snapshot (R54)
 
 )" << R"(Governance + sharded operation:
   determ submit-param-change ...              A5 PARAM_CHANGE tx (see CLI-REFERENCE.md §Governance)
@@ -5810,10 +5812,14 @@ int main(int argc, char** argv) {
         uint16_t port = get_rpc_port(sub_argc, sub_argv);
         std::string domain, topic;
         uint64_t since = UINT64_MAX, hb = 0, qmax = 0, max_frames = 0;
+        bool     reconnect = false;
+        uint64_t max_reconnects = 0;   // 0 = unlimited (when --reconnect set)
+        uint64_t backoff_ms = 1000;
         for (int i = 0; i < sub_argc; ++i) {
             std::string a = sub_argv[i];
             if      (a == "--domain" && i + 1 < sub_argc) domain = sub_argv[++i];
             else if (a == "--topic"  && i + 1 < sub_argc) topic  = sub_argv[++i];
+            else if (a == "--reconnect") reconnect = true;
             else if (a == "--since"  && i + 1 < sub_argc) {
                 if (!arg_u64("dapp-subscribe", "--since", sub_argv[++i], since)) return 1;
             }
@@ -5826,87 +5832,147 @@ int main(int argc, char** argv) {
             else if (a == "--max-frames" && i + 1 < sub_argc) {
                 if (!arg_u64("dapp-subscribe", "--max-frames", sub_argv[++i], max_frames)) return 1;
             }
+            else if (a == "--max-reconnects" && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--max-reconnects", sub_argv[++i], max_reconnects)) return 1;
+            }
+            else if (a == "--backoff-ms" && i + 1 < sub_argc) {
+                if (!arg_u64("dapp-subscribe", "--backoff-ms", sub_argv[++i], backoff_ms)) return 1;
+            }
         }
         if (domain.empty()) {
             std::cerr << "dapp-subscribe requires --domain\n";
             return 1;
         }
-        try {
-            json params = {{"domain", domain}};
-            if (!topic.empty())       params["topic"] = topic;
-            if (since != UINT64_MAX)  params["since"] = since;
-            if (hb   > 0)             params["heartbeat_blocks"] = hb;
-            if (qmax > 0)             params["queue_max"] = qmax;
-            json req = {{"method", "dapp_subscribe"}, {"params", params}};
-            // Same HMAC scheme as rpc::rpc_call (v2.16): hex(HMAC-SHA-256(
-            // secret, method || "|" || params.dump())).
-            if (const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
-                env && *env) {
-                std::string sh = env;
-                std::vector<uint8_t> key;
-                for (size_t i = 0; i + 1 < sh.size(); i += 2) {
-                    unsigned b;
-                    if (std::sscanf(sh.c_str() + i, "%02x", &b) != 1) {
-                        std::cerr << "dapp-subscribe: DETERM_RPC_AUTH_SECRET "
-                                     "is not valid hex\n";
-                        return 1;
-                    }
-                    key.push_back(static_cast<uint8_t>(b));
-                }
-                std::string msg = std::string("dapp_subscribe") + "|" +
-                                  params.dump();
-                uint8_t mac[32];
-                if (determ_hmac_sha256(key.data(), key.size(),
-                        reinterpret_cast<const uint8_t*>(msg.data()),
-                        msg.size(), mac) != 0) {
-                    std::cerr << "dapp-subscribe: HMAC failure\n";
+
+        // Auth secret resolution once (the HMAC is recomputed per attempt
+        // because `since` — and thus params — changes on reconnect).
+        std::vector<uint8_t> auth_key;
+        bool auth_enabled = false;
+        if (const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
+            env && *env) {
+            std::string sh = env;
+            for (size_t i = 0; i + 1 < sh.size(); i += 2) {
+                unsigned b;
+                if (std::sscanf(sh.c_str() + i, "%02x", &b) != 1) {
+                    std::cerr << "dapp-subscribe: DETERM_RPC_AUTH_SECRET "
+                                 "is not valid hex\n";
                     return 1;
                 }
-                std::ostringstream mh;
-                mh << std::hex << std::setfill('0');
-                for (int i = 0; i < 32; ++i) mh << std::setw(2) << int(mac[i]);
-                req["auth"] = mh.str();
+                auth_key.push_back(static_cast<uint8_t>(b));
             }
+            auth_enabled = true;
+        }
 
-            asio::io_context io;
-            asio::ip::tcp::socket sock(io);
-            asio::connect(sock, asio::ip::tcp::resolver(io).resolve(
-                                    "127.0.0.1", std::to_string(port)));
-            std::string line = req.dump() + "\n";
-            asio::write(sock, asio::buffer(line));
-
-            asio::streambuf buf;
-            std::error_code ec;
-            uint64_t printed = 0;
-            while (!ec) {
-                asio::read_until(sock, buf, '\n', ec);
-                if (ec) break;
-                std::istream is(&buf);
-                std::string frame;
-                while (std::getline(is, frame)) {
-                    if (frame.empty()) continue;
-                    std::cout << frame << "\n" << std::flush;
-                    ++printed;
-                    // A plain RPC error envelope (validation failure —
-                    // the socket was never taken over) or an error
-                    // frame (kill) both terminate with exit 2.
-                    auto j = json::parse(frame, nullptr, false);
-                    if (!j.is_discarded()) {
-                        if (j.contains("error") && !j["error"].is_null()) {
-                            std::cerr << "dapp-subscribe rejected: "
-                                      << j["error"] << "\n";
-                            return 2;
-                        }
-                        if (j.value("event", "") == "error") return 2;
+        // Reconnect loop: on an error EVENT frame (backpressure/shutdown)
+        // or a clean disconnect, if --reconnect is set the client redials
+        // with since = the last observed block_index (the wire contract's
+        // reconnect-via-since; overlap is deduped by (block_index,
+        // tx_index)). A plain RPC error envelope (unknown domain, since
+        // beyond head) is a PERMANENT config error — exit 2, no retry.
+        uint64_t last_block = 0; bool have_last = false;
+        uint64_t printed = 0, attempt = 0;
+        for (;;) {
+            bool error_frame = false;
+            try {
+                uint64_t eff_since = since;
+                if (attempt > 0 && have_last) eff_since = last_block;
+                json params = {{"domain", domain}};
+                if (!topic.empty())          params["topic"] = topic;
+                if (eff_since != UINT64_MAX)  params["since"] = eff_since;
+                if (hb   > 0)                params["heartbeat_blocks"] = hb;
+                if (qmax > 0)                params["queue_max"] = qmax;
+                json req = {{"method", "dapp_subscribe"}, {"params", params}};
+                if (auth_enabled) {
+                    std::string msg = std::string("dapp_subscribe") + "|" +
+                                      params.dump();
+                    uint8_t mac[32];
+                    if (determ_hmac_sha256(auth_key.data(), auth_key.size(),
+                            reinterpret_cast<const uint8_t*>(msg.data()),
+                            msg.size(), mac) != 0) {
+                        std::cerr << "dapp-subscribe: HMAC failure\n";
+                        return 1;
                     }
-                    if (max_frames > 0 && printed >= max_frames) return 0;
+                    std::ostringstream mh;
+                    mh << std::hex << std::setfill('0');
+                    for (int i = 0; i < 32; ++i) mh << std::setw(2) << int(mac[i]);
+                    req["auth"] = mh.str();
                 }
+
+                asio::io_context io;
+                asio::ip::tcp::socket sock(io);
+                asio::connect(sock, asio::ip::tcp::resolver(io).resolve(
+                                        "127.0.0.1", std::to_string(port)));
+                std::string line = req.dump() + "\n";
+                asio::write(sock, asio::buffer(line));
+
+                asio::streambuf buf;
+                std::error_code ec;
+                while (!ec && !error_frame) {
+                    asio::read_until(sock, buf, '\n', ec);
+                    if (ec) break;
+                    std::istream is(&buf);
+                    std::string frame;
+                    while (std::getline(is, frame)) {
+                        if (frame.empty()) continue;
+                        std::cout << frame << "\n" << std::flush;
+                        ++printed;
+                        auto j = json::parse(frame, nullptr, false);
+                        if (!j.is_discarded()) {
+                            // Plain RPC error envelope = permanent config
+                            // error (never took the socket over): exit 2,
+                            // no reconnect even if --reconnect is set.
+                            if (j.contains("error") && !j["error"].is_null()) {
+                                std::cerr << "dapp-subscribe rejected: "
+                                          << j["error"] << "\n";
+                                return 2;
+                            }
+                            if (j.value("event", "") == "error") {
+                                error_frame = true;  // transient: reconnectable
+                            }
+                            if (j.contains("block_index") &&
+                                j["block_index"].is_number_unsigned()) {
+                                uint64_t bi = j["block_index"].get<uint64_t>();
+                                if (!have_last || bi > last_block) {
+                                    last_block = bi; have_last = true;
+                                }
+                            }
+                        }
+                        if (max_frames > 0 && printed >= max_frames) return 0;
+                        if (error_frame) break;
+                    }
+                }
+            } catch (std::exception& e) {
+                if (!reconnect) {
+                    std::cerr << "dapp-subscribe failed: " << e.what() << "\n";
+                    return 1;
+                }
+                // fall through to the reconnect decision below
+                std::cerr << "[dapp-subscribe] connection error: " << e.what()
+                          << "\n";
             }
-            // Server closed (node shutdown without error frame reaching
-            // us, or network drop). Redial with --since to resume.
+
+            if (!reconnect) return error_frame ? 2 : 0;
+            ++attempt;
+            if (max_reconnects > 0 && attempt > max_reconnects)
+                return error_frame ? 2 : 0;
+            std::cerr << "[dapp-subscribe] reconnecting (attempt " << attempt
+                      << ") since=" << (have_last ? last_block : since) << "\n"
+                      << std::flush;
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+        }
+    }
+
+    // v2.20 observability (R54): read-only snapshot of the streaming
+    // subscriber fleet. Usage: determ dapp-subscribers [--rpc-port N]
+    if (cmd == "dapp-subscribers") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "dapp_subscribers",
+                                   json::object());
+            std::cout << r.dump(2) << "\n";
             return 0;
         } catch (std::exception& e) {
-            std::cerr << "dapp-subscribe failed: " << e.what() << "\n";
+            std::cerr << "dapp-subscribers query failed: " << e.what() << "\n";
             return 1;
         }
     }

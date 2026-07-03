@@ -3340,6 +3340,7 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
     // The ONLY place frames are written and seq is stamped (SS-1).
     auto write_frame = [&](json f) -> bool {
         f["seq"] = seq++;
+        sub->last_seq.store(seq - 1);   // observability (rpc_dapp_subscribers)
         f["sid"] = sub->sid_hex;
         std::string line = f.dump() + "\n";
         std::error_code ec;
@@ -3470,6 +3471,7 @@ void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
                 sub->kill_reason = "backpressure";
                 sub->queue.clear();
                 sub->bytes_buffered = 0;
+                subscriber_kills_backpressure_.fetch_add(1);
                 if (sub->in_write.load()) {
                     std::error_code ec;
                     sub->socket->close(ec);
@@ -3502,6 +3504,42 @@ void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
         }
         if (enqueued || sub->killed) sub->cv.notify_one();
     }
+}
+
+json Node::rpc_dapp_subscribers() const {
+    // Read-only observability over the streaming subscriber fleet
+    // (StreamingObservabilityReadOnly.md). Takes ONLY subscribers_mutex_
+    // (+ each Subscriber::mu briefly) — never state_mutex_ — and mutates
+    // nothing: the writer thread stays the sole mutator of each queue and
+    // the sole seq assigner, so this read cannot drop a frame or perturb
+    // a stream. Cross-subscriber the scan is best-effort point-in-time,
+    // not a linearizable global instant.
+    json subs = json::array();
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        for (const auto& [id, sub] : subscribers_) {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (sub->done.load()) continue;  // writer finished; being reaped
+            ++count;
+            subs.push_back({
+                {"sid",            sub->sid_hex},
+                {"domain",         sub->domain},
+                {"topic",          sub->topic},
+                {"queue_depth",    sub->queue.size()},
+                {"queue_max",      sub->queue_max},
+                {"bytes_buffered", sub->bytes_buffered},
+                {"seq",            sub->last_seq.load()},
+                {"killed",         sub->killed},
+            });
+        }
+    }
+    return {
+        {"count",               count},
+        {"max",                 SUBSCRIBER_MAX_PER_NODE},
+        {"kills_backpressure",  subscriber_kills_backpressure_.load()},
+        {"subscribers",         subs},
+    };
 }
 
 void Node::shutdown_subscribers(const std::string& reason) {
