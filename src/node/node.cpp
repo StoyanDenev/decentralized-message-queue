@@ -5,8 +5,8 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/crypto/rng/rng.h>
 #include <set>
-#include <openssl/rand.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -842,8 +842,10 @@ void Node::start_contrib_phase() {
     // Phase 1, so they cannot precompute the eventual delay_output
     // (which depends on all K secrets).
     Hash my_secret{};
-    if (RAND_bytes(my_secret.data(), 32) != 1)
-        throw std::runtime_error("RAND_bytes failed for dh_secret");
+    // §3.15: OS CSPRNG via the C99 shim (was OpenSSL RAND_bytes). Entropy
+    // failure stays fatal — a predictable dh_secret breaks the commit-reveal.
+    if (determ_rng_bytes(my_secret.data(), 32) != 0)
+        throw std::runtime_error("OS entropy source failed for dh_secret");
     current_round_secret_ = my_secret;
     Hash my_commit = crypto::SHA256Builder{}
         .append(my_secret)

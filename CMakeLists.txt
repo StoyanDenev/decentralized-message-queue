@@ -116,8 +116,15 @@ add_library(determ-crypto-c99 STATIC
   # §3.8c NIST P-256 (FIPS-profile curve; Montgomery field + RCB complete
   # addition + CT ladder) — `determ test-p256-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/p256/p256.c"
+  # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
+  # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
+  "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
+if(WIN32)
+  # rng.c uses BCryptGenRandom; PUBLIC so every consumer links bcrypt.
+  target_link_libraries(determ-crypto-c99 PUBLIC bcrypt)
+endif()
 
 add_executable(determ ${SOURCES})
 
@@ -128,9 +135,15 @@ target_include_directories(determ PRIVATE
   ${openssl_SOURCE_DIR}/include
 )
 
+# §3.15 (2026-07-03): the daemon's CONSENSUS crypto (SHA-256 builder, Ed25519
+# sign/verify, entropy) now runs on determ-crypto-c99. libcrypto remains
+# linked ONLY for (a) the §Q9 test-oracle subcommands in src/main.cpp
+# (test-*-c99 cross-validate the C99 stack against an independent
+# implementation — by design a non-determ backend) and (b) the wallet-shared
+# helpers compiled into the daemon. libssl (TLS) was never used by any
+# target — no TLS anywhere in src/net — and is dropped.
 target_link_libraries(determ PRIVATE
   determ-crypto-c99
-  ssl
   crypto
   nlohmann_json::nlohmann_json
 )
@@ -220,14 +233,17 @@ add_executable(determ-light
   src/chain/block.cpp
   src/chain/genesis.cpp
 )
+# §3.15 (2026-07-03): determ-light links ZERO OpenSSL. Its whole crypto
+# surface (SHA-256 via src/crypto/sha256.cpp, Ed25519 via src/crypto/keys.cpp
+# + light/keyfile.cpp) now runs on determ-crypto-c99; HMAC in light/main.cpp
+# was already from-scratch. The EOL-OpenSSL liability is out of the
+# light-client verification path entirely.
 target_include_directories(determ-light PRIVATE
   include
   light
-  ${openssl_SOURCE_DIR}/include
 )
 target_link_libraries(determ-light PRIVATE
-  ssl
-  crypto
+  determ-crypto-c99
   nlohmann_json::nlohmann_json
 )
 if(WIN32)

@@ -2,13 +2,14 @@
 // Copyright 2026 Determ Contributors
 //
 // determ-light keyfile loader implementation. Mirrors the parsing /
-// validation logic in wallet/main.cpp::cmd_sign_anon_tx, minus the
-// libsodium-specific bits (we derive the pubkey via OpenSSL Ed25519
-// raw-key APIs — same primitive crypto, no Argon2 / libopaque needed).
+// validation logic in wallet/main.cpp::cmd_sign_anon_tx. Pubkey derivation
+// runs on the in-tree C99 Ed25519 (§3.15 swap 2026-07-03 — determ-light
+// links zero OpenSSL; byte-equal to the previous EVP derivation, proven by
+// `determ test-ed25519-c99`).
 
 #include "keyfile.hpp"
 #include <determ/types.hpp>
-#include <openssl/evp.h>
+#include <determ/crypto/ed25519/ed25519.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -39,23 +40,12 @@ bool is_canonical_anon(const std::string& s) {
     return true;
 }
 
-// Derive an Ed25519 pubkey from a 32-byte raw priv_seed via OpenSSL
-// (no libsodium). Matches src/crypto/keys.cpp::generate_node_key
-// semantics — same Ed25519 instantiation (PureEdDSA on Curve25519).
+// Derive an Ed25519 pubkey from a 32-byte raw priv_seed via the C99
+// RFC 8032 implementation. Matches src/crypto/keys.cpp semantics — same
+// Ed25519 instantiation (PureEdDSA on Curve25519), same derivation.
 PubKey derive_ed_pub(const std::array<uint8_t, 32>& priv_seed) {
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, priv_seed.data(), 32);
-    if (!pkey) {
-        throw std::runtime_error("EVP_PKEY_new_raw_private_key failed");
-    }
     PubKey pub{};
-    size_t len = 32;
-    if (EVP_PKEY_get_raw_public_key(pkey, pub.data(), &len) != 1
-        || len != 32) {
-        EVP_PKEY_free(pkey);
-        throw std::runtime_error("EVP_PKEY_get_raw_public_key failed");
-    }
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(priv_seed.data(), pub.data());
     return pub;
 }
 

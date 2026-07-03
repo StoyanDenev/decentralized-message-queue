@@ -90,8 +90,8 @@ FrostSig frost_aggregate(
 // `message` under `group_pubkey`. RFC 9591 §3 defines aggregation such
 // that the result verifies via the standard Ed25519 verify equation;
 // FROST adds nothing on top of that for the verify path. So this
-// delegates directly to the existing `determ::crypto::verify` (which
-// itself wraps OpenSSL's EVP_PKEY_ED25519 verify per src/crypto/keys.cpp).
+// delegates directly to the existing `determ::crypto::verify` (which runs
+// on the C99 RFC 8032 verifier per src/crypto/keys.cpp — §3.15 swap).
 //
 // Shipping this first means downstream consumers of v2.10 (block-validation
 // path; FA3 proof regression; threshold-rand integration in Phase D) can

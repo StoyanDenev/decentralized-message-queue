@@ -2,8 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/rpc/rpc.hpp>
 #include <determ/types.hpp>
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
+#include <determ/crypto/sha2/sha2.h>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -59,14 +58,17 @@ std::string canonical_for_hmac(const std::string& method, const json& params) {
 
 std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
                               const std::string& message) {
+    // §3.15 swap: C99 HMAC-SHA256 (validated byte-equal vs OpenSSL by
+    // `determ test-sha2-c99`; the test-rpc-auth-hmac self-test keeps an
+    // OpenSSL mirror as the independent oracle). On the (alloc-failure-only)
+    // error path return "" — never matches any client MAC, so auth
+    // fails CLOSED.
     unsigned char hmac[32];
-    unsigned int  hmac_len = 0;
-    HMAC(EVP_sha256(),
-         key.data(),  static_cast<int>(key.size()),
-         reinterpret_cast<const unsigned char*>(message.data()),
-         message.size(),
-         hmac, &hmac_len);
-    return bytes_to_hex(hmac, hmac_len);
+    if (determ_hmac_sha256(key.data(), key.size(),
+                           reinterpret_cast<const unsigned char*>(message.data()),
+                           message.size(), hmac) != 0)
+        return {};
+    return bytes_to_hex(hmac, 32);
 }
 
 } // namespace

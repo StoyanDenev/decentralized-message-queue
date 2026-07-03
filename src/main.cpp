@@ -16,6 +16,7 @@
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
 #include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
+#include <determ/crypto/rng/rng.h>            // §3.15: OS-entropy shim (replaces RAND_bytes)
 #include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
 #include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
@@ -4869,7 +4870,7 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
         // Generate a fresh shard_address_salt if the input didn't supply one.
         Hash zero_salt{};
         if (base.shard_address_salt == zero_salt) {
-            if (RAND_bytes(base.shard_address_salt.data(), 32) != 1) {
+            if (determ_rng_bytes(base.shard_address_salt.data(), 32) != 0) {
                 std::cerr << "Failed to generate shard_address_salt\n";
                 return 1;
             }
@@ -5127,12 +5128,7 @@ static int cmd_account_address(int argc, char** argv) {
     crypto::NodeKey key;
     key.priv_seed = from_hex_arr<32>(argv[0]);
 
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, key.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "invalid privkey\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, key.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
 
     std::cout << make_anon_address(key.pub) << "\n";
     return 0;
@@ -5181,12 +5177,7 @@ static int cmd_send_anon(int argc, char** argv) {
         return 1;
     }
 
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, key.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "invalid privkey for Ed25519\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, key.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
 
     std::string from_addr = make_anon_address(key.pub);
 
@@ -5309,12 +5300,7 @@ static int cmd_submit_param_change(int argc, char** argv) {
             std::cerr << "Invalid keyholder priv hex: " << e.what() << "\n";
             return 1;
         }
-        EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-            EVP_PKEY_ED25519, nullptr, kh.priv_seed.data(), 32);
-        if (!pkey) { std::cerr << "keyholder priv invalid\n"; return 1; }
-        size_t pub_len = 32;
-        EVP_PKEY_get_raw_public_key(pkey, kh.pub.data(), &pub_len);
-        EVP_PKEY_free(pkey);
+        determ_ed25519_pubkey_from_seed(kh.priv_seed.data(), kh.pub.data());
         Signature sig = crypto::sign(kh, sig_msg.data(), sig_msg.size());
         payload.push_back(static_cast<uint8_t>(idx & 0xff));
         payload.push_back(static_cast<uint8_t>((idx >> 8) & 0xff));
@@ -5327,12 +5313,7 @@ static int cmd_submit_param_change(int argc, char** argv) {
     catch (std::exception& e) {
         std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
     }
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(sender.priv_seed.data(), sender.pub.data());
 
     // Sender must be a registered domain (anon accounts may only
     // TRANSFER per the validator). The provided --from is used as-is;
@@ -5427,12 +5408,7 @@ static int cmd_submit_merge_event(int argc, char** argv) {
     catch (std::exception& e) {
         std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
     }
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(sender.priv_seed.data(), sender.pub.data());
 
     uint64_t nonce = 0;
     try {
@@ -5562,12 +5538,7 @@ static int cmd_submit_dapp_register(int argc, char** argv) {
     catch (std::exception& e) {
         std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
     }
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(sender.priv_seed.data(), sender.pub.data());
 
     uint64_t nonce = 0;
     try {
@@ -5647,12 +5618,7 @@ static int cmd_submit_dapp_call(int argc, char** argv) {
     catch (std::exception& e) {
         std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
     }
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
-    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
-    size_t pub_len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(sender.priv_seed.data(), sender.pub.data());
 
     uint64_t nonce = 0;
     try {
@@ -8735,10 +8701,11 @@ int main(int argc, char** argv) {
     //       The "Phase-2-reveal" subset (delay_output,
     //       creator_dh_secrets, cumulative_rand) is excluded because
     //       these values aren't known yet at digest-signing time. The
-    //       remaining excludes (S-030 D2) are reconciled at apply time
-    //       via:
-    //         - state_root: S-033 + S-038 (apply-time gate now wired)
-    //         - the rest:  v2.7 F2 view reconciliation (deferred)
+    //       remaining excludes (S-030 D2) are reconciled via:
+    //         - state_root: S-033 + S-038 (apply-time gate wired)
+    //         - the rest:  v2.7 F2 view reconciliation (SHIPPED — the
+    //           reconciled pool views are bound into the digest via the
+    //           3 F2 view roots; this test asserts the positive binding)
     //
     //       Documenting the exclusion list with explicit assertions
     //       prevents a future commit from silently moving a field
@@ -14203,14 +14170,15 @@ int main(int argc, char** argv) {
 
     if (cmd == "test-ed25519-vectors") {
         // v2.10 Phase-0 / CRYPTO-C99-SPEC §Q7 "validate before you vendor":
-        // pin the daemon's Ed25519 (currently OpenSSL EVP_PKEY_ED25519, the only
-        // shipped signature backend) against the CANONICAL RFC 8032 §7.1 known-
-        // answer vectors. This is the independent oracle any libsodium-free
-        // C99 Ed25519 backend MUST reproduce byte-for-byte (the SHIPPED backend is
-        // the constant-time gf[16] TweetNaCl-derived form in src/crypto/ed25519/;
-        // a ref10 radix-2^51 variant remains a future perf option) (the §Q9 cross-validation gate) — swap the
-        // backend, re-run this, and a single bit of divergence in key derivation
-        // or deterministic signing fails loudly. RFC 8032 Ed25519 signing is
+        // pin the daemon's Ed25519 against the CANONICAL RFC 8032 §7.1 known-
+        // answer vectors. As of the §3.15 swap (2026-07-03) the SHIPPED
+        // backend IS the constant-time gf[16] C99 form in src/crypto/ed25519/
+        // (crypto::sign/verify in keys.cpp; OpenSSL EVP_PKEY_ED25519 remains
+        // only as the independent §Q9 oracle inside test-ed25519-c99; a ref10
+        // radix-2^51 variant remains a future perf option). This test is the
+        // backend-swap detector it was written to be — re-run it after any
+        // backend change and a single bit of divergence in key derivation or
+        // deterministic signing fails loudly. RFC 8032 Ed25519 signing is
         // deterministic, so the signature bytes are themselves a KAT.
         using namespace determ;
         using namespace determ::crypto;

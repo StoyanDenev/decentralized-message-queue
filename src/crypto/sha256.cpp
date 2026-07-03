@@ -1,29 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
+//
+// §3.15 backend swap (2026-07-03): SHA256Builder runs on the in-tree C99
+// FIPS 180-4 engine (src/crypto/sha2/sha256.c) instead of OpenSSL EVP.
+// SHA-256 is a fixed function — same input bytes, same digest — and the C99
+// engine is validated byte-equal against OpenSSL (CAVP KATs + the §Q9
+// cross-validation gate in `determ test-sha2-c99`), so every consensus
+// artifact (block hash, tx root, merkle/state root, genesis hash) is
+// byte-identical across backends; the pinned goldens in
+// `determ test-consensus-vectors` prove it at test time. The big-endian
+// integer encodings in append(uint64_t/int64_t) below are the
+// consensus-critical part of THIS file and are unchanged.
 #include <determ/crypto/sha256.hpp>
-#include <openssl/evp.h>
-#include <stdexcept>
+#include <determ/crypto/sha2/sha2.h>
 #include <cstring>
 
 namespace determ::crypto {
 
 struct SHA256Builder::Impl {
-    EVP_MD_CTX* ctx;
+    determ_sha256_ctx ctx;
 };
 
-SHA256Builder::SHA256Builder() : impl_(new Impl{EVP_MD_CTX_new()}) {
-    if (!impl_->ctx) throw std::runtime_error("EVP_MD_CTX_new failed");
-    if (EVP_DigestInit_ex(impl_->ctx, EVP_sha256(), nullptr) != 1)
-        throw std::runtime_error("EVP_DigestInit_ex failed");
+SHA256Builder::SHA256Builder() : impl_(new Impl) {
+    determ_sha256_init(&impl_->ctx);
 }
 
 SHA256Builder::~SHA256Builder() {
-    EVP_MD_CTX_free(impl_->ctx);
     delete impl_;
 }
 
 SHA256Builder& SHA256Builder::append(const uint8_t* data, size_t len) {
-    EVP_DigestUpdate(impl_->ctx, data, len);
+    determ_sha256_update(&impl_->ctx, data, len);
     return *this;
 }
 
@@ -39,8 +46,7 @@ SHA256Builder& SHA256Builder::append(int64_t v) {
 
 Hash SHA256Builder::finalize() {
     Hash out{};
-    unsigned int len = 32;
-    EVP_DigestFinal_ex(impl_->ctx, out.data(), &len);
+    determ_sha256_final(&impl_->ctx, out.data());   // zeroizes the ctx
     return out;
 }
 

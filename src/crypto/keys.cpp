@@ -1,8 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
+//
+// §3.15 backend swap (2026-07-03): Ed25519 keygen/sign/verify runs on the
+// in-tree C99 RFC 8032 implementation (src/crypto/ed25519/ed25519.c) instead
+// of OpenSSL EVP_PKEY_ED25519. Key format is unchanged (the raw private key
+// IS the 32-byte RFC 8032 seed under both backends — existing node_key.json
+// files load identically) and signing is deterministic RFC 8032, proven
+// byte-equal to OpenSSL over a fuzzed (seed,msg) grid + the RFC 8032 KATs
+// (`determ test-ed25519-c99` / `test-ed25519-vectors`). VERIFY is the
+// consensus-visible edge: the C99 verifier enforces the RFC canonicality
+// gates (S < L, canonical pubkey y < q) and is deliberately STRICTER than
+// OpenSSL's lenient decoder on adversarial encodings. Locked in pre-genesis
+// as THE consensus signature-validity rule (DECISION-LOG.md 2026-07-03):
+// honestly-generated signatures are always canonical and behave identically;
+// forged non-canonical encodings that OpenSSL would tolerate are rejected.
 #include <determ/crypto/keys.hpp>
 #include <determ/util/json_validate.hpp>
-#include <openssl/evp.h>
+#include <determ/crypto/ed25519/ed25519.h>
+#include <determ/crypto/rng/rng.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
@@ -15,20 +30,12 @@ using determ::util::json_require_hex;
 namespace fs = std::filesystem;
 
 NodeKey generate_node_key() {
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
-    if (!ctx) throw std::runtime_error("EVP_PKEY_CTX_new_id failed");
-    if (EVP_PKEY_keygen_init(ctx) <= 0) throw std::runtime_error("keygen_init failed");
-
-    EVP_PKEY* pkey = nullptr;
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) throw std::runtime_error("keygen failed");
-    EVP_PKEY_CTX_free(ctx);
-
     NodeKey key;
-    size_t len = 32;
-    EVP_PKEY_get_raw_public_key(pkey, key.pub.data(), &len);
-    len = 32;
-    EVP_PKEY_get_raw_private_key(pkey, key.priv_seed.data(), &len);
-    EVP_PKEY_free(pkey);
+    // Fresh 32-byte RFC 8032 seed from the OS CSPRNG. Entropy failure is
+    // fatal — an all-zero/partial seed must never become a node identity.
+    if (determ_rng_bytes(key.priv_seed.data(), 32) != 0)
+        throw std::runtime_error("OS entropy source failed (determ_rng_bytes)");
+    determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
     return key;
 }
 
@@ -58,36 +65,21 @@ NodeKey load_node_key(const std::string& path) {
 }
 
 Signature sign(const NodeKey& key, const uint8_t* data, size_t len) {
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, key.priv_seed.data(), 32);
-    if (!pkey) throw std::runtime_error("Failed to create signing key");
-
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (EVP_DigestSignInit(ctx, nullptr, nullptr, nullptr, pkey) <= 0)
-        throw std::runtime_error("DigestSignInit failed");
-
+    // Re-derive the public key from the seed (matching OpenSSL EVP semantics,
+    // which ignored NodeKey.pub): a hand-edited keyfile with a mismatched
+    // stored pub still produces a signature valid under the SEED's pubkey.
+    uint8_t pk[32];
+    determ_ed25519_pubkey_from_seed(key.priv_seed.data(), pk);
     Signature sig{};
-    size_t sig_len = 64;
-    if (EVP_DigestSign(ctx, sig.data(), &sig_len, data, len) <= 0)
-        throw std::runtime_error("DigestSign failed");
-
-    EVP_MD_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
+    if (determ_ed25519_sign(key.priv_seed.data(), pk, data, len, sig.data()) != 0)
+        throw std::runtime_error("Ed25519 sign failed");
     return sig;
 }
 
 bool verify(const PubKey& pub, const uint8_t* data, size_t len, const Signature& sig) {
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub.data(), 32);
-    if (!pkey) return false;
-
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    bool ok = false;
-    if (EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, pkey) > 0)
-        ok = (EVP_DigestVerify(ctx, sig.data(), 64, data, len) == 1);
-
-    EVP_MD_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
-    return ok;
+    // Strict RFC 8032 verify (S < L, canonical pubkey) — see the header
+    // comment: the consensus signature-validity rule as of the §3.15 swap.
+    return determ_ed25519_verify(pub.data(), data, len, sig.data()) == 0;
 }
 
 } // namespace determ::crypto

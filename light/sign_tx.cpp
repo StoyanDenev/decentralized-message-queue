@@ -89,7 +89,7 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
                                        amount, fee, nonce);
 
     // Ed25519 sign via the project's existing crypto::sign helper
-    // (OpenSSL EVP_DigestSign with EVP_PKEY_ED25519).
+    // (C99 RFC 8032 deterministic sign per src/crypto/keys.cpp — §3.15).
     Signature sig = determ::crypto::sign(kf.key, sb.data(), sb.size());
 
     // Recompute the tx hash (SHA-256 over signing_bytes) — what the
