@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1+2)** — FIPS 204 ring core: Z_q reduction + negacyclic NTT (round-trip + schoolbook-conv + independent direct-DFT oracle) + the rounding/hint layer (power2round/decompose/make+use hint, both γ2); §3.18. No signer yet. | Public domain | ~180 |
+| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-3)** — FIPS 204 ring core: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint layer + the SHAKE rejection samplers (uniform/eta/in-ball — the first SHAKE consumers); §3.18. No signer yet. | Public domain | ~250 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -146,7 +146,8 @@ src/crypto/
 │   ├── reduce.c                #   Z_q modular reduction (§3.18)
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
 │   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
-│   └── rounding.c              #   power2round / decompose / make+use hint (inc.2)
+│   ├── rounding.c              #   power2round / decompose / make+use hint (inc.2)
+│   └── sample.c                #   SHAKE rejection samplers: uniform/eta/in-ball (inc.3)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -966,7 +967,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-2: arithmetic core + rounding)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-3: arithmetic core + rounding + SHAKE samplers)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -991,7 +992,15 @@ that every parameter set (ML-DSA-44/65/87) shares.
   of KEYGEN), `decompose` (HighBits/LowBits around the GAMMA2 grid of SIGNING),
   and `make_hint`/`use_hint` (the signature's per-coefficient carry hint). gamma2
   is a runtime argument (GAMMA2_88 for ML-DSA-44, GAMMA2_32 for ML-DSA-65/87), so
-  one core serves all three sets.
+  one core serves all three sets. **Increment 3** adds `sample.c` — the FIRST
+  consumers of the §3.17 SHAKE XOF: `sample_uniform` (RejNTTPoly, SHAKE128 →
+  coefficients uniform in [0,q), the public matrix Â), `sample_eta` (RejBoundedPoly,
+  SHAKE256 → coefficients in [-η,η], the secret vectors; η∈{2,4} runtime), and
+  `sample_in_ball` (SHAKE256 → the challenge with exactly τ coefficients in
+  {-1,+1}; τ runtime). These couple the SHA-3 module into ML-DSA. Rejection
+  sampling has a data-dependent LOOP COUNT (as in the canonical reference — NOT
+  constant-time in the number of SHAKE bytes consumed); the coefficient values
+  are branchless.
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
