@@ -14090,7 +14090,7 @@ int main(int argc, char** argv) {
                         auto pk = unhex(v["pk_hex"]);
                         if (pk.size() != determ_mldsa_pk_bytes(p)) { ok=false; bad=name+" (pk length)"; break; }
                         bool expected = v.value("expected", false);
-                        int got = determ_mldsa_verify(p, dptr(pk), dptr(mprime), mprime.size(), dptr(wsig));
+                        int got = determ_mldsa_verify(p, dptr(pk), dptr(mprime), mprime.size(), dptr(wsig), wsig.size());
                         if ((got != 0) != expected) { ok=false; bad=name+" (verify "+(got?"accepted":"rejected")+", expected "+(expected?"accept":"reject")+")"; break; }
                     }
                 } else {
@@ -14913,11 +14913,13 @@ int main(int argc, char** argv) {
                 std::vector<uint8_t> sig(determ_mldsa_sig_bytes(p));
                 uint8_t z32[32] = {0};
                 if (determ_mldsa_sign(p, sk.data(), mp.data(), mp.size(), z32, sig.data()) != 0) ok=false;
-                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), sig.data()) != 1) ok=false;   // accepts
+                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), sig.data(), sig.size()) != 1) ok=false;   // accepts
                 std::vector<uint8_t> bad = sig; bad[bad.size()/2] ^= 0x01;                                 // tamper sig
-                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), bad.data()) != 0) ok=false;   // rejects
+                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), bad.data(), bad.size()) != 0) ok=false;   // rejects
                 std::vector<uint8_t> mp2 = mp; mp2.back() ^= 0x01;                                         // tamper msg
-                if (determ_mldsa_verify(p, pk.data(), mp2.data(), mp2.size(), sig.data()) != 0) ok=false; // rejects
+                if (determ_mldsa_verify(p, pk.data(), mp2.data(), mp2.size(), sig.data(), sig.size()) != 0) ok=false; // rejects
+                // R70-audit: a truncated signature must be rejected safely (no OOB read).
+                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), sig.data(), sig.size()-1) != 0) ok=false; // short sig rejects
                 // deterministic: signing twice yields identical bytes
                 std::vector<uint8_t> sig2(determ_mldsa_sig_bytes(p));
                 determ_mldsa_sign(p, sk.data(), mp.data(), mp.size(), z32, sig2.data());

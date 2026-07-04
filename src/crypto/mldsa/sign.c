@@ -85,7 +85,7 @@ int determ_mldsa_sign(const determ_mldsa_params* p, const uint8_t* sk,
     int32_t z[LMAX][256], zc[LMAX][256], hint[KMAX][256], r0[KMAX][256];
     uint8_t ctil[64];
     uint8_t w1buf[KMAX * 192];
-    int i, j, c, it; size_t off, epb, wpb;
+    int i, j, c, it, ret; size_t off, epb, wpb;
 
     if (!p) return 1;
     k = p->k; l = p->l; eta = p->eta; g1 = p->gamma1; g2 = p->gamma2;
@@ -168,16 +168,29 @@ int determ_mldsa_sign(const determ_mldsa_params* p, const uint8_t* sk,
               sig[base + omega + i] = (uint8_t)idx;
           }
         }
-        determ_secure_zero(s1, sizeof s1); determ_secure_zero(s2, sizeof s2);
-        determ_secure_zero(t0, sizeof t0); determ_secure_zero(K, sizeof K);
-        determ_secure_zero(rhopp, sizeof rhopp);
-        return 0;
+        ret = 0; goto cleanup;   /* success */
     }
-    return 2;   /* safety cap hit — not expected */
+    ret = 2;                     /* safety cap hit — not expected for a valid sk */
+cleanup:
+    /* Scrub every secret-bearing local on EVERY exit path (R70-audit): the master
+     * secrets (s1,s2,t0,K,rho''), the mask (y,yh), and the key-RECOVERING products
+     * — cs1=c·s1, cs2=c·s2, ct0=c·t0, w=A·y and z/zc/r0/w1 — so they do not linger
+     * in the reclaimed stack frame (z is public, but y and c·s1 together reveal s1).
+     * mat (Â), ctil (c̃), cp/ch (public challenge) and the output sig are public. */
+    determ_secure_zero(s1, sizeof s1); determ_secure_zero(s2, sizeof s2);
+    determ_secure_zero(t0, sizeof t0); determ_secure_zero(K, sizeof K);
+    determ_secure_zero(rhopp, sizeof rhopp); determ_secure_zero(mu, sizeof mu);
+    determ_secure_zero(y, sizeof y); determ_secure_zero(yh, sizeof yh);
+    determ_secure_zero(w, sizeof w); determ_secure_zero(w1, sizeof w1);
+    determ_secure_zero(cs1, sizeof cs1); determ_secure_zero(cs2, sizeof cs2);
+    determ_secure_zero(ct0, sizeof ct0); determ_secure_zero(z, sizeof z);
+    determ_secure_zero(zc, sizeof zc); determ_secure_zero(r0, sizeof r0);
+    return ret;
 }
 
 int determ_mldsa_verify(const determ_mldsa_params* p, const uint8_t* pk,
-                        const uint8_t* mprime, size_t mlen, const uint8_t* sig) {
+                        const uint8_t* mprime, size_t mlen, const uint8_t* sig,
+                        size_t siglen) {
     int k, l; int32_t g1, g2; int tau, omega, beta, lam4;
     uint8_t rho[32], tr[64], mu[64], ctil[64], ctil2[64];
     int32_t mat[KMAX * LMAX][256];
@@ -190,6 +203,11 @@ int determ_mldsa_verify(const determ_mldsa_params* p, const uint8_t* pk,
     k = p->k; l = p->l; g1 = p->gamma1; g2 = p->gamma2;
     tau = p->tau; omega = p->omega; beta = p->tau * p->eta; lam4 = p->lambda / 4;
     if (k < 1 || k > KMAX || l < 1 || l > LMAX) return 0;
+    /* The signature is a fixed-length encoding — reject a wrong-length σ up front so
+     * every subsequent read (sigDecode, the ω+k-byte HintBitUnpack) is in-bounds on
+     * the attacker-controlled `sig`. (R70-audit: verify must be memory-safe on any
+     * malformed input.) */
+    if (siglen != determ_mldsa_sig_bytes(p)) return 0;
     zpb = z_poly_bytes(g1); wpb = w1_poly_bytes(g2);
 
     /* pkDecode + sigDecode. */

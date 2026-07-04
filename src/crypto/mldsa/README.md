@@ -195,13 +195,19 @@ the exact forward-NTT output ordering that byte-exact interop needs.
 **What is proven now:** the WHOLE FIPS 204 scheme — KeyGen, Sign, and Verify — is
 pinned byte-for-byte against the NIST ACVP keyGen/sigGen/sigVer KATs for all three
 parameter sets (§3 items 7-8), through two independent implementations (the shipped
-C and a from-scratch python) both matched to the frozen NIST bytes. **What is NOT
-yet done:** (a) the constant-time / side-channel hardening review of the
-secret-dependent paths (the rejection loop's data-dependent iteration count is the
-canonical ML-DSA behaviour, but the module has not had a dedicated CT audit for
-production signing); (b) the prehash + externalMu ACVP interface variants (out of
-scope for the chain path); (c) chain integration itself. None affects the KAT
-conformance of the pure sign/verify path shipped here.
+C and a from-scratch python) both matched to the frozen NIST bytes. An R70
+adversarial self-audit hardened two things it found: `Verify_internal` now takes a
+`siglen` and rejects a wrong-length σ up front, so every read of the
+attacker-controlled signature (sigDecode + the ω+k-byte HintBitUnpack) is in-bounds
+(a `test-mldsa-c99` assertion feeds it a truncated σ); and `Sign_internal` now
+scrubs **all** secret-bearing locals — the master (s1,s2,t0,K,ρ'') plus the
+key-recovering intermediates (the mask y, and c·s1 / c·s2 / c·t0 / w) — on **every**
+exit path (a shared cleanup), not just the success path. **What is NOT yet done:**
+(a) a full constant-time / side-channel *timing* review — the rejection loop's
+data-dependent iteration count is the canonical ML-DSA behaviour, but the module
+has not had a dedicated CT audit for production signing; (b) the prehash +
+externalMu ACVP interface variants (out of scope for the chain path); (c) chain
+integration itself. None affects the KAT conformance of the pure sign/verify path.
 
 ## 4. Constant-time / hygiene posture
 

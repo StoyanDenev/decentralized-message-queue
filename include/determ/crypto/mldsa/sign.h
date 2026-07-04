@@ -35,9 +35,12 @@ int determ_mldsa_sign(const determ_mldsa_params* p, const uint8_t* sk,
                       const uint8_t rnd[32], uint8_t* sig);
 
 /* ML-DSA.Verify_internal(pk, M', σ): returns 1 iff σ is a valid signature of M'
- * under pk, else 0 (including malformed σ / out-of-range z / bad hint). */
+ * under pk, else 0. Memory-safe on any `sig` — a wrong `siglen` (≠ sig_bytes) is
+ * rejected before any byte is read; malformed σ / out-of-range z / bad hint also
+ * return 0. */
 int determ_mldsa_verify(const determ_mldsa_params* p, const uint8_t* pk,
-                        const uint8_t* mprime, size_t mlen, const uint8_t* sig);
+                        const uint8_t* mprime, size_t mlen, const uint8_t* sig,
+                        size_t siglen);
 
 /* Format a message for the pure external interface (no prehash):
  * M' = IntegerToBytes(0,1) ‖ IntegerToBytes(|ctx|,1) ‖ ctx ‖ M. `out` needs
