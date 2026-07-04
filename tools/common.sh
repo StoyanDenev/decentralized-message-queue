@@ -105,6 +105,24 @@ else
     DETERM_LIGHT=""
 fi
 
+# ── DETERM_DSF (deterministic simulation framework binary) ────────────────────
+# Test-only fourth binary: the DSF core (virtual clock + scheduler + scenario
+# DSL + property checker). Optional like the wallet/light — tests that don't
+# exercise it skip it. Self-contained (no OpenSSL / no determ core link).
+if [ -n "${DETERM_DSF_BIN:-}" ]; then
+    DETERM_DSF="$DETERM_DSF_BIN"
+elif [ -x "build/Release/determ-dsf.exe" ]; then
+    DETERM_DSF="build/Release/determ-dsf.exe"
+elif [ -x "build/determ-dsf.exe" ]; then
+    DETERM_DSF="build/determ-dsf.exe"
+elif [ -x "build/determ-dsf" ]; then
+    DETERM_DSF="build/determ-dsf"
+elif [ -x "build/Release/determ-dsf" ]; then
+    DETERM_DSF="build/Release/determ-dsf"
+else
+    DETERM_DSF=""
+fi
+
 # ── Absolutize binary paths (Windows Python-subprocess portability) ────────────
 # The detection above yields paths RELATIVE to the repo root (e.g.
 # build/Release/determ.exe). Bash resolves a relative-with-slash path against

@@ -256,3 +256,16 @@ endif()
 if(UNIX)
   target_link_libraries(determ-light PRIVATE pthread)
 endif()
+
+# ── determ-dsf: Deterministic Simulation Framework (S-035 Opt 2, DSF-SPEC) ───
+# TEST-ONLY binary. Increment 1 = the deterministic core (virtual clock +
+# discrete-event scheduler + scenario DSL + trace/replay + property checker +
+# framework-demonstration scenarios). Fully self-contained: header-only core
+# under sim/, a single .cpp TU, NO link deps (no OpenSSL, no determ core, no
+# asio) — the same cross-toolchain determinism discipline as the consensus
+# surface (a fixed --seed yields a byte-identical trace across -O0/-O2). The
+# full virtual-network + consensus-engine coupling + 30-scenario set land in
+# later increments. Excluded from install/production targets.
+add_executable(determ-dsf sim/dsf_main.cpp)
+target_compile_features(determ-dsf PRIVATE cxx_std_20)
+target_include_directories(determ-dsf PRIVATE ${CMAKE_SOURCE_DIR}/sim)
