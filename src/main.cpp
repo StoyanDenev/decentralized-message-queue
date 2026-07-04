@@ -4958,10 +4958,12 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
 // v2.17 / S-004 option 2: passphrase-encrypted keyfile at rest. If
 // --passphrase is provided (or DETERM_PASSPHRASE env var is set),
 // the on-disk keyfile is wrapped in an AES-256-GCM envelope keyed
-// from PBKDF2-HMAC-SHA-256(passphrase, salt, 600k iters). The
-// envelope is serialized in the canonical dot-separated format
-// (see wallet/envelope.hpp). File permissions still get 0600 for
-// belt-and-suspenders.
+// from the passphrase. R58: fresh envelopes use the memory-hard
+// Argon2id KDF by default (the DWE2 layout); legacy PBKDF2 (DWE1)
+// envelopes still decrypt (envelope::decrypt auto-detects the KDF
+// from the magic). The envelope is serialized in the canonical
+// dot-separated format (see wallet/envelope.hpp). File permissions
+// still get 0600 for belt-and-suspenders.
 //
 // To read back: `determ account decrypt --in <file> --passphrase ...`
 // (or rely on DETERM_PASSPHRASE env var; passing on CLI is leaked
@@ -16574,7 +16576,7 @@ int main(int argc, char** argv) {
 
         // 1. Encrypt + decrypt round-trip with matching passphrase + AAD.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             auto pt_back = decrypt(env, PW, AAD);
             check(pt_back.has_value(),
                   "encrypt → decrypt round-trip with matching pw + AAD");
@@ -16585,7 +16587,7 @@ int main(int argc, char** argv) {
         // 2. Envelope shape: salt non-empty, nonce is 12 bytes (AES-GCM
         //    standard), ciphertext is plaintext-length + 16-byte tag.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             check(env.salt.size() >= 16,
                   "envelope.salt is >= 16 bytes (DEFAULT_SALT_LEN)");
             check(env.nonce.size() == 12,
@@ -16600,7 +16602,7 @@ int main(int argc, char** argv) {
 
         // 3. Wrong passphrase fails decryption (AEAD tag verification).
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             auto pt_back = decrypt(env, "wrong password", AAD);
             check(!pt_back.has_value(),
                   "decrypt rejects wrong passphrase (AEAD tag fail)");
@@ -16609,7 +16611,7 @@ int main(int argc, char** argv) {
         // 4. Empty passphrase fails (against an envelope encrypted
         //    with non-empty passphrase).
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             auto pt_back = decrypt(env, "", AAD);
             check(!pt_back.has_value(),
                   "decrypt rejects empty passphrase against non-empty-encrypted");
@@ -16619,7 +16621,7 @@ int main(int argc, char** argv) {
         //    property — guardian-1's encrypted share cannot be presented
         //    as guardian-2's because the AAD won't match.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             std::vector<uint8_t> AAD2 = {'g','u','a','r','d','i','a','n','-','2'};
             auto pt_back = decrypt(env, PW, AAD2);
             check(!pt_back.has_value(),
@@ -16629,7 +16631,7 @@ int main(int argc, char** argv) {
         // 6. Tampered ciphertext fails. Flip one byte in the
         //    ciphertext, decrypt must fail.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             env.ciphertext[0] ^= 0xFF;
             auto pt_back = decrypt(env, PW, AAD);
             check(!pt_back.has_value(),
@@ -16639,7 +16641,7 @@ int main(int argc, char** argv) {
         // 7. Tampered tag fails. The tag is the last 16 bytes of the
         //    ciphertext; flip one byte there.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             env.ciphertext[env.ciphertext.size() - 1] ^= 0xFF;
             auto pt_back = decrypt(env, PW, AAD);
             check(!pt_back.has_value(),
@@ -16652,8 +16654,8 @@ int main(int argc, char** argv) {
         //    produce the same ciphertext (would leak that two stored
         //    artifacts encrypted the same plaintext).
         {
-            Envelope e1 = encrypt(PT, PW, AAD, TEST_ITERS);
-            Envelope e2 = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope e1 = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
+            Envelope e2 = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             check(e1.salt != e2.salt,
                   "encrypt: fresh salt per envelope (nondeterminism property)");
             check(e1.nonce != e2.nonce,
@@ -16664,7 +16666,7 @@ int main(int argc, char** argv) {
 
         // 9. Serialize + deserialize round-trip.
         {
-            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, AAD, TEST_ITERS);
             std::string blob = serialize(env);
             auto back = deserialize(blob);
             check(back.has_value(), "deserialize succeeds on valid blob");
@@ -16698,7 +16700,7 @@ int main(int argc, char** argv) {
         // 11. Empty plaintext can be encrypted (degenerate but valid).
         {
             std::vector<uint8_t> empty;
-            Envelope env = encrypt(empty, PW, AAD, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(empty, PW, AAD, TEST_ITERS);
             check(env.ciphertext.size() == 16,
                   "encrypt(empty plaintext) yields 16-byte ciphertext (just tag)");
             auto pt_back = decrypt(env, PW, AAD);
@@ -16708,7 +16710,7 @@ int main(int argc, char** argv) {
 
         // 12. Empty AAD round-trips correctly.
         {
-            Envelope env = encrypt(PT, PW, {}, TEST_ITERS);
+            Envelope env = encrypt_pbkdf2(PT, PW, {}, TEST_ITERS);
             auto pt_back = decrypt(env, PW, {});
             check(pt_back && *pt_back == PT,
                   "encrypt/decrypt with empty AAD round-trips");
