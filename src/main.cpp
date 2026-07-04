@@ -27,6 +27,7 @@
 #include <determ/crypto/mldsa/reduce.h>        // §3.18: ML-DSA modular reduction
 #include <determ/crypto/mldsa/ntt.h>           // §3.18: ML-DSA negacyclic NTT (increment 1)
 #include <determ/crypto/mldsa/rounding.h>      // §3.18: ML-DSA rounding/hint layer (increment 2)
+#include <determ/crypto/mldsa/sample.h>        // §3.18: ML-DSA SHAKE rejection samplers (increment 3)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -472,11 +473,11 @@ In-process tests (deterministic, no network):
                                               f[1600]) byte-equal vs OpenSSL
                                               EVP_sha3/shake + KATs (ML-DSA XOF)
 )" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
-                                              inc.1 Z_q reduction + negacyclic NTT
-                                              (round-trip + schoolbook-conv +
-                                              direct-DFT oracle) + inc.2 rounding
-                                              /hint layer (power2round/decompose/
-                                              make+use hint, both gamma2)
+                                              inc.1 Z_q reduction + NTT (+direct-
+                                              DFT oracle); inc.2 rounding/hint;
+                                              inc.3 SHAKE rejection samplers
+                                              (uniform/eta/in-ball) — the first
+                                              SHAKE consumers
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13502,7 +13503,8 @@ int main(int argc, char** argv) {
                                 "ed25519_verify_strict.json",
                                 "base64_strict.json",
                                 "sha3_shake.json",
-                                "mldsa_ntt.json" };
+                                "mldsa_ntt.json",
+                                "mldsa_sample.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13974,6 +13976,25 @@ int main(int argc, char** argv) {
                         bool mm=false; for (int i=0;i<256;i++) if (((long long)pr[i]-exp[i]) % DETERM_MLDSA_Q) mm=true;
                         if (mm) { ok=false; bad=name+" (ring product mismatch mod q)"; break; }
                     } else { ok=false; bad=name+" (unknown mldsa_ntt type '"+ty+"')"; break; }
+                } else if (prim == "mldsa_sample") {
+                    // §3.18 inc.3 ML-DSA rejection-sampler KAT — the C determ_shake
+                    // + rule must reproduce the independent hashlib-SHAKE reference
+                    // (tools/verify_mldsa_sample.py) byte-for-byte. "out" is the
+                    // full 256-coeff polynomial.
+                    std::string kind = v.value("kind", "");
+                    auto seed = unhex(v["seed_hex"]);
+                    auto& outj = v["out"];
+                    if (!outj.is_array() || outj.size() != 256) { ok=false; bad=name+" (bad out len)"; break; }
+                    int32_t got[256];
+                    if (kind == "uniform") {
+                        determ_mldsa_sample_uniform(got, dptr(seed), seed.size());
+                    } else if (kind == "eta") {
+                        determ_mldsa_sample_eta(got, dptr(seed), seed.size(), (int)v.value("eta", 0));
+                    } else if (kind == "in_ball") {
+                        determ_mldsa_sample_in_ball(got, dptr(seed), seed.size(), (int)v.value("tau", 0));
+                    } else { ok=false; bad=name+" (unknown mldsa_sample kind '"+kind+"')"; break; }
+                    bool mm=false; for (int i=0;i<256;i++) if (got[i] != outj[i].get<int32_t>()) mm=true;
+                    if (mm) { ok=false; bad=name+" (sampler output != reference)"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14413,20 +14434,37 @@ int main(int argc, char** argv) {
             }
             check(ok, "use_hint: use_hint(r,[HB(r)!=HB(r+z)]) == HB(r+z), |z|<=gamma2");
         }
-        // (8) make_hint definitional contract, both gamma2.
+        // (8) make_hint via an INDEPENDENT oracle (R64-audit tautology fix — the
+        //     old `want` re-transcribed the impl's own inequality, so a boundary
+        //     mutation would pass identically). Reconstruct v = a1*2*gamma2 + a0,
+        //     then make_hint(a0,a1) must equal (decompose(v).a1 != a1): the low
+        //     part forces a different high bucket. This restates make_hint's
+        //     SEMANTICS via decompose, catching a >=/> or tie-break mutation.
+        //     Dense sweep across the -gamma2, 0, +gamma2 seams for every bucket.
         {
             bool ok = true;
-            const int32_t gs[2] = { G32, G88 };
+            const int32_t gs[2] = { G32, G88 }; const int ms[2] = { 16, 44 };
+            auto oracle = [&](int32_t a0, int32_t a1, int32_t g2)->unsigned {
+                long long v = ((long long)a1 * 2 * g2 + a0) % Q; if (v < 0) v += Q;
+                int32_t d0; int32_t dv1 = determ_mldsa_decompose((int32_t)v, &d0, g2);
+                return (dv1 != a1) ? 1u : 0u;
+            };
             for (int gi = 0; gi < 2 && ok; gi++) {
-                int32_t g2 = gs[gi];
-                for (int t = 0; t < 40000 && ok; t++) {
+                int32_t g2 = gs[gi]; int m = ms[gi];
+                const int32_t centers[3] = { -g2, 0, g2 };
+                for (int a1 = 0; a1 < m && ok; a1++)
+                    for (int ci = 0; ci < 3; ci++)
+                        for (int32_t d = -3; d <= 3; d++) {
+                            int32_t a0 = centers[ci] + d;
+                            if (determ_mldsa_make_hint(a0, a1, g2) != oracle(a0, a1, g2)) ok = false;
+                        }
+                for (int t = 0; t < 20000 && ok; t++) {
                     int32_t a0 = (int32_t)(next() % (uint64_t)(2u*(uint32_t)g2 + 21u)) - (g2 + 10);
-                    int32_t a1 = (int32_t)(next() % 16u);
-                    unsigned want = (a0 > g2 || a0 < -g2 || (a0 == -g2 && a1 != 0)) ? 1u : 0u;
-                    if (determ_mldsa_make_hint(a0, a1, g2) != want) ok = false;
+                    int32_t a1 = (int32_t)(next() % (uint64_t)m);
+                    if (determ_mldsa_make_hint(a0, a1, g2) != oracle(a0, a1, g2)) ok = false;
                 }
             }
-            check(ok, "make_hint: definitional boundary contract, both gamma2");
+            check(ok, "make_hint == (decompose(a1*2g2+a0).a1 != a1) — independent oracle, dense seams");
         }
         // (9) boundary KAT: exact (a0,a1) at the decomposition seams (byte-exact
         //     interop pins the tie-breaks a loose bound check cannot).
@@ -14446,6 +14484,45 @@ int main(int argc, char** argv) {
             for (const K& k : d32) { int32_t h = determ_mldsa_decompose(k.a,&o,G32); if (h!=k.a1||o!=k.a0) ok=false; }
             for (const K& k : d88) { int32_t h = determ_mldsa_decompose(k.a,&o,G88); if (h!=k.a1||o!=k.a0) ok=false; }
             check(ok, "rounding boundary KAT (power2round + decompose seams, both gamma2)");
+        }
+
+        // ---- §3.18 increment 3: the SHAKE rejection samplers ----
+        // Structural gates (the byte-exact interop KAT vs the independent hashlib
+        // SHAKE reference lives in tools/vectors/mldsa_sample.json, gated by
+        // test-c99-vectors / test_c99_vector_files.sh).
+        {
+            const uint8_t su[34] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,
+                                    19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34};
+            int32_t a[256], b[256];
+            determ_mldsa_sample_uniform(a, su, 34);
+            determ_mldsa_sample_uniform(b, su, 34);
+            bool ok = true;
+            for (int i=0;i<256;i++) { if (!(a[i]>=0 && a[i]<Q)) ok=false; if (a[i]!=b[i]) ok=false; }
+            check(ok, "sample_uniform: 256 coeffs in [0,q) + deterministic (SHAKE128)");
+        }
+        {
+            const uint8_t se[66] = {0}; int32_t a[256], b[256]; bool ok = true;
+            for (int eta : {2, 4}) {
+                determ_mldsa_sample_eta(a, se, 66, eta);
+                determ_mldsa_sample_eta(b, se, 66, eta);
+                for (int i=0;i<256;i++) { if (!(a[i]>=-eta && a[i]<=eta)) ok=false; if (a[i]!=b[i]) ok=false; }
+            }
+            check(ok, "sample_eta: 256 coeffs in [-eta,eta] + deterministic, both eta (SHAKE256)");
+        }
+        {
+            const uint8_t sc[32] = {0}; int32_t c[256], d[256]; bool ok = true;
+            for (int tau : {39, 49, 60}) {
+                determ_mldsa_sample_in_ball(c, sc, 32, tau);
+                determ_mldsa_sample_in_ball(d, sc, 32, tau);
+                int nz = 0; long long norm2 = 0;
+                for (int i=0;i<256;i++) {
+                    if (c[i]) { nz++; if (c[i]!=1 && c[i]!=-1) ok=false; }
+                    norm2 += (long long)c[i]*c[i];
+                    if (c[i]!=d[i]) ok=false;
+                }
+                if (nz != tau || norm2 != tau) ok=false;   // exactly tau signed ones
+            }
+            check(ok, "sample_in_ball: exactly tau in {-1,+1} + ||c||^2==tau + deterministic");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

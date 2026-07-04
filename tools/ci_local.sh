@@ -85,10 +85,10 @@ if [ "$SANITIZE" -eq 1 ]; then
             test-merge-event-determinism test-genesis-determinism test-state-proof-composite-key \
             test-cross-shard-atomicity test-cross-shard-multi-receipt test-cross-shard-outbound-apply \
             test-block-digest test-tx-root test-merkle test-overflow-paths \
-            test-sha256 test-sha2-c99 test-blake2b-c99 test-chacha20-c99 test-xchacha-c99 \
+            test-sha256 test-sha2-c99 test-blake2b-c99 test-sha3-c99 test-chacha20-c99 test-xchacha-c99 \
             test-aes-c99 test-argon2id-c99 test-ct-c99 test-ed25519-c99 test-ed25519-vectors \
             test-ed25519-scalar-reduce test-x25519-c99 test-p256-c99 test-p256-h2c-c99 \
-            test-p256-oprf-c99 test-frost-c99 test-c99-vectors test-c99-api"
+            test-p256-oprf-c99 test-frost-c99 test-mldsa-c99 test-c99-vectors test-c99-api"
   san_fail=0
   for cmd in $SAN_CMDS; do
     if "$SANBIN" "$cmd" >/tmp/ubsan_out.txt 2>&1; then

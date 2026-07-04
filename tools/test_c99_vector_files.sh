@@ -59,7 +59,7 @@ EXPECTED = {
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
-    "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json",
+    "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
 }
 
 try:
@@ -829,6 +829,64 @@ def _mldsa_ctx():
                        ok=(QINV==58728449 and Z[1]==25847 and F==41978)))
     return _MLDSA
 
+def chk_mldsa_sample(vec, label):
+    # FIPS 204 / Dilithium rejection samplers over python hashlib SHAKE — an
+    # implementation of SHAKE DISTINCT from the C determ_shake under test (and
+    # proven byte-equal to it in R62). Recompute each vector and match the stored
+    # output byte-for-byte, plus the structural invariants.
+    import hashlib
+    Q = 8380417; N = 256
+    def sample_uniform(seed):
+        buf = hashlib.shake_128(seed).digest(4096); i = 0; a = []
+        while len(a) < N:
+            if i + 3 > len(buf): buf = hashlib.shake_128(seed).digest(len(buf) + 4096)
+            t = buf[i] | (buf[i+1] << 8) | ((buf[i+2] & 0x7F) << 16); i += 3
+            if t < Q: a.append(t)
+        return a
+    def sample_eta(seed, eta):
+        buf = hashlib.shake_256(seed).digest(4096); i = 0; a = []
+        while len(a) < N:
+            if i >= len(buf): buf = hashlib.shake_256(seed).digest(len(buf) + 4096)
+            b = buf[i]; i += 1
+            for z in (b & 0x0F, b >> 4):
+                if len(a) >= N: break
+                if eta == 2:
+                    if z < 15: a.append(2 - (z % 5))
+                else:
+                    if z < 9: a.append(4 - z)
+        return a
+    def sample_in_ball(seed, tau):
+        buf = hashlib.shake_256(seed).digest(8 + 4096)
+        signs = int.from_bytes(buf[:8], "little"); pos = 8; c = [0]*N
+        for i in range(N - tau, N):
+            while True:
+                if pos >= len(buf): buf = hashlib.shake_256(seed).digest(len(buf) + 4096)
+                j = buf[pos]; pos += 1
+                if j <= i: break
+            c[i] = c[j]; c[j] = 1 - 2*(signs & 1); signs >>= 1
+        return c
+    need(vec, ["kind", "seed_hex", "out"], label)
+    seed = unhex(vec["seed_hex"], label + " seed_hex")
+    out = vec["out"]
+    if not isinstance(out, list) or len(out) != N:
+        return "out is not a 256-int array"
+    out = [int(x) for x in out]
+    kind = vec["kind"]
+    if kind == "uniform":
+        if any(not (0 <= c < Q) for c in out): return "uniform out-of-range"
+        if sample_uniform(seed) != out: return "recomputed sample_uniform != out"
+    elif kind == "eta":
+        eta = int(vec["eta"])
+        if any(not (-eta <= c <= eta) for c in out): return "eta out-of-range"
+        if sample_eta(seed, eta) != out: return "recomputed sample_eta != out"
+    elif kind == "in_ball":
+        tau = int(vec["tau"]); nz = [x for x in out if x]
+        if len(nz) != tau or any(x not in (-1, 1) for x in nz) or sum(x*x for x in out) != tau:
+            return "not exactly tau +/-1 (||c||^2 != tau)"
+        if sample_in_ball(seed, tau) != out: return "recomputed sample_in_ball != out"
+    else:
+        return "unknown mldsa_sample kind %r" % kind
+
 def chk_mldsa_ntt(vec, label):
     m=_mldsa_ctx()
     if not m["ok"]: return "internal NTT reference constants drifted (runner bug)"
@@ -958,6 +1016,7 @@ CHECKERS = {
     "base64_strict": chk_base64_strict,
     "sha3_shake": chk_sha3_shake,
     "mldsa_ntt": chk_mldsa_ntt,
+    "mldsa_sample": chk_mldsa_sample,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

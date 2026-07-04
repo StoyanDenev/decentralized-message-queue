@@ -125,6 +125,8 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/reduce.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/ntt.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/rounding.c"
+  # §3.18 increment 3: the rejection samplers — the first SHAKE consumers.
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/sample.c"
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"
