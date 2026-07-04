@@ -43,13 +43,14 @@ Phase 1 (static, no binary required):
 
 Phase 2 (live, skipped with --static-only):
   Runs the in-process C99 crypto battery by invoking the determ binary
-  directly, one subcommand at a time (the 14 C99-family subcommands in
+  directly, one subcommand at a time (the 16 C99-family subcommands in
   `determ help` order):
     test-ed25519-vectors  test-sha2-c99       test-chacha20-c99
     test-aes-c99          test-ed25519-c99    test-ed25519-scalar-reduce
     test-frost-c99        test-x25519-c99     test-blake2b-c99
-    test-xchacha-c99      test-argon2id-c99   test-ct-c99
-    test-rng-c99          test-c99-vectors    test-c99-api
+    test-sha3-c99         test-xchacha-c99    test-argon2id-c99
+    test-ct-c99           test-rng-c99        test-c99-vectors
+    test-c99-api
   Each battery must exit 0 AND emit its terminal PASS summary marker;
   the script prints a per-test OK/FAILED row and a final verdict.
 
@@ -164,7 +165,7 @@ echo "=== Phase 2: live battery ($DETERM) ==="
 # the "test-" prefix), which is what the marker gate below greps.
 BATTERY="test-ed25519-vectors test-sha2-c99 test-chacha20-c99 test-aes-c99 \
          test-ed25519-c99 test-ed25519-scalar-reduce test-frost-c99 \
-         test-x25519-c99 test-blake2b-c99 test-xchacha-c99 \
+         test-x25519-c99 test-blake2b-c99 test-sha3-c99 test-xchacha-c99 \
          test-argon2id-c99 test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
 FAILED=0
 TOTAL=0

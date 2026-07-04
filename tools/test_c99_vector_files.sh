@@ -59,7 +59,7 @@ EXPECTED = {
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
-    "base64_strict.json",
+    "base64_strict.json", "sha3_shake.json",
 }
 
 try:
@@ -767,6 +767,37 @@ def chk_p256_oprf(vec, label):
         if oprf_challenge(pks_pt, Mv, Zv, t2, t3, ctx, n) != vc:
             return "VerifyProof(proof_hex) failed — challenge mismatch"
 
+def chk_sha3_shake(vec, label):
+    # FIPS 202 SHA-3 / SHAKE, recomputed with python hashlib (sha3_256,
+    # sha3_512, shake_128, shake_256) — an independent Keccak, distinct from
+    # the C99 sha3.c the binary side runs. Per-vector "alg" discriminator;
+    # SHAKE carries "outlen" (XOF), the fixed-length hashes must not.
+    need(vec, ["alg", "msg_hex", "digest_hex"], label)
+    alg = vec["alg"]
+    msg = unhex(vec["msg_hex"], label + " msg_hex")
+    want = unhex(vec["digest_hex"], label + " digest_hex").hex()
+    if alg == "SHA3-256":
+        if "outlen" in vec: return "fixed-length alg carries outlen"
+        if len(want) != 64: return "SHA3-256 digest_hex is not 32 bytes"
+        got = hashlib.sha3_256(msg).hexdigest()
+    elif alg == "SHA3-512":
+        if "outlen" in vec: return "fixed-length alg carries outlen"
+        if len(want) != 128: return "SHA3-512 digest_hex is not 64 bytes"
+        got = hashlib.sha3_512(msg).hexdigest()
+    elif alg == "SHAKE128":
+        need(vec, ["outlen"], label)
+        outlen = int(vec["outlen"])
+        if len(want) != 2 * outlen: return "SHAKE128 digest_hex length != 2*outlen"
+        got = hashlib.shake_128(msg).hexdigest(outlen)
+    elif alg == "SHAKE256":
+        need(vec, ["outlen"], label)
+        outlen = int(vec["outlen"])
+        if len(want) != 2 * outlen: return "SHAKE256 digest_hex length != 2*outlen"
+        got = hashlib.shake_256(msg).hexdigest(outlen)
+    else:
+        return "unknown sha3/shake alg %r" % alg
+    if got != want: return "recomputed %s != digest_hex %s" % (got, want)
+
 def chk_frost_ed25519_rfc9591(vec, label):
     # RFC 9591 E.1 FROST(Ed25519, SHA-512): the scalar-arithmetic subset a
     # python oracle can recompute WITHOUT edwards point math — (a) the Shamir
@@ -835,6 +866,7 @@ CHECKERS = {
     "xchacha20_poly1305_decrypt": chk_xchacha20_poly1305_decrypt,
     "ed25519_verify_strict": chk_ed25519_verify_strict,
     "base64_strict": chk_base64_strict,
+    "sha3_shake": chk_sha3_shake,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

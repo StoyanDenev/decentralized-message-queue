@@ -116,6 +116,9 @@ add_library(determ-crypto-c99 STATIC
   # §3.8c NIST P-256 (FIPS-profile curve; Montgomery field + RCB complete
   # addition + CT ladder) — `determ test-p256-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/p256/p256.c"
+  # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
+  # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"

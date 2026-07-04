@@ -22,6 +22,7 @@
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
+#include <determ/crypto/sha3/sha3.h>           // PQ prereq: C99-native SHA-3/SHAKE (FIPS 202)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -462,6 +463,10 @@ In-process tests (deterministic, no network):
                                               BLAKE2b (RFC 7693) byte-equal vs
                                               OpenSSL EVP_blake2b512 + hashlib
                                               KATs (§3.6 prereq; Argon2id base)
+  determ test-sha3-c99                        PQ prereq: libsodium-free C99
+                                              SHA-3/SHAKE (FIPS 202, Keccak-
+                                              f[1600]) byte-equal vs OpenSSL
+                                              EVP_sha3/shake + KATs (ML-DSA XOF)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13485,7 +13490,8 @@ int main(int argc, char** argv) {
                                 "argon2id.json",
                                 "xchacha20_poly1305_decrypt.json",
                                 "ed25519_verify_strict.json",
-                                "base64_strict.json" };
+                                "base64_strict.json",
+                                "sha3_shake.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13901,6 +13907,33 @@ int main(int argc, char** argv) {
                             msgv.empty()?nullptr:msgv.data(), msgv.size(), gpk, oursig) != 0
                         || determ_ed25519_verify(gpk, msgv.empty()?nullptr:msgv.data(),
                                msgv.size(), oursig) != 0) { ok=false; bad=name + " (determ frost_sign w/ RFC nonces)"; break; }
+                } else if (prim == "sha3_shake") {
+                    // R62 FIPS 202 corpus (python hashlib oracle — an
+                    // independent Keccak), keyed on the per-vector "alg":
+                    // SHA3-256/512 fixed digests + SHAKE128/256 XOF at the
+                    // file-specified output length. Covers the sponge rate
+                    // boundaries (rate-1 / rate / rate+1), multi-block inputs,
+                    // and XOF outputs exceeding the rate (squeeze-permute) —
+                    // the byte-exactness gate on determ_sha3_* / determ_shake_*.
+                    std::string alg = v.value("alg", "");
+                    auto msg = unhex(v["msg_hex"]);
+                    if (alg == "SHA3-256") {
+                        uint8_t out[32]; determ_sha3_256(out, dptr(msg), msg.size());
+                        if (hx(out,32) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (alg == "SHA3-512") {
+                        uint8_t out[64]; determ_sha3_512(out, dptr(msg), msg.size());
+                        if (hx(out,64) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (alg == "SHAKE128") {
+                        size_t outlen = v["outlen"].get<size_t>();
+                        std::vector<uint8_t> out(outlen);
+                        determ_shake128(out.empty()?nullptr:out.data(), outlen, dptr(msg), msg.size());
+                        if (hx(out.data(), outlen) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (alg == "SHAKE256") {
+                        size_t outlen = v["outlen"].get<size_t>();
+                        std::vector<uint8_t> out(outlen);
+                        determ_shake256(out.empty()?nullptr:out.data(), outlen, dptr(msg), msg.size());
+                        if (hx(out.data(), outlen) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name + " (unknown sha3 alg '" + alg + "')"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14045,6 +14078,125 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
+    if (cmd == "test-sha3-c99") {
+        // PQ prerequisite (FIPS 202): validate the C99 SHA-3/SHAKE (Keccak-f[1600])
+        // the ML-DSA/Dilithium XOF sits on. (1) SHA3-256/512 byte-equal vs OpenSSL
+        // EVP over a fuzzed length grid (the §Q9 oracle gate — full sponge absorb/
+        // pad10*1/permute); (2) SHAKE128/256 byte-equal vs OpenSSL EVP DigestFinalXOF
+        // over fuzzed lengths × output sizes incl. > rate (forces squeeze-permute);
+        // (3) FIPS 202 KATs (empty + "abc"); (4) incremental absorb/squeeze == one-
+        // shot across a squeeze-permute; (5) rate-boundary byte-by-byte == one-shot.
+        using namespace determ;
+        int fail=0;
+        auto check=[&](bool c,const std::string&m){ if(c) std::cout<<"  PASS: "<<m<<"\n"; else {std::cout<<"  FAIL: "<<m<<"\n"; fail++;} };
+        auto hx=[](const uint8_t*p,size_t n){ static const char*H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+
+        // (1) SHA3-256 + SHA3-512 vs OpenSSL EVP over fuzzed lengths (rate boundaries).
+        {
+            bool ok256=true, ok512=true; long at=-1;
+            const size_t lens[]={0,1,71,72,73,135,136,137,168,200,255,256,272,1000};
+            for(size_t li=0; li<sizeof(lens)/sizeof(lens[0]); ++li){
+                size_t L=lens[li]; std::vector<uint8_t> in(L);
+                for(size_t i=0;i<L;i++) in[i]=(uint8_t)((i*151u+L*11u+5u)&0xff);
+                const uint8_t* ip = L?in.data():(const uint8_t*)"";
+                uint8_t m256[32]; determ_sha3_256(m256, ip, L);
+                uint8_t m512[64]; determ_sha3_512(m512, ip, L);
+                uint8_t o256[32], o512[64]; unsigned int ol=0;
+                EVP_Digest(ip, L, o256, &ol, EVP_sha3_256(), nullptr);
+                EVP_Digest(ip, L, o512, &ol, EVP_sha3_512(), nullptr);
+                if(std::memcmp(m256,o256,32)!=0){ ok256=false; at=(long)L; }
+                if(std::memcmp(m512,o512,64)!=0){ ok512=false; at=(long)L; }
+            }
+            check(ok256, ok256 ? "SHA3-256 C99 == OpenSSL EVP_sha3_256 over fuzzed lengths (§Q9 gate)"
+                               : "SHA3-256 diverges from OpenSSL (len="+std::to_string(at)+")");
+            check(ok512, ok512 ? "SHA3-512 C99 == OpenSSL EVP_sha3_512 over fuzzed lengths (§Q9 gate)"
+                               : "SHA3-512 diverges from OpenSSL (len="+std::to_string(at)+")");
+        }
+
+        // (2) SHAKE128 + SHAKE256 vs OpenSSL EVP DigestFinalXOF (fuzzed len × outlen incl. > rate).
+        {
+            bool ok128=true, ok256=true; long at=-1;
+            const size_t lens[]={0,1,135,136,137,167,168,169,300};
+            const size_t outs[]={1,16,31,32,136,168,200,512};
+            for(size_t li=0; li<sizeof(lens)/sizeof(lens[0]) && ok128 && ok256; ++li){
+                size_t L=lens[li]; std::vector<uint8_t> in(L);
+                for(size_t i=0;i<L;i++) in[i]=(uint8_t)((i*97u+L*13u+7u)&0xff);
+                const uint8_t* ip=L?in.data():(const uint8_t*)"";
+                for(size_t oi=0; oi<sizeof(outs)/sizeof(outs[0]); ++oi){
+                    size_t O=outs[oi];
+                    std::vector<uint8_t> m128(O), m256v(O), o128(O), o256v(O);
+                    determ_shake128(m128.data(),O,ip,L);
+                    determ_shake256(m256v.data(),O,ip,L);
+                    EVP_MD_CTX* c=EVP_MD_CTX_new();
+                    EVP_DigestInit_ex(c,EVP_shake128(),nullptr); EVP_DigestUpdate(c,ip,L); EVP_DigestFinalXOF(c,o128.data(),O); EVP_MD_CTX_free(c);
+                    c=EVP_MD_CTX_new();
+                    EVP_DigestInit_ex(c,EVP_shake256(),nullptr); EVP_DigestUpdate(c,ip,L); EVP_DigestFinalXOF(c,o256v.data(),O); EVP_MD_CTX_free(c);
+                    if(std::memcmp(m128.data(),o128.data(),O)!=0){ ok128=false; at=(long)(L*1000+O); }
+                    if(std::memcmp(m256v.data(),o256v.data(),O)!=0){ ok256=false; at=(long)(L*1000+O); }
+                }
+            }
+            check(ok128, ok128 ? "SHAKE128 C99 == OpenSSL EVP_shake128 over fuzzed len × outlen (incl. > rate)"
+                               : "SHAKE128 diverges from OpenSSL (code="+std::to_string(at)+")");
+            check(ok256, ok256 ? "SHAKE256 C99 == OpenSSL EVP_shake256 over fuzzed len × outlen (incl. > rate)"
+                               : "SHAKE256 diverges from OpenSSL (code="+std::to_string(at)+")");
+        }
+
+        // (3) FIPS 202 known-answer vectors (independent of the OpenSSL oracle).
+        {
+            uint8_t d[64];
+            determ_sha3_256(d,(const uint8_t*)"",0);
+            check(hx(d,32)=="a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a","SHA3-256(\"\") FIPS 202 KAT");
+            determ_sha3_256(d,(const uint8_t*)"abc",3);
+            check(hx(d,32)=="3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532","SHA3-256(\"abc\") FIPS 202 KAT");
+            determ_sha3_512(d,(const uint8_t*)"",0);
+            check(hx(d,64)=="a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a6"
+                            "15b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26","SHA3-512(\"\") FIPS 202 KAT");
+            uint8_t s[32];
+            determ_shake128(s,32,(const uint8_t*)"",0);
+            check(hx(s,32)=="7f9c2ba4e88f827d616045507605853ed73b8093f6efbc88eb1a6eacfa66ef26","SHAKE128(\"\",32) FIPS 202 KAT");
+            determ_shake256(s,32,(const uint8_t*)"",0);
+            check(hx(s,32)=="46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f","SHAKE256(\"\",32) FIPS 202 KAT");
+        }
+
+        // (4) incremental absorb/squeeze == one-shot, output spanning a squeeze-permute.
+        {
+            std::vector<uint8_t> msg(500); for(size_t i=0;i<msg.size();i++) msg[i]=(uint8_t)(i*7+1);
+            uint8_t one[137]; determ_shake256(one,137,msg.data(),msg.size());
+            determ_keccak_ctx ctx; determ_shake256_init(&ctx);
+            size_t off=0; const size_t chunks[]={1,5,63,136,137,100};
+            for(size_t ci=0; off<msg.size(); ci=(ci+1)%(sizeof(chunks)/sizeof(chunks[0]))){
+                size_t c=chunks[ci]; if(off+c>msg.size()) c=msg.size()-off;
+                determ_keccak_absorb(&ctx,msg.data()+off,c); off+=c;
+            }
+            uint8_t inc[137]; size_t so=0; const size_t sc[]={1,7,128,1};
+            for(size_t ci=0; so<137; ci=(ci+1)%(sizeof(sc)/sizeof(sc[0]))){
+                size_t c=sc[ci]; if(so+c>137) c=137-so;
+                determ_keccak_squeeze(&ctx,inc+so,c); so+=c;
+            }
+            check(std::memcmp(one,inc,137)==0, "SHAKE256 incremental absorb/squeeze == one-shot (137 B, spans squeeze-permute)");
+        }
+
+        // (5) rate-boundary byte-by-byte absorb == one-shot (SHA3-256, rate 136).
+        {
+            bool ok=true; long at=-1;
+            const size_t bl[]={135u,136u,137u,272u};
+            for(size_t bi=0; bi<sizeof(bl)/sizeof(bl[0]); ++bi){
+                size_t L=bl[bi]; std::vector<uint8_t> in(L); for(size_t i=0;i<L;i++) in[i]=(uint8_t)(i&0xff);
+                uint8_t a[32]; determ_sha3_256(a,in.data(),L);
+                determ_keccak_ctx ctx; determ_keccak_init(&ctx,DETERM_SHA3_256_RATE,DETERM_SHA3_DOMAIN);
+                for(size_t i=0;i<L;i++) determ_keccak_absorb(&ctx,in.data()+i,1);
+                uint8_t b[32]; determ_keccak_squeeze(&ctx,b,32);
+                if(std::memcmp(a,b,32)!=0){ ok=false; at=(long)L; }
+            }
+            check(ok, ok ? "SHA3-256 rate-boundary (135/136/137/272 B) byte-by-byte absorb == one-shot"
+                         : "SHA3-256 rate-boundary mismatch (len="+std::to_string(at)+")");
+        }
+
+        std::cout << (fail? "  FAIL: sha3-c99 unit test\n" : "  PASS: sha3-c99 unit test\n");
+        return fail?1:0;
+    }
+
     if (cmd == "test-blake2b-c99") {
         // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6 prerequisite: validate the
         // libsodium-free C99 BLAKE2b (RFC 7693) — (1) the unkeyed 64-byte digest
