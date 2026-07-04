@@ -1,11 +1,11 @@
 # `src/crypto/mldsa/` — ML-DSA (Dilithium, NIST FIPS 204)
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
-§3.16. Status: **increment 1 of the owner-authorized on-chain post-quantum
+§3.16. Status: **increments 1-2 of the owner-authorized on-chain post-quantum
 SIGNATURE track** — the ring arithmetic core (modular reduction + the negacyclic
-NTT) that every ML-DSA parameter set is built on. Public domain, C99, two
-translation units plus a machine-generated constants file. Headers under
-`include/determ/crypto/mldsa/`.
+NTT) plus the coefficient rounding / hint layer, all shared by every ML-DSA
+parameter set. Public domain, C99, three translation units plus a
+machine-generated constants file. Headers under `include/determ/crypto/mldsa/`.
 
 ## 1. What this module implements (and what it does NOT, yet)
 
@@ -20,22 +20,25 @@ ships that ring's arithmetic foundation:
 | `reduce.c` (`reduce.h`) | `determ_mldsa_montgomery_reduce` (a·2⁻³² mod q), `determ_mldsa_reduce32` (Barrett), `determ_mldsa_caddq` (conditional +q). |
 | `ntt.c` (`ntt.h`) | `determ_mldsa_ntt` (forward negacyclic NTT) and `determ_mldsa_invntt_tomont` (inverse, to the Montgomery domain), over the 256 twiddle factors in `zetas.inc`. |
 | `zetas.inc` | **Machine-generated** table `zetas[i] = 2³² · ζ^{brv8(i)} mod q` (centered), ζ = 1753. Regenerated + verified by `tools/verify_mldsa_vectors.py`; never hand-edited. |
+| `rounding.c` (`rounding.h`) | `determ_mldsa_power2round` (t = t1·2^D + t0, the keygen public-key split), `determ_mldsa_decompose` (HighBits/LowBits around the GAMMA2 grid), `determ_mldsa_make_hint` / `determ_mldsa_use_hint` (the signature's per-coefficient carry hint). gamma2 is a runtime arg (GAMMA2_88 / GAMMA2_32). |
 
 The NTT diagonalizes ring multiplication: a length-256 negacyclic convolution
 (the ring product) becomes 256 independent coefficient multiplications in the
 NTT domain — the O(n log n) multiply ML-DSA leans on throughout keygen/sign/verify.
+The rounding layer is what keygen (power2round on **t**) and sign/verify
+(decompose + hints on **w**) sit on top of that ring arithmetic.
 
 **Built on SHAKE.** ML-DSA expands its public matrix **Â** from a seed with
 **SHAKE128** and samples secrets/masks + hashes the message with **SHAKE256** —
 the `src/crypto/sha3/` XOF shipped in CRYPTO-C99-SPEC §3.17. This increment does
 not yet call SHAKE; it lays the arithmetic the sampler will feed.
 
-**Scope (increment 1).** The ring's reduction + NTT ONLY. **Not yet here:**
-coefficient packing/unpacking, power-of-two and decompose/hint rounding, rejection
-sampling (`SampleInBall`, `RejNTTPoly`, `RejBoundedPoly`), the matrix/vector layer,
-and the keygen/sign/verify top level — nor the three parameter sets (ML-DSA-44/65/87).
-Those are later increments. **There is no signing capability in this module and no
-in-tree consumer**; it is purely additive.
+**Scope (increments 1-2).** The ring's reduction + NTT, plus the coefficient
+rounding / hint layer. **Not yet here:** coefficient bit-packing/unpacking,
+rejection sampling (`SampleInBall`, `RejNTTPoly`, `RejBoundedPoly` on the SHAKE
+XOF), the matrix/vector layer, and the keygen/sign/verify top level — nor the
+three parameter sets (ML-DSA-44/65/87). Those are later increments. **There is no
+signing capability in this module and no in-tree consumer**; it is purely additive.
 
 ## 2. Provenance + construction
 
@@ -65,20 +68,37 @@ separately by a byte-exact file corpus recomputed by an independent reference:
    `invntt_tomont(ntt(a)) ≡ a·2³² (mod q)`; (c) NTT-domain product ==
    from-scratch **O(n²) schoolbook negacyclic convolution** — the decisive gate,
    since a single wrong/misordered twiddle factor breaks the convolution while
-   leaving the transform self-invertible; (d) the KAT `ntt(1) == all-ones` (the
-   NTT of the constant polynomial evaluates to 1 at every root).
+   leaving the transform self-invertible; (d) an **independent direct-DFT oracle**
+   `ntt(X)[j] == root^(2·brv8(j)+1)` — a closed-form root evaluation that reuses
+   neither the zetas table nor the butterfly, so a *symmetric* zeta-ordering bug
+   (which the round-trip AND the convolution are both blind to, being invariant
+   under a consistent permutation of the NTT domain) cannot survive; (e) the
+   rounding-layer contracts — power2round / decompose reconstruction + bounds, the
+   `use_hint` semantic round-trip `use_hint(r, [HB(r)≠HB(r+z)]) == HB(r+z)` for
+   |z| ≤ γ2, `make_hint`'s definitional formula, and boundary KATs at the
+   decomposition seams — over both γ2 values.
 2. **`tools/vectors/mldsa_ntt.json`** wired into BOTH §3.13 halves:
    `determ test-c99-vectors` recomputes each vector through the shipped `ntt.c`
    and matches the **exact int32 forward-NTT output** (byte-exact interop) and
    the standard-domain ring product; `tools/test_c99_vector_files.sh` recomputes
    through the independent from-scratch Python reference (`verify_mldsa_vectors.py`),
-   which additionally cross-checks every `product` vector against schoolbook.
-   A bug in `ntt.c` — not just a corrupted vector — turns the corpus RED.
+   which cross-checks every `ntt` vector against the **independent direct-DFT
+   oracle** and every `product` vector against schoolbook. A bug in `ntt.c` — not
+   just a corrupted vector — turns the corpus RED.
+
+**Why the direct-DFT oracle matters (an adversarial-audit finding).** The
+round-trip and the schoolbook-convolution checks are BOTH invariant under a
+consistent permutation of the NTT domain — a symmetric bug in the zetas
+derivation/ordering permutes both operands, and the shared (equally-permuted)
+inverse undoes it, so a *wrong-but-self-consistent* forward transform passes them
+and even yields correct ring products. Only the direct-DFT oracle, whose expected
+values come from root exponentiation rather than the transform under test, pins
+the exact forward-NTT output ordering that byte-exact interop needs.
 
 **What is NOT yet proven:** FIPS 204 *signature-level* byte interop (there is no
-signer yet). The exact-int32 NTT KAT does pin the transform against the reference
-layout, but end-to-end ACVP/FIPS 204 known-answer signature tests arrive with the
-keygen/sign/verify increment.
+signer yet). The exact-int32 NTT KAT + direct-DFT oracle pin the transform against
+the reference layout, but end-to-end ACVP/FIPS 204 known-answer signature tests
+arrive with the keygen/sign/verify increment.
 
 ## 4. Constant-time / hygiene posture
 
@@ -94,12 +114,15 @@ keygen/sign/verify increment.
   implementation-defined-but-not-UB and match the reference on every target
   Determ builds for. Coefficient growth in the forward NTT is bounded (< 9q ≈
   2²⁶ < 2³¹), so the un-reduced additive butterflies never overflow `int32`.
+  `reduce32` does its rounding bias-add in `int64` (`((int64_t)a + (1<<22)) >> 23`)
+  so it is UB-free for **any** `int32 a`, not just the canonical `a ≤ 2³¹ − 2²²`
+  precondition (an adversarial-audit hardening; costs nothing).
 - **No key material yet.** This layer holds no secrets; zeroization/`ct` compares
   belong to the later sampling/signing increment.
 
 ## 5. Known limitations / future work
 
-- **Later PQ increments (owner-authorized):** packing/rounding, rejection
+- **Later PQ increments (owner-authorized):** coefficient bit-packing, rejection
   sampling (on the SHAKE XOF), the matrix/vector layer, then keygen/sign/verify +
   the three parameter sets, gated by FIPS 204 / ACVP KATs — and only then the
   chain-integration + anon-address-format reopening, each separately reviewed.

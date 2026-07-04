@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (increment 1)** — FIPS 204 ring core: Z_q reduction + negacyclic NTT of Z_q[X]/(X²⁵⁶+1) on SHAKE; round-trip + schoolbook-convolution + int32-KAT gated (§3.18). No signer yet. | Public domain | ~120 |
+| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1+2)** — FIPS 204 ring core: Z_q reduction + negacyclic NTT (round-trip + schoolbook-conv + independent direct-DFT oracle) + the rounding/hint layer (power2round/decompose/make+use hint, both γ2); §3.18. No signer yet. | Public domain | ~180 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -142,10 +142,11 @@ src/crypto/
 │   └── argon2id.c              #   one self-contained file; header at include/determ/crypto/argon2/
 ├── sha3/                       # SHIPPED: SHA-3/SHAKE (FIPS 202) Keccak-f[1600]
 │   └── sha3.c                  #   PQ-track XOF (§3.17); header at include/determ/crypto/sha3/
-├── mldsa/                      # SHIPPED (inc.1): ML-DSA (Dilithium, FIPS 204) ring core
+├── mldsa/                      # SHIPPED (inc.1+2): ML-DSA (Dilithium, FIPS 204) ring core
 │   ├── reduce.c                #   Z_q modular reduction (§3.18)
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
-│   └── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
+│   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
+│   └── rounding.c              #   power2round / decompose / make+use hint (inc.2)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -965,7 +966,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increment 1: arithmetic core)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-2: arithmetic core + rounding)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -985,7 +986,12 @@ that every parameter set (ML-DSA-44/65/87) shares.
   O(n log n). **Built on the §3.17 SHAKE XOF** — ML-DSA expands its public matrix
   Â with SHAKE128 and samples secrets/masks + hashes the message with SHAKE256
   (this increment lays the arithmetic the sampler will feed; it does not yet call
-  SHAKE).
+  SHAKE). **Increment 2** adds `rounding.c` — the FIPS 204 coefficient rounding
+  the higher layers sit on: `power2round` (t = t1·2^D + t0, the public-key split
+  of KEYGEN), `decompose` (HighBits/LowBits around the GAMMA2 grid of SIGNING),
+  and `make_hint`/`use_hint` (the signature's per-coefficient carry hint). gamma2
+  is a runtime argument (GAMMA2_88 for ML-DSA-44, GAMMA2_32 for ML-DSA-65/87), so
+  one core serves all three sets.
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
@@ -997,14 +1003,21 @@ that every parameter set (ML-DSA-44/65/87) shares.
   FAST-eligible) pins correctness WITHOUT an external oracle — the reduction
   contract over a swept grid, the NTT round-trip `invntt_tomont(ntt(a)) ≡ a·2³²
   (mod q)`, the NTT-domain product == from-scratch **O(n²) schoolbook negacyclic
-  convolution** (the decisive twiddle-exact gate), and the `ntt(1) == all-ones`
-  KAT. `tools/vectors/mldsa_ntt.json` (from-scratch reference in
-  `verify_mldsa_vectors.py`, schoolbook-cross-checked) is wired into **both**
-  §3.13 halves — `determ test-c99-vectors` matches the exact int32 forward-NTT
-  output through `ntt.c`; `test_c99_vector_files.sh` recomputes through the
-  independent Python reference. Module provenance + audit: `src/crypto/mldsa/README.md`.
-- **Scope / not-yet:** the ring reduction + NTT ONLY. Not yet: coefficient
-  packing/rounding, rejection sampling (`SampleInBall`, `RejNTTPoly`,
+  convolution** (the decisive twiddle-exact gate), an **independent direct-DFT
+  oracle** (ntt(X)[j] == root^(2·brv8(j)+1) — a closed-form evaluation reusing
+  neither the zetas table nor the butterfly, so a symmetric zeta-ordering bug the
+  round-trip + convolution are blind to cannot survive), and the rounding-layer
+  contracts (power2round/decompose reconstruction + bounds, the `use_hint`
+  semantic round-trip `use_hint(r,[HB(r)≠HB(r+z)])==HB(r+z)`, make_hint's
+  definitional formula, and boundary KATs at the decomposition seams — both
+  gamma2). `tools/vectors/mldsa_ntt.json` (from-scratch reference in
+  `verify_mldsa_vectors.py`, schoolbook + direct-DFT cross-checked) is wired into
+  **both** §3.13 halves — `determ test-c99-vectors` matches the exact int32
+  forward-NTT output through `ntt.c`; `test_c99_vector_files.sh` recomputes
+  through the independent Python reference. Module provenance + audit:
+  `src/crypto/mldsa/README.md`.
+- **Scope / not-yet:** the ring reduction + NTT + the rounding/hint layer. Not
+  yet: coefficient bit-packing, rejection sampling (`SampleInBall`, `RejNTTPoly`,
   `RejBoundedPoly` on the SHAKE XOF), the matrix/vector layer, keygen/sign/verify,
   the three parameter sets — nor FIPS 204 *signature-level* byte/ACVP KATs (no
   signer exists yet; the int32 NTT KAT pins the transform's reference layout).
