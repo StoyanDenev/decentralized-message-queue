@@ -1276,3 +1276,17 @@ TweetNaCl relies on all real compilers implementing `<<` on a negative value as 
 **Validation.** `tools/test_wallet_keyfile_argon2.sh` (18/0): fresh keyfile is DWE2/argon2id with default params + round-trips; default-vs-`--iters` magic selection; the pinned pre-R58 DWE1 fixture still decrypts (no orphaned envelopes); wrong-passphrase fail-closed on both layouts; reencrypt keeps Argon2id + preserves the seed. The format-freeze guard (`test_wallet_envelope_compat.sh`) stayed green (DWE1 decrypt preserved). FAST=1 170→171, 0 fail. Proof `KeyfileArgon2Migration.md` (KM-1..KM-5) authored + adversarially verified.
 
 **Cross-decision implication.** Argon2id now has a live consumer (CRYPTO-C99-SPEC §3.6 updated from "no live caller"). Remaining owner-gated menu: the DSF harness (design-review-gated) and the PQ/privacy tracks. Daemon-side node-keyfile Argon2id is a possible follow-up but was deliberately left out of R58's wallet scope.
+
+---
+
+## 2026-07-04 — R59: complete + operationalize the Argon2id at-rest migration; fix the R58 determ build breakage it uncovered
+
+**Authority:** standing optimal-parallelism directive (continue development).
+
+**What triggered it.** R58 shipped the wallet keyfile KDF migration but — verified this round — left the `determ` binary **not compiling**. R58 removed the `iters` parameter from `envelope::encrypt`, but the `determ` binary links `wallet/envelope.cpp` and had 12 call sites in `cmd_test_envelope` still calling the old 4-arg form. R58 only rebuilt `determ-wallet` locally, so the determ build was never exercised; `determ.exe` on disk was a stale pre-R58 binary still defaulting to PBKDF2. **This is exactly the cross-binary breakage the second-platform CI gate exists to catch — a local single-target (`--target determ-wallet`) build masked it.** The `daemon can read Argon2id keyfiles` claim was therefore unverified until this round.
+
+**Fix (serial).** Routed the test-envelope PBKDF2-path call sites to the explicit `encrypt_pbkdf2()` (identical semantics — they assert `pbkdf2_iters == TEST_ITERS`), refreshed the stale "PBKDF2 600k" comment on `cmd_account_create`, rebuilt determ, and VERIFIED end-to-end: `determ account create --passphrase` now produces DWE2/Argon2id (magic 44574532) and `determ account decrypt` reads it back (rc 0). test-envelope stays green (PBKDF2 coverage preserved). determ-light was never affected (it doesn't link envelope.cpp).
+
+**Operationalize (parallel, Workflow, adversarially verified).** `tools/operator_keyfile_kdf_audit.sh` + test (24/0) — a read-only KDF audit that scans keyfiles/envelopes and flags legacy DWE1/PBKDF2 files for `keyfile-reencrypt` upgrade (exit-2 alert gate); verifier independently confirmed read-only via sha256/mtime invariance + the exit-code contract + content-driven (not magic-grep) classification. `docs/proofs/AtRestKdfMigrationCoverage.md` — the end-to-end at-rest coverage map (verifier fixed a decrypt-path citation 5117→5119/5125).
+
+**Lesson (to memory).** After ANY change to a signature in a source file shared across binaries (`wallet/envelope.cpp` is linked into determ AND determ-wallet), build ALL THREE targets (or run `ci_local.sh`) before declaring the round done — a single-target build is not proof the tree compiles. FAST=1 172/0.
