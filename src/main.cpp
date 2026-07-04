@@ -31,6 +31,7 @@
 #include <determ/crypto/mldsa/pack.h>          // §3.18: ML-DSA coefficient bit-packing (increment 4)
 #include <determ/crypto/mldsa/poly.h>          // §3.18: ML-DSA per-poly ring arithmetic (increment 5)
 #include <determ/crypto/mldsa/polyvec.h>       // §3.18: ML-DSA matrix/vector layer (increment 6)
+#include <determ/crypto/mldsa/keygen.h>        // §3.18: ML-DSA keygen (increment 7, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -481,7 +482,7 @@ In-process tests (deterministic, no network):
                                               inc.3 SHAKE samplers; inc.4 coeff
                                               bit-packing (+bit-slice oracle);
                                               inc.5 poly ops + gamma1 mask; inc.6
-                                              matrix/vector (ExpandA/S/Mask)
+                                              matrix/vector; inc.7 keygen (ACVP KAT)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13509,7 +13510,8 @@ int main(int argc, char** argv) {
                                 "sha3_shake.json",
                                 "mldsa_ntt.json",
                                 "mldsa_sample.json",
-                                "mldsa_pack.json" };
+                                "mldsa_pack.json",
+                                "mldsa_keygen.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -14040,6 +14042,26 @@ int main(int argc, char** argv) {
                     if (mm) { ok=false; bad=name+" (packed bytes != reference)"; break; }
                     if (has_unpack) { for (int i=0;i<256;i++) if (rt[i]!=coeffs[i]) mm=true;
                         if (mm) { ok=false; bad=name+" (unpack round-trip mismatch)"; break; } }
+                } else if (prim == "mldsa_keygen") {
+                    // §3.18 inc.7 ML-DSA.KeyGen_internal KAT — the AUTHORITATIVE
+                    // NIST ACVP oracle (seed -> pk/sk). Run the C keygen on the
+                    // ACVP seed and match the encoded pk + sk byte-for-byte.
+                    std::string ps = v.value("paramSet", "");
+                    const determ_mldsa_params* p =
+                        (ps == "ML-DSA-44") ? &DETERM_MLDSA_44 :
+                        (ps == "ML-DSA-65") ? &DETERM_MLDSA_65 :
+                        (ps == "ML-DSA-87") ? &DETERM_MLDSA_87 : nullptr;
+                    if (!p) { ok=false; bad=name+" (unknown paramSet '"+ps+"')"; break; }
+                    auto seed = unhex(v["seed_hex"]);
+                    if (seed.size() != 32) { ok=false; bad=name+" (seed must be 32 bytes)"; break; }
+                    auto wpk = unhex(v["pk_hex"]);
+                    auto wsk = unhex(v["sk_hex"]);
+                    if (wpk.size() != determ_mldsa_pk_bytes(p) || wsk.size() != determ_mldsa_sk_bytes(p)) {
+                        ok=false; bad=name+" (pk/sk length != parameter-set size)"; break; }
+                    std::vector<uint8_t> gpk(determ_mldsa_pk_bytes(p)), gsk(determ_mldsa_sk_bytes(p));
+                    determ_mldsa_keygen(p, dptr(seed), gpk.data(), gsk.data());
+                    if (gpk != wpk) { ok=false; bad=name+" (pk != ACVP reference)"; break; }
+                    if (gsk != wsk) { ok=false; bad=name+" (sk != ACVP reference)"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14797,6 +14819,45 @@ int main(int argc, char** argv) {
             for (int i=0;i<k && ok;i++) for (int c=0;c<256 && ok;c++)
                 if (canon(tn[i][c]) != canon(ts[i][c])) ok=false;
             check(ok, "matrix·vector: invntt(A_hat . s_hat) == O(n^2) schoolbook A·s (k≠l)");
+        }
+
+        // ---- §3.18 increment 7: ML-DSA.KeyGen_internal (ACVP-pinned) ----
+        auto hexof = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for (size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s; };
+        {
+            // (16) sizes for all three sets + determinism + the shared-rho prefix
+            //      (pk[0:32] == sk[0:32]). The full byte-exact NIST KAT is the
+            //      §3.13 mldsa_keygen.json gate; this is the fast structural check.
+            bool ok = true;
+            const determ_mldsa_params* sets[3] = { &DETERM_MLDSA_44, &DETERM_MLDSA_65, &DETERM_MLDSA_87 };
+            const size_t pkS[3] = {1312,1952,2592}, skS[3] = {2560,4032,4896};
+            for (int si=0; si<3 && ok; si++) {
+                const determ_mldsa_params* p = sets[si];
+                if (determ_mldsa_pk_bytes(p)!=pkS[si] || determ_mldsa_sk_bytes(p)!=skS[si]) ok=false;
+                std::vector<uint8_t> seed(32,(uint8_t)(si*17+1));
+                std::vector<uint8_t> pk(pkS[si]), sk(skS[si]), pk2(pkS[si]), sk2(skS[si]);
+                determ_mldsa_keygen(p, seed.data(), pk.data(), sk.data());
+                determ_mldsa_keygen(p, seed.data(), pk2.data(), sk2.data());
+                if (pk!=pk2 || sk!=sk2) ok=false;                 // deterministic in the seed
+                for (int c=0;c<32 && ok;c++) if (pk[c]!=sk[c]) ok=false;  // shared rho
+            }
+            check(ok, "keygen: pk/sk sizes (44/65/87) + deterministic + shared rho prefix");
+        }
+        {
+            // (17) authoritative KAT: ML-DSA-44 keygen on the NIST ACVP seed
+            //      reproduces the NIST pk/sk (pinned via their SHA-256; full bytes
+            //      in tools/vectors/mldsa_keygen.json).
+            const uint8_t seed44[32] = {
+                0xD7,0x13,0x61,0xC0,0x00,0xF9,0xA7,0xBC,0x99,0xDF,0xB4,0x25,0xBC,0xB6,0xBB,0x27,
+                0xC3,0x2C,0x36,0xAB,0x44,0x4F,0xF3,0x70,0x8B,0x2D,0x93,0xB4,0xE6,0x6D,0x5B,0x5B };
+            std::vector<uint8_t> pk(1312), sk(2560);
+            determ_mldsa_keygen(&DETERM_MLDSA_44, seed44, pk.data(), sk.data());
+            uint8_t hpk[32], hsk[32];
+            determ_sha256(pk.data(), pk.size(), hpk);
+            determ_sha256(sk.data(), sk.size(), hsk);
+            bool ok = hexof(hpk,32)=="451a808c522218fadbdab146fc12004b0741c7d069f238f43ad77216159f6a34"
+                   && hexof(hsk,32)=="0196ccbde5fbd1804e8c784efb83998338076d586fe73ee07ba712ccc9fc32c2";
+            check(ok, "keygen KAT: ML-DSA-44(ACVP seed) pk/sk == NIST (SHA-256 pinned)");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

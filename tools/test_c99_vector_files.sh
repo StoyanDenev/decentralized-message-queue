@@ -60,7 +60,7 @@ EXPECTED = {
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
-    "mldsa_pack.json",
+    "mldsa_pack.json", "mldsa_keygen.json",
 }
 
 try:
@@ -1101,6 +1101,32 @@ def chk_frost_ed25519_rfc9591(vec, label):
     except Exception as e:
         return "aggregate signature does not verify as plain Ed25519 under the group pk (%s)" % e
 
+def chk_mldsa_keygen(vec, label):
+    # ML-DSA (FIPS 204) KeyGen KAT — the AUTHORITATIVE NIST ACVP oracle (seed ->
+    # pk/sk). Recompute ML-DSA.KeyGen_internal(seed) through the INDEPENDENT python
+    # keygen (tools/verify_mldsa_keygen.py; hashlib SHAKE + a from-scratch python
+    # NTT, distinct from the C determ NTT under test) and match the stored ACVP
+    # pk/sk byte-for-byte. Both C and python are pinned against the frozen NIST
+    # bytes, so a bug shared by both is still caught by the external reference.
+    # The wrapper cd's to the repo root before piping this heredoc to `python -`,
+    # so cwd is the repo root and "tools" holds verify_mldsa_keygen (there is no
+    # reliable __file__ under `python -`).
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_mldsa_keygen as vk
+    except Exception as e:
+        return "cannot import verify_mldsa_keygen (%s)" % e
+    need(vec, ["paramSet", "seed_hex", "pk_hex", "sk_hex"], label)
+    ps = vec["paramSet"]
+    if ps not in vk.PARAMS: return "unknown paramSet %r" % ps
+    k, l, eta = vk.PARAMS[ps]
+    seed = unhex(vec["seed_hex"], label + " seed_hex")
+    if len(seed) != 32: return "seed must be 32 bytes"
+    pk, sk = vk.keygen(seed, k, l, eta)
+    if pk.hex().upper() != vec["pk_hex"].upper(): return "recomputed pk != ACVP reference"
+    if sk.hex().upper() != vec["sk_hex"].upper(): return "recomputed sk != ACVP reference"
+    if pk[:32] != sk[:32]: return "pk/sk rho prefix mismatch"
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1126,6 +1152,7 @@ CHECKERS = {
     "mldsa_ntt": chk_mldsa_ntt,
     "mldsa_sample": chk_mldsa_sample,
     "mldsa_pack": chk_mldsa_pack,
+    "mldsa_keygen": chk_mldsa_keygen,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
