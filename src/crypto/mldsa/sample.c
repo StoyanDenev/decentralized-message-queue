@@ -3,6 +3,7 @@
  * src/crypto/sha3/. See include/determ/crypto/mldsa/sample.h + the module README. */
 #include <determ/crypto/mldsa/sample.h>
 #include <determ/crypto/mldsa/params.h>
+#include <determ/crypto/mldsa/pack.h>
 #include <determ/crypto/sha3/sha3.h>
 #include <determ/crypto/secure_zero.h>
 
@@ -91,4 +92,28 @@ void determ_mldsa_sample_in_ball(int32_t c[256], const uint8_t* seed, size_t see
     }
     determ_secure_zero(&ctx, sizeof ctx);
     determ_secure_zero(s, sizeof s);
+}
+
+/* ExpandMask / SampleUniformGamma1: squeeze a FIXED 256*bits/8 bytes of SHAKE256,
+ * unpack gamma1-bit fields, and map field f -> gamma1 - f, giving coefficients in
+ * (-gamma1, gamma1]. No rejection ⇒ constant-time. Unsupported gamma1 fail-safes
+ * to all-zero. */
+void determ_mldsa_sample_gamma1(int32_t a[256], const uint8_t* seed, size_t seedlen, int32_t gamma1) {
+    determ_keccak_ctx ctx;
+    uint8_t buf[640];
+    int bits, nbytes, i;
+
+    if (gamma1 != DETERM_MLDSA_GAMMA1_17 && gamma1 != DETERM_MLDSA_GAMMA1_19) {
+        for (i = 0; i < N; i++) a[i] = 0; return;
+    }
+    bits = (gamma1 == DETERM_MLDSA_GAMMA1_17) ? 18 : 20;
+    nbytes = N * bits / 8;   /* 576 or 640 */
+    determ_shake256_init(&ctx);
+    determ_keccak_absorb(&ctx, seed, seedlen);
+    determ_keccak_finalize(&ctx);
+    determ_keccak_squeeze(&ctx, buf, (size_t)nbytes);
+    determ_mldsa_unpack_bits(a, buf, N, bits);
+    for (i = 0; i < N; i++) a[i] = gamma1 - a[i];
+    determ_secure_zero(&ctx, sizeof ctx);
+    determ_secure_zero(buf, sizeof buf);
 }

@@ -29,6 +29,7 @@
 #include <determ/crypto/mldsa/rounding.h>      // §3.18: ML-DSA rounding/hint layer (increment 2)
 #include <determ/crypto/mldsa/sample.h>        // §3.18: ML-DSA SHAKE rejection samplers (increment 3)
 #include <determ/crypto/mldsa/pack.h>          // §3.18: ML-DSA coefficient bit-packing (increment 4)
+#include <determ/crypto/mldsa/poly.h>          // §3.18: ML-DSA per-poly ring arithmetic (increment 5)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -476,9 +477,9 @@ In-process tests (deterministic, no network):
 )" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
                                               inc.1 Z_q reduction + NTT (+direct-
                                               DFT oracle); inc.2 rounding/hint;
-                                              inc.3 SHAKE samplers (uniform/eta/
                                               in-ball); inc.4 coeff bit-packing
-                                              (t1/t0/eta/w1/z + bit-slice oracle)
+                                              (t1/t0/eta/w1/z + bit-slice oracle);
+                                              inc.5 poly ring ops + gamma1 mask
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13998,6 +13999,10 @@ int main(int argc, char** argv) {
                         int tau = (int)v.value("tau", 0);
                         if (tau < 0 || tau > 256) { ok=false; bad=name+" (tau out of [0,256])"; break; }
                         determ_mldsa_sample_in_ball(got, dptr(seed), seed.size(), tau);
+                    } else if (kind == "gamma1") {
+                        int32_t g1 = (int32_t)v.value("gamma1", 0);
+                        if (g1 != DETERM_MLDSA_GAMMA1_17 && g1 != DETERM_MLDSA_GAMMA1_19) { ok=false; bad=name+" (gamma1 must be 2^17 or 2^19)"; break; }
+                        determ_mldsa_sample_gamma1(got, dptr(seed), seed.size(), g1);
                     } else { ok=false; bad=name+" (unknown mldsa_sample kind '"+kind+"')"; break; }
                     bool mm=false; for (int i=0;i<256;i++) if (got[i] != outj[i].get<int32_t>()) mm=true;
                     if (mm) { ok=false; bad=name+" (sampler output != reference)"; break; }
@@ -14007,18 +14012,25 @@ int main(int argc, char** argv) {
                     // the coefficients (invertible encodings). Byte layout was
                     // verified vs the canonical Dilithium pack_t1 file-side.
                     std::string kind = v.value("kind", "");
-                    int bits = (int)v.value("bits", 0);
                     auto& cj = v["coeffs"];
                     if (!cj.is_array() || cj.size() != 256) { ok=false; bad=name+" (bad coeffs len)"; break; }
                     int32_t coeffs[256]; for (int i=0;i<256;i++) coeffs[i]=cj[i].get<int32_t>();
                     auto want = unhex(v["bytes_hex"]);
-                    int nbytes = (256*bits + 7) / 8;
-                    uint8_t gotb[640]; int32_t rt[256]; bool has_unpack = true;
-                    if (kind == "t1")      { determ_mldsa_pack_t1(gotb, coeffs); determ_mldsa_unpack_t1(rt, gotb); }
-                    else if (kind == "t0") { determ_mldsa_pack_t0(gotb, coeffs); determ_mldsa_unpack_t0(rt, gotb); }
-                    else if (kind == "eta"){ int e=(int)v.value("eta",0); determ_mldsa_pack_eta(gotb, coeffs, e); determ_mldsa_unpack_eta(rt, gotb, e); }
-                    else if (kind == "w1") { determ_mldsa_pack_w1(gotb, coeffs, (int32_t)v.value("gamma2",0)); has_unpack=false; }
-                    else if (kind == "z")  { int32_t g=(int32_t)v.value("gamma1",0); determ_mldsa_pack_z(gotb, coeffs, g); determ_mldsa_unpack_z(rt, gotb, g); }
+                    // nbytes is derived from `kind` (the encoder's fixed output size),
+                    // NEVER from the untrusted JSON `bits` field — a crafted bits could
+                    // otherwise size the compare loop past gotb (R66-audit OOB fix).
+                    uint8_t gotb[640]; int32_t rt[256]; bool has_unpack = true; int nbytes = 0;
+                    if (kind == "t1")      { nbytes=320; determ_mldsa_pack_t1(gotb, coeffs); determ_mldsa_unpack_t1(rt, gotb); }
+                    else if (kind == "t0") { nbytes=416; determ_mldsa_pack_t0(gotb, coeffs); determ_mldsa_unpack_t0(rt, gotb); }
+                    else if (kind == "eta"){ int e=(int)v.value("eta",0);
+                        if (e!=2 && e!=4) { ok=false; bad=name+" (eta must be 2 or 4)"; break; }
+                        nbytes=(e==2)?96:128; determ_mldsa_pack_eta(gotb, coeffs, e); determ_mldsa_unpack_eta(rt, gotb, e); }
+                    else if (kind == "w1") { int32_t g=(int32_t)v.value("gamma2",0);
+                        if (g!=DETERM_MLDSA_GAMMA2_88 && g!=DETERM_MLDSA_GAMMA2_32) { ok=false; bad=name+" (bad gamma2)"; break; }
+                        nbytes=(g==DETERM_MLDSA_GAMMA2_88)?192:128; determ_mldsa_pack_w1(gotb, coeffs, g); has_unpack=false; }
+                    else if (kind == "z")  { int32_t g=(int32_t)v.value("gamma1",0);
+                        if (g!=DETERM_MLDSA_GAMMA1_17 && g!=DETERM_MLDSA_GAMMA1_19) { ok=false; bad=name+" (bad gamma1)"; break; }
+                        nbytes=(g==DETERM_MLDSA_GAMMA1_17)?576:640; determ_mldsa_pack_z(gotb, coeffs, g); determ_mldsa_unpack_z(rt, gotb, g); }
                     else { ok=false; bad=name+" (unknown mldsa_pack kind '"+kind+"')"; break; }
                     if ((int)want.size() != nbytes) { ok=false; bad=name+" (byte-length mismatch)"; break; }
                     bool mm=false;
@@ -14602,6 +14614,73 @@ int main(int argc, char** argv) {
                 for (int i=0;i<256;i++) if (z[i]!=zb[i]) ok=false;
             }
             check(ok, "pack encoders: t1/t0/eta/z pack->unpack identity (both eta, both gamma1)");
+        }
+
+        // ---- §3.18 increment 5: per-poly ring arithmetic + gamma1 mask sampler ----
+        // (10) sample_gamma1 (ExpandMask): 256 coeffs in (-gamma1, gamma1] +
+        //      deterministic, both gamma1. Byte-exact interop KAT vs the independent
+        //      hashlib-SHAKE reference is gated file-side in mldsa_sample.json.
+        {
+            const uint8_t sg[66] = {0}; int32_t a[256], b[256]; bool ok = true;
+            for (int32_t g1 : {DETERM_MLDSA_GAMMA1_17, DETERM_MLDSA_GAMMA1_19}) {
+                determ_mldsa_sample_gamma1(a, sg, 66, g1);
+                determ_mldsa_sample_gamma1(b, sg, 66, g1);
+                for (int i=0;i<256;i++) { if (!(a[i] > -g1 && a[i] <= g1)) ok=false; if (a[i]!=b[i]) ok=false; }
+            }
+            // fail-safe: an unsupported gamma1 must zero the output (no silent wrong).
+            determ_mldsa_sample_gamma1(a, sg, 66, 12345);
+            for (int i=0;i<256;i++) if (a[i]!=0) ok=false;
+            check(ok, "sample_gamma1: 256 coeffs in (-gamma1,gamma1] + deterministic + fail-safe zero");
+        }
+        // (11) poly_add / poly_sub are exact element-wise; poly_reduce / poly_caddq
+        //      preserve residue within their bounds (delegating to the reduce layer).
+        {
+            bool ok = true;
+            for (int t = 0; t < 64 && ok; t++) {
+                int32_t a[256], b[256], c[256];
+                randpoly(a); randpoly(b);
+                determ_mldsa_poly_add(c, a, b);
+                for (int i=0;i<256 && ok;i++) if (c[i] != a[i]+b[i]) ok=false;
+                determ_mldsa_poly_sub(c, a, b);
+                for (int i=0;i<256 && ok;i++) if (c[i] != a[i]-b[i]) ok=false;
+            }
+            // reduce/caddq: residue preserved, output in the documented range.
+            for (int t = 0; t < 64 && ok; t++) {
+                int32_t a[256], r[256];
+                for (int i=0;i<256;i++) a[i] = (int32_t)(next() % (uint64_t)((long long)Q*4)) - (int32_t)((long long)Q*2);
+                for (int i=0;i<256;i++) r[i]=a[i];
+                determ_mldsa_poly_reduce(r);
+                for (int i=0;i<256 && ok;i++) { if (canon(r[i]) != canon(a[i])) ok=false;
+                    if (!(r[i] > -6283009 && r[i] < 6283009)) ok=false; }
+                for (int i=0;i<256;i++) r[i]=(int32_t)(next()%(uint64_t)Q) - (Q-1)/2; // some negative
+                int32_t rc[256]; for (int i=0;i<256;i++) rc[i]=r[i];
+                determ_mldsa_poly_caddq(rc);
+                for (int i=0;i<256 && ok;i++) { if (rc[i]<0 || rc[i]>=Q) ok=false;
+                    if (canon(rc[i]) != canon(r[i])) ok=false; }
+            }
+            check(ok, "poly_add/sub exact element-wise; poly_reduce/caddq preserve residue + bounds");
+        }
+        // (12) poly_pointwise_montgomery is the per-poly NTT-domain multiply: taking
+        //      it over ntt(a),ntt(b) then invntt must reproduce the O(n^2) schoolbook
+        //      negacyclic product (the same independent oracle as (3), now driven
+        //      through the poly wrapper — a wrong wrapper cannot pass).
+        {
+            bool ok = true;
+            for (int t = 0; t < 16 && ok; t++) {
+                int32_t a[256], b[256], na[256], nb[256], prod[256];
+                randpoly(a); randpoly(b);
+                for (int i=0;i<256;i++){ na[i]=a[i]; nb[i]=b[i]; }
+                determ_mldsa_ntt(na); determ_mldsa_ntt(nb);
+                determ_mldsa_poly_pointwise_montgomery(prod, na, nb);
+                determ_mldsa_invntt_tomont(prod);
+                for (int i=0;i<256 && ok;i++) {
+                    long long acc = 0;
+                    for (int j=0;j<=i;j++) acc += (long long)a[j]*b[i-j] % Q;
+                    for (int j=i+1;j<256;j++) acc -= (long long)a[j]*b[256+i-j] % Q;
+                    if (canon(prod[i]) != canon(acc)) ok=false;
+                }
+            }
+            check(ok, "poly_pointwise_montgomery: invntt(pw(ntt a, ntt b)) == schoolbook negacyclic");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

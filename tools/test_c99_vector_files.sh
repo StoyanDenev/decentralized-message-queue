@@ -944,6 +944,23 @@ def chk_mldsa_sample(vec, label):
                 if j<=i: break
             c[i]=c[j]; c[j]=SGN[signs&1]; signs>>=1
         return c
+    G1_17=1<<17; G1_19=1<<19
+    def sample_gamma1(seed,g1):
+        bits=18 if g1==G1_17 else 20; buf=hashlib.shake_256(seed).digest(N*bits//8)
+        vals=[]; acc=0; nb=0; bi=0
+        for _ in range(N):
+            while nb<bits: acc|=buf[bi]<<nb; bi+=1; nb+=8
+            vals.append(acc&((1<<bits)-1)); acc>>=bits; nb-=bits
+        return [g1-f for f in vals]
+    def sample_gamma1_indep(seed,g1):
+        # INDEPENDENT field read: bit-slice by absolute offset (not word-at-a-time).
+        bits=18 if g1==G1_17 else 20; buf=hashlib.shake_256(seed).digest(N*bits//8); out=[]
+        for i in range(N):
+            v=0
+            for b in range(bits):
+                k=i*bits+b; v|=((buf[k>>3]>>(k&7))&1)<<b
+            out.append(g1-v)
+        return out
     need(vec, ["kind", "seed_hex", "out"], label)
     seed = unhex(vec["seed_hex"], label + " seed_hex")
     out = vec["out"]
@@ -969,6 +986,12 @@ def chk_mldsa_sample(vec, label):
             return "not exactly tau +/-1 (||c||^2 != tau)"
         if sample_in_ball(seed, tau) != out: return "recomputed sample_in_ball != out"
         if sample_in_ball_indep(seed, tau) != out: return "independent sign-TABLE mapping disagrees"
+    elif kind == "gamma1":
+        g1 = int(vec["gamma1"])
+        if g1 not in (G1_17, G1_19): return "gamma1 must be 2^17 or 2^19"
+        if any(not (-g1 < c <= g1) for c in out): return "gamma1 out of (-g1, g1]"
+        if sample_gamma1(seed, g1) != out: return "recomputed sample_gamma1 != out"
+        if sample_gamma1_indep(seed, g1) != out: return "independent bit-slice field read disagrees"
     else:
         return "unknown mldsa_sample kind %r" % kind
 

@@ -37,6 +37,12 @@ void determ_mldsa_sample_eta(int32_t a[256], const uint8_t* seed, size_t seedlen
  * the sign field). tau in [0,256]. */
 void determ_mldsa_sample_in_ball(int32_t c[256], const uint8_t* seed, size_t seedlen, int tau);
 
+/* Mask (ExpandMask / SampleUniformGamma1): SHAKE256(seed) → coefficients in
+ * (-γ1, γ1], by unpacking γ1-bit fields (no rejection — a FIXED byte count, so
+ * this one IS constant-time). gamma1 must be DETERM_MLDSA_GAMMA1_17 (18-bit) or
+ * _19 (20-bit); an unsupported value fail-safes to an all-zero output. */
+void determ_mldsa_sample_gamma1(int32_t a[256], const uint8_t* seed, size_t seedlen, int32_t gamma1);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -102,6 +102,34 @@ def sample_in_ball_indep(seed, tau):
         c[i] = c[j]; c[j] = _SIGN_TABLE[signs & 1]; signs >>= 1
     return c
 
+G1_17 = 1 << 17
+G1_19 = 1 << 19
+
+def _unpack_bits(buf, n, bits):
+    vals = []; acc = 0; nb = 0; bi = 0
+    for _ in range(n):
+        while nb < bits: acc |= buf[bi] << nb; bi += 1; nb += 8
+        vals.append(acc & ((1 << bits) - 1)); acc >>= bits; nb -= bits
+    return vals
+
+def sample_gamma1(seed, g1):
+    bits = 18 if g1 == G1_17 else 20
+    buf = hashlib.shake_256(seed).digest(N * bits // 8)
+    return [g1 - f for f in _unpack_bits(buf, N, bits)]
+
+def sample_gamma1_indep(seed, g1):
+    # INDEPENDENT field read: bit-slice each field by absolute offset (distinct
+    # from the word-at-a-time unpacker), then g1 - field.
+    bits = 18 if g1 == G1_17 else 20
+    buf = hashlib.shake_256(seed).digest(N * bits // 8)
+    out = []
+    for i in range(N):
+        v = 0
+        for b in range(bits):
+            k = i * bits + b; v |= ((buf[k >> 3] >> (k & 7)) & 1) << b
+        out.append(g1 - v)
+    return out
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(HERE, "tools", "vectors", "mldsa_sample.json")
 
@@ -123,6 +151,11 @@ def gen():
                            ("inball tau=%d: seq seed" % tau, bytes(range(48)))]:
             vecs.append({"kind": "in_ball", "tau": tau, "name": name,
                          "seed_hex": seed.hex(), "out": sample_in_ball(seed, tau)})
+    for g1 in (G1_17, G1_19):
+        for name, seed in [("gamma1 g1=%d: zero seed" % g1, b"\x00" * 66),
+                           ("gamma1 g1=%d: seq seed" % g1, bytes(range(66)))]:
+            vecs.append({"kind": "gamma1", "gamma1": g1, "name": name,
+                         "seed_hex": seed.hex(), "out": sample_gamma1(seed, g1)})
     doc = {"primitive": "mldsa_sample",
            "source": "FIPS 204 / Dilithium rejection samplers (RejNTTPoly Alg 30, "
                      "RejBoundedPoly Alg 31, SampleInBall Alg 29) over python "
@@ -165,6 +198,14 @@ def verify():
                 print("  bad: %s: recompute != stored" % v["name"]); continue
             if sample_in_ball_indep(seed, tau) != out:
                 print("  bad: %s: independent sign-TABLE mapping disagrees" % v["name"]); continue
+        elif v["kind"] == "gamma1":
+            g1 = v["gamma1"]; got = sample_gamma1(seed, g1)
+            if len(out) != N or any(not (-g1 < c <= g1) for c in out):
+                print("  bad: %s: out-of-range (must be in (-g1, g1])" % v["name"]); continue
+            if got != out:
+                print("  bad: %s: recompute != stored" % v["name"]); continue
+            if sample_gamma1_indep(seed, g1) != out:
+                print("  bad: %s: independent bit-slice field read disagrees" % v["name"]); continue
         else:
             print("  bad: %s: unknown kind %r" % (v.get("name"), v["kind"])); continue
         ok += 1
