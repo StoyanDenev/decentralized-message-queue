@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-4)** — FIPS 204 building blocks: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers + coefficient bit-packing (t1/t0/eta/w1/z); §3.18. No signer yet. | Public domain | ~320 |
+| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-5)** — FIPS 204 building blocks: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers (uniform/eta/in-ball/gamma1) + coefficient bit-packing (t1/t0/eta/w1/z) + per-poly ring ops (add/sub/reduce/caddq/pointwise-Montgomery); §3.18. No signer yet. | Public domain | ~360 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -142,13 +142,14 @@ src/crypto/
 │   └── argon2id.c              #   one self-contained file; header at include/determ/crypto/argon2/
 ├── sha3/                       # SHIPPED: SHA-3/SHAKE (FIPS 202) Keccak-f[1600]
 │   └── sha3.c                  #   PQ-track XOF (§3.17); header at include/determ/crypto/sha3/
-├── mldsa/                      # SHIPPED (inc.1+2): ML-DSA (Dilithium, FIPS 204) ring core
+├── mldsa/                      # SHIPPED (inc.1-5): ML-DSA (Dilithium, FIPS 204) ring core
 │   ├── reduce.c                #   Z_q modular reduction (§3.18)
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
 │   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
 │   ├── rounding.c              #   power2round / decompose / make+use hint (inc.2)
-│   ├── sample.c                #   SHAKE rejection samplers: uniform/eta/in-ball (inc.3)
-│   └── pack.c                  #   coefficient bit-packing: t1/t0/eta/w1/z (inc.4)
+│   ├── sample.c                #   SHAKE samplers: uniform/eta/in-ball (inc.3) + gamma1 mask (inc.5)
+│   ├── pack.c                  #   coefficient bit-packing: t1/t0/eta/w1/z (inc.4)
+│   └── poly.c                  #   per-poly ring ops: add/sub/reduce/caddq/pointwise-Montgomery (inc.5)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -968,7 +969,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-4: arithmetic core + rounding + SHAKE samplers + bit-packing)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-5: arithmetic core + rounding + SHAKE samplers + bit-packing + per-poly ring ops)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -1008,7 +1009,17 @@ that every parameter set (ML-DSA-44/65/87) shares.
   `pack_bits`/`unpack_bits` (generic LSB-first) plus the FIPS 204 field encoders
   t1 (10-bit), t0 (13-bit), s1/s2 (η-dependent), w1 (γ2-dependent), z
   (γ1-dependent). Byte-identical to the canonical Dilithium per-field packers
-  (verified vs the reference `pack_t1`).
+  (verified vs the reference `pack_t1`). **Increment 5** adds `poly.c` — the
+  per-polynomial ring operations keygen/sign/verify compose over the NTT +
+  samplers: `poly_add`/`poly_sub` (e.g. A·s1 + s2, A·z − c·t1·2^d),
+  `poly_reduce`/`poly_caddq` (bring coefficients back into range / to the
+  non-negative representative), and `poly_pointwise_montgomery` (the per-poly step
+  of a matrix·vector product once both operands are in the NTT domain) — plus
+  `sample_gamma1` (ExpandMask / SampleUniformGamma1): SHAKE256 → a FIXED
+  256·bits/8-byte squeeze, unpacked into γ1-bit fields mapped f ↦ γ1 − f giving
+  coefficients in (−γ1, γ1]. Unlike the other samplers this one does **no
+  rejection**, so it IS constant-time in the SHAKE bytes consumed; an unsupported
+  γ1 fail-safes to all-zero.
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
@@ -1039,15 +1050,27 @@ that every parameter set (ML-DSA-44/65/87) shares.
   sign/mask bug. The **bit-packing** is validated by pack↔unpack round-trip AND an
   **independent bit-slice oracle** (each field re-read by absolute bit offset,
   distinct from the unpacker), with t1 byte-checked vs the reference `pack_t1`;
-  `mldsa_sample.json` + `mldsa_pack.json` are wired into both §3.13 halves. Module
-  provenance + audit: `src/crypto/mldsa/README.md`.
+  `mldsa_sample.json` + `mldsa_pack.json` are wired into both §3.13 halves. The
+  **gamma1 mask sampler** extends `mldsa_sample.json` (both γ1 = 2¹⁷/2¹⁹) — the C
+  squeeze/unpack/subtract is matched byte-for-byte vs the independent hashlib-SHAKE
+  reference AND an independent bit-slice field read (distinct from the word-at-a-time
+  unpacker), plus a fail-safe-zero check in `test-mldsa-c99`. The **per-poly ring
+  ops** are checked in `test-mldsa-c99`: add/sub exact element-wise, reduce/caddq
+  residue-preserving within bounds, and `poly_pointwise_montgomery` driven through
+  the SAME independent O(n²) schoolbook-negacyclic oracle as the arithmetic core
+  (`invntt(pw(ntt a, ntt b)) == schoolbook a·b` — a wrong wrapper cannot pass). The
+  R66-audit also closed an out-of-bounds read in the `mldsa_pack` vector-file
+  handler (it now derives the compare length from `kind`, never the untrusted JSON
+  `bits`). Module provenance + audit: `src/crypto/mldsa/README.md`.
 - **Scope / not-yet:** the ring reduction + NTT, the rounding/hint layer, the
-  SHAKE samplers, and the coefficient bit-packing. Not yet: the matrix/vector
-  layer (ExpandA/ExpandS/ExpandMask), keygen/sign/verify, the three parameter
-  sets — nor FIPS 204 *signature-level* byte/ACVP KATs (no signer exists yet; the
-  int32 NTT KAT pins the transform's layout, and the sampler/pack value mappings
-  get their authoritative pin with the keygen/sign KAT increment).
-  Additive with no in-tree consumer.
+  SHAKE samplers (uniform/eta/in-ball + the gamma1 mask), the coefficient
+  bit-packing, and the per-polynomial ring ops (add/sub/reduce/caddq + pointwise
+  Montgomery multiply). Not yet: the matrix/vector layer (ExpandA/ExpandS build the
+  domain-separated seeds and iterate the samplers over the k×l poly vectors),
+  keygen/sign/verify, the three parameter sets — nor FIPS 204 *signature-level*
+  byte/ACVP KATs (no signer exists yet; the int32 NTT KAT pins the transform's
+  layout, and the sampler/pack value mappings get their authoritative pin with the
+  keygen/sign KAT increment). Additive with no in-tree consumer.
 
 ---
 
