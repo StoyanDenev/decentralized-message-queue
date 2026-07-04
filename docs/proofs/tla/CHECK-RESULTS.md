@@ -15,53 +15,54 @@ specs model terminating exhibits; liveness properties are checked where the
 
 | Spec | Verdict | Distinct states | Depth | Time |
 |---|---|---|---|---|
-| AbortApply | PASS | 579400 | 29 | 87s |
-| AbortEscalation | PASS | 19 | 13 | 3s |
-| AccountState | PASS | 180270 | 17 | 13s |
-| AnonAccountLifecycle | PASS | 126095 | 9 | 25s |
-| AppliedReceiptRestore | PASS | 184024 | 9 | 10s |
+| AbortApply | PASS | 579400 | 29 | 89s |
+| AbortEscalation | PASS | 19 | 13 | 2s |
+| AccountState | PASS | 180270 | 17 | 14s |
+| AnonAccountLifecycle | PASS | 126095 | 9 | 30s |
+| AppliedReceiptRestore | PASS | 184024 | 9 | 11s |
 | BFTAcceptGate | PASS | 16897 | 3 | 3s |
-| BlockTimestampMonotonic | PASS | 49753 | 12 | 26s |
-| BoundedMempoolAdmission | PASS | 5342 | 9 | 11s |
+| BlockTimestampMonotonic | PASS | 49753 | 12 | 29s |
+| BoundedMempoolAdmission | PASS | 5342 | 9 | 13s |
 | ChainPrevHashLink | PASS | 36469 | 12 | 21s |
 | CompositeKeyStateProof | PASS | 8421 | 4 | 4s |
 | Consensus | PASS | 20757 | 17 | 10s |
-| CrossShardOutboundApply | PASS | 103425 | 7 | 43s |
+| CrossShardOutboundApply | PASS | 103425 | 7 | 37s |
 | CrossShardReceiptDedup | PASS | 5183 | 9 | 5s |
-| DAppRegistrationRead | PASS | 104025 | 3 | 33s |
-| DAppRegistry | PASS | 45989 | 9 | 22s |
-| DAppRegistryLifecycleSM | PASS | 70981 | 13 | 20s |
-| EpochCommitteeRotation | PASS | 407178 | 25 | 85s |
-| EquivocationApply | PASS | 17600 | 14 | 4s |
-| EquivocationEvidenceVerify | PASS | 2072 | 6 | 5s |
+| DAppRegistrationRead | PASS | 104025 | 3 | 31s |
+| DAppRegistry | PASS | 45989 | 9 | 20s |
+| DAppRegistryLifecycleSM | PASS | 70981 | 13 | 24s |
+| EpochCommitteeRotation | PASS | 407178 | 25 | 93s |
+| EquivocationApply | PASS | 17600 | 14 | 5s |
+| EquivocationEvidenceVerify | PASS | 2072 | 6 | 6s |
 | FeeAccounting | PASS | 34398 | 10 | 8s |
-| GovernanceParamChange | PASS | 33174 | 8 | 23s |
-| HelloHandshake | PASS | 378505 | 7 | 56s |
-| MempoolAdmission | PASS | 37134 | 16 | 40s |
-| MergeEventAcceptGate | PASS | 67 | 13 | 3s |
+| GovernanceParamChange | PASS | 33174 | 8 | 25s |
+| HelloHandshake | PASS | 378505 | 7 | 61s |
+| MempoolAdmission | PASS | 37134 | 16 | 39s |
+| MergeEventAcceptGate | PASS | 67 | 13 | 2s |
 | MerklePathVerify | PASS | 519121 | 3 | 49s |
-| MultiEventComposition | PASS | 63348 | 5 | 39s |
-| NefPoolDrain | PASS | 5203 | 13 | 3s |
-| Nonce | PASS | 2304 | 13 | 6s |
-| Receipts | PASS | 229 | 7 | 3s |
+| MultiEventComposition | PASS | 63348 | 5 | 37s |
+| NefPoolDrain | PASS | 5203 | 13 | 4s |
+| Nonce | PASS | 2304 | 13 | 7s |
+| Receipts | PASS | 229 | 7 | 2s |
 | RegionalShardingCommittee | PASS | 72750 | 23 | 26s |
-| RpcAdmissionOrdering | PASS | 6901 | 13 | 3s |
-| RpcHmacAuth | PASS | 87405 | 15 | 10s |
-| Sharding | PASS | 865 | 5 | 2s |
+| RpcAdmissionOrdering | PASS | 6901 | 13 | 4s |
+| RpcHmacAuth | PASS | 87405 | 15 | 11s |
+| Sharding | PASS | 865 | 5 | 3s |
 | Snapshot | PASS | 40841 | 9 | 7s |
-| SnapshotIntegrity | PASS | 283204 | 17 | 59s |
-| StakeForfeitureCascade | PASS | 1431567 | 23 | 185s |
+| SnapshotIntegrity | PASS | 283204 | 17 | 65s |
+| StakeForfeitureCascade | PASS | 1431567 | 23 | 200s |
 | StakeLifecycle | PASS | 10980 | 15 | 5s |
 | StakeRefundFlow | PASS | 2992 | 14 | 4s |
-| SubscriberBackpressure | PASS | 880 | 18 | 3s |
+| SubscriberBackpressure | PASS | 880 | 18 | 4s |
 | SubscriberCatchupPartition | PASS | 1346 | 11 | 3s |
-| SubsidyDistribution | PASS | 4150 | 8 | 9s |
+| SubscriberReconnectSeam | PASS | 2240 | 13 | 4s |
+| SubsidyDistribution | PASS | 4150 | 8 | 10s |
 | SupplyCounterRead | PASS | 76448 | 7 | 13s |
-| TcpKeepaliveReap | PASS | 4438 | 19 | 3s |
-| UnitarySupplyLedger | PASS | 549575 | 6 | 101s |
-| UnstakeEligibilityRead | PASS | 312075 | 3 | 88s |
-| WireFrameCap | PASS | 112945 | 10 | 20s |
+| TcpKeepaliveReap | PASS | 4438 | 19 | 4s |
+| UnitarySupplyLedger | PASS | 549575 | 6 | 117s |
+| UnstakeEligibilityRead | PASS | 312075 | 3 | 86s |
+| WireFrameCap | PASS | 112945 | 10 | 19s |
 
 Spec-only modules (no `.cfg`; imported helpers or unconfigured): BlockchainStateIntegrity CrossShardReceiptRoundtrip CrossShardSupplyConservation F2ViewReconciliation FrostVerify JsonValidation LightStatePersistence MakeBlockSigPrimitive MakeContribCommitment MultiPeerCrossCheck PartnerSubsetDigestBinding RateLimiterEviction RegistrantRead S006ContribMsgEquivocation TimestampMedianReconciliation VerifyChainWalk
 
-Summary: **46 PASS / 0 FAIL / 0 QUARANTINED** of 46 configs. Quarantine reasons live in the QUARANTINE list in `tools/test_tla_model_check.sh`.
+Summary: **47 PASS / 0 FAIL / 0 QUARANTINED** of 47 configs. Quarantine reasons live in the QUARANTINE list in `tools/test_tla_model_check.sh`.
