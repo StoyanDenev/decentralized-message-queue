@@ -31,13 +31,15 @@ void determ_mldsa_sample_uniform(int32_t a[256], const uint8_t* seed, size_t see
 
 /* RejBoundedPoly / SampleEta: SHAKE256(seed), each byte gives two 4-bit
  * candidates. eta==2: accept z<15, coeff = 2 - (z mod 5). eta==4: accept z<9,
- * coeff = 4 - z. An unsupported eta yields no accepts (loop cannot fill) — the
- * caller contract requires eta in {2,4}. */
+ * coeff = 4 - z. An UNSUPPORTED eta is fail-safe: the output is zeroed and the
+ * function returns (no silent wrong-output down the eta==4 path). */
 void determ_mldsa_sample_eta(int32_t a[256], const uint8_t* seed, size_t seedlen, int eta) {
     determ_keccak_ctx ctx;
     unsigned ctr = 0;
     uint8_t byte;
+    int k;
 
+    if (eta != 2 && eta != 4) { for (k = 0; k < N; k++) a[k] = 0; return; }
     determ_shake256_init(&ctx);
     determ_keccak_absorb(&ctx, seed, seedlen);
     determ_keccak_finalize(&ctx);
@@ -66,6 +68,11 @@ void determ_mldsa_sample_in_ball(int32_t c[256], const uint8_t* seed, size_t see
     uint64_t signs = 0;
     int i, j;
 
+    /* Fail-safe on an out-of-contract tau: zero the output and return. Without
+     * this, tau > N makes the loop start at a negative i and the do/while
+     * rejection (j in [0,255] > i < 0 always) never terminates — a hang the
+     * untrusted vector-file path could trigger. */
+    if (tau < 0 || tau > N) { for (i = 0; i < N; i++) c[i] = 0; return; }
     determ_shake256_init(&ctx);
     determ_keccak_absorb(&ctx, seed, seedlen);
     determ_keccak_finalize(&ctx);

@@ -28,6 +28,7 @@
 #include <determ/crypto/mldsa/ntt.h>           // §3.18: ML-DSA negacyclic NTT (increment 1)
 #include <determ/crypto/mldsa/rounding.h>      // §3.18: ML-DSA rounding/hint layer (increment 2)
 #include <determ/crypto/mldsa/sample.h>        // §3.18: ML-DSA SHAKE rejection samplers (increment 3)
+#include <determ/crypto/mldsa/pack.h>          // §3.18: ML-DSA coefficient bit-packing (increment 4)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -475,9 +476,9 @@ In-process tests (deterministic, no network):
 )" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
                                               inc.1 Z_q reduction + NTT (+direct-
                                               DFT oracle); inc.2 rounding/hint;
-                                              inc.3 SHAKE rejection samplers
-                                              (uniform/eta/in-ball) — the first
-                                              SHAKE consumers
+                                              inc.3 SHAKE samplers (uniform/eta/
+                                              in-ball); inc.4 coeff bit-packing
+                                              (t1/t0/eta/w1/z + bit-slice oracle)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13504,7 +13505,8 @@ int main(int argc, char** argv) {
                                 "base64_strict.json",
                                 "sha3_shake.json",
                                 "mldsa_ntt.json",
-                                "mldsa_sample.json" };
+                                "mldsa_sample.json",
+                                "mldsa_pack.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13989,12 +13991,41 @@ int main(int argc, char** argv) {
                     if (kind == "uniform") {
                         determ_mldsa_sample_uniform(got, dptr(seed), seed.size());
                     } else if (kind == "eta") {
-                        determ_mldsa_sample_eta(got, dptr(seed), seed.size(), (int)v.value("eta", 0));
+                        int eta = (int)v.value("eta", 0);
+                        if (eta != 2 && eta != 4) { ok=false; bad=name+" (eta must be 2 or 4)"; break; }
+                        determ_mldsa_sample_eta(got, dptr(seed), seed.size(), eta);
                     } else if (kind == "in_ball") {
-                        determ_mldsa_sample_in_ball(got, dptr(seed), seed.size(), (int)v.value("tau", 0));
+                        int tau = (int)v.value("tau", 0);
+                        if (tau < 0 || tau > 256) { ok=false; bad=name+" (tau out of [0,256])"; break; }
+                        determ_mldsa_sample_in_ball(got, dptr(seed), seed.size(), tau);
                     } else { ok=false; bad=name+" (unknown mldsa_sample kind '"+kind+"')"; break; }
                     bool mm=false; for (int i=0;i<256;i++) if (got[i] != outj[i].get<int32_t>()) mm=true;
                     if (mm) { ok=false; bad=name+" (sampler output != reference)"; break; }
+                } else if (prim == "mldsa_pack") {
+                    // §3.18 inc.4 bit-packing KAT: pack the coefficients through the
+                    // C encoder and match the reference bytes, then unpack and match
+                    // the coefficients (invertible encodings). Byte layout was
+                    // verified vs the canonical Dilithium pack_t1 file-side.
+                    std::string kind = v.value("kind", "");
+                    int bits = (int)v.value("bits", 0);
+                    auto& cj = v["coeffs"];
+                    if (!cj.is_array() || cj.size() != 256) { ok=false; bad=name+" (bad coeffs len)"; break; }
+                    int32_t coeffs[256]; for (int i=0;i<256;i++) coeffs[i]=cj[i].get<int32_t>();
+                    auto want = unhex(v["bytes_hex"]);
+                    int nbytes = (256*bits + 7) / 8;
+                    uint8_t gotb[640]; int32_t rt[256]; bool has_unpack = true;
+                    if (kind == "t1")      { determ_mldsa_pack_t1(gotb, coeffs); determ_mldsa_unpack_t1(rt, gotb); }
+                    else if (kind == "t0") { determ_mldsa_pack_t0(gotb, coeffs); determ_mldsa_unpack_t0(rt, gotb); }
+                    else if (kind == "eta"){ int e=(int)v.value("eta",0); determ_mldsa_pack_eta(gotb, coeffs, e); determ_mldsa_unpack_eta(rt, gotb, e); }
+                    else if (kind == "w1") { determ_mldsa_pack_w1(gotb, coeffs, (int32_t)v.value("gamma2",0)); has_unpack=false; }
+                    else if (kind == "z")  { int32_t g=(int32_t)v.value("gamma1",0); determ_mldsa_pack_z(gotb, coeffs, g); determ_mldsa_unpack_z(rt, gotb, g); }
+                    else { ok=false; bad=name+" (unknown mldsa_pack kind '"+kind+"')"; break; }
+                    if ((int)want.size() != nbytes) { ok=false; bad=name+" (byte-length mismatch)"; break; }
+                    bool mm=false;
+                    for (int i=0;i<nbytes;i++) if (gotb[i] != want[i]) mm=true;
+                    if (mm) { ok=false; bad=name+" (packed bytes != reference)"; break; }
+                    if (has_unpack) { for (int i=0;i<256;i++) if (rt[i]!=coeffs[i]) mm=true;
+                        if (mm) { ok=false; bad=name+" (unpack round-trip mismatch)"; break; } }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14523,6 +14554,54 @@ int main(int argc, char** argv) {
                 if (nz != tau || norm2 != tau) ok=false;   // exactly tau signed ones
             }
             check(ok, "sample_in_ball: exactly tau in {-1,+1} + ||c||^2==tau + deterministic");
+        }
+
+        // ---- §3.18 increment 4: coefficient bit-packing ----
+        // Generic pack/unpack round-trip AND an INDEPENDENT bit-slice oracle
+        // (read each field bit-by-bit by absolute offset — a code path distinct
+        // from unpack_bits, so a symmetric pack/unpack permutation cannot pass).
+        {
+            auto slice_field = [](const uint8_t* buf, int i, int bits)->uint32_t {
+                uint32_t v = 0;
+                for (int b = 0; b < bits; b++) { int k = i*bits + b; v |= (uint32_t)((buf[k>>3] >> (k&7)) & 1u) << b; }
+                return v;
+            };
+            bool ok = true;
+            uint8_t buf[256*20/8 + 8];
+            int32_t in[256], out[256];
+            for (int bits = 1; bits <= 20 && ok; bits++) {
+                uint32_t m = (bits >= 32) ? 0xFFFFFFFFu : ((1u<<bits)-1u);
+                for (int i=0;i<256;i++) in[i] = (int32_t)(next() & m);
+                determ_mldsa_pack_bits(buf, in, 256, bits);
+                determ_mldsa_unpack_bits(out, buf, 256, bits);
+                for (int i=0;i<256 && ok;i++) {
+                    if (out[i] != in[i]) ok=false;               // round-trip
+                    if (slice_field(buf, i, bits) != (uint32_t)in[i]) ok=false;  // independent oracle
+                }
+            }
+            check(ok, "pack_bits: unpack round-trip + independent bit-slice oracle (bits 1..20)");
+        }
+        {
+            bool ok = true;
+            int32_t t1[256], t1b[256], t0[256], t0b[256], s[256], sb[256], z[256], zb[256];
+            uint8_t bt1[320], bt0[416], bs[128], bz[640];
+            for (int i=0;i<256;i++) t1[i] = (int32_t)(next() % 1024u);           // 10-bit
+            determ_mldsa_pack_t1(bt1, t1); determ_mldsa_unpack_t1(t1b, bt1);
+            for (int i=0;i<256;i++) if (t1[i]!=t1b[i]) ok=false;
+            for (int i=0;i<256;i++) t0[i] = (int32_t)(next() % 8191u) - 4095;    // (-2^12, 2^12]
+            determ_mldsa_pack_t0(bt0, t0); determ_mldsa_unpack_t0(t0b, bt0);
+            for (int i=0;i<256;i++) if (t0[i]!=t0b[i]) ok=false;
+            for (int eta : {2, 4}) {
+                for (int i=0;i<256;i++) s[i] = (int32_t)(next() % (uint64_t)(2*eta+1)) - eta;
+                determ_mldsa_pack_eta(bs, s, eta); determ_mldsa_unpack_eta(sb, bs, eta);
+                for (int i=0;i<256;i++) if (s[i]!=sb[i]) ok=false;
+            }
+            for (int32_t g1 : {DETERM_MLDSA_GAMMA1_17, DETERM_MLDSA_GAMMA1_19}) {
+                for (int i=0;i<256;i++) z[i] = (int32_t)(next() % (uint64_t)(2*g1)) - (g1-1);
+                determ_mldsa_pack_z(bz, z, g1); determ_mldsa_unpack_z(zb, bz, g1);
+                for (int i=0;i<256;i++) if (z[i]!=zb[i]) ok=false;
+            }
+            check(ok, "pack encoders: t1/t0/eta/z pack->unpack identity (both eta, both gamma1)");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

@@ -60,6 +60,7 @@ EXPECTED = {
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
+    "mldsa_pack.json",
 }
 
 try:
@@ -829,6 +830,56 @@ def _mldsa_ctx():
                        ok=(QINV==58728449 and Z[1]==25847 and F==41978)))
     return _MLDSA
 
+def chk_mldsa_pack(vec, label):
+    # FIPS 204 coefficient bit-packing. Two INDEPENDENT checks (not a round-trip
+    # tautology): recompute the LSB-first packed bytes AND re-extract each field
+    # by a direct bit-slice (absolute-offset, a distinct code path). t1 is also
+    # cross-checked vs the canonical reference pack_t1 formula.
+    Q = 8380417; N = 256; D = 13
+    G1_17 = 1 << 17; G1_19 = 1 << 19; G2_88 = (Q-1)//88; G2_32 = (Q-1)//32
+    def pack_bits(vals, bits):
+        total = (len(vals)*bits+7)//8; out = bytearray(total); acc = 0; nb = 0; oi = 0
+        for v in vals:
+            acc |= (v & ((1<<bits)-1)) << nb; nb += bits
+            while nb >= 8: out[oi] = acc & 0xFF; oi += 1; acc >>= 8; nb -= 8
+        if nb: out[oi] = acc & 0xFF
+        return bytes(out)
+    def unpack_bits(buf, n, bits):
+        vals=[]; acc=0; nb=0; bi=0
+        for _ in range(n):
+            while nb < bits: acc |= buf[bi] << nb; bi += 1; nb += 8
+            vals.append(acc & ((1<<bits)-1)); acc >>= bits; nb -= bits
+        return vals
+    def slice_field(buf, i, bits):
+        v = 0
+        for b in range(bits):
+            k = i*bits + b; v |= ((buf[k>>3] >> (k&7)) & 1) << b
+        return v
+    def ref_pack_t1(a):
+        r = bytearray(320)
+        for i in range(N//4):
+            r[5*i+0] = a[4*i+0] & 0xFF
+            r[5*i+1] = ((a[4*i+0]>>8) | (a[4*i+1]<<2)) & 0xFF
+            r[5*i+2] = ((a[4*i+1]>>6) | (a[4*i+2]<<4)) & 0xFF
+            r[5*i+3] = ((a[4*i+2]>>4) | (a[4*i+3]<<6)) & 0xFF
+            r[5*i+4] = (a[4*i+3]>>2) & 0xFF
+        return bytes(r)
+    need(vec, ["kind", "coeffs", "bits", "bytes_hex"], label)
+    kind = vec["kind"]; bits = int(vec["bits"])
+    coeffs = [int(x) for x in vec["coeffs"]]
+    if len(coeffs) != N: return "coeffs is not 256 ints"
+    buf = unhex(vec["bytes_hex"], label + " bytes_hex")
+    if kind == "t1":    fields = coeffs
+    elif kind == "t0":  fields = [(1 << (D-1)) - c for c in coeffs]
+    elif kind == "eta": fields = [int(vec["eta"]) - c for c in coeffs]
+    elif kind == "w1":  fields = coeffs
+    elif kind == "z":   fields = [int(vec["gamma1"]) - c for c in coeffs]
+    else: return "unknown mldsa_pack kind %r" % kind
+    if pack_bits(fields, bits) != buf: return "repacked bytes != bytes_hex"
+    if any(slice_field(buf, i, bits) != fields[i] for i in range(N)): return "bit-slice oracle != fields"
+    if unpack_bits(buf, N, bits) != fields: return "unpack != fields"
+    if kind == "t1" and ref_pack_t1(coeffs) != buf: return "!= reference pack_t1"
+
 def chk_mldsa_sample(vec, label):
     # FIPS 204 / Dilithium rejection samplers over python hashlib SHAKE — an
     # implementation of SHAKE DISTINCT from the C determ_shake under test (and
@@ -865,6 +916,34 @@ def chk_mldsa_sample(vec, label):
                 if j <= i: break
             c[i] = c[j]; c[j] = 1 - 2*(signs & 1); signs >>= 1
         return c
+    # INDEPENDENT value-mapping representations (spec TABLE / stdlib, NOT the
+    # shared arithmetic rule) — catch a mapping wrong in both C and python.
+    ETA2=[2,1,0,-1,-2,2,1,0,-1,-2,2,1,0,-1,-2]; ETA4=[4,3,2,1,0,-1,-2,-3,-4]; SGN={0:1,1:-1}
+    def sample_uniform_indep(seed):
+        buf=hashlib.shake_128(seed).digest(4096); i=0; a=[]
+        while len(a)<N:
+            if i+3>len(buf): buf=hashlib.shake_128(seed).digest(len(buf)+4096)
+            t=int.from_bytes(bytes([buf[i],buf[i+1],buf[i+2]&0x7F]),"little"); i+=3
+            if t<Q: a.append(t)
+        return a
+    def sample_eta_indep(seed,eta):
+        tbl=ETA2 if eta==2 else ETA4; buf=hashlib.shake_256(seed).digest(4096); i=0; a=[]
+        while len(a)<N:
+            if i>=len(buf): buf=hashlib.shake_256(seed).digest(len(buf)+4096)
+            b=buf[i]; i+=1
+            for z in (b&0x0F,b>>4):
+                if len(a)>=N: break
+                if z<len(tbl): a.append(tbl[z])
+        return a
+    def sample_in_ball_indep(seed,tau):
+        buf=hashlib.shake_256(seed).digest(8+4096); signs=int.from_bytes(buf[:8],"little"); pos=8; c=[0]*N
+        for i in range(N-tau,N):
+            while True:
+                if pos>=len(buf): buf=hashlib.shake_256(seed).digest(len(buf)+4096)
+                j=buf[pos]; pos+=1
+                if j<=i: break
+            c[i]=c[j]; c[j]=SGN[signs&1]; signs>>=1
+        return c
     need(vec, ["kind", "seed_hex", "out"], label)
     seed = unhex(vec["seed_hex"], label + " seed_hex")
     out = vec["out"]
@@ -875,15 +954,21 @@ def chk_mldsa_sample(vec, label):
     if kind == "uniform":
         if any(not (0 <= c < Q) for c in out): return "uniform out-of-range"
         if sample_uniform(seed) != out: return "recomputed sample_uniform != out"
+        if sample_uniform_indep(seed) != out: return "independent (int.from_bytes) read disagrees"
     elif kind == "eta":
         eta = int(vec["eta"])
+        if eta not in (2, 4): return "eta must be 2 or 4"
         if any(not (-eta <= c <= eta) for c in out): return "eta out-of-range"
         if sample_eta(seed, eta) != out: return "recomputed sample_eta != out"
+        if sample_eta_indep(seed, eta) != out: return "independent spec-TABLE mapping disagrees"
     elif kind == "in_ball":
-        tau = int(vec["tau"]); nz = [x for x in out if x]
+        tau = int(vec["tau"])
+        if not (0 <= tau <= N): return "tau out of [0,256]"
+        nz = [x for x in out if x]
         if len(nz) != tau or any(x not in (-1, 1) for x in nz) or sum(x*x for x in out) != tau:
             return "not exactly tau +/-1 (||c||^2 != tau)"
         if sample_in_ball(seed, tau) != out: return "recomputed sample_in_ball != out"
+        if sample_in_ball_indep(seed, tau) != out: return "independent sign-TABLE mapping disagrees"
     else:
         return "unknown mldsa_sample kind %r" % kind
 
@@ -1017,6 +1102,7 @@ CHECKERS = {
     "sha3_shake": chk_sha3_shake,
     "mldsa_ntt": chk_mldsa_ntt,
     "mldsa_sample": chk_mldsa_sample,
+    "mldsa_pack": chk_mldsa_pack,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

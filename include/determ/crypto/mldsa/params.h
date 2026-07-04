@@ -40,4 +40,10 @@
 #define DETERM_MLDSA_GAMMA2_88 ((DETERM_MLDSA_Q - 1) / 88)   /* 95232  — ML-DSA-44 */
 #define DETERM_MLDSA_GAMMA2_32 ((DETERM_MLDSA_Q - 1) / 32)   /* 261888 — ML-DSA-65/87 */
 
+/* Coefficient range of the signature's z (mask) polynomial: z ∈ (-GAMMA1, GAMMA1].
+ * Parameter-set-specific: 2^17 for ML-DSA-44, 2^19 for ML-DSA-65/87. The z packer
+ * takes gamma1 as a runtime argument (18-bit vs 20-bit fields). */
+#define DETERM_MLDSA_GAMMA1_17 (1 << 17)   /* 131072  — ML-DSA-44 */
+#define DETERM_MLDSA_GAMMA1_19 (1 << 19)   /* 524288  — ML-DSA-65/87 */
+
 #endif /* DETERM_CRYPTO_MLDSA_PARAMS_H */
