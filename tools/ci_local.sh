@@ -69,7 +69,12 @@ if [ "$SANITIZE" -eq 1 ]; then
   # unrelated CMake feature-tests).
   cmake -B "$SAN_DIR" -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDETERM_UBSAN=ON \
     >/dev/null 2>&1 || { echo "FAIL: UBSan configure"; exit 1; }
-  cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$JOBS" --target determ \
+  # Cap parallelism to 2 for the UBSan build: main.cpp + the large consensus TUs
+  # under UBSan peak several GB each, and -j4 concurrent OOM-killed the GitHub
+  # runner (SIGTERM/143). -j2 (with the -O1 from CMakeLists) keeps peak RAM within
+  # the runner while staying faster than a serial build (the job has 150-min headroom).
+  SAN_JOBS=2; [ "$JOBS" -lt 2 ] && SAN_JOBS="$JOBS"
+  cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$SAN_JOBS" --target determ \
     2>&1 | grep -iE "error:|runtime error" && { echo "FAIL: UBSan build error"; exit 1; }
   SANBIN=$(find "$SAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
   [ -x "$SANBIN" ] || { echo "FAIL: UBSan determ binary not found"; exit 1; }

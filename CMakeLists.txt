@@ -200,10 +200,17 @@ endif()
 # vendored deps stay uninstrumented, so the OpenSSL tree is reused from cache
 # and the sanitized build is just the ~18 Determ TUs.
 if(DETERM_UBSAN)
-  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=undefined)
-  target_compile_options(determ            PRIVATE -fsanitize=undefined)
+  # -O1 (overriding RelWithDebInfo's -O2) on the instrumented targets: the
+  # ~14k-line main.cpp under -O2 -g + UBSan peaks several GB per TU and OOM-killed
+  # the GitHub runner (SIGTERM/143 at ~5.5 min, right as the build started) when
+  # compiled in parallel. -O1 slashes per-TU compiler memory while UBSan still
+  # catches the C-standard UB this gate targets (the state_root determinism-fork
+  # and signed-shift classes are optimization-level-independent). Paired with the
+  # -j cap in tools/ci_local.sh --sanitize.
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=undefined -O1)
+  target_compile_options(determ            PRIVATE -fsanitize=undefined -O1)
   target_link_options(determ               PRIVATE -fsanitize=undefined)
-  message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan")
+  message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan (-O1)")
 endif()
 
 # ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────
