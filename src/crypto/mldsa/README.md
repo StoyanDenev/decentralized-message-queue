@@ -1,16 +1,19 @@
 # `src/crypto/mldsa/` — ML-DSA (Dilithium, NIST FIPS 204)
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
-§3.16. Status: **increments 1-7 of the owner-authorized on-chain post-quantum
-SIGNATURE track** — the ring arithmetic core (modular reduction + the negacyclic
-NTT), the coefficient rounding / hint layer, the SHAKE rejection samplers (the
-first consumers of the SHA-3 XOF), the coefficient bit-packing, the per-polynomial
-ring operations, the matrix/vector layer (ExpandA/ExpandS/ExpandMask + polyvec
-arithmetic + the NTT-domain matrix·vector product), and **ML-DSA.KeyGen_internal
-(increment 7, pinned byte-for-byte against the NIST ACVP KeyGen KATs)** — all
-shared by every ML-DSA parameter set. Public domain, C99, eight translation units
-plus a machine-generated constants file. Headers under
-`include/determ/crypto/mldsa/`.
+§3.16. Status: **the COMPLETE FIPS 204 signature scheme (increments 1-8)** of the
+owner-authorized on-chain post-quantum SIGNATURE track — the ring arithmetic core
+(modular reduction + the negacyclic NTT), the coefficient rounding / hint layer,
+the SHAKE rejection samplers (the first consumers of the SHA-3 XOF), the
+coefficient bit-packing, the per-polynomial ring operations, the matrix/vector
+layer (ExpandA/ExpandS/ExpandMask + polyvec arithmetic + the NTT-domain
+matrix·vector product), **ML-DSA.KeyGen_internal** (increment 7), and
+**Sign_internal + Verify_internal** (increment 8) — **all three top-level
+operations pinned byte-for-byte against the NIST ACVP keyGen/sigGen/sigVer KATs**,
+for every ML-DSA parameter set. Public domain, C99, nine translation units plus a
+machine-generated constants file. Headers under `include/determ/crypto/mldsa/`.
+Still additive — no in-tree consumer yet (chain integration is a later,
+separately-reviewed step).
 
 ## 1. What this module implements (and what it does NOT, yet)
 
@@ -30,7 +33,8 @@ ships that ring's arithmetic foundation:
 | `pack.c` (`pack.h`) | Coefficient bit-packing: the generic LSB-first `pack_bits`/`unpack_bits` plus the FIPS 204 field encoders t1 (10-bit), t0 (13-bit), s1/s2 (η-bit), w1 (γ2-bit), z (γ1-bit) — the polynomial ↔ byte codec keygen/sign/verify serialize with. |
 | `poly.c` (`poly.h`) | Per-polynomial ring operations (inc.5) the top level composes over the NTT + samplers: `determ_mldsa_poly_add`/`_sub` (e.g. A·s1 + s2), `determ_mldsa_poly_reduce`/`_caddq` (coefficients back into range / to [0,q)), `determ_mldsa_poly_pointwise_montgomery` (the per-poly step of a matrix·vector product in the NTT domain). |
 | `polyvec.c` (`polyvec.h`) | Matrix/vector layer (inc.6): the domain-separated seed expansion `determ_mldsa_expand_a` (ExpandA, k×l public matrix Â over SHAKE128), `determ_mldsa_expand_s` (ExpandS, secret vectors s1/s2 over SHAKE256), `determ_mldsa_expand_mask` (ExpandMask, per-round mask y over SHAKE256); plus polyvec add/sub/reduce/caddq/ntt/invntt and the NTT-domain matrix·vector product `determ_mldsa_polyvec_matrix_pointwise` (t = Â·v̂, pointwise-Montgomery accumulate). Dimensions (k,l), η, γ1 are runtime args → one layer serves all three sets. |
-| `keygen.c` (`keygen.h`) | ML-DSA.KeyGen_internal (inc.7): `determ_mldsa_keygen(params, seed, pk, sk)` — H(ξ‖k‖l)→(ρ,ρ',K), ExpandA/ExpandS, t = invNTT(Â∘NTT(s1))+s2, Power2Round, pkEncode(ρ,t1) + tr=H(pk) + skEncode(ρ,K,tr,s1,s2,t0). Deterministic in the 32-byte seed; parameter sets `DETERM_MLDSA_44/65/87` + `determ_mldsa_pk_bytes`/`sk_bytes`. Pinned byte-for-byte against the NIST ACVP KeyGen KATs. |
+| `keygen.c` (`keygen.h`) | ML-DSA.KeyGen_internal (inc.7): `determ_mldsa_keygen(params, seed, pk, sk)` — H(ξ‖k‖l)→(ρ,ρ',K), ExpandA/ExpandS, t = invNTT(Â∘NTT(s1))+s2, Power2Round, pkEncode(ρ,t1) + tr=H(pk) + skEncode(ρ,K,tr,s1,s2,t0). Deterministic in the 32-byte seed; parameter sets `DETERM_MLDSA_44/65/87` (now carrying the full {k,l,η,τ,γ1,γ2,ω,λ}) + `determ_mldsa_pk_bytes`/`sk_bytes`. Pinned byte-for-byte against the NIST ACVP KeyGen KATs. |
+| `sign.c` (`sign.h`) | ML-DSA.Sign_internal + Verify_internal (inc.8): `determ_mldsa_sign(params, sk, M', mlen, rnd, sig)` (Fiat-Shamir rejection loop → sigEncode with HintBitPack) and `determ_mldsa_verify(...)` (→ UseHint + c̃ recompute, with HintBitUnpack's 3 malformed-hint rejections). Deterministic when rnd = 32 zero bytes. `determ_mldsa_sig_bytes` + `determ_mldsa_format_message` (M' = 0x00‖len(ctx)‖ctx‖M). Pinned byte-for-byte against the NIST ACVP sigGen/sigVer KATs. |
 
 The NTT diagonalizes ring multiplication: a length-256 negacyclic convolution
 (the ring product) becomes 256 independent coefficient multiplications in the
@@ -44,16 +48,17 @@ the `src/crypto/sha3/` XOF shipped in CRYPTO-C99-SPEC §3.17. Increment 3 (`samp
 is the first code to actually call SHAKE, turning a seed into ring elements; the
 increment-5 `sample_gamma1` (ExpandMask) is the mask sampler sign uses per round.
 
-**Scope (increments 1-7).** The ring's reduction + NTT, the coefficient rounding
-/ hint layer, the SHAKE samplers (uniform/eta/in-ball + the gamma1 mask), the
-coefficient bit-packing (`pack.c`), the per-polynomial ring operations (`poly.c`),
-the matrix/vector layer (`polyvec.c`), and **key generation** (`keygen.c`:
-ML-DSA.KeyGen_internal + pk/sk encode, ACVP-pinned for all three parameter sets).
-**Not yet here:** **sign** (`Sign_internal` — the Fiat-Shamir rejection loop:
-ExpandMask → w = A·y → challenge c = SampleInBall(H(μ‖w1)) → z = y + c·s1 with the
-‖z‖∞ / ‖r0‖∞ bound rejection + the hint) and **verify**, plus their FIPS 204 ACVP
-KATs. Those are the next increments. **The module has key generation but no signing
-capability yet and no in-tree consumer**; it is purely additive.
+**Scope (increments 1-8 — the complete scheme).** The ring's reduction + NTT, the
+coefficient rounding / hint layer, the SHAKE samplers (uniform/eta/in-ball + the
+gamma1 mask), the coefficient bit-packing (`pack.c`), the per-polynomial ring
+operations (`poly.c`), the matrix/vector layer (`polyvec.c`), **key generation**
+(`keygen.c`), and **signing + verification** (`sign.c`: Sign_internal's
+Fiat-Shamir-with-aborts loop + Verify_internal), ACVP-pinned for all three
+parameter sets. The **pure external interface** (`format_message`) + the internal
+interface are covered. **Not implemented (out of scope for the chain path):** the
+prehash HashML-DSA variant and the externalMu interface. **The module now has all
+three top-level operations but no in-tree consumer yet** — it is purely additive;
+chain integration is a later, separately-reviewed step.
 
 ## 2. Provenance + construction
 
@@ -171,14 +176,32 @@ the exact forward-NTT output ordering that byte-exact interop needs.
    **Reproducing the ACVP pk/sk retroactively pins the whole increment 1-6 stack**:
    it exercises the NTT, the samplers, the packing, the ring ops, and the ExpandA/S
    seed byte layout end-to-end against NIST.
+8. **Sign + Verify — ACVP-pinned end-to-end.** `tools/vectors/mldsa_sign.json` holds
+   the NIST **ACVP sigGen (deterministic)** vectors and `mldsa_verify.json` the
+   **sigVer** vectors (external + internal interface, pure), wired into BOTH §3.13
+   halves: `determ test-c99-vectors` runs the shipped C `Sign_internal` on the ACVP
+   sk + M' and matches the NIST signature **byte-for-byte** (deterministic variant),
+   and runs `Verify_internal` against the sigVer accept/reject flags — the reject
+   cases exercise the ‖z‖∞ bound and the three HintBitUnpack rejections (bad count,
+   non-increasing indices, non-zero pad). `tools/test_c99_vector_files.sh` recomputes
+   through an **independent python signer/verifier** (`tools/verify_mldsa_sign.py` —
+   hashlib SHAKE + a from-scratch python NTT). `test-mldsa-c99` adds a self-contained
+   keygen→sign→verify round-trip: verify accepts a genuine signature, rejects a
+   flipped-signature and a flipped-message, signing twice is byte-identical
+   (determinism), and the external `format_message` layout (0x00‖len‖ctx‖M, with
+   ctxlen>255 fail-closed) is checked. The sign proof reproduced the ACVP signatures
+   byte-for-byte in python BEFORE the C was written, so the C port was mechanical.
 
-**What is proven now:** ML-DSA **KeyGen** is pinned byte-for-byte against the NIST
-ACVP KATs for all three parameter sets (§3 item 7), which transitively exercises
-the whole increment 1-6 stack against the external reference. **What is NOT yet
-proven:** FIPS 204 *signature-level* byte interop — there is no `Sign_internal` /
-`Verify_internal` yet, so the SampleInBall challenge hashing, the ExpandMask mask
-loop, the rejection bounds, and the hint packing get their authoritative pin with
-the FIPS 204 sigGen/sigVer ACVP KATs at the signing increment.
+**What is proven now:** the WHOLE FIPS 204 scheme — KeyGen, Sign, and Verify — is
+pinned byte-for-byte against the NIST ACVP keyGen/sigGen/sigVer KATs for all three
+parameter sets (§3 items 7-8), through two independent implementations (the shipped
+C and a from-scratch python) both matched to the frozen NIST bytes. **What is NOT
+yet done:** (a) the constant-time / side-channel hardening review of the
+secret-dependent paths (the rejection loop's data-dependent iteration count is the
+canonical ML-DSA behaviour, but the module has not had a dedicated CT audit for
+production signing); (b) the prehash + externalMu ACVP interface variants (out of
+scope for the chain path); (c) chain integration itself. None affects the KAT
+conformance of the pure sign/verify path shipped here.
 
 ## 4. Constant-time / hygiene posture
 
@@ -214,13 +237,14 @@ the FIPS 204 sigGen/sigVer ACVP KATs at the signing increment.
 
 ## 5. Known limitations / future work
 
-- **Later PQ increments (owner-authorized):** **sign + verify** —
-  `Sign_internal` (the Fiat-Shamir rejection loop over ExpandMask/challenge/hint,
-  reusing the matrix/vector layer + rounding + samplers + packing) and
-  `Verify_internal`, gated by the FIPS 204 sigGen/sigVer ACVP KATs — and only then
-  the chain-integration + anon-address-format reopening, each separately reviewed.
-  KeyGen (this increment) is the template: library-primitive-first, pinned to the
-  NIST ACVP corpus.
+- **Later PQ steps (owner-authorized, each separately reviewed):** with the scheme
+  now complete + ACVP-pinned, the remaining work is (1) a **constant-time / side-
+  channel hardening review** of the secret-dependent paths before production signing;
+  (2) **chain integration** — offering ML-DSA as a PQ signature option alongside
+  Ed25519 (a consensus-critical change) + the anon-address-format reopening; and
+  optionally (3) the prehash HashML-DSA / externalMu interface variants if a
+  consumer needs them. The library primitive itself is done: KeyGen + Sign + Verify,
+  library-primitive-first, pinned to the NIST ACVP corpus.
 - **Scalar reference NTT.** No AVX2 / vectorized path; correctness and
   constant-time posture are the gates, throughput tuning is later (same posture
   as the AES S-box and the SHA-3 permutation).

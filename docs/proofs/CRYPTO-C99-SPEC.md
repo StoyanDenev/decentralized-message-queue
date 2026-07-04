@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-7)** — FIPS 204: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers (uniform/eta/in-ball/gamma1) + coefficient bit-packing (t1/t0/eta/w1/z) + per-poly ring ops + matrix/vector layer (ExpandA/S/Mask + polyvec + matrix·vector) + **KeyGen (ACVP-pinned, 3 param sets)**; §3.18. Sign/verify next. | Public domain | ~520 |
+| ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-8 — COMPLETE)** — FIPS 204 the whole scheme: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + **KeyGen + Sign + Verify**, all **ACVP-pinned (3 param sets)**; §3.18. Additive; chain integration is the next (owner-gated) step. | Public domain | ~740 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -142,7 +142,7 @@ src/crypto/
 │   └── argon2id.c              #   one self-contained file; header at include/determ/crypto/argon2/
 ├── sha3/                       # SHIPPED: SHA-3/SHAKE (FIPS 202) Keccak-f[1600]
 │   └── sha3.c                  #   PQ-track XOF (§3.17); header at include/determ/crypto/sha3/
-├── mldsa/                      # SHIPPED (inc.1-7): ML-DSA (Dilithium, FIPS 204) — keygen live
+├── mldsa/                      # SHIPPED (inc.1-8): ML-DSA (Dilithium, FIPS 204) — COMPLETE scheme
 │   ├── reduce.c                #   Z_q modular reduction (§3.18)
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
 │   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
@@ -151,7 +151,8 @@ src/crypto/
 │   ├── pack.c                  #   coefficient bit-packing: t1/t0/eta/w1/z (inc.4)
 │   ├── poly.c                  #   per-poly ring ops: add/sub/reduce/caddq/pointwise-Montgomery (inc.5)
 │   ├── polyvec.c               #   matrix/vector layer: ExpandA/S/Mask + polyvec + matrix·vector (inc.6)
-│   └── keygen.c                #   ML-DSA.KeyGen_internal + pk/sk encode (inc.7, ACVP-pinned)
+│   ├── keygen.c                #   ML-DSA.KeyGen_internal + pk/sk encode (inc.7, ACVP-pinned)
+│   └── sign.c                  #   ML-DSA.Sign_internal + Verify_internal + sigEncode/hint (inc.8, ACVP-pinned)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -971,7 +972,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-7: arithmetic core + rounding + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + KEYGEN, ACVP-pinned)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-8: the COMPLETE scheme — KeyGen + Sign + Verify, all ACVP-pinned)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -1037,8 +1038,20 @@ that every parameter set (ML-DSA-44/65/87) shares.
   (t1, t0) ← Power2Round(t); pk ← pkEncode(ρ, t1); tr ← H(pk, 64);
   sk ← skEncode(ρ, K, tr, s1, s2, t0). Deterministic in the 32-byte seed ξ (no
   internal RNG — the caller supplies ξ, exactly as the ACVP KATs do); the three
-  parameter sets are a `determ_mldsa_params{k,l,η}` (DETERM_MLDSA_44/65/87). The
-  encoded key sizes are 1312/1952/2592 (pk) and 2560/4032/4896 (sk).
+  parameter sets are a `determ_mldsa_params{k,l,η,…}` (DETERM_MLDSA_44/65/87). The
+  encoded key sizes are 1312/1952/2592 (pk) and 2560/4032/4896 (sk). **Increment 8**
+  adds `sign.c` — **ML-DSA.Sign_internal (Alg 7)** and **Verify_internal (Alg 8)**,
+  the Fiat-Shamir-with-aborts top level that completes the scheme. Sign runs the
+  rejection loop: ExpandMask → w = A·y → the commitment hash c̃ = H(μ‖w1Encode(w1))
+  → challenge c = SampleInBall(c̃) → z = y + c·s1, rejecting on the ‖z‖∞ ≥ γ1−β,
+  ‖r0‖∞ ≥ γ2−β, ‖c·t0‖∞ ≥ γ2, and #hints > ω bounds, then emits sigEncode(c̃, z, h)
+  with the ω+k-byte HintBitPack. Verify recomputes w'Approx = A·ẑ − ĉ·(t1·2^d)^,
+  runs UseHint, and checks c̃ = H(μ‖w1Encode(w1')) with the three malformed-hint
+  rejections in HintBitUnpack. Sign is **deterministic** in (sk, M', rnd): a 32-byte
+  all-zero rnd gives the FIPS 204 deterministic variant (byte-reproducible, as the
+  ACVP sigGen KATs use); a random rnd gives the hedged variant. The message M' is
+  pre-formatted — for the pure external interface, `determ_mldsa_format_message`
+  builds M' = 0x00 ‖ len(ctx) ‖ ctx ‖ M. Signature sizes: 2420/3309/4627.
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
@@ -1101,16 +1114,31 @@ that every parameter set (ML-DSA-44/65/87) shares.
   (pk/sk sizes for all three sets, keygen determinism, the shared-ρ prefix) plus a
   compact SHA-256-pinned ML-DSA-44 KAT. This retroactively pins the whole increment
   1-6 stack: reproducing the ACVP pk/sk exercises the NTT, samplers, packing, ring
-  ops, and the ExpandA/S seed layout end-to-end against NIST. Module provenance +
-  audit: `src/crypto/mldsa/README.md`.
-- **Scope / not-yet:** increments 1-6 (ring reduction + NTT, rounding/hint, the
-  SHAKE samplers, bit-packing, the per-poly ring ops, the matrix/vector layer) plus
-  **keygen** (increment 7: ML-DSA.KeyGen_internal + pk/sk encode, ACVP-pinned for
-  all three sets). Not yet: **sign** (ML-DSA.Sign_internal — the Fiat-Shamir
-  rejection loop: ExpandMask → w = A·y → challenge c = H(μ‖w1) → z = y + c·s1 with
-  the ‖z‖∞/‖r0‖∞ bound rejection + the hint) and **verify**, then their FIPS 204
-  ACVP KATs. Keygen is additive with no in-tree consumer; chain integration + the
-  anon-address-format reopening are later, separately-reviewed steps.
+  ops, and the ExpandA/S seed layout end-to-end against NIST. **Sign + verify
+  (increment 8) are likewise ACVP-pinned:** `tools/vectors/mldsa_sign.json` holds
+  the NIST **ACVP sigGen (deterministic)** vectors and `mldsa_verify.json` the
+  **sigVer** vectors (both external + internal interface, from `ML-DSA-sigGen/
+  sigVer-FIPS204`), wired into BOTH §3.13 halves — `determ test-c99-vectors` runs
+  the shipped C Sign_internal and matches the NIST signature **byte-for-byte**
+  (deterministic) and runs Verify_internal against the sigVer accept/reject flags
+  (including the failure cases that exercise the norm bounds + the three
+  HintBitUnpack rejections); `test_c99_vector_files.sh` recomputes through an
+  **independent python signer/verifier** (from-scratch NTT, distinct from the C).
+  `test-mldsa-c99` adds a self-contained keygen→sign→verify round-trip with
+  tamper-detection (flipped sig / flipped message both reject), the sign-determinism
+  check, and the external `format_message` layout. Module provenance + audit:
+  `src/crypto/mldsa/README.md`.
+- **Scope:** the **COMPLETE FIPS 204 signature scheme** — increments 1-6 (ring
+  reduction + NTT, rounding/hint, the SHAKE samplers, bit-packing, the per-poly ring
+  ops, the matrix/vector layer) + **KeyGen** (inc. 7) + **Sign + Verify** (inc. 8),
+  ACVP-pinned for all three parameter sets (ML-DSA-44/65/87). The pure external
+  interface is covered (`format_message`); NOT implemented: the prehash HashML-DSA
+  variant and the externalMu interface (out of scope for the chain path — the pure
+  external + internal interfaces are the ACVP groups that gate this module). **Still
+  additive — no in-tree consumer yet.** Next: chain integration (a PQ signature
+  option alongside Ed25519) + the anon-address-format reopening, each a
+  consensus-critical, separately-reviewed step; and the constant-time hardening
+  review of the secret-dependent paths before any production signing use.
 
 ---
 
