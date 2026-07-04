@@ -95,6 +95,7 @@ Achieved via three substitutions:
 | AES-256-GCM | `src/crypto/aes/` | NIST FIPS 197 + SP 800-38D | Public domain | ~3K |
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
+| SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -138,6 +139,8 @@ src/crypto/
 │   └── blake2b.c               #   the hash Argon2id builds on; header at include/determ/crypto/blake2/
 ├── argon2/                     # SHIPPED: Argon2id (RFC 9106) on ../blake2/blake2b
 │   └── argon2id.c              #   one self-contained file; header at include/determ/crypto/argon2/
+├── sha3/                       # SHIPPED: SHA-3/SHAKE (FIPS 202) Keccak-f[1600]
+│   └── sha3.c                  #   PQ-track XOF (§3.17); header at include/determ/crypto/sha3/
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -405,8 +408,8 @@ Migration steps:
 
 **Validation:** the in-process `determ test-*` subcommands continue passing after
 migration; per-primitive `determ test-*-c99` subcommands (sha2/aes/chacha20/ed25519/
-frost/x25519/blake2b/xchacha/argon2id) + the full-stack libsodium-equivalence harness
-above are the regression gate.
+frost/x25519/blake2b/sha3/xchacha/argon2id/p256) + the full-stack libsodium-equivalence
+harness above are the regression gate.
 
 ### Q10: Profile bundling — crypto choice tied to TimingProfile
 
@@ -920,6 +923,42 @@ Original plan (retained):
 - Update V2-DESIGN.md crypto cascades (v2.10/v2.22/v2.25 reflect new substrate)
 - Per-module README documenting provenance + version pin + audit notes
 - This spec doc as the central reference
+
+### 3.17 SHA-3 / SHAKE (FIPS 202) — **SHIPPED** (post-quantum XOF prerequisite)
+
+The libsodium-free, OpenSSL-free Keccak sponge, shipped as **increment 1 of the
+owner-authorized on-chain post-quantum signature track**. It exists ahead of a
+signature consumer because **ML-DSA / Dilithium (FIPS 204)** is built on SHAKE:
+**SHAKE128** expands the public matrix **Â** from the seed ρ, **SHAKE256** drives
+coefficient/nonce sampling and the rejection loop, and the same primitive
+underlies **SLH-DSA (FIPS 205)**. Shipping the XOF first, KAT-gated, means those
+schemes build on a validated sponge.
+
+- **Implementation:** `src/crypto/sha3/sha3.c` + `include/determ/crypto/sha3/sha3.h`
+  — Keccak-f[1600] (24 rounds θ ρ π χ ι, canonical RC/ρ-offset/π-permutation
+  tables) plus the four FIPS 202 functions (SHA3-256, SHA3-512, SHAKE128,
+  SHAKE256) and the incremental sponge context (`determ_keccak_init/absorb/
+  finalize/squeeze`) the rejection-sampling loop squeezes in blocks. pad10\*1
+  with the `0x06` (SHA-3) / `0x1F` (SHAKE) domain byte. State is little-endian
+  lane-packed via explicit shifts (no `uint64`↔`uint8` aliasing) → byte-identical
+  across toolchains/endianness.
+- **Constant-time:** naturally CT by construction — no secret-dependent branch,
+  rotation, or memory index (no S-box table); every branch is on public lengths.
+  This is why FIPS 202 is the standard XOF for constant-time lattice signatures.
+- **Validation:** `determ test-sha3-c99` (wrapper `tools/test_sha3_c99.sh`,
+  FAST-eligible) — byte-equal vs the OpenSSL §Q9 oracle (`EVP_sha3_256/512`,
+  `EVP_shake128/256` via `DigestFinalXOF`) over a fuzzed length grid crossing the
+  sponge rate boundaries and XOF outputs exceeding the rate, plus the FIPS 202
+  KATs, incremental==one-shot, and a rate-boundary byte-by-byte check. The
+  `tools/vectors/sha3_shake.json` corpus (`hashlib` oracle, 32 vectors) is wired
+  into **both** §3.13 halves (`determ test-c99-vectors` recomputes through
+  `sha3.c`; `tools/test_c99_vector_files.sh` recomputes through `hashlib`).
+  Module provenance + audit notes: `src/crypto/sha3/README.md`.
+- **Scope:** the four named FIPS 202 functions only. No SHA-3-224/384, no
+  cSHAKE/KMAC/TupleHash/ParallelHash (SP 800-185), no bit-interleaved/SIMD path
+  (throughput tuning is a later optimization, not a security gate). ML-DSA itself
+  is a later increment; today the module is additive with no in-tree signature
+  consumer.
 
 ---
 
