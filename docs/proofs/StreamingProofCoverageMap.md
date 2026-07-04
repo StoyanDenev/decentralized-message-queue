@@ -69,7 +69,7 @@ and lists the corroborating ones in Evidence.
 | **SS-3** | Kill-vs-drop: a live connection is `seq`-contiguous or observably dead; silent frame loss is impossible. | TLA-machine-checked (FB71) **+** prose+code-cite | FB71 `tla/SubscriberBackpressure.tla` `INV_NoSilentGap` + `INV_KillOnOverflow` + `INV_KilledFailClosed` (+ M1 drop-oldest mutant falsifies, non-vacuity); `StreamingSubscriptionSoundness.md` SS-3 (enqueue case analysis, `src/node/node.cpp` kill path). Backpressure-kill is **not** triggered live in the regression (see §5). |
 | **SS-4** | Bounded resource envelope: `SUBSCRIBER_MAX_PER_NODE × SUBSCRIBER_BYTES_MAX = 256 × 16 MiB = 4 GiB` worst case + operator levers. | prose+code-cite | `StreamingSubscriptionSoundness.md` SS-4 (per-growth-site enforcement argument); `docs/V2-DESIGN.md` §v2.20 constants table. The product arithmetic itself is **prose only** — not modeled (FB71 abstracts the byte cap to a frame count and models one subscriber; the global-product bound is out of its scope). |
 | **SS-5** | Every pushed frame is causally preceded by a subscribe that passed S-014 consume then S-001 HMAC verify; no unauthenticated frame path. | prose+code-cite **+** composed-from `S014RateLimiterSoundness.md`, `RpcAuthHmacSoundness.md` | `StreamingSubscriptionSoundness.md` SS-5 (P-4 gate ordering, `src/rpc/rpc.cpp` `handle_session`); composes T-1/T-2/T-3 and the S-001 closure. The gate-**ordering** argument is prose; `tools/test_dapp_subscribe.sh` exercises validation refusals (unknown domain / since-beyond-head, normal error envelope, no takeover) but not the auth-ordering itself. |
-| **SS-6** | Non-claims: at-least-once across reconnects (client dedup), node trusted for content, payload confidentiality unchanged, heartbeat timing public. | prose+code-cite **+** composed-from `V2-DAPP-DESIGN.md` §10 | `StreamingSubscriptionSoundness.md` SS-6 (explicit trust-model boundary); payload-privacy posture inherited from `V2-DAPP-DESIGN.md` §10. A **boundary statement**, not a positive property — nothing to machine-check; the reconnect dedup key `(block_index, tx_index)` is a client-side contract. |
+| **SS-6** | Reconnect: no matching event is lost across a disconnect+reconnect seam (client redials with `since = last_block` INCLUSIVE, dedups by `(block_index, tx_index)`). Plus the non-claims: node trusted for content, payload confidentiality unchanged, heartbeat timing public. | reconnect no-loss → **TLA-machine-checked FB73** (R56) **+** regression-test; the non-claims → prose+code-cite / composed-from `V2-DAPP-DESIGN.md` §10 | `StreamingSubscriptionSoundness.md` SS-6; `tla/SubscriberReconnectSeam.tla` (FB73 — INV_NoLoss / INV_NoDup; the EXCLUSIVE-since mutant falsifies INV_NoLoss, validating the inclusive-since decision `src/main.cpp` `eff_since = last_block`); `tools/test_dapp_subscribe.sh` (`--since B` inclusive / `--since B+1` exclusive boundary). The payload-confidentiality / node-trusted arms remain **boundary statements** (nothing to machine-check), payload posture inherited from `V2-DAPP-DESIGN.md` §10. |
 
 ## §3. Coverage table — SO-1..SO-4 (observability read)
 
@@ -107,7 +107,10 @@ and lists the corroborating ones in Evidence.
   byte cap to a frame count and models a single subscriber, so the global product is prose).
 - **SS-5** (auth/rate-limit **ordering** — gate sequence in `handle_session`; the limiter and
   HMAC soundness are composed, the *ordering* is argued).
-- **SS-6** (trust-model boundary / non-claims — a scoping statement, not a positive property).
+- **SS-6** reconnect no-loss → **FB73** `tla/SubscriberReconnectSeam.tla` (R56): the cross-reconnect
+  seam is machine-checked (INV_NoLoss + the EXCLUSIVE-since mutant validating the inclusive-since
+  choice). The remaining SS-6 arms (node-trusted-for-content, payload confidentiality) are boundary
+  statements, not positive properties.
 - **SO-1, SO-2, SO-4** (read-only / non-perturbing / disclosure — Q-1..Q-4 systems arguments;
   SO-1/SO-2/SO-4 each compose a companion theorem but the streaming-reader-specific step is
   prose).
