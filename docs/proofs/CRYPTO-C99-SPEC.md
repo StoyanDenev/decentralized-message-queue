@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-6)** — FIPS 204 building blocks: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers (uniform/eta/in-ball/gamma1) + coefficient bit-packing (t1/t0/eta/w1/z) + per-poly ring ops (add/sub/reduce/caddq/pointwise-Montgomery) + matrix/vector layer (ExpandA/S/Mask + polyvec + matrix·vector); §3.18. No signer yet. | Public domain | ~430 |
+| ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-7)** — FIPS 204: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers (uniform/eta/in-ball/gamma1) + coefficient bit-packing (t1/t0/eta/w1/z) + per-poly ring ops + matrix/vector layer (ExpandA/S/Mask + polyvec + matrix·vector) + **KeyGen (ACVP-pinned, 3 param sets)**; §3.18. Sign/verify next. | Public domain | ~520 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -142,7 +142,7 @@ src/crypto/
 │   └── argon2id.c              #   one self-contained file; header at include/determ/crypto/argon2/
 ├── sha3/                       # SHIPPED: SHA-3/SHAKE (FIPS 202) Keccak-f[1600]
 │   └── sha3.c                  #   PQ-track XOF (§3.17); header at include/determ/crypto/sha3/
-├── mldsa/                      # SHIPPED (inc.1-6): ML-DSA (Dilithium, FIPS 204) ring core
+├── mldsa/                      # SHIPPED (inc.1-7): ML-DSA (Dilithium, FIPS 204) — keygen live
 │   ├── reduce.c                #   Z_q modular reduction (§3.18)
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
 │   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
@@ -150,7 +150,8 @@ src/crypto/
 │   ├── sample.c                #   SHAKE samplers: uniform/eta/in-ball (inc.3) + gamma1 mask (inc.5)
 │   ├── pack.c                  #   coefficient bit-packing: t1/t0/eta/w1/z (inc.4)
 │   ├── poly.c                  #   per-poly ring ops: add/sub/reduce/caddq/pointwise-Montgomery (inc.5)
-│   └── polyvec.c               #   matrix/vector layer: ExpandA/S/Mask + polyvec + matrix·vector (inc.6)
+│   ├── polyvec.c               #   matrix/vector layer: ExpandA/S/Mask + polyvec + matrix·vector (inc.6)
+│   └── keygen.c                #   ML-DSA.KeyGen_internal + pk/sk encode (inc.7, ACVP-pinned)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -970,7 +971,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-6: arithmetic core + rounding + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-7: arithmetic core + rounding + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + KEYGEN, ACVP-pinned)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -1030,6 +1031,14 @@ that every parameter set (ML-DSA-44/65/87) shares.
   invntt) and the NTT-domain **matrix·vector product** t = Â·v̂ (pointwise-
   Montgomery accumulate). The dimensions (k, l), η, and γ1 are runtime arguments,
   so this one layer serves ML-DSA-44/65/87 (out-of-range dims are a no-op).
+  **Increment 7** adds `keygen.c` — **ML-DSA.KeyGen_internal(ξ)** (FIPS 204
+  Algorithm 6), the first TOP-LEVEL operation: (ρ, ρ', K) ← H(ξ ‖ k ‖ l, 128);
+  Â ← ExpandA(ρ); (s1, s2) ← ExpandS(ρ'); t ← invNTT(Â ∘ NTT(s1)) + s2;
+  (t1, t0) ← Power2Round(t); pk ← pkEncode(ρ, t1); tr ← H(pk, 64);
+  sk ← skEncode(ρ, K, tr, s1, s2, t0). Deterministic in the 32-byte seed ξ (no
+  internal RNG — the caller supplies ξ, exactly as the ACVP KATs do); the three
+  parameter sets are a `determ_mldsa_params{k,l,η}` (DETERM_MLDSA_44/65/87). The
+  encoded key sizes are 1312/1952/2592 (pk) and 2560/4032/4896 (sk).
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
@@ -1080,20 +1089,28 @@ that every parameter set (ML-DSA-44/65/87) shares.
   (`invntt(Â·ŝ) == schoolbook A·s`, run on a non-square k≠l set), so a wrong
   pointwise-accumulate, a transposed matrix, or a bad invntt cannot pass. There is
   no external ACVP oracle pre-signer, so those re-derivations + the schoolbook
-  oracle are the pin; the AUTHORITATIVE byte-layout pin arrives with the FIPS 204
-  keygen/sign ACVP KATs. Module provenance + audit: `src/crypto/mldsa/README.md`.
-- **Scope / not-yet:** the ring reduction + NTT, the rounding/hint layer, the
-  SHAKE samplers (uniform/eta/in-ball + the gamma1 mask), the coefficient
-  bit-packing, the per-polynomial ring ops (add/sub/reduce/caddq + pointwise
-  Montgomery multiply), and the matrix/vector layer (ExpandA/ExpandS/ExpandMask +
-  polyvec arithmetic + the NTT-domain matrix·vector product). Not yet: the
-  keygen/sign/verify top level (the Fiat-Shamir loop assembling these pieces), the
-  three parameter sets' full assembly, and the public-/secret-key + signature
-  serialization — nor FIPS 204 *signature-level* byte/ACVP KATs (no signer exists
-  yet; the int32 NTT KAT pins the transform's layout, the sampler/pack value
-  mappings + the seed-expansion byte layout are pinned by independent
-  re-derivations, and all get their authoritative pin with the keygen/sign KAT
-  increment). Additive with no in-tree consumer.
+  oracle are the pin. **Keygen (increment 7) IS the AUTHORITATIVE external pin:**
+  `tools/vectors/mldsa_keygen.json` holds the **NIST ACVP** KeyGen KATs (seed →
+  pk/sk, from `usnistgov/ACVP-Server` `ML-DSA-keyGen-FIPS204/internalProjection.json`,
+  one per parameter set) and is wired into BOTH §3.13 halves — `determ
+  test-c99-vectors` runs the shipped C keygen on the ACVP seed and matches pk + sk
+  byte-for-byte; `test_c99_vector_files.sh` recomputes through an **independent
+  python keygen** (hashlib SHAKE + a from-scratch python NTT, distinct from the C)
+  and matches the same frozen NIST bytes, so a bug shared by C and python is still
+  caught by the external reference. `test-mldsa-c99` adds the fast structural check
+  (pk/sk sizes for all three sets, keygen determinism, the shared-ρ prefix) plus a
+  compact SHA-256-pinned ML-DSA-44 KAT. This retroactively pins the whole increment
+  1-6 stack: reproducing the ACVP pk/sk exercises the NTT, samplers, packing, ring
+  ops, and the ExpandA/S seed layout end-to-end against NIST. Module provenance +
+  audit: `src/crypto/mldsa/README.md`.
+- **Scope / not-yet:** increments 1-6 (ring reduction + NTT, rounding/hint, the
+  SHAKE samplers, bit-packing, the per-poly ring ops, the matrix/vector layer) plus
+  **keygen** (increment 7: ML-DSA.KeyGen_internal + pk/sk encode, ACVP-pinned for
+  all three sets). Not yet: **sign** (ML-DSA.Sign_internal — the Fiat-Shamir
+  rejection loop: ExpandMask → w = A·y → challenge c = H(μ‖w1) → z = y + c·s1 with
+  the ‖z‖∞/‖r0‖∞ bound rejection + the hint) and **verify**, then their FIPS 204
+  ACVP KATs. Keygen is additive with no in-tree consumer; chain integration + the
+  anon-address-format reopening are later, separately-reviewed steps.
 
 ---
 
