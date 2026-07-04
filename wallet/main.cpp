@@ -2841,7 +2841,11 @@ int cmd_backup_verify(int argc, char** argv) {
     // envelope_details JSON output.
     struct EnvDetail {
         int      share_index{0};
+        bool     is_argon{false};       // R58 DWE2/Argon2id vs DWE1/PBKDF2
         uint32_t pbkdf2_iters{0};
+        uint32_t argon2_t{0};
+        uint32_t argon2_m_kib{0};
+        uint32_t argon2_p{0};
         size_t   salt_len{0};
         size_t   nonce_len{0};
         size_t   aad_len{0};
@@ -2913,7 +2917,10 @@ int cmd_backup_verify(int argc, char** argv) {
                         + ": ciphertext too short to contain GCM tag");
             return 2;
         }
-        details.push_back({idx, env.pbkdf2_iters,
+        details.push_back({idx,
+                            env.kdf == envelope::Kdf::ARGON2ID,
+                            env.pbkdf2_iters,
+                            env.argon2_t, env.argon2_m_kib, env.argon2_p,
                             env.salt.size(), env.nonce.size(),
                             env.aad.size(),  env.ciphertext.size(),
                             true});
@@ -2954,7 +2961,11 @@ int cmd_backup_verify(int argc, char** argv) {
         for (const auto& d : details) {
             arr.push_back({
                 {"share_index",  d.share_index},
+                {"kdf",          d.is_argon ? "argon2id" : "pbkdf2-hmac-sha256"},
                 {"pbkdf2_iters", d.pbkdf2_iters},
+                {"argon2_t_cost",     d.argon2_t},
+                {"argon2_m_cost_kib", d.argon2_m_kib},
+                {"argon2_lanes",      d.argon2_p},
                 {"salt_len",     d.salt_len},
                 {"nonce_len",    d.nonce_len},
                 {"aad_len",      d.aad_len},
@@ -2979,8 +2990,12 @@ int cmd_backup_verify(int argc, char** argv) {
         std::cout << "Share-to-envelope mapping: [OK] 1:1 by share_index\n";
         std::cout << "Envelope structural integrity:\n";
         for (const auto& d : details) {
-            std::cout << "  Envelope " << d.share_index
-                      << ": PBKDF2=" << d.pbkdf2_iters
+            std::cout << "  Envelope " << d.share_index << ": "
+                      << (d.is_argon
+                            ? "Argon2id(t=" + std::to_string(d.argon2_t)
+                                + ",m=" + std::to_string(d.argon2_m_kib) + "KiB"
+                                + ",p=" + std::to_string(d.argon2_p) + ")"
+                            : "PBKDF2=" + std::to_string(d.pbkdf2_iters))
                       << ", salt="   << d.salt_len  << "B"
                       << ", nonce="  << d.nonce_len << "B"
                       << ", ct="     << d.ct_len    << "B [OK]\n";
@@ -18432,13 +18447,26 @@ int cmd_account_accounting(int argc, char** argv) {
                 "  per-domain report. Exit 0 on success, 1 on args/RPC/parse "
                 "error.\n"
                 "\n"
-                "  NON-CLAIMS: assume-applied (an included tx skipped at apply "
-                "for\n"
-                "  insufficient balance, or a failed UNSTAKE, lands in "
-                "non_tx_delta);\n"
-                "  single-shard view (cross-shard credits arrive as receipts "
-                "on the\n"
-                "  other shard); it does NOT re-derive consensus balance.\n";
+                "  NON-CLAIMS (assume-applied — these land in non_tx_delta, not\n"
+                "  a mis-tally): (1) an included tx skipped at apply for "
+                "insufficient\n"
+                "  balance; (2) a failed UNSTAKE (fee-refunded); (3) a DAPP_CALL "
+                "whose\n"
+                "  target DApp is unregistered/inactive or whose topic/payload "
+                "framing\n"
+                "  is invalid — chain.cpp charges only the fee and applies NO "
+                "amount\n"
+                "  debit/credit, so the tool's dapp_spend/credit for it is an\n"
+                "  assume-applied artifact; (4) single-shard view — on a sharded "
+                "chain a\n"
+                "  cross-shard TRANSFER/DAPP_CALL debits the sender here but the "
+                "recipient\n"
+                "  is credited off-shard via a receipt, so a cross-shard "
+                "recipient's\n"
+                "  credits_received is an assume-applied artifact (the tool has "
+                "no shard\n"
+                "  geometry to exclude it). It does NOT re-derive consensus "
+                "balance.\n";
             return 0;
         }
         else {
