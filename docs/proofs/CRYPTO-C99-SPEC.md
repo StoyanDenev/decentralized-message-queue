@@ -96,7 +96,7 @@ Achieved via three substitutions:
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
-| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-3)** — FIPS 204 ring core: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint layer + the SHAKE rejection samplers (uniform/eta/in-ball — the first SHAKE consumers); §3.18. No signer yet. | Public domain | ~250 |
+| ML-DSA / Dilithium arithmetic | `src/crypto/mldsa/` | **SHIPPED (inc.1-4)** — FIPS 204 building blocks: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE rejection samplers + coefficient bit-packing (t1/t0/eta/w1/z); §3.18. No signer yet. | Public domain | ~320 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -147,7 +147,8 @@ src/crypto/
 │   ├── ntt.c                   #   negacyclic NTT of Z_q[X]/(X^256+1) + zetas.inc
 │   ├── zetas.inc               #   machine-generated twiddle factors (verify_mldsa_vectors.py)
 │   ├── rounding.c              #   power2round / decompose / make+use hint (inc.2)
-│   └── sample.c                #   SHAKE rejection samplers: uniform/eta/in-ball (inc.3)
+│   ├── sample.c                #   SHAKE rejection samplers: uniform/eta/in-ball (inc.3)
+│   └── pack.c                  #   coefficient bit-packing: t1/t0/eta/w1/z (inc.4)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -967,7 +968,7 @@ schemes build on a validated sponge.
   is a later increment; today the module is additive with no in-tree signature
   consumer.
 
-### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-3: arithmetic core + rounding + SHAKE samplers)**
+### 3.18 ML-DSA / Dilithium (FIPS 204) — **SHIPPED (increments 1-4: arithmetic core + rounding + SHAKE samplers + bit-packing)**
 
 The on-chain post-quantum SIGNATURE track (owner-authorized 2026-07-04 — see the
 governance reversal in `DECISION-LOG.md` and the reopened
@@ -1000,7 +1001,14 @@ that every parameter set (ML-DSA-44/65/87) shares.
   {-1,+1}; τ runtime). These couple the SHA-3 module into ML-DSA. Rejection
   sampling has a data-dependent LOOP COUNT (as in the canonical reference — NOT
   constant-time in the number of SHAKE bytes consumed); the coefficient values
-  are branchless.
+  are branchless. `sample_in_ball` fail-safes on an out-of-contract τ (and
+  `sample_eta` on an unsupported η) rather than hang/mis-fill — an R65-audit fix,
+  since the untrusted vector-file path passes those through. **Increment 4** adds
+  `pack.c` — the polynomial ↔ byte codec keygen/sign/verify serialize with:
+  `pack_bits`/`unpack_bits` (generic LSB-first) plus the FIPS 204 field encoders
+  t1 (10-bit), t0 (13-bit), s1/s2 (η-dependent), w1 (γ2-dependent), z
+  (γ1-dependent). Byte-identical to the canonical Dilithium per-field packers
+  (verified vs the reference `pack_t1`).
 - **Constant-time:** data-independent by construction — no secret-dependent
   branch, loop bound, or memory index in the butterflies or the reductions. The
   low-word multiply in `montgomery_reduce` is unsigned (no signed-overflow UB);
@@ -1023,13 +1031,22 @@ that every parameter set (ML-DSA-44/65/87) shares.
   `verify_mldsa_vectors.py`, schoolbook + direct-DFT cross-checked) is wired into
   **both** §3.13 halves — `determ test-c99-vectors` matches the exact int32
   forward-NTT output through `ntt.c`; `test_c99_vector_files.sh` recomputes
-  through the independent Python reference. Module provenance + audit:
-  `src/crypto/mldsa/README.md`.
-- **Scope / not-yet:** the ring reduction + NTT + the rounding/hint layer. Not
-  yet: coefficient bit-packing, rejection sampling (`SampleInBall`, `RejNTTPoly`,
-  `RejBoundedPoly` on the SHAKE XOF), the matrix/vector layer, keygen/sign/verify,
-  the three parameter sets — nor FIPS 204 *signature-level* byte/ACVP KATs (no
-  signer exists yet; the int32 NTT KAT pins the transform's reference layout).
+  through the independent Python reference. The **samplers** are structurally
+  gated + KAT'd against an independent SHAKE (python `hashlib`), and — an R65-audit
+  hardening — their value MAPPING is cross-checked by an independent representation
+  (spec lookup TABLE for eta / in-ball-sign, stdlib `int.from_bytes` for the
+  uniform read), since a rule shared by C and python would otherwise hide a
+  sign/mask bug. The **bit-packing** is validated by pack↔unpack round-trip AND an
+  **independent bit-slice oracle** (each field re-read by absolute bit offset,
+  distinct from the unpacker), with t1 byte-checked vs the reference `pack_t1`;
+  `mldsa_sample.json` + `mldsa_pack.json` are wired into both §3.13 halves. Module
+  provenance + audit: `src/crypto/mldsa/README.md`.
+- **Scope / not-yet:** the ring reduction + NTT, the rounding/hint layer, the
+  SHAKE samplers, and the coefficient bit-packing. Not yet: the matrix/vector
+  layer (ExpandA/ExpandS/ExpandMask), keygen/sign/verify, the three parameter
+  sets — nor FIPS 204 *signature-level* byte/ACVP KATs (no signer exists yet; the
+  int32 NTT KAT pins the transform's layout, and the sampler/pack value mappings
+  get their authoritative pin with the keygen/sign KAT increment).
   Additive with no in-tree consumer.
 
 ---

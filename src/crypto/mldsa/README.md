@@ -1,11 +1,11 @@
 # `src/crypto/mldsa/` — ML-DSA (Dilithium, NIST FIPS 204)
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
-§3.16. Status: **increments 1-3 of the owner-authorized on-chain post-quantum
+§3.16. Status: **increments 1-4 of the owner-authorized on-chain post-quantum
 SIGNATURE track** — the ring arithmetic core (modular reduction + the negacyclic
 NTT), the coefficient rounding / hint layer, and the SHAKE rejection samplers
 (the first consumers of the SHA-3 XOF), all shared by every ML-DSA parameter set.
-Public domain, C99, four translation units plus a machine-generated constants
+Public domain, C99, five translation units plus a machine-generated constants
 file. Headers under `include/determ/crypto/mldsa/`.
 
 ## 1. What this module implements (and what it does NOT, yet)
@@ -23,6 +23,7 @@ ships that ring's arithmetic foundation:
 | `zetas.inc` | **Machine-generated** table `zetas[i] = 2³² · ζ^{brv8(i)} mod q` (centered), ζ = 1753. Regenerated + verified by `tools/verify_mldsa_vectors.py`; never hand-edited. |
 | `rounding.c` (`rounding.h`) | `determ_mldsa_power2round` (t = t1·2^D + t0, the keygen public-key split), `determ_mldsa_decompose` (HighBits/LowBits around the GAMMA2 grid), `determ_mldsa_make_hint` / `determ_mldsa_use_hint` (the signature's per-coefficient carry hint). gamma2 is a runtime arg (GAMMA2_88 / GAMMA2_32). |
 | `sample.c` (`sample.h`) | The SHAKE rejection samplers — the FIRST consumers of `src/crypto/sha3/`: `determ_mldsa_sample_uniform` (RejNTTPoly, SHAKE128 → [0,q), the public matrix Â), `determ_mldsa_sample_eta` (RejBoundedPoly, SHAKE256 → [-η,η], the secrets; η∈{2,4} runtime), `determ_mldsa_sample_in_ball` (SHAKE256 → the challenge, exactly τ signed 1s; τ runtime). |
+| `pack.c` (`pack.h`) | Coefficient bit-packing: the generic LSB-first `pack_bits`/`unpack_bits` plus the FIPS 204 field encoders t1 (10-bit), t0 (13-bit), s1/s2 (η-bit), w1 (γ2-bit), z (γ1-bit) — the polynomial ↔ byte codec keygen/sign/verify serialize with. |
 
 The NTT diagonalizes ring multiplication: a length-256 negacyclic convolution
 (the ring product) becomes 256 independent coefficient multiplications in the
@@ -35,10 +36,9 @@ The rounding layer is what keygen (power2round on **t**) and sign/verify
 the `src/crypto/sha3/` XOF shipped in CRYPTO-C99-SPEC §3.17. Increment 3 (`sample.c`)
 is the first code to actually call SHAKE, turning a seed into ring elements.
 
-**Scope (increments 1-3).** The ring's reduction + NTT, the coefficient rounding
-/ hint layer, and the SHAKE rejection samplers (`sample_uniform` / `sample_eta` /
-`sample_in_ball`). **Not yet here:** coefficient bit-packing/unpacking, the
-matrix/vector layer (ExpandA/ExpandS/ExpandMask that build the domain-separated
+**Scope (increments 1-4).** The ring's reduction + NTT, the coefficient rounding
+/ hint layer, the SHAKE rejection samplers, and the coefficient bit-packing
+(`pack.c`). **Not yet here:** the matrix/vector layer (ExpandA/ExpandS/ExpandMask that build the domain-separated
 seeds and iterate these samplers), and the keygen/sign/verify top level — nor the
 three parameter sets (ML-DSA-44/65/87). Those are later increments. **There is no
 signing capability in this module and no in-tree consumer**; it is purely additive.
@@ -102,18 +102,29 @@ the exact forward-NTT output ordering that byte-exact interop needs.
    [0,q); eta in [-η,η]; in-ball exactly τ signed 1s with ‖c‖²==τ; all
    deterministic), plus `tools/vectors/mldsa_sample.json` (generated +
    reproduced by `tools/verify_mldsa_sample.py`) wired into both §3.13 halves.
-   The oracle is python `hashlib.shake_128/256` — a SHAKE implementation
-   **distinct from the C `determ_shake`** (and proven byte-equal to it +
-   OpenSSL in R62). So each sampler vector is a genuine cross-implementation KAT
-   (C `determ_shake` + rule vs python `hashlib` + rule); the rejection rules
-   layered on top are the canonical FIPS 204 algorithms, simple enough to audit
-   by inspection.
+   The SHAKE STREAM is cross-checked against python `hashlib.shake_128/256` — a
+   SHAKE **distinct from the C `determ_shake`** (proven byte-equal + vs OpenSSL in
+   R62). The value-mapping RULE is shared (both encode the FIPS 204 algorithm), so
+   — an **R65-audit hardening** — the mapping is ALSO cross-checked by an
+   INDEPENDENT REPRESENTATION: a spec lookup TABLE for the eta / in-ball-sign
+   convention (data, not the arithmetic formula) and stdlib `int.from_bytes` for
+   the uniform 23-bit read. A shared formula bug (e.g. an eta sign-flip that stays
+   in range) that the byte-equal KAT + structural gates would miss is caught by
+   the table. `sample_in_ball` fail-safes on out-of-contract τ (and `sample_eta`
+   on unsupported η) — the untrusted vector-file path validates them too.
+4. **The bit-packing** — `determ test-mldsa-c99` checks pack↔unpack round-trip AND
+   an **independent bit-slice oracle** (each field re-read by absolute bit offset,
+   a code path distinct from the unpacker, so a symmetric pack/unpack permutation
+   cannot pass); `tools/vectors/mldsa_pack.json` (via `tools/verify_mldsa_pack.py`)
+   is wired into both §3.13 halves, with `t1` byte-checked against the canonical
+   reference `pack_t1` formula.
 
 **What is NOT yet proven:** FIPS 204 *signature-level* byte interop (there is no
-signer yet). The exact-int32 NTT KAT + direct-DFT oracle pin the transform, and
-the samplers are cross-checked against an independent SHAKE, but end-to-end
-ACVP/FIPS 204 known-answer signature tests arrive with the keygen/sign/verify
-increment.
+signer yet). The NTT KAT + direct-DFT oracle pin the transform; the samplers +
+packing are cross-checked against independent representations of both the SHAKE
+stream and the value mapping — but the AUTHORITATIVE end-to-end pin of the sampler
+/ pack value mappings arrives with the FIPS 204 keygen/sign ACVP KATs at the
+signing increment.
 
 ## 4. Constant-time / hygiene posture
 
@@ -140,14 +151,18 @@ increment.
   public, so this is harmless; `sample_eta` runs on the secret ρ', matching the
   reference's accepted posture (the leak is the reject count, not the secret
   coefficients). The samplers scrub their SHAKE context with `determ_secure_zero`.
+- **Bit-packing is data-independent.** `pack_bits`/`unpack_bits` and the field
+  encoders have fixed loop bounds and no value-dependent branch or memory index
+  (the shift amounts depend only on the public bit width), so serializing a secret
+  polynomial does not leak it through timing.
 - **No stored key material.** No verify entry point / secret comparison here yet;
   the `ct.h` compares belong to the later signing increment.
 
 ## 5. Known limitations / future work
 
-- **Later PQ increments (owner-authorized):** coefficient bit-packing, the
-  matrix/vector layer (ExpandA/ExpandS/ExpandMask that build the domain-separated
-  seeds and iterate these samplers), then keygen/sign/verify +
+- **Later PQ increments (owner-authorized):** the matrix/vector layer
+  (ExpandA/ExpandS/ExpandMask that build the domain-separated seeds and iterate
+  these samplers over vectors of polynomials), then keygen/sign/verify +
   the three parameter sets, gated by FIPS 204 / ACVP KATs — and only then the
   chain-integration + anon-address-format reopening, each separately reviewed.
 - **Scalar reference NTT.** No AVX2 / vectorized path; correctness and
