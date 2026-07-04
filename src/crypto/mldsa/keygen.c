@@ -16,9 +16,13 @@
 #define KMAX 8
 #define LMAX 7
 
-const determ_mldsa_params DETERM_MLDSA_44 = { 4, 4, 2 };
-const determ_mldsa_params DETERM_MLDSA_65 = { 6, 5, 4 };
-const determ_mldsa_params DETERM_MLDSA_87 = { 8, 7, 2 };
+/* {k, l, eta, tau, gamma1, gamma2, omega, lambda} */
+const determ_mldsa_params DETERM_MLDSA_44 =
+    { 4, 4, 2, 39, DETERM_MLDSA_GAMMA1_17, DETERM_MLDSA_GAMMA2_88, 80, 128 };
+const determ_mldsa_params DETERM_MLDSA_65 =
+    { 6, 5, 4, 49, DETERM_MLDSA_GAMMA1_19, DETERM_MLDSA_GAMMA2_32, 55, 192 };
+const determ_mldsa_params DETERM_MLDSA_87 =
+    { 8, 7, 2, 60, DETERM_MLDSA_GAMMA1_19, DETERM_MLDSA_GAMMA2_32, 75, 256 };
 
 /* Per-poly eta-packed byte count: η=2 → 3 bits → 96 B; η=4 → 4 bits → 128 B. */
 static size_t eta_poly_bytes(int eta) { return (eta == 2) ? 96u : 128u; }

@@ -32,6 +32,7 @@
 #include <determ/crypto/mldsa/poly.h>          // §3.18: ML-DSA per-poly ring arithmetic (increment 5)
 #include <determ/crypto/mldsa/polyvec.h>       // §3.18: ML-DSA matrix/vector layer (increment 6)
 #include <determ/crypto/mldsa/keygen.h>        // §3.18: ML-DSA keygen (increment 7, ACVP-pinned)
+#include <determ/crypto/mldsa/sign.h>          // §3.18: ML-DSA sign/verify (increment 8, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -482,7 +483,8 @@ In-process tests (deterministic, no network):
                                               inc.3 SHAKE samplers; inc.4 coeff
                                               bit-packing (+bit-slice oracle);
                                               inc.5 poly ops + gamma1 mask; inc.6
-                                              matrix/vector; inc.7 keygen (ACVP KAT)
+                                              matrix/vector; inc.7 keygen; inc.8
+                                              sign+verify (all ACVP-pinned)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13511,7 +13513,9 @@ int main(int argc, char** argv) {
                                 "mldsa_ntt.json",
                                 "mldsa_sample.json",
                                 "mldsa_pack.json",
-                                "mldsa_keygen.json" };
+                                "mldsa_keygen.json",
+                                "mldsa_sign.json",
+                                "mldsa_verify.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -14062,6 +14066,33 @@ int main(int argc, char** argv) {
                     determ_mldsa_keygen(p, dptr(seed), gpk.data(), gsk.data());
                     if (gpk != wpk) { ok=false; bad=name+" (pk != ACVP reference)"; break; }
                     if (gsk != wsk) { ok=false; bad=name+" (sk != ACVP reference)"; break; }
+                } else if (prim == "mldsa_sign" || prim == "mldsa_verify") {
+                    // §3.18 inc.8 Sign_internal / Verify_internal KAT — the NIST ACVP
+                    // sigGen (deterministic) + sigVer oracle. M' is pre-formatted.
+                    std::string ps = v.value("paramSet", "");
+                    const determ_mldsa_params* p =
+                        (ps == "ML-DSA-44") ? &DETERM_MLDSA_44 :
+                        (ps == "ML-DSA-65") ? &DETERM_MLDSA_65 :
+                        (ps == "ML-DSA-87") ? &DETERM_MLDSA_87 : nullptr;
+                    if (!p) { ok=false; bad=name+" (unknown paramSet '"+ps+"')"; break; }
+                    auto mprime = unhex(v["mprime_hex"]);
+                    auto wsig = unhex(v["sig_hex"]);
+                    if (prim == "mldsa_sign") {
+                        auto sk = unhex(v["sk_hex"]);
+                        if (sk.size() != determ_mldsa_sk_bytes(p)) { ok=false; bad=name+" (sk length)"; break; }
+                        if (wsig.size() != determ_mldsa_sig_bytes(p)) { ok=false; bad=name+" (sig length)"; break; }
+                        std::vector<uint8_t> gsig(determ_mldsa_sig_bytes(p));
+                        uint8_t z32[32] = {0};   // deterministic variant
+                        if (determ_mldsa_sign(p, dptr(sk), dptr(mprime), mprime.size(), z32, gsig.data()) != 0) {
+                            ok=false; bad=name+" (sign returned error)"; break; }
+                        if (gsig != wsig) { ok=false; bad=name+" (signature != ACVP reference)"; break; }
+                    } else {
+                        auto pk = unhex(v["pk_hex"]);
+                        if (pk.size() != determ_mldsa_pk_bytes(p)) { ok=false; bad=name+" (pk length)"; break; }
+                        bool expected = v.value("expected", false);
+                        int got = determ_mldsa_verify(p, dptr(pk), dptr(mprime), mprime.size(), dptr(wsig));
+                        if ((got != 0) != expected) { ok=false; bad=name+" (verify "+(got?"accepted":"rejected")+", expected "+(expected?"accept":"reject")+")"; break; }
+                    }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14858,6 +14889,53 @@ int main(int argc, char** argv) {
             bool ok = hexof(hpk,32)=="451a808c522218fadbdab146fc12004b0741c7d069f238f43ad77216159f6a34"
                    && hexof(hsk,32)=="0196ccbde5fbd1804e8c784efb83998338076d586fe73ee07ba712ccc9fc32c2";
             check(ok, "keygen KAT: ML-DSA-44(ACVP seed) pk/sk == NIST (SHA-256 pinned)");
+        }
+
+        // ---- §3.18 increment 8: Sign_internal + Verify_internal ----
+        // The authoritative byte-for-byte NIST ACVP sigGen/sigVer KAT is the §3.13
+        // mldsa_sign.json + mldsa_verify.json gate; here a self-contained functional
+        // round-trip + tamper-detection + the external M' format check.
+        {
+            // (18) keygen → sign → verify round-trip + tamper detection, all 3 sets.
+            bool ok = true;
+            const determ_mldsa_params* sets[3] = { &DETERM_MLDSA_44, &DETERM_MLDSA_65, &DETERM_MLDSA_87 };
+            for (int si=0; si<3 && ok; si++) {
+                const determ_mldsa_params* p = sets[si];
+                uint8_t seed[32]; for (int i=0;i<32;i++) seed[i]=(uint8_t)(si*31+i+1);
+                std::vector<uint8_t> pk(determ_mldsa_pk_bytes(p)), sk(determ_mldsa_sk_bytes(p));
+                determ_mldsa_keygen(p, seed, pk.data(), sk.data());
+                // M' = format(ctx="ctx", msg="determ ml-dsa sign roundtrip")
+                const uint8_t ctx[3] = {'c','t','x'};
+                const char* m = "determ ml-dsa sign roundtrip";
+                std::vector<uint8_t> mp(2 + 3 + strlen(m));
+                size_t mlen = determ_mldsa_format_message(mp.data(), ctx, 3, (const uint8_t*)m, strlen(m));
+                if (mlen != mp.size()) ok=false;
+                std::vector<uint8_t> sig(determ_mldsa_sig_bytes(p));
+                uint8_t z32[32] = {0};
+                if (determ_mldsa_sign(p, sk.data(), mp.data(), mp.size(), z32, sig.data()) != 0) ok=false;
+                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), sig.data()) != 1) ok=false;   // accepts
+                std::vector<uint8_t> bad = sig; bad[bad.size()/2] ^= 0x01;                                 // tamper sig
+                if (determ_mldsa_verify(p, pk.data(), mp.data(), mp.size(), bad.data()) != 0) ok=false;   // rejects
+                std::vector<uint8_t> mp2 = mp; mp2.back() ^= 0x01;                                         // tamper msg
+                if (determ_mldsa_verify(p, pk.data(), mp2.data(), mp2.size(), sig.data()) != 0) ok=false; // rejects
+                // deterministic: signing twice yields identical bytes
+                std::vector<uint8_t> sig2(determ_mldsa_sig_bytes(p));
+                determ_mldsa_sign(p, sk.data(), mp.data(), mp.size(), z32, sig2.data());
+                if (sig != sig2) ok=false;
+            }
+            check(ok, "sign/verify: keygen→sign→verify round-trip + tamper reject + deterministic (44/65/87)");
+        }
+        {
+            // (19) format_message: M' = 0x00 ‖ len(ctx) ‖ ctx ‖ M, and ctxlen>255 fails.
+            bool ok = true;
+            uint8_t out[16]; const uint8_t ctx[2]={0xAA,0xBB}; const uint8_t msg[3]={1,2,3};
+            size_t n = determ_mldsa_format_message(out, ctx, 2, msg, 3);
+            const uint8_t want[7] = {0x00,0x02,0xAA,0xBB,0x01,0x02,0x03};
+            if (n != 7) ok=false; else for (int i=0;i<7;i++) if (out[i]!=want[i]) ok=false;
+            std::vector<uint8_t> big(300, 0);   // ctxlen 256 > 255 must fail
+            std::vector<uint8_t> obuf(600);
+            if (determ_mldsa_format_message(obuf.data(), big.data(), 256, msg, 3) != 0) ok=false;
+            check(ok, "format_message: 0x00||len(ctx)||ctx||M + ctxlen>255 fail-closed");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

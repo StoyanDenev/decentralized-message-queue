@@ -60,7 +60,7 @@ EXPECTED = {
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
-    "mldsa_pack.json", "mldsa_keygen.json",
+    "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
 }
 
 try:
@@ -1127,6 +1127,41 @@ def chk_mldsa_keygen(vec, label):
     if sk.hex().upper() != vec["sk_hex"].upper(): return "recomputed sk != ACVP reference"
     if pk[:32] != sk[:32]: return "pk/sk rho prefix mismatch"
 
+def _import_vs():
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    import verify_mldsa_sign as vs
+    return vs
+def chk_mldsa_sign(vec, label):
+    # ML-DSA (FIPS 204) Sign_internal KAT — the NIST ACVP sigGen (deterministic)
+    # oracle. Recompute the signature through the INDEPENDENT python signer
+    # (tools/verify_mldsa_sign.py; hashlib SHAKE + from-scratch NTT, distinct from
+    # the C) and match the stored ACVP signature byte-for-byte.
+    try: vs = _import_vs()
+    except Exception as e: return "cannot import verify_mldsa_sign (%s)" % e
+    need(vec, ["paramSet", "mprime_hex", "sk_hex", "sig_hex"], label)
+    ps = vec["paramSet"]
+    if ps not in vs.PARAMS: return "unknown paramSet %r" % ps
+    got = vs.sign_internal(unhex(vec["sk_hex"], label+" sk"),
+                           unhex(vec["mprime_hex"], label+" mprime"), vs.PARAMS[ps])
+    if got.hex() != vec["sig_hex"].lower(): return "recomputed signature != ACVP reference"
+def chk_mldsa_verify(vec, label):
+    # ML-DSA (FIPS 204) Verify_internal KAT — the NIST ACVP sigVer oracle.
+    # Recompute accept/reject through the independent python verifier and match the
+    # stored testPassed flag (exercises the norm bounds + the hint-decode rejects).
+    try: vs = _import_vs()
+    except Exception as e: return "cannot import verify_mldsa_sign (%s)" % e
+    need(vec, ["paramSet", "mprime_hex", "pk_hex", "sig_hex", "expected"], label)
+    ps = vec["paramSet"]
+    if ps not in vs.PARAMS: return "unknown paramSet %r" % ps
+    try:
+        got = vs.verify_internal(unhex(vec["pk_hex"], label+" pk"),
+                                 unhex(vec["mprime_hex"], label+" mprime"),
+                                 unhex(vec["sig_hex"], label+" sig"), vs.PARAMS[ps])
+    except Exception:
+        got = False
+    if bool(got) != bool(vec["expected"]):
+        return "verify %s, expected %s (%s)" % (got, vec["expected"], vec.get("reason",""))
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1153,6 +1188,8 @@ CHECKERS = {
     "mldsa_sample": chk_mldsa_sample,
     "mldsa_pack": chk_mldsa_pack,
     "mldsa_keygen": chk_mldsa_keygen,
+    "mldsa_sign": chk_mldsa_sign,
+    "mldsa_verify": chk_mldsa_verify,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

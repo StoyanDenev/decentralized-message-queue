@@ -143,6 +143,8 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/polyvec.c"
   # §3.18 increment 7: ML-DSA.KeyGen_internal (ACVP-pinned; pk/sk encode).
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/keygen.c"
+  # §3.18 increment 8: ML-DSA Sign_internal + Verify_internal (ACVP-pinned).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/sign.c"
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"

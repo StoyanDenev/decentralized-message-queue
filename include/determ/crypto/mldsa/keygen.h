@@ -25,12 +25,21 @@ extern "C" {
 
 /* Parameter set: matrix dimensions (k rows, l columns) + the secret bound η.
  * The other ML-DSA parameters (τ, γ1, γ2, β, ω) belong to sign/verify. */
-typedef struct { int k; int l; int eta; } determ_mldsa_params;
+/* A full ML-DSA parameter set. keygen uses only {k, l, eta}; sign/verify use the
+ * rest (tau, gamma1, gamma2, omega, lambda — beta = tau·eta is derived). */
+typedef struct {
+    int k; int l; int eta;
+    int tau;        /* # of ±1 in the challenge */
+    int32_t gamma1; /* mask bound (2^17 or 2^19) */
+    int32_t gamma2; /* low-order rounding grid ((q-1)/88 or (q-1)/32) */
+    int omega;      /* max # of hint 1's */
+    int lambda;     /* collision strength in bits; c~ = lambda/4 bytes */
+} determ_mldsa_params;
 
 /* The three FIPS 204 parameter sets. */
-extern const determ_mldsa_params DETERM_MLDSA_44;  /* k=4, l=4, η=2 */
-extern const determ_mldsa_params DETERM_MLDSA_65;  /* k=6, l=5, η=4 */
-extern const determ_mldsa_params DETERM_MLDSA_87;  /* k=8, l=7, η=2 */
+extern const determ_mldsa_params DETERM_MLDSA_44;  /* k=4, l=4, η=2, τ=39, γ1=2^17, ω=80, λ=128 */
+extern const determ_mldsa_params DETERM_MLDSA_65;  /* k=6, l=5, η=4, τ=49, γ1=2^19, ω=55, λ=192 */
+extern const determ_mldsa_params DETERM_MLDSA_87;  /* k=8, l=7, η=2, τ=60, γ1=2^19, ω=75, λ=256 */
 
 /* Encoded key sizes for a parameter set:
  *   pk = 32 (ρ) + k·320 (t1, 10-bit SimpleBitPack)
