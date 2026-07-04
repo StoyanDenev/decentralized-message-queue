@@ -18317,6 +18317,388 @@ int cmd_validator_roster_snapshot(int argc, char** argv) {
 //   0  export complete (or empty if no matching txs)
 //   1  args / parse error / RPC unreachable / unwritable output /
 //      unreadable accounts file / invalid account shape
+// R57: per-domain accounting — a READ-ONLY transaction-flow ledger for one
+// or more domains, cross-checked against the authoritative balance. Walks
+// the chain via the `block` RPC, classifies each tx's effect on the domain
+// (credit/debit/dapp-spend/stake/unstake/fee) exactly as chain.cpp's
+// apply_transactions does, sums the flows, then fetches the authoritative
+// `balance` + `stake_info` and surfaces the residual `non_tx_delta` (= the
+// domain's genesis opening + block-creator subsidy/fee income + NEF + any
+// cross-shard receipts). It does NOT re-derive consensus balance — the
+// authoritative figure is the daemon's. Soundness + the reconciliation
+// identity: docs/proofs/WalletDomainAccountingSoundness.md.
+int cmd_account_accounting(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string accounts_in;
+    int64_t from_h_arg = -1, to_h_arg = -1, last_n_arg = -1;
+    bool human = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) rpc_port    = std::atoi(argv[++i]);
+        else if (a == "--accounts" && i + 1 < argc) accounts_in = argv[++i];
+        else if (a == "--from" && i + 1 < argc) { if (!arg_i64("account-accounting", "--from", argv[++i], from_h_arg)) return 1; }
+        else if (a == "--to"   && i + 1 < argc) { if (!arg_i64("account-accounting", "--to", argv[++i], to_h_arg)) return 1; }
+        else if (a == "--last" && i + 1 < argc) { if (!arg_i64("account-accounting", "--last", argv[++i], last_n_arg)) return 1; }
+        else if (a == "--human") human = true;
+        else if (a == "--json") { /* default */ }
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet account-accounting --rpc-port <N> "
+                "--accounts <list|@file>\n"
+                "       [--from H] [--to H | --last N] [--human] [--json]\n"
+                "\n"
+                "  Read-only per-domain transaction-flow accounting, "
+                "cross-checked\n"
+                "  against the authoritative balance. For each account it "
+                "walks the\n"
+                "  chain (block RPC) over [from, to] and tallies the effect "
+                "of the\n"
+                "  domain's own transactions, classified exactly as the "
+                "chain applies\n"
+                "  them:\n"
+                "    credits_received  Σ amount of TRANSFER/DAPP_CALL to this "
+                "domain\n"
+                "    debits_sent       Σ amount of TRANSFER from this domain\n"
+                "    dapp_spend        Σ amount of DAPP_CALL from this domain\n"
+                "    staked / unstaked Σ amount of STAKE / UNSTAKE from this "
+                "domain\n"
+                "    fees_paid         Σ fee of every tx signed by this "
+                "domain\n"
+                "    tx_flow_net       credits+unstaked "
+                "- debits-dapp_spend-staked-fees\n"
+                "    blocks_produced   # blocks where the domain is a creator "
+                "(income hint)\n"
+                "  then fetches the authoritative balance + locked stake and "
+                "reports\n"
+                "    non_tx_delta = balance - tx_flow_net\n"
+                "  which, for a [0,head] walk, is the domain's genesis "
+                "opening plus\n"
+                "  everything NOT in its own transactions: block-creator "
+                "subsidy/fee\n"
+                "  income (see blocks_produced), first-register NEF, inbound "
+                "cross-shard\n"
+                "  receipts. This is a diagnostic residual, not an error.\n"
+                "\n"
+                "  --accounts: comma-separated or @<file> (one per line, # "
+                "comments +\n"
+                "  blank lines skipped). Each is an anon address (0x + 64 hex, "
+                "mixed\n"
+                "  case normalized) or a domain ([a-z][a-z0-9-]*.[a-z]+).\n"
+                "  --from/--to bracket the walk (inclusive; default 0..head); "
+                "--last N\n"
+                "  is the last-N-blocks tail (exclusive with --from/--to).\n"
+                "  --json (default) emits {window, accounts:[...]}; --human "
+                "prints a\n"
+                "  per-domain report. Exit 0 on success, 1 on args/RPC/parse "
+                "error.\n"
+                "\n"
+                "  NON-CLAIMS: assume-applied (an included tx skipped at apply "
+                "for\n"
+                "  insufficient balance, or a failed UNSTAKE, lands in "
+                "non_tx_delta);\n"
+                "  single-shard view (cross-shard credits arrive as receipts "
+                "on the\n"
+                "  other shard); it does NOT re-derive consensus balance.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "account-accounting: unknown argument '" << a << "'\n"
+                         "Try: determ-wallet account-accounting --help\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "account-accounting: --rpc-port <N> is required (1..65535)\n";
+        return 1;
+    }
+    if (accounts_in.empty()) {
+        std::cerr << "account-accounting: --accounts <list|@file> is required\n";
+        return 1;
+    }
+    if (last_n_arg >= 0 && (from_h_arg >= 0 || to_h_arg >= 0)) {
+        std::cerr << "account-accounting: --last is mutually exclusive with "
+                     "--from / --to\n";
+        return 1;
+    }
+
+    // ── account-shape helpers (mirror tx-history-export) ──────────────────
+    auto is_anon_shape = [](const std::string& s) {
+        if (s.size() != 66 || s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                  (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
+    };
+    auto is_domain_shape = [](const std::string& s) {
+        if (s.empty() || !(s[0] >= 'a' && s[0] <= 'z')) return false;
+        size_t dot = s.find('.');
+        if (dot == std::string::npos || dot == 0 || dot == s.size() - 1) return false;
+        for (size_t i = 1; i < dot; ++i) {
+            char c = s[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
+                return false;
+        }
+        for (size_t i = dot + 1; i < s.size(); ++i)
+            if (!(s[i] >= 'a' && s[i] <= 'z')) return false;
+        return true;
+    };
+    auto normalize_anon = [](std::string s) {
+        for (size_t i = 2; i < s.size(); ++i)
+            if (s[i] >= 'A' && s[i] <= 'F') s[i] = char(s[i] - 'A' + 'a');
+        return s;
+    };
+    std::vector<std::string> accounts_raw;
+    if (accounts_in[0] == '@') {
+        std::ifstream in_f(accounts_in.substr(1));
+        if (!in_f) {
+            std::cerr << "account-accounting: cannot open --accounts file: "
+                      << accounts_in.substr(1) << "\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in_f, line)) {
+            while (!line.empty() && (line.back()=='\r'||line.back()==' '||
+                   line.back()=='\t'||line.back()=='\n')) line.pop_back();
+            size_t p = line.find_first_not_of(" \t");
+            if (p == std::string::npos) continue;
+            line.erase(0, p);
+            if (line.empty() || line[0] == '#') continue;
+            accounts_raw.push_back(line);
+        }
+    } else {
+        std::stringstream ss(accounts_in);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            size_t a0 = tok.find_first_not_of(" \t");
+            if (a0 == std::string::npos) continue;
+            size_t a1 = tok.find_last_not_of(" \t");
+            tok = tok.substr(a0, a1 - a0 + 1);
+            if (!tok.empty()) accounts_raw.push_back(tok);
+        }
+    }
+    // Preserve caller order for output; canonicalize for matching.
+    std::vector<std::string> order;
+    std::set<std::string> accounts;
+    for (auto& a : accounts_raw) {
+        std::string canon;
+        if (is_anon_shape(a)) canon = normalize_anon(a);
+        else if (is_domain_shape(a)) canon = a;
+        else {
+            std::cerr << "account-accounting: invalid account '" << a
+                      << "' — expected anon address (0x + 64 hex) or domain "
+                         "([a-z][a-z0-9-]*.[a-z]+)\n";
+            return 1;
+        }
+        if (accounts.insert(canon).second) order.push_back(canon);
+    }
+    if (order.empty()) {
+        std::cerr << "account-accounting: --accounts resolved to zero entries\n";
+        return 1;
+    }
+
+    // ── per-domain accumulator ────────────────────────────────────────────
+    struct Acct {
+        uint64_t credits = 0, debits = 0, dapp_spend = 0;
+        uint64_t staked = 0, unstaked = 0, fees_paid = 0;
+        uint64_t txs_sent = 0, txs_recv = 0, blocks_produced = 0;
+    };
+    std::map<std::string, Acct> acct;
+    for (auto& d : order) acct[d];  // ensure every requested account appears
+
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) { std::cerr << "account-accounting: WSAStartup failed\n"; return 1; }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "account-accounting: " << conn_err << "\n";
+        return 1;
+    }
+    std::string inbuf;
+    uint64_t chain_height = 0;
+    try {
+        auto st = rpc_call_over_socket(s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number())
+            chain_height = st["height"].get<uint64_t>();
+    } catch (std::exception& e) {
+        close_sock(s);
+        std::cerr << "account-accounting: status RPC failed: " << e.what() << "\n";
+        return 1;
+    }
+    uint64_t from_h = 0, to_h = 0;
+    if (chain_height > 0) {
+        uint64_t head_index = chain_height - 1;
+        to_h = head_index;
+        if (last_n_arg > 0) {
+            uint64_t n = std::min<uint64_t>(uint64_t(last_n_arg), chain_height);
+            from_h = chain_height - n;
+        } else {
+            if (from_h_arg >= 0) from_h = uint64_t(from_h_arg);
+            if (to_h_arg   >= 0) to_h   = std::min<uint64_t>(uint64_t(to_h_arg), head_index);
+        }
+    }
+
+    // STAKE/UNSTAKE carry the amount as an 8-byte little-endian `payload`
+    // (chain.cpp:860-863 / :875-878); their `amount` field is always 0. Decode
+    // it exactly as apply does, so `staked`/`unstaked` mirror the ledger.
+    auto stake_payload_amount = [](const nlohmann::json& tx) -> uint64_t {
+        if (!tx.contains("payload") || !tx["payload"].is_string()) return 0;
+        std::vector<uint8_t> p;
+        try { p = from_hex(tx["payload"].get<std::string>()); }
+        catch (...) { return 0; }
+        if (p.size() != 8) return 0;              // apply requires exactly 8 bytes
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= uint64_t(p[i]) << (8 * i);  // little-endian
+        return v;
+    };
+
+    // ── walk [from_h, to_h], classify each tx per chain.cpp apply rules ────
+    if (chain_height > 0 && from_h <= to_h) {
+        for (uint64_t h = from_h; h <= to_h; ++h) {
+            nlohmann::json blk;
+            try {
+                blk = rpc_call_over_socket(s, inbuf, "block", {{"index", h}});
+            } catch (std::exception& e) {
+                close_sock(s);
+                std::cerr << "account-accounting: block RPC failed at height "
+                          << h << ": " << e.what() << "\n";
+                return 1;
+            }
+            if (!blk.is_object()) continue;
+            // Block-creator income hint (subsidy + fees split across creators).
+            if (blk.contains("creators") && blk["creators"].is_array()) {
+                for (auto& c : blk["creators"]) {
+                    if (!c.is_string()) continue;
+                    auto it = acct.find(c.get<std::string>());
+                    if (it != acct.end()) it->second.blocks_produced++;
+                }
+            }
+            if (!blk.contains("transactions") || !blk["transactions"].is_array())
+                continue;
+            for (const auto& tx : blk["transactions"]) {
+                if (!tx.is_object()) continue;
+                std::string frm = tx.value("from", std::string{});
+                std::string to  = tx.value("to",   std::string{});
+                if (is_anon_shape(frm)) frm = normalize_anon(frm);
+                if (is_anon_shape(to))  to  = normalize_anon(to);
+                int      t   = tx.value("type",   0);
+                uint64_t amt = tx.value("amount", uint64_t{0});
+                uint64_t fee = tx.value("fee",    uint64_t{0});
+                auto fit = acct.find(frm);
+                auto tit = acct.find(to);
+                const bool from_hit = fit != acct.end();
+                const bool to_hit   = tit != acct.end();
+                if (!from_hit && !to_hit) continue;
+                // Sender side: fee is paid on every tx type the domain signs.
+                if (from_hit) {
+                    fit->second.fees_paid += fee;
+                    fit->second.txs_sent++;
+                    switch (t) {
+                        case 0:  fit->second.debits     += amt; break; // TRANSFER
+                        case 3:  fit->second.staked      += stake_payload_amount(tx); break; // STAKE
+                        case 4:  fit->second.unstaked    += stake_payload_amount(tx); break; // UNSTAKE
+                        case 10: fit->second.dapp_spend  += amt; break; // DAPP_CALL
+                        default: break; // REGISTER/DEREGISTER/PARAM_CHANGE/… fee-only
+                    }
+                }
+                // Receiver side: only TRANSFER (0) + DAPP_CALL (10) credit `to`.
+                if (to_hit && (t == 0 || t == 10)) {
+                    tit->second.credits += amt;
+                    tit->second.txs_recv++;
+                }
+            }
+        }
+    }
+
+    // ── authoritative balance + locked stake per domain ───────────────────
+    struct Live { uint64_t balance = 0, locked = 0; bool ok = false; };
+    std::map<std::string, Live> live;
+    for (auto& d : order) {
+        Live L;
+        try {
+            auto b = rpc_call_over_socket(s, inbuf, "balance", {{"domain", d}});
+            if (b.contains("balance") && b["balance"].is_number()) {
+                L.balance = b["balance"].get<uint64_t>();
+                L.ok = true;
+            }
+            auto si = rpc_call_over_socket(s, inbuf, "stake_info", {{"domain", d}});
+            if (si.contains("locked") && si["locked"].is_number())
+                L.locked = si["locked"].get<uint64_t>();
+        } catch (std::exception&) { /* leave L.ok=false; report null balance */ }
+        live[d] = L;
+    }
+    close_sock(s);
+
+    // ── emit ──────────────────────────────────────────────────────────────
+    auto net_of = [](const Acct& a) -> long long {
+        return (long long)(a.credits + a.unstaked)
+             - (long long)(a.debits + a.dapp_spend + a.staked + a.fees_paid);
+    };
+    if (!human) {
+        nlohmann::json out;
+        out["window"] = {{"from", from_h}, {"to", to_h},
+                         {"chain_height", chain_height}};
+        nlohmann::json arr = nlohmann::json::array();
+        for (auto& d : order) {
+            const Acct& a = acct[d];
+            const Live& L = live[d];
+            long long net = net_of(a);
+            nlohmann::json row;
+            row["domain"]           = d;
+            row["credits_received"] = a.credits;
+            row["debits_sent"]      = a.debits;
+            row["dapp_spend"]       = a.dapp_spend;
+            row["staked"]           = a.staked;
+            row["unstaked"]         = a.unstaked;
+            row["fees_paid"]        = a.fees_paid;
+            row["txs_sent"]         = a.txs_sent;
+            row["txs_received"]     = a.txs_recv;
+            row["blocks_produced"]  = a.blocks_produced;
+            row["tx_flow_net"]      = net;
+            if (L.ok) {
+                row["authoritative_balance"] = L.balance;
+                row["locked_stake"]          = L.locked;
+                row["non_tx_delta"]          = (long long)L.balance - net;
+            } else {
+                row["authoritative_balance"] = nullptr;
+                row["locked_stake"]          = nullptr;
+                row["non_tx_delta"]          = nullptr;
+            }
+            arr.push_back(row);
+        }
+        out["accounts"] = arr;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Per-domain accounting  window [" << from_h << ", " << to_h
+                  << "]  (chain height " << chain_height << ")\n";
+        for (auto& d : order) {
+            const Acct& a = acct[d];
+            const Live& L = live[d];
+            long long net = net_of(a);
+            std::cout << "\n" << d << ":\n"
+                      << "  credits_received   " << a.credits << "\n"
+                      << "  debits_sent        " << a.debits << "\n"
+                      << "  dapp_spend         " << a.dapp_spend << "\n"
+                      << "  staked / unstaked  " << a.staked << " / " << a.unstaked << "\n"
+                      << "  fees_paid          " << a.fees_paid << "\n"
+                      << "  txs sent/received  " << a.txs_sent << " / " << a.txs_recv << "\n"
+                      << "  blocks_produced    " << a.blocks_produced << "\n"
+                      << "  tx_flow_net        " << net << "\n";
+            if (L.ok)
+                std::cout << "  authoritative bal  " << L.balance
+                          << "  (locked " << L.locked << ")\n"
+                          << "  non_tx_delta       " << ((long long)L.balance - net)
+                          << "  (genesis opening + subsidy/fee + NEF + xshard)\n";
+            else
+                std::cout << "  authoritative bal  <unavailable>\n";
+        }
+    }
+    return 0;
+}
+
 int cmd_tx_history_export(int argc, char** argv) {
     int rpc_port = -1;
     std::string accounts_in;
@@ -24815,6 +25197,14 @@ void print_usage() {
         "                                             ('what was the balance at block H?').\n"
         "                                             Exit 0 success (including empty result), 1\n"
         "                                             args/parse/IO/RPC error or invalid account.\n"
+        "  account-accounting --rpc-port <N>          Read-only per-domain transaction-flow\n"
+        "                     --accounts <list|@file>  accounting (credits/debits/dapp-spend/\n"
+        "                     [--from H] [--to H|--last N]  stake/fees + blocks_produced), each\n"
+        "                     [--human] [--json]       classified as the chain applies it, then\n"
+        "                                             cross-checked against the authoritative\n"
+        "                                             balance with a non_tx_delta residual\n"
+        "                                             (genesis + subsidy/fee + NEF + xshard). Read-\n"
+        "                                             only; see WalletDomainAccountingSoundness.md.\n"
         "  snapshot-verify --in <file>                OFFLINE snapshot internal-consistency\n"
         "                  [--determ-bin <path>]      check. Invokes `determ snapshot inspect\n"
         "                  [--expect-state-root <hex>]   --in <file> --json` as a subprocess to\n"
@@ -25067,6 +25457,7 @@ int main(int argc, char** argv) {
     if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
     if (cmd == "tx-history-export") return cmd_tx_history_export(argc - 2, argv + 2);
     if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
+    if (cmd == "account-accounting") return cmd_account_accounting(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
     if (cmd == "state-proof-verify") return cmd_state_proof_verify(argc - 2, argv + 2);
