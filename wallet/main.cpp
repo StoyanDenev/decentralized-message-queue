@@ -1009,17 +1009,20 @@ int cmd_shamir_rotate(int argc, char** argv) {
 int cmd_envelope_encrypt(int argc, char** argv) {
     std::string plaintext_hex, password, aad_hex;
     uint32_t iters = envelope::DEFAULT_PBKDF2_ITERS;
+    bool iters_given = false;   // --iters selects the legacy PBKDF2 (DWE1) KDF
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--plaintext" && i + 1 < argc) plaintext_hex = argv[++i];
         else if (a == "--password"  && i + 1 < argc) password      = argv[++i];
         else if (a == "--aad"       && i + 1 < argc) aad_hex       = argv[++i];
-        else if (a == "--iters"     && i + 1 < argc) { if (!arg_u32("envelope encrypt", "--iters", argv[++i], iters)) return 1; }
+        else if (a == "--iters"     && i + 1 < argc) { if (!arg_u32("envelope encrypt", "--iters", argv[++i], iters)) return 1; iters_given = true; }
     }
     if (plaintext_hex.empty() || password.empty()) {
         std::cerr << "Usage: determ-wallet envelope encrypt "
                      "--plaintext <hex> --password <str> "
-                     "[--aad <hex>] [--iters <N>]\n";
+                     "[--aad <hex>] [--iters <N>]\n"
+                     "  Default KDF is memory-hard Argon2id (DWE2). Passing\n"
+                     "  --iters selects the legacy PBKDF2 KDF (DWE1) for interop.\n";
         return 1;
     }
     std::vector<uint8_t> pt, aad;
@@ -1030,7 +1033,9 @@ int cmd_envelope_encrypt(int argc, char** argv) {
         std::cerr << "hex parse: " << e.what() << "\n"; return 1;
     }
     try {
-        auto env = envelope::encrypt(pt, password, aad, iters);
+        // --iters => legacy PBKDF2 (DWE1); otherwise the Argon2id default (DWE2).
+        auto env = iters_given ? envelope::encrypt_pbkdf2(pt, password, aad, iters)
+                               : envelope::encrypt(pt, password, aad);
         std::cout << envelope::serialize(env) << "\n";
     } catch (std::exception& e) {
         std::cerr << "encrypt: " << e.what() << "\n"; return 1;
@@ -1149,16 +1154,26 @@ int cmd_inspect_envelope(int argc, char** argv) {
     const size_t ct_total = env.ciphertext.size();
     const size_t ct_body  = ct_total - TAG_LEN;
     const bool   aad_present = !env.aad.empty();
+    const bool   is_argon = (env.kdf == envelope::Kdf::ARGON2ID);
+    const char*  fmt_name = is_argon ? "DWE2" : "DWE1";
+    const int    fmt_ver  = is_argon ? 2 : 1;
+    const char*  kdf_name = is_argon ? "argon2id" : "pbkdf2-hmac-sha256";
 
     if (json_output) {
         // Hand-built JSON: deliberately minimal — no nested objects, no
         // arrays of bytes. Keep the schema flat so monitoring scripts can
         // parse with jq/Python json with zero ambiguity. Hex strings are
-        // lowercase to match envelope::serialize convention.
+        // lowercase to match envelope::serialize convention. Both KDF
+        // param sets are always present (the inactive one reads 0), so a
+        // consumer keyed on pbkdf2_iters keeps working across the migration.
         std::cout << "{"
-                  << "\"format\":\"DWE1\","
-                  << "\"version\":1,"
-                  << "\"pbkdf2_iters\":" << env.pbkdf2_iters << ","
+                  << "\"format\":\"" << fmt_name << "\","
+                  << "\"version\":"  << fmt_ver  << ","
+                  << "\"kdf\":\""    << kdf_name << "\","
+                  << "\"pbkdf2_iters\":"     << env.pbkdf2_iters << ","
+                  << "\"argon2_t_cost\":"    << env.argon2_t     << ","
+                  << "\"argon2_m_cost_kib\":"<< env.argon2_m_kib << ","
+                  << "\"argon2_lanes\":"     << env.argon2_p     << ","
                   << "\"salt_len\":"     << env.salt.size()  << ","
                   << "\"salt_hex\":\""   << to_hex(env.salt) << "\","
                   << "\"nonce_len\":"    << env.nonce.size() << ","
@@ -1172,8 +1187,15 @@ int cmd_inspect_envelope(int argc, char** argv) {
                   << "}\n";
     } else {
         std::cout << "envelope file:   " << in_path           << "\n";
-        std::cout << "format:          DWE1 (version 1)\n";
-        std::cout << "pbkdf2_iters:    " << env.pbkdf2_iters  << "\n";
+        std::cout << "format:          " << fmt_name << " (version " << fmt_ver << ")\n";
+        std::cout << "kdf:             " << kdf_name          << "\n";
+        if (is_argon) {
+            std::cout << "argon2_t_cost:   " << env.argon2_t     << " passes\n";
+            std::cout << "argon2_m_cost:   " << env.argon2_m_kib << " KiB\n";
+            std::cout << "argon2_lanes:    " << env.argon2_p     << "\n";
+        } else {
+            std::cout << "pbkdf2_iters:    " << env.pbkdf2_iters << "\n";
+        }
         std::cout << "salt_len:        " << env.salt.size()   << " bytes\n";
         std::cout << "salt_hex:        " << to_hex(env.salt)  << "\n";
         std::cout << "nonce_len:       " << env.nonce.size()  << " bytes\n";
@@ -2863,11 +2885,16 @@ int cmd_backup_verify(int argc, char** argv) {
         const auto& env = *env_opt;
         // Per-envelope structural sanity checks. envelope::deserialize
         // already enforces salt >= 8B, nonce == 12B, ciphertext >= 16B,
-        // but recheck here so the JSON output reports the actual values
-        // and a future deserialize-relaxation doesn't silently bypass.
-        if (env.pbkdf2_iters == 0) {
+        // and a non-zero KDF cost, but recheck here so the JSON output
+        // reports the actual values and a future deserialize-relaxation
+        // doesn't silently bypass. KDF-aware: DWE1 keys on pbkdf2_iters,
+        // DWE2 (Argon2id) on the t_cost pass count.
+        const bool kdf_cost_ok = (env.kdf == envelope::Kdf::ARGON2ID)
+                                     ? (env.argon2_t != 0)
+                                     : (env.pbkdf2_iters != 0);
+        if (!kdf_cost_ok) {
             report_fail("envelopes file: entry share_index="
-                        + std::to_string(idx) + ": pbkdf2_iters is zero");
+                        + std::to_string(idx) + ": KDF cost parameter is zero");
             return 2;
         }
         if (env.salt.empty()) {
@@ -6003,7 +6030,12 @@ int cmd_keyfile_info(int argc, char** argv) {
                   << "\"pubkey_hex\":\""   << pubkey_hex   << "\","
                   << "\"anon_address\":\"" << anon_address << "\","
                   << "\"envelope\":{"
-                  << "\"pbkdf2_iters\":"   << env.pbkdf2_iters << ","
+                  << "\"format\":\"" << (env.kdf == envelope::Kdf::ARGON2ID ? "DWE2" : "DWE1") << "\","
+                  << "\"kdf\":\"" << (env.kdf == envelope::Kdf::ARGON2ID ? "argon2id" : "pbkdf2-hmac-sha256") << "\","
+                  << "\"pbkdf2_iters\":"     << env.pbkdf2_iters << ","
+                  << "\"argon2_t_cost\":"    << env.argon2_t     << ","
+                  << "\"argon2_m_cost_kib\":"<< env.argon2_m_kib << ","
+                  << "\"argon2_lanes\":"     << env.argon2_p     << ","
                   << "\"salt_len\":"       << env.salt.size()  << ","
                   << "\"nonce_len\":"      << env.nonce.size() << ","
                   << "\"ct_len\":"         << env.ciphertext.size() << ","
@@ -6011,13 +6043,21 @@ int cmd_keyfile_info(int argc, char** argv) {
                   << "}"
                   << "}\n";
     } else {
+        const bool nk_argon = (env.kdf == envelope::Kdf::ARGON2ID);
         std::cout << "keyfile:           " << in_path           << "\n";
         std::cout << "header_version:    DETERM-NODE-V1\n";
         std::cout << "pubkey_hex:        " << pubkey_hex        << "\n";
         std::cout << "anon_address:      " << anon_address      << "\n";
         std::cout << "envelope:\n";
-        std::cout << "  format:          DWE1 (version 1)\n";
-        std::cout << "  pbkdf2_iters:    " << env.pbkdf2_iters  << "\n";
+        std::cout << "  format:          " << (nk_argon ? "DWE2 (version 2)" : "DWE1 (version 1)") << "\n";
+        std::cout << "  kdf:             " << (nk_argon ? "argon2id" : "pbkdf2-hmac-sha256") << "\n";
+        if (nk_argon) {
+            std::cout << "  argon2_t_cost:   " << env.argon2_t     << " passes\n";
+            std::cout << "  argon2_m_cost:   " << env.argon2_m_kib << " KiB\n";
+            std::cout << "  argon2_lanes:    " << env.argon2_p     << "\n";
+        } else {
+            std::cout << "  pbkdf2_iters:    " << env.pbkdf2_iters << "\n";
+        }
         std::cout << "  salt_len:        " << env.salt.size()   << " bytes\n";
         std::cout << "  nonce_len:       " << env.nonce.size()  << " bytes\n";
         std::cout << "  ciphertext_len:  " << env.ciphertext.size() << " bytes\n";

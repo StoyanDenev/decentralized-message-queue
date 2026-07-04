@@ -2,9 +2,11 @@
 # determ-wallet keyfile-info passive diagnostic CLI test.
 #
 # `keyfile-info` is the S-004 passive complement to `inspect-envelope`:
-# it parses a 2-line encrypted node keyfile (DETERM-NODE-V1 header + DWE1
-# envelope blob) and dumps the metadata WITHOUT decrypting (no passphrase,
-# no plaintext recovery).
+# it parses a 2-line encrypted node keyfile (DETERM-NODE-V1 header + a
+# DWE1/DWE2 envelope blob) and dumps the metadata WITHOUT decrypting (no
+# passphrase, no plaintext recovery). R58: fresh keyfiles are Argon2id
+# (DWE2); the DWE1 (PBKDF2) read path stays covered by the envelope
+# format-freeze guard's pinned blobs.
 #
 # Coverage:
 #   - Build a fresh encrypted keyfile via the existing `keyfile-create` CLI.
@@ -117,11 +119,13 @@ assert_eq "$RC" "0" "keyfile-info exit 0"
 assert_contains "$OUT" "header_version:    DETERM-NODE-V1" "reports header_version"
 assert_contains "$OUT" "pubkey_hex:        $EXPECTED_PUB" "reports correct pubkey hex"
 assert_contains "$OUT" "anon_address:      0x$EXPECTED_PUB" "anon-address = 0x + pubkey"
-assert_contains "$OUT" "DWE1 (version 1)" "reports envelope format"
+# R58: keyfile-create now defaults to the memory-hard Argon2id KDF (DWE2).
+assert_contains "$OUT" "DWE2 (version 2)" "reports envelope format (Argon2id default)"
+assert_contains "$OUT" "kdf:             argon2id" "reports argon2id kdf"
 assert_contains "$OUT" "salt_len:        16 bytes" "reports 16-byte salt"
 assert_contains "$OUT" "nonce_len:       12 bytes" "reports 12-byte nonce"
 assert_contains "$OUT" "aad_present:     true" "reports aad_present=true (header pubkey AAD)"
-assert_contains "$OUT" "pbkdf2_iters:" "reports pbkdf2_iters"
+assert_contains "$OUT" "argon2_t_cost:" "reports argon2_t_cost"
 
 # ── 4. --json output is well-formed and carries the expected schema ──────────
 echo
@@ -146,12 +150,19 @@ assert d["header_version"] == "DETERM-NODE-V1"
 assert d["pubkey_hex"] == "$EXPECTED_PUB"
 assert d["anon_address"] == "0x$EXPECTED_PUB"
 env = d["envelope"]
-required = {"pbkdf2_iters","salt_len","nonce_len","ct_len","aad_present"}
+# R58: keyfiles now use Argon2id (DWE2). The envelope carries the format +
+# kdf tag and both KDF param sets (the inactive one reads 0).
+required = {"format","kdf","argon2_t_cost","argon2_m_cost_kib","argon2_lanes",
+            "pbkdf2_iters","salt_len","nonce_len","ct_len","aad_present"}
 missing = required - set(env.keys())
 assert not missing, f"missing envelope fields: {missing}"
+assert env["format"] == "DWE2"
+assert env["kdf"] == "argon2id"
 assert env["nonce_len"] == 12
 assert env["salt_len"] == 16
-assert env["pbkdf2_iters"] > 0
+assert env["argon2_t_cost"] > 0
+assert env["argon2_m_cost_kib"] > 0
+assert env["argon2_lanes"] > 0
 assert env["ct_len"] > 0
 assert env["aad_present"] is True
 PY_EOF
