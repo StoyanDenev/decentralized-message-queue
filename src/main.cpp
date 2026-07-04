@@ -23,6 +23,9 @@
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
 #include <determ/crypto/sha3/sha3.h>           // PQ prereq: C99-native SHA-3/SHAKE (FIPS 202)
+#include <determ/crypto/mldsa/params.h>        // §3.18: ML-DSA (Dilithium, FIPS 204) ring params
+#include <determ/crypto/mldsa/reduce.h>        // §3.18: ML-DSA modular reduction
+#include <determ/crypto/mldsa/ntt.h>           // §3.18: ML-DSA negacyclic NTT (increment 1)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -467,6 +470,10 @@ In-process tests (deterministic, no network):
                                               SHA-3/SHAKE (FIPS 202, Keccak-
                                               f[1600]) byte-equal vs OpenSSL
                                               EVP_sha3/shake + KATs (ML-DSA XOF)
+)" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
+                                              increment 1: Z_q reduction + the
+                                              negacyclic NTT — round-trip +
+                                              schoolbook-convolution + KAT gates
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -13491,7 +13498,8 @@ int main(int argc, char** argv) {
                                 "xchacha20_poly1305_decrypt.json",
                                 "ed25519_verify_strict.json",
                                 "base64_strict.json",
-                                "sha3_shake.json" };
+                                "sha3_shake.json",
+                                "mldsa_ntt.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13934,6 +13942,35 @@ int main(int argc, char** argv) {
                         determ_shake256(out.empty()?nullptr:out.data(), outlen, dptr(msg), msg.size());
                         if (hx(out.data(), outlen) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name + " (unknown sha3 alg '" + alg + "')"; break; }
+                } else if (prim == "mldsa_ntt") {
+                    // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
+                    // reference oracle (tools/verify_mldsa_vectors.py). "ntt"
+                    // vectors pin the exact int32 forward-NTT output (byte-exact
+                    // interop); "product" vectors pin the standard-domain
+                    // negacyclic ring product (schoolbook-cross-checked file-side).
+                    std::string ty = v.value("type", "");
+                    auto rd = [&](const json& arr, int32_t out[256])->bool {
+                        if (!arr.is_array() || arr.size()!=256) return false;
+                        for (int i=0;i<256;i++) out[i]=arr[i].get<int32_t>();
+                        return true;
+                    };
+                    if (ty == "ntt") {
+                        int32_t in[256], exp[256];
+                        if (!rd(v["in"], in) || !rd(v["ntt_out"], exp)) { ok=false; bad=name+" (bad array len)"; break; }
+                        determ_mldsa_ntt(in);
+                        bool mm=false; for (int i=0;i<256;i++) if (in[i]!=exp[i]) mm=true;
+                        if (mm) { ok=false; bad=name+" (ntt int32 output mismatch)"; break; }
+                    } else if (ty == "product") {
+                        int32_t a[256], b[256], exp[256];
+                        if (!rd(v["a"],a)||!rd(v["b"],b)||!rd(v["prod"],exp)) { ok=false; bad=name+" (bad array len)"; break; }
+                        int32_t na[256], nb[256], pr[256];
+                        for (int i=0;i<256;i++){ na[i]=a[i]; nb[i]=b[i]; }
+                        determ_mldsa_ntt(na); determ_mldsa_ntt(nb);
+                        for (int i=0;i<256;i++) pr[i]=determ_mldsa_montgomery_reduce((int64_t)na[i]*nb[i]);
+                        determ_mldsa_invntt_tomont(pr);
+                        bool mm=false; for (int i=0;i<256;i++) if (((long long)pr[i]-exp[i]) % DETERM_MLDSA_Q) mm=true;
+                        if (mm) { ok=false; bad=name+" (ring product mismatch mod q)"; break; }
+                    } else { ok=false; bad=name+" (unknown mldsa_ntt type '"+ty+"')"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -14194,6 +14231,117 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail? "  FAIL: sha3-c99 unit test\n" : "  PASS: sha3-c99 unit test\n");
+        return fail?1:0;
+    }
+
+    if (cmd == "test-mldsa-c99") {
+        // §3.18: validate the C99 ML-DSA (Dilithium, FIPS 204) arithmetic core —
+        // increment 1 of the PQ signature track: modular reduction over
+        // Z_q (q=8380417) + the negacyclic NTT of Z_q[X]/(X^256+1). No external
+        // oracle is needed: the transform is pinned by two self-consistent
+        // properties plus a fixed reference KAT.
+        //   (1) reduce contract: montgomery_reduce/reduce32/caddq stay in range
+        //       and compute the right residue over a swept input grid;
+        //   (2) NTT round-trip: invntt_tomont(ntt(a)) == a * 2^32 (mod q);
+        //   (3) NTT convolution == O(n^2) schoolbook negacyclic product (the
+        //       decisive correctness gate — a wrong twiddle factor breaks it);
+        //   (4) a fixed KAT: ntt() of a pinned input matches the reference
+        //       int32 output (byte-exact interop, also gated file-side via §3.13
+        //       tools/vectors/mldsa_ntt.json).
+        const int32_t Q = DETERM_MLDSA_Q;
+        int fail = 0;
+        auto check = [&](bool ok, const char* msg){
+            std::cout << (ok ? "  PASS: " : "  FAIL: ") << msg << "\n";
+            if (!ok) fail = 1;
+        };
+        auto canon = [&](long long x)->long long { x %= Q; if (x < 0) x += Q; return x; };
+        // Deterministic splitmix64 PRNG (no rand(); reproducible across toolchains).
+        uint64_t st = 0x9e3779b97f4a7c15ULL;
+        auto next = [&]()->uint64_t {
+            st += 0x9e3779b97f4a7c15ULL; uint64_t z = st;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+            return z ^ (z >> 31);
+        };
+        auto randpoly = [&](int32_t p[256]){ for (int i=0;i<256;i++) p[i]=(int32_t)(next()%(uint64_t)Q); };
+
+        // (1) reduction contract over a swept grid.
+        {
+            bool ok = true;
+            for (long long a = -(long long)Q*4; a <= (long long)Q*4 && ok; a += 100003) {
+                int32_t r = determ_mldsa_reduce32((int32_t)a);
+                if (canon(r) != canon(a)) ok = false;         // right residue
+                if (!(r > -6283009 && r < 6283009)) ok = false; // Barrett bound
+            }
+            check(ok, "reduce32: residue correct + centered bound (|t| < 6283009)");
+            ok = true;
+            for (int32_t a = -Q+1; a < Q && ok; a += 65537) {
+                int32_t c = determ_mldsa_caddq(a);
+                if (c < 0 || c >= Q || canon(c) != canon(a)) ok = false;
+            }
+            check(ok, "caddq: maps (-q,q) into [0,q) preserving residue");
+            ok = true;
+            // montgomery_reduce(a) == a * 2^{-32} (mod q): check a*R then reduce -> a.
+            for (int i = 0; i < 4000 && ok; i++) {
+                long long v = (long long)(next() % (uint64_t)Q);
+                long long aR = v * ((long long)1 << 32);       // v in Montgomery domain
+                int32_t got = determ_mldsa_montgomery_reduce(aR);
+                if (canon(got) != canon(v)) ok = false;
+                if (!(got > -Q && got < Q)) ok = false;
+            }
+            check(ok, "montgomery_reduce: t == a*2^-32 (mod q), |t| < q");
+        }
+
+        // (2) round-trip invntt_tomont(ntt(a)) == a * MONT (mod q).
+        {
+            bool ok = true;
+            for (int t = 0; t < 32 && ok; t++) {
+                int32_t a[256], b[256];
+                randpoly(a);
+                for (int i=0;i<256;i++) b[i]=a[i];
+                determ_mldsa_ntt(b);
+                determ_mldsa_invntt_tomont(b);
+                for (int i=0;i<256 && ok;i++)
+                    if (canon(b[i]) != canon((long long)a[i] * DETERM_MLDSA_MONT)) ok = false;
+            }
+            check(ok, "NTT round-trip: invntt_tomont(ntt(a)) == a * 2^32 (mod q)");
+        }
+
+        // (3) NTT-domain product == schoolbook negacyclic convolution.
+        {
+            bool ok = true;
+            for (int t = 0; t < 24 && ok; t++) {
+                int32_t a[256], b[256], na[256], nb[256], prod[256];
+                randpoly(a); randpoly(b);
+                for (int i=0;i<256;i++){ na[i]=a[i]; nb[i]=b[i]; }
+                determ_mldsa_ntt(na); determ_mldsa_ntt(nb);
+                for (int i=0;i<256;i++)
+                    prod[i] = determ_mldsa_montgomery_reduce((int64_t)na[i]*nb[i]);
+                determ_mldsa_invntt_tomont(prod);
+                // schoolbook: (X^256 + 1) negacyclic, mod q.
+                for (int i=0;i<256 && ok;i++) {
+                    // coefficient i of a*b in the ring
+                    long long acc = 0;
+                    for (int j=0;j<=i;j++) acc += (long long)a[j]*b[i-j] % Q;
+                    for (int j=i+1;j<256;j++) acc -= (long long)a[j]*b[256+i-j] % Q;
+                    if (canon(prod[i]) != canon(acc)) ok = false;
+                }
+            }
+            check(ok, "NTT product == O(n^2) schoolbook negacyclic (twiddle-exact)");
+        }
+
+        // (4) fixed KAT: ntt(delta = X^0) has every output coefficient == 1 in the
+        //     standard domain (NTT of the constant polynomial 1). Sharp on a
+        //     mis-ordered/mis-signed zeta or a montgomery_reduce error.
+        {
+            int32_t a[256]; for (int i=0;i<256;i++) a[i]=0; a[0]=1;
+            determ_mldsa_ntt(a);
+            bool ok = true;
+            for (int i=0;i<256 && ok;i++) if (canon(a[i]) != 1) ok = false;
+            check(ok, "KAT: ntt(1) == all-ones (evaluation of the constant poly)");
+        }
+
+        std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");
         return fail?1:0;
     }
 

@@ -119,6 +119,11 @@ add_library(determ-crypto-c99 STATIC
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"
+  # §3.18 ML-DSA (Dilithium, FIPS 204) PQ signature track, increment 1: the
+  # Z_q arithmetic core (modular reduction + negacyclic NTT) — `determ
+  # test-mldsa-c99`. Built on the SHAKE XOF above; additive (no signer yet).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/reduce.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/ntt.c"
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"

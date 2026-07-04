@@ -59,7 +59,7 @@ EXPECTED = {
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
-    "base64_strict.json", "sha3_shake.json",
+    "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json",
 }
 
 try:
@@ -767,6 +767,83 @@ def chk_p256_oprf(vec, label):
         if oprf_challenge(pks_pt, Mv, Zv, t2, t3, ctx, n) != vc:
             return "VerifyProof(proof_hex) failed — challenge mismatch"
 
+_MLDSA = {}
+def _mldsa_ctx():
+    # From-scratch FIPS 204 / Dilithium NTT reference, distinct from the C99
+    # under test: zetas DERIVED here from zeta=1753 (never read from the C), plus
+    # a schoolbook negacyclic-convolution second oracle for the product vectors.
+    if _MLDSA: return _MLDSA
+    Q=8380417; N=256; MONT=(1<<32)%Q; QINV=pow(Q,-1,1<<32); ROOT=1753
+    F=(MONT*MONT%Q)*pow(N,-1,Q)%Q
+    def brv8(i): return int('{:08b}'.format(i)[::-1],2)
+    def smod(x):
+        x%=Q; return x-Q if x>Q//2 else x
+    Z=[smod(MONT*pow(ROOT,brv8(i),Q)%Q) for i in range(N)]
+    def mr(a):
+        t=((a&0xFFFFFFFF)*QINV)&0xFFFFFFFF
+        if t>=(1<<31): t-=(1<<32)
+        return (a-t*Q)>>32
+    def ntt(p):
+        p=p[:]; k=0; L=128
+        while L>=1:
+            s=0
+            while s<N:
+                k+=1; z=Z[k]
+                for j in range(s,s+L):
+                    t=mr(z*p[j+L]); p[j+L]=p[j]-t; p[j]=p[j]+t
+                s+=2*L
+            L>>=1
+        return p
+    def inv(p):
+        p=p[:]; k=256; L=1
+        while L<N:
+            s=0
+            while s<N:
+                k-=1; z=-Z[k]
+                for j in range(s,s+L):
+                    t=p[j]; p[j]=t+p[j+L]; p[j+L]=mr(z*(t-p[j+L]))
+                s+=2*L
+            L<<=1
+        return [mr(F*x) for x in p]
+    def sb(a,b):
+        r=[0]*N
+        for i in range(N):
+            for j in range(N):
+                k=i+j; v=a[i]*b[j]%Q
+                if k>=N: r[k-N]=(r[k-N]-v)%Q
+                else: r[k]=(r[k]+v)%Q
+        return [smod(x) for x in r]
+    def prod(a,b):
+        na,nb=ntt(a[:]),ntt(b[:]); pw=[mr(na[i]*nb[i]) for i in range(N)]
+        return [smod(x) for x in inv(pw[:])]
+    _MLDSA.update(dict(Q=Q,N=N,smod=smod,ntt=ntt,sb=sb,prod=prod,
+                       ok=(QINV==58728449 and Z[1]==25847 and F==41978)))
+    return _MLDSA
+
+def chk_mldsa_ntt(vec, label):
+    m=_mldsa_ctx()
+    if not m["ok"]: return "internal NTT reference constants drifted (runner bug)"
+    N=m["N"]
+    def ints(a, fld):
+        if not isinstance(a, list) or len(a)!=N: return None
+        return [int(x) for x in a]
+    t=vec.get("type")
+    if t=="ntt":
+        need(vec, ["in","ntt_out"], label)
+        pin=ints(vec["in"],"in"); want=ints(vec["ntt_out"],"ntt_out")
+        if pin is None or want is None: return "in/ntt_out is not a 256-int array"
+        got=m["ntt"](pin[:])
+        if got!=want: return "recomputed ntt != ntt_out"
+    elif t=="product":
+        need(vec, ["a","b","prod"], label)
+        a=ints(vec["a"],"a"); b=ints(vec["b"],"b"); want=ints(vec["prod"],"prod")
+        if a is None or b is None or want is None: return "a/b/prod is not a 256-int array"
+        fast=m["prod"](a,b); slow=m["sb"](a,b)
+        if fast!=slow: return "fast ring-product != schoolbook oracle (runner bug)"
+        if [m["smod"](x) for x in want]!=slow: return "stored prod != schoolbook oracle"
+    else:
+        return "unknown mldsa_ntt vector type %r" % t
+
 def chk_sha3_shake(vec, label):
     # FIPS 202 SHA-3 / SHAKE, recomputed with python hashlib (sha3_256,
     # sha3_512, shake_128, shake_256) — an independent Keccak, distinct from
@@ -867,6 +944,7 @@ CHECKERS = {
     "ed25519_verify_strict": chk_ed25519_verify_strict,
     "base64_strict": chk_base64_strict,
     "sha3_shake": chk_sha3_shake,
+    "mldsa_ntt": chk_mldsa_ntt,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
