@@ -41,7 +41,11 @@ jobs:
   # Separate job: Linux/GCC-only.
   ubsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The UBSan pass compiles the ~14k-line main.cpp at RelWithDebInfo with
+    # -fsanitize=undefined AND builds the vendored OpenSSL from source on a clean
+    # runner; the first Actions run hit the 90-min wall (SIGTERM/143) before the
+    # build finished. Give it headroom (the dev-box WSL2 run is the fast gate).
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Install python cryptography (vector-gate oracle)

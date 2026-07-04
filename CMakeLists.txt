@@ -15,6 +15,14 @@ option(DETERM_UBSAN "Instrument Determ's own targets with UBSan (GCC/Clang)" OFF
 
 include(FetchContent)
 
+# The vendored OpenSSL fork (janbar/openssl-cmake) declares a pre-3.5
+# cmake_minimum_required; CMake 4.0 removed compatibility with < 3.5 and refuses
+# to configure it (surfaced on the windows-latest CI runner, which upgraded to
+# CMake 4.x). Allow the old minimum for the FetchContent subprojects — set BEFORE
+# the FetchContent_MakeAvailable calls so it is in scope for their add_subdirectory.
+# Harmless on the dev box's CMake 3.x (an unused cache/normal variable there).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 # ── OpenSSL (no Perl required) ──────────────────────────────────────────────
 set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
 set(WITH_APPS             OFF CACHE BOOL "" FORCE)
