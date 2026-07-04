@@ -30,6 +30,7 @@
 #include <determ/crypto/mldsa/sample.h>        // §3.18: ML-DSA SHAKE rejection samplers (increment 3)
 #include <determ/crypto/mldsa/pack.h>          // §3.18: ML-DSA coefficient bit-packing (increment 4)
 #include <determ/crypto/mldsa/poly.h>          // §3.18: ML-DSA per-poly ring arithmetic (increment 5)
+#include <determ/crypto/mldsa/polyvec.h>       // §3.18: ML-DSA matrix/vector layer (increment 6)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -477,9 +478,10 @@ In-process tests (deterministic, no network):
 )" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
                                               inc.1 Z_q reduction + NTT (+direct-
                                               DFT oracle); inc.2 rounding/hint;
-                                              in-ball); inc.4 coeff bit-packing
-                                              (t1/t0/eta/w1/z + bit-slice oracle);
-                                              inc.5 poly ring ops + gamma1 mask
+                                              inc.3 SHAKE samplers; inc.4 coeff
+                                              bit-packing (+bit-slice oracle);
+                                              inc.5 poly ops + gamma1 mask; inc.6
+                                              matrix/vector (ExpandA/S/Mask)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -14621,16 +14623,34 @@ int main(int argc, char** argv) {
         //      deterministic, both gamma1. Byte-exact interop KAT vs the independent
         //      hashlib-SHAKE reference is gated file-side in mldsa_sample.json.
         {
+            // Structural (range + determinism + fail-safe) AND — an R67-audit
+            // hardening — an INDEPENDENT value-mapping check: re-squeeze the same
+            // SHAKE256 stream and read each gamma1-bit field by absolute bit offset
+            // (a bit-slice, distinct from sample_gamma1's word-at-a-time unpack),
+            // then coeff == gamma1 - field. Catches a bit-reversed/mis-shifted field
+            // read that the bounds check alone would pass (the file-side KAT also
+            // pins this, but the binary test now carries its own independent oracle).
             const uint8_t sg[66] = {0}; int32_t a[256], b[256]; bool ok = true;
             for (int32_t g1 : {DETERM_MLDSA_GAMMA1_17, DETERM_MLDSA_GAMMA1_19}) {
+                int bits = (g1 == DETERM_MLDSA_GAMMA1_17) ? 18 : 20;
                 determ_mldsa_sample_gamma1(a, sg, 66, g1);
                 determ_mldsa_sample_gamma1(b, sg, 66, g1);
-                for (int i=0;i<256;i++) { if (!(a[i] > -g1 && a[i] <= g1)) ok=false; if (a[i]!=b[i]) ok=false; }
+                uint8_t buf[640];
+                { determ_keccak_ctx ctx; determ_shake256_init(&ctx);
+                  determ_keccak_absorb(&ctx, sg, 66); determ_keccak_finalize(&ctx);
+                  determ_keccak_squeeze(&ctx, buf, (size_t)(256*bits/8)); }
+                for (int i=0;i<256;i++) {
+                    if (!(a[i] > -g1 && a[i] <= g1)) ok=false;      // range
+                    if (a[i]!=b[i]) ok=false;                       // deterministic
+                    uint32_t f = 0;                                 // independent bit-slice
+                    for (int bit=0; bit<bits; bit++) { int kk=i*bits+bit; f |= (uint32_t)((buf[kk>>3]>>(kk&7))&1u)<<bit; }
+                    if (a[i] != g1 - (int32_t)f) ok=false;          // coeff == gamma1 - field
+                }
             }
             // fail-safe: an unsupported gamma1 must zero the output (no silent wrong).
             determ_mldsa_sample_gamma1(a, sg, 66, 12345);
             for (int i=0;i<256;i++) if (a[i]!=0) ok=false;
-            check(ok, "sample_gamma1: 256 coeffs in (-gamma1,gamma1] + deterministic + fail-safe zero");
+            check(ok, "sample_gamma1: (-gamma1,gamma1] + deterministic + independent bit-slice map + fail-safe");
         }
         // (11) poly_add / poly_sub are exact element-wise; poly_reduce / poly_caddq
         //      preserve residue within their bounds (delegating to the reduce layer).
@@ -14681,6 +14701,102 @@ int main(int argc, char** argv) {
                 }
             }
             check(ok, "poly_pointwise_montgomery: invntt(pw(ntt a, ntt b)) == schoolbook negacyclic");
+        }
+
+        // ---- §3.18 increment 6: the matrix / vector layer ----
+        // ExpandA/ExpandS/ExpandMask + polyvec arithmetic + the NTT-domain
+        // matrix·vector product. There is no external ACVP oracle pre-signer, so the
+        // seed-expansion byte layouts are pinned by re-deriving each seed a SECOND
+        // way in the test (independent of the loop that produced it) and matching
+        // the already-gated sampler output; the matrix·vector product is pinned by
+        // the SAME independent O(n^2) schoolbook-negacyclic oracle as the core.
+        {
+            // (13) ExpandA: k×l matrix, each entry in [0,q), deterministic, and
+            //      entry (i,j) == sample_uniform(rho || col=j || row=i) — an
+            //      independent seed re-derivation that catches a transposed i/j or a
+            //      swapped nonce byte order (which structural checks are blind to).
+            bool ok = true;
+            const int k = 6, l = 5;
+            static int32_t mat[6*5][256], mat2[6*5][256], ref[256];
+            uint8_t rho[32]; for (int i=0;i<32;i++) rho[i]=(uint8_t)(i*3+1);
+            determ_mldsa_expand_a(mat, rho, k, l);
+            determ_mldsa_expand_a(mat2, rho, k, l);
+            for (int i=0;i<k && ok;i++) for (int j=0;j<l && ok;j++) {
+                int32_t* e = mat[i*l+j];
+                for (int c=0;c<256;c++) { if (!(e[c]>=0 && e[c]<Q)) ok=false; if (e[c]!=mat2[i*l+j][c]) ok=false; }
+                uint8_t seed[34]; for (int c=0;c<32;c++) seed[c]=rho[c];
+                seed[32]=(uint8_t)j; seed[33]=(uint8_t)i;            // col then row
+                determ_mldsa_sample_uniform(ref, seed, 34);
+                for (int c=0;c<256 && ok;c++) if (e[c]!=ref[c]) ok=false;
+            }
+            check(ok, "ExpandA: k×l in [0,q) + deterministic + entry(i,j)==sample_uniform(rho||j||i)");
+        }
+        {
+            // (14) ExpandS + ExpandMask: correct dims/ranges/determinism and the
+            //      nonce SEQUENCE (s1 uses 0..l-1, s2 uses l..l+k-1; y uses l*kappa+i)
+            //      re-derived independently against the gated samplers.
+            bool ok = true;
+            const int k = 4, l = 4, eta = 2;
+            static int32_t s1[4][256], s2[4][256], yv[4][256], rp[256];
+            uint8_t rhoprime[64]; for (int i=0;i<64;i++) rhoprime[i]=(uint8_t)(i*5+2);
+            determ_mldsa_expand_s(s1, s2, rhoprime, k, l, eta);
+            for (int i=0;i<l && ok;i++) {
+                uint8_t seed[66]; for (int c=0;c<64;c++) seed[c]=rhoprime[c];
+                seed[64]=(uint8_t)((i)&0xff); seed[65]=(uint8_t)(((i)>>8)&0xff);
+                determ_mldsa_sample_eta(rp, seed, 66, eta);
+                for (int c=0;c<256 && ok;c++) { if (!(s1[i][c]>=-eta && s1[i][c]<=eta)) ok=false; if (s1[i][c]!=rp[c]) ok=false; }
+            }
+            for (int i=0;i<k && ok;i++) {
+                uint8_t seed[66]; for (int c=0;c<64;c++) seed[c]=rhoprime[c];
+                seed[64]=(uint8_t)((l+i)&0xff); seed[65]=(uint8_t)(((l+i)>>8)&0xff);   // nonce l+i
+                determ_mldsa_sample_eta(rp, seed, 66, eta);
+                for (int c=0;c<256 && ok;c++) if (s2[i][c]!=rp[c]) ok=false;
+            }
+            const int32_t g1 = DETERM_MLDSA_GAMMA1_17; const int kappa = 7;
+            determ_mldsa_expand_mask(yv, rhoprime, kappa, l, g1);
+            for (int i=0;i<l && ok;i++) {
+                int nonce = l*kappa + i;
+                uint8_t seed[66]; for (int c=0;c<64;c++) seed[c]=rhoprime[c];
+                seed[64]=(uint8_t)(nonce&0xff); seed[65]=(uint8_t)((nonce>>8)&0xff);
+                determ_mldsa_sample_gamma1(rp, seed, 66, g1);
+                for (int c=0;c<256 && ok;c++) { if (!(yv[i][c] > -g1 && yv[i][c] <= g1)) ok=false; if (yv[i][c]!=rp[c]) ok=false; }
+            }
+            check(ok, "ExpandS/ExpandMask: ranges + nonce sequence (s1:0.., s2:l.., y:l*kappa+i)");
+        }
+        {
+            // (15) the DECISIVE gate — t = A·s via the NTT-domain module path
+            //      (ntt → matrix_pointwise → invntt_tomont) == the from-scratch O(n^2)
+            //      schoolbook negacyclic matrix·vector. Independent representation of
+            //      the product, so a wrong pointwise-accumulate, a transposed matrix,
+            //      or a bad invntt cannot pass. Run on a non-square set (k≠l).
+            auto ringmul = [&](int32_t out[256], const int32_t a[256], const int32_t b[256]){
+                for (int i=0;i<256;i++) {
+                    long long acc=0;
+                    for (int j=0;j<=i;j++) acc += (long long)a[j]*b[i-j] % Q;
+                    for (int j=i+1;j<256;j++) acc -= (long long)a[j]*b[256+i-j] % Q;
+                    long long v = acc % Q; if (v<0) v+=Q; out[i]=(int32_t)v;
+                }
+            };
+            bool ok = true;
+            const int k = 6, l = 5;
+            static int32_t A[6*5][256], An[6*5][256], s[5][256], sn[5][256];
+            static int32_t tn[6][256], ts[6][256], term[256];
+            for (int e=0;e<k*l;e++) for (int c=0;c<256;c++) A[e][c]=(int32_t)(next()%(uint64_t)Q);
+            for (int e=0;e<l;e++)   for (int c=0;c<256;c++) s[e][c]=(int32_t)(next()%(uint64_t)Q);
+            for (int e=0;e<k*l;e++) for (int c=0;c<256;c++) An[e][c]=A[e][c];
+            for (int e=0;e<l;e++)   for (int c=0;c<256;c++) sn[e][c]=s[e][c];
+            determ_mldsa_polyvec_ntt(An, k*l);
+            determ_mldsa_polyvec_ntt(sn, l);
+            determ_mldsa_polyvec_matrix_pointwise(tn, An, sn, k, l);
+            determ_mldsa_polyvec_invntt_tomont(tn, k);
+            for (int i=0;i<k;i++) {                       // schoolbook reference
+                for (int c=0;c<256;c++) ts[i][c]=0;
+                for (int j=0;j<l;j++) { ringmul(term, A[i*l+j], s[j]);
+                    for (int c=0;c<256;c++) ts[i][c]=(int32_t)(((long long)ts[i][c]+term[c])%Q); }
+            }
+            for (int i=0;i<k && ok;i++) for (int c=0;c<256 && ok;c++)
+                if (canon(tn[i][c]) != canon(ts[i][c])) ok=false;
+            check(ok, "matrix·vector: invntt(A_hat . s_hat) == O(n^2) schoolbook A·s (k≠l)");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");

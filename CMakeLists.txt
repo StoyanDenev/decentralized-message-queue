@@ -131,6 +131,8 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/pack.c"
   # §3.18 increment 5: per-poly ring arithmetic (add/sub/reduce/caddq/pointwise).
   "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/poly.c"
+  # §3.18 increment 6: matrix/vector layer (ExpandA/ExpandS/ExpandMask + polyvec ops).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/polyvec.c"
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"
