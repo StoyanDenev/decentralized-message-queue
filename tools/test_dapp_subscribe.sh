@@ -300,6 +300,46 @@ print('ALL' if ok else 'FAILED: ' + repr([f.get('event') for f in frames]))" 2>/
   echo "$CHECK" | grep -q "^ALL$" \
     && assert true "topic filter: chat call invisible to --topic rpc" \
     || assert false "topic filter"
+
+  # SS-2 gap-freedom cross-check (FB72 companion): the streaming catch-up
+  # over [since, head] must deliver EXACTLY the event set the retrospective
+  # dapp-messages poll reports for the same range — same (block_height,
+  # tx_hash) identities, no gap, no extra. Independent-API cross-validation
+  # of the [since,N) ∪ [N,∞) partition on the catch-up side.
+  HEAD=$($DETERM status --rpc-port 8791 2>/dev/null \
+        | python -c "import sys,json
+try: print(json.load(sys.stdin).get('height',0))
+except: print(0)")
+  $DETERM dapp-messages --rpc-port 8791 --domain node1 --from 0 2>/dev/null > $T/poll.json
+  # Capture the full catch-up (subscribed + all dapp_call + live); a generous
+  # --max-frames bounds it (1 subscribed + events + 1 live).
+  $DETERM dapp-subscribe --rpc-port 8791 --domain node1 --since 0 \
+    --max-frames 64 > $T/catchup.frames 2>/dev/null &
+  CU_PID=$!
+  sleep 2; kill "$CU_PID" 2>/dev/null
+  CHECK=$(python -c "
+import json
+poll = json.loads(open('$T/poll.json').read())
+poll_ids = {(e['block_height'], e['tx_hash']) for e in poll.get('events', [])}
+frames = []
+for l in open('$T/catchup.frames'):
+    l=l.strip()
+    if not l: continue
+    try: frames.append(json.loads(l))
+    except: pass
+# catch-up dapp_call frames are those BEFORE the 'live' marker
+stream_ids=set()
+for f in frames:
+    if f.get('event')=='live': break
+    if f.get('event')=='dapp_call':
+        stream_ids.add((f['block_index'], f['tx_hash']))
+ok = (len(poll_ids) >= 1
+      and stream_ids == poll_ids)   # exact set equality: no gap, no extra
+print('ALL' if ok else 'FAILED poll=%r stream=%r' % (sorted(poll_ids), sorted(stream_ids)))" 2>/dev/null)
+  echo "    $CHECK"
+  echo "$CHECK" | grep -q "^ALL$" \
+    && assert true "SS-2 gap-freedom: streaming catch-up == dapp-messages poll (same event set)" \
+    || assert false "SS-2 gap-freedom cross-check"
 else
   echo "  SKIP: DAPP_CALL did not apply within window (known multi-node"
   echo "        timing flake, see test_dapp_e2e.sh §9) — replay + filter"
