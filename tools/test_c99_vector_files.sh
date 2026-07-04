@@ -816,7 +816,16 @@ def _mldsa_ctx():
     def prod(a,b):
         na,nb=ntt(a[:]),ntt(b[:]); pw=[mr(na[i]*nb[i]) for i in range(N)]
         return [smod(x) for x in inv(pw[:])]
-    _MLDSA.update(dict(Q=Q,N=N,smod=smod,ntt=ntt,sb=sb,prod=prod,
+    def dft(a):
+        # INDEPENDENT forward-NTT oracle (direct evaluation, no butterfly/zetas reuse):
+        # ntt(a)[j] == sum_i a[i]*root^(i*(2*brv8(j)+1)) mod q, standard domain.
+        out=[0]*N
+        for j in range(N):
+            e=(2*brv8(j)+1)%512; acc=0
+            for i in range(N): acc=(acc+a[i]*pow(ROOT,(i*e)%512,Q))%Q
+            out[j]=acc%Q
+        return out
+    _MLDSA.update(dict(Q=Q,N=N,smod=smod,ntt=ntt,sb=sb,prod=prod,dft=dft,
                        ok=(QINV==58728449 and Z[1]==25847 and F==41978)))
     return _MLDSA
 
@@ -834,6 +843,10 @@ def chk_mldsa_ntt(vec, label):
         if pin is None or want is None: return "in/ntt_out is not a 256-int array"
         got=m["ntt"](pin[:])
         if got!=want: return "recomputed ntt != ntt_out"
+        # independent direct-DFT oracle (no butterfly reuse) must agree mod q
+        dref=m["dft"](pin); Q=m["Q"]
+        if any((want[j]-dref[j])%Q for j in range(m["N"])):
+            return "ntt_out disagrees with the independent direct-DFT oracle"
     elif t=="product":
         need(vec, ["a","b","prod"], label)
         a=ints(vec["a"],"a"); b=ints(vec["b"],"b"); want=ints(vec["prod"],"prod")

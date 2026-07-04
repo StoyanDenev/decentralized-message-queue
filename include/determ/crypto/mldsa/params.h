@@ -30,8 +30,14 @@
  * Montgomery radix; a value x held as x*R mod q is "in the Montgomery domain". */
 #define DETERM_MLDSA_MONT (-4186625)
 
-/* Dropped low-order bits of the public key (FIPS 204). Not used by the NTT
- * layer; recorded here for the later packing/rounding increment. */
+/* Dropped low-order bits of the public key (FIPS 204): t = t1*2^D + t0. */
 #define DETERM_MLDSA_D 13
+
+/* Low-order rounding modulus GAMMA2 = (q-1)/(2*m), where m = #high-bit buckets.
+ * Parameter-set-specific: ML-DSA-44 uses (q-1)/88 (m=44); ML-DSA-65 and -87 use
+ * (q-1)/32 (m=16). decompose/use_hint take gamma2 as a runtime argument and
+ * select the matching reduction, so this one arithmetic core serves all sets. */
+#define DETERM_MLDSA_GAMMA2_88 ((DETERM_MLDSA_Q - 1) / 88)   /* 95232  — ML-DSA-44 */
+#define DETERM_MLDSA_GAMMA2_32 ((DETERM_MLDSA_Q - 1) / 32)   /* 261888 — ML-DSA-65/87 */
 
 #endif /* DETERM_CRYPTO_MLDSA_PARAMS_H */

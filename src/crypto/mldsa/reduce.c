@@ -20,10 +20,14 @@ int32_t determ_mldsa_montgomery_reduce(int64_t a) {
     return t;
 }
 
-/* Barrett: t = round(a / q) via the fixed-point (a + 2^22) >> 23, then a - t*q. */
+/* Barrett: t = round(a / q) via the fixed-point (a + 2^22) >> 23, then a - t*q.
+ * The bias add is done in int64 so the contract holds for ANY int32 a without
+ * signed-overflow UB (the canonical reference assumes a <= 2^31 - 2^22; widening
+ * removes that precondition at no cost — t and a - t*q both stay in int32 range
+ * because t = round(a/q) is bounded by |a|/q + 1). */
 int32_t determ_mldsa_reduce32(int32_t a) {
     int32_t t;
-    t = (a + (1 << 22)) >> 23;
+    t = (int32_t)(((int64_t)a + (1 << 22)) >> 23);
     t = a - t * Q;
     return t;
 }

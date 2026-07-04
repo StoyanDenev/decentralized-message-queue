@@ -92,6 +92,23 @@ def ring_product_standard(a, b):
     pw = [montgomery_reduce(na[i] * nb[i]) for i in range(N)]
     return [smod(x) for x in invntt_tomont(pw[:])]
 
+def dft_eval(a):
+    """INDEPENDENT forward-NTT oracle — direct evaluation, NO butterfly / zetas reuse.
+    The reference NTT output at position j is the polynomial a(X) evaluated at the
+    primitive 512-th root raised to (2*brv8(j)+1):  ntt(a)[j] = sum_i a[i]*root^(i*e_j),
+    e_j = 2*brv8(j)+1, in the standard domain. Recomputing ntt_out this way shares no
+    code path with ntt()/invntt_tomont(), so a symmetric zetas-ordering bug that the
+    round-trip and schoolbook-convolution checks are BLIND to (both invariant under a
+    consistent permutation of the NTT domain) cannot survive this comparison."""
+    out = [0] * N
+    for j in range(N):
+        e = (2 * brv8(j) + 1) % 512
+        acc = 0
+        for i in range(N):
+            acc = (acc + a[i] * pow(ROOT, (i * e) % 512, Q)) % Q
+        out[j] = acc % Q
+    return out
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(HERE, "tools", "vectors", "mldsa_ntt.json")
 
@@ -135,7 +152,12 @@ def verify():
             got = ntt(v["in"][:])
             if got != v["ntt_out"]:
                 print("  bad: %s: fast-NTT recompute != ntt_out" % v["name"]); continue
-            # second oracle: constant term of ntt(delta) etc. is implicitly covered
+            # INDEPENDENT oracle: the direct-DFT evaluation (no butterfly / zetas reuse)
+            # must agree with ntt_out mod q — catches a symmetric zetas-ordering bug the
+            # round-trip and convolution checks are blind to.
+            dref = dft_eval(v["in"])
+            if any((v["ntt_out"][j] - dref[j]) % Q for j in range(N)):
+                print("  bad: %s: ntt_out disagrees with the independent direct-DFT oracle" % v["name"]); continue
             ok += 1
         elif v["type"] == "product":
             fast = ring_product_standard(v["a"], v["b"])

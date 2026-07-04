@@ -26,6 +26,7 @@
 #include <determ/crypto/mldsa/params.h>        // §3.18: ML-DSA (Dilithium, FIPS 204) ring params
 #include <determ/crypto/mldsa/reduce.h>        // §3.18: ML-DSA modular reduction
 #include <determ/crypto/mldsa/ntt.h>           // §3.18: ML-DSA negacyclic NTT (increment 1)
+#include <determ/crypto/mldsa/rounding.h>      // §3.18: ML-DSA rounding/hint layer (increment 2)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
@@ -471,9 +472,11 @@ In-process tests (deterministic, no network):
                                               f[1600]) byte-equal vs OpenSSL
                                               EVP_sha3/shake + KATs (ML-DSA XOF)
 )" << R"(  determ test-mldsa-c99                       §3.18 ML-DSA (Dilithium, FIPS 204)
-                                              increment 1: Z_q reduction + the
-                                              negacyclic NTT — round-trip +
-                                              schoolbook-convolution + KAT gates
+                                              inc.1 Z_q reduction + negacyclic NTT
+                                              (round-trip + schoolbook-conv +
+                                              direct-DFT oracle) + inc.2 rounding
+                                              /hint layer (power2round/decompose/
+                                              make+use hint, both gamma2)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -14339,6 +14342,110 @@ int main(int argc, char** argv) {
             bool ok = true;
             for (int i=0;i<256 && ok;i++) if (canon(a[i]) != 1) ok = false;
             check(ok, "KAT: ntt(1) == all-ones (evaluation of the constant poly)");
+        }
+        // (4b) INDEPENDENT root-ordering oracle: the monomial X evaluates at the
+        //      j-th root, so ntt(X)[j] == root^(2*brv8(j)+1) (mod q). This reuses
+        //      neither the zetas table nor the butterfly, so it catches a symmetric
+        //      zeta-ordering bug that the round-trip + convolution checks are blind
+        //      to (both invariant under a consistent permutation of the NTT domain).
+        {
+            auto brv8 = [](unsigned i){ unsigned r=0; for(int b=0;b<8;b++) r|=((i>>b)&1u)<<(7-b); return r; };
+            auto modpow = [&](long long base, long long e)->long long {
+                long long r = 1 % Q, b = base % Q; if (b < 0) b += Q;
+                while (e > 0) { if (e & 1) r = (r*b) % Q; b = (b*b) % Q; e >>= 1; } return r; };
+            int32_t a[256]; for (int i=0;i<256;i++) a[i]=0; a[1]=1;   /* polynomial X */
+            determ_mldsa_ntt(a);
+            bool ok = true;
+            for (int j=0;j<256 && ok;j++) {
+                long long e = (2*(long long)brv8((unsigned)j) + 1) % 512;
+                if (canon(a[j]) != modpow(1753, e)) ok = false;
+            }
+            check(ok, "KAT: ntt(X)[j] == root^(2*brv8(j)+1) (independent root-ordering oracle)");
+        }
+
+        // ---- §3.18 increment 2: the rounding / hint layer ----
+        const int32_t G32 = DETERM_MLDSA_GAMMA2_32, G88 = DETERM_MLDSA_GAMMA2_88;
+        // (5) power2round: a1*2^D + a0 == a exactly, -2^(D-1) < a0 <= 2^(D-1).
+        {
+            bool ok = true;
+            for (int t = 0; t < 60000 && ok; t++) {
+                int32_t a = (int32_t)(next() % (uint64_t)Q), a0;
+                int32_t a1 = determ_mldsa_power2round(a, &a0);
+                if ((int64_t)a1 * (1 << DETERM_MLDSA_D) + a0 != a) ok = false;
+                if (!(a0 > -(1 << (DETERM_MLDSA_D-1)) && a0 <= (1 << (DETERM_MLDSA_D-1)))) ok = false;
+            }
+            check(ok, "power2round: a1*2^D + a0 == a exactly, |a0| <= 2^12");
+        }
+        // (6) decompose: a1*(2*gamma2) + a0 == a (mod q), a0 centered, a1 in [0,m).
+        {
+            bool ok = true;
+            const int32_t gs[2] = { G32, G88 }; const int32_t ms[2] = { 16, 44 };
+            for (int gi = 0; gi < 2 && ok; gi++) {
+                int32_t g2 = gs[gi], m = ms[gi];
+                for (int t = 0; t < 60000 && ok; t++) {
+                    int32_t a = (int32_t)(next() % (uint64_t)Q), a0;
+                    int32_t a1 = determ_mldsa_decompose(a, &a0, g2);
+                    if (((int64_t)a1 * 2 * g2 + a0 - a) % Q) ok = false;
+                    if (!(a0 >= -g2 && a0 <= g2)) ok = false;
+                    if (!(a1 >= 0 && a1 < m)) ok = false;
+                }
+            }
+            check(ok, "decompose: recon mod q + |a0| <= gamma2 + a1 in [0,m), both gamma2");
+        }
+        // (7) use_hint semantic round-trip: use_hint(r, [HB(r)!=HB(r+z)]) == HB(r+z),
+        //     |z| <= gamma2 — the verifier recovers the signer's high bits.
+        {
+            bool ok = true;
+            const int32_t gs[2] = { G32, G88 };
+            for (int gi = 0; gi < 2 && ok; gi++) {
+                int32_t g2 = gs[gi];
+                for (int t = 0; t < 60000 && ok; t++) {
+                    int32_t lo; (void)lo;
+                    int32_t r = (int32_t)(next() % (uint64_t)Q);
+                    int32_t z = (int32_t)(next() % (uint64_t)(2u*(uint32_t)g2 + 1u)) - g2; // [-g2,g2]
+                    int32_t v = (int32_t)(((int64_t)r + z) % Q); if (v < 0) v += Q;
+                    int32_t d0;
+                    int32_t r1 = determ_mldsa_decompose(r, &d0, g2);
+                    int32_t v1 = determ_mldsa_decompose(v, &d0, g2);
+                    unsigned h = (r1 != v1) ? 1u : 0u;
+                    if (determ_mldsa_use_hint(r, h, g2) != v1) ok = false;
+                }
+            }
+            check(ok, "use_hint: use_hint(r,[HB(r)!=HB(r+z)]) == HB(r+z), |z|<=gamma2");
+        }
+        // (8) make_hint definitional contract, both gamma2.
+        {
+            bool ok = true;
+            const int32_t gs[2] = { G32, G88 };
+            for (int gi = 0; gi < 2 && ok; gi++) {
+                int32_t g2 = gs[gi];
+                for (int t = 0; t < 40000 && ok; t++) {
+                    int32_t a0 = (int32_t)(next() % (uint64_t)(2u*(uint32_t)g2 + 21u)) - (g2 + 10);
+                    int32_t a1 = (int32_t)(next() % 16u);
+                    unsigned want = (a0 > g2 || a0 < -g2 || (a0 == -g2 && a1 != 0)) ? 1u : 0u;
+                    if (determ_mldsa_make_hint(a0, a1, g2) != want) ok = false;
+                }
+            }
+            check(ok, "make_hint: definitional boundary contract, both gamma2");
+        }
+        // (9) boundary KAT: exact (a0,a1) at the decomposition seams (byte-exact
+        //     interop pins the tie-breaks a loose bound check cannot).
+        {
+            struct K { int32_t a, a0, a1; };
+            const K p2r[] = {
+                {0,0,0},{4096,4096,0},{4097,-4095,1},{8191,-1,1},{8192,0,1},
+                {8193,1,1},{8380416,0,1023},{2000000,1152,244} };
+            const K d32[] = {
+                {261887,261887,0},{261888,261888,0},{261889,-261887,1},
+                {523776,0,1},{8380416,-1,0},{4190208,0,8},{785664,261888,1},{1047559,7,2} };
+            const K d88[] = {
+                {95231,95231,0},{95232,95232,0},{95233,-95231,1},
+                {190464,0,1},{8380416,-1,0},{4190208,0,22},{285696,95232,1},{380935,7,2} };
+            bool ok = true; int32_t o;
+            for (const K& k : p2r) { int32_t h = determ_mldsa_power2round(k.a,&o); if (h!=k.a1||o!=k.a0) ok=false; }
+            for (const K& k : d32) { int32_t h = determ_mldsa_decompose(k.a,&o,G32); if (h!=k.a1||o!=k.a0) ok=false; }
+            for (const K& k : d88) { int32_t h = determ_mldsa_decompose(k.a,&o,G88); if (h!=k.a1||o!=k.a0) ok=false; }
+            check(ok, "rounding boundary KAT (power2round + decompose seams, both gamma2)");
         }
 
         std::cout << (fail? "  FAIL: mldsa-c99 unit test\n" : "  PASS: mldsa-c99 unit test\n");
