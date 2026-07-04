@@ -18411,16 +18411,15 @@ int cmd_account_accounting(int argc, char** argv) {
                 "  domain's own transactions, classified exactly as the "
                 "chain applies\n"
                 "  them:\n"
-                "    credits_received  Σ amount of TRANSFER/DAPP_CALL to this "
+                "    credits_received  Σ amount of same-shard TRANSFER to this "
                 "domain\n"
                 "    debits_sent       Σ amount of TRANSFER from this domain\n"
-                "    dapp_spend        Σ amount of DAPP_CALL from this domain\n"
                 "    staked / unstaked Σ amount of STAKE / UNSTAKE from this "
                 "domain\n"
                 "    fees_paid         Σ fee of every tx signed by this "
                 "domain\n"
                 "    tx_flow_net       credits+unstaked "
-                "- debits-dapp_spend-staked-fees\n"
+                "- debits-staked-fees\n"
                 "    blocks_produced   # blocks where the domain is a creator "
                 "(income hint)\n"
                 "  then fetches the authoritative balance + locked stake and "
@@ -18447,26 +18446,24 @@ int cmd_account_accounting(int argc, char** argv) {
                 "  per-domain report. Exit 0 on success, 1 on args/RPC/parse "
                 "error.\n"
                 "\n"
-                "  NON-CLAIMS (assume-applied — these land in non_tx_delta, not\n"
-                "  a mis-tally): (1) an included tx skipped at apply for "
-                "insufficient\n"
-                "  balance; (2) a failed UNSTAKE (fee-refunded); (3) a DAPP_CALL "
-                "whose\n"
-                "  target DApp is unregistered/inactive or whose topic/payload "
-                "framing\n"
-                "  is invalid — chain.cpp charges only the fee and applies NO "
-                "amount\n"
-                "  debit/credit, so the tool's dapp_spend/credit for it is an\n"
-                "  assume-applied artifact; (4) single-shard view — on a sharded "
-                "chain a\n"
-                "  cross-shard TRANSFER/DAPP_CALL debits the sender here but the "
-                "recipient\n"
-                "  is credited off-shard via a receipt, so a cross-shard "
-                "recipient's\n"
-                "  credits_received is an assume-applied artifact (the tool has "
-                "no shard\n"
-                "  geometry to exclude it). It does NOT re-derive consensus "
-                "balance.\n";
+                "  NON-CLAIMS (folded into non_tx_delta, not a mis-tally): (1) an\n"
+                "  included tx skipped at apply for insufficient balance; (2) a "
+                "failed\n"
+                "  UNSTAKE (fee-refunded). To stay provably-exact, the tally "
+                "counts ONLY\n"
+                "  what a single-shard block walk can confirm: TRANSFER debits, "
+                "STAKE/\n"
+                "  UNSTAKE (payload amount), fees, and SAME-SHARD TRANSFER "
+                "credits.\n"
+                "  DAPP_CALL amounts are NOT tallied (the chain fee-only no-ops "
+                "an\n"
+                "  inactive/unregistered/bad-topic call and the wallet can't tell "
+                "success\n"
+                "  from no-op) and cross-shard receiver credits are NOT tallied "
+                "(no shard\n"
+                "  geometry) — both fold into non_tx_delta. Only its fee is "
+                "counted for a\n"
+                "  DAPP_CALL. It does NOT re-derive consensus balance.\n";
             return 0;
         }
         else {
@@ -18568,7 +18565,7 @@ int cmd_account_accounting(int argc, char** argv) {
 
     // ── per-domain accumulator ────────────────────────────────────────────
     struct Acct {
-        uint64_t credits = 0, debits = 0, dapp_spend = 0;
+        uint64_t credits = 0, debits = 0;
         uint64_t staked = 0, unstaked = 0, fees_paid = 0;
         uint64_t txs_sent = 0, txs_recv = 0, blocks_produced = 0;
     };
@@ -18668,12 +18665,20 @@ int cmd_account_accounting(int argc, char** argv) {
                         case 0:  fit->second.debits     += amt; break; // TRANSFER
                         case 3:  fit->second.staked      += stake_payload_amount(tx); break; // STAKE
                         case 4:  fit->second.unstaked    += stake_payload_amount(tx); break; // UNSTAKE
-                        case 10: fit->second.dapp_spend  += amt; break; // DAPP_CALL
-                        default: break; // REGISTER/DEREGISTER/PARAM_CHANGE/… fee-only
+                        // R60 shrink: DAPP_CALL (10) amount is NOT tallied — the chain
+                        // fee-only no-ops an inactive/unregistered/bad-topic call, and
+                        // the wallet can't tell success from no-op, so the moved amount
+                        // (if any) folds into non_tx_delta. Only its fee (charged above)
+                        // is counted. Keeps the tally provably-exact (no phantom spend).
+                        default: break; // DAPP_CALL / REGISTER / DEREGISTER / … fee-only
                     }
                 }
-                // Receiver side: only TRANSFER (0) + DAPP_CALL (10) credit `to`.
-                if (to_hit && (t == 0 || t == 10)) {
+                // Receiver side: only same-shard TRANSFER (0) credits `to`. DAPP_CALL
+                // credits + cross-shard receiver credits are NOT tallied (the wallet has
+                // no DApp-registry / shard geometry to confirm them) — they fold into
+                // non_tx_delta. On a single-shard chain (the default) every TRANSFER
+                // credit here is exact; cross-shard is out of scope (single-shard view).
+                if (to_hit && t == 0) {
                     tit->second.credits += amt;
                     tit->second.txs_recv++;
                 }
@@ -18703,7 +18708,7 @@ int cmd_account_accounting(int argc, char** argv) {
     // ── emit ──────────────────────────────────────────────────────────────
     auto net_of = [](const Acct& a) -> long long {
         return (long long)(a.credits + a.unstaked)
-             - (long long)(a.debits + a.dapp_spend + a.staked + a.fees_paid);
+             - (long long)(a.debits + a.staked + a.fees_paid);
     };
     if (!human) {
         nlohmann::json out;
@@ -18718,7 +18723,6 @@ int cmd_account_accounting(int argc, char** argv) {
             row["domain"]           = d;
             row["credits_received"] = a.credits;
             row["debits_sent"]      = a.debits;
-            row["dapp_spend"]       = a.dapp_spend;
             row["staked"]           = a.staked;
             row["unstaked"]         = a.unstaked;
             row["fees_paid"]        = a.fees_paid;
@@ -18749,7 +18753,6 @@ int cmd_account_accounting(int argc, char** argv) {
             std::cout << "\n" << d << ":\n"
                       << "  credits_received   " << a.credits << "\n"
                       << "  debits_sent        " << a.debits << "\n"
-                      << "  dapp_spend         " << a.dapp_spend << "\n"
                       << "  staked / unstaked  " << a.staked << " / " << a.unstaked << "\n"
                       << "  fees_paid          " << a.fees_paid << "\n"
                       << "  txs sent/received  " << a.txs_sent << " / " << a.txs_recv << "\n"
