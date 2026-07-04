@@ -582,14 +582,16 @@ Original plan (retained for the deviation record):
   (the determ daemon is libsodium-free, so they are captured not computed live).
 - **Memory-hard, NOT constant-time in the data-dependent passes** by design (Argon2d
   GPU-resistance); the Argon2id hybrid keeps the secret-derived addressing of pass-0
-  first-half data-independent (RFC 9106 §3.4). The intended consumer is the
-  passphrase keyfile KDF. (Call-site reality: the v2.17/S-004 envelope today
-  derives via OpenSSL `PKCS5_PBKDF2_HMAC` (`wallet/envelope.cpp::derive_key`);
-  the tree's former only libsodium `crypto_pwhash` caller was the wallet OPAQUE
-  stub (`wallet/opaque_primitives.cpp::argon2id`), which was DELETED with the
-  liboprf track (DECISION-LOG.md 2026-07-03) — so `determ_argon2id` now has no
-  live caller, and its one prospective consumer is the envelope PBKDF2→Argon2id
-  switch, an on-disk format change. See `src/crypto/argon2/README.md` §5.)
+  first-half data-independent (RFC 9106 §3.4). **WIRED as the passphrase keyfile
+  KDF (R58, 2026-07-04):** the wallet envelope now derives fresh keys via
+  `determ_argon2id` (`wallet/envelope.cpp::derive_key_argon2`) by default — the
+  `DWE2` layout — instead of PBKDF2 (`derive_key_pbkdf2`, the retained `DWE1`
+  interop path). The switch is a versioned, back-compatible on-disk format
+  migration (4-byte magic selects the KDF; every `DWE1` envelope still decrypts;
+  unknown magic fails closed). Proven in `KeyfileArgon2Migration.md`. This is
+  Argon2id's first live caller (the tree's former only libsodium `crypto_pwhash`
+  caller was the deleted wallet OPAQUE stub). See `src/crypto/argon2/README.md`
+  §5.)
 
 ### 3.7 secp256k1 + libsecp256k1-zkp — **DE-SCOPED** (2026-07-03)
 

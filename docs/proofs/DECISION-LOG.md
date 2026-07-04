@@ -1258,3 +1258,21 @@ TweetNaCl relies on all real compilers implementing `<<` on a negative value as 
 **Docs threaded (per the standing directive — docs follow the code).** `WalletDomainAccountingSoundness.md` (WA-1..WA-5, workflow-authored + adversarially verified against `chain.cpp`; amount-source note added post-fix), a proofs/README row, a CLI-REFERENCE "Read-only accounting (RPC)" subsection, and this entry. No push (push remains explicitly owner-authorized only).
 
 **Cross-decision implication.** The remaining owner-gated menu is unchanged minus this item: keyfile PBKDF2→Argon2id (on-disk format change), the DSF harness (design-review-gated), and the PQ/privacy tracks.
+
+---
+
+## 2026-07-04 — R58: wallet keyfile KDF PBKDF2→Argon2id (owner-selected) — versioned back-compatible envelope migration
+
+**Authority:** Stoyan Denev — selected "Argon2id keyfile" from the owner-gated menu (AskUserQuestion) after R57. This is the authorization for the on-disk keyfile format change the item was gated on.
+
+**Question.** The wallet's passphrase-encrypted envelope (keyfiles, Shamir backup shares, recovery envelopes) derived its AES-256-GCM key via PBKDF2-HMAC-SHA-256 (600k iters). PBKDF2 is pure-compute and cheaply parallelized on GPU/ASIC; the C99 Argon2id primitive (memory-hard, RFC 9106) had shipped as a validated library since task #284 but had **no live caller** — its intended consumer, the keyfile KDF, was the gated on-disk format change. How to wire it without orphaning every envelope already on disk?
+
+**Options considered.** (a) **Hard cutover** — switch encrypt+decrypt to Argon2id, re-pin all fixtures. Rejected: orphans every DWE1 keyfile/backup in the field, and the format-freeze guard exists precisely to make that a RED failure. (b) **New magic, dual-read** *(chosen)* — a 4-byte magic distinguishes DWE2 (Argon2id) from DWE1 (PBKDF2); `decrypt`/`deserialize` auto-select the KDF from it; `encrypt` defaults to Argon2id but `encrypt_pbkdf2` + `envelope encrypt --iters` retain the legacy path for interop; the params slot is 4 bytes (iters) for DWE1, 12 bytes (t|m|p) for DWE2, disambiguated by the magic. (c) **In-place bulk re-encrypt of existing files** — rejected as unnecessary and dangerous (touches every secret at rest at once); instead legacy files upgrade opportunistically on the next `keyfile-reencrypt`.
+
+**Choice.** Option (b). Defaults t=3, m=64 MiB, p=1 (above the OWASP Argon2id floor). The AES-256-GCM AEAD leg is byte-identical across DWE1/DWE2 — only the KDF and its param slot differ — so the confidentiality/integrity proofs carry over verbatim and only the passphrase work-factor bound strengthens.
+
+**Scope guard (why this stayed wallet-only).** Node keyfiles are produced by the *daemon* (`determ`, its own keyfile.cpp), not the wallet envelope; they remain PBKDF2 (a separable owner decision). The wallet's `keyfile-info`/`inspect-envelope`/`node-keyfile-info` inspectors were made KDF-aware so they honestly report either KDF, and `account-import-many`'s structural check was fixed to key on the correct cost field per KDF (it had rejected Argon2id's zero `pbkdf2_iters`).
+
+**Validation.** `tools/test_wallet_keyfile_argon2.sh` (18/0): fresh keyfile is DWE2/argon2id with default params + round-trips; default-vs-`--iters` magic selection; the pinned pre-R58 DWE1 fixture still decrypts (no orphaned envelopes); wrong-passphrase fail-closed on both layouts; reencrypt keeps Argon2id + preserves the seed. The format-freeze guard (`test_wallet_envelope_compat.sh`) stayed green (DWE1 decrypt preserved). FAST=1 170→171, 0 fail. Proof `KeyfileArgon2Migration.md` (KM-1..KM-5) authored + adversarially verified.
+
+**Cross-decision implication.** Argon2id now has a live consumer (CRYPTO-C99-SPEC §3.6 updated from "no live caller"). Remaining owner-gated menu: the DSF harness (design-review-gated) and the PQ/privacy tracks. Daemon-side node-keyfile Argon2id is a possible follow-up but was deliberately left out of R58's wallet scope.
