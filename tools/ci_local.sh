@@ -114,9 +114,9 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "=== ci_local: configure ==="
   cmake -B "$BUILD_DIR" -S . -DCMAKE_BUILD_TYPE=Release || {
     echo "FAIL: ci-local configure failed"; exit 1; }
-  echo "=== ci_local: build determ + determ-wallet + determ-light ==="
+  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-dsf ==="
   cmake --build "$BUILD_DIR" --config Release -j "$JOBS" \
-        --target determ determ-wallet determ-light || {
+        --target determ determ-wallet determ-light determ-dsf || {
     echo "FAIL: ci-local build failed"; exit 1; }
 fi
 
@@ -132,7 +132,11 @@ DETERM_BIN=$(find_bin determ)               || { echo "FAIL: determ binary not f
 DETERM_WALLET_BIN=$(find_bin determ-wallet) || { echo "FAIL: determ-wallet binary not found"; exit 1; }
 DETERM_LIGHT_BIN=$(find_bin determ-light)   || { echo "FAIL: determ-light binary not found"; exit 1; }
 export DETERM_BIN DETERM_WALLET_BIN DETERM_LIGHT_BIN
-echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN ==="
+# determ-dsf is the test-only 4th binary (its test is SKIP-clean). Export it so the
+# DSF test uses the NATIVE build, not a Windows determ-dsf.exe picked up via WSL
+# interop (which writes traces the Linux shell can't read — an empty-trace RED).
+if DETERM_DSF_BIN=$(find_bin determ-dsf); then export DETERM_DSF_BIN; fi
+echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} ==="
 
 echo "=== ci_local: FAST=1 suite ==="
 FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; exit 1; }
