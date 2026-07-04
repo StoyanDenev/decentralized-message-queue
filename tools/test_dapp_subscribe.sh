@@ -340,6 +340,47 @@ print('ALL' if ok else 'FAILED poll=%r stream=%r' % (sorted(poll_ids), sorted(st
   echo "$CHECK" | grep -q "^ALL$" \
     && assert true "SS-2 gap-freedom: streaming catch-up == dapp-messages poll (same event set)" \
     || assert false "SS-2 gap-freedom cross-check"
+
+  # SS-6 reconnect-seam boundary (FB73 companion): the --reconnect logic
+  # resumes with since = last_block INCLUSIVE. The deterministic core of
+  # its no-loss guarantee is that `--since B` INCLUDES an event at block B
+  # while `--since B+1` EXCLUDES it. Pin exactly that boundary against the
+  # applied DAPP_CALL's block (from the poll).
+  B=$(python -c "
+import json
+poll = json.loads(open('$T/poll.json').read())
+ev = poll.get('events', [])
+print(ev[0]['block_height'] if ev else -1)" 2>/dev/null)
+  if [ "$B" -ge 0 ] 2>/dev/null; then
+    $DETERM dapp-subscribe --rpc-port 8791 --domain node1 --since "$B" \
+      --max-frames 32 > $T/since_incl.frames 2>/dev/null &
+    P1=$!; sleep 2; kill "$P1" 2>/dev/null
+    $DETERM dapp-subscribe --rpc-port 8791 --domain node1 --since "$((B+1))" \
+      --max-frames 32 > $T/since_excl.frames 2>/dev/null &
+    P2=$!; sleep 2; kill "$P2" 2>/dev/null
+    CHECK=$(python -c "
+import json
+def calls_at_B(path, B):
+    n=0
+    for l in open(path):
+        l=l.strip()
+        if not l: continue
+        try: f=json.loads(l)
+        except: continue
+        if f.get('event')=='live': break
+        if f.get('event')=='dapp_call' and f.get('block_index')==B: n+=1
+    return n
+incl = calls_at_B('$T/since_incl.frames', $B)
+excl = calls_at_B('$T/since_excl.frames', $B)
+ok = (incl >= 1 and excl == 0)   # since=B includes block B; since=B+1 excludes it
+print('ALL' if ok else 'FAILED incl@B=%d excl@B=%d' % (incl, excl))" 2>/dev/null)
+    echo "    $CHECK"
+    echo "$CHECK" | grep -q "^ALL$" \
+      && assert true "SS-6 reconnect seam: --since B inclusive, --since B+1 exclusive (block $B)" \
+      || assert false "SS-6 reconnect-seam boundary"
+  else
+    echo "  SKIP: no event block to pin the --since boundary against"
+  fi
 else
   echo "  SKIP: DAPP_CALL did not apply within window (known multi-node"
   echo "        timing flake, see test_dapp_e2e.sh §9) — replay + filter"
