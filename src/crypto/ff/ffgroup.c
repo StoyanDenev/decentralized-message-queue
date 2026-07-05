@@ -291,20 +291,19 @@ int determ_ff_vector_commit(uint8_t out[DETERM_FF_ELEM_BYTES],
     if (ff_is_zero(rl) || ff_ge(rl, DETERM_FF_Q)) return -1;         /* r == 0 or r >= q */
     modexp(acc, DETERM_FF_H, rl);                                    /* acc = h^r */
     for (size_t i = 0; i < n; i++) {
+        /* CONSTANT-TIME: no zero-scalar skip (would leak which a_i/b_i are zero — the
+         * bit-vector of a committed value). base^0 = 1 => always exponentiating is
+         * byte-identical to skipping; the ff_* corpora are the guard. */
         be_load(sl, a + i * DETERM_FF_ELEM_BYTES);                   /* a_i * G_i */
         if (ff_ge(sl, DETERM_FF_Q)) return -1;
-        if (!ff_is_zero(sl)) {
-            if (ff_gen_limbs(gen, (uint32_t)i, 0) != 0) return -1;
-            modexp(term, gen, sl);
-            modmul_normal(acc, acc, term);
-        }
+        if (ff_gen_limbs(gen, (uint32_t)i, 0) != 0) return -1;
+        modexp(term, gen, sl);
+        modmul_normal(acc, acc, term);
         be_load(sl, b + i * DETERM_FF_ELEM_BYTES);                   /* b_i * H_i */
         if (ff_ge(sl, DETERM_FF_Q)) return -1;
-        if (!ff_is_zero(sl)) {
-            if (ff_gen_limbs(gen, (uint32_t)i, 1) != 0) return -1;
-            modexp(term, gen, sl);
-            modmul_normal(acc, acc, term);
-        }
+        if (ff_gen_limbs(gen, (uint32_t)i, 1) != 0) return -1;
+        modexp(term, gen, sl);
+        modmul_normal(acc, acc, term);
     }
     be_store(out, acc);
     return 0;
@@ -316,8 +315,11 @@ int determ_ff_msm(uint8_t out[DETERM_FF_ELEM_BYTES],
     memset(acc, 0, sizeof(acc)); acc[0] = 1;                         /* identity = 1 */
     for (size_t i = 0; i < n; i++) {
         be_load(sl, scalars + i * DETERM_FF_ELEM_BYTES);
-        if (ff_ge(sl, DETERM_FF_Q)) return -1;                       /* scalar >= q */
-        if (ff_is_zero(sl)) continue;                                /* skip before reading the point */
+        if (ff_ge(sl, DETERM_FF_Q)) return -1;                       /* scalar >= q (validity reject) */
+        /* CONSTANT-TIME: no zero-scalar skip. A `continue` on ff_is_zero(sl) would leak
+         * WHICH secret scalars are zero (in the range prover, the bits of a committed
+         * value). base^0 = 1 contributes the identity, so always exponentiating is
+         * byte-identical to skipping (the ff_* corpora are the guard). */
         be_load(pl, points + i * DETERM_FF_ELEM_BYTES);
         if (ff_is_zero(pl) || ff_ge(pl, DETERM_FF_P)) return -1;     /* point 0 or >= p */
         modexp(term, pl, sl);
