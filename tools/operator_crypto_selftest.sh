@@ -50,8 +50,8 @@ Phase 2 (live, skipped with --static-only):
     test-frost-c99        test-x25519-c99     test-blake2b-c99
     test-sha3-c99         test-mldsa-c99      test-xchacha-c99
     test-argon2id-c99     test-p256-c99       test-p256-h2c-c99
-    test-p256-oprf-c99    test-ct-c99         test-rng-c99
-    test-c99-vectors      test-c99-api
+    test-p256-oprf-c99    test-pedersen-c99   test-ct-c99
+    test-rng-c99          test-c99-vectors    test-c99-api
   Each battery must exit 0 AND emit its terminal PASS summary marker;
   the script prints a per-test OK/FAILED row and a final verdict.
 
@@ -168,7 +168,7 @@ BATTERY="test-ed25519-vectors test-sha2-c99 test-chacha20-c99 test-aes-c99 \
          test-ed25519-c99 test-ed25519-scalar-reduce test-frost-c99 \
          test-x25519-c99 test-blake2b-c99 test-sha3-c99 test-mldsa-c99 \
          test-xchacha-c99 test-argon2id-c99 test-p256-c99 test-p256-h2c-c99 \
-         test-p256-oprf-c99 test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
+         test-p256-oprf-c99 test-pedersen-c99 test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
 FAILED=0
 TOTAL=0
 for t in $BATTERY; do

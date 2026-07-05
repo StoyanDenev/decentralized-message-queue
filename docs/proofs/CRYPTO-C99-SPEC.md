@@ -97,6 +97,7 @@ Achieved via three substitutions:
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
 | ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-8 — COMPLETE)** — FIPS 204 the whole scheme: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + **KeyGen + Sign + Verify**, all **ACVP-pinned (3 param sets)**; §3.18. Additive; chain integration is the next (owner-gated) step. | Public domain | ~740 |
+| Pedersen commitment | `src/crypto/pedersen/` | **SHIPPED (range-proof track inc.1)** — `C = v*G + r*H` over P-256, H a nothing-up-my-sleeve RFC 9380 hash-to-curve generator; pure composition over §3.8c P-256; binding (unknown log_G H) + hiding + additive homomorphism gated by `test-pedersen-c99` + the dual-oracle `pedersen.json`; §3.19. Additive; range proofs + chain integration are the next (owner-gated) steps. | Public domain | ~85 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -153,6 +154,8 @@ src/crypto/
 │   ├── polyvec.c               #   matrix/vector layer: ExpandA/S/Mask + polyvec + matrix·vector (inc.6)
 │   ├── keygen.c                #   ML-DSA.KeyGen_internal + pk/sk encode (inc.7, ACVP-pinned)
 │   └── sign.c                  #   ML-DSA.Sign_internal + Verify_internal + sigEncode/hint (inc.8, ACVP-pinned)
+├── pedersen/                   # SHIPPED: Pedersen commitment over P-256 (§3.19)
+│   └── pedersen.c              #   C = v*G + r*H; range-proof track inc.1 (test-pedersen-c99)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -1148,6 +1151,41 @@ that every parameter set (ML-DSA-44/65/87) shares.
   option alongside Ed25519) + the anon-address-format reopening, each a
   consensus-critical, separately-reviewed step; and the constant-time hardening
   review of the secret-dependent paths before any production signing use.
+
+### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increment 1)**
+
+The owner-authorized (2026-07-04) confidential-transaction / range-proof track,
+executed **library-primitive-first, KAT-gated, zero consensus touch** (the same
+pattern as ML-DSA / P-256 / Argon2id) — chain integration is a later,
+separately-reviewed step. Increment 1 is the **Pedersen commitment** itself, the
+building block a range proof (a later increment) commits to.
+
+- **Implementation:** `src/crypto/pedersen/` — `C = v*G + r*H` over NIST P-256
+  (group order n), where G is the base point and **H is a nothing-up-my-sleeve
+  second generator** with unknown log_G(H): `H = hash_to_curve("Determ Pedersen
+  generator H over NIST P-256 v1", "DETERM-PEDERSEN-P256_XMD:SHA-256_SSWU_RO_")`
+  via the RFC 9380 `P256_XMD:SHA-256_SSWU_RO_` map. **Binding** reduces to the
+  unknown discrete log (finding a second opening recovers log_G(H)); **hiding** is
+  information-theoretic for a uniform r (the impl rejects r==0). Pure composition
+  over the §3.8c P-256 API (`base_mul`/`point_mul`/`point_add`/`hash_to_curve`/
+  `compress`) — no new field/group arithmetic; correctness inherited from those
+  already-OpenSSL/RFC-gated primitives. API: `determ_pedersen_generator_h` /
+  `_commit` / `_verify` / `_add` (32-byte big-endian scalars < n, 33-byte SEC1
+  compressed commitments; v==0 allowed, r==0 rejected).
+- **Validation:** `determ test-pedersen-c99` (8 assertions — H KAT + on-curve +
+  H≠G; `commit == compress(v*G+r*H)` via the raw P-256 API; the v==0 path; the
+  **additive homomorphism** `commit(v1,r1)+commit(v2,r2) == commit(v1+v2, r1+r2)`;
+  open/verify accept + reject; binding sanity; input rejection r==0 / v≥n /
+  non-decodable add) + the §3.13 dual-oracle byte-frozen corpus
+  `tools/vectors/pedersen.json` (6 vectors incl. a mod-n WRAPAROUND homomorphism
+  vector) recomputed by BOTH the C impl (`test-c99-vectors`) and the independent
+  from-scratch Python EC (`tools/verify_pedersen.py`). Soundness accounting:
+  `PedersenCommitmentSoundness.md`; per-module provenance:
+  `src/crypto/pedersen/README.md`. **Additive — no in-tree consumer yet.** Next
+  on this track: range proofs (Bulletproofs), then chain integration — each
+  separately reviewed. CT posture: data-independent except the documented
+  `scalar_is_zero(v)` branch (a v==0 value commitment); full timing review is the
+  owner-gated step.
 
 ---
 

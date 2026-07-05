@@ -46,6 +46,10 @@
 #include "determ/crypto/ed25519/ed25519.h"
 #include "determ/crypto/x25519/x25519.h"
 #include "determ/crypto/p256/p256.h"
+/* §3.19 Pedersen commitment over P-256 (C = v*G + r*H) — the range-proof /
+ * confidential-tx track's first building block; a LIBRARY PRIMITIVE, no chain
+ * call site. Pure composition over the P-256 primitives above. */
+#include "determ/crypto/pedersen/pedersen.h"
 /* §3.18 ML-DSA (Dilithium, FIPS 204) — the complete PQ signature scheme (KeyGen +
  * Sign + Verify), owner-authorized + ACVP-pinned. Shipped as a LIBRARY PRIMITIVE;
  * chain integration (a PQ signature option) is a later, separately-reviewed step. */
