@@ -136,8 +136,10 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/rangeproof.c"
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
-  # bignum, no __int128 — `determ test-ff-pedersen-c99`.
+  # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4
+  # Bulletproofs inner-product argument over Z_p* — `determ test-ff-ipa-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/ff/ffgroup.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/ff/ffipa.c"
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"

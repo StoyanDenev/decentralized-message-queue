@@ -62,7 +62,7 @@ EXPECTED = {
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
-    "ff_pedersen.json", "ff_scalar.json",
+    "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json",
 }
 
 try:
@@ -1233,6 +1233,17 @@ def chk_ff_scalar(vec, label):
         return "cannot import verify_ff_scalar (%s)" % e
     return vs.check_ff_scalar(vec, label)
 
+def chk_ff_ipa(vec, label):
+    # §3.20 inc.4 Bulletproofs IPA over Z_p* — recompute commit / prove through the
+    # independent from-scratch Python (tools/verify_ff_ipa.py, native bignums) and
+    # match the frozen bytes (proofs also re-verified inside the checker).
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_ff_ipa as vi
+    except Exception as e:
+        return "cannot import verify_ff_ipa (%s)" % e
+    return vi.check_ff_ipa(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1267,6 +1278,7 @@ CHECKERS = {
     "bp_agg_rangeproof": chk_bp_agg_rangeproof,
     "ff_pedersen": chk_ff_pedersen,
     "ff_scalar": chk_ff_scalar,
+    "ff_ipa": chk_ff_ipa,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

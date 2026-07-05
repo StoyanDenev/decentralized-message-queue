@@ -38,6 +38,7 @@
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
+#include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -532,6 +533,9 @@ In-process tests (deterministic, no network):
   determ test-ff-scalar-c99                   §3.20 inc.3: finite-field scalar field
                                               mod q (add/mul/inv/hash_to_scalar) — the
                                               §3.20 IPA/range-proof exponent field
+  determ test-ff-ipa-c99                      §3.20 inc.4: Bulletproofs inner-product
+                                              argument over Z_p* (commit/prove/verify,
+                                              2·log2(n) elements) — MODERN range-proof core
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13901,6 +13905,39 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: ff-scalar-c99 unit test\n" : "  PASS: ff-scalar-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-ff-ipa-c99") {
+        // §3.20 inc.4: Bulletproofs IPA over Z_p*. commit/prove/verify round-trip for
+        // n in {1,2,4}; proof-length; soundness (wrong P + tampered proof reject). The
+        // byte-exact KAT vs tools/verify_ff_ipa.py is the §3.13 gate (ff_ipa.json). n is
+        // kept small — the 3072-bit modexp is ~1700x slower than the P-256 IPA.
+        int fail=0;
+        auto check=[&](bool ok,const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        const size_t E=DETERM_FF_ELEM_BYTES;
+        auto mkscalar=[&](std::vector<uint8_t>& out, uint32_t seed){
+            std::vector<uint8_t> raw(E);
+            for (size_t i=0;i<E;i++) raw[i]=(uint8_t)((seed*2654435761u) + (uint32_t)i*40503u + (uint32_t)(i>>3));
+            out.assign(E,0); determ_ff_scalar_reduce(out.data(), raw.data());   // < q
+        };
+        for (size_t n : {size_t(1),size_t(2),size_t(4)}) {
+            std::vector<uint8_t> a(n*E), b(n*E), s;
+            for (size_t i=0;i<n;i++){ mkscalar(s,(uint32_t)(n*100+i));    std::memcpy(&a[i*E],s.data(),E);
+                                      mkscalar(s,(uint32_t)(n*100+i+50)); std::memcpy(&b[i*E],s.data(),E); }
+            int rr=0; for(size_t t=n;t>1;t>>=1) rr++;
+            size_t plen=determ_ff_ipa_proof_len(n);
+            std::vector<uint8_t> P(E), proof(plen);
+            bool ok = plen==(size_t)(2*rr+2)*E
+                   && determ_ff_ipa_commit(P.data(), a.data(), b.data(), n)==0
+                   && determ_ff_ipa_prove(proof.data(), a.data(), b.data(), P.data(), n)==0
+                   && determ_ff_ipa_verify(P.data(), proof.data(), n)==0;              // valid accepts
+            std::vector<uint8_t> Pbad=P; Pbad[E-1]^=1;
+            ok = ok && determ_ff_ipa_verify(Pbad.data(), proof.data(), n)!=0;           // wrong P rejects
+            std::vector<uint8_t> pbad=proof; pbad[plen-1]^=1;
+            ok = ok && determ_ff_ipa_verify(P.data(), pbad.data(), n)!=0;               // tampered proof rejects
+            check(ok, "ipa n="+std::to_string(n)+": commit/prove/verify + proof_len + wrong-P/tamper reject");
+        }
+        std::cout << (fail? "  FAIL: ff-ipa-c99 unit test\n" : "  PASS: ff-ipa-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -14181,7 +14218,7 @@ int main(int argc, char** argv) {
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "bp_agg_rangeproof.json", "ff_pedersen.json",
-                                "ff_scalar.json",
+                                "ff_scalar.json", "ff_ipa.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14891,6 +14928,33 @@ int main(int argc, char** argv) {
                         if (determ_ff_hash_to_scalar(o.data(), msg.data(), msg.size(),
                                                      (const uint8_t*)dst.data(), dst.size())!=0
                             ||hx(o.data(),384)!=v["out_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name; break; }
+                } else if (prim == "ff_ipa") {
+                    // §3.20 inc.4 Bulletproofs IPA over Z_p* — recompute commit / prove
+                    // via the C and match the frozen bytes (independent verify_ff_ipa.py).
+                    std::string ty = v.value("type","");
+                    size_t n = v["n"].get<size_t>();
+                    const auto& aa=v["a_hex"]; const auto& bb=v["b_hex"];
+                    bool okk = (aa.size()==n && bb.size()==n);
+                    std::vector<uint8_t> a(n*384), b(n*384);
+                    for (size_t i=0; okk && i<n; i++){
+                        auto ea=unhex(aa[i].get<std::string>()); auto eb=unhex(bb[i].get<std::string>());
+                        if (ea.size()!=384||eb.size()!=384){ okk=false; break; }
+                        std::memcpy(&a[i*384],ea.data(),384); std::memcpy(&b[i*384],eb.data(),384);
+                    }
+                    if (!okk) { ok=false; bad=name; break; }
+                    if (ty == "ipa_commit") {
+                        std::vector<uint8_t> Pc(384);
+                        if (determ_ff_ipa_commit(Pc.data(), a.data(), b.data(), n)!=0
+                            || hx(Pc.data(),384)!=v["p_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "ipa_prove") {
+                        auto pb=unhex(v["p_hex"].get<std::string>());
+                        size_t plen=determ_ff_ipa_proof_len(n);
+                        std::vector<uint8_t> proof(plen);
+                        if (pb.size()!=384 || plen==0
+                            || determ_ff_ipa_prove(proof.data(), a.data(), b.data(), pb.data(), n)!=0
+                            || hx(proof.data(),plen)!=v["proof_hex"].get<std::string>()
+                            || determ_ff_ipa_verify(pb.data(), proof.data(), n)!=0) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
