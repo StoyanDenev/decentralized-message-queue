@@ -119,7 +119,7 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.
 
-## Increments 2-7 (SHIPPED — the complete confidential-tx primitive set over this group)
+## Increments 2-8 (SHIPPED — the complete confidential-tx primitive set + end-to-end composition)
 
 Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.20 for the full treatment):
@@ -158,12 +158,20 @@ Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-
   `determ_ff_msm`, no group inverse) is proven to open to zero via a Schnorr PoK `E=h^x`.
   Built on the public inc.1-3 API only — no sealed-code change. Validated by
   `determ test-ff-balance-c99` + `ff_balance.json` (`tools/verify_ff_balance.py`).
+- **inc.8 — end-to-end confidential-tx composition** (`determ test-ff-confidential-tx-c99`,
+  a structural test — NOT a new primitive): composes a per-output inc.5 range proof + the
+  inc.7 balance proof into one confidential transaction over the PUBLIC APIs only, and
+  pins the composition identity `V_j == C_out[j]` (a range proof's value commitment IS its
+  tx output commitment — both `g=4`,`h`, so a cross-primitive generator mismatch turns it
+  RED) plus the division of labour (balance catches inflation, range catches an
+  out-of-range amount). Mirror: `tools/verify_ff_confidential_tx.py`.
 
 Full soundness accounting for inc.1-6: `docs/proofs/FiniteFieldBulletproofsSoundness.md`.
 
 ## Known limitations / future work
 
-- **Confidential-tx primitive set COMPLETE (inc.1-7).** Remaining on this backend: a
+- **Confidential-tx primitive set COMPLETE + composed end-to-end (inc.1-8).** Remaining on
+  this backend: a
   group-abstraction layer so P-256 (§3.19) and Z_p* (§3.20) share ONE Bulletproofs
   prover/verifier (avoids the two parallel implementations), then confidential-tx chain
   integration (owner-gated).

@@ -1306,7 +1306,7 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
-### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-7: range-proof stack + balance proof)**
+### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-8: range-proof stack + balance proof + end-to-end composition)**
 
 The **owner-decided curve/group split** for the v2.22 confidential-transaction
 integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
@@ -1431,11 +1431,26 @@ built entirely on the public inc.1-3 API. API `determ_ff_balance_excess`/`_prove
 (balanced accepts; an unbalanced tx and a tampered proof both reject) + corpus
 `ff_balance.json`, independent Python `tools/verify_ff_balance.py`.
 
-All seven increments are **NOT constant-time** (the owner-gated CT-hardening step) and
-**additive — no chain call site**. The confidential-tx primitive set is now complete
-(commit → vector-commit/MSM → scalar field → IPA → single-value range proof → aggregated
-range proof → balance proof). The full soundness accounting is
-`docs/proofs/FiniteFieldBulletproofsSoundness.md`. Next on this backend: a
+**Increment 8 — end-to-end confidential-tx composition** (`test-ff-confidential-tx-c99`,
+a structural test — NOT a new primitive). Composes the two shipped halves into one
+confidential transaction over the **public §3.20 APIs only**: a per-output inc.5 range
+proof + the inc.7 balance proof. It pins the load-bearing composition fact that an
+output's range-proof value commitment `V_j` is **byte-identical** to its tx commitment
+`C_out[j]` — because both use the same `g = 4` and `h` — so a cross-primitive generator
+mismatch would break the composition and turn the test RED. It also demonstrates the
+**division of labour**: an *inflation* attempt (`Σv_out + fee ≠ Σv_in`, honest blindings)
+is caught by the **balance** proof (each output is still an in-range commitment, so the
+range proofs pass); an *out-of-range* output (`= 2^n`) is caught by that output's
+**range** proof (a wrapped value can still balance). Mirror: `tools/verify_ff_confidential_tx.py`
+(composes the already-byte-exact inc.5/6/7 references); no new corpus — the composed
+bytes are pinned by `ff_rangeproof.json` / `ff_aggrangeproof.json` / `ff_balance.json`.
+
+All eight increments are **NOT constant-time** (the owner-gated CT-hardening step) and
+**additive — no chain call site**. The confidential-tx primitive set is complete and
+demonstrated end-to-end (commit → vector-commit/MSM → scalar field → IPA → single-value
+range proof → aggregated range proof → balance proof → confidential-tx composition). The
+full soundness accounting is `docs/proofs/FiniteFieldBulletproofsSoundness.md`. Next on
+this backend: a
 group-abstraction layer so P-256 and `Z_p*` share one Bulletproofs prover; then chain
 integration (owner-gated, per the design doc). The `Z_p*` modexp is ~1700× slower than
 the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8) —
