@@ -46,5 +46,10 @@
 #include "determ/crypto/ed25519/ed25519.h"
 #include "determ/crypto/x25519/x25519.h"
 #include "determ/crypto/p256/p256.h"
+/* §3.18 ML-DSA (Dilithium, FIPS 204) — the complete PQ signature scheme (KeyGen +
+ * Sign + Verify), owner-authorized + ACVP-pinned. Shipped as a LIBRARY PRIMITIVE;
+ * chain integration (a PQ signature option) is a later, separately-reviewed step. */
+#include "determ/crypto/mldsa/keygen.h"
+#include "determ/crypto/mldsa/sign.h"
 
 #endif /* DETERM_CRYPTO_H */

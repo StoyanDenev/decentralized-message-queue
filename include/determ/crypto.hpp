@@ -444,6 +444,71 @@ inline bool verify(const CompressedPoint& pk, const CompressedPoint& blinded,
 }
 } // namespace oprf_p256
 
+// ─── ML-DSA / Dilithium (FIPS 204) signatures (§3.18) ───────────────────────
+// The complete PQ signature scheme — KeyGen + Sign + Verify, ACVP-pinned. A
+// LIBRARY PRIMITIVE; chain integration (a PQ signature option) is separately gated.
+namespace mldsa {
+
+enum class ParamSet { ML_DSA_44, ML_DSA_65, ML_DSA_87 };
+
+inline const determ_mldsa_params& params(ParamSet ps) {
+    switch (ps) {
+        case ParamSet::ML_DSA_65: return DETERM_MLDSA_65;
+        case ParamSet::ML_DSA_87: return DETERM_MLDSA_87;
+        default:                  return DETERM_MLDSA_44;
+    }
+}
+inline size_t pk_bytes(ParamSet ps)  { return determ_mldsa_pk_bytes(&params(ps)); }
+inline size_t sk_bytes(ParamSet ps)  { return determ_mldsa_sk_bytes(&params(ps)); }
+inline size_t sig_bytes(ParamSet ps) { return determ_mldsa_sig_bytes(&params(ps)); }
+
+struct KeyPair { Bytes pk; Bytes sk; };
+
+// KeyGen_internal(seed): deterministic in the 32-byte seed ξ.
+inline KeyPair keygen(ParamSet ps, std::span<const uint8_t, 32> seed) {
+    const auto& p = params(ps);
+    KeyPair kp;
+    kp.pk.resize(determ_mldsa_pk_bytes(&p));
+    kp.sk.resize(determ_mldsa_sk_bytes(&p));
+    determ_mldsa_keygen(&p, seed.data(), kp.pk.data(), kp.sk.data());
+    return kp;
+}
+
+// M' for the pure external interface: 0x00 | len(ctx) | ctx | M (ctx <= 255 bytes).
+inline Bytes format_message(std::span<const uint8_t> ctx, std::span<const uint8_t> msg) {
+    Bytes out(2 + ctx.size() + msg.size());
+    size_t n = determ_mldsa_format_message(out.data(), detail::ptr(ctx), ctx.size(),
+                                           detail::ptr(msg), msg.size());
+    if (n == 0) throw std::runtime_error("determ::c99: mldsa context too long (> 255 bytes)");
+    out.resize(n);
+    return out;
+}
+
+// Sign_internal(sk, M'): deterministic by default (rnd = 32 zero bytes); pass a
+// 32-byte rnd for the hedged variant. `mprime` is the already-formatted message.
+inline Bytes sign(ParamSet ps, std::span<const uint8_t> sk, std::span<const uint8_t> mprime,
+                  std::optional<std::span<const uint8_t, 32>> rnd = std::nullopt) {
+    const auto& p = params(ps);
+    static const std::array<uint8_t, 32> ZERO{};
+    const uint8_t* r = rnd ? rnd->data() : ZERO.data();
+    Bytes sig(determ_mldsa_sig_bytes(&p));
+    // require() throws when rc != 0; determ_mldsa_sign returns 0 on success, so
+    // pass the raw rc (NOT `rc == 0`, which would be 1/true on success and throw).
+    detail::require(determ_mldsa_sign(&p, detail::ptr(sk), detail::ptr(mprime), mprime.size(),
+                                      r, sig.data()),
+                    "mldsa sign failed (bad params / rejection cap)");
+    return sig;
+}
+
+// Verify_internal(pk, M', sig): memory-safe on any sig (wrong length -> false).
+inline bool verify(ParamSet ps, std::span<const uint8_t> pk, std::span<const uint8_t> mprime,
+                   std::span<const uint8_t> sig) {
+    const auto& p = params(ps);
+    return determ_mldsa_verify(&p, detail::ptr(pk), detail::ptr(mprime), mprime.size(),
+                               detail::ptr(sig), sig.size()) == 1;
+}
+} // namespace mldsa
+
 // ─── Constant-time / hygiene (§3.10) ────────────────────────────────────────
 
 // Constant-time equality; use for every secret-adjacent compare.

@@ -1381,6 +1381,42 @@ Additional in-process tests:
 )" << "\n";
 }
 
+// §3.18 ML-DSA C++ wrapper (determ::c99::mldsa) self-test — kept in its OWN
+// function so the heavy Sign_internal/Verify_internal stack frames (~170 KB each)
+// don't stack on top of the large test-c99-api frame and trip the stack guard
+// (0xC0000409). Returns true iff every wrapper round-trip holds.
+static bool mldsa_api_selftest() {
+    using namespace determ::c99;
+    using namespace determ::c99::mldsa;
+    try {
+        int si = 0;
+        for (ParamSet ps : {ParamSet::ML_DSA_44, ParamSet::ML_DSA_65, ParamSet::ML_DSA_87}) {
+            std::array<uint8_t,32> seed{}; for (int i=0;i<32;i++) seed[i]=(uint8_t)(si*31+i+1);
+            KeyPair kp = keygen(ps, seed);
+            if (kp.pk.size()!=pk_bytes(ps) || kp.sk.size()!=sk_bytes(ps)) return false;
+            const determ_mldsa_params& p = params(ps);       // wrapper keygen == raw C keygen
+            std::vector<uint8_t> rpk(determ_mldsa_pk_bytes(&p)), rsk(determ_mldsa_sk_bytes(&p));
+            determ_mldsa_keygen(&p, seed.data(), rpk.data(), rsk.data());
+            if (kp.pk != rpk || kp.sk != rsk) return false;
+            std::array<uint8_t,3> ctx{'c','t','x'};
+            std::string m = "determ ml-dsa sign roundtrip";
+            Bytes mp = format_message(ctx, std::span<const uint8_t>((const uint8_t*)m.data(), m.size()));
+            Bytes sig = sign(ps, kp.sk, mp);                 // deterministic
+            if (!verify(ps, kp.pk, mp, sig)) return false;    // accepts
+            if (sign(ps, kp.sk, mp) != sig) return false;     // deterministic
+            Bytes bad = sig; bad[bad.size()/3] ^= 0x01;
+            if (verify(ps, kp.pk, mp, bad)) return false;     // tampered sig rejects
+            bad.pop_back();
+            if (verify(ps, kp.pk, mp, bad)) return false;     // short sig rejects safely
+            si++;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "  mldsa_api_selftest exception: " << e.what() << "\n";
+        return false;
+    }
+}
+
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 static int cmd_init(int argc, char** argv) {
@@ -13463,6 +13499,12 @@ int main(int argc, char** argv) {
             check(ok, "(12) oprf_p256 wrapper: blind/evaluate/finalize == direct evaluate; "
                       "VOPRF prove->verify accepts, tampered proof + wrong mode reject");
         }
+        // (13) §3.18 ML-DSA C++ wrapper: keygen -> sign -> verify round-trip via the
+        //      determ::c99::mldsa namespace (all 3 sets), wrapper keygen == raw C,
+        //      tamper + short-sig reject. Body in mldsa_api_selftest() (file scope,
+        //      catches wrapper exceptions and reports rather than terminating).
+        check(mldsa_api_selftest(),
+              "(13) mldsa wrapper: keygen->sign->verify (44/65/87) == raw C; tamper + short-sig reject");
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": c99-api " << (fail == 0
