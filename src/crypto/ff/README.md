@@ -1,4 +1,4 @@
-# `src/crypto/ff/` — finite-field Pedersen commitment over Z_p* (RFC 3526 MODP-3072)
+# `src/crypto/ff/` — finite-field Bulletproofs stack over Z_p* (RFC 3526 MODP-3072)
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.16 (walked by `tools/operator_crypto_selftest.sh`). Module spec section:
@@ -119,11 +119,31 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.
 
+## Increments 2-4 (SHIPPED — the Bulletproofs core over this group)
+
+Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-SPEC.md`
+§3.20 for the full treatment):
+
+- **inc.2 — vector commit + MSM** (`ffgroup.c`): nothing-up-my-sleeve order-`q`
+  generator families `G_i`/`H_i` (`determ_ff_gen`, hash-to-group + square), the vector
+  commit `C = h^r·ΠG_i^{a_i}·ΠH_i^{b_i} mod p` (`determ_ff_vector_commit`), and the
+  multi-exponentiation `ΠP_i^{s_i} mod p` (`determ_ff_msm`). Validated by
+  `determ test-ff-pedersen-c99` (7 assertions) + `ff_pedersen.json` (14 vectors).
+- **inc.3 — scalar field mod `q`** (`ffgroup.c`): the CIOS Montgomery core is
+  parameterized by a `(modulus, R², n')` context (`CTX_P`/`CTX_Q`); mod-`p` routines
+  stay byte-identical. `determ_ff_scalar_reduce`/`_add`/`_mul`/`_inv` + the Fiat-Shamir
+  `determ_ff_hash_to_scalar`. Validated by `determ test-ff-scalar-c99` (5 assertions) +
+  `ff_scalar.json` (11 vectors, `tools/verify_ff_scalar.py`).
+- **inc.4 — Bulletproofs IPA** (`ffipa.c`): `determ_ff_ipa_commit`/`_prove`/`_verify`,
+  a `2·log2(n)`-element inner-product argument, the log-size core the range proof
+  reduces to. Validated by `determ test-ff-ipa-c99` + `ff_ipa.json`
+  (`tools/verify_ff_ipa.py`; the C proof bytes match the Python byte-for-byte).
+
 ## Known limitations / future work
 
-- **NOT a range proof.** This is the commitment primitive only. The vector commit /
-  MSM / IPA / range proof over this group (mirroring §3.19 inc.2-6), behind a
-  group-abstraction layer so P-256 and Z_p* share one prover, are the next
+- **NOT yet a range proof.** inc.1-4 give the commitment + vector commit + IPA core;
+  the single-value + aggregated range proof over this group (mirroring §3.19 inc.5-6),
+  behind a group-abstraction layer so P-256 and Z_p* share one prover, are the next
   increments on this backend.
 - **No constant-time modexp** — the owner-gated hardening step (see the CT posture).
 - **Library only — not yet a chain consensus or wallet primitive.** Chain

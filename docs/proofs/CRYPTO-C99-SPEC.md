@@ -1306,7 +1306,7 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
-### 3.20 Finite-field Pedersen commitment over Z_p* — **SHIPPED (confidential-tx MODERN backend, increment 1)**
+### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-4)**
 
 The **owner-decided curve/group split** for the v2.22 confidential-transaction
 integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
@@ -1351,10 +1351,49 @@ Increment 1 is the finite-field analog of §3.19 inc.1 — library-primitive-fir
   the independent from-scratch Python (`tools/verify_ff_pedersen.py`, whose
   safe-prime + subgroup-membership + binding + homomorphism self-tests pass, using
   Python's native bignums as the reference arithmetic). Soundness/provenance:
-  `src/crypto/ff/README.md`. **Additive — no in-tree consumer yet.** Next on this
-  backend: the vector commitment / MSM / IPA / range proof over the same group
-  (mirroring §3.19 inc.2-6) behind a group-abstraction layer so P-256 and Z_p* share
-  one prover; then chain integration (owner-gated, per the design doc).
+  `src/crypto/ff/README.md`.
+
+**Increment 2 — vector-commitment generators + vector commit + MSM** (`ffgroup.c`,
+mirrors §3.19 inc.2/3). Two nothing-up-my-sleeve order-`q` generator FAMILIES
+`G_i = determ_ff_gen(i,0)`, `H_i = determ_ff_gen(i,1)` (hash-to-group: 13 SHA-256
+counter blocks of `family-DST ‖ big-endian index` → reduce mod p → square into `G_q`);
+the vector Pedersen commit `C = h^r · Π G_i^{a_i} · Π H_i^{b_i} mod p`
+(`determ_ff_vector_commit`); and the general multi-exponentiation `Π P_i^{s_i} mod p`
+(`determ_ff_msm`) — the `Z_p*` identity is the element `1` (representable), so the MSM
+is 2-way, unlike the P-256 3-way. `test-ff-pedersen-c99` 4→7 assertions; corpus
+`ff_pedersen.json` 6→14 vectors (gen KATs, vector_commit, MSM incl. the all-zero
+identity).
+
+**Increment 3 — scalar field mod `q`** (`ffgroup.c`, the exponent/challenge field the
+IPA/range proof operate in). The CIOS Montgomery core is parameterized by a
+`(modulus, R², n')` context — `CTX_P` for group elements, `CTX_Q` for scalars — so the
+mod-`p` routines are byte-identical wrappers (the `ff_pedersen`/`bp` corpora guard the
+byte-identity). API: `determ_ff_scalar_reduce` / `_add` / `_mul` / `_inv` (Fermat
+`a^{q-2}`) and `determ_ff_hash_to_scalar` (13 SHA-256 counter blocks → mod q — the
+deterministic Fiat-Shamir challenge map). `q`-Montgomery constants
+(`DETERM_FF_QNPRIME`, `DETERM_FF_QR2`) machine-generated into `ff_params.h`.
+`determ test-ff-scalar-c99` (5 assertions) + corpus `ff_scalar.json` (11 vectors),
+independent Python `tools/verify_ff_scalar.py`.
+
+**Increment 4 — Bulletproofs inner-product argument (IPA)** (`src/crypto/ff/ffipa.c`,
+mirrors §3.19 inc.4). A proof of knowledge of vectors `a, b` with
+`P = Π g_i^{a_i} · Π h_i^{b_i} · u^{<a,b>} mod p` in `2·log2(n)` group elements + 2
+scalars, non-interactive via a deterministic Fiat-Shamir transcript (label
+`DETERM-FF-BP-IPA-v1`). API `determ_ff_ipa_commit` / `_prove` / `_verify` (+ the
+`_gens` generator-supplied variants the range proof will use with a `y`-rescaled `h`
+family). Pure composition over inc.2/inc.3 — no new arithmetic; malformed `L/R/af/bf`
+reject via the MSM/scalar bound checks. `determ test-ff-ipa-c99` (n=1,2,4 round-trip +
+proof-length + wrong-`P`/tampered-proof reject) + corpus `ff_ipa.json` (commit/prove
+KAT for n=2,4, the file-half also re-verifying each proof), independent Python
+`tools/verify_ff_ipa.py` whose selftest also checks soundness (n up to 8) — **the C
+IPA proof bytes match this Python byte-for-byte**. `n` kept small in the corpus: the
+3072-bit modexp is ~1700× slower than the P-256 IPA (`n` up to 256 supported).
+
+All four increments are **NOT constant-time** (the owner-gated CT-hardening step) and
+**additive — no chain call site**. Next on this backend: the single-value + aggregated
+range proof over `Z_p*` (mirroring §3.19 inc.5-6), then a group-abstraction layer so
+P-256 and `Z_p*` share one prover; then chain integration (owner-gated, per the design
+doc).
 
 ---
 
