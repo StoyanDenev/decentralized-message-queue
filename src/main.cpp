@@ -540,6 +540,9 @@ In-process tests (deterministic, no network):
   determ test-ff-rangeproof-c99               §3.20 inc.5: single-value Bulletproofs
                                               range proof over Z_p* (v∈[0,2^n)) — the
                                               MODERN confidential-tx amount range
+  determ test-ff-agg-rangeproof-c99           §3.20 inc.6: AGGREGATED range proof over
+                                              Z_p* (m values, one proof of size
+                                              2·log2(m·n)+O(1)) — confidential-tx batch
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13995,6 +13998,48 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: ff-rangeproof-c99 unit test\n" : "  PASS: ff-rangeproof-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-ff-agg-rangeproof-c99") {
+        // §3.20 inc.6: AGGREGATED Bulletproofs range proof over Z_p* — m values in one
+        // proof. agg prove/verify + one-value-out-of-range + tampered-proof + wrong-V
+        // reject (m·n = 4, 8). Byte-exact KAT vs verify_ff_rangeproof.py emit-agg is the
+        // §3.13 gate (ff_aggrangeproof.json). m·n small — the 3072-bit modexp is heavy.
+        int fail=0;
+        auto check=[&](bool ok,const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        const size_t E=DETERM_FF_ELEM_BYTES;
+        auto mkscalar=[&](std::vector<uint8_t>& out, uint32_t seed){
+            std::vector<uint8_t> raw(E);
+            for (size_t i=0;i<E;i++) raw[i]=(uint8_t)((seed*2654435761u)+(uint32_t)i*40503u+(uint32_t)(i>>3));
+            out.assign(E,0); determ_ff_scalar_reduce(out.data(), raw.data());
+        };
+        const std::pair<size_t,size_t> cases[2] = {{2,2},{2,4}};
+        for (auto mn : cases) {
+            size_t m=mn.first, n=mn.second, nm=m*n;
+            std::vector<uint64_t> v(m); for (size_t j=0;j<m;j++) v[j]=((uint64_t)3<<j)%((uint64_t)1<<n);
+            std::vector<uint8_t> gamma(m*E), alpha,rho,tau1,tau2,s;
+            for (size_t j=0;j<m;j++){ mkscalar(s,(uint32_t)(m*13+j)); std::memcpy(&gamma[j*E],s.data(),E); }
+            mkscalar(alpha,(uint32_t)(m*13+100)); mkscalar(rho,(uint32_t)(m*13+101));
+            mkscalar(tau1,(uint32_t)(m*13+102)); mkscalar(tau2,(uint32_t)(m*13+103));
+            std::vector<uint8_t> sL(nm*E), sR(nm*E);
+            for (size_t i=0;i<nm;i++){ mkscalar(s,(uint32_t)(nm*7+i)); std::memcpy(&sL[i*E],s.data(),E);
+                                      mkscalar(s,(uint32_t)(nm*7+i+30)); std::memcpy(&sR[i*E],s.data(),E); }
+            size_t plen=determ_ff_agg_rangeproof_proof_len(m,n);
+            std::vector<uint8_t> V(m*E), proof(plen);
+            bool ok = plen>0
+                   && determ_ff_agg_rangeproof_prove(V.data(),proof.data(),v.data(),gamma.data(),alpha.data(),rho.data(),tau1.data(),tau2.data(),sL.data(),sR.data(),m,n)==0
+                   && determ_ff_agg_rangeproof_verify(V.data(),proof.data(),m,n)==0;                 // valid accepts
+            std::vector<uint64_t> vb=v; vb[m-1]=(uint64_t)1<<n;
+            std::vector<uint8_t> Vb(m*E), pb(plen);
+            ok = ok && determ_ff_agg_rangeproof_prove(Vb.data(),pb.data(),vb.data(),gamma.data(),alpha.data(),rho.data(),tau1.data(),tau2.data(),sL.data(),sR.data(),m,n)==0
+                    && determ_ff_agg_rangeproof_verify(Vb.data(),pb.data(),m,n)!=0;                  // one value OOR rejects
+            std::vector<uint8_t> pt=proof; pt[6*E+E-1]^=1;
+            ok = ok && determ_ff_agg_rangeproof_verify(V.data(),pt.data(),m,n)!=0;                   // tampered rejects
+            std::vector<uint8_t> Vw=V; Vw[E-1]^=1;
+            ok = ok && determ_ff_agg_rangeproof_verify(Vw.data(),proof.data(),m,n)!=0;               // wrong V rejects
+            check(ok, "agg-rangeproof m="+std::to_string(m)+" n="+std::to_string(n)+": prove/verify + out-of-range/tamper/wrong-V reject");
+        }
+        std::cout << (fail? "  FAIL: ff-agg-rangeproof-c99 unit test\n" : "  PASS: ff-agg-rangeproof-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -14276,6 +14321,7 @@ int main(int argc, char** argv) {
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "bp_agg_rangeproof.json", "ff_pedersen.json",
                                 "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
+                                "ff_aggrangeproof.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -15042,6 +15088,38 @@ int main(int argc, char** argv) {
                         || hx(V.data(),384)!=v["v_commit_hex"].get<std::string>()
                         || hx(proof.data(),plen)!=v["proof_hex"].get<std::string>()
                         || determ_ff_rangeproof_verify(V.data(),proof.data(),n)!=0) { ok=false; bad=name; break; }
+                } else if (prim == "ff_aggrangeproof") {
+                    // §3.20 inc.6 aggregated range proof — recompute the m V_j + prove via
+                    // the C and match the frozen bytes (independent verify_ff_rangeproof.py
+                    // emit-agg; the proof is also re-verified).
+                    size_t m = v["m"].get<size_t>(), n = v["n"].get<size_t>(), nm = m*n;
+                    const auto& vj=v["v_hex"]; const auto& gj=v["gamma_hex"];
+                    const auto& sLj=v["sL_hex"]; const auto& sRj=v["sR_hex"];
+                    bool okk = (vj.size()==m && gj.size()==m && sLj.size()==nm && sRj.size()==nm);
+                    std::vector<uint64_t> vv(m); std::vector<uint8_t> gamma(m*384), sL(nm*384), sR(nm*384);
+                    for (size_t j=0; okk && j<m; j++){
+                        auto vb=unhex(vj[j].get<std::string>()); auto gb=unhex(gj[j].get<std::string>());
+                        if (vb.size()!=384||gb.size()!=384){ okk=false; break; }
+                        uint64_t xv=0; for (int b=0;b<8;b++) xv=(xv<<8)|(uint64_t)vb[384-8+b]; vv[j]=xv;
+                        std::memcpy(&gamma[j*384],gb.data(),384);
+                    }
+                    for (size_t i=0; okk && i<nm; i++){
+                        auto a=unhex(sLj[i].get<std::string>()); auto b=unhex(sRj[i].get<std::string>());
+                        if (a.size()!=384||b.size()!=384){ okk=false; break; }
+                        std::memcpy(&sL[i*384],a.data(),384); std::memcpy(&sR[i*384],b.data(),384);
+                    }
+                    auto alpha=unhex(v["alpha_hex"].get<std::string>()); auto rho=unhex(v["rho_hex"].get<std::string>());
+                    auto tau1=unhex(v["tau1_hex"].get<std::string>());  auto tau2=unhex(v["tau2_hex"].get<std::string>());
+                    okk = okk && alpha.size()==384 && rho.size()==384 && tau1.size()==384 && tau2.size()==384;
+                    if (!okk) { ok=false; bad=name; break; }
+                    size_t plen=determ_ff_agg_rangeproof_proof_len(m,n);
+                    std::vector<uint8_t> V(m*384), proof(plen);
+                    if (plen==0
+                        || determ_ff_agg_rangeproof_prove(V.data(),proof.data(),vv.data(),gamma.data(),alpha.data(),
+                                                          rho.data(),tau1.data(),tau2.data(),sL.data(),sR.data(),m,n)!=0
+                        || hx(V.data(),m*384)!=v["v_commit_hex"].get<std::string>()
+                        || hx(proof.data(),plen)!=v["proof_hex"].get<std::string>()
+                        || determ_ff_agg_rangeproof_verify(V.data(),proof.data(),m,n)!=0) { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
                     // reference oracle (tools/verify_mldsa_vectors.py). "ntt"

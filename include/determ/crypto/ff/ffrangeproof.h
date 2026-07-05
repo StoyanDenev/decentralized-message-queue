@@ -51,6 +51,33 @@ int determ_ff_rangeproof_prove(uint8_t V_out[384], uint8_t *proof, uint64_t v,
  * bad n / OOM). Public-data operation, fail-closed. */
 int determ_ff_rangeproof_verify(const uint8_t V[384], const uint8_t *proof, size_t n);
 
+/* ── §3.20 increment 6: the AGGREGATED range proof (m values, one proof) ──────
+ * Proves that m committed values v_0..v_{m-1} EACH lie in [0, 2^n) in ONE proof of size
+ * 2*log2(m*n)+O(1) group elements. The m bit-vectors are concatenated; value j's 2^n
+ * slot is scaled by z^(2+j), so m=1 recovers the single-value proof. Transcript
+ * "DETERM-FF-BP-AGGRANGE-v1". Constraints: n <= DETERM_FF_RANGEPROOF_MAX_BITS (64),
+ * m >= 1, m*n a power of two <= 256. Same 384-byte big-endian wire convention. */
+
+/* Byte length of an aggregated proof: 2688 + determ_ff_ipa_proof_len(m*n). 0 if (m,n) is
+ * invalid. (The m value commitments V are a separate m*384-byte output, not in `proof`.) */
+size_t determ_ff_agg_rangeproof_proof_len(size_t m, size_t n);
+
+/* Prove that every v[j] in [0, 2^n) for j<m. Writes m compressed value commitments
+ * V_j = g^{v[j]}*h^{gamma[j]} to V_out (m*384 bytes) and the proof. gamma is m
+ * consecutive 384-byte scalars; sL, sR are each m*n consecutive 384-byte scalars;
+ * alpha/rho/tau1/tau2 are single 384-byte scalars (caller-supplied randomness). Returns
+ * 0, or -1 on bad (m,n) / invalid scalar / OOM. Deterministic. */
+int determ_ff_agg_rangeproof_prove(uint8_t *V_out, uint8_t *proof,
+                                   const uint64_t *v, const uint8_t *gamma,
+                                   const uint8_t alpha[384], const uint8_t rho[384],
+                                   const uint8_t tau1[384], const uint8_t tau2[384],
+                                   const uint8_t *sL, const uint8_t *sR, size_t m, size_t n);
+
+/* Verify: 0 iff `proof` is a valid aggregated range proof for the m value commitments V
+ * (m*384 bytes), -1 otherwise (malformed / any v[j] out of range / bad (m,n) / OOM).
+ * Fail-closed. A single out-of-range value in the batch rejects. */
+int determ_ff_agg_rangeproof_verify(const uint8_t *V, const uint8_t *proof, size_t m, size_t n);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
