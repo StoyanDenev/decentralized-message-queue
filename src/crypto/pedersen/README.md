@@ -2,7 +2,7 @@
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.16 (walked by `tools/operator_crypto_selftest.sh`). Module spec section:
-CRYPTO-C99-SPEC §3.19. Status: **increments 1-7 of
+CRYPTO-C99-SPEC §3.19. Status: **increments 1-8 of
 the owner-authorized range-proof / confidential-transaction track** (authorized
 2026-07-04, library-primitive-first). A Pedersen commitment `C = v*G + r*H` over
 NIST P-256 (inc.1), the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` (inc.2), the
@@ -182,8 +182,17 @@ The point subtractions are **scalar negations in the exponent** (`−C = (n−1)
 primitive and NO change to the sealed P-256 core**; the only local arithmetic is a
 256-bit add-mod-n / negate-mod-n over the exported curve order. API
 `determ_p256_balance_excess` / `_prove` / `_verify`; 65-byte proof = `compress(T)‖s`;
-transcript DST `DETERM-P256-BALANCE-v1-challenge`. This completes the FIPS-profile
-confidential-tx primitive set, symmetric with the MODERN-profile §3.20 `Z_p*` stack.
+transcript DST `DETERM-P256-BALANCE-v1-challenge`.
+
+**Increment 8 — the end-to-end confidential-tx composition (`determ
+test-p256-confidential-tx-c99`, a structural test — NOT a new primitive):** composes a
+per-output inc.5 range proof + the inc.7 balance proof into one confidential transaction
+over the PUBLIC APIs only, and pins the composition identity `V_j == C_out[j]` (a range
+proof's value commitment IS its tx output commitment — both `v*G + r*H`, so a
+cross-primitive generator mismatch turns it RED) plus the division of labour (balance
+catches inflation, range catches an out-of-range amount). Mirror:
+`tools/verify_p256_confidential_tx.py`. This completes the FIPS-profile confidential-tx
+primitive set, symmetric with the MODERN-profile §3.20 `Z_p*` stack.
 
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.

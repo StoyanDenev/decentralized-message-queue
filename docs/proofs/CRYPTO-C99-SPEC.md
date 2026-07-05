@@ -97,7 +97,7 @@ Achieved via three substitutions:
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
 | ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-8 — COMPLETE)** — FIPS 204 the whole scheme: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + **KeyGen + Sign + Verify**, all **ACVP-pinned (3 param sets)**; §3.18. Additive; chain integration is the next (owner-gated) step. | Public domain | ~740 |
-| Pedersen commitment + Bulletproofs IPA + range proof (single + aggregated) + balance proof | `src/crypto/pedersen/` | **SHIPPED (confidential-tx track inc.1-7)** — inc.1 `C = v*G + r*H` over P-256 (H a nothing-up-my-sleeve RFC 9380 hash-to-curve gen); inc.2 the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` over two nothing-up-my-sleeve generator families (the Bulletproofs A/S shape); inc.3 the general MSM `Σ s_i*P_i` (identity-aware); inc.4 the **Bulletproofs inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points + 2 scalars (`ipa.c`); inc.5 the **single-value range proof** — a committed `v ∈ [0, 2^n)` in `2*log2(n)+O(1)` elements, wrapping the IPA (`rangeproof.c`); inc.6 the **aggregated range proof** — `m` values in one `2*log2(m*n)+O(1)`-element proof (value `j`'s slot scaled by `z^(2+j)`, IPA over `m*n`); all non-interactive via deterministic Fiat-Shamir; pure composition over §3.8c P-256; binding + hiding + homomorphism gated by `test-pedersen-c99`, the IPA by `test-bp-ipa-c99`, the range proofs by `test-bp-rangeproof-c99` + `test-bp-agg-rangeproof-c99`, each with a dual-oracle corpus (`pedersen.json` + `bp_ipa.json` + `bp_rangeproof.json` + `bp_agg_rangeproof.json`); inc.7 the **confidential-tx balance proof** — a Schnorr PoK that the excess `E = Σ C_in − Σ C_out − fee*G` opens to zero (`E = x*H`, amount conservation), `balance.c` (zero sealed-code change), gated by `test-p256-balance-c99` + `p256_balance.json`; §3.19. The confidential-tx LIBRARY is complete — the FIPS-profile P-256 stack now offers the same primitive set as the MODERN-profile §3.20 `Z_p*` stack; a confidential-tx chain integration is the next (owner-gated) step. | Public domain | ~900 |
+| Pedersen commitment + Bulletproofs IPA + range proof (single + aggregated) + balance proof + composition | `src/crypto/pedersen/` | **SHIPPED (confidential-tx track inc.1-8)** — inc.1 `C = v*G + r*H` over P-256 (H a nothing-up-my-sleeve RFC 9380 hash-to-curve gen); inc.2 the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` over two nothing-up-my-sleeve generator families (the Bulletproofs A/S shape); inc.3 the general MSM `Σ s_i*P_i` (identity-aware); inc.4 the **Bulletproofs inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points + 2 scalars (`ipa.c`); inc.5 the **single-value range proof** — a committed `v ∈ [0, 2^n)` in `2*log2(n)+O(1)` elements, wrapping the IPA (`rangeproof.c`); inc.6 the **aggregated range proof** — `m` values in one `2*log2(m*n)+O(1)`-element proof (value `j`'s slot scaled by `z^(2+j)`, IPA over `m*n`); all non-interactive via deterministic Fiat-Shamir; pure composition over §3.8c P-256; binding + hiding + homomorphism gated by `test-pedersen-c99`, the IPA by `test-bp-ipa-c99`, the range proofs by `test-bp-rangeproof-c99` + `test-bp-agg-rangeproof-c99`, each with a dual-oracle corpus (`pedersen.json` + `bp_ipa.json` + `bp_rangeproof.json` + `bp_agg_rangeproof.json`); inc.7 the **confidential-tx balance proof** — a Schnorr PoK that the excess `E = Σ C_in − Σ C_out − fee*G` opens to zero (`E = x*H`, amount conservation), `balance.c` (zero sealed-code change), gated by `test-p256-balance-c99` + `p256_balance.json`; inc.8 the **end-to-end confidential-tx composition** (per-output range proof + balance proof, pinning `V_j == C_out[j]` + the balance-catches-inflation / range-catches-out-of-range division of labour, `test-p256-confidential-tx-c99`); §3.19. The confidential-tx LIBRARY is complete — the FIPS-profile P-256 stack now offers the same primitive set as the MODERN-profile §3.20 `Z_p*` stack; a confidential-tx chain integration is the next (owner-gated) step. | Public domain | ~900 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -1154,7 +1154,7 @@ that every parameter set (ML-DSA-44/65/87) shares.
   consensus-critical, separately-reviewed step; and the constant-time hardening
   review of the secret-dependent paths before any production signing use.
 
-### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increments 1-7: range-proof stack + balance proof)**
+### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increments 1-8: range-proof stack + balance proof + end-to-end composition)**
 
 The owner-authorized (2026-07-04) confidential-transaction / range-proof track,
 executed **library-primitive-first, KAT-gated, zero consensus touch** (the same
@@ -1271,6 +1271,19 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   independent Python `tools/verify_p256_balance.py`. An adversarial audit confirmed the
   local add/negate-mod-n edge cases (the `t==n` reduction; `carry ⟹ t<n` for `n>2^255`),
   the SEC1 compression, and fail-closed-on-identity.
+- **Increment 8 — end-to-end confidential-tx composition (`test-p256-confidential-tx-c99`,
+  a structural test — NOT a new primitive):** the FIPS-profile sibling of the §3.20 inc.8
+  finite-field composition. Composes the two shipped halves into one confidential
+  transaction over the **public §3.19 APIs only**: a per-output inc.5 range proof + the
+  inc.7 balance proof. It pins the composition fact that an output's range-proof value
+  commitment `V_j` is **byte-identical** to its tx commitment `C_out[j]` — because both
+  use the base point `G` and the §3.19 generator `H` — so a cross-primitive generator
+  mismatch turns the test RED. It also demonstrates the **division of labour**: an
+  *inflation* attempt (`Σv_out + fee ≠ Σv_in`, honest blindings) is caught by the
+  **balance** proof (each output is still an in-range commitment, so the range proofs
+  pass); an *out-of-range* output (`= 2^n`) is caught by that output's **range** proof.
+  Mirror: `tools/verify_p256_confidential_tx.py`; no new corpus — the composed bytes are
+  pinned by `bp_rangeproof.json` / `bp_agg_rangeproof.json` / `p256_balance.json`.
 - **Validation:** `determ test-pedersen-c99` (14 assertions — inc.1: H KAT +
   on-curve + H≠G; `commit == compress(v*G+r*H)` via the raw P-256 API; the v==0
   path; the **additive homomorphism**; open/verify accept + reject; binding
