@@ -1,11 +1,13 @@
 # `src/crypto/pedersen/` — Pedersen commitment over NIST P-256
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
-§3.16 (walked by `tools/operator_crypto_selftest.sh`). Status: **increment 1 of the
-owner-authorized range-proof / confidential-transaction track** (authorized
+§3.16 (walked by `tools/operator_crypto_selftest.sh`). Status: **increments 1-3 of
+the owner-authorized range-proof / confidential-transaction track** (authorized
 2026-07-04, library-primitive-first). A Pedersen commitment `C = v*G + r*H` over
-NIST P-256 (§3.19). **ZERO consensus touch — purely additive, not wired into any
-chain call site**; chain/wallet integration is a later, separately-reviewed step.
+NIST P-256 (inc.1), the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` (inc.2), and
+the general multi-scalar multiplication `Σ s_i*P_i` (inc.3) — §3.19. **ZERO
+consensus touch — purely additive, not wired into any chain call site**;
+chain/wallet integration is a later, separately-reviewed step.
 Headers under `include/determ/crypto/pedersen/`.
 
 ## What this module implements
@@ -55,6 +57,18 @@ for a uniform `r`, `C` is uniform over the group and reveals nothing about `v`.
   (`0 < r < n_order`). A zero-scalar term is skipped; `n == 0` yields `C = r*H`.
   This is the shape a range proof commits its bit-vectors (`a_L`, `a_R`) against.
 
+**Increment 3 — the general multi-scalar multiplication:**
+
+- `determ_pedersen_msm(out33, scalars, points33, n)` — `Σ_{i<n} s_i*P_i` over
+  ARBITRARY compressed points (unlike `vector_commit`, whose points are the fixed
+  generator families) — the operation the Bulletproofs inner-product argument
+  reduces its `L`/`R` commitments and generator-folding to; `vector_commit` is the
+  special case of it over the `[H, G_i, H_i]` list. Because the sum MAY legitimately
+  be the group identity (which has no 33-byte SEC1 encoding), the return is 3-way:
+  `0` = success (`out33` = the sum), `1` = the sum is the identity (`out33`
+  untouched; `n == 0` returns `1`), `-1` = a scalar `>= n_order` or a point fails to
+  decode. A zero-scalar term is skipped.
+
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
 
@@ -83,7 +97,7 @@ already-validated P-256 API (`include/determ/crypto/p256/p256.h`):
 The P-256 primitives are each already validated byte-equal vs OpenSSL EC
 (`determ test-p256-c99`) or against the RFC 9380 appendix vectors
 (`determ test-p256-h2c-c99`), so the correctness of the arithmetic is inherited;
-the only new logic is its composition. C99, ~60 LOC, Determ-original.
+the only new logic is its composition. C99, ~185 LOC, Determ-original.
 
 ## Standards cited
 
@@ -96,7 +110,7 @@ the only new logic is its composition. C99, ~60 LOC, Determ-original.
 
 ## Validation evidence
 
-`determ test-pedersen-c99` (11 assertions). These gates pin the COMPOSITION — the
+`determ test-pedersen-c99` (14 assertions). These gates pin the COMPOSITION — the
 underlying P-256 arithmetic is already gated byte-equal vs OpenSSL / RFC 9380:
 
 1. **`H` generator** — on-curve (`determ_p256_point_check`), deterministic across
@@ -128,14 +142,26 @@ Increment 2 (vector commitment):
     b1+b2, r1+r2)`; `n == 0 ⇒ C = r*H`; a zero vector entry is skipped correctly; and
     `r == 0` rejects.
 
-**§3.13 dual-oracle byte-frozen corpus** — `tools/vectors/pedersen.json` (12 vectors),
+Increment 3 (general MSM):
+
+12. **msm correctness** — `msm([3,5],[G_0,G_1]) == 3*G_0 + 5*G_1` recomputed via the
+    raw API, AND `vector_commit(a,b,2,r) == msm([r,a_0,a_1,b_0,b_1],[H,G_0,G_1,H_0,H_1])`
+    — a non-circular cross-check of both functions through independent code paths.
+13. **msm identity + skip** — `msm([1,n-1],[G_0,G_0])` returns the identity (rc 1,
+    since `(n-1)*G_0 == -G_0`); a zero-scalar term is skipped; `n == 0` returns the
+    identity.
+14. **msm rejects** — a scalar `= n_order` and a non-decodable point (bad SEC1 prefix)
+    each return `-1`.
+
+**§3.13 dual-oracle byte-frozen corpus** — `tools/vectors/pedersen.json` (14 vectors),
 wired into BOTH gate halves: `determ test-c99-vectors` recomputes each vector through
 the shipped C impl, and `tools/test_c99_vector_files.sh` recomputes through an
 INDEPENDENT from-scratch Python (`tools/verify_pedersen.py` — its own P-256 EC ladder
 + RFC 9380 hash-to-curve, self-checked against the C-pinned `H` KAT before write). The
 corpus carries the `H` generator, four `commit` vectors, a `homomorphism` vector whose
 scalars force a **mod-n wraparound** in `v1+v2` and `r1+r2`, five vector-generator
-KATs (`gen`), and a `vector_commit` (with a zero entry). A bug in `pedersen.c` — not
+KATs (`gen`), a `vector_commit` (with a zero entry), and an `msm` + an
+`msm`→identity vector. A bug in `pedersen.c` — not
 just a corrupted vector — turns the corpus RED, because the C and Python
 implementations are independent.
 
