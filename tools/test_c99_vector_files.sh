@@ -61,6 +61,7 @@ EXPECTED = {
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
+    "pedersen.json",
 }
 
 try:
@@ -1162,6 +1163,18 @@ def chk_mldsa_verify(vec, label):
     if bool(got) != bool(vec["expected"]):
         return "verify %s, expected %s (%s)" % (got, vec["expected"], vec.get("reason",""))
 
+def chk_pedersen(vec, label):
+    # §3.19 Pedersen commitment over P-256 — independent recomputation via the
+    # from-scratch EC + RFC 9380 hash_to_curve in tools/verify_pedersen.py: H and
+    # every C = v*G + r*H are recomputed here, never trusted from the file. Same
+    # dual-oracle posture as the mldsa checkers (C determ vs this python).
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_pedersen as vp
+    except Exception as e:
+        return "cannot import verify_pedersen (%s)" % e
+    return vp.check_pedersen(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1190,6 +1203,7 @@ CHECKERS = {
     "mldsa_keygen": chk_mldsa_keygen,
     "mldsa_sign": chk_mldsa_sign,
     "mldsa_verify": chk_mldsa_verify,
+    "pedersen": chk_pedersen,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

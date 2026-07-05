@@ -34,6 +34,7 @@
 #include <determ/crypto/mldsa/keygen.h>        // §3.18: ML-DSA keygen (increment 7, ACVP-pinned)
 #include <determ/crypto/mldsa/sign.h>          // §3.18: ML-DSA sign/verify (increment 8, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
+#include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -505,6 +506,10 @@ In-process tests (deterministic, no network):
                                               (P-256, SHA-256) protocol —
                                               blind/evaluate/finalize + DLEQ
                                               reject paths (vectors via §3.13)
+  determ test-pedersen-c99                    §3.19: Pedersen commitment over
+                                              P-256 (C = v*G + r*H) — H KAT +
+                                              additive homomorphism + open/
+                                              verify + reject gates (§3.13)
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13265,6 +13270,126 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+    if (cmd == "test-pedersen-c99") {
+        // §3.19 Pedersen commitment over P-256 (range-proof / confidential-tx
+        // track, increment 1). C = v*G + r*H with H a nothing-up-my-sleeve second
+        // generator (hash_to_curve of a fixed string, unknown log_G(H)). The
+        // commit/verify/add layer is pure composition over the P-256 primitives
+        // already gated byte-equal vs OpenSSL (test-p256-c99) / RFC 9380
+        // (test-p256-h2c-c99), so these gates pin the COMPOSITION: H's KAT +
+        // on-curve/!=G, commit == v*G+r*H via the raw API, the additive
+        // homomorphism (the decisive algebraic property), open/verify accept+
+        // reject, r==0 / v>=n rejection, and add's non-decodable-input reject.
+        int fail = 0;
+        auto check = [&](bool ok, const char* msg){
+            std::cout << (ok ? "  PASS: " : "  FAIL: ") << msg << "\n";
+            if (!ok) fail = 1;
+        };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for (size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s; };
+        auto commit = [&](const uint8_t v[32], const uint8_t r[32], uint8_t out33[33]){
+            return determ_pedersen_commit(out33, v, r);
+        };
+
+        // curve constants + the base point G (SEC1 uncompressed).
+        uint8_t p_[32], n_[32], b_[32], gx[32], gy[32];
+        determ_p256_params(p_, n_, b_, gx, gy);
+        uint8_t G[65]; G[0]=0x04; std::memcpy(G+1, gx, 32); std::memcpy(G+33, gy, 32);
+
+        // (1) H generator: on-curve, deterministic, H != G, and the pinned KAT.
+        uint8_t H[65], H2[65];
+        int hrc = determ_pedersen_generator_h(H);
+        determ_pedersen_generator_h(H2);
+        uint8_t Hc[33]; determ_p256_point_compress(Hc, H);
+        bool h_ok = (hrc == 0)
+            && determ_p256_point_check(H) == 0
+            && std::memcmp(H, H2, 65) == 0
+            && std::memcmp(H, G, 65) != 0;
+        check(h_ok, "generator_h: on-curve + deterministic + H != G");
+        check(hx(Hc, 33) == "0235527ee68afadb08b77415a8b00cc314abb1fd526451508271ee6c441ae0ad55",
+              "generator_h: compressed H matches the pinned KAT");
+
+        // (2) commit correctness: commit(v,r) == compress(v*G + r*H) via raw P-256.
+        {
+            uint8_t v[32]={0}, r[32]={0};
+            v[31]=9;  r[30]=0x12; r[31]=0x34;      // v=9, r=0x1234
+            uint8_t C[33];
+            bool ok = commit(v, r, C) == 0;
+            uint8_t vG[65], rH[65], sum[65], Cref[33];
+            ok = ok && determ_p256_base_mul(vG, v)==0;
+            ok = ok && determ_p256_point_mul(rH, r, H)==0;
+            ok = ok && determ_p256_point_add(sum, vG, rH)==0;
+            ok = ok && determ_p256_point_compress(Cref, sum)==0;
+            ok = ok && std::memcmp(C, Cref, 33)==0;
+            check(ok, "commit: C == compress(v*G + r*H) via the raw P-256 API");
+        }
+
+        // (3) v==0 path: commit(0, r) == r*H.
+        {
+            uint8_t v[32]={0}, r[32]={0}; r[31]=0x77;
+            uint8_t C[33], rH[65], Cref[33];
+            bool ok = commit(v, r, C) == 0;
+            ok = ok && determ_p256_point_mul(rH, r, H)==0;
+            ok = ok && determ_p256_point_compress(Cref, rH)==0;
+            ok = ok && std::memcmp(C, Cref, 33)==0;
+            check(ok, "commit(0, r) == r*H (zero-value commitment)");
+        }
+
+        // (4) additive homomorphism, no-carry small scalars (so v1+v2 and r1+r2
+        //     need no mod-n reduction): commit(v1,r1) (+) commit(v2,r2) ==
+        //     commit(v1+v2, r1+r2). The decisive algebraic gate.
+        {
+            uint8_t v1[32]={0}, v2[32]={0}, v3[32]={0};
+            v1[31]=5; v2[31]=7; v3[31]=12;
+            uint8_t r1[32]={0}, r2[32]={0}, r3[32]={0};
+            r1[30]=0x11; r1[31]=0x22; r2[30]=0x33; r2[31]=0x44; r3[30]=0x44; r3[31]=0x66;
+            uint8_t C1[33], C2[33], Csum[33], C3[33];
+            bool ok = commit(v1,r1,C1)==0 && commit(v2,r2,C2)==0 && commit(v3,r3,C3)==0;
+            ok = ok && determ_pedersen_add(Csum, C1, C2)==0;
+            ok = ok && std::memcmp(Csum, C3, 33)==0;
+            check(ok, "homomorphism: commit(v1,r1)+commit(v2,r2) == commit(v1+v2, r1+r2)");
+        }
+
+        // (5) open/verify accept + reject (wrong v, wrong r, tampered C).
+        {
+            uint8_t v[32]={0}, r[32]={0}; v[31]=42; r[30]=0xAB; r[31]=0xCD;
+            uint8_t C[33]; commit(v, r, C);
+            bool ok = determ_pedersen_verify(C, v, r) == 0;             // correct open accepts
+            uint8_t vbad[32]; std::memcpy(vbad, v, 32); vbad[31]=43;
+            ok = ok && determ_pedersen_verify(C, vbad, r) != 0;         // wrong value rejects
+            uint8_t rbad[32]; std::memcpy(rbad, r, 32); rbad[31]^=0x01;
+            ok = ok && determ_pedersen_verify(C, v, rbad) != 0;         // wrong blinding rejects
+            uint8_t Cbad[33]; std::memcpy(Cbad, C, 33); Cbad[20]^=0x01;
+            ok = ok && determ_pedersen_verify(Cbad, v, r) != 0;         // tampered C rejects
+            check(ok, "verify: correct open accepts; wrong v / wrong r / tampered C reject");
+        }
+
+        // (6) binding sanity: different values -> different commitments (same r).
+        {
+            uint8_t r[32]={0}; r[31]=0x55;
+            uint8_t v1[32]={0}, v2[32]={0}; v1[31]=1; v2[31]=2;
+            uint8_t C1[33], C2[33];
+            bool ok = commit(v1,r,C1)==0 && commit(v2,r,C2)==0 && std::memcmp(C1,C2,33)!=0;
+            check(ok, "binding: commit(v1,r) != commit(v2,r) for v1 != v2");
+        }
+
+        // (7) input validation: r==0 rejected; v>=n rejected; malformed add reject.
+        {
+            uint8_t v[32]={0}, zero[32]={0}; v[31]=5;
+            uint8_t C[33];
+            bool ok = determ_pedersen_commit(C, v, zero) == -1;         // r==0 -> no hiding -> reject
+            uint8_t r[32]={0}; r[31]=3;
+            ok = ok && determ_pedersen_commit(C, n_, r) == -1;          // v >= n rejects (base_mul)
+            uint8_t junk[33]; std::memset(junk, 0xEE, 33); junk[0]=0x05; // bad SEC1 prefix
+            uint8_t good[33]; commit(v, r, good);
+            uint8_t out[33];
+            ok = ok && determ_pedersen_add(out, junk, good) == -1;
+            check(ok, "reject: r==0, v>=n, and a non-decodable commitment in add");
+        }
+
+        std::cout << (fail? "  FAIL: pedersen-c99 unit test\n" : "  PASS: pedersen-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -13543,6 +13668,7 @@ int main(int argc, char** argv) {
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
+                                "pedersen.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14000,6 +14126,34 @@ int main(int argc, char** argv) {
                         determ_shake256(out.empty()?nullptr:out.data(), outlen, dptr(msg), msg.size());
                         if (hx(out.data(), outlen) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name + " (unknown sha3 alg '" + alg + "')"; break; }
+                } else if (prim == "pedersen") {
+                    // §3.19 Pedersen commitment over P-256. Recompute H and each
+                    // commitment C = v*G + r*H via the C API; match the frozen
+                    // (independent-Python-generated, verify_pedersen.py) bytes.
+                    std::string ty = v.value("type", "");
+                    if (ty == "h_generator") {
+                        uint8_t H[65], Hc[33];
+                        if (determ_pedersen_generator_h(H) != 0
+                            || determ_p256_point_compress(Hc, H) != 0
+                            || hx(Hc, 33) != v["h_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "commit") {
+                        auto vv = unhex(v["v_hex"]); auto rr = unhex(v["r_hex"]);
+                        uint8_t C[33];
+                        if (vv.size()!=32 || rr.size()!=32
+                            || determ_pedersen_commit(C, vv.data(), rr.data()) != 0
+                            || hx(C, 33) != v["c_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "homomorphism") {
+                        // commit(v1,r1) (+) commit(v2,r2) == c3 (the frozen add,
+                        // with mod-n wraparound on v1+v2 and r1+r2).
+                        auto v1 = unhex(v["v1_hex"]); auto r1 = unhex(v["r1_hex"]);
+                        auto v2 = unhex(v["v2_hex"]); auto r2 = unhex(v["r2_hex"]);
+                        uint8_t C1[33], C2[33], Csum[33];
+                        if (v1.size()!=32||r1.size()!=32||v2.size()!=32||r2.size()!=32
+                            || determ_pedersen_commit(C1, v1.data(), r1.data()) != 0
+                            || determ_pedersen_commit(C2, v2.data(), r2.data()) != 0
+                            || determ_pedersen_add(Csum, C1, C2) != 0
+                            || hx(Csum, 33) != v["c3_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name + " (unknown pedersen type '" + ty + "')"; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
                     // reference oracle (tools/verify_mldsa_vectors.py). "ntt"

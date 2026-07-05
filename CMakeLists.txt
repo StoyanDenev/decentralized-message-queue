@@ -124,6 +124,10 @@ add_library(determ-crypto-c99 STATIC
   # §3.8c NIST P-256 (FIPS-profile curve; Montgomery field + RCB complete
   # addition + CT ladder) — `determ test-p256-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/p256/p256.c"
+  # §3.19 Pedersen commitment over P-256 (range-proof / confidential-tx track,
+  # increment 1) — pure composition over the P-256 primitives above; `determ
+  # test-pedersen-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/pedersen.c"
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"
