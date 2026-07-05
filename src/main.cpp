@@ -13610,14 +13610,17 @@ int main(int argc, char** argv) {
         // (1) proof_len contract.
         {
             bool ok = determ_rangeproof_proof_len(4)==424 && determ_rangeproof_proof_len(8)==490
-                   && determ_rangeproof_proof_len(16)==556 && determ_rangeproof_proof_len(3)==0
+                   && determ_rangeproof_proof_len(16)==556 && determ_rangeproof_proof_len(32)==622
+                   && determ_rangeproof_proof_len(64)==688 && determ_rangeproof_proof_len(3)==0
                    && determ_rangeproof_proof_len(128)==0;
             check(ok, "proof_len: 228 + ipa_proof_len(n); non-power-of-2 and n>64 -> 0");
         }
-        // (2)-(4) round-trip + determinism + soundness, n in {4,8,16}.
+        // (2)-(4) round-trip + determinism + soundness. n up to 64 (the maximum)
+        // exercises the exact-fit (2*64+1)/(2*64+3) prove/verify buffers on every run.
         bool rt=true, det=true, sound=true;
         struct RPCase { size_t n; uint64_t seed; uint64_t v; };
-        RPCase cases[] = { {4,1,9}, {8,2,200}, {16,3,43210} };
+        RPCase cases[] = { {4,1,9}, {8,2,200}, {16,3,43210},
+                           {32,4,2863311530ull}, {64,5,((uint64_t)1<<63)|12345} };
         for (auto& c : cases) {
             uint8_t gamma[32], alpha[32], rho[32], tau1[32], tau2[32];
             setsc(gamma, 101*c.seed+7);
@@ -13635,12 +13638,16 @@ int main(int argc, char** argv) {
             uint8_t Vbad[33]; std::vector<uint8_t> pfx(plen);
             if (determ_rangeproof_prove(Vbad, pfx.data(), c.v+1, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)==0
                 && determ_rangeproof_verify(Vbad, pf.data(), c.n)==0) sound=false;
-            // out-of-range v = 2^n -> verify rejects
-            uint8_t Voor[33]; std::vector<uint8_t> pfoor(plen);
-            if (determ_rangeproof_prove(Voor, pfoor.data(), (uint64_t)1<<c.n, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)==0
-                && determ_rangeproof_verify(Voor, pfoor.data(), c.n)==0) sound=false;
+            // out-of-range v = 2^n -> verify rejects. Skipped at n==64: no uint64
+            // is >= 2^64 (and (uint64_t)1<<64 would be UB), so the range [0,2^64)
+            // is the whole domain and there is no out-of-range witness to test.
+            if (c.n < 64) {
+                uint8_t Voor[33]; std::vector<uint8_t> pfoor(plen);
+                if (determ_rangeproof_prove(Voor, pfoor.data(), (uint64_t)1<<c.n, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)==0
+                    && determ_rangeproof_verify(Voor, pfoor.data(), c.n)==0) sound=false;
+            }
         }
-        check(rt,    "round-trip: prove -> verify accepts (n in {4,8,16})");
+        check(rt,    "round-trip: prove -> verify accepts (n in {4,8,16,32,64})");
         check(det,   "deterministic: prove twice yields identical V + proof bytes");
         check(sound, "soundness: tampered proof, wrong commitment, and out-of-range v all reject");
 
