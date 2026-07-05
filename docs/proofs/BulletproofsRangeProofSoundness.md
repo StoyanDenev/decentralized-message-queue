@@ -156,10 +156,21 @@ The two-leg split is the standard §3.13 defense-in-depth: the structural test i
 
 ---
 
+## 5A. The aggregated range proof (increment 6)
+
+Increment 6 (`determ_agg_rangeproof_prove`/`_verify`, same `rangeproof.c`) generalizes the single-value proof to prove that **`m` committed values `v_0..v_{m-1}` each lie in `[0, 2^n)` in ONE proof** of size `2*log2(m*n) + O(1)` group elements (Bünz et al. 2018 **§4.3**, the aggregation of `m` single range proofs). The `m` bit-vectors are concatenated into a length-`m*n` `a_L`; value `j`'s `2^n` slot is scaled by `z^(2+j)` (0-indexed), so the constant term is `t_0 = Σ_j z^(2+j)·v_j + delta(y,z)` with `delta = (z − z^2)·<1^{mn}, y^{mn}> − (Σ_j z^(3+j))·<1^n, 2^n>`, and the final `<l,r> = t̂` check is the **same inc.4 IPA over the `m*n`-wide generators**. Setting `m = 1` recovers §1.2 exactly.
+
+**All of RP-1..RP-6 carry over** with the `m`-value generalization — the construction is identical modulo the per-slot `z^(2+j)` weighting, which the same `t_0`-oracle machine-verifies (`verify_bp_agg_rangeproof._t0_oracle` checks `t_0 == Σ_j z^(2+j)·v_j + delta` over `(m,n) ∈ {(1,4),(2,2),(2,4),(4,2),(2,8),(4,4)}`). The **soundness** (RP-2) is Bünz §4.3's reduction: aggregation preserves special-soundness, and the `z^(2+j)` separation binds each value to its own range — so a **single out-of-range value anywhere in the batch is caught** (its slot's `z^(2+j)·v_j` term breaks Check 1). This is a witnessed reject in the structural test, not just prose.
+
+**Gate.** `determ test-bp-agg-rangeproof-c99` (proof_len contract `228 + ipa_proof_len(m*n)`, non-pow2 `m*n` / `m*n>256 → 0`; round-trip for `(m,n) ∈ {(1,4),(2,4),(4,4),(2,8)}`; determinism; soundness — tampered proof, wrong batch of commitments, AND out-of-range-in-batch all reject) + the §3.13 dual-oracle corpus `tools/vectors/bp_agg_rangeproof.json` (3 vectors, `(m,n) ∈ {(2,4),(4,4),(2,8)}`) recomputed byte-for-byte by BOTH the C and the independent from-scratch Python (`tools/verify_bp_agg_rangeproof.py`). An off-corpus cross-check further confirms byte-exact agreement at the **`m*n = 256` max-buffer boundary** (`m=32, n=8`), empirically de-risking the exact-fit aggregated `scal`/`pts` `(2·256+3)`-element arrays. The **non-claims/limits carry over verbatim** except NC-1 (single-value) which inc.6 supersedes; NC-2's "not aggregated" is now also superseded (aggregation shipped) while the single-multi-exp verify optimization remains a non-goal.
+
+---
+
 ## 6. Status
 
 - **Spec.** Complete (this document).
 - **The structural test + both byte-gate halves shipped and green.** `test-bp-rangeproof-c99` (proof_len + round-trip + determinism + soundness-reject incl. out-of-range), the `bp_rangeproof` branch of `test-c99-vectors` (binary half), and `chk_bp_rangeproof`/`verify_bp_rangeproof.check_rangeproof` (file half) validate the three-vector corpus + the reject/round-trip paths; the C99 output — `V` + all proof fields + the inner IPA — is byte-exact against the independent Python, whose `_t0_oracle` machine-verifies the completeness identity for `n ∈ {1,2,4,8,16}`.
 - **Claims.** RP-1 (completeness), RP-2 (soundness — reduced to Bulletproofs §4 under ECDLP + ROM; reject witnesses incl. out-of-range, NOT an extractor), RP-3 (determinism / non-interactivity), RP-4 (dual-oracle byte-exactness — full proof, two independent impls), RP-5 (proof_len contract), RP-6 (trust inheritance; `sc_add`/`sc_sub` the only new arithmetic, corroborated via the byte-exact oracle + the audit fuzz) — all closed.
-- **Non-claims (NC-1..NC-4).** Single value only; not the multi-exp-optimized/aggregated verifier; not a consensus/wallet primitive; not constant-time (owner-gated CT hardening).
+- **Non-claims (NC-1..NC-4).** Single value only [SUPERSEDED by the inc.6 aggregation, §5A]; not the multi-exp-optimized verifier [aggregation now shipped]; not a consensus/wallet primitive; not constant-time (owner-gated CT hardening).
+- **Increment 6 (aggregation).** Shipped and gated (§5A): `m` values in one proof, `test-bp-agg-rangeproof-c99` + the dual C∥Python `bp_agg_rangeproof.json` corpus, RP-1..RP-6 carry over, a single out-of-range value in the batch rejects, byte-exact to the `m*n=256` max-buffer boundary.
 - **Limits (L-1..L-4).** Soundness assumes ECDLP + generator independence (reduction, not extractor); conformance is over the three frozen vectors + bounded structural `n`; Fiat-Shamir soundness is in the ROM; timing → §3.12 / `ConstantTimeInventory.md`.

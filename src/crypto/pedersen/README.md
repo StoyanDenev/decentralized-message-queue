@@ -144,6 +144,28 @@ inc.1-4 primitives is the modular add/sub (`sc_add` / `sc_sub`); everything else
 `determ_pedersen_msm` + the P-256 point/scalar ops. `n` is a power of two ≤ 64 (a
 value fits a `uint64_t`).
 
+**Increment 6 — the AGGREGATED range proof (same `rangeproof.c`):**
+
+Proves that `m` committed values `v_0..v_{m-1}` EACH lie in `[0, 2^n)` in ONE proof
+of size `2*log2(m*n) + O(1)` group elements — a per-value saving over `m` separate
+proofs.
+
+- `determ_agg_rangeproof_proof_len(m, n)` — `228 + determ_ipa_proof_len(m*n)`; `0`
+  unless `n ≤ 64`, `m ≥ 1`, and `m*n` is a power of two `≤ DETERM_IPA_MAX_N` (256).
+- `determ_agg_rangeproof_prove(V_out, proof, v[], gamma[], alpha, rho, tau1, tau2,
+  sL, sR, m, n)` — writes `m` compressed value commitments `V_j = v[j]*g +
+  gamma[j]*h` to `V_out` (`m*33` bytes) and the proof. `gamma` is `m` scalars; `sL`,
+  `sR` are each `m*n` scalars; the rest are single scalars.
+- `determ_agg_rangeproof_verify(V, proof, m, n)` — verifies against the `m` value
+  commitments; a single out-of-range value anywhere in the batch rejects.
+
+The construction concatenates the `m` bit-vectors into a length-`m*n` `a_L`; value
+`j`'s `2^n` slot is scaled by `z^(2+j)` (0-indexed, so `m=1` reduces exactly to the
+single-value proof). The verifier's `t̂` identity gains the `Σ_j z^(2+j)·V_j` term
+and `delta` the `Σ_j z^(3+j)` sum. The final `<l,r>=t̂` check is the same inc.4 IPA
+over the `m*n`-wide generators. Own transcript label `DETERM-BP-AGGRANGE-v1`
+(seeds `m`, `n`, all `V_j`). Reuses every single-value static — no new arithmetic.
+
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
 

@@ -97,7 +97,7 @@ Achieved via three substitutions:
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
 | ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-8 — COMPLETE)** — FIPS 204 the whole scheme: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + **KeyGen + Sign + Verify**, all **ACVP-pinned (3 param sets)**; §3.18. Additive; chain integration is the next (owner-gated) step. | Public domain | ~740 |
-| Pedersen commitment + Bulletproofs IPA + range proof | `src/crypto/pedersen/` | **SHIPPED (range-proof track inc.1-5)** — inc.1 `C = v*G + r*H` over P-256 (H a nothing-up-my-sleeve RFC 9380 hash-to-curve gen); inc.2 the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` over two nothing-up-my-sleeve generator families (the Bulletproofs A/S shape); inc.3 the general MSM `Σ s_i*P_i` (identity-aware); inc.4 the **Bulletproofs inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points + 2 scalars (`ipa.c`); inc.5 the **Bulletproofs single-value range proof** — proving a committed `v ∈ [0, 2^n)` without revealing `v`, in `2*log2(n)+O(1)` elements, wrapping the IPA (`rangeproof.c`); all non-interactive via deterministic Fiat-Shamir; pure composition over §3.8c P-256; binding (unknown dlog) + hiding + homomorphism gated by `test-pedersen-c99`, the IPA by `test-bp-ipa-c99`, the range proof by `test-bp-rangeproof-c99`, each with a dual-oracle corpus (`pedersen.json` + `bp_ipa.json` + `bp_rangeproof.json`); §3.19. Additive; a confidential-tx chain integration is the next (owner-gated) step. | Public domain | ~600 |
+| Pedersen commitment + Bulletproofs IPA + range proof (single + aggregated) | `src/crypto/pedersen/` | **SHIPPED (range-proof track inc.1-6)** — inc.1 `C = v*G + r*H` over P-256 (H a nothing-up-my-sleeve RFC 9380 hash-to-curve gen); inc.2 the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` over two nothing-up-my-sleeve generator families (the Bulletproofs A/S shape); inc.3 the general MSM `Σ s_i*P_i` (identity-aware); inc.4 the **Bulletproofs inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points + 2 scalars (`ipa.c`); inc.5 the **single-value range proof** — a committed `v ∈ [0, 2^n)` in `2*log2(n)+O(1)` elements, wrapping the IPA (`rangeproof.c`); inc.6 the **aggregated range proof** — `m` values in one `2*log2(m*n)+O(1)`-element proof (value `j`'s slot scaled by `z^(2+j)`, IPA over `m*n`); all non-interactive via deterministic Fiat-Shamir; pure composition over §3.8c P-256; binding + hiding + homomorphism gated by `test-pedersen-c99`, the IPA by `test-bp-ipa-c99`, the range proofs by `test-bp-rangeproof-c99` + `test-bp-agg-rangeproof-c99`, each with a dual-oracle corpus (`pedersen.json` + `bp_ipa.json` + `bp_rangeproof.json` + `bp_agg_rangeproof.json`); §3.19. The range-proof LIBRARY is complete; a confidential-tx chain integration is the next (owner-gated) step. | Public domain | ~800 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -157,7 +157,7 @@ src/crypto/
 ├── pedersen/                   # SHIPPED: Pedersen commitment + Bulletproofs IPA + range proof over P-256 (§3.19)
 │   ├── pedersen.c              #   inc.1 C=v*G+r*H; inc.2 vector commit r*H+Σ(a_i*G_i+b_i*H_i); inc.3 MSM Σ s_i*P_i (test-pedersen-c99)
 │   ├── ipa.c                   #   inc.4 Bulletproofs inner-product argument P=<a,g>+<b,h>+<a,b>*u, 2*log2(n) pts (test-bp-ipa-c99)
-│   └── rangeproof.c            #   inc.5 Bulletproofs range proof v in [0,2^n), wraps the IPA (test-bp-rangeproof-c99)
+│   └── rangeproof.c            #   inc.5 single-value + inc.6 AGGREGATED range proof (m values), wraps the IPA (test-bp-rangeproof-c99 / test-bp-agg-rangeproof-c99)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -1154,7 +1154,7 @@ that every parameter set (ML-DSA-44/65/87) shares.
   consensus-critical, separately-reviewed step; and the constant-time hardening
   review of the secret-dependent paths before any production signing use.
 
-### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increments 1-5)**
+### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increments 1-6)**
 
 The owner-authorized (2026-07-04) confidential-transaction / range-proof track,
 executed **library-primitive-first, KAT-gated, zero consensus touch** (the same
@@ -1236,6 +1236,21 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   decode failure. The only new arithmetic beyond the inc.1-4 primitives is the
   modular add/sub (`sc_add`/`sc_sub`); everything else composes over
   `determ_pedersen_msm` + the P-256 point/scalar ops.
+- **Increment 6 — the AGGREGATED range proof (`rangeproof.c`, same module):**
+  proves that `m` committed values `v_0..v_{m-1}` EACH lie in `[0, 2^n)` in ONE
+  proof of size `2*log2(m*n) + O(1)` group elements (vs. `m` separate proofs). The
+  `m` bit-vectors are concatenated into a length-`m*n` `a_L`; value `j`'s `2^n` slot
+  is scaled by `z^(2+j)` (0-indexed, so `m=1` recovers inc.5); the final `<l,r>=t̂`
+  check is compressed by the same inc.4 IPA over the `m*n`-wide generators. API:
+  `determ_agg_rangeproof_prove(V_out, proof, v[], gamma[], alpha, rho, tau1, tau2,
+  sL, sR, m, n)` (writes `m` value commitments to `V_out` + the proof) / `_verify(V,
+  proof, m, n)` / `_proof_len(m, n) = 228 + determ_ipa_proof_len(m*n)`. Constraints:
+  `n ≤ 64`, `m ≥ 1`, `m*n` a power of two `≤ DETERM_IPA_MAX_N` (256). The verifier's
+  `t̂` identity gains the `Σ_j z^(2+j)·V_j` term and `delta` the `Σ_j z^(3+j)` sum;
+  the `z^(2+j)`-slot vector places each value's `2^n` weighting. Reuses every
+  single-value static (`sc_add`/`sc_sub`/`rp_inner`/`msm`/the IPA `_gens`); a single
+  out-of-range value anywhere in the batch rejects. Deterministic Fiat-Shamir
+  transcript with its own label `DETERM-BP-AGGRANGE-v1` (seeds `m`, `n`, all `V_j`).
 - **Validation:** `determ test-pedersen-c99` (14 assertions — inc.1: H KAT +
   on-curve + H≠G; `commit == compress(v*G+r*H)` via the raw P-256 API; the v==0
   path; the **additive homomorphism**; open/verify accept + reject; binding
@@ -1266,12 +1281,25 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   corpus `tools/vectors/bp_rangeproof.json` (3 vectors, n∈{4,8,16}) recomputed by
   BOTH the C impl and the independent from-scratch Python
   (`tools/verify_bp_rangeproof.py`, whose t0-oracle + round-trip + tamper +
-  out-of-range self-tests pass over n∈{1,2,4,8,16}). Soundness accounting:
-  `PedersenCommitmentSoundness.md` + `BulletproofsIPASoundness.md` +
-  `BulletproofsRangeProofSoundness.md`; per-module provenance:
-  `src/crypto/pedersen/README.md`. **Additive — no in-tree consumer yet.** Next on
-  this track: chain integration (a confidential-transaction protocol wiring these
-  proofs into the ledger) — a separately-reviewed, consensus-critical step; also
+  out-of-range self-tests pass over n∈{1,2,4,8,16}). inc.6: `determ
+  test-bp-agg-rangeproof-c99` (4 assertions — the `proof_len` contract [228 +
+  `ipa_proof_len(m*n)`; non-power-of-2 `m*n` / `m*n>256` → 0]; round-trip for
+  (m,n)∈{(1,4),(2,4),(4,4),(2,8)}; determinism; soundness [a byte-flipped proof, a
+  wrong batch of commitments, AND an out-of-range value anywhere in the batch all
+  reject]) + the §3.13 dual-oracle corpus `tools/vectors/bp_agg_rangeproof.json` (3
+  vectors, (m,n)∈{(2,4),(4,4),(2,8)}) recomputed BYTE-FOR-BYTE by BOTH the C and the
+  independent from-scratch Python (`tools/verify_bp_agg_rangeproof.py`, whose
+  t0-oracle + round-trip + tamper + out-of-range-in-batch self-tests pass over
+  (m,n)∈{(1,4),(2,2),(2,4),(4,2),(2,8),(4,4)}); an off-corpus cross-check further
+  confirms byte-exact agreement at the m*n=256 max-buffer boundary. Soundness
+  accounting: `PedersenCommitmentSoundness.md` + `BulletproofsIPASoundness.md` +
+  `BulletproofsRangeProofSoundness.md` (extended in-doc for the inc.6 aggregation);
+  per-module provenance: `src/crypto/pedersen/README.md`. **Additive — no in-tree
+  consumer yet.** The library side of the range-proof track is now COMPLETE
+  (commit + vector commit + MSM + IPA + single-value range proof + aggregated range
+  proof). Next: chain integration (a confidential-transaction protocol wiring these
+  proofs into the ledger — see `ConfidentialTxIntegrationDesign.md`), a
+  separately-reviewed, owner-gated, consensus-critical step; also
   candidate: proof aggregation (multiple values in one argument) and the
   single-multi-exp verify optimization.
   CT posture: data-independent except the documented `scalar_is_zero` branches (a
