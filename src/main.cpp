@@ -533,6 +533,9 @@ In-process tests (deterministic, no network):
                                               proof over P-256 (Σv_in=Σv_out+fee, no
                                               amounts revealed) — FIPS-profile
                                               amount-conservation half
+  determ test-p256-confidential-tx-c99        §3.19 inc.8: END-TO-END confidential-tx
+                                              composition over P-256 (per-output range +
+                                              balance; range catches OOR, balance inflation)
   determ test-ff-pedersen-c99                 §3.20: finite-field Pedersen commit
                                               (g^v h^r mod p) over RFC 3526 MODP-
                                               3072 — the MODERN large-prime backend
@@ -14221,6 +14224,79 @@ int main(int argc, char** argv) {
             check(determ_p256_balance_verify(Exc.data(), pt.data())!=0, "tampered proof: verify rejects");
         }
         std::cout << (fail? "  FAIL: p256-balance-c99 unit test\n" : "  PASS: p256-balance-c99 unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-p256-confidential-tx-c99") {
+        // §3.19 inc.8: the END-TO-END confidential-tx COMPOSITION over NIST P-256 — the
+        // FIPS-profile sibling of the §3.20 inc.8 finite-field composition. NOT a new
+        // primitive: it composes a per-output inc.5 RANGE proof + the inc.7 BALANCE proof
+        // into one confidential transaction over the PUBLIC §3.19 APIs. It pins the
+        // composition identity V_j == C_out[j] (a range proof's value commitment IS its tx
+        // output commitment — both v*G + r*H, so a cross-primitive generator mismatch turns
+        // it RED) and the division of labour: BALANCE catches inflation, RANGE catches an
+        // out-of-range amount. Mirror of tools/verify_p256_confidential_tx.py. n=2.
+        int fail=0;
+        auto check=[&](bool ok,const char* m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        auto setsc=[](uint8_t out[32], uint64_t v){ std::memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); };
+        auto commit=[&](std::vector<uint8_t>&out,uint64_t v,uint64_t r)->int{
+            uint8_t vs[32],rs[32]; setsc(vs,v); setsc(rs,r); out.assign(33,0);
+            return determ_pedersen_commit(out.data(), vs, rs); };
+        // A balanced 2-in-2-out confidential tx, output values in [0,2^n):
+        //   v_in {3,1} r {500,400}; v_out {2,1} r {333,444}; fee 1  (Σv_in=4=3+1).
+        const size_t n=2;
+        const uint64_t v_in[2]={3,1}, r_in[2]={500,400}, v_out[2]={2,1}, r_out[2]={333,444};
+        const uint64_t fee=1;
+        std::vector<uint8_t> Ci(2*33), Co(2*33), c(33);
+        bool okc = true;
+        for (int j=0;j<2;j++){ okc = okc && commit(c,v_in[j],r_in[j])==0; std::memcpy(&Ci[(size_t)j*33],c.data(),33); }
+        for (int j=0;j<2;j++){ okc = okc && commit(c,v_out[j],r_out[j])==0; std::memcpy(&Co[(size_t)j*33],c.data(),33); }
+        // One range proof per OUTPUT, with gamma_j = r_out[j] so V_j must equal C_out[j].
+        size_t plen=determ_rangeproof_proof_len(n);
+        bool okrange=okc, okidentity=okc;
+        for (int j=0;j<2;j++){
+            uint8_t gamma[32], alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(gamma, r_out[j]);
+            setsc(alpha,7*j+3); setsc(rho,11*j+5); setsc(tau1,29*j+31); setsc(tau2,37*j+41);
+            std::vector<uint8_t> sL(n*32), sR(n*32);
+            for (size_t i=0;i<n;i++){ setsc(&sL[i*32], 13*j+17*i+1); setsc(&sR[i*32], 19*j+23*i+2); }
+            std::vector<uint8_t> V(33), proof(plen);
+            bool pj = plen>0 && determ_rangeproof_prove(V.data(),proof.data(),v_out[j],gamma,alpha,rho,tau1,tau2,sL.data(),sR.data(),n)==0;
+            okidentity = okidentity && pj && std::memcmp(V.data(), &Co[(size_t)j*33], 33)==0;   // V_j == C_out[j]
+            okrange    = okrange    && pj && determ_rangeproof_verify(V.data(),proof.data(),n)==0;
+        }
+        check(okidentity, "each output's range-proof commitment V_j == its tx commitment C_out[j] (shared G,H)");
+        check(okrange,    "every output range proof verifies (v_out in [0,2^n))");
+        // Balance proof over all commitments: x = Σr_in - Σr_out (mod n) = 123 (positive).
+        std::vector<uint8_t> Exc(33), x(32), k(32), bproof(DETERM_P256_BALANCE_PROOF_BYTES);
+        setsc(x.data(), r_in[0]+r_in[1]-r_out[0]-r_out[1]); setsc(k.data(), 0x5151);
+        bool okbal = determ_p256_balance_excess(Exc.data(), Ci.data(),2, Co.data(),2, fee)==0
+                  && determ_p256_balance_prove(bproof.data(), Exc.data(), x.data(), k.data())==0
+                  && determ_p256_balance_verify(Exc.data(), bproof.data())==0;
+        check(okbal, "balance proof verifies (Sv_in = Sv_out + fee)");
+        check(okrange && okidentity && okbal, "HONEST confidential tx accepts: all range proofs AND the balance proof");
+        // INFLATION: bump an output value (still in range) so Σv_out+fee != Σv_in — the
+        // BALANCE proof's job (each output stays an in-range commitment).
+        {
+            std::vector<uint8_t> Cob(2*33), Eb(33), pbb(DETERM_P256_BALANCE_PROOF_BYTES);
+            bool o2 = commit(c,3,r_out[0])==0; std::memcpy(&Cob[0],c.data(),33);   // 2 -> 3 (in range)
+            o2 = o2 && commit(c,v_out[1],r_out[1])==0; std::memcpy(&Cob[33],c.data(),33);
+            o2 = o2 && determ_p256_balance_excess(Eb.data(), Ci.data(),2, Cob.data(),2, fee)==0
+                    && determ_p256_balance_prove(pbb.data(), Eb.data(), x.data(), k.data())==0
+                    && determ_p256_balance_verify(Eb.data(), pbb.data())!=0;        // inflation rejects
+            check(o2, "INFLATION (Sv_out+fee != Sv_in): the BALANCE proof rejects");
+        }
+        // RANGE VIOLATION: an output value = 2^n (out of range) — the RANGE proof's job.
+        {
+            uint8_t gamma[32], alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(gamma, r_out[1]); setsc(alpha,11); setsc(rho,12); setsc(tau1,13); setsc(tau2,14);
+            std::vector<uint8_t> sL(n*32), sR(n*32);
+            for (size_t i=0;i<n;i++){ setsc(&sL[i*32], 500+i); setsc(&sR[i*32], 540+i); }
+            std::vector<uint8_t> Vb(33), pb(plen);
+            bool o3 = plen>0 && determ_rangeproof_prove(Vb.data(),pb.data(),(uint64_t)1<<n,gamma,alpha,rho,tau1,tau2,sL.data(),sR.data(),n)==0
+                             && determ_rangeproof_verify(Vb.data(),pb.data(),n)!=0;   // v=2^n out of range rejects
+            check(o3, "RANGE VIOLATION (output = 2^n): that output's RANGE proof rejects");
+        }
+        std::cout << (fail? "  FAIL: p256-confidential-tx-c99 unit test\n" : "  PASS: p256-confidential-tx-c99 unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {
