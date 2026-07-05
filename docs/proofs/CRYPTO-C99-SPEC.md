@@ -97,7 +97,7 @@ Achieved via three substitutions:
 | Argon2id | `src/crypto/argon2/` | **SHIPPED** — RFC 9106 / P-H-C reference on the shipped BLAKE2b; byte-equal vs libsodium `crypto_pwhash_argon2id` (12/12 over a t×m grid) | Public domain | ~180 |
 | SHA-3 / SHAKE | `src/crypto/sha3/` | **SHIPPED** — canonical FIPS 202 Keccak-f[1600] (SHA3-256/512 + SHAKE128/256 XOF, incremental sponge); byte-equal vs OpenSSL `EVP_sha3/shake` + `hashlib`; the PQ-track XOF (ML-DSA §3.17) | Public domain | ~150 |
 | ML-DSA / Dilithium | `src/crypto/mldsa/` | **SHIPPED (inc.1-8 — COMPLETE)** — FIPS 204 the whole scheme: Z_q reduction + negacyclic NTT (+direct-DFT oracle) + rounding/hint + SHAKE samplers + bit-packing + per-poly ring ops + matrix/vector layer + **KeyGen + Sign + Verify**, all **ACVP-pinned (3 param sets)**; §3.18. Additive; chain integration is the next (owner-gated) step. | Public domain | ~740 |
-| Pedersen commitment | `src/crypto/pedersen/` | **SHIPPED (range-proof track inc.1)** — `C = v*G + r*H` over P-256, H a nothing-up-my-sleeve RFC 9380 hash-to-curve generator; pure composition over §3.8c P-256; binding (unknown log_G H) + hiding + additive homomorphism gated by `test-pedersen-c99` + the dual-oracle `pedersen.json`; §3.19. Additive; range proofs + chain integration are the next (owner-gated) steps. | Public domain | ~85 |
+| Pedersen commitment | `src/crypto/pedersen/` | **SHIPPED (range-proof track inc.1-2)** — inc.1 `C = v*G + r*H` over P-256 (H a nothing-up-my-sleeve RFC 9380 hash-to-curve gen); inc.2 the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` over two nothing-up-my-sleeve generator families (the Bulletproofs A/S shape); pure composition over §3.8c P-256; binding (unknown dlog) + hiding + additive/vector homomorphism gated by `test-pedersen-c99` + the dual-oracle `pedersen.json`; §3.19. Additive; the range proof (Bulletproofs) + chain integration are the next (owner-gated) steps. | Public domain | ~150 |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -155,7 +155,7 @@ src/crypto/
 │   ├── keygen.c                #   ML-DSA.KeyGen_internal + pk/sk encode (inc.7, ACVP-pinned)
 │   └── sign.c                  #   ML-DSA.Sign_internal + Verify_internal + sigEncode/hint (inc.8, ACVP-pinned)
 ├── pedersen/                   # SHIPPED: Pedersen commitment over P-256 (§3.19)
-│   └── pedersen.c              #   C = v*G + r*H; range-proof track inc.1 (test-pedersen-c99)
+│   └── pedersen.c              #   inc.1 C = v*G+r*H; inc.2 vector commit r*H+Σ(a_i*G_i+b_i*H_i) (test-pedersen-c99)
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
 │   └── secp256k1.h
@@ -1152,13 +1152,15 @@ that every parameter set (ML-DSA-44/65/87) shares.
   consensus-critical, separately-reviewed step; and the constant-time hardening
   review of the secret-dependent paths before any production signing use.
 
-### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increment 1)**
+### 3.19 Pedersen commitment over P-256 — **SHIPPED (range-proof / confidential-tx track, increments 1-2)**
 
 The owner-authorized (2026-07-04) confidential-transaction / range-proof track,
 executed **library-primitive-first, KAT-gated, zero consensus touch** (the same
 pattern as ML-DSA / P-256 / Argon2id) — chain integration is a later,
-separately-reviewed step. Increment 1 is the **Pedersen commitment** itself, the
-building block a range proof (a later increment) commits to.
+separately-reviewed step. Increment 1 is the **Pedersen commitment** itself;
+increment 2 adds the **vector-commitment generators + vector commit** — the
+Bulletproofs A/S-commitment shape a range proof (a later increment) commits its
+bit-vectors against.
 
 - **Implementation:** `src/crypto/pedersen/` — `C = v*G + r*H` over NIST P-256
   (group order n), where G is the base point and **H is a nothing-up-my-sleeve
@@ -1172,19 +1174,33 @@ building block a range proof (a later increment) commits to.
   already-OpenSSL/RFC-gated primitives. API: `determ_pedersen_generator_h` /
   `_commit` / `_verify` / `_add` (32-byte big-endian scalars < n, 33-byte SEC1
   compressed commitments; v==0 allowed, r==0 rejected).
-- **Validation:** `determ test-pedersen-c99` (8 assertions — H KAT + on-curve +
-  H≠G; `commit == compress(v*G+r*H)` via the raw P-256 API; the v==0 path; the
-  **additive homomorphism** `commit(v1,r1)+commit(v2,r2) == commit(v1+v2, r1+r2)`;
-  open/verify accept + reject; binding sanity; input rejection r==0 / v≥n /
-  non-decodable add) + the §3.13 dual-oracle byte-frozen corpus
-  `tools/vectors/pedersen.json` (6 vectors incl. a mod-n WRAPAROUND homomorphism
-  vector) recomputed by BOTH the C impl (`test-c99-vectors`) and the independent
-  from-scratch Python EC (`tools/verify_pedersen.py`). Soundness accounting:
+- **Increment 2 — vector commitment (`caf6e50`):** `determ_pedersen_gen(index,
+  which)` derives two independent nothing-up-my-sleeve generator FAMILIES
+  `G_i`/`H_i` = `hash_to_curve(4-byte BE index, "DETERM-PEDERSEN-VEC-{G,H}-P256_
+  XMD:SHA-256_SSWU_RO_")` — no known dlog to `G`, to the scalar `H`, or to each
+  other. `determ_pedersen_vector_commit(a, b, n, r)` computes the Bulletproofs
+  A/S-commitment shape **`C = r*H + Σ_{i<n}(a_i*G_i + b_i*H_i)`** (r = blinding,
+  a = a_L, b = a_R). A zero-scalar term is skipped — a documented data-dependent
+  branch; a range prover over SECRET bit-vectors needs a constant-time multi-exp
+  (owner-gated CT hardening). Still pure composition over the P-256 API.
+- **Validation:** `determ test-pedersen-c99` (11 assertions — inc.1: H KAT +
+  on-curve + H≠G; `commit == compress(v*G+r*H)` via the raw P-256 API; the v==0
+  path; the **additive homomorphism**; open/verify accept + reject; binding
+  sanity; input rejection r==0 / v≥n / non-decodable add. inc.2: the vector
+  generators on-curve/deterministic/distinct/≠G,H + which>1 reject;
+  `vector_commit == r*H+Σ(a_i*G_i+b_i*H_i)` via the raw API; the **vector
+  homomorphism** `vc(a1,b1,r1)+vc(a2,b2,r2)==vc(a1+a2,b1+b2,r1+r2)`; n==0 => r*H +
+  zero-entry skip + r==0 reject) + the §3.13 dual-oracle byte-frozen corpus
+  `tools/vectors/pedersen.json` (12 vectors: H KAT, 4 commits, a mod-n WRAPAROUND
+  homomorphism, 5 generator KATs, a vector_commit) recomputed by BOTH the C impl
+  (`test-c99-vectors`) and the independent from-scratch Python EC
+  (`tools/verify_pedersen.py`). Soundness accounting:
   `PedersenCommitmentSoundness.md`; per-module provenance:
   `src/crypto/pedersen/README.md`. **Additive — no in-tree consumer yet.** Next
-  on this track: range proofs (Bulletproofs), then chain integration — each
-  separately reviewed. CT posture: data-independent except the documented
-  `scalar_is_zero(v)` branch (a v==0 value commitment); full timing review is the
+  on this track: the range proof itself (Bulletproofs — inner-product argument +
+  the range-proof protocol), then chain integration — each separately reviewed.
+  CT posture: data-independent except the documented `scalar_is_zero` branches (a
+  v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
 ---

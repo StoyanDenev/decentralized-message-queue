@@ -8,13 +8,14 @@ The module is deliberately thin. It is written **entirely against the §3.8c P-2
 
 ## Scope
 
-**In scope.** The four exported operations, verified against `pedersen.c`:
-- `determ_pedersen_generator_h` — the deterministic nothing-up-my-sleeve second generator `H` (`:18-23`);
-- `determ_pedersen_commit` — `C = v·G + r·H`, SEC1 compressed 33-byte output (`:34-56`);
-- `determ_pedersen_verify` — the opening check (recompute + constant-time compare) (`:58-66`);
-- `determ_pedersen_add` — the homomorphic combination `decompress(c1) + decompress(c2)` (`:68-75`).
+**In scope.** The exported operations, verified against `pedersen.c`:
+- `determ_pedersen_generator_h` — the deterministic nothing-up-my-sleeve second generator `H`;
+- `determ_pedersen_commit` — `C = v·G + r·H`, SEC1 compressed 33-byte output;
+- `determ_pedersen_verify` — the opening check (recompute + constant-time compare);
+- `determ_pedersen_add` — the homomorphic combination `decompress(c1) + decompress(c2)`;
+- **(increment 2)** `determ_pedersen_gen` — the nothing-up-my-sleeve vector-generator families `G_i`/`H_i`; and `determ_pedersen_vector_commit` — `C = r·H + Σ(a_i·G_i + b_i·H_i)`, the Bulletproofs A/S-commitment shape.
 
-This is **increment 1** of the range-proof / confidential-transaction track (owner-authorized 2026-07-04): **library-primitive-first, ZERO consensus touch** — additive, not wired into any chain call site (`pedersen.h:1-4`).
+This is **increments 1-2** of the range-proof / confidential-transaction track (owner-authorized 2026-07-04): **library-primitive-first, ZERO consensus touch** — additive, not wired into any chain call site (`pedersen.h:1-4`).
 
 **Out of scope.**
 - **Range proofs / Bulletproofs** — a later increment. A Pedersen commitment on its own says NOTHING about whether `v` lies in any valid range; that guarantee is not this primitive's job (see NC-1).
@@ -74,7 +75,7 @@ So `commit` returns `-1` iff `v >= n`, `r` invalid (`0` or `>= n`), or (negligib
 
 ---
 
-## 2. Soundness / conformance claims (PC-1 .. PC-8)
+## 2. Soundness / conformance claims (PC-1 .. PC-10)
 
 Each claim states the claim, the **evidence** (which `test-pedersen-c99` assertion, which `pedersen.json` vector, or which gate proves it), and honest caveats. The eight numbered assertions of `determ test-pedersen-c99` are at `src/main.cpp:13299-13388`; the six-vector corpus is `tools/vectors/pedersen.json`, consumed by both §3.13 halves.
 
@@ -147,7 +148,23 @@ Each claim states the claim, the **evidence** (which `test-pedersen-c99` asserti
 
 **Evidence.** `pedersen.c` calls **only** `determ_p256_hash_to_curve`, `_point_mul`, `_base_mul`, `_point_add`, `_point_compress`, `_point_decompress` (verified: no other arithmetic appears in the file, `:1-75`). Each is validated by `determ test-p256-c99` (curve constants byte-equal OpenSSL `EC_GROUP`; `[k]G` byte-equal OpenSSL `EVP` over a scalar grid; on-curve accept/reject; scalar-validity gates) and `determ test-p256-h2c-c99` (the RFC 9380 `P256_XMD:SHA-256_SSWU_RO_` appendix vectors + mod-n ops vs the OpenSSL BIGNUM oracle) — the audited subject of `docs/proofs/P256CryptoStackAudit.md`. Input-rejection at the Pedersen boundary is also inherited: `test-pedersen-c99` assertion (7) (`main.cpp:13376-13388`) confirms `r == 0` rejects (via `point_mul`), `v >= n` rejects (via `base_mul`, tested with `v = n` exactly), and a non-decodable commitment (bad SEC1 prefix `0x05`) makes `add` return `-1` (via `point_decompress`).
 
-**Caveat.** This is a **forward-reference**, not a re-proof: that the underlying scalar-mult / point-add / SSWU are correct and constant-time is discharged in `P256CryptoStackAudit.md` + the OpenSSL parity tests, not here. The Pedersen gates give end-to-end cover only on the covered inputs (a primitive defect would diverge the frozen bytes — but only for those six vectors, L-2).
+**Caveat.** This is a **forward-reference**, not a re-proof: that the underlying scalar-mult / point-add / SSWU are correct and constant-time is discharged in `P256CryptoStackAudit.md` + the OpenSSL parity tests, not here. The Pedersen gates give end-to-end cover only on the covered inputs (a primitive defect would diverge the frozen bytes — but only for those vectors, L-2).
+
+### PC-9 — Increment 2: the vector-commitment generators are independent nothing-up-my-sleeve points
+
+**Claim.** `determ_pedersen_gen(index, which)` yields, for `which ∈ {0,1}`, two generator FAMILIES `G_i`/`H_i` that are on-curve, deterministic, mutually distinct, and distinct from the base point `G` and the §3.19 scalar `H` — each with no known discrete-log relation to any of the others (the vector-Pedersen binding assumption).
+
+**Evidence.** `G_i = hash_to_curve(IntToBytes(i,4), "DETERM-PEDERSEN-VEC-G-P256_XMD:SHA-256_SSWU_RO_")`, `H_i` the same with the `-VEC-H-` DST (`pedersen.c` `determ_pedersen_gen`). The three domains (`-VEC-G-`, `-VEC-H-`, and the increment-1 `-P256_` DST for the scalar `H`) are pairwise distinct RFC 9380 domain-separation tags, so the outputs are independent random-oracle images with unknown mutual dlog (same nothing-up-my-sleeve argument as PC-1/PC-2, now per-index). `test-pedersen-c99` assertion (8) checks on-curve (`point_check`), determinism (same index → same point), mutual distinctness of `G_0,G_1,H_0,H_1`, distinctness from `G` and the scalar `H`, and that `which > 1` returns `-1`. The exact bytes of five generators (`G_0,G_1,G_2,H_0,H_1`) are frozen in `pedersen.json` (`gen` vectors) and recomputed byte-for-byte by BOTH the C impl (`test-c99-vectors`) and the independent Python `derive_gen` (`verify_pedersen.py`).
+
+**Caveat.** Independence rests on the RFC 9380 hash-to-curve behaving as a random oracle and on ECDLP (L-1), exactly as for `H`. The KAT freezes 5 of an unbounded family; the derivation is uniform in `index` so a per-index defect on an untested index would still diverge the (index-parameterised) recomputation.
+
+### PC-10 — Increment 2: the vector commit computes `r*H + Σ(a_i*G_i + b_i*H_i)` and is vector-homomorphic
+
+**Claim.** `determ_pedersen_vector_commit(a, b, n, r)` equals `r*H + Σ_{i<n}(a_i*G_i + b_i*H_i)` (the Bulletproofs A/S-commitment shape), and is additively homomorphic in the vectors: `vc(a1,b1,r1) (+) vc(a2,b2,r2) == vc(a1+a2, b1+b2, r1+r2)`.
+
+**Evidence.** `test-pedersen-c99` assertion (9) recomputes `r*H + Σ(a_i*G_i + b_i*H_i)` term-by-term via the raw P-256 API (`point_mul` + `point_add`) and asserts byte-equality with `vector_commit`'s output — pinning both the formula AND the family pairing (`a_i` with `G_i = gen(i,0)`, `b_i` with `H_i = gen(i,1)`; a swap would diverge). Assertion (10) checks the vector homomorphism on no-carry small vectors. Assertion (11) checks the degenerate/edge behaviour: `n == 0 ⇒ C = r*H`, a zero vector entry is skipped correctly (`vc([0,5],[0,0],r) == r*H + 5*G_1`, recomputed), and `r == 0` is rejected. A `vector_commit` with a zero `b`-entry is additionally frozen in `pedersen.json` and recomputed by the independent Python `vector_commit_pt`. The homomorphism is the group law: `Σ a1_i*G_i + Σ a2_i*G_i = Σ(a1_i+a2_i)*G_i`, etc.
+
+**Caveat.** The zero-scalar skip is a data-dependent branch on `a_i`/`b_i` (NC-2, extended). The homomorphism assertion uses no-carry vectors; the mod-n reduction is the same group-law argument as PC-4 and is not separately byte-pinned for the vector form. Binding of the vector commit reduces to the mutual-dlog-unknownness of the whole generator set (PC-9) under ECDLP — assumed, not proved (L-1).
 
 ---
 
@@ -156,14 +173,14 @@ Each claim states the claim, the **evidence** (which `test-pedersen-c99` asserti
 - **NC-1 — This is NOT a range proof.** A Pedersen commitment reveals nothing about whether `v` lies in a valid range (e.g. `[0, 2^64)`), is non-negative, or is not an overflow value near `n`. Range enforcement (Bulletproofs or an equivalent) is the **next increment** and is entirely out of scope here. A committed `v` could be any scalar `< n`; the commitment binds and hides it but proves no predicate about it.
 - **NC-2 — The `scalar_is_zero(v)` branch is a documented data-dependent branch on `v`.** `commit` branches on whether the value is zero (`pedersen.c:44`), taking the `C = r·H` path for a zero-value commitment. This is a data-dependent control-flow path on `v` (documented in the code comment `:26-27` and the README §CT posture). `scalar_is_zero` itself reads all 32 bytes without short-circuit, but the branch on its result is not constant-time in `v`. A timing-side-channel review is the **separate owner-gated CT step** — the same posture as every other §3 primitive (L-4); this document asserts **functional** correctness only, not timing.
 - **NC-3 — Not a consensus or wallet primitive yet.** No Determ chain, ledger, or wallet code path constructs, stores, opens, or homomorphically combines a commitment. This is an additive **library primitive with no in-tree consumer** (`pedersen.h:1-4`). None of the binding/hiding/homomorphism claims here says anything about a chain-level confidential-transaction protocol — that is a later, separately-reviewed increment.
-- **NC-4 — Single commitment only; no vector / multi-value form.** The API commits **one** value under **one** blinding factor. Vector commitments (`Σ vi·Gi + r·H`), multi-generator Pedersen, or polynomial commitments are out of scope (§1, out-of-scope).
+- **NC-4 — No inner-product argument / range-proof protocol yet.** Increment 2 (PC-9/PC-10) adds the two-family vector commit `r·H + Σ(a_i·G_i + b_i·H_i)` — the Bulletproofs A/S-commitment shape — but NOT the log-size inner-product argument, the polynomial commitments (`T_1`, `T_2`), the Fiat-Shamir transcript, or the range-proof protocol that binds them into a proof of `v ∈ [0, 2^n)`. Those are later increments. What is shipped is a *commitment* building block; it proves no range predicate (NC-1 stands).
 
 ---
 
 ## 4. Limits (L-1 .. L-4)
 
 - **L-1 — Binding is not proven; it is assumed under ECDLP.** PC-2 reduces double-opening to computing `log_G(H)`; that `H`'s discrete log is genuinely unknown rests on `H` being a public RFC 9380 hash-to-curve output (PC-1) AND on P-256 discrete-log hardness. A break of ECDLP on P-256 breaks binding regardless of any byte-exactness here. This is the ambient EC assumption, assumed not proved.
-- **L-2 — Bounded input set for byte-exact conformance.** PC-7 quantifies over exactly the six frozen `pedersen.json` vectors (one `H` KAT, four commit inputs, one wraparound homomorphism). The structural test (PC-3..PC-6) widens coverage to fresh non-vector inputs but is not byte-pinned. Not exercised as frozen bytes: arbitrary `(v, r)`, `add` with mixed-sign near-inverse operands beyond the tested cases, the exact-inverse `commit` → identity `-1` path.
+- **L-2 — Bounded input set for byte-exact conformance.** PC-7/PC-9/PC-10 quantify over exactly the twelve frozen `pedersen.json` vectors (one `H` KAT, four commit inputs, one wraparound homomorphism, five generator KATs, one vector_commit). The structural tests (PC-3..PC-6, PC-9/PC-10 assertions (8)-(11)) widen coverage to fresh non-vector inputs but are not byte-pinned. Not exercised as frozen bytes: arbitrary `(v, r)`, `add` with mixed-sign near-inverse operands beyond the tested cases, the exact-inverse `commit`/`vector_commit` → identity `-1` path, and vector commits at large `n`.
 - **L-3 — Hiding depends on the caller's `r`.** PC-3's perfect hiding holds only for a uniform, nonzero `r`; the primitive enforces only `r != 0`, not `r`'s distribution or uniqueness. Caller misuse (biased/reused `r`) is outside what any test here can catch.
 - **L-4 — Timing out of scope.** The `scalar_is_zero(v)` branch (NC-2) and the underlying ladder's CT posture are asserted in `src/crypto/p256/README.md` / `P256CryptoStackAudit.md` and probed by the `ct-timing-probe` tranche; the normative timing boundary is CRYPTO-C99-SPEC §3.12 / `ConstantTimeInventory.md`. This document asserts functional conformance only.
 
@@ -186,12 +203,12 @@ The two-leg split is the standard §3.13 defense-in-depth: the structural test (
 
 | Reference | Role |
 |---|---|
-| `src/crypto/pedersen/pedersen.c` | The shipped implementation — every §1 construction-map claim is verified against these 75 lines. |
-| `include/determ/crypto/pedersen/pedersen.h` | The public API contracts (wire format, `0 < r < n`, `v == 0` allowed, return-code semantics). |
+| `src/crypto/pedersen/pedersen.c` | The shipped implementation — every §1 construction-map claim is verified against it (inc.1 commit/verify/add + inc.2 gen/vector_commit). |
+| `include/determ/crypto/pedersen/pedersen.h` | The public API contracts (wire format, `0 < r < n`, `v == 0` allowed, the vector-commit families/skip semantics, return-code semantics). |
 | `include/determ/crypto/p256/p256.h` | The §3.8c primitive contracts (`base_mul`/`point_mul`/`point_add`/`hash_to_curve`/`compress`/`decompress`) the module composes over. |
-| `src/main.cpp:13273-13392` (`test-pedersen-c99`) | The 8-assertion structural/negative test (PC-1..PC-6, PC-8). |
-| `src/main.cpp:14129-14156` (`test-c99-vectors` `pedersen` branch) | Byte gate binary half (PC-7 leg 2). |
-| `tools/vectors/pedersen.json` | The 6-vector dual-oracle corpus — the byte-pinned middle term (PC-1/PC-4/PC-6/PC-7). |
+| `src/main.cpp` (`test-pedersen-c99`) | The 11-assertion structural/negative test (PC-1..PC-6, PC-8 inc.1; PC-9/PC-10 assertions (8)-(11) inc.2). |
+| `src/main.cpp` (`test-c99-vectors` `pedersen` branch) | Byte gate binary half — `h_generator`/`commit`/`homomorphism`/`gen`/`vector_commit` types (PC-7 leg 2). |
+| `tools/vectors/pedersen.json` | The 12-vector dual-oracle corpus — the byte-pinned middle term (PC-1/PC-4/PC-6/PC-7/PC-9/PC-10). |
 | `tools/verify_pedersen.py` | The independent from-scratch Python oracle + `emit()` generator (PC-7 leg 1); self-checks its H against the C-pinned KAT. |
 | `tools/test_c99_vector_files.sh` (`chk_pedersen`, `:1166-1176`) | Byte gate file half wiring. |
 | `docs/proofs/P256CryptoStackAudit.md` | The correctness + constant-time companion for the underlying P-256 primitives (PC-8 / L-4 forward-reference). |
@@ -205,7 +222,7 @@ The two-leg split is the standard §3.13 defense-in-depth: the structural test (
 ## 7. Status
 
 - **Spec.** Complete (this document).
-- **The structural test + both byte-gate halves shipped and green.** `test-pedersen-c99` (8 assertions), the `pedersen` branch of `test-c99-vectors` (binary half), and `chk_pedersen`/`verify_pedersen.check_pedersen` (file half) validate the six-vector corpus + the reject/algebraic paths; the C99 output is byte-exact against the independent Python.
-- **Claims.** PC-1 (H generator + KAT), PC-2 (computational binding, reduced to unknown `log_G(H)` under ECDLP — structural non-degeneracy witness only), PC-3 (information-theoretic hiding for uniform nonzero `r`; `r==0` rejected), PC-4 (additive homomorphism, no-carry gate + mod-n wraparound vector), PC-5 (open/verify accept+reject), PC-6 (commit == `v·G+r·H` incl. `v==0`), PC-7 (dual-oracle byte-freeze, transposition-non-blind), PC-8 (trust inheritance from the OpenSSL/RFC-9380-gated P-256 primitives) — all closed.
-- **Non-claims (NC-1..NC-4).** Not a range proof; the `v==0` branch is a documented data-dependent path (CT review owner-gated); not a consensus/wallet primitive; single-commitment only.
-- **Limits (L-1..L-4).** Binding assumes ECDLP; conformance is over the six frozen vectors; hiding depends on the caller's `r`; timing → §3.12 / `ConstantTimeInventory.md`.
+- **The structural test + both byte-gate halves shipped and green.** `test-pedersen-c99` (11 assertions), the `pedersen` branch of `test-c99-vectors` (binary half), and `chk_pedersen`/`verify_pedersen.check_pedersen` (file half) validate the twelve-vector corpus + the reject/algebraic paths; the C99 output is byte-exact against the independent Python.
+- **Claims.** PC-1 (H generator + KAT), PC-2 (computational binding, reduced to unknown `log_G(H)` under ECDLP — structural non-degeneracy witness only), PC-3 (information-theoretic hiding for uniform nonzero `r`; `r==0` rejected), PC-4 (additive homomorphism, no-carry gate + mod-n wraparound vector), PC-5 (open/verify accept+reject), PC-6 (commit == `v·G+r·H` incl. `v==0`), PC-7 (dual-oracle byte-freeze, transposition-non-blind), PC-8 (trust inheritance from the OpenSSL/RFC-9380-gated P-256 primitives), **PC-9 (inc.2 vector generators — independent nothing-up-my-sleeve families), PC-10 (inc.2 vector commit == `r·H+Σ(a_i·G_i+b_i·H_i)` + vector homomorphism)** — all closed.
+- **Non-claims (NC-1..NC-4).** Not a range proof; the `scalar_is_zero` branches are documented data-dependent paths (CT review owner-gated); not a consensus/wallet primitive; no inner-product argument / range-proof protocol yet (the vector commit is shipped, the proof protocol is not).
+- **Limits (L-1..L-4).** Binding assumes ECDLP; conformance is over the twelve frozen vectors; hiding depends on the caller's `r`; timing → §3.12 / `ConstantTimeInventory.md`.

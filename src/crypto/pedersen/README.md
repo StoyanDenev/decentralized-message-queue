@@ -41,6 +41,20 @@ for a uniform `r`, `C` is uniform over the group and reveals nothing about `v`.
   either input fails to decode or the result is the identity (`c2 == -c1`, i.e. the
   commitments cancel).
 
+**Increment 2 — the vector commitment (the Bulletproofs building block):**
+
+- `determ_pedersen_gen(out65, index, which)` — two independent nothing-up-my-sleeve
+  generator FAMILIES: `G_i` (`which=0`) and `H_i` (`which=1`), each derived as
+  `hash_to_curve(IntToBytes(index, 4), "DETERM-PEDERSEN-VEC-{G,H}-P256_XMD:SHA-256_
+  SSWU_RO_")`. The three domains (`-VEC-G-`, `-VEC-H-`, and the scalar `H`'s
+  `-P256_` DST) are distinct, so no family member shares a known discrete log with
+  `G`, the scalar `H`, or any other family member. `-1` iff `which > 1`.
+- `determ_pedersen_vector_commit(out33, a, b, n, r)` — the Bulletproofs A/S-commitment
+  shape `C = r*H + Σ_{i<n}(a_i*G_i + b_i*H_i)`, where `a` and `b` are each `n`
+  consecutive 32-byte big-endian scalars (`< n_order`), `r` is the blinding factor
+  (`0 < r < n_order`). A zero-scalar term is skipped; `n == 0` yields `C = r*H`.
+  This is the shape a range proof commits its bit-vectors (`a_L`, `a_R`) against.
+
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
 
@@ -82,7 +96,7 @@ the only new logic is its composition. C99, ~60 LOC, Determ-original.
 
 ## Validation evidence
 
-`determ test-pedersen-c99` (8 assertions). These gates pin the COMPOSITION — the
+`determ test-pedersen-c99` (11 assertions). These gates pin the COMPOSITION — the
 underlying P-256 arithmetic is already gated byte-equal vs OpenSSL / RFC 9380:
 
 1. **`H` generator** — on-curve (`determ_p256_point_check`), deterministic across
@@ -102,26 +116,40 @@ underlying P-256 arithmetic is already gated byte-equal vs OpenSSL / RFC 9380:
 8. **input validation** — `r == 0` rejected, `v >= n` rejected, and a non-decodable
    commitment fed to `add` rejected.
 
-**§3.13 dual-oracle byte-frozen corpus** — `tools/vectors/pedersen.json`, wired into
-BOTH gate halves: `determ test-c99-vectors` recomputes each vector through the
-shipped C impl, and `tools/test_c99_vector_files.sh` recomputes through an
+Increment 2 (vector commitment):
+
+9. **vector generators** — `gen(i, which)` on-curve, deterministic, the four
+   `G_0,G_1,H_0,H_1` mutually distinct and distinct from `G` and the scalar `H`, and
+   `which > 1` rejects.
+10. **vector_commit correctness** — `vector_commit(a,b,n,r) == r*H + Σ(a_i*G_i +
+    b_i*H_i)` recomputed term-by-term through the raw P-256 API (pins the formula AND
+    the `a_i↔G_i` / `b_i↔H_i` family pairing).
+11. **vector homomorphism + edges** — `vc(a1,b1,r1) (+) vc(a2,b2,r2) == vc(a1+a2,
+    b1+b2, r1+r2)`; `n == 0 ⇒ C = r*H`; a zero vector entry is skipped correctly; and
+    `r == 0` rejects.
+
+**§3.13 dual-oracle byte-frozen corpus** — `tools/vectors/pedersen.json` (12 vectors),
+wired into BOTH gate halves: `determ test-c99-vectors` recomputes each vector through
+the shipped C impl, and `tools/test_c99_vector_files.sh` recomputes through an
 INDEPENDENT from-scratch Python (`tools/verify_pedersen.py` — its own P-256 EC ladder
 + RFC 9380 hash-to-curve, self-checked against the C-pinned `H` KAT before write). The
-corpus carries the `H` generator, four `commit` vectors, and a `homomorphism` vector
-whose scalars force a **mod-n wraparound** in `v1+v2` and `r1+r2` (exercising the
-group-law reduction the small no-carry unit-test scalars do not). A bug in
-`pedersen.c` — not just a corrupted vector — turns the corpus RED, because the C and
-Python implementations are independent.
+corpus carries the `H` generator, four `commit` vectors, a `homomorphism` vector whose
+scalars force a **mod-n wraparound** in `v1+v2` and `r1+r2`, five vector-generator
+KATs (`gen`), and a `vector_commit` (with a zero entry). A bug in `pedersen.c` — not
+just a corrupted vector — turns the corpus RED, because the C and Python
+implementations are independent.
 
 ## Constant-time / hygiene posture
 
-- **Data-independent EXCEPT one documented branch.** The single secret-dependent path
-  is `scalar_is_zero(v)` in `commit()` — the `v == 0` value-commitment shortcut. It is
-  noted honestly here rather than hidden: `scalar_is_zero` reads all 32 bytes (no
-  short-circuit), but the branch on its result reveals whether the committed value is
-  zero. For confidential-transaction use a caller committing to `v == 0` should be
-  aware of this. Removing the branch (always computing `v*G` and adding, given a
-  point-at-infinity-safe base multiply for `v == 0`) is a candidate hardening for the
+- **Data-independent EXCEPT the documented zero-scalar branches.** In `commit()` the
+  `scalar_is_zero(v)` shortcut (the `v == 0` value-commitment path) is the one
+  secret-dependent branch; in `vector_commit()` the same predicate skips a zero
+  `a_i`/`b_i` term. `scalar_is_zero` reads all 32 bytes (no short-circuit), but the
+  branch on its result reveals whether that scalar is zero. This matters for a range
+  prover: `vector_commit` over the SECRET bit-vectors `a_L`/`a_R` would leak the
+  zero-positions via timing — such a caller needs a **constant-time multi-exp** (always
+  computing `s*G_i` and conditionally selecting, or a Straus/Pippenger CT variant).
+  That, plus removing `commit`'s `v == 0` branch, is the candidate hardening for the
   dedicated CT review.
 - **The heavy lifting is inherited constant-time.** The secret-scalar multiplies
   (`base_mul`, `point_mul`) run the P-256 module's uniform double-and-add-always
@@ -137,12 +165,14 @@ Python implementations are independent.
 
 ## Known limitations / future work
 
-- **NOT a range proof.** This is the commitment primitive only; a range proof /
-  Bulletproof (showing the committed `v` lies in a valid range without revealing it)
-  is the next increment on this track.
-- **No vector / multi-value commitment form.** Only the single-value
-  `C = v*G + r*H`; a multi-generator `C = Σ v_i*G_i + r*H` is not implemented (add if
-  a consumer appears).
+- **NOT a range proof.** These are the commitment primitives only (single value + the
+  vector commit); the range proof / Bulletproof (showing the committed `v` lies in a
+  valid range without revealing it) is the next increment on this track — it needs the
+  inner-product argument, the polynomial commitments `T_1`/`T_2`, and the Fiat-Shamir
+  transcript, none of which is here yet.
+- **No constant-time multi-exp.** `vector_commit` skips zero-scalar terms (a
+  data-dependent branch); a range prover over secret bit-vectors needs a CT multi-exp
+  (see the CT posture above) — the owner-gated hardening step.
 - **Library only — not yet a chain consensus or wallet primitive.** The module is
   additive with no in-tree call site; chain integration (confidential transactions)
   is a later, separately-reviewed, consensus-critical step.

@@ -141,11 +141,17 @@ def vector_commit_pt(a, b, r):
     if not (0 < r < N):
         raise ValueError("r must satisfy 0 < r < n")
     C = pt_mul(r, H_POINT[0] if H_POINT else derive_h())  # r*H (scalar blinding gen)
+    # Match the C contract byte-for-byte across the WHOLE scalar domain: a term
+    # is skipped iff its scalar is EXACTLY zero (not merely 0 mod n), and any
+    # scalar >= n is rejected (the C point_mul returns -1). This keeps the two
+    # oracles faithful even for the non-canonical k*n scalars a corpus never hits.
     for i in range(len(a)):
-        if a[i] % N:
-            C = pt_add(C, pt_mul(a[i], derive_gen(i, 0)))
-        if b[i] % N:
-            C = pt_add(C, pt_mul(b[i], derive_gen(i, 1)))
+        for scal, which in ((a[i], 0), (b[i], 1)):
+            if scal == 0:
+                continue
+            if scal >= N:
+                raise ValueError("scalar >= n (matches the C -1 reject)")
+            C = pt_add(C, pt_mul(scal, derive_gen(i, which)))
     return C
 
 
