@@ -134,6 +134,10 @@ add_library(determ-crypto-c99 STATIC
   # §3.19 inc.5: the Bulletproofs single-value range proof (v in [0,2^n)) wrapping
   # the inc.4 IPA — `determ test-bp-rangeproof-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/rangeproof.c"
+  # §3.19 inc.7: confidential-tx balance proof over P-256 (the FIPS-profile amount-
+  # conservation half) — pure composition over the pedersen/P-256 public API,
+  # `determ test-p256-balance-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/balance.c"
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
   # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4

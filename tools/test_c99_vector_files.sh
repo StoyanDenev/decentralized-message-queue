@@ -62,6 +62,7 @@ EXPECTED = {
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
+    "p256_balance.json",
     "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
     "ff_aggrangeproof.json", "ff_balance.json",
 }
@@ -1267,6 +1268,17 @@ def chk_ff_aggrangeproof(vec, label):
         return "cannot import verify_ff_rangeproof (%s)" % e
     return vr.check_ff_aggrangeproof(vec, label)
 
+def chk_p256_balance(vec, label):
+    # §3.19 inc.7 confidential-tx balance proof over NIST P-256 — recompute the excess E +
+    # the Schnorr proof through the independent from-scratch Python (tools/verify_p256_balance.py,
+    # own scalar-mult ladder; the proof is also re-verified) and match the frozen bytes.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_p256_balance as vpb
+    except Exception as e:
+        return "cannot import verify_p256_balance (%s)" % e
+    return vpb.check_p256_balance(vec, label)
+
 def chk_ff_balance(vec, label):
     # §3.20 inc.7 confidential-tx balance proof over Z_p* — recompute the excess E + the
     # Schnorr proof through the independent from-scratch Python (tools/verify_ff_balance.py,
@@ -1315,6 +1327,7 @@ CHECKERS = {
     "ff_ipa": chk_ff_ipa,
     "ff_rangeproof": chk_ff_rangeproof,
     "ff_aggrangeproof": chk_ff_aggrangeproof,
+    "p256_balance": chk_p256_balance,
     "ff_balance": chk_ff_balance,
 }
 
