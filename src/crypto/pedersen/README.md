@@ -105,7 +105,44 @@ come from `hash_to_scalar` under a fixed challenge-DST, with a zero challenge
 rejected and re-absorbed. Everything reduces to `determ_pedersen_msm` — the module
 adds NO new group arithmetic. `sc_add` (mod-`n` scalar addition, used for the folds)
 is the one new scalar op: a 33-byte big-endian add + one conditional subtract of the
-order.
+order. The IPA also exposes **generator-supplied** variants
+`determ_ipa_prove_gens` / `_verify_gens` (the fixed-generator forms are thin
+wrappers over them); the range proof below drives them with a `y`-rescaled `h`
+family.
+
+**Increment 5 — the Bulletproofs single-value range proof (`rangeproof.c` /
+`include/determ/crypto/pedersen/rangeproof.h`):**
+
+The whole point of the track: a proof that a Pedersen-committed value `v` lies in
+**`[0, 2^n)`** WITHOUT revealing `v`, in `2*log2(n) + O(1)` group elements. The
+value commitment is the inc.1 shape `V = v*g + gamma*h` (`g` = the P-256 base
+point, `h` = the nothing-up-my-sleeve scalar generator `H`).
+
+- `determ_rangeproof_proof_len(n)` — the proof size in bytes: `228 +
+  determ_ipa_proof_len(n)` (the `A|S|T1|T2` points + the `taux|mu|t_hat` scalars +
+  the inner IPA proof). `0` for `n` not a power of two or `n >
+  DETERM_RANGEPROOF_MAX_BITS` (64).
+- `determ_rangeproof_prove(V_out, proof, v, gamma, alpha, rho, tau1, tau2, sL, sR,
+  n)` — writes `V = v*g + gamma*h` to `V_out[33]` and the proof. The prover
+  randomness (`alpha`, `rho` blind `A`,`S`; `tau1`,`tau2` blind the polynomial
+  commitments `T1`,`T2`; `sL`,`sR` are the blinding vectors) is caller-supplied for
+  reproducibility (a real prover draws it from a CSPRNG). Internally: bit-decompose
+  `v` into `a_L`/`a_R = a_L - 1^n`; commit `A = alpha*h + <a_L,g_i> + <a_R,h_i>`
+  (inc.2 shape) and `S`; Fiat-Shamir challenges `y`,`z` (after `A`,`S`) and `x`
+  (after `T1`,`T2`); form `l = l(x)`, `r = r(x)`, `t_hat = <l,r>`, `taux`, `mu`;
+  then the **inc.4 IPA** proves `<l,r> = t_hat` over `(g_i, h'_i = y^-i*h_i, u)`.
+- `determ_rangeproof_verify(V33, proof, n)` — two checks: the `t_hat` polynomial
+  identity `t_hat*g + taux*h == z^2*V + delta(y,z)*g + x*T1 + x^2*T2` (with
+  `delta = (z - z^2)*<1,y^n> - z^3*<1,2^n>`), and the IPA over the reconstructed
+  `P = A + x*S - z*<1,g_i> + <z*y^n + z^2*2^n, h'_i> - mu*h`. Fail-**closed**: any
+  identity intermediate or decode failure (a tampered `A/S/T1/T2/V`, a wrong `V`,
+  or an out-of-range `v`) rejects.
+
+The transcript is domain-separated by its own label `DETERM-BP-RANGE-v1` (distinct
+from the IPA's), so the two never collide. The only new arithmetic beyond the
+inc.1-4 primitives is the modular add/sub (`sc_add` / `sc_sub`); everything else is
+`determ_pedersen_msm` + the P-256 point/scalar ops. `n` is a power of two ≤ 64 (a
+value fits a `uint64_t`).
 
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
