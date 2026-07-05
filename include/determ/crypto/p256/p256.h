@@ -110,6 +110,17 @@ int determ_p256_hash_to_scalar(uint8_t out[32],
 int determ_p256_point_add(uint8_t out[65], const uint8_t p[65],
                           const uint8_t q[65]);
 
+/* Constant-time multi-scalar multiplication out33 = compress(Σ_i s_i·P_i) — the CT
+ * Bulletproofs MSM. scalars: n×32 big-endian (each < n_order; a zero scalar IS allowed and
+ * contributes the identity term). points33: n×33 SEC1 compressed. Accumulates in the
+ * internal projective domain so the identity needs no special-casing and there is NO
+ * zero-scalar skip (a skip would leak which secret scalars are zero — the bits of a
+ * committed value in the range prover). Returns 0 (compressed sum in out33), 1 (the whole
+ * sum is the group identity — out33 untouched, no compressed encoding exists), or -1 (a
+ * scalar >= n_order or a point fails to decode; both public-validity gates). */
+int determ_p256_msm_ct(uint8_t out33[33], const uint8_t *scalars,
+                       const uint8_t *points33, size_t n);
+
 /* SEC1 compressed <-> uncompressed (the RFC 9497 wire format is compressed,
  * Ne = 33). Compress validates the input point; decompress solves
  * y² = x³ − 3x + b (p ≡ 3 mod 4 sqrt), picks the prefix parity, and rejects

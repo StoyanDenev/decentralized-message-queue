@@ -767,6 +767,40 @@ int determ_p256_point_add(uint8_t out[65], const uint8_t p[65],
     return encode_point(out, &r);     /* infinity (P + -P) -> -1 */
 }
 
+int determ_p256_msm_ct(uint8_t out33[33], const uint8_t *scalars,
+                       const uint8_t *points33, size_t n) {
+    /* Constant-time Σ s_i·P_i — the CT Bulletproofs multi-scalar multiplication. NO
+     * zero-scalar skip: a `continue` on s_i == 0 would leak WHICH secret scalars are zero
+     * (in the range prover, the bits of a committed value). The accumulation runs in the
+     * internal pt (projective) domain so the identity O needs no special-casing —
+     * pt_scalar_mul(0,P) = O and the RCB-complete pt_add absorbs O — hence every term
+     * folds uniformly (constant-time in the scalars). scalars: n×32 big-endian (< n_order;
+     * 0 allowed); points33: n×33 SEC1 compressed. Returns 0 (compressed sum -> out33),
+     * 1 (the sum is the identity; out33 untouched), or -1 (a scalar >= n_order or a point
+     * that fails to decode — public-validity gates). Byte-identical to the old
+     * encoded-domain accumulation (the pedersen/bp_* corpora are the guard). */
+    pt acc, P, term;
+    uint8_t p65[65], enc65[65];
+    int rc = 0;
+    p256_init();
+    pt_set_infinity(&acc);
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t *si = scalars + i * 32;
+        if (!be_lt(si, N_BE)) { rc = -1; goto done; }              /* scalar >= n (0 allowed) */
+        if (determ_p256_point_decompress(p65, points33 + i * 33) != 0) { rc = -1; goto done; }
+        if (decode_point(&P, p65) != 0) { rc = -1; goto done; }
+        pt_scalar_mul(&term, si, &P);                              /* CT ladder; s_i == 0 -> O */
+        pt_add(&acc, &acc, &term);                                 /* acc + O = acc */
+    }
+    if (encode_point(enc65, &acc) != 0) { rc = 1; goto done; }     /* the whole sum is O */
+    rc = determ_p256_point_compress(out33, enc65);
+done:
+    determ_secure_zero(&acc, sizeof acc);
+    determ_secure_zero(&P, sizeof P);
+    determ_secure_zero(&term, sizeof term);
+    return rc;
+}
+
 int determ_p256_hash_to_curve(uint8_t out[65],
                               const uint8_t* msg, size_t msglen,
                               const uint8_t* dst, size_t dstlen) {

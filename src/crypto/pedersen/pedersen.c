@@ -5,6 +5,7 @@
 #include "determ/crypto/pedersen/pedersen.h"
 #include "determ/crypto/p256/p256.h"
 #include "determ/crypto/ct.h"
+#include "determ/crypto/secure_zero.h"
 
 #include <string.h>
 
@@ -31,9 +32,26 @@ static int scalar_is_zero(const uint8_t s[32]) {
     return acc == 0;
 }
 
+/* out = (in == 0) ? 1 : in — constant-time (so base_mul/point_mul always gets a nonzero
+ * scalar and never takes its zero-reject branch; the caller then folds uniformly and
+ * discards the dummy term when the real scalar was zero). */
+static void ct_scalar_nz(uint8_t out[32], const uint8_t in[32]) {
+    uint8_t z = (uint8_t)scalar_is_zero(in);        /* 1 if in == 0 else 0 */
+    uint8_t keep = (uint8_t)(z - 1);                /* 0xFF if in != 0 (keep), 0x00 if in == 0 */
+    for (int i = 0; i < 32; i++) out[i] = (uint8_t)(in[i] & keep);
+    out[31] |= z;                                   /* in == 0 -> out = 1 */
+}
+
+/* out[0..len) = pick ? b : a, byte-wise constant-time select (pick in {0,1}). */
+static void ct_point_select(uint8_t *out, const uint8_t *a, const uint8_t *b,
+                            uint8_t pick, size_t len) {
+    uint8_t m = (uint8_t)(0u - pick);               /* 0xFF if pick else 0x00 */
+    for (size_t i = 0; i < len; i++) out[i] = (uint8_t)((b[i] & m) | (a[i] & (uint8_t)~m));
+}
+
 int determ_pedersen_commit(uint8_t out33[33],
                            const uint8_t v[32], const uint8_t r[32]) {
-    uint8_t H[65], rH[65], vG[65], C[65];
+    uint8_t H[65], rH[65], vG[65], vGrH[65], C[65], v_nz[32];
 
     if (determ_pedersen_generator_h(H) != 0) return -1;
 
@@ -41,16 +59,17 @@ int determ_pedersen_commit(uint8_t out33[33],
      * malformed H (cannot happen for the fixed H, but keep the guard). */
     if (determ_p256_point_mul(rH, r, H) != 0) return -1;
 
-    if (scalar_is_zero(v)) {
-        /* v == 0: C = r*H directly (base_mul rejects the zero scalar). */
-        memcpy(C, rH, 65);
-    } else {
-        /* v*G (rejects v >= n; v != 0 here), then C = v*G + r*H. The RCB
-         * complete-addition formula in point_add handles v*G == r*H etc.; only
-         * the exact-inverse case (v*G == -r*H) yields the identity -> -1. */
-        if (determ_p256_base_mul(vG, v) != 0) return -1;
-        if (determ_p256_point_add(C, vG, rH) != 0) return -1;
-    }
+    /* CONSTANT-TIME: compute v*G with a nonzero-substituted scalar (so base_mul never
+     * takes its zero-reject branch), then branchlessly select r*H (v == 0) vs v*G + r*H
+     * (v != 0) — no leak of whether the committed value is zero. Byte-identical to the old
+     * `if (v==0) C=r*H else C=v*G+r*H` (the pedersen corpus is the guard). base_mul still
+     * rejects v >= n (for v != 0, v_nz == v). The RCB point_add handles v*G == r*H; only
+     * the exact-inverse case (v*G == -r*H, never for honest inputs) yields -1. */
+    ct_scalar_nz(v_nz, v);
+    if (determ_p256_base_mul(vG, v_nz) != 0) { determ_secure_zero(v_nz, sizeof v_nz); return -1; }
+    if (determ_p256_point_add(vGrH, vG, rH) != 0) { determ_secure_zero(v_nz, sizeof v_nz); return -1; }
+    ct_point_select(C, rH, vGrH, (uint8_t)(1u - (unsigned)scalar_is_zero(v)), 65);   /* pick = (v != 0), branchless */
+    determ_secure_zero(v_nz, sizeof v_nz);
 
     return determ_p256_point_compress(out33, C);
 }
@@ -97,31 +116,34 @@ int determ_pedersen_gen(uint8_t out65[65], uint32_t index, uint8_t which) {
 int determ_pedersen_vector_commit(uint8_t out33[33],
                                   const uint8_t *a, const uint8_t *b,
                                   size_t n, const uint8_t r[32]) {
-    uint8_t H[65], acc[65], gen[65], term[65];
+    uint8_t H[65], acc[65], gen[65], term[65], cand[65], s_nz[32];
 
-    /* Start the accumulator at r*H (rejects r == 0 / r >= n_order). Because the
-     * start is non-identity, an intermediate identity can only arise if a later
-     * term exactly cancels the running sum — a known-dlog / adversarial event
-     * that point_add reports as -1. */
+    /* Start the accumulator at r*H (rejects r == 0 / r >= n_order). The start is
+     * non-identity and stays non-identity for honest inputs (a mid-loop identity needs an
+     * adversarial exact-cancellation), so every point_add below is a valid real+real add. */
     if (determ_pedersen_generator_h(H) != 0) return -1;
     if (determ_p256_point_mul(acc, r, H) != 0) return -1;
 
     for (size_t i = 0; i < n; i++) {
         const uint8_t *ai = a + i * 32;
         const uint8_t *bi = b + i * 32;
-        /* a_i * G_i (skip the identity term a_i == 0). */
-        if (!scalar_is_zero(ai)) {
-            if (determ_pedersen_gen(gen, (uint32_t)i, 0) != 0) return -1;
-            if (determ_p256_point_mul(term, ai, gen) != 0) return -1;
-            if (determ_p256_point_add(acc, acc, term) != 0) return -1;
-        }
-        /* b_i * H_i (skip the identity term b_i == 0). */
-        if (!scalar_is_zero(bi)) {
-            if (determ_pedersen_gen(gen, (uint32_t)i, 1) != 0) return -1;
-            if (determ_p256_point_mul(term, bi, gen) != 0) return -1;
-            if (determ_p256_point_add(acc, acc, term) != 0) return -1;
-        }
+        /* CONSTANT-TIME a_i*G_i: always exponentiate (nonzero-substituted scalar) + fold
+         * into a candidate, then select `acc` unchanged when a_i == 0 — no leak of the
+         * secret bit-vector. Byte-identical to the old zero-skip (point_mul still rejects
+         * a_i >= n; for a_i != 0, s_nz == a_i). */
+        if (determ_pedersen_gen(gen, (uint32_t)i, 0) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        ct_scalar_nz(s_nz, ai);
+        if (determ_p256_point_mul(term, s_nz, gen) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        if (determ_p256_point_add(cand, acc, term) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        ct_point_select(acc, acc, cand, (uint8_t)(1u - (unsigned)scalar_is_zero(ai)), 65);   /* pick = (a_i != 0) */
+        /* b_i * H_i (same shape). */
+        if (determ_pedersen_gen(gen, (uint32_t)i, 1) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        ct_scalar_nz(s_nz, bi);
+        if (determ_p256_point_mul(term, s_nz, gen) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        if (determ_p256_point_add(cand, acc, term) != 0) { determ_secure_zero(s_nz, sizeof s_nz); return -1; }
+        ct_point_select(acc, acc, cand, (uint8_t)(1u - (unsigned)scalar_is_zero(bi)), 65);   /* pick = (b_i != 0) */
     }
+    determ_secure_zero(s_nz, sizeof s_nz);
     return determ_p256_point_compress(out33, acc);
 }
 
@@ -129,28 +151,10 @@ int determ_pedersen_vector_commit(uint8_t out33[33],
 
 int determ_pedersen_msm(uint8_t out33[33],
                         const uint8_t *scalars, const uint8_t *points33, size_t n) {
-    uint8_t acc[65], P[65], term[65];
-    int acc_is_identity = 1;   /* the empty sum is the group identity */
-
-    for (size_t i = 0; i < n; i++) {
-        const uint8_t *si = scalars + i * 32;
-        if (scalar_is_zero(si)) continue;            /* s_i == 0: identity term, skip */
-        /* Decode P_i, then term = s_i * P_i. Since s_i in [1, n_order) and P_i is a
-         * non-identity curve point of prime order, term is never the identity, so
-         * point_mul's -1 here means "bad scalar / bad point". */
-        if (determ_p256_point_decompress(P, points33 + i * 33) != 0) return -1;
-        if (determ_p256_point_mul(term, si, P) != 0) return -1;
-
-        if (acc_is_identity) {
-            memcpy(acc, term, 65);
-            acc_is_identity = 0;
-        } else {
-            /* acc, term are both valid non-identity points here, so a -1 from
-             * point_add means the RESULT is the identity (acc == -term). */
-            if (determ_p256_point_add(acc, acc, term) != 0) acc_is_identity = 1;
-        }
-    }
-
-    if (acc_is_identity) return 1;                   /* the sum is the identity */
-    return determ_p256_point_compress(out33, acc) == 0 ? 0 : -1;
+    /* CONSTANT-TIME: delegated to the pt-domain determ_p256_msm_ct, which folds every term
+     * uniformly (pt_scalar_mul(0,P) = O, the RCB-complete pt_add absorbs O) — so it needs
+     * no acc_is_identity flag and NO zero-scalar skip, and leaks nothing about which secret
+     * scalars are zero. Byte-identical to the old encoded-domain accumulation (the
+     * pedersen / bp_* corpora are the guard). */
+    return determ_p256_msm_ct(out33, scalars, points33, n);
 }
