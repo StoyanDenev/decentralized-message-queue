@@ -56,6 +56,40 @@ int determ_rangeproof_prove(uint8_t V_out[33], uint8_t *proof,
 int determ_rangeproof_verify(const uint8_t V33[33],
                              const uint8_t *proof, size_t n);
 
+/* ── §3.19 increment 6: the AGGREGATED range proof ───────────────────────────
+ * Proves that m committed values v_0..v_{m-1} EACH lie in [0, 2^n) in ONE proof
+ * of size 2*log2(m*n)+O(1) group elements (vs. m separate proofs). The m bit-
+ * vectors are concatenated; value j's 2^n slot is scaled by z^(2+j) (0-indexed),
+ * so m=1 recovers the single-value proof above. The final <l,r>=t_hat check is
+ * compressed by the same inc.4 IPA over the m*n-wide generators.
+ *
+ * Constraints: n a per-value bit width <= DETERM_RANGEPROOF_MAX_BITS (64), m >= 1,
+ * and m*n a power of two <= DETERM_IPA_MAX_N (256). Same wire convention. */
+
+/* Byte length of an aggregated proof: 228 + determ_ipa_proof_len(m*n) (the header
+ * A|S|T1|T2|taux|mu|t_hat + the IPA over m*n). 0 if (m,n) is invalid. (The m value
+ * commitments V are a separate m*33-byte output, not part of `proof`.) */
+size_t determ_agg_rangeproof_proof_len(size_t m, size_t n);
+
+/* Prove that every v[j] in [0, 2^n) for j<m. Writes m compressed value commitments
+ * V_j = v[j]*g + gamma[j]*h to V_out (m*33 bytes) and the proof. gamma is m
+ * consecutive 32-byte scalars; sL, sR are each m*n consecutive 32-byte scalars;
+ * alpha/rho/tau1/tau2 are single 32-byte scalars (caller-supplied randomness, as
+ * in the single-value form). Returns 0, or -1 on bad (m,n) / invalid scalar / a
+ * (negligible) identity intermediate. Deterministic. */
+int determ_agg_rangeproof_prove(uint8_t *V_out, uint8_t *proof,
+                                const uint64_t *v, const uint8_t *gamma,
+                                const uint8_t alpha[32], const uint8_t rho[32],
+                                const uint8_t tau1[32], const uint8_t tau2[32],
+                                const uint8_t *sL, const uint8_t *sR,
+                                size_t m, size_t n);
+
+/* Verify: 0 iff `proof` is a valid aggregated range proof for the m value
+ * commitments V (m*33 bytes), -1 otherwise (malformed / any v[j] out of range /
+ * bad (m,n)). Fail-closed. A single out-of-range value in the batch rejects. */
+int determ_agg_rangeproof_verify(const uint8_t *V, const uint8_t *proof,
+                                 size_t m, size_t n);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -385,3 +385,300 @@ int determ_rangeproof_verify(const uint8_t V33[33], const uint8_t *proof, size_t
 
     return determ_ipa_verify_gens(P_ipa, ipa, gv, hprime, u, n);
 }
+
+/* ── §3.19 increment 6: the AGGREGATED range proof (m values, one proof) ──────
+ * Ported from tools/verify_bp_agg_rangeproof.py (python-prove-first). Reuses every
+ * file-static helper above; the aggregated vectors are m*n wide (<= DETERM_IPA_MAX_N).
+ * Value j's 2^n slot is scaled by z^(2+j); m=1 reduces to the single-value proof. */
+#define MN_MAX DETERM_IPA_MAX_N                 /* 256: max aggregated bit-width m*n */
+
+/* -1 if (m,n) invalid, else log2(m*n). Requires n in [1,64], m>=1, m*n a power of
+ * two in [1, MN_MAX]. */
+static int agg_rounds(size_t m, size_t n) {
+    if (m < 1 || n < 1 || n > RP_MAXN) return -1;
+    size_t nm = m * n;
+    if (nm < 1 || nm > MN_MAX) return -1;
+    int r = 0; size_t t = nm;
+    while (t > 1) { if (t & 1) return -1; t >>= 1; r++; }
+    return r;
+}
+
+size_t determ_agg_rangeproof_proof_len(size_t m, size_t n) {
+    if (agg_rounds(m, n) < 0) return 0;
+    return RP_HDR + determ_ipa_proof_len(m * n);
+}
+
+/* aggregated Fiat-Shamir transcript: label ‖ m(4BE) ‖ n(4BE) ‖ V_0..V_{m-1} */
+typedef struct { uint8_t buf[9600]; size_t len; } agg_tr;   /* m<=256 => V bytes <= 8448 */
+static void atr_init(agg_tr *t, const uint8_t *Vs, size_t m, size_t n) {
+    static const char LABEL[] = "DETERM-BP-AGGRANGE-v1";
+    t->len = sizeof(LABEL) - 1;
+    memcpy(t->buf, LABEL, t->len);
+    uint32_t mm = (uint32_t)m, nn = (uint32_t)n;
+    t->buf[t->len++] = (uint8_t)(mm >> 24); t->buf[t->len++] = (uint8_t)(mm >> 16);
+    t->buf[t->len++] = (uint8_t)(mm >> 8);  t->buf[t->len++] = (uint8_t)mm;
+    t->buf[t->len++] = (uint8_t)(nn >> 24); t->buf[t->len++] = (uint8_t)(nn >> 16);
+    t->buf[t->len++] = (uint8_t)(nn >> 8);  t->buf[t->len++] = (uint8_t)nn;
+    for (size_t j = 0; j < m; j++) { memcpy(t->buf + t->len, Vs + j * 33, 33); t->len += 33; }
+}
+static void atr_absorb(agg_tr *t, const uint8_t pt33[33]) {
+    memcpy(t->buf + t->len, pt33, 33); t->len += 33;
+}
+static int atr_challenge(agg_tr *t, uint8_t out32[32]) {
+    static const char CDST[] = "DETERM-BP-AGGRANGE-v1-challenge";
+    if (determ_p256_hash_to_scalar(out32, t->buf, t->len,
+                                   (const uint8_t *)CDST, sizeof(CDST) - 1) != 0) return -1;
+    uint8_t z = 0; for (int i = 0; i < 32; i++) z |= out32[i];
+    if (z == 0) return -1;
+    memcpy(t->buf + t->len, out32, 32); t->len += 32;
+    return 0;
+}
+
+int determ_agg_rangeproof_prove(uint8_t *V_out, uint8_t *proof,
+                                const uint64_t *v, const uint8_t *gamma,
+                                const uint8_t alpha[32], const uint8_t rho[32],
+                                const uint8_t tau1[32], const uint8_t tau2[32],
+                                const uint8_t *sL, const uint8_t *sR,
+                                size_t m, size_t n) {
+    if (agg_rounds(m, n) < 0) return -1;
+    size_t nm = m * n;
+
+    uint8_t g[33], h[33], u[33], gv[MN_MAX * 33], hv[MN_MAX * 33];
+    if (base_g(g) != 0 || ped_h(h) != 0) return -1;
+    for (size_t i = 0; i < nm; i++) {
+        if (gen_c(gv + i * 33, (uint32_t)i, 0) != 0) return -1;
+        if (gen_c(hv + i * 33, (uint32_t)i, 1) != 0) return -1;
+    }
+    if (gen_c(u, U_INDEX, 0) != 0) return -1;
+
+    uint8_t sc2[2 * 32], pt2[2 * 33];
+    for (size_t j = 0; j < m; j++) {              /* V_j = v_j*g + gamma_j*h */
+        uint8_t vscal[32];
+        u64_to_scalar(vscal, v[j]);
+        memcpy(sc2, vscal, 32); memcpy(sc2 + 32, gamma + j * 32, 32);
+        memcpy(pt2, g, 33); memcpy(pt2 + 33, h, 33);
+        if (msm_nonid(V_out + j * 33, sc2, pt2, 2) != 0) return -1;
+    }
+
+    uint8_t aL[MN_MAX * 32], aR[MN_MAX * 32];
+    for (size_t j = 0; j < m; j++) for (size_t k = 0; k < n; k++) {
+        size_t i = j * n + k;
+        memset(aL + i * 32, 0, 32);
+        aL[i * 32 + 31] = (uint8_t)((v[j] >> k) & 1);
+        sc_sub(aR + i * 32, aL + i * 32, SC_ONE);
+    }
+
+    uint8_t scal[(2 * MN_MAX + 3) * 32], pts[(2 * MN_MAX + 3) * 33];
+    uint8_t A[33], S[33];
+    memcpy(scal, alpha, 32);
+    for (size_t i = 0; i < nm; i++) { memcpy(scal + (1 + i) * 32, aL + i * 32, 32);
+                                      memcpy(scal + (1 + nm + i) * 32, aR + i * 32, 32); }
+    memcpy(pts, h, 33);
+    for (size_t i = 0; i < nm; i++) { memcpy(pts + (1 + i) * 33, gv + i * 33, 33);
+                                      memcpy(pts + (1 + nm + i) * 33, hv + i * 33, 33); }
+    if (msm_nonid(A, scal, pts, 2 * nm + 1) != 0) return -1;
+    memcpy(scal, rho, 32);
+    for (size_t i = 0; i < nm; i++) { memcpy(scal + (1 + i) * 32, sL + i * 32, 32);
+                                      memcpy(scal + (1 + nm + i) * 32, sR + i * 32, 32); }
+    if (msm_nonid(S, scal, pts, 2 * nm + 1) != 0) return -1;
+
+    agg_tr tr; atr_init(&tr, V_out, m, n);
+    atr_absorb(&tr, A); atr_absorb(&tr, S);
+    uint8_t y[32], z[32];
+    if (atr_challenge(&tr, y) != 0) return -1;
+    if (atr_challenge(&tr, z) != 0) return -1;
+
+    uint8_t yn[MN_MAX * 32], twon[RP_MAXN * 32], z2[32];
+    if (sc_powers(yn, y, nm) != 0) return -1;
+    for (size_t k = 0; k < n; k++) u64_to_scalar(twon + k * 32, (uint64_t)1 << k);
+    if (sc_mul(z2, z, z) != 0) return -1;
+
+    /* zslot[j*n+k] = z^(2+j) * 2^k */
+    uint8_t zslot[MN_MAX * 32], zpow[32]; memcpy(zpow, z2, 32);
+    for (size_t j = 0; j < m; j++) {
+        for (size_t k = 0; k < n; k++)
+            if (sc_mul(zslot + (j * n + k) * 32, zpow, twon + k * 32) != 0) return -1;
+        if (j + 1 < m && sc_mul(zpow, zpow, z) != 0) return -1;
+    }
+
+    uint8_t l0[MN_MAX * 32], r0[MN_MAX * 32], r1[MN_MAX * 32];
+    for (size_t i = 0; i < nm; i++) {
+        sc_sub(l0 + i * 32, aL + i * 32, z);
+        uint8_t t[32];
+        sc_add(t, aR + i * 32, z);
+        if (sc_mul(t, yn + i * 32, t) != 0) return -1;
+        sc_add(r0 + i * 32, t, zslot + i * 32);
+        if (sc_mul(r1 + i * 32, yn + i * 32, sR + i * 32) != 0) return -1;
+    }
+
+    uint8_t t1[32], t2[32], ta[32], tb[32], T1[33], T2[33];
+    if (rp_inner(ta, sL, r0, nm) != 0 || rp_inner(tb, l0, r1, nm) != 0) return -1;
+    sc_add(t1, ta, tb);
+    if (rp_inner(t2, sL, r1, nm) != 0) return -1;
+    memcpy(sc2, t1, 32); memcpy(sc2 + 32, tau1, 32);
+    memcpy(pt2, g, 33); memcpy(pt2 + 33, h, 33);
+    if (msm_nonid(T1, sc2, pt2, 2) != 0) return -1;
+    memcpy(sc2, t2, 32); memcpy(sc2 + 32, tau2, 32);
+    if (msm_nonid(T2, sc2, pt2, 2) != 0) return -1;
+
+    atr_absorb(&tr, T1); atr_absorb(&tr, T2);
+    uint8_t x[32];
+    if (atr_challenge(&tr, x) != 0) return -1;
+
+    uint8_t l[MN_MAX * 32], r[MN_MAX * 32], that[32];
+    for (size_t i = 0; i < nm; i++) {
+        uint8_t t[32];
+        if (sc_mul(t, sL + i * 32, x) != 0) return -1;
+        sc_add(l + i * 32, l0 + i * 32, t);
+        if (sc_mul(t, r1 + i * 32, x) != 0) return -1;
+        sc_add(r + i * 32, r0 + i * 32, t);
+    }
+    if (rp_inner(that, l, r, nm) != 0) return -1;
+
+    /* taux = tau2*x^2 + tau1*x + sum_j z^(2+j)*gamma_j ; mu = alpha + rho*x */
+    uint8_t x2[32], taux[32], mu[32], tmp[32];
+    if (sc_mul(x2, x, x) != 0) return -1;
+    if (sc_mul(taux, tau2, x2) != 0) return -1;
+    if (sc_mul(tmp, tau1, x) != 0) return -1;
+    sc_add(taux, taux, tmp);
+    memcpy(zpow, z2, 32);
+    for (size_t j = 0; j < m; j++) {
+        if (sc_mul(tmp, zpow, gamma + j * 32) != 0) return -1;
+        sc_add(taux, taux, tmp);
+        if (j + 1 < m && sc_mul(zpow, zpow, z) != 0) return -1;
+    }
+    if (sc_mul(tmp, rho, x) != 0) return -1;
+    sc_add(mu, alpha, tmp);
+
+    uint8_t yinv[32], yinvn[MN_MAX * 32], hprime[MN_MAX * 33];
+    if (determ_p256_scalar_inv_mod_n(yinv, y) != 0) return -1;
+    if (sc_powers(yinvn, yinv, nm) != 0) return -1;
+    for (size_t i = 0; i < nm; i++) {
+        uint8_t P[65], T[65];
+        if (determ_p256_point_decompress(P, hv + i * 33) != 0) return -1;
+        if (determ_p256_point_mul(T, yinvn + i * 32, P) != 0) return -1;
+        if (determ_p256_point_compress(hprime + i * 33, T) != 0) return -1;
+    }
+    uint8_t P_ipa[33];
+    for (size_t i = 0; i < nm; i++) { memcpy(scal + i * 32, l + i * 32, 32);
+                                      memcpy(scal + (nm + i) * 32, r + i * 32, 32); }
+    memcpy(scal + 2 * nm * 32, that, 32);
+    for (size_t i = 0; i < nm; i++) { memcpy(pts + i * 33, gv + i * 33, 33);
+                                      memcpy(pts + (nm + i) * 33, hprime + i * 33, 33); }
+    memcpy(pts + 2 * nm * 33, u, 33);
+    if (msm_nonid(P_ipa, scal, pts, 2 * nm + 1) != 0) return -1;
+
+    if (determ_ipa_prove_gens(proof + RP_HDR, l, r, gv, hprime, u, P_ipa, nm) != 0) return -1;
+
+    memcpy(proof + RP_A, A, 33);   memcpy(proof + RP_S, S, 33);
+    memcpy(proof + RP_T1, T1, 33); memcpy(proof + RP_T2, T2, 33);
+    memcpy(proof + RP_TAUX, taux, 32); memcpy(proof + RP_MU, mu, 32);
+    memcpy(proof + RP_THAT, that, 32);
+    return 0;
+}
+
+int determ_agg_rangeproof_verify(const uint8_t *V, const uint8_t *proof, size_t m, size_t n) {
+    if (agg_rounds(m, n) < 0) return -1;
+    size_t nm = m * n;
+
+    uint8_t g[33], h[33], u[33], gv[MN_MAX * 33], hv[MN_MAX * 33];
+    if (base_g(g) != 0 || ped_h(h) != 0) return -1;
+    for (size_t i = 0; i < nm; i++) {
+        if (gen_c(gv + i * 33, (uint32_t)i, 0) != 0) return -1;
+        if (gen_c(hv + i * 33, (uint32_t)i, 1) != 0) return -1;
+    }
+    if (gen_c(u, U_INDEX, 0) != 0) return -1;
+
+    const uint8_t *A = proof + RP_A, *S = proof + RP_S;
+    const uint8_t *T1 = proof + RP_T1, *T2 = proof + RP_T2;
+    const uint8_t *taux = proof + RP_TAUX, *mu = proof + RP_MU, *that = proof + RP_THAT;
+    const uint8_t *ipa = proof + RP_HDR;
+
+    agg_tr tr; atr_init(&tr, V, m, n);
+    atr_absorb(&tr, A); atr_absorb(&tr, S);
+    uint8_t y[32], z[32];
+    if (atr_challenge(&tr, y) != 0) return -1;
+    if (atr_challenge(&tr, z) != 0) return -1;
+    atr_absorb(&tr, T1); atr_absorb(&tr, T2);
+    uint8_t x[32];
+    if (atr_challenge(&tr, x) != 0) return -1;
+
+    uint8_t yn[MN_MAX * 32], twon[RP_MAXN * 32], z2[32], x2[32];
+    if (sc_powers(yn, y, nm) != 0) return -1;
+    for (size_t k = 0; k < n; k++) u64_to_scalar(twon + k * 32, (uint64_t)1 << k);
+    if (sc_mul(z2, z, z) != 0) return -1;
+    if (sc_mul(x2, x, x) != 0) return -1;
+
+    /* zslot + the per-value z^(2+j) (needed for Check 1's V-side + zsum for delta) */
+    uint8_t zslot[MN_MAX * 32], zpow[32]; memcpy(zpow, z2, 32);
+    uint8_t vscal[MN_MAX * 32];            /* reused: holds the z^(2+j) V-side scalars (m<=256) */
+    uint8_t zsum[32] = {0};                /* sum_j z^(3+j) for delta */
+    for (size_t j = 0; j < m; j++) {
+        memcpy(vscal + j * 32, zpow, 32);
+        uint8_t t3[32];
+        if (sc_mul(t3, zpow, z) != 0) return -1;   /* z^(3+j) */
+        sc_add(zsum, zsum, t3);
+        for (size_t k = 0; k < n; k++)
+            if (sc_mul(zslot + (j * n + k) * 32, zpow, twon + k * 32) != 0) return -1;
+        if (j + 1 < m && sc_mul(zpow, zpow, z) != 0) return -1;
+    }
+
+    /* delta = (z - z^2)*<1^{mn}, y^{mn}> - zsum*(2^n - 1) */
+    uint8_t sum_y[32] = {0}, sum_2[32] = {0}, delta[32], ta[32], tb[32];
+    for (size_t i = 0; i < nm; i++) sc_add(sum_y, sum_y, yn + i * 32);
+    for (size_t k = 0; k < n; k++) sc_add(sum_2, sum_2, twon + k * 32);
+    sc_sub(ta, z, z2);
+    if (sc_mul(ta, ta, sum_y) != 0) return -1;
+    if (sc_mul(tb, zsum, sum_2) != 0) return -1;
+    sc_sub(delta, ta, tb);
+
+    /* Check 1: that*g + taux*h == sum_j z^(2+j)*V_j + delta*g + x*T1 + x^2*T2 */
+    uint8_t lhs[33], rhs[33], sc2[2 * 32], pt2[2 * 33];
+    uint8_t scal[(2 * MN_MAX + 3) * 32], pts[(2 * MN_MAX + 3) * 33];
+    memcpy(sc2, that, 32); memcpy(sc2 + 32, taux, 32);
+    memcpy(pt2, g, 33); memcpy(pt2 + 33, h, 33);
+    if (msm_nonid(lhs, sc2, pt2, 2) != 0) return -1;
+    for (size_t j = 0; j < m; j++) { memcpy(scal + j * 32, vscal + j * 32, 32);
+                                     memcpy(pts + j * 33, V + j * 33, 33); }
+    memcpy(scal + m * 32, delta, 32); memcpy(scal + (m + 1) * 32, x, 32);
+    memcpy(scal + (m + 2) * 32, x2, 32);
+    memcpy(pts + m * 33, g, 33); memcpy(pts + (m + 1) * 33, T1, 33);
+    memcpy(pts + (m + 2) * 33, T2, 33);
+    if (msm_nonid(rhs, scal, pts, m + 3) != 0) return -1;
+    if (memcmp(lhs, rhs, 33) != 0) return -1;
+
+    /* Check 2: P = A + x*S - z*<1,gv> + <z*y^{mn} + zslot, h'> - mu*h, then IPA */
+    uint8_t yinv[32], yinvn[MN_MAX * 32], hprime[MN_MAX * 33];
+    if (determ_p256_scalar_inv_mod_n(yinv, y) != 0) return -1;
+    if (sc_powers(yinvn, yinv, nm) != 0) return -1;
+    for (size_t i = 0; i < nm; i++) {
+        uint8_t P[65], T[65];
+        if (determ_p256_point_decompress(P, hv + i * 33) != 0) return -1;
+        if (determ_p256_point_mul(T, yinvn + i * 32, P) != 0) return -1;
+        if (determ_p256_point_compress(hprime + i * 33, T) != 0) return -1;
+    }
+    uint8_t negz[32], negmu[32];
+    sc_sub(negz, SC_ZERO, z);
+    sc_sub(negmu, SC_ZERO, mu);
+    memcpy(scal, SC_ONE, 32); memcpy(scal + 32, x, 32);
+    for (size_t i = 0; i < nm; i++) memcpy(scal + (2 + i) * 32, negz, 32);
+    for (size_t i = 0; i < nm; i++) {
+        uint8_t t[32];
+        if (sc_mul(t, z, yn + i * 32) != 0) return -1;
+        sc_add(scal + (2 + nm + i) * 32, t, zslot + i * 32);
+    }
+    memcpy(scal + (2 + 2 * nm) * 32, negmu, 32);
+    memcpy(pts, A, 33); memcpy(pts + 33, S, 33);
+    for (size_t i = 0; i < nm; i++) { memcpy(pts + (2 + i) * 33, gv + i * 33, 33);
+                                      memcpy(pts + (2 + nm + i) * 33, hprime + i * 33, 33); }
+    memcpy(pts + (2 + 2 * nm) * 33, h, 33);
+    uint8_t P[33];
+    if (msm_nonid(P, scal, pts, 2 * nm + 3) != 0) return -1;
+
+    uint8_t P_ipa[33];
+    memcpy(sc2, SC_ONE, 32); memcpy(sc2 + 32, that, 32);
+    memcpy(pt2, P, 33); memcpy(pt2 + 33, u, 33);
+    if (msm_nonid(P_ipa, sc2, pt2, 2) != 0) return -1;
+
+    return determ_ipa_verify_gens(P_ipa, ipa, gv, hprime, u, nm);
+}

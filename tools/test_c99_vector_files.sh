@@ -61,7 +61,7 @@ EXPECTED = {
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
-    "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
+    "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
 }
 
 try:
@@ -1199,6 +1199,17 @@ def chk_bp_rangeproof(vec, label):
         return "cannot import verify_bp_rangeproof (%s)" % e
     return vr.check_rangeproof(vec, label)
 
+def chk_bp_agg_rangeproof(vec, label):
+    # §3.19 inc.6 aggregated range proof — rebuild randomness from (m,n,seed), recompute
+    # the m value commitments + the whole proof through the independent from-scratch Python
+    # in tools/verify_bp_agg_rangeproof.py, and match the frozen bytes. Same dual-oracle posture.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_bp_agg_rangeproof as va
+    except Exception as e:
+        return "cannot import verify_bp_agg_rangeproof (%s)" % e
+    return va.check_agg_rangeproof(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1230,6 +1241,7 @@ CHECKERS = {
     "pedersen": chk_pedersen,
     "bp_ipa": chk_bp_ipa,
     "bp_rangeproof": chk_bp_rangeproof,
+    "bp_agg_rangeproof": chk_bp_agg_rangeproof,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
