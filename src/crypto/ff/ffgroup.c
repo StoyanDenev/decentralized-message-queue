@@ -7,6 +7,7 @@
  * (Koç–Acar–Kaliski), no __int128 / intrinsics. NOT constant-time (owner-gated). */
 #include "determ/crypto/ff/ffgroup.h"
 #include "ff_params.h"                 /* GENERATED (same dir): P, Q, R2, H, NPRIME */
+#include "determ/crypto/sha2/sha2.h"   /* determ_sha256 — hash-to-group (inc.2) */
 
 #include <string.h>
 
@@ -141,5 +142,135 @@ int determ_ff_pedersen_add(uint8_t out[DETERM_FF_ELEM_BYTES],
     if (ff_ge(a, DETERM_FF_P) || ff_ge(b, DETERM_FF_P)) return -1;   /* not reduced */
     modmul_normal(c, a, b);
     be_store(out, c);
+    return 0;
+}
+
+/* ── §3.20 increment 2: vector-commitment generators + vector commit + MSM ──── */
+
+static int ff_is_one(const uint32_t a[96]) {
+    if (a[0] != 1) return 0;
+    uint32_t x = 0; for (int i = 1; i < 96; i++) x |= a[i];
+    return x == 0;
+}
+
+/* acc <<= 1 across 96 limbs; returns the bit shifted out of the top (bit 3072). */
+static uint32_t ff_shl1(uint32_t a[96]) {
+    uint32_t carry = 0;
+    for (int i = 0; i < 96; i++) {
+        uint32_t nc = a[i] >> 31;
+        a[i] = (a[i] << 1) | carry;
+        carry = nc;
+    }
+    return carry;
+}
+
+/* acc -= p (unconditionally; caller guarantees acc >= p). */
+static void ff_sub_p(uint32_t a[96]) {
+    uint32_t tmp[96];
+    uint64_t br = 0;
+    for (int j = 0; j < S; j++) {
+        uint64_t d = (uint64_t)a[j] - (uint64_t)DETERM_FF_P[j] - br;
+        tmp[j] = (uint32_t)d; br = (d >> 32) & 1;
+    }
+    memcpy(a, tmp, S * 4);
+}
+
+/* acc = int(material[0..mlen), big-endian) mod p, via bit-Horner (MSB-first). Each
+ * step doubles acc (< 2p) and adds one message bit, then one conditional subtract of
+ * p keeps acc < p — byte-identical to Python's int.from_bytes(material,"big") % P. */
+static void ff_mod_reduce_wide(uint32_t acc[96], const uint8_t *material, size_t mlen) {
+    memset(acc, 0, S * 4);
+    for (size_t k = 0; k < mlen; k++) {
+        uint8_t byte = material[k];
+        for (int bit = 7; bit >= 0; bit--) {
+            uint32_t carry = ff_shl1(acc);       /* acc = 2*acc, capturing bit 3072 */
+            acc[0] |= (uint32_t)((byte >> bit) & 1u);
+            if (carry || ff_ge(acc, DETERM_FF_P)) ff_sub_p(acc);
+        }
+    }
+}
+
+/* Hash-to-group: 13 SHA-256 blocks of (prefix || counter) -> 416 bytes -> reduce
+ * mod p -> SQUARE into the order-q QR subgroup G_q. out is normal-domain < p, != 0,1.
+ * Returns 0, or -1 on the negligible degenerate square (out in {0,1}). */
+static int ff_hash_to_group(uint32_t out[96], const uint8_t *prefix, size_t plen) {
+    uint8_t material[416];
+    uint8_t blk[64];
+    memcpy(blk, prefix, plen);                   /* plen <= 40 for our DSTs */
+    for (int i = 0; i < 13; i++) {
+        blk[plen] = (uint8_t)i;
+        determ_sha256(blk, plen + 1, material + 32 * i);
+    }
+    uint32_t hs[96];
+    ff_mod_reduce_wide(hs, material, 416);
+    modmul_normal(out, hs, hs);                  /* out = hs^2 mod p, order q */
+    if (ff_is_zero(out) || ff_is_one(out)) return -1;
+    return 0;
+}
+
+static const uint8_t FF_VG_DST[] = "DETERM-FF-PEDERSEN-VEC-G-MODP3072-v1";
+static const uint8_t FF_VH_DST[] = "DETERM-FF-PEDERSEN-VEC-H-MODP3072-v1";
+
+/* limbs-out generator (internal): out = gen(index, which), normal-domain < p. */
+static int ff_gen_limbs(uint32_t out[96], uint32_t index, uint8_t which) {
+    const uint8_t *dst; size_t dl;
+    if (which == 0)      { dst = FF_VG_DST; dl = sizeof(FF_VG_DST) - 1; }
+    else if (which == 1) { dst = FF_VH_DST; dl = sizeof(FF_VH_DST) - 1; }
+    else return -1;
+    uint8_t prefix[64];
+    memcpy(prefix, dst, dl);
+    prefix[dl + 0] = (uint8_t)(index >> 24); prefix[dl + 1] = (uint8_t)(index >> 16);
+    prefix[dl + 2] = (uint8_t)(index >> 8);  prefix[dl + 3] = (uint8_t)index;
+    return ff_hash_to_group(out, prefix, dl + 4);
+}
+
+int determ_ff_gen(uint8_t out[DETERM_FF_ELEM_BYTES], uint32_t index, uint8_t which) {
+    uint32_t g[96];
+    if (ff_gen_limbs(g, index, which) != 0) return -1;
+    be_store(out, g);
+    return 0;
+}
+
+int determ_ff_vector_commit(uint8_t out[DETERM_FF_ELEM_BYTES],
+                            const uint8_t *a, const uint8_t *b,
+                            size_t n, const uint8_t r[DETERM_FF_ELEM_BYTES]) {
+    uint32_t rl[96], acc[96], sl[96], gen[96], term[96];
+    be_load(rl, r);
+    if (ff_is_zero(rl) || ff_ge(rl, DETERM_FF_Q)) return -1;         /* r == 0 or r >= q */
+    modexp(acc, DETERM_FF_H, rl);                                    /* acc = h^r */
+    for (size_t i = 0; i < n; i++) {
+        be_load(sl, a + i * DETERM_FF_ELEM_BYTES);                   /* a_i * G_i */
+        if (ff_ge(sl, DETERM_FF_Q)) return -1;
+        if (!ff_is_zero(sl)) {
+            if (ff_gen_limbs(gen, (uint32_t)i, 0) != 0) return -1;
+            modexp(term, gen, sl);
+            modmul_normal(acc, acc, term);
+        }
+        be_load(sl, b + i * DETERM_FF_ELEM_BYTES);                   /* b_i * H_i */
+        if (ff_ge(sl, DETERM_FF_Q)) return -1;
+        if (!ff_is_zero(sl)) {
+            if (ff_gen_limbs(gen, (uint32_t)i, 1) != 0) return -1;
+            modexp(term, gen, sl);
+            modmul_normal(acc, acc, term);
+        }
+    }
+    be_store(out, acc);
+    return 0;
+}
+
+int determ_ff_msm(uint8_t out[DETERM_FF_ELEM_BYTES],
+                  const uint8_t *scalars, const uint8_t *points, size_t n) {
+    uint32_t acc[96], sl[96], pl[96], term[96];
+    memset(acc, 0, sizeof(acc)); acc[0] = 1;                         /* identity = 1 */
+    for (size_t i = 0; i < n; i++) {
+        be_load(sl, scalars + i * DETERM_FF_ELEM_BYTES);
+        if (ff_ge(sl, DETERM_FF_Q)) return -1;                       /* scalar >= q */
+        if (ff_is_zero(sl)) continue;                                /* skip before reading the point */
+        be_load(pl, points + i * DETERM_FF_ELEM_BYTES);
+        if (ff_is_zero(pl) || ff_ge(pl, DETERM_FF_P)) return -1;     /* point 0 or >= p */
+        modexp(term, pl, sl);
+        modmul_normal(acc, acc, term);
+    }
+    be_store(out, acc);
     return 0;
 }

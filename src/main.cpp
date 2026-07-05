@@ -13781,6 +13781,58 @@ int main(int argc, char** argv) {
             if (determ_ff_pedersen_commit(c.data(),v.data(),allff.data())==0) val=false;  // r>=q
         }
         check(val, "input validation: r==0, v>=q, r>=q all reject");
+        // ── §3.20 inc.2: generator families, vector commit, MSM ──
+        auto putbe = [&](std::vector<uint8_t>& b, size_t off, uint64_t val){
+            for (size_t i=0;i<E;i++) b[off+i]=0;
+            for (int i=0;i<8;i++) b[off+E-1-i]=(uint8_t)(val>>(8*i)); };
+        // (5) generator families: deterministic, distinct, which>1 rejects.
+        {
+            std::vector<uint8_t> g0(E),g1(E),h0(E),t(E);
+            bool ok = determ_ff_gen(g0.data(),0,0)==0 && determ_ff_gen(g1.data(),1,0)==0
+                   && determ_ff_gen(h0.data(),0,1)==0;
+            ok = ok && determ_ff_gen(t.data(),0,0)==0 && t==g0;      // deterministic
+            ok = ok && g0!=g1 && g0!=h0 && g1!=h0;                   // families distinct
+            ok = ok && determ_ff_gen(t.data(),0,2)==-1;             // which>1 rejects
+            check(ok, "gen: deterministic, families distinct, which>1 rejects");
+        }
+        // (6) vector_commit == MSM over [h,G_i,H_i]; n==0 => h^r; r==0 rejects.
+        {
+            std::vector<uint8_t> a(2*E), b(2*E), r(E), VC(E), M(E);
+            putbe(a,0,3); putbe(a,E,5); putbe(b,0,7); putbe(b,E,0); setbe(r,0x1234);
+            bool ok = determ_ff_vector_commit(VC.data(),a.data(),b.data(),2,r.data())==0;
+            std::vector<uint8_t> h(E),g0(E),g1(E),h0(E),h1(E);
+            determ_ff_pedersen_generator_h(h.data());
+            determ_ff_gen(g0.data(),0,0); determ_ff_gen(g1.data(),1,0);
+            determ_ff_gen(h0.data(),0,1); determ_ff_gen(h1.data(),1,1);
+            std::vector<uint8_t> pts(5*E), sc(5*E);
+            std::memcpy(&pts[0*E],h.data(),E);  std::memcpy(&pts[1*E],g0.data(),E);
+            std::memcpy(&pts[2*E],g1.data(),E); std::memcpy(&pts[3*E],h0.data(),E);
+            std::memcpy(&pts[4*E],h1.data(),E);
+            putbe(sc,0,0x1234); putbe(sc,E,3); putbe(sc,2*E,5); putbe(sc,3*E,7); putbe(sc,4*E,0);
+            ok = ok && determ_ff_msm(M.data(),sc.data(),pts.data(),5)==0 && M==VC;
+            std::vector<uint8_t> C0(E), hr(E);
+            ok = ok && determ_ff_vector_commit(C0.data(),nullptr,nullptr,0,r.data())==0;
+            ok = ok && determ_ff_msm(hr.data(),r.data(),h.data(),1)==0 && C0==hr;   // n==0 => h^r
+            std::vector<uint8_t> zr(E,0);
+            ok = ok && determ_ff_vector_commit(C0.data(),a.data(),b.data(),2,zr.data())==-1; // r==0
+            check(ok, "vector_commit == MSM over [h,G_i,H_i]; n==0 => h^r; r==0 rejects");
+        }
+        // (7) MSM: all-zero => identity 1; scalar>=q rejects; zero point rejects.
+        {
+            std::vector<uint8_t> g0(E),g1(E); determ_ff_gen(g0.data(),0,0); determ_ff_gen(g1.data(),1,0);
+            std::vector<uint8_t> pts(2*E), M(E);
+            std::memcpy(&pts[0],g0.data(),E); std::memcpy(&pts[E],g1.data(),E);
+            std::vector<uint8_t> sc0(2*E,0);
+            bool ok = determ_ff_msm(M.data(),sc0.data(),pts.data(),2)==0;
+            std::vector<uint8_t> one(E,0); one[E-1]=1;
+            ok = ok && M==one;                                        // all-zero => 1
+            std::vector<uint8_t> scbad(2*E,0xff);
+            ok = ok && determ_ff_msm(M.data(),scbad.data(),pts.data(),2)==-1;   // scalar>=q rejects
+            std::vector<uint8_t> sc1(2*E,0); sc1[E-1]=2;              // scalar0=2, scalar1=0
+            std::vector<uint8_t> pz(2*E,0);
+            ok = ok && determ_ff_msm(M.data(),sc1.data(),pz.data(),2)==-1;      // zero point rejects
+            check(ok, "msm: all-zero => identity 1; scalar>=q rejects; zero point rejects");
+        }
         std::cout << (fail? "  FAIL: ff-pedersen-c99 unit test\n" : "  PASS: ff-pedersen-c99 unit test\n");
         return fail?1:0;
     }
@@ -14716,6 +14768,37 @@ int main(int argc, char** argv) {
                             || determ_ff_pedersen_commit(c2.data(),v2.data(),r2.data())!=0
                             || determ_ff_pedersen_add(c3.data(),c1.data(),c2.data())!=0
                             || hx(c3.data(),384)!=v["c3_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "ff_gen") {                     // §3.20 inc.2
+                        int idx = v["index"].get<int>(); int wh = v["which"].get<int>();
+                        std::vector<uint8_t> g(384);
+                        if (determ_ff_gen(g.data(),(uint32_t)idx,(uint8_t)wh)!=0
+                            || hx(g.data(),384)!=v["g_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "ff_vector_commit") {
+                        const auto& aa=v["a_hex"]; const auto& bb=v["b_hex"];
+                        size_t n=aa.size(); bool okk=(bb.size()==n);
+                        std::vector<uint8_t> a(n*384), b(n*384);
+                        for (size_t i=0; okk && i<n; i++){
+                            auto ea=unhex(aa[i].get<std::string>()); auto eb=unhex(bb[i].get<std::string>());
+                            if (ea.size()!=384||eb.size()!=384){ okk=false; break; }
+                            std::memcpy(&a[i*384],ea.data(),384); std::memcpy(&b[i*384],eb.data(),384);
+                        }
+                        auto rb=unhex(v["r_hex"].get<std::string>());
+                        std::vector<uint8_t> c(384);
+                        if (!okk || rb.size()!=384
+                            || determ_ff_vector_commit(c.data(), n?a.data():nullptr, n?b.data():nullptr, n, rb.data())!=0
+                            || hx(c.data(),384)!=v["c_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "ff_msm") {
+                        const auto& ss=v["scalars_hex"]; const auto& pp=v["points_hex"];
+                        size_t n=ss.size(); bool okk=(pp.size()==n);
+                        std::vector<uint8_t> sc(n*384), pts(n*384);
+                        for (size_t i=0; okk && i<n; i++){
+                            auto es=unhex(ss[i].get<std::string>()); auto ep=unhex(pp[i].get<std::string>());
+                            if (es.size()!=384||ep.size()!=384){ okk=false; break; }
+                            std::memcpy(&sc[i*384],es.data(),384); std::memcpy(&pts[i*384],ep.data(),384);
+                        }
+                        std::vector<uint8_t> m(384);
+                        if (!okk || determ_ff_msm(m.data(), n?sc.data():nullptr, n?pts.data():nullptr, n)!=0
+                            || hx(m.data(),384)!=v["m_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
