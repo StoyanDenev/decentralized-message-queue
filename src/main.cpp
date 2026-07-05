@@ -35,6 +35,7 @@
 #include <determ/crypto/mldsa/sign.h>          // §3.18: ML-DSA sign/verify (increment 8, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
+#include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -510,6 +511,10 @@ In-process tests (deterministic, no network):
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
                                               verify + reject gates (§3.13)
+  determ test-bp-ipa-c99                      §3.19 inc.4: Bulletproofs inner-
+                                              product argument over P-256 —
+                                              round-trip + soundness + byte-exact
+                                              proof KAT vs python (§3.13)
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13531,6 +13536,52 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: pedersen-c99 unit test\n" : "  PASS: pedersen-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-bp-ipa-c99") {
+        // §3.19 inc.4: the Bulletproofs inner-product argument over P-256 — a proof
+        // of knowledge of a,b with P = <a,g> + <b,h> + <a,b>*u, 2*log2(n) points +
+        // 2 scalars. The C is a mechanical port of tools/verify_bp_ipa.py (whose
+        // per-round-invariant + round-trip + soundness self-tests passed first);
+        // the byte-exact proof KAT vs that Python is the §3.13 dual-oracle gate
+        // (bp_ipa.json). Here: proof_len; round-trip accept; determinism; and the
+        // soundness rejects (tampered proof + wrong commitment).
+        int fail = 0;
+        auto check = [&](bool ok, const char* m){ std::cout << (ok?"  PASS: ":"  FAIL: ") << m << "\n"; if(!ok) fail=1; };
+        auto mkab = [](std::vector<uint8_t>& a, std::vector<uint8_t>& b, size_t n){
+            a.assign(n*32,0); b.assign(n*32,0);
+            for (size_t i=0;i<n;i++){ a[i*32+31]=(uint8_t)(7*i+3); b[i*32+31]=(uint8_t)(5*i+11); }
+        };
+        // (1) proof_len contract.
+        {
+            bool ok = determ_ipa_proof_len(1)==64 && determ_ipa_proof_len(2)==130
+                   && determ_ipa_proof_len(4)==196 && determ_ipa_proof_len(8)==262
+                   && determ_ipa_proof_len(3)==0 && determ_ipa_proof_len(512)==0;
+            check(ok, "proof_len: 66*log2(n)+64; non-power-of-2 and n>MAX -> 0");
+        }
+        // (2)-(4) round-trip + determinism + soundness, n in {1,2,4,8}.
+        bool rt=true, det=true, sound=true;
+        for (size_t n : {(size_t)1,(size_t)2,(size_t)4,(size_t)8}) {
+            std::vector<uint8_t> a,b; mkab(a,b,n);
+            uint8_t P[33];
+            if (determ_ipa_commit(P, a.data(), b.data(), n)!=0){ rt=false; break; }
+            size_t plen = determ_ipa_proof_len(n);
+            std::vector<uint8_t> pf(plen), pf2(plen);
+            if (determ_ipa_prove(pf.data(), a.data(), b.data(), P, n)!=0){ rt=false; break; }
+            if (determ_ipa_verify(P, pf.data(), n)!=0){ rt=false; break; }
+            determ_ipa_prove(pf2.data(), a.data(), b.data(), P, n);
+            if (pf != pf2) det=false;
+            std::vector<uint8_t> bad = pf; bad[plen/2] ^= 0x01;
+            if (determ_ipa_verify(P, bad.data(), n)==0) sound=false;         // tampered proof rejects
+            std::vector<uint8_t> a2=a; a2[31]^=0x02; uint8_t P2[33];
+            if (determ_ipa_commit(P2, a2.data(), b.data(), n)==0
+                && determ_ipa_verify(P2, pf.data(), n)==0) sound=false;      // proof for P must not verify under P2
+        }
+        check(rt,    "round-trip: commit -> prove -> verify accepts (n in {1,2,4,8})");
+        check(det,   "deterministic: prove twice yields identical proof bytes");
+        check(sound, "soundness: a tampered proof + a wrong commitment both reject");
+
+        std::cout << (fail? "  FAIL: bp-ipa-c99 unit test\n" : "  PASS: bp-ipa-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -13809,7 +13860,7 @@ int main(int argc, char** argv) {
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
-                                "pedersen.json",
+                                "pedersen.json", "bp_ipa.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14335,6 +14386,33 @@ int main(int argc, char** argv) {
                             ok=false; bad=name; break;
                         }
                     } else { ok=false; bad=name + " (unknown pedersen type '" + ty + "')"; break; }
+                } else if (prim == "bp_ipa") {
+                    // §3.19 inc.4 Bulletproofs IPA — recompute the whole proof from
+                    // the stored witness (av,bv) via the C IPA and match the frozen
+                    // (independent-Python-generated) P + L/R + final (a,b) bytes.
+                    size_t nn = v["n"].get<size_t>();
+                    std::vector<uint8_t> a, b; bool vok = true;
+                    for (auto& s : v["av_hex"]) { auto x = unhex(s.get<std::string>());
+                        if (x.size()!=32){vok=false;break;} a.insert(a.end(), x.begin(), x.end()); }
+                    for (auto& s : v["bv_hex"]) { auto x = unhex(s.get<std::string>());
+                        if (x.size()!=32){vok=false;break;} b.insert(b.end(), x.begin(), x.end()); }
+                    if (!vok || v["av_hex"].size()!=nn || v["bv_hex"].size()!=nn) { ok=false; bad=name; break; }
+                    uint8_t P[33];
+                    if (determ_ipa_commit(P, a.data(), b.data(), nn) != 0
+                        || hx(P,33) != v["P_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    size_t plen = determ_ipa_proof_len(nn);
+                    std::vector<uint8_t> pf(plen);
+                    if (determ_ipa_prove(pf.data(), a.data(), b.data(), P, nn) != 0
+                        || determ_ipa_verify(P, pf.data(), nn) != 0) { ok=false; bad=name; break; }
+                    size_t rounds = v["L_hex"].size();
+                    bool m = true;
+                    for (size_t j=0;j<rounds && m;j++)
+                        if (hx(pf.data()+j*33, 33) != v["L_hex"][j].get<std::string>()) m=false;
+                    for (size_t j=0;j<rounds && m;j++)
+                        if (hx(pf.data()+rounds*33+j*33, 33) != v["R_hex"][j].get<std::string>()) m=false;
+                    if (m && hx(pf.data()+2*rounds*33, 32) != v["a_hex"].get<std::string>()) m=false;
+                    if (m && hx(pf.data()+2*rounds*33+32, 32) != v["b_hex"].get<std::string>()) m=false;
+                    if (!m) { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
                     // reference oracle (tools/verify_mldsa_vectors.py). "ntt"

@@ -61,7 +61,7 @@ EXPECTED = {
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
-    "pedersen.json",
+    "pedersen.json", "bp_ipa.json",
 }
 
 try:
@@ -1175,6 +1175,18 @@ def chk_pedersen(vec, label):
         return "cannot import verify_pedersen (%s)" % e
     return vp.check_pedersen(vec, label)
 
+def chk_bp_ipa(vec, label):
+    # §3.19 inc.4 Bulletproofs inner-product argument — recompute the whole proof
+    # (P + L/R points + final a,b) from the stored witness through the independent
+    # from-scratch Python IPA in tools/verify_bp_ipa.py, and match the frozen bytes.
+    # Same dual-oracle posture: the C determ IPA is checked against this Python.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_bp_ipa as vi
+    except Exception as e:
+        return "cannot import verify_bp_ipa (%s)" % e
+    return vi.check_ipa(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1204,6 +1216,7 @@ CHECKERS = {
     "mldsa_sign": chk_mldsa_sign,
     "mldsa_verify": chk_mldsa_verify,
     "pedersen": chk_pedersen,
+    "bp_ipa": chk_bp_ipa,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
