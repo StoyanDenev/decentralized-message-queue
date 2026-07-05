@@ -109,12 +109,28 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
 
 ## Constant-time / hygiene posture
 
-- **NOT constant-time.** The `modexp` square-and-multiply branches on secret exponent
-  bits, and the Montgomery conditional subtraction is data-dependent. This is the
-  same posture as the §3.19 range prover and is the **owner-gated CT-hardening
-  step** — and, per `ConfidentialTxIntegrationDesign.md` (NC-4/L-4), a hard
-  requirement before any on-chain confidential-tx prover use, since a non-CT prover
-  leaks the committed amount via timing.
+- **`modexp` is now CONSTANT-TIME in the exponent (owner-authorized 2026-07-06).** The
+  exponentiation is a fixed 4-bit-window square-and-multiply with a **branchless** 16-entry
+  table select (the whole table is scanned every window and blended by a constant-time
+  equality mask `ff_ct_eq`) — no branch on secret exponent bits, no secret-indexed memory
+  access. The base is public (every caller exponentiates a public generator `g`/`h`/`G_i`/
+  `H_i` by a secret scalar), so the table build leaks nothing. The Montgomery conditional
+  subtraction (`montmul_c`) is likewise a **branchless masked blend**, not a data-dependent
+  branch. The rewrite is **byte-output-invariant** — all 40 ff_* dual-oracle corpus vectors
+  recompute byte-equal — and an independent adversarial audit confirmed the CT property
+  (no secret branch / no secret-indexed access) + the masked-select correctness. Source-
+  level CT (the standard codebase assumption, cf. `p256.c` `fe_cmov`); the empirical
+  `ct-timing-probe` demonstration is a documented follow-up (the ~tens-of-ms 3072-bit op
+  needs an operator-set small `--samples`). Windowing is also a modest perf win (~16% fewer
+  Montgomery multiplies vs the old bit-serial square-and-multiply). This closes the
+  amount-leak that `ConfidentialTxIntegrationDesign.md` (NC-4/L-4) flags as a hard
+  prerequisite before any on-chain confidential-tx prover use.
+- **Residual (the NEXT CT increment):** the `determ_ff_msm` / `determ_ff_vector_commit`
+  **zero-scalar skip** (`if (ff_is_zero(sl)) continue` / `if (!ff_is_zero(sl))`) is still
+  data-dependent — it leaks which secret scalars are zero (in the range prover, the bits of
+  the committed value). It must be made branchless (always exponentiate; `base^0 = 1`
+  contributes the identity) before the prover is fully constant-time. Byte-invariant, so
+  the same corpora guard it.
 - The size/perf cost of a 3072-bit finite-field group vs. a 256-bit curve
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.

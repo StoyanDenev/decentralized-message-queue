@@ -1375,9 +1375,14 @@ Increment 1 is the finite-field analog of §3.19 inc.1 — library-primitive-fir
 - **Arithmetic:** a **portable C99 bignum — 32-bit-limb CIOS Montgomery
   multiplication** (Koç–Acar–Kaliski), NO `__int128` / compiler intrinsics, so it
   builds identically on MSVC and GCC. `commit = modmul(g^v mod p, h^r mod p)` via
-  square-and-multiply modexp. NOT constant-time (the owner-gated CT-hardening step,
-  same posture as the §3.19 range prover — and, per the design doc, a hard
-  requirement before any on-chain prover use).
+  modexp. The `modexp` is **constant-time in the exponent** (2026-07-06): a fixed
+  4-bit-window square-and-multiply with a branchless table select (no branch on secret
+  exponent bits, no secret-indexed memory; the Montgomery conditional subtract is a
+  masked blend) — byte-output-invariant (the ff_* corpora are the guard), audited, and
+  modestly faster than the old bit-serial square-and-multiply. **Residual:** the
+  `determ_ff_msm`/`_vector_commit` zero-scalar skip is still data-dependent (the next CT
+  increment) — so the range prover is not YET fully constant-time end-to-end, a hard
+  requirement before any on-chain prover use (per the design doc).
 - **Validation:** `determ test-ff-pedersen-c99` (4 assertions — the H generator
   [deterministic, non-trivial]; `commit → verify` accept + wrong-v / wrong-r reject;
   the additive homomorphism `c1*c2 == commit(v1+v2, r1+r2)`; input validation [r==0,
@@ -1489,9 +1494,11 @@ full soundness accounting is `docs/proofs/FiniteFieldBulletproofsSoundness.md`. 
 this backend: a
 group-abstraction layer so P-256 and `Z_p*` share one Bulletproofs prover; then chain
 integration (owner-gated, per the design doc). The `Z_p*` modexp is ~1700× slower than
-the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8) —
-CT-hardening + a windowed/precomputed modexp is the owner-gated performance +
-side-channel step before any on-chain prover.
+the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8). **CT status:
+the modexp is now constant-time + windowed (2026-07-06, owner-authorized) — the dominant
+amount-leak is closed; the remaining CT work is the `determ_ff_msm`/`_vector_commit`
+zero-scalar skip (the next increment) before the prover is fully constant-time end-to-end
+for on-chain use.**
 
 ---
 

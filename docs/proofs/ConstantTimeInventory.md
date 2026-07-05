@@ -511,6 +511,51 @@ mod-n operands; exercises `sc_mont_mul`). First measured runs read clean
 (max |t| < 1.5 at smoke sample sizes); the §5 targets below fold them into the
 inventory's measurement plan (target 13).
 
+### 2.10 ff — finite-field Bulletproofs group over Z_p* (§3.20, the MODERN confidential-tx backend)
+
+**Secrets handled:** the range/balance prover's exponents — the committed value `v` and
+the blinding factors `r`/`gamma`, the bit-vectors and polynomial-blinding scalars — all
+flow into the group exponentiation `modexp(base, exp) = base^exp mod p` (`src/crypto/ff/
+ffgroup.c`). The **base is always a public generator** (`g`/`h`/`G_i`/`H_i`/`u`); the
+**exponent is the secret**.
+
+**Mechanisms making the secret-dependent work constant-time (as of 2026-07-06,
+owner-authorized):**
+- `modexp_c` — **fixed 4-bit-window square-and-multiply with a branchless table select.**
+  No branch on secret exponent bits (the old bit-serial `if ((e>>bit)&1) mul` is gone);
+  the window value `d` selects `base^d` by scanning ALL 16 table entries every window and
+  blending them under the constant-time equality mask `ff_ct_eq` — `d` is never used as a
+  memory index, so there is no secret-indexed access / cache-timing leak. The table is
+  built from the public base only. Faster than the old bit-serial version (~16% fewer
+  Montgomery multiplies) — the "windowed modexp" perf lever.
+- `montmul_c` — the final CIOS conditional subtract is a **branchless masked blend**
+  (`out = (tmp & msk) | (t & ~msk)`, `msk = 0 - ge`), not a data-dependent branch/memcpy.
+- The CIOS inner loops are fixed-count (`S = 96`); no data-dependent branch there.
+
+**Byte-output-invariant + audited:** the CT rewrite computes byte-identical results — all
+40 ff_* dual-oracle corpus vectors recompute byte-equal — and an independent adversarial
+audit confirmed the CT property (no secret branch / no secret-indexed access) + the
+masked-select correctness. Source-level CT is the standard codebase assumption (cf. §2.9
+`fe_cmov` / §4.1.5).
+
+**Residual (the NEXT CT increment, tracked):** the `determ_ff_msm` / `determ_ff_vector_commit`
+**zero-scalar skip** (`if (ff_is_zero(sl)) continue` / `if (!ff_is_zero(sl))`, `ffgroup.c`)
+is still data-dependent — it leaks which secret scalars are zero (in the range prover, the
+bits of the committed value). It must be made branchless (always exponentiate; `base^0 = 1`
+contributes the identity) before the Z_p* prover is fully constant-time end-to-end. This
+is byte-invariant, so the same ff_* corpora guard it. Until then the §3.20 prover is
+**CT-in-the-exponent but not yet fully CT** — noted as a hard prerequisite before any
+on-chain confidential-tx prover use (`ConfidentialTxIntegrationDesign.md` NC-4/L-4). The
+§3.19 P-256 range prover shares the identical residual (the pedersen MSM zero-scalar skip,
+§2.9) — its scalar-mult ladder is already CT.
+
+**Probe-target mapping (→ §3.12).** An `ff-modexp` `ct-timing-probe` target (secret =
+exponent, fix-vs-random, via `determ_ff_pedersen_commit`) is a documented follow-up: the
+~tens-of-ms 3072-bit operation makes the default 200k-sample probe impractical, so it
+needs an operator-set small `--samples`/`--seconds`. The CT property here rests primarily
+on the audit + code inspection (no secret branch / no secret-indexed access), with the
+probe as a supplementary empirical check.
+
 ---
 
 ## 3. Comparison census
