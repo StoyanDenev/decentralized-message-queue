@@ -1306,6 +1306,56 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
+### 3.20 Finite-field Pedersen commitment over Z_p* — **SHIPPED (confidential-tx MODERN backend, increment 1)**
+
+The **owner-decided curve/group split** for the v2.22 confidential-transaction
+integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
+**FIPS profiles use the §3.19 P-256 Bulletproofs stack** (FIPS-validated curve,
+auditability); **MODERN profiles use finite-field "large primes, not curves"**.
+The philosophy is NIST-curve-for-the-NIST-trusting-audience, non-NIST-big-prime-
+math-for-the-privacy-audience — and it makes confidential amounts available in
+**every** profile (the v2.22 spec had marked them FIPS-unavailable under the
+secp256k1 assumption). The chosen amount primitive is a **Pedersen commitment**
+(not ElGamal encryption); amount delivery is the existing Q3 DH+AEAD, and the God-
+Stack (zk-VM L2) carries computation privacy separately. See
+`ConfidentialTxIntegrationDesign.md`.
+
+Increment 1 is the finite-field analog of §3.19 inc.1 — library-primitive-first,
+**KAT-gated, zero consensus touch**.
+
+- **Implementation:** `src/crypto/ff/ffgroup.c` — the commitment `C = g^v * h^r mod
+  p` in the prime-order subgroup `G_q ⊂ Z_p*`, where **p is the RFC 3526 MODP-3072
+  safe prime** (group 15; reproduced from its published formula and machine-verified
+  prime, with `q = (p-1)/2` also prime), `q` is the subgroup order, `g = 4` (a
+  quadratic residue, hence an order-`q` generator), and `h` is a **nothing-up-my-
+  sleeve second generator** with unknown `log_g(h)` (hash-to-group: SHA-256 over a
+  fixed DST → mod p → square into the QR subgroup; pinned KAT). **Binding** reduces
+  to the finite-field discrete log; **hiding** is information-theoretic for uniform
+  r. The group constants (`p`, `q`, `n' = -p⁻¹ mod 2³²`, `R² mod p`, `h`) are
+  machine-generated into `src/crypto/ff/ff_params.h` by
+  `tools/verify_ff_pedersen.py`. API: `determ_ff_pedersen_generator_h` / `_commit` /
+  `_verify` / `_add` — all elements and scalars 384-byte (3072-bit) big-endian;
+  scalars `v ∈ [0,q)`, `r ∈ (0,q)`.
+- **Arithmetic:** a **portable C99 bignum — 32-bit-limb CIOS Montgomery
+  multiplication** (Koç–Acar–Kaliski), NO `__int128` / compiler intrinsics, so it
+  builds identically on MSVC and GCC. `commit = modmul(g^v mod p, h^r mod p)` via
+  square-and-multiply modexp. NOT constant-time (the owner-gated CT-hardening step,
+  same posture as the §3.19 range prover — and, per the design doc, a hard
+  requirement before any on-chain prover use).
+- **Validation:** `determ test-ff-pedersen-c99` (4 assertions — the H generator
+  [deterministic, non-trivial]; `commit → verify` accept + wrong-v / wrong-r reject;
+  the additive homomorphism `c1*c2 == commit(v1+v2, r1+r2)`; input validation [r==0,
+  v≥q, r≥q reject]) + the §3.13 dual-oracle byte-frozen corpus
+  `tools/vectors/ff_pedersen.json` (6 vectors: H KAT, 4 commits, a **mod-q
+  wraparound** homomorphism) recomputed by BOTH the C impl (`test-c99-vectors`) and
+  the independent from-scratch Python (`tools/verify_ff_pedersen.py`, whose
+  safe-prime + subgroup-membership + binding + homomorphism self-tests pass, using
+  Python's native bignums as the reference arithmetic). Soundness/provenance:
+  `src/crypto/ff/README.md`. **Additive — no in-tree consumer yet.** Next on this
+  backend: the vector commitment / MSM / IPA / range proof over the same group
+  (mirroring §3.19 inc.2-6) behind a group-abstraction layer so P-256 and Z_p* share
+  one prover; then chain integration (owner-gated, per the design doc).
+
 ---
 
 ## 4. Total estimated cost
