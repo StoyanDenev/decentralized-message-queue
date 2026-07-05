@@ -547,6 +547,9 @@ In-process tests (deterministic, no network):
   determ test-ff-balance-c99                  §3.20 inc.7: confidential-tx balance proof
                                               over Z_p* (Σv_in=Σv_out+fee, no amounts
                                               revealed) — amount-conservation half
+  determ test-ff-confidential-tx-c99          §3.20 inc.8: END-TO-END confidential-tx
+                                              composition over Z_p* (per-output range +
+                                              balance; range catches OOR, balance inflation)
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -14085,6 +14088,91 @@ int main(int argc, char** argv) {
             check(determ_ff_balance_verify(Exc.data(), pt.data())!=0, "tampered proof: verify rejects");
         }
         std::cout << (fail? "  FAIL: ff-balance-c99 unit test\n" : "  PASS: ff-balance-c99 unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-ff-confidential-tx-c99") {
+        // §3.20 inc.8: the END-TO-END confidential-tx COMPOSITION over Z_p*. NOT a new
+        // primitive — it composes the two shipped halves of a confidential transaction over
+        // the PUBLIC §3.20 APIs only: a per-output inc.5 RANGE proof (the non-negativity /
+        // no-overflow half) + the inc.7 BALANCE proof (the amount-conservation half). It
+        // pins the load-bearing composition fact — an output's range-proof value commitment
+        // V_j is BYTE-IDENTICAL to its tx commitment C_out[j] because both use the same
+        // g=4 / h=DETERM_FF_H — and the division of labour: BALANCE catches inflation,
+        // RANGE catches an out-of-range amount. Mirror of tools/verify_ff_confidential_tx.py.
+        // NOT constant-time (owner-gated). n=2 keeps the three range proofs cheap.
+        int fail=0;
+        auto check=[&](bool ok,const char* m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        const size_t E=DETERM_FF_ELEM_BYTES;
+        auto setbe=[&](std::vector<uint8_t>&b,uint64_t val){ b.assign(E,0); for(int i=0;i<8;i++) b[E-1-i]=(uint8_t)(val>>(8*i)); };
+        auto mkscalar=[&](std::vector<uint8_t>& out, uint32_t seed){
+            std::vector<uint8_t> raw(E);
+            for (size_t i=0;i<E;i++) raw[i]=(uint8_t)((seed*2654435761u)+(uint32_t)i*40503u+(uint32_t)(i>>3));
+            out.assign(E,0); determ_ff_scalar_reduce(out.data(), raw.data());
+        };
+        auto commit=[&](std::vector<uint8_t>&out,uint64_t v,uint64_t r)->int{
+            std::vector<uint8_t> vs,rs; setbe(vs,v); setbe(rs,r); out.assign(E,0);
+            return determ_ff_pedersen_commit(out.data(), vs.data(), rs.data()); };
+        // A balanced 2-in-2-out confidential tx, output values in [0,2^n):
+        //   v_in {3,1} r {500,400}; v_out {2,1} r {333,444}; fee 1  (Σv_in=4=3+1).
+        const size_t n=2;
+        const uint64_t v_in[2]={3,1}, r_in[2]={500,400}, v_out[2]={2,1}, r_out[2]={333,444};
+        const uint64_t fee=1;
+        std::vector<uint8_t> Ci(2*E), Co(2*E), c(E);
+        bool okc = true;
+        for (int j=0;j<2;j++){ okc = okc && commit(c,v_in[j],r_in[j])==0; std::memcpy(&Ci[(size_t)j*E],c.data(),E); }
+        for (int j=0;j<2;j++){ okc = okc && commit(c,v_out[j],r_out[j])==0; std::memcpy(&Co[(size_t)j*E],c.data(),E); }
+        // One range proof per OUTPUT, with gamma_j = r_out[j] so V_j must equal C_out[j].
+        size_t plen=determ_ff_rangeproof_proof_len(n);
+        bool okrange=okc, okidentity=okc;
+        std::vector<uint8_t> alpha,rho,tau1,tau2,s;
+        for (int j=0;j<2;j++){
+            std::vector<uint8_t> gamma; setbe(gamma, r_out[j]);
+            mkscalar(alpha,(uint32_t)(j*7+2)); mkscalar(rho,(uint32_t)(j*7+3));
+            mkscalar(tau1,(uint32_t)(j*7+4)); mkscalar(tau2,(uint32_t)(j*7+5));
+            std::vector<uint8_t> sL(n*E), sR(n*E);
+            for (size_t i=0;i<n;i++){ mkscalar(s,(uint32_t)(j*100+i)); std::memcpy(&sL[i*E],s.data(),E);
+                                      mkscalar(s,(uint32_t)(j*100+i+40)); std::memcpy(&sR[i*E],s.data(),E); }
+            std::vector<uint8_t> V(E), proof(plen);
+            bool pj = plen>0 && determ_ff_rangeproof_prove(V.data(),proof.data(),v_out[j],gamma.data(),alpha.data(),rho.data(),tau1.data(),tau2.data(),sL.data(),sR.data(),n)==0;
+            okidentity = okidentity && pj && std::memcmp(V.data(), &Co[(size_t)j*E], E)==0;   // V_j == C_out[j]
+            okrange    = okrange    && pj && determ_ff_rangeproof_verify(V.data(),proof.data(),n)==0;
+        }
+        check(okidentity, "each output's range-proof commitment V_j == its tx commitment C_out[j] (shared g=4,h)");
+        check(okrange,    "every output range proof verifies (v_out in [0,2^n))");
+        // Balance proof over all commitments: x = Σr_in - Σr_out (mod q) = 123 (positive).
+        std::vector<uint8_t> Exc(E), x(E), k(E), bproof(DETERM_FF_BALANCE_PROOF_BYTES);
+        setbe(x, r_in[0]+r_in[1]-r_out[0]-r_out[1]); setbe(k, 0x5151);
+        bool okbal = determ_ff_balance_excess(Exc.data(), Ci.data(),2, Co.data(),2, fee)==0
+                  && determ_ff_balance_prove(bproof.data(), Exc.data(), x.data(), k.data())==0
+                  && determ_ff_balance_verify(Exc.data(), bproof.data())==0;
+        check(okbal, "balance proof verifies (Sv_in = Sv_out + fee)");
+        check(okrange && okidentity && okbal, "HONEST confidential tx accepts: all range proofs AND the balance proof");
+        // INFLATION: bump an output value (still in range) so Σv_out+fee != Σv_in. This is
+        // the BALANCE proof's job to catch — the per-output commitments are each still valid
+        // in-range commitments, so range cannot see it.
+        {
+            std::vector<uint8_t> Cob(2*E), Eb(E), pbb(DETERM_FF_BALANCE_PROOF_BYTES);
+            bool o2 = commit(c,3,r_out[0])==0; std::memcpy(&Cob[0],c.data(),E);   // 2 -> 3 (in range)
+            o2 = o2 && commit(c,v_out[1],r_out[1])==0; std::memcpy(&Cob[E],c.data(),E);
+            o2 = o2 && determ_ff_balance_excess(Eb.data(), Ci.data(),2, Cob.data(),2, fee)==0
+                    && determ_ff_balance_prove(pbb.data(), Eb.data(), x.data(), k.data())==0
+                    && determ_ff_balance_verify(Eb.data(), pbb.data())!=0;         // inflation rejects
+            check(o2, "INFLATION (Sv_out+fee != Sv_in): the BALANCE proof rejects");
+        }
+        // RANGE VIOLATION: an output value = 2^n (out of range). This is the RANGE proof's
+        // job to catch — a wrapped value could still balance, so balance cannot see it.
+        {
+            std::vector<uint8_t> gamma; setbe(gamma, r_out[1]);
+            mkscalar(alpha,11); mkscalar(rho,12); mkscalar(tau1,13); mkscalar(tau2,14);
+            std::vector<uint8_t> sL(n*E), sR(n*E);
+            for (size_t i=0;i<n;i++){ mkscalar(s,(uint32_t)(500+i)); std::memcpy(&sL[i*E],s.data(),E);
+                                      mkscalar(s,(uint32_t)(540+i)); std::memcpy(&sR[i*E],s.data(),E); }
+            std::vector<uint8_t> Vb(E), pb(plen);
+            bool o3 = plen>0 && determ_ff_rangeproof_prove(Vb.data(),pb.data(),(uint64_t)1<<n,gamma.data(),alpha.data(),rho.data(),tau1.data(),tau2.data(),sL.data(),sR.data(),n)==0
+                             && determ_ff_rangeproof_verify(Vb.data(),pb.data(),n)!=0;   // v=2^n out of range rejects
+            check(o3, "RANGE VIOLATION (output = 2^n): that output's RANGE proof rejects");
+        }
+        std::cout << (fail? "  FAIL: ff-confidential-tx-c99 unit test\n" : "  PASS: ff-confidential-tx-c99 unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {
