@@ -1306,7 +1306,7 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
-### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-4)**
+### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-5)**
 
 The **owner-decided curve/group split** for the v2.22 confidential-transaction
 integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
@@ -1389,11 +1389,25 @@ KAT for n=2,4, the file-half also re-verifying each proof), independent Python
 IPA proof bytes match this Python byte-for-byte**. `n` kept small in the corpus: the
 3072-bit modexp is ~1700× slower than the P-256 IPA (`n` up to 256 supported).
 
-All four increments are **NOT constant-time** (the owner-gated CT-hardening step) and
-**additive — no chain call site**. Next on this backend: the single-value + aggregated
-range proof over `Z_p*` (mirroring §3.19 inc.5-6), then a group-abstraction layer so
-P-256 and `Z_p*` share one prover; then chain integration (owner-gated, per the design
-doc).
+**Increment 5 — single-value range proof** (`src/crypto/ff/ffrangeproof.c`, mirrors
+§3.19 inc.5). Proves a Pedersen-committed value `v ∈ [0, 2^n)` WITHOUT revealing `v`, in
+`2·log2(n)+O(1)` group elements — the MODERN-profile confidential-tx amount range. Value
+commitment `V = g^v · h^gamma mod p` (`g = 4` the inc.1 value generator; `h` the inc.1
+blinding generator); `A`/`S` bit-vector commits over the inc.2 families; t-poly `T1`/`T2`;
+the `⟨l,r⟩ = t̂` check compressed by the inc.4 IPA over `(G_i, h'_i = y^-i·H_i, u)`.
+Transcript `DETERM-FF-BP-RANGE-v1`. API `determ_ff_rangeproof_prove`/`_verify`. Pure
+composition over inc.1-4 plus a scalar subtraction (`determ_ff_scalar_sub`, `a-b mod q`).
+`determ test-ff-rangeproof-c99` (n=2,4 round-trip + out-of-range `v=2^n` + tampered-proof
++ wrong-`V` reject) + corpus `ff_rangeproof.json`, independent Python
+`tools/verify_ff_rangeproof.py` — the C `V`+proof bytes match it byte-for-byte, and an
+independent soundness audit (re-derived from Bünz et al. 2018 §4.2) confirmed the
+construction is a faithful, sound Bulletproofs range proof (δ/l/r/t-poly/Check-1/Check-2
+all match the paper; the range-binding identity `t0 = δ(y,z) + z²·v` holds numerically).
+
+All five increments are **NOT constant-time** (the owner-gated CT-hardening step) and
+**additive — no chain call site**. Next on this backend: the aggregated range proof over
+`Z_p*` (mirroring §3.19 inc.6), then a group-abstraction layer so P-256 and `Z_p*` share
+one prover; then chain integration (owner-gated, per the design doc).
 
 ---
 
