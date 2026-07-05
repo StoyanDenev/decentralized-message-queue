@@ -30,23 +30,37 @@ size_t determ_mldsa_sig_bytes(const determ_mldsa_params* p) {
          + (size_t)(p->omega + p->k);
 }
 
-/* Centered representative of a (mod q) in (-q/2, q/2]. */
+/* Centered representative of a (mod q) in (-q/2, q/2].
+ * Branchless (CT-hardening pass): no secret-dependent control flow — center()
+ * runs on the secret z during rejected rounds (only the accepted zc is
+ * published). The compiler emits a multiply/shift for the constant-divisor
+ * `% Q`; the two range folds are arithmetic-shift masks. Byte-identical result
+ * to the two-branch form -> ACVP sigGen KATs unchanged. */
 static int32_t center(int32_t a) {
-    a %= Q; if (a < 0) a += Q;
-    if (a > Q / 2) a -= Q;
+    a %= Q;                               /* a in (-Q, Q) */
+    a += (a >> 31) & Q;                   /* a<0 ? a+Q : a  -> a in [0, Q) */
+    a -= (((Q / 2 - a) >> 31) & Q);       /* a>Q/2 ? a-Q : a -> (-Q/2, Q/2] */
     return a;
 }
 /* HighBits(a) via decompose (a reduced to canonical [0,q) first). */
 static int32_t hi(int32_t a, int32_t g2) { int32_t lo, x = a % Q; if (x < 0) x += Q; return determ_mldsa_decompose(x, &lo, g2); }
-/* ||v||_inf over `len` polys, coefficients centered — returns 1 if any |coeff| >= bound. */
+/* ||v||_inf over `len` polys — returns 1 if any centered |coeff| >= bound.
+ * Constant-time (CT-hardening pass): scans ALL coefficients and accumulates the
+ * violation with no early return and no secret-dependent branch, so a rejected
+ * candidate (v = secret z / r0 / ct0) leaks neither WHICH coefficient nor HOW
+ * MANY exceeded `bound` — only the public per-iteration reject count remains
+ * (the canonical ML-DSA leak). `bound` is a public parameter. The 0/1 decision
+ * is byte-identical to the early-return form -> ACVP sigGen KATs unchanged. */
 static int chknorm(const int32_t v[][256], int len, int32_t bound) {
-    int i, c;
+    int i, c; int32_t bad = 0;
     for (i = 0; i < len; i++)
         for (c = 0; c < N; c++) {
-            int32_t t = center(v[i][c]); if (t < 0) t = -t;
-            if (t >= bound) return 1;
+            int32_t t = center(v[i][c]);
+            int32_t m = t >> 31;              /* branchless |t| = (t+m)^m */
+            int32_t at = (t + m) ^ m;
+            bad |= (bound - at - 1) >> 31;    /* at>=bound -> negative -> all-ones */
         }
-    return 0;
+    return (int)(bad & 1);
 }
 
 size_t determ_mldsa_format_message(uint8_t* out, const uint8_t* ctx, size_t ctxlen,
