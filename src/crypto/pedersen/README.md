@@ -1,13 +1,15 @@
-# `src/crypto/pedersen/` — Pedersen commitment over NIST P-256
+# `src/crypto/pedersen/` — Pedersen commitment + Bulletproofs IPA over NIST P-256
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
-§3.16 (walked by `tools/operator_crypto_selftest.sh`). Status: **increments 1-3 of
+§3.16 (walked by `tools/operator_crypto_selftest.sh`). Module spec section:
+CRYPTO-C99-SPEC §3.19. Status: **increments 1-4 of
 the owner-authorized range-proof / confidential-transaction track** (authorized
 2026-07-04, library-primitive-first). A Pedersen commitment `C = v*G + r*H` over
-NIST P-256 (inc.1), the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` (inc.2), and
-the general multi-scalar multiplication `Σ s_i*P_i` (inc.3) — §3.19. **ZERO
-consensus touch — purely additive, not wired into any chain call site**;
-chain/wallet integration is a later, separately-reviewed step.
+NIST P-256 (inc.1), the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` (inc.2), the
+general multi-scalar multiplication `Σ s_i*P_i` (inc.3), and the **Bulletproofs
+inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points (inc.4)
+— §3.19. **ZERO consensus touch — purely additive, not wired into any chain call
+site**; chain/wallet integration is a later, separately-reviewed step.
 Headers under `include/determ/crypto/pedersen/`.
 
 ## What this module implements
@@ -69,6 +71,42 @@ for a uniform `r`, `C` is uniform over the group and reveals nothing about `v`.
   untouched; `n == 0` returns `1`), `-1` = a scalar `>= n_order` or a point fails to
   decode. A zero-scalar term is skipped.
 
+**Increment 4 — the Bulletproofs inner-product argument (`ipa.c` /
+`include/determ/crypto/pedersen/ipa.h`):**
+
+A logarithmic-size proof of knowledge of two length-`n` vectors `a`, `b` behind the
+commitment `P = <a,g> + <b,h> + <a,b>*u`, where `g`/`h` are the inc.2 generator
+families and `u` is a fixed independent generator. The proof is `2*log2(n)` group
+points + 2 final scalars, made **non-interactive** by a deterministic Fiat-Shamir
+transcript.
+
+- `determ_ipa_proof_len(n)` — the exact proof size in bytes: `66*log2(n) + 64`
+  (`2*log2(n)` compressed 33-byte points + two 32-byte scalars). Returns `0` for
+  `n` not a power of two, `n > DETERM_IPA_MAX_N` (256), or `n < 1`.
+- `determ_ipa_commit(out33, a, b, n)` — forms `P = <a,g> + <b,h> + <a,b>*u` (the
+  statement the proof is about), via `determ_pedersen_msm` over the concatenated
+  generator/scalar lists.
+- `determ_ipa_prove(proof, a, b, P33, n)` — emits the proof. Each round splits the
+  vectors in half, commits the cross-terms `L = <a_lo,g_hi> + <b_hi,h_lo> +
+  <a_lo,b_hi>*u` and `R` (symmetric), derives the Fiat-Shamir challenge `x` by
+  hashing the running transcript, then folds `a' = x*a_lo + x⁻¹*a_hi`,
+  `b' = x⁻¹*b_lo + x*b_hi`, `g' = x⁻¹*g_lo + x*g_hi`, `h' = x*h_lo + x⁻¹*h_hi` and
+  recurses. The loop invariant is `P' = <a',g'> + <b',h'> + <a',b'>*u = x²*L + P +
+  x⁻²*R` — the decisive algebraic oracle the tests pin at every round.
+- `determ_ipa_verify(P33, proof, n)` — replays the same transcript to recover each
+  `x`, updates `P' = x²*L + P + x⁻²*R` (`msm([L, P', R], [x², 1, x⁻²])`), and checks
+  the final `P'` equals `a_f*g_0 + b_f*h_0 + (a_f*b_f)*u`. Fail-**closed**: a
+  malformed `L`/`R`, a wrong `P`, or a tampered scalar yields a mismatched final
+  point and rejects.
+
+The transcript is domain-separated by the label `DETERM-BP-IPA-v1`, seeded with
+`compress(P)`, `compress(u)`, and `n` as a 4-byte big-endian integer; challenges
+come from `hash_to_scalar` under a fixed challenge-DST, with a zero challenge
+rejected and re-absorbed. Everything reduces to `determ_pedersen_msm` — the module
+adds NO new group arithmetic. `sc_add` (mod-`n` scalar addition, used for the folds)
+is the one new scalar op: a 33-byte big-endian add + one conditional subtract of the
+order.
+
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
 
@@ -97,7 +135,11 @@ already-validated P-256 API (`include/determ/crypto/p256/p256.h`):
 The P-256 primitives are each already validated byte-equal vs OpenSSL EC
 (`determ test-p256-c99`) or against the RFC 9380 appendix vectors
 (`determ test-p256-h2c-c99`), so the correctness of the arithmetic is inherited;
-the only new logic is its composition. C99, ~185 LOC, Determ-original.
+the only new logic is its composition. C99, ~370 LOC total (`pedersen.c` ~185 +
+`ipa.c` ~185), Determ-original. The inner-product argument (inc.4) likewise composes
+entirely over `determ_pedersen_msm` + the P-256 scalar ops — the only new arithmetic
+is `sc_add` (mod-`n` scalar addition), exhaustively fuzzed against a Python oracle
+(200k+ cases incl. all order boundaries) in the adversarial audit.
 
 ## Standards cited
 
@@ -152,6 +194,28 @@ Increment 3 (general MSM):
     identity.
 14. **msm rejects** — a scalar `= n_order` and a non-decodable point (bad SEC1 prefix)
     each return `-1`.
+
+Increment 4 (inner-product argument) — `determ test-bp-ipa-c99` (4 assertions):
+
+15. **proof_len contract** — `determ_ipa_proof_len` returns 64/130/196/262 for
+    n=1/2/4/8 and `0` for a non-power-of-two (`n=3`) and `n > MAX` (`n=512`).
+16. **round-trip** — `commit → prove → verify` accepts for `n ∈ {1,2,4,8}` (n=1 is
+    the 0-round degenerate `P == a·g_0 + b·h_0 + ab·u`).
+17. **determinism** — proving the same statement twice yields byte-identical proofs
+    (the Fiat-Shamir transcript is a pure function of the inputs).
+18. **soundness** — a byte-flipped proof AND a proof verified against a wrong
+    commitment (`commit` over a different `a`) both reject.
+
+**§3.13 dual-oracle byte-frozen corpus (inc.4)** — `tools/vectors/bp_ipa.json` (2
+vectors: `ipa` n=4 → 2 L/R rounds, `ipa` n=8 → 3), wired into BOTH gate halves
+(`determ test-c99-vectors` C-side + `tools/test_c99_vector_files.sh` → `chk_bp_ipa`
+→ `tools/verify_bp_ipa.py` Python-side). The Python reference is INDEPENDENT (its
+own IPA over the `verify_pedersen.py` EC ladder) and self-checks the per-round
+algebraic invariant + round-trip + wrong-P reject + tamper over `n ∈ {1,2,4,8,16}`
+before emitting. It recomputes `P`, every `L`/`R`, and the final `a`/`b` scalars
+byte-for-byte, so a bug in `ipa.c` — not just a corrupted vector — turns the corpus
+RED. The adversarial audit independently re-derived the corpus from scratch and it
+matched byte-for-byte.
 
 **§3.13 dual-oracle byte-frozen corpus** — `tools/vectors/pedersen.json` (14 vectors),
 wired into BOTH gate halves: `determ test-c99-vectors` recomputes each vector through
