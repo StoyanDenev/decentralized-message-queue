@@ -4,16 +4,18 @@
 # second generator via RFC 9380 hash_to_curve). Pure composition over the
 # §3.8c P-256 primitives already gated byte-equal vs OpenSSL / RFC 9380.
 #
-# 8 assertions: (1) H is on-curve, deterministic, != G, and matches the pinned
-# compressed KAT; (2) commit(v,r) == compress(v*G + r*H) recomputed via the raw
-# P-256 API; (3) the v==0 zero-value path C == r*H; (4) the additive
-# homomorphism commit(v1,r1)+commit(v2,r2) == commit(v1+v2, r1+r2) — the
-# decisive algebraic gate; (5) open/verify accepts a correct (v,r) and rejects a
-# wrong value / wrong blinding / tampered commitment; (6) binding sanity
-# (distinct values -> distinct commitments); (7) input validation (r==0, v>=n,
-# non-decodable add input all rejected). The byte-frozen H + commitment corpus
-# is cross-checked file-side (independent python) in tools/test_c99_vector_files.sh
-# (pedersen.json), the §3.13 second half.
+# 11 assertions. Increment 1 (single commitment) (1)-(7): H on-curve/
+# deterministic/!=G/pinned KAT; commit(v,r)==compress(v*G+r*H) via the raw P-256
+# API; the v==0 zero-value path C==r*H; the additive homomorphism
+# commit(v1,r1)+commit(v2,r2)==commit(v1+v2,r1+r2); open/verify accept + reject
+# (wrong value / wrong blinding / tampered commitment); binding sanity; input
+# validation (r==0, v>=n, non-decodable add). Increment 2 (vector commitment)
+# (8)-(11): the nothing-up-my-sleeve vector generators gen(i,which) on-curve/
+# deterministic/distinct/!=G,H + which>1 reject; vector_commit == r*H +
+# Σ(a_i*G_i + b_i*H_i) via the raw API; the vector homomorphism; n==0 => r*H +
+# zero-entry skip + r==0 reject. The byte-frozen H / generator / commitment
+# corpus (12 vectors) is cross-checked file-side by an independent python in
+# tools/test_c99_vector_files.sh (pedersen.json), the §3.13 second half.
 set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh

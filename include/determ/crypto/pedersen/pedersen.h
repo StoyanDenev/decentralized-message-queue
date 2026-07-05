@@ -66,6 +66,38 @@ int determ_pedersen_verify(const uint8_t commitment33[33],
 int determ_pedersen_add(uint8_t out33[33],
                         const uint8_t c1_33[33], const uint8_t c2_33[33]);
 
+/* ── §3.19 increment 2: vector-commitment generators + vector commit ─────────
+ * The Bulletproofs-shaped building block. Two independent nothing-up-my-sleeve
+ * generator FAMILIES G_i and H_i (i = 0,1,2,…), each derived by hashing the
+ * 4-byte big-endian index onto the curve under a family-specific RFC 9380 DST —
+ * so the family has no known discrete-log relation to G, to the §3.19 scalar H,
+ * or to each other. These are the vector generators a range proof commits its
+ * bit-vectors against. */
+
+/* out65 = the `index`-th generator of family `which` (0 = the "G" family,
+ * 1 = the "H" family), SEC1 uncompressed. Deterministic, never the identity,
+ * always on-curve. Returns 0, or -1 only on `which` > 1. */
+int determ_pedersen_gen(uint8_t out65[65], uint32_t index, uint8_t which);
+
+/* Vector Pedersen commitment (the Bulletproofs A/S-commitment shape):
+ *
+ *     C = r*H + Σ_{i=0}^{n-1} ( a_i * G_i  +  b_i * H_i )
+ *
+ * where H is the §3.19 scalar blinding generator, G_i = gen(i,0), H_i = gen(i,1).
+ * `a` and `b` are each `n` consecutive 32-byte big-endian scalars (< n_order);
+ * a term with a zero scalar contributes the identity and is skipped. r is the
+ * blinding factor, 0 < r < n_order (r == 0 rejected — no hiding). out33 = SEC1
+ * compressed. Returns 0, or -1 on: an invalid scalar (r == 0, or any a_i/b_i ≥
+ * the group order), or the (negligible / adversarial) identity result. n == 0
+ * is allowed and yields C = r*H.
+ *
+ * NOTE the zero-scalar skip is a data-dependent branch on a_i/b_i — fine for the
+ * public-vector uses, but a range prover over SECRET bit-vectors needs a
+ * constant-time multi-exp (the owner-gated CT-hardening step; see the README). */
+int determ_pedersen_vector_commit(uint8_t out33[33],
+                                  const uint8_t *a, const uint8_t *b,
+                                  size_t n, const uint8_t r[32]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

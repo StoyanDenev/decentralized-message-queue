@@ -124,6 +124,42 @@ def commit_hex(v_hex, r_hex):
     return compress(commit_pt(int(v_hex, 16), int(r_hex, 16))).hex()
 
 
+# ── §3.19 increment 2: vector-commitment generators + vector commit ──────────
+VG_DST = b"DETERM-PEDERSEN-VEC-G-P256_XMD:SHA-256_SSWU_RO_"
+VH_DST = b"DETERM-PEDERSEN-VEC-H-P256_XMD:SHA-256_SSWU_RO_"
+
+
+def derive_gen(index, which):
+    dst = VG_DST if which == 0 else VH_DST
+    ub = expand_xmd(index.to_bytes(4, "big"), dst, 96)
+    u0 = int.from_bytes(ub[:48], "big") % P
+    u1 = int.from_bytes(ub[48:], "big") % P
+    return pt_add(map_sswu(u0), map_sswu(u1))
+
+
+def vector_commit_pt(a, b, r):
+    if not (0 < r < N):
+        raise ValueError("r must satisfy 0 < r < n")
+    C = pt_mul(r, H_POINT[0] if H_POINT else derive_h())  # r*H (scalar blinding gen)
+    for i in range(len(a)):
+        if a[i] % N:
+            C = pt_add(C, pt_mul(a[i], derive_gen(i, 0)))
+        if b[i] % N:
+            C = pt_add(C, pt_mul(b[i], derive_gen(i, 1)))
+    return C
+
+
+H_POINT = []  # memoize the scalar H once
+
+
+def vector_commit_hex(a_hex, b_hex, r_hex):
+    if not H_POINT:
+        H_POINT.append(derive_h())
+    a = [int(x, 16) for x in a_hex]
+    b = [int(x, 16) for x in b_hex]
+    return compress(vector_commit_pt(a, b, int(r_hex, 16))).hex()
+
+
 # ---- §3.13 file-half checker (imported by test_c99_vector_files.sh) ----
 def check_pedersen(vec, label):
     t = vec.get("type")
@@ -145,6 +181,14 @@ def check_pedersen(vec, label):
         got = compress(pt_add(c1, c2)).hex()
         if got != vec["c3_hex"]:
             return "recomputed C1+C2 %s != c3_hex %s" % (got, vec["c3_hex"])
+    elif t == "gen":
+        got = compress(derive_gen(int(vec["index"]), int(vec["which"]))).hex()
+        if got != vec["g_hex"]:
+            return "recomputed gen %s != g_hex %s" % (got, vec["g_hex"])
+    elif t == "vector_commit":
+        got = vector_commit_hex(vec["a_hex"], vec["b_hex"], vec["r_hex"])
+        if got != vec["c_hex"]:
+            return "recomputed vector_commit %s != c_hex %s" % (got, vec["c_hex"])
     else:
         return "unknown pedersen vector type %r" % t
     return None
@@ -185,6 +229,21 @@ def emit():
         "v1_hex": _s32(v1), "r1_hex": _s32(r1),
         "v2_hex": _s32(v2), "r2_hex": _s32(r2),
         "c3_hex": c3,
+    })
+    # ── increment 2: the vector-commitment generators + a vector commit ──
+    for index, which in [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)]:
+        vectors.append({
+            "name": "vector gen %s[%d]" % ("G" if which == 0 else "H", index),
+            "type": "gen", "index": index, "which": which,
+            "g_hex": compress(derive_gen(index, which)).hex(),
+        })
+    va = [_s32(3), _s32(5), _s32(0x1234)]      # a = [3, 5, 0x1234]
+    vb = [_s32(7), _s32(9), _s32(0)]           # b = [7, 9, 0] (last skipped)
+    vr = _s32(0xC0FFEE)
+    vectors.append({
+        "name": "vector_commit n=3 (incl. a zero b-entry)",
+        "type": "vector_commit", "a_hex": va, "b_hex": vb, "r_hex": vr,
+        "c_hex": vector_commit_hex(va, vb, vr),
     })
     doc = {
         "primitive": "pedersen",

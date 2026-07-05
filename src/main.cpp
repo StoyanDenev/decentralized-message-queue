@@ -13387,6 +13387,76 @@ int main(int argc, char** argv) {
             check(ok, "reject: r==0, v>=n, and a non-decodable commitment in add");
         }
 
+        // (8) [inc.2] vector-commit generators: on-curve, deterministic, mutually
+        //     distinct, distinct from G and the scalar H; which>1 rejects. The
+        //     byte values are frozen + cross-checked C-vs-Python in pedersen.json.
+        {
+            uint8_t G0[65],G1[65],H0[65],H1[65],t[65];
+            bool ok = determ_pedersen_gen(G0,0,0)==0 && determ_pedersen_gen(G1,1,0)==0
+                   && determ_pedersen_gen(H0,0,1)==0 && determ_pedersen_gen(H1,1,1)==0;
+            ok = ok && determ_pedersen_gen(t,0,0)==0 && std::memcmp(t,G0,65)==0;   // deterministic
+            ok = ok && determ_pedersen_gen(t,0,2)==-1;                            // which>1 rejects
+            const uint8_t* pts[4]={G0,G1,H0,H1};
+            for (int i=0;i<4 && ok;i++){
+                if (determ_p256_point_check(pts[i])!=0) ok=false;                  // on-curve
+                if (std::memcmp(pts[i],G,65)==0 || std::memcmp(pts[i],H,65)==0) ok=false; // != G / scalar H
+                for (int j=i+1;j<4;j++) if (std::memcmp(pts[i],pts[j],65)==0) ok=false;    // distinct
+            }
+            check(ok, "gen: on-curve + deterministic + distinct + != G/H + which>1 rejects");
+        }
+        // (9) [inc.2] vector_commit == r*H + Σ(a_i*G_i + b_i*H_i) via the raw API.
+        {
+            uint8_t a[2*32]={0}, b[2*32]={0}, r[32]={0};
+            a[31]=3; a[63]=5; b[31]=7; b[63]=9; r[30]=0xAA; r[31]=0xBB;  // a=[3,5] b=[7,9]
+            uint8_t C[33];
+            bool ok = determ_pedersen_vector_commit(C, a, b, 2, r)==0;
+            uint8_t acc[65], g[65], term[65], Cref[33];
+            ok = ok && determ_p256_point_mul(acc, r, H)==0;
+            for (int i=0;i<2 && ok;i++){
+                ok = ok && determ_pedersen_gen(g,i,0)==0 && determ_p256_point_mul(term, a+i*32, g)==0
+                        && determ_p256_point_add(acc, acc, term)==0;
+                ok = ok && determ_pedersen_gen(g,i,1)==0 && determ_p256_point_mul(term, b+i*32, g)==0
+                        && determ_p256_point_add(acc, acc, term)==0;
+            }
+            ok = ok && determ_p256_point_compress(Cref, acc)==0 && std::memcmp(C,Cref,33)==0;
+            check(ok, "vector_commit: == r*H + Σ(a_i*G_i + b_i*H_i) via the raw P-256 API");
+        }
+        // (10) [inc.2] vector homomorphism (no-carry small scalars):
+        //      vc(a1,b1,r1) (+) vc(a2,b2,r2) == vc(a1+a2, b1+b2, r1+r2).
+        {
+            uint8_t a1[2*32]={0},b1[2*32]={0},a2[2*32]={0},b2[2*32]={0};
+            uint8_t a3[2*32]={0},b3[2*32]={0},r1[32]={0},r2[32]={0},r3[32]={0};
+            a1[31]=2;a1[63]=3; a2[31]=4;a2[63]=5; a3[31]=6;a3[63]=8;
+            b1[31]=1;b1[63]=1; b2[31]=2;b2[63]=2; b3[31]=3;b3[63]=3;
+            r1[31]=0x10; r2[31]=0x21; r3[31]=0x31;
+            uint8_t C1[33],C2[33],C3[33],Csum[33];
+            bool ok = determ_pedersen_vector_commit(C1,a1,b1,2,r1)==0
+                   && determ_pedersen_vector_commit(C2,a2,b2,2,r2)==0
+                   && determ_pedersen_vector_commit(C3,a3,b3,2,r3)==0
+                   && determ_pedersen_add(Csum,C1,C2)==0
+                   && std::memcmp(Csum,C3,33)==0;
+            check(ok, "vector_commit homomorphism: vc(a1,b1,r1)+vc(a2,b2,r2)==vc(a1+a2,b1+b2,r1+r2)");
+        }
+        // (11) [inc.2] n==0 => C=r*H; a zero entry (skip path) still correct; r==0 rejects.
+        {
+            uint8_t r[32]={0}; r[31]=0x42;
+            uint8_t C0[33], rHc[33], rH[65];
+            bool ok = determ_pedersen_vector_commit(C0, nullptr, nullptr, 0, r)==0  // n=0 => r*H
+                   && determ_p256_point_mul(rH, r, H)==0
+                   && determ_p256_point_compress(rHc, rH)==0
+                   && std::memcmp(C0, rHc, 33)==0;
+            uint8_t a[2*32]={0}, b[2*32]={0}; a[63]=5;                 // a=[0,5], b=[0,0]
+            uint8_t C[33], acc[65], g[65], term[65], Cref[33];
+            ok = ok && determ_pedersen_vector_commit(C, a, b, 2, r)==0 // zero a0 skipped
+                    && determ_p256_point_mul(acc, r, H)==0
+                    && determ_pedersen_gen(g,1,0)==0 && determ_p256_point_mul(term, a+32, g)==0
+                    && determ_p256_point_add(acc, acc, term)==0
+                    && determ_p256_point_compress(Cref, acc)==0 && std::memcmp(C, Cref, 33)==0;
+            uint8_t zero[32]={0};
+            ok = ok && determ_pedersen_vector_commit(C, a, b, 2, zero)==-1;  // r==0 rejects
+            check(ok, "vector_commit: n==0 => r*H; zero-entry skip correct; r==0 rejects");
+        }
+
         std::cout << (fail? "  FAIL: pedersen-c99 unit test\n" : "  PASS: pedersen-c99 unit test\n");
         return fail?1:0;
     }
@@ -14153,6 +14223,28 @@ int main(int argc, char** argv) {
                             || determ_pedersen_commit(C2, v2.data(), r2.data()) != 0
                             || determ_pedersen_add(Csum, C1, C2) != 0
                             || hx(Csum, 33) != v["c3_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "gen") {
+                        // [inc.2] the index-th vector generator, compressed.
+                        uint8_t P65[65], Pc[33];
+                        uint32_t idx = v["index"].get<uint32_t>();
+                        uint8_t which = (uint8_t)v["which"].get<int>();
+                        if (determ_pedersen_gen(P65, idx, which) != 0
+                            || determ_p256_point_compress(Pc, P65) != 0
+                            || hx(Pc, 33) != v["g_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "vector_commit") {
+                        // [inc.2] C = r*H + Σ a_i*G_i + b_i*H_i.
+                        std::vector<uint8_t> a, b; bool vok = true;
+                        for (auto& s : v["a_hex"]) { auto x = unhex(s.get<std::string>());
+                            if (x.size()!=32){vok=false;break;} a.insert(a.end(), x.begin(), x.end()); }
+                        for (auto& s : v["b_hex"]) { auto x = unhex(s.get<std::string>());
+                            if (x.size()!=32){vok=false;break;} b.insert(b.end(), x.begin(), x.end()); }
+                        size_t nn = v["a_hex"].size();
+                        auto rr = unhex(v["r_hex"]);
+                        uint8_t C[33];
+                        if (!vok || v["b_hex"].size()!=nn || rr.size()!=32
+                            || determ_pedersen_vector_commit(C, a.empty()?nullptr:a.data(),
+                                                             b.empty()?nullptr:b.data(), nn, rr.data()) != 0
+                            || hx(C, 33) != v["c_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name + " (unknown pedersen type '" + ty + "')"; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch

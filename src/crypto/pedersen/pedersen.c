@@ -73,3 +73,54 @@ int determ_pedersen_add(uint8_t out33[33],
     if (determ_p256_point_add(sum, p1, p2) != 0) return -1; /* identity -> -1 */
     return determ_p256_point_compress(out33, sum);
 }
+
+/* ── §3.19 increment 2: vector-commitment generators + vector commit ─────── */
+
+/* Family DSTs. Distinct suite tags so G_i, H_i, and the §3.19 scalar H all land
+ * in separate hash_to_curve domains — no known dlog relation among them. */
+static const char PEDERSEN_VG_DST[] = "DETERM-PEDERSEN-VEC-G-P256_XMD:SHA-256_SSWU_RO_";
+static const char PEDERSEN_VH_DST[] = "DETERM-PEDERSEN-VEC-H-P256_XMD:SHA-256_SSWU_RO_";
+
+int determ_pedersen_gen(uint8_t out65[65], uint32_t index, uint8_t which) {
+    const char *dst;
+    size_t dstlen;
+    if (which == 0)      { dst = PEDERSEN_VG_DST; dstlen = sizeof(PEDERSEN_VG_DST) - 1; }
+    else if (which == 1) { dst = PEDERSEN_VH_DST; dstlen = sizeof(PEDERSEN_VH_DST) - 1; }
+    else return -1;
+    /* msg = the 4-byte big-endian index (fixed width so no length ambiguity). */
+    uint8_t msg[4];
+    msg[0] = (uint8_t)(index >> 24); msg[1] = (uint8_t)(index >> 16);
+    msg[2] = (uint8_t)(index >> 8);  msg[3] = (uint8_t)(index);
+    return determ_p256_hash_to_curve(out65, msg, 4, (const uint8_t *)dst, dstlen);
+}
+
+int determ_pedersen_vector_commit(uint8_t out33[33],
+                                  const uint8_t *a, const uint8_t *b,
+                                  size_t n, const uint8_t r[32]) {
+    uint8_t H[65], acc[65], gen[65], term[65];
+
+    /* Start the accumulator at r*H (rejects r == 0 / r >= n_order). Because the
+     * start is non-identity, an intermediate identity can only arise if a later
+     * term exactly cancels the running sum — a known-dlog / adversarial event
+     * that point_add reports as -1. */
+    if (determ_pedersen_generator_h(H) != 0) return -1;
+    if (determ_p256_point_mul(acc, r, H) != 0) return -1;
+
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t *ai = a + i * 32;
+        const uint8_t *bi = b + i * 32;
+        /* a_i * G_i (skip the identity term a_i == 0). */
+        if (!scalar_is_zero(ai)) {
+            if (determ_pedersen_gen(gen, (uint32_t)i, 0) != 0) return -1;
+            if (determ_p256_point_mul(term, ai, gen) != 0) return -1;
+            if (determ_p256_point_add(acc, acc, term) != 0) return -1;
+        }
+        /* b_i * H_i (skip the identity term b_i == 0). */
+        if (!scalar_is_zero(bi)) {
+            if (determ_pedersen_gen(gen, (uint32_t)i, 1) != 0) return -1;
+            if (determ_p256_point_mul(term, bi, gen) != 0) return -1;
+            if (determ_p256_point_add(acc, acc, term) != 0) return -1;
+        }
+    }
+    return determ_p256_point_compress(out33, acc);
+}
