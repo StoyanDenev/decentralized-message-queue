@@ -47,8 +47,17 @@ static int ff_bytes_eq(const uint8_t *a, const uint8_t *b, size_t n) {
     return d == 0;
 }
 
-/* out = a * b * R^{-1} mod p  (CIOS Montgomery, R = 2^3072). a, b < p => out < p. */
-static void montmul(uint32_t out[96], const uint32_t a[96], const uint32_t b[96]) {
+/* A Montgomery context: the modulus (96 limbs), R^2 mod modulus, and -modulus^{-1} mod
+ * 2^32. Group ELEMENTS live mod p (CTX_P); the scalar/exponent field lives mod q
+ * (CTX_Q — §3.20 inc.3, the subgroup order). One CIOS routine, two moduli. */
+typedef struct { const uint32_t *M; const uint32_t *R2; uint32_t nprime; } ff_ctx;
+static const ff_ctx CTX_P = { DETERM_FF_P, DETERM_FF_R2,  DETERM_FF_NPRIME };
+static const ff_ctx CTX_Q = { DETERM_FF_Q, DETERM_FF_QR2, DETERM_FF_QNPRIME };
+
+/* out = a * b * R^{-1} mod M  (CIOS Montgomery, R = 2^3072). a, b < M => out < M. */
+static void montmul_c(uint32_t out[96], const uint32_t a[96], const uint32_t b[96],
+                      const ff_ctx *c) {
+    const uint32_t *M = c->M;
     uint32_t t[98];
     memset(t, 0, sizeof(t));
     for (int i = 0; i < S; i++) {
@@ -61,51 +70,59 @@ static void montmul(uint32_t out[96], const uint32_t a[96], const uint32_t b[96]
         uint64_t x = (uint64_t)t[S] + C;
         t[S] = (uint32_t)x; t[S + 1] = (uint32_t)(x >> 32);
 
-        uint32_t m = (uint32_t)((uint64_t)t[0] * DETERM_FF_NPRIME);   /* mod 2^32 */
-        C = ((uint64_t)t[0] + (uint64_t)m * DETERM_FF_P[0]) >> 32;    /* low limb -> 0 */
-        for (int j = 1; j < S; j++) {   /* t = (t + m * p) / 2^32 */
-            uint64_t y = (uint64_t)t[j] + (uint64_t)m * DETERM_FF_P[j] + C;
+        uint32_t m = (uint32_t)((uint64_t)t[0] * c->nprime);     /* mod 2^32 */
+        C = ((uint64_t)t[0] + (uint64_t)m * M[0]) >> 32;         /* low limb -> 0 */
+        for (int j = 1; j < S; j++) {   /* t = (t + m * M) / 2^32 */
+            uint64_t y = (uint64_t)t[j] + (uint64_t)m * M[j] + C;
             t[j - 1] = (uint32_t)y; C = y >> 32;
         }
         uint64_t y = (uint64_t)t[S] + C;
         t[S - 1] = (uint32_t)y;
         t[S] = (uint32_t)((uint64_t)t[S + 1] + (y >> 32));
     }
-    /* t (limbs 0..S, < 2p) : conditionally subtract p once. */
+    /* t (limbs 0..S, < 2M) : conditionally subtract M once. */
     uint32_t tmp[96];
     uint64_t br = 0;
     for (int j = 0; j < S; j++) {
-        uint64_t d = (uint64_t)t[j] - (uint64_t)DETERM_FF_P[j] - br;
+        uint64_t d = (uint64_t)t[j] - (uint64_t)M[j] - br;
         tmp[j] = (uint32_t)d; br = (d >> 32) & 1;
     }
-    if (t[S] != 0 || br == 0) memcpy(out, tmp, S * 4);   /* t >= p => use t - p */
+    if (t[S] != 0 || br == 0) memcpy(out, tmp, S * 4);   /* t >= M => use t - M */
     else                       memcpy(out, t, S * 4);
 }
 
-static void to_mont(uint32_t out[96], const uint32_t a[96]) { montmul(out, a, DETERM_FF_R2); }
-static void from_mont(uint32_t out[96], const uint32_t a[96]) { montmul(out, a, ONE_LIMB); }
+static void to_mont_c(uint32_t out[96], const uint32_t a[96], const ff_ctx *c)   { montmul_c(out, a, c->R2, c); }
+static void from_mont_c(uint32_t out[96], const uint32_t a[96], const ff_ctx *c) { montmul_c(out, a, ONE_LIMB, c); }
 
-/* out = base^exp mod p (both normal domain, exp < q). */
-static void modexp(uint32_t out[96], const uint32_t base[96], const uint32_t exp[96]) {
+/* out = base^exp mod M (both normal domain, exp any 3072-bit). */
+static void modexp_c(uint32_t out[96], const uint32_t base[96], const uint32_t exp[96],
+                     const ff_ctx *c) {
     uint32_t bm[96], res[96];
-    to_mont(bm, base);
-    to_mont(res, ONE_LIMB);             /* mont(1) = R mod p */
+    to_mont_c(bm, base, c);
+    to_mont_c(res, ONE_LIMB, c);        /* mont(1) = R mod M */
     for (int limb = 95; limb >= 0; limb--) {
         uint32_t e = exp[limb];
         for (int bit = 31; bit >= 0; bit--) {
-            montmul(res, res, res);
-            if ((e >> bit) & 1u) montmul(res, res, bm);
+            montmul_c(res, res, res, c);
+            if ((e >> bit) & 1u) montmul_c(res, res, bm, c);
         }
     }
-    from_mont(out, res);
+    from_mont_c(out, res, c);
 }
 
-/* out = a * b mod p (normal domain). */
-static void modmul_normal(uint32_t out[96], const uint32_t a[96], const uint32_t b[96]) {
+/* out = a * b mod M (normal domain). */
+static void modmul_normal_c(uint32_t out[96], const uint32_t a[96], const uint32_t b[96],
+                            const ff_ctx *c) {
     uint32_t am[96];
-    to_mont(am, a);
-    montmul(out, am, b);                /* (a*R)*b*R^{-1} = a*b */
+    to_mont_c(am, a, c);
+    montmul_c(out, am, b, c);           /* (a*R)*b*R^{-1} = a*b */
 }
+
+/* mod-p convenience wrappers — byte-identical to the pre-inc.3 fixed-modulus routines
+ * (the ff_pedersen.json / bp corpora are the byte-identity guard). */
+static void montmul(uint32_t out[96], const uint32_t a[96], const uint32_t b[96])       { montmul_c(out, a, b, &CTX_P); }
+static void modexp(uint32_t out[96], const uint32_t base[96], const uint32_t exp[96])   { modexp_c(out, base, exp, &CTX_P); }
+static void modmul_normal(uint32_t out[96], const uint32_t a[96], const uint32_t b[96]) { modmul_normal_c(out, a, b, &CTX_P); }
 
 int determ_ff_pedersen_generator_h(uint8_t out[DETERM_FF_ELEM_BYTES]) {
     be_store(out, DETERM_FF_H);
@@ -164,28 +181,30 @@ static uint32_t ff_shl1(uint32_t a[96]) {
     return carry;
 }
 
-/* acc -= p (unconditionally; caller guarantees acc >= p). */
-static void ff_sub_p(uint32_t a[96]) {
+/* acc -= M (unconditionally; caller guarantees acc >= M). */
+static void ff_sub_mod(uint32_t a[96], const uint32_t M[96]) {
     uint32_t tmp[96];
     uint64_t br = 0;
     for (int j = 0; j < S; j++) {
-        uint64_t d = (uint64_t)a[j] - (uint64_t)DETERM_FF_P[j] - br;
+        uint64_t d = (uint64_t)a[j] - (uint64_t)M[j] - br;
         tmp[j] = (uint32_t)d; br = (d >> 32) & 1;
     }
     memcpy(a, tmp, S * 4);
 }
 
-/* acc = int(material[0..mlen), big-endian) mod p, via bit-Horner (MSB-first). Each
- * step doubles acc (< 2p) and adds one message bit, then one conditional subtract of
- * p keeps acc < p — byte-identical to Python's int.from_bytes(material,"big") % P. */
-static void ff_mod_reduce_wide(uint32_t acc[96], const uint8_t *material, size_t mlen) {
+/* acc = int(material[0..mlen), big-endian) mod M, via bit-Horner (MSB-first). Each step
+ * doubles acc (< 2M) and adds one message bit, then one conditional subtract of M keeps
+ * acc < M — byte-identical to Python's int.from_bytes(material,"big") % M. Used with p
+ * (hash-to-group) and with q (hash-to-scalar / scalar_reduce, §3.20 inc.3). */
+static void ff_mod_reduce_wide(uint32_t acc[96], const uint8_t *material, size_t mlen,
+                               const uint32_t M[96]) {
     memset(acc, 0, S * 4);
     for (size_t k = 0; k < mlen; k++) {
         uint8_t byte = material[k];
         for (int bit = 7; bit >= 0; bit--) {
             uint32_t carry = ff_shl1(acc);       /* acc = 2*acc, capturing bit 3072 */
             acc[0] |= (uint32_t)((byte >> bit) & 1u);
-            if (carry || ff_ge(acc, DETERM_FF_P)) ff_sub_p(acc);
+            if (carry || ff_ge(acc, M)) ff_sub_mod(acc, M);
         }
     }
 }
@@ -202,7 +221,7 @@ static int ff_hash_to_group(uint32_t out[96], const uint8_t *prefix, size_t plen
         determ_sha256(blk, plen + 1, material + 32 * i);
     }
     uint32_t hs[96];
-    ff_mod_reduce_wide(hs, material, 416);
+    ff_mod_reduce_wide(hs, material, 416, DETERM_FF_P);
     modmul_normal(out, hs, hs);                  /* out = hs^2 mod p, order q */
     if (ff_is_zero(out) || ff_is_one(out)) return -1;
     return 0;
@@ -272,5 +291,72 @@ int determ_ff_msm(uint8_t out[DETERM_FF_ELEM_BYTES],
         modmul_normal(acc, acc, term);
     }
     be_store(out, acc);
+    return 0;
+}
+
+/* ── §3.20 increment 3: scalar field arithmetic mod q (the subgroup order) ──── */
+
+int determ_ff_scalar_reduce(uint8_t out[DETERM_FF_ELEM_BYTES],
+                            const uint8_t in[DETERM_FF_ELEM_BYTES]) {
+    uint32_t r[96];
+    ff_mod_reduce_wide(r, in, DETERM_FF_ELEM_BYTES, DETERM_FF_Q);   /* in mod q */
+    be_store(out, r);
+    return 0;
+}
+
+int determ_ff_scalar_add(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]) {
+    uint32_t al[96], bl[96], s[96];
+    be_load(al, a); be_load(bl, b);
+    if (ff_ge(al, DETERM_FF_Q) || ff_ge(bl, DETERM_FF_Q)) return -1;   /* not reduced */
+    uint64_t carry = 0;
+    for (int i = 0; i < S; i++) { uint64_t x = (uint64_t)al[i] + bl[i] + carry; s[i] = (uint32_t)x; carry = x >> 32; }
+    if (carry || ff_ge(s, DETERM_FF_Q)) ff_sub_mod(s, DETERM_FF_Q);   /* a+b < 2q -> one subtract */
+    be_store(out, s);
+    return 0;
+}
+
+int determ_ff_scalar_mul(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]) {
+    uint32_t al[96], bl[96], r[96];
+    be_load(al, a); be_load(bl, b);
+    if (ff_ge(al, DETERM_FF_Q) || ff_ge(bl, DETERM_FF_Q)) return -1;   /* not reduced */
+    modmul_normal_c(r, al, bl, &CTX_Q);                               /* a*b mod q */
+    be_store(out, r);
+    return 0;
+}
+
+int determ_ff_scalar_inv(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES]) {
+    uint32_t al[96], qm2[96], r[96], two[96];
+    be_load(al, a);
+    if (ff_is_zero(al) || ff_ge(al, DETERM_FF_Q)) return -1;           /* 0 or >= q */
+    memset(two, 0, sizeof(two)); two[0] = 2;                          /* qm2 = q - 2 */
+    uint64_t br = 0;
+    for (int j = 0; j < S; j++) { uint64_t d = (uint64_t)DETERM_FF_Q[j] - two[j] - br; qm2[j] = (uint32_t)d; br = (d >> 32) & 1; }
+    modexp_c(r, al, qm2, &CTX_Q);                                     /* a^{q-2} mod q */
+    be_store(out, r);
+    return 0;
+}
+
+int determ_ff_hash_to_scalar(uint8_t out[DETERM_FF_ELEM_BYTES],
+                             const uint8_t *msg, size_t mlen,
+                             const uint8_t *dst, size_t dstlen) {
+    uint8_t material[416];
+    for (int i = 0; i < 13; i++) {                                   /* 13 blocks -> 416 B > q */
+        determ_sha256_ctx ctx;
+        determ_sha256_init(&ctx);
+        determ_sha256_update(&ctx, dst, dstlen);
+        determ_sha256_update(&ctx, msg, mlen);
+        uint8_t cb = (uint8_t)i;
+        determ_sha256_update(&ctx, &cb, 1);
+        determ_sha256_final(&ctx, material + 32 * i);
+    }
+    uint32_t r[96];
+    ff_mod_reduce_wide(r, material, 416, DETERM_FF_Q);               /* mod q */
+    if (ff_is_zero(r)) return -1;                                    /* zero scalar unusable */
+    be_store(out, r);
     return 0;
 }

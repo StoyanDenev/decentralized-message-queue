@@ -529,6 +529,9 @@ In-process tests (deterministic, no network):
                                               (g^v h^r mod p) over RFC 3526 MODP-
                                               3072 — the MODERN large-prime backend
                                               — homomorphism + byte-exact KAT
+  determ test-ff-scalar-c99                   §3.20 inc.3: finite-field scalar field
+                                              mod q (add/mul/inv/hash_to_scalar) — the
+                                              §3.20 IPA/range-proof exponent field
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13836,6 +13839,68 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: ff-pedersen-c99 unit test\n" : "  PASS: ff-pedersen-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-ff-scalar-c99") {
+        // §3.20 inc.3: scalar field mod q (the subgroup order). add(+commut)/mul/
+        // inv(roundtrip a*inv==1)/reduce/hash_to_scalar + reject paths. Byte-exact KAT
+        // vs tools/verify_ff_scalar.py (native bignums) is the §3.13 gate (ff_scalar.json).
+        int fail=0;
+        auto check=[&](bool ok,const char*m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        const size_t E=DETERM_FF_ELEM_BYTES;
+        auto setbe=[&](std::vector<uint8_t>&b,uint64_t val){ b.assign(E,0); for(int i=0;i<8;i++) b[E-1-i]=(uint8_t)(val>>(8*i)); };
+        // (1) add: commutative + small sum correct.
+        {
+            std::vector<uint8_t> a(E),b(E),s1(E),s2(E),exp(E);
+            setbe(a,0x1234); setbe(b,0x5678); setbe(exp,0x1234+0x5678);
+            bool ok = determ_ff_scalar_add(s1.data(),a.data(),b.data())==0
+                   && determ_ff_scalar_add(s2.data(),b.data(),a.data())==0 && s1==s2 && s1==exp;
+            check(ok,"scalar_add: a+b == b+a, small sum correct");
+        }
+        // (2) mul: small product correct; a>=q rejects (mul + add).
+        {
+            std::vector<uint8_t> a(E),b(E),p(E),exp(E),allff(E,0xff),o(E);
+            setbe(a,9); setbe(b,0x1234); setbe(exp,9ull*0x1234);
+            bool ok = determ_ff_scalar_mul(p.data(),a.data(),b.data())==0 && p==exp;
+            ok = ok && determ_ff_scalar_mul(o.data(),allff.data(),b.data())==-1
+                    && determ_ff_scalar_add(o.data(),allff.data(),b.data())==-1;
+            check(ok,"scalar_mul: small product correct; a>=q rejects (mul+add)");
+        }
+        // (3) inv: a*inv(a)==1; reject 0 and >=q.
+        {
+            bool ok=true;
+            for (uint64_t x : {7ull,0xdeadbeefull,123456789ull}) {
+                std::vector<uint8_t> a(E),inv(E),prod(E),one(E,0); one[E-1]=1; setbe(a,x);
+                ok = ok && determ_ff_scalar_inv(inv.data(),a.data())==0
+                        && determ_ff_scalar_mul(prod.data(),a.data(),inv.data())==0 && prod==one;
+            }
+            std::vector<uint8_t> z(E,0),o(E),allff(E,0xff);
+            ok = ok && determ_ff_scalar_inv(o.data(),z.data())==-1
+                    && determ_ff_scalar_inv(o.data(),allff.data())==-1;
+            check(ok,"scalar_inv: a*inv(a)==1; inv(0) and inv(>=q) reject");
+        }
+        // (4) reduce: >=q -> <q; idempotent on a reduced value.
+        {
+            std::vector<uint8_t> big(E,0xff),red(E),red2(E),zero(E,0),chk(E);
+            bool ok = determ_ff_scalar_reduce(red.data(),big.data())==0
+                   && determ_ff_scalar_add(chk.data(),red.data(),zero.data())==0 && chk==red   // red<q
+                   && determ_ff_scalar_reduce(red2.data(),red.data())==0 && red2==red;          // idempotent
+            check(ok,"scalar_reduce: >=q -> <q, idempotent on reduced");
+        }
+        // (5) hash_to_scalar: deterministic, <q, distinct msgs differ.
+        {
+            const char* dst="DETERM-FF-HASH-TO-SCALAR-MODP3072-Q-v1";
+            std::vector<uint8_t> h1(E),h2(E),hb(E),zero(E,0),chk(E);
+            std::string m1="determ-ipa-challenge-0001", m2="determ-ipa-challenge-0002";
+            bool ok = determ_ff_hash_to_scalar(h1.data(),(const uint8_t*)m1.data(),m1.size(),(const uint8_t*)dst,std::strlen(dst))==0
+                   && determ_ff_hash_to_scalar(h2.data(),(const uint8_t*)m1.data(),m1.size(),(const uint8_t*)dst,std::strlen(dst))==0
+                   && h1==h2
+                   && determ_ff_hash_to_scalar(hb.data(),(const uint8_t*)m2.data(),m2.size(),(const uint8_t*)dst,std::strlen(dst))==0
+                   && hb!=h1
+                   && determ_ff_scalar_add(chk.data(),h1.data(),zero.data())==0;   // h1 < q
+            check(ok,"hash_to_scalar: deterministic, <q, distinct msgs differ");
+        }
+        std::cout << (fail? "  FAIL: ff-scalar-c99 unit test\n" : "  PASS: ff-scalar-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -14116,6 +14181,7 @@ int main(int argc, char** argv) {
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "bp_agg_rangeproof.json", "ff_pedersen.json",
+                                "ff_scalar.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14799,6 +14865,32 @@ int main(int argc, char** argv) {
                         std::vector<uint8_t> m(384);
                         if (!okk || determ_ff_msm(m.data(), n?sc.data():nullptr, n?pts.data():nullptr, n)!=0
                             || hx(m.data(),384)!=v["m_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name; break; }
+                } else if (prim == "ff_scalar") {
+                    // §3.20 inc.3 scalar field mod q — recompute add/mul/inv/reduce/
+                    // hash_to_scalar via the C and match the frozen 384-byte bytes.
+                    std::string ty = v.value("type","");
+                    if (ty == "sc_reduce") {
+                        auto in=unhex(v["in_hex"].get<std::string>()); std::vector<uint8_t> o(384);
+                        if (in.size()!=384 || determ_ff_scalar_reduce(o.data(),in.data())!=0
+                            || hx(o.data(),384)!=v["out_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "sc_add" || ty == "sc_mul") {
+                        auto a=unhex(v["a_hex"].get<std::string>()); auto b=unhex(v["b_hex"].get<std::string>());
+                        if (a.size()!=384||b.size()!=384) { ok=false; bad=name; break; }
+                        std::vector<uint8_t> o(384);
+                        int rc = (ty=="sc_add") ? determ_ff_scalar_add(o.data(),a.data(),b.data())
+                                                : determ_ff_scalar_mul(o.data(),a.data(),b.data());
+                        if (rc!=0 || hx(o.data(),384)!=v["out_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "sc_inv") {
+                        auto a=unhex(v["a_hex"].get<std::string>()); std::vector<uint8_t> o(384);
+                        if (a.size()!=384||determ_ff_scalar_inv(o.data(),a.data())!=0
+                            ||hx(o.data(),384)!=v["out_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "hash_to_scalar") {
+                        auto msg=unhex(v["msg_hex"].get<std::string>()); std::string dst=v["dst"].get<std::string>();
+                        std::vector<uint8_t> o(384);
+                        if (determ_ff_hash_to_scalar(o.data(), msg.data(), msg.size(),
+                                                     (const uint8_t*)dst.data(), dst.size())!=0
+                            ||hx(o.data(),384)!=v["out_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch

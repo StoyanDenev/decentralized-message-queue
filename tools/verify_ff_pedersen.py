@@ -205,12 +205,18 @@ def _selftest():
           " + gens/vector_commit/msm OK")
 
 
-def emit_params():
+def _mont_nprime(mod):
     inv = 1
-    for _ in range(6):
-        inv = (inv * (2 - P * inv)) % (1 << 32)
-    nprime = (-inv) % (1 << 32)
+    for _ in range(6):                 # Newton: doubles correct bits each step -> mod 2^32
+        inv = (inv * (2 - mod * inv)) % (1 << 32)
+    return (-inv) % (1 << 32)
+
+
+def emit_params():
+    nprime = _mont_nprime(P)
     r2 = pow(2, 32 * LIMBS * 2, P)
+    qnprime = _mont_nprime(Q)          # §3.20 inc.3: Montgomery constants for the SCALAR field mod q
+    qr2 = pow(2, 32 * LIMBS * 2, Q)
     def limbs(x): return [(x >> (32 * i)) & 0xFFFFFFFF for i in range(LIMBS)]
     def arr(name, x):
         L = limbs(x); s = "static const uint32_t %s[96] = {\n" % name
@@ -228,13 +234,16 @@ def emit_params():
         f.write(" * 96 little-endian uint32 limbs. NPRIME = -p^{-1} mod 2^32. R2 = 2^6144 mod p.\n")
         f.write(" * p head %s... tail ...%s */\n" % (hx[:16], hx[-16:]))
         f.write("#ifndef DETERM_FF_PARAMS_H\n#define DETERM_FF_PARAMS_H\n#include <stdint.h>\n\n")
-        f.write("#define DETERM_FF_LIMBS 96\n#define DETERM_FF_NPRIME 0x%08xu\n\n" % nprime)
+        f.write("#define DETERM_FF_LIMBS 96\n")
+        f.write("#define DETERM_FF_NPRIME 0x%08xu   /* -p^{-1} mod 2^32 */\n" % nprime)
+        f.write("#define DETERM_FF_QNPRIME 0x%08xu  /* -q^{-1} mod 2^32 (scalar field) */\n\n" % qnprime)
         f.write(arr("DETERM_FF_P", P) + "\n")
         f.write(arr("DETERM_FF_Q", Q) + "\n")
         f.write(arr("DETERM_FF_R2", r2) + "\n")
+        f.write(arr("DETERM_FF_QR2", qr2) + "\n")     # 2^6144 mod q — scalar-field Montgomery
         f.write(arr("DETERM_FF_H", H) + "\n")
         f.write("#endif\n")
-    print("wrote %s (nprime=0x%08x)" % (out, nprime))
+    print("wrote %s (nprime=0x%08x qnprime=0x%08x)" % (out, nprime, qnprime))
 
 
 def emit():

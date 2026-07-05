@@ -62,7 +62,7 @@ EXPECTED = {
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
-    "ff_pedersen.json",
+    "ff_pedersen.json", "ff_scalar.json",
 }
 
 try:
@@ -1222,6 +1222,17 @@ def chk_ff_pedersen(vec, label):
         return "cannot import verify_ff_pedersen (%s)" % e
     return vf.check_ff_pedersen(vec, label)
 
+def chk_ff_scalar(vec, label):
+    # §3.20 inc.3 scalar field mod q — recompute add/mul/inv/reduce/hash_to_scalar
+    # through the independent from-scratch Python (tools/verify_ff_scalar.py, native
+    # bignums) and match the frozen 384-byte big-endian bytes.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_ff_scalar as vs
+    except Exception as e:
+        return "cannot import verify_ff_scalar (%s)" % e
+    return vs.check_ff_scalar(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1255,6 +1266,7 @@ CHECKERS = {
     "bp_rangeproof": chk_bp_rangeproof,
     "bp_agg_rangeproof": chk_bp_agg_rangeproof,
     "ff_pedersen": chk_ff_pedersen,
+    "ff_scalar": chk_ff_scalar,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

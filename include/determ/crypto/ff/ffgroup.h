@@ -88,6 +88,36 @@ int determ_ff_vector_commit(uint8_t out[DETERM_FF_ELEM_BYTES],
 int determ_ff_msm(uint8_t out[DETERM_FF_ELEM_BYTES],
                   const uint8_t *scalars, const uint8_t *points, size_t n);
 
+/* ── §3.20 increment 3: scalar field arithmetic mod q (the subgroup order) ────
+ * The field the §3.20 Bulletproofs IPA / range proof operate their exponents in.
+ * All scalars are 384-byte big-endian; add/mul/inv require reduced inputs (< q).
+ * NOT constant-time (owner-gated), same posture as the group ops. */
+
+/* out = in mod q (in is any 384-byte big-endian value; e.g. a wide hash). Returns 0. */
+int determ_ff_scalar_reduce(uint8_t out[DETERM_FF_ELEM_BYTES],
+                            const uint8_t in[DETERM_FF_ELEM_BYTES]);
+
+/* out = (a + b) mod q. Returns 0, or -1 if a or b is not reduced (>= q). */
+int determ_ff_scalar_add(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]);
+
+/* out = (a * b) mod q. Returns 0, or -1 if a or b is not reduced (>= q). */
+int determ_ff_scalar_mul(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]);
+
+/* out = a^{-1} mod q (Fermat, a^{q-2}). Returns 0, or -1 if a is 0 or >= q. */
+int determ_ff_scalar_inv(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES]);
+
+/* out = hash_to_scalar(dst, msg) mod q: 13 SHA-256 counter blocks of (dst || msg ||
+ * counter) -> reduce mod q. The deterministic Fiat-Shamir challenge map for the §3.20
+ * IPA. Returns 0, or -1 if the reduced scalar is 0 (negligible / unusable challenge). */
+int determ_ff_hash_to_scalar(uint8_t out[DETERM_FF_ELEM_BYTES],
+                             const uint8_t *msg, size_t mlen,
+                             const uint8_t *dst, size_t dstlen);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

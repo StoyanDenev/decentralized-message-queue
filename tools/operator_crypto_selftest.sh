@@ -43,7 +43,7 @@ Phase 1 (static, no binary required):
 
 Phase 2 (live, skipped with --static-only):
   Runs the in-process C99 crypto battery by invoking the determ binary
-  directly, one subcommand at a time (the 24 C99-family subcommands in
+  directly, one subcommand at a time (the 26 C99-family subcommands in
   `determ help` order):
     test-ed25519-vectors  test-sha2-c99       test-chacha20-c99
     test-aes-c99          test-ed25519-c99    test-ed25519-scalar-reduce
@@ -52,8 +52,8 @@ Phase 2 (live, skipped with --static-only):
     test-argon2id-c99     test-p256-c99       test-p256-h2c-c99
     test-p256-oprf-c99    test-pedersen-c99   test-bp-ipa-c99
     test-bp-rangeproof-c99 test-bp-agg-rangeproof-c99 test-ff-pedersen-c99
-    test-ct-c99           test-rng-c99        test-c99-vectors
-    test-c99-api
+    test-ff-scalar-c99    test-ct-c99         test-rng-c99
+    test-c99-vectors      test-c99-api
   Each battery must exit 0 AND emit its terminal PASS summary marker;
   the script prints a per-test OK/FAILED row and a final verdict.
 
@@ -161,12 +161,13 @@ fi
 
 echo
 echo "=== Phase 2: live battery ($DETERM) ==="
-# All 25 in-process C99-family subcommands, in `determ help` order
+# All 26 in-process C99-family subcommands, in `determ help` order
 # (test-rng-c99 added with the §3.15 OS-entropy shim, R50; test-bp-ipa-c99
 # added with the §3.19 inc.4 Bulletproofs inner-product argument;
 # test-bp-rangeproof-c99 with inc.5 single-value range proof;
 # test-bp-agg-rangeproof-c99 with inc.6 aggregated range proof;
-# test-ff-pedersen-c99 with the §3.20 finite-field Pedersen backend).
+# test-ff-pedersen-c99 with the §3.20 finite-field Pedersen backend;
+# test-ff-scalar-c99 with the §3.20 inc.3 finite-field scalar field mod q).
 # Every one emits a terminal "PASS: <name> "/"FAIL: <name> " summary
 # line from its src/main.cpp dispatch block (name = subcommand minus
 # the "test-" prefix), which is what the marker gate below greps.
@@ -176,7 +177,7 @@ BATTERY="test-ed25519-vectors test-sha2-c99 test-chacha20-c99 test-aes-c99 \
          test-xchacha-c99 test-argon2id-c99 test-p256-c99 test-p256-h2c-c99 \
          test-p256-oprf-c99 test-pedersen-c99 test-bp-ipa-c99 \
          test-bp-rangeproof-c99 test-bp-agg-rangeproof-c99 test-ff-pedersen-c99 \
-         test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
+         test-ff-scalar-c99 test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
 FAILED=0
 TOTAL=0
 for t in $BATTERY; do
