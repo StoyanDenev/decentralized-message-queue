@@ -98,6 +98,27 @@ int determ_pedersen_vector_commit(uint8_t out33[33],
                                   const uint8_t *a, const uint8_t *b,
                                   size_t n, const uint8_t r[32]);
 
+/* ── §3.19 increment 3: general multi-scalar multiplication ──────────────────
+ * The general operation `Σ_{i<n} s_i * P_i` over ARBITRARY points (unlike
+ * vector_commit, whose points are the fixed generator families). This is the
+ * primitive the Bulletproofs inner-product argument (a later increment) reduces
+ * its L/R commitments and generator-folding to; `vector_commit` is the special
+ * case of it over the `[H, G_0.., H_0..]` generator list.
+ *
+ * out33 = SEC1 compressed. `scalars` is `n` consecutive 32-byte big-endian
+ * scalars (< n_order); `points33` is `n` consecutive 33-byte SEC1 compressed
+ * points. A term with a zero scalar contributes the identity and is skipped.
+ * Unlike the commitments, the SUM MAY legitimately be the identity, so the
+ * return value is 3-way:
+ *    0  — success, out33 holds the (non-identity) sum;
+ *    1  — the sum is the group identity (out33 is left untouched — the identity
+ *         has no 33-byte SEC1-compressed encoding); n == 0 always returns 1;
+ *   -1  — a scalar >= n_order, or a point fails to decode.
+ * The zero-scalar skip is a data-dependent branch (same CT caveat as
+ * vector_commit — a constant-time multi-exp is the owner-gated hardening step). */
+int determ_pedersen_msm(uint8_t out33[33],
+                        const uint8_t *scalars, const uint8_t *points33, size_t n);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

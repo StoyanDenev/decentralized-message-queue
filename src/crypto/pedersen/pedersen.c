@@ -124,3 +124,33 @@ int determ_pedersen_vector_commit(uint8_t out33[33],
     }
     return determ_p256_point_compress(out33, acc);
 }
+
+/* ── §3.19 increment 3: general multi-scalar multiplication ─────────────── */
+
+int determ_pedersen_msm(uint8_t out33[33],
+                        const uint8_t *scalars, const uint8_t *points33, size_t n) {
+    uint8_t acc[65], P[65], term[65];
+    int acc_is_identity = 1;   /* the empty sum is the group identity */
+
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t *si = scalars + i * 32;
+        if (scalar_is_zero(si)) continue;            /* s_i == 0: identity term, skip */
+        /* Decode P_i, then term = s_i * P_i. Since s_i in [1, n_order) and P_i is a
+         * non-identity curve point of prime order, term is never the identity, so
+         * point_mul's -1 here means "bad scalar / bad point". */
+        if (determ_p256_point_decompress(P, points33 + i * 33) != 0) return -1;
+        if (determ_p256_point_mul(term, si, P) != 0) return -1;
+
+        if (acc_is_identity) {
+            memcpy(acc, term, 65);
+            acc_is_identity = 0;
+        } else {
+            /* acc, term are both valid non-identity points here, so a -1 from
+             * point_add means the RESULT is the identity (acc == -term). */
+            if (determ_p256_point_add(acc, acc, term) != 0) acc_is_identity = 1;
+        }
+    }
+
+    if (acc_is_identity) return 1;                   /* the sum is the identity */
+    return determ_p256_point_compress(out33, acc) == 0 ? 0 : -1;
+}

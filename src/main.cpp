@@ -13456,6 +13456,77 @@ int main(int argc, char** argv) {
             ok = ok && determ_pedersen_vector_commit(C, a, b, 2, zero)==-1;  // r==0 rejects
             check(ok, "vector_commit: n==0 => r*H; zero-entry skip correct; r==0 rejects");
         }
+        // (12) [inc.3] MSM correctness: Σ s_i*P_i == recompute via the raw API; and
+        //      vector_commit is the MSM special case over the [H, G_i, H_i] list.
+        {
+            uint8_t Hc[33]; determ_p256_point_compress(Hc, H);
+            uint8_t G0[65],G1[65],H0[65],H1[65];
+            determ_pedersen_gen(G0,0,0); determ_pedersen_gen(G1,1,0);
+            determ_pedersen_gen(H0,0,1); determ_pedersen_gen(H1,1,1);
+            uint8_t G0c[33],G1c[33],H0c[33],H1c[33];
+            determ_p256_point_compress(G0c,G0); determ_p256_point_compress(G1c,G1);
+            determ_p256_point_compress(H0c,H0); determ_p256_point_compress(H1c,H1);
+            // direct: MSM([3,5],[G0,G1]) == 3*G0 + 5*G1
+            uint8_t sc[2*32]={0}; sc[31]=3; sc[63]=5;
+            uint8_t pts[2*33]; std::memcpy(pts,G0c,33); std::memcpy(pts+33,G1c,33);
+            uint8_t M[33]; int rc = determ_pedersen_msm(M, sc, pts, 2);
+            uint8_t a3[65],b5[65],sum[65],Ref[33], s3[32]={0}, s5[32]={0}; s3[31]=3; s5[31]=5;
+            bool ok = rc==0
+                   && determ_p256_point_mul(a3, s3, G0)==0
+                   && determ_p256_point_mul(b5, s5, G1)==0
+                   && determ_p256_point_add(sum, a3, b5)==0
+                   && determ_p256_point_compress(Ref, sum)==0
+                   && std::memcmp(M, Ref, 33)==0;
+            // cross-check: vector_commit(a,b,2,r) == MSM([r,a0,a1,b0,b1],[H,G0,G1,H0,H1])
+            uint8_t a[2*32]={0}, b[2*32]={0}, r[32]={0};
+            a[31]=3; a[63]=5; b[31]=7; b[63]=9; r[30]=0x12; r[31]=0x34;
+            uint8_t VC[33]; ok = ok && determ_pedersen_vector_commit(VC, a, b, 2, r)==0;
+            uint8_t sc5[5*32]={0};
+            std::memcpy(sc5, r, 32); std::memcpy(sc5+32, a, 32); std::memcpy(sc5+64, a+32, 32);
+            std::memcpy(sc5+96, b, 32); std::memcpy(sc5+128, b+32, 32);
+            uint8_t pts5[5*33];
+            std::memcpy(pts5,Hc,33); std::memcpy(pts5+33,G0c,33); std::memcpy(pts5+66,G1c,33);
+            std::memcpy(pts5+99,H0c,33); std::memcpy(pts5+132,H1c,33);
+            uint8_t M5[33]; ok = ok && determ_pedersen_msm(M5, sc5, pts5, 5)==0
+                                    && std::memcmp(M5, VC, 33)==0;
+            check(ok, "msm: S s_i*P_i == recompute; vector_commit == msm over [H,G_i,H_i]");
+        }
+        // (13) [inc.3] MSM identity result (canceling terms) + zero-scalar skip + n==0.
+        {
+            uint8_t G0[65]; determ_pedersen_gen(G0,0,0);
+            uint8_t nm1[32]; std::memcpy(nm1, n_, 32);            // n-1 (=> (n-1)*G0 == -G0)
+            for (int i=31;i>=0;i--){ if (nm1[i]!=0){ nm1[i]=(uint8_t)(nm1[i]-1); break; } nm1[i]=0xFF; }
+            uint8_t nG0[65]; bool ok = determ_p256_point_mul(nG0, nm1, G0)==0;
+            uint8_t G0c[33], nG0c[33];
+            determ_p256_point_compress(G0c, G0); determ_p256_point_compress(nG0c, nG0);
+            uint8_t sc[2*32]={0}; sc[31]=1; sc[63]=1;             // [1,1] over [G0, -G0]
+            uint8_t pts[2*33]; std::memcpy(pts,G0c,33); std::memcpy(pts+33,nG0c,33);
+            uint8_t M[33];
+            ok = ok && determ_pedersen_msm(M, sc, pts, 2)==1;     // == identity
+            // zero-scalar skip: MSM([0,5],[G0,G1]) == 5*G1
+            uint8_t G1[65]; determ_pedersen_gen(G1,1,0);
+            uint8_t G1c[33]; determ_p256_point_compress(G1c, G1);
+            uint8_t sc2[2*32]={0}; sc2[63]=5;
+            uint8_t pts2[2*33]; std::memcpy(pts2,G0c,33); std::memcpy(pts2+33,G1c,33);
+            uint8_t M2[33], r5[65], R2[33], s5[32]={0}; s5[31]=5;
+            ok = ok && determ_pedersen_msm(M2, sc2, pts2, 2)==0
+                    && determ_p256_point_mul(r5, s5, G1)==0
+                    && determ_p256_point_compress(R2, r5)==0
+                    && std::memcmp(M2, R2, 33)==0;
+            ok = ok && determ_pedersen_msm(M, nullptr, nullptr, 0)==1;  // empty sum == identity
+            check(ok, "msm: canceling terms -> identity (rc 1); zero-scalar skip; n==0 -> identity");
+        }
+        // (14) [inc.3] MSM rejects a scalar >= order and a non-decodable point.
+        {
+            uint8_t G0[65]; determ_pedersen_gen(G0,0,0);
+            uint8_t G0c[33]; determ_p256_point_compress(G0c, G0);
+            uint8_t M[33];
+            bool ok = determ_pedersen_msm(M, n_, G0c, 1)==-1;          // scalar == order
+            uint8_t sc1[32]={0}; sc1[31]=3;
+            uint8_t badpt[33]; std::memset(badpt, 0xEE, 33); badpt[0]=0x05; // bad SEC1 prefix
+            ok = ok && determ_pedersen_msm(M, sc1, badpt, 1)==-1;
+            check(ok, "msm: scalar >= n rejects; non-decodable point rejects");
+        }
 
         std::cout << (fail? "  FAIL: pedersen-c99 unit test\n" : "  PASS: pedersen-c99 unit test\n");
         return fail?1:0;
@@ -14245,6 +14316,24 @@ int main(int argc, char** argv) {
                             || determ_pedersen_vector_commit(C, a.empty()?nullptr:a.data(),
                                                              b.empty()?nullptr:b.data(), nn, rr.data()) != 0
                             || hx(C, 33) != v["c_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "msm") {
+                        // [inc.3] Σ s_i*P_i over arbitrary compressed points; the
+                        // result may be the identity (`identity: true`, rc 1).
+                        std::vector<uint8_t> scs, pts; bool vok = true;
+                        for (auto& s : v["scalars_hex"]) { auto x = unhex(s.get<std::string>());
+                            if (x.size()!=32){vok=false;break;} scs.insert(scs.end(), x.begin(), x.end()); }
+                        for (auto& s : v["points_hex"]) { auto x = unhex(s.get<std::string>());
+                            if (x.size()!=33){vok=false;break;} pts.insert(pts.end(), x.begin(), x.end()); }
+                        size_t nn = v["scalars_hex"].size();
+                        uint8_t C[33];
+                        int mrc = (vok && v["points_hex"].size()==nn)
+                            ? determ_pedersen_msm(C, scs.empty()?nullptr:scs.data(),
+                                                  pts.empty()?nullptr:pts.data(), nn) : -99;
+                        if (v.value("identity", false)) {
+                            if (mrc != 1) { ok=false; bad=name; break; }
+                        } else if (mrc != 0 || hx(C, 33) != v["c_hex"].get<std::string>()) {
+                            ok=false; bad=name; break;
+                        }
                     } else { ok=false; bad=name + " (unknown pedersen type '" + ty + "')"; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch

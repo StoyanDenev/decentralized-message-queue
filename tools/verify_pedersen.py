@@ -104,6 +104,21 @@ def compress(pt):
     return bytes([2 + (pt[1] & 1)]) + pt[0].to_bytes(32, "big")
 
 
+def decompress(buf):
+    if len(buf) != 33 or buf[0] not in (2, 3):
+        raise ValueError("not a 33-byte compressed point")
+    x = int.from_bytes(buf[1:], "big")
+    if x >= P:
+        raise ValueError("x-coordinate out of range")
+    g = (pow(x, 3, P) + A * x + B) % P
+    y = pow(g, (P + 1) // 4, P)               # P == 3 mod 4
+    if y * y % P != g:
+        raise ValueError("point not on curve")
+    if (y & 1) != (buf[0] & 1):
+        y = P - y
+    return (x, y)
+
+
 def derive_h():
     ub = expand_xmd(H_MSG, H_DST, 96)            # count=2 * m=1 * L=48
     u0 = int.from_bytes(ub[:48], "big") % P
@@ -166,6 +181,28 @@ def vector_commit_hex(a_hex, b_hex, r_hex):
     return compress(vector_commit_pt(a, b, int(r_hex, 16))).hex()
 
 
+# ── §3.19 increment 3: general multi-scalar multiplication ───────────────────
+def msm_pt(scalars, points):
+    # Matches the C determ_pedersen_msm contract across the whole domain: skip a
+    # term iff its scalar is EXACTLY zero, reject any scalar >= n, and return None
+    # for the identity (empty / canceling sum).
+    acc = None
+    for s, pt in zip(scalars, points):
+        if s == 0:
+            continue
+        if s >= N:
+            raise ValueError("scalar >= n (matches the C -1 reject)")
+        acc = pt_add(acc, pt_mul(s, pt))
+    return acc
+
+
+def msm_hex(scalars_hex, points_hex):
+    scalars = [int(s, 16) for s in scalars_hex]
+    points = [decompress(bytes.fromhex(p)) for p in points_hex]
+    r = msm_pt(scalars, points)
+    return None if r is None else compress(r).hex()
+
+
 # ---- §3.13 file-half checker (imported by test_c99_vector_files.sh) ----
 def check_pedersen(vec, label):
     t = vec.get("type")
@@ -195,6 +232,13 @@ def check_pedersen(vec, label):
         got = vector_commit_hex(vec["a_hex"], vec["b_hex"], vec["r_hex"])
         if got != vec["c_hex"]:
             return "recomputed vector_commit %s != c_hex %s" % (got, vec["c_hex"])
+    elif t == "msm":
+        got = msm_hex(vec["scalars_hex"], vec["points_hex"])
+        if vec.get("identity"):
+            if got is not None:
+                return "expected the identity, recomputed %s" % got
+        elif got != vec["c_hex"]:
+            return "recomputed msm %s != c_hex %s" % (got, vec["c_hex"])
     else:
         return "unknown pedersen vector type %r" % t
     return None
@@ -250,6 +294,22 @@ def emit():
         "name": "vector_commit n=3 (incl. a zero b-entry)",
         "type": "vector_commit", "a_hex": va, "b_hex": vb, "r_hex": vr,
         "c_hex": vector_commit_hex(va, vb, vr),
+    })
+    # ── increment 3: general MSM over arbitrary points ──
+    g0 = compress(derive_gen(0, 0)).hex()
+    g1 = compress(derive_gen(1, 0)).hex()
+    h0 = compress(derive_gen(0, 1)).hex()
+    msc = [_s32(3), _s32(5), _s32(7)]
+    mpts = [g0, g1, h0]
+    vectors.append({
+        "name": "msm n=3 over [G0,G1,H0]",
+        "type": "msm", "scalars_hex": msc, "points_hex": mpts,
+        "c_hex": msm_hex(msc, mpts),
+    })
+    vectors.append({
+        "name": "msm -> identity (1*G0 + (n-1)*G0)",
+        "type": "msm", "scalars_hex": [_s32(1), _s32(N - 1)],
+        "points_hex": [g0, g0], "identity": True,
     })
     doc = {
         "primitive": "pedersen",
