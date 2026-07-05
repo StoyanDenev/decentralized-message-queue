@@ -2,15 +2,19 @@
 
 Per-module provenance + audit README required by `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.16 (walked by `tools/operator_crypto_selftest.sh`). Module spec section:
-CRYPTO-C99-SPEC §3.19. Status: **increments 1-4 of
+CRYPTO-C99-SPEC §3.19. Status: **increments 1-7 of
 the owner-authorized range-proof / confidential-transaction track** (authorized
 2026-07-04, library-primitive-first). A Pedersen commitment `C = v*G + r*H` over
 NIST P-256 (inc.1), the vector commit `C = r*H + Σ(a_i*G_i + b_i*H_i)` (inc.2), the
-general multi-scalar multiplication `Σ s_i*P_i` (inc.3), and the **Bulletproofs
-inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points (inc.4)
-— §3.19. **ZERO consensus touch — purely additive, not wired into any chain call
-site**; chain/wallet integration is a later, separately-reviewed step.
-Headers under `include/determ/crypto/pedersen/`.
+general multi-scalar multiplication `Σ s_i*P_i` (inc.3), the **Bulletproofs
+inner-product argument** `P = <a,g> + <b,h> + <a,b>*u` in `2*log2(n)` points (inc.4),
+the **single-value range proof** `v ∈ [0,2^n)` (inc.5), the **aggregated range proof**
+(inc.6), and the **confidential-tx balance proof** — a Schnorr PoK that the excess
+`E = Σ C_in − Σ C_out − fee*G` opens to zero (`E = x*H`, amount conservation; inc.7,
+`balance.c`) — §3.19. This is the complete confidential-tx primitive set for the
+FIPS profile, symmetric with the MODERN-profile §3.20 `Z_p*` stack. **ZERO consensus
+touch — purely additive, not wired into any chain call site**; chain/wallet integration
+is a later, separately-reviewed step. Headers under `include/determ/crypto/pedersen/`.
 
 ## What this module implements
 
@@ -165,6 +169,21 @@ single-value proof). The verifier's `t̂` identity gains the `Σ_j z^(2+j)·V_j`
 and `delta` the `Σ_j z^(3+j)` sum. The final `<l,r>=t̂` check is the same inc.4 IPA
 over the `m*n`-wide generators. Own transcript label `DETERM-BP-AGGRANGE-v1`
 (seeds `m`, `n`, all `V_j`). Reuses every single-value static — no new arithmetic.
+
+**Increment 7 — the confidential-tx balance proof (`balance.c` /
+`include/determ/crypto/pedersen/balance.h`):** the *amount-conservation* half of a
+confidential transaction (the inc.5/6 range proofs are the *no-inflation* half). Proves
+`Σ v_in = Σ v_out + fee` WITHOUT revealing any amount: a tx balances iff the excess
+`E = Σ C_in − Σ C_out − fee*G` has no G-component, i.e. `E = x*H` for the blinding excess
+`x = (Σ r_in − Σ r_out) mod n`; the prover gives a Schnorr PoK of discrete log base `H`
+(`E = x*H`), which — since `log_G(H)` is unknown — forces the G-coefficient to zero.
+The point subtractions are **scalar negations in the exponent** (`−C = (n−1)*C`,
+`−fee*G = (n−fee)*G`) so the excess is one `determ_pedersen_msm` — **no point-negation
+primitive and NO change to the sealed P-256 core**; the only local arithmetic is a
+256-bit add-mod-n / negate-mod-n over the exported curve order. API
+`determ_p256_balance_excess` / `_prove` / `_verify`; 65-byte proof = `compress(T)‖s`;
+transcript DST `DETERM-P256-BALANCE-v1-challenge`. This completes the FIPS-profile
+confidential-tx primitive set, symmetric with the MODERN-profile §3.20 `Z_p*` stack.
 
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.
