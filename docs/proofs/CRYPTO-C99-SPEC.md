@@ -1379,10 +1379,11 @@ Increment 1 is the finite-field analog of §3.19 inc.1 — library-primitive-fir
   4-bit-window square-and-multiply with a branchless table select (no branch on secret
   exponent bits, no secret-indexed memory; the Montgomery conditional subtract is a
   masked blend) — byte-output-invariant (the ff_* corpora are the guard), audited, and
-  modestly faster than the old bit-serial square-and-multiply. **Residual:** the
-  `determ_ff_msm`/`_vector_commit` zero-scalar skip is still data-dependent (the next CT
-  increment) — so the range prover is not YET fully constant-time end-to-end, a hard
-  requirement before any on-chain prover use (per the design doc).
+  modestly faster than the old bit-serial square-and-multiply. The `determ_ff_msm`/
+  `_vector_commit` **zero-scalar skip is also removed** (always exponentiate; `base^0 = 1`)
+  — so the **Z_p\* prover is now constant-time for its own honest inputs** (no
+  secret-value-dependent branch/memory). The one cross-profile residual is the §3.19 P-256
+  `determ_pedersen_msm` zero-skip (a harder additive-identity CT-select — a follow-up).
 - **Validation:** `determ test-ff-pedersen-c99` (4 assertions — the H generator
   [deterministic, non-trivial]; `commit → verify` accept + wrong-v / wrong-r reject;
   the additive homomorphism `c1*c2 == commit(v1+v2, r1+r2)`; input validation [r==0,
@@ -1495,10 +1496,11 @@ this backend: a
 group-abstraction layer so P-256 and `Z_p*` share one Bulletproofs prover; then chain
 integration (owner-gated, per the design doc). The `Z_p*` modexp is ~1700× slower than
 the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8). **CT status:
-the modexp is now constant-time + windowed (2026-07-06, owner-authorized) — the dominant
-amount-leak is closed; the remaining CT work is the `determ_ff_msm`/`_vector_commit`
-zero-scalar skip (the next increment) before the prover is fully constant-time end-to-end
-for on-chain use.**
+the modexp is constant-time + windowed AND the `determ_ff_msm`/`_vector_commit` zero-scalar
+skip is removed (2026-07-06, owner-authorized) — the Z_p\* prover is now constant-time for
+its own honest inputs (byte-invariant, audited). The one cross-profile residual before
+on-chain use is the §3.19 P-256 `determ_pedersen_msm` zero-skip (a harder additive-identity
+CT-select).**
 
 ---
 

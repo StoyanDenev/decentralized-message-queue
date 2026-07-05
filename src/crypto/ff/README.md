@@ -125,12 +125,21 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   Montgomery multiplies vs the old bit-serial square-and-multiply). This closes the
   amount-leak that `ConfidentialTxIntegrationDesign.md` (NC-4/L-4) flags as a hard
   prerequisite before any on-chain confidential-tx prover use.
-- **Residual (the NEXT CT increment):** the `determ_ff_msm` / `determ_ff_vector_commit`
-  **zero-scalar skip** (`if (ff_is_zero(sl)) continue` / `if (!ff_is_zero(sl))`) is still
-  data-dependent — it leaks which secret scalars are zero (in the range prover, the bits of
-  the committed value). It must be made branchless (always exponentiate; `base^0 = 1`
-  contributes the identity) before the prover is fully constant-time. Byte-invariant, so
-  the same corpora guard it.
+- **`determ_ff_msm` / `determ_ff_vector_commit` zero-scalar skip: REMOVED (now
+  constant-time, 2026-07-06).** The old `if (ff_is_zero(sl)) continue` / `if (!ff_is_zero
+  (sl))` guards leaked which secret scalars are zero (in the range prover, the bits of the
+  committed value); they are gone — the code always exponentiates (`base^0 = 1` contributes
+  the identity, so it is byte-identical to skipping — all 40 ff_* corpus vectors, including
+  the zero-entry ones, stay byte-equal). With this the **Z_p\* prover is constant-time for
+  its own (honest) inputs**: no secret-value-dependent branch or memory access remains in
+  the exponent path or the multi-exponentiation. The only residual branches are the
+  `ff_ge(sl, q)` / point-validity rejects, which never fire for a prover's own honestly-
+  generated scalars/points (the standard public-validity-rejection residual).
+- **Cross-profile residual (a follow-up):** the §3.19 P-256 `determ_pedersen_msm` has the
+  identical zero-scalar skip, but its CT fix is harder — the additive group identity `O`
+  has no compressed encoding and is special-cased (an `acc_is_identity` flag), so a
+  zero-scalar term (`0·P = O`) needs a constant-time identity-SELECT (don't fold `O` into
+  the accumulator) rather than the finite-field no-op (`base^0 = 1`). Deferred.
 - The size/perf cost of a 3072-bit finite-field group vs. a 256-bit curve
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.

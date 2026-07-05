@@ -538,16 +538,26 @@ audit confirmed the CT property (no secret branch / no secret-indexed access) + 
 masked-select correctness. Source-level CT is the standard codebase assumption (cf. §2.9
 `fe_cmov` / §4.1.5).
 
-**Residual (the NEXT CT increment, tracked):** the `determ_ff_msm` / `determ_ff_vector_commit`
-**zero-scalar skip** (`if (ff_is_zero(sl)) continue` / `if (!ff_is_zero(sl))`, `ffgroup.c`)
-is still data-dependent — it leaks which secret scalars are zero (in the range prover, the
-bits of the committed value). It must be made branchless (always exponentiate; `base^0 = 1`
-contributes the identity) before the Z_p* prover is fully constant-time end-to-end. This
-is byte-invariant, so the same ff_* corpora guard it. Until then the §3.20 prover is
-**CT-in-the-exponent but not yet fully CT** — noted as a hard prerequisite before any
-on-chain confidential-tx prover use (`ConfidentialTxIntegrationDesign.md` NC-4/L-4). The
-§3.19 P-256 range prover shares the identical residual (the pedersen MSM zero-scalar skip,
-§2.9) — its scalar-mult ladder is already CT.
+**MSM/vector_commit zero-scalar skip — REMOVED (constant-time, 2026-07-06).** The
+`determ_ff_msm` / `determ_ff_vector_commit` `if (ff_is_zero(sl)) continue` / `if
+(!ff_is_zero(sl))` guards (which leaked which secret scalars are zero — in the range
+prover, the bits of the committed value) are gone: the code always exponentiates
+(`base^0 = 1` contributes the identity, so byte-identical to skipping — all 40 ff_*
+corpus vectors, including the zero-entry ones, stay byte-equal). **With this the §3.20
+Z_p\* prover is constant-time for its own honest inputs** — no secret-value-dependent
+branch or memory access remains in the exponent path or the multi-exponentiation. The only
+residual branches are `ff_ge(sl, q)` / point-validity rejects, which never fire for a
+prover's own honestly-generated scalars/points (the standard public-validity-rejection
+residual, §4.1).
+
+**Cross-profile residual (a follow-up):** the §3.19 P-256 `determ_pedersen_msm` (§2.9) has
+the identical zero-scalar skip, but its CT fix is HARDER — the additive group identity `O`
+has no compressed encoding and is special-cased (an `acc_is_identity` flag), so a
+zero-scalar term (`0·P = O`) needs a constant-time identity-SELECT (do not fold `O` into
+the accumulator) rather than the finite-field no-op (`base^0 = 1`). Until it lands the
+§3.19 range prover keeps this one data-dependent skip (its scalar-mult ladder is already
+CT). This is the last CT item before an on-chain confidential-tx prover
+(`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
 
 **Probe-target mapping (→ §3.12).** An `ff-modexp` `ct-timing-probe` target (secret =
 exponent, fix-vs-random, via `determ_ff_pedersen_commit`) is a documented follow-up: the
