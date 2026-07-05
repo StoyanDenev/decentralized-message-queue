@@ -778,10 +778,19 @@ Original plan (retained):
   evaluate/finalize/prove/verify) under the same error model — an invalid
   OWN scalar throws (separated from the C layer's conflated -1 by a cheap
   public validity check), adversarial peer inputs return nullopt/false.
+- The `determ::c99::mldsa` namespace covers the §3.18 ML-DSA (Dilithium, FIPS
+  204) surface (`ParamSet` {44,65,87}; `keygen(ps, seed32)`; `format_message`
+  building M' = 0x00‖len(ctx)‖ctx‖M; deterministic `sign(ps, sk, mprime)` with
+  an optional 32-byte `rnd` for the hedged variant; `verify(ps, pk, mprime,
+  sig)`). Error model: `keygen`/`format_message`/`sign` throw `std::runtime_error`
+  on a parameter/context/precondition failure; `verify` returns `bool` (any
+  malformed or wrong-length signature -> `false`, never throws). A LIBRARY
+  PRIMITIVE — chain integration is separately gated.
 - Validated by `determ test-c99-api` (wrapper output == raw C API output per
   primitive, with KAT anchors; the full AEAD tamper -> nullopt contract;
   P-256 DH commutativity + compress round-trip + OPRF protocol identity +
-  VOPRF tamper/wrong-mode rejects).
+  VOPRF tamper/wrong-mode rejects; ML-DSA keygen→sign→verify round-trip == raw
+  C for all three sets, with tamper + short-signature rejection).
 - Remaining for full §3.11: RAII incremental/streaming state (BLAKE2b first —
   the only shipped streaming C API), the caller-refactor mechanical-edit test
   (lands with §3.15), and umbrella rows for §3.7/§3.9a as they ship.

@@ -238,8 +238,13 @@ integration itself. None affects the KAT conformance of the pure sign/verify pat
   encoders have fixed loop bounds and no value-dependent branch or memory index
   (the shift amounts depend only on the public bit width), so serializing a secret
   polynomial does not leak it through timing.
-- **No stored key material.** No verify entry point / secret comparison here yet;
-  the `ct.h` compares belong to the later signing increment.
+- **Verify compares only public data.** `determ_mldsa_verify` recomputes the
+  commitment `w1` and checks the challenge hash `c̃` — both derived from public
+  inputs (`pk`, `M'`, `sig`); there is no secret-dependent comparison, so a
+  constant-time compare is not required on the verify path. The signer scrubs all
+  secret working buffers (`s1,s2,t0,K,rhopp,mu,y,…,z,r0`) via `determ_secure_zero`
+  on every exit of `determ_mldsa_sign` (success, rejection-cap, and error paths
+  share one `cleanup:` label).
 
 ## 5. Known limitations / future work
 
