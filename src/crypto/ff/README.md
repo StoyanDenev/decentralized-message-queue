@@ -119,7 +119,7 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.
 
-## Increments 2-5 (SHIPPED — the Bulletproofs range-proof stack over this group)
+## Increments 2-6 (SHIPPED — the complete Bulletproofs range-proof stack over this group)
 
 Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.20 for the full treatment):
@@ -145,13 +145,18 @@ Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-
   (`tools/verify_ff_rangeproof.py`; C V+proof match byte-for-byte); an independent
   soundness audit re-derived δ/Check-1/Check-2 from Bünz et al. §4.2 and confirmed
   `t0 = δ(y,z)+z²·v`. Also adds `determ_ff_scalar_sub` to the inc.3 scalar field.
+- **inc.6 — aggregated range proof** (`ffrangeproof.c`): `determ_ff_agg_rangeproof_prove`/
+  `_verify` — m values in ONE proof of size `2·log2(m·n)+O(1)` (the confidential-tx batch
+  range). Value j's `2^n` slot scaled `z^(2+j)`; `m=1` recovers the single-value proof.
+  Transcript `DETERM-FF-BP-AGGRANGE-v1`. Validated by `determ test-ff-agg-rangeproof-c99`
+  + `ff_aggrangeproof.json`; an independent audit re-derived the aggregation from Bünz et
+  al. §4.3 and confirmed an out-of-range value rejects in every batch position.
 
 ## Known limitations / future work
 
-- **NOT yet an AGGREGATED range proof.** inc.1-5 give the commitment + vector commit +
-  IPA + single-value range proof; the aggregated range proof (m values in one proof,
-  mirroring §3.19 inc.6), and a group-abstraction layer so P-256 and Z_p* share one
-  prover, are the next increments on this backend.
+- **Range-proof stack COMPLETE (inc.1-6).** Remaining on this backend: a group-abstraction
+  layer so P-256 (§3.19) and Z_p* (§3.20) share ONE Bulletproofs prover/verifier (avoids
+  the two parallel implementations), then confidential-tx chain integration.
 - **No constant-time modexp** — the owner-gated hardening step (see the CT posture).
 - **Library only — not yet a chain consensus or wallet primitive.** Chain
   integration (confidential transactions) is a later, separately-reviewed,

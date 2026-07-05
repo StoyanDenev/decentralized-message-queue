@@ -1306,7 +1306,7 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
-### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-5)**
+### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-6, range-proof stack complete)**
 
 The **owner-decided curve/group split** for the v2.22 confidential-transaction
 integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
@@ -1404,10 +1404,26 @@ independent soundness audit (re-derived from Bünz et al. 2018 §4.2) confirmed 
 construction is a faithful, sound Bulletproofs range proof (δ/l/r/t-poly/Check-1/Check-2
 all match the paper; the range-binding identity `t0 = δ(y,z) + z²·v` holds numerically).
 
-All five increments are **NOT constant-time** (the owner-gated CT-hardening step) and
-**additive — no chain call site**. Next on this backend: the aggregated range proof over
-`Z_p*` (mirroring §3.19 inc.6), then a group-abstraction layer so P-256 and `Z_p*` share
-one prover; then chain integration (owner-gated, per the design doc).
+**Increment 6 — aggregated range proof** (`ffrangeproof.c`, mirrors §3.19 inc.6). Proves
+that m committed values `v_0..v_{m-1}` EACH lie in `[0, 2^n)` in ONE proof of size
+`2·log2(m·n)+O(1)` group elements (the confidential-tx batch range). The m bit-vectors
+are concatenated (m·n ≤ 256); value j's `2^n` slot is scaled by `z^(2+j)`; `taux` gains
+`Σ_j z^(2+j)·gamma_j`; `delta` gains `Σ_j z^(3+j)`; Check 1's V-side is
+`Π_j V_j^{z^(2+j)}`; `m=1` recovers the single-value proof. Transcript
+`DETERM-FF-BP-AGGRANGE-v1`. API `determ_ff_agg_rangeproof_prove`/`_verify`.
+`determ test-ff-agg-rangeproof-c99` (m·n=4,8 round-trip + one-value-out-of-range +
+tamper + wrong-`V` reject) + corpus `ff_aggrangeproof.json`. An independent aggregation
+audit (re-derived from Bünz et al. 2018 §4.3) confirmed all six aggregation formulas and
+that an out-of-range value is rejected in **every** batch position (the z-power binding).
+
+All six increments are **NOT constant-time** (the owner-gated CT-hardening step) and
+**additive — no chain call site**. The range-proof stack is now complete end-to-end
+(commit → vector-commit/MSM → scalar field → IPA → single-value range proof → aggregated
+range proof). Next on this backend: a group-abstraction layer so P-256 and `Z_p*` share
+one Bulletproofs prover; then chain integration (owner-gated, per the design doc). The
+`Z_p*` modexp is ~1700× slower than the P-256 stack, so the corpora/tests keep m·n small
+(m·n ≤ 8) — CT-hardening + a windowed/precomputed modexp is the owner-gated performance +
+side-channel step before any on-chain prover.
 
 ---
 
