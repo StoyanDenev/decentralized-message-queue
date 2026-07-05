@@ -328,6 +328,22 @@ int determ_ff_scalar_mul(uint8_t out[DETERM_FF_ELEM_BYTES],
     return 0;
 }
 
+int determ_ff_scalar_sub(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]) {
+    uint32_t al[96], bl[96], negb[96], s[96];
+    be_load(al, a); be_load(bl, b);
+    if (ff_ge(al, DETERM_FF_Q) || ff_ge(bl, DETERM_FF_Q)) return -1;   /* not reduced */
+    if (ff_is_zero(bl)) { be_store(out, al); return 0; }              /* a - 0 = a */
+    uint64_t br = 0;                                                  /* negb = q - b, in (0,q) */
+    for (int j = 0; j < S; j++) { uint64_t d = (uint64_t)DETERM_FF_Q[j] - bl[j] - br; negb[j] = (uint32_t)d; br = (d >> 32) & 1; }
+    uint64_t carry = 0;                                              /* s = (a + negb) mod q */
+    for (int i = 0; i < S; i++) { uint64_t x = (uint64_t)al[i] + negb[i] + carry; s[i] = (uint32_t)x; carry = x >> 32; }
+    if (carry || ff_ge(s, DETERM_FF_Q)) ff_sub_mod(s, DETERM_FF_Q);
+    be_store(out, s);
+    return 0;
+}
+
 int determ_ff_scalar_inv(uint8_t out[DETERM_FF_ELEM_BYTES],
                          const uint8_t a[DETERM_FF_ELEM_BYTES]) {
     uint32_t al[96], qm2[96], r[96], two[96];

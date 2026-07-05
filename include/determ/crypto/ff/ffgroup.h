@@ -107,6 +107,11 @@ int determ_ff_scalar_mul(uint8_t out[DETERM_FF_ELEM_BYTES],
                          const uint8_t a[DETERM_FF_ELEM_BYTES],
                          const uint8_t b[DETERM_FF_ELEM_BYTES]);
 
+/* out = (a - b) mod q (== a + (q-b)). Returns 0, or -1 if a or b is not reduced. */
+int determ_ff_scalar_sub(uint8_t out[DETERM_FF_ELEM_BYTES],
+                         const uint8_t a[DETERM_FF_ELEM_BYTES],
+                         const uint8_t b[DETERM_FF_ELEM_BYTES]);
+
 /* out = a^{-1} mod q (Fermat, a^{q-2}). Returns 0, or -1 if a is 0 or >= q. */
 int determ_ff_scalar_inv(uint8_t out[DETERM_FF_ELEM_BYTES],
                          const uint8_t a[DETERM_FF_ELEM_BYTES]);

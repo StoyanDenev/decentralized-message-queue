@@ -62,7 +62,7 @@ EXPECTED = {
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
-    "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json",
+    "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
 }
 
 try:
@@ -1244,6 +1244,17 @@ def chk_ff_ipa(vec, label):
         return "cannot import verify_ff_ipa (%s)" % e
     return vi.check_ff_ipa(vec, label)
 
+def chk_ff_rangeproof(vec, label):
+    # §3.20 inc.5 single-value Bulletproofs range proof over Z_p* — recompute V + prove
+    # through the independent from-scratch Python (tools/verify_ff_rangeproof.py, native
+    # bignums; the proof is also re-verified inside the checker) and match the frozen bytes.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_ff_rangeproof as vr
+    except Exception as e:
+        return "cannot import verify_ff_rangeproof (%s)" % e
+    return vr.check_ff_rangeproof(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1279,6 +1290,7 @@ CHECKERS = {
     "ff_pedersen": chk_ff_pedersen,
     "ff_scalar": chk_ff_scalar,
     "ff_ipa": chk_ff_ipa,
+    "ff_rangeproof": chk_ff_rangeproof,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

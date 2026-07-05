@@ -45,6 +45,11 @@ def sc_mul(a, b):
     return (a * b) % Q
 
 
+def sc_sub(a, b):
+    if not (0 <= a < Q and 0 <= b < Q): raise ValueError("operands must be < q")
+    return (a - b) % Q
+
+
 def sc_inv(a):
     if not (0 < a < Q): raise ValueError("a must satisfy 0 < a < q")
     return pow(a, Q - 2, Q)                # Fermat: a^{q-2} = a^{-1} mod q (q prime)
@@ -72,6 +77,10 @@ def check_ff_scalar(vec, label):
         got = _to_bytes(sc_mul(int(vec["a_hex"], 16), int(vec["b_hex"], 16))).hex()
         if got != vec["out_hex"]:
             return "recomputed a*b != out_hex"
+    elif t == "sc_sub":
+        got = _to_bytes(sc_sub(int(vec["a_hex"], 16), int(vec["b_hex"], 16))).hex()
+        if got != vec["out_hex"]:
+            return "recomputed a-b != out_hex"
     elif t == "sc_inv":
         got = _to_bytes(sc_inv(int(vec["a_hex"], 16))).hex()
         if got != vec["out_hex"]:
@@ -94,6 +103,9 @@ def _selftest():
     assert sc_add(c, 5) == (c + 5) % Q and sc_add(c, 5) < Q, "add must wrap mod q"
     assert sc_mul(a, b) == a * b
     assert sc_mul(Q - 1, Q - 1) == pow(Q - 1, 2, Q)
+    assert sc_sub(b, a) == b - a                                    # b>a: no wrap
+    assert sc_sub(a, b) == (a - b) % Q and 0 < sc_sub(a, b) < Q     # a<b: underflow wraps
+    assert sc_add(sc_sub(a, b), b) == a and sc_sub(a, a) == 0
     for x in (1, 2, 7, 0x123456789, Q - 1, Q // 2):
         assert sc_mul(x, sc_inv(x)) == 1, "inverse broken for %d" % x
     # hash_to_scalar deterministic, reduced, nonzero
@@ -118,6 +130,10 @@ def emit():
     for name, a, b in [("mul small", 0x9, 0x1234), ("mul near-q", Q - 2, Q - 5)]:
         vectors.append({"name": name, "type": "sc_mul", "a_hex": _s(a), "b_hex": _s(b),
                         "out_hex": _to_bytes(sc_mul(a, b)).hex()})
+    # sc_sub: plain + an underflow (a < b -> wraps mod q) + a-0
+    for name, a, b in [("sub small", 0x5678, 0x1234), ("sub underflow", 3, 10), ("sub a-0", 0x99, 0)]:
+        vectors.append({"name": name, "type": "sc_sub", "a_hex": _s(a), "b_hex": _s(b),
+                        "out_hex": _to_bytes(sc_sub(a, b)).hex()})
     # sc_inv: a few (the C recomputes a^{q-2}; file-half also implicitly checks a*inv==1)
     for name, a in [("inv 7", 7), ("inv deadbeef", 0xdeadbeef), ("inv q-1", Q - 1)]:
         vectors.append({"name": name, "type": "sc_inv", "a_hex": _s(a),
