@@ -562,12 +562,19 @@ Byte-output-invariant (all 35 P-256 corpus vectors byte-equal) + independently a
 provers are constant-time for their own honest inputs — no CT residual remains before the
 owner-gated chain integration** (`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
 
-**Probe-target mapping (→ §3.12).** An `ff-modexp` `ct-timing-probe` target (secret =
-exponent, fix-vs-random, via `determ_ff_pedersen_commit`) is a documented follow-up: the
-~tens-of-ms 3072-bit operation makes the default 200k-sample probe impractical, so it
-needs an operator-set small `--samples`/`--seconds`. The CT property here rests primarily
-on the audit + code inspection (no secret branch / no secret-indexed access), with the
-probe as a supplementary empirical check.
+**Probe-target mapping (→ §3.12).** The `p256-msm-zeroskip` `ct-timing-probe` target
+(`src/main.cpp`) empirically backs the zero-skip removal: its two classes — `both-nonzero`
+and `one-zero` — differ ONLY in whether the 2nd secret scalar is zero (the exact contrast
+the removed skip leaked, since it ran one fewer scalar-mult for a zero term), timing
+`determ_pedersen_msm` over 2 fixed points. A first measured run read **max |t| ≈ 1.39** at
+8000 samples (all crop percentiles ≤ 1.4, well under the TVLA |t| > 4.5 threshold) — no
+evidence of a zero-dependent timing difference, i.e. the CT MSM times identically whether
+or not a scalar is zero. (Per TimingProbeDesign §5.4 this is *evidence*, not a proof;
+timing is environment-dependent and the target is out of `run_all.sh` by design.) The
+analogous **`ff-modexp` empirical probe is impractical** with the current fixed
+20000-sample calibration: a single 3072-bit `Z_p*` `determ_ff_pedersen_commit` is
+~hundreds of ms, so calibration alone would run for tens of minutes — the §3.20 modexp CT
+therefore rests on the audit + byte-identity (above), not an empirical probe.
 
 ---
 
