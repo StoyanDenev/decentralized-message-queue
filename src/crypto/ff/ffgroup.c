@@ -42,6 +42,12 @@ static int ff_is_zero(const uint32_t a[96]) {
     uint32_t x = 0; for (int i = 0; i < 96; i++) x |= a[i];
     return x == 0;
 }
+/* Constant-time equality mask: 0xFFFFFFFF if a == b, else 0 (branchless — the house
+ * `mask = 0 - condition` idiom, cf. p256.c fe_cmov). Used for the CT modexp table select. */
+static uint32_t ff_ct_eq(uint32_t a, uint32_t b) {
+    uint32_t x = a ^ b;                                  /* 0 iff a == b */
+    return (uint32_t)0 - (uint32_t)(1u ^ ((x | (0u - x)) >> 31));
+}
 static int ff_bytes_eq(const uint8_t *a, const uint8_t *b, size_t n) {
     uint8_t d = 0; for (size_t i = 0; i < n; i++) d |= (uint8_t)(a[i] ^ b[i]);
     return d == 0;
@@ -80,32 +86,59 @@ static void montmul_c(uint32_t out[96], const uint32_t a[96], const uint32_t b[9
         t[S - 1] = (uint32_t)y;
         t[S] = (uint32_t)((uint64_t)t[S + 1] + (y >> 32));
     }
-    /* t (limbs 0..S, < 2M) : conditionally subtract M once. */
+    /* t (limbs 0..S, < 2M) : conditionally subtract M once — CONSTANT-TIME masked select
+     * (no data-dependent branch, no data-dependent memcpy source). Byte-identical to the
+     * old `if (t[S] != 0 || br == 0) out = t-M else out = t` (the ff_/bp_ dual-oracle
+     * corpora are the byte-identity guard). */
     uint32_t tmp[96];
     uint64_t br = 0;
     for (int j = 0; j < S; j++) {
         uint64_t d = (uint64_t)t[j] - (uint64_t)M[j] - br;
         tmp[j] = (uint32_t)d; br = (d >> 32) & 1;
     }
-    if (t[S] != 0 || br == 0) memcpy(out, tmp, S * 4);   /* t >= M => use t - M */
-    else                       memcpy(out, t, S * 4);
+    /* use (t - M) iff t >= M, i.e. (t[S] != 0) OR (borrow-out == 0). */
+    uint32_t ne  = (t[S] | (0u - t[S])) >> 31;           /* 1 iff t[S] != 0 */
+    uint32_t ge  = ne | (1u - (uint32_t)br);             /* 1 iff use tmp (= t - M) */
+    uint32_t msk = 0u - ge;                              /* 0xFFFFFFFF / 0 */
+    for (int j = 0; j < S; j++) out[j] = (tmp[j] & msk) | (t[j] & ~msk);
 }
 
 static void to_mont_c(uint32_t out[96], const uint32_t a[96], const ff_ctx *c)   { montmul_c(out, a, c->R2, c); }
 static void from_mont_c(uint32_t out[96], const uint32_t a[96], const ff_ctx *c) { montmul_c(out, a, ONE_LIMB, c); }
 
-/* out = base^exp mod M (both normal domain, exp any 3072-bit). */
+/* out = base^exp mod M (both normal domain, exp any 3072-bit). CONSTANT-TIME in the
+ * EXPONENT: a fixed 4-bit-window square-and-multiply with a BRANCHLESS table select — no
+ * branch on secret exponent bits and no secret-indexed memory access (the whole 16-entry
+ * table is scanned every window, blended by a constant-time equality mask). This is the
+ * confidential-tx prover prerequisite (a non-CT modexp leaks the committed amount via
+ * timing). It is also FASTER than the bit-serial square-and-multiply: 768 windows *
+ * (4 squares + 1 multiply) + 15 table-setup multiplies < the old 3072 squares + ~1536
+ * data-dependent multiplies. The base is assumed PUBLIC (every Determ caller exponentiates
+ * a public generator g/h/G_i/H_i by a secret scalar), so the table build leaks nothing.
+ * Byte-identical to the pre-CT square-and-multiply — the ff_/bp_ dual-oracle corpora are
+ * the byte-identity guard. */
 static void modexp_c(uint32_t out[96], const uint32_t base[96], const uint32_t exp[96],
                      const ff_ctx *c) {
-    uint32_t bm[96], res[96];
-    to_mont_c(bm, base, c);
-    to_mont_c(res, ONE_LIMB, c);        /* mont(1) = R mod M */
-    for (int limb = 95; limb >= 0; limb--) {
-        uint32_t e = exp[limb];
-        for (int bit = 31; bit >= 0; bit--) {
-            montmul_c(res, res, res, c);
-            if ((e >> bit) & 1u) montmul_c(res, res, bm, c);
+    uint32_t table[16][96];
+    to_mont_c(table[0], ONE_LIMB, c);                   /* base^0 = mont(1) */
+    to_mont_c(table[1], base, c);                       /* base^1 */
+    for (int k = 2; k < 16; k++) montmul_c(table[k], table[k - 1], table[1], c);
+    uint32_t res[96];
+    memcpy(res, table[0], sizeof res);                  /* res = 1 (Montgomery domain) */
+    for (int w = 767; w >= 0; w--) {                    /* 768 windows, MSB first */
+        montmul_c(res, res, res, c);                    /* res = res^16 (4 squarings) */
+        montmul_c(res, res, res, c);
+        montmul_c(res, res, res, c);
+        montmul_c(res, res, res, c);
+        int bitpos = 4 * w;                             /* window = exp bits [4w+3 .. 4w] */
+        uint32_t d = (exp[bitpos >> 5] >> (bitpos & 31)) & 0xFu;   /* single-limb: 4 | 32 */
+        uint32_t sel[96];
+        memset(sel, 0, sizeof sel);
+        for (int k = 0; k < 16; k++) {                  /* branchless select of table[d] */
+            uint32_t m = ff_ct_eq((uint32_t)k, d);
+            for (int j = 0; j < 96; j++) sel[j] |= table[k][j] & m;
         }
+        montmul_c(res, res, sel, c);                    /* res *= base^d */
     }
     from_mont_c(out, res, c);
 }
