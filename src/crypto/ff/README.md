@@ -119,7 +119,7 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.
 
-## Increments 2-6 (SHIPPED — the complete Bulletproofs range-proof stack over this group)
+## Increments 2-7 (SHIPPED — the complete confidential-tx primitive set over this group)
 
 Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-SPEC.md`
 §3.20 for the full treatment):
@@ -151,12 +151,22 @@ Built on the same bignum, mirroring §3.19 inc.2-4 (see `docs/proofs/CRYPTO-C99-
   Transcript `DETERM-FF-BP-AGGRANGE-v1`. Validated by `determ test-ff-agg-rangeproof-c99`
   + `ff_aggrangeproof.json`; an independent audit re-derived the aggregation from Bünz et
   al. §4.3 and confirmed an out-of-range value rejects in every batch position.
+- **inc.7 — confidential-tx balance proof** (`ffbalance.c`): `determ_ff_balance_excess`/
+  `_prove`/`_verify` — proves `Σv_in = Σv_out + fee` without revealing amounts (the
+  amount-conservation half; the range proofs are the no-inflation half). The excess
+  `E = ΠC_in·ΠC_out^{-1}·g^{-fee}` (inverses are scalar negations in the exponent, so one
+  `determ_ff_msm`, no group inverse) is proven to open to zero via a Schnorr PoK `E=h^x`.
+  Built on the public inc.1-3 API only — no sealed-code change. Validated by
+  `determ test-ff-balance-c99` + `ff_balance.json` (`tools/verify_ff_balance.py`).
+
+Full soundness accounting for inc.1-6: `docs/proofs/FiniteFieldBulletproofsSoundness.md`.
 
 ## Known limitations / future work
 
-- **Range-proof stack COMPLETE (inc.1-6).** Remaining on this backend: a group-abstraction
-  layer so P-256 (§3.19) and Z_p* (§3.20) share ONE Bulletproofs prover/verifier (avoids
-  the two parallel implementations), then confidential-tx chain integration.
+- **Confidential-tx primitive set COMPLETE (inc.1-7).** Remaining on this backend: a
+  group-abstraction layer so P-256 (§3.19) and Z_p* (§3.20) share ONE Bulletproofs
+  prover/verifier (avoids the two parallel implementations), then confidential-tx chain
+  integration (owner-gated).
 - **No constant-time modexp** — the owner-gated hardening step (see the CT posture).
 - **Library only — not yet a chain consensus or wallet primitive.** Chain
   integration (confidential transactions) is a later, separately-reviewed,

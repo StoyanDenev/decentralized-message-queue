@@ -1306,7 +1306,7 @@ range proof** — the whole point of the track: proving a committed `v` lies in
   v==0 value commitment; a zero vector entry); full timing review is the
   owner-gated step.
 
-### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-6, range-proof stack complete)**
+### 3.20 Finite-field Bulletproofs stack over Z_p* — **SHIPPED (confidential-tx MODERN backend, increments 1-7: range-proof stack + balance proof)**
 
 The **owner-decided curve/group split** for the v2.22 confidential-transaction
 integration (2026-07-05, amending the v2.22 §2.Q1/Q2 secp256k1 plan of record):
@@ -1416,13 +1416,30 @@ tamper + wrong-`V` reject) + corpus `ff_aggrangeproof.json`. An independent aggr
 audit (re-derived from Bünz et al. 2018 §4.3) confirmed all six aggregation formulas and
 that an out-of-range value is rejected in **every** batch position (the z-power binding).
 
-All six increments are **NOT constant-time** (the owner-gated CT-hardening step) and
-**additive — no chain call site**. The range-proof stack is now complete end-to-end
+**Increment 7 — confidential-tx balance proof** (`src/crypto/ff/ffbalance.c`). The
+*amount-conservation* half of a confidential transaction (the inc.5/6 range proofs are
+the *no-inflation* half; together they are the complete amount guarantee). Proves
+`Σ v_in = Σ v_out + fee` WITHOUT revealing any amount: a transaction balances iff the
+excess `E = Π C_in · Π C_out^{-1} · g^{-fee}` (in `G_q`) has no g-component, i.e.
+`E = h^{r_excess}`; the prover proves knowledge of that blinding excess with a Schnorr
+PoK of discrete log base `h` (`E = h^x`). Since `log_g(h)` is unknown, `E = h^x` forces
+the g-exponent `Σv_in − Σv_out − fee` to zero. The group-element inverses are scalar
+negations in the exponent (`C^{-1} = C^{q-1}`, `g^{-fee} = g^{q-fee}`), so the excess is
+one `determ_ff_msm` — **no group-inverse primitive and no change to any sealed code**;
+built entirely on the public inc.1-3 API. API `determ_ff_balance_excess`/`_prove`/
+`_verify`; transcript DST `DETERM-FF-BALANCE-v1-challenge`. `determ test-ff-balance-c99`
+(balanced accepts; an unbalanced tx and a tampered proof both reject) + corpus
+`ff_balance.json`, independent Python `tools/verify_ff_balance.py`.
+
+All seven increments are **NOT constant-time** (the owner-gated CT-hardening step) and
+**additive — no chain call site**. The confidential-tx primitive set is now complete
 (commit → vector-commit/MSM → scalar field → IPA → single-value range proof → aggregated
-range proof). Next on this backend: a group-abstraction layer so P-256 and `Z_p*` share
-one Bulletproofs prover; then chain integration (owner-gated, per the design doc). The
-`Z_p*` modexp is ~1700× slower than the P-256 stack, so the corpora/tests keep m·n small
-(m·n ≤ 8) — CT-hardening + a windowed/precomputed modexp is the owner-gated performance +
+range proof → balance proof). The full soundness accounting is
+`docs/proofs/FiniteFieldBulletproofsSoundness.md`. Next on this backend: a
+group-abstraction layer so P-256 and `Z_p*` share one Bulletproofs prover; then chain
+integration (owner-gated, per the design doc). The `Z_p*` modexp is ~1700× slower than
+the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8) —
+CT-hardening + a windowed/precomputed modexp is the owner-gated performance +
 side-channel step before any on-chain prover.
 
 ---
