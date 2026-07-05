@@ -37,6 +37,7 @@
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
+#include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -524,6 +525,10 @@ In-process tests (deterministic, no network):
                                               range proof (m values, one proof)
                                               over P-256 — round-trip + soundness
                                               + byte-exact proof KAT vs python
+  determ test-ff-pedersen-c99                 §3.20: finite-field Pedersen commit
+                                              (g^v h^r mod p) over RFC 3526 MODP-
+                                              3072 — the MODERN large-prime backend
+                                              — homomorphism + byte-exact KAT
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13723,6 +13728,62 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: bp-agg-rangeproof-c99 unit test\n" : "  PASS: bp-agg-rangeproof-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-ff-pedersen-c99") {
+        // §3.20 inc.1: finite-field Pedersen over the RFC 3526 MODP-3072 prime-order
+        // subgroup (the MODERN-profile large-prime backend). Port of
+        // tools/verify_ff_pedersen.py; byte-exact commit KAT vs that Python (native
+        // bignums) is the §3.13 gate (ff_pedersen.json). Here: H generator
+        // (deterministic, non-trivial); commit->verify accept + reject; the additive
+        // homomorphism; input validation (r==0, v>=q, r>=q all reject).
+        int fail = 0;
+        auto check = [&](bool ok, const char* m){ std::cout << (ok?"  PASS: ":"  FAIL: ") << m << "\n"; if(!ok) fail=1; };
+        const size_t E = DETERM_FF_ELEM_BYTES;   // 384
+        auto setbe = [&](std::vector<uint8_t>& b, uint64_t val){ b.assign(E,0); for(int i=0;i<8;i++) b[E-1-i]=(uint8_t)(val>>(8*i)); };
+        // (1) H generator: deterministic + non-trivial.
+        {
+            std::vector<uint8_t> h1(E), h2(E);
+            determ_ff_pedersen_generator_h(h1.data());
+            determ_ff_pedersen_generator_h(h2.data());
+            bool nz=false; for (auto x:h1) if(x){nz=true;break;}
+            bool one=(h1[E-1]==1); for (size_t i=0;i<E-1;i++) if(h1[i]) one=false;
+            check(h1==h2 && nz && !one, "H generator: deterministic, non-zero, != 1");
+        }
+        // (2) commit -> verify accept + reject.
+        bool cok=true;
+        {
+            std::vector<uint8_t> v,r,c(E); setbe(v,9); setbe(r,0x1234);
+            if (determ_ff_pedersen_commit(c.data(),v.data(),r.data())!=0) cok=false;
+            if (cok && determ_ff_pedersen_verify(c.data(),v.data(),r.data())!=0) cok=false;
+            std::vector<uint8_t> vbad; setbe(vbad,10);
+            if (cok && determ_ff_pedersen_verify(c.data(),vbad.data(),r.data())==0) cok=false;
+            std::vector<uint8_t> rbad; setbe(rbad,0x1235);
+            if (cok && determ_ff_pedersen_verify(c.data(),v.data(),rbad.data())==0) cok=false;
+        }
+        check(cok, "commit == g^v h^r mod p; open/verify accept; wrong v / wrong r reject");
+        // (3) additive homomorphism (small values, no q-wrap).
+        bool hom=true;
+        {
+            std::vector<uint8_t> v1,r1,v2,r2,c1(E),c2(E),cadd(E),vs,rs,cs(E);
+            setbe(v1,5); setbe(r1,7); setbe(v2,11); setbe(r2,13); setbe(vs,16); setbe(rs,20);
+            if (determ_ff_pedersen_commit(c1.data(),v1.data(),r1.data())!=0) hom=false;
+            if (hom && determ_ff_pedersen_commit(c2.data(),v2.data(),r2.data())!=0) hom=false;
+            if (hom && determ_ff_pedersen_add(cadd.data(),c1.data(),c2.data())!=0) hom=false;
+            if (hom && determ_ff_pedersen_commit(cs.data(),vs.data(),rs.data())!=0) hom=false;
+            if (hom && cadd!=cs) hom=false;
+        }
+        check(hom, "additive homomorphism: c1*c2 == commit(v1+v2, r1+r2)");
+        // (4) input validation.
+        bool val=true;
+        {
+            std::vector<uint8_t> v,rz,c(E),allff(E,0xff),rv; setbe(v,9); setbe(rz,0); setbe(rv,0x99);
+            if (determ_ff_pedersen_commit(c.data(),v.data(),rz.data())==0) val=false;     // r==0
+            if (determ_ff_pedersen_commit(c.data(),allff.data(),rv.data())==0) val=false; // v>=q
+            if (determ_ff_pedersen_commit(c.data(),v.data(),allff.data())==0) val=false;  // r>=q
+        }
+        check(val, "input validation: r==0, v>=q, r>=q all reject");
+        std::cout << (fail? "  FAIL: ff-pedersen-c99 unit test\n" : "  PASS: ff-pedersen-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -14002,7 +14063,7 @@ int main(int argc, char** argv) {
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
-                                "bp_agg_rangeproof.json",
+                                "bp_agg_rangeproof.json", "ff_pedersen.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14632,6 +14693,30 @@ int main(int argc, char** argv) {
                     if (mt && hx(ip+2*rounds*33,32)!=v["ipa_a_hex"].get<std::string>()) mt=false;
                     if (mt && hx(ip+2*rounds*33+32,32)!=v["ipa_b_hex"].get<std::string>()) mt=false;
                     if (!mt) { ok=false; bad=name; break; }
+                } else if (prim == "ff_pedersen") {
+                    // §3.20 finite-field Pedersen — recompute g^v*h^r mod p (or the
+                    // homomorphic product) via the C bignum and match the frozen
+                    // (independent-Python-generated) 384-byte big-endian bytes.
+                    std::string ty = v.value("type","");
+                    if (ty == "h_generator") {
+                        std::vector<uint8_t> h(384); determ_ff_pedersen_generator_h(h.data());
+                        if (hx(h.data(),384) != v["h_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "commit") {
+                        auto vb=unhex(v["v_hex"].get<std::string>()); auto rb=unhex(v["r_hex"].get<std::string>());
+                        if (vb.size()!=384 || rb.size()!=384) { ok=false; bad=name; break; }
+                        std::vector<uint8_t> c(384);
+                        if (determ_ff_pedersen_commit(c.data(),vb.data(),rb.data())!=0
+                            || hx(c.data(),384)!=v["c_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else if (ty == "homomorphism") {
+                        auto v1=unhex(v["v1_hex"].get<std::string>()); auto r1=unhex(v["r1_hex"].get<std::string>());
+                        auto v2=unhex(v["v2_hex"].get<std::string>()); auto r2=unhex(v["r2_hex"].get<std::string>());
+                        if (v1.size()!=384||r1.size()!=384||v2.size()!=384||r2.size()!=384){ ok=false; bad=name; break; }
+                        std::vector<uint8_t> c1(384),c2(384),c3(384);
+                        if (determ_ff_pedersen_commit(c1.data(),v1.data(),r1.data())!=0
+                            || determ_ff_pedersen_commit(c2.data(),v2.data(),r2.data())!=0
+                            || determ_ff_pedersen_add(c3.data(),c1.data(),c2.data())!=0
+                            || hx(c3.data(),384)!=v["c3_hex"].get<std::string>()) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
                     // reference oracle (tools/verify_mldsa_vectors.py). "ntt"
