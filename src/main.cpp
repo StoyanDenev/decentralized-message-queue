@@ -40,6 +40,7 @@
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
+#include <determ/crypto/ff/ffbalance.h>        // §3.20 inc.7: confidential-tx balance proof
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -543,6 +544,9 @@ In-process tests (deterministic, no network):
   determ test-ff-agg-rangeproof-c99           §3.20 inc.6: AGGREGATED range proof over
                                               Z_p* (m values, one proof of size
                                               2·log2(m·n)+O(1)) — confidential-tx batch
+  determ test-ff-balance-c99                  §3.20 inc.7: confidential-tx balance proof
+                                              over Z_p* (Σv_in=Σv_out+fee, no amounts
+                                              revealed) — amount-conservation half
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -14040,6 +14044,49 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: ff-agg-rangeproof-c99 unit test\n" : "  PASS: ff-agg-rangeproof-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-ff-balance-c99") {
+        // §3.20 inc.7: confidential-tx balance proof over Z_p*. A balanced tx
+        // (Σv_in=Σv_out+fee) proves+verifies; an unbalanced tx and a tampered proof both
+        // reject. Byte-exact KAT vs tools/verify_ff_balance.py is the §3.13 gate
+        // (ff_balance.json). Composes with the inc.5/6 range proofs into the full
+        // confidential-tx amount guarantee.
+        int fail=0;
+        auto check=[&](bool ok,const char* m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        const size_t E=DETERM_FF_ELEM_BYTES;
+        auto setbe=[&](std::vector<uint8_t>&b,uint64_t val){ b.assign(E,0); for(int i=0;i<8;i++) b[E-1-i]=(uint8_t)(val>>(8*i)); };
+        auto commit=[&](std::vector<uint8_t>&out,uint64_t v,uint64_t r)->int{
+            std::vector<uint8_t> vs,rs; setbe(vs,v); setbe(rs,r); out.assign(E,0);
+            return determ_ff_pedersen_commit(out.data(), vs.data(), rs.data()); };
+        // balanced: v_in {10,20} r {111,222}; v_out {5,22} r {33,44}; fee 3 (Σv_in=30=27+3).
+        std::vector<uint8_t> Ci(2*E), Co(2*E), c(E);
+        bool ok = commit(c,10,111)==0; std::memcpy(&Ci[0],c.data(),E);
+        ok = ok && commit(c,20,222)==0; std::memcpy(&Ci[E],c.data(),E);
+        ok = ok && commit(c,5,33)==0;  std::memcpy(&Co[0],c.data(),E);
+        ok = ok && commit(c,22,44)==0; std::memcpy(&Co[E],c.data(),E);
+        std::vector<uint8_t> Exc(E), x(E), k(E), proof(DETERM_FF_BALANCE_PROOF_BYTES);
+        setbe(x, 111+222-33-44); setbe(k, 0x9999);   // x = Σr_in - Σr_out = 256
+        ok = ok && determ_ff_balance_excess(Exc.data(), Ci.data(),2, Co.data(),2, 3)==0
+                && determ_ff_balance_prove(proof.data(), Exc.data(), x.data(), k.data())==0
+                && determ_ff_balance_verify(Exc.data(), proof.data())==0;
+        check(ok, "balanced tx (Sv_in=Sv_out+fee): excess+prove+verify accepts");
+        // unbalanced: bump an output value 5->6 (Σv_out=28, Σv_in=30 != 31).
+        {
+            std::vector<uint8_t> Cob(2*E), Eb(E), pb(DETERM_FF_BALANCE_PROOF_BYTES);
+            bool o2 = commit(c,6,33)==0;  std::memcpy(&Cob[0],c.data(),E);
+            o2 = o2 && commit(c,22,44)==0; std::memcpy(&Cob[E],c.data(),E);
+            o2 = o2 && determ_ff_balance_excess(Eb.data(), Ci.data(),2, Cob.data(),2, 3)==0
+                    && determ_ff_balance_prove(pb.data(), Eb.data(), x.data(), k.data())==0
+                    && determ_ff_balance_verify(Eb.data(), pb.data())!=0;   // unbalanced rejects
+            check(o2, "unbalanced tx: verify rejects (excess has a g-component)");
+        }
+        // tamper: flip last byte of s -> reject.
+        {
+            std::vector<uint8_t> pt=proof; pt[DETERM_FF_BALANCE_PROOF_BYTES-1]^=1;
+            check(determ_ff_balance_verify(Exc.data(), pt.data())!=0, "tampered proof: verify rejects");
+        }
+        std::cout << (fail? "  FAIL: ff-balance-c99 unit test\n" : "  PASS: ff-balance-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -14321,7 +14368,7 @@ int main(int argc, char** argv) {
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "bp_agg_rangeproof.json", "ff_pedersen.json",
                                 "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
-                                "ff_aggrangeproof.json",
+                                "ff_aggrangeproof.json", "ff_balance.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -15120,6 +15167,25 @@ int main(int argc, char** argv) {
                         || hx(V.data(),m*384)!=v["v_commit_hex"].get<std::string>()
                         || hx(proof.data(),plen)!=v["proof_hex"].get<std::string>()
                         || determ_ff_agg_rangeproof_verify(V.data(),proof.data(),m,n)!=0) { ok=false; bad=name; break; }
+                } else if (prim == "ff_balance") {
+                    // §3.20 inc.7 balance proof — recompute the excess E + prove via the C
+                    // and match the frozen bytes (independent verify_ff_balance.py; also re-verified).
+                    const auto& cij=v["c_in_hex"]; const auto& coj=v["c_out_hex"];
+                    size_t nin=cij.size(), nout=coj.size();
+                    std::vector<uint8_t> Ci(nin*384), Co(nout*384);
+                    bool okk=true;
+                    for (size_t i=0; okk && i<nin; i++){ auto e=unhex(cij[i].get<std::string>()); if(e.size()!=384){okk=false;break;} std::memcpy(&Ci[i*384],e.data(),384); }
+                    for (size_t i=0; okk && i<nout; i++){ auto e=unhex(coj[i].get<std::string>()); if(e.size()!=384){okk=false;break;} std::memcpy(&Co[i*384],e.data(),384); }
+                    uint64_t fee = v["fee"].get<uint64_t>();
+                    auto xb=unhex(v["x_hex"].get<std::string>()); auto kb=unhex(v["k_hex"].get<std::string>());
+                    okk = okk && xb.size()==384 && kb.size()==384;
+                    if (!okk) { ok=false; bad=name; break; }
+                    std::vector<uint8_t> Exc(384), proof(DETERM_FF_BALANCE_PROOF_BYTES);
+                    if (determ_ff_balance_excess(Exc.data(), nin?Ci.data():nullptr, nin, nout?Co.data():nullptr, nout, fee)!=0
+                        || hx(Exc.data(),384)!=v["e_hex"].get<std::string>()
+                        || determ_ff_balance_prove(proof.data(), Exc.data(), xb.data(), kb.data())!=0
+                        || hx(proof.data(),DETERM_FF_BALANCE_PROOF_BYTES)!=v["proof_hex"].get<std::string>()
+                        || determ_ff_balance_verify(Exc.data(), proof.data())!=0) { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch
                     // reference oracle (tools/verify_mldsa_vectors.py). "ntt"

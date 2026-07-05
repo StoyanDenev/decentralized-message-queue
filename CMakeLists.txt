@@ -142,6 +142,8 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/ff/ffipa.c"
   # §3.20 inc.5 single-value Bulletproofs range proof over Z_p* — `determ test-ff-rangeproof-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/ff/ffrangeproof.c"
+  # §3.20 inc.7 confidential-tx balance proof over Z_p* — `determ test-ff-balance-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ff/ffbalance.c"
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"

@@ -63,7 +63,7 @@ EXPECTED = {
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
     "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
-    "ff_aggrangeproof.json",
+    "ff_aggrangeproof.json", "ff_balance.json",
 }
 
 try:
@@ -1267,6 +1267,17 @@ def chk_ff_aggrangeproof(vec, label):
         return "cannot import verify_ff_rangeproof (%s)" % e
     return vr.check_ff_aggrangeproof(vec, label)
 
+def chk_ff_balance(vec, label):
+    # §3.20 inc.7 confidential-tx balance proof over Z_p* — recompute the excess E + the
+    # Schnorr proof through the independent from-scratch Python (tools/verify_ff_balance.py,
+    # native bignums; the proof is also re-verified) and match the frozen bytes.
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_ff_balance as vb
+    except Exception as e:
+        return "cannot import verify_ff_balance (%s)" % e
+    return vb.check_ff_balance(vec, label)
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1304,6 +1315,7 @@ CHECKERS = {
     "ff_ipa": chk_ff_ipa,
     "ff_rangeproof": chk_ff_rangeproof,
     "ff_aggrangeproof": chk_ff_aggrangeproof,
+    "ff_balance": chk_ff_balance,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
