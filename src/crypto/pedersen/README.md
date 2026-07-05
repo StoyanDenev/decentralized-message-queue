@@ -318,16 +318,21 @@ implementations are independent.
 
 ## Constant-time / hygiene posture
 
-- **Data-independent EXCEPT the documented zero-scalar branches.** In `commit()` the
-  `scalar_is_zero(v)` shortcut (the `v == 0` value-commitment path) is the one
-  secret-dependent branch; in `vector_commit()` the same predicate skips a zero
-  `a_i`/`b_i` term. `scalar_is_zero` reads all 32 bytes (no short-circuit), but the
-  branch on its result reveals whether that scalar is zero. This matters for a range
-  prover: `vector_commit` over the SECRET bit-vectors `a_L`/`a_R` would leak the
-  zero-positions via timing — such a caller needs a **constant-time multi-exp** (always
-  computing `s*G_i` and conditionally selecting, or a Straus/Pippenger CT variant).
-  That, plus removing `commit`'s `v == 0` branch, is the candidate hardening for the
-  dedicated CT review.
+- **Constant-time — the zero-scalar branches are REMOVED (owner-authorized 2026-07-06).**
+  `commit` / `vector_commit` / `msm` previously skipped a zero scalar (`scalar_is_zero`),
+  which leaked which secret scalars are zero — for a range prover over the SECRET
+  bit-vectors `a_L`/`a_R`, the bits of the committed value. They are now data-oblivious:
+  - `msm` routes through the pt-domain `determ_p256_msm_ct`, which accumulates in the
+    projective representation where the identity `O` needs no special-casing
+    (`pt_scalar_mul(0,P)=O`, the RCB-complete `pt_add` absorbs `O`) — no `acc_is_identity`
+    flag, no zero-skip;
+  - `commit` / `vector_commit` always exponentiate a nonzero-substituted scalar
+    (`ct_scalar_nz` → `base^0` never invoked) and branchlessly select the real vs dummy
+    result (`ct_point_select`), valid because the accumulator starts at the non-identity
+    `r*H`.
+  Byte-output-invariant (all 35 P-256 corpus vectors byte-equal) + independently audited
+  (6/6 CT properties SOUND). The only residual branches are the `scalar >= n` / point-decode
+  public-validity rejects, which never fire for a prover's own honest inputs.
 - **The heavy lifting is inherited constant-time.** The secret-scalar multiplies
   (`base_mul`, `point_mul`) run the P-256 module's uniform double-and-add-always
   ladder with a branchless conditional swap — no secret-dependent branch or memory

@@ -135,11 +135,15 @@ The mod-q wraparound vector exercises full-width (~3071-bit) exponents.
   the exponent path or the multi-exponentiation. The only residual branches are the
   `ff_ge(sl, q)` / point-validity rejects, which never fire for a prover's own honestly-
   generated scalars/points (the standard public-validity-rejection residual).
-- **Cross-profile residual (a follow-up):** the §3.19 P-256 `determ_pedersen_msm` has the
-  identical zero-scalar skip, but its CT fix is harder — the additive group identity `O`
-  has no compressed encoding and is special-cased (an `acc_is_identity` flag), so a
-  zero-scalar term (`0·P = O`) needs a constant-time identity-SELECT (don't fold `O` into
-  the accumulator) rather than the finite-field no-op (`base^0 = 1`). Deferred.
+- **Cross-profile residual: RESOLVED (2026-07-06).** The §3.19 P-256
+  `determ_pedersen_commit` / `_vector_commit` / `_msm` had the identical zero-scalar skips;
+  they are now constant-time too — the MSM routes through a pt-domain `determ_p256_msm_ct`
+  (accumulates in the projective representation where `O` needs no special-casing;
+  `pt_scalar_mul(0,P)=O`, `pt_add` absorbs `O`), and commit/vector_commit use branchless
+  scalar-substitution + point-selects (their accumulator starts at the non-identity `r*H`).
+  **Both the FIPS §3.19 P-256 and MODERN §3.20 `Z_p*` confidential-tx provers are now
+  constant-time for their own honest inputs** — no CT residual remains before an on-chain
+  prover (only the owner-gated chain integration itself).
 - The size/perf cost of a 3072-bit finite-field group vs. a 256-bit curve
   (~10-12× larger elements, verify an order of magnitude slower) is the documented,
   owner-accepted trade for the "large primes, not curves" MODERN posture.

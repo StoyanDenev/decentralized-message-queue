@@ -550,14 +550,17 @@ residual branches are `ff_ge(sl, q)` / point-validity rejects, which never fire 
 prover's own honestly-generated scalars/points (the standard public-validity-rejection
 residual, §4.1).
 
-**Cross-profile residual (a follow-up):** the §3.19 P-256 `determ_pedersen_msm` (§2.9) has
-the identical zero-scalar skip, but its CT fix is HARDER — the additive group identity `O`
-has no compressed encoding and is special-cased (an `acc_is_identity` flag), so a
-zero-scalar term (`0·P = O`) needs a constant-time identity-SELECT (do not fold `O` into
-the accumulator) rather than the finite-field no-op (`base^0 = 1`). Until it lands the
-§3.19 range prover keeps this one data-dependent skip (its scalar-mult ladder is already
-CT). This is the last CT item before an on-chain confidential-tx prover
-(`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
+**Cross-profile residual: RESOLVED (2026-07-06).** The §3.19 P-256 `determ_pedersen_msm` /
+`_vector_commit` / `_commit` had the identical zero-scalar skips; they are now CT too. The
+MSM routes through a new pt-domain `determ_p256_msm_ct` (accumulates in the projective
+representation where the identity `O` needs no special-casing — `pt_scalar_mul(0,P)=O`, the
+RCB-complete `pt_add` absorbs `O` — so no `acc_is_identity` flag and no skip); commit and
+vector_commit use branchless scalar-substitution (`ct_scalar_nz`) + point-selects
+(`ct_point_select`), valid because their accumulator starts at the non-identity `r*H`.
+Byte-output-invariant (all 35 P-256 corpus vectors byte-equal) + independently audited
+(6/6 CT properties SOUND). **With this BOTH the §3.19 P-256 and §3.20 Z_p\* confidential-tx
+provers are constant-time for their own honest inputs — no CT residual remains before the
+owner-gated chain integration** (`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
 
 **Probe-target mapping (→ §3.12).** An `ff-modexp` `ct-timing-probe` target (secret =
 exponent, fix-vs-random, via `determ_ff_pedersen_commit`) is a documented follow-up: the

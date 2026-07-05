@@ -1382,8 +1382,10 @@ Increment 1 is the finite-field analog of §3.19 inc.1 — library-primitive-fir
   modestly faster than the old bit-serial square-and-multiply. The `determ_ff_msm`/
   `_vector_commit` **zero-scalar skip is also removed** (always exponentiate; `base^0 = 1`)
   — so the **Z_p\* prover is now constant-time for its own honest inputs** (no
-  secret-value-dependent branch/memory). The one cross-profile residual is the §3.19 P-256
-  `determ_pedersen_msm` zero-skip (a harder additive-identity CT-select — a follow-up).
+  secret-value-dependent branch/memory). The §3.19 P-256 pedersen commit/vector_commit/msm
+  zero-skips are **also removed** (via the pt-domain `determ_p256_msm_ct` + branchless
+  point-selects), so **both** the FIPS and MODERN confidential-tx provers are now
+  constant-time for their own honest inputs — no CT residual remains.
 - **Validation:** `determ test-ff-pedersen-c99` (4 assertions — the H generator
   [deterministic, non-trivial]; `commit → verify` accept + wrong-v / wrong-r reject;
   the additive homomorphism `c1*c2 == commit(v1+v2, r1+r2)`; input validation [r==0,
@@ -1498,9 +1500,10 @@ integration (owner-gated, per the design doc). The `Z_p*` modexp is ~1700× slow
 the P-256 stack, so the range-proof corpora/tests keep m·n small (m·n ≤ 8). **CT status:
 the modexp is constant-time + windowed AND the `determ_ff_msm`/`_vector_commit` zero-scalar
 skip is removed (2026-07-06, owner-authorized) — the Z_p\* prover is now constant-time for
-its own honest inputs (byte-invariant, audited). The one cross-profile residual before
-on-chain use is the §3.19 P-256 `determ_pedersen_msm` zero-skip (a harder additive-identity
-CT-select).**
+its own honest inputs (byte-invariant, audited). The §3.19 P-256 pedersen zero-skips are
+also removed (via the pt-domain `determ_p256_msm_ct` + branchless point-selects), so BOTH
+confidential-tx provers are now constant-time — no CT residual remains before the
+owner-gated chain integration.**
 
 ---
 
