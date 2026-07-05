@@ -12998,6 +12998,17 @@ int main(int argc, char** argv) {
               { "fix-poly", "rnd-poly" }, 1 },
             { "frost-sign-partial", "determ_frost_sign_partial t=3 pos=0 (secret = share + nonces; target 9)",
               { "fix-secrets", "rnd-secrets" }, 1 },
+            // ── the CT confidential-tx MSM (the 2026-07-06 zero-scalar-skip removal) ──
+            // The two classes differ ONLY in whether the 2nd secret scalar is zero — the
+            // exact contrast the removed skip would have leaked (it ran one fewer
+            // scalar-mult for a zero term). The CT MSM (pt-domain determ_p256_msm_ct)
+            // times identically. (The 3072-bit ff modexp CT is not probed here — a single
+            // op is ~tens-to-hundreds of ms, so the fixed 20000-sample calibration is
+            // impractical; its CT rests on the audit + byte-identity, see
+            // ConstantTimeInventory §2.10.)
+            { "p256-msm-zeroskip", "determ_pedersen_msm 2 terms — CT zero-scalar handling "
+              "(classes differ only in whether the 2nd scalar is zero)",
+              { "both-nonzero", "one-zero" }, 1 },
         };
 
         if (sub == "--list") {
@@ -13083,6 +13094,18 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 32; i++) if (s[i]) return;      // nonzero
             }
         };
+        // Fixtures for the p256-msm-zeroskip target: two fixed valid points (G, 2G,
+        // compressed) + two fixed nonzero scalars < n (top byte 0 keeps them < n). The
+        // probe times determ_pedersen_msm over these 2 terms; only the 2nd SCALAR changes
+        // between classes (nonzero vs zero), so any timing difference == a zero-skip leak.
+        uint8_t msm_pts[66], msm_nz1[32], msm_nz2[32];
+        {
+            uint8_t p65[65], s[32];
+            std::memset(s, 0, 32); s[31] = 1; determ_p256_base_mul(p65, s); determ_p256_point_compress(msm_pts, p65);       // G
+            std::memset(s, 0, 32); s[31] = 2; determ_p256_base_mul(p65, s); determ_p256_point_compress(msm_pts + 33, p65);  // 2G
+            for (int i = 0; i < 32; i++) { msm_nz1[i] = (uint8_t)(0x11 * (i % 7) + 3); msm_nz2[i] = (uint8_t)(0x22 + i); }
+            msm_nz1[0] = 0; msm_nz2[0] = 0;   // top byte 0 => both < n and nonzero
+        }
         // Ed25519-domain scalar for the FROST targets: LE, top nibble masked
         // so the value stays < L (2^252 < L); pinned FIX values derive from
         // fixseed/fixscalar under the same mask.
@@ -13123,6 +13146,7 @@ int main(int argc, char** argv) {
         auto run_one = [&](size_t c) -> double {
             uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64], key[32];
             uint8_t big96[96], Dl[96], El[96];   // FROST shares/poly/(share,d,e) + commitment lists
+            uint8_t msm_s[64];                   // p256-msm-zeroskip: the 2 secret scalars
             // ---- setup (untimed) ----
             if (id == "ct-memcmp") {
                 std::memcpy(bufB, bufA, 32);
@@ -13184,6 +13208,10 @@ int main(int argc, char** argv) {
                               std::memset(scalar + 16, 0, 16); scalar[31] = 1;
                               std::memcpy(seed, scalar, 32); seed[30] = 0x7f; }
                 else { p256_rnd_scalar(scalar); p256_rnd_scalar(seed); }
+            } else if (id == "p256-msm-zeroskip") {
+                std::memcpy(msm_s, msm_nz1, 32);
+                if (c == 0) std::memcpy(msm_s + 32, msm_nz2, 32);   // both scalars nonzero
+                else        std::memset(msm_s + 32, 0, 32);          // 2nd scalar zero
             }
             // ---- timed region ----
             uint64_t t0 = now_ticks();
@@ -13218,6 +13246,7 @@ int main(int argc, char** argv) {
                 else if (id == "frost-sign-partial") sink += determ_frost_sign_partial(
                                                         frost_xs, 3, 0, big96, big96 + 32, big96 + 64,
                                                         Dl, El, fixmsg, 64, frost_gpk, o32);
+                else if (id == "p256-msm-zeroskip") { uint8_t o33[33]; sink += determ_pedersen_msm(o33, msm_s, msm_pts, 2); }
             }
             uint64_t t1 = now_ticks();
             return (double)(t1 - t0) / (double)batch;
