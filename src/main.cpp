@@ -36,6 +36,7 @@
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
+#include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
@@ -515,6 +516,10 @@ In-process tests (deterministic, no network):
                                               product argument over P-256 —
                                               round-trip + soundness + byte-exact
                                               proof KAT vs python (§3.13)
+  determ test-bp-rangeproof-c99               §3.19 inc.5: Bulletproofs single-
+                                              value range proof (v in [0,2^n))
+                                              over P-256 — round-trip + soundness
+                                              + byte-exact proof KAT vs python
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -13582,6 +13587,66 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: bp-ipa-c99 unit test\n" : "  PASS: bp-ipa-c99 unit test\n");
         return fail?1:0;
     }
+    if (cmd == "test-bp-rangeproof-c99") {
+        // §3.19 inc.5: the Bulletproofs single-value range proof over P-256 — proves a
+        // committed v lies in [0,2^n) in 2*log2(n)+O(1) group elements, wrapping the
+        // inc.4 IPA. The C is a mechanical port of tools/verify_bp_rangeproof.py (whose
+        // t0-oracle + round-trip + tamper + out-of-range self-tests passed first); the
+        // byte-exact proof KAT vs that Python is the §3.13 dual-oracle gate
+        // (bp_rangeproof.json). Here: proof_len; round-trip accept; determinism; and the
+        // soundness rejects (tampered proof, wrong commitment, out-of-range v).
+        int fail = 0;
+        auto check = [&](bool ok, const char* m){ std::cout << (ok?"  PASS: ":"  FAIL: ") << m << "\n"; if(!ok) fail=1; };
+        auto setsc = [](uint8_t out[32], uint64_t v){ memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); };
+        // _demo_rnd(n, seed) — must match tools/verify_bp_rangeproof.py byte-for-byte.
+        auto mkrnd = [&](size_t n, uint64_t seed, uint8_t alpha[32], uint8_t rho[32],
+                         uint8_t tau1[32], uint8_t tau2[32],
+                         std::vector<uint8_t>& sL, std::vector<uint8_t>& sR){
+            setsc(alpha, 7*seed+3); setsc(rho, 11*seed+5);
+            setsc(tau1, 29*seed+31); setsc(tau2, 37*seed+41);
+            sL.assign(n*32,0); sR.assign(n*32,0);
+            for (size_t i=0;i<n;i++){ setsc(&sL[i*32], 13*seed+17*i+1); setsc(&sR[i*32], 19*seed+23*i+2); }
+        };
+        // (1) proof_len contract.
+        {
+            bool ok = determ_rangeproof_proof_len(4)==424 && determ_rangeproof_proof_len(8)==490
+                   && determ_rangeproof_proof_len(16)==556 && determ_rangeproof_proof_len(3)==0
+                   && determ_rangeproof_proof_len(128)==0;
+            check(ok, "proof_len: 228 + ipa_proof_len(n); non-power-of-2 and n>64 -> 0");
+        }
+        // (2)-(4) round-trip + determinism + soundness, n in {4,8,16}.
+        bool rt=true, det=true, sound=true;
+        struct RPCase { size_t n; uint64_t seed; uint64_t v; };
+        RPCase cases[] = { {4,1,9}, {8,2,200}, {16,3,43210} };
+        for (auto& c : cases) {
+            uint8_t gamma[32], alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(gamma, 101*c.seed+7);
+            std::vector<uint8_t> sL, sR; mkrnd(c.n, c.seed, alpha, rho, tau1, tau2, sL, sR);
+            size_t plen = determ_rangeproof_proof_len(c.n);
+            std::vector<uint8_t> pf(plen), pf2(plen); uint8_t V[33], V2[33];
+            if (determ_rangeproof_prove(V, pf.data(), c.v, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)!=0){ rt=false; break; }
+            if (determ_rangeproof_verify(V, pf.data(), c.n)!=0){ rt=false; break; }
+            determ_rangeproof_prove(V2, pf2.data(), c.v, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n);
+            if (pf != pf2 || memcmp(V,V2,33)!=0) det=false;
+            // tamper a proof byte (taux region) -> reject
+            std::vector<uint8_t> bad = pf; bad[132] ^= 0x01;
+            if (determ_rangeproof_verify(V, bad.data(), c.n)==0) sound=false;
+            // wrong commitment: a proof for V must NOT verify under a different V'
+            uint8_t Vbad[33]; std::vector<uint8_t> pfx(plen);
+            if (determ_rangeproof_prove(Vbad, pfx.data(), c.v+1, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)==0
+                && determ_rangeproof_verify(Vbad, pf.data(), c.n)==0) sound=false;
+            // out-of-range v = 2^n -> verify rejects
+            uint8_t Voor[33]; std::vector<uint8_t> pfoor(plen);
+            if (determ_rangeproof_prove(Voor, pfoor.data(), (uint64_t)1<<c.n, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), c.n)==0
+                && determ_rangeproof_verify(Voor, pfoor.data(), c.n)==0) sound=false;
+        }
+        check(rt,    "round-trip: prove -> verify accepts (n in {4,8,16})");
+        check(det,   "deterministic: prove twice yields identical V + proof bytes");
+        check(sound, "soundness: tampered proof, wrong commitment, and out-of-range v all reject");
+
+        std::cout << (fail? "  FAIL: bp-rangeproof-c99 unit test\n" : "  PASS: bp-rangeproof-c99 unit test\n");
+        return fail?1:0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -13860,7 +13925,7 @@ int main(int argc, char** argv) {
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
-                                "pedersen.json", "bp_ipa.json",
+                                "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
@@ -14412,6 +14477,43 @@ int main(int argc, char** argv) {
                         if (hx(pf.data()+rounds*33+j*33, 33) != v["R_hex"][j].get<std::string>()) m=false;
                     if (m && hx(pf.data()+2*rounds*33, 32) != v["a_hex"].get<std::string>()) m=false;
                     if (m && hx(pf.data()+2*rounds*33+32, 32) != v["b_hex"].get<std::string>()) m=false;
+                    if (!m) { ok=false; bad=name; break; }
+                } else if (prim == "bp_rangeproof") {
+                    // §3.19 inc.5 Bulletproofs range proof — rebuild the prover
+                    // randomness from (n, seed) [== verify_bp_rangeproof._demo_rnd],
+                    // recompute V + the whole proof via the C, and match the frozen
+                    // (independent-Python-generated) bytes for every field.
+                    size_t nn = v["n"].get<size_t>();
+                    uint64_t seed = v["seed"].get<uint64_t>();
+                    auto setsc = [](uint8_t out[32], uint64_t x){ memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(x>>(8*i)); };
+                    uint8_t gamma[32], alpha[32], rho[32], tau1[32], tau2[32];
+                    { auto gb = unhex(v["gamma_hex"].get<std::string>()); if (gb.size()!=32){ok=false;bad=name;break;} memcpy(gamma, gb.data(), 32); }
+                    setsc(alpha, 7*seed+3); setsc(rho, 11*seed+5);
+                    setsc(tau1, 29*seed+31); setsc(tau2, 37*seed+41);
+                    std::vector<uint8_t> sL(nn*32), sR(nn*32);
+                    for (size_t i=0;i<nn;i++){ setsc(&sL[i*32], 13*seed+17*i+1); setsc(&sR[i*32], 19*seed+23*i+2); }
+                    uint64_t vv=0; { auto vb = unhex(v["v_hex"].get<std::string>()); if (vb.size()!=32){ok=false;bad=name;break;} for (int i=24;i<32;i++) vv=(vv<<8)|vb[i]; }
+                    size_t plen = determ_rangeproof_proof_len(nn);
+                    if (plen==0){ ok=false; bad=name; break; }
+                    std::vector<uint8_t> pf(plen); uint8_t V[33];
+                    if (determ_rangeproof_prove(V, pf.data(), vv, gamma, alpha, rho, tau1, tau2, sL.data(), sR.data(), nn) != 0
+                        || determ_rangeproof_verify(V, pf.data(), nn) != 0) { ok=false; bad=name; break; }
+                    bool m = hx(V,33)==v["V_hex"].get<std::string>()
+                          && hx(pf.data()+0,33)==v["A_hex"].get<std::string>()
+                          && hx(pf.data()+33,33)==v["S_hex"].get<std::string>()
+                          && hx(pf.data()+66,33)==v["T1_hex"].get<std::string>()
+                          && hx(pf.data()+99,33)==v["T2_hex"].get<std::string>()
+                          && hx(pf.data()+132,32)==v["taux_hex"].get<std::string>()
+                          && hx(pf.data()+164,32)==v["mu_hex"].get<std::string>()
+                          && hx(pf.data()+196,32)==v["that_hex"].get<std::string>();
+                    size_t rounds = v["ipa_L_hex"].size();
+                    const uint8_t* ip = pf.data()+228;
+                    for (size_t j=0;j<rounds && m;j++)
+                        if (hx(ip+j*33,33) != v["ipa_L_hex"][j].get<std::string>()) m=false;
+                    for (size_t j=0;j<rounds && m;j++)
+                        if (hx(ip+rounds*33+j*33,33) != v["ipa_R_hex"][j].get<std::string>()) m=false;
+                    if (m && hx(ip+2*rounds*33,32) != v["ipa_a_hex"].get<std::string>()) m=false;
+                    if (m && hx(ip+2*rounds*33+32,32) != v["ipa_b_hex"].get<std::string>()) m=false;
                     if (!m) { ok=false; bad=name; break; }
                 } else if (prim == "mldsa_ntt") {
                     // §3.18 ML-DSA (Dilithium, FIPS 204) NTT KAT — from-scratch

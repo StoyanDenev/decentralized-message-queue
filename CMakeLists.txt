@@ -131,6 +131,9 @@ add_library(determ-crypto-c99 STATIC
   # §3.19 inc.4: the Bulletproofs inner-product argument (the range-proof track's
   # log-size core) — `determ test-bp-ipa-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ipa.c"
+  # §3.19 inc.5: the Bulletproofs single-value range proof (v in [0,2^n)) wrapping
+  # the inc.4 IPA — `determ test-bp-rangeproof-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/rangeproof.c"
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"

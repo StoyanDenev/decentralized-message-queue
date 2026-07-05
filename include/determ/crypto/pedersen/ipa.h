@@ -56,6 +56,20 @@ int determ_ipa_prove(uint8_t *proof,
 int determ_ipa_verify(const uint8_t P33[33],
                       const uint8_t *proof, size_t n);
 
+/* Generator-supplied variants: the same protocol, but the caller provides the
+ * generator vectors g, h (each n consecutive 33-byte SEC1 compressed points) and
+ * the inner-product generator u33. The fixed-generator determ_ipa_prove/_verify
+ * above are exactly the special case g_i = pedersen_gen(i,0),
+ * h_i = pedersen_gen(i,1), u = pedersen_gen(0xFFFFFFFF,0). The §3.19 inc.5
+ * Bulletproofs range proof uses these with a y-rescaled h family (h'_i =
+ * y^-i * h_i). Same contract/return codes as the fixed-generator forms. */
+int determ_ipa_prove_gens(uint8_t *proof, const uint8_t *a, const uint8_t *b,
+                          const uint8_t *g, const uint8_t *h, const uint8_t u33[33],
+                          const uint8_t P33[33], size_t n);
+int determ_ipa_verify_gens(const uint8_t P33[33], const uint8_t *proof,
+                           const uint8_t *g, const uint8_t *h, const uint8_t u33[33],
+                           size_t n);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

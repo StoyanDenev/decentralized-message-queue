@@ -132,18 +132,15 @@ int determ_ipa_commit(uint8_t out33[33], const uint8_t *a, const uint8_t *b, siz
     return determ_pedersen_msm(out33, scal, pts, 2 * n + 1) == 0 ? 0 : -1;
 }
 
-int determ_ipa_prove(uint8_t *proof, const uint8_t *a_in, const uint8_t *b_in,
-                     const uint8_t P33[33], size_t n) {
+int determ_ipa_prove_gens(uint8_t *proof, const uint8_t *a_in, const uint8_t *b_in,
+                          const uint8_t *g_in, const uint8_t *h_in, const uint8_t u33[33],
+                          const uint8_t P33[33], size_t n) {
     int rounds = ipa_rounds(n);
     if (rounds < 0) return -1;
     uint8_t a[DETERM_IPA_MAX_N * 32], b[DETERM_IPA_MAX_N * 32];
     uint8_t g[DETERM_IPA_MAX_N * 33], h[DETERM_IPA_MAX_N * 33], u[33];
     memcpy(a, a_in, n * 32); memcpy(b, b_in, n * 32);
-    for (size_t i = 0; i < n; i++) {
-        if (gen_c(g + i * 33, (uint32_t)i, 0) != 0) return -1;
-        if (gen_c(h + i * 33, (uint32_t)i, 1) != 0) return -1;
-    }
-    if (gen_c(u, U_INDEX, 0) != 0) return -1;
+    memcpy(g, g_in, n * 33); memcpy(h, h_in, n * 33); memcpy(u, u33, 33);
 
     ipa_tr tr; tr_init(&tr, P33, u, n);
     uint8_t *Lw = proof, *Rw = proof + (size_t)rounds * 33;
@@ -201,15 +198,28 @@ int determ_ipa_prove(uint8_t *proof, const uint8_t *a_in, const uint8_t *b_in,
     return 0;
 }
 
-int determ_ipa_verify(const uint8_t P33[33], const uint8_t *proof, size_t n) {
-    int rounds = ipa_rounds(n);
-    if (rounds < 0) return -1;
+/* Fixed-generator prove: build g_i=gen(i,0), h_i=gen(i,1), u=gen(0xFFFFFFFF,0)
+ * then delegate to the generator-supplied core (byte-identical to the pre-refactor
+ * inline path). */
+int determ_ipa_prove(uint8_t *proof, const uint8_t *a, const uint8_t *b,
+                     const uint8_t P33[33], size_t n) {
+    if (ipa_rounds(n) < 0) return -1;
     uint8_t g[DETERM_IPA_MAX_N * 33], h[DETERM_IPA_MAX_N * 33], u[33];
     for (size_t i = 0; i < n; i++) {
         if (gen_c(g + i * 33, (uint32_t)i, 0) != 0) return -1;
         if (gen_c(h + i * 33, (uint32_t)i, 1) != 0) return -1;
     }
     if (gen_c(u, U_INDEX, 0) != 0) return -1;
+    return determ_ipa_prove_gens(proof, a, b, g, h, u, P33, n);
+}
+
+int determ_ipa_verify_gens(const uint8_t P33[33], const uint8_t *proof,
+                           const uint8_t *g_in, const uint8_t *h_in, const uint8_t u33[33],
+                           size_t n) {
+    int rounds = ipa_rounds(n);
+    if (rounds < 0) return -1;
+    uint8_t g[DETERM_IPA_MAX_N * 33], h[DETERM_IPA_MAX_N * 33], u[33];
+    memcpy(g, g_in, n * 33); memcpy(h, h_in, n * 33); memcpy(u, u33, 33);
 
     const uint8_t *Ls = proof, *Rs = proof + (size_t)rounds * 33;
     const uint8_t *af = proof + 2 * (size_t)rounds * 33, *bf = af + 32;
@@ -243,4 +253,16 @@ int determ_ipa_verify(const uint8_t P33[33], const uint8_t *proof, size_t n) {
     memcpy(pts, g, 33); memcpy(pts + 33, h, 33); memcpy(pts + 66, u, 33);
     if (determ_pedersen_msm(rhs, scal, pts, 3) != 0) return -1;
     return memcmp(Pp, rhs, 33) == 0 ? 0 : -1;
+}
+
+/* Fixed-generator verify: build the ciphersuite generators, then delegate. */
+int determ_ipa_verify(const uint8_t P33[33], const uint8_t *proof, size_t n) {
+    if (ipa_rounds(n) < 0) return -1;
+    uint8_t g[DETERM_IPA_MAX_N * 33], h[DETERM_IPA_MAX_N * 33], u[33];
+    for (size_t i = 0; i < n; i++) {
+        if (gen_c(g + i * 33, (uint32_t)i, 0) != 0) return -1;
+        if (gen_c(h + i * 33, (uint32_t)i, 1) != 0) return -1;
+    }
+    if (gen_c(u, U_INDEX, 0) != 0) return -1;
+    return determ_ipa_verify_gens(P33, proof, g, h, u, n);
 }
