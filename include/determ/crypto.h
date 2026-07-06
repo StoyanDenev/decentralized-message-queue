@@ -29,8 +29,8 @@
  *     for protocol adoption.
  *   - The Ed25519 scalar/group primitives (ed25519/ed25519_group.h) — the
  *     FROST building blocks; explicit include for the same reason.
- *   - Future §3.7/§3.8c/§3.9 primitives (secp256k1, P-256, OPRF) — added here
- *     when they ship.
+ *   - §3.8c/§3.9 primitives (P-256, RFC 9497 OPRF) are shipped and included here.
+ *     secp256k1 (former §3.7) was never implemented — P-256 supplants it.
  */
 #ifndef DETERM_CRYPTO_H
 #define DETERM_CRYPTO_H

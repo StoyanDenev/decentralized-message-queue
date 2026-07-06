@@ -465,7 +465,7 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 
 **Two FIPS-bundled profiles:** `cluster` (in-house enterprise / financial services / regulated; 50ms blocks) and `tactical` (military / defense / embedded; 20ms blocks). Both bundle FIPS-compliant cryptography because both serve deployment contexts where FIPS 140-2/3 compliance is non-negotiable.
 
-**Non-FIPS commercial use cases.** Operators wanting single-cluster (BEACON + CURRENT) deployment without FIPS regulatory requirement should use the `web` profile — sharding is acceptable for single-region commercial deployments, and `web` provides confidential transactions which are unavailable in FIPS profiles.
+**Non-FIPS commercial use cases.** Operators wanting single-cluster (BEACON + CURRENT) deployment without FIPS regulatory requirement should use the `web` profile — sharding is acceptable for single-region commercial deployments. Confidential transactions (the §3.22 P-256 shielded pool) are available regardless of profile.
 
 **Why bundled rather than orthogonal.** Real-world deployment scenarios that demand FIPS-compliant cryptography are the same scenarios that demand tactical-grade timing — military embedded systems, defense communications, regulated industries with strict cryptographic compliance. Decoupling crypto from timing would create combinatorial profile space (5 timings × 2 cryptos = 10 effective profiles) with most combinations unused in practice. Bundling reflects the real-world alignment: tactical IS the FIPS use case.
 
@@ -481,10 +481,10 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 | AEAD (v2.17 keyfiles, v2.22 amount encryption, direct-to-DApp) | XChaCha20-Poly1305 | **AES-256-GCM (FIPS 197 + SP 800-38D)** |
 | Prime-order group | secp256k1 | **NIST P-256 (FIPS 186-5)** |
 | ECDH (v2.22 amount handshake; v2.24 audit-key exchange) | secp256k1 ECDH (libsecp256k1) | **NIST P-256 ECDH (SP 800-56A)** |
-| **Confidential transactions (v2.22 Bulletproofs)** | ✅ Available | ❌ **UNAVAILABLE — no FIPS-validated range proofs exist** |
+| **Confidential transactions (v2.22 Bulletproofs)** | ✅ Available | ✅ Available (§3.22 P-256 shielded pool; FIPS-approved primitives, but the ZK construction is NOT a FIPS-validated algorithm) |
 | Theme 9 DSSO OPRF (v2.25) | secp256k1 voprf | **NIST P-256 voprf** |
 
-**Critical caveat: confidential transactions unavailable in FIPS profiles.** Both `tactical` (military / defense) and `cluster` (in-house enterprise / financial services / regulated) deployments cannot use v2.22 confidential transactions. This is structurally required — NIST has not standardized zero-knowledge range proofs (Bulletproofs included), so no FIPS-validated implementation exists. FIPS-profile deployments must use clear-amount TRANSFER tx exclusively + v2.24 audit hooks for regulator access. Documented as accepted trade-off for FIPS compliance.
+**Caveat: FIPS confidential-tx runs on non-NIST-standardized ZK constructions.** Both `tactical` (military / defense) and `cluster` (in-house enterprise / financial services / regulated) FIPS deployments CAN use v2.22 confidential transactions — they run on the §3.22 P-256 shielded pool (Pedersen + Bulletproofs over NIST P-256, composed with the §3.23 ring signatures for input-unlinkability). Those are built on FIPS-approved primitives (P-256 + SHA-256), but NIST has not standardized zero-knowledge range proofs / ring signatures, so the CONSTRUCTIONS are not themselves FIPS-validated algorithms; a deployment requiring per-operation CMVP validation treats them as out-of-module and may fall back to clear-amount TRANSFER + v2.24 audit hooks. Crypto is a POSTURE, not a code switch — the one binary contains all of it (params.hpp / DECISION-LOG 2026-07-03).
 
 **Non-FIPS sub-50ms deployments.** Operators wanting sub-50ms blocks for non-regulated scenarios (commercial delivery drones, industrial robotics without FIPS requirement, high-frequency commercial settlement without compliance constraint) cannot use the `tactical` or `cluster` profile names directly because both bundle FIPS. The closest MODERN profile is `regional` (~150ms). Options:
 

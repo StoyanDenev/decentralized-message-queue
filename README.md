@@ -615,9 +615,9 @@ A profile is a **complete deployment archetype**: timing, committee size, chain 
 
 Timing fields (`tx_commit_ms` / `block_sig_ms` / `abort_claim_ms`): cluster `50/50/25`, web `200/200/100`, regional `300/300/150`, global `600/600/300`, tactical `20/20/10`.
 
-**Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack: AES-256-GCM AEAD, PBKDF2-HMAC-SHA-256 KDF, NIST P-256 prime-order operations, Ed25519 (FIPS 186-5) signatures, X25519 (SP 800-186) KX. Confidential transactions (Bulletproofs) are not available in FIPS profiles because no FIPS-validated zero-knowledge range proof construction exists. FIPS profiles use clear-amount TRANSFER with v2.24 audit hooks.
+**Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack: AES-256-GCM AEAD, PBKDF2-HMAC-SHA-256 KDF, NIST P-256 prime-order operations, Ed25519 (FIPS 186-5) signatures, X25519 (SP 800-186) KX. Confidential transactions (Pedersen + Bulletproofs over P-256, §3.19 / the §3.22 shielded pool) and input-unlinkability ring signatures (§3.23) ARE available and are built on FIPS-approved primitives (P-256 + SHA-256) — but the zero-knowledge CONSTRUCTIONS themselves are NOT FIPS-validated ALGORITHMS (NIST has no approved range-proof / ring-signature standard), so a deployment requiring per-operation CMVP validation treats them as out-of-module.
 
-The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, secp256k1 prime-order operations + Bulletproofs, Ed25519 signatures, X25519 KX. Full v2.22 confidential-transaction support.
+The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, Ed25519 signatures, X25519 KX; the MODERN large-prime ZK backend is big-prime Z_p* (RFC 3526 MODP-3072, §3.20 — a library primitive today, not yet consensus-wired). secp256k1 was never implemented (P-256 supplants it). Confidential transactions are available via the P-256 shielded pool (§3.22), which is profile-agnostic.
 
 See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10 for full cryptographic-profile rationale and feature-availability matrix.
 
