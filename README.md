@@ -989,7 +989,7 @@ Determ's safety-critical mechanisms are covered by per-property analytic proofs 
 
 Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V15 from F0; V12/V13 are the cross-shard receipt source/destination split, V14 is the timestamp bound, V15 is transaction apply consistency), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
 
-Concrete-security bounds: every property holds with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Under Grover (post-quantum), bounds degrade to `Q · 2⁻⁶⁴` for Ed25519 — operationally secure but a PQ-signature migration (Dilithium / Falcon) would restore classical bounds.
+Concrete-security bounds: every property holds with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Under Grover (post-quantum), bounds degrade to `Q · 2⁻⁶⁴` for Ed25519 — operationally secure, and a **post-quantum signature path is now available**: an opt-in **`PQ_TRANSFER`** whose sender is a PQ-native bearer account bound to an **ML-DSA (Dilithium, FIPS 204)** key (CRYPTO-C99-SPEC §3.21; [`PQSignatureEnvelopeSoundness.md`](docs/proofs/PQSignatureEnvelopeSoundness.md)). It is additive and state-root-invariant — an existing Ed25519 chain is byte-identical — so PQ accounts coexist with classical ones without a migration.
 
 ---
 
