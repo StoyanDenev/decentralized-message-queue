@@ -10,7 +10,9 @@
 
 namespace determ::light {
 
-int cmd_pq_sign_tx(int argc, char** argv);    // build a DPQ1-authenticated tx
+int cmd_pq_sign_tx(int argc, char** argv);    // build a DPQ1-authenticated tx (demonstration)
 int cmd_pq_verify_tx(int argc, char** argv);  // verify a DPQ1-authenticated tx (offline)
+int cmd_pq_address(int argc, char** argv);    // derive the PQ-native bearer address from a seed
+int cmd_pq_transfer(int argc, char** argv);   // build a canonical, submittable PQ_TRANSFER
 
 } // namespace determ::light

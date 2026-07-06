@@ -4,6 +4,7 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
+#include <determ/crypto/pq_address.hpp>  // §3.21 PQ-native bearer address (S-028)
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/rng/rng.h>
@@ -3640,6 +3641,19 @@ json Node::rpc_submit_tx(const json& tx_json) {
             "submitted tx.to is non-canonical (uppercase hex); "
             "anon addresses MUST be lowercase: got '" + tx.to
           + "', expected '" + normalize_anon_address(tx.to) + "'");
+    }
+    // §3.21 S-028 for PQ-native bearer addresses (same rationale as anon: the
+    // signed signing_bytes embed from/to byte-for-byte, so we reject rather than
+    // normalize). from is also consensus-enforced canonical in verify_pq_transaction.
+    if (is_pq_anon_address(tx.from) && tx.from != normalize_pq_anon_address(tx.from)) {
+        throw std::runtime_error(
+            "submitted PQ tx.from is non-canonical (uppercase hex); PQ addresses "
+            "MUST be lowercase: got '" + tx.from + "'");
+    }
+    if (is_pq_anon_address(tx.to)   && tx.to   != normalize_pq_anon_address(tx.to)) {
+        throw std::runtime_error(
+            "submitted PQ tx.to is non-canonical (uppercase hex); PQ addresses "
+            "MUST be lowercase: got '" + tx.to + "'");
     }
 
     // Recompute hash to defend against client-side errors / tampering.

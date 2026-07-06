@@ -331,6 +331,13 @@ void print_usage() {
         "      consensus accept-rule for such a tx is a separate, owner-gated step.\n"
         "  pq-verify-tx --file <tx.json>\n"
         "      Offline-verify a DPQ1-authenticated tx (exit 0 verified / 3 invalid).\n"
+        "  pq-address --scheme {mldsa44|mldsa65|mldsa87} --mldsa-seed <hex32>\n"
+        "      Print the PQ-native bearer address (the ML-DSA public key) for a seed.\n"
+        "  pq-transfer --to <addr> --amount <N> --fee <N> --nonce <N>\n"
+        "              --scheme {mldsa44|mldsa65|mldsa87} --mldsa-seed <hex32> [--out <file>]\n"
+        "      Build a canonical, SUBMITTABLE PQ_TRANSFER (§3.21): derives the PQ-native\n"
+        "      `from` address, signs a DPQ1 envelope over signing_bytes; feed --out to\n"
+        "      submit-tx. Verify a validator would accept it with `determ verify-pq-tx`.\n"
         "  submit-tx --rpc-port <N> --tx-json <file>\n"
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
@@ -7696,6 +7703,8 @@ int main(int argc, char** argv) {
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
         if (cmd == "pq-sign-tx")            return cmd_pq_sign_tx(sub_argc, sub_argv);
         if (cmd == "pq-verify-tx")          return cmd_pq_verify_tx(sub_argc, sub_argv);
+        if (cmd == "pq-address")            return cmd_pq_address(sub_argc, sub_argv);
+        if (cmd == "pq-transfer")           return cmd_pq_transfer(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);

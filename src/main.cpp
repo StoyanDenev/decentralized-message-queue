@@ -505,6 +505,10 @@ In-process tests (deterministic, no network):
                                               address + PQ_TRANSFER consensus
                                               accept-rule (envelope key bound to
                                               address); state-root-invariant
+  determ verify-pq-tx --file <tx.json>        §3.21 inc.6: apply the PQ_TRANSFER
+                                              accept-rule to a tx file (0 verified
+                                              / 3 invalid) — the loop closer for
+                                              determ-light pq-transfer
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -14698,6 +14702,30 @@ int main(int argc, char** argv) {
         if (fail==0) std::cout << "  PASS: pqauth (DPQ1 envelope) unit test\n";
         return fail==0 ? 0 : 1;
     }
+    if (cmd == "verify-pq-tx") {
+        // §3.21 inc.6 — apply the CONSENSUS accept-rule
+        // (determ::chain::verify_pq_transaction) to a transaction JSON file.
+        // Closes the client loop: `determ-light pq-transfer` produces a tx, this
+        // confirms a validator would accept it. Exit 0 = VERIFIED (an authentic
+        // on-chain PQ_TRANSFER), 3 = INVALID, 1 = usage/parse.
+        std::string path;
+        for (int i = 2; i < argc; i++) { std::string a = argv[i];
+            if (a == "--file" && i + 1 < argc) path = argv[++i]; }
+        if (path.empty()) { std::cerr << "verify-pq-tx: --file <tx.json> is required\n"; return 1; }
+        try {
+            std::ifstream f(path);
+            if (!f) { std::cerr << "verify-pq-tx: cannot read " << path << "\n"; return 1; }
+            json j; f >> j;
+            auto tx = determ::chain::Transaction::from_json(j);
+            if (determ::chain::verify_pq_transaction(tx)) {
+                std::cout << "VERIFIED: authentic PQ_TRANSFER (from " << tx.from.substr(0, 18)
+                          << "... amount=" << tx.amount << " nonce=" << tx.nonce << ")\n";
+                return 0;
+            }
+            std::cout << "INVALID: not an authentic PQ_TRANSFER\n";
+            return 3;
+        } catch (const std::exception& e) { std::cerr << "verify-pq-tx: " << e.what() << "\n"; return 1; }
+    }
     if (cmd == "test-pq-transaction") {
         // §3.21 inc.4 — the PQ-native BEARER address (determ::pq_address) + the
         // PQ_TRANSFER consensus accept-rule (determ::chain::verify_pq_transaction).
@@ -14744,6 +14772,15 @@ int main(int argc, char** argv) {
           std::optional<std::span<const uint8_t,32>> eo=std::span<const uint8_t,32>(es);
           auto t=tx; t.pq_auth = pqauth::sign(pqauth::Scheme::HYBRID_MLDSA65, t.signing_bytes(), mseed, eo);
           check(!chain::verify_pq_transaction(t), "hybrid scheme rejected for PQ-native account"); }
+        // S-028: a non-canonical (uppercase-hex) PQ `from` is rejected even
+        // with an envelope signed over ITS OWN signing_bytes (pq_pk still matches
+        // the address, so only the canonicalization check fires) — prevents
+        // account fragmentation across case spellings.
+        { std::string up=pqaddr; for(size_t i=4;i<up.size();i++){char c=up[i]; if(c>='a'&&c<='f') up[i]=(char)(c-'a'+'A');}
+          Transaction t; t.type=TxType::PQ_TRANSFER; t.from=up; t.to="0x"+std::string(64,'b');
+          t.amount=100; t.fee=1; t.nonce=0;
+          t.pq_auth = pqauth::sign(pqauth::Scheme::MLDSA65, t.signing_bytes(), mseed);
+          check(!chain::verify_pq_transaction(t), "non-canonical (uppercase) PQ from rejected (S-028)"); }
 
         // State-root invariance signal: a non-PQ tx serializes with NO pq_auth
         // key, and its signing_bytes is unaffected by the new field.
