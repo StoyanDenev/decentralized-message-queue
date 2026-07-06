@@ -49,6 +49,23 @@ int determ_p256_balance_prove(uint8_t proof[65], const uint8_t E_in[33],
  * fails). Public-data operation, fail-closed. */
 int determ_p256_balance_verify(const uint8_t E_in[33], const uint8_t proof[65]);
 
+/* CRYPTO-C99-SPEC.md §3.22b — CONTEXT-BOUND balance proof. Identical to the pair
+ * above EXCEPT the Fiat-Shamir challenge binds an extra 32-byte context digest:
+ *   c = hash_to_scalar(E ‖ T ‖ ctx32)   (vs ‖ E ‖ T only).
+ * This binds the PoK-of-blinding to a caller-chosen context so a captured proof
+ * cannot be replayed against a DIFFERENT context. The shielded-pool UNSHIELD
+ * spend sets ctx32 = SHA-256(from ‖ to ‖ nonce ‖ amount) so a mempool-observed
+ * withdraw proof cannot be copied and redirected to another recipient (front-
+ * running theft). A bound proof does NOT verify under the unbound verifier and
+ * vice-versa (domain separation), and a proof bound to ctx A is rejected under
+ * ctx B. Same 65-byte wire, same x/k rules, deterministic. Returns 0 / -1. */
+int determ_p256_balance_prove_bound(uint8_t proof[65], const uint8_t E_in[33],
+                                    const uint8_t x[32], const uint8_t k[32],
+                                    const uint8_t ctx32[32]);
+
+int determ_p256_balance_verify_bound(const uint8_t E_in[33], const uint8_t proof[65],
+                                     const uint8_t ctx32[32]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

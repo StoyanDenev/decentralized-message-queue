@@ -7,7 +7,8 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/merkle.hpp>
-#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify
+#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify / determ_unshield_verify
+#include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
 #include <determ/util/json_validate.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -814,6 +815,48 @@ void Chain::apply_transactions(const Block& b) {
             total_fees += tx.fee;
             shielded_pool_[ckey] = height;                      // add unspent note
             accumulated_shielded_ += A;                         // A left the transparent live sum
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::UNSHIELD: {
+            // §3.22b confidential -> transparent withdraw. Spend an unspent note
+            // C (which IS its own nullifier — removed here so it can be spent at
+            // most once) and return its PUBLIC amount A to the transparent
+            // recipient tx.to, minus fee (fee accrues to creators). The proof is
+            // BOUND to (from,to,nonce,amount) so a captured withdraw proof cannot
+            // be replayed/redirected. Belt-and-suspenders re-verify (validator is
+            // the authoritative accept-rule); skip on any failure.
+            uint64_t A = tx.amount;
+            if (tx.payload.size() != 98) continue;
+            if (A < tx.fee) continue;                           // amount must cover the fee
+            // §3.22b is single-shard only (like DAPP_CALL in v2.19). A cross-shard
+            // credit here would land spendable value on THIS shard keyed by an
+            // off-shard address with NO outbound booking + NO receipt — a silent
+            // break of the K-shard aggregate supply identity that per-shard A1
+            // cannot catch. Reject (the note is NOT spent). Cross-shard confidential
+            // withdraw (receipt + block_outbound) is a separate, owner-gated step.
+            if (is_cross_shard(tx.to)) continue;
+            __ensure_shielded_pool();
+            std::string ckey = to_hex(tx.payload.data(), 33);
+            auto note = shielded_pool_.find(ckey);
+            if (note == shielded_pool_.end()) continue;         // not an unspent note (also blocks double-spend)
+            Hash ctx = unshield_spend_ctx_hash(tx.from, tx.to, tx.nonce, A);
+            if (determ_unshield_verify(tx.payload.data(), tx.payload.size(),
+                                       A, ctx.data()) != 0) continue;
+            // Pedersen binding guarantees A equals the amount C was SHIELDed with,
+            // so accumulated_shielded_ >= A and this cannot underflow (A1 would
+            // throw if it ever did).
+            shielded_pool_.erase(note);
+            accumulated_shielded_ -= A;
+            uint64_t credit = A - tx.fee;
+            auto& rcv = accounts_[tx.to].balance;
+            if (!checked_add_u64(rcv, credit, &rcv)) {
+                throw std::runtime_error(
+                    "S-007: UNSHIELD credit would overflow recipient balance (to="
+                    + tx.to + ")");
+            }
+            total_fees += tx.fee;
             sender.next_nonce++;
             break;
         }

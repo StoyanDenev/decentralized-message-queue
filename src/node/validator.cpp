@@ -4,7 +4,8 @@
 #include <determ/node/producer.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
-#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD accept-rule
+#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD / §3.22b UNSHIELD accept-rules
+#include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/keys.hpp>
@@ -589,10 +590,12 @@ BlockValidator::Result BlockValidator::check_transactions(
             // locked but no apply path runs.
             return {false, "REGION_CHANGE tx type is reserved for future use"};
         } else if (from_anon) {
-            // TRANSFER and §3.22 SHIELD are allowed from anonymous (bearer)
-            // accounts; everything else (register/stake/gov) needs a domain.
-            if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD)
-                return {false, "anonymous accounts may only TRANSFER or SHIELD (got "
+            // TRANSFER and §3.22 SHIELD / §3.22b UNSHIELD are allowed from
+            // anonymous (bearer) accounts; everything else (register/stake/gov)
+            // needs a domain.
+            if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD
+                && tx.type != TxType::UNSHIELD)
+                return {false, "anonymous accounts may only TRANSFER, SHIELD or UNSHIELD (got "
                              + std::to_string(int(tx.type)) + ")"};
             pk = parse_anon_pubkey(tx.from);
         } else {
@@ -1097,6 +1100,32 @@ BlockValidator::Result BlockValidator::check_transactions(
             if (determ_shield_verify(tx.payload.data(), tx.payload.size(),
                                      tx.amount) != 0)
                 return {false, "SHIELD commitment/balance proof invalid"};
+            break;
+        }
+        case TxType::UNSHIELD: {
+            // §3.22b confidential -> transparent withdraw. payload = C(33 SEC1)
+            // || balance_proof(65). C must be an unspent note; A must cover the
+            // fee; the CONTEXT-BOUND proof must verify against
+            // ctx = SHA-256(from||to||nonce||amount), so a captured withdraw
+            // proof cannot be replayed/redirected. (Apply is authoritative and
+            // removes C — its own nullifier; this is the submit-time gate.)
+            if (tx.payload.size() != 98)
+                return {false, "UNSHIELD payload must be 98 bytes (C33||proof65)"};
+            if (tx.amount < tx.fee)
+                return {false, "UNSHIELD amount must cover the fee"};
+            // §3.22b single-shard only (v1), like DAPP_CALL. A cross-shard credit
+            // would silently break the K-shard aggregate supply identity (no
+            // outbound booking, no receipt); reject at submit-time.
+            if (chain.is_cross_shard(tx.to))
+                return {false, "UNSHIELD cross-shard not supported (v1); "
+                               "tx.to must route to this shard"};
+            std::string ckey = to_hex(tx.payload.data(), 33);
+            if (!chain.shielded_note_exists(ckey))
+                return {false, "UNSHIELD references an unknown or already-spent note"};
+            Hash ctx = unshield_spend_ctx_hash(tx.from, tx.to, tx.nonce, tx.amount);
+            if (determ_unshield_verify(tx.payload.data(), tx.payload.size(),
+                                       tx.amount, ctx.data()) != 0)
+                return {false, "UNSHIELD commitment/context-bound proof invalid"};
             break;
         }
         }

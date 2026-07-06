@@ -39,6 +39,7 @@
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
 #include <determ/crypto/pedersen/balance.h>    // §3.19 inc.7: confidential-tx balance proof (P-256)
 #include <determ/crypto/pedersen/ctxbundle.h>  // §3.22: DCT1 confidential-transfer proof bundle
+#include <determ/chain/shielded.hpp>           // §3.22b: unshield_spend_ctx_hash
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
@@ -1096,6 +1097,13 @@ Additional in-process tests:
                                               (A1 net of confidential pool),
                                               state-root observability, bad-proof
                                               + duplicate-note no-op at apply.
+  determ test-unshield                        §3.22b UNSHIELD (confidential ->
+                                              transparent withdraw): the CONTEXT-
+                                              BOUND proof (front-run/redirect
+                                              rejected, domain-sep), apply removes
+                                              the note (its own nullifier) +
+                                              credits amount-fee + conserves A1,
+                                              front-run + double-spend no-op.
   determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
                                               variants produce equivalent state;
                                               head()/at() empty-chain throw
@@ -36407,6 +36415,189 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-shield\n" : "  PASS: test-shield\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-unshield") {
+        // §3.22b UNSHIELD (confidential -> transparent withdraw) CONSENSUS test.
+        // The load-bearing property is the CONTEXT-BOUND proof: a captured
+        // withdraw proof cannot be redirected to a different recipient (front-
+        // running theft). Also: apply removes the note (its own nullifier),
+        // credits amount - fee, conserves supply (A1), and double-spend /
+        // domain-separation are no-ops.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto setbe32 = [&](std::vector<uint8_t>& b, uint64_t val) {
+            b.assign(32, 0);
+            for (int i = 0; i < 8; i++) b[31 - i] = uint8_t(val >> (8 * i));
+        };
+        auto commitC = [&](uint64_t A, uint64_t r, std::vector<uint8_t>& C) -> bool {
+            std::vector<uint8_t> vs, rs; setbe32(vs, A); setbe32(rs, r); C.assign(33, 0);
+            return determ_pedersen_commit(C.data(), vs.data(), rs.data()) == 0;
+        };
+        // SHIELD payload — UNBOUND proof (deposits the note C = A*G + r*H).
+        auto make_shield = [&](uint64_t A, uint64_t r, std::vector<uint8_t>& out) -> bool {
+            std::vector<uint8_t> C, E(33), x(32), k(32), proof(DETERM_P256_BALANCE_PROOF_BYTES);
+            if (!commitC(A, r, C)) return false;
+            if (determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A) != 0) return false;
+            setbe32(x, r); setbe32(k, 0xC0FFEEu);
+            if (determ_p256_balance_prove(proof.data(), E.data(), x.data(), k.data()) != 0) return false;
+            out.clear(); out.insert(out.end(), C.begin(), C.end());
+            out.insert(out.end(), proof.begin(), proof.end());
+            return out.size() == 98;
+        };
+        // UNSHIELD payload — CONTEXT-BOUND proof over ctx (same note C).
+        auto make_unshield = [&](uint64_t A, uint64_t r, const Hash& ctx,
+                                 std::vector<uint8_t>& out) -> bool {
+            std::vector<uint8_t> C, E(33), x(32), k(32), proof(DETERM_P256_BALANCE_PROOF_BYTES);
+            if (!commitC(A, r, C)) return false;
+            if (determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A) != 0) return false;
+            setbe32(x, r); setbe32(k, 0xD00Du);
+            if (determ_p256_balance_prove_bound(proof.data(), E.data(), x.data(),
+                                                k.data(), ctx.data()) != 0) return false;
+            out.clear(); out.insert(out.end(), C.begin(), C.end());
+            out.insert(out.end(), proof.begin(), proof.end());
+            return out.size() == 98;
+        };
+
+        const uint64_t kAliceBal = 1000, kA = 100, kFee = 1, kR = 0xBEEFu;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg; cfg.chain_id = "unshield-test"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = kAliceBal;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        std::vector<uint8_t> sp;   // the SHIELD payload for note (kA, kR)
+        make_shield(kA, kR, sp);
+        auto shielded_chain = [&](Chain& c) {
+            c.append(make_genesis_block(make_cfg()));
+            Transaction tx; tx.type = TxType::SHIELD; tx.from = "alice"; tx.to = "";
+            tx.amount = kA; tx.fee = kFee; tx.nonce = 0; tx.payload = sp;
+            Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === 1. Bound accept-rule + FRONT-RUN + domain-separation (crypto) ===
+        Hash ctx_ab = unshield_spend_ctx_hash("alice", "bob", 1, kA);
+        Hash ctx_at = unshield_spend_ctx_hash("alice", "attacker", 1, kA);
+        std::vector<uint8_t> up;
+        check(make_unshield(kA, kR, ctx_ab, up) && up.size() == 98,
+              "setup: built a valid 98-byte context-bound UNSHIELD payload");
+        check(determ_unshield_verify(up.data(), up.size(), kA, ctx_ab.data()) == 0,
+              "accept-rule: bound proof verifies for its own (from,to,nonce,amount)");
+        check(determ_unshield_verify(up.data(), up.size(), kA, ctx_at.data()) != 0,
+              "FRONT-RUN: the SAME proof REJECTS when redirected to a different recipient");
+        check(determ_unshield_verify(up.data(), up.size(), kA + 1, ctx_ab.data()) != 0,
+              "accept-rule: bound proof rejects for a wrong amount");
+        check(determ_unshield_verify(sp.data(), sp.size(), kA, ctx_ab.data()) != 0,
+              "domain-sep: an UNBOUND (SHIELD) proof is rejected by the UNSHIELD verifier");
+
+        // === 2. Apply a valid UNSHIELD ===
+        {
+            Chain c; shielded_chain(c);
+            check(c.shielded_note_count() == 1 && c.accumulated_shielded() == kA,
+                  "setup: note is in the pool after SHIELD");
+            uint64_t bob0 = c.balance("bob"), alice0 = c.balance("alice");
+            Transaction tx; tx.type = TxType::UNSHIELD; tx.from = "alice"; tx.to = "bob";
+            tx.amount = kA; tx.fee = kFee; tx.nonce = 1; tx.payload = up;
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(tx);
+            bool threw = false;
+            try { c.append(b); }
+            catch (const std::exception& e) { threw = true; std::cout << "  (threw: " << e.what() << ")\n"; }
+            check(!threw, "apply: UNSHIELD block applied without violating A1");
+            check(c.shielded_note_count() == 0 && c.accumulated_shielded() == 0,
+                  "apply: note removed from pool + shielded supply back to 0");
+            check(c.balance("bob") == bob0 + (kA - kFee),
+                  "apply: recipient credited EXACTLY amount - fee");
+            check(c.balance("alice") == alice0,
+                  "apply: withdrawer's transparent balance untouched (value came from the pool)");
+            check(c.expected_total() == c.live_total_supply(),
+                  "apply: A1 holds after the withdraw (value relocated back, not created)");
+        }
+
+        // === 3. Front-running theft is a no-op at apply ===
+        {
+            Chain c; shielded_chain(c);
+            Transaction tx; tx.type = TxType::UNSHIELD; tx.from = "alice"; tx.to = "attacker";
+            tx.amount = kA; tx.fee = kFee; tx.nonce = 1; tx.payload = up;   // bound to bob!
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(tx);
+            c.append(b);
+            check(c.shielded_note_count() == 1 && c.accumulated_shielded() == kA,
+                  "FRONT-RUN apply: redirected UNSHIELD is a no-op — note NOT spent");
+            check(c.balance("attacker") == 0,
+                  "FRONT-RUN apply: attacker NOT credited");
+        }
+
+        // === 4. Double-spend is a no-op at apply (the note is its own nullifier) ===
+        {
+            Chain c; shielded_chain(c);
+            Transaction tx; tx.type = TxType::UNSHIELD; tx.from = "alice"; tx.to = "bob";
+            tx.amount = kA; tx.fee = kFee; tx.nonce = 1; tx.payload = up;
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(tx);
+            c.append(b);
+            check(c.shielded_note_count() == 0, "setup: first UNSHIELD spent the note");
+            Hash ctx2 = unshield_spend_ctx_hash("alice", "bob", 2, kA);
+            std::vector<uint8_t> up2; make_unshield(kA, kR, ctx2, up2);
+            uint64_t bob1 = c.balance("bob");
+            Transaction tx2; tx2.type = TxType::UNSHIELD; tx2.from = "alice"; tx2.to = "bob";
+            tx2.amount = kA; tx2.fee = kFee; tx2.nonce = 2; tx2.payload = up2;
+            Block b2; b2.index = 3; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"val"}; b2.transactions.push_back(tx2);
+            c.append(b2);
+            check(c.accumulated_shielded() == 0 && c.balance("bob") == bob1,
+                  "double-spend: re-UNSHIELDing a spent note is a no-op (note is its own nullifier)");
+        }
+
+        // === 5. Cross-shard UNSHIELD is rejected at apply (single-shard v1) ===
+        {
+            const uint32_t kShards = 2;
+            Hash salt{};
+            GenesisConfig cfg = make_cfg();
+            cfg.chain_role = ChainRole::SHARD;
+            cfg.shard_id = 0;
+            cfg.initial_shard_count = kShards;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_shard_routing(kShards, salt, ShardId{0});
+            // SHIELD the note on shard 0.
+            Transaction s; s.type = TxType::SHIELD; s.from = "alice"; s.to = "";
+            s.amount = kA; s.fee = kFee; s.nonce = 0; s.payload = sp;
+            Block bs; bs.index = 1; bs.prev_hash = c.head().compute_hash();
+            bs.creators = {"val"}; bs.transactions.push_back(s);
+            c.append(bs);
+            // Find a recipient that routes OFF shard 0.
+            std::string remote;
+            for (int i = 0; i < 512 && remote.empty(); ++i) {
+                char buf[16]; std::snprintf(buf, sizeof(buf), "rcpt%03x", i);
+                if (crypto::shard_id_for_address(buf, kShards, salt) != ShardId{0}) remote = buf;
+            }
+            check(!remote.empty() && c.is_cross_shard(remote),
+                  "setup: found an off-shard recipient for the cross-shard check");
+            Hash ctxX = unshield_spend_ctx_hash("alice", remote, 1, kA);
+            std::vector<uint8_t> upx; make_unshield(kA, kR, ctxX, upx);
+            Transaction tx; tx.type = TxType::UNSHIELD; tx.from = "alice"; tx.to = remote;
+            tx.amount = kA; tx.fee = kFee; tx.nonce = 1; tx.payload = upx;
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(tx);
+            c.append(b);
+            check(c.shielded_note_count() == 1 && c.accumulated_shielded() == kA,
+                  "cross-shard: UNSHIELD to an off-shard address is a no-op — note NOT spent");
+            check(c.balance(remote) == 0,
+                  "cross-shard: off-shard recipient NOT credited (no silent supply mislocation)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-unshield\n" : "  PASS: test-unshield\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-cross-shard-supply-invariant") {

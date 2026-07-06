@@ -60,6 +60,19 @@ int determ_ctx_bundle_verify(const uint8_t *bundle, size_t len);
 // Returns 0 iff valid, -1 otherwise. Never touches consensus state.
 int determ_shield_verify(const uint8_t *payload, size_t len, uint64_t amount);
 
+// UNSHIELD accept-rule (§3.22b confidential->transparent withdraw). Same 98-byte
+// payload shape as SHIELD (C(33) || balance_proof(65)) proving C commits to the
+// declared PUBLIC `amount`, but the balance proof is CONTEXT-BOUND: its Fiat-
+// Shamir challenge hashes the extra `ctx32` digest. The caller sets
+// ctx32 = SHA-256(from || to || nonce || amount) of the withdrawing tx, so a
+// captured withdraw proof cannot be replayed/redirected to a different recipient
+// (front-running theft) — a copied proof carries the original ctx and fails once
+// any of from/to/nonce/amount differs. Knowledge of the blinding r (the PoK)
+// authorizes the spend; the ctx binding pins WHO it pays. Returns 0 iff valid,
+// -1 otherwise. Never touches consensus state.
+int determ_unshield_verify(const uint8_t *payload, size_t len, uint64_t amount,
+                           const uint8_t ctx32[32]);
+
 #ifdef __cplusplus
 }
 #endif

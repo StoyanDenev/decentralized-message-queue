@@ -110,3 +110,37 @@ int determ_p256_balance_verify(const uint8_t E_in[PT], const uint8_t proof[DETER
     if (determ_pedersen_msm(rhs, sc2, pt2, 2) != 0) return -1;    /* T + c*E (rejects malformed T/E / identity) */
     return (memcmp(lhs, rhs, PT) == 0) ? 0 : -1;
 }
+
+/* §3.22b context-bound variants: identical to the pair above but the challenge
+ * hashes E ‖ T ‖ ctx32 (98 bytes) instead of E ‖ T (66). Same BAL_DST, so a
+ * bound proof and an unbound proof over the same (E,T) get DIFFERENT challenges
+ * -> neither verifies under the other (domain separation), and a proof bound to
+ * ctx A fails under ctx B. */
+int determ_p256_balance_prove_bound(uint8_t proof[DETERM_P256_BALANCE_PROOF_BYTES],
+                                    const uint8_t E_in[PT], const uint8_t x[SC], const uint8_t k[SC],
+                                    const uint8_t ctx32[SC]) {
+    uint8_t h33[PT], T[PT], c[SC], cx[SC], s[SC], msg[2 * PT + SC];
+    if (compress_h(h33) != 0) return -1;
+    if (determ_pedersen_msm(T, k, h33, 1) != 0) return -1;   /* T = k*H (rejects k>=n; k==0 -> identity -> !=0) */
+    memcpy(msg, E_in, PT); memcpy(msg + PT, T, PT); memcpy(msg + 2 * PT, ctx32, SC);
+    if (determ_p256_hash_to_scalar(c, msg, 2 * PT + SC, (const uint8_t *)BAL_DST, sizeof(BAL_DST) - 1) != 0) return -1;
+    if (determ_p256_scalar_mul_mod_n(cx, c, x) != 0) return -1;   /* c*x (rejects x>=n) */
+    add_mod_n(s, k, cx);                                          /* s = k + c*x mod n */
+    memcpy(proof, T, PT); memcpy(proof + PT, s, SC);
+    return 0;
+}
+
+int determ_p256_balance_verify_bound(const uint8_t E_in[PT], const uint8_t proof[DETERM_P256_BALANCE_PROOF_BYTES],
+                                     const uint8_t ctx32[SC]) {
+    const uint8_t *T = proof, *s = proof + PT;
+    uint8_t h33[PT], c[SC], lhs[PT], rhs[PT], one[SC], msg[2 * PT + SC], sc2[2 * SC], pt2[2 * PT];
+    if (compress_h(h33) != 0) return -1;
+    memcpy(msg, E_in, PT); memcpy(msg + PT, T, PT); memcpy(msg + 2 * PT, ctx32, SC);
+    if (determ_p256_hash_to_scalar(c, msg, 2 * PT + SC, (const uint8_t *)BAL_DST, sizeof(BAL_DST) - 1) != 0) return -1;
+    if (determ_pedersen_msm(lhs, s, h33, 1) != 0) return -1;      /* s*H */
+    sc_one(one);
+    memcpy(sc2, one, SC); memcpy(sc2 + SC, c, SC);
+    memcpy(pt2, T, PT);   memcpy(pt2 + PT, E_in, PT);
+    if (determ_pedersen_msm(rhs, sc2, pt2, 2) != 0) return -1;    /* T + c*E */
+    return (memcmp(lhs, rhs, PT) == 0) ? 0 : -1;
+}

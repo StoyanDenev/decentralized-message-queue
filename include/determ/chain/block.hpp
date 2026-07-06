@@ -196,6 +196,15 @@ enum class TxType : uint8_t {
     // leaf are emitted only when non-empty/non-zero). Supply-conserving: A moves
     // from the transparent live sum into accumulated_shielded_.
     SHIELD         = 12,
+    // §3.22b confidential-tx UNSHIELD (confidential -> transparent withdraw):
+    // spends an unspent note C from the confidential set and returns its PUBLIC
+    // amount A to a transparent recipient (minus fee). payload = C(33) ||
+    // balance_proof(65) proving C commits to exactly A, but the proof is
+    // CONTEXT-BOUND to (from,to,nonce,amount) — a captured withdraw proof cannot
+    // be replayed/redirected (front-running theft). The commitment IS its own
+    // nullifier: apply removes C from the pool, so it can be spent at most once.
+    // Additive + state-root-invariant, same as SHIELD.
+    UNSHIELD       = 13,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use

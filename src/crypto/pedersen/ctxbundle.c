@@ -75,3 +75,16 @@ int determ_shield_verify(const uint8_t *payload, size_t len, uint64_t amount) {
     /* The balance proof proves E opens to zero on H, i.e. C = amount*G + r*H. */
     return determ_p256_balance_verify(E, payload + 33);
 }
+
+int determ_unshield_verify(const uint8_t *payload, size_t len, uint64_t amount,
+                           const uint8_t ctx32[32]) {
+    if (payload == 0 || ctx32 == 0 || len != 98) return -1;
+    /* Same excess E = C - amount*G as SHIELD (C is the single input, no outputs,
+     * fee = amount). A non-zero return is a malformed commitment or the identity
+     * excess (amount==0 and r==0) -> reject. */
+    uint8_t E[33];
+    if (determ_p256_balance_excess(E, payload, 1, 0, 0, amount) != 0) return -1;
+    /* Context-BOUND PoK: proves C = amount*G + r*H (knowledge of r) AND binds the
+     * spend to ctx32 so a captured proof cannot be redirected. */
+    return determ_p256_balance_verify_bound(E, payload + 33, ctx32);
+}

@@ -449,6 +449,11 @@ public:
     uint64_t accumulated_shielded() const { return accumulated_shielded_; }
     // §3.22: number of unspent confidential notes (commitments) in the pool.
     size_t   shielded_note_count() const { return shielded_pool_.size(); }
+    // §3.22b: does an unspent note with this hex commitment exist? (UNSHIELD
+    // submit-time note-membership check; apply is the authoritative gate.)
+    bool     shielded_note_exists(const std::string& commitment_hex) const {
+        return shielded_pool_.count(commitment_hex) != 0;
+    }
     // expected_total = the value the TRANSPARENT live sum must equal post-apply.
     // §3.22: value moved into the confidential pool (accumulated_shielded_) leaves
     // the transparent live sum, so it is subtracted here. Total real supply =

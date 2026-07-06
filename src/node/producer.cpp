@@ -1038,6 +1038,16 @@ Block build_body(
             sb -= cost;
             break;
         }
+        case TxType::UNSHIELD: {
+            // §3.22b confidential->transparent withdraw: NO transparent debit
+            // (value comes from the confidential pool); credit tx.to with
+            // amount - fee. Provisional — apply re-checks note membership + the
+            // context-bound proof and removes the note (its own nullifier).
+            if (tx.amount < tx.fee) continue;
+            if (chain.is_cross_shard(tx.to)) continue;   // §3.22b single-shard only (v1)
+            get_bal(tx.to) += tx.amount - tx.fee;
+            break;
+        }
         }
         nn++;
         b.transactions.push_back(tx);
