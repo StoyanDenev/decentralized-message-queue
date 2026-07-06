@@ -4,6 +4,7 @@
 #include <determ/node/producer.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
+#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD accept-rule
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/keys.hpp>
@@ -588,9 +589,10 @@ BlockValidator::Result BlockValidator::check_transactions(
             // locked but no apply path runs.
             return {false, "REGION_CHANGE tx type is reserved for future use"};
         } else if (from_anon) {
-            // Only TRANSFER is allowed from anonymous accounts.
-            if (tx.type != TxType::TRANSFER)
-                return {false, "anonymous accounts may only TRANSFER (got "
+            // TRANSFER and §3.22 SHIELD are allowed from anonymous (bearer)
+            // accounts; everything else (register/stake/gov) needs a domain.
+            if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD)
+                return {false, "anonymous accounts may only TRANSFER or SHIELD (got "
                              + std::to_string(int(tx.type)) + ")"};
             pk = parse_anon_pubkey(tx.from);
         } else {
@@ -1082,6 +1084,19 @@ BlockValidator::Result BlockValidator::check_transactions(
                                  + "] signature invalid from " + it.from};
                 }
             }
+            break;
+        }
+        case TxType::SHIELD: {
+            // §3.22 transparent->confidential on-ramp. payload = C(33 SEC1)
+            // || balance_proof(65). The accept-rule proves C commits to
+            // EXACTLY the declared PUBLIC tx.amount, so a depositor cannot
+            // mint value by committing to more than they debit. The debit
+            // (amount + fee) is charged at apply time.
+            if (tx.payload.size() != 98)
+                return {false, "SHIELD payload must be 98 bytes (C33||proof65)"};
+            if (determ_shield_verify(tx.payload.data(), tx.payload.size(),
+                                     tx.amount) != 0)
+                return {false, "SHIELD commitment/balance proof invalid"};
             break;
         }
         }

@@ -1089,6 +1089,13 @@ Additional in-process tests:
                                               outbound-in-flight) + slashed ==
                                               expected_total; dup-inbound no-op;
                                               serialize/restore determinism.
+  determ test-shield                          §3.22 SHIELD (transparent ->
+                                              confidential on-ramp): accept-rule
+                                              (valid/wrong-amount/tampered),
+                                              apply debit + supply conservation
+                                              (A1 net of confidential pool),
+                                              state-root observability, bad-proof
+                                              + duplicate-note no-op at apply.
   determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
                                               variants produce equivalent state;
                                               head()/at() empty-chain throw
@@ -36258,6 +36265,150 @@ int main(int argc, char** argv) {
     //
     // Proofs: FA7 (CrossShardReceipts.md), FA-Apply-13
     // (CrossShardOutboundApply.md), FA-Apply-9 (CrossShardReceiptDedup.md).
+    if (cmd == "test-shield") {
+        // §3.22 SHIELD (transparent -> confidential on-ramp) CONSENSUS test.
+        // Exercises the full apply-path: the crypto accept-rule, supply
+        // conservation (A1 under the confidential-pool subtraction), the
+        // cn:/c: state leaves, state-root observability, and the two
+        // belt-and-suspenders apply rejections (bad proof, duplicate note).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto setbe32 = [&](std::vector<uint8_t>& b, uint64_t val) {
+            b.assign(32, 0);
+            for (int i = 0; i < 8; i++) b[31 - i] = uint8_t(val >> (8 * i));
+        };
+        // Build a valid 98-byte SHIELD payload committing to EXACTLY `A`:
+        //   C = A*G + r*H ; E = C - A*G = r*H ; proof = Schnorr PoK(E = r*H).
+        // The blinding excess x equals r (single input, zero outputs).
+        auto make_shield_payload =
+            [&](uint64_t A, uint64_t r, std::vector<uint8_t>& out) -> bool {
+            std::vector<uint8_t> vs, rs, C(33), E(33), x(32), k(32),
+                                 proof(DETERM_P256_BALANCE_PROOF_BYTES);
+            setbe32(vs, A); setbe32(rs, r);
+            if (determ_pedersen_commit(C.data(), vs.data(), rs.data()) != 0) return false;
+            if (determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A) != 0) return false;
+            setbe32(x, r); setbe32(k, 0xC0FFEEu);
+            if (determ_p256_balance_prove(proof.data(), E.data(), x.data(), k.data()) != 0) return false;
+            out.clear();
+            out.insert(out.end(), C.begin(), C.end());
+            out.insert(out.end(), proof.begin(), proof.end());
+            return out.size() == 98;
+        };
+
+        // Genesis: sender "alice" funded with a balance (NOT a creator, so the
+        // per-block fee/subsidy that accrues to creators cannot skew her
+        // balance); creator "val" is the block producer that collects the fee.
+        const uint64_t kAliceBal = 1000, kA = 100, kFee = 1;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg;
+            cfg.chain_id = "shield-test";
+            cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c;
+            val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i)
+                val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = kAliceBal;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        auto shield_tx = [&](const std::vector<uint8_t>& payload, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::SHIELD; tx.from = "alice"; tx.to = "";
+            tx.amount = kA; tx.fee = kFee; tx.nonce = nonce; tx.payload = payload;
+            return tx;
+        };
+
+        // === 1. Standalone accept-rule (the crypto gate validator+apply use) ===
+        std::vector<uint8_t> good;
+        check(make_shield_payload(kA, 0xBEEFu, good) && good.size() == 98,
+              "setup: built a valid 98-byte SHIELD payload (C33 || proof65)");
+        check(determ_shield_verify(good.data(), good.size(), kA) == 0,
+              "accept-rule: valid payload verifies against the declared amount");
+        check(determ_shield_verify(good.data(), good.size(), kA + 1) != 0,
+              "accept-rule: SAME payload REJECTS for a wrong (inflated) amount");
+        {
+            std::vector<uint8_t> bad = good; bad[97] ^= 1;   // flip last proof byte
+            check(determ_shield_verify(bad.data(), bad.size(), kA) != 0,
+                  "accept-rule: tampered balance proof rejects");
+        }
+
+        // === 2. Genesis is shield-free (leaf-emission guard is off) ===
+        Chain c;
+        c.append(make_genesis_block(make_cfg()));
+        check(c.accumulated_shielded() == 0 && c.shielded_note_count() == 0,
+              "feature-off: genesis has zero shielded supply + empty pool");
+        const uint64_t alice0 = c.balance("alice");
+        const uint64_t live0  = c.live_total_supply();
+        const Hash     root0  = c.compute_state_root();
+
+        // === 3. Apply a SHIELD block ===
+        bool threw = false;
+        try {
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"};
+            b.transactions.push_back(shield_tx(good, 0));
+            c.append(b);                       // internally asserts A1 (throws if broken)
+        } catch (const std::exception& e) {
+            threw = true;
+            std::cout << "  (append threw: " << e.what() << ")\n";
+        }
+        check(!threw, "apply: SHIELD block applied without violating the A1 invariant");
+        check(c.accumulated_shielded() == kA,
+              "apply: accumulated_shielded == A (value moved into the confidential pool)");
+        check(c.shielded_note_count() == 1,
+              "apply: exactly one confidential note (commitment) added to the pool");
+        check(c.balance("alice") == alice0 - kA - kFee,
+              "apply: sender debited EXACTLY amount + fee");
+        check(c.expected_total() == c.live_total_supply(),
+              "apply: A1 holds — expected_total (net of shielded) == transparent live");
+        // Global conservation: transparent live + confidential pool - minted
+        // subsidy == the genesis baseline (fee redistributes, nets to zero).
+        check(c.live_total_supply() + c.accumulated_shielded()
+                  - c.accumulated_subsidy() == live0,
+              "conservation: transparent + confidential - minted == genesis baseline");
+        check(c.compute_state_root() != root0,
+              "apply: SHIELD changes the state root (feature observable when used)");
+
+        // === 4. Bad-proof SHIELD is a no-op at apply (belt-and-suspenders) ===
+        {
+            Chain c2; c2.append(make_genesis_block(make_cfg()));
+            uint64_t a0 = c2.balance("alice");
+            std::vector<uint8_t> bad = good; bad[97] ^= 1;
+            Block b; b.index = 1; b.prev_hash = c2.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(shield_tx(bad, 0));
+            bool t2 = false;
+            try { c2.append(b); } catch (...) { t2 = true; }
+            check(!t2, "bad-proof: block still applies (invalid SHIELD skipped, A1 intact)");
+            check(c2.accumulated_shielded() == 0 && c2.shielded_note_count() == 0,
+                  "bad-proof: no confidential value or note created");
+            check(c2.balance("alice") == a0,
+                  "bad-proof: sender NOT debited (apply skipped the tx)");
+        }
+
+        // === 5. Duplicate-commitment SHIELD is rejected at apply (no double-mint) ===
+        {
+            Chain c3; c3.append(make_genesis_block(make_cfg()));
+            Block b1; b1.index = 1; b1.prev_hash = c3.head().compute_hash();
+            b1.creators = {"val"}; b1.transactions.push_back(shield_tx(good, 0));
+            c3.append(b1);
+            uint64_t after1 = c3.accumulated_shielded();
+            Block b2; b2.index = 2; b2.prev_hash = c3.head().compute_hash();
+            b2.creators = {"val"}; b2.transactions.push_back(shield_tx(good, 1));
+            c3.append(b2);                      // same commitment -> apply skips it
+            check(c3.accumulated_shielded() == after1 && c3.shielded_note_count() == 1,
+                  "duplicate: re-SHIELDing the same commitment is a no-op (double-mint blocked)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-shield\n" : "  PASS: test-shield\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-cross-shard-supply-invariant") {
         using namespace determ;
         using namespace determ::chain;

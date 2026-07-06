@@ -7,6 +7,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/merkle.hpp>
+#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify
 #include <determ/util/json_validate.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -407,6 +408,22 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     const_leaf("c:accumulated_slashed",  accumulated_slashed_);
     const_leaf("c:accumulated_inbound",  accumulated_inbound_);
     const_leaf("c:accumulated_outbound", accumulated_outbound_);
+    // §3.22: CONDITIONAL — emitted only when non-zero, so a shield-free chain's
+    // state root is byte-identical to a pre-§3.22 chain (unlike the always-present
+    // counters above). The confidential pool below is likewise empty on such chains.
+    if (accumulated_shielded_ != 0)
+        const_leaf("c:accumulated_shielded", accumulated_shielded_);
+
+    // §3.22 confidential commitment set ("cn:" + hex(33-byte commitment)):
+    // value = SHA256(commitment_bytes || height_LE). std::map iteration is sorted,
+    // so leaf order is deterministic. Empty (no leaves) on any shield-free chain.
+    for (auto& [key, height] : shielded_pool_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> cb = from_hex(key);
+        b.append(cb.data(), cb.size());
+        b.append(height);
+        leaves.push_back({k_with_prefix("cn:", key), hash_bytes(b)});
+    }
 
     return leaves;
 }
@@ -575,6 +592,7 @@ Chain::StateSnapshot Chain::create_state_snapshot() const {
     s.accumulated_slashed        = accumulated_slashed_;
     s.accumulated_inbound        = accumulated_inbound_;
     s.accumulated_outbound       = accumulated_outbound_;
+    s.accumulated_shielded       = accumulated_shielded_;   // §3.22 (shielded_pool lazy)
     s.min_stake                  = min_stake_;
     s.suspension_slash           = suspension_slash_;
     s.unstake_delay              = unstake_delay_;
@@ -613,12 +631,15 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
     if (s.dapp_registry)
         dapp_registry_          = std::move(*s.dapp_registry);
+    if (s.shielded_pool)
+        shielded_pool_          = std::move(*s.shielded_pool);   // §3.22 (lazy)
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
     accumulated_slashed_        = s.accumulated_slashed;
     accumulated_inbound_        = s.accumulated_inbound;
     accumulated_outbound_       = s.accumulated_outbound;
+    accumulated_shielded_       = s.accumulated_shielded;   // §3.22
     min_stake_                  = s.min_stake;
     suspension_slash_           = s.suspension_slash;
     unstake_delay_              = s.unstake_delay;
@@ -669,6 +690,10 @@ void Chain::apply_transactions(const Block& b) {
         if (!__snapshot.dapp_registry)
             __snapshot.dapp_registry = dapp_registry_;
     };
+    auto __ensure_shielded_pool = [&]() {          // §3.22 (lazy)
+        if (!__snapshot.shielded_pool)
+            __snapshot.shielded_pool = shielded_pool_;
+    };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
     // effective_height <= this block's index BEFORE replaying the block.
@@ -714,6 +739,7 @@ void Chain::apply_transactions(const Block& b) {
         accumulated_slashed_ = 0;
         accumulated_inbound_ = 0;
         accumulated_outbound_= 0;
+        accumulated_shielded_= 0;   // §3.22 (genesis is always shield-free)
         // Genesis-time invariant trivially holds (live == genesis_total).
         return;
     }
@@ -767,6 +793,27 @@ void Chain::apply_transactions(const Block& b) {
                 block_outbound += tx.amount;
             }
             total_fees += tx.fee;
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::SHIELD: {
+            // §3.22 confidential on-ramp: debit the PUBLIC amount A + fee from the
+            // transparent sender and add the commitment C to the confidential set.
+            // Belt-and-suspenders re-verify (the block validator is the
+            // authoritative accept-rule); skip on any failure, like TRANSFER does.
+            uint64_t A = tx.amount;
+            uint64_t cost = A + tx.fee;
+            if (sender.balance < cost) continue;
+            if (tx.payload.size() != 98) continue;
+            if (determ_shield_verify(tx.payload.data(), tx.payload.size(), A) != 0) continue;
+            std::string ckey = to_hex(tx.payload.data(), 33);   // hex of the 33-byte commitment
+            __ensure_shielded_pool();
+            if (shielded_pool_.count(ckey)) continue;           // duplicate commitment
+            sender.balance -= cost;
+            total_fees += tx.fee;
+            shielded_pool_[ckey] = height;                      // add unspent note
+            accumulated_shielded_ += A;                         // A left the transparent live sum
             sender.next_nonce++;
             break;
         }
@@ -1626,6 +1673,14 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["accumulated_slashed"]  = accumulated_slashed_;
     snap["accumulated_inbound"]  = accumulated_inbound_;
     snap["accumulated_outbound"] = accumulated_outbound_;
+    // §3.22: emit ONLY when non-zero/non-empty so a shield-free chain's snapshot
+    // JSON is byte-identical to a pre-§3.22 one.
+    if (accumulated_shielded_ != 0) snap["accumulated_shielded"] = accumulated_shielded_;
+    if (!shielded_pool_.empty()) {
+        json cn = json::array();
+        for (auto& [k, h] : shielded_pool_) cn.push_back({{"c", k}, {"h", h}});
+        snap["shielded_pool"] = cn;
+    }
 
     // S-032 cache: persist the Phase-1 abort accumulator so a
     // snapshot-bootstrapped node doesn't have to rebuild it from the log.
@@ -1750,6 +1805,10 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.accumulated_slashed_  = snap.value("accumulated_slashed",  uint64_t{0});
     c.accumulated_inbound_  = snap.value("accumulated_inbound",  uint64_t{0});
     c.accumulated_outbound_ = snap.value("accumulated_outbound", uint64_t{0});
+    c.accumulated_shielded_ = snap.value("accumulated_shielded", uint64_t{0});   // §3.22
+    if (snap.contains("shielded_pool") && snap["shielded_pool"].is_array())
+        for (auto& e : snap["shielded_pool"])
+            c.shielded_pool_[e.value("c", std::string{})] = e.value("h", uint64_t{0});
     // genesis_total deferred until after accounts/stakes load so legacy
     // snapshots (without the field) can fall back to live sum.
 

@@ -1030,6 +1030,14 @@ Block build_body(
             sb -= tx.fee;
             break;
         }
+        case TxType::SHIELD: {
+            // §3.22 transparent->confidential on-ramp: debit (amount + fee);
+            // NO transparent credit (value moves into the confidential pool).
+            uint64_t cost = tx.amount + tx.fee;
+            if (sb < cost) continue;
+            sb -= cost;
+            break;
+        }
         }
         nn++;
         b.transactions.push_back(tx);

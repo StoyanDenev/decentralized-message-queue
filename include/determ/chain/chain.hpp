@@ -446,13 +446,21 @@ public:
     uint64_t accumulated_slashed()  const { return accumulated_slashed_; }
     uint64_t accumulated_inbound()  const { return accumulated_inbound_; }
     uint64_t accumulated_outbound() const { return accumulated_outbound_; }
-    // expected_total = the value the live sum must equal post-apply.
+    uint64_t accumulated_shielded() const { return accumulated_shielded_; }
+    // §3.22: number of unspent confidential notes (commitments) in the pool.
+    size_t   shielded_note_count() const { return shielded_pool_.size(); }
+    // expected_total = the value the TRANSPARENT live sum must equal post-apply.
+    // §3.22: value moved into the confidential pool (accumulated_shielded_) leaves
+    // the transparent live sum, so it is subtracted here. Total real supply =
+    // live_total_supply() + accumulated_shielded_ (the confidential pool holds
+    // that value as opaque commitments). Zero for shield-free chains.
     uint64_t expected_total() const {
         return genesis_total_
              + accumulated_subsidy_
              + accumulated_inbound_
              - accumulated_slashed_
-             - accumulated_outbound_;
+             - accumulated_outbound_
+             - accumulated_shielded_;
     }
     // Live sum across accounts.balance + stakes.locked. O(N) over two
     // maps — used by the post-apply assertion and by RPC.
@@ -555,6 +563,16 @@ private:
     // nullopt and skips the deep-copy cost.
     std::map<std::string, DAppEntry>            dapp_registry_;
 
+    // §3.22 confidential-tx shielded pool: the set of confidential output
+    // commitments (unspent notes). Keyed by the lowercase hex of the 33-byte
+    // SEC1-compressed Pedersen commitment; value = the block height it was added
+    // (informational / for future pruning). In the DCT1 "named input" CT model
+    // the commitment IS its own nullifier — a spend names + removes it — so no
+    // separate nullifier derivation is needed. Empty on any shield-free chain
+    // (additive: zero state-root leaves). Lazy-snapshotted (most blocks don't
+    // touch it).
+    std::map<std::string, uint64_t>             shielded_pool_;
+
     // A9 Phase 2C: single lock-free committed view bundling accounts,
     // stakes, and registrants. Published at every successful apply
     // via std::atomic_store on the shared_ptr. Readers atomic_load
@@ -621,6 +639,11 @@ private:
     uint64_t                                    accumulated_slashed_{0};
     uint64_t                                    accumulated_inbound_{0};
     uint64_t                                    accumulated_outbound_{0};
+    // §3.22: total value moved from transparent balances into the confidential
+    // pool via SHIELD. Subtracted in expected_total() so the transparent supply
+    // invariant holds. Zero on shield-free chains (its state-root leaf is emitted
+    // only when non-zero, preserving byte-identity).
+    uint64_t                                    accumulated_shielded_{0};
 
     // A5 Phase 2: staged governance parameter changes keyed by
     // activation height. Ordered map ensures deterministic activation
@@ -700,6 +723,7 @@ private:
         std::optional<MergeStateMap>                        merge_state;
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
         std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
+        std::optional<std::map<std::string, uint64_t>>      shielded_pool;   // §3.22 (lazy)
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>
@@ -713,6 +737,7 @@ private:
         uint64_t accumulated_slashed{0};
         uint64_t accumulated_inbound{0};
         uint64_t accumulated_outbound{0};
+        uint64_t accumulated_shielded{0};   // §3.22
         uint64_t min_stake{0};
         uint64_t suspension_slash{0};
         uint64_t unstake_delay{0};

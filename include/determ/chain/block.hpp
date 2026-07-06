@@ -187,6 +187,15 @@ enum class TxType : uint8_t {
     // types are unchanged; pq_auth is serialized only when non-empty). The
     // accept-rule binds the envelope's ML-DSA key to the `from` address.
     PQ_TRANSFER    = 11,
+    // §3.22 confidential-tx SHIELD (transparent -> confidential on-ramp): debit a
+    // PUBLIC amount A + fee from the transparent `from`, and add a Pedersen
+    // commitment C (payload = C(33) || balance_proof(65)) to the confidential
+    // commitment set. The accept-rule proves C commits to exactly A (the excess
+    // C - A*G opens to zero on H). Additive + state-root-invariant: a chain with
+    // no SHIELD is byte-identical (the cn: namespace + the shielded-supply counter
+    // leaf are emitted only when non-empty/non-zero). Supply-conserving: A moves
+    // from the transparent live sum into accumulated_shielded_.
+    SHIELD         = 12,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use

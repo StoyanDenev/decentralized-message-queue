@@ -52,6 +52,14 @@ int determ_ctx_bundle_serialize(uint8_t *out, size_t out_len,
 // Returns 0 iff the confidential transfer is valid, -1 otherwise.
 int determ_ctx_bundle_verify(const uint8_t *bundle, size_t len);
 
+// SHIELD accept-rule (§3.22 transparent->confidential on-ramp). Verifies that a
+// 98-byte payload (C(33) SEC1-compressed commitment || balance_proof(65)) proves
+// the commitment C commits to EXACTLY the declared PUBLIC `amount` — i.e. the
+// excess E = C - amount*G opens to zero on H (a Schnorr PoK of the blinding r).
+// This stops a depositor injecting value by committing to more than they debit.
+// Returns 0 iff valid, -1 otherwise. Never touches consensus state.
+int determ_shield_verify(const uint8_t *payload, size_t len, uint64_t amount);
+
 #ifdef __cplusplus
 }
 #endif

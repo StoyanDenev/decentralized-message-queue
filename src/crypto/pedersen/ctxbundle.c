@@ -64,3 +64,14 @@ int determ_ctx_bundle_verify(const uint8_t *bundle, size_t len) {
     if (determ_agg_rangeproof_verify(C_out, agg_rp, m, n) != 0) return -1;
     return 0;
 }
+
+int determ_shield_verify(const uint8_t *payload, size_t len, uint64_t amount) {
+    if (payload == 0 || len != 98) return -1;
+    /* E = C - amount*G  (balance excess with C as the single input, NO outputs,
+     * fee = amount). A non-zero return is a malformed commitment or the identity
+     * excess (which would mean amount==0 and r==0) -> reject. */
+    uint8_t E[33];
+    if (determ_p256_balance_excess(E, payload, 1, 0, 0, amount) != 0) return -1;
+    /* The balance proof proves E opens to zero on H, i.e. C = amount*G + r*H. */
+    return determ_p256_balance_verify(E, payload + 33);
+}
