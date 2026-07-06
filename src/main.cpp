@@ -43,6 +43,7 @@
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
 #include <determ/crypto/ff/ffbalance.h>        // §3.20 inc.7: confidential-tx balance proof
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
+#include <determ/crypto/pqauth.hpp>           // §3.21: DPQ1 post-quantum tx-authentication envelope
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
 #include <determ/crypto.hpp>                  // §3.11: determ::c99 C++ wrapper over the C99 stack
@@ -493,6 +494,10 @@ In-process tests (deterministic, no network):
                                               inc.5 poly ops + gamma1 mask; inc.6
                                               matrix/vector; inc.7 keygen; inc.8
                                               sign+verify (all ACVP-pinned)
+  determ test-pqauth                          §3.21 DPQ1 PQ tx-auth envelope:
+                                              ML-DSA (+HYBRID Ed25519) over a tx's
+                                              signing_bytes; frozen corpus byte-
+                                              equal C vs python (verify_pqauth.py)
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -14575,6 +14580,110 @@ int main(int argc, char** argv) {
                       : "had assertion failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-pqauth") {
+        // CRYPTO-C99-SPEC §3.21 — the DPQ1 post-quantum transaction-authentication
+        // envelope (determ::pqauth). Binds a tx's canonical signing_bytes to an
+        // ML-DSA signature, optionally HYBRID with Ed25519. This gate: round-trip +
+        // determinism + tamper/malformed rejection for every scheme, then the frozen
+        // corpus (tools/vectors/pqauth.json) recomputed BYTE-FOR-BYTE through the
+        // shipped determ::pqauth::sign. The file side (tools/verify_pqauth.py) checks
+        // the SAME bytes through an independent python ed25519 + ML-DSA oracle.
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        // Fixed seeds/message matching tools/verify_pqauth.py.
+        std::array<uint8_t,32> mseed{}; for(int i=0;i<32;i++) mseed[i]=(uint8_t)i;
+        std::array<uint8_t,32> eseed{}; for(int i=0;i<32;i++) eseed[i]=(uint8_t)(0x40+i);
+        std::vector<uint8_t> msg(64);  for(int i=0;i<64;i++) msg[i]=(uint8_t)i;
+
+        struct SC { pqauth::Scheme s; const char* name; bool hybrid; };
+        SC cases[] = {
+            {pqauth::Scheme::MLDSA44,"mldsa44",false},
+            {pqauth::Scheme::MLDSA65,"mldsa65",false},
+            {pqauth::Scheme::MLDSA87,"mldsa87",false},
+            {pqauth::Scheme::HYBRID_MLDSA44,"hybrid44",true},
+            {pqauth::Scheme::HYBRID_MLDSA65,"hybrid65",true},
+            {pqauth::Scheme::HYBRID_MLDSA87,"hybrid87",true},
+        };
+        for (auto& c : cases) {
+            std::optional<std::span<const uint8_t,32>> edopt;
+            if (c.hybrid) edopt = std::span<const uint8_t,32>(eseed);
+            auto env  = pqauth::sign(c.s, msg, mseed, edopt);
+            auto vr   = pqauth::verify(env, msg);
+            check(vr.ok && vr.scheme==(uint8_t)c.s && vr.hybrid==c.hybrid,
+                  std::string("roundtrip ")+c.name);
+            // hybrid must recover BOTH pubkeys; pq-only must recover only the pq pubkey.
+            check(!vr.pq_pk.empty() && (vr.ed_pk.empty() != c.hybrid),
+                  std::string("recovered pubkeys ")+c.name);
+            auto env2 = pqauth::sign(c.s, msg, mseed, edopt);
+            check(env==env2, std::string("determinism ")+c.name);
+            auto badmsg = msg; badmsg[0]^=1;
+            check(!pqauth::verify(env, badmsg).ok, std::string("wrong-message reject ")+c.name);
+            auto tam = env; tam.back()^=1;
+            check(!pqauth::verify(tam, msg).ok, std::string("tamper-tail reject ")+c.name);
+        }
+
+        // Hybrid: tampering EITHER half alone must reject (both must pass).
+        {
+            std::optional<std::span<const uint8_t,32>> edopt = std::span<const uint8_t,32>(eseed);
+            auto env = pqauth::sign(pqauth::Scheme::HYBRID_MLDSA65, msg, mseed, edopt);
+            auto t1 = env; t1[env.size()-32]^=1;   // inside ed_sig tail
+            check(!pqauth::verify(t1,msg).ok, "hybrid ed-half tamper reject");
+            auto t2 = env; t2[100]^=1;             // inside pq_sig region
+            check(!pqauth::verify(t2,msg).ok, "hybrid pq-half tamper reject");
+        }
+
+        // Malformed envelopes -> fail closed (never throw; ok=false).
+        {
+            auto env = pqauth::sign(pqauth::Scheme::MLDSA44, msg, mseed, std::nullopt);
+            auto e1=env; e1[0]^=1;                         check(!pqauth::verify(e1,msg).ok, "malformed: bad magic");
+            std::vector<uint8_t> e2(env.begin(), env.begin()+env.size()/2);
+                                                           check(!pqauth::verify(e2,msg).ok, "malformed: truncated");
+            auto e3=env; e3.push_back(0);                  check(!pqauth::verify(e3,msg).ok, "malformed: trailing byte");
+            auto e4=env; e4[4]=0x04;                       check(!pqauth::verify(e4,msg).ok, "malformed: unknown scheme");
+            std::vector<uint8_t> e5;                       check(!pqauth::verify(e5,msg).ok, "malformed: empty");
+        }
+
+        // Frozen corpus: recompute each vector byte-for-byte + verify.
+        {
+            std::string path = (argc>2)? argv[2] : "tools/vectors/pqauth.json";
+            std::ifstream f(path);
+            if(!f) check(false, std::string("corpus present: ")+path);
+            else {
+                json doc; f>>doc; int n=0;
+                for (auto& v : doc) {
+                    std::string name=v.value("name","?");
+                    uint8_t scheme=(uint8_t)v["scheme"].get<int>();
+                    auto vmsg=unhex(v["message"].get<std::string>());
+                    auto vms =unhex(v["mldsa_seed"].get<std::string>());
+                    std::array<uint8_t,32> ms{}; std::copy(vms.begin(),vms.end(),ms.begin());
+                    std::array<uint8_t,32> esa{};
+                    std::optional<std::span<const uint8_t,32>> es;
+                    bool hybrid = (scheme & 0x10)!=0;
+                    if (hybrid && !v["ed_seed"].is_null()) {
+                        auto ve=unhex(v["ed_seed"].get<std::string>());
+                        std::copy(ve.begin(),ve.end(),esa.begin()); es=std::span<const uint8_t,32>(esa);
+                    }
+                    auto env = pqauth::sign((pqauth::Scheme)scheme, vmsg, ms, es);
+                    bool bytes_ok = (hx(env.data(),env.size()) == v["envelope_hex"].get<std::string>());
+                    bool ver_ok   = pqauth::verify(env, vmsg).ok;
+                    check(bytes_ok && ver_ok, std::string("corpus byte-equal + verify: ")+name);
+                    n++;
+                }
+                check(n>0, "corpus non-empty");
+            }
+        }
+
+        if (fail==0) std::cout << "  PASS: pqauth (DPQ1 envelope) unit test\n";
+        return fail==0 ? 0 : 1;
     }
     if (cmd == "test-c99-vectors") {
         // CRYPTO-C99-SPEC §3.13 — the binary half of the vector-file gate.
