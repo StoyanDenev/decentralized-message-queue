@@ -40,6 +40,7 @@
 #include <determ/crypto/pedersen/balance.h>    // §3.19 inc.7: confidential-tx balance proof (P-256)
 #include <determ/crypto/pedersen/ctxbundle.h>  // §3.22: DCT1 confidential-transfer proof bundle
 #include <determ/chain/shielded.hpp>           // §3.22b: unshield_spend_ctx_hash
+#include <determ/crypto/ringsig/lsag.h>        // §3.23: LSAG linkable ring signature
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
@@ -554,6 +555,11 @@ In-process tests (deterministic, no network):
   determ test-p256-confidential-tx-c99        §3.19 inc.8: END-TO-END confidential-tx
                                               composition over P-256 (per-output range +
                                               balance; range catches OOR, balance inflation)
+  determ test-lsag-c99                        §3.23: LSAG linkable ring signature over
+                                              P-256 (input-unlinkability inc.1) — prove
+                                              membership in a ring of n keys without
+                                              revealing which + a key-image nullifier;
+                                              dual-oracle byte-freeze + linkability
   determ test-ff-pedersen-c99                 §3.20: finite-field Pedersen commit
                                               (g^v h^r mod p) over RFC 3526 MODP-
                                               3072 — the MODERN large-prime backend
@@ -14436,6 +14442,73 @@ int main(int argc, char** argv) {
                                     check(determ_ctx_bundle_verify(b.data(),b.size())!=0, "malformed: trailing byte"); }
 
         std::cout << (fail? "  FAIL: p256-ctx-bundle unit test\n" : "  PASS: p256-ctx-bundle unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-lsag-c99") {
+        // §3.23 LSAG linkable ring signature over NIST P-256 (input-unlinkability
+        // increment 1). Pins: sign→verify accepts; the DUAL-ORACLE byte-freeze vs
+        // tools/verify_lsag.py (key image + signature bytes); LINKABILITY (same key
+        // → same key image = the double-spend nullifier; different key → different
+        // image); and tamper / wrong-message / wrong-image / malformed reject.
+        int fail = 0;
+        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        auto setsc = [](uint8_t out[32], uint64_t v){ std::memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); };
+        auto pubkey = [&](uint64_t xv, uint8_t out33[33])->bool{
+            uint8_t x[32], P65[65]; setsc(x, xv);
+            return determ_p256_base_mul(P65, x)==0 && determ_p256_point_compress(out33, P65)==0; };
+
+        const uint64_t xs[4] = {0x1111,0x2222,0x3333,0x4444};
+        const size_t N = 4, ELL = 2;
+        std::vector<uint8_t> ring(N*33);
+        bool okr = true;
+        for (size_t i=0;i<N;i++) okr = okr && pubkey(xs[i], &ring[i*33]);
+        check(okr, "setup: built the ring pubkeys P_i = x_i*G");
+
+        const std::string msg = "spend note #7";
+        uint8_t xsig[32]; setsc(xsig, xs[ELL]);
+        const size_t slen = determ_lsag_sig_len(N);
+        std::vector<uint8_t> sig(slen), I(33);
+        check(determ_lsag_sign(sig.data(), slen, I.data(), (const uint8_t*)msg.data(), msg.size(),
+                               ring.data(), N, xsig, ELL)==0, "sign: produced a ring signature");
+
+        // Dual-oracle byte-freeze: an INDEPENDENT python reference (verify_lsag.py)
+        // reproduces this exact key image + signature from the same inputs.
+        const std::string EXP_IMG = "02e3aff154a04f37f08efebb8d85990c8f0d024be434d005be4ebcc8e329440c10";
+        const std::string EXP_SIG =
+            "b820d54ab9e4f2258b6daf6a2d6785e4325205c4d3412bcc7667fb2f7efc9a3f"
+            "dedd7420cec61722a320c756364282b33a46a3f3e4b611720640134254326280"
+            "0099c3392450c4ec8fe1042d457579dbce106ad6f80ff9a7b80d6522d5d26e33"
+            "9eaa30de3712c0010187064f58592fb540bf62ce9f51f5ed43efd2e4917b4ce5"
+            "8ee396e2dcc36f61c75378679c8cdd94bc3d5eabde9245d3025516b3856a9117";
+        check(to_hex(I.data(),33)==EXP_IMG, "dual-oracle: key image == python verify_lsag.py");
+        check(to_hex(sig.data(),slen)==EXP_SIG, "dual-oracle: signature bytes == python (byte-freeze)");
+
+        check(determ_lsag_verify((const uint8_t*)msg.data(), msg.size(), ring.data(), N,
+                                 I.data(), sig.data(), slen)==0, "verify ACCEPTS the honest ring signature");
+        { std::vector<uint8_t> I2(33);
+          check(determ_lsag_key_image(I2.data(), xsig, &ring[ELL*33])==0 && I2==I,
+                "key_image() standalone == the sign's key image"); }
+
+        // Linkability: same key, different message -> SAME image (the nullifier).
+        { const std::string m2="another spend"; std::vector<uint8_t> sig2(slen), I2(33);
+          determ_lsag_sign(sig2.data(), slen, I2.data(), (const uint8_t*)m2.data(), m2.size(), ring.data(), N, xsig, ELL);
+          check(I2==I, "LINKABILITY: same signing key -> SAME key image (double-spend nullifier)");
+          check(sig2!=sig, "signature changes with the message"); }
+        // Different key -> different image (unlinkable but distinct).
+        { uint8_t x0[32]; setsc(x0, xs[0]); std::vector<uint8_t> sig0(slen), I0(33);
+          determ_lsag_sign(sig0.data(), slen, I0.data(), (const uint8_t*)msg.data(), msg.size(), ring.data(), N, x0, 0);
+          check(I0!=I, "a different signing key -> a different key image"); }
+
+        { auto b=sig; b[40]^=1;
+          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I.data(),b.data(),slen)!=0, "tampered signature rejects"); }
+        { const std::string wm="different msg";
+          check(determ_lsag_verify((const uint8_t*)wm.data(),wm.size(),ring.data(),N,I.data(),sig.data(),slen)!=0, "wrong-message rejects"); }
+        { uint8_t x0[32]; setsc(x0,xs[0]); std::vector<uint8_t> I0(33); determ_lsag_key_image(I0.data(),x0,&ring[0]);
+          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I0.data(),sig.data(),slen)!=0, "wrong key image rejects"); }
+        { std::vector<uint8_t> b(slen-1,0);
+          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
+
+        std::cout << (fail? "  FAIL: lsag-c99 unit test\n" : "  PASS: lsag-c99 unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {

@@ -139,6 +139,10 @@ add_library(determ-crypto-c99 STATIC
   # `determ test-p256-balance-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/balance.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ctxbundle.c"  # §3.22 DCT1 confidential-transfer bundle
+  # §3.23: LSAG linkable ring signature over P-256 (input-unlinkability inc.1 —
+  # CryptoNote membership + key-image nullifier) — pure composition over the P-256
+  # + RFC 9380 hash-to-curve public API; `determ test-lsag-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/lsag.c"
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
   # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4

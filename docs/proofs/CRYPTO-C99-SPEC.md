@@ -1556,6 +1556,14 @@ The **first consensus consumer of the CTX-1 DCT1 bundle**: a confidential→conf
 - **Gate**: `test-confidential-transfer` (valid 2-in/2-out applies + supply conserved + A1; tamper/double-spend no-op; the duplicate-input inflation guard) via `tools/test_confidential_transfer.sh`. Clean refute-by-default adversarial audit.
 - **Non-claims.** Amount-private but **NOT input-unlinkable** (inputs are named → the note graph is visible; hidden inputs need a nullifier-from-secret + set-membership argument — a larger owner-gated increment); **no on-chain output-secret delivery** (recipient channel is off-chain); adds NO new crypto primitive (reuses the CTX-1 DCT1 bundle). Not post-quantum; single-shard / P-256.
 
+### 3.23 LSAG linkable ring signature over P-256 (`determ::ringsig`) — **SHIPPED (input-unlinkability inc.1: library primitive)**
+
+The **input-unlinkability** track — the primitive that will let a confidential spend prove it consumes *one of N* pool notes **without revealing which** (closing [`ShieldedPoolSoundness.md`](ShieldedPoolSoundness.md) NC-7, the visible note graph). The **Liu-Wei-Wong 2004** Linkable Spontaneous Anonymous Group signature (the CryptoNote / early-Monero RingCT membership primitive). Full accounting: [`LsagRingSignatureSoundness.md`](LsagRingSignatureSoundness.md) (LSAG-1..6).
+
+- **Construction** (`src/crypto/ringsig/lsag.c`): a signer who knows the private key `x` of ONE of `n` ring pubkeys `{P_i = x_i·G}` proves membership without revealing which, and publishes a **key image** `I = x·H_p(P_signer)` (`H_p` = RFC 9380 SSWU RO map) that is DETERMINISTIC in the signing key — the **double-spend nullifier**. Wire: ring = `n` compressed pubkeys; sig = `c0(32) ‖ s_0..s_{n-1}` = `32·(n+1)` B. Verify walks the challenge ring `c := hash_to_scalar(prefix ‖ compress(s_i·G + c·P_i) ‖ compress(s_i·H_p_i + c·I))` and accepts iff it closes (`c == c0`); `prefix = SHA-256(DOM ‖ n ‖ ring ‖ I ‖ msg)` binds ring+image+message. Built ENTIRELY on the shipped §3.8c/§3.9b P-256 API — adds NO new hardness assumption (soundness = P-256 ECDLP + ROM).
+- **Dual-oracle**: `test-lsag-c99` (C — sign/verify + linkability + tamper/wrong-msg/wrong-image/malformed reject + a key-image + signature byte KAT) + `tools/verify_lsag.py` (INDEPENDENT python: own P-256 ladder + RFC 9380 hash-to-curve) reproducing the same image + signature byte-for-byte into `tools/vectors/lsag.json`. Deterministic signing (RFC-6979-style nonces).
+- **NOT a consensus feature.** This is a LIBRARY primitive. An unlinkable confidential SPEND needs a shielded-pool integration — per-note spend keys + ring selection + an on-chain **key-image (nullifier) set** for double-spend rejection, composed with the §3.22c amount-hiding proofs — a separate, owner-gated step. O(N) size (the log-size Groth-Kohlweiss / Lelantus one-of-many is a later optimization); NOT constant-time; NOT post-quantum.
+
 ---
 
 ## 4. Total estimated cost
