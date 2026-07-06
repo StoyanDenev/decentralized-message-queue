@@ -41,6 +41,7 @@
 #include <determ/crypto/pedersen/ctxbundle.h>  // §3.22: DCT1 confidential-transfer proof bundle
 #include <determ/chain/shielded.hpp>           // §3.22b: unshield_spend_ctx_hash
 #include <determ/crypto/ringsig/lsag.h>        // §3.23: LSAG linkable ring signature
+#include <determ/crypto/ringsig/clsag.h>       // §3.23b: CLSAG concise linkable ring sig
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
@@ -559,6 +560,12 @@ In-process tests (deterministic, no network):
                                               P-256 (input-unlinkability inc.1) — prove
                                               membership in a ring of n keys without
                                               revealing which + a key-image nullifier;
+                                              dual-oracle byte-freeze + linkability
+  determ test-clsag-c99                       §3.23b: CLSAG concise linkable ring
+                                              signature over P-256 (input-unlinkability
+                                              inc.2) — two key layers (spend + amount
+                                              commitment) folded into ONE concise ring
+                                              via hash aggregation (the RingCT primitive);
                                               dual-oracle byte-freeze + linkability
   determ test-ff-pedersen-c99                 §3.20: finite-field Pedersen commit
                                               (g^v h^r mod p) over RFC 3526 MODP-
@@ -14509,6 +14516,88 @@ int main(int argc, char** argv) {
           check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
 
         std::cout << (fail? "  FAIL: lsag-c99 unit test\n" : "  PASS: lsag-c99 unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-clsag-c99") {
+        // §3.23b CLSAG concise linkable ring signature over NIST P-256 (input-
+        // unlinkability increment 2). Pins: sign→verify accepts; the DUAL-ORACLE
+        // byte-freeze vs tools/verify_clsag.py (key image I, aux image D, and the
+        // signature bytes); LINKABILITY (same spend key → same key image = the
+        // double-spend nullifier, independent of the pseudo-out / message); and
+        // tamper / wrong-message / wrong-aux-image / wrong-key-image / wrong-
+        // pseudo-out / malformed reject. Inputs are the frozen ring4/idx2 vector.
+        int fail = 0;
+        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        auto cat = [](const std::vector<std::string>& hs){ std::vector<uint8_t> v; for(auto&h:hs){auto b=from_hex(h); v.insert(v.end(),b.begin(),b.end());} return v; };
+        auto setsc = [](uint64_t v){ std::vector<uint8_t> out(32,0); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); return out; };
+
+        std::vector<uint8_t> ringP = cat({
+            "020dcc7648c78a3118f2612866fe83ef19f40304f623399e1211a10f2b3d1c05cf",
+            "03a62f048f367359809c2d46c2049d7d7bf268c3c073c472753cb18a24a8ad20b1",
+            "038570e95d85825286db92c78317679bdd8ffe3c90d0af84291bf64132b66fcc99",
+            "02a85b3aad6f3a346d85523141cb434e1caf4c642b2b3cc952cb07a635cb6a1df1"});
+        std::vector<uint8_t> ringC = cat({
+            "039c187c0e128b6ffb2944bd0a58655308317a138c3750371108a91fc3745f8ede",
+            "028569c67980f7e1ffbf10a1b80592891b6fcbddc59608f5860fb54fcbc0f7b1df",
+            "028027a151e81320f99ca7e22be72c24e26b9d14a9b9e81fb64a9086d1a6aadbf3",
+            "03ed221d077db1efa09bec84be5ebc6c0d49d38b3753a8933ec7396dc4a70a7fea"});
+        std::vector<uint8_t> coff = from_hex("031e0ad64bafb42b47ad5504f8fc6d19311c7769430814d79d7e403c55dcd48945");
+        std::vector<uint8_t> p    = from_hex("0000000000000000000000000000000000000000000000000000000000003333");
+        std::vector<uint8_t> z    = from_hex("0000000000000000000000000000000000000000000000000000000000000161");
+        const size_t N = 4, ELL = 2;
+        const std::string msg = "clsag spend note #7";
+
+        const size_t slen = determ_clsag_sig_len(N);
+        std::vector<uint8_t> sig(slen), I(33), D(33);
+        check(determ_clsag_sign(sig.data(), slen, I.data(), D.data(),
+                                (const uint8_t*)msg.data(), msg.size(),
+                                ringP.data(), ringC.data(), N, coff.data(),
+                                p.data(), z.data(), ELL)==0, "sign: produced a concise ring signature");
+
+        // Dual-oracle byte-freeze: an INDEPENDENT python reference (verify_clsag.py)
+        // reproduces this exact key image, aux image, and signature.
+        const std::string EXP_IMG = "02bb52567ad8c271b70c9e9e692de340fb412882101d380116b3d1cf43a923b8be";
+        const std::string EXP_D   = "03b3c4ddcb9c980ffa1ee0683fca36bb2bc7a3889a7bed5990a8310b4c181e7781";
+        const std::string EXP_SIG =
+            "abf36aa4e76b1540dbb90e7e0bbc6692aafc66f1a994510d720681442901d2cd"
+            "df64852f2ab153e9fd85512c7b1e030bef0282bbe2e24568a8d1cfb5d3a5f09d"
+            "c1832fb51f06d30f56d4d5fbe7098b5ffc6371b9f52ff63914aee8a2697b1c6f"
+            "c555614b43bfa8453eab4abdbc23740e0056b1eb4b3fc658888a5716654fe62b"
+            "0d36d2a11629792cb3bdbc7f0eecf782a96c8379dc5c7aec7ea94b4cc39dd20f";
+        check(to_hex(I.data(),33)==EXP_IMG, "dual-oracle: key image I == python verify_clsag.py");
+        check(to_hex(D.data(),33)==EXP_D,   "dual-oracle: aux image D == python verify_clsag.py");
+        check(to_hex(sig.data(),slen)==EXP_SIG, "dual-oracle: signature bytes == python (byte-freeze)");
+
+        check(determ_clsag_verify((const uint8_t*)msg.data(), msg.size(), ringP.data(), ringC.data(), N,
+                                  coff.data(), I.data(), D.data(), sig.data(), slen)==0,
+              "verify ACCEPTS the honest concise ring signature");
+        { std::vector<uint8_t> I2(33), D2(33);
+          check(determ_clsag_key_images(I2.data(), D2.data(), p.data(), z.data(), &ringP[ELL*33])==0 && I2==I && D2==D,
+                "key_images() standalone == the sign's I and D"); }
+
+        // Linkability: same spend key, different message -> SAME key image I (the
+        // nullifier is independent of the message and pseudo-out).
+        { const std::string m2="another spend"; std::vector<uint8_t> sig2(slen), I2(33), D2(33);
+          determ_clsag_sign(sig2.data(), slen, I2.data(), D2.data(), (const uint8_t*)m2.data(), m2.size(),
+                            ringP.data(), ringC.data(), N, coff.data(), p.data(), z.data(), ELL);
+          check(I2==I, "LINKABILITY: same spend key -> SAME key image (double-spend nullifier)");
+          check(sig2!=sig, "signature changes with the message"); }
+        // Different spend key (ring member 0, x=0x1111) -> different key image.
+        { std::vector<uint8_t> p0=setsc(0x1111), I0(33), D0(33);
+          determ_clsag_key_images(I0.data(), D0.data(), p0.data(), z.data(), &ringP[0]);
+          check(I0!=I, "a different spend key -> a different key image"); }
+
+        { auto b=sig; b[40]^=1;
+          check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),b.data(),slen)!=0, "tampered signature rejects"); }
+        { const std::string wm="different msg";
+          check(determ_clsag_verify((const uint8_t*)wm.data(),wm.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),sig.data(),slen)!=0, "wrong-message rejects"); }
+        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),I.data(),sig.data(),slen)!=0, "wrong aux image D rejects"); }
+        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),D.data(),D.data(),sig.data(),slen)!=0, "wrong key image I rejects"); }
+        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,ringC.data()/*wrong pseudo-out*/,I.data(),D.data(),sig.data(),slen)!=0, "wrong pseudo-out rejects"); }
+        { std::vector<uint8_t> b(slen-1,0);
+          check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
+
+        std::cout << (fail? "  FAIL: clsag-c99 unit test\n" : "  PASS: clsag-c99 unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {

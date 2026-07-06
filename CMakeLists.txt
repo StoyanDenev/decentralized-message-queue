@@ -143,6 +143,11 @@ add_library(determ-crypto-c99 STATIC
   # CryptoNote membership + key-image nullifier) — pure composition over the P-256
   # + RFC 9380 hash-to-curve public API; `determ test-lsag-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/lsag.c"
+  # §3.23b: CLSAG concise linkable ring signature over P-256 (input-unlinkability
+  # inc.2 — Monero RingCT membership + balance; TWO key layers folded into ONE
+  # concise ring via hash aggregation) — pure composition over the same P-256 +
+  # RFC 9380 hash-to-curve public API; `determ test-clsag-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/clsag.c"
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
   # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4
