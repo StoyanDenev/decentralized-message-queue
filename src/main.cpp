@@ -14388,6 +14388,14 @@ int main(int argc, char** argv) {
         bool okser = blen>0 && determ_ctx_bundle_serialize(bundle.data(),blen,Ci,n_in,Co,m,n,fee,agg.data(),bproof)==0;
         check(okser, std::string("serialize (len=")+std::to_string(blen)+")");
         check(okser && determ_ctx_bundle_verify(bundle.data(),blen)==0, "verify ACCEPTS an honest confidential transfer");
+        // Dual-oracle byte-freeze: an INDEPENDENT python oracle (tools/verify_ctx_bundle.py,
+        // composing verify_pedersen + verify_bp_agg_rangeproof + verify_p256_balance)
+        // reproduces this exact bundle; pin C == python by its SHA-256.
+        { uint8_t h[32]; determ_sha256(bundle.data(), bundle.size(), h);
+          static const char* Hx="0123456789abcdef"; std::string hs;
+          for(int i=0;i<32;i++){ hs.push_back(Hx[h[i]>>4]); hs.push_back(Hx[h[i]&0xf]); }
+          check(hs=="dfa6e800f3887957b3ddf90f8cc2ca61bcd6005911b865921b4b3226468a0e18",
+                "bundle SHA-256 == python oracle (dual-oracle byte-freeze)"); }
 
         // Tamper each region -> reject.
         auto tamper=[&](size_t off,const std::string& what){ auto b=bundle; b[off]^=0x01; check(determ_ctx_bundle_verify(b.data(),b.size())!=0, what); };
