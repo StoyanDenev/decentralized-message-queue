@@ -138,6 +138,7 @@ add_library(determ-crypto-c99 STATIC
   # conservation half) — pure composition over the pedersen/P-256 public API,
   # `determ test-p256-balance-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/balance.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ctxbundle.c"  # §3.22 DCT1 confidential-transfer bundle
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
   # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4

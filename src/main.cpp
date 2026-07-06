@@ -38,6 +38,7 @@
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
 #include <determ/crypto/pedersen/balance.h>    // §3.19 inc.7: confidential-tx balance proof (P-256)
+#include <determ/crypto/pedersen/ctxbundle.h>  // §3.22: DCT1 confidential-transfer proof bundle
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
@@ -14342,6 +14343,69 @@ int main(int argc, char** argv) {
             check(o3, "RANGE VIOLATION (output = 2^n): that output's RANGE proof rejects");
         }
         std::cout << (fail? "  FAIL: p256-confidential-tx-c99 unit test\n" : "  PASS: p256-confidential-tx-c99 unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-p256-ctx-bundle") {
+        // §3.22: the DCT1 confidential-transfer proof BUNDLE — serialize
+        // {C_in, C_out, aggregated range proof, balance proof} + fail-closed verify
+        // (range AND balance). test-p256-confidential-tx-c99 pins the crypto; THIS
+        // pins the serialization layout + the accept / tamper / malformed verify.
+        int fail=0;
+        auto check=[&](bool ok,const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        auto setsc=[](uint8_t out[32], uint64_t v){ std::memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); };
+        auto commit=[&](uint8_t out33[33],uint64_t v,uint64_t r)->int{ uint8_t vs[32],rs[32]; setsc(vs,v); setsc(rs,r); return determ_pedersen_commit(out33,vs,rs); };
+
+        const size_t n=4, m=2, n_in=2;
+        const uint64_t v_in[2]={3,1}, r_in[2]={500,400}, v_out[2]={2,1}, r_out[2]={333,444}, fee=1;
+        uint8_t Ci[2*33], Co[2*33];
+        bool okc=true;
+        for (size_t j=0;j<n_in;j++) okc = okc && commit(&Ci[j*33], v_in[j], r_in[j])==0;
+        for (size_t j=0;j<m;j++)    okc = okc && commit(&Co[j*33], v_out[j], r_out[j])==0;
+
+        // ONE aggregated range proof over the m outputs; gammas = r_out so V == C_out.
+        uint8_t alpha[32],rho[32],tau1[32],tau2[32];
+        setsc(alpha,17); setsc(rho,19); setsc(tau1,23); setsc(tau2,29);
+        std::vector<uint8_t> sL(m*n*32), sR(m*n*32);
+        for (size_t i=0;i<m*n;i++){ setsc(&sL[i*32], 31+7*i); setsc(&sR[i*32], 41+11*i); }
+        uint64_t vals[2]={v_out[0],v_out[1]};
+        uint8_t gammas[2*32]; setsc(&gammas[0], r_out[0]); setsc(&gammas[32], r_out[1]);
+        size_t agglen=determ_agg_rangeproof_proof_len(m,n);
+        std::vector<uint8_t> agg(agglen), V(m*33);
+        bool okagg = agglen>0 && determ_agg_rangeproof_prove(V.data(),agg.data(),vals,gammas,alpha,rho,tau1,tau2,sL.data(),sR.data(),m,n)==0
+                     && std::memcmp(V.data(), Co, m*33)==0;   // composition identity V == C_out
+        check(okc && okagg, "components: commitments + aggregated range proof (V == C_out)");
+
+        // Balance proof: x = Sum(r_in) - Sum(r_out) = 123.
+        uint8_t Exc[33], x[32], k[32], bproof[DETERM_P256_BALANCE_PROOF_BYTES];
+        setsc(x, r_in[0]+r_in[1]-r_out[0]-r_out[1]); setsc(k, 0x5151);
+        bool okbal = determ_p256_balance_excess(Exc, Ci, n_in, Co, m, fee)==0
+                  && determ_p256_balance_prove(bproof, Exc, x, k)==0;
+        check(okbal, "balance proof built");
+
+        // Serialize + verify (accept).
+        size_t blen=determ_ctx_bundle_len(n_in,m,n);
+        std::vector<uint8_t> bundle(blen);
+        bool okser = blen>0 && determ_ctx_bundle_serialize(bundle.data(),blen,Ci,n_in,Co,m,n,fee,agg.data(),bproof)==0;
+        check(okser, std::string("serialize (len=")+std::to_string(blen)+")");
+        check(okser && determ_ctx_bundle_verify(bundle.data(),blen)==0, "verify ACCEPTS an honest confidential transfer");
+
+        // Tamper each region -> reject.
+        auto tamper=[&](size_t off,const std::string& what){ auto b=bundle; b[off]^=0x01; check(determ_ctx_bundle_verify(b.data(),b.size())!=0, what); };
+        tamper(7,                          "tamper fee -> reject");
+        tamper(15,                         "tamper a C_in byte -> reject");
+        tamper(15+n_in*33,                 "tamper a C_out byte -> reject");
+        tamper(15+n_in*33+m*33+4,          "tamper an agg-rangeproof byte -> reject");
+        tamper(blen-1,                     "tamper a balance-proof byte -> reject");
+
+        // Malformed -> fail closed.
+        { auto b=bundle; b[0]^=1;   check(determ_ctx_bundle_verify(b.data(),b.size())!=0, "malformed: bad magic"); }
+        { std::vector<uint8_t> b(bundle.begin(), bundle.begin()+blen/2);
+                                    check(determ_ctx_bundle_verify(b.data(),b.size())!=0, "malformed: truncated"); }
+        { auto b=bundle; b[6]=3;    check(determ_ctx_bundle_verify(b.data(),b.size())!=0, "malformed: n not a power of two"); }
+        { auto b=bundle; b.push_back(0);
+                                    check(determ_ctx_bundle_verify(b.data(),b.size())!=0, "malformed: trailing byte"); }
+
+        std::cout << (fail? "  FAIL: p256-ctx-bundle unit test\n" : "  PASS: p256-ctx-bundle unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {
