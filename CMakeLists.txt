@@ -282,6 +282,7 @@ add_executable(determ-light
   light/trustless_read.cpp
   light/keyfile.cpp
   light/sign_tx.cpp
+  light/pq_sign_tx.cpp
   light/watch.cpp
   light/export.cpp
   light/verify_archive.cpp
@@ -294,6 +295,7 @@ add_executable(determ-light
   src/crypto/merkle.cpp
   src/crypto/keys.cpp
   src/crypto/sha256.cpp
+  src/crypto/pqauth.cpp          # §3.21 DPQ1 PQ tx-auth envelope (determ::pqauth)
   src/chain/block.cpp
   src/chain/genesis.cpp
 )

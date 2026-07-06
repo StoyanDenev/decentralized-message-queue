@@ -63,6 +63,7 @@
 #include "trustless_read.hpp"
 #include "keyfile.hpp"
 #include "sign_tx.hpp"
+#include "pq_sign_tx.hpp"
 #include "watch.hpp"
 #include "export.hpp"
 #include "verify_archive.hpp"
@@ -320,6 +321,16 @@ void print_usage() {
         "  sign-tx --keyfile <path> --type {TRANSFER|STAKE|UNSTAKE}\n"
         "          --to <addr> --amount <N> --fee <N> --nonce <N> [--out <file>]\n"
         "      Offline sign with operator-supplied nonce.\n"
+        "  pq-sign-tx --type {TRANSFER|STAKE|UNSTAKE} --from <addr> --to <addr>\n"
+        "             --amount <N> --fee <N> --nonce <N>\n"
+        "             --scheme {mldsa44|mldsa65|mldsa87|hybrid44|hybrid65|hybrid87}\n"
+        "             --mldsa-seed <hex32> [--ed-seed <hex32>] [--out <file>]\n"
+        "      Post-quantum tx authentication (CRYPTO-C99-SPEC §3.21): bind the tx's\n"
+        "      canonical signing_bytes with a DPQ1 ML-DSA (optionally +Ed25519 hybrid)\n"
+        "      envelope. --ed-seed is required for hybrid*. Client tooling; the\n"
+        "      consensus accept-rule for such a tx is a separate, owner-gated step.\n"
+        "  pq-verify-tx --file <tx.json>\n"
+        "      Offline-verify a DPQ1-authenticated tx (exit 0 verified / 3 invalid).\n"
         "  submit-tx --rpc-port <N> --tx-json <file>\n"
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
@@ -7683,6 +7694,8 @@ int main(int argc, char** argv) {
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
+        if (cmd == "pq-sign-tx")            return cmd_pq_sign_tx(sub_argc, sub_argv);
+        if (cmd == "pq-verify-tx")          return cmd_pq_verify_tx(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
