@@ -77,17 +77,31 @@ inline constexpr uint64_t SUSPENSION_SLASH = 10;
 // Bundling crypto with timing reflects this real-world alignment rather
 // than exposing two orthogonal selection axes.
 //
-//   MODERN: cryptographically-strongest defaults — XChaCha20-Poly1305 AEAD,
-//           Argon2id passphrase KDF, secp256k1 + Bulletproofs for confidential
-//           transactions, secp256k1 OPRF for T-OPAQUE. Faster + safer with
-//           random nonces; not FIPS-validated. Default for non-FIPS deployments.
+// NOTE (crypto is a POSTURE, not a code switch — see the TimingProfile note
+// below, DECISION-LOG 2026-07-03): the one binary contains all algorithms; the
+// profile documents the intended algorithm PREFERENCE, and real FIPS 140
+// compliance is a deployment property (a pluggable CMVP-validated module).
 //
-//   FIPS:   FIPS 140-2/3 compliant — AES-256-GCM AEAD (FIPS 197 + SP 800-38D),
+//   MODERN: cryptographically-strongest defaults — XChaCha20-Poly1305 AEAD,
+//           Argon2id passphrase KDF, and — for confidential transactions — the
+//           big-prime Z_p* (RFC 3526 MODP-3072) Pedersen + Bulletproofs backend
+//           (§3.20, the MODERN large-prime ZK stack; a library primitive today,
+//           not yet wired to consensus). secp256k1 OPRF for T-OPAQUE. Faster +
+//           safer with random nonces; not FIPS-validated. Default for non-FIPS
+//           deployments.
+//
+//   FIPS:   FIPS-ALIGNED posture — AES-256-GCM AEAD (FIPS 197 + SP 800-38D),
 //           PBKDF2-HMAC-SHA-256 passphrase KDF (SP 800-132; substantially weaker
-//           than Argon2id), NIST P-256 for prime-order needs (no FIPS-validated
-//           Bulletproofs → CONFIDENTIAL TRANSACTIONS UNAVAILABLE in FIPS profile),
-//           P-256 OPRF for T-OPAQUE. Required for military/defense/government/
-//           regulated-healthcare deployments. Mandated for tactical profile.
+//           than Argon2id), NIST P-256 for prime-order needs. Confidential
+//           transactions (Pedersen + Bulletproofs over P-256, §3.19 / the §3.22
+//           shielded pool) AND input-unlinkability ring signatures (§3.23) ARE
+//           available and are built on FIPS-approved primitives (P-256 + SHA-256)
+//           — but the ZK CONSTRUCTIONS themselves are NOT FIPS-validated
+//           ALGORITHMS (NIST has no approved range-proof / ring-signature
+//           standard), so a deployment requiring per-operation CMVP validation
+//           treats them as out-of-module. P-256 OPRF for T-OPAQUE. Required for
+//           military/defense/government/regulated-healthcare deployments.
+//           Mandated for tactical profile.
 enum class CryptoProfile : uint8_t {
     MODERN = 0,
     FIPS   = 1,
@@ -162,8 +176,10 @@ struct TimingProfile {
 // Trade-offs of FIPS that operators accept by choosing cluster:
 //   - PBKDF2 instead of Argon2id (weaker passphrase hashing — operators
 //     mitigate by enforcing strong-password policy or hardware-protected keys)
-//   - NIST P-256 instead of secp256k1 (different curve family)
-//   - NO CONFIDENTIAL TRANSACTIONS (no FIPS-validated range proofs)
+//   - NIST P-256 (vs the MODERN profile's big-prime Z_p* large-prime backend)
+//   - Confidential-tx ZK (P-256 range proofs / ring signatures) is FIPS-ALIGNED
+//     (built on P-256 + SHA-256) but NOT a FIPS-validated ALGORITHM — a deployment
+//     needing per-op CMVP validation treats it as out-of-module
 //   - AES-256-GCM instead of XChaCha20-Poly1305 (FIPS-validated AEAD)
 //
 // Non-FIPS commercial single-cluster deployments (small commercial
@@ -211,8 +227,10 @@ inline constexpr TimingProfile PROFILE_GLOBAL {
 // Trade-offs of FIPS that operators accept by choosing tactical:
 //   - PBKDF2 instead of Argon2id (significantly weaker passphrase hashing —
 //     not a primary concern in tactical where keys are pre-provisioned)
-//   - NIST P-256 instead of secp256k1 (different curve family)
-//   - NO CONFIDENTIAL TRANSACTIONS (no FIPS-validated range proofs)
+//   - NIST P-256 (vs the MODERN profile's big-prime Z_p* large-prime backend)
+//   - Confidential-tx ZK (P-256 range proofs / ring signatures) is FIPS-ALIGNED
+//     (built on P-256 + SHA-256) but NOT a FIPS-validated ALGORITHM — a deployment
+//     needing per-op CMVP validation treats it as out-of-module
 //   - AES-256-GCM instead of XChaCha20-Poly1305 (FIPS-validated AEAD)
 //
 // Non-regulated "tactical-shape" deployments (commercial drones, industrial
