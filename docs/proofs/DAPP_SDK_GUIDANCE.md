@@ -18,7 +18,7 @@
 
 | Profile | Shape | Why |
 |---|---|---|
-| **FIPS** (`tactical`, `cluster`) | **Smart-client web UI** — fully browser-based; no native component required | SJCL's primitive coverage matches the FIPS primitive set exactly. Self-contained browser deliverable; small audit surface; no native installation friction. Confidential transactions don't exist in FIPS (per C99-11), so the heavy MODERN-only primitives (Bulletproofs, secp256k1, ChaCha20) are not needed. |
+| **FIPS** (`tactical`, `cluster`) | **Smart-client web UI** — fully browser-based; no native component required | SJCL's primitive coverage matches the FIPS primitive set exactly. Self-contained browser deliverable; small audit surface; no native installation friction. The FIPS primitive set is NIST P-256 / AES-256-GCM / PBKDF2, so the MODERN-only libraries (secp256k1, ChaCha20) aren't needed browser-side. (FIPS does support confidential-tx via the P-256 shielded pool, but its Bulletproof verification stays server-side, like the MODERN row.) |
 | **MODERN** (`web`, `regional`, `global`) | **Native DLT client + web interface** — native app handles wire-format crypto; web interface uses SJCL for UI-layer concerns | Browser-side Bulletproof verification has no maintained C99-WASM port; secp256k1 + ChaCha20 + Argon2id are similarly browser-friction-heavy at production-grade. Native client takes ownership of wire-format crypto; web layer becomes a thin UI. |
 
 This split is the **load-bearing architectural choice** that this doc documents. Specific stack recommendations follow.
@@ -44,7 +44,7 @@ Total browser-side surface: SJCL + ~20 LOC HKDF wrapper.
 
 ### 2.2 What's NOT needed
 
-Because FIPS profile excludes confidential transactions (C99-11):
+Because the FIPS browser smart-client uses NIST P-256 / AES-256-GCM / PBKDF2 and leaves wire-format ZK (Bulletproof / Pedersen) verification server-side:
 - ❌ Bulletproof range-proof verification
 - ❌ Pedersen commitment operations
 - ❌ secp256k1 primitives

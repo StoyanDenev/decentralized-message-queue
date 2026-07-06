@@ -58,7 +58,7 @@ Because no master key exists, auditors evaluating a `PFS_ONLY` deployment cannot
 3. **Auditor verifies the disclosure cryptographically** in five steps (no trust in sender's word required):
    a. Fetch tx_hash from chain → confirm `tx.to == recipient_addr` and tx is in `AMT_PFS` mode.
    b. Fetch the original `PUBLISH_OTPK_BATCH` from chain history → recover the OTPK pubkey for `otpk_id`.
-   c. Recompute the Pedersen commitment: `commitment = amount · G + blinding_factor · H` (on secp256k1).
+   c. Recompute the Pedersen commitment: `commitment = amount · G + blinding_factor · H` (on NIST P-256).
    d. Compare against `tx.amount_commitment` on-chain.
    e. If equal → sender's disclosure is cryptographically verified. If unequal → sender is providing false information; auditor knows the disclosed amount is wrong but does not learn the true amount.
 

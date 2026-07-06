@@ -63,7 +63,7 @@ Three categories chosen 2026-05-24. Partner-activity-threshold deliberately NOT 
 
 **Subsystems requiring zero-bug windows** (populated pre-beta; placeholder list):
 - Consensus apply path (block validation, state transition): zero bugs in last [TBD] days
-- Cryptographic primitives (secp256k1 ECDSA + ECDH + Bulletproofs, FROST-Ed25519): zero bugs in last [TBD] days
+- Cryptographic primitives (P-256 ECDSA + ECDH + Bulletproofs, FROST-Ed25519): zero bugs in last [TBD] days
 - Wallet (key management, tx construction, OTPK lifecycle): zero bugs in last [TBD] days
 - Beaconless v2 manifest validation: zero bugs in last [TBD] days
 - v2.22 confidential-amount apply path (Pedersen, range-proof verify): zero bugs in last [TBD] days
