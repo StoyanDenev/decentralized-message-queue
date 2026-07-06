@@ -969,6 +969,7 @@ Block build_body(
 
         uint64_t& sb = get_bal(tx.from);
         switch (tx.type) {
+        case TxType::PQ_TRANSFER:   // §3.21: identical build-body semantics to TRANSFER
         case TxType::TRANSFER: {
             uint64_t cost = tx.amount + tx.fee;
             if (sb < cost) continue;

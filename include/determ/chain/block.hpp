@@ -178,6 +178,15 @@ enum class TxType : uint8_t {
     // tx.to == own_domain, decrypts the payload with its
     // service_pubkey, and dispatches to internal handlers.
     DAPP_CALL      = 10,
+    // §3.21 post-quantum transfer. Same balance/nonce/fee semantics as
+    // TRANSFER, but the sender is a PQ-native BEARER account whose address
+    // commits to an ML-DSA (FIPS 204) public key (is_pq_anon_address), and
+    // authenticity is a DPQ1 envelope (determ::pqauth) carried in the new
+    // `pq_auth` field instead of the 64-byte Ed25519 `sig`. Additive: a chain
+    // with no PQ_TRANSFER is byte-identical (signing_bytes + the existing tx
+    // types are unchanged; pq_auth is serialized only when non-empty). The
+    // accept-rule binds the envelope's ML-DSA key to the `from` address.
+    PQ_TRANSFER    = 11,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use
@@ -212,6 +221,11 @@ struct Transaction {
     std::vector<uint8_t> payload;
     Signature            sig{};
     Hash                 hash{};
+    // §3.21 PQ_TRANSFER authenticator: a DPQ1 envelope (determ::pqauth) over
+    // signing_bytes. Empty for every non-PQ tx type — and, like `sig`/`hash`,
+    // it is NOT part of signing_bytes (a signature cannot sign itself) and is
+    // serialized only when non-empty, so existing txs are byte-identical.
+    std::vector<uint8_t> pq_auth;
 
     std::vector<uint8_t> signing_bytes() const;
     Hash                 compute_hash() const;

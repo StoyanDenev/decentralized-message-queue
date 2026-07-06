@@ -44,6 +44,9 @@ json Transaction::to_json() const {
     j["payload"] = to_hex(payload.data(), payload.size());
     j["sig"]     = to_hex(sig);
     j["hash"]    = to_hex(hash);
+    // §3.21: the DPQ1 PQ authenticator is emitted ONLY when present, so every
+    // non-PQ tx serializes byte-identically to before this field existed.
+    if (!pq_auth.empty()) j["pq_auth"] = to_hex(pq_auth.data(), pq_auth.size());
     return j;
 }
 
@@ -63,6 +66,10 @@ Transaction Transaction::from_json(const json& j) {
     tx.payload = from_hex(json_require<std::string>(j, "payload"));
     tx.sig     = from_hex_arr<64>(json_require_hex(j, "sig", 128));
     tx.hash    = from_hex_arr<32>(json_require_hex(j, "hash", 64));
+    // §3.21: optional DPQ1 PQ authenticator (present only for PQ_TRANSFER).
+    // Absent for every legacy tx, so pre-§3.21 JSON round-trips unchanged.
+    if (j.contains("pq_auth") && j["pq_auth"].is_string())
+        tx.pq_auth = from_hex(j["pq_auth"].get<std::string>());
     return tx;
 }
 

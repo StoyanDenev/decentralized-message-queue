@@ -3,6 +3,7 @@
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/chain/params.hpp>
+#include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/keys.hpp>
@@ -519,6 +520,14 @@ BlockValidator::Result BlockValidator::check_transactions(
             return {false, "Zeroth pool is a pseudo-account; no tx may "
                           "originate from " + std::string(ZEROTH_ADDRESS)};
 
+        // §3.21: a PQ_TRANSFER carries no Ed25519 `sig` — it is authenticated by
+        // its DPQ1 envelope (ML-DSA) bound to the PQ-native `from` address. The
+        // shared accept-rule (S-043 one-helper) does the whole auth check; the tx
+        // then flows through the SAME nonce / payload / apply path as TRANSFER.
+        if (tx.type == TxType::PQ_TRANSFER) {
+            if (!verify_pq_transaction(tx))
+                return {false, "PQ_TRANSFER authentication invalid from: " + tx.from};
+        } else {
         PubKey pk{};
         if (tx.type == TxType::REGISTER) {
             if (from_anon)
@@ -593,6 +602,7 @@ BlockValidator::Result BlockValidator::check_transactions(
         auto sb = tx.signing_bytes();
         if (!verify(pk, sb.data(), sb.size(), tx.sig))
             return {false, "tx signature invalid from: " + tx.from};
+        }  // end non-PQ (Ed25519) signature path (§3.21)
 
         uint64_t& n = chain_next(tx.from);
         if (tx.nonce != n)
@@ -602,6 +612,7 @@ BlockValidator::Result BlockValidator::check_transactions(
         n++;
 
         switch (tx.type) {
+        case TxType::PQ_TRANSFER:   // §3.21: same nonce/payload limits as TRANSFER
         case TxType::TRANSFER:
             // A4: TRANSFER may carry an optional application-defined
             // payload (memo, contract reference, off-chain pointer,

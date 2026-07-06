@@ -3,6 +3,7 @@
 #include <determ/node/node.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
+#include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/rng/rng.h>
@@ -1983,6 +1984,10 @@ void Node::on_block(const chain::Block& b) {
 bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     using namespace determ::crypto;
     using namespace determ::chain;
+    // §3.21: a PQ_TRANSFER is authenticated by its DPQ1 envelope (ML-DSA) bound
+    // to the PQ-native `from` address — not the Ed25519 `sig`. Same shared
+    // accept-rule the block validator uses.
+    if (tx.type == TxType::PQ_TRANSFER) return verify_pq_transaction(tx);
     PubKey pk{};
     const bool from_anon = is_anon_address(tx.from);
     if (tx.type == TxType::REGISTER) {

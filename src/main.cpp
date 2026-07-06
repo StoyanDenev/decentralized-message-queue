@@ -44,6 +44,9 @@
 #include <determ/crypto/ff/ffbalance.h>        // §3.20 inc.7: confidential-tx balance proof
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/pqauth.hpp>           // §3.21: DPQ1 post-quantum tx-authentication envelope
+#include <determ/crypto/pq_address.hpp>       // §3.21: PQ-native bearer address (inc.4)
+#include <determ/chain/pq_tx_auth.hpp>        // §3.21: PQ_TRANSFER consensus accept-rule (inc.4)
+#include <determ/crypto.hpp>                  // determ::c99 (ML-DSA keygen for the PQ tx test)
 #include <determ/crypto/base64/base64.h>      // §3.15/1c: strict RFC 4648 base64 (R53 vector gate)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
 #include <determ/crypto.hpp>                  // §3.11: determ::c99 C++ wrapper over the C99 stack
@@ -498,6 +501,10 @@ In-process tests (deterministic, no network):
                                               ML-DSA (+HYBRID Ed25519) over a tx's
                                               signing_bytes; frozen corpus byte-
                                               equal C vs python (verify_pqauth.py)
+  determ test-pq-transaction                  §3.21 inc.4: PQ-native bearer
+                                              address + PQ_TRANSFER consensus
+                                              accept-rule (envelope key bound to
+                                              address); state-root-invariant
   determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
                                               XChaCha20-Poly1305 (draft xchacha)
                                               vs OpenSSL inner AEAD + HChaCha20
@@ -14689,6 +14696,64 @@ int main(int argc, char** argv) {
         }
 
         if (fail==0) std::cout << "  PASS: pqauth (DPQ1 envelope) unit test\n";
+        return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-pq-transaction") {
+        // §3.21 inc.4 — the PQ-native BEARER address (determ::pq_address) + the
+        // PQ_TRANSFER consensus accept-rule (determ::chain::verify_pq_transaction).
+        // Additive: existing tx types serialize byte-identically (asserted here);
+        // a PQ-free chain's state root is unchanged (the FAST golden vectors).
+        using namespace determ;
+        using determ::chain::Transaction;
+        using determ::chain::TxType;
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+
+        // ML-DSA-65 keypair from a fixed seed; PQ address form 0x02 = ML-DSA-65.
+        std::array<uint8_t,32> mseed{}; for (int i=0;i<32;i++) mseed[i]=(uint8_t)(i+1);
+        auto kp = determ::c99::mldsa::keygen(determ::c99::mldsa::ParamSet::ML_DSA_65, mseed);
+        std::string pqaddr = make_pq_anon_address(0x02, kp.pk);
+
+        // Address module: round-trip + shape + disjoint from the Ed25519 anon space.
+        check(is_pq_anon_address(pqaddr), "is_pq_anon_address(make(...))");
+        check(pq_anon_address_form(pqaddr)==0x02, "form byte == 0x02");
+        check(parse_pq_anon_pubkey(pqaddr)==kp.pk, "parse recovers the ML-DSA pubkey");
+        check(!is_anon_address(pqaddr), "PQ address is NOT an Ed25519 anon address (disjoint)");
+        check(!is_pq_anon_address("0x"+std::string(64,'a')), "Ed25519 anon addr is NOT a PQ address");
+        check(!is_pq_anon_address(pqaddr.substr(0,pqaddr.size()-2)), "truncated PQ addr rejected");
+        check(!is_pq_anon_address("0x04"+pqaddr.substr(4)), "bad form byte rejected");
+
+        // Build + sign a valid PQ_TRANSFER (envelope over the real signing_bytes).
+        Transaction tx;
+        tx.type=TxType::PQ_TRANSFER; tx.from=pqaddr; tx.to="0x"+std::string(64,'b');
+        tx.amount=100; tx.fee=1; tx.nonce=0;
+        tx.pq_auth = pqauth::sign(pqauth::Scheme::MLDSA65, tx.signing_bytes(), mseed);
+        check(chain::verify_pq_transaction(tx), "accept a valid PQ_TRANSFER");
+
+        // Negatives (the accept-rule must fail closed).
+        { auto t=tx; t.amount=101;                    check(!chain::verify_pq_transaction(t), "tampered amount rejected"); }
+        { auto t=tx; t.type=TxType::TRANSFER;         check(!chain::verify_pq_transaction(t), "non-PQ type rejected"); }
+        { auto t=tx; t.from="0x"+std::string(64,'a'); check(!chain::verify_pq_transaction(t), "non-PQ `from` rejected"); }
+        { auto t=tx; t.pq_auth.clear();               check(!chain::verify_pq_transaction(t), "empty pq_auth rejected"); }
+        { std::array<uint8_t,32> other{}; for(int i=0;i<32;i++) other[i]=(uint8_t)(0x80+i);
+          auto t=tx; t.pq_auth = pqauth::sign(pqauth::Scheme::MLDSA65, t.signing_bytes(), other);
+          check(!chain::verify_pq_transaction(t), "envelope key != address key rejected (binding)"); }
+        { std::array<uint8_t,32> es{}; for(int i=0;i<32;i++) es[i]=(uint8_t)(0x40+i);
+          std::optional<std::span<const uint8_t,32>> eo=std::span<const uint8_t,32>(es);
+          auto t=tx; t.pq_auth = pqauth::sign(pqauth::Scheme::HYBRID_MLDSA65, t.signing_bytes(), mseed, eo);
+          check(!chain::verify_pq_transaction(t), "hybrid scheme rejected for PQ-native account"); }
+
+        // State-root invariance signal: a non-PQ tx serializes with NO pq_auth
+        // key, and its signing_bytes is unaffected by the new field.
+        { Transaction t2; t2.type=TxType::TRANSFER; t2.from="0x"+std::string(64,'a');
+          t2.to="0x"+std::string(64,'b'); t2.amount=5; t2.fee=0; t2.nonce=0; t2.hash=t2.compute_hash();
+          auto j=t2.to_json();
+          check(!j.contains("pq_auth"), "non-PQ tx to_json omits pq_auth (byte-identical)");
+          check(Transaction::from_json(j).pq_auth.empty(), "non-PQ tx from_json leaves pq_auth empty"); }
+
+        if (fail==0) std::cout << "  PASS: pq-transaction (PQ-native address + PQ_TRANSFER accept-rule) unit test\n";
         return fail==0 ? 0 : 1;
     }
     if (cmd == "test-c99-vectors") {

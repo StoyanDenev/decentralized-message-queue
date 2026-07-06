@@ -740,6 +740,7 @@ void Chain::apply_transactions(const Block& b) {
         if (tx.nonce != sender.next_nonce) continue;
 
         switch (tx.type) {
+        case TxType::PQ_TRANSFER:   // §3.21: identical apply semantics to TRANSFER
         case TxType::TRANSFER: {
             uint64_t cost = tx.amount + tx.fee;
             if (sender.balance < cost) continue;
