@@ -205,6 +205,15 @@ enum class TxType : uint8_t {
     // nullifier: apply removes C from the pool, so it can be spent at most once.
     // Additive + state-root-invariant, same as SHIELD.
     UNSHIELD       = 13,
+    // §3.22c confidential-tx CONFIDENTIAL_TRANSFER (confidential -> confidential):
+    // consumes n_in unspent input notes and produces m output notes with HIDDEN
+    // amounts, verified by the shipped DCT1 bundle (range ∧ balance:
+    // Σv_in = Σv_out + fee, fee PUBLIC). payload = the DCT1 bundle. Inputs are
+    // NAMED (referenced by commitment) and removed from the pool (their own
+    // nullifiers); outputs are added. Amount-private in motion; NOT input-
+    // unlinkable (named inputs) and no on-chain output-secret delivery — see
+    // ShieldedPoolSoundness NC-7/NC-8. Additive + state-root-invariant.
+    CONFIDENTIAL_TRANSFER = 14,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use

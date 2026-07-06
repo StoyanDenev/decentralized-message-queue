@@ -38,6 +38,23 @@ int determ_ctx_bundle_serialize(uint8_t *out, size_t out_len,
     return 0;
 }
 
+int determ_ctx_bundle_header(const uint8_t *bundle, size_t len,
+                             size_t *n_in_out, size_t *m_out, size_t *n_out, uint64_t *fee_out) {
+    if (bundle == 0 || len < DCT_HDR)                       return -1;
+    if (bundle[0] != 'D' || bundle[1] != 'C' ||
+        bundle[2] != 'T' || bundle[3] != '1')               return -1;
+    size_t n_in = bundle[4], m = bundle[5], n = bundle[6];
+    size_t need = determ_ctx_bundle_len(n_in, m, n);        /* validates all params */
+    if (need == 0 || len != need)                           return -1;
+    uint64_t fee = 0;
+    for (int i = 0; i < 8; i++) fee = (fee << 8) | bundle[7 + i];
+    if (n_in_out) *n_in_out = n_in;
+    if (m_out)    *m_out    = m;
+    if (n_out)    *n_out    = n;
+    if (fee_out)  *fee_out  = fee;
+    return 0;
+}
+
 int determ_ctx_bundle_verify(const uint8_t *bundle, size_t len) {
     if (bundle == 0 || len < DCT_HDR)                       return -1;
     if (bundle[0] != 'D' || bundle[1] != 'C' ||

@@ -1104,6 +1104,13 @@ Additional in-process tests:
                                               the note (its own nullifier) +
                                               credits amount-fee + conserves A1,
                                               front-run + double-spend no-op.
+  determ test-confidential-transfer           §3.22c CONFIDENTIAL_TRANSFER
+                                              (confidential -> confidential via the
+                                              DCT1 bundle): consume named inputs +
+                                              add hidden-amount outputs, supply
+                                              conserved (fee leaves pool, A1),
+                                              tamper/double-spend no-op, and the
+                                              duplicate-input INFLATION GUARD.
   determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
                                               variants produce equivalent state;
                                               head()/at() empty-chain throw
@@ -36598,6 +36605,186 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-unshield\n" : "  PASS: test-unshield\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-confidential-transfer") {
+        // §3.22c CONFIDENTIAL_TRANSFER (confidential -> confidential) CONSENSUS
+        // test. Consumes NAMED input notes + produces HIDDEN-amount output notes
+        // via the shipped DCT1 bundle. Pins: apply consumes inputs + adds outputs
+        // + conserves supply (fee leaves the pool, A1 holds); a tampered bundle is
+        // a no-op; double-spend is a no-op; and — the CRITICAL inflation guard —
+        // a bundle listing the SAME input note twice is REJECTED.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto setsc = [](uint8_t out[32], uint64_t v) {
+            std::memset(out, 0, 32); for (int i = 0; i < 8; i++) out[31 - i] = uint8_t(v >> (8 * i));
+        };
+        auto commit = [&](uint8_t out33[33], uint64_t v, uint64_t r) -> int {
+            uint8_t vs[32], rs[32]; setsc(vs, v); setsc(rs, r);
+            return determ_pedersen_commit(out33, vs, rs);
+        };
+        // A SHIELD payload (unbound proof) that deposits note C = commit(A, r).
+        auto shield_payload = [&](uint64_t A, uint64_t r) -> std::vector<uint8_t> {
+            std::vector<uint8_t> C(33), E(33), x(32), k(32),
+                                 pf(DETERM_P256_BALANCE_PROOF_BYTES), out;
+            commit(C.data(), A, r);
+            determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A);
+            setsc(x.data(), r); setsc(k.data(), 0xC0FFEEu);
+            determ_p256_balance_prove(pf.data(), E.data(), x.data(), k.data());
+            out.insert(out.end(), C.begin(), C.end()); out.insert(out.end(), pf.begin(), pf.end());
+            return out;
+        };
+        // Build a DCT1 bundle: n_in inputs, m outputs (gammas = r_out so V == C_out),
+        // ONE aggregated range proof + a balance proof (x = Σr_in - Σr_out).
+        const size_t n = 4;
+        auto build_bundle = [&](std::vector<uint64_t> v_in, std::vector<uint64_t> r_in,
+                                std::vector<uint64_t> v_out, std::vector<uint64_t> r_out,
+                                uint64_t fee) -> std::vector<uint8_t> {
+            size_t n_in = v_in.size(), m = v_out.size();
+            std::vector<uint8_t> Ci(n_in * 33), Co(m * 33);
+            for (size_t j = 0; j < n_in; j++) commit(&Ci[j * 33], v_in[j], r_in[j]);
+            for (size_t j = 0; j < m; j++)    commit(&Co[j * 33], v_out[j], r_out[j]);
+            uint8_t alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(alpha, 17); setsc(rho, 19); setsc(tau1, 23); setsc(tau2, 29);
+            std::vector<uint8_t> sL(m * n * 32), sR(m * n * 32);
+            for (size_t i = 0; i < m * n; i++) { setsc(&sL[i * 32], 31 + 7 * i); setsc(&sR[i * 32], 41 + 11 * i); }
+            std::vector<uint8_t> gammas(m * 32);
+            for (size_t j = 0; j < m; j++) setsc(&gammas[j * 32], r_out[j]);
+            size_t agglen = determ_agg_rangeproof_proof_len(m, n);
+            std::vector<uint8_t> agg(agglen), V(m * 33);
+            if (determ_agg_rangeproof_prove(V.data(), agg.data(), v_out.data(), gammas.data(),
+                                            alpha, rho, tau1, tau2, sL.data(), sR.data(), m, n) != 0) return {};
+            uint64_t sr_in = 0, sr_out = 0;
+            for (auto r : r_in) sr_in += r; for (auto r : r_out) sr_out += r;
+            uint8_t Exc[33], x[32], k[32], bproof[DETERM_P256_BALANCE_PROOF_BYTES];
+            setsc(x, sr_in - sr_out); setsc(k, 0x5151);
+            if (determ_p256_balance_excess(Exc, Ci.data(), n_in, Co.data(), m, fee) != 0) return {};
+            if (determ_p256_balance_prove(bproof, Exc, x, k) != 0) return {};
+            size_t blen = determ_ctx_bundle_len(n_in, m, n);
+            std::vector<uint8_t> bundle(blen);
+            if (determ_ctx_bundle_serialize(bundle.data(), blen, Ci.data(), n_in,
+                                            Co.data(), m, n, fee, agg.data(), bproof) != 0) return {};
+            return bundle;
+        };
+
+        // Note set: inputs (3,r=500) + (1,r=400) -> outputs (2,r=333) + (1,r=444), fee 1.
+        // Σv_in = 4 = Σv_out (3) + fee (1).
+        const uint64_t vi0 = 3, ri0 = 500, vi1 = 1, ri1 = 400;
+        const uint64_t vo0 = 2, ro0 = 333, vo1 = 1, ro1 = 444, fee = 1;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg; cfg.chain_id = "ctx-transfer-test"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        // A chain with the two input notes SHIELDed (alice nonce -> 2).
+        auto shielded_chain = [&](Chain& c) {
+            c.append(make_genesis_block(make_cfg()));
+            Transaction s0; s0.type = TxType::SHIELD; s0.from = "alice"; s0.to = "";
+            s0.amount = vi0; s0.fee = 0; s0.nonce = 0; s0.payload = shield_payload(vi0, ri0);
+            Transaction s1; s1.type = TxType::SHIELD; s1.from = "alice"; s1.to = "";
+            s1.amount = vi1; s1.fee = 0; s1.nonce = 1; s1.payload = shield_payload(vi1, ri1);
+            Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions = {s0, s1};
+            c.append(b);
+        };
+        auto xfer_tx = [&](const std::vector<uint8_t>& bundle, uint64_t nonce) {
+            Transaction t; t.type = TxType::CONFIDENTIAL_TRANSFER; t.from = "alice"; t.to = "";
+            t.amount = 0; t.fee = fee; t.nonce = nonce; t.payload = bundle;
+            return t;
+        };
+
+        std::vector<uint8_t> bundle = build_bundle({vi0, vi1}, {ri0, ri1}, {vo0, vo1}, {ro0, ro1}, fee);
+        check(!bundle.empty() && determ_ctx_bundle_verify(bundle.data(), bundle.size()) == 0,
+              "setup: built a valid DCT1 confidential-transfer bundle (2-in/2-out)");
+
+        // === 1. Apply a valid confidential transfer ===
+        {
+            Chain c; shielded_chain(c);
+            check(c.shielded_note_count() == 2 && c.accumulated_shielded() == vi0 + vi1,
+                  "setup: 2 input notes are in the pool after SHIELD");
+            uint64_t val0 = c.balance("val");
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(bundle, 2));
+            bool threw = false;
+            try { c.append(b); }
+            catch (const std::exception& e) { threw = true; std::cout << "  (threw: " << e.what() << ")\n"; }
+            check(!threw, "apply: CONFIDENTIAL_TRANSFER applied without violating A1");
+            check(c.shielded_note_count() == 2,
+                  "apply: pool still holds 2 notes (2 inputs removed, 2 outputs added)");
+            check(c.accumulated_shielded() == vo0 + vo1,
+                  "apply: shielded supply == Σv_out (dropped by the PUBLIC fee only)");
+            check(c.expected_total() == c.live_total_supply(),
+                  "apply: A1 holds (value stays confidential; only the fee left the pool)");
+            uint8_t Ci0[33], Co0[33]; commit(Ci0, vi0, ri0); commit(Co0, vo0, ro0);
+            check(!c.shielded_note_exists(to_hex(Ci0, 33)),
+                  "apply: an input note was removed (spent)");
+            check(c.shielded_note_exists(to_hex(Co0, 33)),
+                  "apply: an output note was added (hidden amount)");
+            check(c.balance("val") > val0, "apply: the public fee was credited to creators");
+        }
+
+        // === 2. Tampered bundle is a no-op at apply ===
+        {
+            Chain c; shielded_chain(c);
+            std::vector<uint8_t> bad = bundle; bad[bad.size() - 1] ^= 1;   // flip a balance-proof byte
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(bad, 2));
+            c.append(b);
+            check(c.shielded_note_count() == 2 && c.accumulated_shielded() == vi0 + vi1,
+                  "tampered bundle: no-op — inputs NOT consumed");
+        }
+
+        // === 3. Double-spend is a no-op (inputs already consumed) ===
+        {
+            Chain c; shielded_chain(c);
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(bundle, 2));
+            c.append(b);
+            check(c.accumulated_shielded() == vo0 + vo1, "setup: first transfer consumed the inputs");
+            Block b2; b2.index = 3; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"val"}; b2.transactions.push_back(xfer_tx(bundle, 3));
+            c.append(b2);   // inputs gone -> no-op
+            check(c.accumulated_shielded() == vo0 + vo1 && c.shielded_note_count() == 2,
+                  "double-spend: re-submitting a consumed transfer is a no-op");
+        }
+
+        // === 4. CRITICAL: a bundle listing the SAME input note twice is REJECTED ===
+        // Without the dedup guard, an attacker could consume one note worth V as
+        // 2V and inflate the confidential supply. Build a VALID bundle over
+        // C_in = [C, C] (crypto sees two commitments; balance holds for 2V) and
+        // confirm apply rejects it — the note stays, no inflation.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            // SHIELD ONE note worth 3.
+            Transaction s; s.type = TxType::SHIELD; s.from = "alice"; s.to = "";
+            s.amount = 3; s.fee = 0; s.nonce = 0; s.payload = shield_payload(3, 500);
+            Block bs; bs.index = 1; bs.prev_hash = c.head().compute_hash();
+            bs.creators = {"val"}; bs.transactions.push_back(s);
+            c.append(bs);
+            check(c.shielded_note_count() == 1 && c.accumulated_shielded() == 3,
+                  "setup: single note (worth 3) shielded");
+            // Bundle claiming to consume that note TWICE: Σv_in = 6, outputs 3+2, fee 1.
+            std::vector<uint8_t> dup = build_bundle({3, 3}, {500, 500}, {3, 2}, {333, 444}, 1);
+            check(!dup.empty() && determ_ctx_bundle_verify(dup.data(), dup.size()) == 0,
+                  "setup: the double-listing bundle is CRYPTOGRAPHICALLY valid (crypto can't see it's one note)");
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(dup, 1));
+            c.append(b);
+            check(c.shielded_note_count() == 1 && c.accumulated_shielded() == 3,
+                  "INFLATION GUARD: duplicate-input transfer REJECTED — note not spent, no inflation");
+        }
+
+        std::cout << (fail ? "  FAIL: test-confidential-transfer\n" : "  PASS: test-confidential-transfer\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-cross-shard-supply-invariant") {

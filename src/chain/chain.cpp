@@ -14,6 +14,7 @@
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
+#include <set>   // §3.22c CONFIDENTIAL_TRANSFER input/output dedup
 #include <cstdio>
 
 namespace determ::chain {
@@ -856,6 +857,51 @@ void Chain::apply_transactions(const Block& b) {
                     "S-007: UNSHIELD credit would overflow recipient balance (to="
                     + tx.to + ")");
             }
+            total_fees += tx.fee;
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::CONFIDENTIAL_TRANSFER: {
+            // §3.22c confidential -> confidential. payload = a DCT1 bundle proving
+            // range (each hidden output in [0,2^n)) AND balance (Σv_in = Σv_out +
+            // fee, fee PUBLIC). Consume the n_in NAMED input notes (their own
+            // nullifiers — removed) and add the m HIDDEN-amount output notes. The
+            // fee (public) leaves the confidential pool to creators. Pool -> pool:
+            // no transparent tx.to credit, so no cross-shard vector (unlike
+            // UNSHIELD). Belt-and-suspenders re-verify; skip on any failure.
+            const uint8_t* b = tx.payload.data();
+            size_t blen = tx.payload.size();
+            size_t n_in = 0, m = 0, nbits = 0; uint64_t bundle_fee = 0;
+            if (determ_ctx_bundle_header(b, blen, &n_in, &m, &nbits, &bundle_fee) != 0) continue;
+            if (tx.fee != bundle_fee) continue;                 // public fee must match tx.fee
+            if (determ_ctx_bundle_verify(b, blen) != 0) continue;   // range + balance
+            const uint8_t* Cin  = b + 15;
+            const uint8_t* Cout = b + 15 + n_in * 33;
+            __ensure_shielded_pool();
+            // All-or-nothing: gather keys with a dedup set BEFORE mutating. The
+            // dup-input check is CRITICAL — listing the same note twice would let
+            // the bundle claim 2*value and inflate. Every input must be unspent;
+            // every output must be fresh; no key may repeat across the whole set.
+            std::vector<std::string> in_keys, out_keys;
+            std::set<std::string> seen;
+            bool ok = true;
+            for (size_t i = 0; i < n_in && ok; ++i) {
+                std::string k = to_hex(Cin + i * 33, 33);
+                if (!shielded_pool_.count(k) || !seen.insert(k).second) ok = false;
+                else in_keys.push_back(k);
+            }
+            for (size_t j = 0; j < m && ok; ++j) {
+                std::string k = to_hex(Cout + j * 33, 33);
+                if (shielded_pool_.count(k) || !seen.insert(k).second) ok = false;
+                else out_keys.push_back(k);
+            }
+            if (!ok) continue;   // missing/duplicate input, or output collision
+            for (auto& k : in_keys)  shielded_pool_.erase(k);
+            for (auto& k : out_keys) shielded_pool_[k] = height;
+            // Pedersen binding: Σv_in (== the consumed notes' shield values) =
+            // Σv_out + fee >= fee, so accumulated_shielded_ >= fee -> no underflow.
+            accumulated_shielded_ -= bundle_fee;
             total_fees += tx.fee;
             sender.next_nonce++;
             break;

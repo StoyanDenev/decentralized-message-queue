@@ -594,8 +594,9 @@ BlockValidator::Result BlockValidator::check_transactions(
             // anonymous (bearer) accounts; everything else (register/stake/gov)
             // needs a domain.
             if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD
-                && tx.type != TxType::UNSHIELD)
-                return {false, "anonymous accounts may only TRANSFER, SHIELD or UNSHIELD (got "
+                && tx.type != TxType::UNSHIELD && tx.type != TxType::CONFIDENTIAL_TRANSFER)
+                return {false, "anonymous accounts may only TRANSFER, SHIELD, UNSHIELD "
+                               "or CONFIDENTIAL_TRANSFER (got "
                              + std::to_string(int(tx.type)) + ")"};
             pk = parse_anon_pubkey(tx.from);
         } else {
@@ -1126,6 +1127,34 @@ BlockValidator::Result BlockValidator::check_transactions(
             if (determ_unshield_verify(tx.payload.data(), tx.payload.size(),
                                        tx.amount, ctx.data()) != 0)
                 return {false, "UNSHIELD commitment/context-bound proof invalid"};
+            break;
+        }
+        case TxType::CONFIDENTIAL_TRANSFER: {
+            // §3.22c confidential -> confidential. payload = a DCT1 bundle. Verify
+            // the header + range/balance proofs + that tx.fee == the bundle's
+            // PUBLIC fee, and that every NAMED input note is currently unspent
+            // (submit-time; apply removes them + is authoritative). Duplicate
+            // inputs are rejected — listing a note twice would inflate. Pool ->
+            // pool, so no tx.to / cross-shard concern.
+            const uint8_t* b = tx.payload.data();
+            size_t blen = tx.payload.size();
+            size_t n_in = 0, m = 0, nbits = 0; uint64_t bundle_fee = 0;
+            if (determ_ctx_bundle_header(b, blen, &n_in, &m, &nbits, &bundle_fee) != 0)
+                return {false, "CONFIDENTIAL_TRANSFER malformed DCT1 bundle header"};
+            if (tx.fee != bundle_fee)
+                return {false, "CONFIDENTIAL_TRANSFER tx.fee must equal the bundle's public fee"};
+            if (determ_ctx_bundle_verify(b, blen) != 0)
+                return {false, "CONFIDENTIAL_TRANSFER bundle proof invalid (range/balance)"};
+            const uint8_t* Cin = b + 15;
+            std::set<std::string> seen;
+            for (size_t i = 0; i < n_in; ++i) {
+                std::string k = to_hex(Cin + i * 33, 33);
+                if (!chain.shielded_note_exists(k))
+                    return {false, "CONFIDENTIAL_TRANSFER references an unknown or "
+                                   "already-spent input note"};
+                if (!seen.insert(k).second)
+                    return {false, "CONFIDENTIAL_TRANSFER duplicate input note"};
+            }
             break;
         }
         }

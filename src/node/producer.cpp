@@ -1048,6 +1048,12 @@ Block build_body(
             get_bal(tx.to) += tx.amount - tx.fee;
             break;
         }
+        case TxType::CONFIDENTIAL_TRANSFER:
+            // §3.22c pool -> pool: no transparent debit/credit (the public fee
+            // moves from the confidential pool to creators at apply). Provisional
+            // accounting is a no-op; apply verifies the bundle + consumes/produces
+            // the notes authoritatively.
+            break;
         }
         nn++;
         b.transactions.push_back(tx);

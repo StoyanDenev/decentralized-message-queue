@@ -877,7 +877,7 @@ These are not roadmap items — they're outside the design intent:
 - **Bridges to other chains.** Could be built on top, not part of the core protocol.
 - **On-chain frontend hosting.** Belongs off-chain.
 - **Oracle networks.** Application-specific.
-- **Full anonymity / graph privacy** (mixnets, stealth addresses, sender/receiver hiding). The anonymous bearer-wallet account model is the *identity*-privacy story. *Amount*-privacy confidential transactions — Bulletproofs range proofs + the shielded-pool **SHIELD** / **UNSHIELD** transparent↔confidential bridge (CRYPTO-C99-SPEC §3.22a/§3.22b; MODERN profiles) — are an owner-authorized, in-flight feature, but they hide **amounts only**, never the sender/receiver/transaction graph; no broader anonymity layer is planned.
+- **Full anonymity / graph privacy** (mixnets, stealth addresses, sender/receiver hiding). The anonymous bearer-wallet account model is the *identity*-privacy story. *Amount*-privacy confidential transactions — Bulletproofs range proofs + the shielded pool: **SHIELD** / **UNSHIELD** (transparent↔confidential bridge) + **CONFIDENTIAL_TRANSFER** (confidential→confidential, hidden amounts) (CRYPTO-C99-SPEC §3.22a/b/c; MODERN profiles) — are an owner-authorized, in-flight feature, but they hide **amounts only**, never the sender/receiver/transaction graph (confidential transfers still name their inputs); no broader anonymity layer is planned.
 
 A future fork or layer-2 could add these. The base protocol does not.
 

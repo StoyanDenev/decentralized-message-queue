@@ -45,6 +45,19 @@ int determ_ctx_bundle_serialize(uint8_t *out, size_t out_len,
                                 const uint8_t *agg_rangeproof,
                                 const uint8_t balance_proof[65]);
 
+// Parse ONLY the header of a bundle (no proof verification): validates the
+// magic + parameter ranges + that `len` matches the exact expected size, then
+// writes n_in / m / n / fee. Returns 0 iff the header is well-formed, -1
+// otherwise. On success the caller can locate the commitment arrays as
+//   C_in  = bundle + 15                       (n_in commitments, 33 B each)
+//   C_out = bundle + 15 + n_in*33             (m    commitments, 33 B each)
+// This is the accessor the CONFIDENTIAL_TRANSFER consensus path uses to pull the
+// input/output commitments out for pool membership + insert/remove; it does NOT
+// replace determ_ctx_bundle_verify (which must still be called to check the
+// range + balance proofs).
+int determ_ctx_bundle_header(const uint8_t *bundle, size_t len,
+                             size_t *n_in, size_t *m, size_t *n, uint64_t *fee);
+
 // Verify a bundle of `len` fully attacker-controlled bytes. Recomputes the
 // excess E, verifies the balance proof against it, and verifies the aggregated
 // range proof against C_out (= V). Fail-closed on any malformed/degenerate
