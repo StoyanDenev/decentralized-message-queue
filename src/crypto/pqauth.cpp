@@ -43,14 +43,31 @@ bool scheme_valid(uint8_t s) {
     return (s & 0xE0) == 0 && ((s & 0xF0) == 0x00 || (s & 0xF0) == 0x10);
 }
 
-std::vector<uint8_t> format_mprime(std::span<const uint8_t> message) {
+// M' for ML-DSA: 0x00 | len(CTX') | CTX' | message, where CTX' = CTX || scheme.
+// Binding the scheme byte into the ML-DSA context makes the signature refuse a
+// cross-scheme re-label (audit fix: hybrid-strip / downgrade defence — a hybrid
+// envelope cannot be relabelled to a same-param pq-only one over the same msg).
+std::vector<uint8_t> format_mprime(uint8_t scheme, std::span<const uint8_t> message) {
     std::vector<uint8_t> mp;
-    mp.reserve(2 + CTXLEN + message.size());
+    const uint8_t ctxlen = static_cast<uint8_t>(CTXLEN + 1);
+    mp.reserve(2 + ctxlen + message.size());
     mp.push_back(0x00);
-    mp.push_back(static_cast<uint8_t>(CTXLEN));
+    mp.push_back(ctxlen);
     mp.insert(mp.end(), CTX, CTX + CTXLEN);
+    mp.push_back(scheme);
     mp.insert(mp.end(), message.begin(), message.end());
     return mp;
+}
+
+// The Ed25519 half of a HYBRID envelope signs scheme || message (the same scheme
+// binding), so stripping the ed tail + relabelling to pq-only breaks the ML-DSA
+// half's scheme binding AND removes a valid ed half — the downgrade is rejected.
+std::vector<uint8_t> ed_message(uint8_t scheme, std::span<const uint8_t> message) {
+    std::vector<uint8_t> m;
+    m.reserve(1 + message.size());
+    m.push_back(scheme);
+    m.insert(m.end(), message.begin(), message.end());
+    return m;
 }
 
 } // namespace
@@ -71,7 +88,7 @@ std::vector<uint8_t> sign(Scheme scheme_e, std::span<const uint8_t> message,
         throw std::invalid_argument("pqauth::sign: hybrid scheme requires ed_seed");
 
     auto kp     = determ::c99::mldsa::keygen(ps, mldsa_seed);          // (pk, sk)
-    auto mp     = format_mprime(message);
+    auto mp     = format_mprime(scheme, message);
     auto pq_sig = determ::c99::mldsa::sign(ps, kp.sk, mp);            // deterministic
     determ_secure_zero(kp.sk.data(), kp.sk.size());                   // sk is secret
 
@@ -89,7 +106,8 @@ std::vector<uint8_t> sign(Scheme scheme_e, std::span<const uint8_t> message,
         std::array<uint8_t, 32> es{};
         std::copy(ed_seed->begin(), ed_seed->end(), es.begin());
         auto ed_pk  = determ::c99::ed25519::public_key(es);
-        auto ed_sig = determ::c99::ed25519::sign(es, ed_pk, message);
+        auto edm    = ed_message(scheme, message);
+        auto ed_sig = determ::c99::ed25519::sign(es, ed_pk, edm);
         env.insert(env.end(), ed_pk.begin(), ed_pk.end());
         env.insert(env.end(), ed_sig.begin(), ed_sig.end());
         determ_secure_zero(es.data(), es.size());
@@ -139,10 +157,13 @@ VerifyResult verify(std::span<const uint8_t> env, std::span<const uint8_t> messa
         }
         if (off != env.size()) return r;                   // strict: no trailing bytes
 
-        const auto mp    = format_mprime(message);
+        const auto mp    = format_mprime(scheme, message);
         const bool pq_ok = determ::c99::mldsa::verify(ps, pq_pk, mp, pq_sig);
         bool ed_ok = true;
-        if (hybrid) ed_ok = determ::c99::ed25519::verify(ed_pk, message, ed_sig);
+        if (hybrid) {
+            const auto edm = ed_message(scheme, message);
+            ed_ok = determ::c99::ed25519::verify(ed_pk, edm, ed_sig);
+        }
 
         r.scheme = scheme;
         r.hybrid = hybrid;

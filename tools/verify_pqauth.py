@@ -40,7 +40,9 @@ def build_envelope(scheme, message, mldsa_seed, ed_seed=None):
     name = SCHEME_NAME[scheme]
     p    = MLDSA_PARAMS[name]
     pk, sk = mldsa_keygen(mldsa_seed, p["k"], p["l"], p["eta"])
-    Mp     = bytes([0x00, len(CTX)]) + CTX + message
+    # CTX' = CTX || scheme: binding the scheme byte into the ML-DSA context makes
+    # the signature refuse a cross-scheme re-label (hybrid-strip / downgrade defence).
+    Mp     = bytes([0x00, len(CTX) + 1]) + CTX + bytes([scheme]) + message
     pq_sig = mldsa_sign(sk, Mp, p)                 # deterministic (rnd = 32 zero bytes)
     env  = bytearray()
     env += MAGIC
@@ -51,7 +53,8 @@ def build_envelope(scheme, message, mldsa_seed, ed_seed=None):
         assert ed_seed is not None, "hybrid scheme needs an ed_seed"
         sk_ed  = nacl.signing.SigningKey(ed_seed)
         ed_pk  = bytes(sk_ed.verify_key)
-        ed_sig = sk_ed.sign(message).signature     # RFC 8032 deterministic detached 64B
+        # Ed25519 signs scheme || message (same scheme binding as the ML-DSA half).
+        ed_sig = sk_ed.sign(bytes([scheme]) + message).signature   # RFC 8032 detached 64B
         env += ed_pk
         env += ed_sig
     return bytes(env)

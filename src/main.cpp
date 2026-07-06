@@ -14639,6 +14639,12 @@ int main(int argc, char** argv) {
             check(!pqauth::verify(t1,msg).ok, "hybrid ed-half tamper reject");
             auto t2 = env; t2[100]^=1;             // inside pq_sig region
             check(!pqauth::verify(t2,msg).ok, "hybrid pq-half tamper reject");
+            // Scheme-binding (audit fix): strip the 96-byte ed tail + relabel
+            // hybrid65 (0x12) -> mldsa65 (0x02). The ML-DSA sig is bound to the
+            // scheme byte via the context, so the stripped/relabelled envelope
+            // must NOT verify as a valid pq-only one over the same message.
+            std::vector<uint8_t> strip(env.begin(), env.end()-96); strip[4]=0x02;
+            check(!pqauth::verify(strip, msg).ok, "hybrid-strip downgrade rejected");
         }
 
         // Malformed envelopes -> fail closed (never throw; ok=false).
