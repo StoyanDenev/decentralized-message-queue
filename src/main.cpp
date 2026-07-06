@@ -42,6 +42,7 @@
 #include <determ/chain/shielded.hpp>           // §3.22b: unshield_spend_ctx_hash
 #include <determ/crypto/ringsig/lsag.h>        // §3.23: LSAG linkable ring signature
 #include <determ/crypto/ringsig/clsag.h>       // §3.23b: CLSAG concise linkable ring sig
+#include <determ/crypto/ringsig/ringct_spend.h> // §3.23c: RingCT spend composition + transpose
 #include <determ/crypto/ff/ffgroup.h>          // §3.20: finite-field Pedersen (Z_p*)
 #include <determ/crypto/ff/ffipa.h>            // §3.20 inc.4: finite-field Bulletproofs IPA
 #include <determ/crypto/ff/ffrangeproof.h>     // §3.20 inc.5: finite-field range proof
@@ -567,6 +568,11 @@ In-process tests (deterministic, no network):
                                               commitment) folded into ONE concise ring
                                               via hash aggregation (the RingCT primitive);
                                               dual-oracle byte-freeze + linkability
+  determ test-ringct-spend-c99                §3.23c: LIBRARY-only RingCT spend-statement
+                                              composition — a commitment-transposition
+                                              proof (value-on-H <-> value-on-G bridge) +
+                                              a verifier composing CLSAG + the §3.22c DCT1
+                                              bundle end-to-end; dual-oracle byte-freeze
   determ test-ff-pedersen-c99                 §3.20: finite-field Pedersen commit
                                               (g^v h^r mod p) over RFC 3526 MODP-
                                               3072 — the MODERN large-prime backend
@@ -14598,6 +14604,114 @@ int main(int argc, char** argv) {
           check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
 
         std::cout << (fail? "  FAIL: clsag-c99 unit test\n" : "  PASS: clsag-c99 unit test\n");
+        return fail?1:0;
+    }
+    if (cmd == "test-ringct-spend-c99") {
+        // §3.23c RingCT spend-statement composition over NIST P-256 (input-
+        // unlinkability inc.3, LIBRARY-only). Pins: the commitment-transposition proof
+        // (the value-on-H <-> value-on-G bridge) — prove→verify + the DUAL-ORACLE
+        // byte-freeze vs tools/verify_ringct_spend.py + wrong-amount reject; and the
+        // full CLSAG→transpose→DCT1 spend verifier (accept the honest spend; reject a
+        // tamper of ANY layer / a wrong pseudo-out / a wrong message). Inputs are the
+        // frozen ring4/idx2 spend (amount A=3 -> outputs [1,1] + fee 1).
+        int fail = 0;
+        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
+        auto cat = [](const std::vector<std::string>& hs){ std::vector<uint8_t> v; for(auto&h:hs){auto b=from_hex(h); v.insert(v.end(),b.begin(),b.end());} return v; };
+        auto setsc = [](uint64_t v){ std::vector<uint8_t> out(32,0); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); return out; };
+
+        std::vector<uint8_t> ringP = cat({
+            "020dcc7648c78a3118f2612866fe83ef19f40304f623399e1211a10f2b3d1c05cf",
+            "03a62f048f367359809c2d46c2049d7d7bf268c3c073c472753cb18a24a8ad20b1",
+            "038570e95d85825286db92c78317679bdd8ffe3c90d0af84291bf64132b66fcc99",
+            "02a85b3aad6f3a346d85523141cb434e1caf4c642b2b3cc952cb07a635cb6a1df1"});
+        std::vector<uint8_t> ringC = cat({
+            "0229d45b849f92aa599c760c7e380c16af3b01786d190e8dcc172242b97f80b60e",
+            "02e756c4db19fe7a0fee7e35933ad6dedef1c389eb4305806e7411bf65ff8edbe6",
+            "02571a3a95c5b0e248040e550cc2cd9ca571371c80cd6864fd0cffa730ca3919e7",
+            "037fc1bde5d77a067004df831619cc22c981817473fa58a923127f26b64da4de8c"});
+        std::vector<uint8_t> coffH = from_hex("0248140fca4253aec596f001117a334fd62ec27b0b46b98ba273c8c779b95d8958");
+        std::vector<uint8_t> coffG = from_hex("02b630ea429d2954b1d2685fcc43cbebfcbd6876f5db8a2dff15992e0caeca2aee");
+        std::vector<uint8_t> I = from_hex("02bb52567ad8c271b70c9e9e692de340fb412882101d380116b3d1cf43a923b8be");
+        std::vector<uint8_t> D = from_hex("038e5f8e7448e12228dba07f680422842ff99190599d4e28813b6399af144808bc");
+        const std::string msg = "ringct spend note #7";
+        std::vector<uint8_t> vv = setsc(3), aa = setsc(0x0abc), bb = setsc(0x0d1f);
+
+        std::vector<uint8_t> clsag_sig = cat({
+            "8df873d26891f5bacd2961cb2ff3ec49b1dba8cdaf55b22327362aea186e3e44",
+            "c6523e45fae2799737b35051cbc3ff79c6e4644019d4c1e7d026d8b681d1b9e0",
+            "963920d87d79b3670cdaca93bb5020ca6f62fbb3c403d846ebff1eaf9c4f2ca1",
+            "415aedb228671ea25d13dc9381eb646681a0c2935e6d609413923547f46162df",
+            "cc4dfdf12bf414344786a1a5ce95f750c44eb27b13fd2fee0571a2bd462aae44"});
+        std::vector<uint8_t> transpose = cat({
+            "030de7f468d871598c584bf725344a1facb0f19b0a40e0a915431382aee18474",
+            "2c026197f290e32670d382faa700e83336413333f30c14ddab11820cbd227dcb",
+            "ae6966d6953dfa5633a0419df15137f7d643237eee0333f41e32621cabdc5e5c",
+            "c504ebe737da07fbea59764ea8e6c72a2b5017a364cf0dcc36fb7fb2c73cd958",
+            "bdfb737acd403cbb3ff1a33f00c9eb1f00fdbf291e8dd25be8cb93f17a792b94",
+            "55e4"});
+        std::vector<uint8_t> bundle = cat({
+            "44435431010204000000000000000102b630ea429d2954b1d2685fcc43cbebfc",
+            "bd6876f5db8a2dff15992e0caeca2aee027ccf978a4ba1e9b8e3d57a228ac0cb",
+            "314e52d8ac44dde60b085d926b2596cde7030e0f94a4809c991680acd0d09458",
+            "ba193144edf5d6d02988dd9032d316dc40a303f0310145a69d5e69c8b9fddd0c",
+            "fd178dabe63402710135f64900a49870c53d8b02c09184eec469460013deb773",
+            "e76fa77289ddff8dc783549aaf21d8a75b180858031a48a0109f683f6afd1490",
+            "d51b9b6824d8cb67d41ebc196f74912766d7a90e970312eb052bae004c6c8557",
+            "59d99694a19483666a2b5026679ef6097883ecd73e1a59f7ab6e9ae1abdfd4fd",
+            "d6edad375a477e7a5e540b838877e84f88774e24c8538b642b706a32e13cc674",
+            "a36694b224cf3e0dd057e700e6632201e86a1b76c35f18140377b179c9d4e2e5",
+            "2a195d7432e71814d614024d74e58469b06f364f30e40235b1987ea132ecec52",
+            "20a418a4c76079b2d070050f710696bedd70a25054b78a03654f06ea446819ba",
+            "7e6b94dd529ddb29a9f4b38560e860ef8c4cec2f1587043102b8f493f73b4107",
+            "2c58d6f9a436451050c169ca0e1835698eb73dbdc578696b4b02f0e618a9a893",
+            "7a135928f097e3fcfbe50afa979a06166a6f23d769907e6e6cd802191a7ccb26",
+            "eb24200ecd61a2a07d88d460785df684c7c2e9e86a7d959a2b7edc03e1f6a315",
+            "ce9562c4ce963bb45fcfb45f409246b6b0994815b5bdad4bb2d2211446b1f7d2",
+            "131775e413ddf94a978791ada7908a36aa8146f2a935fa347817df8e4f6e1c93",
+            "e006a6a2870f3eceaa4d6792dedef5918359b6b1c130ac9ce7eac29e03c651b2",
+            "4b3d04ac9f57d6bd7c530ad2a06d31fe0b767051a437338487d56811a135012e",
+            "5a912552be0f08cfca644783777b7ea6fd2d53c10456c79e42b43fa09c"});
+
+        // (1) transpose: prove -> byte-freeze + the two commitments it emits.
+        const std::string EXP_T =
+            "030de7f468d871598c584bf725344a1facb0f19b0a40e0a915431382aee18474"
+            "2c026197f290e32670d382faa700e83336413333f30c14ddab11820cbd227dcb"
+            "ae6966d6953dfa5633a0419df15137f7d643237eee0333f41e32621cabdc5e5c"
+            "c504ebe737da07fbea59764ea8e6c72a2b5017a364cf0dcc36fb7fb2c73cd958"
+            "bdfb737acd403cbb3ff1a33f00c9eb1f00fdbf291e8dd25be8cb93f17a792b94"
+            "55e4";
+        std::vector<uint8_t> tp(162), cH(33), cG(33);
+        check(determ_commit_transpose_prove(tp.data(), cH.data(), cG.data(),
+                                            vv.data(), aa.data(), bb.data())==0, "transpose: prove OK");
+        check(to_hex(tp.data(),162)==EXP_T, "dual-oracle: transpose proof == python (byte-freeze)");
+        check(cH==coffH, "transpose C_H == CLSAG pseudo-out coffset_H (value-on-H)");
+        check(cG==coffG, "transpose C_G == bundle input coffset_G (value-on-G)");
+        check(determ_commit_transpose_verify(coffH.data(), coffG.data(), transpose.data())==0,
+              "transpose: verify ACCEPTS the honest bridge");
+        check(determ_commit_transpose_verify(coffH.data(), coffH.data(), transpose.data())!=0,
+              "transpose: a WRONG-amount C_G (coffset_H reused) rejects");
+
+        // (2) the full RingCT spend statement — CLSAG -> transpose -> DCT1.
+        const size_t slen = determ_clsag_sig_len(4);
+        auto spend = [&](const uint8_t* m, size_t ml, const uint8_t* cH_, const uint8_t* sig,
+                         const uint8_t* tr, const uint8_t* bu, size_t bl)->int{
+            return determ_ringct_spend_verify(m, ml, ringP.data(), ringC.data(), 4, cH_,
+                                              I.data(), D.data(), sig, slen, tr, bu, bl); };
+        check(spend((const uint8_t*)msg.data(), msg.size(), coffH.data(), clsag_sig.data(),
+                    transpose.data(), bundle.data(), bundle.size())==0,
+              "spend: verify ACCEPTS the honest end-to-end RingCT spend");
+        { auto b=clsag_sig; b[40]^=1;
+          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),b.data(),transpose.data(),bundle.data(),bundle.size())!=0, "spend: tampered CLSAG rejects"); }
+        { auto b=transpose; b[70]^=1;
+          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),clsag_sig.data(),b.data(),bundle.data(),bundle.size())!=0, "spend: tampered transpose rejects"); }
+        { auto b=bundle; b[b.size()-1]^=1;
+          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),clsag_sig.data(),transpose.data(),b.data(),b.size())!=0, "spend: tampered bundle rejects"); }
+        check(spend((const uint8_t*)msg.data(),msg.size(),coffG.data(),clsag_sig.data(),transpose.data(),bundle.data(),bundle.size())!=0,
+              "spend: a WRONG pseudo-out (coffset_G as coffset_H) rejects");
+        { const std::string wm="wrong message";
+          check(spend((const uint8_t*)wm.data(),wm.size(),coffH.data(),clsag_sig.data(),transpose.data(),bundle.data(),bundle.size())!=0, "spend: wrong-message rejects"); }
+
+        std::cout << (fail? "  FAIL: ringct-spend-c99 unit test\n" : "  PASS: ringct-spend-c99 unit test\n");
         return fail?1:0;
     }
     if (cmd == "test-c99-api") {

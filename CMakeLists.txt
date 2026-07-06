@@ -148,6 +148,11 @@ add_library(determ-crypto-c99 STATIC
   # concise ring via hash aggregation) — pure composition over the same P-256 +
   # RFC 9380 hash-to-curve public API; `determ test-clsag-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/clsag.c"
+  # §3.23c: the LIBRARY-only RingCT spend-statement composition (input-unlinkability
+  # inc.3) — a commitment-transposition proof (the value-on-H <-> value-on-G bridge,
+  # a Schnorr AND-proof) + a verifier composing §3.23b CLSAG + §3.22c DCT1 end-to-end;
+  # `determ test-ringct-spend-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/ringct_spend.c"
   # §3.20 inc.1: finite-field Pedersen commitment over the RFC 3526 MODP-3072
   # prime-order subgroup (the MODERN-profile large-prime backend) — CIOS Montgomery
   # bignum, no __int128 — `determ test-ff-pedersen-c99`. ffipa.c adds the §3.20 inc.4
