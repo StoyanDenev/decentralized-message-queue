@@ -30,7 +30,7 @@ paths:
 | # | Option | Status (in-session) |
 |---|---|---|
 | 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 152 in-process `determ test-*` subcommands; continues incrementally |
-| 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`) + **increments 1-3 shipped** (self-contained `sim/` core + `determ-dsf` + 20 scenarios, `tools/test_dsf_{core,inc2,inc3}.sh`); §Q1/§Q2 consensus-injection + FA4 wiring pending |
+| 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`) + **increments 1-4 shipped** (self-contained `sim/` core + `determ-dsf` + 27 scenarios incl. the §Q5 generator, `tools/test_dsf_{core,inc2,inc3,inc4}.sh`); §Q1/§Q2 consensus-injection + FA4 wiring pending |
 | 3 | Path portability (`tools/common.sh`) | ✅ shipped |
 
 **Closure goal for Option 1.** Every FA-track theorem AND every S-* closure
@@ -529,7 +529,7 @@ trace-level properties hold.
 
 **Resolution.** Option 2 (DSF) is spec-resolved at
 `docs/proofs/DSF-SPEC.md` **and its framework has shipped (increments 1-3:
-the self-contained `sim/` core + 20 scenarios).** It is the canonical
+the self-contained `sim/` core + 27 scenarios incl. the §Q5 generator).** It is the canonical
 extension for trace-level properties. NOTE: the increment-1-3 scenarios run
 a TOY model, not the real consensus engine, so F-1 itself is NOT yet closed —
 the FA4-closing random-Byzantine fuzz awaits the §Q1/§Q2 injection increment
