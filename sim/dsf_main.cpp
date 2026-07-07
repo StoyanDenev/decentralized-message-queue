@@ -28,6 +28,7 @@
 #include <vector>
 #include "scenario.hpp"
 #include "scenarios.hpp"
+#include "scenarios_inc2.hpp"
 
 namespace {
 
@@ -56,7 +57,7 @@ const Scenario* find_scenario(const std::vector<Scenario>& v,
 }
 
 void print_list(const std::vector<Scenario>& v) {
-    std::cout << "DSF scenarios (increment 1, framework-demonstration):\n";
+    std::cout << "DSF scenarios (increments 1-2):\n";
     for (const auto& s : v) {
         std::cout << "  " << s.name;
         if (s.expect_violation) std::cout << "  [expect-violation self-test]";
@@ -81,6 +82,7 @@ void print_usage() {
 int main(int argc, char** argv) {
     std::vector<Scenario> scenarios;
     register_seed_scenarios(scenarios);
+    register_inc2_scenarios(scenarios);   // increment-2 adversarial scenarios
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
