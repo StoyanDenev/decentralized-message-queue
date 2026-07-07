@@ -29,6 +29,7 @@
 #include "scenario.hpp"
 #include "scenarios.hpp"
 #include "scenarios_inc2.hpp"
+#include "scenarios_inc3.hpp"
 
 namespace {
 
@@ -83,6 +84,7 @@ int main(int argc, char** argv) {
     std::vector<Scenario> scenarios;
     register_seed_scenarios(scenarios);
     register_inc2_scenarios(scenarios);   // increment-2 adversarial scenarios
+    register_inc3_scenarios(scenarios);   // increment-3 adversarial scenarios
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
