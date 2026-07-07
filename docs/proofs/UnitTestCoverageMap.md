@@ -532,12 +532,20 @@ trace-level properties hold.
 the self-contained `sim/` core + 34 baked scenarios incl. the §Q5 generator's
 two templates (broadcast + agreement) + the inc-5 §Q5/§Q6 `--generate N --seed S
 [--template]` reproducible-variant CLI).** It is the canonical
-extension for trace-level properties. NOTE: the increment-1-6 scenarios run
-a TOY model, not the real consensus engine, so F-1 itself is NOT yet closed —
-the FA4-closing random-Byzantine fuzz awaits the §Q1/§Q2 injection increment
-that drives the actual Node/Validator/Producer under `VirtualClock` +
-`VirtualTransport`. The 136-seed is not expected to reach FA4-level coverage
-without it.
+extension for trace-level properties. NOTE: the increment-1-6 DSF scenarios run
+a TOY model, not the real consensus engine. **The real-engine closure path is now
+DECIDED and STARTED (owner 2026-07-07: "keep DSF self-contained"):** rather than
+link the real engine into determ-dsf, the multi-block randomized-Byzantine
+CONSENSUS traces run over the REAL `Chain::append` apply path via `test-fa-*`
+subcommands in the determ binary (`docs/proofs/RealEngineFAHarness.md`) — the
+consensus-layer analog of `test-supply-invariant-fuzz` (which already covers the
+ECONOMIC A1 trace over the real engine). **Increment 1 (`test-fa-equivocation-trace`)
+closes a SLICE of F-1/FA4 for the FA6 equivocation-slashing invariant (slash-once
+/ idempotence / A1 / determinism over 48 real-apply blocks).** F-1/FA4 remain OPEN
+overall until the abort/escalation, cross-shard (FA7), F2, and FA4-liveness slices
+have their own real-engine trace harnesses. The `time::Clock` seam
+(`docs/proofs/ClockInjectionSeam.md`, increment 1 shipped) is only needed if a
+future harness drives a real networked Node; the apply-level harnesses do not need it.
 
 ### F-2 — Per-FA-Apply test surface is comprehensive
 
