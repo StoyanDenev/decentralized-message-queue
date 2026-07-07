@@ -74,8 +74,8 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] --list   "
-        "(register + list/run N seed-driven variants)\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree] --list\n"
+        "                                 (register + list/run N seed-driven variants)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
         "seed to reproduce any failure.\n";
@@ -89,6 +89,9 @@ int main(int argc, char** argv) {
     register_inc2_scenarios(scenarios);   // increment-2 adversarial scenarios
     register_inc3_scenarios(scenarios);   // increment-3 adversarial scenarios
     register_generated_scenarios(scenarios, 0x9E5C6Eull, 6); // increment-4 §Q5 generated variants
+    register_generated_scenarios(scenarios, 0x4A17E5ull, 6,   // increment-6 §Q5 2nd template (agreement)
+                                 "gen_agree", true,
+                                 determ::sim::GenTemplate::Agreement);
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
@@ -97,6 +100,7 @@ int main(int argc, char** argv) {
     bool        quiet       = false;
     bool        want_list   = false;
     uint64_t    generate_count = 0;      // --generate N: N seed-driven variants
+    std::string template_name = "broadcast";  // --template broadcast|agree
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -109,6 +113,7 @@ int main(int argc, char** argv) {
         };
         if (a == "--list")          { want_list = true; }
         else if (a == "--generate") { generate_count = std::stoull(need("--generate")); }
+        else if (a == "--template") { template_name = need("--template"); }
         else if (a == "--help" || a == "-h") { print_usage(); return 0; }
         else if (a == "--scenario") { scenario_name = need("--scenario"); }
         else if (a == "--seed")     { seed_str      = need("--seed"); }
@@ -129,13 +134,19 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // §Q5/§Q6: --generate N registers N reliable-broadcast variants seeded by
-    // the run --seed, named gen_run_00..0(N-1). Same (--generate N, --seed S)
-    // => the same variant set on any host; each is then runnable / listable.
-    if (generate_count > 0)
+    // §Q5/§Q6: --generate N registers N variants seeded by the run --seed, named
+    // gen_run_00..0(N-1). --template picks the generator template (broadcast |
+    // agree). Same (--generate N, --seed S, --template T) => the same variant set
+    // on any host; each is then runnable / listable.
+    if (generate_count > 0) {
+        const determ::sim::GenTemplate tmpl =
+            (template_name == "agree" || template_name == "agreement")
+                ? determ::sim::GenTemplate::Agreement
+                : determ::sim::GenTemplate::Broadcast;
         register_generated_scenarios(scenarios, seed,
                                      static_cast<int>(generate_count),
-                                     "gen_run", /*with_selftest=*/false);
+                                     "gen_run", /*with_selftest=*/false, tmpl);
+    }
 
     if (want_list) { print_list(scenarios); return 0; }
 

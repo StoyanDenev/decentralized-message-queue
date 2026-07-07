@@ -166,27 +166,149 @@ inline Scenario make_broadcast_variant(int idx, const GenParams& p,
     return s;
 }
 
-// Register `count` reliable-broadcast variants generated from `gen_seed`, plus a
-// single `gen_overcount_selftest` that proves a generated fault profile surfaces
-// a real (non-idempotent-apply) bug.
+// ── Increment 6: a SECOND generator template — single-value-flood AGREEMENT ──
+//
+// A DIFFERENT §Q7 checker family (network-partition / equivocation) exercised
+// under the same randomized fault profiles. A leader floods one decision value
+// V to every follower; each follower latches the FIRST value it sees and never
+// changes it (first-write-wins). Under any drawn drop/dup/latency/jitter profile
+// this (a) never splits (only V is ever sent, so all non-zero deciders agree)
+// and (b) eventually decides (a late DECIDE(V) reaches every follower). So every
+// generated variant is expected to PASS. `correct` controls the leader: true =
+// honest single-value flood; false = Byzantine equivocation (V to even nodes,
+// V' to odd nodes) — the planted bug used by the self-test, which makes even and
+// odd followers latch DIFFERENT values so `agree_no_split` MUST fire.
+inline Scenario make_agreement_variant(int idx, const GenParams& p,
+                                       bool correct, bool self_test,
+                                       const char* name_prefix = "gen_agree") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_disagree_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a Byzantine leader equivocates (floods value V "
+                      "to even nodes, V' to odd nodes) over first-write-wins "
+                      "deciders. agree_no_split MUST fire. ")
+        : std::string("generated single-value-flood agreement variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p](Simulator& sim) {
+        sim.add_node("leader");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f](const Message& m) {
+                if (m.kind != "DECIDE") return;
+                Node& self = sim.state().nodes[f];
+                // First-write-wins: latch the first decision, never change it.
+                if (self.kv["decided"] == 0)
+                    self.kv["decided"] = static_cast<int64_t>(m.payload);
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["V"] = 42;      // the honest decided value
+        const int followers = p.followers;
+
+        // SAFETY: no two followers hold different (non-zero) decided values.
+        sim.props().add("agree_no_split", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                int64_t ref = 0; std::string ref_id;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    auto it = n.kv.find("decided");
+                    const int64_t v = it == n.kv.end() ? 0 : it->second;
+                    if (v == 0) continue;                 // undecided — skip
+                    if (ref == 0) { ref = v; ref_id = id; continue; }
+                    if (v != ref) {
+                        if (d) *d = id + " decided=" + std::to_string(v) +
+                                    " != " + ref_id + " decided=" +
+                                    std::to_string(ref);
+                        return false;
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: every follower eventually decides the honest value V.
+        sim.props().add("agree_all_decided", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t V = st.scalars.count("V") ? st.scalars.at("V") : 0;
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    ++seen;
+                    auto it = n.kv.find("decided");
+                    const int64_t v = it == n.kv.end() ? 0 : it->second;
+                    if (v != V) {
+                        if (d) *d = id + " decided=" + std::to_string(v) +
+                                    " != V=" + std::to_string(V);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p, correct](Simulator& sim) {
+        const int64_t V = 42, Vbad = 43;
+        // Flood the decision 30 times (every 25ms). Honest: same V to all.
+        // Byzantine (self-test): V to even nodes, V' to odd nodes.
+        for (int t = 0; t < 30; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p, correct, V, Vbad]() {
+                for (int i = 0; i < p.followers; ++i) {
+                    const int64_t val = correct ? V
+                                                : ((i % 2 == 0) ? V : Vbad);
+                    sim.send("leader", "f" + std::to_string(i), "DECIDE",
+                             static_cast<uint64_t>(val));
+                }
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
+// The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
+// (no-overcount + convergence); Agreement = §Q7 equivocation/partition
+// (no-split + decide). Both draw the SAME randomized fault profiles.
+enum class GenTemplate { Broadcast, Agreement };
+
+inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
+                             bool correct, bool self_test, const char* prefix) {
+    return tmpl == GenTemplate::Agreement
+        ? make_agreement_variant(idx, p, correct, self_test, prefix)
+        : make_broadcast_variant(idx, p, correct, self_test, prefix);
+}
+
+// Register `count` generated variants of `tmpl` from `gen_seed`, plus (unless
+// with_selftest is false) a single template-specific self-test that proves a
+// generated fault profile surfaces a real bug: `gen_overcount_selftest`
+// (Broadcast, non-idempotent apply under forced dup) or `gen_disagree_selftest`
+// (Agreement, an equivocating leader over first-write-wins deciders).
 inline void register_generated_scenarios(std::vector<Scenario>& out,
                                          uint64_t gen_seed, int count,
                                          const char* name_prefix = "gen_broadcast",
-                                         bool with_selftest = true) {
+                                         bool with_selftest = true,
+                                         GenTemplate tmpl = GenTemplate::Broadcast) {
     SplitMix64 g(gen_seed);
     for (int i = 0; i < count; ++i) {
         GenParams p = draw_params(g);
-        out.push_back(make_broadcast_variant(i, p, /*idempotent=*/true,
-                                             /*self_test=*/false, name_prefix));
+        out.push_back(make_variant(tmpl, i, p, /*correct=*/true,
+                                   /*self_test=*/false, name_prefix));
     }
     if (!with_selftest) return;
-    // Self-test: a non-idempotent apply under a forced-duplicate profile
-    // overcounts. Fixed profile so the violation is guaranteed (not seed-luck).
+    // Self-test on a FIXED profile so the violation is guaranteed (not seed-luck).
     GenParams bug;
-    bug.followers = 2; bug.base_latency = 0; bug.jitter = 0;
-    bug.drop = 0.0; bug.dup = 1.0;                 // duplicate everything
-    out.push_back(make_broadcast_variant(0, bug, /*idempotent=*/false,
-                                         /*self_test=*/true));
+    bug.base_latency = 0; bug.jitter = 0;
+    if (tmpl == GenTemplate::Agreement) {
+        bug.followers = 4; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; equivocation is the bug
+    } else {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
+    }
+    out.push_back(make_variant(tmpl, 0, bug, /*correct=*/false,
+                               /*self_test=*/true, name_prefix));
 }
 
 } // namespace determ::sim
