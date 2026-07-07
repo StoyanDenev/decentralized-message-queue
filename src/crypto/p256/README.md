@@ -1,9 +1,11 @@
 # `src/crypto/p256/` — NIST P-256 (secp256r1)
 
-CRYPTO-C99-SPEC.md §3.8c. The FIPS-profile curve: per spec §2 Q10 the
-`tactical` + `cluster` profiles bundle FIPS-validated cryptography, and
-secp256k1 is not on NIST's curve list — P-256 supplants it in those
-deployments. The downstream consumer is OPRF-P256 (§3.9b); ECDH-style scalar
+CRYPTO-C99-SPEC.md §3.8c. The prime-order curve: per spec §2 Q10 the
+`tactical` + `cluster` profiles bundle FIPS-validated cryptography, which
+requires a NIST-listed curve. P-256 is Determ's profile-agnostic prime-order
+stack for all Bulletproofs / OPRF / confidential-tx needs — secp256k1 was
+rejected (a Koblitz curve, not on NIST's list) and was never implemented
+(DECISION-LOG 2026-07-07 D3). The downstream consumer is OPRF-P256 (§3.9b); ECDH-style scalar
 multiplication is the surface shipped here.
 
 ## What this module implements

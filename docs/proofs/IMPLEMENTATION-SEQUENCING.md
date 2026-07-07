@@ -120,6 +120,9 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 
 ### Bundle 3: v2.22 Confidential Transactions (largest bundle)
 
+
+> **SUPERSEDED — crypto direction (2026-07-07).** The `secp256k1` / `libsecp256k1(-zkp)` plan in this Bundle 3 table (PRIV-1 "reuses libsecp256k1", PRIV-2 "Bulletproofs over secp256k1", PRIV-3 "secp256k1 ECDH amount handshake", plus the "Depends on"/"Can parallelize" curve rows) was ABANDONED. secp256k1 was never implemented and was rejected by the owner on 2026-07-07 (a Koblitz curve). Confidential transactions, Bulletproofs/range proofs, Pedersen commitments, and the ECDH amount handshake are built over the profile-agnostic **NIST P-256** stack — `src/crypto/pedersen/` (§3.19, SHIPPED inc.1-8) on `src/crypto/p256/` (§3.8c). There is no per-profile "curve-follows-profile" split: one binary carries every algorithm, and v2.10 uses X25519/Ed25519 (not a separate secp256k1 family). The v2.22 confidential-tx *chain integration* is itself DE-SCOPED (the P-256 library is complete; integration is owner-gated — see `docs/ROADMAP.md`). See `DECISION-LOG.md` 2026-07-07. The effort/curve rows below are retained verbatim as the original (superseded) plan.
+
 | Decision | Effort | Notes |
 |---|---|---|
 | PRIV-1: Per-epoch HKDF view-key derivation | 2 weeks | reuses libsecp256k1 |

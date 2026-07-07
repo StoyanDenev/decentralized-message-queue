@@ -406,7 +406,7 @@ A separate design candidate document at `docs/Improvements.md` outlines four wir
 
 The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519` (FIPS path, identical to v1.0 wire format) or `SIG_BLS12_381_AGGREGATE` (MODERN path). Validators dispatch verification by `signature_form` per the deployment's crypto profile. (The `crypto_profile_build` compile-time gate this originally referenced was REMOVED 2026-07-03 — single build; the crypto profile is a genesis/preset-level posture, DECISION-LOG.md 2026-07-03.)
 
-**Deferred reason (MODERN variant).** BLS12-381 is a pairing-friendly curve outside CRYPTO-C99's current two-curve discipline (curve25519 + secp256k1). Adding pairing primitives requires a carefully audited C99 pairing implementation (currently no production-grade option in C99). Bandwidth savings (~1 KB per block at K=16) are real but secondary to the cryptographic-discipline cost. Project-policy decision required to expand crypto-curve roster.
+**Deferred reason (MODERN variant).** BLS12-381 is a pairing-friendly curve outside CRYPTO-C99's current two-curve discipline (curve25519 + NIST P-256 — secp256k1 was rejected and never built per DECISION-LOG.md 2026-07-07). Adding pairing primitives requires a carefully audited C99 pairing implementation (currently no production-grade option in C99). Bandwidth savings (~1 KB per block at K=16) are real but secondary to the cryptographic-discipline cost. Project-policy decision required to expand crypto-curve roster.
 
 **Deferred reason (FIPS variant).** None — FIPS variant is the current v1.0 K-of-K Ed25519 wire format. The "improvement" for FIPS is the absence of change. Documented here so future implementation threads understand the profile-dispatch contract.
 
@@ -767,7 +767,7 @@ Items that V2-DESIGN.md originally framed as chain-level substrate but were recl
 
 **Original V2-DESIGN.md framing.** Chain-level substrate; T-OPAQUE on K committee members; FROST-Ed25519 threshold-signed assertions verified against on-chain committee pubkey set.
 
-**Reclassified as.** Chain-aware DApp registered via v2.18 DAPP_REGISTER. K DApp instances run BY committee members; T-OPAQUE coordination via DAPP_CALL; assertion signing via chain's FROST primitive (when applicable) or per-instance signing verified against DApp registry.
+**Reclassified as.** Chain-aware DApp registered via v2.18 DAPP_REGISTER. K DApp instances run BY committee members; T-OPAQUE coordination via DAPP_CALL; assertion signing via the chain's own K-of-K block signature (DLT-A; FROST was removed from the chain path per DECISION-LOG.md 2026-06-07) or per-instance signing verified against DApp registry.
 
 **Reclassification rationale.** ~80% of substrate's security properties recoverable at the DApp level; ~8-12 weeks of v1.0 critical-path work eliminated; DSSO iterates post-mainnet without no-migrations constraints; federation by design (multiple DSSO providers can coexist). See `DECISION-LOG.md` 2026-05-24 entry "DSSO architecture (v2.25): DApp, not substrate".
 
@@ -777,7 +777,7 @@ Items that V2-DESIGN.md originally framed as chain-level substrate but were recl
 - v2.18 DAPP_REGISTER (✅ shipped)
 - v2.19 DAPP_CALL (✅ shipped)
 - v2.26 on-chain key rotation (in Theme 9 review-track; v1.0 critical path)
-- v2.10 FROST threshold sigs for assertion-signing path (✅ in review-week bundle 1)
+- Chain K-of-K block signature as the DSSO assertion attestation (DLT-A; FROST removed from the chain path per DECISION-LOG.md 2026-06-07). The K-of-K block-sig path is already shipped.
 - Committee-instance DApp-hosting infrastructure (post-v1.0; new DApp pattern not previously deployed)
 
 **Related.** Memory `dlt-dsso-as-dapp`; V2-DESIGN.md §v2.25 (original substrate design — preserved for historical reference but supplanted by this reclassification); `DECISION-LOG.md` 2026-05-24 entry.

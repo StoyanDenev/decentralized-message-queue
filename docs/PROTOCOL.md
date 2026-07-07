@@ -45,7 +45,7 @@ Three additional primitives appear in operator-facing or wallet-side flows but n
 | AEAD | AES-256-GCM | v2.17 keyfile envelopes (`account create --passphrase`); A2 wallet recovery share envelopes (§15) |
 | KDF (passphrase) | PBKDF2-HMAC-SHA-256, 600 000 iterations | v2.17 keyfile envelopes; A2 wallet recovery (passphrase scheme) |
 | KDF (memory-hard) | Argon2id | A2 wallet recovery OPAQUE adapter (§15; gated to v2.14 for the real `libopaque` integration) |
-| OPRF group + sealed-box | Ristretto255 (libsodium) | A2 wallet recovery OPAQUE adapter; v2.18 DApp `service_pubkey` end-to-end encryption |
+| OPRF group + sealed-box | NIST P-256 OPRF (RFC 9497 P256-SHA256) + X25519 sealed-box (determ::c99; libsodium removed, ristretto255 never used) | A2 wallet recovery OPAQUE adapter; v2.18 DApp `service_pubkey` end-to-end encryption |
 
 These are operationally important but **invisible to consensus** — none of them appear in `signing_bytes()`, `block_digest`, or any validator rule. An implementation that re-implements wallet recovery or DApp encryption against a different curve choice (e.g. P-256 sealed-box) remains consensus-compatible with the reference; only operator-facing tooling needs to match.
 

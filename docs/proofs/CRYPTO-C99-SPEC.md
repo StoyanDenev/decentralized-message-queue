@@ -8,7 +8,7 @@
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
-- `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs primitive switches to secp256k1 per this spec)
+- `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs are over NIST P-256 — secp256k1 was rejected 2026-07-07 and never built)
 - `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard threshold accumulator uses FROST-Ed25519)
 - `DSF-SPEC.md` — Phase 0 deterministic-simulation framework (parallel work track)
 
@@ -37,7 +37,7 @@ Out of scope:
 
 ## 2. Design decisions
 
-> **⚠ SUPERSEDED (2026-07-07) — the secp256k1 curve-family decision below was reversed by the owner.** This section documents the *original* "curve25519 + secp256k1" crypto-family design (Q1) and its per-profile bundling (Q10). The owner rejected **secp256k1 specifically** (a Koblitz curve) on 2026-07-07: it was never implemented, and the MODERN profile now reuses **Ed25519 / X25519** plus the **profile-agnostic NIST P-256** stack for all prime-order / Bulletproofs / OPRF / confidential-tx needs — there is no separate secp256k1 or `Z_p*` backend (see `DECISION-LOG.md` 2026-07-07 and the §3.20 removal note). The Q10 profile table below has been corrected to reality; the surrounding Q1–Q9 prose still reflects the original secp256k1 intent and is pending a full reconciliation. Treat §3 (the AS-BUILT C99 stack) as authoritative where the two disagree.
+> **⚠ SUPERSEDED (2026-07-07) — the secp256k1 curve-family decision below was reversed by the owner.** This section documents the *original* "curve25519 + secp256k1" crypto-family design (Q1) and its per-profile bundling (Q10). The owner rejected **secp256k1 specifically** (a Koblitz curve) on 2026-07-07: it was never implemented, and the MODERN profile now reuses **Ed25519 / X25519** plus the **profile-agnostic NIST P-256** stack for all prime-order / Bulletproofs / OPRF / confidential-tx needs — there is no separate secp256k1 or `Z_p*` backend (see `DECISION-LOG.md` 2026-07-07 and the §3.20 removal note). The Q10 profile table below has been corrected to reality, and the Q4 directory tree + Q5 C API sketch below have been reconciled to the as-built NIST P-256 stack; the surrounding Q1–Q9 rationale prose is RETAINED as the historical design record and must NOT be read as the current stack (`web`/`regional`/`global` MODERN deployments use P-256, not secp256k1). Treat §3 (the AS-BUILT C99 stack) as authoritative where the two disagree.
 
 ### Q1: Two curve families, deliberately
 
@@ -158,23 +158,21 @@ src/crypto/
 │   ├── pedersen.c              #   inc.1 C=v*G+r*H; inc.2 vector commit r*H+Σ(a_i*G_i+b_i*H_i); inc.3 MSM Σ s_i*P_i (test-pedersen-c99)
 │   ├── ipa.c                   #   inc.4 Bulletproofs inner-product argument P=<a,g>+<b,h>+<a,b>*u, 2*log2(n) pts (test-bp-ipa-c99)
 │   └── rangeproof.c            #   inc.5 single-value + inc.6 AGGREGATED range proof (m values), wraps the IPA (test-bp-rangeproof-c99 / test-bp-agg-rangeproof-c99)
-├── secp256k1/                  # libsecp256k1 vendored
-│   ├── (libsecp256k1 source tree, pinned version)
-│   └── secp256k1.h
-├── secp256k1_zkp/              # libsecp256k1-zkp vendored
-│   ├── bulletproofs.c
-│   ├── (libsecp256k1-zkp source tree, pinned version)
-│   └── secp256k1_zkp.h
+├── p256/                       # SHIPPED: from-scratch NIST P-256 (§3.8c) — the profile-agnostic
+│   └── p256.c                  #   prime-order workhorse. Supplants the never-built secp256k1 for
+│                               #   Bulletproofs (../pedersen/), OPRF/VOPRF (RFC 9497 P256-SHA256),
+│                               #   hash-to-curve (RFC 9380 SSWU), and all prime-order needs.
 ├── frost/                      # FROST-Ed25519 from RFC 9591
 │   ├── frost_keygen.c
 │   ├── frost_sign.c
 │   ├── frost_aggregate.c
 │   ├── frost_pss_refresh.c
 │   └── frost.h
-├── oprf/                       # OPRF on secp256k1 + hash-to-curve
-│   ├── oprf.c
-│   ├── hash_to_curve.c         # RFC 9380 for secp256k1
-│   └── oprf.h
+├── ringsig/                    # SHIPPED: §3.23 input-unlinkability ring signatures (LSAG/CLSAG/RingCT over P-256)
+│   ├── lsag.c
+│   ├── clsag.c
+│   └── ringct_spend.c          #   (OPRF/VOPRF is NOT its own module — it ships inside p256/ as
+│                               #    RFC 9497 P256-SHA256; hash-to-curve is RFC 9380 SSWU for P-256, also in p256/)
 ├── ct/                         # Constant-time primitives
 │   ├── ct_compare.c
 │   ├── ct_select.c
@@ -275,16 +273,14 @@ int determ_argon2id(const uint8_t* password, size_t password_len,
                      uint32_t parallelism,
                      uint8_t* out_hash, size_t out_len);
 
-// ─── secp256k1 (Bulletproofs + OPRF + signing) ──────────────────────
-typedef struct { uint8_t bytes[32]; } determ_secp256k1_scalar_t;
-typedef struct { uint8_t bytes[33]; } determ_secp256k1_point_t;  // compressed
-
-int determ_secp256k1_bulletproof_prove(/* ... */);
-int determ_secp256k1_bulletproof_verify(/* ... */);
-
-int determ_secp256k1_oprf_blind(/* ... */);
-int determ_secp256k1_oprf_evaluate(/* ... */);
-int determ_secp256k1_oprf_unblind(/* ... */);
+// ─── Prime-order group over NIST P-256 (Bulletproofs + OPRF) — SHIPPED ──────────────────────
+// The secp256k1 typedefs/functions that stood here were never implemented
+// (owner rejected secp256k1 on 2026-07-07 — see the §2 banner + DECISION-LOG.md).
+// There are no determ_secp256k1_* symbols. The shipped prime-order API is NIST
+// P-256 (src/crypto/p256/, §3.8c) with these layers on top:
+//   point/scalar ops : determ_p256_base_mul / _point_mul / _point_add / _msm_ct
+//   Bulletproofs     : determ_pedersen_commit + IPA/range-proof (src/crypto/pedersen/, §3.19)
+//   OPRF / VOPRF     : determ_p256_oprf_blind / _evaluate / _finalize + determ_p256_voprf_prove / _verify (RFC 9497 P256-SHA256, §3.9b)
 
 // ─── FROST-Ed25519 threshold signatures ─────────────────────────────
 typedef struct { /* per-member secret share */ } determ_frost_share_t;
@@ -1433,6 +1429,8 @@ The **input-unlinkability inc.3** — the increment that shows the shipped priva
 ---
 
 ## 4. Total estimated cost
+
+> **SUPERSEDED (2026-07-07) — original-plan sections.** §4–§8 (cost, risks, downstream, decision-review, long-term) below were written for the original **secp256k1 / libsecp256k1(-zkp) / ristretto255** crypto-family plan, which was abandoned — secp256k1 was rejected 2026-07-07 (a Koblitz curve) and never built, and ristretto255 was never used (libsodium removed from the tree). The AS-BUILT crypto is the `### 3.x` subsections above (NIST P-256 §3.8c, Pedersen/Bulletproofs §3.19, OPRF §3.9b). Read the `secp256k1` / `libsecp256k1(-zkp)` / `ristretto255` cost rows, risk items, binary-size figures, and review questions below as the historical plan. See the §2 banner + `DECISION-LOG.md` 2026-07-07.
 
 | Sub-component | Effort | Profile |
 |---|---|---|
