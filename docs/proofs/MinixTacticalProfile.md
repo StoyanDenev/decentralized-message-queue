@@ -19,6 +19,16 @@ provenance + SBOM for every linked artifact, minimal unvetted third-party code
 and **preserved consensus determinism** (byte-identical digests + state roots
 across every swap).
 
+**Minix is UNCONDITIONAL long-term architecture, NOT a build switch (owner
+2026-07-07).** The dependency minimization is the actual code path for *every*
+build — there is no `#ifdef MINIX`, no runtime profile flag, one binary with one
+set of code paths. It is the long-term direction of the C99 / from-scratch ethos,
+extended from the crypto TCB (already done — `determ-crypto-c99`) to the whole
+external-dependency surface. The "TACTICAL profile" is a posture / audit LABEL
+(a documented dependency + TCB boundary + SBOM an auditor signs against), exactly
+as CryptoProfile (MODERN / FIPS) is a posture label and not a code switch (one
+binary, all algorithms). Nothing in this track is gated on a profile.
+
 ## 2. External dependency inventory (verified against CMakeLists.txt)
 
 The ENTIRE third-party **source** dependency set is exactly three FetchContent'd
@@ -114,9 +124,16 @@ crypto is known correct). This is the cleanest OpenSSL removal and loses nothing
 ## 7. Phased plan
 
 1. **Design (this doc)** — owner-review + scope decision.
-2. **`net::Transport` seam, byte-invariant** — introduce the interface with
-   `AsioTransport` as the only backend (asio still underneath). Gate: native
-   cluster tests + goldens unchanged.
+2. **The `net::` seam, byte-invariant, asio still underneath** — introduce the
+   interfaces slice by slice. **STARTED: the `net::Timer` slice SHIPPED
+   (`be24c3e`)** — `include/determ/net/timer.hpp` (asio-free interface) +
+   `AsioTimer` backend; Node's contrib/block-sig/grace deadline timers now go
+   through it. Validated byte-invariant: goldens reproduce, FAST 197/0, and a
+   live 5-node/K=3 cluster (`test_weak_3node`) reaches height 11 in ~3s with head
+   agreement + committee rotation (liveness intact), both new headers GCC-13
+   clean. Remaining slices behind the same pattern: `net::EventLoop`
+   (io_context: run/stop/post), then `net::Transport` (acceptor + sockets +
+   resolver). Gate for each: native cluster tests + goldens unchanged.
 3. **Native backends behind the seam** — `IocpTransport` (Windows) +
    `EpollKqueueTransport` (POSIX), no third-party library; validate cluster
    liveness + goldens byte-identical + the S-043 wire-roundtrip-verify per message
