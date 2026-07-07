@@ -608,10 +608,8 @@ void Node::run() {
     // multi-node cluster fires the first round before peers are reachable,
     // the contrib phase aborts (broadcast goes nowhere), and per-node
     // generations diverge; recovery never converges.
-    auto grace = std::make_shared<asio::steady_timer>(
-        io_, std::chrono::milliseconds(1500));
-    grace->async_wait([this, grace](std::error_code ec) {
-        if (ec) return;
+    auto grace = std::make_shared<net::AsioTimer>(io_);
+    grace->arm(std::chrono::milliseconds(1500), [this, grace] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (gossip_.peer_count() == 0) {
             state_ = SyncState::IN_SYNC;
@@ -908,9 +906,7 @@ void Node::start_contrib_phase() {
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 
-    contrib_timer_.expires_after(std::chrono::milliseconds(cfg_.tx_commit_ms));
-    contrib_timer_.async_wait([this](std::error_code ec) {
-        if (ec) return;
+    contrib_timer_.arm(std::chrono::milliseconds(cfg_.tx_commit_ms), [this] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         handle_contrib_timeout();
     });
@@ -1068,9 +1064,7 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     pending_secrets_[cfg_.domain]    = current_round_secret_;
     gossip_.broadcast(net::make_block_sig(my_sig));
 
-    block_sig_timer_.expires_after(std::chrono::milliseconds(cfg_.block_sig_ms));
-    block_sig_timer_.async_wait([this](std::error_code ec) {
-        if (ec) return;
+    block_sig_timer_.arm(std::chrono::milliseconds(cfg_.block_sig_ms), [this] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         handle_block_sig_timeout();
     });

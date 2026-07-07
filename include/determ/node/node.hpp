@@ -6,6 +6,7 @@
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/net/gossip.hpp>
+#include <determ/net/asio_timer.hpp>
 #include <determ/time/clock.hpp>
 #include <asio.hpp>
 #include <thread>
@@ -653,8 +654,12 @@ private:
     std::map<std::pair<ShardId, Hash>, uint64_t>
         pending_inbound_first_seen_;
 
-    asio::steady_timer              contrib_timer_;
-    asio::steady_timer              block_sig_timer_;
+    // §minix net::Timer seam — the deadline timers now go through the
+    // net::Timer interface (AsioTimer today; native IOCP/epoll/kqueue later).
+    // Behavior-identical to the asio::steady_timer they replace; timers are pure
+    // scheduling (not digest-bound), so this is byte-invariant for consensus.
+    net::AsioTimer                  contrib_timer_;
+    net::AsioTimer                  block_sig_timer_;
 
     // S7: AbortClaim accumulation. Keyed by (round, missing_creator) so
     // multiple competing claim sets don't conflict. M-1 matching claims
