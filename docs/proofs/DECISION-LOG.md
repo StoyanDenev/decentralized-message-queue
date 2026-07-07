@@ -1320,3 +1320,45 @@ TweetNaCl relies on all real compilers implementing `<<` on a negative value as 
 4. **account-accounting → shrink to provably-exact** (the R60 V3/V4 caveat). SHIPPED this round: dropped the `dapp_spend` tally + the DAPP_CALL/cross-shard receiver credit; the tool now tallies only single-shard-confirmable flows (TRANSFER debit + same-shard credit, STAKE/UNSTAKE payload, fees). The DAPP_CALL amount + inbound fold into `non_tx_delta` by construction, so no over-count is possible; WA-2 drops from four assume-applied cases to two; the proof + CLI-REFERENCE simplified. Single-shard is provably exact modulo V1/V2; multi-shard is out of scope (run per-shard).
 
 **Governance note.** #2 and #3 are deliberate reversals of prior owner-frozen / future-tier decisions, made with explicit owner authority and recorded here per the append-only convention (the original entries stand; this supersedes them). Both are **consensus-critical, multi-week** tracks — they will be executed incrementally, library-primitive-first (KAT-verified, zero consensus touch), with the chain-integration steps each gated on their own review. Nothing is pushed.
+
+---
+
+## 2026-07-07 — Privacy-track direction: DSSO mechanism, input-unlinkability wiring, MODERN curve (owner decisions)
+
+Three owner decisions made during a live review of the just-shipped input-unlinkability library primitives (§3.23 LSAG / §3.23b CLSAG / §3.23c RingCT-compose) and the profile↔crypto doc reconciliation. Spec refs: `CRYPTO-C99-SPEC.md` §3.23/§3.23b/§3.23c, §3.9b, §3.20; `v2.22-PRIVACY-SPEC.md`; `include/determ/chain/params.hpp`; README. Memory: `determ-profile-crypto-posture.md`, `determ-shielded-pool-track.md`.
+
+### D1 — DSSO mechanism: DLT-A (not FROST-based T-OPAQUE)
+
+**Question.** DSSO's identity assertions were originally designed as T-OPAQUE on the K committee, threshold-signed via FROST (V2-DESIGN §v2.25). FROST was later frozen as a Claude-introduced deviation. Which mechanism ships?
+
+**Options.** (A) **DLT-A** — T-OPRF over threshold DH (joint password eval, no operator learns the password) + the chain's own K-of-K block signature AS the threshold attestation + DAPP_CALL; uses only shipped primitives. (B) restore **FROST-based T-OPAQUE**; (C) T-OPAQUE as a pure DApp (per-instance signing).
+
+**Choice.** (A) DLT-A.
+
+**Why not B/C.** B reopens the FROST freeze (re-audit + re-commit to a pulled primitive; foreclosed v2.10 DKG; against KISS) and buys nothing for the password property — FROST was only ever the *signature* layer, not the OPRF. C loses the chain-level threshold attestation (weaker trust). Corrects a prior agent error: "T-OPAQUE was removed" was WRONG — only the libsodium OPAQUE *stub* was deleted (#308); the threshold-OPRF core is live and needs no FROST.
+
+**Cross-decision implication.** With D3, DLT-A's T-OPRF DH stays **X25519** (the README wording is now correct, not stale). MODERN needs a Z_p*-free threshold-OPRF only if D3 had gone big-prime — it didn't. DSSO ships post-v1.0 as a DApp.
+
+### D2 — Input-unlinkability: stays LIBRARY, not wired
+
+**Question.** Wire CLSAG into consensus now (per-note keys + ring/pseudo-out selection + on-chain key-image nullifier set) to deliver the FIPS graph-privacy feature, or leave the primitives as library code?
+
+**Options.** (A) wire now; (B) leave as library, wire later; (C) build the Lelantus/Groth-Kohlweiss log-size alternative.
+
+**Choice.** (B) leave as library.
+
+**Why not A/C.** A is consensus-critical + multi-week + adds a decoy-selection footgun, with no concrete near-term requirement. C is a different architecture (global accumulator) superseding the already-built RingCT path. The graph-privacy *feature* is deferred; LSAG/CLSAG/RingCT-compose remain validated, audited library primitives ready to wire when a requirement is concrete.
+
+### D3 — MODERN ZK curve: reuse P-256 (drop big primes AND secp256k1)
+
+**Question.** MODERN's confidential-tx / large-prime backend was documented as big-prime Z_p* (§3.20). Is that the right choice?
+
+**Options.** (A) big-prime Z_p*; (B) X25519-boundary variants; (C) ristretto255 (ed25519-family ZK); **(D, that emerged) reuse the profile-agnostic P-256 shielded pool — no MODERN-specific ZK backend.**
+
+**Choice.** (D) reuse P-256. Clarifying fact: the owner's curve objection was **secp256k1 SPECIFICALLY** (Koblitz), NOT special curves in general — Ed25519 is acceptable, so big-prime Z_p* was solving a non-problem; and P-256 ≠ secp256k1, so the owner does not object to it. MODERN = Ed25519 sig + X25519 KX + the already-wired, profile-agnostic **P-256 shielded pool** (§3.22) for confidential-tx.
+
+**Why not A/C.** A (big primes) pays a large per-tx cost (3072-bit DH ~1-2 orders of magnitude slower + ~12× bandwidth) to solve a problem that was really just "not secp256k1." C (ristretto255) is a *new backend to build + audit* — only worth it if MODERN-ZK-off-NIST-curves is a goal in itself, which it is not (the objection was secp256k1, not P-256).
+
+**Cross-decision implication.** The **§3.20 Z_p* ff-stack** (`ffgroup`/`ffipa`/`ffrangeproof`/`ffbalance`/`ff_confidential_tx`, ~5 files + tests) is now **consumer-less**. Deletion vs keep-as-optional-conservative-backend is **PENDING owner confirmation** (they chose reuse-P-256 but did not answer the delete-Z_p* question). This also resolves the §Q10 per-curve amount-handshake ECDH inconsistency (MODERN amount handshake = X25519, FIPS = P-256) — that reconciliation + the ~112 T-OPAQUE→DLT-A doc refs are follow-on sweeps, not yet done. Docs reconciled to D3 (params.hpp / README / v2.22-PRIVACY-SPEC / PRE-IMPLEMENTATION-REVIEW) 2026-07-07.
+
+**Governance note.** D1-D3 are direction decisions (not code). No consensus code changed; this entry + the doc corrections capture them. Nothing pushed.

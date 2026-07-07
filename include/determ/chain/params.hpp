@@ -83,12 +83,13 @@ inline constexpr uint64_t SUSPENSION_SLASH = 10;
 // compliance is a deployment property (a pluggable CMVP-validated module).
 //
 //   MODERN: cryptographically-strongest defaults — XChaCha20-Poly1305 AEAD,
-//           Argon2id passphrase KDF, and — for confidential transactions — the
-//           big-prime Z_p* (RFC 3526 MODP-3072) Pedersen + Bulletproofs backend
-//           (§3.20, the MODERN large-prime ZK stack; a library primitive today,
-//           not yet wired to consensus). secp256k1 OPRF for T-OPAQUE. Faster +
-//           safer with random nonces; not FIPS-validated. Default for non-FIPS
-//           deployments.
+//           Argon2id passphrase KDF, Ed25519 signatures, X25519 KX. Confidential
+//           transactions ride the profile-agnostic P-256 shielded pool (§3.22) —
+//           the same wired backend FIPS uses; MODERN adds NO separate ZK curve
+//           (secp256k1 never built; the big-prime Z_p* §3.20 stack is an unwired
+//           library primitive, not MODERN's backend). X25519 T-OPRF for the DSSO
+//           DApp (DLT-A). Faster + safer with random nonces; not FIPS-validated.
+//           Default for non-FIPS deployments.
 //
 //   FIPS:   FIPS-ALIGNED posture — AES-256-GCM AEAD (FIPS 197 + SP 800-38D),
 //           PBKDF2-HMAC-SHA-256 passphrase KDF (SP 800-132; substantially weaker
@@ -176,7 +177,7 @@ struct TimingProfile {
 // Trade-offs of FIPS that operators accept by choosing cluster:
 //   - PBKDF2 instead of Argon2id (weaker passphrase hashing — operators
 //     mitigate by enforcing strong-password policy or hardware-protected keys)
-//   - NIST P-256 (vs the MODERN profile's big-prime Z_p* large-prime backend)
+//   - NIST P-256 ECDH for KX (vs the MODERN profile's X25519); confidential-tx is P-256 in both
 //   - Confidential-tx ZK (P-256 range proofs / ring signatures) is FIPS-ALIGNED
 //     (built on P-256 + SHA-256) but NOT a FIPS-validated ALGORITHM — a deployment
 //     needing per-op CMVP validation treats it as out-of-module
@@ -227,7 +228,7 @@ inline constexpr TimingProfile PROFILE_GLOBAL {
 // Trade-offs of FIPS that operators accept by choosing tactical:
 //   - PBKDF2 instead of Argon2id (significantly weaker passphrase hashing —
 //     not a primary concern in tactical where keys are pre-provisioned)
-//   - NIST P-256 (vs the MODERN profile's big-prime Z_p* large-prime backend)
+//   - NIST P-256 ECDH for KX (vs the MODERN profile's X25519); confidential-tx is P-256 in both
 //   - Confidential-tx ZK (P-256 range proofs / ring signatures) is FIPS-ALIGNED
 //     (built on P-256 + SHA-256) but NOT a FIPS-validated ALGORITHM — a deployment
 //     needing per-op CMVP validation treats it as out-of-module
