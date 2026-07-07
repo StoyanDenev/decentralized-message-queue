@@ -59,7 +59,7 @@ const Scenario* find_scenario(const std::vector<Scenario>& v,
 }
 
 void print_list(const std::vector<Scenario>& v) {
-    std::cout << "DSF scenarios (increments 1-2):\n";
+    std::cout << "DSF scenarios (" << v.size() << " registered):\n";
     for (const auto& s : v) {
         std::cout << "  " << s.name;
         if (s.expect_violation) std::cout << "  [expect-violation self-test]";
@@ -74,6 +74,8 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] --list   "
+        "(register + list/run N seed-driven variants)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
         "seed to reproduce any failure.\n";
@@ -93,6 +95,8 @@ int main(int argc, char** argv) {
     std::string seed_str    = "0x1";    // default deterministic seed
     uint64_t    max_events  = 0;         // 0 => framework default cap
     bool        quiet       = false;
+    bool        want_list   = false;
+    uint64_t    generate_count = 0;      // --generate N: N seed-driven variants
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -103,7 +107,8 @@ int main(int argc, char** argv) {
             }
             return argv[++i];
         };
-        if (a == "--list")          { print_list(scenarios); return 0; }
+        if (a == "--list")          { want_list = true; }
+        else if (a == "--generate") { generate_count = std::stoull(need("--generate")); }
         else if (a == "--help" || a == "-h") { print_usage(); return 0; }
         else if (a == "--scenario") { scenario_name = need("--scenario"); }
         else if (a == "--seed")     { seed_str      = need("--seed"); }
@@ -117,15 +122,25 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (scenario_name.empty()) {
-        std::cerr << "error: --scenario <name> is required (see --list)\n";
-        return 2;
-    }
-
     uint64_t seed = 0;
     if (!parse_seed(seed_str, seed)) {
         std::cerr << "error: bad --seed '" << seed_str
                   << "' (want 0xHEX or decimal)\n";
+        return 2;
+    }
+
+    // §Q5/§Q6: --generate N registers N reliable-broadcast variants seeded by
+    // the run --seed, named gen_run_00..0(N-1). Same (--generate N, --seed S)
+    // => the same variant set on any host; each is then runnable / listable.
+    if (generate_count > 0)
+        register_generated_scenarios(scenarios, seed,
+                                     static_cast<int>(generate_count),
+                                     "gen_run", /*with_selftest=*/false);
+
+    if (want_list) { print_list(scenarios); return 0; }
+
+    if (scenario_name.empty()) {
+        std::cerr << "error: --scenario <name> is required (see --list)\n";
         return 2;
     }
 

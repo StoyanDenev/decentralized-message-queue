@@ -71,11 +71,12 @@ inline std::string gen_params_str(const GenParams& p) {
 // controls the follower's apply: true = monotone max (correct); false = additive
 // (the planted bug used by the self-test).
 inline Scenario make_broadcast_variant(int idx, const GenParams& p,
-                                       bool idempotent, bool self_test) {
+                                       bool idempotent, bool self_test,
+                                       const char* name_prefix = "gen_broadcast") {
     Scenario s;
-    char nm[40];
-    std::snprintf(nm, sizeof(nm), self_test ? "gen_overcount_selftest"
-                                            : "gen_broadcast_%02d", idx);
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_overcount_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
     s.name = nm;
     s.description = (self_test
         ? std::string("SELF-TEST: a generated fault profile (forced dup) over a "
@@ -169,13 +170,16 @@ inline Scenario make_broadcast_variant(int idx, const GenParams& p,
 // single `gen_overcount_selftest` that proves a generated fault profile surfaces
 // a real (non-idempotent-apply) bug.
 inline void register_generated_scenarios(std::vector<Scenario>& out,
-                                         uint64_t gen_seed, int count) {
+                                         uint64_t gen_seed, int count,
+                                         const char* name_prefix = "gen_broadcast",
+                                         bool with_selftest = true) {
     SplitMix64 g(gen_seed);
     for (int i = 0; i < count; ++i) {
         GenParams p = draw_params(g);
         out.push_back(make_broadcast_variant(i, p, /*idempotent=*/true,
-                                             /*self_test=*/false));
+                                             /*self_test=*/false, name_prefix));
     }
+    if (!with_selftest) return;
     // Self-test: a non-idempotent apply under a forced-duplicate profile
     // overcounts. Fixed profile so the violation is guaranteed (not seed-luck).
     GenParams bug;
