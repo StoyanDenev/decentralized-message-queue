@@ -30,6 +30,7 @@
 #include "scenarios.hpp"
 #include "scenarios_inc2.hpp"
 #include "scenarios_inc3.hpp"
+#include "generator.hpp"
 
 namespace {
 
@@ -85,6 +86,7 @@ int main(int argc, char** argv) {
     register_seed_scenarios(scenarios);
     register_inc2_scenarios(scenarios);   // increment-2 adversarial scenarios
     register_inc3_scenarios(scenarios);   // increment-3 adversarial scenarios
+    register_generated_scenarios(scenarios, 0x9E5C6Eull, 6); // increment-4 §Q5 generated variants
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
