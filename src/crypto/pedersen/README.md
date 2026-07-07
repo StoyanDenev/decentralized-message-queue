@@ -12,7 +12,7 @@ the **single-value range proof** `v ∈ [0,2^n)` (inc.5), the **aggregated range
 (inc.6), and the **confidential-tx balance proof** — a Schnorr PoK that the excess
 `E = Σ C_in − Σ C_out − fee*G` opens to zero (`E = x*H`, amount conservation; inc.7,
 `balance.c`) — §3.19. This is the complete confidential-tx primitive set for the
-FIPS profile, symmetric with the MODERN-profile §3.20 `Z_p*` stack. **ZERO consensus
+FIPS profile (profile-agnostic — MODERN reuses this same P-256 stack). **ZERO consensus
 touch — purely additive, not wired into any chain call site**; chain/wallet integration
 is a later, separately-reviewed step. Headers under `include/determ/crypto/pedersen/`.
 
@@ -192,7 +192,7 @@ proof's value commitment IS its tx output commitment — both `v*G + r*H`, so a
 cross-primitive generator mismatch turns it RED) plus the division of labour (balance
 catches inflation, range catches an out-of-range amount). Mirror:
 `tools/verify_p256_confidential_tx.py`. This completes the FIPS-profile confidential-tx
-primitive set, symmetric with the MODERN-profile §3.20 `Z_p*` stack.
+primitive set (profile-agnostic — MODERN reuses P-256, not a separate Z_p* backend).
 
 Wire convention (inherited from the P-256 module): scalars are 32-byte BIG-ENDIAN
 (`< n`); commitments are 33-byte SEC1 COMPRESSED points.

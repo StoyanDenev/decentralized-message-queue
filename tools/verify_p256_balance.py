@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Independent Python reference for the Determ CONFIDENTIAL-TX BALANCE PROOF over NIST
-# P-256 — CRYPTO-C99-SPEC.md §3.19 increment 7. The FIPS-profile sibling of the §3.20
-# inc.7 finite-field balance proof: the amount-conservation half of a confidential
+# P-256 — CRYPTO-C99-SPEC.md §3.19 increment 7: the amount-conservation half of a confidential
 # transaction (the §3.19 inc.5/6 range proofs are the no-inflation half), proving
 # Σ v_in = Σ v_out + fee WITHOUT revealing any amount, given Pedersen commitments
 # C = v*G + r*H (G the P-256 base point = the value generator, H the §3.19

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # CRYPTO-C99-SPEC.md §3.19 increment 7 — the C99 confidential-tx BALANCE PROOF over NIST
-# P-256 (src/crypto/pedersen/balance.c), the FIPS-profile sibling of the §3.20 inc.7
-# finite-field balance proof and the amount-conservation half of a confidential
+# P-256 (src/crypto/pedersen/balance.c), the amount-conservation half of a confidential
 # transaction (the §3.19 inc.5/6 range proofs are the no-inflation half). Proves
 # Σv_in = Σv_out + fee without revealing any amount: the excess
 # E = Σ C_in − Σ C_out − fee*G (one multi-exponentiation; point subtractions are scalar

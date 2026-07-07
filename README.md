@@ -617,7 +617,7 @@ Timing fields (`tx_commit_ms` / `block_sig_ms` / `abort_claim_ms`): cluster `50/
 
 **Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack: AES-256-GCM AEAD, PBKDF2-HMAC-SHA-256 KDF, NIST P-256 prime-order operations, Ed25519 (FIPS 186-5) signatures, X25519 (SP 800-186) KX. Confidential transactions (Pedersen + Bulletproofs over P-256, §3.19 / the §3.22 shielded pool) and input-unlinkability ring signatures (§3.23) ARE available and are built on FIPS-approved primitives (P-256 + SHA-256) — but the zero-knowledge CONSTRUCTIONS themselves are NOT FIPS-validated ALGORITHMS (NIST has no approved range-proof / ring-signature standard), so a deployment requiring per-operation CMVP validation treats them as out-of-module.
 
-The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, Ed25519 signatures, X25519 KX. Confidential transactions ride the profile-agnostic P-256 shielded pool (§3.22) — the same wired backend as FIPS; MODERN adds no separate ZK curve (secp256k1 was never built; the big-prime Z_p* §3.20 stack is an unwired library primitive, not MODERN's backend).
+The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, Ed25519 signatures, X25519 KX. Confidential transactions ride the profile-agnostic P-256 shielded pool (§3.22) — the same wired backend as FIPS; MODERN adds no separate ZK curve (secp256k1 was never built; the big-prime Z_p* backend was removed 2026-07-07).
 
 See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10 for full cryptographic-profile rationale and feature-availability matrix.
 

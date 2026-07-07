@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CRYPTO-C99-SPEC.md §3.19 increment 8 — the END-TO-END confidential-tx COMPOSITION over
-# NIST P-256, the FIPS-profile sibling of the §3.20 inc.8 finite-field composition. NOT a
+# NIST P-256. NOT a
 # new primitive: it composes the two shipped halves of a confidential transaction over the
 # PUBLIC §3.19 APIs — a per-output inc.5 RANGE proof (the non-negativity / no-overflow
 # half) plus the inc.7 BALANCE proof (amount conservation) — into one flow, and pins

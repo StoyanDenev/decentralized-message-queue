@@ -86,8 +86,8 @@ inline constexpr uint64_t SUSPENSION_SLASH = 10;
 //           Argon2id passphrase KDF, Ed25519 signatures, X25519 KX. Confidential
 //           transactions ride the profile-agnostic P-256 shielded pool (§3.22) —
 //           the same wired backend FIPS uses; MODERN adds NO separate ZK curve
-//           (secp256k1 never built; the big-prime Z_p* §3.20 stack is an unwired
-//           library primitive, not MODERN's backend). X25519 T-OPRF for the DSSO
+//           (secp256k1 never built; a big-prime Z_p* backend was considered and
+//           removed 2026-07-07). X25519 T-OPRF for the DSSO
 //           DApp (DLT-A). Faster + safer with random nonces; not FIPS-validated.
 //           Default for non-FIPS deployments.
 //

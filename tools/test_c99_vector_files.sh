@@ -63,8 +63,6 @@ EXPECTED = {
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
     "p256_balance.json",
-    "ff_pedersen.json", "ff_scalar.json", "ff_ipa.json", "ff_rangeproof.json",
-    "ff_aggrangeproof.json", "ff_balance.json",
 }
 
 try:
@@ -1213,61 +1211,6 @@ def chk_bp_agg_rangeproof(vec, label):
         return "cannot import verify_bp_agg_rangeproof (%s)" % e
     return va.check_agg_rangeproof(vec, label)
 
-def chk_ff_pedersen(vec, label):
-    # §3.20 finite-field Pedersen over RFC 3526 MODP-3072 — recompute g^v*h^r mod p
-    # (or the homomorphic product) through the independent from-scratch Python in
-    # tools/verify_ff_pedersen.py (native bignums), and match the frozen 384-byte bytes.
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_pedersen as vf
-    except Exception as e:
-        return "cannot import verify_ff_pedersen (%s)" % e
-    return vf.check_ff_pedersen(vec, label)
-
-def chk_ff_scalar(vec, label):
-    # §3.20 inc.3 scalar field mod q — recompute add/mul/inv/reduce/hash_to_scalar
-    # through the independent from-scratch Python (tools/verify_ff_scalar.py, native
-    # bignums) and match the frozen 384-byte big-endian bytes.
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_scalar as vs
-    except Exception as e:
-        return "cannot import verify_ff_scalar (%s)" % e
-    return vs.check_ff_scalar(vec, label)
-
-def chk_ff_ipa(vec, label):
-    # §3.20 inc.4 Bulletproofs IPA over Z_p* — recompute commit / prove through the
-    # independent from-scratch Python (tools/verify_ff_ipa.py, native bignums) and
-    # match the frozen bytes (proofs also re-verified inside the checker).
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_ipa as vi
-    except Exception as e:
-        return "cannot import verify_ff_ipa (%s)" % e
-    return vi.check_ff_ipa(vec, label)
-
-def chk_ff_rangeproof(vec, label):
-    # §3.20 inc.5 single-value Bulletproofs range proof over Z_p* — recompute V + prove
-    # through the independent from-scratch Python (tools/verify_ff_rangeproof.py, native
-    # bignums; the proof is also re-verified inside the checker) and match the frozen bytes.
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_rangeproof as vr
-    except Exception as e:
-        return "cannot import verify_ff_rangeproof (%s)" % e
-    return vr.check_ff_rangeproof(vec, label)
-
-def chk_ff_aggrangeproof(vec, label):
-    # §3.20 inc.6 AGGREGATED Bulletproofs range proof over Z_p* — recompute the m V_j +
-    # prove through the independent from-scratch Python (tools/verify_ff_rangeproof.py
-    # emit-agg, native bignums; the proof is also re-verified) and match the frozen bytes.
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_rangeproof as vr
-    except Exception as e:
-        return "cannot import verify_ff_rangeproof (%s)" % e
-    return vr.check_ff_aggrangeproof(vec, label)
-
 def chk_p256_balance(vec, label):
     # §3.19 inc.7 confidential-tx balance proof over NIST P-256 — recompute the excess E +
     # the Schnorr proof through the independent from-scratch Python (tools/verify_p256_balance.py,
@@ -1278,17 +1221,6 @@ def chk_p256_balance(vec, label):
     except Exception as e:
         return "cannot import verify_p256_balance (%s)" % e
     return vpb.check_p256_balance(vec, label)
-
-def chk_ff_balance(vec, label):
-    # §3.20 inc.7 confidential-tx balance proof over Z_p* — recompute the excess E + the
-    # Schnorr proof through the independent from-scratch Python (tools/verify_ff_balance.py,
-    # native bignums; the proof is also re-verified) and match the frozen bytes.
-    if "tools" not in sys.path: sys.path.insert(0, "tools")
-    try:
-        import verify_ff_balance as vb
-    except Exception as e:
-        return "cannot import verify_ff_balance (%s)" % e
-    return vb.check_ff_balance(vec, label)
 
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
@@ -1322,13 +1254,7 @@ CHECKERS = {
     "bp_ipa": chk_bp_ipa,
     "bp_rangeproof": chk_bp_rangeproof,
     "bp_agg_rangeproof": chk_bp_agg_rangeproof,
-    "ff_pedersen": chk_ff_pedersen,
-    "ff_scalar": chk_ff_scalar,
-    "ff_ipa": chk_ff_ipa,
-    "ff_rangeproof": chk_ff_rangeproof,
-    "ff_aggrangeproof": chk_ff_aggrangeproof,
     "p256_balance": chk_p256_balance,
-    "ff_balance": chk_ff_balance,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

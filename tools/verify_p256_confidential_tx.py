@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Independent Python reference for the Determ CONFIDENTIAL-TRANSACTION COMPOSITION over
-# NIST P-256 — CRYPTO-C99-SPEC.md §3.19 increment 8, the FIPS-profile sibling of the
-# §3.20 inc.8 finite-field composition. NOT a new primitive: the capstone that COMPOSES
+# NIST P-256 — CRYPTO-C99-SPEC.md §3.19 increment 8. NOT a new primitive: the capstone that COMPOSES
 # the two shipped halves of a confidential transaction into one end-to-end flow and proves
 # they work together —
 #

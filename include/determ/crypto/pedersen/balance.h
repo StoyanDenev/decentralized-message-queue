@@ -8,9 +8,8 @@
 extern "C" {
 #endif
 
-/* CRYPTO-C99-SPEC.md §3.19 increment 7 — confidential-tx BALANCE PROOF over NIST P-256,
- * the FIPS-profile sibling of the §3.20 inc.7 finite-field balance proof. The amount-
- * conservation half of a confidential transaction (the §3.19 inc.5/6 range proofs are the
+/* CRYPTO-C99-SPEC.md §3.19 increment 7 — confidential-tx BALANCE PROOF over NIST P-256.
+ * The amount-conservation half of a confidential transaction (the §3.19 inc.5/6 range proofs are the
  * no-inflation half): proves Σ v_in = Σ v_out + fee WITHOUT revealing any amount, given
  * Pedersen commitments C = v*G + r*H (G the P-256 base point / value generator, H the
  * §3.19 nothing-up-my-sleeve blinding generator).

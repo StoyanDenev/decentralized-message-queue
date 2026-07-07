@@ -511,56 +511,28 @@ mod-n operands; exercises `sc_mont_mul`). First measured runs read clean
 (max |t| < 1.5 at smoke sample sizes); the §5 targets below fold them into the
 inventory's measurement plan (target 13).
 
-### 2.10 ff — finite-field Bulletproofs group over Z_p* (§3.20, the MODERN confidential-tx backend)
+### 2.10 pedersen — P-256 confidential-tx MSM / commit / vector-commit (§3.19)
 
-**Secrets handled:** the range/balance prover's exponents — the committed value `v` and
-the blinding factors `r`/`gamma`, the bit-vectors and polynomial-blinding scalars — all
-flow into the group exponentiation `modexp(base, exp) = base^exp mod p` (`src/crypto/ff/
-ffgroup.c`). The **base is always a public generator** (`g`/`h`/`G_i`/`H_i`/`u`); the
-**exponent is the secret**.
+**Secrets handled:** the range/balance prover's scalars — the committed value `v`, the
+blinding factors `r`/`gamma`, the bit-vectors and polynomial-blinding scalars — flow into
+the multi-scalar multiplication `Σ s_i·P_i` and the Pedersen commit / vector-commit
+(`src/crypto/pedersen/`). The **base points are always public generators** (`G`/`H`/`G_i`/
+`H_i`/`u`); the **scalars are the secret**.
 
-**Mechanisms making the secret-dependent work constant-time (as of 2026-07-06,
-owner-authorized):**
-- `modexp_c` — **fixed 4-bit-window square-and-multiply with a branchless table select.**
-  No branch on secret exponent bits (the old bit-serial `if ((e>>bit)&1) mul` is gone);
-  the window value `d` selects `base^d` by scanning ALL 16 table entries every window and
-  blending them under the constant-time equality mask `ff_ct_eq` — `d` is never used as a
-  memory index, so there is no secret-indexed access / cache-timing leak. The table is
-  built from the public base only. Faster than the old bit-serial version (~16% fewer
-  Montgomery multiplies) — the "windowed modexp" perf lever.
-- `montmul_c` — the final CIOS conditional subtract is a **branchless masked blend**
-  (`out = (tmp & msk) | (t & ~msk)`, `msk = 0 - ge`), not a data-dependent branch/memcpy.
-- The CIOS inner loops are fixed-count (`S = 96`); no data-dependent branch there.
-
-**Byte-output-invariant + audited:** the CT rewrite computes byte-identical results — all
-40 ff_* dual-oracle corpus vectors recompute byte-equal — and an independent adversarial
-audit confirmed the CT property (no secret branch / no secret-indexed access) + the
-masked-select correctness. Source-level CT is the standard codebase assumption (cf. §2.9
-`fe_cmov` / §4.1.5).
-
-**MSM/vector_commit zero-scalar skip — REMOVED (constant-time, 2026-07-06).** The
-`determ_ff_msm` / `determ_ff_vector_commit` `if (ff_is_zero(sl)) continue` / `if
-(!ff_is_zero(sl))` guards (which leaked which secret scalars are zero — in the range
-prover, the bits of the committed value) are gone: the code always exponentiates
-(`base^0 = 1` contributes the identity, so byte-identical to skipping — all 40 ff_*
-corpus vectors, including the zero-entry ones, stay byte-equal). **With this the §3.20
-Z_p\* prover is constant-time for its own honest inputs** — no secret-value-dependent
-branch or memory access remains in the exponent path or the multi-exponentiation. The only
-residual branches are `ff_ge(sl, q)` / point-validity rejects, which never fire for a
-prover's own honestly-generated scalars/points (the standard public-validity-rejection
-residual, §4.1).
-
-**Cross-profile residual: RESOLVED (2026-07-06).** The §3.19 P-256 `determ_pedersen_msm` /
-`_vector_commit` / `_commit` had the identical zero-scalar skips; they are now CT too. The
-MSM routes through a new pt-domain `determ_p256_msm_ct` (accumulates in the projective
-representation where the identity `O` needs no special-casing — `pt_scalar_mul(0,P)=O`, the
-RCB-complete `pt_add` absorbs `O` — so no `acc_is_identity` flag and no skip); commit and
-vector_commit use branchless scalar-substitution (`ct_scalar_nz`) + point-selects
-(`ct_point_select`), valid because their accumulator starts at the non-identity `r*H`.
-Byte-output-invariant (all 35 P-256 corpus vectors byte-equal) + independently audited
-(6/6 CT properties SOUND). **With this BOTH the §3.19 P-256 and §3.20 Z_p\* confidential-tx
-provers are constant-time for their own honest inputs — no CT residual remains before the
-owner-gated chain integration** (`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
+**Zero-scalar skip — REMOVED (constant-time, 2026-07-06, owner-authorized).** The
+`determ_pedersen_msm` / `_vector_commit` / `_commit` routines had `if (scalar==0) continue`
+guards that leaked which secret scalars are zero (in the range prover, the bits of the
+committed value). They are gone: the MSM routes through a pt-domain `determ_p256_msm_ct`
+(accumulates in the projective representation where the identity `O` needs no special-casing
+— `pt_scalar_mul(0,P)=O`, the RCB-complete `pt_add` absorbs `O` — so no `acc_is_identity`
+flag and no skip); commit and vector_commit use branchless scalar-substitution
+(`ct_scalar_nz`) + point-selects (`ct_point_select`), valid because their accumulator starts
+at the non-identity `r*H`. **Byte-output-invariant** (all 35 P-256 corpus vectors byte-equal)
++ independently audited (6/6 CT properties SOUND). The only residual branches are
+point-validity / `ge(s,n)` rejects, which never fire for a prover's own honestly-generated
+scalars/points (the standard public-validity-rejection residual, §4.1). With this the P-256
+confidential-tx prover is constant-time for its own honest inputs — no CT residual remains
+before the owner-gated chain integration (`ConfidentialTxIntegrationDesign.md` NC-4/L-4).
 
 **Probe-target mapping (→ §3.12).** The `p256-msm-zeroskip` `ct-timing-probe` target
 (`src/main.cpp`) empirically backs the zero-skip removal: its two classes — `both-nonzero`
@@ -570,12 +542,7 @@ the removed skip leaked, since it ran one fewer scalar-mult for a zero term), ti
 8000 samples (all crop percentiles ≤ 1.4, well under the TVLA |t| > 4.5 threshold) — no
 evidence of a zero-dependent timing difference, i.e. the CT MSM times identically whether
 or not a scalar is zero. (Per TimingProbeDesign §5.4 this is *evidence*, not a proof;
-timing is environment-dependent and the target is out of `run_all.sh` by design.) The
-analogous **`ff-modexp` empirical probe is impractical** with the current fixed
-20000-sample calibration: a single 3072-bit `Z_p*` `determ_ff_pedersen_commit` is
-~hundreds of ms, so calibration alone would run for tens of minutes — the §3.20 modexp CT
-therefore rests on the audit + byte-identity (above), not an empirical probe.
-
+timing is environment-dependent and the target is out of `run_all.sh` by design.)
 ---
 
 ## 3. Comparison census
