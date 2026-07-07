@@ -143,11 +143,13 @@ Constant-time by construction — no secret-dependent branch, index, or table:
   `ed25519.h` header): a precomputed-table, radix-2^51 implementation would be
   faster; it is a throughput optimization, not a security gate. Tracked as
   future work.
-- **Daemon sign/verify call sites still use OpenSSL `EVP_PKEY_ED25519`.** This
-  module is additive at the sign/verify level; its in-tree consumer is the
-  FROST layer via `ed25519_group.h`. (Verified: no `src/` caller of
-  `determ_ed25519_sign`/`_verify` outside the `src/main.cpp` test dispatch and
-  the module itself.)
+- **Daemon sign/verify migrated to this module (§3.15 backend swap, 2026-07-03).**
+  `determ::crypto::sign`/`verify` (`src/crypto/keys.cpp:74`/`:82`) call
+  `determ_ed25519_sign`/`_verify` — the consensus Ed25519 path is now this
+  from-scratch C99 module, with **no OpenSSL runtime dependency** (OpenSSL
+  `EVP_PKEY_ED25519` survives only as the byte-equality test oracle in the
+  `src/main.cpp` `test-*-c99` dispatch). The FROST layer additionally consumes
+  the exposed scalar/group ops via `ed25519_group.h`.
 - **RFC 9591 binding-factor interop vectors** are a tracked follow-up in the
   FROST module that builds on this one (C99CryptoStackAudit.md §7 documented
   non-goals) — they validate FROST's derivation, not this module's arithmetic,
