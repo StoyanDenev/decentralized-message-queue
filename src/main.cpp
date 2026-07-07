@@ -19993,6 +19993,19 @@ int main(int argc, char** argv) {
                   "now_unix returns plausible post-2017 unix time");
         }
 
+        // 14b. §Q1 ClockInjectionSeam: RealClock.unix_seconds() is a VERBATIM
+        //      delegate to now_unix() — this equality is the byte-invariance
+        //      guarantee for the injected consensus clock. Sample r between two
+        //      now_unix() reads: floor(system_clock) is non-decreasing across
+        //      three back-to-back calls, so r ∈ {a, b} with b-a ≤ 1 (never flaky).
+        {
+            int64_t a = now_unix();
+            int64_t r = determ::time::RealClock::instance().unix_seconds();
+            int64_t b = now_unix();
+            check(r == a || r == b,
+                  "RealClock.unix_seconds() == now_unix() (verbatim delegate)");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": encoding " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

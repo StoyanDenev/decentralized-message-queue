@@ -124,8 +124,9 @@ void Config::save(const std::string& path) const {
 
 // ─── Node ────────────────────────────────────────────────────────────────────
 
-Node::Node(const Config& cfg)
+Node::Node(const Config& cfg, determ::time::Clock& clock)
     : cfg_(cfg)
+    , clock_(clock)
     , gossip_(io_)
     , contrib_timer_(io_)
     , block_sig_timer_(io_) {
@@ -3450,7 +3451,7 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
             }
             if (!write_frame({{"event", "heartbeat"},
                                {"block_index", head},
-                               {"ts", now_unix()}})) {
+                               {"ts", clock_.unix_seconds()}})) {
                 finish(false);
                 return;
             }
@@ -3504,7 +3505,7 @@ void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
             } else if (++sub->blocks_since_frame >= sub->heartbeat_blocks) {
                 enqueue({{"event", "heartbeat"},
                           {"block_index", b.index},
-                          {"ts", now_unix()}}, 256);
+                          {"ts", clock_.unix_seconds()}}, 256);
                 sub->blocks_since_frame = 0;
             }
         }

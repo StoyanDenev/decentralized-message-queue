@@ -6,6 +6,7 @@
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/net/gossip.hpp>
+#include <determ/time/clock.hpp>
 #include <asio.hpp>
 #include <thread>
 #include <atomic>
@@ -174,7 +175,13 @@ enum class SyncState : uint8_t { SYNCING, IN_SYNC };
 
 class Node {
 public:
-    explicit Node(const Config& cfg);
+    // §Q1 clock injection: the wall clock is an injected dependency. Defaults
+    // to the process-wide RealClock (verbatim now_unix()), so every existing
+    // caller — and every produced byte — is unchanged. The DSF supplies a
+    // deterministic virtual clock to drive the real engine (docs/proofs/
+    // ClockInjectionSeam.md). The referent must outlive the Node.
+    explicit Node(const Config& cfg,
+                  determ::time::Clock& clock = determ::time::RealClock::instance());
     ~Node();
 
     void run();
@@ -484,6 +491,10 @@ private:
     void apply_block_locked(const chain::Block& b);
 
     Config                cfg_;
+    // §Q1 injected wall clock (declared right after cfg_, initialized right
+    // after cfg_ — no -Wreorder, no dependency on other members). RealClock by
+    // default; consensus-time reads go through clock_.unix_seconds().
+    determ::time::Clock&  clock_;
     crypto::NodeKey       key_;
     chain::Chain          chain_;
     NodeRegistry          registry_;
