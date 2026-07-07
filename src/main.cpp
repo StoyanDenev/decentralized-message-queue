@@ -819,6 +819,12 @@ Additional in-process tests:
                                               full stake forfeit +
                                               deregistration (inactive_from)
                                               + A1 invariant
+  determ test-fa-equivocation-trace           FA harness (real engine): seeded
+                                              multi-block Byzantine TRACE of
+                                              equivocation slashing —
+                                              slash-once/idempotence/A1/
+                                              determinism (closes a slice of
+                                              F-1/FA4; determ-dsf untouched)
   determ test-equivocation-evidence           FA6 equivocation-evidence
                                               VERIFICATION — two-sig double-
                                               sign proof accept/reject arms
@@ -25591,6 +25597,232 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // ── FA harness (real-engine, self-contained path) ────────────────────────
+    // Per the owner decision (2026-07-07): determ-dsf stays a self-contained TOY
+    // framework; the F-1/FA4 gap (multi-block randomized-Byzantine consensus
+    // properties over the REAL engine) is closed by `test-fa-*` harnesses that
+    // live HERE — the determ binary already links the real Chain/apply path.
+    // This is the CONSENSUS-layer analog of test-supply-invariant-fuzz (which
+    // already covers the ECONOMIC A1 trace): a seeded, deterministic,
+    // reproducible multi-block trace that injects Byzantine events via the REAL
+    // Chain::append apply path and asserts trace-level invariants after every
+    // block. See docs/proofs/RealEngineFAHarness.md.
+    //
+    // Increment 1 — equivocation SLASHING: over a randomized trace of
+    // EquivocationEvents (a mix of FRESH targets and DUPLICATE re-submissions),
+    // the apply path must (a) zero a fresh equivocator's stake + deactivate its
+    // registry + bump accumulated_slashed by exactly its stake, (b) be
+    // IDEMPOTENT on duplicates (no double-slash), (c) keep A1
+    // (expected_total == live_total_supply) after every block, (d) keep
+    // accumulated_slashed monotone non-decreasing. Non-vacuous (asserts real
+    // slashes + real duplicates occurred) with a negative control (an
+    // event-free block moves nothing) and a same-seed determinism check.
+    if (cmd == "test-fa-equivocation-trace") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic counter-seeded SplitMix64 (no wall clock / OS RNG) —
+        // same generator family as test-supply-invariant-fuzz.
+        uint64_t rng_state = 0xD1E7A5A1B0C0FFEEULL;
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+
+        // Genesis: a never-slashed block author + K distinct-stake validators
+        // that are the slash targets (distinct stakes make the exact-total
+        // invariant unambiguous).
+        const int K = 6;
+        GenesisConfig cfg;
+        cfg.chain_id = "fa-equivocation-trace";
+        auto add_creator = [&](const std::string& dom, uint64_t stake,
+                               uint64_t bal, int idx) {
+            GenesisCreator gc; gc.domain = dom;
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x10 * (idx + 1) + j);
+            gc.initial_stake = stake;
+            cfg.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = dom; ga.balance = bal;
+            cfg.initial_balances.push_back(ga);
+        };
+        add_creator("author", 200, 500, 0);
+        std::vector<std::string> vs;
+        std::vector<uint64_t>    stake0(size_t(K), 0);
+        for (int i = 0; i < K; ++i) {
+            vs.push_back("v" + std::to_string(i));
+            stake0[size_t(i)] = 1000 + uint64_t(100 * i);   // 1000..1500 distinct
+            add_creator(vs[size_t(i)], stake0[size_t(i)], 100, i + 1);
+        }
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_block_subsidy(0);   // isolate slashing: no minting this trace
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant holds at genesis baseline");
+
+        std::vector<char> seen(size_t(K), 0);     // which validators are slashed
+        uint64_t expected_slashed_total = 0;
+        uint64_t prev_slashed = c.accumulated_slashed();
+        int fresh_slashes = 0, duplicate_attempts = 0;
+        bool trace_ok = true;
+
+        const int kBlocks = 48;
+        for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
+            int j = int(next_rand() % uint64_t(K));
+            bool is_fresh = !seen[size_t(j)];
+
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());   // strictly increasing
+            b.creators  = {"author"};
+            for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                b.cumulative_rand[t] = uint8_t(next_rand() & 0xff);
+            EquivocationEvent ev;
+            ev.equivocator = vs[size_t(j)];
+            ev.block_index = b.index;
+            for (size_t t = 0; t < ev.digest_a.size(); ++t)
+                ev.digest_a[t] = uint8_t(next_rand() & 0xff);
+            for (size_t t = 0; t < ev.digest_b.size(); ++t)
+                ev.digest_b[t] = uint8_t(next_rand() & 0xff);
+            b.equivocation_events.push_back(ev);
+
+            const uint64_t before_slashed = c.accumulated_slashed();
+            try {
+                c.append(b);
+            } catch (const std::exception& e) {
+                check(false, "apply threw at block " + std::to_string(b.index)
+                      + ": " + e.what());
+                trace_ok = false; break;
+            }
+
+            if (is_fresh) {
+                ++fresh_slashes;
+                expected_slashed_total += stake0[size_t(j)];
+                seen[size_t(j)] = 1;
+                if (c.stake(vs[size_t(j)]) != 0) {
+                    check(false, vs[size_t(j)] + " stake not zeroed on fresh slash");
+                    trace_ok = false;
+                }
+                if (c.accumulated_slashed() != expected_slashed_total) {
+                    check(false, "accumulated_slashed != running total on fresh slash");
+                    trace_ok = false;
+                }
+                auto reg = c.registrant(vs[size_t(j)]);
+                if (!(reg.has_value() && reg->inactive_from != UINT64_MAX)) {
+                    check(false, vs[size_t(j)] + " registry not deactivated on slash");
+                    trace_ok = false;
+                }
+            } else {
+                ++duplicate_attempts;
+                // IDEMPOTENCE: no double-slash — stake stays 0, counter frozen.
+                if (c.stake(vs[size_t(j)]) != 0) {
+                    check(false, vs[size_t(j)] + " stake changed on duplicate evidence");
+                    trace_ok = false;
+                }
+                if (c.accumulated_slashed() != before_slashed) {
+                    check(false, "DOUBLE-SLASH: accumulated_slashed grew on duplicate evidence");
+                    trace_ok = false;
+                }
+            }
+
+            // Per-block invariants over the REAL committed state.
+            if (c.expected_total() != c.live_total_supply()) {
+                check(false, "A1 violated at block " + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.accumulated_slashed() < prev_slashed) {
+                check(false, "accumulated_slashed decreased (non-monotone)");
+                trace_ok = false;
+            }
+            prev_slashed = c.accumulated_slashed();
+        }
+
+        check(trace_ok,
+              "trace ran to completion with all per-block invariants holding");
+
+        // Exact total: Σ over DISTINCT slashed validators of their pre-slash stake.
+        uint64_t manual = 0;
+        for (int i = 0; i < K; ++i) if (seen[size_t(i)]) manual += stake0[size_t(i)];
+        check(c.accumulated_slashed() == expected_slashed_total
+              && expected_slashed_total == manual,
+              "exact: accumulated_slashed == Σ distinct-slashed stakes (no double-count)");
+
+        // Non-vacuity: the trace actually slashed AND actually retried duplicates.
+        check(fresh_slashes >= 1, "non-vacuous: at least one fresh slash occurred");
+        check(duplicate_attempts >= 1,
+              "non-vacuous: at least one duplicate (idempotence actually exercised)");
+
+        // Negative control: an event-free block must NOT move the slashed counter
+        // (the monotone invariant is not trivially always-increasing).
+        {
+            const uint64_t before = c.accumulated_slashed();
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());
+            b.creators  = {"author"};
+            c.append(b);
+            check(c.accumulated_slashed() == before,
+                  "negative control: event-free block leaves accumulated_slashed unchanged");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 holds after the negative-control block");
+        }
+
+        // Determinism (§Q6-style): the same seed reproduces a byte-identical
+        // final state root over the REAL engine. Self-contained re-run helper.
+        auto final_root = [&](uint64_t seed) -> Hash {
+            uint64_t rs = seed;
+            auto rnd = [&]() -> uint64_t {
+                rs += 0x9E3779B97F4A7C15ULL;
+                uint64_t z = rs;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                return z ^ (z >> 31);
+            };
+            Chain cc;
+            cc.append(make_genesis_block(cfg));
+            cc.set_block_subsidy(0);
+            for (int blk = 0; blk < kBlocks; ++blk) {
+                int j = int(rnd() % uint64_t(K));
+                Block b;
+                b.index     = cc.height();
+                b.prev_hash = cc.head().compute_hash();
+                b.timestamp = static_cast<int64_t>(cc.height());
+                b.creators  = {"author"};
+                for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                    b.cumulative_rand[t] = uint8_t(rnd() & 0xff);
+                EquivocationEvent ev;
+                ev.equivocator = vs[size_t(j)];
+                ev.block_index = b.index;
+                for (size_t t = 0; t < ev.digest_a.size(); ++t)
+                    ev.digest_a[t] = uint8_t(rnd() & 0xff);
+                for (size_t t = 0; t < ev.digest_b.size(); ++t)
+                    ev.digest_b[t] = uint8_t(rnd() & 0xff);
+                b.equivocation_events.push_back(ev);
+                cc.append(b);
+            }
+            return cc.compute_state_root();
+        };
+        check(final_root(0xABCDEFULL) == final_root(0xABCDEFULL),
+              "determinism: same seed reproduces identical final state root");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-equivocation-trace "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << fresh_slashes << " fresh slashes, "
+                  << duplicate_attempts << " idempotent duplicates over "
+                  << kBlocks << " blocks)\n";
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
