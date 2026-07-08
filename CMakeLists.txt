@@ -74,6 +74,16 @@ endif()
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
+# minix §4.5: native net backends are per-platform TUs. The IOCP pair is
+# Windows-only (each is also #ifdef _WIN32-guarded, but pruning here keeps
+# non-Windows builds from even parsing them); the future POSIX reactor pair
+# gets the mirrored prune when it lands.
+if(NOT WIN32)
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_event_loop.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_transport.cpp")
+endif()
+
 # v2.17 / S-004 option 2: passphrase-encrypted keyfiles. The
 # envelope crypto (AES-256-GCM + PBKDF2-HMAC-SHA-256) lives in
 # wallet/envelope.cpp; main `determ` binary needs it for

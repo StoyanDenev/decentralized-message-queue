@@ -9,11 +9,11 @@
 #include <memory>
 #include <string>
 
-// This header (and rpc.cpp) is asio-free: the daemon-side server sits behind
-// the minix net::Transport/net::EventLoop seam (docs/proofs/
-// MinixTacticalProfile.md §4.4 slice B). rpc_call, the CLI's blocking
-// client below, is a separate "cut asio" checklist item — out of scope here
-// — and still constructs its own raw asio::io_context in rpc.cpp.
+// This header AND rpc.cpp are fully asio-free: the daemon-side server sits
+// behind the minix net::Transport/net::EventLoop seam (docs/proofs/
+// MinixTacticalProfile.md §4.4 slice B), and rpc_call — the CLI's blocking
+// client below — rides net::SyncClient (the raw-socket line client from the
+// cut-asio CLI migration).
 namespace determ::rpc {
 
 // Minimal line-oriented JSON-RPC server.

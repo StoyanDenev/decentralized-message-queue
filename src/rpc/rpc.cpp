@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/rpc/rpc.hpp>
+#include <determ/net/sync_client.hpp>
 #include <determ/types.hpp>
 #include <determ/crypto/sha2/sha2.h>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
-// rpc_call (the CLI's blocking client, bottom of this file) is a separate
-// "cut asio" checklist item from the RpcServer/subscriber slice B migration
-// above it — it still talks raw asio directly, so it needs its own include
-// now that rpc.hpp no longer pulls asio.hpp in for it transitively.
-#include <asio.hpp>
 
 namespace determ::rpc {
 
@@ -300,12 +296,8 @@ json RpcServer::dispatch(const json& req) {
 json rpc_call(const std::string& host, uint16_t port,
                const std::string& method, const json& params,
                const std::string& auth_secret_hex) {
-    asio::io_context io;
-    asio::ip::tcp::resolver resolver(io);
-    auto endpoints = resolver.resolve(host, std::to_string(port));
-
-    asio::ip::tcp::socket socket(io);
-    asio::connect(socket, endpoints);
+    net::SyncClient client;
+    client.connect(host, port);
 
     json req = {{"method", method}, {"params", params}};
     // v2.16: auth secret resolution. Order of precedence:
@@ -330,13 +322,8 @@ json rpc_call(const std::string& host, uint16_t port,
             canonical_for_hmac(method, params));
     }
     std::string line = req.dump() + "\n";
-    asio::write(socket, asio::buffer(line));
-
-    asio::streambuf buf;
-    asio::read_until(socket, buf, '\n');
-    std::istream is(&buf);
-    std::string resp;
-    std::getline(is, resp);
+    client.write_all(line.data(), line.size());
+    std::string resp = client.read_line();
 
     auto j = json::parse(resp);
     if (!j["error"].is_null())

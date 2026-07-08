@@ -65,7 +65,11 @@ else
 fi
 
 # ── 2. minix seam interface headers are asio-free ───────────────────────────
-IFACE_HEADERS="include/determ/net/timer.hpp include/determ/net/event_loop.hpp include/determ/net/transport.hpp"
+# The iocp_*.hpp NATIVE backend headers (§4.5 increment 1) are pinned here
+# too: unlike the Asio* backends they must never touch asio (they exist to
+# replace it) — and per the §4.5 layout rule they carry no OS includes either
+# (opaque void*/uintptr_t handles; <windows.h> lives in src/net/*.cpp only).
+IFACE_HEADERS="include/determ/net/timer.hpp include/determ/net/event_loop.hpp include/determ/net/transport.hpp include/determ/net/iocp_event_loop.hpp include/determ/net/iocp_timer.hpp include/determ/net/iocp_transport.hpp include/determ/net/sync_client.hpp"
 for h in $IFACE_HEADERS; do
     if [ ! -f "$h" ]; then fail "interface header missing: $h"; continue; fi
     if grep -qE 'asio' "$h"; then

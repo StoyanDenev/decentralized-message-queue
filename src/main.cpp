@@ -55,11 +55,24 @@
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
 #include <determ/net/rate_limiter.hpp>
+#ifdef _WIN32
+// minix §4.5 increment 1: the native IOCP backend, exercised by
+// test-net-native (the daemon itself stays on the Asio* backends until the
+// native cutover increment).
+#include <determ/net/iocp_event_loop.hpp>
+#include <determ/net/iocp_timer.hpp>
+#include <determ/net/iocp_transport.hpp>
+#endif
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
 // Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"
 #include "shamir.hpp"
-#include <asio.hpp>
+// minix cut-asio CLI migration: the blocking CLI clients (headers/snapshot
+// gossip-frame fetchers, the dapp-subscribe stream reader) ride
+// net::SyncClient — this TU no longer includes asio directly (the seam
+// backends still pull it in transitively via node.hpp until the native
+// cutover).
+#include <determ/net/sync_client.hpp>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -70,6 +83,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <future>      // test-net-native: promise/future completion gates
 #include <random>      // ct-timing-probe: interleaved class assignment + RND-class secrets
 #include <cmath>       // ct-timing-probe: Welch t / sqrt
 #include <algorithm>   // ct-timing-probe: percentile crop thresholds (nth_element)
@@ -782,6 +796,18 @@ Additional in-process tests:
                                               thread run() exactly-once
                                               fan-in; all phases sequenced
                                               via stop() (no sleep races)
+  determ test-net-native                      minix native-backend contracts —
+                                              IocpEventLoop/IocpTimer/
+                                              IocpTransport (Windows; skips
+                                              PASS on POSIX): the same seam
+                                              pins as test-net-seam PLUS
+                                              loopback accept/connect,
+                                              async exactly-N/whole-span
+                                              round trip, sync write_all/
+                                              read_line, cross-thread
+                                              close() aborts a blocked sync
+                                              write (FB71) AND a pending
+                                              async read (CancelIoEx)
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -2482,15 +2508,12 @@ static int cmd_headers(int argc, char** argv) {
         uint16_t port = static_cast<uint16_t>(
             std::stoi(peer_str.substr(colon + 1)));
         try {
-            asio::io_context io;
-            asio::ip::tcp::resolver resolver(io);
-            auto endpoints = resolver.resolve(host, std::to_string(port));
-            asio::ip::tcp::socket socket(io);
-            asio::connect(socket, endpoints);
+            net::SyncClient client;
+            client.connect(host, port);
 
             auto write_msg = [&](const net::Message& msg) {
                 auto buf = msg.serialize();
-                asio::write(socket, asio::buffer(buf));
+                client.write_all(buf.data(), buf.size());
             };
 
             // HELLO + HEADERS_REQUEST. Tag ourselves SINGLE/0 since
@@ -2505,7 +2528,7 @@ static int cmd_headers(int argc, char** argv) {
             // headers / etc. concurrently).
             std::array<uint8_t, 4> hdr;
             for (int spin = 0; spin < 200; ++spin) {
-                asio::read(socket, asio::buffer(hdr));
+                client.read_exact(hdr.data(), hdr.size());
                 uint32_t len = (uint32_t(hdr[0]) << 24)
                              | (uint32_t(hdr[1]) << 16)
                              | (uint32_t(hdr[2]) <<  8)
@@ -2516,7 +2539,7 @@ static int cmd_headers(int argc, char** argv) {
                     return 1;
                 }
                 std::vector<uint8_t> body(len);
-                asio::read(socket, asio::buffer(body));
+                client.read_exact(body.data(), body.size());
                 net::Message m = net::Message::deserialize(body.data(),
                                                               body.size());
                 if (m.type != net::MsgType::HEADERS_RESPONSE) continue;
@@ -4059,15 +4082,12 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
     uint16_t    port = static_cast<uint16_t>(std::stoi(peer_str.substr(colon + 1)));
 
     try {
-        asio::io_context io;
-        asio::ip::tcp::resolver resolver(io);
-        auto endpoints = resolver.resolve(host, std::to_string(port));
-        asio::ip::tcp::socket socket(io);
-        asio::connect(socket, endpoints);
+        net::SyncClient client;
+        client.connect(host, port);
 
         auto write_msg = [&](const net::Message& msg) {
             auto buf = msg.serialize();
-            asio::write(socket, asio::buffer(buf));
+            client.write_all(buf.data(), buf.size());
         };
 
         // HELLO so the peer doesn't drop us. We tag ourselves as
@@ -4081,7 +4101,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
         // meantime).
         std::array<uint8_t, 4> hdr;
         for (int spin = 0; spin < 200; ++spin) {
-            asio::read(socket, asio::buffer(hdr));
+            client.read_exact(hdr.data(), hdr.size());
             uint32_t len = (uint32_t(hdr[0]) << 24)
                          | (uint32_t(hdr[1]) << 16)
                          | (uint32_t(hdr[2]) << 8)
@@ -4091,7 +4111,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
                 return 1;
             }
             std::vector<uint8_t> body(len);
-            asio::read(socket, asio::buffer(body));
+            client.read_exact(body.data(), body.size());
             net::Message m = net::Message::deserialize(body.data(), body.size());
             if (m.type != net::MsgType::SNAPSHOT_RESPONSE) continue;
 
@@ -6042,48 +6062,46 @@ int main(int argc, char** argv) {
                     req["auth"] = mh.str();
                 }
 
-                asio::io_context io;
-                asio::ip::tcp::socket sock(io);
-                asio::connect(sock, asio::ip::tcp::resolver(io).resolve(
-                                        "127.0.0.1", std::to_string(port)));
+                net::SyncClient sock;
+                sock.connect("127.0.0.1", port);
                 std::string line = req.dump() + "\n";
-                asio::write(sock, asio::buffer(line));
+                sock.write_all(line.data(), line.size());
 
-                asio::streambuf buf;
-                std::error_code ec;
-                while (!ec && !error_frame) {
-                    asio::read_until(sock, buf, '\n', ec);
-                    if (ec) break;
-                    std::istream is(&buf);
+                while (!error_frame) {
                     std::string frame;
-                    while (std::getline(is, frame)) {
-                        if (frame.empty()) continue;
-                        std::cout << frame << "\n" << std::flush;
-                        ++printed;
-                        auto j = json::parse(frame, nullptr, false);
-                        if (!j.is_discarded()) {
-                            // Plain RPC error envelope = permanent config
-                            // error (never took the socket over): exit 2,
-                            // no reconnect even if --reconnect is set.
-                            if (j.contains("error") && !j["error"].is_null()) {
-                                std::cerr << "dapp-subscribe rejected: "
-                                          << j["error"] << "\n";
-                                return 2;
-                            }
-                            if (j.value("event", "") == "error") {
-                                error_frame = true;  // transient: reconnectable
-                            }
-                            if (j.contains("block_index") &&
-                                j["block_index"].is_number_unsigned()) {
-                                uint64_t bi = j["block_index"].get<uint64_t>();
-                                if (!have_last || bi > last_block) {
-                                    last_block = bi; have_last = true;
-                                }
+                    try {
+                        frame = sock.read_line();
+                    } catch (const std::exception&) {
+                        // EOF / transport end — the old read_until ec-break
+                        // path: with --reconnect we redial below; without,
+                        // a clean server-side close still exits 0.
+                        break;
+                    }
+                    if (frame.empty()) continue;
+                    std::cout << frame << "\n" << std::flush;
+                    ++printed;
+                    auto j = json::parse(frame, nullptr, false);
+                    if (!j.is_discarded()) {
+                        // Plain RPC error envelope = permanent config
+                        // error (never took the socket over): exit 2,
+                        // no reconnect even if --reconnect is set.
+                        if (j.contains("error") && !j["error"].is_null()) {
+                            std::cerr << "dapp-subscribe rejected: "
+                                      << j["error"] << "\n";
+                            return 2;
+                        }
+                        if (j.value("event", "") == "error") {
+                            error_frame = true;  // transient: reconnectable
+                        }
+                        if (j.contains("block_index") &&
+                            j["block_index"].is_number_unsigned()) {
+                            uint64_t bi = j["block_index"].get<uint64_t>();
+                            if (!have_last || bi > last_block) {
+                                last_block = bi; have_last = true;
                             }
                         }
-                        if (max_frames > 0 && printed >= max_frames) return 0;
-                        if (error_frame) break;
                     }
+                    if (max_frames > 0 && printed >= max_frames) return 0;
                 }
             } catch (std::exception& e) {
                 if (!reconnect) {
@@ -8802,8 +8820,8 @@ int main(int argc, char** argv) {
     }
     // S-001 / v2.16 RPC HMAC-SHA-256 authentication contract. The
     // production verifier (RpcServer::verify_auth) and client signer
-    // (rpc_call) both live in src/rpc/rpc.cpp behind an asio
-    // io_context + Node, so they cannot be exercised in-process. This
+    // (rpc_call) both live in src/rpc/rpc.cpp behind a live transport
+    // + Node, so they cannot be exercised in-process. This
     // test re-implements the SAME auth-field algebra from rpc.cpp —
     //
     //   canonical_for_hmac(method, params) = method + "|" + params.dump()
@@ -25576,6 +25594,257 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
+    }
+    // minix §4.5 increment 1: the native IOCP backend behind the SAME seam
+    // contracts test-net-seam pins for the asio backends, PLUS the transport
+    // surface (loopback accept/connect, exactly-N/whole-span async round
+    // trip, the sync write_all/read_line half, and the two §4.5 abort
+    // contracts: cross-thread close() aborts a BLOCKED SYNC WRITE — the FB71
+    // mechanism — and a PENDING ASYNC READ via CancelIoEx). Windows-only
+    // backend: on POSIX the subcommand prints its PASS marker and exits 0
+    // (the wrapper stays green on both CI legs; epoll/kqueue get their own
+    // reactor test when they land).
+    if (cmd == "test-net-native") {
+#ifndef _WIN32
+        std::cout << "  PASS: net-native (IOCP backend is Windows-only; "
+                     "skipped on POSIX)\n";
+        return 0;
+#else
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. EventLoop.post + stop() releases run().
+        {
+            IocpEventLoop loop;
+            bool ran = false;
+            loop.post([&] { ran = true; loop.stop(); });
+            loop.run();
+            check(ran, "IocpEventLoop.post: posted fn ran; stop() released run()");
+        }
+
+        // 2. Timer.arm fires on clean expiry (expiry posted by the deadline
+        //    thread, dispatched by run() — run() returning IS the liveness
+        //    half, exactly as in test-net-seam).
+        {
+            IocpEventLoop loop;
+            IocpTimer t(loop);
+            bool fired = false;
+            t.arm(std::chrono::milliseconds(1),
+                  [&] { fired = true; loop.stop(); });
+            loop.run();
+            check(fired, "IocpTimer.arm: clean expiry runs on_expire");
+        }
+
+        // 3. Timer.cancel suppresses + is idempotent (unreachable deadline —
+        //    the same discipline the seam test uses; see its phase-3 note).
+        {
+            IocpEventLoop loop;
+            IocpTimer never_armed(loop);
+            never_armed.cancel();
+            IocpTimer t(loop);
+            bool bad = false;
+            t.arm(std::chrono::milliseconds(600000) /* unreachable */,
+                  [&] { bad = true; });
+            t.cancel();
+            t.cancel();
+            loop.post([&] { loop.stop(); });
+            loop.run();
+            check(!bad, "IocpTimer.cancel: cancelled arm's on_expire suppressed");
+            check(true, "IocpTimer.cancel: idempotent + safe when not armed (no crash)");
+        }
+
+        // 4. Re-arm supersedes.
+        {
+            IocpEventLoop loop;
+            IocpTimer t(loop);
+            bool a = false, b = false;
+            t.arm(std::chrono::milliseconds(600000) /* superseded */,
+                  [&] { a = true; });
+            t.arm(std::chrono::milliseconds(1),
+                  [&] { b = true; loop.stop(); });
+            loop.run();
+            check(!a, "IocpTimer re-arm: superseded on_expire NOT called");
+            check(b,  "IocpTimer re-arm: superseding arm fired");
+        }
+
+        // 5. Multi-thread run(): the native IOCP model — N workers blocked
+        //    on one port; 64 pre-posted fns run exactly once across 2
+        //    threads (mirrors the seam test; mine blocks on an empty port
+        //    rather than returning, so pre-posting is not even load-bearing
+        //    here — stop() is what releases the threads either way).
+        {
+            IocpEventLoop loop;
+            constexpr int N = 64;
+            std::atomic<int> count{0};
+            for (int i = 0; i < N; ++i) {
+                loop.post([&] {
+                    if (count.fetch_add(1) + 1 == N) loop.stop();
+                });
+            }
+            std::thread t1([&] { loop.run(); });
+            std::thread t2([&] { loop.run(); });
+            t1.join();
+            t2.join();
+            check(count.load() == N,
+                  "IocpEventLoop multi-thread run(): 64 posted fns ran exactly once across 2 threads");
+        }
+
+        // 6. Transport: loopback accept/connect + the Connection contracts.
+        {
+            IocpEventLoop loop;
+            std::thread w1([&] { loop.run(); });
+            std::thread w2([&] { loop.run(); });
+
+            IocpTransport transport(loop);
+            IocpAcceptor  acceptor(loop, 0, /*localhost_only=*/true);
+            const uint16_t port = acceptor.local_port();
+            check(port != 0, "IocpAcceptor: ephemeral bind reports the assigned port");
+
+            using ConnPtr = std::shared_ptr<Connection>;
+            auto pair_up = [&]() -> std::pair<ConnPtr, ConnPtr> {
+                // Heap promises captured BY VALUE: on the timeout/diagnosis
+                // path this lambda returns while the accept/connect ops are
+                // still pending — their late completions must land on
+                // still-alive promises, not dangling stack slots.
+                auto srv_p = std::make_shared<std::promise<ConnPtr>>();
+                auto cli_p = std::make_shared<std::promise<ConnPtr>>();
+                acceptor.async_accept(
+                    [srv_p](std::error_code ec, ConnPtr c) {
+                        srv_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                transport.async_connect(
+                    "127.0.0.1", port,
+                    [cli_p](std::error_code ec, ConnPtr c) {
+                        cli_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                auto sf = srv_p->get_future();
+                auto cf = cli_p->get_future();
+                if (sf.wait_for(std::chrono::seconds(15)) !=
+                        std::future_status::ready ||
+                    cf.wait_for(std::chrono::seconds(15)) !=
+                        std::future_status::ready)
+                    return {nullptr, nullptr};
+                return {sf.get(), cf.get()};
+            };
+
+            auto [srv, cli] = pair_up();
+            check(srv && cli, "loopback accept+connect produced both Connections");
+            if (srv && cli) {
+                check(srv->remote_endpoint().rfind("127.0.0.1:", 0) == 0,
+                      "accepted Connection remote_endpoint() is ip:port");
+
+                // 6a. Async exactly-N / whole-span round trip, sized to force
+                //     multiple partial completions through the XferOp loop.
+                constexpr size_t kN = 1 << 20;   // 1 MiB
+                std::vector<uint8_t> tx(kN), rx(kN, 0);
+                for (size_t i = 0; i < kN; ++i)
+                    tx[i] = static_cast<uint8_t>(i * 31 + 7);
+                std::promise<std::pair<std::error_code, std::size_t>> wp, rp;
+                cli->async_write(tx.data(), kN,
+                                 [&](std::error_code ec, std::size_t n) {
+                                     wp.set_value({ec, n});
+                                 });
+                srv->async_read(rx.data(), kN,
+                                [&](std::error_code ec, std::size_t n) {
+                                    rp.set_value({ec, n});
+                                });
+                auto wf = wp.get_future();
+                auto rf = rp.get_future();
+                bool io_done =
+                    wf.wait_for(std::chrono::seconds(15)) ==
+                        std::future_status::ready &&
+                    rf.wait_for(std::chrono::seconds(15)) ==
+                        std::future_status::ready;
+                check(io_done, "async 1MiB round trip completed (no hang)");
+                if (io_done) {
+                    auto [wec, wn] = wf.get();
+                    auto [rec, rn] = rf.get();
+                    check(!wec && wn == kN, "async_write: whole span, success");
+                    check(!rec && rn == kN, "async_read: exactly N, success");
+                    check(tx == rx, "async round trip: bytes intact in order");
+                }
+
+                // 6b. Sync half: write_all + read_line, including the
+                //     bytes-past-'\n'-carry-over contract (two lines, one
+                //     write, two reads).
+                check(srv->write_all("a-from-server\nb-from-server\n", 28),
+                      "sync write_all (server)");
+                std::string l1, l2;
+                check(cli->read_line(l1) && l1 == "a-from-server",
+                      "sync read_line: first line");
+                check(cli->read_line(l2) && l2 == "b-from-server",
+                      "sync read_line: second line served from the carry buffer");
+                check(cli->write_all("ping\n", 5), "sync write_all (client)");
+                std::string l3;
+                check(srv->read_line(l3) && l3 == "ping",
+                      "sync read_line (server)");
+
+                // 6c. Cross-thread close() aborts a PENDING ASYNC READ (the
+                //     CancelIoEx path — §4.5 risk 1's completion still flows
+                //     through the port, with an error).
+                std::promise<std::error_code> ap;
+                std::vector<uint8_t> abuf(16);
+                cli->async_read(abuf.data(), abuf.size(),
+                                [&](std::error_code ec, std::size_t) {
+                                    ap.set_value(ec);
+                                });
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                cli->close();
+                auto af = ap.get_future();
+                bool aborted =
+                    af.wait_for(std::chrono::seconds(15)) ==
+                        std::future_status::ready &&
+                    af.get();
+                check(aborted,
+                      "cross-thread close(): pending async_read completed with an error (CancelIoEx)");
+                srv->close();
+            }
+
+            // 6d. FB71 analogue on a FRESH pair: a PENDING sync write (peer
+            //     never reads) is aborted by a cross-thread close() well
+            //     before the 30s timeout backstop. Loopback AFD absorbs one
+            //     full overlapped send synchronously regardless of size
+            //     (probed: the FIRST 4 MiB completes inline, the SECOND
+            //     pends) — so the writer loops 4 MiB chunks until one pends;
+            //     close() then aborts the in-flight op (probed: CancelIoEx
+            //     wakes the event-wait in ~0ms with ERROR_OPERATION_ABORTED).
+            auto [srv2, cli2] = pair_up();
+            check(srv2 && cli2, "second loopback pair for the blocked-write abort");
+            if (srv2 && cli2) {
+                srv2->set_send_timeout(std::chrono::milliseconds(30000));
+                auto blocked = std::async(std::launch::async, [&] {
+                    std::vector<char> big(4 * 1024 * 1024, 'x');
+                    for (int i = 0; i < 64; ++i)   // ≤256 MiB before giving up
+                        if (!srv2->write_all(big.data(), big.size()))
+                            return false;   // the release we assert on
+                    return true;            // never pended — machine absorbed 256 MiB?!
+                });
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                srv2->close();
+                bool released =
+                    blocked.wait_for(std::chrono::seconds(15)) ==
+                        std::future_status::ready &&
+                    blocked.get() == false;
+                check(released,
+                      "FB71: cross-thread close() aborted a BLOCKED sync write_all promptly");
+                cli2->close();
+            }
+
+            loop.stop();
+            w1.join();
+            w2.join();
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": net-native "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+#endif // _WIN32
     }
     // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
     // the stake-lifecycle complement to STAKE (covered in
