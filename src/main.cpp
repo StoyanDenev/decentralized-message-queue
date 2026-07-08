@@ -825,6 +825,35 @@ Additional in-process tests:
                                               slash-once/idempotence/A1/
                                               determinism (closes a slice of
                                               F-1/FA4; determ-dsf untouched)
+  determ test-fa-abort-trace                  FA harness (real engine): seeded
+                                              multi-block Byzantine TRACE of
+                                              Phase-1 AbortEvents — exact
+                                              min(SUSPENSION_SLASH,stake)
+                                              deducts w/ floor-at-0,
+                                              abort_records cache, A1/
+                                              monotone/determinism (inc-2)
+  determ test-fa-cross-shard-trace            FA harness (real engine): seeded
+                                              two-chain cross-shard receipt
+                                              TRACE — exactly-once credit
+                                              (dedup rejects duplicates), no
+                                              credit without debit, in-flight
+                                              two-chain conservation sum, A1
+                                              on both chains, determinism
+                                              (FA7 slice; determ-dsf untouched)
+  determ test-fa-multi-event-trace            FA harness (real engine): seeded
+                                              MIXED multi-event trace — random
+                                              TRANSFER/equivocation/abort per
+                                              block; A1 + exact slash total +
+                                              shadow balances/nonces/stakes
+                                              jointly (FA-Apply-15 F-1 slice)
+  determ test-fa-merge-trace                  FA harness (real engine): seeded
+                                              multi-block adversarial TRACE of
+                                              the R7 MERGE_EVENT merge-map
+                                              state machine — model
+                                              equivalence, first-write-wins
+                                              dup BEGIN, stale-END/bad-partner
+                                              no-ops, fee+nonce always
+                                              consumed, A1, determinism
   determ test-equivocation-evidence           FA6 equivocation-evidence
                                               VERIFICATION — two-sig double-
                                               sign proof accept/reject arms
@@ -25822,6 +25851,1507 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions" : "had failures")
                   << " (" << fresh_slashes << " fresh slashes, "
                   << duplicate_attempts << " idempotent duplicates over "
+                  << kBlocks << " blocks)\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Increment 2 — abort-event SUSPENSION slashing (S-032 family): over a
+    // randomized multi-block trace of Phase-1 AbortEvents against a
+    // K-validator committee (a FORCED repeat-target schedule that drains one
+    // small-stake validator through full -> partial -> zero deducts, random
+    // Phase-1 targets, and scheduled Phase-2 no-ops), the apply path must
+    // (a) deduct EXACTLY min(SUSPENSION_SLASH, stake) from a Phase-1 target's
+    // stake (floor at 0, never negative, entry never erased),
+    // (b) bump accumulated_slashed by exactly the deduct (partial and zero
+    // deducts included) and keep it monotone non-decreasing,
+    // (c) keep the S-032 abort_records cache EXACT per domain (count
+    // increments + last_block updates on every Phase-1 abort — even for
+    // drained stake; Phase-2 rounds are NEVER recorded),
+    // (d) keep A1 (expected_total == live_total_supply) after every block.
+    // Non-vacuous (fresh + repeat targets, real stake movement, >=1 PARTIAL
+    // deduct, >=1 floored ZERO deduct, real Phase-2 no-ops) with a negative
+    // control (event-free block moves nothing) and a same-seed determinism
+    // check. See docs/proofs/RealEngineFAHarness.md.
+    if (cmd == "test-fa-abort-trace") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic counter-seeded SplitMix64 (no wall clock / OS RNG) —
+        // same generator family as test-fa-equivocation-trace.
+        uint64_t rng_state = 0xFAAB0127D5EEDB01ULL;
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+
+        // Genesis: a never-slashed block author + K validators that are the
+        // abort targets. v0 gets a deliberately SMALL, non-multiple-of-slash
+        // stake (25) so the forced repeat schedule drives it through a
+        // PARTIAL deduct (25 -> 15 -> 5 -> 0: third hit deducts 5 < SLASH)
+        // and then floored ZERO deducts, structurally — independent of the
+        // random targets. v1..v5 are large + distinct (can't drain in 48
+        // blocks: 48 x 10 = 480 < 1100).
+        const int K = 6;
+        GenesisConfig cfg;
+        cfg.chain_id = "fa-abort-trace";
+        auto add_creator = [&](const std::string& dom, uint64_t stake,
+                               uint64_t bal, int idx) {
+            GenesisCreator gc; gc.domain = dom;
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x10 * (idx + 1) + j);
+            gc.initial_stake = stake;
+            cfg.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = dom; ga.balance = bal;
+            cfg.initial_balances.push_back(ga);
+        };
+        add_creator("author", 200, 500, 0);
+        std::vector<std::string> vs;
+        std::vector<uint64_t>    stake0(size_t(K), 0);
+        for (int i = 0; i < K; ++i) {
+            vs.push_back("v" + std::to_string(i));
+            stake0[size_t(i)] = (i == 0) ? 25 : 1000 + uint64_t(100 * i);
+            add_creator(vs[size_t(i)], stake0[size_t(i)], 100, i + 1);
+        }
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_block_subsidy(0);   // isolate slashing: no minting this trace
+        const uint64_t SLASH = c.suspension_slash();
+        check(SLASH == 10, "baseline: genesis-default SUSPENSION_SLASH == 10");
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant holds at genesis baseline");
+
+        // Mirror model of the REAL apply semantics (chain.cpp suspension
+        // block): per Phase-1 event, count++/last_block=index, then
+        // deduct = min(SLASH, stake); Phase-2 (round != 1) does NOTHING.
+        std::vector<uint64_t> exp_stake = stake0;
+        std::vector<uint64_t> exp_count(size_t(K), 0);
+        std::vector<uint64_t> exp_last(size_t(K), 0);
+        uint64_t exp_slashed  = 0;
+        uint64_t prev_slashed = c.accumulated_slashed();
+        int fresh_targets = 0, repeat_targets = 0, moved_stake = 0,
+            partial_deducts = 0, zero_deducts = 0, phase2_noops = 0;
+        bool trace_ok = true;
+
+        const int kBlocks = 48;
+        for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
+            // Deterministic adversarial schedule (mirrored in final_root):
+            //   blk % 8 == 0 -> FORCED repeat target v0, Phase-1 (drains
+            //                   25 -> 0: full, partial, then zero deducts);
+            //   blk % 5 == 3 -> Phase-2 (round=2) no-op vs random target;
+            //   otherwise    -> Phase-1 vs random target.
+            int j = 0; uint8_t ev_round = 1;
+            if (blk % 8 == 0)      { j = 0; ev_round = 1; }
+            else if (blk % 5 == 3) { j = int(next_rand() % uint64_t(K)); ev_round = 2; }
+            else                   { j = int(next_rand() % uint64_t(K)); ev_round = 1; }
+
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());   // strictly increasing
+            b.creators  = {"author"};
+            for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                b.cumulative_rand[t] = uint8_t(next_rand() & 0xff);
+            AbortEvent ae;
+            ae.round         = ev_round;
+            ae.aborting_node = vs[size_t(j)];
+            ae.timestamp     = static_cast<int64_t>(b.index);
+            for (size_t t = 0; t < ae.event_hash.size(); ++t)
+                ae.event_hash[t] = uint8_t(next_rand() & 0xff);   // distinct per block
+            b.abort_events.push_back(ae);
+
+            // Advance the mirror model (matches chain.cpp exactly).
+            if (ev_round == 1) {
+                bool is_fresh = (exp_count[size_t(j)] == 0);
+                exp_count[size_t(j)]++;
+                exp_last[size_t(j)] = b.index;
+                uint64_t deduct = std::min<uint64_t>(SLASH, exp_stake[size_t(j)]);
+                exp_stake[size_t(j)] -= deduct;
+                exp_slashed          += deduct;
+                if (is_fresh) ++fresh_targets; else ++repeat_targets;
+                if (deduct > 0)                 ++moved_stake;
+                if (deduct > 0 && deduct < SLASH) ++partial_deducts;
+                if (deduct == 0)                ++zero_deducts;
+            } else {
+                ++phase2_noops;
+            }
+
+            try {
+                c.append(b);
+            } catch (const std::exception& e) {
+                check(false, "apply threw at block " + std::to_string(b.index)
+                      + ": " + e.what());
+                trace_ok = false; break;
+            }
+
+            // EXACT per-validator stake + abort_records cache vs the model
+            // (whole committee, every block — catches cross-domain bleed).
+            for (int i = 0; i < K && trace_ok; ++i) {
+                if (c.stake(vs[size_t(i)]) != exp_stake[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " stake != model at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+                auto it = c.abort_records().find(vs[size_t(i)]);
+                if (exp_count[size_t(i)] == 0) {
+                    if (it != c.abort_records().end()) {
+                        check(false, vs[size_t(i)]
+                              + " has an abort_record before any Phase-1 abort");
+                        trace_ok = false;
+                    }
+                } else if (it == c.abort_records().end()
+                           || it->second.count != exp_count[size_t(i)]
+                           || it->second.last_block != exp_last[size_t(i)]) {
+                    check(false, vs[size_t(i)]
+                          + " abort_record (count,last_block) != model at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+            }
+
+            // EXACT running slashed total, monotonicity, A1 — every block.
+            if (c.accumulated_slashed() != exp_slashed) {
+                check(false, "accumulated_slashed != exact running total at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.accumulated_slashed() < prev_slashed) {
+                check(false, "accumulated_slashed decreased (non-monotone)");
+                trace_ok = false;
+            }
+            if (c.expected_total() != c.live_total_supply()) {
+                check(false, "A1 violated at block " + std::to_string(b.index));
+                trace_ok = false;
+            }
+            prev_slashed = c.accumulated_slashed();
+        }
+
+        check(trace_ok,
+              "trace ran to completion with all per-block invariants holding");
+
+        // Exact total, independently recomputed: Σ over the committee of
+        // (genesis stake - final stake) must equal both the model's running
+        // total and the chain's counter (no unaccounted stake movement).
+        uint64_t manual = 0;
+        for (int i = 0; i < K; ++i)
+            manual += stake0[size_t(i)] - exp_stake[size_t(i)];
+        check(c.accumulated_slashed() == exp_slashed && exp_slashed == manual,
+              "exact: accumulated_slashed == Σ (genesis - final) committee stake");
+
+        // Non-vacuity: every adversarial arm actually fired. fresh/repeat/
+        // moved/partial/zero are STRUCTURALLY guaranteed by the forced-v0
+        // schedule (hits at blocks 0,8,16,24,32,40 drain 25 -> 15 -> 5 -> 0);
+        // Phase-2 no-ops by the blk%5==3 schedule.
+        check(fresh_targets >= 1, "non-vacuous: at least one FRESH target");
+        check(repeat_targets >= 1, "non-vacuous: at least one REPEAT target");
+        check(moved_stake >= 1,
+              "non-vacuous: at least one slash actually moved stake");
+        check(partial_deducts >= 1,
+              "non-vacuous: >=1 PARTIAL deduct (stake < SUSPENSION_SLASH at hit)");
+        check(zero_deducts >= 1,
+              "non-vacuous: >=1 floored ZERO deduct (records still increment)");
+        check(phase2_noops >= 1,
+              "non-vacuous: >=1 Phase-2 no-op exercised");
+
+        // Negative control: an event-free block must NOT move any tracked
+        // quantity (stake, accumulated_slashed, abort_records) and A1 holds.
+        {
+            const uint64_t before_slashed = c.accumulated_slashed();
+            const uint64_t v0_before      = c.stake(vs[0]);
+            uint64_t before_counts = 0;
+            for (const auto& kv : c.abort_records())
+                before_counts += kv.second.count;
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());
+            b.creators  = {"author"};
+            c.append(b);
+            uint64_t after_counts = 0;
+            for (const auto& kv : c.abort_records())
+                after_counts += kv.second.count;
+            check(c.accumulated_slashed() == before_slashed
+                  && c.stake(vs[0]) == v0_before
+                  && after_counts == before_counts,
+                  "negative control: event-free block moves no tracked quantity");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 holds after the negative-control block");
+        }
+
+        // Determinism (§Q6-style): the same seed reproduces a byte-identical
+        // final state root over the REAL engine. Self-contained re-run helper
+        // mirroring the exact generation (schedule + PRNG call order).
+        auto final_root = [&](uint64_t seed) -> Hash {
+            uint64_t rs = seed;
+            auto rnd = [&]() -> uint64_t {
+                rs += 0x9E3779B97F4A7C15ULL;
+                uint64_t z = rs;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                return z ^ (z >> 31);
+            };
+            Chain cc;
+            cc.append(make_genesis_block(cfg));
+            cc.set_block_subsidy(0);
+            for (int blk = 0; blk < kBlocks; ++blk) {
+                int j = 0; uint8_t ev_round = 1;
+                if (blk % 8 == 0)      { j = 0; ev_round = 1; }
+                else if (blk % 5 == 3) { j = int(rnd() % uint64_t(K)); ev_round = 2; }
+                else                   { j = int(rnd() % uint64_t(K)); ev_round = 1; }
+                Block b;
+                b.index     = cc.height();
+                b.prev_hash = cc.head().compute_hash();
+                b.timestamp = static_cast<int64_t>(cc.height());
+                b.creators  = {"author"};
+                for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                    b.cumulative_rand[t] = uint8_t(rnd() & 0xff);
+                AbortEvent ae;
+                ae.round         = ev_round;
+                ae.aborting_node = vs[size_t(j)];
+                ae.timestamp     = static_cast<int64_t>(b.index);
+                for (size_t t = 0; t < ae.event_hash.size(); ++t)
+                    ae.event_hash[t] = uint8_t(rnd() & 0xff);
+                b.abort_events.push_back(ae);
+                cc.append(b);
+            }
+            return cc.compute_state_root();
+        };
+        check(final_root(0x5EEDFACEULL) == final_root(0x5EEDFACEULL),
+              "determinism: same seed reproduces identical final state root");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-abort-trace "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << fresh_targets << " fresh + " << repeat_targets
+                  << " repeat Phase-1 targets, " << moved_stake
+                  << " stake-moving, " << partial_deducts << " partial, "
+                  << zero_deducts << " floored-zero deducts, "
+                  << phase2_noops << " Phase-2 no-ops over "
+                  << kBlocks << " blocks)\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // ── FA harness (real-engine, self-contained path) ────────────────────────
+    // Increment — cross-shard receipt CONSERVATION (FA7: no-double-credit /
+    // no-credit-without-debit): a seeded, reproducible TWO-CHAIN trace.
+    // Source shard A (ShardId 0) and destination shard B (ShardId 1) are both
+    // REAL Chains under shard_count=2 routing. Per block, A applies a real
+    // cross-shard TRANSFER through the real apply path (local debit +
+    // accumulated_outbound, chain.cpp TRANSFER branch); the harness relays the
+    // corresponding CrossShardReceipt (as the beacon relay would) and B applies
+    // it via Block::inbound_receipts — INCLUDING adversarial DUPLICATE
+    // re-submissions of already-applied receipts (the applied_inbound_receipts
+    // (src_shard, tx_hash) dedup must reject them) and WITHHELD receipts
+    // (delivered one block late, so value is genuinely in flight). Asserted
+    // after every block: B never double-credits (balance == Σ unique delivered
+    // amounts exactly), credited-on-B <= debited-on-A (exact after the final
+    // flush), per-chain A1 analogs (accumulated_outbound / accumulated_inbound
+    // running totals + expected_total == live_total_supply on BOTH chains), and
+    // the two-chain conservation sum live_A + live_B + in_flight == genesis_A +
+    // genesis_B. Non-vacuous (real credits, real duplicate rejects, real
+    // in-flight blocks) with a negative control (event-free blocks move
+    // nothing) and a same-seed determinism check over BOTH state roots.
+    // See docs/proofs/RealEngineFAHarness.md.
+    if (cmd == "test-fa-cross-shard-trace") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic counter-seeded SplitMix64 (no wall clock / OS RNG) —
+        // same generator family as test-fa-equivocation-trace.
+        uint64_t rng_state = 0xFA7C505DB0C0FFEEULL;
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+
+        // Genesis A (source shard 0): "author" block creator + "alice", the
+        // funded cross-shard sender (48 blocks * max 51/block < 10000).
+        GenesisConfig cfg_a;
+        cfg_a.chain_id = "fa-cross-shard-trace-A";
+        {
+            GenesisCreator gc; gc.domain = "author";
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x10 + j);
+            gc.initial_stake = 0;   // no stake — simpler A1 math (per
+                                    // test-cross-shard-outbound-apply)
+            cfg_a.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = "author"; ga.balance = 500;
+            cfg_a.initial_balances.push_back(ga);
+            GenesisAllocation gs; gs.domain = "alice"; gs.balance = 10000;
+            cfg_a.initial_balances.push_back(gs);
+        }
+        // Genesis B (destination shard 1): "author" creator only. The credited
+        // address arrives purely via inbound receipts (starts at balance 0).
+        GenesisConfig cfg_b;
+        cfg_b.chain_id = "fa-cross-shard-trace-B";
+        {
+            GenesisCreator gc; gc.domain = "author";
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x20 + j);
+            gc.initial_stake = 0;
+            cfg_b.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = "author"; ga.balance = 500;
+            cfg_b.initial_balances.push_back(ga);
+        }
+
+        // Deterministic probe for an address that routes AWAY from shard 0
+        // (with shard_count=2 it therefore routes exactly to B's shard 1) —
+        // same probe as test-cross-shard-outbound-apply.
+        const Hash salt{};
+        auto find_cross_shard_address = [&salt]() {
+            for (int i = 0; i < 256; ++i) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "addr%02x", i);
+                std::string addr = buf;
+                if (crypto::shard_id_for_address(addr, 2, salt) != ShardId{0})
+                    return addr;
+            }
+            return std::string{};  // unreachable in practice
+        };
+
+        Chain ca;                       // source shard A (ShardId 0)
+        ca.append(make_genesis_block(cfg_a));
+        ca.set_block_subsidy(0);        // isolate receipt flow: no minting
+        ca.set_shard_routing(2, salt, ShardId{0});
+        Chain cb;                       // destination shard B (ShardId 1)
+        cb.append(make_genesis_block(cfg_b));
+        cb.set_block_subsidy(0);
+        cb.set_shard_routing(2, salt, ShardId{1});
+
+        std::string remote = find_cross_shard_address();
+        check(!remote.empty() && ca.is_cross_shard(remote),
+              "fixture: remote address is cross-shard on A (routes to shard 1)");
+        check(!cb.is_cross_shard(remote),
+              "fixture: remote address is LOCAL on B (shard_count=2, my_shard=1)");
+
+        const uint64_t gen_a = ca.live_total_supply();   // 10500
+        const uint64_t gen_b = cb.live_total_supply();   // 500
+        check(ca.expected_total() == ca.live_total_supply()
+              && cb.expected_total() == cb.live_total_supply(),
+              "A1: invariant holds on BOTH chains at genesis baseline");
+
+        uint64_t emitted_sum = 0;       // Σ amounts debited outbound on A
+        uint64_t delivered_sum = 0;     // Σ amounts credited (unique) on B
+        uint64_t receipt_counter = 0;   // unique tx_hash source
+        std::vector<CrossShardReceipt> pending;        // withheld (in flight)
+        std::vector<CrossShardReceipt> applied_list;   // delivered — dup pool
+        int fresh_credits = 0, duplicate_attempts = 0, withheld = 0;
+        int in_flight_blocks = 0;
+        bool trace_ok = true;
+
+        const int kBlocks = 48;
+        for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
+            // Fixed 4 draws per block (branch-independent PRNG consumption).
+            const uint64_t amt_draw      = next_rand();
+            const uint64_t withhold_draw = next_rand();
+            const uint64_t dup_draw      = next_rand();
+            const uint64_t dupsel_draw   = next_rand();
+            const uint64_t amt      = 1 + (amt_draw % 50);
+            const bool     withhold = (withhold_draw % 2 == 0);
+            const bool     want_dup = (dup_draw % 2 == 0);
+
+            // ── A block: one REAL cross-shard TRANSFER through apply ──────
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = amt; tx.fee = 1; tx.nonce = uint64_t(blk);
+            Block ab;
+            ab.index     = ca.height();
+            ab.prev_hash = ca.head().compute_hash();
+            ab.timestamp = static_cast<int64_t>(ca.height());
+            ab.creators  = {"author"};
+            ab.transactions.push_back(tx);
+            try {
+                ca.append(ab);
+            } catch (const std::exception& e) {
+                check(false, "A apply threw at block " + std::to_string(ab.index)
+                      + ": " + e.what());
+                trace_ok = false; break;
+            }
+            if (ca.next_nonce("alice") != uint64_t(blk) + 1) {
+                check(false, "outbound TRANSFER did not apply at A block "
+                      + std::to_string(ab.index) + " (nonce frozen)");
+                trace_ok = false; break;
+            }
+            emitted_sum += amt;
+            if (ca.accumulated_outbound() != emitted_sum) {
+                check(false, "A accumulated_outbound != running emitted sum at block "
+                      + std::to_string(ab.index));
+                trace_ok = false;
+            }
+
+            // Relay receipt (what the beacon relay would carry to B). Unique
+            // tx_hash from a deterministic counter; dedup keys on
+            // (src_shard, tx_hash) per chain.cpp inbound apply.
+            CrossShardReceipt r;
+            r.src_shard = ShardId{0};
+            r.dst_shard = ShardId{1};
+            r.src_block_index = ab.index;
+            r.src_block_hash  = ca.head().compute_hash();
+            ++receipt_counter;
+            for (int t = 0; t < 8; ++t)
+                r.tx_hash[size_t(t)] =
+                    uint8_t((receipt_counter >> (8 * t)) & 0xff);
+            r.from = "alice"; r.to = remote;
+            r.amount = amt; r.fee = 1; r.nonce = uint64_t(blk);
+
+            // Delivery plan: everything withheld earlier ships now; the fresh
+            // receipt ships now OR is withheld one block (value in flight).
+            std::vector<CrossShardReceipt> deliver = pending;
+            pending.clear();
+            if (withhold) { pending.push_back(r); ++withheld; }
+            else          { deliver.push_back(r); }
+
+            // Adversarial DUPLICATE: re-submit an ALREADY-APPLIED receipt.
+            bool inject_dup = want_dup && !applied_list.empty();
+            CrossShardReceipt dup;
+            if (inject_dup) {
+                dup = applied_list[size_t(dupsel_draw
+                                          % uint64_t(applied_list.size()))];
+                if (!cb.inbound_receipt_applied(ShardId{0}, dup.tx_hash)) {
+                    check(false, "dedup-set lost an applied receipt before "
+                          "duplicate re-submission");
+                    trace_ok = false;
+                }
+            }
+
+            // ── B block: inbound receipts (+ the duplicate) through apply ──
+            Block bb;
+            bb.index     = cb.height();
+            bb.prev_hash = cb.head().compute_hash();
+            bb.timestamp = static_cast<int64_t>(cb.height());
+            bb.creators  = {"author"};
+            for (size_t d = 0; d < deliver.size(); ++d)
+                bb.inbound_receipts.push_back(deliver[d]);
+            if (inject_dup) {
+                bb.inbound_receipts.push_back(dup);
+                ++duplicate_attempts;
+            }
+            try {
+                cb.append(bb);
+            } catch (const std::exception& e) {
+                check(false, "B apply threw at block " + std::to_string(bb.index)
+                      + ": " + e.what());
+                trace_ok = false; break;
+            }
+            for (size_t d = 0; d < deliver.size(); ++d) {
+                delivered_sum += deliver[d].amount;
+                ++fresh_credits;
+                if (!cb.inbound_receipt_applied(ShardId{0}, deliver[d].tx_hash)) {
+                    check(false, "delivered receipt not marked applied at B block "
+                          + std::to_string(bb.index));
+                    trace_ok = false;
+                }
+                applied_list.push_back(deliver[d]);
+            }
+
+            // ── Per-block invariants over the REAL committed state ─────────
+            // Exactly-once credit: duplicates must contribute ZERO.
+            if (cb.accumulated_inbound() != delivered_sum) {
+                check(false, "DOUBLE-CREDIT: B accumulated_inbound != unique "
+                      "delivered sum at block " + std::to_string(bb.index));
+                trace_ok = false;
+            }
+            if (cb.balance(remote) != delivered_sum) {
+                check(false, "DOUBLE-CREDIT: B balance(remote) != unique "
+                      "delivered sum at block " + std::to_string(bb.index));
+                trace_ok = false;
+            }
+            // FA7 debit side: A's live supply dropped by exactly what left.
+            if (ca.live_total_supply() != gen_a - emitted_sum) {
+                check(false, "A live supply != genesis - emitted at block "
+                      + std::to_string(ab.index));
+                trace_ok = false;
+            }
+            if (cb.live_total_supply() != gen_b + delivered_sum) {
+                check(false, "B live supply != genesis + delivered at block "
+                      + std::to_string(bb.index));
+                trace_ok = false;
+            }
+            // A1 on BOTH chains (apply also self-asserts; belt-and-suspenders).
+            if (ca.expected_total() != ca.live_total_supply()
+                || cb.expected_total() != cb.live_total_supply()) {
+                check(false, "A1 violated on a chain at trace block "
+                      + std::to_string(blk));
+                trace_ok = false;
+            }
+            // No credit without debit + two-chain conservation sum.
+            if (delivered_sum > emitted_sum) {
+                check(false, "FA7 VIOLATION: credited on B exceeds debited on A "
+                      "at trace block " + std::to_string(blk));
+                trace_ok = false;
+            } else {
+                uint64_t in_flight = emitted_sum - delivered_sum;
+                if (ca.live_total_supply() + cb.live_total_supply() + in_flight
+                    != gen_a + gen_b) {
+                    check(false, "two-chain conservation sum violated at trace "
+                          "block " + std::to_string(blk));
+                    trace_ok = false;
+                }
+                if (in_flight > 0) ++in_flight_blocks;
+            }
+        }
+
+        check(trace_ok,
+              "trace ran to completion with all per-block invariants holding");
+
+        // Final flush: deliver every still-in-flight receipt, then the
+        // conservation identity must be EXACT (all delivered <=> equality).
+        if (!pending.empty()) {
+            Block bb;
+            bb.index     = cb.height();
+            bb.prev_hash = cb.head().compute_hash();
+            bb.timestamp = static_cast<int64_t>(cb.height());
+            bb.creators  = {"author"};
+            for (size_t d = 0; d < pending.size(); ++d)
+                bb.inbound_receipts.push_back(pending[d]);
+            cb.append(bb);
+            for (size_t d = 0; d < pending.size(); ++d) {
+                delivered_sum += pending[d].amount;
+                ++fresh_credits;
+                applied_list.push_back(pending[d]);
+            }
+            pending.clear();
+        }
+        check(delivered_sum == emitted_sum,
+              "exact: after flush, credited on B == debited on A (all delivered)");
+        check(cb.balance(remote) == emitted_sum
+              && cb.accumulated_inbound() == emitted_sum,
+              "exact: B balance(remote) + accumulated_inbound == Σ unique receipts");
+        check(ca.live_total_supply() + cb.live_total_supply() == gen_a + gen_b,
+              "exact: two-chain conservation — live_A + live_B == genesis_A + genesis_B");
+
+        // Non-vacuity: the adversarial conditions actually occurred.
+        check(fresh_credits >= 1,
+              "non-vacuous: at least one real cross-shard credit occurred");
+        check(duplicate_attempts >= 1,
+              "non-vacuous: at least one duplicate re-submission was rejected");
+        check(withheld >= 1 && in_flight_blocks >= 1,
+              "non-vacuous: at least one receipt was genuinely in flight "
+              "(strict credited < debited observed)");
+
+        // Negative control: event-free blocks on BOTH chains move nothing.
+        {
+            const uint64_t a_out = ca.accumulated_outbound();
+            const uint64_t b_in  = cb.accumulated_inbound();
+            const uint64_t b_bal = cb.balance(remote);
+            const uint64_t a_sup = ca.live_total_supply();
+            const uint64_t b_sup = cb.live_total_supply();
+            Block ab;
+            ab.index     = ca.height();
+            ab.prev_hash = ca.head().compute_hash();
+            ab.timestamp = static_cast<int64_t>(ca.height());
+            ab.creators  = {"author"};
+            ca.append(ab);
+            Block bb;
+            bb.index     = cb.height();
+            bb.prev_hash = cb.head().compute_hash();
+            bb.timestamp = static_cast<int64_t>(cb.height());
+            bb.creators  = {"author"};
+            cb.append(bb);
+            check(ca.accumulated_outbound() == a_out
+                  && cb.accumulated_inbound() == b_in
+                  && cb.balance(remote) == b_bal
+                  && ca.live_total_supply() == a_sup
+                  && cb.live_total_supply() == b_sup,
+                  "negative control: event-free blocks move no tracked quantity");
+            check(ca.expected_total() == ca.live_total_supply()
+                  && cb.expected_total() == cb.live_total_supply(),
+                  "A1 holds on both chains after the negative-control blocks");
+        }
+
+        // Determinism (§Q6-style): the same seed reproduces byte-identical
+        // final state roots on BOTH chains. Self-contained re-run helper.
+        auto final_roots = [&](uint64_t seed) -> std::pair<Hash, Hash> {
+            uint64_t rs = seed;
+            auto rnd = [&]() -> uint64_t {
+                rs += 0x9E3779B97F4A7C15ULL;
+                uint64_t z = rs;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                return z ^ (z >> 31);
+            };
+            Chain xa;
+            xa.append(make_genesis_block(cfg_a));
+            xa.set_block_subsidy(0);
+            xa.set_shard_routing(2, salt, ShardId{0});
+            Chain xb;
+            xb.append(make_genesis_block(cfg_b));
+            xb.set_block_subsidy(0);
+            xb.set_shard_routing(2, salt, ShardId{1});
+            uint64_t rc = 0;
+            std::vector<CrossShardReceipt> pend, applied;
+            for (int blk = 0; blk < kBlocks; ++blk) {
+                const uint64_t amt_draw      = rnd();
+                const uint64_t withhold_draw = rnd();
+                const uint64_t dup_draw      = rnd();
+                const uint64_t dupsel_draw   = rnd();
+                const uint64_t amt      = 1 + (amt_draw % 50);
+                const bool     wh       = (withhold_draw % 2 == 0);
+                const bool     want_dup = (dup_draw % 2 == 0);
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = remote;
+                tx.amount = amt; tx.fee = 1; tx.nonce = uint64_t(blk);
+                Block ab;
+                ab.index     = xa.height();
+                ab.prev_hash = xa.head().compute_hash();
+                ab.timestamp = static_cast<int64_t>(xa.height());
+                ab.creators  = {"author"};
+                ab.transactions.push_back(tx);
+                xa.append(ab);
+                CrossShardReceipt r;
+                r.src_shard = ShardId{0};
+                r.dst_shard = ShardId{1};
+                r.src_block_index = ab.index;
+                r.src_block_hash  = xa.head().compute_hash();
+                ++rc;
+                for (int t = 0; t < 8; ++t)
+                    r.tx_hash[size_t(t)] = uint8_t((rc >> (8 * t)) & 0xff);
+                r.from = "alice"; r.to = remote;
+                r.amount = amt; r.fee = 1; r.nonce = uint64_t(blk);
+                std::vector<CrossShardReceipt> deliver = pend;
+                pend.clear();
+                if (wh) pend.push_back(r); else deliver.push_back(r);
+                Block bb;
+                bb.index     = xb.height();
+                bb.prev_hash = xb.head().compute_hash();
+                bb.timestamp = static_cast<int64_t>(xb.height());
+                bb.creators  = {"author"};
+                for (size_t d = 0; d < deliver.size(); ++d)
+                    bb.inbound_receipts.push_back(deliver[d]);
+                if (want_dup && !applied.empty())
+                    bb.inbound_receipts.push_back(
+                        applied[size_t(dupsel_draw % uint64_t(applied.size()))]);
+                xb.append(bb);
+                for (size_t d = 0; d < deliver.size(); ++d)
+                    applied.push_back(deliver[d]);
+            }
+            if (!pend.empty()) {
+                Block bb;
+                bb.index     = xb.height();
+                bb.prev_hash = xb.head().compute_hash();
+                bb.timestamp = static_cast<int64_t>(xb.height());
+                bb.creators  = {"author"};
+                for (size_t d = 0; d < pend.size(); ++d)
+                    bb.inbound_receipts.push_back(pend[d]);
+                xb.append(bb);
+            }
+            return { xa.compute_state_root(), xb.compute_state_root() };
+        };
+        check(final_roots(0xABCDEFULL) == final_roots(0xABCDEFULL),
+              "determinism: same seed reproduces identical final state roots "
+              "on BOTH chains");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-cross-shard-trace "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << fresh_credits << " unique credits, "
+                  << duplicate_attempts << " duplicate rejects, "
+                  << withheld << " withheld/in-flight over "
+                  << kBlocks << " blocks)\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Increment — MIXED multi-event COMPOSITION (the FA-Apply-15
+    // MultiEventComposition canonical F-1 target): over a randomized trace,
+    // each block carries 0-2 TRANSFER txs and/or an EquivocationEvent and/or
+    // a Phase-1 AbortEvent (composition drawn from the PRNG). A SHADOW MODEL
+    // updated per the REAL apply rules (chain.cpp: tx loop -> fee
+    // distribution to creators -> abort SUSPENSION_SLASH -> equivocation
+    // full forfeit of the REMAINING stake) must match the live chain after
+    // EVERY block, JOINTLY: A1 (expected_total == live_total_supply),
+    // accumulated_slashed EXACT across BOTH slash kinds, sender balances +
+    // nonce monotonicity, stakes never underflowed, creator fee routing.
+    // Non-vacuous (every event kind occurred AND >=1 block carried >=2 kinds
+    // simultaneously) with a negative control (an event-free block moves
+    // nothing) and a same-seed determinism check.
+    if (cmd == "test-fa-multi-event-trace") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic counter-seeded SplitMix64 (no wall clock / OS RNG) —
+        // same generator family as test-fa-equivocation-trace.
+        uint64_t rng_state = 0xFA151C0DEC0FFEE5ULL;
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+
+        // Genesis: author (sole block creator — receives ALL fees) + K
+        // distinct-stake validators (the slash targets; distinct stakes make
+        // the exact-total invariant unambiguous) + SN stake-free sender
+        // accounts (the TRANSFER actors, balance-only allocations).
+        const int K = 6, SN = 4;
+        GenesisConfig cfg;
+        cfg.chain_id = "fa-multi-event-trace";
+        auto add_creator = [&](const std::string& dom, uint64_t stake,
+                               uint64_t bal, int idx) {
+            GenesisCreator gc; gc.domain = dom;
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x10 * (idx + 1) + j);
+            gc.initial_stake = stake;
+            cfg.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = dom; ga.balance = bal;
+            cfg.initial_balances.push_back(ga);
+        };
+        add_creator("author", 200, 500, 0);
+        std::vector<std::string> vs;
+        std::vector<uint64_t>    stake0(size_t(K), 0);
+        for (int i = 0; i < K; ++i) {
+            vs.push_back("v" + std::to_string(i));
+            stake0[size_t(i)] = 1000 + uint64_t(100 * i);   // 1000..1500 distinct
+            add_creator(vs[size_t(i)], stake0[size_t(i)], 100, i + 1);
+        }
+        std::vector<std::string> us;
+        for (int i = 0; i < SN; ++i) {
+            us.push_back("u" + std::to_string(i));
+            GenesisAllocation ga; ga.domain = us[size_t(i)]; ga.balance = 10000;
+            cfg.initial_balances.push_back(ga);
+        }
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_block_subsidy(0);   // no minting: fee routing accounted exactly
+        const uint64_t SUSP = c.suspension_slash();
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant holds at genesis baseline");
+        check(SUSP >= 1 && SUSP < 1000,
+              "sanity: suspension_slash in (0, min validator stake) — abort "
+              "slash is partial, so abort+equiv composition is meaningful");
+
+        // Shadow model — updated per the REAL apply rules read from chain.cpp.
+        std::vector<uint64_t> vstake = stake0;               // shadow stakes
+        std::vector<char>     equiv_seen(size_t(K), 0);
+        std::vector<uint64_t> ubal(size_t(SN), 10000);       // shadow sender balances
+        std::vector<uint64_t> unonce(size_t(SN), 0);         // shadow sender nonces
+        uint64_t author_bal   = 500;                         // shadow creator balance
+        uint64_t exp_slashed  = 0;
+        uint64_t prev_slashed = c.accumulated_slashed();
+        int transfers_applied = 0, equiv_total = 0, equiv_fresh = 0,
+            equiv_dup = 0, abort_total = 0, multi_kind_blocks = 0;
+        bool trace_ok = true;
+
+        const int kBlocks = 48;
+        for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());   // strictly increasing
+            b.creators  = {"author"};
+
+            uint64_t fees_this_block = 0;
+            int kinds = 0;
+
+            // 1) 0-2 TRANSFER txs. tx.nonce comes from the SHADOW nonce; the
+            //    shadow mirrors the REAL TRANSFER arm exactly (chain.cpp:
+            //    nonce-gate, skip WITHOUT nonce advance when balance <
+            //    amount+fee, fee accrues to creators).
+            int ntx = int(next_rand() % 3);
+            int applied_now = 0;
+            for (int t = 0; t < ntx; ++t) {
+                int s = int(next_rand() % uint64_t(SN));
+                int r = int((uint64_t(s) + 1 + next_rand() % uint64_t(SN - 1))
+                            % uint64_t(SN));                 // distinct recipient
+                uint64_t amount = 1 + next_rand() % 50;
+                uint64_t fee    = 1 + next_rand() % 3;
+                Transaction tx;
+                tx.type   = TxType::TRANSFER;
+                tx.from   = us[size_t(s)];
+                tx.to     = us[size_t(r)];
+                tx.amount = amount;
+                tx.fee    = fee;
+                tx.nonce  = unonce[size_t(s)];
+                b.transactions.push_back(tx);
+                if (ubal[size_t(s)] >= amount + fee) {
+                    ubal[size_t(s)] -= amount + fee;
+                    ubal[size_t(r)] += amount;
+                    fees_this_block += fee;
+                    unonce[size_t(s)]++;
+                    ++applied_now;
+                }
+            }
+            if (applied_now > 0) ++kinds;
+            transfers_applied += applied_now;
+
+            // 2) EquivocationEvent (full forfeit of the REMAINING stake).
+            bool has_equiv = (next_rand() % 3 == 0);
+            int jq = -1;
+            if (has_equiv) {
+                jq = int(next_rand() % uint64_t(K));
+                EquivocationEvent ev;
+                ev.equivocator = vs[size_t(jq)];
+                ev.block_index = b.index;
+                for (size_t t = 0; t < ev.digest_a.size(); ++t)
+                    ev.digest_a[t] = uint8_t(next_rand() & 0xff);
+                for (size_t t = 0; t < ev.digest_b.size(); ++t)
+                    ev.digest_b[t] = uint8_t(next_rand() & 0xff);
+                b.equivocation_events.push_back(ev);
+                ++kinds;
+            }
+
+            // 3) Phase-1 AbortEvent (round=1 -> SUSPENSION_SLASH, bounded
+            //    by the available stake).
+            bool has_abort = (next_rand() % 3 == 0);
+            int ja = -1;
+            if (has_abort) {
+                ja = int(next_rand() % uint64_t(K));
+                AbortEvent ae;
+                ae.round = 1;
+                ae.aborting_node = vs[size_t(ja)];
+                b.abort_events.push_back(ae);
+                ++kinds;
+            }
+
+            for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                b.cumulative_rand[t] = uint8_t(next_rand() & 0xff);
+            if (kinds >= 2) ++multi_kind_blocks;
+
+            // Shadow apply — SAME ORDER as chain.cpp apply_transactions:
+            // txs (mirrored inline above) -> fee/subsidy distribution
+            // (subsidy 0, sole creator gets all fees, no dust) ->
+            // abort_events (min(SUSP, locked) deduction) ->
+            // equivocation_events (forfeit whatever stake REMAINS after
+            // the abort deduction — same-actor composition is exact).
+            author_bal += fees_this_block;
+            if (has_abort) {
+                ++abort_total;
+                uint64_t deduct = std::min<uint64_t>(SUSP, vstake[size_t(ja)]);
+                vstake[size_t(ja)] -= deduct;
+                exp_slashed       += deduct;
+            }
+            if (has_equiv) {
+                ++equiv_total;
+                if (!equiv_seen[size_t(jq)]) { ++equiv_fresh; equiv_seen[size_t(jq)] = 1; }
+                else ++equiv_dup;
+                exp_slashed        += vstake[size_t(jq)];   // full forfeit
+                vstake[size_t(jq)]  = 0;
+            }
+
+            try {
+                c.append(b);
+            } catch (const std::exception& e) {
+                check(false, "apply threw at block " + std::to_string(b.index)
+                      + ": " + e.what());
+                trace_ok = false; break;
+            }
+
+            // Per-block invariants over the REAL committed state — jointly.
+            if (c.expected_total() != c.live_total_supply()) {
+                check(false, "A1 violated at block " + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.accumulated_slashed() != exp_slashed) {
+                check(false, "accumulated_slashed != shadow running total "
+                      "(both slash kinds) at block " + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.accumulated_slashed() < prev_slashed) {
+                check(false, "accumulated_slashed decreased (non-monotone)");
+                trace_ok = false;
+            }
+            prev_slashed = c.accumulated_slashed();
+            for (int i = 0; i < SN && trace_ok; ++i) {
+                if (c.balance(us[size_t(i)]) != ubal[size_t(i)]) {
+                    check(false, us[size_t(i)] + " balance != shadow at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+                if (c.next_nonce(us[size_t(i)]) != unonce[size_t(i)]) {
+                    check(false, us[size_t(i)] + " nonce != shadow (monotonicity"
+                          " broken) at block " + std::to_string(b.index));
+                    trace_ok = false;
+                }
+            }
+            for (int i = 0; i < K && trace_ok; ++i) {
+                if (c.stake(vs[size_t(i)]) != vstake[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " stake != shadow at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+                if (c.stake(vs[size_t(i)]) > stake0[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " stake ABOVE genesis value "
+                          "(underflow wrap)");
+                    trace_ok = false;
+                }
+            }
+            if (trace_ok && c.balance("author") != author_bal) {
+                check(false, "author balance != shadow (fee routing) at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (trace_ok && has_equiv) {
+                auto reg = c.registrant(vs[size_t(jq)]);
+                if (!(reg.has_value() && reg->inactive_from != UINT64_MAX)) {
+                    check(false, vs[size_t(jq)] + " registry not deactivated "
+                          "on equivocation");
+                    trace_ok = false;
+                }
+            }
+        }
+
+        check(trace_ok,
+              "trace ran to completion with all per-block invariants holding jointly");
+
+        // Exact slash total, recomputed INDEPENDENTLY of the running shadow:
+        // stakes in this trace are only ever reduced by the two slash kinds
+        // (no STAKE/UNSTAKE/DEREGISTER txs by construction), so every
+        // validator's deficit vs genesis must sum to the counter exactly.
+        uint64_t deficit = 0;
+        for (int i = 0; i < K; ++i)
+            deficit += stake0[size_t(i)] - c.stake(vs[size_t(i)]);
+        check(c.accumulated_slashed() == deficit,
+              "exact: accumulated_slashed == sum of validator stake deficits "
+              "(both slash kinds, no double-count)");
+
+        // Non-vacuity: every event KIND occurred, and composition was real.
+        check(transfers_applied >= 1,
+              "non-vacuous: at least one TRANSFER applied");
+        check(equiv_total >= 1 && equiv_fresh >= 1,
+              "non-vacuous: at least one equivocation (incl. a fresh full forfeit)");
+        check(abort_total >= 1,
+              "non-vacuous: at least one Phase-1 abort (suspension slash)");
+        check(multi_kind_blocks >= 1,
+              "non-vacuous: at least one block carried >=2 event kinds simultaneously");
+
+        // Negative control: an event-free block must move NO tracked quantity
+        // (subsidy is 0, no txs, no events — the invariants are not trivially
+        // always-drifting).
+        {
+            const uint64_t slashed_before = c.accumulated_slashed();
+            const uint64_t author_before  = c.balance("author");
+            std::vector<uint64_t> ub, un, vst;
+            for (int i = 0; i < SN; ++i) {
+                ub.push_back(c.balance(us[size_t(i)]));
+                un.push_back(c.next_nonce(us[size_t(i)]));
+            }
+            for (int i = 0; i < K; ++i) vst.push_back(c.stake(vs[size_t(i)]));
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());
+            b.creators  = {"author"};
+            c.append(b);
+            bool frozen = c.accumulated_slashed() == slashed_before
+                       && c.balance("author") == author_before;
+            for (int i = 0; i < SN; ++i)
+                frozen = frozen && c.balance(us[size_t(i)]) == ub[size_t(i)]
+                                && c.next_nonce(us[size_t(i)]) == un[size_t(i)];
+            for (int i = 0; i < K; ++i)
+                frozen = frozen && c.stake(vs[size_t(i)]) == vst[size_t(i)];
+            check(frozen,
+                  "negative control: event-free block moves NO tracked quantity");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 holds after the negative-control block");
+        }
+
+        // Determinism (§Q6-style): the same seed reproduces a byte-identical
+        // final state root over the REAL engine. Self-contained re-run helper
+        // mirroring the exact PRNG draw order + shadow nonce/balance logic of
+        // the main trace.
+        auto final_root = [&](uint64_t seed) -> Hash {
+            uint64_t rs = seed;
+            auto rnd = [&]() -> uint64_t {
+                rs += 0x9E3779B97F4A7C15ULL;
+                uint64_t z = rs;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                return z ^ (z >> 31);
+            };
+            Chain cc;
+            cc.append(make_genesis_block(cfg));
+            cc.set_block_subsidy(0);
+            std::vector<uint64_t> sb(size_t(SN), 10000), sn(size_t(SN), 0);
+            for (int blk = 0; blk < kBlocks; ++blk) {
+                Block b;
+                b.index     = cc.height();
+                b.prev_hash = cc.head().compute_hash();
+                b.timestamp = static_cast<int64_t>(cc.height());
+                b.creators  = {"author"};
+                int ntx = int(rnd() % 3);
+                for (int t = 0; t < ntx; ++t) {
+                    int s = int(rnd() % uint64_t(SN));
+                    int r = int((uint64_t(s) + 1 + rnd() % uint64_t(SN - 1))
+                                % uint64_t(SN));
+                    uint64_t amount = 1 + rnd() % 50;
+                    uint64_t fee    = 1 + rnd() % 3;
+                    Transaction tx;
+                    tx.type   = TxType::TRANSFER;
+                    tx.from   = us[size_t(s)];
+                    tx.to     = us[size_t(r)];
+                    tx.amount = amount;
+                    tx.fee    = fee;
+                    tx.nonce  = sn[size_t(s)];
+                    b.transactions.push_back(tx);
+                    if (sb[size_t(s)] >= amount + fee) {
+                        sb[size_t(s)] -= amount + fee;
+                        sb[size_t(r)] += amount;
+                        sn[size_t(s)]++;
+                    }
+                }
+                if (rnd() % 3 == 0) {
+                    int jq = int(rnd() % uint64_t(K));
+                    EquivocationEvent ev;
+                    ev.equivocator = vs[size_t(jq)];
+                    ev.block_index = b.index;
+                    for (size_t t = 0; t < ev.digest_a.size(); ++t)
+                        ev.digest_a[t] = uint8_t(rnd() & 0xff);
+                    for (size_t t = 0; t < ev.digest_b.size(); ++t)
+                        ev.digest_b[t] = uint8_t(rnd() & 0xff);
+                    b.equivocation_events.push_back(ev);
+                }
+                if (rnd() % 3 == 0) {
+                    int ja = int(rnd() % uint64_t(K));
+                    AbortEvent ae;
+                    ae.round = 1;
+                    ae.aborting_node = vs[size_t(ja)];
+                    b.abort_events.push_back(ae);
+                }
+                for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                    b.cumulative_rand[t] = uint8_t(rnd() & 0xff);
+                cc.append(b);
+            }
+            return cc.compute_state_root();
+        };
+        check(final_root(0x5EEDFA15ULL) == final_root(0x5EEDFA15ULL),
+              "determinism: same seed reproduces identical final state root");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-multi-event-trace "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << transfers_applied << " transfers, "
+                  << equiv_total << " equivocations (" << equiv_fresh
+                  << " fresh, " << equiv_dup << " duplicate), "
+                  << abort_total << " aborts, "
+                  << multi_kind_blocks << " multi-kind blocks over "
+                  << kBlocks << " blocks)\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Increment — MERGE_EVENT (R7 regional-shard merge) state-machine trace:
+    // over a randomized trace of merge BEGIN/END events (a mix of FRESH
+    // BEGINs, DUPLICATE BEGINs carrying a guaranteed-DIFFERENT region, valid
+    // ENDs, STALE ENDs ("lost gossip") and BAD-PARTNER attempts), the apply
+    // path (chain.cpp TxType::MERGE_EVENT) must (a) insert
+    // (shard -> partner, region) on a fresh BEGIN gated by the ring
+    // constraint partner == (shard+1) % shard_count, (b) be FIRST-WRITE-WINS
+    // on a duplicate BEGIN (std::map::insert — the original pairing + region
+    // survive), (c) erase on a matching END and no-op on a stale END or a
+    // bad-partner event, (d) consume fee + nonce on EVERY decoded event,
+    // INCLUDING rejected mutations, and (e) move NO value — merge state is
+    // pure metadata, so author balance + supply are constant and A1 holds
+    // after every block. The chain's merge_state() is checked FIELD-FOR-FIELD
+    // against an independently maintained model map after every block (plus
+    // the is_shard_merged / shards_absorbed_by read APIs). Non-vacuous (a
+    // forced blocks-0..4 prefix guarantees every event kind occurs for any
+    // seed) with a negative control (an event-free block moves nothing) and a
+    // same-seed determinism check.
+    if (cmd == "test-fa-merge-trace") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic counter-seeded SplitMix64 (no wall clock / OS RNG) —
+        // same generator family as test-fa-equivocation-trace.
+        uint64_t rng_state = 0xC0FFEE0DDBA5EBA1ULL;
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+
+        // Genesis: a single author who both SENDS every MERGE_EVENT tx and
+        // is the sole block creator — the fee round-trips (debited at apply,
+        // credited back via creator fee distribution), so the author balance
+        // is CONSTANT across the whole trace. Merge events are metadata-only:
+        // the supply must not move either.
+        GenesisConfig cfg;
+        cfg.chain_id = "fa-merge-trace";
+        GenesisCreator author_c;
+        author_c.domain = "author";
+        for (size_t j = 0; j < author_c.ed_pub.size(); ++j)
+            author_c.ed_pub[j] = uint8_t(0x10 + j);
+        author_c.initial_stake = 500;
+        cfg.initial_creators = {author_c};
+        GenesisAllocation author_bal;
+        author_bal.domain = "author"; author_bal.balance = 1000;
+        cfg.initial_balances = {author_bal};
+
+        const uint32_t kShards = 4;   // ring pairing: 0->1->2->3->0
+        const int      kBlocks = 48;
+        const char*    kRegions[4] = {"", "us-east", "eu-west", "ap-south"};
+
+        // Adversarial event kinds. Blocks 0..4 are a FORCED prefix (one of
+        // each kind, in a feasible order) so non-vacuity holds for ANY seed;
+        // blocks 5..47 pick a kind at random with deterministic feasibility
+        // fallbacks.
+        //   0 FRESH-BEGIN  unmerged shard, valid ring partner   -> inserts
+        //   1 DUP-BEGIN    merged shard, DIFFERENT region       -> no-op
+        //   2 VALID-END    merged shard, matching partner       -> erases
+        //   3 STALE-END    unmerged shard ("lost gossip")       -> no-op
+        //   4 BAD-PARTNER  partner == (shard+2)%4 fails the ring
+        //                  gate (BEGIN or END)                  -> no-op
+        struct Ev {
+            int         kind{0};
+            uint8_t     type{0};     // MergeEvent::BEGIN / ::END
+            uint32_t    shard{0};
+            uint32_t    partner{0};
+            std::string region{};
+        };
+        using ModelMap = std::map<uint32_t, std::string>;  // shard -> region
+
+        auto merged_of = [](const ModelMap& m) {
+            std::vector<uint32_t> v;
+            for (const auto& kv : m) v.push_back(kv.first);
+            return v;
+        };
+        auto unmerged_of = [&](const ModelMap& m) {
+            std::vector<uint32_t> v;
+            for (uint32_t s = 0; s < kShards; ++s)
+                if (m.count(s) == 0) v.push_back(s);
+            return v;
+        };
+
+        // Deterministic event generator — shared verbatim by the main trace
+        // and the determinism re-run helper (both feed it their own PRNG and
+        // their own model, so the two runs derive identical event streams).
+        auto gen_event = [&](auto& rnd, const ModelMap& model, int blk) -> Ev {
+            Ev e;
+            int kind = (blk < 5) ? blk : int(rnd() % 5ULL);
+            // Feasibility fallbacks (deterministic; the loop terminates
+            // because the merged and unmerged sets cannot both be empty).
+            for (;;) {
+                if (kind == 0 && model.size() == size_t(kShards)) { kind = 2; continue; }
+                if ((kind == 1 || kind == 2) && model.empty())    { kind = 0; continue; }
+                if (kind == 3 && model.size() == size_t(kShards)) { kind = 2; continue; }
+                break;
+            }
+            e.kind = kind;
+            switch (kind) {
+            case 0: {   // FRESH-BEGIN
+                auto u = unmerged_of(model);
+                e.shard   = u[size_t(rnd() % u.size())];
+                e.partner = (e.shard + 1) % kShards;
+                e.type    = MergeEvent::BEGIN;
+                e.region  = kRegions[size_t(rnd() % 4ULL)];
+                break;
+            }
+            case 1: {   // DUP-BEGIN: same shard, guaranteed-DIFFERENT region
+                auto m = merged_of(model);
+                e.shard   = m[size_t(rnd() % m.size())];
+                e.partner = (e.shard + 1) % kShards;
+                e.type    = MergeEvent::BEGIN;
+                e.region  = model.at(e.shard) + "X";
+                break;
+            }
+            case 2: {   // VALID-END
+                auto m = merged_of(model);
+                e.shard   = m[size_t(rnd() % m.size())];
+                e.partner = (e.shard + 1) % kShards;
+                e.type    = MergeEvent::END;
+                e.region  = kRegions[size_t(rnd() % 4ULL)];  // ignored by apply
+                break;
+            }
+            case 3: {   // STALE-END
+                auto u = unmerged_of(model);
+                e.shard   = u[size_t(rnd() % u.size())];
+                e.partner = (e.shard + 1) % kShards;
+                e.type    = MergeEvent::END;
+                e.region  = "";
+                break;
+            }
+            default: {  // BAD-PARTNER: (shard+2)%4 can never equal (shard+1)%4
+                e.shard   = uint32_t(rnd() % uint64_t(kShards));
+                e.partner = (e.shard + 2) % kShards;
+                e.type    = (rnd() & 1) ? uint8_t(MergeEvent::BEGIN)
+                                        : uint8_t(MergeEvent::END);
+                e.region  = "bad";
+                break;
+            }
+            }
+            return e;
+        };
+
+        // Independent mirror of chain.cpp's MERGE_EVENT apply (the model the
+        // real state is checked against): ring gate, then FIRST-WRITE-WINS
+        // insert on BEGIN / erase-if-present on END.
+        auto model_apply = [&](ModelMap& model, const Ev& e) {
+            if (e.partner != (e.shard + 1) % kShards) return;
+            if (e.type == MergeEvent::BEGIN) {
+                model.insert({e.shard, e.region});  // map::insert: no overwrite
+            } else {
+                auto it = model.find(e.shard);
+                if (it != model.end()) model.erase(it);
+            }
+        };
+
+        auto make_merge_tx = [](const Ev& e, uint64_t nonce, uint64_t height) {
+            MergeEvent ev;
+            ev.event_type            = e.type;
+            ev.shard_id              = e.shard;
+            ev.partner_id            = e.partner;
+            ev.effective_height      = height;
+            ev.evidence_window_start = 0;
+            ev.merging_shard_region  = e.region;
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "author"; tx.fee = 1; tx.nonce = nonce;
+            tx.payload = ev.encode();
+            return tx;
+        };
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_block_subsidy(0);   // isolate: merge events must move NOTHING
+        {
+            Hash salt{};
+            c.set_shard_routing(kShards, salt, ShardId{0});
+        }
+        const uint64_t baseline_supply = c.live_total_supply();
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant holds at genesis baseline");
+
+        ModelMap model;
+        int fresh_begins = 0, dup_begins = 0, valid_ends = 0,
+            stale_ends = 0, bad_partner_attempts = 0;
+        bool trace_ok = true;
+
+        for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
+            Ev e = gen_event(next_rand, model, blk);
+
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());  // strictly increasing
+            b.creators  = {"author"};
+            for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                b.cumulative_rand[t] = uint8_t(next_rand() & 0xff);
+            b.transactions.push_back(make_merge_tx(e, uint64_t(blk), b.index));
+
+            try {
+                c.append(b);
+            } catch (const std::exception& ex) {
+                check(false, "apply threw at block " + std::to_string(b.index)
+                      + ": " + ex.what());
+                trace_ok = false; break;
+            }
+
+            switch (e.kind) {
+            case 0:  ++fresh_begins;         break;
+            case 1:  ++dup_begins;           break;
+            case 2:  ++valid_ends;           break;
+            case 3:  ++stale_ends;           break;
+            default: ++bad_partner_attempts; break;
+            }
+            model_apply(model, e);
+
+            const auto& ms = c.merge_state();
+
+            // FIRST-WRITE-WINS witness: the duplicate BEGIN carried a
+            // guaranteed-different region — it must NOT have overwritten.
+            if (e.kind == 1) {
+                auto it = ms.find(e.shard);
+                if (it == ms.end() || it->second.refugee_region == e.region) {
+                    check(false, "dup BEGIN overwrote/erased shard "
+                          + std::to_string(e.shard) + " at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+            }
+
+            // Model equivalence, field-for-field (partner + region), plus the
+            // is_shard_merged read API on both merged and unmerged shards.
+            if (ms.size() != model.size()) {
+                check(false, "merge_state size != model at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+            for (const auto& kv : model) {
+                auto it = ms.find(kv.first);
+                ShardId p = ShardId{kShards};  // sentinel outside [0,kShards)
+                if (it == ms.end()
+                    || it->second.partner_id != (kv.first + 1) % kShards
+                    || it->second.refugee_region != kv.second
+                    || !c.is_shard_merged(kv.first, &p)
+                    || p != (kv.first + 1) % kShards) {
+                    check(false, "merge_state entry for shard "
+                          + std::to_string(kv.first)
+                          + " diverges from model at block "
+                          + std::to_string(b.index));
+                    trace_ok = false;
+                }
+            }
+            for (uint32_t s = 0; s < kShards; ++s) {
+                if (model.count(s) == 0 && c.is_shard_merged(s)) {
+                    check(false, "phantom merge for shard " + std::to_string(s)
+                          + " at block " + std::to_string(b.index));
+                    trace_ok = false;
+                }
+            }
+
+            // shards_absorbed_by inverse lookup matches the model exactly.
+            size_t inv_total = 0; bool inv_ok = true;
+            for (uint32_t p = 0; p < kShards; ++p) {
+                auto absorbed = c.shards_absorbed_by(p);
+                inv_total += absorbed.size();
+                for (const auto& pr : absorbed) {
+                    auto mit = model.find(pr.first);
+                    if (mit == model.end()
+                        || (pr.first + 1) % kShards != p
+                        || mit->second != pr.second) inv_ok = false;
+                }
+            }
+            if (!inv_ok || inv_total != model.size()) {
+                check(false, "shards_absorbed_by inverse diverges at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+
+            // Fee + nonce consumed on EVERY decoded event — including
+            // rejected mutations (dup/stale/bad-partner). nonce == blk+1 also
+            // proves the tx actually RAN (chain.cpp silently skips
+            // nonce-mismatched txs — a skipped tx would make the no-op
+            // assertions vacuous).
+            if (c.next_nonce("author") != uint64_t(blk) + 1) {
+                check(false, "nonce not consumed at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.balance("author") != 1000) {
+                check(false, "author balance moved at block "
+                      + std::to_string(b.index)
+                      + " (fee must round-trip via sole creator)");
+                trace_ok = false;
+            }
+
+            // A1 + metadata-only: supply constant after every block.
+            if (c.expected_total() != c.live_total_supply()) {
+                check(false, "A1 violated at block " + std::to_string(b.index));
+                trace_ok = false;
+            }
+            if (c.live_total_supply() != baseline_supply) {
+                check(false, "supply moved at block " + std::to_string(b.index)
+                      + " (merge events are metadata-only)");
+                trace_ok = false;
+            }
+        }
+
+        check(trace_ok,
+              "trace ran to completion with all per-block invariants holding");
+
+        // Non-vacuity: every adversarial kind actually occurred (guaranteed
+        // by the forced blocks-0..4 prefix; the counters prove it).
+        check(fresh_begins >= 1,
+              "non-vacuous: >=1 fresh BEGIN inserted an entry");
+        check(dup_begins >= 1,
+              "non-vacuous: >=1 duplicate BEGIN (first-write-wins exercised)");
+        check(valid_ends >= 1,
+              "non-vacuous: >=1 valid END erased an entry");
+        check(stale_ends >= 1,
+              "non-vacuous: >=1 stale END (lost-gossip no-op exercised)");
+        check(bad_partner_attempts >= 1,
+              "non-vacuous: >=1 bad-partner event (ring gate exercised)");
+
+        // Negative control: an event-free block moves neither the merge map
+        // nor the nonce nor the supply.
+        {
+            const uint64_t nonce_before   = c.next_nonce("author");
+            const size_t   entries_before = c.merge_state().size();
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = static_cast<int64_t>(c.height());
+            b.creators  = {"author"};
+            c.append(b);
+            bool same = c.merge_state().size() == entries_before
+                        && c.merge_state().size() == model.size();
+            for (const auto& kv : model) {
+                auto it = c.merge_state().find(kv.first);
+                if (it == c.merge_state().end()
+                    || it->second.refugee_region != kv.second
+                    || it->second.partner_id != (kv.first + 1) % kShards)
+                    same = false;
+            }
+            check(same,
+                  "negative control: event-free block leaves merge_state unchanged");
+            check(c.next_nonce("author") == nonce_before,
+                  "negative control: event-free block consumes no nonce");
+            check(c.expected_total() == c.live_total_supply()
+                  && c.live_total_supply() == baseline_supply,
+                  "A1 holds (supply still at baseline) after the negative-control block");
+        }
+
+        // Determinism (§Q6-style): the same seed reproduces a byte-identical
+        // final state root over the REAL engine (merge_state_ is part of the
+        // state commitment via the "m:" leaves). Self-contained re-run helper
+        // reusing gen_event/model_apply with its own PRNG + model.
+        auto final_root = [&](uint64_t seed) -> Hash {
+            uint64_t rs = seed;
+            auto rnd = [&]() -> uint64_t {
+                rs += 0x9E3779B97F4A7C15ULL;
+                uint64_t z = rs;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                return z ^ (z >> 31);
+            };
+            Chain cc;
+            cc.append(make_genesis_block(cfg));
+            cc.set_block_subsidy(0);
+            Hash salt{};
+            cc.set_shard_routing(kShards, salt, ShardId{0});
+            ModelMap m;
+            for (int blk = 0; blk < kBlocks; ++blk) {
+                Ev e = gen_event(rnd, m, blk);
+                Block b;
+                b.index     = cc.height();
+                b.prev_hash = cc.head().compute_hash();
+                b.timestamp = static_cast<int64_t>(cc.height());
+                b.creators  = {"author"};
+                for (size_t t = 0; t < b.cumulative_rand.size(); ++t)
+                    b.cumulative_rand[t] = uint8_t(rnd() & 0xff);
+                b.transactions.push_back(make_merge_tx(e, uint64_t(blk), b.index));
+                cc.append(b);
+                model_apply(m, e);
+            }
+            return cc.compute_state_root();
+        };
+        check(final_root(0xFACEB00C5EEDULL) == final_root(0xFACEB00C5EEDULL),
+              "determinism: same seed reproduces identical final state root");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-merge-trace "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << fresh_begins << " fresh BEGINs, "
+                  << dup_begins << " dup BEGINs, "
+                  << valid_ends << " valid ENDs, "
+                  << stale_ends << " stale ENDs, "
+                  << bad_partner_attempts << " bad-partner rejects over "
                   << kBlocks << " blocks)\n";
         return fail == 0 ? 0 : 1;
     }
