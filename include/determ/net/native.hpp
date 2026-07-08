@@ -25,23 +25,23 @@
 
 #ifdef _WIN32
 #include <determ/net/iocp_event_loop.hpp>
-#include <determ/net/iocp_timer.hpp>
+#include <determ/net/loop_timer.hpp>
 #include <determ/net/iocp_transport.hpp>
 
 namespace determ::net {
 using NativeEventLoop = IocpEventLoop;
-using NativeTimer     = IocpTimer;
+using NativeTimer     = LoopTimer;
 using NativeTransport = IocpTransport;
 } // namespace determ::net
 
 #else
 #include <determ/net/reactor_event_loop.hpp>
-#include <determ/net/reactor_timer.hpp>
+#include <determ/net/loop_timer.hpp>
 #include <determ/net/reactor_transport.hpp>
 
 namespace determ::net {
 using NativeEventLoop = ReactorEventLoop;
-using NativeTimer     = ReactorTimer;
+using NativeTimer     = LoopTimer;
 using NativeTransport = ReactorTransport;
 } // namespace determ::net
 

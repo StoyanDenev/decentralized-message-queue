@@ -82,12 +82,12 @@ public:
     void arm(int fd, uint32_t interest, std::shared_ptr<ReactorHandler> h);
     void deregister(int fd);
 
-    // ── Timer service (backs ReactorTimer) ──────────────────────────────
+    // ── Timer service (EventLoop interface; backs net::LoopTimer) ───────
     uint64_t timer_schedule(std::chrono::milliseconds delay,
-                            std::function<void()> fn) {
+                            std::function<void()> fn) override {
         return timers_.schedule(delay, std::move(fn));
     }
-    void timer_cancel(uint64_t id) { timers_.cancel(id); }
+    void timer_cancel(uint64_t id) override { timers_.cancel(id); }
 
 private:
     int               epfd_   = -1;

@@ -9,6 +9,8 @@
 // UNCONDITIONAL — not gated on any build profile (minix is the long-term
 // architecture, not a TACTICAL-profile switch).
 #pragma once
+#include <chrono>
+#include <cstdint>
 #include <functional>
 
 namespace determ::net {
@@ -28,6 +30,19 @@ public:
 
     // Queue fn for execution on a loop thread (never inline in the caller).
     virtual void post(std::function<void()> fn) = 0;
+
+    // ── Timer service (backs net::LoopTimer) ────────────────────────────
+    // Schedule fn to be post()ed after `delay`; returns an id that
+    // timer_cancel suppresses if it fires first. Every backend delegates to
+    // the shared net::TimerService (timer_service.hpp), so the suppression
+    // window is uniform: a cancel racing the exact expiry moment may lose —
+    // the seam contract tests use unreachable deadlines for their cancel
+    // assertions. Interface-level so consumers holding an abstract
+    // EventLoop& (Node's injection seam, LoopTimer) can schedule without
+    // knowing the concrete backend.
+    virtual uint64_t timer_schedule(std::chrono::milliseconds delay,
+                                    std::function<void()> fn) = 0;
+    virtual void     timer_cancel(uint64_t id) = 0;
 };
 
 } // namespace determ::net

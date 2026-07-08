@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <algorithm>
 
 namespace determ::node {
@@ -124,10 +125,29 @@ void Config::save(const std::string& path) const {
 
 // ─── Node ────────────────────────────────────────────────────────────────────
 
-Node::Node(const Config& cfg, determ::time::Clock& clock)
-    : cfg_(cfg)
+namespace {
+// §Q2 injection guard: the transport is bound to its loop, so a harness
+// must inject both or neither — mixing an injected one with an owned
+// default would pair a transport with the WRONG loop.
+void check_injection_pair(net::EventLoop* loop, net::Transport* transport) {
+    if ((loop == nullptr) != (transport == nullptr))
+        throw std::invalid_argument(
+            "Node: inject loop and transport together or not at all");
+}
+} // namespace
+
+Node::Node(const Config& cfg, determ::time::Clock& clock,
+           net::EventLoop* loop, net::Transport* transport)
+    : cfg_((check_injection_pair(loop, transport), cfg))
     , clock_(clock)
-    , transport_(loop_)
+    , owned_loop_(loop ? nullptr
+                       : std::make_unique<net::NativeEventLoop>())
+    , owned_transport_(
+          transport ? nullptr
+                    : std::make_unique<net::NativeTransport>(
+                          static_cast<net::NativeEventLoop&>(*owned_loop_)))
+    , loop_(loop ? *loop : *owned_loop_)
+    , transport_(transport ? *transport : *owned_transport_)
     , gossip_(transport_)
     , contrib_timer_(loop_)
     , block_sig_timer_(loop_) {

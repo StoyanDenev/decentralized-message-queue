@@ -7,8 +7,8 @@
 // clean expiry; a cancel() (or a re-arm) before firing suppresses it — the asio
 // `if (ec) return;` idiom made the interface contract.
 //
-// Backends: IocpTimer (Windows) and ReactorTimer (POSIX epoll), selected by
-// net/native.hpp — both over the shared net::TimerService deadline engine.
+// Implementation: net::LoopTimer (loop_timer.hpp), one class over ANY
+// EventLoop's timer service (the shared net::TimerService deadline engine).
 // asio is DELETED (minix §7 step 4). UNCONDITIONAL — not gated on any build
 // profile (minix is the long-term architecture, not a TACTICAL-profile
 // switch).

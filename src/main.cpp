@@ -59,14 +59,13 @@
 // minix §4.5 increment 1: the native IOCP backend, exercised by
 // test-net-native. Since the §4.5b increment-2 cutover the WINDOWS daemon
 // runs on these too (via net/native.hpp).
+#include <determ/net/loop_timer.hpp>
 #include <determ/net/iocp_event_loop.hpp>
-#include <determ/net/iocp_timer.hpp>
 #include <determ/net/iocp_transport.hpp>
 #else
 // minix §4.5: the native epoll reactor backend — the POSIX leg of
 // test-net-native (same assertions, other proactor emulation).
 #include <determ/net/reactor_event_loop.hpp>
-#include <determ/net/reactor_timer.hpp>
 #include <determ/net/reactor_transport.hpp>
 #endif
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
@@ -25460,12 +25459,12 @@ int main(int argc, char** argv) {
         // the §4.5 point: one seam contract, two proactor emulations.
 #ifdef _WIN32
         using TestEventLoop = IocpEventLoop;
-        using TestTimer     = IocpTimer;
+        using TestTimer     = LoopTimer;
         using TestTransport = IocpTransport;
         using TestAcceptor  = IocpAcceptor;
 #else
         using TestEventLoop = ReactorEventLoop;
-        using TestTimer     = ReactorTimer;
+        using TestTimer     = LoopTimer;
         using TestTransport = ReactorTransport;
         using TestAcceptor  = ReactorAcceptor;
 #endif

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 //
-// TimerService — the shared deadline-thread timer engine behind IocpTimer
-// and ReactorTimer (minix §4.5). Neither IOCP nor epoll/kqueue has a timer
+// TimerService — the shared deadline-thread timer engine behind every
+// EventLoop's timer_schedule/timer_cancel (and thus net::LoopTimer, minix
+// §4.5). Neither IOCP nor epoll/kqueue has a timer
 // primitive that fits the seam's model directly, and the engine is pure
 // std:: (a lazily-started thread, a tiny entry list, a condition variable),
 // so both native event loops delegate to one implementation: schedule(delay,

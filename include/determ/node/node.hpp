@@ -180,8 +180,19 @@ public:
     // caller — and every produced byte — is unchanged. The DSF supplies a
     // deterministic virtual clock to drive the real engine (docs/proofs/
     // ClockInjectionSeam.md). The referent must outlive the Node.
+    //
+    // §Q2 transport injection (the same pattern, minix §4.1): loop/transport
+    // default to null, in which case the Node constructs its own platform-
+    // native backends (net/native.hpp) — the exact pre-injection behavior.
+    // Injecting BOTH (they must come as a pair: the transport is bound to
+    // its loop; mixing an injected one with an owned default throws
+    // std::invalid_argument) lets a harness drive the REAL engine over an
+    // in-memory VirtualTransport — deterministic multi-node liveness traces
+    // (FA4) without sockets. Injected referents must outlive the Node.
     explicit Node(const Config& cfg,
-                  determ::time::Clock& clock = determ::time::RealClock::instance());
+                  determ::time::Clock& clock = determ::time::RealClock::instance(),
+                  net::EventLoop* loop = nullptr,
+                  net::Transport* transport = nullptr);
     ~Node();
 
     void run();
@@ -552,18 +563,21 @@ private:
     // enough to displace anything — caller should reject the tx.
     bool mempool_make_room_for(const chain::Transaction& tx);
 
-    // §minix net::EventLoop seam — the daemon event loop behind the
-    // per-platform selector (net/native.hpp: IOCP on Windows, asio on POSIX
-    // until the epoll/kqueue reactor lands). Declared BEFORE gossip_/timers:
-    // their initializers take loop_ by reference AND the transport/timer
-    // ctors access it, so it must be constructed first. Side benefit:
-    // members destruct in the correct order (gossip_'s acceptor/sockets
-    // before the loop that services them).
-    net::NativeEventLoop            loop_;
-    // §minix net::Transport seam — the byte transport GossipNet networks
-    // through (accept + connect). Declared after loop_ (its ctor uses it)
-    // and before gossip_ (which takes transport_&).
-    net::NativeTransport            transport_;
+    // §minix net::EventLoop/Transport seam — the daemon networks through
+    // the ABSTRACT interfaces; the concrete backends are either owned
+    // platform-native defaults (net/native.hpp: IOCP on Windows, the epoll
+    // reactor on POSIX) or injected by a harness (§Q2 — VirtualTransport).
+    // Declaration order is load-bearing: the owned defaults FIRST (the
+    // owned transport's ctor takes the owned loop), the references next
+    // (bound to owned or injected), gossip_/timers after (they take the
+    // references). Destruction runs in reverse: gossip_'s connections go
+    // down before the owned transport (which joins its connect helpers)
+    // before the owned loop — and injected backends, owned by the
+    // injector, outlive the Node entirely.
+    std::unique_ptr<net::EventLoop> owned_loop_;
+    std::unique_ptr<net::Transport> owned_transport_;
+    net::EventLoop&                 loop_;
+    net::Transport&                 transport_;
     net::GossipNet                  gossip_;
     std::vector<chain::AbortEvent>  current_aborts_;
     std::vector<size_t>             current_creator_indices_;
@@ -670,11 +684,10 @@ private:
     std::map<std::pair<ShardId, Hash>, uint64_t>
         pending_inbound_first_seen_;
 
-    // §minix net::Timer seam — the deadline timers go through the net::Timer
-    // interface via the per-platform selector (IocpTimer on Windows,
-    // AsioTimer on POSIX). Timers are pure scheduling (not digest-bound), so
-    // this is byte-invariant for consensus; the observable surface is
-    // liveness (phase timeouts), gated by the live cluster tests.
+    // §minix net::Timer seam — the deadline timers are net::LoopTimer over
+    // the (possibly injected) event loop. Timers are pure scheduling (not
+    // digest-bound), so this is byte-invariant for consensus; the observable
+    // surface is liveness (phase timeouts), gated by the live cluster tests.
     net::NativeTimer                contrib_timer_;
     net::NativeTimer                block_sig_timer_;
 
