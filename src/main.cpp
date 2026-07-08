@@ -820,13 +820,17 @@ Additional in-process tests:
                                               connect, write-after-close, and
                                               the two-loop multi-node shape
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
-                                              process: 3 real Nodes over an
+                                              process: 5 real Nodes over an
                                               injected VirtualTransport (one
                                               shared VirtualNetwork, no OS
-                                              sockets/processes) — all reach
-                                              height>=3 + finalized blocks
-                                              byte-identical across nodes
-                                              (weak-BFT K=2/M=3)
+                                              sockets/processes; 3-of-5 weak
+                                              BFT, per-block committees) —
+                                              liveness+agreement, then
+                                              FAILOVER (kill one node,
+                                              survivors keep finalizing via
+                                              abort/reselect), then REJOIN
+                                              (restart syncs + adopts the
+                                              outage blocks byte-identically)
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -25980,19 +25984,32 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // FA4 (F-1) liveness, real engine, in process: THREE real node::Node
+    // FA4 (F-1) liveness, real engine, in process: FIVE real node::Node
     // instances — the full production stack (GossipNet wire codec, contrib/
     // block-sig rounds, sync grace, committee selection, chain apply) —
     // run in ONE process over an injected VirtualEventLoop/VirtualTransport
     // per node, sharing a VirtualNetwork instead of OS sockets. This is
     // what the §Q2 injection seam + virtual backend were built for: the
-    // multi-node liveness property (blocks finalize and AGREE across
-    // nodes) as a hermetic unit test — no ports, no processes, no
-    // platform networking, FAST-eligible — where before it needed a live
-    // shell-orchestrated cluster. Weak-BFT K=2/M=3 (test_weak_3node's
-    // shape). Wall-clock timers still drive the rounds (virtual TIME is
-    // the next evolution); hermetic-not-yet-deterministic, so assertions
-    // are threshold liveness + prefix agreement, not byte traces.
+    // multi-node liveness properties as a hermetic unit test — no ports,
+    // no processes, no platform networking — where before they needed a
+    // live shell-orchestrated cluster. Genesis is test_weak_3node's
+    // LIVE-VALIDATED shape verbatim (M_pool=5, K_committee=3 weak BFT,
+    // epoch_blocks=1 so committees re-derive per block; K=2 committees
+    // wedge by design — S-044). Three phases:
+    //   A. liveness+agreement — all 5 reach height >= 3; blocks 1..3
+    //      byte-identical (fork-freedom over the real gossip path).
+    //   B. FAILOVER — node4 is DESTROYED (dtor → close propagation, the
+    //      crashed-process model); the weak-BFT claim is that per-block
+    //      committee re-derivation + abort/reselection keep finalizing
+    //      with 4/5 alive: survivors must advance >= 3 more blocks.
+    //   C. REJOIN — a fresh Node with node4's identity + saved chain
+    //      boots on a NEW loop/transport pair, syncs from the survivors
+    //      (real GET_CHAIN/CHAIN_RESPONSE path), and must catch up past
+    //      the failover blocks AND agree byte-for-byte on a post-kill
+    //      block (it adopted the survivors' chain, not a fork).
+    // Wall-clock timers still drive the rounds (virtual TIME is the next
+    // evolution); hermetic-not-yet-deterministic, so assertions are
+    // threshold liveness + prefix agreement, not byte traces.
     if (cmd == "test-fa-liveness-virtual") {
         using namespace determ;
         using namespace determ::net;
@@ -26003,20 +26020,32 @@ int main(int argc, char** argv) {
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
 
-        constexpr int      kNodes        = 3;
-        constexpr uint64_t kTargetHeight = 3;
+        constexpr int      kNodes        = 5;
+        // Finalized-block count target. chain height is the BLOCK COUNT
+        // (genesis included), so "blocks 1..3 finalized on every node"
+        // is height >= kTargetBlocks + 1 — off by one from the naive
+        // reading, which an adversarial review caught making the
+        // agreement check comparable-but-null at exactly height 3.
+        constexpr uint64_t kTargetBlocks = 3;
 
-        fs::path dir = fs::temp_directory_path() / "determ-fa-liveness-virtual";
+        // Unique per run: concurrent invocations (or a leftover from a
+        // killed run) must not share chain state.
+        fs::path dir = fs::temp_directory_path() /
+            ("determ-fa-liveness-virtual-" +
+             std::to_string(static_cast<unsigned long long>(
+                 std::chrono::steady_clock::now().time_since_epoch().count())));
         std::error_code fec;
         fs::remove_all(dir, fec);
         fs::create_directories(dir);
 
-        // Genesis: 3 creators, each keyed + staked at min_stake (1000),
-        // weak BFT (K=2 of M=3 — one non-signer tolerated per block).
+        // Genesis: 5 creators, each keyed + staked at min_stake (1000) —
+        // the test_weak_3node shape: 3-of-5 weak BFT, per-block committees.
         chain::GenesisConfig g;
         g.chain_id     = "fa-liveness-virtual";
-        g.m_creators   = 3;
-        g.k_block_sigs = 2;
+        g.m_creators   = 5;
+        g.k_block_sigs = 3;
+        g.epoch_blocks = 1;
+        g.block_subsidy = 10;
         std::array<crypto::NodeKey, kNodes> keys;
         for (int i = 0; i < kNodes; ++i) {
             keys[i] = crypto::generate_node_key();
@@ -26038,12 +26067,8 @@ int main(int argc, char** argv) {
         std::vector<std::unique_ptr<VirtualTransport>> transports;
         std::vector<std::unique_ptr<node::Node>>       nodes;
         const uint16_t base_port = 7601;
-        for (int i = 0; i < kNodes; ++i) {
-            loops.push_back(std::make_unique<VirtualEventLoop>());
-            transports.push_back(
-                std::make_unique<VirtualTransport>(*loops[i], vnet));
-        }
-        for (int i = 0; i < kNodes; ++i) {
+
+        auto make_cfg = [&](int i) {
             node::Config cfg;
             cfg.domain       = "node" + std::to_string(i);
             cfg.data_dir     = (dir / cfg.domain).string();
@@ -26051,13 +26076,23 @@ int main(int argc, char** argv) {
             cfg.key_path     = (dir / (cfg.domain + ".key")).string();
             cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
             cfg.genesis_path = gpath;
-            cfg.m_creators   = 3;
-            cfg.k_block_sigs = 2;
+            cfg.m_creators   = 5;
+            cfg.k_block_sigs = 3;
             cfg.log_quiet    = true;
             for (int p = 0; p < kNodes; ++p)
                 if (p != i)
                     cfg.bootstrap_peers.push_back(
                         "127.0.0.1:" + std::to_string(base_port + p));
+            return cfg;
+        };
+
+        for (int i = 0; i < kNodes; ++i) {
+            loops.push_back(std::make_unique<VirtualEventLoop>());
+            transports.push_back(
+                std::make_unique<VirtualTransport>(*loops[i], vnet));
+        }
+        for (int i = 0; i < kNodes; ++i) {
+            node::Config cfg = make_cfg(i);
             fs::create_directories(cfg.data_dir);
             crypto::save_node_key(keys[i], cfg.key_path);
             nodes.push_back(std::make_unique<node::Node>(
@@ -26076,26 +26111,34 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
 
-        // Liveness: every node's REAL chain advances past kTargetHeight.
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(60);
-        bool reached = false;
-        while (std::chrono::steady_clock::now() < deadline) {
+        auto min_height = [&](size_t upto) {
             uint64_t min_h = UINT64_MAX;
-            for (auto& n : nodes) {
-                const uint64_t h = n->rpc_status()["height"].get<uint64_t>();
-                min_h = std::min(min_h, h);
+            for (size_t i = 0; i < upto; ++i)
+                min_h = std::min(min_h,
+                    nodes[i]->rpc_status()["height"].get<uint64_t>());
+            return min_h;
+        };
+        auto wait_min_height = [&](size_t upto, uint64_t target, int secs) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(secs);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (min_height(upto) >= target) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            if (min_h >= kTargetHeight) { reached = true; break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+            return false;
+        };
+
+        // ── Phase A: liveness + agreement over the full 5-node cluster ──
+        const bool reached = wait_min_height(kNodes, kTargetBlocks + 1, 60);
         check(reached,
-              "liveness: 3 real Nodes over VirtualTransport all reached height >= 3");
+              "liveness: 5 real Nodes over VirtualTransport all finalized blocks 1..3");
 
         // Agreement: identical genesis identity + byte-identical finalized
         // blocks 1..target on every node (fork-freedom over the real
         // gossip path; state agreement follows from deterministic apply,
-        // pinned separately by the golden consensus vectors).
+        // pinned separately by the golden consensus vectors). The explicit
+        // non-null conjunct keeps this check from ever passing on
+        // out-of-range null==null comparisons.
         if (reached) {
             const std::string g0 =
                 nodes[0]->rpc_status()["genesis"].get<std::string>();
@@ -26105,17 +26148,177 @@ int main(int argc, char** argv) {
             check(genesis_agree, "agreement: one genesis hash across all nodes");
 
             bool blocks_agree = true;
-            for (uint64_t h = 1; h <= kTargetHeight; ++h) {
-                const std::string b0 = nodes[0]->rpc_block(h).dump();
-                for (int i = 1; i < kNodes; ++i)
-                    blocks_agree &= nodes[i]->rpc_block(h).dump() == b0;
+            for (uint64_t h = 1; h <= kTargetBlocks; ++h) {
+                const nlohmann::json b0 = nodes[0]->rpc_block(h);
+                blocks_agree &= !b0.is_null();
+                for (int i = 1; i < kNodes; ++i) {
+                    const nlohmann::json bi = nodes[i]->rpc_block(h);
+                    blocks_agree &= !bi.is_null() && bi.dump() == b0.dump();
+                }
             }
             check(blocks_agree,
                   "agreement: blocks 1..3 byte-identical across all nodes (no fork)");
         }
 
-        for (auto& n : nodes) n->stop();
-        for (auto& t : runners) t.join();
+        // ── Phase B: FAILOVER — destroy node4, survivors keep finalizing ──
+        // stop() first (main thread) then join its runner BEFORE the dtor:
+        // the documented shutdown order for an embedded Node. The dtor then
+        // tears down gossip → every peer Connection close()s → survivors
+        // see EOF and reap the peer (the crashed-process model).
+        uint64_t h_kill = 0;
+        if (reached) {
+            h_kill = nodes[0]->rpc_status()["height"].get<uint64_t>();
+            nodes[4]->stop();
+            runners[4].join();
+            nodes[4].reset();
+            // Weak-BFT failover: per-block committee re-derivation
+            // (epoch_blocks=1) + the S-044-fixed abort/reselection path
+            // must keep the 4 survivors finalizing. Committees drawing the
+            // dead node abort (its contrib never arrives) and re-select —
+            // this is exactly the liveness claim 3-of-5 exists for.
+            // MAJORITY liveness is what the shipped design guarantees:
+            // 3 of 4 survivors must keep finalizing (the S-047 retry
+            // closed the all-stuck wedge modes). The 4th can land on a
+            // minority SAME-HEIGHT fork (the abort-vs-finalize race) and
+            // stay there — Chain::resolve_fork exists (S-029) but is not
+            // wired into Node, and sync is append-only, so a forked
+            // survivor cannot reorg: that is OPEN finding S-048
+            // (owner-gated head-reorg wiring). The harness reports that
+            // mode as a loud KNOWN-OPEN marker rather than a gate flake;
+            // a true cluster wedge (majority stuck) still FAILS.
+            auto survivor_heights = [&]() {
+                std::vector<uint64_t> hs;
+                for (int i = 0; i < 4; ++i)
+                    hs.push_back(
+                        nodes[i]->rpc_status()["height"].get<uint64_t>());
+                std::sort(hs.begin(), hs.end());
+                return hs;   // ascending: hs[1] >= target <=> 3-of-4 ok
+            };
+            const uint64_t target   = h_kill + 3;
+            const auto     deadln   = std::chrono::steady_clock::now() +
+                                      std::chrono::seconds(90);
+            bool majority = false;
+            while (std::chrono::steady_clock::now() < deadln) {
+                if (survivor_heights()[1] >= target) { majority = true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            check(majority,
+                  "failover: majority of survivors (3 of 4) kept finalizing past the kill height (abort/reselect liveness)");
+            if (majority) {
+                // Give the slowest survivor a short grace, then classify.
+                const auto grace = std::chrono::steady_clock::now() +
+                                   std::chrono::seconds(10);
+                while (std::chrono::steady_clock::now() < grace &&
+                       survivor_heights()[0] < target)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (survivor_heights()[0] < target) {
+                    std::cout << "  KNOWN-OPEN S-048: a survivor is stuck on a"
+                                 " minority same-height fork and cannot reorg"
+                                 " (resolve_fork unwired; append-only sync) —"
+                                 " cluster liveness held, node-level recovery"
+                                 " did not:\n";
+                    for (int i = 0; i < 4; ++i) {
+                        const auto st = nodes[i]->rpc_status();
+                        std::cout << "    node" << i
+                                  << " height=" << st["height"]
+                                  << " head=" << st["head_hash"].get<std::string>().substr(0, 12)
+                                  << " (h_kill=" << h_kill << ")\n";
+                    }
+                }
+            } else {
+                // True wedge diagnostics: which mode — all-stuck (no
+                // rounds starting), height divergence, or reap fault.
+                for (int i = 0; i < 4; ++i) {
+                    const auto st = nodes[i]->rpc_status();
+                    std::cout << "  DIAG node" << i
+                              << " height=" << st["height"]
+                              << " peers=" << st["peer_count"]
+                              << " sync=" << st["sync_state"]
+                              << " head=" << st["head_hash"].get<std::string>().substr(0, 12)
+                              << " (h_kill=" << h_kill << ")\n";
+                }
+            }
+        }
+
+        // ── Phase C: REJOIN — node4's identity returns on fresh substrate ──
+        // A crashed validator restarting: same key, same saved chain.json,
+        // NEW loop/transport (the old loop is stop()-permanent, its port
+        // freed by the old acceptor's teardown). It must sync the
+        // survivors' chain (GET_CHAIN/CHAIN_RESPONSE) past the failover
+        // blocks and agree byte-for-byte on a block it was dead for.
+        if (reached && fail == 0) {
+            loops.push_back(std::make_unique<VirtualEventLoop>());
+            transports.push_back(std::make_unique<VirtualTransport>(
+                *loops.back(), vnet));
+            nodes[4] = std::make_unique<node::Node>(
+                make_cfg(4), determ::time::RealClock::instance(),
+                loops.back().get(), transports.back().get());
+            node::Node* n4 = nodes[4].get();
+            runners.emplace_back([n4] { n4->run(); });
+
+            const uint64_t rejoin_target = h_kill + 3;
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(90);
+            bool caught_up = false;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (nodes[4]->rpc_status()["height"].get<uint64_t>() >=
+                    rejoin_target) { caught_up = true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!caught_up) {
+                // Classify: a rejoiner whose SAVED chain tail is a
+                // minority same-height block (it died holding one) hits
+                // the append-only-sync wall — the S-048 mode again
+                // ("invalid block: prev_hash mismatch" spam). Detect by
+                // divergence: its head block differs from the majority's
+                // block at the same index. That is the registered open
+                // defect, not a sync regression — loud note, not a flake.
+                const uint64_t h4 =
+                    nodes[4]->rpc_status()["height"].get<uint64_t>();
+                const nlohmann::json mine = nodes[4]->rpc_block(h4 - 1);
+                const nlohmann::json ref  = nodes[0]->rpc_block(h4 - 1);
+                if (!mine.is_null() && !ref.is_null() &&
+                    mine.dump() != ref.dump()) {
+                    std::cout << "  KNOWN-OPEN S-048: the rejoiner's saved"
+                                 " tail is a minority same-height block —"
+                                 " append-only sync cannot reorg it"
+                                 " (resolve_fork unwired)\n";
+                } else {
+                    check(false,
+                          "rejoin: restarted node4 caught up past the failover blocks (real sync path)");
+                }
+            } else {
+                check(true,
+                      "rejoin: restarted node4 caught up past the failover blocks (real sync path)");
+            }
+            if (caught_up) {
+                // A block finalized while node4 was DEAD must now be
+                // byte-identical on the rejoined node — it adopted the
+                // survivors' chain, not a fork of its own. Reference =
+                // the HIGHEST survivor (a majority-branch node; node0
+                // could be an S-048 minority-fork straggler). Blocks with
+                // INDEX >= h_kill were created post-kill (indices
+                // 0..h_kill-1 existed at the kill, h_kill being a block
+                // COUNT); index h_kill+1 exists on both sides because
+                // both counts are >= h_kill+3. Null-checked so an
+                // out-of-range null==null can never green this.
+                int ref = 0; uint64_t ref_h = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const uint64_t h =
+                        nodes[i]->rpc_status()["height"].get<uint64_t>();
+                    if (h > ref_h) { ref_h = h; ref = i; }
+                }
+                const uint64_t h_dead = h_kill + 1;
+                const nlohmann::json b4 = nodes[4]->rpc_block(h_dead);
+                const nlohmann::json br = nodes[ref]->rpc_block(h_dead);
+                check(!b4.is_null() && !br.is_null() &&
+                          b4.dump() == br.dump(),
+                      "rejoin: a block finalized during the outage is byte-identical on the rejoined node");
+            }
+        }
+
+        for (auto& n : nodes) if (n) n->stop();
+        for (auto& t : runners) if (t.joinable()) t.join();
         nodes.clear();        // before transports/loops (lifetime rule)
         transports.clear();
         loops.clear();

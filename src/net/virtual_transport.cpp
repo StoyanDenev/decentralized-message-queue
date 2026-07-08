@@ -11,14 +11,18 @@
 // directions' queues, parked ops, and closed flags — the same role the
 // reactor's op_mu_ plays, extended across the pair because a write on one
 // end completes a parked read on the other. Completion POSTS happen while
-// holding Pair::mu ON PURPOSE: a post can target the PEER's loop, and the
-// peer's teardown path (close() in ~VirtualConnection, which runs before
-// the peer destroys its loop) serializes behind the same mutex — so the
-// target loop cannot be destroyed mid-post. This does not violate the
-// reactor's completion-outside-lock discipline: post() only ENQUEUES (it
-// takes the loop's queue mutex briefly, a leaf lock); the completion is
-// INVOKED later on a loop thread with no pair lock held. Lock order is
-// strictly {network mu_ | pair mu} → loop queue mutex, never the reverse.
+// holding Pair::mu; that is safe because every post target is a
+// shared_ptr<VirtualEventLoop::State> the SOURCE itself keeps alive (a
+// Pair side, a Listener, a queued connect), so a post can never touch a
+// destroyed loop no matter what order the loop OBJECTS die in — the
+// adversarial-review finding that motivated the shared-state design. This
+// does not violate the reactor's completion-outside-lock discipline:
+// post() only ENQUEUES (it takes the state's queue mutex briefly, a leaf
+// lock); the completion is INVOKED later on a loop thread with no pair
+// lock held. Lock order is strictly {network mu_ | pair mu} → loop queue
+// mutex, never the reverse — which is why State::drain() destroys dropped
+// closures OUTSIDE the queue mutex (their dtors run ~Peer → close(),
+// which takes pair mutexes and re-posts).
 #include <determ/net/virtual_transport.hpp>
 
 #include <algorithm>
@@ -47,23 +51,55 @@ std::error_code ec_refused() {
 
 // ── VirtualEventLoop ─────────────────────────────────────────────────────────
 
+void VirtualEventLoop::State::post(std::function<void()> fn) {
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        // Post-after-stop still enqueues; the closure is dropped at
+        // drain() (the reactor's failed-wakeup drop semantics).
+        q.push_back(std::move(fn));
+    }
+    cv.notify_one();
+}
+
+void VirtualEventLoop::State::drain() {
+    // Destroy undelivered closures with NO lock held: their destructors
+    // run consumer teardown (~Peer -> close()) which takes pair mutexes
+    // and posts to states — including, possibly, THIS one again. The loop
+    // re-swaps until those re-posts stop; holding mu across the
+    // destruction would reverse the {pair mu -> loop mu} lock order
+    // (review finding: ABBA deadlock under concurrent multi-loop
+    // teardown).
+    for (;;) {
+        std::deque<std::function<void()>> drop;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (q.empty()) break;
+            drop.swap(q);
+        }
+        // `drop` destroyed here, lock-free.
+    }
+}
+
 VirtualEventLoop::~VirtualEventLoop() {
     stop();
     // Stop the timer thread BEFORE dropping the queue so no timer post
     // races the teardown (the reactor-destructor ordering).
     timers_.shutdown();
-    std::lock_guard<std::mutex> lk(mu_);
-    q_.clear();   // undelivered posts dropped without invoking — the
-                  // never-dispatched-handler semantics all backends share
+    // Drop undelivered posts NOW (never invoked). Pairs/listeners still
+    // holding st_ keep the STATE alive past this dtor, so their later
+    // teardown posts land harmlessly in a stopped queue and are dropped
+    // by ~State when the last ref goes.
+    st_->drain();
 }
 
 void VirtualEventLoop::run() {
-    std::unique_lock<std::mutex> lk(mu_);
+    State& s = *st_;
+    std::unique_lock<std::mutex> lk(s.mu);
     for (;;) {
-        cv_.wait(lk, [this] { return stopped_ || !q_.empty(); });
-        if (stopped_) return;
-        std::function<void()> fn = std::move(q_.front());
-        q_.pop_front();
+        s.cv.wait(lk, [&s] { return s.stopped || !s.q.empty(); });
+        if (s.stopped) return;
+        std::function<void()> fn = std::move(s.q.front());
+        s.q.pop_front();
         lk.unlock();
         // May block for a session's lifetime (RpcServer's posted-closure
         // session model) — other run() threads keep servicing the queue.
@@ -74,20 +110,14 @@ void VirtualEventLoop::run() {
 
 void VirtualEventLoop::stop() {
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        stopped_ = true;   // permanent — run() never resumes (contract)
+        std::lock_guard<std::mutex> lk(st_->mu);
+        st_->stopped = true;   // permanent — run() never resumes (contract)
     }
-    cv_.notify_all();
+    st_->cv.notify_all();
 }
 
 void VirtualEventLoop::post(std::function<void()> fn) {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        // Post-after-stop still enqueues; the closure is dropped at
-        // destruction (the reactor's failed-wakeup drop semantics).
-        q_.push_back(std::move(fn));
-    }
-    cv_.notify_one();
+    st_->post(std::move(fn));
 }
 
 // ── VirtualConnection::Pair ──────────────────────────────────────────────────
@@ -102,7 +132,11 @@ struct VirtualConnection::Pair {
         bool              active = false;
     };
     struct Side {
-        VirtualEventLoop*   loop = nullptr;  // where THIS side's completions run
+        // Where THIS side's completions run. A shared ref to the loop's
+        // STATE (not the loop object): teardown-synthesized completions
+        // (close() from a dropped closure's ~Peer) must be able to post
+        // after the loop object is gone, in any loop-destruction order.
+        std::shared_ptr<VirtualEventLoop::State> loop;
         std::deque<uint8_t> inbox;           // bytes awaiting this side's reads
         ParkedRead          rd;
         bool                closed = false;
@@ -265,9 +299,12 @@ bool VirtualConnection::read_line(std::string& out_line) {
     Pair::Side& me   = P.side[side_];
     Pair::Side& peer = P.side[1 - side_];
     for (;;) {
-        // Buffered complete lines are delivered even after close() — the
-        // reactor's carry_-scan-before-closed-check ordering. The inbox IS
-        // the carry: bytes past '\n' simply stay queued.
+        // Buffered complete lines are delivered even after close(). For
+        // PEER-close this is the reactor's carry_-scan-before-EOF-check
+        // ordering; for LOCAL close it is a documented deviation (header
+        // preamble) — deterministic drain instead of the native fail-
+        // without-drain. The inbox IS the carry: bytes past '\n' stay
+        // queued.
         auto nl = std::find(me.inbox.begin(), me.inbox.end(),
                             static_cast<uint8_t>('\n'));
         if (nl != me.inbox.end()) {
@@ -285,14 +322,14 @@ bool VirtualConnection::read_line(std::string& out_line) {
 
 struct VirtualNetwork::Listener {
     struct PendingConnect {
-        VirtualEventLoop*    loop;    // connector's loop; guaranteed alive —
-                                      // ~VirtualTransport cancels its own
-                                      // entries before its loop can die
+        // Connector's loop STATE (shared ref — outlives the loop object;
+        // ~VirtualTransport additionally cancels its own entries).
+        std::shared_ptr<VirtualEventLoop::State> loop;
         VirtualTransport*    owner;   // cancellation key for the above
         Transport::ConnectCb cb;
     };
 
-    VirtualEventLoop*          loop = nullptr;   // acceptor's loop
+    std::shared_ptr<VirtualEventLoop::State> loop;   // acceptor's loop state
     uint16_t                   port = 0;
     bool                       dead = false;
     Acceptor::AcceptCb         parked;    // one-shot; the consumer re-arms
@@ -322,7 +359,7 @@ VirtualNetwork::register_listener(uint16_t& port, VirtualEventLoop& loop) {
                                  std::to_string(port));
     }
     auto l  = std::make_shared<Listener>();
-    l->loop = &loop;
+    l->loop = loop.st_;
     l->port = port;
     listeners_[port] = l;
     return l;
@@ -349,7 +386,7 @@ void VirtualNetwork::arm_accept(const std::shared_ptr<Listener>& l,
         // A connect was queued before this accept (both orders supported).
         Listener::PendingConnect pc = std::move(l->pending.front());
         l->pending.pop_front();
-        auto [acc, conn] = make_pair_locked(*l->loop, *pc.loop);
+        auto [acc, conn] = make_pair_locked(l->loop, pc.loop);
         std::shared_ptr<Connection> accepted  = std::move(acc);
         std::shared_ptr<Connection> connected = std::move(conn);
         // Both callbacks delivered ON A LOOP THREAD via post — never
@@ -379,7 +416,7 @@ void VirtualNetwork::connect(uint16_t port, VirtualEventLoop& caller_loop,
     if (l->parked) {
         Acceptor::AcceptCb acb = std::move(l->parked);
         l->parked = nullptr;
-        auto [acc, conn] = make_pair_locked(*l->loop, caller_loop);
+        auto [acc, conn] = make_pair_locked(l->loop, caller_loop.st_);
         std::shared_ptr<Connection> accepted  = std::move(acc);
         std::shared_ptr<Connection> connected = std::move(conn);
         l->loop->post([acb = std::move(acb), accepted] { acb({}, accepted); });
@@ -390,7 +427,7 @@ void VirtualNetwork::connect(uint16_t port, VirtualEventLoop& caller_loop,
         // Park the connect until async_accept is called (TCP backlog
         // analogue; refused if the acceptor is destroyed first).
         l->pending.push_back(
-            Listener::PendingConnect{&caller_loop, owner, std::move(cb)});
+            Listener::PendingConnect{caller_loop.st_, owner, std::move(cb)});
     }
 }
 
@@ -409,11 +446,12 @@ void VirtualNetwork::cancel_connects(VirtualTransport* owner) {
 
 std::pair<std::shared_ptr<VirtualConnection>,
           std::shared_ptr<VirtualConnection>>
-VirtualNetwork::make_pair_locked(VirtualEventLoop& accept_loop,
-                                 VirtualEventLoop& connect_loop) {
+VirtualNetwork::make_pair_locked(
+    std::shared_ptr<VirtualEventLoop::State> accept_loop,
+    std::shared_ptr<VirtualEventLoop::State> connect_loop) {
     auto P = std::make_shared<VirtualConnection::Pair>();
-    P->side[0].loop = &accept_loop;
-    P->side[1].loop = &connect_loop;
+    P->side[0].loop = std::move(accept_loop);
+    P->side[1].loop = std::move(connect_loop);
     // Unique pseudo-port per pair so consumers that parse "ip:port"
     // (RpcServer's rfind(':') strip, gossip's per-IP bucket) behave
     // identically; wraps within [50000, 65535].

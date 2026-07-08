@@ -19,6 +19,15 @@ public:
     // §minix net::Transport seam — GossipNet networks through the Transport
     // interface (accept + connect); it no longer touches asio directly.
     explicit GossipNet(Transport& transport);
+    // Explicitly close every peer connection. Without this, a peer whose
+    // read is parked in the backend forms an ownership cycle (the parked
+    // callback owns the Peer, the Peer owns the Connection, the backend's
+    // op state owns the callback) that dropping peers_ alone never breaks
+    // — ~Peer would not run and the connection state leaks (adversarial
+    // review of the virtual backend; the native backends have the same
+    // shape via their op registries). close() clears the parked ops on
+    // both ends, so the refs unwind when peers_ is destroyed.
+    ~GossipNet();
 
     void listen(uint16_t port);
     void connect(const std::string& host, uint16_t port);

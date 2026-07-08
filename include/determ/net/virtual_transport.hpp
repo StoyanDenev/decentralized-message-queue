@@ -44,6 +44,21 @@
 //    pseudo-port per pair; BOTH ends of a pair report the same string. All
 //    virtual peers therefore share the "127.0.0.1" rate-limit bucket —
 //    exactly like a native localhost cluster.
+//  - async_connect completes only at RENDEZVOUS with an armed async_accept
+//    (until then it parks in the listener's backlog): there is no kernel
+//    backlog that completes the client's handshake before the server
+//    accepts. Consumers that connect and immediately WRITE still work (the
+//    write lands once the pair exists); consumers that require connect
+//    completion before the passive side ever calls async_accept would hang
+//    here where a native backend proceeds.
+//  - Close-abort/EOF error completions report n=0 and leave any undelivered
+//    bytes queued in the inbox; a native reactor may report partial n>0
+//    with the bytes copied out. Seam consumers ignore n on error (Peer
+//    tears the session down), so the difference is unobservable through
+//    the seam.
+//  - read_line after LOCAL close still drains already-buffered COMPLETE
+//    lines before returning false (the same drain it performs on peer-close
+//    EOF); a native backend's post-close read fails without draining.
 //
 // DETERMINISM. With a SINGLE run() thread per loop, delivery order is
 // exactly post() order (a locked FIFO) — deterministic multi-node traces
@@ -89,10 +104,31 @@ class VirtualTransport;
 // Undelivered work is dropped at destruction without invoking.
 class VirtualEventLoop final : public EventLoop {
 public:
+    // The loop's post-target state, held by shared_ptr: every internal
+    // post SOURCE (a Pair side, a Listener, a queued connect) keeps a ref,
+    // so a completion synthesized during PAIR teardown — e.g. a dropped
+    // closure's ~Peer running close() — always posts into a live State
+    // even when the VirtualEventLoop OBJECT was already destroyed (the
+    // closure is then dropped when the state's last ref goes; it never
+    // runs). This is what makes multi-loop teardown order-free: a review
+    // round found the raw-pointer form UAFs when survivors' loops die
+    // before a dead node's queued closures do. INTERNAL — consumers never
+    // touch this type.
+    struct State {
+        std::mutex                        mu;
+        std::condition_variable           cv;
+        std::deque<std::function<void()>> q;
+        bool                              stopped = false;   // guarded by mu
+        void post(std::function<void()> fn);
+        void drain();   // destroy undelivered closures OUTSIDE the lock,
+                        // looping until their dtors stop re-posting
+        ~State() { drain(); }
+    };
+
     VirtualEventLoop() = default;
-    ~VirtualEventLoop() override;   // stop() + timer shutdown; undelivered
-                                    // posts dropped (never-dispatched
-                                    // semantics). Callers join their own
+    ~VirtualEventLoop() override;   // stop() + timer shutdown + drain
+                                    // (undelivered posts dropped, never
+                                    // invoked). Callers join their own
                                     // run() threads first, as everywhere.
 
     VirtualEventLoop(const VirtualEventLoop&) = delete;
@@ -114,13 +150,12 @@ public:
     void timer_cancel(uint64_t id) override { timers_.cancel(id); }
 
 private:
-    std::mutex                        mu_;
-    std::condition_variable           cv_;
-    std::deque<std::function<void()>> q_;
-    bool                              stopped_ = false;   // guarded by mu_
+    friend class VirtualNetwork;   // reads st_ to wire pair/listener posts
 
-    TimerService timers_{[this](std::function<void()> fn) {
-        post(std::move(fn));
+    std::shared_ptr<State> st_{std::make_shared<State>()};
+
+    TimerService timers_{[st = st_](std::function<void()> fn) {
+        st->post(std::move(fn));
     }};
 };
 
@@ -193,10 +228,12 @@ private:
                  VirtualTransport* owner, Transport::ConnectCb cb);
     void cancel_connects(VirtualTransport* owner);
     // Builds a wired pair; {accept-side, connect-side}. Caller holds mu_.
+    // Takes the loops' shared STATEs (see VirtualEventLoop::State): the
+    // pair keeps them alive so its teardown posts are order-free.
     std::pair<std::shared_ptr<VirtualConnection>,
               std::shared_ptr<VirtualConnection>>
-    make_pair_locked(VirtualEventLoop& accept_loop,
-                     VirtualEventLoop& connect_loop);
+    make_pair_locked(std::shared_ptr<VirtualEventLoop::State> accept_loop,
+                     std::shared_ptr<VirtualEventLoop::State> connect_loop);
 
     std::mutex mu_;
     std::map<uint16_t, std::shared_ptr<Listener>> listeners_;

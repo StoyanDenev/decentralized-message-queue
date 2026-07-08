@@ -591,7 +591,18 @@ chain_loaded:
                                   { on_status_response(h, gh, peer); };
 }
 
-Node::~Node() { stop(); }
+Node::~Node() {
+    stop();
+    // stop() racing a mid-startup run() can leave threads spawned AFTER
+    // its joins ran (they start into the stopped loop and exit at once,
+    // but stay joinable). Sweep them so no joinable std::thread reaches
+    // member destruction (std::terminate); both sweeps are no-ops on the
+    // normal path where stop() already joined everything.
+    join_loop_threads();
+    save_stop_.store(true);
+    save_cv_.notify_all();
+    if (save_thread_.joinable()) save_thread_.join();
+}
 
 void Node::run() {
     running_ = true;
@@ -614,9 +625,17 @@ void Node::run() {
     if (cfg_.chain_role == ChainRole::SHARD) connect_addrs(cfg_.beacon_peers);
     if (cfg_.chain_role == ChainRole::BEACON) connect_addrs(cfg_.shard_peers);
 
-    unsigned n = std::max(1u, std::thread::hardware_concurrency());
-    for (unsigned i = 0; i < n; ++i)
-        threads_.emplace_back([this] { loop_.run(); });
+    {
+        // Spawn under the same mutex join_loop_threads() takes: a
+        // cross-thread stop() racing this startup section must not
+        // iterate threads_ while it grows. If stop() wins the lock first,
+        // these threads start into an already-stopped loop and exit
+        // immediately; run()'s tail join collects them.
+        std::lock_guard<std::mutex> lk(threads_join_mutex_);
+        unsigned n = std::max(1u, std::thread::hardware_concurrency());
+        for (unsigned i = 0; i < n; ++i)
+            threads_.emplace_back([this] { loop_.run(); });
+    }
 
     // A9 / S-031 follow-on: spawn the async chain.save worker.
     // Sits idle on save_cv_ until enqueue_save() flips save_pending_.
@@ -1207,7 +1226,37 @@ namespace {
     }
 }
 
+// S-047 retry payload (header note). Order matters: abort events first —
+// in CHAIN order, so a generation-behind receiver adopts them sequentially
+// (each adoption re-derives the committee the NEXT event's claimers were
+// drawn from) — then contribs, then sigs. We relay EVERY stored entry,
+// not just our own: a committee member that died mid-round may have
+// delivered its contrib/sig to SOME peers only (per-peer write ordering),
+// and the peers it missed can never receive it from the author again —
+// the reproduced deadlock is one live member in phase 2 (has the dead
+// node's contrib) and the other stuck in phase 1 (doesn't), claiming in
+// different (round, missing) buckets so the 2-claim quorum can never
+// assemble. Relaying is protocol-sound: every entry is signed by its
+// AUTHOR and re-verified at the receiver; a relay cannot forge, only
+// re-deliver. Everything here is a stored original — re-serialization is
+// byte-identical, so every receiver path dedups (event_hash match,
+// contrib core-commit match, sig digest match) instead of reading
+// equivocation.
+void Node::rebroadcast_round_state_locked() {
+    Hash prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    for (auto& ae : current_aborts_)
+        gossip_.broadcast(net::make_abort_event(ae, chain_.height(), prev));
+    for (auto& [_, c] : pending_contribs_)
+        gossip_.broadcast(net::make_contrib(c));
+    for (auto& [_, s] : pending_block_sigs_)
+        gossip_.broadcast(net::make_block_sig(s));
+}
+
 void Node::handle_contrib_timeout() {
+    // Stale queued expiry: cancel() can lose against an already-popped
+    // deadline (timer_service.hpp header) — the phase gate makes that
+    // window harmless.
+    if (phase_ != ConsensusPhase::CONTRIB) return;
     std::string missing = find_first_missing(current_creator_domains_,
         [&](const std::string& d) {
             return pending_contribs_.find(d) != pending_contribs_.end();
@@ -1216,6 +1265,26 @@ void Node::handle_contrib_timeout() {
     if (std::find(current_creator_domains_.begin(),
                   current_creator_domains_.end(), cfg_.domain)
         == current_creator_domains_.end()) return;
+
+    // S-047 (found by test-fa-liveness-virtual's failover phase): the
+    // round must RETRY its one-shot broadcasts. Two reproduced permanent
+    // wedges: (a) a claim volley lost/mistimed while a committee member
+    // is dead leaves the live members stuck in CONTRIB forever (never
+    // IDLE, so never re-selected; off-committee nodes' in_creators guard
+    // drops the claims); (b) a contrib or hash-chained abort EVENT missed
+    // during a height/generation transient splits the committee across
+    // phases/generations that then mutually drop each other's messages
+    // (the aborts_gen gate + the adoption committee check). The retry
+    // tick re-broadcasts the full round state (abort tail + own contrib
+    // + own sig — all byte-identical, receiver-deduped, no S-006 false
+    // positive) and re-claims; the timer chain is cut by
+    // enter_block_sig_phase/reset_round's cancel + the phase gate.
+    rebroadcast_round_state_locked();
+    contrib_timer_.arm(std::chrono::milliseconds(cfg_.tx_commit_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_contrib_timeout();
+    });
+
     if (cfg_.domain == missing) return;     // we don't claim against ourselves
 
     Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
@@ -1238,21 +1307,37 @@ void Node::handle_block_sig_timeout() {
     // k_use = k_bft when escalation gates fire — see ~L768). Designated
     // proposer eliminates the silent-fork race (different peers picking
     // different K-subsets).
+    if (phase_ != ConsensusPhase::BLOCK_SIG) return;   // stale queued expiry
     auto mode = current_mode();
     size_t required = required_block_sigs(mode, current_creator_domains_.size());
     if (pending_block_sigs_.size() >= required) {
         try_finalize_round();   // try_finalize_round itself enforces proposer-only in BFT
-        return;
+        // A BFT non-proposer (or a missing-proposer-sig corner) leaves the
+        // round open even with enough sigs — fall through to the S-047
+        // retry/claim path instead of returning, or the round wedges with
+        // a dead proposer exactly like the one-shot phase-1 volley did.
+        if (phase_ != ConsensusPhase::BLOCK_SIG) return;   // finalized
     }
 
     std::string missing = find_first_missing(current_creator_domains_,
         [&](const std::string& d) {
             return pending_block_sigs_.find(d) != pending_block_sigs_.end();
         });
-    if (missing.empty()) return;
     if (std::find(current_creator_domains_.begin(),
                   current_creator_domains_.end(), cfg_.domain)
         == current_creator_domains_.end()) return;
+
+    // S-047 retry (see handle_contrib_timeout): re-broadcast the full
+    // round state — including our CONTRIB, not just the sig: a peer that
+    // missed it during a height transient is stuck in phase 1 and can
+    // only be healed by a phase-2 member re-sending phase-1 state.
+    rebroadcast_round_state_locked();
+    block_sig_timer_.arm(std::chrono::milliseconds(cfg_.block_sig_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_block_sig_timeout();
+    });
+
+    if (missing.empty()) return;
     if (cfg_.domain == missing) return;
 
     Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();

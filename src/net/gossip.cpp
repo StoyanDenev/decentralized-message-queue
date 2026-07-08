@@ -9,6 +9,16 @@ namespace determ::net {
 
 GossipNet::GossipNet(Transport& transport) : transport_(transport) {}
 
+GossipNet::~GossipNet() {
+    // Break the parked-op ownership cycle (header note) so ~Peer actually
+    // runs when peers_ is destroyed. Loop threads are already joined at
+    // this point (Node::stop precedes destruction), so the aborts these
+    // close()es synthesize are never dispatched — they are dropped by the
+    // loop's teardown drain, per the never-dispatched-handler semantics.
+    std::lock_guard<std::mutex> lk(peers_mutex_);
+    for (auto& p : peers_) p->close();
+}
+
 void GossipNet::set_hello(const std::string& domain, uint16_t listen_port) {
     our_domain_ = domain;
     our_port_   = listen_port;

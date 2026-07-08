@@ -196,6 +196,14 @@ public:
     ~Node();
 
     void run();
+    // Cross-thread-safe + idempotent, but NOT a completion barrier: a
+    // second concurrent stop() (including the destructor's) may return
+    // while the first is still mid-teardown. An embedding harness that
+    // needs teardown COMPLETE serializes externally — stop(), then join
+    // the thread running run() (the FA4 harness's order). Note also that
+    // stop() joins the loop threads, so it must not be called FROM a loop
+    // thread (an RPC-triggered in-loop shutdown would self-join); the
+    // daemon has no such path.
     void stop();
 
     // §minix net::Transport/net::EventLoop seam accessors — RpcServer
@@ -721,6 +729,18 @@ private:
     // harness's Node::stop(). One guarded helper serializes the two sites.
     std::mutex                      threads_join_mutex_;
     void join_loop_threads();
+
+    // S-047: one retry tick's worth of idempotent round-state
+    // re-broadcast (abort-event tail + own contrib + own block sig).
+    // Every consensus message was originally a ONE-SHOT broadcast; a
+    // receiver that missed one during a height/generation transient
+    // could never recover (abort events are hash-chained, contribs are
+    // gen-gated) and the round wedged permanently — the failure family
+    // test-fa-liveness-virtual's failover phase reproduces. All
+    // re-broadcasts are byte-identical to the originals, so receivers
+    // dup-drop them (no S-006 equivocation false positive). Caller holds
+    // state_mutex_.
+    void rebroadcast_round_state_locked();
 
     // A9 / S-031 follow-on: async chain.save() worker.
     //

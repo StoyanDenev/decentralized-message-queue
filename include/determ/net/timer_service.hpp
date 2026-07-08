@@ -10,10 +10,15 @@
 // fn) hands the callback to the owning loop's post() when the deadline
 // passes — on_expire runs on a LOOP thread, exactly like the asio
 // waitable-timer model. cancel(id) before the deadline suppresses the
-// callback; a cancel that races the exact expiry moment may lose (the
-// completion is already posted) — the same window every backend has, which
-// is why the seam contract tests use unreachable deadlines for their cancel
-// assertions.
+// callback; a cancel that races the expiry may lose — the suppression
+// window closes when the deadline thread POPS the entry, and the callback
+// may then sit in the loop queue arbitrarily long before executing, so a
+// stale fire can land noticeably after its cancel. The same window exists
+// on every backend (it is why the seam contract tests use unreachable
+// deadlines for their cancel assertions); timer CONSUMERS must key their
+// callbacks by round/generation rather than assume cancel is a barrier —
+// the Node round timers do (a stale phase-timeout's abort claim carries
+// its round and is quorum-checked).
 #pragma once
 #include <chrono>
 #include <condition_variable>
@@ -41,6 +46,11 @@ public:
                       std::function<void()> fn) {
         std::lock_guard<std::mutex> lk(mu_);
         uint64_t id = next_id_++;
+        // Post-shutdown arm (e.g. a timer re-armed from a closure being
+        // destroyed during loop teardown): accepted and never fires —
+        // stopped-loop semantics. Restarting the deadline thread here
+        // would race the destructor's join.
+        if (shutdown_) return id;
         entries_.push_back(
             {std::chrono::steady_clock::now() + delay, id, std::move(fn)});
         if (!thread_.joinable())
@@ -72,6 +82,17 @@ public:
         }
         cv_.notify_all();
         if (thread_.joinable()) thread_.join();
+        // Destroy still-pending callbacks OUTSIDE the lock and BEFORE the
+        // member destructor: a pending fn can own a self-keeping timer
+        // (the Node grace-timer pattern) whose destructor reenters
+        // cancel() — which must find a valid, already-empty entries_, not
+        // a vector mid-destruction (adversarial-review finding: reentrant
+        // vector mutation at loop teardown is UB).
+        std::vector<Entry> drop;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            drop.swap(entries_);
+        }
     }
 
 private:
