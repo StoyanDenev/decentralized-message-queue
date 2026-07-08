@@ -57,12 +57,10 @@ IocpEventLoop::IocpEventLoop() {
 
 IocpEventLoop::~IocpEventLoop() {
     stop();
-    {
-        std::lock_guard<std::mutex> lk(timer_mu_);
-        timer_shutdown_ = true;
-    }
-    timer_cv_.notify_all();
-    if (timer_thread_.joinable()) timer_thread_.join();
+    // Stop the timer thread BEFORE draining: no timer post can race the
+    // teardown below (the TimerService member's own destructor re-runs
+    // this idempotently after the loop body).
+    timers_.shutdown();
 
     // Drain: free still-queued op packets WITHOUT invoking user callbacks
     // (asio's never-dispatched-handler semantics). In-flight socket I/O must
@@ -150,68 +148,6 @@ void IocpEventLoop::post(std::function<void()> fn) {
     op->base.on_abandon  = &PostOp::abandon;
     if (!::PostQueuedCompletionStatus(port_, 0, kKeyOp, &op->base.ov))
         delete op;   // port dead — drop, matching a stopped io_context
-}
-
-// ── Timer service ────────────────────────────────────────────────────────────
-
-uint64_t IocpEventLoop::timer_schedule(std::chrono::milliseconds delay,
-                                       std::function<void()> fn) {
-    std::lock_guard<std::mutex> lk(timer_mu_);
-    uint64_t id = next_timer_id_++;
-    timer_entries_.push_back(
-        {std::chrono::steady_clock::now() + delay, id, std::move(fn)});
-    if (!timer_thread_.joinable())
-        timer_thread_ = std::thread([this] { timer_thread_body(); });
-    timer_cv_.notify_all();
-    return id;
-}
-
-void IocpEventLoop::timer_cancel(uint64_t id) {
-    if (id == 0) return;
-    std::lock_guard<std::mutex> lk(timer_mu_);
-    for (auto it = timer_entries_.begin(); it != timer_entries_.end(); ++it) {
-        if (it->id == id) {
-            timer_entries_.erase(it);
-            break;
-        }
-    }
-    // Already-fired (or never-existed) ids: nothing to remove — the
-    // suppression window closed when the entry was popped for posting,
-    // exactly the asio waitable-timer race documented in the header.
-}
-
-void IocpEventLoop::timer_thread_body() {
-    std::unique_lock<std::mutex> lk(timer_mu_);
-    while (!timer_shutdown_) {
-        if (timer_entries_.empty()) {
-            timer_cv_.wait(lk);
-            continue;
-        }
-        auto next = timer_entries_.front().deadline;
-        for (const auto& e : timer_entries_)
-            if (e.deadline < next) next = e.deadline;
-
-        if (std::chrono::steady_clock::now() < next) {
-            timer_cv_.wait_until(lk, next);
-            continue;   // re-evaluate: entries may have changed under the wait
-        }
-
-        // Pop everything due, post outside the lock (post() never blocks,
-        // but holding timer_mu_ across foreign code invites lock-order knots).
-        auto now = std::chrono::steady_clock::now();
-        std::vector<std::function<void()>> due;
-        for (auto it = timer_entries_.begin(); it != timer_entries_.end();) {
-            if (it->deadline <= now) {
-                due.push_back(std::move(it->fn));
-                it = timer_entries_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        lk.unlock();
-        for (auto& f : due) post(std::move(f));
-        lk.lock();
-    }
 }
 
 } // namespace determ::net

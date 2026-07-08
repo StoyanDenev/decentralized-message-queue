@@ -18,14 +18,11 @@
 // src/net/iocp_event_loop.cpp.
 #pragma once
 #include <determ/net/event_loop.hpp>
+#include <determ/net/timer_service.hpp>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <mutex>
-#include <thread>
-#include <vector>
 
 namespace determ::net {
 
@@ -55,35 +52,22 @@ public:
     void* native_port() const { return port_; }
 
     // ── Timer service (backs IocpTimer) ─────────────────────────────────
-    // IOCP has no native timer primitive; a dedicated deadline thread owns a
-    // small entry list and post()s each due callback onto the loop. Returns
-    // an id; timer_cancel(id) before the deadline suppresses the callback.
-    // Same suppression window as asio's waitable-timer thread: a cancel that
-    // races the exact expiry moment may lose (the completion is already
-    // posted) — the seam contract tests use unreachable deadlines for their
-    // cancel assertions for exactly this reason.
+    // IOCP has no native timer primitive; the shared net::TimerService
+    // deadline thread post()s each due callback onto this loop (see
+    // timer_service.hpp for the suppression-window contract).
     uint64_t timer_schedule(std::chrono::milliseconds delay,
-                            std::function<void()> fn);
-    void     timer_cancel(uint64_t id);
+                            std::function<void()> fn) {
+        return timers_.schedule(delay, std::move(fn));
+    }
+    void timer_cancel(uint64_t id) { timers_.cancel(id); }
 
 private:
-    void timer_thread_body();
-
     void*             port_ = nullptr;   // HANDLE
     std::atomic<bool> stopped_{false};
     std::atomic<int>  threads_in_run_{0};
-
-    struct TimerEntry {
-        std::chrono::steady_clock::time_point deadline;
-        uint64_t                              id;
-        std::function<void()>                 fn;
-    };
-    std::mutex              timer_mu_;
-    std::condition_variable timer_cv_;
-    std::vector<TimerEntry> timer_entries_;   // tiny N (3 per Node) — linear ops
-    uint64_t                next_timer_id_ = 1;
-    bool                    timer_shutdown_ = false;
-    std::thread             timer_thread_;    // started lazily on first schedule
+    TimerService      timers_{[this](std::function<void()> fn) {
+        post(std::move(fn));
+    }};
 };
 
 } // namespace determ::net

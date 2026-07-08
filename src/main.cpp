@@ -62,6 +62,12 @@
 #include <determ/net/iocp_event_loop.hpp>
 #include <determ/net/iocp_timer.hpp>
 #include <determ/net/iocp_transport.hpp>
+#else
+// minix §4.5: the native epoll reactor backend — the POSIX leg of
+// test-net-native (same assertions, other proactor emulation).
+#include <determ/net/reactor_event_loop.hpp>
+#include <determ/net/reactor_timer.hpp>
+#include <determ/net/reactor_transport.hpp>
 #endif
 // The asio backends, exercised by test-net-seam on every platform (and still
 // the POSIX daemon backend until the epoll/kqueue reactor lands). Explicit
@@ -803,17 +809,17 @@ Additional in-process tests:
                                               fan-in; all phases sequenced
                                               via stop() (no sleep races)
   determ test-net-native                      minix native-backend contracts —
-                                              IocpEventLoop/IocpTimer/
-                                              IocpTransport (Windows; skips
-                                              PASS on POSIX): the same seam
-                                              pins as test-net-seam PLUS
-                                              loopback accept/connect,
+                                              the platform's native backend
+                                              (IOCP on Windows, the epoll
+                                              reactor on POSIX): the same
+                                              seam pins as test-net-seam
+                                              PLUS loopback accept/connect,
                                               async exactly-N/whole-span
                                               round trip, sync write_all/
                                               read_line, cross-thread
                                               close() aborts a blocked sync
                                               write (FB71) AND a pending
-                                              async read (CancelIoEx)
+                                              async read
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -25611,12 +25617,21 @@ int main(int argc, char** argv) {
     // (the wrapper stays green on both CI legs; epoll/kqueue get their own
     // reactor test when they land).
     if (cmd == "test-net-native") {
-#ifndef _WIN32
-        std::cout << "  PASS: net-native (IOCP backend is Windows-only; "
-                     "skipped on POSIX)\n";
-        return 0;
-#else
         using namespace determ::net;
+        // The SAME assertion body runs against each platform's native
+        // backend — IOCP on Windows, the epoll reactor on POSIX — which is
+        // the §4.5 point: one seam contract, two proactor emulations.
+#ifdef _WIN32
+        using TestEventLoop = IocpEventLoop;
+        using TestTimer     = IocpTimer;
+        using TestTransport = IocpTransport;
+        using TestAcceptor  = IocpAcceptor;
+#else
+        using TestEventLoop = ReactorEventLoop;
+        using TestTimer     = ReactorTimer;
+        using TestTransport = ReactorTransport;
+        using TestAcceptor  = ReactorAcceptor;
+#endif
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
@@ -25625,33 +25640,33 @@ int main(int argc, char** argv) {
 
         // 1. EventLoop.post + stop() releases run().
         {
-            IocpEventLoop loop;
+            TestEventLoop loop;
             bool ran = false;
             loop.post([&] { ran = true; loop.stop(); });
             loop.run();
-            check(ran, "IocpEventLoop.post: posted fn ran; stop() released run()");
+            check(ran, "native EventLoop.post: posted fn ran; stop() released run()");
         }
 
         // 2. Timer.arm fires on clean expiry (expiry posted by the deadline
         //    thread, dispatched by run() — run() returning IS the liveness
         //    half, exactly as in test-net-seam).
         {
-            IocpEventLoop loop;
-            IocpTimer t(loop);
+            TestEventLoop loop;
+            TestTimer t(loop);
             bool fired = false;
             t.arm(std::chrono::milliseconds(1),
                   [&] { fired = true; loop.stop(); });
             loop.run();
-            check(fired, "IocpTimer.arm: clean expiry runs on_expire");
+            check(fired, "native Timer.arm: clean expiry runs on_expire");
         }
 
         // 3. Timer.cancel suppresses + is idempotent (unreachable deadline —
         //    the same discipline the seam test uses; see its phase-3 note).
         {
-            IocpEventLoop loop;
-            IocpTimer never_armed(loop);
+            TestEventLoop loop;
+            TestTimer never_armed(loop);
             never_armed.cancel();
-            IocpTimer t(loop);
+            TestTimer t(loop);
             bool bad = false;
             t.arm(std::chrono::milliseconds(600000) /* unreachable */,
                   [&] { bad = true; });
@@ -25659,22 +25674,22 @@ int main(int argc, char** argv) {
             t.cancel();
             loop.post([&] { loop.stop(); });
             loop.run();
-            check(!bad, "IocpTimer.cancel: cancelled arm's on_expire suppressed");
-            check(true, "IocpTimer.cancel: idempotent + safe when not armed (no crash)");
+            check(!bad, "native Timer.cancel: cancelled arm's on_expire suppressed");
+            check(true, "native Timer.cancel: idempotent + safe when not armed (no crash)");
         }
 
         // 4. Re-arm supersedes.
         {
-            IocpEventLoop loop;
-            IocpTimer t(loop);
+            TestEventLoop loop;
+            TestTimer t(loop);
             bool a = false, b = false;
             t.arm(std::chrono::milliseconds(600000) /* superseded */,
                   [&] { a = true; });
             t.arm(std::chrono::milliseconds(1),
                   [&] { b = true; loop.stop(); });
             loop.run();
-            check(!a, "IocpTimer re-arm: superseded on_expire NOT called");
-            check(b,  "IocpTimer re-arm: superseding arm fired");
+            check(!a, "native Timer re-arm: superseded on_expire NOT called");
+            check(b,  "native Timer re-arm: superseding arm fired");
         }
 
         // 5. Multi-thread run(): the native IOCP model — N workers blocked
@@ -25683,7 +25698,7 @@ int main(int argc, char** argv) {
         //    rather than returning, so pre-posting is not even load-bearing
         //    here — stop() is what releases the threads either way).
         {
-            IocpEventLoop loop;
+            TestEventLoop loop;
             constexpr int N = 64;
             std::atomic<int> count{0};
             for (int i = 0; i < N; ++i) {
@@ -25696,19 +25711,19 @@ int main(int argc, char** argv) {
             t1.join();
             t2.join();
             check(count.load() == N,
-                  "IocpEventLoop multi-thread run(): 64 posted fns ran exactly once across 2 threads");
+                  "native EventLoop multi-thread run(): 64 posted fns ran exactly once across 2 threads");
         }
 
         // 6. Transport: loopback accept/connect + the Connection contracts.
         {
-            IocpEventLoop loop;
+            TestEventLoop loop;
             std::thread w1([&] { loop.run(); });
             std::thread w2([&] { loop.run(); });
 
-            IocpTransport transport(loop);
-            IocpAcceptor  acceptor(loop, 0, /*localhost_only=*/true);
+            TestTransport transport(loop);
+            TestAcceptor  acceptor(loop, 0, /*localhost_only=*/true);
             const uint16_t port = acceptor.local_port();
-            check(port != 0, "IocpAcceptor: ephemeral bind reports the assigned port");
+            check(port != 0, "native Acceptor: ephemeral bind reports the assigned port");
 
             using ConnPtr = std::shared_ptr<Connection>;
             auto pair_up = [&]() -> std::pair<ConnPtr, ConnPtr> {
@@ -25850,7 +25865,6 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
-#endif // _WIN32
     }
     // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
     // the stake-lifecycle complement to STAKE (covered in

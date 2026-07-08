@@ -12,8 +12,11 @@
 // Current selection:
 //   Windows: the native IOCP backend (§4.5b increment 2 — the daemon cutover;
 //            no transport library on this platform anymore).
-//   POSIX:   the asio backends, until the epoll/kqueue ReactorTransport lands
-//            (§4.5); then this branch flips and asio is deleted (§7 step 4).
+//   POSIX:   the native epoll reactor backend (§4.5 — no transport library
+//            here either; the kqueue policy split lands when a BSD/macOS
+//            gate exists). The daemon no longer constructs ANY asio type —
+//            the Asio* backends survive only for test-net-seam's contract
+//            pins until asio is deleted outright (§7 step 4).
 //
 // This is a SELECTOR, not a seam interface: consumers still program against
 // net::EventLoop/Transport/Timer/Connection (transport.hpp etc.) — the
@@ -32,14 +35,14 @@ using NativeTransport = IocpTransport;
 } // namespace determ::net
 
 #else
-#include <determ/net/asio_event_loop.hpp>
-#include <determ/net/asio_timer.hpp>
-#include <determ/net/asio_transport.hpp>
+#include <determ/net/reactor_event_loop.hpp>
+#include <determ/net/reactor_timer.hpp>
+#include <determ/net/reactor_transport.hpp>
 
 namespace determ::net {
-using NativeEventLoop = AsioEventLoop;
-using NativeTimer     = AsioTimer;
-using NativeTransport = AsioTransport;
+using NativeEventLoop = ReactorEventLoop;
+using NativeTimer     = ReactorTimer;
+using NativeTransport = ReactorTransport;
 } // namespace determ::net
 
 #endif

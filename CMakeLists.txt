@@ -74,14 +74,18 @@ endif()
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
-# minix §4.5: native net backends are per-platform TUs. The IOCP pair is
-# Windows-only (each is also #ifdef _WIN32-guarded, but pruning here keeps
-# non-Windows builds from even parsing them); the future POSIX reactor pair
-# gets the mirrored prune when it lands.
+# minix §4.5: native net backends are per-platform TUs (each is also
+# #ifdef-guarded, but pruning here keeps the other platform's builds from
+# even parsing them): the IOCP pair is Windows-only, the epoll reactor pair
+# is POSIX-only.
 if(NOT WIN32)
     list(REMOVE_ITEM SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_event_loop.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_transport.cpp")
+else()
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/reactor_event_loop.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/reactor_transport.cpp")
 endif()
 
 # v2.17 / S-004 option 2: passphrase-encrypted keyfiles. The
