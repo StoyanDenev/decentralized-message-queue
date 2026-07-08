@@ -141,6 +141,24 @@ void VirtualEventLoop::run() {
     }
 }
 
+void VirtualEventLoop::run_until_idle() {
+    // Deterministic single-thread drive (DeterministicSchedulerDesign.md §2).
+    // run() with the cv.wait replaced by "empty => return": the CALLING thread
+    // drains the ready FIFO to quiescence and returns. Re-posts a closure makes
+    // while it runs land back in s.q and are picked up by the same loop (the
+    // while re-tests q.empty() after each fn). No stop() needed; if the loop was
+    // stopped, this returns without processing (run()'s stopped semantics).
+    State& s = *st_;
+    std::unique_lock<std::mutex> lk(s.mu);
+    while (!s.stopped && !s.q.empty()) {
+        std::function<void()> fn = std::move(s.q.front());
+        s.q.pop_front();
+        lk.unlock();
+        fn();
+        lk.lock();
+    }
+}
+
 void VirtualEventLoop::stop() {
     {
         std::lock_guard<std::mutex> lk(st_->mu);

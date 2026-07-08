@@ -1,11 +1,13 @@
 # Deterministic Scheduler Design — a no-thread virtual-time drive for the real consensus engine
 
-**Status: DESIGN-REVIEW-ONLY (no code yet).** This is the design-review-first
-step the [KqueueReactorDesign.md](KqueueReactorDesign.md) discipline mandates for
-a change that touches shipped orchestration: nothing here may be implemented until
-the seam deltas below are agreed, and one item (§5, the Node no-self-thread mode)
-requires an OWNER decision because the smallest honest version of it touches the
-production `run()` path. The goal is a fully DETERMINISTIC single-thread scheduler
+**Status: DESIGN-REVIEW; increment 1 SHIPPED, increments 2-5 design-only.** This is
+the design-review-first step the [KqueueReactorDesign.md](KqueueReactorDesign.md)
+discipline mandates for a change that touches shipped orchestration. **Increment 1
+(the additive, byte-invariant `VirtualEventLoop::run_until_idle()` — §4 table) is
+SHIPPED** (pure-std test backend, production `run()` untouched); the substantive
+scheduler (increments 2-5) stays design-only until the seam deltas below are
+agreed, and one item (§5, the Node no-self-thread mode) requires an OWNER decision
+because the smallest honest version of it touches the production `run()` path. The goal is a fully DETERMINISTIC single-thread scheduler
 that drives the REAL `node::Node` + `BlockValidator` + producer so Byzantine
 schedules replay byte-for-byte — closing the F-1/FA4 gap
 ([RealEngineFAHarness.md](RealEngineFAHarness.md) §5) and unblocking the reliable
@@ -297,7 +299,7 @@ reproducibly); the S-048 half remains owner-gated.
 
 | # | Increment | Gate |
 |---|---|---|
-| 1 | **`VirtualEventLoop::run_until_idle()`** — caller-thread drain, additive; re-drive an existing single-loop test (`test-net-virtual`) through it instead of a spawned thread | goldens byte-identical + FAST + the re-driven test byte-matches the threaded run |
+| 1 | **`VirtualEventLoop::run_until_idle()`** — caller-thread drain, additive; re-drive an existing single-loop test (`test-net-virtual`) through it instead of a spawned thread — **SHIPPED** ([virtual_transport.cpp](../../src/net/virtual_transport.cpp) `run_until_idle`; `test-net-virtual` phase 1b asserts caller-thread FIFO drain == threaded `run()` order, mid-drain re-posts run to quiescence in the same call, empty-queue returns immediately) | goldens byte-identical + FAST 207/0 both platforms + the re-driven test byte-matches the threaded run ✓ |
 | 2 | **Virtual-time timer source** — loop-local ordered timer queue consulted by the poll, `virtual_now` advance-to-next-timer; a unit test arms 3 timers and asserts fixed fire order + zero wall time | FAST + timer-order test + `test-net-virtual` still green (native/`TimerService` path untouched) |
 | 3 | **`Node::start_external()`** (§5 owner gate) — setup-only entry, spawns no loop/save threads; re-drive a SINGLE-node scenario (the `test-virtual-clock` shape, [main.cpp:26724](../../src/main.cpp)) deterministically | goldens + FAST + live `test_weak_3node` (production `run()` proven untouched) |
 | 4 | **Global multi-loop scheduler** (§3.4 decision) — merged logical-time order over N loops; re-drive `test-fa-liveness-virtual` deterministically, blocks 1..3 byte-identical | FAST + the deterministic run byte-matches across TWO invocations (the replay-twice-identical check) + live cluster unchanged |

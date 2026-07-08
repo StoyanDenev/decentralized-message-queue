@@ -140,6 +140,18 @@ public:
     void stop() override;
     void post(std::function<void()> fn) override;
 
+    // Deterministic single-thread drive (DeterministicSchedulerDesign.md §2,
+    // increment 1). Drains the ready FIFO on the CALLING thread and returns
+    // when the queue empties (or stop() was called) — mechanically run()
+    // with cv.wait replaced by "if empty, return", so no worker thread and
+    // no stop() are needed to make progress. Re-posts generated while a
+    // closure runs are drained in the same call (the classic run-to-quiescence
+    // step a virtual-time scheduler advances between). Backend-specific (not on
+    // the EventLoop interface): only a harness holding the concrete loop drives
+    // it; production always uses the threaded run(). Byte-invariant — run() is
+    // untouched. NOT thread-safe against a concurrent run() on the same loop.
+    void run_until_idle();
+
     // ── Timer service (the EventLoop interface's timer half) ────────────
     // REAL wall-clock deadlines via the shared net::TimerService deadline
     // thread (virtual time is a later evolution of this backend) — the

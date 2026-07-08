@@ -25784,6 +25784,39 @@ int main(int argc, char** argv) {
                   "virtual EventLoop: single-thread run() delivers in exact post() order");
         }
 
+        // 1b. run_until_idle(): the deterministic single-thread drive
+        //     (DeterministicSchedulerDesign.md §2 increment 1). Drains the FIFO
+        //     on the CALLING thread with NO worker thread and NO stop(), and
+        //     produces the SAME order run() does — the byte-identical-results
+        //     property the deterministic-scheduler plan is built on.
+        {
+            VirtualEventLoop loop;
+            std::vector<int> order;
+            for (int i = 1; i <= 5; ++i) loop.post([&, i] { order.push_back(i); });
+            loop.run_until_idle();                     // no stop(), no thread
+            check(order == std::vector<int>({1, 2, 3, 4, 5}),
+                  "virtual run_until_idle: drains FIFO on the caller thread, exact order, no stop()");
+
+            // Re-posts made WHILE a closure runs are drained in the same call
+            // (run-to-quiescence — the step a virtual-time scheduler advances
+            // the clock between).
+            std::vector<int> chain;
+            loop.post([&] {
+                chain.push_back(10);
+                loop.post([&] {
+                    chain.push_back(20);
+                    loop.post([&] { chain.push_back(30); });
+                });
+            });
+            loop.run_until_idle();
+            check(chain == std::vector<int>({10, 20, 30}),
+                  "virtual run_until_idle: re-posts generated mid-drain run in the same call (quiescence)");
+
+            // Empty queue returns immediately (no hang, no stop needed).
+            loop.run_until_idle();
+            check(true, "virtual run_until_idle: returns immediately on an empty queue");
+        }
+
         // 2. LoopTimer over the virtual loop: clean expiry fires; cancel
         //    suppresses; re-arm supersedes (same pins as test-net-native
         //    phases 2-4 — LoopTimer is the SAME class, now over the
