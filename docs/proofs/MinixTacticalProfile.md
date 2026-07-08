@@ -103,6 +103,24 @@ to IOCP and is emulated over epoll/kqueue (readiness → perform the syscall →
 the callback) — the same internal shape asio uses. Designing the seam
 proactor-first avoids a rewrite when the IOCP backend lands.
 
+### 4.3b Status — slices SHIPPED
+
+`net::Timer` (`be24c3e`), `net::EventLoop` (`16ae94c`), and **`net::Transport`
+slice A (`b1c9228`) — the GOSSIP path (Peer + GossipNet) now runs entirely
+through the asio-free proactor Transport interface** (`transport.hpp`:
+Connection with EXPLICIT exactly-N/whole-span/no-overlap completion contracts,
+Acceptor, Transport; `asio_transport.hpp` backend; `peer.hpp`/`gossip.hpp` no
+longer include asio). Gate: 3-target build + goldens + BOTH live clusters
+(`test_weak_3node` head agreement; `test_multinode` height 330+, no fork) +
+FAST + GCC-clean interface header + the ratchet (transport.hpp pinned
+asio-free). A draft→verified **`test-net-seam` contract test** pins the
+Timer/EventLoop semantics in-process (the verify stage caught a real Windows
+flake: asio's waitable-timer thread queues SUCCESS completions independently of
+run(), so to-be-cancelled deadlines must be unreachable). **Slice B remaining:
+RpcServer + the dapp_subscribe subscriber socket (the synchronous consumers —
+§4.4 awkward fits 1-2), then the native IOCP/epoll/kqueue backends, then cut
+asio** (including the CLI sync clients).
+
 ### 4.4 Transport surface survey (completed — the remaining raw-asio consumers)
 
 A full read of `src/net/peer.cpp`, `src/net/gossip.cpp`, `src/rpc/rpc.cpp`, and
@@ -157,23 +175,76 @@ readiness→completion emulation must loop until exactly-N bytes transfer
 silently; (6) Peer's write queue is UNBOUNDED (unlike the subscriber's
 kill-on-overflow) — a bounded-queue decision belongs to the rewrite.
 
-## 5. JSON track — nlohmann_json → in-tree
+## 5. JSON track — nlohmann_json → in-tree (SURVEYED)
 
-JSON is used for config, RPC, and snapshot serialization. **Confirm before
-swapping** whether any of these feed a consensus commitment: the block digest is
-over the **binary** codec (not JSON), and the state root is over binary state
-leaves — but snapshot round-trip byte-determinism is separately tested
-(`test-snapshot-*`), so the replacement reader must reproduce the exact snapshot
-byte-format. Options: a hand-rolled minimal reader (parses only the fixed
-config/RPC/snapshot schemas) vs. vet + freeze the single-header nlohmann_json (it
-is already a single vendored header — a lighter audit than asio/OpenSSL).
+A full usage survey (~975 references, 60+ files, all three binaries) settled
+the confirm-before-swapping question. **TWO sites require byte-exact canonical
+JSON serialization across implementations:**
 
-## 6. OpenSSL track — test-oracle split
+1. **CONSENSUS DIGEST — `hash_abort_event()` SHA-256s `claims_json.dump()`**
+   ([producer.cpp:350](../../src/node/producer.cpp)), and that hash feeds
+   `compute_block_digest` via the abort view root (producer.cpp:667-672) — i.e.
+   the K-of-K-signed block digest of any abort-carrying block depends on
+   nlohmann's canonical dump bytes (sorted keys, compact separators). The light
+   client MIRRORS the same dump-hash ([verify.cpp:84](../../light/verify.cpp)).
+   A one-byte writer divergence forks consensus on abort-carrying chains.
+2. **RPC HMAC** over `method+"|"+params.dump()` computed independently by the
+   server ([rpc.cpp:51-56](../../src/rpc/rpc.cpp)) and by wallet/light clients —
+   a mixed-implementation fleet must dump byte-identically (pinned by
+   `test-rpc-auth-hmac`, which explicitly guards an ordered_json/bump swap).
 
-Move the `test-*-c99` oracle subcommands out of `main.cpp` into a dedicated test
-binary (e.g. `determ-cryptotest`) that links OpenSSL. The daemon then links **zero
-OpenSSL** while retaining the independent cross-check (valuable — it is how the C99
-crypto is known correct). This is the cleanest OpenSSL removal and loses nothing.
+Everything else is schema-only: the state root is over BINARY domain-prefixed
+leaves (not JSON bytes) and `restore_from_snapshot` re-verifies it against the
+committee-signed header; config/genesis/RPC shapes/snapshots need fidelity, not
+cross-implementation byte-equality. The wire is JSON-heavy (wire v0 pure JSON;
+the v1 "binary" envelope wraps `payload.dump()` for every type except
+TRANSACTION; HELLO always JSON). **The used subset is narrow:** bool, u8-u64
+ints, ASCII/hex strings, arrays, sorted-key objects; doubles appear ONLY in
+node Config (never on a wire/digest path); zero
+ordered_json/json_pointer/CBOR/msgpack/SAX usage; nlohmann's throw-on-invalid-
+UTF-8 dump behavior is load-bearing (fail-closed on binary leaf keys).
+
+**Two-phase plan:** PHASE 1 (near-zero risk, ~half day): vendor the single
+header in-tree (`third_party/nlohmann/json.hpp`, v3.11.3), delete the
+FetchContent, add a SHA-256 byte-ratchet guard — meets the minix
+whole-source-in-repo/offline-build bar without touching a consumer. PHASE 2
+(owner-gated, ~1-2 weeks): in-tree `determ::json` behind an API-compatible
+shim — FEASIBLE given the narrow subset, but 1.5-3 KLOC of consensus-adjacent
+code gated by dual-oracle dump-equality over a corpus that MUST include
+claims_json abort arrays + HELLO + Block::to_json + RPC params + snapshots,
+the existing pin tests, AND a mixed-fleet cluster test (one node per
+implementation) exercising abort events; the parser needs a depth cap +
+strict UTF-8 (it is the outermost consumer of every peer-supplied byte).
+
+## 6. OpenSSL track — test-oracle split (SURVEYED, ready to implement)
+
+Split design (surveyed; ~one focused day, byte-invariant, loses zero coverage):
+a new top-level `cryptotest/main.cpp` (mirroring `wallet/`, `light/`) with a
+small dispatcher plus the **11 pure-oracle handlers moved VERBATIM** (stdout
+byte-identical so wrapper summary-pins stay green): `test-{aes,ed25519,frost,
+x25519,p256,p256-h2c,sha3,blake2b,xchacha,chacha20,sha2}-c99`, together with
+their help lines and the openssl includes (the vestigial `rand.h` include drops
+entirely). The **2 mixed handlers stay in determ and are de-OpenSSL'd in
+place**: `test-rpc-auth-hmac` swaps its local OpenSSL HMAC lambda to
+`determ_hmac_sha256` (a truer mirror of the production rpc.cpp path; the
+HMAC-vs-OpenSSL cross-check lives on in the moved `test-sha2-c99`), and
+`test-ed25519-vectors` derives the pubkey via `determ_ed25519_pubkey_from_seed`
+checked against the embedded RFC 8032 constant (the RFC hex stays the
+independent anchor). CMake: `determ-cryptotest` links determ-crypto-c99 +
+crypto + nlohmann (no asio); `determ` drops `crypto` from its link list and the
+openssl include dir; the OpenSSL FetchContent + the new target wrap in
+`option(DETERM_BUILD_CRYPTOTEST ... ON)` so a tactical/SBOM build with `OFF`
+never even fetches OpenSSL sources. Wrappers: a `DETERM_CRYPTOTEST` block in
+tools/common.sh (cloned from the DETERM_LIGHT pattern); 11 wrappers flip
+`$DETERM` → `$DETERM_CRYPTOTEST`; ci_local.sh + operator_crypto_selftest.sh
+route PER-COMMAND (its battery mixes moving and staying subcommands). The
+dependency-surface ratchet check 3 then tightens to a ZERO-exception pin
+(no openssl includes anywhere in src/). Risks: the R59 all-targets-build
+lesson applies directly (4 binaries after the split); moved handlers' stdout
+must stay byte-identical (the stale-summary-pin lesson); the two in-place
+edits are behavior-relevant, mitigated by the already-validated C99 calls.
+The daemon then links **zero OpenSSL** while retaining the independent
+cross-check (how the C99 crypto is known correct).
 
 ## 7. Phased plan
 
@@ -205,7 +276,9 @@ crypto is known correct). This is the cleanest OpenSSL removal and loses nothing
    type.
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
    epoll/kqueue only.
-5. **JSON track** (§5). 6. **OpenSSL split** (§6). 7. **Tactical profile** — the
+5. **JSON track** (§5 — SURVEYED: phase-1 vendor+freeze ready; phase-2
+   determ::json owner-gated). 6. **OpenSSL split** (§6 — SURVEYED: the
+   determ-cryptotest design is implementation-ready). 7. **Tactical profile** — the
    posture label + SBOM + audit-boundary doc + reproducible-build attestation.
 
 ## 8. Open owner decisions
