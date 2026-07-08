@@ -324,9 +324,29 @@ completions).
 (include/determ/net/sync_client.hpp, from the proven light/rpc_client
 pattern) replaced asio in `rpc_call`, both gossip-frame fetchers
 (`headers --peer`, `snapshot fetch`), and the dapp-subscribe stream reader;
-`src/rpc/rpc.cpp` and `src/main.cpp` no longer include asio at all. The
-remaining direct asio consumers in the tree are exactly the three `Asio*`
-backend headers and `node.hpp`'s transitional includes of them.
+`src/rpc/rpc.cpp` and `src/main.cpp` no longer include asio at all.
+
+### 4.5c Status — increment 2 SHIPPED (`6cd99de`): the Windows daemon
+### runs on native IOCP
+
+The cutover: `include/determ/net/native.hpp` is a per-platform selector —
+`NativeEventLoop`/`NativeTimer`/`NativeTransport` alias the `Iocp*` types
+on Windows and the `Asio*` types on POSIX (flips when the epoll/kqueue
+reactor lands; the asio branch is deleted with §7 step 4). Node declares
+its loop/transport/timers by the aliases and constructs them uniformly
+(`transport_(loop_)`, `timer_(loop_)` — AsioTimer/AsioTransport gained
+loop-taking ctors matching the Iocp shape), so the WINDOWS daemon's entire
+networking stack — gossip, RPC accept/session, dapp_subscribe streaming
+(FB71 now rides IocpConnection's CancelIoEx event-abort write), and all
+three consensus deadline timers — is transport-library-free. `node.hpp`
+no longer includes asio; the remaining asio consumers in the tree are
+exactly the three `Asio*` backend headers (POSIX daemon + the
+test-net-seam contract pins). Member order guarantees destruction safety:
+loop_ first-declared/last-destroyed; ~IocpTransport joins in-flight
+connect helpers before the loop dies. Gate (all on the IOCP-native
+daemon, first try): goldens byte-identical, BOTH live clusters, live
+test_dapp_subscribe 13/13, FAST 204/204, GCC-clean selector header,
+ratchet green.
 
 ## 5. JSON track — nlohmann_json → in-tree (SURVEYED)
 
@@ -431,14 +451,13 @@ cross-check (how the C99 crypto is known correct).
    the dapp_subscribe subscriber, via a synchronous escape-hatch on
    `Connection` (§4.3b, §4.4 fit (1)). Gate: native cluster tests + goldens
    unchanged, both slices.
-3. **Native backends behind the seam** — **STARTED: IOCP increment 1
-   SHIPPED (`b1c5056`, §4.5b)** — `IocpEventLoop`/`IocpTimer`/
-   `IocpTransport` implement the full seam, gated by the 22-assertion
-   `test-net-native` contract battery (daemon not yet cut over). Remaining:
-   the Windows daemon cutover (swap Node/RpcServer's Asio* members to the
-   Iocp* types, gated by BOTH live clusters + goldens + the S-043
-   wire-roundtrip-verify per message type), then the epoll/kqueue
-   `ReactorTransport` (POSIX).
+3. **Native backends behind the seam** — **WINDOWS DONE: IOCP increment 1
+   SHIPPED (`b1c5056`, §4.5b) + increment 2, the daemon cutover, SHIPPED
+   (`6cd99de`, §4.5c)** — the Windows daemon's whole networking stack runs
+   on native IOCP via the `net/native.hpp` per-platform selector, gated by
+   both live clusters + goldens + FAST on the cut-over binary. Remaining:
+   the epoll/kqueue `ReactorTransport` (POSIX), then flip native.hpp's
+   POSIX branch.
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
    epoll/kqueue only. **The CLI-blocking-clients slice of this step already
    SHIPPED (`b1c5056`): `net::SyncClient` replaced asio in `rpc_call` + the
