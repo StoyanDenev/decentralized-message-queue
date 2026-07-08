@@ -196,5 +196,8 @@ step the injected clock in **≤30s increments** (or advance a single shared clo
 that both the stamp and the validation read, keeping their delta 0). The test
 therefore advances within the window; a >30s jump was observed to (correctly)
 wedge the in-flight round until re-stamped. This constraint is the input to the
-increment 5/6 scheduler design — the remaining piece is a no-thread single-thread
-scheduler so the clock can be stepped at quiescent points deterministically.
+increment 5/6 scheduler design ([DeterministicSchedulerDesign.md](DeterministicSchedulerDesign.md),
+design-review-only) — the remaining piece is a no-thread single-thread scheduler
+so the clock can be stepped at quiescent points deterministically. Its proposed
+smallest-first-step is `VirtualEventLoop::run_until_idle()` (drain the FIFO on the
+calling thread), additive and byte-invariant by construction.

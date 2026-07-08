@@ -26788,6 +26788,141 @@ int main(int argc, char** argv) {
         loop.reset();
         fs::remove_all(dir, fec);
 
+        // ── (C) SHARED clock across a real multi-node cluster ──────────
+        // The §Q1/§4 claim the whole DSF virtual-time plan rests on: when
+        // every committee member reads ONE injected clock, reconcile_median_time
+        // over their K committed proposer_times still yields the injected value
+        // and the ±30s gate passes on every node. Three real Nodes (M=K=3,
+        // strong mode — all three sign every block, so all three proposer_times
+        // enter the median) share a single VirtualClock over one VirtualNetwork.
+        {
+            determ::time::VirtualClock shared(kT0);
+            constexpr int kN = 3;
+            fs::path dir2 = fs::temp_directory_path() /
+                ("determ-virtual-clock-cluster-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir2, fec);
+            fs::create_directories(dir2);
+
+            chain::GenesisConfig g2;
+            g2.chain_id      = "virtual-clock-cluster";
+            g2.m_creators    = kN;
+            g2.k_block_sigs  = kN;
+            g2.epoch_blocks  = 1;
+            g2.block_subsidy = 10;
+            std::array<crypto::NodeKey, kN> keys2;
+            for (int i = 0; i < kN; ++i) {
+                keys2[i] = crypto::generate_node_key();
+                chain::GenesisCreator c;
+                c.domain        = "node" + std::to_string(i);
+                c.ed_pub        = keys2[i].pub;
+                c.initial_stake = 1000;
+                g2.initial_creators.push_back(c);
+            }
+            const std::string gpath2 = (dir2 / "genesis.json").string();
+            g2.save(gpath2);
+
+            const uint16_t base2 = 7661;
+            VirtualNetwork vnet2;
+            std::vector<std::unique_ptr<VirtualEventLoop>> loops2;
+            std::vector<std::unique_ptr<VirtualTransport>> transports2;
+            std::vector<std::unique_ptr<node::Node>>       cnodes;
+            for (int i = 0; i < kN; ++i) {
+                loops2.push_back(std::make_unique<VirtualEventLoop>());
+                transports2.push_back(
+                    std::make_unique<VirtualTransport>(*loops2[i], vnet2));
+            }
+            for (int i = 0; i < kN; ++i) {
+                node::Config cfg2;
+                cfg2.domain       = "node" + std::to_string(i);
+                cfg2.data_dir     = (dir2 / cfg2.domain).string();
+                cfg2.listen_port  = static_cast<uint16_t>(base2 + i);
+                cfg2.key_path     = (dir2 / (cfg2.domain + ".key")).string();
+                cfg2.chain_path   = (dir2 / cfg2.domain / "chain.json").string();
+                cfg2.genesis_path = gpath2;
+                cfg2.m_creators   = kN;
+                cfg2.k_block_sigs = kN;
+                cfg2.log_quiet    = true;
+                for (int p = 0; p < kN; ++p)
+                    if (p != i)
+                        cfg2.bootstrap_peers.push_back(
+                            "127.0.0.1:" + std::to_string(base2 + p));
+                fs::create_directories(cfg2.data_dir);
+                crypto::save_node_key(keys2[i], cfg2.key_path);
+                // Every node references the SAME shared VirtualClock.
+                cnodes.push_back(std::make_unique<node::Node>(
+                    cfg2, shared, loops2[i].get(), transports2[i].get()));
+            }
+
+            std::vector<std::thread> crun;
+            for (int i = 0; i < kN; ++i) {
+                node::Node* n = cnodes[i].get();
+                crun.emplace_back([n] { n->run(); });
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+            auto cmin_height = [&] {
+                uint64_t m = UINT64_MAX;
+                for (auto& n : cnodes)
+                    m = std::min(m, n->rpc_status()["height"].get<uint64_t>());
+                return m;
+            };
+            auto cwait = [&](uint64_t target, int secs) {
+                const auto dl = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(secs);
+                while (std::chrono::steady_clock::now() < dl) {
+                    if (cmin_height() >= target) return true;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                return false;
+            };
+
+            const bool creached = cwait(2, 60);   // all 3 finalize block 1
+            check(creached,
+                  "cluster: 3 real Nodes sharing one VirtualClock all finalized a block");
+            if (creached) {
+                // Every node's block 1 timestamp is the injected value...
+                bool ts_ok = true, agree = true;
+                const auto b0 = cnodes[0]->rpc_block(1);
+                const std::string b0s = b0.is_null() ? "" : b0.dump();
+                for (auto& n : cnodes) {
+                    const auto b = n->rpc_block(1);
+                    ts_ok &= !b.is_null() &&
+                             b["timestamp"].get<int64_t>() == kT0;
+                    agree &= !b.is_null() && b.dump() == b0s;
+                }
+                check(ts_ok,
+                      "cluster: block-1 timestamp == injected clock on EVERY node (shared-clock median)");
+                check(agree,
+                      "cluster: block 1 byte-identical across all 3 nodes (no fork under a shared clock)");
+
+                // ...and advancing the shared clock retargets later blocks.
+                shared.set_unix(kT0 + kDelta);
+                const uint64_t h2 = cmin_height();
+                const bool adv = cwait(h2 + 2, 60);
+                check(adv, "cluster: kept finalizing after the shared clock advanced");
+                if (adv) {
+                    bool found = false;
+                    const uint64_t top = cmin_height();
+                    for (uint64_t h = h2 + 1; h < top && !found; ++h) {
+                        const auto b = cnodes[0]->rpc_block(h);
+                        if (!b.is_null() &&
+                            b["timestamp"].get<int64_t>() == kT0 + kDelta)
+                            found = true;
+                    }
+                    check(found,
+                          "cluster: a post-advance block timestamp == the new injected value on the shared clock");
+                }
+            }
+
+            for (auto& n : cnodes) if (n) n->stop();
+            for (auto& t : crun) if (t.joinable()) t.join();
+            cnodes.clear();
+            transports2.clear();
+            loops2.clear();
+            fs::remove_all(dir2, fec);
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": virtual-clock "
                   << (fail == 0 ? "all assertions" : "had failures")
