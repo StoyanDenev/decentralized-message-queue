@@ -57,12 +57,18 @@
 #include <determ/net/rate_limiter.hpp>
 #ifdef _WIN32
 // minix §4.5 increment 1: the native IOCP backend, exercised by
-// test-net-native (the daemon itself stays on the Asio* backends until the
-// native cutover increment).
+// test-net-native. Since the §4.5b increment-2 cutover the WINDOWS daemon
+// runs on these too (via net/native.hpp).
 #include <determ/net/iocp_event_loop.hpp>
 #include <determ/net/iocp_timer.hpp>
 #include <determ/net/iocp_transport.hpp>
 #endif
+// The asio backends, exercised by test-net-seam on every platform (and still
+// the POSIX daemon backend until the epoll/kqueue reactor lands). Explicit
+// includes: node.hpp no longer pulls them in transitively on Windows.
+#include <determ/net/asio_event_loop.hpp>
+#include <determ/net/asio_timer.hpp>
+#include <determ/net/asio_transport.hpp>
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
 // Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"

@@ -13,6 +13,7 @@
 // asio.
 #pragma once
 #include <determ/net/transport.hpp>
+#include <determ/net/asio_event_loop.hpp>
 #include <asio.hpp>
 #include <istream>
 #include <utility>
@@ -127,6 +128,10 @@ private:
 class AsioTransport final : public Transport {
 public:
     explicit AsioTransport(asio::io_context& io) : io_(io) {}
+    // Loop-taking ctor: the SAME construction shape as IocpTransport(loop),
+    // so the platform-selector alias (net/native.hpp) lets Node construct
+    // the transport uniformly as Transport(loop_) on both backends.
+    explicit AsioTransport(AsioEventLoop& loop) : io_(loop.raw()) {}
 
     std::unique_ptr<Acceptor> listen(uint16_t port,
                                       bool localhost_only) override {

@@ -6,11 +6,8 @@
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/net/gossip.hpp>
-#include <determ/net/asio_timer.hpp>
-#include <determ/net/asio_event_loop.hpp>
-#include <determ/net/asio_transport.hpp>
+#include <determ/net/native.hpp>
 #include <determ/time/clock.hpp>
-#include <asio.hpp>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -555,19 +552,18 @@ private:
     // enough to displace anything — caller should reject the tx.
     bool mempool_make_room_for(const chain::Transaction& tx);
 
-    // §minix net::EventLoop seam — the daemon event loop behind an interface
-    // (AsioEventLoop today; native IOCP/epoll/kqueue later). Declared BEFORE
-    // gossip_/timers: their initializers call loop_.raw(), which requires a
-    // constructed object (the old `asio::io_context io_` member sat AFTER
-    // gossip_, which only worked because binding a reference doesn't access
-    // the referent). Side benefit: members now destruct in the correct order
-    // (gossip_'s acceptor/sockets before the loop that services them).
-    net::AsioEventLoop              loop_;
+    // §minix net::EventLoop seam — the daemon event loop behind the
+    // per-platform selector (net/native.hpp: IOCP on Windows, asio on POSIX
+    // until the epoll/kqueue reactor lands). Declared BEFORE gossip_/timers:
+    // their initializers take loop_ by reference AND the transport/timer
+    // ctors access it, so it must be constructed first. Side benefit:
+    // members destruct in the correct order (gossip_'s acceptor/sockets
+    // before the loop that services them).
+    net::NativeEventLoop            loop_;
     // §minix net::Transport seam — the byte transport GossipNet networks
-    // through (accept + connect). AsioTransport today (fed by loop_.raw());
-    // native IOCP/epoll/kqueue backends later. Declared after loop_ (its ctor
-    // calls loop_.raw()) and before gossip_ (which takes transport_&).
-    net::AsioTransport              transport_;
+    // through (accept + connect). Declared after loop_ (its ctor uses it)
+    // and before gossip_ (which takes transport_&).
+    net::NativeTransport            transport_;
     net::GossipNet                  gossip_;
     std::vector<chain::AbortEvent>  current_aborts_;
     std::vector<size_t>             current_creator_indices_;
@@ -674,12 +670,13 @@ private:
     std::map<std::pair<ShardId, Hash>, uint64_t>
         pending_inbound_first_seen_;
 
-    // §minix net::Timer seam — the deadline timers now go through the
-    // net::Timer interface (AsioTimer today; native IOCP/epoll/kqueue later).
-    // Behavior-identical to the asio::steady_timer they replace; timers are pure
-    // scheduling (not digest-bound), so this is byte-invariant for consensus.
-    net::AsioTimer                  contrib_timer_;
-    net::AsioTimer                  block_sig_timer_;
+    // §minix net::Timer seam — the deadline timers go through the net::Timer
+    // interface via the per-platform selector (IocpTimer on Windows,
+    // AsioTimer on POSIX). Timers are pure scheduling (not digest-bound), so
+    // this is byte-invariant for consensus; the observable surface is
+    // liveness (phase timeouts), gated by the live cluster tests.
+    net::NativeTimer                contrib_timer_;
+    net::NativeTimer                block_sig_timer_;
 
     // S7: AbortClaim accumulation. Keyed by (round, missing_creator) so
     // multiple competing claim sets don't conflict. M-1 matching claims

@@ -127,10 +127,10 @@ void Config::save(const std::string& path) const {
 Node::Node(const Config& cfg, determ::time::Clock& clock)
     : cfg_(cfg)
     , clock_(clock)
-    , transport_(loop_.raw())
+    , transport_(loop_)
     , gossip_(transport_)
-    , contrib_timer_(loop_.raw())
-    , block_sig_timer_(loop_.raw()) {
+    , contrib_timer_(loop_)
+    , block_sig_timer_(loop_) {
 
     validator_.set_k_block_sigs(cfg.k_block_sigs);
     validator_.set_m_pool(cfg.m_creators);
@@ -609,7 +609,7 @@ void Node::run() {
     // multi-node cluster fires the first round before peers are reachable,
     // the contrib phase aborts (broadcast goes nowhere), and per-node
     // generations diverge; recovery never converges.
-    auto grace = std::make_shared<net::AsioTimer>(loop_.raw());
+    auto grace = std::make_shared<net::NativeTimer>(loop_);
     grace->arm(std::chrono::milliseconds(1500), [this, grace] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (gossip_.peer_count() == 0) {

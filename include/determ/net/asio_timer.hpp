@@ -14,6 +14,7 @@
 // asio; until then this is the sole backend.
 #pragma once
 #include <determ/net/timer.hpp>
+#include <determ/net/asio_event_loop.hpp>
 #include <asio.hpp>
 #include <utility>
 
@@ -22,6 +23,10 @@ namespace determ::net {
 class AsioTimer final : public Timer {
 public:
     explicit AsioTimer(asio::io_context& io) : timer_(io) {}
+    // Loop-taking ctor: the SAME construction shape as IocpTimer(loop), so
+    // the platform-selector alias (net/native.hpp) lets Node construct its
+    // timers uniformly as Timer(loop_) on both backends.
+    explicit AsioTimer(AsioEventLoop& loop) : timer_(loop.raw()) {}
 
     void arm(std::chrono::milliseconds delay,
              std::function<void()> on_expire) override {
