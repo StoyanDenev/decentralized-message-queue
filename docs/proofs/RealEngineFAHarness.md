@@ -125,10 +125,25 @@ never reorg (`Chain::resolve_fork` exists per S-029 but is unwired); the
 harness classifies that mode and prints a `KNOWN-OPEN S-048` marker instead
 of flaking. See SECURITY.md §S-047/§S-048.
 
+**Increment 7 — adversarial NETWORK (`test-fa-partition-virtual`).** The same
+5-node cluster over the virtual backend, now with a deterministic fault model
+(`VirtualNetwork::set_loss`/`partition`/`heal`, whole-frame granular,
+byte-invariant default —
+[AdversarialTransportHarness.md](AdversarialTransportHarness.md)). The hard
+gate is PARTITION SAFETY: a {4}|{1} delivery partition; the loss-free majority
+keeps finalizing (the S-047 abort/reselect routes around the isolated node),
+the isolated node freezes below quorum and never forks (consistent prefix). A
+non-gating LOSSY-LINKS diagnostic then surfaces the round's key finding —
+**sustained loss induces timing skew that triggers the OPEN S-048 same-height
+fork**, which the S-047 retry re-delivers messages for but cannot **reorg**.
+So "no fork / reliable liveness under loss" is not assertable while S-048 is
+open, and the reliable loss-liveness gate + the deterministic S-048
+reproduction are precisely the virtual-TIME follow-on below.
+
 Wall-clock timers still drive the rounds, so the harness is *hermetic but not
 yet deterministic*: the remaining FA4 work is a virtual-TIME evolution of the
 backend (deterministic schedules, then ADVERSARIAL schedules —
-delayed/reordered delivery, partition, timeout injection). Until then
-adversarial-scheduling liveness remains covered by the per-block slices
-(`test-required-block-sigs` etc.), the analytic proof (`Liveness.md`), and
-the live cluster tests.
+delayed/reordered delivery, partition, timeout injection), which also unblocks
+the S-048 reorg fix's regression test. Until then adversarial-scheduling
+liveness remains covered by the per-block slices (`test-required-block-sigs`
+etc.), the analytic proof (`Liveness.md`), and the live cluster tests.

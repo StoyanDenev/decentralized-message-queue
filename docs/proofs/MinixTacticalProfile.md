@@ -75,10 +75,15 @@ every platform, contract-pinned by `test-net-virtual` and the dependency
 ratchet), and `Node` gained the Clock-pattern loop/transport injection ctor
 (inject both or neither; defaults construct the platform-native pair —
 byte-invariant for every existing caller). The payoff harness is
-`test-fa-liveness-virtual`: three real `Node`s reach consensus in one process
+`test-fa-liveness-virtual`: five real `Node`s reach consensus in one process
 over in-memory pipes ([RealEngineFAHarness.md](RealEngineFAHarness.md) §5).
+The backend also gained a deterministic **fault model**
+(`VirtualNetwork::set_loss`/`partition`/`heal`, whole-frame granular,
+byte-invariant default) driving `test-fa-partition-virtual`'s partition +
+loss scenarios ([AdversarialTransportHarness.md](AdversarialTransportHarness.md)).
 Timers are still wall-clock; a virtual-TIME loop is the backend's next
-evolution (deterministic, then adversarial, schedules).
+evolution (deterministic, then adversarial, schedules) — which also unblocks
+a reliable loss-liveness gate + the deterministic S-048 reproduction.
 
 ### 4.2 Determinism safety (the key de-risker)
 
