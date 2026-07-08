@@ -55,11 +55,17 @@
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
 #include <determ/net/rate_limiter.hpp>
+// minix: LoopTimer works over ANY EventLoop (native or virtual) — both
+// platforms' test batteries use it.
+#include <determ/net/loop_timer.hpp>
+// minix §4.1 / DSF §Q2: the deterministic in-memory backend — pure std,
+// both platforms — exercised by test-net-virtual and driving the FA4
+// in-process multi-node harness.
+#include <determ/net/virtual_transport.hpp>
 #ifdef _WIN32
 // minix §4.5 increment 1: the native IOCP backend, exercised by
 // test-net-native. Since the §4.5b increment-2 cutover the WINDOWS daemon
 // runs on these too (via net/native.hpp).
-#include <determ/net/loop_timer.hpp>
 #include <determ/net/iocp_event_loop.hpp>
 #include <determ/net/iocp_transport.hpp>
 #else
@@ -804,6 +810,15 @@ Additional in-process tests:
                                               close() aborts a blocked sync
                                               write (FB71) AND a pending
                                               async read
+  determ test-net-virtual                     minix in-memory backend contracts
+                                              — VirtualEventLoop/LoopTimer/
+                                              VirtualTransport (the FA4/DSF §Q2
+                                              deterministic backend): the same
+                                              seam pins as test-net-native PLUS
+                                              single-thread FIFO determinism,
+                                              both rendezvous orders, refused
+                                              connect, write-after-close, and
+                                              the two-loop multi-node shape
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -25698,6 +25713,261 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": net-native "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // minix §4.1 / DSF §Q2: the VIRTUAL (in-memory) backend contract
+    // battery — the same seam pins test-net-native runs on the native
+    // backends (loop lifecycle, LoopTimer, rendezvous, exactly-N/whole-span
+    // round trip, sync half, close-aborts-pending-read), PLUS the surface
+    // only this backend has: refused connect on a listener-less port, BOTH
+    // rendezvous orders (accept-then-connect and connect-then-accept), the
+    // documented write-after-close deviation (fails immediately — the FB71
+    // mechanism here, since in-memory writes never block), and the
+    // MULTI-NODE shape the FA4 harness uses (two loops, two transports,
+    // one shared VirtualNetwork). Pure std, identical on every platform.
+    if (cmd == "test-net-virtual") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. EventLoop.post + stop() releases run(); single-thread FIFO
+        //    order (the determinism property FA4 traces lean on).
+        {
+            VirtualEventLoop loop;
+            std::vector<int> order;
+            loop.post([&] { order.push_back(1); });
+            loop.post([&] { order.push_back(2); });
+            loop.post([&] { order.push_back(3); loop.stop(); });
+            loop.run();
+            check(order == std::vector<int>({1, 2, 3}),
+                  "virtual EventLoop: single-thread run() delivers in exact post() order");
+        }
+
+        // 2. LoopTimer over the virtual loop: clean expiry fires; cancel
+        //    suppresses; re-arm supersedes (same pins as test-net-native
+        //    phases 2-4 — LoopTimer is the SAME class, now over the
+        //    interface's virtual timer methods).
+        {
+            VirtualEventLoop loop;
+            LoopTimer t(loop);
+            bool fired = false;
+            t.arm(std::chrono::milliseconds(1),
+                  [&] { fired = true; loop.stop(); });
+            loop.run();
+            check(fired, "virtual LoopTimer: clean expiry runs on_expire");
+        }
+        {
+            VirtualEventLoop loop;
+            LoopTimer t(loop);
+            bool bad = false;
+            t.arm(std::chrono::milliseconds(600000), [&] { bad = true; });
+            t.cancel();
+            t.cancel();
+            LoopTimer t2(loop);
+            bool b = false;
+            t2.arm(std::chrono::milliseconds(600000), [&] { bad = true; });
+            t2.arm(std::chrono::milliseconds(1),
+                   [&] { b = true; loop.stop(); });
+            loop.run();
+            check(!bad && b,
+                  "virtual LoopTimer: cancel suppresses (idempotent); re-arm supersedes");
+        }
+
+        // 3. Multi-thread run(): 64 posted fns exactly once across 2
+        //    threads (locked-FIFO analogue of the native GQCS/eventfd pin).
+        {
+            VirtualEventLoop loop;
+            constexpr int N = 64;
+            std::atomic<int> count{0};
+            for (int i = 0; i < N; ++i) {
+                loop.post([&] {
+                    if (count.fetch_add(1) + 1 == N) loop.stop();
+                });
+            }
+            std::thread t1([&] { loop.run(); });
+            std::thread t2([&] { loop.run(); });
+            t1.join();
+            t2.join();
+            check(count.load() == N,
+                  "virtual EventLoop multi-thread run(): 64 posted fns ran exactly once across 2 threads");
+        }
+
+        // 4. The MULTI-NODE shape: two loops, two transports, ONE shared
+        //    VirtualNetwork — node B listens, node A connects — plus the
+        //    full Connection contract battery across the pair.
+        {
+            VirtualNetwork  net;
+            VirtualEventLoop loopA, loopB;
+            std::thread ta([&] { loopA.run(); });
+            std::thread tb([&] { loopB.run(); });
+            VirtualTransport transA(loopA, net);
+            VirtualTransport transB(loopB, net);
+
+            auto acceptor = transB.listen(0, /*localhost_only=*/true);
+            const uint16_t port =
+                static_cast<VirtualAcceptor*>(acceptor.get())->local_port();
+            check(port != 0, "virtual Acceptor: port-0 bind reports the auto-assigned port");
+
+            using ConnPtr = std::shared_ptr<Connection>;
+            auto pair_up = [&]() -> std::pair<ConnPtr, ConnPtr> {
+                auto srv_p = std::make_shared<std::promise<ConnPtr>>();
+                auto cli_p = std::make_shared<std::promise<ConnPtr>>();
+                acceptor->async_accept(
+                    [srv_p](std::error_code ec, ConnPtr c) {
+                        srv_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                transA.async_connect(
+                    "127.0.0.1", port,
+                    [cli_p](std::error_code ec, ConnPtr c) {
+                        cli_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                auto sf = srv_p->get_future();
+                auto cf = cli_p->get_future();
+                if (sf.wait_for(std::chrono::seconds(15)) !=
+                        std::future_status::ready ||
+                    cf.wait_for(std::chrono::seconds(15)) !=
+                        std::future_status::ready)
+                    return {nullptr, nullptr};
+                return {sf.get(), cf.get()};
+            };
+
+            auto [srv, cli] = pair_up();
+            check(srv && cli,
+                  "cross-loop rendezvous (accept-then-connect) produced both Connections");
+            if (srv && cli) {
+                check(srv->remote_endpoint().rfind("127.0.0.1:", 0) == 0 &&
+                      srv->remote_endpoint() == cli->remote_endpoint(),
+                      "remote_endpoint(): ip:port-shaped, identical on both ends of a pair");
+
+                // 4a. Async exactly-N / whole-span round trip (1 MiB,
+                //     written in 3 uneven chunks so the parked read
+                //     completes only when the LAST chunk lands).
+                constexpr size_t kN = 1 << 20;
+                std::vector<uint8_t> tx(kN), rx(kN, 0);
+                for (size_t i = 0; i < kN; ++i)
+                    tx[i] = static_cast<uint8_t>(i * 31 + 7);
+                std::promise<std::pair<std::error_code, std::size_t>> rp;
+                srv->async_read(rx.data(), kN,
+                                [&](std::error_code ec, std::size_t n) {
+                                    rp.set_value({ec, n});
+                                });
+                const size_t cut1 = kN / 3, cut2 = 2 * (kN / 3);
+                check(cli->write_all(tx.data(), cut1) &&
+                      cli->write_all(tx.data() + cut1, cut2 - cut1) &&
+                      cli->write_all(tx.data() + cut2, kN - cut2),
+                      "three-chunk write_all across the pair");
+                auto rf = rp.get_future();
+                bool io_done = rf.wait_for(std::chrono::seconds(15)) ==
+                               std::future_status::ready;
+                check(io_done, "parked exactly-N read completed on the final chunk (no hang)");
+                if (io_done) {
+                    auto [rec, rn] = rf.get();
+                    check(!rec && rn == kN && tx == rx,
+                          "async_read: exactly N, bytes intact in order");
+                }
+
+                // 4b. Sync half: write_all + read_line incl. the
+                //     bytes-past-'\n' carry contract.
+                check(srv->write_all("a-from-server\nb-from-server\n", 28),
+                      "sync write_all (server)");
+                std::string l1, l2;
+                check(cli->read_line(l1) && l1 == "a-from-server" &&
+                      cli->read_line(l2) && l2 == "b-from-server",
+                      "sync read_line: two lines from one write (carry contract)");
+
+                // 4c. Cross-thread close() aborts a PENDING async read;
+                //     write-after-close fails immediately on BOTH ends
+                //     (the documented deviation = the FB71 mechanism here).
+                std::promise<std::error_code> ap;
+                std::vector<uint8_t> abuf(16);
+                cli->async_read(abuf.data(), abuf.size(),
+                                [&](std::error_code ec, std::size_t) {
+                                    ap.set_value(ec);
+                                });
+                std::thread closer([&] { cli->close(); });
+                closer.join();
+                auto af = ap.get_future();
+                bool aborted = af.wait_for(std::chrono::seconds(15)) ==
+                                   std::future_status::ready &&
+                               af.get();
+                check(aborted,
+                      "cross-thread close(): pending async_read completed with an error");
+                check(!cli->write_all("x", 1),
+                      "write_all after local close fails immediately");
+                check(!srv->write_all("x", 1),
+                      "write_all after PEER close fails immediately (FB71 next-write break)");
+                std::string dummy;
+                check(!srv->read_line(dummy),
+                      "read_line after peer close sees EOF (false)");
+                srv->close();
+            }
+
+            // 4d. The OTHER rendezvous order: connect FIRST (parked in the
+            //     listener backlog), then async_accept picks it up.
+            {
+                auto cli_p = std::make_shared<std::promise<ConnPtr>>();
+                transA.async_connect(
+                    "127.0.0.1", port,
+                    [cli_p](std::error_code ec, ConnPtr c) {
+                        cli_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                auto srv_p = std::make_shared<std::promise<ConnPtr>>();
+                acceptor->async_accept(
+                    [srv_p](std::error_code ec, ConnPtr c) {
+                        srv_p->set_value(ec ? nullptr : std::move(c));
+                    });
+                auto sf = srv_p->get_future();
+                auto cf = cli_p->get_future();
+                bool ok = sf.wait_for(std::chrono::seconds(15)) ==
+                              std::future_status::ready &&
+                          cf.wait_for(std::chrono::seconds(15)) ==
+                              std::future_status::ready;
+                ConnPtr s2 = ok ? sf.get() : nullptr;
+                ConnPtr c2 = ok ? cf.get() : nullptr;
+                check(s2 && c2,
+                      "connect-then-accept order also rendezvouses (TCP backlog analogue)");
+                if (s2) s2->close();
+                if (c2) c2->close();
+            }
+
+            // 4e. Refused connect: no listener on the port → error, posted.
+            {
+                auto p = std::make_shared<std::promise<std::error_code>>();
+                transA.async_connect("127.0.0.1", 1 /* nothing listens */,
+                                     [p](std::error_code ec, ConnPtr) {
+                                         p->set_value(ec);
+                                     });
+                auto f = p->get_future();
+                bool refused = f.wait_for(std::chrono::seconds(15)) ==
+                                   std::future_status::ready &&
+                               f.get();
+                check(refused, "async_connect to a listener-less port is refused (posted error)");
+            }
+
+            // 4f. Duplicate bind throws (native-acceptor ctor parity).
+            {
+                bool threw = false;
+                try {
+                    VirtualAcceptor dup(net, loopB, port, true);
+                } catch (const std::runtime_error&) {
+                    threw = true;
+                }
+                check(threw, "duplicate bind on a taken port throws (native parity)");
+            }
+
+            loopA.stop();
+            loopB.stop();
+            ta.join();
+            tb.join();
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": net-virtual "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
