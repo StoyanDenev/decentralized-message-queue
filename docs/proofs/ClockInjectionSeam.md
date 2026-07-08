@@ -1,8 +1,12 @@
 # Clock Injection Seam — byte-invariant §Q1/§Q2 dependency injection
 
-**Status:** increment 1 SHIPPED (the `time::Clock` interface + `Node` ctor seam +
-operational-read rewire, byte-invariant). Increments 2-6 planned; increment 3
-carries an owner-gated architecture decision (see §6). Relates to
+**Status:** increments 1-2 SHIPPED (byte-invariant). Increment 1 = the
+`time::Clock` interface + `Node` ctor seam + operational-read rewire. Increment 2
+= the two digest-bound Node sites + the validator's ±30s gate now read the
+injected `clock_`, plus a concrete `VirtualClock` and a `test-virtual-clock`
+demonstration that a REAL single-node engine finalizes blocks whose digest-bound
+timestamp equals an injected virtual time (§8). Increments 3-6 planned (see §6);
+increment 3 carries an owner-gated architecture decision. Relates to
 [DSF-SPEC.md](DSF-SPEC.md) §Q1/§Q2 and the F-1/FA4 gaps in
 [UnitTestCoverageMap.md](UnitTestCoverageMap.md).
 
@@ -34,13 +38,13 @@ rewiring of `now_unix()` call sites as long as `RealClock` delegates verbatim.
 
 ## 1. The consensus time sites (verified anchors)
 
-| Site | Anchor | Digest-bound? | Role |
-|---|---|---|---|
-| proposer_time (S-043) | [node.cpp:906](../../src/node/node.cpp) | **YES** | signed `ContribMsg` → `reconcile_median_time` → `b.timestamp` → `compute_block_digest` |
-| abort-event ts (S-043 class) | [node.cpp:1294](../../src/node/node.cpp) | **YES** | `ev.timestamp` + `ev.event_hash` → view-abort root → `compute_block_digest`; peers adopt verbatim |
-| assembler fallback | [producer.cpp:812](../../src/node/producer.cpp) | no (overwritten by median on the production path; only binds legacy block identity) | free function; hoist value from the Node caller |
-| ±30s freshness gate | [validator.cpp:1414](../../src/node/validator.cpp) | no (accept/reject at VERIFY time) | needs a shared clock so producer + validator agree under simulation |
-| subscriber heartbeat | [node.cpp:3453](../../src/node/node.cpp) / [:3507](../../src/node/node.cpp) | no (informational) | rewired in increment 1 |
+| Site | Anchor | Digest-bound? | Role | inc.2 status |
+|---|---|---|---|---|
+| proposer_time (S-043) | [node.cpp:957](../../src/node/node.cpp) | **YES** | signed `ContribMsg` → `reconcile_median_time` → `b.timestamp` → `compute_block_digest` | → `clock_.unix_seconds()` |
+| abort-event ts (S-043 class) | [node.cpp:1407](../../src/node/node.cpp) | **YES** | `ts` → `compute_abort_hash` → `ev`/view-abort root → `compute_block_digest`; peers adopt verbatim | → `clock_.unix_seconds()` |
+| assembler fallback | [producer.cpp:812](../../src/node/producer.cpp) | no (overwritten by median on the production path; only binds legacy block identity, and then `creator_proposer_times` is cleared so the digest does NOT bind `timestamp`) | free function; unchanged (`now_unix()`) | unchanged |
+| ±30s freshness gate | [validator.cpp:1414](../../src/node/validator.cpp) | no (accept/reject at VERIFY time) | needs a shared clock so producer + validator agree under simulation | → `clock_->unix_seconds()` (via `set_clock`) |
+| subscriber heartbeat | [node.cpp:3551](../../src/node/node.cpp) / [:3604](../../src/node/node.cpp) | no (informational) | rewired in increment 1 | on `clock_` |
 
 `reconcile_median_time`, `check_timestamp`'s median re-derivation,
 `light_compute_block_digest`, and genesis (`timestamp=0`) read **no** clock. The
@@ -111,11 +115,19 @@ self-test.
 1. **Increment 1 (SHIPPED, byte-invariant):** interface + Node ctor seam +
    operational-heartbeat rewire. Gate: 3-target build + goldens + FAST 196/0 +
    a `RealClock == now_unix()` delegation assertion; GCC-13 header check.
-2. **Increment 2 (production-side, byte-invariant):** rewire the two digest-bound
-   Node sites (node.cpp:906, :1294) to `clock_.unix_seconds()`; give
-   `BlockValidator` a `set_clock()` for the ±30s gate; hoist the producer
-   fallback value from the Node caller (keep the free function clock-free). Gate:
-   goldens + FAST unchanged (still invariant, RealClock delegates verbatim).
+2. **Increment 2 (production-side, byte-invariant) — SHIPPED:** the two
+   digest-bound Node sites ([node.cpp:957](../../src/node/node.cpp) proposer_time,
+   [:1407](../../src/node/node.cpp) abort ts) read `clock_.unix_seconds()`;
+   `BlockValidator` gained `set_clock()` and its ±30s gate reads
+   `clock_->unix_seconds()`, wired from the Node ctor + reconfig so producer and
+   validator resolve to the SAME injected clock. The producer free-function
+   fallback ([producer.cpp:812](../../src/node/producer.cpp)) was LEFT on
+   `now_unix()` — it is non-digest-bound (the median overwrites it on the
+   production path, and when it survives `creator_proposer_times` is cleared so
+   the digest omits `timestamp`), so hoisting it was unnecessary and would have
+   enlarged the diff for no invariance gain. Plus a concrete `VirtualClock` +
+   `test-virtual-clock` (§8). Gate (both platforms): goldens byte-identical +
+   FAST 207/0 + live `test_weak_3node` cluster + the byte-invariance spot-check.
 3. **Increment 3 (build linkage) — OWNER-GATED ARCHITECTURE FORK:** to drive the
    real engine, `determ-dsf` must link the consensus objects (a `determ-core`
    static lib = `src/*.cpp` minus `main.cpp`). That drags **asio + OpenSSL** into
@@ -150,3 +162,39 @@ self-test.
   static lib guarantees this; a per-target recompile does not.
 - **Genesis + apply trap:** genesis `timestamp=0` and the clock-free apply path
   must NOT be routed through `Clock`.
+
+## 8. Increment 2 demonstration — `VirtualClock` + `test-virtual-clock`
+
+[include/determ/time/virtual_clock.hpp](../../include/determ/time/virtual_clock.hpp)
+is a `final` `Clock` whose `unix_seconds()` returns an injected
+`std::atomic<int64_t>` (harness-set via `set_unix`/`advance`); `steady_now()` is
+derived from the SAME atomic so a harness sees one controllable time base. It is
+never the production default — `RealClock` is — it exists only to drive the real
+engine at a chosen wall time.
+
+`determ test-virtual-clock` ([src/main.cpp](../../src/main.cpp),
+[tools/test_virtual_clock.sh](../../tools/test_virtual_clock.sh), FAST=1) proves
+two things over the REAL `node::Node` running on the pure-std
+`VirtualEventLoop`/`VirtualTransport` (both platforms, no OS sockets):
+
+1. **Byte-invariance spot-check:** `RealClock::instance().unix_seconds()` tracks
+   `determ::now_unix()` (the verbatim-delegate property §0 depends on). The
+   goldens carry the full byte-for-byte proof; this is the runtime canary.
+2. **Virtual-time consensus:** a single `M=K=1` Node (its own committee, so its
+   lone `proposer_time` is the whole lower-median) finalizes a block whose
+   digest-bound `timestamp` equals the injected `T0` exactly; advance the clock
+   and a later finalized block carries the new value. The validator's freshness
+   gate reads the same injected clock, so stamp and validation never disagree.
+
+**The freshness-window constraint (a real finding).** The ±30s gate compares a
+block's stamp against the clock read at VALIDATION time. Under real wall time the
+two are always within a round's wall duration (≪30s). Under an injected clock a
+harness that jumps time by **>30s in one step** makes an in-flight block (stamped
+at the old value, validated at the new) fail the gate — correctly: that is the
+gate doing its job, not a bug. So a fully deterministic virtual-time harness must
+step the injected clock in **≤30s increments** (or advance a single shared clock
+that both the stamp and the validation read, keeping their delta 0). The test
+therefore advances within the window; a >30s jump was observed to (correctly)
+wedge the in-flight round until re-stamped. This constraint is the input to the
+increment 5/6 scheduler design — the remaining piece is a no-thread single-thread
+scheduler so the clock can be stepped at quiescent points deterministically.

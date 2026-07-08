@@ -4,6 +4,7 @@
 #include <determ/chain/block.hpp>
 #include <determ/chain/chain.hpp>
 #include <determ/node/registry.hpp>
+#include <determ/time/clock.hpp>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -79,6 +80,15 @@ public:
         external_epoch_rand_ = std::move(p);
     }
 
+    // §Q1 clock injection: the NON-digest ±30s freshness gate
+    // (check_timestamp) reads wall time through this. Default RealClock ==
+    // determ::now_unix() verbatim, so the default validation path is
+    // byte-identical. The Node passes its own injected clock so a node
+    // running on a virtual clock validates block timestamps against the
+    // SAME time source it stamped them with (else a virtual-time block's
+    // timestamp would fail the real-time window). Never enters a digest.
+    void set_clock(const determ::time::Clock& c) { clock_ = &c; }
+
     Result validate(const chain::Block& b,
                     const chain::Chain& chain,
                     const NodeRegistry& registry) const;
@@ -145,6 +155,9 @@ private:
     std::vector<PubKey> param_keyholders_{};
     uint32_t     param_threshold_{0};
     EpochRandProvider external_epoch_rand_{};
+    // §Q1 clock injection for the freshness gate; default = process
+    // RealClock (== determ::now_unix(), byte-invariant). Non-owning.
+    const determ::time::Clock* clock_{&determ::time::RealClock::instance()};
 };
 
 } // namespace determ::node

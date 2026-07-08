@@ -154,6 +154,10 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
 
     validator_.set_k_block_sigs(cfg.k_block_sigs);
     validator_.set_m_pool(cfg.m_creators);
+    // §Q1: the validator's freshness gate reads the SAME injected clock the
+    // node stamps proposer_time/abort-ts with (RealClock default => byte-
+    // identical; a virtual clock keeps stamping + validation consistent).
+    validator_.set_clock(clock_);
 
     key_ = crypto::load_node_key(cfg_.key_path);
 
@@ -204,6 +208,9 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         validator_.set_shard_id(cfg_.shard_id);
         validator_.set_committee_region(cfg_.committee_region);
         validator_.set_sharding_mode(cfg_.sharding_mode);
+        // §Q1: keep the validator's freshness gate on the node's injected
+        // clock across reconfig too (RealClock default => byte-identical).
+        validator_.set_clock(clock_);
         // A5: governance state mirrored from genesis. Uncontrolled
         // chains pass mode=0 + empty keyholders, which makes the
         // validator reject any PARAM_CHANGE outright (the default).
@@ -940,14 +947,17 @@ void Node::start_contrib_phase() {
     // S-030-D2 timestamp reconciliation: commit this node's local wall-clock
     // into the Phase-1 ContribMsg (signed). The assembler medians the K
     // committed times into the canonical block timestamp at build_body, and
-    // compute_block_digest binds it. now_unix() > 0 so the reconciliation gate
-    // (all proposer_times non-zero) fires on production blocks.
+    // compute_block_digest binds it. clock_.unix_seconds() > 0 on any real
+    // clock so the reconciliation gate (all proposer_times non-zero) fires on
+    // production blocks. (A DSF VirtualClock must be seeded to a realistic
+    // non-zero epoch: proposer_time == 0 is the legacy sentinel that DISABLES
+    // reconciliation, unbinding the timestamp — see virtual_clock.hpp.)
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
                                           snap, my_commit,
                                           f2_eq_view, f2_abort_view, f2_inbound_view,
-                                          static_cast<uint64_t>(now_unix()));
+                                          static_cast<uint64_t>(clock_.unix_seconds()));
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 
@@ -1397,7 +1407,7 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     if (bucket.size() < needed) return;
 
     // Build the AbortEvent with the claim quorum.
-    int64_t ts   = now_unix();
+    int64_t ts   = clock_.unix_seconds();
     Hash    rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
     Hash    ah   = current_aborts_.empty()
                  ? crypto::compute_abort_hash(msg.round, msg.missing_creator, ts, rand)
@@ -2264,7 +2274,7 @@ void Node::on_contrib(const ContribMsg& msg) {
     //
     // S-030-D2 timestamp reconciliation: the sender ALSO binds its committed
     // proposer_time (DTM-TS-v1 tail, non-zero on every production contrib —
-    // start_contrib_round passes now_unix()). The recompute MUST bind it too,
+    // start_contrib_phase passes clock_.unix_seconds()). The recompute MUST bind it too,
     // or the recomputed digest is the pre-feature shape and EVERY honest
     // production contrib fails this sig check — Phase-1 never gathers K
     // contribs and the cluster spirals through abort rounds without ever

@@ -1411,7 +1411,7 @@ BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
     }
 
     constexpr int64_t kTimestampWindowSec = 30;
-    int64_t diff = b.timestamp - now_unix();
+    int64_t diff = b.timestamp - clock_->unix_seconds();
     if (diff > kTimestampWindowSec || diff < -kTimestampWindowSec)
         return {false, "timestamp out of +-30s window"};
     return {true, ""};

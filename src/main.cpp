@@ -62,6 +62,9 @@
 // both platforms — exercised by test-net-virtual and driving the FA4
 // in-process multi-node harness.
 #include <determ/net/virtual_transport.hpp>
+// §Q1: the harness-driven injected clock — drives the real engine's
+// digest-bound wall time under a chosen virtual value (test-virtual-clock).
+#include <determ/time/virtual_clock.hpp>
 #ifdef _WIN32
 // minix §4.5 increment 1: the native IOCP backend, exercised by
 // test-net-native. Since the §4.5b increment-2 cutover the WINDOWS daemon
@@ -844,7 +847,15 @@ Additional in-process tests:
                                               LOSSY-LINKS diagnostic that
                                               reports tip progress and any
                                               loss-induced S-048 fork
-)" R"(  determ test-fa-equivocation-trace           FA harness (real engine): seeded
+)" R"(  determ test-virtual-clock                   §Q1 clock injection (real
+                                              engine, in process): RealClock ==
+                                              now_unix() byte-invariance, then a
+                                              single M=K=1 Node on a VirtualClock
+                                              over the VirtualEventLoop finalizes
+                                              blocks whose digest-bound timestamp
+                                              equals the injected virtual time —
+                                              and tracks it when advanced
+  determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
                                               slash-once/idempotence/A1/
@@ -26620,6 +26631,165 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-partition-virtual "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // §Q1 increment 2: the injected consensus clock drives the real engine's
+    // digest-bound wall time. Two claims, demonstrated end-to-end over the
+    // real Node + the pure-std VirtualEventLoop/VirtualTransport (both
+    // platforms, no OS sockets):
+    //   (A) BYTE-INVARIANCE of the production default — RealClock.unix_seconds()
+    //       IS determ::now_unix() (a verbatim delegate), so the default
+    //       consensus path is unchanged. The goldens (test-consensus-vectors)
+    //       carry the byte-for-byte proof; this is the runtime spot-check.
+    //   (B) a Node built on a VirtualClock finalizes blocks whose committed,
+    //       digest-bound timestamp EQUALS the injected virtual seconds, and
+    //       TRACKS it when the harness advances the clock. Single M=K=1 node
+    //       is its own committee, so its lone proposer_time is the whole
+    //       lower-median: block.timestamp == the injected value exactly.
+    // See docs/proofs/ClockInjectionSeam.md.
+    if (cmd == "test-virtual-clock") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // ── (A) byte-invariance of the production default ──────────────
+        // The two reads must track to within a second; a >1s gap could only
+        // be a system_clock second-boundary straddle between the two calls,
+        // never a semantic difference (RealClock forwards now_unix() verbatim).
+        {
+            const int64_t direct = determ::now_unix();
+            const int64_t via    = determ::time::RealClock::instance().unix_seconds();
+            check(via >= direct && (via - direct) <= 1,
+                  "RealClock.unix_seconds() tracks determ::now_unix() (byte-invariant default path)");
+        }
+
+        // ── (B) virtual-time consensus over the real engine ────────────
+        // kDelta stays WITHIN the validator's ±30s freshness window on
+        // purpose: the gate compares a block's stamp against the clock read
+        // at validation time, so an instantaneous jump larger than the window
+        // is correctly rejected (real wall time never jumps >30s between a
+        // stamp and its check). A fully deterministic virtual-time harness
+        // must therefore step the clock in <=30s increments (or advance the
+        // validation clock in lockstep) — noted in ClockInjectionSeam.md.
+        constexpr int64_t kT0    = 1700000000;  // fixed, distinctive epoch
+        constexpr int64_t kDelta = 5;           // in-window step
+        determ::time::VirtualClock vclock(kT0);
+
+        fs::path dir = fs::temp_directory_path() /
+            ("determ-virtual-clock-" +
+             std::to_string(static_cast<unsigned long long>(
+                 std::chrono::steady_clock::now().time_since_epoch().count())));
+        std::error_code fec;
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+
+        // Genesis: a single staked creator = its own K=1 committee, per-block
+        // epochs (the smallest engine that finalizes blocks unaided).
+        chain::GenesisConfig g;
+        g.chain_id      = "virtual-clock";
+        g.m_creators    = 1;
+        g.k_block_sigs  = 1;
+        g.epoch_blocks  = 1;
+        g.block_subsidy = 10;
+        crypto::NodeKey key = crypto::generate_node_key();
+        chain::GenesisCreator gc;
+        gc.domain        = "node0";
+        gc.ed_pub        = key.pub;
+        gc.initial_stake = 1000;
+        g.initial_creators.push_back(gc);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+
+        node::Config cfg;
+        cfg.domain       = "node0";
+        cfg.data_dir     = (dir / "node0").string();
+        cfg.listen_port  = 7651;
+        cfg.key_path     = (dir / "node0.key").string();
+        cfg.chain_path   = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath;
+        cfg.m_creators   = 1;
+        cfg.k_block_sigs = 1;
+        cfg.log_quiet    = true;
+        fs::create_directories(cfg.data_dir);
+        crypto::save_node_key(key, cfg.key_path);
+
+        // Loop outlives transport outlives node (reverse declaration order).
+        VirtualNetwork vnet;
+        auto loop      = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        // THE seam: the node reads consensus wall time through vclock, not the OS.
+        auto vnode = std::make_unique<node::Node>(
+            cfg, vclock, loop.get(), transport.get());
+
+        std::thread runner([&] { vnode->run(); });
+
+        auto height = [&] {
+            return vnode->rpc_status()["height"].get<uint64_t>();
+        };
+        auto wait_height = [&](uint64_t target, int secs) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(secs);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (height() >= target) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            return false;
+        };
+
+        // Block at index 1 (genesis is index 0) is produced entirely at kT0.
+        const bool got1 = wait_height(2, 30);
+        check(got1, "single node self-produced a block on the virtual clock");
+        if (got1) {
+            const auto b1 = vnode->rpc_block(1);
+            const int64_t ts1 = b1.is_null() ? -1 : b1["timestamp"].get<int64_t>();
+            check(ts1 == kT0,
+                  "finalized block timestamp == injected virtual time (T0)");
+            if (ts1 != kT0)
+                std::cout << "    (observed timestamp: " << ts1
+                          << ", expected " << kT0 << ")\n";
+        }
+
+        // Advance the injected clock (within the freshness window). Rounds
+        // started after this stamp the new value; a round already in flight
+        // stamped T0, so target +2 heights to move past that at-most-one
+        // straggler, then require a finalized block carrying exactly T1.
+        vclock.set_unix(kT0 + kDelta);
+        const uint64_t h_adv = height();
+        const bool got_adv = wait_height(h_adv + 2, 30);
+        check(got_adv, "node kept finalizing after the injected clock advanced");
+        if (got_adv) {
+            bool found_t1 = false;
+            int64_t last_ts = -1;
+            const uint64_t top = height();
+            for (uint64_t h = h_adv + 1; h < top && !found_t1; ++h) {
+                const auto bh = vnode->rpc_block(h);
+                if (bh.is_null()) continue;
+                last_ts = bh["timestamp"].get<int64_t>();
+                if (last_ts == kT0 + kDelta) found_t1 = true;
+            }
+            check(found_t1,
+                  "a post-advance block timestamp == the new injected virtual time (T0+delta)");
+            if (!found_t1)
+                std::cout << "    (last observed post-advance timestamp: "
+                          << last_ts << ", expected " << (kT0 + kDelta) << ")\n";
+        }
+
+        vnode->stop();
+        runner.join();
+        vnode.reset();
+        transport.reset();
+        loop.reset();
+        fs::remove_all(dir, fec);
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": virtual-clock "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
