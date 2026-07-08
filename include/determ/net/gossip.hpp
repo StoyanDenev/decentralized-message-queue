@@ -2,10 +2,10 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/net/peer.hpp>
+#include <determ/net/transport.hpp>
 #include <determ/net/rate_limiter.hpp>
 #include <determ/chain/block.hpp>
 #include <determ/node/producer.hpp>
-#include <asio.hpp>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -16,7 +16,9 @@ namespace determ::net {
 
 class GossipNet {
 public:
-    explicit GossipNet(asio::io_context& io);
+    // §minix net::Transport seam — GossipNet networks through the Transport
+    // interface (accept + connect); it no longer touches asio directly.
+    explicit GossipNet(Transport& transport);
 
     void listen(uint16_t port);
     void connect(const std::string& host, uint16_t port);
@@ -105,8 +107,8 @@ private:
     void handle_message(std::shared_ptr<Peer> peer, const Message& msg);
     void handle_peer_closed(std::shared_ptr<Peer> peer);
 
-    asio::io_context&                        io_;
-    std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
+    Transport&                               transport_;
+    std::unique_ptr<Acceptor>                acceptor_;
     std::vector<std::shared_ptr<Peer>>       peers_;
     mutable std::mutex                       peers_mutex_;
     std::string                              our_domain_;

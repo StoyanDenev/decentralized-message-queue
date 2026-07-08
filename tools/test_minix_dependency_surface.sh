@@ -44,7 +44,7 @@ else
 fi
 
 # ── 2. minix seam interface headers are asio-free ───────────────────────────
-IFACE_HEADERS="include/determ/net/timer.hpp include/determ/net/event_loop.hpp"
+IFACE_HEADERS="include/determ/net/timer.hpp include/determ/net/event_loop.hpp include/determ/net/transport.hpp"
 for h in $IFACE_HEADERS; do
     if [ ! -f "$h" ]; then fail "interface header missing: $h"; continue; fi
     if grep -qE 'asio' "$h"; then

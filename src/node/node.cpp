@@ -127,7 +127,8 @@ void Config::save(const std::string& path) const {
 Node::Node(const Config& cfg, determ::time::Clock& clock)
     : cfg_(cfg)
     , clock_(clock)
-    , gossip_(loop_.raw())
+    , transport_(loop_.raw())
+    , gossip_(transport_)
     , contrib_timer_(loop_.raw())
     , block_sig_timer_(loop_.raw()) {
 

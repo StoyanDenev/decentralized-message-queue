@@ -7,7 +7,7 @@
 
 namespace determ::net {
 
-GossipNet::GossipNet(asio::io_context& io) : io_(io) {}
+GossipNet::GossipNet(Transport& transport) : transport_(transport) {}
 
 void GossipNet::set_hello(const std::string& domain, uint16_t listen_port) {
     our_domain_ = domain;
@@ -28,17 +28,16 @@ void GossipNet::set_rate_limit(double per_sec, double burst) {
 }
 
 void GossipNet::listen(uint16_t port) {
-    asio::ip::tcp::endpoint ep(asio::ip::tcp::v4(), port);
-    acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_, ep);
+    acceptor_ = transport_.listen(port);
     accept_loop();
     std::cout << "[gossip] listening on port " << port << "\n";
 }
 
 void GossipNet::accept_loop() {
     acceptor_->async_accept(
-        [this](std::error_code ec, asio::ip::tcp::socket socket) {
-            if (!ec) {
-                auto peer = std::make_shared<Peer>(std::move(socket));
+        [this](std::error_code ec, std::shared_ptr<Connection> conn) {
+            if (!ec && conn) {
+                auto peer = std::make_shared<Peer>(std::move(conn));
                 attach(peer);
                 if (!our_domain_.empty())
                     peer->send(make_hello(our_domain_, our_port_, our_role_, our_shard_id_));
@@ -48,7 +47,7 @@ void GossipNet::accept_loop() {
 }
 
 void GossipNet::connect(const std::string& host, uint16_t port) {
-    async_connect(io_, host, port,
+    async_connect(transport_, host, port,
         [this, host, port](std::shared_ptr<Peer> peer) {
             if (!log_quiet_) {
                 std::cout << "[gossip] connected to " << host << ":" << port << "\n";

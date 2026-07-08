@@ -2,7 +2,7 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/net/messages.hpp>
-#include <asio.hpp>
+#include <determ/net/transport.hpp>
 #include <functional>
 #include <memory>
 #include <string>
@@ -16,7 +16,10 @@ public:
     using MessageHandler = std::function<void(std::shared_ptr<Peer>, const Message&)>;
     using CloseHandler   = std::function<void(std::shared_ptr<Peer>)>;
 
-    explicit Peer(asio::ip::tcp::socket socket);
+    // §minix net::Transport seam — Peer sits on a Connection (byte stream)
+    // instead of a raw asio socket; all framing (4-byte BE length prefix,
+    // S-022 caps) stays here, so the backend swap cannot change wire bytes.
+    explicit Peer(std::shared_ptr<Connection> conn);
     ~Peer();
 
     void start(MessageHandler on_msg, CloseHandler on_close);
@@ -50,7 +53,7 @@ private:
     void read_body(uint32_t len);
     void do_write();
 
-    asio::ip::tcp::socket         socket_;
+    std::shared_ptr<Connection>   conn_;
     std::string                   address_;
     std::string                   domain_;
     ChainRole              chain_role_{ChainRole::SINGLE};
@@ -67,8 +70,9 @@ private:
     CloseHandler                  on_close_;
 };
 
-// Async outbound connection helper
-void async_connect(asio::io_context& io,
+// Async outbound connection helper: resolve + connect via the Transport seam,
+// wrapping the resulting Connection in a Peer.
+void async_connect(Transport& transport,
                    const std::string& host, uint16_t port,
                    std::function<void(std::shared_ptr<Peer>)> on_connect,
                    std::function<void(const std::string&)>    on_error);

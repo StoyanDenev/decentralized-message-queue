@@ -8,6 +8,7 @@
 #include <determ/net/gossip.hpp>
 #include <determ/net/asio_timer.hpp>
 #include <determ/net/asio_event_loop.hpp>
+#include <determ/net/asio_transport.hpp>
 #include <determ/time/clock.hpp>
 #include <asio.hpp>
 #include <thread>
@@ -559,6 +560,11 @@ private:
     // the referent). Side benefit: members now destruct in the correct order
     // (gossip_'s acceptor/sockets before the loop that services them).
     net::AsioEventLoop              loop_;
+    // §minix net::Transport seam — the byte transport GossipNet networks
+    // through (accept + connect). AsioTransport today (fed by loop_.raw());
+    // native IOCP/epoll/kqueue backends later. Declared after loop_ (its ctor
+    // calls loop_.raw()) and before gossip_ (which takes transport_&).
+    net::AsioTransport              transport_;
     net::GossipNet                  gossip_;
     std::vector<chain::AbortEvent>  current_aborts_;
     std::vector<size_t>             current_creator_indices_;

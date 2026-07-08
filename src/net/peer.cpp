@@ -5,14 +5,9 @@
 
 namespace determ::net {
 
-Peer::Peer(asio::ip::tcp::socket socket)
-    : socket_(std::move(socket)) {
-    try {
-        address_ = socket_.remote_endpoint().address().to_string() + ":" +
-                   std::to_string(socket_.remote_endpoint().port());
-    } catch (...) {
-        address_ = "unknown";
-    }
+Peer::Peer(std::shared_ptr<Connection> conn)
+    : conn_(std::move(conn)) {
+    address_ = conn_->remote_endpoint();
     // S-026: enable TCP-level keepalive so dead connections (network
     // partition, peer crash without FIN, NAT-rebind timeout) are detected
     // and reaped via the on_close path instead of lingering as zombie
@@ -29,12 +24,7 @@ Peer::Peer(asio::ip::tcp::socket socket)
     // Windows). Per-socket override of the interval is non-portable and
     // would couple the protocol to OS APIs unnecessarily; the system-
     // level knob is the right surface.
-    try {
-        socket_.set_option(asio::socket_base::keep_alive(true));
-    } catch (...) {
-        // Setting keepalive can theoretically fail (closed socket, etc).
-        // Not worth aborting peer attach over — log silently and continue.
-    }
+    conn_->set_keep_alive(true);
 }
 
 Peer::~Peer() {
@@ -49,7 +39,7 @@ void Peer::start(MessageHandler on_msg, CloseHandler on_close) {
 
 void Peer::read_header() {
     auto self = shared_from_this();
-    asio::async_read(socket_, asio::buffer(header_buf_),
+    conn_->async_read(header_buf_.data(), header_buf_.size(),
         [self](std::error_code ec, size_t) {
             if (ec) {
                 if (self->on_close_) self->on_close_(self);
@@ -72,7 +62,7 @@ void Peer::read_header() {
 void Peer::read_body(uint32_t len) {
     body_buf_.resize(len);
     auto self = shared_from_this();
-    asio::async_read(socket_, asio::buffer(body_buf_),
+    conn_->async_read(body_buf_.data(), body_buf_.size(),
         [self](std::error_code ec, size_t) {
             if (ec) {
                 if (self->on_close_) self->on_close_(self);
@@ -130,7 +120,7 @@ void Peer::send(const Message& msg) {
 
 void Peer::do_write() {
     auto self = shared_from_this();
-    asio::async_write(socket_, asio::buffer(write_queue_.front()),
+    conn_->async_write(write_queue_.front().data(), write_queue_.front().size(),
         [self](std::error_code ec, size_t) {
             std::lock_guard<std::mutex> lock(self->write_mutex_);
             self->write_queue_.pop_front();
@@ -143,26 +133,18 @@ void Peer::do_write() {
 }
 
 void Peer::close() {
-    std::error_code ec;
-    socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-    socket_.close(ec);
+    conn_->close();
 }
 
-void async_connect(asio::io_context& io,
+void async_connect(Transport& transport,
                    const std::string& host, uint16_t port,
                    std::function<void(std::shared_ptr<Peer>)> on_connect,
                    std::function<void(const std::string&)>    on_error) {
-    auto resolver = std::make_shared<asio::ip::tcp::resolver>(io);
-    resolver->async_resolve(host, std::to_string(port),
-        [resolver, &io, on_connect, on_error](std::error_code ec,
-                                               asio::ip::tcp::resolver::results_type results) {
-            if (ec) { on_error(ec.message()); return; }
-            auto socket = std::make_shared<asio::ip::tcp::socket>(io);
-            asio::async_connect(*socket, results,
-                [socket, resolver, on_connect, on_error](std::error_code ec2, auto) {
-                    if (ec2) { on_error(ec2.message()); return; }
-                    on_connect(std::make_shared<Peer>(std::move(*socket)));
-                });
+    transport.async_connect(host, port,
+        [on_connect, on_error](std::error_code ec,
+                               std::shared_ptr<Connection> conn) {
+            if (ec || !conn) { on_error(ec.message()); return; }
+            on_connect(std::make_shared<Peer>(std::move(conn)));
         });
 }
 
