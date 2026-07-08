@@ -56,6 +56,28 @@ public:
 
     // S-026: SO_KEEPALIVE (OS-default probe intervals). Best-effort.
     virtual void set_keep_alive(bool on) = 0;
+
+    // ── Synchronous half (slice B: RpcServer + the dapp_subscribe writer) ──
+    // Both consumers are thread-per-session/thread-per-subscriber blocking
+    // models, not callback-driven — they call these directly on their own
+    // thread instead of async_read/async_write. Readiness-based backends
+    // (epoll/kqueue) implement these by looping the syscall on the calling
+    // thread until done; a proactor backend (IOCP) can implement them as a
+    // post-and-wait over its own completion.
+
+    // Blocking, whole-span write. true iff all n bytes were written.
+    virtual bool write_all(const void* buf, std::size_t n) = 0;
+
+    // Best-effort bound (SO_SNDTIMEO-equivalent) on subsequent write_all()
+    // calls — the mechanism that keeps a stalled subscriber's writer thread
+    // from blocking forever. Not required to be exact; a backend that
+    // cannot bound sends may no-op.
+    virtual void set_send_timeout(std::chrono::milliseconds ms) = 0;
+
+    // Blocking read of one line, delimited by '\n' (consumed, excluded from
+    // out_line). false = error/EOF; the caller must stop reading. Backs the
+    // line-oriented JSON-RPC session model (RpcServer::handle_session).
+    virtual bool read_line(std::string& out_line) = 0;
 };
 
 // A listening endpoint producing Connections.
@@ -79,9 +101,12 @@ public:
 
     virtual ~Transport() = default;
 
-    // Bind + listen on the given port (any-interface IPv4, the gossip model).
-    // Throws on bind failure (as the current acceptor construction does).
-    virtual std::unique_ptr<Acceptor> listen(uint16_t port) = 0;
+    // Bind + listen on the given port. any-interface IPv4 (the gossip model)
+    // when localhost_only is false; 127.0.0.1-only when true (S-001,
+    // RpcServer's default posture). Throws on bind failure (as the current
+    // acceptor construction does).
+    virtual std::unique_ptr<Acceptor> listen(uint16_t port,
+                                              bool localhost_only) = 0;
 
     // Resolve + connect (the two stages folded together — both call sites do
     // both). On failure cb receives a non-zero error_code and a null

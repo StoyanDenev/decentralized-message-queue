@@ -14,6 +14,7 @@
 #pragma once
 #include <determ/net/transport.hpp>
 #include <asio.hpp>
+#include <istream>
 #include <utility>
 
 namespace determ::net {
@@ -57,15 +58,58 @@ public:
         }
     }
 
+    bool write_all(const void* buf, std::size_t n) override {
+        std::error_code ec;
+        asio::write(socket_, asio::buffer(buf, n), ec);
+        return !ec;
+    }
+
+    void set_send_timeout(std::chrono::milliseconds ms) override {
+        // Same setsockopt(SO_SNDTIMEO) the pre-seam subscriber_session used
+        // directly via native_handle() — moved here so both synchronous
+        // consumers (RpcServer, the subscriber writer) share one
+        // platform-split implementation instead of each carrying its own.
+#ifdef _WIN32
+        DWORD tv = static_cast<DWORD>(ms.count());
+        setsockopt(socket_.native_handle(), SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&tv), sizeof tv);
+#else
+        struct timeval tv {};
+        tv.tv_sec  = static_cast<long>(ms.count() / 1000);
+        tv.tv_usec = static_cast<long>((ms.count() % 1000) * 1000);
+        setsockopt(socket_.native_handle(), SOL_SOCKET, SO_SNDTIMEO, &tv,
+                   sizeof tv);
+#endif
+    }
+
+    bool read_line(std::string& out_line) override {
+        // read_buf_ persists across calls: read_until may buffer bytes past
+        // the delimiter, and a session calls this in a loop (one RPC line
+        // per call) — the excess must carry over, exactly as the previous
+        // in-RpcServer asio::streambuf did.
+        std::error_code ec;
+        asio::read_until(socket_, read_buf_, '\n', ec);
+        if (ec) return false;
+        std::istream is(&read_buf_);
+        std::getline(is, out_line);
+        return true;
+    }
+
 private:
     asio::ip::tcp::socket socket_;
     std::string           endpoint_;
+    asio::streambuf       read_buf_;
 };
 
 class AsioAcceptor final : public Acceptor {
 public:
-    AsioAcceptor(asio::io_context& io, uint16_t port)
-        : acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {}
+    AsioAcceptor(asio::io_context& io, uint16_t port, bool localhost_only)
+        : acceptor_(io, asio::ip::tcp::endpoint(
+                            localhost_only
+                                ? asio::ip::address(
+                                      asio::ip::address_v4::loopback())
+                                : asio::ip::address(asio::ip::address_v4::any()),
+                            port)) {}
 
     void async_accept(AcceptCb cb) override {
         acceptor_.async_accept(
@@ -84,8 +128,9 @@ class AsioTransport final : public Transport {
 public:
     explicit AsioTransport(asio::io_context& io) : io_(io) {}
 
-    std::unique_ptr<Acceptor> listen(uint16_t port) override {
-        return std::make_unique<AsioAcceptor>(io_, port);
+    std::unique_ptr<Acceptor> listen(uint16_t port,
+                                      bool localhost_only) override {
+        return std::make_unique<AsioAcceptor>(io_, port, localhost_only);
     }
 
     void async_connect(const std::string& host, uint16_t port,

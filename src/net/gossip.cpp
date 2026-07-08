@@ -28,7 +28,7 @@ void GossipNet::set_rate_limit(double per_sec, double burst) {
 }
 
 void GossipNet::listen(uint16_t port) {
-    acceptor_ = transport_.listen(port);
+    acceptor_ = transport_.listen(port, /*localhost_only=*/false);
     accept_loop();
     std::cout << "[gossip] listening on port " << port << "\n";
 }

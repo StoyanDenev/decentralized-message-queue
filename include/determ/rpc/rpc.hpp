@@ -2,12 +2,18 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/net/rate_limiter.hpp>
+#include <determ/net/transport.hpp>
+#include <determ/net/event_loop.hpp>
 #include <determ/node/node.hpp>
-#include <asio.hpp>
 #include <functional>
 #include <memory>
 #include <string>
 
+// This header (and rpc.cpp) is asio-free: the daemon-side server sits behind
+// the minix net::Transport/net::EventLoop seam (docs/proofs/
+// MinixTacticalProfile.md §4.4 slice B). rpc_call, the CLI's blocking
+// client below, is a separate "cut asio" checklist item — out of scope here
+// — and still constructs its own raw asio::io_context in rpc.cpp.
 namespace determ::rpc {
 
 // Minimal line-oriented JSON-RPC server.
@@ -32,7 +38,12 @@ public:
     // `burst` is the bucket capacity (max calls in a sudden burst
     // before steady-state rate kicks in). Both 0 disables rate
     // limiting entirely (default behavior, backward compat).
-    RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
+    //
+    // transport/loop are the same net:: seam GossipNet networks through
+    // (Node's transport_/loop_ members) — RpcServer no longer owns an
+    // io_context of its own.
+    RpcServer(net::Transport& transport, net::EventLoop& loop,
+                node::Node& node, uint16_t port,
                 bool localhost_only = true,
                 const std::string& auth_secret_hex = "",
                 double rate_per_sec = 0.0,
@@ -41,14 +52,15 @@ public:
 
 private:
     void accept_loop();
-    void handle_session(std::shared_ptr<asio::ip::tcp::socket> socket);
+    void handle_session(std::shared_ptr<net::Connection> conn);
     nlohmann::json dispatch(const nlohmann::json& req);
     // v2.16: verify HMAC if auth_secret_ is set. Returns empty string on
     // pass; error message on failure. No-op when auth is disabled.
     std::string verify_auth(const nlohmann::json& req) const;
-    asio::io_context&             io_;
+    net::Transport&               transport_;
+    net::EventLoop&                loop_;
     node::Node&                   node_;
-    asio::ip::tcp::acceptor       acceptor_;
+    std::unique_ptr<net::Acceptor> acceptor_;
     std::vector<uint8_t>          auth_secret_;  // empty = auth disabled
 
     // S-014: per-peer-IP token bucket. Shared limiter type with GossipNet.

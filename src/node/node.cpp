@@ -3230,7 +3230,7 @@ json Node::rpc_dapp_messages(const std::string& domain,
 //   SS-3: queue overflow KILLS the subscriber (error frame + close),
 //         never drops frames — a live connection's stream is gapless.
 
-bool Node::rpc_dapp_subscribe(std::shared_ptr<asio::ip::tcp::socket> socket,
+bool Node::rpc_dapp_subscribe(std::shared_ptr<net::Connection> conn,
                                  const json& params,
                                  std::string& error_out) {
     const std::string domain = params.value("domain", std::string{});
@@ -3303,7 +3303,7 @@ bool Node::rpc_dapp_subscribe(std::shared_ptr<asio::ip::tcp::socket> socket,
         sub->since            = since;
         sub->queue_max        = qmax;
         sub->heartbeat_blocks = hb;
-        sub->socket           = std::move(socket);
+        sub->socket           = std::move(conn);
         head_at_register      = head;
         subscribers_[sub->id] = sub;
     }
@@ -3323,20 +3323,7 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
     // us at most this long before the write errors and the session dies
     // (client redials with since=last_observed). Complements the
     // backpressure kill, which handles queue growth while we're stalled.
-    {
-        const int timeout_ms = 5000;
-#ifdef _WIN32
-        DWORD tv = timeout_ms;
-        setsockopt(sub->socket->native_handle(), SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&tv), sizeof tv);
-#else
-        struct timeval tv{};
-        tv.tv_sec  = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(sub->socket->native_handle(), SOL_SOCKET, SO_SNDTIMEO,
-                   &tv, sizeof tv);
-#endif
-    }
+    sub->socket->set_send_timeout(std::chrono::milliseconds(5000));
 
     uint64_t seq = 0;
     // The ONLY place frames are written and seq is stamped (SS-1).
@@ -3345,11 +3332,10 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
         sub->last_seq.store(seq - 1);   // observability (rpc_dapp_subscribers)
         f["sid"] = sub->sid_hex;
         std::string line = f.dump() + "\n";
-        std::error_code ec;
         sub->in_write.store(true);
-        asio::write(*sub->socket, asio::buffer(line), ec);
+        bool ok = sub->socket->write_all(line.data(), line.size());
         sub->in_write.store(false);
-        return !ec;
+        return ok;
     };
     auto finish = [&](bool emit_error) {
         if (emit_error) {
@@ -3362,8 +3348,7 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
             // Best-effort: the socket may already be closed/broken.
             write_frame({{"event", "error"}, {"code", reason}});
         }
-        std::error_code ec;
-        sub->socket->close(ec);
+        sub->socket->close();
         sub->done.store(true);
         sub->cv.notify_all();
     };
@@ -3475,8 +3460,7 @@ void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
                 sub->bytes_buffered = 0;
                 subscriber_kills_backpressure_.fetch_add(1);
                 if (sub->in_write.load()) {
-                    std::error_code ec;
-                    sub->socket->close(ec);
+                    sub->socket->close();
                 }
                 return false;
             }
@@ -3561,8 +3545,7 @@ void Node::shutdown_subscribers(const std::string& reason) {
             // parked writers wake via the notify and still deliver the
             // final error frame.
             if (sub->in_write.load()) {
-                std::error_code ec;
-                sub->socket->close(ec);
+                sub->socket->close();
             }
         }
         sub->cv.notify_all();

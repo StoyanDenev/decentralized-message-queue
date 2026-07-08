@@ -6,6 +6,11 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+// rpc_call (the CLI's blocking client, bottom of this file) is a separate
+// "cut asio" checklist item from the RpcServer/subscriber slice B migration
+// above it — it still talks raw asio directly, so it needs its own include
+// now that rpc.hpp no longer pulls asio.hpp in for it transitively.
+#include <asio.hpp>
 
 namespace determ::rpc {
 
@@ -75,20 +80,17 @@ std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
 
 // ─── Server ──────────────────────────────────────────────────────────────────
 
-// S-001 mitigation: localhost_only binds to 127.0.0.1 only.
-// asio::ip::address_v4::loopback() returns the loopback address — equivalent
-// to make_address("127.0.0.1") but avoids the string-parsing path.
-RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
+// S-001 mitigation: localhost_only binds to 127.0.0.1 only (now the
+// Transport::listen() backend's job — AsioTransport picks loopback vs
+// any-interface the same way this ctor used to inline).
+RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
+                       node::Node& node, uint16_t port,
                        bool localhost_only, const std::string& auth_secret_hex,
                        double rate_per_sec, double burst)
-    : io_(io)
+    : transport_(transport)
+    , loop_(loop)
     , node_(node)
-    , acceptor_(io, asio::ip::tcp::endpoint(
-                       localhost_only
-                           ? asio::ip::tcp::endpoint(
-                                 asio::ip::address_v4::loopback(), port).address()
-                           : asio::ip::address(asio::ip::address_v4::any()),
-                       port))
+    , acceptor_(transport_.listen(port, localhost_only))
     , auth_secret_(hex_to_bytes(auth_secret_hex)) {
     rate_limiter_.configure(rate_per_sec, burst);
     std::cout << "[rpc] listening on "
@@ -133,35 +135,27 @@ std::string RpcServer::verify_auth(const json& req) const {
 void RpcServer::start() { accept_loop(); }
 
 void RpcServer::accept_loop() {
-    auto socket = std::make_shared<asio::ip::tcp::socket>(io_);
-    acceptor_.async_accept(*socket, [this, socket](std::error_code ec) {
-        if (!ec)
-            asio::post(io_, [this, socket] { handle_session(socket); });
-        accept_loop();
-    });
+    acceptor_->async_accept(
+        [this](std::error_code ec, std::shared_ptr<net::Connection> conn) {
+            if (!ec && conn)
+                loop_.post([this, conn] { handle_session(conn); });
+            accept_loop();
+        });
 }
 
-void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
+void RpcServer::handle_session(std::shared_ptr<net::Connection> conn) {
     // S-014: cache the peer's IP once per session for rate-limit lookup.
-    // remote_endpoint() can throw on disconnected sockets; catch and
-    // default to "unknown" (rate-limit bucket name; unaffected
-    // operationally since rate limiter is per-name).
-    std::string peer_ip;
-    try {
-        auto ep = socket->remote_endpoint();
-        peer_ip = ep.address().to_string();
-    } catch (...) {
-        peer_ip = "unknown";
-    }
+    // remote_endpoint() is "ip:port" (never throws) — strip the port the
+    // same way GossipNet does for its own per-peer-IP bucket (gossip.cpp):
+    // keying by ip:port would give every new connection from the same
+    // client a fresh bucket, defeating the limit.
+    std::string peer_ip = conn->remote_endpoint();
+    auto colon = peer_ip.rfind(':');
+    if (colon != std::string::npos) peer_ip = peer_ip.substr(0, colon);
 
-    asio::streambuf buf;
-    std::error_code ec;
-    while (!ec) {
-        asio::read_until(*socket, buf, '\n', ec);
-        if (ec) break;
-        std::istream is(&buf);
+    while (true) {
         std::string line;
-        std::getline(is, line);
+        if (!conn->read_line(line)) break;
         if (line.empty()) continue;
         json response;
         try {
@@ -191,7 +185,7 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
                     //      client can't cheaply hoard subscriber slots
                     //      (S-014 extension; 99 more on top of the one
                     //      token already consumed for this line).
-                    //   4. hand the socket to the node; on success the
+                    //   4. hand the connection to the node; on success the
                     //      subscriber's writer thread owns it and this
                     //      session loop must never touch it again.
                     // Validation failures reply through the normal
@@ -201,9 +195,9 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
                         response["result"] = nullptr;
                         response["error"]  = "rate_limited";
                     } else if (node_.rpc_dapp_subscribe(
-                                   socket, req.value("params", json::object()),
+                                   conn, req.value("params", json::object()),
                                    sub_err)) {
-                        return;  // socket taken over — streaming
+                        return;  // connection taken over — streaming
                     } else {
                         response["result"] = nullptr;
                         response["error"]  = sub_err;
@@ -218,7 +212,7 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
             response["error"]  = e.what();
         }
         std::string reply = response.dump() + "\n";
-        asio::write(*socket, asio::buffer(reply), ec);
+        if (!conn->write_all(reply.data(), reply.size())) break;
     }
 }
 

@@ -190,10 +190,13 @@ public:
     void run();
     void stop();
 
-    // TRANSITIONAL (minix): hands the raw io_context to consumers not yet
-    // behind the net seam (RpcServer). Shrinks with each minix slice; deleted
-    // together with asio when the native backends land.
-    asio::io_context& io_context_access() { return loop_.raw(); }
+    // §minix net::Transport/net::EventLoop seam accessors — RpcServer
+    // constructs against these (the same transport_/loop_ GossipNet
+    // networks through) instead of owning its own io_context. Slice B
+    // retired the old TRANSITIONAL io_context_access(): RpcServer was its
+    // only caller.
+    net::Transport&  transport_access()  { return transport_; }
+    net::EventLoop&  event_loop_access() { return loop_; }
 
     // RPC handlers
     nlohmann::json rpc_status()                                     const;
@@ -351,7 +354,7 @@ public:
     // never silently dropped-from, so a live connection's seq stream
     // is gapless by construction (FB71 SubscriberBackpressure.tla
     // machine-checks this; StreamingSubscriptionSoundness.md SS-1/SS-3).
-    bool rpc_dapp_subscribe(std::shared_ptr<asio::ip::tcp::socket> socket,
+    bool rpc_dapp_subscribe(std::shared_ptr<net::Connection> conn,
                               const nlohmann::json& params,
                               std::string& error_out);
 
@@ -780,7 +783,7 @@ private:
         // write (the stuck-writer release — FB71 liveness property).
         std::atomic<bool>           in_write{false};
         std::atomic<bool>           done{false};
-        std::shared_ptr<asio::ip::tcp::socket> socket;
+        std::shared_ptr<net::Connection> socket;
         std::thread                 thread;
     };
     std::map<uint64_t, std::shared_ptr<Subscriber>> subscribers_;
