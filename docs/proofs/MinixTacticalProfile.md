@@ -1,14 +1,14 @@
 # Minix — minimal-dependency tactical profile (design + dependency audit)
 
-**Status:** design / scoping doc (FUTURE-tier). Goal set by the owner (2026-07-07):
+**Status:** design + LIVE status doc. Goal set by the owner (2026-07-07):
 make a **minimal, fully-auditable dependency footprint the main goal** so a
-**"tactical" build profile** can be audited for military/defense use. NO code yet —
-this is the survey+design artifact that gates implementation, in the same
-survey→design→byte-invariant-increments discipline as
-[ClockInjectionSeam.md](ClockInjectionSeam.md). The networking track shares the
-`net::Transport` seam scoped for DSF §Q2. **Networking backend DECIDED (owner
-2026-07-07): native IOCP (Windows) + epoll/kqueue (POSIX), NO transport library
-(no libevent2, no asio) — §4.3.**
+**"tactical" build profile** can be audited for military/defense use. The
+networking track shares the `net::Transport` seam scoped for DSF §Q2.
+**Networking backend DECIDED (owner 2026-07-07): native IOCP (Windows) +
+epoll/kqueue (POSIX), NO transport library — and as of §4.5e the track's
+END-STATE HOLDS: asio is DELETED from the tree; the daemon networks on
+native IOCP/epoll only, and the whole third-party source dependency set is
+{OpenSSL}, test-oracle-only, skippable via DETERM_BUILD_CRYPTOTEST=OFF.**
 
 ## 1. Goal
 
@@ -36,7 +36,7 @@ libraries. Everything else is in-tree from-scratch or OS-native.
 
 | Dependency | Provenance | Role | Minix disposition |
 |---|---|---|---|
-| **asio** 1.30.2 | `chriskohlhoff/asio` ([CMakeLists.txt:38](../../CMakeLists.txt)) | Daemon networking — P2P gossip + JSON-RPC server; header-only C++ templates | **REPLACE → native async I/O: IOCP (Windows) + epoll/kqueue (POSIX), no transport library** |
+| ~~asio~~ | **DELETED (§4.5e)** — was `chriskohlhoff/asio` FetchContent | (was) daemon networking | **DONE: replaced by native IOCP (Windows) + epoll reactor (POSIX) behind the net:: seam; the ratchet pins a tree-wide zero-asio-includes check** |
 | **nlohmann_json** | **VENDORED in-tree** at `third_party/nlohmann/json.hpp` (v3.11.3 single-include; SHA-256 byte-ratcheted) | JSON for config / RPC / snapshot serialization | **PHASE 1 DONE** (vendor + freeze; FetchContent deleted); phase-2 in-tree `determ::json` stays owner-gated (§5) |
 | **OpenSSL** 1.1.1w | `janbar/openssl-cmake` FetchContent — now wrapped in `option(DETERM_BUILD_CRYPTOTEST)` | **Test-oracle only** — the §Q9 dual-oracle handlers live in the separate `determ-cryptotest` binary | **SPLIT DONE (§6)** — the daemon links ZERO OpenSSL (zero openssl strings in determ.exe); a tactical build with `OFF` never even fetches OpenSSL |
 | `determ-crypto-c99` | in-tree, from scratch ([CMakeLists.txt:92](../../CMakeLists.txt)) | ALL production crypto (hash, Ed25519, AEAD, KDF, entropy) | **KEEP** — already the minix ideal (the C99 goal, done) |
@@ -496,12 +496,13 @@ cross-check (how the C99 crypto is known correct).
    platform, gated by both live clusters + goldens + FAST on each
    platform's native binary. Remaining in this step: kqueue only
    (design-review-only until a BSD/macOS gate exists — §4.5).
-4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
-   epoll/kqueue only. **The CLI-blocking-clients slice of this step already
-   SHIPPED (`b1c5056`): `net::SyncClient` replaced asio in `rpc_call` + the
-   headers/snapshot gossip-frame fetchers + the dapp-subscribe stream
-   reader** — the only remaining asio consumers are the `Asio*` backends
-   themselves (deleted with this step).
+4. **Cut asio — DONE (`a1348f3`, §4.5e)**: the FetchContent dep, the three
+   `Asio*` backend headers, and `test-net-seam` (superseded by
+   `test-net-native`'s identical pins on the REAL backends) are deleted;
+   the ratchet pins FetchContent=={openssl} + a tree-wide
+   zero-asio-includes check. (The CLI-blocking-clients slice had already
+   shipped in `b1c5056` via `net::SyncClient`.) Gate: both platforms
+   reconfigured + rebuilt from scratch, full battery green on each.
 5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
    phase-2 determ::json owner-gated). 6. **OpenSSL split** (§6 — **SHIPPED**
    `217191a`: the daemon links ZERO OpenSSL; determ-cryptotest is the sole
