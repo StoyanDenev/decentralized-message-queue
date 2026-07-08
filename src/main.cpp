@@ -74,6 +74,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <atomic>
 #include <chrono>
 #include <random>      // ct-timing-probe: interleaved class assignment + RND-class secrets
 #include <cmath>       // ct-timing-probe: Welch t / sqrt
@@ -819,6 +820,17 @@ Additional in-process tests:
                                               full stake forfeit +
                                               deregistration (inactive_from)
                                               + A1 invariant
+  determ test-net-seam                        minix net-seam contracts —
+                                              net::Timer + net::EventLoop
+                                              (asio backends) interface
+                                              pins: post/run/stop life-
+                                              cycle, arm() fires only on
+                                              clean expiry, cancel()
+                                              suppresses (idempotent),
+                                              re-arm supersedes, multi-
+                                              thread run() exactly-once
+                                              fan-in; all phases sequenced
+                                              via stop() (no sleep races)
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -27353,6 +27365,155 @@ int main(int argc, char** argv) {
                   << stale_ends << " stale ENDs, "
                   << bad_partner_attempts << " bad-partner rejects over "
                   << kBlocks << " blocks)\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // minix net-seam contract pins (docs/proofs/MinixTacticalProfile.md
+    // §4): net::Timer (include/determ/net/timer.hpp; AsioTimer backend)
+    // and net::EventLoop (include/determ/net/event_loop.hpp;
+    // AsioEventLoop backend). These interfaces are the seam the future
+    // native IOCP / epoll/kqueue backends must satisfy, so the CONTRACT
+    // — not the asio implementation detail — is what this test pins:
+    //   * post(fn) runs fn on a loop thread; stop() releases run()
+    //   * arm(delay, on_expire) fires ONLY on clean expiry
+    //   * cancel() before expiry suppresses on_expire (idempotent,
+    //     safe when not armed)
+    //   * a re-arm SUPERSEDES the previous arm (old callback suppressed)
+    //   * run() is callable concurrently from multiple threads
+    //
+    // Timing discipline: every phase is sequenced through loop.run()
+    // returning when a callback calls stop() — no sleeps racing timers.
+    // Cancels/re-arms are issued BEFORE run() starts, AND the deadlines
+    // they beat are 10 MINUTES out — unreachable within the test — so
+    // outcomes are ORDERED by the API, never raced against wall-clock.
+    // (The long deadline matters on Windows: asio's waitable-timer
+    // thread can queue a SUCCESS completion even before run() once a
+    // deadline passes, so a short to-be-cancelled deadline would open a
+    // preemption window between the adjacent arm/cancel statements.)
+    // Each phase uses a FRESH AsioEventLoop (asio::io_context needs
+    // restart() after stop(); a fresh loop per phase sidesteps
+    // stopped-state reuse entirely — AsioEventLoop is
+    // default-constructible).
+    if (cmd == "test-net-seam") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. EventLoop.post: the posted fn runs on a loop thread (flag
+        //    observed set after run() returns) and stop() called from
+        //    inside a posted callback releases run(). run() returning
+        //    at all IS the stop() assertion — a broken stop() hangs
+        //    here rather than passing vacuously.
+        {
+            AsioEventLoop loop;
+            bool ran = false;
+            loop.post([&] { ran = true; loop.stop(); });
+            loop.run();   // returns because the posted fn called stop()
+            check(ran, "EventLoop.post: posted fn ran; stop() released run()");
+        }
+
+        // 2. Timer.arm fires on clean expiry: arm(1ms); run() until the
+        //    expiry callback stops the loop. run() returning is the
+        //    liveness half (a never-firing timer would hang, not pass);
+        //    the flag pins that on_expire's body executed. Load can only
+        //    make this phase slower, never wrong.
+        {
+            AsioEventLoop loop;
+            AsioTimer t(loop.raw());
+            bool fired = false;
+            t.arm(std::chrono::milliseconds(1),
+                  [&] { fired = true; loop.stop(); });
+            loop.run();
+            check(fired, "Timer.arm: clean expiry runs on_expire");
+        }
+
+        // 3. Timer.cancel suppresses: arm(10min) whose callback would
+        //    set a bad flag; cancel() IMMEDIATELY — before run() starts
+        //    and 10 minutes before the deadline, so no scheduler stall
+        //    can let the expiry win. The cancelled wait completes with
+        //    operation_aborted and the AsioTimer `if (ec) return;` idiom
+        //    suppresses the callback (the aborted completion is queued
+        //    by cancel() itself, ahead of the posted stop — a broken
+        //    suppression idiom sets `bad` and FAILs; it is not masked
+        //    by the stop). A posted stop() then drains the loop
+        //    deterministically. Also pins cancel() idempotence: safe on
+        //    a never-armed timer, safe called twice.
+        {
+            AsioEventLoop loop;
+            AsioTimer never_armed(loop.raw());
+            never_armed.cancel();   // contract: safe if not currently armed
+            AsioTimer t(loop.raw());
+            bool bad = false;
+            t.arm(std::chrono::milliseconds(600000) /* unreachable */,
+                  [&] { bad = true; });
+            t.cancel();
+            t.cancel();             // contract: idempotent
+            loop.post([&] { loop.stop(); });
+            loop.run();
+            check(!bad, "Timer.cancel: cancelled arm's on_expire suppressed");
+            check(true, "Timer.cancel: idempotent + safe when not armed (no crash)");
+        }
+
+        // 4. Re-arm supersedes: ONE timer armed at 10min (would set
+        //    flagA), then IMMEDIATELY re-armed at 1ms (sets flagB +
+        //    stops the loop). Both arms are issued before run() and the
+        //    first deadline is unreachable, so the superseded arm can
+        //    never win a race — expires_after() on the re-arm aborts
+        //    the pending wait and the suppression idiom drops flagA's
+        //    callback (the aborted completion is delivered pre-run; a
+        //    broken idiom sets flagA and FAILs). run() returning
+        //    promptly proves the loop is not waiting out the superseded
+        //    deadline.
+        {
+            AsioEventLoop loop;
+            AsioTimer t(loop.raw());
+            bool a = false, b = false;
+            t.arm(std::chrono::milliseconds(600000) /* superseded */,
+                  [&] { a = true; });
+            t.arm(std::chrono::milliseconds(1),
+                  [&] { b = true; loop.stop(); });
+            loop.run();
+            check(!a, "Timer re-arm: superseded on_expire NOT called");
+            check(b,  "Timer re-arm: superseding arm fired");
+        }
+
+        // 5. Multi-thread run(): two worker threads service the SAME
+        //    fresh loop. All N callbacks are posted BEFORE either thread
+        //    starts, so the loop has queued work the instant run() is
+        //    entered (asio's run() returns immediately on an empty
+        //    queue — pre-posting is the work pattern that holds both
+        //    threads; asio counts an in-flight handler as outstanding
+        //    work, so neither thread can go idle before the stop).
+        //    Each callback increments an atomic; the one that reaches N
+        //    calls stop(), releasing BOTH threads. join() returning is
+        //    the release assertion (a stuck run() hangs here); count ==
+        //    N pins exactly-once execution with no lost or duplicated
+        //    posts across threads (a lost post empties the queue early
+        //    and both run()s return with count < N — a fast FAIL, not a
+        //    hang).
+        {
+            AsioEventLoop loop;
+            constexpr int N = 64;
+            std::atomic<int> count{0};
+            for (int i = 0; i < N; ++i) {
+                loop.post([&] {
+                    if (count.fetch_add(1) + 1 == N) loop.stop();
+                });
+            }
+            std::thread t1([&] { loop.run(); });
+            std::thread t2([&] { loop.run(); });
+            t1.join();
+            t2.join();
+            check(count.load() == N,
+                  "EventLoop multi-thread run(): 64 posted fns ran exactly once across 2 threads");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": net-seam "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
