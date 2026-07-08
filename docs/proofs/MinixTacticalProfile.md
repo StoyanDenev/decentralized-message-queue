@@ -37,8 +37,8 @@ libraries. Everything else is in-tree from-scratch or OS-native.
 | Dependency | Provenance | Role | Minix disposition |
 |---|---|---|---|
 | **asio** 1.30.2 | `chriskohlhoff/asio` ([CMakeLists.txt:38](../../CMakeLists.txt)) | Daemon networking — P2P gossip + JSON-RPC server; header-only C++ templates | **REPLACE → native async I/O: IOCP (Windows) + epoll/kqueue (POSIX), no transport library** |
-| **nlohmann_json** | FetchContent `json` ([CMakeLists.txt:47](../../CMakeLists.txt)) | JSON for config / RPC / snapshot serialization; single-header C++ | **REPLACE** (in-tree reader) or **vet + freeze** |
-| **OpenSSL** 1.1.1w | `janbar/openssl-cmake` ([CMakeLists.txt:29](../../CMakeLists.txt)) | **Test-oracle only** — `test-*-c99` cross-validation in main.cpp; linked to the daemon only because main.cpp is one TU | **SPLIT** the oracle into a separate test binary → daemon links zero OpenSSL |
+| **nlohmann_json** | **VENDORED in-tree** at `third_party/nlohmann/json.hpp` (v3.11.3 single-include; SHA-256 byte-ratcheted) | JSON for config / RPC / snapshot serialization | **PHASE 1 DONE** (vendor + freeze; FetchContent deleted); phase-2 in-tree `determ::json` stays owner-gated (§5) |
+| **OpenSSL** 1.1.1w | `janbar/openssl-cmake` FetchContent — now wrapped in `option(DETERM_BUILD_CRYPTOTEST)` | **Test-oracle only** — the §Q9 dual-oracle handlers live in the separate `determ-cryptotest` binary | **SPLIT DONE (§6)** — the daemon links ZERO OpenSSL (zero openssl strings in determ.exe); a tactical build with `OFF` never even fetches OpenSSL |
 | `determ-crypto-c99` | in-tree, from scratch ([CMakeLists.txt:92](../../CMakeLists.txt)) | ALL production crypto (hash, Ed25519, AEAD, KDF, entropy) | **KEEP** — already the minix ideal (the C99 goal, done) |
 | ws2_32 / wsock32 / crypt32 / bcrypt (Win), pthread (Unix) | OS-native | Sockets, OS entropy, threads | **KEEP** — platform, vendor-audited |
 
@@ -204,10 +204,12 @@ node Config (never on a wire/digest path); zero
 ordered_json/json_pointer/CBOR/msgpack/SAX usage; nlohmann's throw-on-invalid-
 UTF-8 dump behavior is load-bearing (fail-closed on binary leaf keys).
 
-**Two-phase plan:** PHASE 1 (near-zero risk, ~half day): vendor the single
-header in-tree (`third_party/nlohmann/json.hpp`, v3.11.3), delete the
-FetchContent, add a SHA-256 byte-ratchet guard — meets the minix
-whole-source-in-repo/offline-build bar without touching a consumer. PHASE 2
+**Two-phase plan:** **PHASE 1 SHIPPED (`23ac341`):** the single header is
+vendored at `third_party/nlohmann/json.hpp` (v3.11.3), the FetchContent is
+deleted (the fetch set is down to {asio, openssl-when-cryptotest}), and the
+dependency ratchet byte-pins the vendored header by SHA-256 — the minix
+whole-source-in-repo/offline-build bar, zero consumer changes, all JSON
+contract pins (HMAC, config/genesis/hello/snapshot determinism) green. PHASE 2
 (owner-gated, ~1-2 weeks): in-tree `determ::json` behind an API-compatible
 shim — FEASIBLE given the narrow subset, but 1.5-3 KLOC of consensus-adjacent
 code gated by dual-oracle dump-equality over a corpus that MUST include
@@ -216,9 +218,13 @@ the existing pin tests, AND a mixed-fleet cluster test (one node per
 implementation) exercising abort events; the parser needs a depth cap +
 strict UTF-8 (it is the outermost consumer of every peer-supplied byte).
 
-## 6. OpenSSL track — test-oracle split (SURVEYED, ready to implement)
+## 6. OpenSSL track — test-oracle split (SHIPPED `217191a`)
 
-Split design (surveyed; ~one focused day, byte-invariant, loses zero coverage):
+Executed exactly as designed (byte-invariant, zero coverage lost): all 11
+moved outputs diffed BYTE-IDENTICAL against pre-split baselines; both in-place
+C99 swaps PASS; the operator battery routes per-command (26/26); the ratchet
+is a ZERO-exception pin; FAST 203/0, goldens, and a live cluster all green —
+and `determ.exe` contains zero "openssl" strings. The design as implemented:
 a new top-level `cryptotest/main.cpp` (mirroring `wallet/`, `light/`) with a
 small dispatcher plus the **11 pure-oracle handlers moved VERBATIM** (stdout
 byte-identical so wrapper summary-pins stay green): `test-{aes,ed25519,frost,
@@ -276,9 +282,11 @@ cross-check (how the C99 crypto is known correct).
    type.
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
    epoll/kqueue only.
-5. **JSON track** (§5 — SURVEYED: phase-1 vendor+freeze ready; phase-2
-   determ::json owner-gated). 6. **OpenSSL split** (§6 — SURVEYED: the
-   determ-cryptotest design is implementation-ready). 7. **Tactical profile** — the
+5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
+   phase-2 determ::json owner-gated). 6. **OpenSSL split** (§6 — **SHIPPED**
+   `217191a`: the daemon links ZERO OpenSSL; determ-cryptotest is the sole
+   OpenSSL consumer, skippable via DETERM_BUILD_CRYPTOTEST=OFF).
+   7. **Tactical profile** — the
    posture label + SBOM + audit-boundary doc + reproducible-build attestation.
 
 ## 8. Open owner decisions
