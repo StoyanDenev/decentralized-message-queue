@@ -139,10 +139,10 @@ through the new Connection), FAST 203/203, GCC-clean header compile, and a
 5-lens adversarial review (FB71 liveness, rate-limit-by-IP security,
 lifetime/concurrency, byte-behavior parity, build hygiene) that surfaced
 zero code findings. **Remaining: the native IOCP/epoll/kqueue backends
-(design in §4.5), then cut asio** (including the CLI sync clients, fit
-(6)'s Peer write-queue bound decision, and finally deleting the now-only-
-interim synchronous Connection methods' asio backing once the natives ship
-their own).
+(design in §4.5; IOCP increment 1 SHIPPED — §4.5b; CLI sync clients also
+already off asio via net::SyncClient), then cut asio** (fit (6)'s Peer
+write-queue bound decision rides the Windows daemon cutover; the Asio*
+backends are deleted last).
 
 ### 4.4 Transport surface survey (completed — the remaining raw-asio consumers)
 
@@ -276,6 +276,58 @@ dev-box access at all** — ship it design-review-only until that's provisioned,
 don't silently treat it as equally gated). Only after all three are live +
 gated does cutting asio (phased plan step 4) become safe.
 
+### 4.5b Status — IOCP increment 1 SHIPPED (`b1c5056`) + cut-asio CLI clients
+
+`IocpEventLoop` + `IocpTimer` + `IocpTransport` implement the full seam
+(Windows-only TUs, CMake-pruned on POSIX; public headers opaque-handle only
+per the §4.5 layout rule). **The daemon stays on the Asio* backends** —
+increment 1 is the backend + `test-net-native` (22 in-process assertions:
+every test-net-seam pin against the native types, PLUS loopback
+accept/connect, a 1 MiB async exactly-N round trip, the sync
+write_all/read_line carry contract, and BOTH §4.5 abort contracts:
+cross-thread `close()` aborts a pending async read via CancelIoEx AND a
+blocked sync write). Two DELIBERATE deviations from the §4.5 design, both
+empirically driven:
+
+1. **`write_all` is an overlapped WSASend waited on a port-skipping
+   (low-bit `hEvent`) event, not a plain blocking send.** Probed on the dev
+   box: a thread blocked in raw `send()` is NOT reliably woken by a
+   cross-thread `closesocket` — the pre-seam/asio path was silently bounded
+   by `SO_SNDTIMEO` alone (production: 5s). With the event design,
+   `close()`'s CancelIoEx aborts the in-flight send in ~0ms — §1.6's
+   "native makes the stuck-writer release strictly cleaner" prediction,
+   realized for the SYNC path too. (Probe also showed loopback AFD absorbs
+   exactly one full overlapped send of any size synchronously — the FB71
+   contract test loops 4 MiB chunks so the second genuinely pends.)
+2. **No ConnectEx** — `async_connect` resolves + candidate-loops a BLOCKING
+   connect on a short-lived helper thread (a blocking connect on an
+   overlapped-capable socket is mode-independent), matching asio's
+   try-every-resolver-result behavior (which ConnectEx-on-first-result
+   would have silently dropped) with far less machinery. The helper threads
+   are TRACKED and joined by `~IocpTransport` — the enforcement mechanism
+   for §4.5's "loop must outlive any in-flight connect" (every consumer
+   destroys the transport before the loop; Node's member order guarantees
+   it).
+
+Gate: 5-target build, MinGW GCC 13 `-Wall -Wextra -Werror` on all new TUs,
+goldens, test-net-native 22/22, FAST 204/204, live `test_weak_3node` +
+`test_dapp_subscribe`, ratchet extended (iocp_*/sync_client headers pinned
+asio-free). A 41-agent 5-lens adversarial review (op lifetime/UAF, threading
+races, Winsock API contracts, CLI parity, seam conformance) confirmed 8
+findings — all fixed pre-commit (SIGPIPE parity on POSIX sends, an
+acceptor-ctor socket leak, a test-only dangling-promise path, the two items
+above, and a destructor-drain grace poll for kernel-propagating aborted
+completions).
+
+**The cut-asio CLI migration also SHIPPED in the same commit**: §4.4's
+"CLI blocking clients" item is DONE — `net::SyncClient`
+(include/determ/net/sync_client.hpp, from the proven light/rpc_client
+pattern) replaced asio in `rpc_call`, both gossip-frame fetchers
+(`headers --peer`, `snapshot fetch`), and the dapp-subscribe stream reader;
+`src/rpc/rpc.cpp` and `src/main.cpp` no longer include asio at all. The
+remaining direct asio consumers in the tree are exactly the three `Asio*`
+backend headers and `node.hpp`'s transitional includes of them.
+
 ## 5. JSON track — nlohmann_json → in-tree (SURVEYED)
 
 A full usage survey (~975 references, 60+ files, all three binaries) settled
@@ -379,12 +431,20 @@ cross-check (how the C99 crypto is known correct).
    the dapp_subscribe subscriber, via a synchronous escape-hatch on
    `Connection` (§4.3b, §4.4 fit (1)). Gate: native cluster tests + goldens
    unchanged, both slices.
-3. **Native backends behind the seam** — `IocpTransport` (Windows) +
-   epoll/kqueue `ReactorTransport` (POSIX), no third-party library; design
-   pass done (§4.5); validate cluster liveness + goldens byte-identical + the
-   S-043 wire-roundtrip-verify per message type.
+3. **Native backends behind the seam** — **STARTED: IOCP increment 1
+   SHIPPED (`b1c5056`, §4.5b)** — `IocpEventLoop`/`IocpTimer`/
+   `IocpTransport` implement the full seam, gated by the 22-assertion
+   `test-net-native` contract battery (daemon not yet cut over). Remaining:
+   the Windows daemon cutover (swap Node/RpcServer's Asio* members to the
+   Iocp* types, gated by BOTH live clusters + goldens + the S-043
+   wire-roundtrip-verify per message type), then the epoll/kqueue
+   `ReactorTransport` (POSIX).
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
-   epoll/kqueue only.
+   epoll/kqueue only. **The CLI-blocking-clients slice of this step already
+   SHIPPED (`b1c5056`): `net::SyncClient` replaced asio in `rpc_call` + the
+   headers/snapshot gossip-frame fetchers + the dapp-subscribe stream
+   reader** — the only remaining asio consumers are the `Asio*` backends
+   themselves (deleted with this step).
 5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
    phase-2 determ::json owner-gated). 6. **OpenSSL split** (§6 — **SHIPPED**
    `217191a`: the daemon links ZERO OpenSSL; determ-cryptotest is the sole
