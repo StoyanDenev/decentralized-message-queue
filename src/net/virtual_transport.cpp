@@ -26,9 +26,42 @@
 #include <determ/net/virtual_transport.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 
 namespace determ::net {
+
+// Per-link delivery policy (the fault model). Co-owned by the Pair (read on
+// the write path) and the VirtualNetwork (mutated by set_loss/partition/heal
+// from the harness thread). The gates + rate are atomics so the write path
+// reads them lock-free; `rng` is touched ONLY under the owning Pair::mu (the
+// write path holds it), so it needs no atomicity; groups are immutable after
+// creation.
+struct VirtualNetwork::LinkFlags {
+    std::atomic<bool>     ab{true};          // deliver side0 -> side1
+    std::atomic<bool>     ba{true};          // deliver side1 -> side0
+    std::atomic<uint32_t> drop_permille{0};  // 0 = lossless
+    int      group0 = 0;   // accept-side group  (immutable)
+    int      group1 = 0;   // connect-side group (immutable)
+    uint64_t rng    = 0;   // xorshift64 state; advanced under owning Pair::mu
+
+    // Advance the per-link RNG (caller holds the owning Pair::mu) and decide
+    // whether THIS frame is dropped by the loss model. Never a fixed point:
+    // seeded non-zero at creation.
+    bool roll_drop() {
+        const uint32_t d = drop_permille.load(std::memory_order_relaxed);
+        if (d == 0) return false;
+        uint64_t x = rng;
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;   // xorshift64
+        rng = x;
+        return (x % 1000u) < d;
+    }
+    // Is delivery in the given direction currently allowed by the partition?
+    bool gate(int side) const {
+        return (side == 0) ? ab.load(std::memory_order_relaxed)
+                           : ba.load(std::memory_order_relaxed);
+    }
+};
 
 namespace {
 
@@ -146,6 +179,12 @@ struct VirtualConnection::Pair {
     std::condition_variable cv;   // wakes read_line waiters on either end
     Side                    side[2];
     std::string             endpoint;   // "127.0.0.1:<pseudo-port>", both ends
+    // The fault-model policy for this link (never null once wired). Read on
+    // the write path under mu (for rng); the gate/rate atomics may also be
+    // flipped by the network without mu — that race is intended (a partition
+    // taking effect "around" an in-flight write is exactly what a real
+    // network does).
+    std::shared_ptr<VirtualNetwork::LinkFlags> link;
 };
 
 namespace {
@@ -234,6 +273,15 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
         me.loop->post([cb = std::move(cb)] { cb(ec_reset(), 0); });
         return;
     }
+    // Fault model: a partitioned or randomly-dropped frame LEAVES the host
+    // (the write completes successfully to the caller) but never reaches the
+    // peer inbox — a packet lost downstream. Whole-frame granularity: one
+    // async_write == one Peer message, so this drops exactly one message and
+    // never splits a frame. Default policy (gate open, 0 loss) never drops.
+    if (P.link && (!P.link->gate(side_) || P.link->roll_drop())) {
+        me.loop->post([cb = std::move(cb), n] { cb({}, n); });
+        return;
+    }
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     peer.inbox.insert(peer.inbox.end(), p, p + n);
     // Whole-span completion first, then the peer's now-satisfiable parked
@@ -287,6 +335,11 @@ bool VirtualConnection::write_all(const void* buf, std::size_t n) {
     // is what the FB71 kill path needs (there is no in-flight stall to
     // interrupt in this backend).
     if (me.closed || peer.closed) return false;
+    // Fault model (see async_write): a partitioned/dropped frame "sends"
+    // (returns true — bytes left the host) but is not delivered. The sync
+    // half isn't on the gossip path, so this matters only if a future sync
+    // consumer runs under fault injection; kept for parity.
+    if (P.link && (!P.link->gate(side_) || P.link->roll_drop())) return true;
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     peer.inbox.insert(peer.inbox.end(), p, p + n);
     deliver_locked(P, peer);
@@ -325,11 +378,13 @@ struct VirtualNetwork::Listener {
         // Connector's loop STATE (shared ref — outlives the loop object;
         // ~VirtualTransport additionally cancels its own entries).
         std::shared_ptr<VirtualEventLoop::State> loop;
+        int                  group;   // connector's partition group
         VirtualTransport*    owner;   // cancellation key for the above
         Transport::ConnectCb cb;
     };
 
     std::shared_ptr<VirtualEventLoop::State> loop;   // acceptor's loop state
+    int                        group = 0;   // acceptor's partition group
     uint16_t                   port = 0;
     bool                       dead = false;
     Acceptor::AcceptCb         parked;    // one-shot; the consumer re-arms
@@ -339,7 +394,8 @@ struct VirtualNetwork::Listener {
 VirtualNetwork::~VirtualNetwork() = default;
 
 std::shared_ptr<VirtualNetwork::Listener>
-VirtualNetwork::register_listener(uint16_t& port, VirtualEventLoop& loop) {
+VirtualNetwork::register_listener(uint16_t& port, VirtualEventLoop& loop,
+                                  int group) {
     std::lock_guard<std::mutex> lk(mu_);
     if (port == 0) {
         // Auto-assign from the counter, skipping taken ports; wraps within
@@ -358,9 +414,10 @@ VirtualNetwork::register_listener(uint16_t& port, VirtualEventLoop& loop) {
         throw std::runtime_error("VirtualAcceptor: bind failed on port " +
                                  std::to_string(port));
     }
-    auto l  = std::make_shared<Listener>();
-    l->loop = loop.st_;
-    l->port = port;
+    auto l   = std::make_shared<Listener>();
+    l->loop  = loop.st_;
+    l->group = group;
+    l->port  = port;
     listeners_[port] = l;
     return l;
 }
@@ -386,7 +443,8 @@ void VirtualNetwork::arm_accept(const std::shared_ptr<Listener>& l,
         // A connect was queued before this accept (both orders supported).
         Listener::PendingConnect pc = std::move(l->pending.front());
         l->pending.pop_front();
-        auto [acc, conn] = make_pair_locked(l->loop, pc.loop);
+        auto [acc, conn] = make_pair_locked(l->loop, l->group,
+                                            pc.loop, pc.group);
         std::shared_ptr<Connection> accepted  = std::move(acc);
         std::shared_ptr<Connection> connected = std::move(conn);
         // Both callbacks delivered ON A LOOP THREAD via post — never
@@ -403,7 +461,7 @@ void VirtualNetwork::arm_accept(const std::shared_ptr<Listener>& l,
 }
 
 void VirtualNetwork::connect(uint16_t port, VirtualEventLoop& caller_loop,
-                             VirtualTransport* owner,
+                             int caller_group, VirtualTransport* owner,
                              Transport::ConnectCb cb) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = listeners_.find(port);
@@ -416,7 +474,8 @@ void VirtualNetwork::connect(uint16_t port, VirtualEventLoop& caller_loop,
     if (l->parked) {
         Acceptor::AcceptCb acb = std::move(l->parked);
         l->parked = nullptr;
-        auto [acc, conn] = make_pair_locked(l->loop, caller_loop.st_);
+        auto [acc, conn] = make_pair_locked(l->loop, l->group,
+                                            caller_loop.st_, caller_group);
         std::shared_ptr<Connection> accepted  = std::move(acc);
         std::shared_ptr<Connection> connected = std::move(conn);
         l->loop->post([acb = std::move(acb), accepted] { acb({}, accepted); });
@@ -426,8 +485,8 @@ void VirtualNetwork::connect(uint16_t port, VirtualEventLoop& caller_loop,
     } else {
         // Park the connect until async_accept is called (TCP backlog
         // analogue; refused if the acceptor is destroyed first).
-        l->pending.push_back(
-            Listener::PendingConnect{caller_loop.st_, owner, std::move(cb)});
+        l->pending.push_back(Listener::PendingConnect{
+            caller_loop.st_, caller_group, owner, std::move(cb)});
     }
 }
 
@@ -447,8 +506,8 @@ void VirtualNetwork::cancel_connects(VirtualTransport* owner) {
 std::pair<std::shared_ptr<VirtualConnection>,
           std::shared_ptr<VirtualConnection>>
 VirtualNetwork::make_pair_locked(
-    std::shared_ptr<VirtualEventLoop::State> accept_loop,
-    std::shared_ptr<VirtualEventLoop::State> connect_loop) {
+    std::shared_ptr<VirtualEventLoop::State> accept_loop, int accept_group,
+    std::shared_ptr<VirtualEventLoop::State> connect_loop, int connect_group) {
     auto P = std::make_shared<VirtualConnection::Pair>();
     P->side[0].loop = std::move(accept_loop);
     P->side[1].loop = std::move(connect_loop);
@@ -460,16 +519,67 @@ VirtualNetwork::make_pair_locked(
                             ? static_cast<uint16_t>(50000)
                             : static_cast<uint16_t>(next_pseudo_port_ + 1);
     P->endpoint = "127.0.0.1:" + std::to_string(pseudo);
+
+    // Wire the fault-model policy: inherit the current loss + partition,
+    // seed the per-link RNG non-zero (0 is an xorshift fixed point), and
+    // register the link so a later set_loss/partition/heal can mutate it.
+    auto lf = std::make_shared<LinkFlags>();
+    lf->group0 = accept_group;
+    lf->group1 = connect_group;
+    lf->drop_permille.store(loss_permille_, std::memory_order_relaxed);
+    lf->rng = (static_cast<uint64_t>(pseudo) << 1) | 1ull;
+    if (link_blocked_locked(accept_group, connect_group)) {
+        lf->ab.store(false, std::memory_order_relaxed);
+        lf->ba.store(false, std::memory_order_relaxed);
+    }
+    P->link = lf;
+    links_.push_back(std::move(lf));
+
     return {std::make_shared<VirtualConnection>(P, 0),
             std::make_shared<VirtualConnection>(P, 1)};
+}
+
+bool VirtualNetwork::link_blocked_locked(int ga, int gb) const {
+    if (partition_a_.empty()) return false;
+    const bool a_in = partition_a_.count(ga) != 0;
+    const bool b_in = partition_a_.count(gb) != 0;
+    return a_in != b_in;   // straddles the boundary
+}
+
+void VirtualNetwork::set_loss(uint32_t permille) {
+    if (permille > 1000) permille = 1000;
+    std::lock_guard<std::mutex> lk(mu_);
+    loss_permille_ = permille;
+    for (auto& lf : links_)
+        lf->drop_permille.store(permille, std::memory_order_relaxed);
+}
+
+void VirtualNetwork::partition(const std::set<int>& side_a) {
+    std::lock_guard<std::mutex> lk(mu_);
+    partition_a_ = side_a;
+    for (auto& lf : links_) {
+        const bool blocked = link_blocked_locked(lf->group0, lf->group1);
+        lf->ab.store(!blocked, std::memory_order_relaxed);
+        lf->ba.store(!blocked, std::memory_order_relaxed);
+    }
+}
+
+void VirtualNetwork::heal() {
+    std::lock_guard<std::mutex> lk(mu_);
+    partition_a_.clear();
+    for (auto& lf : links_) {
+        lf->ab.store(true, std::memory_order_relaxed);
+        lf->ba.store(true, std::memory_order_relaxed);
+    }
 }
 
 // ── VirtualAcceptor ──────────────────────────────────────────────────────────
 
 VirtualAcceptor::VirtualAcceptor(VirtualNetwork& net, VirtualEventLoop& loop,
-                                 uint16_t port, bool /*localhost_only*/)
+                                 uint16_t port, bool /*localhost_only*/,
+                                 int group)
     : net_(net), port_(port) {
-    state_ = net_.register_listener(port_, loop);   // may assign port_ (0)
+    state_ = net_.register_listener(port_, loop, group);   // may assign port_ (0)
 }
 
 VirtualAcceptor::~VirtualAcceptor() {
@@ -495,12 +605,12 @@ VirtualTransport::~VirtualTransport() {
 std::unique_ptr<Acceptor> VirtualTransport::listen(uint16_t port,
                                                    bool localhost_only) {
     return std::make_unique<VirtualAcceptor>(net_, loop_, port,
-                                             localhost_only);
+                                             localhost_only, group_);
 }
 
 void VirtualTransport::async_connect(const std::string& /*host*/,
                                      uint16_t port, ConnectCb cb) {
-    net_.connect(port, loop_, this, std::move(cb));
+    net_.connect(port, loop_, group_, this, std::move(cb));
 }
 
 VirtualNetwork& VirtualTransport::default_network() {

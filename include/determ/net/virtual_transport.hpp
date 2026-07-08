@@ -90,8 +90,10 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace determ::net {
 
@@ -207,9 +209,65 @@ public:
     VirtualNetwork(const VirtualNetwork&) = delete;
     VirtualNetwork& operator=(const VirtualNetwork&) = delete;
 
+    // ── Adversarial fault injection (test-facing; OFF by default) ────────
+    // The virtual backend can model a lossy/partitioned network so the FA4
+    // harness can stress consensus liveness under adversarial DELIVERY (the
+    // S-047 territory), not just node death. On the GOSSIP path this is
+    // WHOLE-FRAME granular: Peer's write pump issues exactly one complete
+    // length-prefixed message per async_write call (src/net/peer.cpp
+    // do_write), so dropping/gating one write drops exactly one logical
+    // message and can never split a frame — the property the consensus
+    // harness relies on. (The SYNC half `write_all` is a raw byte-stream op
+    // with no intrinsic framing: a fault drops the whole span of a SINGLE
+    // write_all call, so it never splits WITHIN a call, but a sync consumer
+    // that wrote one frame across MULTIPLE write_all calls under loss could
+    // have a fragment dropped. That is by-convention-safe for today's sync
+    // callers, which each write one complete line/reply — see the write_all
+    // note in the .cpp; the gossip/consensus path never uses write_all.) A
+    // fault gates the
+    // SENDER's delivery into the peer inbox; the write still "succeeds" to
+    // the caller (a packet that left the host and was lost downstream), so
+    // no connection tears down and no peer is reaped — a lossy link, not a
+    // crash. Default (no group set, no partition, zero loss) is
+    // byte-identical to a perfect network; every existing test is
+    // unaffected. Thread-safe; call these from the harness thread while the
+    // cluster runs.
+
+    // Per-link message-drop probability in PER-MILLE (0..1000), applied to
+    // every current AND future link, both directions. Seeded per-link
+    // (xorshift advanced under the pair mutex); the drop DISTRIBUTION is
+    // fixed but exact drops inherit the harness's existing wall-clock
+    // nondeterminism.
+    void set_loss(uint32_t permille);
+
+    // Partition: every link whose two endpoint groups STRADDLE the boundary
+    // (one in `side_a`, the other not) has delivery blocked BOTH ways;
+    // non-straddling links deliver normally. Applies to current AND future
+    // links; recomputable (idempotent). Endpoints are tagged via
+    // VirtualTransport::set_partition_group (default group 0 → no straddle
+    // possible). Gates DELIVERY only — does not sever, so on heal() gossip
+    // resumes and the S-047 retry re-delivers. A minority partitioned below
+    // quorum cannot finalize (safety), and absent a periodic re-sync probe
+    // does NOT auto-catch-up on heal — that recovery boundary is
+    // operational (SECURITY.md §S-048).
+    void partition(const std::set<int>& side_a);
+
+    // Remove any partition (loss unaffected; clear it via set_loss(0)).
+    void heal();
+
 private:
     friend class VirtualTransport;
     friend class VirtualAcceptor;
+    // The connection pair holds a shared_ptr<LinkFlags> — grant it access to
+    // name the (otherwise-private) nested policy type.
+    friend struct VirtualConnection::Pair;
+
+    // Per-link delivery policy: two direction gates + a drop rate + the two
+    // endpoint groups + the per-link RNG. Co-owned by the Pair and the
+    // network — the write path reads the atomics without touching the
+    // network, and the network flips them without touching the pair.
+    // Defined in the .cpp.
+    struct LinkFlags;
 
     // Per-port listener state: the parked one-shot accept callback and the
     // queue of connects that arrived before an async_accept (both
@@ -219,24 +277,37 @@ private:
 
     // Registry ops (implemented in the .cpp; every one takes mu_).
     // register_listener assigns `port` in place when it is 0 (auto-assign
-    // from a counter) and throws std::runtime_error when taken.
+    // from a counter) and throws std::runtime_error when taken. `group` is
+    // the acceptor's partition group (recorded so links it forms inherit
+    // it).
     std::shared_ptr<Listener> register_listener(uint16_t& port,
-                                                VirtualEventLoop& loop);
+                                                VirtualEventLoop& loop,
+                                                int group);
     void unregister_listener(const std::shared_ptr<Listener>& l);
     void arm_accept(const std::shared_ptr<Listener>& l, Acceptor::AcceptCb cb);
-    void connect(uint16_t port, VirtualEventLoop& caller_loop,
+    void connect(uint16_t port, VirtualEventLoop& caller_loop, int caller_group,
                  VirtualTransport* owner, Transport::ConnectCb cb);
     void cancel_connects(VirtualTransport* owner);
     // Builds a wired pair; {accept-side, connect-side}. Caller holds mu_.
-    // Takes the loops' shared STATEs (see VirtualEventLoop::State): the
-    // pair keeps them alive so its teardown posts are order-free.
+    // Takes the loops' shared STATEs (see VirtualEventLoop::State) — the
+    // pair keeps them alive so its teardown posts are order-free — plus the
+    // two endpoint groups, so the new link inherits the current partition +
+    // loss and is registered for later mutation.
     std::pair<std::shared_ptr<VirtualConnection>,
               std::shared_ptr<VirtualConnection>>
     make_pair_locked(std::shared_ptr<VirtualEventLoop::State> accept_loop,
-                     std::shared_ptr<VirtualEventLoop::State> connect_loop);
+                     int accept_group,
+                     std::shared_ptr<VirtualEventLoop::State> connect_loop,
+                     int connect_group);
+    // Does a link between groups (ga, gb) straddle the current partition?
+    // Caller holds mu_.
+    bool link_blocked_locked(int ga, int gb) const;
 
     std::mutex mu_;
     std::map<uint16_t, std::shared_ptr<Listener>> listeners_;
+    std::vector<std::shared_ptr<LinkFlags>> links_;   // fault registry (all pairs)
+    std::set<int> partition_a_;                        // empty = no partition
+    uint32_t      loss_permille_   = 0;                // 0 = lossless
     uint16_t next_auto_port_   = 30000;   // listen(0) auto-assignment
     uint16_t next_pseudo_port_ = 50000;   // remote_endpoint() pair ids
 };
@@ -247,8 +318,9 @@ public:
     // result back via local_port()). Throws std::runtime_error when the
     // port is taken (bind-failure parity with the native acceptors).
     // localhost_only is accepted and ignored — in-process by construction.
+    // `group` is the owning transport's partition group (default 0).
     VirtualAcceptor(VirtualNetwork& net, VirtualEventLoop& loop,
-                    uint16_t port, bool localhost_only);
+                    uint16_t port, bool localhost_only, int group);
     // Unregisters the port. A parked accept callback is DROPPED, never
     // invoked (the drained-handlers contract every backend shares);
     // still-queued connects to this port are refused (posted on each
@@ -291,9 +363,16 @@ public:
     // construction site: VirtualTransport(loop, VirtualTransport::default_network()).
     static VirtualNetwork& default_network();
 
+    // Partition group of THIS endpoint (= this node) for the fault model
+    // (VirtualNetwork::partition). Default 0 = all endpoints in one group =
+    // no partition possible. Set before the node forms connections; a link
+    // records the groups of its two endpoints at creation.
+    void set_partition_group(int g) { group_ = g; }
+
 private:
     VirtualEventLoop& loop_;
     VirtualNetwork&   net_;
+    int               group_ = 0;
 };
 
 } // namespace determ::net

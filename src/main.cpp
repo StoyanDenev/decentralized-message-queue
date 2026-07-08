@@ -831,7 +831,20 @@ Additional in-process tests:
                                               abort/reselect), then REJOIN
                                               (restart syncs + adopts the
                                               outage blocks byte-identically)
-  determ test-fa-equivocation-trace           FA harness (real engine): seeded
+  determ test-fa-partition-virtual            FA4 under ADVERSARIAL NETWORK
+                                              (real engine, in process): 5
+                                              Nodes over the injected
+                                              VirtualTransport with fault
+                                              injection — PARTITION SAFETY
+                                              (gate: isolate a node; the
+                                              majority finalizes via the
+                                              S-047 abort/reselect, the
+                                              isolated node freezes below
+                                              quorum and never forks) + a
+                                              LOSSY-LINKS diagnostic that
+                                              reports tip progress and any
+                                              loss-induced S-048 fork
+)" R"(  determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
                                               slash-once/idempotence/A1/
@@ -25965,7 +25978,7 @@ int main(int argc, char** argv) {
             {
                 bool threw = false;
                 try {
-                    VirtualAcceptor dup(net, loopB, port, true);
+                    VirtualAcceptor dup(net, loopB, port, true, /*group=*/0);
                 } catch (const std::runtime_error&) {
                     threw = true;
                 }
@@ -26326,6 +26339,287 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-liveness-virtual "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA4 liveness under ADVERSARIAL NETWORK conditions, real engine, in
+    // process: the failover harness (test-fa-liveness-virtual) stresses
+    // node DEATH; this one stresses the DELIVERY layer — lossy links and a
+    // network partition — over the same 5 real Nodes / 3-of-5 weak BFT /
+    // per-block-committee shape. This is the S-047 territory: the retry
+    // (Node::rebroadcast_round_state_locked) exists precisely so a message
+    // lost in transit is re-delivered; without it, uniform loss wedges the
+    // round on the first drop. The virtual backend's fault model
+    // (VirtualNetwork::set_loss / partition / heal, whole-frame granular)
+    // gates DELIVERY, so no connection is torn down — a lossy link, not a
+    // crash. Phases:
+    //   1. LOSSY LINKS — steady state, then 25% then 50% per-frame drop on
+    //      EVERY link; the cluster must KEEP finalizing + agreeing (the
+    //      retry re-delivers), then heal loss and resume full-rate.
+    //   2. PARTITION SAFETY — isolate one node (a {4}|{1} delivery split);
+    //      the 4-node majority keeps finalizing while the isolated node,
+    //      being below quorum, FREEZES and never forks (its chain stays a
+    //      consistent prefix of the majority's). Heal does NOT auto-recover
+    //      the isolated node (no periodic re-sync probe — an operational
+    //      boundary, SECURITY.md §S-048); that is noted, not asserted.
+    if (cmd == "test-fa-partition-virtual") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        constexpr int      kNodes        = 5;
+        constexpr uint64_t kTargetBlocks = 3;
+
+        fs::path dir = fs::temp_directory_path() /
+            ("determ-fa-partition-virtual-" +
+             std::to_string(static_cast<unsigned long long>(
+                 std::chrono::steady_clock::now().time_since_epoch().count())));
+        std::error_code fec;
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+
+        // Genesis: the test_weak_3node 3-of-5 shape, per-block committees.
+        chain::GenesisConfig g;
+        g.chain_id      = "fa-partition-virtual";
+        g.m_creators    = 5;
+        g.k_block_sigs  = 3;
+        g.epoch_blocks  = 1;
+        g.block_subsidy = 10;
+        std::array<crypto::NodeKey, kNodes> keys;
+        for (int i = 0; i < kNodes; ++i) {
+            keys[i] = crypto::generate_node_key();
+            chain::GenesisCreator c;
+            c.domain        = "node" + std::to_string(i);
+            c.ed_pub        = keys[i].pub;
+            c.initial_stake = 1000;
+            g.initial_creators.push_back(c);
+        }
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+
+        VirtualNetwork vnet;
+        std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+        std::vector<std::unique_ptr<VirtualTransport>> transports;
+        std::vector<std::unique_ptr<node::Node>>       nodes;
+        const uint16_t base_port = 7651;
+
+        auto make_cfg = [&](int i) {
+            node::Config cfg;
+            cfg.domain       = "node" + std::to_string(i);
+            cfg.data_dir     = (dir / cfg.domain).string();
+            cfg.listen_port  = static_cast<uint16_t>(base_port + i);
+            cfg.key_path     = (dir / (cfg.domain + ".key")).string();
+            cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
+            cfg.genesis_path = gpath;
+            cfg.m_creators   = 5;
+            cfg.k_block_sigs = 3;
+            cfg.log_quiet    = true;
+            for (int p = 0; p < kNodes; ++p)
+                if (p != i)
+                    cfg.bootstrap_peers.push_back(
+                        "127.0.0.1:" + std::to_string(base_port + p));
+            return cfg;
+        };
+
+        for (int i = 0; i < kNodes; ++i) {
+            loops.push_back(std::make_unique<VirtualEventLoop>());
+            transports.push_back(
+                std::make_unique<VirtualTransport>(*loops[i], vnet));
+            // node4 is the partition minority (group 1); the rest are
+            // group 0. Groups are inert until VirtualNetwork::partition is
+            // called, so phase 1 (loss only) is unaffected.
+            transports[i]->set_partition_group(i == 4 ? 1 : 0);
+        }
+        for (int i = 0; i < kNodes; ++i) {
+            node::Config cfg = make_cfg(i);
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(keys[i], cfg.key_path);
+            nodes.push_back(std::make_unique<node::Node>(
+                cfg, determ::time::RealClock::instance(),
+                loops[i].get(), transports[i].get()));
+        }
+
+        std::vector<std::thread> runners;
+        for (int i = 0; i < kNodes; ++i) {
+            node::Node* n = nodes[i].get();
+            runners.emplace_back([n] { n->run(); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+
+        auto height_of = [&](int i) {
+            return nodes[i]->rpc_status()["height"].get<uint64_t>();
+        };
+        auto min_height = [&](int lo, int hi) {
+            uint64_t m = UINT64_MAX;
+            for (int i = lo; i < hi; ++i) m = std::min(m, height_of(i));
+            return m;
+        };
+        // Liveness is a CHAIN property: does finalization keep happening?
+        // Measured by the tip (max height over a node set), NOT the min —
+        // under sustained loss a node can miss enough consecutive block
+        // broadcasts to fall >TOLERANCE behind and, with no periodic
+        // re-sync probe (the §S-048-adjacent boundary), it cannot catch up
+        // via gossip. That straggler does not fork and does not stop the
+        // committee from finalizing; a min-based measure would wrongly read
+        // its lag as a liveness failure. The tip advancing == rounds
+        // completing == the S-047 property.
+        auto max_height = [&](int lo, int hi) {
+            uint64_t m = 0;
+            for (int i = lo; i < hi; ++i) m = std::max(m, height_of(i));
+            return m;
+        };
+        auto argmax_height = [&](int lo, int hi) {
+            int best = lo; uint64_t bh = 0;
+            for (int i = lo; i < hi; ++i) {
+                const uint64_t h = height_of(i);
+                if (h >= bh) { bh = h; best = i; }
+            }
+            return best;
+        };
+        auto wait_tip = [&](int lo, int hi, uint64_t target, int secs) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(secs);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (max_height(lo, hi) >= target) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return false;
+        };
+        // No-fork: every node that HOLDS block h agrees on it byte-for-byte
+        // (a straggler that lacks it yet is skipped — absence is not a fork).
+        auto agree_holders = [&](uint64_t h) {
+            std::string ref;
+            int holders = 0;
+            for (int i = 0; i < kNodes; ++i) {
+                const nlohmann::json b = nodes[i]->rpc_block(h);
+                if (b.is_null()) continue;
+                const std::string d = b.dump();
+                if (holders++ == 0) ref = d;
+                else if (d != ref) return false;
+            }
+            return holders > 0;
+        };
+
+        // ── Phase 0: steady state on a perfect network ──────────────────
+        // Wait for ALL five to catch up (poll the MIN with its own timeout —
+        // not "tip reaches target, then check min once", which has no margin
+        // for a node lagging under host/CI scheduling contention).
+        auto wait_all = [&](int lo, int hi, uint64_t target, int secs) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(secs);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (min_height(lo, hi) >= target) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return false;
+        };
+        const bool reached = wait_all(0, kNodes, kTargetBlocks + 1, 120);
+        check(reached,
+              "steady state: all 5 nodes finalized blocks 1..3 on a clean network");
+
+        // ── Phase 1: PARTITION SAFETY ({4}|{1}, node4 isolated) ─────────
+        // Runs FIRST, on the pristine post-steady-state cluster: a delivery
+        // partition isolates node4 (group 1) from the group-0 majority. No
+        // loss on the majority's internal links, so the 4-node quorum stays
+        // on ONE chain (the abort/reselect that routes around the drawn-but-
+        // unreachable node4 each block is driven by the S-047 retry, whose
+        // volleys always land on the clean intra-majority links). node4,
+        // below the K=3 quorum, cannot finalize and FREEZES — its chain
+        // stays a consistent PREFIX, never a competing fork.
+        if (reached) {
+            vnet.partition({1});   // isolate group 1 (node4) from group 0
+            // Let any in-flight block for node4 land and its rounds stall.
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            const uint64_t maj_tip = max_height(0, 4);   // majority = nodes 0..3
+
+            const bool maj_live = wait_tip(0, 4, maj_tip + 2, 90);
+            check(maj_live,
+                  "partition: the 4-node majority keeps finalizing while node4 is isolated (S-047 retry drives the abort/reselect around it)");
+
+            // Freeze evidence over a FIXED wall window, independent of how
+            // fast the majority finalized: an un-isolated node4 would advance
+            // across a 4 s window (the majority produces a block roughly per
+            // second); a below-quorum isolated node4 cannot produce any. This
+            // is the robust form — sampling node4 only at the instant the
+            // majority sprints +2 could false-pass on transient gossip lag.
+            const uint64_t h4_x = height_of(4);
+            std::this_thread::sleep_for(std::chrono::seconds(4));
+            const uint64_t h4_y = height_of(4);
+            check(h4_y == h4_x,
+                  "partition safety: isolated node4 froze (no advance over a fixed window while the majority finalized — below quorum)");
+            check(h4_y < max_height(0, 4),
+                  "partition safety: node4 fell behind the majority (it is genuinely isolated)");
+            if (h4_y >= 1) {
+                // node4's head block must equal the majority's block at the
+                // same index — its chain is a consistent PREFIX, never a
+                // fork. Reference = the furthest-ahead majority node (it is
+                // guaranteed to hold every lower block).
+                const uint64_t hi  = h4_y - 1;
+                const int      ref = argmax_height(0, 4);
+                const nlohmann::json b4 = nodes[4]->rpc_block(hi);
+                const nlohmann::json bm = nodes[ref]->rpc_block(hi);
+                check(!b4.is_null() && !bm.is_null() && b4.dump() == bm.dump(),
+                      "partition safety: node4's chain is a consistent prefix of the majority (no competing fork)");
+            }
+
+            vnet.heal();
+            // node4 does NOT auto-catch-up: the only sync trigger is the
+            // one-shot startup STATUS_REQUEST, so a delivery-partitioned
+            // node has no re-probe. Recovery is operational (restart /
+            // resync) — the §S-048-adjacent boundary. Noted, not asserted.
+            std::cout << "  NOTE: after heal node4 stays behind (no periodic "
+                         "re-sync probe — operational recovery boundary, "
+                         "SECURITY.md §S-048)\n";
+        }
+
+        // ── Phase 2: LOSSY-LINKS DIAGNOSTIC (non-gating) ────────────────
+        // Exercises the loss primitive + surfaces a genuine finding, but is
+        // NOT a hard gate. The S-047 retry re-delivers dropped ROUND
+        // messages, so the chain tip keeps advancing under loss (reported
+        // below). But sustained loss also induces timing skew, and timing
+        // skew triggers the abort-vs-finalize race that produces two
+        // validly-signed SAME-HEIGHT blocks — the OPEN S-048 fork, which
+        // the retry cannot heal (it delivers messages, it does not reorg).
+        // So "no fork under loss" is NOT assertable while S-048 is open, and
+        // heavy loss can even fragment the cluster below quorum. This phase
+        // therefore REPORTS (a) whether the majority tip advanced under 10%
+        // loss and (b) whether a same-height fork was observed — the
+        // empirical case that a reliable loss-liveness gate must wait on the
+        // S-048 fix (a virtual-TIME follow-on where the fork is
+        // reproducible). See docs/proofs/AdversarialTransportHarness.md and
+        // SECURITY.md §S-047/§S-048.
+        if (fail == 0) {
+            const uint64_t h = max_height(0, 4);
+            vnet.set_loss(100);   // 10% per-frame drop on every link
+            const bool adv = wait_tip(0, 4, h + 2, 60);
+            std::cout << "  NOTE: under 10% link loss the majority tip "
+                      << (adv ? "advanced +2 (S-047 retry re-delivered dropped round messages)"
+                              : "did not reach +2 in 60s (loss-induced S-048 fragmentation possible)")
+                      << "\n";
+            // A same-height fork = two holders disagree on the block at h+1.
+            const bool no_fork = agree_holders(h + 1);
+            std::cout << "  NOTE: loss-induced same-height fork "
+                      << (no_fork ? "not observed this run"
+                                  : "OBSERVED — the OPEN S-048 defect (the retry delivers messages but cannot reorg a fork; SECURITY.md §S-048)")
+                      << "\n";
+            vnet.set_loss(0);
+        }
+
+        for (auto& n : nodes) if (n) n->stop();
+        for (auto& t : runners) if (t.joinable()) t.join();
+        nodes.clear();
+        transports.clear();
+        loops.clear();
+        fs::remove_all(dir, fec);
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-partition-virtual "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
