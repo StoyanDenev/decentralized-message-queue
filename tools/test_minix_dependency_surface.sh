@@ -97,9 +97,28 @@ else
     fail "cryptotest/main.cpp missing its openssl includes — the oracle binary lost its oracle"
 fi
 
+# ── 4. RpcServer stays asio-free (net::Transport slice B) ───────────────────
+# Unlike check 2 (the net:: SEAM interface headers), rpc.hpp/rpc.cpp are a
+# CONSUMER of the seam — but slice B moved RpcServer fully onto net::Transport/
+# net::Connection, so the header should carry zero non-comment 'asio' tokens
+# too. A re-introduced direct asio include here is a regression back toward
+# the raw-socket coupling slice B removed.
+RPC_HDR="include/determ/rpc/rpc.hpp"
+if [ ! -f "$RPC_HDR" ]; then
+    fail "RpcServer header missing: $RPC_HDR"
+elif grep -qE 'asio' "$RPC_HDR"; then
+    if grep -vE '^\s*(//|\*)' "$RPC_HDR" | grep -qE 'asio'; then
+        fail "$RPC_HDR contains a non-comment 'asio' token — RpcServer regressed off the net::Transport seam"
+    else
+        ok "$RPC_HDR: asio appears only in comments (RpcServer stays seam-based)"
+    fi
+else
+    ok "$RPC_HDR is asio-free (RpcServer fully on net::Transport/net::Connection)"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
-    echo "  PASS: minix-dependency-surface (3rd-party set pinned; seam interfaces asio-free; OpenSSL test-oracle-only)"
+    echo "  PASS: minix-dependency-surface (3rd-party set pinned; seam interfaces asio-free; RpcServer asio-free; OpenSSL test-oracle-only)"
     exit 0
 else
     echo "  FAIL: minix-dependency-surface ($FAILS violation(s))"

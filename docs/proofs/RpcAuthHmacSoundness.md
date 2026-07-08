@@ -151,23 +151,25 @@ std::string canonical_for_hmac(const std::string& method, const json& params) {
 }
 ```
 
-The constructor accepts a hex-encoded secret and converts to bytes (`src/rpc/rpc.cpp:79-90`):
+The constructor accepts a hex-encoded secret and converts to bytes (`src/rpc/rpc.cpp:86-94`; the `asio::io_context&` parameter shown in earlier revisions of this doc was replaced by the minix `net::Transport&`/`net::EventLoop&` seam in the net::Transport slice B migration — the HMAC contract below is unaffected, since auth verification never touched the transport type):
 
 ```cpp
-RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
+RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
+                       node::Node& node, uint16_t port,
                        bool localhost_only, const std::string& auth_secret_hex,
                        double rate_per_sec, double burst)
-    : io_(io)
+    : transport_(transport)
+    , loop_(loop)
     , node_(node)
-    , acceptor_(io, ...)
+    , acceptor_(transport_.listen(port, localhost_only))
     , auth_secret_(hex_to_bytes(auth_secret_hex)) {
     ...
 }
 ```
 
-The startup log at `src/rpc/rpc.cpp:92-104` emits only the length (`auth_secret_.size()`) — never the value.
+The startup log at `src/rpc/rpc.cpp:96-108` emits only the length (`auth_secret_.size()`) — never the value.
 
-The dispatch ordering at `src/rpc/rpc.cpp:166-187` runs rate-limit *before* parse, then auth *after* parse-but-before-dispatch (necessary because computing the expected HMAC requires the parsed `method` and `params`). The ordering is documented inline as a deliberate choice: rate-limited callers should not even reveal whether their auth was valid.
+The dispatch ordering at `src/rpc/rpc.cpp:161-209` (inside `handle_session`) runs rate-limit *before* parse, then auth *after* parse-but-before-dispatch (necessary because computing the expected HMAC requires the parsed `method` and `params`). The ordering is documented inline as a deliberate choice: rate-limited callers should not even reveal whether their auth was valid.
 
 ---
 

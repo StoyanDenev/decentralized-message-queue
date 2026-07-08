@@ -116,10 +116,33 @@ FAST + GCC-clean interface header + the ratchet (transport.hpp pinned
 asio-free). A draft→verified **`test-net-seam` contract test** pins the
 Timer/EventLoop semantics in-process (the verify stage caught a real Windows
 flake: asio's waitable-timer thread queues SUCCESS completions independently of
-run(), so to-be-cancelled deadlines must be unreachable). **Slice B remaining:
-RpcServer + the dapp_subscribe subscriber socket (the synchronous consumers —
-§4.4 awkward fits 1-2), then the native IOCP/epoll/kqueue backends, then cut
-asio** (including the CLI sync clients).
+run(), so to-be-cancelled deadlines must be unreachable). **Slice B SHIPPED
+(`2c026ae`) — RpcServer + the dapp_subscribe subscriber socket (the two
+synchronous consumers, §4.4 awkward fit (1)) now run through `Connection`
+too.** Both are thread-per-connection blocking session models, not
+callback-driven, so `Connection` gained a synchronous half alongside slice
+A's async half: `write_all(buf,n)->bool`, `read_line(out)->bool`,
+`set_send_timeout(ms)` (the interface shape §4.4 had already anticipated —
+`set_send_timeout` was listed there before this slice existed). This is a
+deliberate scoping choice, not a redesign: awkward fit (1) is resolved with
+a sync escape hatch on the EXISTING seam; the full async migration of these
+two consumers is deferred to fit (2)/(3)/(5)'s resolution once a native
+backend actually lands (a real async rewrite of a thread-per-connection
+model is pointless to do twice). `Transport::listen` gained an explicit
+`localhost_only` bool with NO default (a virtual function default argument
+resolves on the caller's static type, which is unsafe across an abstract
+base — every call site, including GossipNet's, now passes it explicitly).
+Gate: 5-target build clean, goldens, net-seam contract test, a LIVE
+`test_dapp_subscribe` 3-node cluster run (13/13 — catch-up replay, seq
+contiguity, backpressure observability, all exercising the FB71 path
+through the new Connection), FAST 203/203, GCC-clean header compile, and a
+5-lens adversarial review (FB71 liveness, rate-limit-by-IP security,
+lifetime/concurrency, byte-behavior parity, build hygiene) that surfaced
+zero code findings. **Remaining: the native IOCP/epoll/kqueue backends
+(design in §4.5), then cut asio** (including the CLI sync clients, fit
+(6)'s Peer write-queue bound decision, and finally deleting the now-only-
+interim synchronous Connection methods' asio backing once the natives ship
+their own).
 
 ### 4.4 Transport surface survey (completed — the remaining raw-asio consumers)
 
@@ -160,9 +183,11 @@ callable cross-thread, `remote_endpoint()` noexcept, `set_keep_alive`,
 `Transport` (`listen(port, localhost_only)`, `async_connect(host, port, cb)`).
 Framing stays entirely in Peer — Transport is byte-stream only.
 
-**Awkward fits to resolve in the design:** (1) the two synchronous consumers
-(RPC session `read_until`, subscriber blocking write) need either a sync
-`read_some/write_all` pair on the seam or an async refactor; (2) the
+**Awkward fits to resolve in the design:** (1) **RESOLVED (slice B,
+`2c026ae`)** — the two synchronous consumers (RPC session `read_until`,
+subscriber blocking write) got a sync `write_all`/`read_line`/
+`set_send_timeout` triple on `Connection`, not an async refactor (deferred
+to the native-backend step, §4.5); (2) the
 cross-thread `close()`-breaks-blocking-write contract must hold on native
 backends (IOCP: `CancelIoEx`/`closesocket`; POSIX: fd shutdown while blocked in
 `send`); (3) native backends must reproduce asio's "same-operation completions
@@ -174,6 +199,82 @@ readiness→completion emulation must loop until exactly-N bytes transfer
 (edge-triggered epoll must fully drain) or Peer's fixed-length framing breaks
 silently; (6) Peer's write queue is UNBOUNDED (unlike the subscriber's
 kill-on-overflow) — a bounded-queue decision belongs to the rewrite.
+
+### 4.5 Native backend design (pre-implementation — gates the phase 3 build)
+
+A forward-looking design pass (no code yet — this is the gate before writing
+`IocpTransport`/`ReactorTransport`) resolved awkward fits (2)-(5) concretely
+enough to implement against:
+
+**File layout.** `iocp_event_loop.{hpp,cpp}` + `iocp_transport.{hpp,cpp}`
+(Windows); one SHARED `reactor_event_loop.{hpp,cpp}` + `reactor_transport.{hpp,
+cpp}` for BOTH POSIX backends, parameterized over a 4-primitive `Reactor`
+policy (`detail/epoll_reactor.{hpp,cpp}` / `detail/kqueue_reactor.{hpp,cpp}` —
+create-queue-fd, register/modify interest, wait, interpret-event). Everything
+else — `recv`/`send`/`connect`/`accept`, the read/write state machine, the
+`close()`-synthesizes-abort logic — is byte-identical POSIX and shared; the
+`.hpp`/`.cpp` split (unlike today's header-only `asio_*.hpp`) keeps
+`<Windows.h>`/`<sys/epoll.h>`/`<sys/event.h>` out of every other TU's
+transitive includes. CMake prunes `src/net/{iocp,reactor,detail/*}*.cpp` from
+`SOURCES` per-platform via the same `if(WIN32)`/`elseif(APPLE)`/`elseif(UNIX)`
+idiom already used elsewhere in `CMakeLists.txt` — only the `determ` daemon
+target is affected (wallet/light/cryptotest use explicit file lists, not the
+`src/` glob).
+
+**IOCP.** One heap-allocated `IoOperation{OVERLAPPED ov; WSABUF; IoCb cb;
+shared_ptr<IocpConnection> pin; total_requested/transferred; base}` per
+in-flight op, self-owning until its completion is dequeued. **WSARecv/WSASend
+do NOT guarantee N bytes per completion** even under IOCP (a proactor for the
+syscall, not for "exactly N") — `async_read`'s exact-N contract needs the
+SAME loop-until-N discipline as the POSIX backends, just driven by
+completions: advance the `WSABUF` and re-issue on partial transfer, using the
+SAME `OVERLAPPED` (safe — the prior call already completed). `AcceptEx`/
+`ConnectEx` are extension functions resolved once via `WSAIoctl`
+(`SIO_GET_EXTENSION_FUNCTION_POINTER`); both need `SO_UPDATE_ACCEPT_CONTEXT`/
+`SO_UPDATE_CONNECT_CONTEXT` before `shutdown`/`getpeername` behave (a
+well-documented but easy-to-miss requirement). `AsioAcceptor`'s convenience
+ctor sets `SO_REUSEADDR` by default (confirmed against the vendored asio
+source) — `IocpAcceptor`/the POSIX reactors must replicate this explicitly or
+silently regress restart-after-crash rebind behavior (a gap the golden-vector
+gate would NOT catch — only a live restart-timing test would). `close()` uses
+`CancelIoEx(handle, NULL)` (NOT the older thread-scoped `CancelIo` — the
+cross-thread FB71 contract needs the ALL-pending-ops variant, the same call
+asio itself uses for this); critically, `CancelIoEx` only REQUESTS
+cancellation — the pending op's `IoOperation` must not be freed until its
+(now-aborted) completion is actually dequeued through
+`GetQueuedCompletionStatus`, or the kernel can still be writing into freed
+memory. `net::EventLoop`'s existing multi-thread `run()` contract is already
+phrased in IOCP's image (`event_loop.hpp:21-24`) — this backend needs the
+LEAST new invention relative to the shipped interface.
+
+**epoll/kqueue.** A resumable per-connection `ReadOp`/`WriteOp` state machine:
+attempt the syscall immediately (data may already be buffered), park on
+`EAGAIN` by registering readiness interest, resume from the partial offset on
+the next wakeup — the same "loop until N, then complete" shape as IOCP, just
+split across possibly-many wakeups. **The multi-thread hazard IOCP does NOT
+have:** with `net::EventLoop::run()`'s N-threads-service-one-loop contract, two
+threads' `epoll_wait`/`kevent` calls CAN return the same ready fd
+simultaneously (documented epoll/kqueue behavior) — without one-shot interest
+(`EPOLLONESHOT` / `EV_ONESHOT`), two threads could split ONE logical N-byte
+read between them and silently deliver bytes out of order with no error and
+the right total count. Since Peer's framing carries consensus-relevant gossip
+messages, this is a genuine silent-corruption class, not a crash — recommend
+`EPOLLONESHOT`+level-triggered as the starting combo (edge-triggered as a
+later perf pass). **`close()` from another thread has no blocked syscall to
+interrupt** (the fd is always non-blocking) — the epoll/kqueue analogue of
+`CancelIoEx` is "synthesize the pending op's aborted completion right now,"
+serialized against a REAL completion by an explicit `op_mu_`/`active`-flag
+guard so exactly one of {real completion, close-synthesized abort} ever fires
+— new correctness surface IOCP gets for free from the kernel and POSIX must
+build by hand.
+
+**Recommended order:** IOCP first (validates the interface on the easier
+backend, using existing Windows FAST + both live clusters), then epoll
+(exercisable locally via WSL2 + the `ubuntu-latest` CI leg), then kqueue last
+(shares most code with epoll, but **there is currently no macOS CI runner or
+dev-box access at all** — ship it design-review-only until that's provisioned,
+don't silently treat it as equally gated). Only after all three are live +
+gated does cutting asio (phased plan step 4) become safe.
 
 ## 5. JSON track — nlohmann_json → in-tree (SURVEYED)
 
@@ -273,13 +374,15 @@ cross-check (how the C99 crypto is known correct).
    ratchet guard** (`tools/test_minix_dependency_surface.sh`, FAST) pins the
    FetchContent set to exactly {asio, json, openssl}, keeps the seam interface
    headers asio-free, and keeps OpenSSL confined to the test oracle.
-   Remaining slice behind the same pattern: `net::Transport` (acceptor +
-   sockets + resolver — surface surveyed in §4.4). Gate: native cluster tests +
-   goldens unchanged.
+   `net::Transport` SHIPPED in two slices: **slice A (`b1c9228`)** — the
+   gossip path (Peer/GossipNet) — and **slice B (`2c026ae`)** — RpcServer +
+   the dapp_subscribe subscriber, via a synchronous escape-hatch on
+   `Connection` (§4.3b, §4.4 fit (1)). Gate: native cluster tests + goldens
+   unchanged, both slices.
 3. **Native backends behind the seam** — `IocpTransport` (Windows) +
-   `EpollKqueueTransport` (POSIX), no third-party library; validate cluster
-   liveness + goldens byte-identical + the S-043 wire-roundtrip-verify per message
-   type.
+   epoll/kqueue `ReactorTransport` (POSIX), no third-party library; design
+   pass done (§4.5); validate cluster liveness + goldens byte-identical + the
+   S-043 wire-roundtrip-verify per message type.
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
    epoll/kqueue only.
 5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
@@ -308,6 +411,19 @@ cross-check (how the C99 crypto is known correct).
   (epoll edge/level-trigger, kqueue) semantics.
 - Native async **buffer-lifetime / threading** care (IOCP overlapped buffers must
   outlive the completion; edge-triggered epoll must drain the socket fully).
+- **The epoll/kqueue `close()`-races-a-real-completion hazard has NO IOCP
+  analogue** (§4.5): IOCP gets exactly-once completion delivery from the
+  kernel for free even under `CancelIoEx`; the POSIX reactors must build that
+  guarantee by hand (an `op_mu_`/active-flag serialization) or risk a missed
+  completion (hang) or a double-fired one (use-after-free) — this asymmetry
+  means the two POSIX backends carry correctness surface the Windows backend
+  structurally cannot have, and deserves its own stress test (rapid
+  connect/close churn) before either is trusted, not just the shared
+  golden-vector/cluster gate.
+- **kqueue has zero CI coverage today** (`.github/workflows/ci.yml` runs only
+  `ubuntu-latest`/`windows-latest`, no `macos-latest`) — ship kqueue as
+  design-review-only until a macOS runner exists; don't silently gate it as
+  equally validated as the other two.
 - JSON reader must be **schema-exact** and reproduce snapshot byte-format.
 - **Reproducible-build determinism** must hold across the new toolchain/deps.
 - This is **consensus-adjacent + owner-gated**; each increment ships behind the
