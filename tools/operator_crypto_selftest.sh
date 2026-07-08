@@ -184,7 +184,19 @@ TOTAL=0
 for t in $BATTERY; do
   TOTAL=$((TOTAL+1))
   name="${t#test-}"
-  OUT=$("$DETERM" "$t" 2>&1); RC=$?
+  # minix §6 split: the 11 dual-oracle movers run in determ-cryptotest (the
+  # sole OpenSSL binary); everything else stays on the daemon. Per-command
+  # routing — the battery deliberately mixes both.
+  case " test-aes-c99 test-ed25519-c99 test-frost-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99 test-sha3-c99 test-blake2b-c99 test-xchacha-c99 test-chacha20-c99 test-sha2-c99 " in
+    *" $t "*)
+      if [ -z "${DETERM_CRYPTOTEST:-}" ]; then
+        echo "operator_crypto_selftest: determ-cryptotest not built (needed for $t; build it or set DETERM_CRYPTOTEST_BIN)" >&2
+        exit 2
+      fi
+      BIN="$DETERM_CRYPTOTEST" ;;
+    *) BIN="$DETERM" ;;
+  esac
+  OUT=$("$BIN" "$t" 2>&1); RC=$?
   # 126/127 mid-battery = the binary became unrunnable between probes
   # (rebuild grabbed the lock) — that is "binary unavailable", not a
   # crypto failure. Map to the exit-2 contract immediately.

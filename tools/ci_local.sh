@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tools/ci_local.sh — the local second-platform verification gate.
 #
-# Builds all three binaries (determ, determ-wallet, determ-light) and runs
+# Builds the determ binaries (determ, determ-wallet, determ-light,
+# determ-cryptotest — the Minix §6 OpenSSL test-oracle split) and runs
 # the FAST=1 suite + the offline doc-coherence guards on the CURRENT
 # platform's toolchain. Running it inside WSL2 Ubuntu (or any Linux) gives
 # the green surface a second, independent platform: GCC/Linux next to the
@@ -74,10 +75,15 @@ if [ "$SANITIZE" -eq 1 ]; then
   # runner (SIGTERM/143). -j2 (with the -O1 from CMakeLists) keeps peak RAM within
   # the runner while staying faster than a serial build (the job has 150-min headroom).
   SAN_JOBS=2; [ "$JOBS" -lt 2 ] && SAN_JOBS="$JOBS"
-  cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$SAN_JOBS" --target determ \
+  # Minix §6 split: the 11 pure-oracle test-*-c99 subcommands live in the
+  # standalone determ-cryptotest binary — build it under UBSan alongside determ
+  # so the full c99-crypto surface stays in the sanitize net.
+  cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$SAN_JOBS" --target determ determ-cryptotest \
     2>&1 | grep -iE "error:|runtime error" && { echo "FAIL: UBSan build error"; exit 1; }
   SANBIN=$(find "$SAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
   [ -x "$SANBIN" ] || { echo "FAIL: UBSan determ binary not found"; exit 1; }
+  SANBIN_CT=$(find "$SAN_DIR" -maxdepth 2 -name determ-cryptotest -type f -perm -u+x | head -1)
+  [ -x "$SANBIN_CT" ] || { echo "FAIL: UBSan determ-cryptotest binary not found"; exit 1; }
   export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
   echo "=== ci_local --sanitize: run consensus/determinism + full c99-crypto surface under UBSan ==="
   # The consensus/determinism/arithmetic surface + the ENTIRE determ::c99 crypto
@@ -90,16 +96,25 @@ if [ "$SANITIZE" -eq 1 ]; then
             test-merge-event-determinism test-genesis-determinism test-state-proof-composite-key \
             test-cross-shard-atomicity test-cross-shard-multi-receipt test-cross-shard-outbound-apply \
             test-block-digest test-tx-root test-merkle test-overflow-paths \
-            test-sha256 test-sha2-c99 test-blake2b-c99 test-sha3-c99 test-chacha20-c99 test-xchacha-c99 \
-            test-aes-c99 test-argon2id-c99 test-ct-c99 test-ed25519-c99 test-ed25519-vectors \
-            test-ed25519-scalar-reduce test-x25519-c99 test-p256-c99 test-p256-h2c-c99 \
-            test-p256-oprf-c99 test-frost-c99 test-mldsa-c99 test-c99-vectors test-c99-api"
+            test-sha256 test-argon2id-c99 test-ct-c99 test-ed25519-vectors \
+            test-ed25519-scalar-reduce test-p256-oprf-c99 test-mldsa-c99 test-c99-vectors test-c99-api"
+  # The 11 moved oracle subcommands (Minix §6) run on the UBSan determ-cryptotest.
+  SAN_CMDS_CT="test-sha2-c99 test-blake2b-c99 test-sha3-c99 test-chacha20-c99 test-xchacha-c99 \
+            test-aes-c99 test-ed25519-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99 test-frost-c99"
   san_fail=0
   for cmd in $SAN_CMDS; do
     if "$SANBIN" "$cmd" >/tmp/ubsan_out.txt 2>&1; then
       echo "  PASS(ubsan): $cmd"
     else
       echo "  FAIL(ubsan): $cmd"; grep -iE "runtime error|undefined|shift" /tmp/ubsan_out.txt | head -3
+      san_fail=1
+    fi
+  done
+  for cmd in $SAN_CMDS_CT; do
+    if "$SANBIN_CT" "$cmd" >/tmp/ubsan_out.txt 2>&1; then
+      echo "  PASS(ubsan): $cmd [determ-cryptotest]"
+    else
+      echo "  FAIL(ubsan): $cmd [determ-cryptotest]"; grep -iE "runtime error|undefined|shift" /tmp/ubsan_out.txt | head -3
       san_fail=1
     fi
   done
@@ -119,9 +134,9 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "=== ci_local: configure ==="
   cmake -B "$BUILD_DIR" -S . -DCMAKE_BUILD_TYPE=Release || {
     echo "FAIL: ci-local configure failed"; exit 1; }
-  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-dsf ==="
+  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-cryptotest + determ-dsf ==="
   cmake --build "$BUILD_DIR" --config Release -j "$JOBS" \
-        --target determ determ-wallet determ-light determ-dsf || {
+        --target determ determ-wallet determ-light determ-cryptotest determ-dsf || {
     echo "FAIL: ci-local build failed"; exit 1; }
 fi
 
@@ -136,12 +151,16 @@ find_bin() {
 DETERM_BIN=$(find_bin determ)               || { echo "FAIL: determ binary not found under $BUILD_DIR"; exit 1; }
 DETERM_WALLET_BIN=$(find_bin determ-wallet) || { echo "FAIL: determ-wallet binary not found"; exit 1; }
 DETERM_LIGHT_BIN=$(find_bin determ-light)   || { echo "FAIL: determ-light binary not found"; exit 1; }
-export DETERM_BIN DETERM_WALLET_BIN DETERM_LIGHT_BIN
+# Minix §6 split: the 11 pure-oracle test-*-c99 wrappers run against the
+# standalone determ-cryptotest binary (the daemon links zero OpenSSL), so it
+# is REQUIRED for a green FAST suite — fail loudly, not late in a wrapper.
+DETERM_CRYPTOTEST_BIN=$(find_bin determ-cryptotest) || { echo "FAIL: determ-cryptotest binary not found"; exit 1; }
+export DETERM_BIN DETERM_WALLET_BIN DETERM_LIGHT_BIN DETERM_CRYPTOTEST_BIN
 # determ-dsf is the test-only 4th binary (its test is SKIP-clean). Export it so the
 # DSF test uses the NATIVE build, not a Windows determ-dsf.exe picked up via WSL
 # interop (which writes traces the Linux shell can't read — an empty-trace RED).
 if DETERM_DSF_BIN=$(find_bin determ-dsf); then export DETERM_DSF_BIN; fi
-echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} ==="
+echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} ==="
 
 echo "=== ci_local: FAST=1 suite ==="
 FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; exit 1; }

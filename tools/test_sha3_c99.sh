@@ -18,8 +18,15 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
+# Minix §6 OpenSSL split: this oracle subcommand lives in the standalone
+# determ-cryptotest binary (the daemon links zero OpenSSL).
+if [ -z "${DETERM_CRYPTOTEST:-}" ]; then
+  echo "  FAIL: determ-cryptotest binary not found (build the determ-cryptotest target or set DETERM_CRYPTOTEST_BIN)"
+  exit 1
+fi
+
 echo "=== C99 SHA-3/SHAKE (FIPS 202) vs OpenSSL EVP_sha3/shake + FIPS 202 KATs ==="
-OUT=$($DETERM test-sha3-c99 2>&1)
+OUT=$($DETERM_CRYPTOTEST test-sha3-c99 2>&1)
 echo "$OUT"
 
 if echo "$OUT" | tail -3 | grep -q "PASS: sha3-c99 unit test"; then

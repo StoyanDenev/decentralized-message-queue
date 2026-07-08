@@ -80,12 +80,21 @@ for h in $IFACE_HEADERS; do
     fi
 done
 
-# ── 3. OpenSSL includes confined to the test oracle (src/main.cpp) ──────────
-LEAKS="$(grep -rlE '#include\s*<openssl/' src include 2>/dev/null | grep -v '^src/main.cpp$' || true)"
+# ── 3. OpenSSL confined to the SEPARATE test-oracle binary (ZERO exception) ──
+# After the minix §6 split, the daemon/wallet/light link zero OpenSSL; the
+# ONLY permitted openssl includes in the tree live in cryptotest/main.cpp
+# (the determ-cryptotest dual-oracle binary). ANY openssl include under src/
+# or include/ is production OpenSSL creep and goes red.
+LEAKS="$(grep -rlE '#include\s*<openssl/' src include 2>/dev/null || true)"
 if [ -z "$LEAKS" ]; then
-    ok "openssl includes confined to src/main.cpp (test-oracle only; production is determ-crypto-c99)"
+    ok "ZERO openssl includes in src/+include/ (oracle isolated in cryptotest/; daemon links no OpenSSL)"
 else
     fail "openssl include leaked into production source: $LEAKS"
+fi
+if grep -qlE '#include\s*<openssl/' cryptotest/main.cpp 2>/dev/null; then
+    ok "cryptotest/main.cpp holds the dual-oracle openssl includes (expected)"
+else
+    fail "cryptotest/main.cpp missing its openssl includes — the oracle binary lost its oracle"
 fi
 
 echo ""

@@ -23,16 +23,25 @@ include(FetchContent)
 # Harmless on the dev box's CMake 3.x (an unused cache/normal variable there).
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-# ── OpenSSL (no Perl required) ──────────────────────────────────────────────
-set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
-set(WITH_APPS             OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  openssl
-  GIT_REPOSITORY https://github.com/janbar/openssl-cmake.git
-  GIT_TAG        1.1.1w-20231130
-  GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(openssl)
+# ── OpenSSL (no Perl required) — TEST-ORACLE ONLY (minix §6 split) ──────────
+# After the test-oracle split, OpenSSL is consumed EXCLUSIVELY by the
+# determ-cryptotest binary (the §Q9 dual-oracle cross-validation of the
+# determ-crypto-c99 stack). The daemon, wallet, and light link ZERO OpenSSL.
+# A tactical/SBOM build with -DDETERM_BUILD_CRYPTOTEST=OFF never even fetches
+# the OpenSSL sources.
+option(DETERM_BUILD_CRYPTOTEST
+       "Build the OpenSSL test-oracle binary (determ-cryptotest)" ON)
+if(DETERM_BUILD_CRYPTOTEST)
+  set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
+  set(WITH_APPS             OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    openssl
+    GIT_REPOSITORY https://github.com/janbar/openssl-cmake.git
+    GIT_TAG        1.1.1w-20231130
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(openssl)
+endif()
 
 # ── Asio (standalone, header-only) ─────────────────────────────────────────
 FetchContent_Declare(
@@ -198,20 +207,14 @@ target_include_directories(determ PRIVATE
   include
   ${CMAKE_SOURCE_DIR}/wallet
   ${asio_SOURCE_DIR}/asio/include
-  ${openssl_SOURCE_DIR}/include
 )
 
-# §3.15 (2026-07-03): the daemon's CONSENSUS crypto (SHA-256 builder, Ed25519
-# sign/verify, entropy) now runs on determ-crypto-c99. libcrypto remains
-# linked ONLY for the §Q9 test-oracle subcommands in src/main.cpp
-# (test-*-c99 cross-validate the C99 stack against an independent
-# implementation — by design a non-determ backend). After 1c (same day)
-# this is the LAST OpenSSL consumer in the tree: determ-light and
-# determ-wallet link zero OpenSSL. libssl (TLS) was never used by any
-# target — no TLS anywhere in src/net — and is dropped.
+# minix §6 (OpenSSL test-oracle split): the daemon links ZERO OpenSSL. All
+# production crypto runs on determ-crypto-c99 (§3.15), and the §Q9 dual-oracle
+# test-*-c99 subcommands now live in the separate determ-cryptotest binary —
+# the sole OpenSSL consumer in the tree.
 target_link_libraries(determ PRIVATE
   determ-crypto-c99
-  crypto
   nlohmann_json::nlohmann_json
 )
 
@@ -342,3 +345,36 @@ endif()
 add_executable(determ-dsf sim/dsf_main.cpp)
 target_compile_features(determ-dsf PRIVATE cxx_std_20)
 target_include_directories(determ-dsf PRIVATE ${CMAKE_SOURCE_DIR}/sim)
+
+# ── determ-cryptotest: OpenSSL dual-oracle test binary (minix §6 split) ──────
+# TEST-ONLY. Holds the 11 §Q9 test-*-c99 cross-validation subcommands moved
+# VERBATIM out of src/main.cpp (byte-identical stdout; wrapper summary pins
+# unchanged) so the daemon links zero OpenSSL. This target is the SOLE OpenSSL
+# consumer in the tree; -DDETERM_BUILD_CRYPTOTEST=OFF (tactical/SBOM builds)
+# skips both this target and the OpenSSL FetchContent entirely. Links the
+# in-tree determ-crypto-c99 (the implementation under test), OpenSSL crypto
+# (the independent oracle), and src/crypto/sha256.cpp (the determ::crypto
+# SHA-256 wrapper used by test-sha2-c99's backend-parity leg).
+if(DETERM_BUILD_CRYPTOTEST)
+  add_executable(determ-cryptotest
+    cryptotest/main.cpp
+    src/crypto/sha256.cpp
+  )
+  target_include_directories(determ-cryptotest PRIVATE
+    include
+    ${openssl_SOURCE_DIR}/include
+  )
+  target_link_libraries(determ-cryptotest PRIVATE
+    determ-crypto-c99
+    crypto
+  )
+  if(WIN32)
+    target_link_libraries(determ-cryptotest PRIVATE crypt32)
+    # Mirror determ's stack reserve: the frost/p256 handlers carry large
+    # stack locals inherited verbatim from the monolithic dispatcher.
+    target_link_options(determ-cryptotest PRIVATE /STACK:16777216)
+  endif()
+  if(UNIX)
+    target_link_libraries(determ-cryptotest PRIVATE pthread)
+  endif()
+endif()

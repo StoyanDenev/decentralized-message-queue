@@ -18,8 +18,15 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
+# Minix §6 OpenSSL split: this oracle subcommand lives in the standalone
+# determ-cryptotest binary (the daemon links zero OpenSSL).
+if [ -z "${DETERM_CRYPTOTEST:-}" ]; then
+  echo "  FAIL: determ-cryptotest binary not found (build the determ-cryptotest target or set DETERM_CRYPTOTEST_BIN)"
+  exit 1
+fi
+
 echo "=== C99 Ed25519 (RFC 8032) vs OpenSSL EVP_PKEY_ED25519 + the RFC 8032 §7.1 KAT ==="
-OUT=$($DETERM test-ed25519-c99 2>&1)
+OUT=$($DETERM_CRYPTOTEST test-ed25519-c99 2>&1)
 echo "$OUT"
 
 if echo "$OUT" | tail -3 | grep -q "PASS: ed25519-c99 all cross-validation + RFC 8032 KAT matched"; then

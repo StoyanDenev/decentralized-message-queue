@@ -105,6 +105,28 @@ else
     DETERM_LIGHT=""
 fi
 
+# ── DETERM_CRYPTOTEST (OpenSSL test-oracle binary) ────────────────────────────
+# Standalone crypto test-oracle binary (cryptotest/main.cpp): carries the 11
+# pure-oracle test-*-c99 subcommands split out of the daemon per
+# docs/proofs/MinixTacticalProfile.md §6, so `determ` links zero OpenSSL.
+# Optional like the wallet/light — tests that don't exercise it skip the
+# detection block entirely; the test-*-c99 wrappers do their own fail when
+# it is absent.
+if [ -n "${DETERM_CRYPTOTEST_BIN:-}" ]; then
+    DETERM_CRYPTOTEST="$DETERM_CRYPTOTEST_BIN"
+elif [ -x "build/Release/determ-cryptotest.exe" ]; then
+    DETERM_CRYPTOTEST="build/Release/determ-cryptotest.exe"
+elif [ -x "build/determ-cryptotest.exe" ]; then
+    DETERM_CRYPTOTEST="build/determ-cryptotest.exe"
+elif [ -x "build/determ-cryptotest" ]; then
+    DETERM_CRYPTOTEST="build/determ-cryptotest"
+elif [ -x "build/Release/determ-cryptotest" ]; then
+    DETERM_CRYPTOTEST="build/Release/determ-cryptotest"
+else
+    # Crypto-oracle binary is optional for tests that don't exercise it.
+    DETERM_CRYPTOTEST=""
+fi
+
 # ── DETERM_DSF (deterministic simulation framework binary) ────────────────────
 # Test-only fourth binary: the DSF core (virtual clock + scheduler + scenario
 # DSL + property checker). Optional like the wallet/light — tests that don't
@@ -150,5 +172,6 @@ _dt_abs() {  # echo $1 made absolute under PROJECT_ROOT unless empty/already-abs
 DETERM="$(_dt_abs "$DETERM")"
 DETERM_WALLET="$(_dt_abs "$DETERM_WALLET")"
 DETERM_LIGHT="$(_dt_abs "$DETERM_LIGHT")"
+DETERM_CRYPTOTEST="$(_dt_abs "$DETERM_CRYPTOTEST")"
 
-export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT
+export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT DETERM_CRYPTOTEST

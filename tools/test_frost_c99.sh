@@ -23,8 +23,15 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
+# Minix §6 OpenSSL split: this oracle subcommand lives in the standalone
+# determ-cryptotest binary (the daemon links zero OpenSSL).
+if [ -z "${DETERM_CRYPTOTEST:-}" ]; then
+  echo "  FAIL: determ-cryptotest binary not found (build the determ-cryptotest target or set DETERM_CRYPTOTEST_BIN)"
+  exit 1
+fi
+
 echo "=== C99 FROST-Ed25519 keygen (Shamir/Lagrange over the Ed25519 scalar field) ==="
-OUT=$($DETERM test-frost-c99 2>&1)
+OUT=$($DETERM_CRYPTOTEST test-frost-c99 2>&1)
 echo "$OUT"
 
 # Pin the binary's CURRENT terminal summary marker exactly. (When PSS refresh
