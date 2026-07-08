@@ -1,6 +1,6 @@
 # Real-Engine FA Harness — closing F-1/FA4 over the actual consensus engine
 
-**Status:** increment 1 SHIPPED (`test-fa-equivocation-trace`). This is the
+**Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice remains (§5). This is the
 **self-contained path** chosen by the owner (AskUserQuestion, 2026-07-07) for the
 DSF §Q1/§Q2 goal: rather than link the real engine into `determ-dsf` (which would
 drag asio + OpenSSL and reverse its self-contained property — see
@@ -65,23 +65,36 @@ assertions green; full-run output byte-identical across invocations. Gated by
 `tools/test_fa_equivocation_trace.sh` (FAST). No consensus code is modified — the
 harness only READS the real engine through existing public `Chain` APIs.
 
-## 4. What this closes, and what remains
+## 4. Increments 2-5 (SHIPPED) — the full apply-level event-family sweep
 
-Increment 1 closes a **slice** of F-1/FA4 for the FA6 equivocation-slashing
-invariant against the REAL apply path (previously only single-event apply tests +
-the TOY DSF scenario existed). F-1/FA4 remain **open overall** until the other
-consensus invariants have real-engine trace harnesses. Planned increments (each a
-`test-fa-*` mirroring this structure):
+All four follow the §2 contract; each was drafted + adversarially verified
+against the real Chain APIs by an independent reviewer before integration, and
+each full run is byte-identical across invocations.
 
-- **inc 2 — abort / BFT-escalation:** a trace of abort events; assert escalation
-  monotonicity + the quorum floor (S-044/S-045) + no spurious finalization.
-- **inc 3 — cross-shard receipt conservation:** a multi-shard trace; assert
-  no-double-credit / no-credit-without-debit + per-shard A1 (FA7).
-- **inc 4 — merge-event / view-reconciliation (F2):** assert no phantom evidence.
-- **liveness slice (FA4):** a trace asserting strict height progress + head
-  advance under a bounded adversary.
+| Increment | Subcommand | Trace property (against the REAL apply) | Observed adversarial run |
+|---|---|---|---|
+| 2 — abort / suspension (S-032) | `test-fa-abort-trace` | Phase-1 `AbortEvent` deducts exactly `min(SUSPENSION_SLASH, stake)` with floor-at-0 (a forced schedule drives one small-stake validator through full → PARTIAL → floored-ZERO deducts); `abort_records` cache exact per domain (Phase-2 rounds never recorded); `accumulated_slashed` exact + monotone; A1 per block | 6 fresh + 34 repeat targets, 1 partial, 7 floored-zero deducts, 8 Phase-2 no-ops |
+| 3 — cross-shard conservation (FA7) | `test-fa-cross-shard-trace` | TWO real chains (source shard A + dest shard B); real cross-shard TRANSFERs emit outbound receipts on A, B applies inbound receipts including adversarial DUPLICATE re-submissions — no-double-credit (`applied_inbound_receipts` dedup), no-credit-without-debit, two-chain conservation, per-chain A1 analogs, dual-chain state-root determinism | 48 unique credits, 23 duplicate rejects, 27 withheld/in-flight |
+| 4 — multi-event composition (FA-Apply-15) | `test-fa-multi-event-trace` | blocks carrying RANDOM MIXES of TRANSFERs + `EquivocationEvent`s + `AbortEvent`s simultaneously; a shadow model mirrors the real apply rules (fees to creators, BOTH slash kinds into one `accumulated_slashed`, nonce monotonicity, stake never underflows); joint A1 per block | 57 transfers, 16 equivocations (6 fresh / 10 dup), 15 aborts, 21 multi-kind blocks |
+| 5 — merge-event lifecycle | `test-fa-merge-trace` | `MergeEvent` BEGIN/END lifecycle over randomized topology per the real apply semantics — fresh BEGINs, duplicate BEGINs, valid ENDs, stale ENDs, bad-partner rejects; A1 per block | 14 fresh BEGINs, 5 dup BEGINs, 12 valid ENDs, 9 stale ENDs, 8 bad-partner rejects |
 
-The consensus **clock** injection ([ClockInjectionSeam.md](ClockInjectionSeam.md),
-increment 1 shipped) is only required if a future harness drives a real *networked*
-`Node` (which samples `proposer_time`); the block-apply-level harnesses here drive
-the apply path directly and do not need it.
+Gated by `tools/test_fa_{abort,cross_shard,multi_event,merge}_trace.sh` (FAST).
+
+## 5. What this closes, and what remains
+
+Increments 1-5 close the **apply-level** F-1 slices for every major consensus
+event family: FA6 equivocation slashing, S-032 abort/suspension accounting, FA7
+cross-shard receipt conservation, FA-Apply-15 multi-event composition (the
+canonical F-1 target alongside FA4), and the merge-event lifecycle — each as a
+seeded randomized-Byzantine multi-block trace over the REAL `Chain::append`
+apply path, complementing `test-supply-invariant-fuzz`'s economic A1 trace.
+
+**Still open: the FA4 liveness slice.** Liveness (height progress under
+adversarial *scheduling* — timeouts, abort cascades, escalation) is a property
+of the networked `Node` phase machine, not of the apply path; a real-engine
+FA4 harness needs to drive a real `Node` under controlled time/transport — i.e.
+the [ClockInjectionSeam.md](ClockInjectionSeam.md) increments 2+ plus the minix
+`net::Transport` seam ([MinixTacticalProfile.md](MinixTacticalProfile.md) §4;
+the same seam serves both goals). Until then FA4 remains covered only by the
+per-block slices (`test-required-block-sigs` etc.), the analytic proof
+(`Liveness.md`), and the live cluster tests.

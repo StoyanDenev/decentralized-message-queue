@@ -539,13 +539,20 @@ link the real engine into determ-dsf, the multi-block randomized-Byzantine
 CONSENSUS traces run over the REAL `Chain::append` apply path via `test-fa-*`
 subcommands in the determ binary (`docs/proofs/RealEngineFAHarness.md`) — the
 consensus-layer analog of `test-supply-invariant-fuzz` (which already covers the
-ECONOMIC A1 trace over the real engine). **Increment 1 (`test-fa-equivocation-trace`)
-closes a SLICE of F-1/FA4 for the FA6 equivocation-slashing invariant (slash-once
-/ idempotence / A1 / determinism over 48 real-apply blocks).** F-1/FA4 remain OPEN
-overall until the abort/escalation, cross-shard (FA7), F2, and FA4-liveness slices
-have their own real-engine trace harnesses. The `time::Clock` seam
-(`docs/proofs/ClockInjectionSeam.md`, increment 1 shipped) is only needed if a
-future harness drives a real networked Node; the apply-level harnesses do not need it.
+ECONOMIC A1 trace over the real engine). **Increments 1-5 (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`)
+close the APPLY-LEVEL F-1 slices for every major consensus event family** — FA6
+equivocation slashing, S-032 abort/suspension accounting, FA7 cross-shard receipt
+conservation (two real chains, duplicate re-submission adversary), FA-Apply-15
+multi-event composition (the canonical F-1 target: random per-block mixes of
+transfers + equivocations + aborts vs a shadow model), and the merge-event
+lifecycle — each a seeded randomized-Byzantine multi-block trace with per-block
+A1, non-vacuity, a negative control, and same-seed state-root determinism.
+**What remains of F-1/FA4: the FA4 LIVENESS slice** — height progress under
+adversarial scheduling is a networked-Node phase-machine property, reachable only
+by driving a real Node under controlled time/transport (the `time::Clock` seam,
+`docs/proofs/ClockInjectionSeam.md` increments 2+, plus the minix
+`net::Transport` seam — one seam serves both goals). The apply-level harnesses
+do not need those seams.
 
 ### F-2 — Per-FA-Apply test surface is comprehensive
 
