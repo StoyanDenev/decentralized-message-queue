@@ -98,18 +98,37 @@ harness needs to drive a real `Node` under controlled time/transport — the
 `net::Transport` seam ([MinixTacticalProfile.md](MinixTacticalProfile.md) §4;
 the same seam serves both goals). Increment 6 delivers the TRANSPORT half:
 `Node` gained a §Q2 loop/transport injection seam (pair-enforced, defaults =
-platform-native, byte-invariant), and `test-fa-liveness-virtual` runs THREE
+platform-native, byte-invariant), and `test-fa-liveness-virtual` runs FIVE
 real `Node` instances — full production stack: GossipNet wire codec,
 HELLO/STATUS handshake, contrib/block-sig rounds, committee selection, chain
-apply — in one process over an in-memory `VirtualTransport`
-(`include/determ/net/virtual_transport.hpp`), asserting threshold liveness
-(every node reaches height ≥ 3) and prefix agreement (finalized blocks 1..3
-byte-identical across nodes) under weak-BFT K=2/M=3. Its first run caught a
-real latent teardown bug (the `run()`/`stop()` double-join race,
-`Node::join_loop_threads()`). Wall-clock timers still drive the rounds, so the
-harness is *hermetic but not yet deterministic*: the remaining FA4 work is a
-virtual-TIME evolution of the backend (deterministic schedules, then
-ADVERSARIAL schedules — delayed/reordered delivery, partition, timeout
-injection). Until then adversarial-scheduling liveness remains covered by the
-per-block slices (`test-required-block-sigs` etc.), the analytic proof
-(`Liveness.md`), and the live cluster tests.
+apply, GET_CHAIN sync — in one process over an in-memory `VirtualTransport`
+(`include/determ/net/virtual_transport.hpp`), in test_weak_3node's
+live-validated 3-of-5 shape (`epoch_blocks=1` per-block committees), across
+three phases: liveness+agreement (blocks 1..3 byte-identical on all five),
+FAILOVER (destroy one node; majority of survivors must keep finalizing via
+abort/reselection), and REJOIN (the identity restarts on fresh substrate,
+syncs the survivors' chain, and adopts an outage block byte-identically).
+
+The harness immediately paid for itself with three REAL findings no other
+surface could catch (live cluster tests never kill a node mid-run): the
+`run()`/`stop()` double-join teardown race (`Node::join_loop_threads()`);
+**S-047** (High-liveness, mitigated) — every consensus round message was a
+one-shot broadcast, so one missed claim / hash-chained abort event / contrib
+(in particular a crashing member's asymmetrically-delivered last messages)
+wedged the chain permanently even at 4/5 honest-alive — closed by the
+re-arming retry tick `Node::rebroadcast_round_state_locked()` (relays the
+full stored, author-signed round state; byte-identical, receiver-deduped,
+zero wire/digest change; failover loop 5/12 wedges → 0/14); and **S-048**
+(Medium, OPEN, owner-gated) — the abort-vs-finalize race can strand one node
+on a validly-signed minority same-height block that append-only sync can
+never reorg (`Chain::resolve_fork` exists per S-029 but is unwired); the
+harness classifies that mode and prints a `KNOWN-OPEN S-048` marker instead
+of flaking. See SECURITY.md §S-047/§S-048.
+
+Wall-clock timers still drive the rounds, so the harness is *hermetic but not
+yet deterministic*: the remaining FA4 work is a virtual-TIME evolution of the
+backend (deterministic schedules, then ADVERSARIAL schedules —
+delayed/reordered delivery, partition, timeout injection). Until then
+adversarial-scheduling liveness remains covered by the per-block slices
+(`test-required-block-sigs` etc.), the analytic proof (`Liveness.md`), and
+the live cluster tests.
