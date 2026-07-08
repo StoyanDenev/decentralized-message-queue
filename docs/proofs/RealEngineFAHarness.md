@@ -1,6 +1,6 @@
 # Real-Engine FA Harness — closing F-1/FA4 over the actual consensus engine
 
-**Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice remains (§5). This is the
+**Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice OPENED with increment 6, `test-fa-liveness-virtual` (§5) — real multi-node liveness+agreement in process; adversarial-schedule traces (virtual time) remain. This is the
 **self-contained path** chosen by the owner (AskUserQuestion, 2026-07-07) for the
 DSF §Q1/§Q2 goal: rather than link the real engine into `determ-dsf` (which would
 drag asio + OpenSSL and reverse its self-contained property — see
@@ -89,12 +89,27 @@ canonical F-1 target alongside FA4), and the merge-event lifecycle — each as a
 seeded randomized-Byzantine multi-block trace over the REAL `Chain::append`
 apply path, complementing `test-supply-invariant-fuzz`'s economic A1 trace.
 
-**Still open: the FA4 liveness slice.** Liveness (height progress under
-adversarial *scheduling* — timeouts, abort cascades, escalation) is a property
-of the networked `Node` phase machine, not of the apply path; a real-engine
-FA4 harness needs to drive a real `Node` under controlled time/transport — i.e.
-the [ClockInjectionSeam.md](ClockInjectionSeam.md) increments 2+ plus the minix
+**The FA4 liveness slice — increment 6 SHIPPED (`test-fa-liveness-virtual`),
+adversarial scheduling remains.** Liveness (height progress under adversarial
+*scheduling* — timeouts, abort cascades, escalation) is a property of the
+networked `Node` phase machine, not of the apply path; a real-engine FA4
+harness needs to drive a real `Node` under controlled time/transport — the
+[ClockInjectionSeam.md](ClockInjectionSeam.md) §Q1 clock plus the minix
 `net::Transport` seam ([MinixTacticalProfile.md](MinixTacticalProfile.md) §4;
-the same seam serves both goals). Until then FA4 remains covered only by the
+the same seam serves both goals). Increment 6 delivers the TRANSPORT half:
+`Node` gained a §Q2 loop/transport injection seam (pair-enforced, defaults =
+platform-native, byte-invariant), and `test-fa-liveness-virtual` runs THREE
+real `Node` instances — full production stack: GossipNet wire codec,
+HELLO/STATUS handshake, contrib/block-sig rounds, committee selection, chain
+apply — in one process over an in-memory `VirtualTransport`
+(`include/determ/net/virtual_transport.hpp`), asserting threshold liveness
+(every node reaches height ≥ 3) and prefix agreement (finalized blocks 1..3
+byte-identical across nodes) under weak-BFT K=2/M=3. Its first run caught a
+real latent teardown bug (the `run()`/`stop()` double-join race,
+`Node::join_loop_threads()`). Wall-clock timers still drive the rounds, so the
+harness is *hermetic but not yet deterministic*: the remaining FA4 work is a
+virtual-TIME evolution of the backend (deterministic schedules, then
+ADVERSARIAL schedules — delayed/reordered delivery, partition, timeout
+injection). Until then adversarial-scheduling liveness remains covered by the
 per-block slices (`test-required-block-sigs` etc.), the analytic proof
 (`Liveness.md`), and the live cluster tests.

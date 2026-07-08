@@ -68,6 +68,18 @@ contained to one seam and is the SAME abstraction scoped for §Q2's
 `VirtualTransport` (deterministic testing) — one seam serves both minix and DSF
 testability.
 
+**§Q2 SHIPPED.** The third backend exists: `VirtualEventLoop` /
+`VirtualTransport` / `VirtualNetwork` (`include/determ/net/virtual_transport.hpp`
++ `src/net/virtual_transport.cpp` — pure std, zero OS includes, identical TU on
+every platform, contract-pinned by `test-net-virtual` and the dependency
+ratchet), and `Node` gained the Clock-pattern loop/transport injection ctor
+(inject both or neither; defaults construct the platform-native pair —
+byte-invariant for every existing caller). The payoff harness is
+`test-fa-liveness-virtual`: three real `Node`s reach consensus in one process
+over in-memory pipes ([RealEngineFAHarness.md](RealEngineFAHarness.md) §5).
+Timers are still wall-clock; a virtual-TIME loop is the backend's next
+evolution (deterministic, then adversarial, schedules).
+
 ### 4.2 Determinism safety (the key de-risker)
 
 Networking is **not digest-bound**: the apply / state-commitment path
@@ -503,6 +515,16 @@ cross-check (how the C99 crypto is known correct).
    zero-asio-includes check. (The CLI-blocking-clients slice had already
    shipped in `b1c5056` via `net::SyncClient`.) Gate: both platforms
    reconfigured + rebuilt from scratch, full battery green on each.
+4b. **Virtual backend + Node injection — DONE** (`e79c94a` seam,
+   `d073ff3` backend, `0dfdd39` harness; §4.1 "§Q2 SHIPPED"): EventLoop
+   grew interface-level `timer_schedule`/`timer_cancel` (the two identical
+   per-backend timers collapsed into one `net::LoopTimer` over the abstract
+   loop); `Node` takes an optional loop+transport pair (Clock pattern,
+   byte-invariant defaults); the pure-std `VirtualTransport` backend +
+   `test-net-virtual` contract battery; and `test-fa-liveness-virtual` —
+   3 real Nodes reaching byte-identical consensus in one process, which
+   also caught + fixed the latent `run()`/`stop()` double-join race
+   (`Node::join_loop_threads()`).
 5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
    phase-2 determ::json owner-gated). 6. **OpenSSL split** (§6 — **SHIPPED**
    `217191a`: the daemon links ZERO OpenSSL; determ-cryptotest is the sole
