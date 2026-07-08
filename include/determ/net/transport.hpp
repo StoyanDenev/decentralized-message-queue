@@ -2,13 +2,12 @@
 // Copyright 2026 Determ Contributors
 //
 // net::Transport — the socket/acceptor/connect slice of the minix net seam
-// (docs/proofs/MinixTacticalProfile.md §4.4; slice 3 after net::Timer and
-// net::EventLoop). Proactor-style completion interface: it maps 1:1 onto IOCP
-// completions and is emulated over epoll/kqueue readiness (loop the syscall
-// until exactly-N bytes transfer, THEN invoke the completion). AsioTransport
-// (net/asio_transport.hpp) is today's backend; the native minix backends
-// (IOCP on Windows, epoll/kqueue on POSIX) implement the SAME interface, at
-// which point asio is dropped. UNCONDITIONAL — not gated on any build profile.
+// (docs/proofs/MinixTacticalProfile.md §4.4). Proactor-style completion
+// interface: it maps 1:1 onto IOCP completions and is emulated over epoll
+// readiness (loop the syscall until exactly-N bytes transfer, THEN invoke
+// the completion). Backends: IocpTransport (Windows) and ReactorTransport
+// (POSIX epoll), selected by net/native.hpp; asio is DELETED (minix §7
+// step 4). UNCONDITIONAL — not gated on any build profile.
 //
 // Transport is BYTE-STREAM only: all framing (the 4-byte big-endian length
 // prefix, S-022 caps) stays in Peer/messages — swapping the backend cannot

@@ -43,14 +43,8 @@ if(DETERM_BUILD_CRYPTOTEST)
   FetchContent_MakeAvailable(openssl)
 endif()
 
-# ── Asio (standalone, header-only) ─────────────────────────────────────────
-FetchContent_Declare(
-  asio
-  GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
-  GIT_TAG        asio-1-30-2
-  GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(asio)
+# (asio DELETED — minix §7 step 4: the daemon networks on native IOCP
+#  (Windows) / epoll (POSIX) behind the net:: seam; no transport library.)
 
 # ── nlohmann/json — VENDORED in-tree (minix JSON track, phase 1) ────────────
 # The single-include header v3.11.3 lives at third_party/nlohmann/json.hpp,
@@ -220,7 +214,6 @@ add_executable(determ ${SOURCES})
 target_include_directories(determ PRIVATE
   include
   ${CMAKE_SOURCE_DIR}/wallet
-  ${asio_SOURCE_DIR}/asio/include
 )
 
 # minix §6 (OpenSSL test-oracle split): the daemon links ZERO OpenSSL. All

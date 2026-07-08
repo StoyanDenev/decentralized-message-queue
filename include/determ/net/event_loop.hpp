@@ -2,13 +2,12 @@
 // Copyright 2026 Determ Contributors
 //
 // net::EventLoop — the daemon event-loop slice of the minix net seam
-// (docs/proofs/MinixTacticalProfile.md §4; slice 2 after net::Timer). The loop
-// services async completions (timers, and eventually sockets) and executes
-// posted callbacks. AsioEventLoop (net/asio_event_loop.hpp) is today's backend;
-// the future minix native backends (IOCP completion port on Windows,
-// epoll/kqueue on POSIX) implement the SAME interface, at which point asio is
-// dropped. UNCONDITIONAL — not gated on any build profile (minix is the
-// long-term architecture, not a TACTICAL-profile switch).
+// (docs/proofs/MinixTacticalProfile.md §4). The loop services async
+// completions (sockets, timers) and executes posted callbacks. Backends:
+// IocpEventLoop (Windows completion port) and ReactorEventLoop (POSIX
+// epoll), selected by net/native.hpp; asio is DELETED (minix §7 step 4).
+// UNCONDITIONAL — not gated on any build profile (minix is the long-term
+// architecture, not a TACTICAL-profile switch).
 #pragma once
 #include <functional>
 

@@ -38,11 +38,22 @@ echo "=== minix dependency-surface ratchet ==="
 DECLARED="$(grep -A1 'FetchContent_Declare(' CMakeLists.txt \
             | grep -vE 'FetchContent_Declare|^--' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' ' ')"
-EXPECTED="asio openssl "
+EXPECTED="openssl "
 if [ "$DECLARED" = "$EXPECTED" ]; then
-    ok "FetchContent set is exactly {asio, openssl} (json vendored; no new third-party source dep)"
+    ok "FetchContent set is exactly {openssl} (test-oracle-only; asio DELETED — native IOCP/epoll; json vendored)"
 else
     fail "FetchContent set CHANGED: got '{$DECLARED}' expected '{$EXPECTED}' — a new external dependency needs an owner decision + a MinixTacticalProfile.md row (then update this pin)"
+fi
+
+# ── 1c. asio stays DELETED: zero asio includes anywhere in production code ──
+# The §7 step-4 end-state: the daemon networks on native IOCP (Windows) /
+# epoll (POSIX) behind the net:: seam. Any reappearing '#include <asio'
+# anywhere in the tree's C/C++ source is a transport-library regression.
+ASIO_LEAKS="$(grep -rlE '#include\s*<asio' src include wallet light cryptotest 2>/dev/null || true)"
+if [ -z "$ASIO_LEAKS" ]; then
+    ok "ZERO asio includes in the tree (native IOCP/epoll only — the minix networking end-state)"
+else
+    fail "asio include reappeared: $ASIO_LEAKS"
 fi
 
 # ── 1b. Vendored nlohmann/json header is byte-pinned (SHA-256 ratchet) ──────
