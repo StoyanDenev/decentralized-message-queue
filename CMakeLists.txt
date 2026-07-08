@@ -43,13 +43,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(asio)
 
-# ── nlohmann/json ───────────────────────────────────────────────────────────
-FetchContent_Declare(
-  json
-  URL      https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+# ── nlohmann/json — VENDORED in-tree (minix JSON track, phase 1) ────────────
+# The single-include header v3.11.3 lives at third_party/nlohmann/json.hpp,
+# byte-pinned by the SHA-256 ratchet in tools/test_minix_dependency_surface.sh.
+# Vendoring replaces the FetchContent download: the whole JSON source is
+# auditable in-repo and configure works fully offline. The imported target name
+# is preserved, so no consumer changes anywhere. (The former release-tarball
+# pin was SHA256 d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d.)
+add_library(nlohmann_json INTERFACE)
+add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+target_include_directories(nlohmann_json INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
-FetchContent_MakeAvailable(json)
 
 # ── determ executable ───────────────────────────────────────────────────────
 add_definitions(-DASIO_STANDALONE -DASIO_NO_DEPRECATED)

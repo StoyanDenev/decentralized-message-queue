@@ -32,15 +32,36 @@ ok()   { echo "  ok: $*"; }
 
 echo "=== minix dependency-surface ratchet ==="
 
-# ── 1. FetchContent set is pinned to exactly {openssl, asio, json} ──────────
+# ── 1. FetchContent set is pinned to exactly {openssl, asio} ────────────────
+# (json left the set in the minix JSON-track phase 1: it is VENDORED in-tree
+#  at third_party/nlohmann/json.hpp and byte-pinned by check 1b below.)
 DECLARED="$(grep -A1 'FetchContent_Declare(' CMakeLists.txt \
             | grep -vE 'FetchContent_Declare|^--' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' ' ')"
-EXPECTED="asio json openssl "
+EXPECTED="asio openssl "
 if [ "$DECLARED" = "$EXPECTED" ]; then
-    ok "FetchContent set is exactly {asio, json, openssl} (no new third-party source dep)"
+    ok "FetchContent set is exactly {asio, openssl} (json vendored; no new third-party source dep)"
 else
     fail "FetchContent set CHANGED: got '{$DECLARED}' expected '{$EXPECTED}' — a new external dependency needs an owner decision + a MinixTacticalProfile.md row (then update this pin)"
+fi
+
+# ── 1b. Vendored nlohmann/json header is byte-pinned (SHA-256 ratchet) ──────
+# Any edit to the vendored third-party header — a silent local patch, an
+# unreviewed version bump — goes RED until the owner re-pins. The two
+# byte-exact JSON contracts (the hash_abort_event claims_json.dump() consensus
+# digest + the RPC HMAC canonical dump) make the JSON writer consensus-adjacent.
+JSON_HDR="third_party/nlohmann/json.hpp"
+JSON_PIN="9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6"
+if [ ! -f "$JSON_HDR" ]; then
+    fail "vendored JSON header missing: $JSON_HDR"
+else
+    GOT="$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$JSON_HDR" 2>/dev/null \
+           || sha256sum "$JSON_HDR" | cut -d' ' -f1)"
+    if [ "$GOT" = "$JSON_PIN" ]; then
+        ok "vendored json.hpp (v3.11.3 single-include) matches the SHA-256 pin"
+    else
+        fail "vendored json.hpp SHA-256 CHANGED: got $GOT expected $JSON_PIN — an edit/bump of the vendored header needs owner review (byte-exact JSON contracts: abort-event digest + RPC HMAC)"
+    fi
 fi
 
 # ── 2. minix seam interface headers are asio-free ───────────────────────────
