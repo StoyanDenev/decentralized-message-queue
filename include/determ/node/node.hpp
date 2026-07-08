@@ -7,6 +7,7 @@
 #include <determ/node/producer.hpp>
 #include <determ/net/gossip.hpp>
 #include <determ/net/asio_timer.hpp>
+#include <determ/net/asio_event_loop.hpp>
 #include <determ/time/clock.hpp>
 #include <asio.hpp>
 #include <thread>
@@ -188,7 +189,10 @@ public:
     void run();
     void stop();
 
-    asio::io_context& io_context_access() { return io_; }
+    // TRANSITIONAL (minix): hands the raw io_context to consumers not yet
+    // behind the net seam (RpcServer). Shrinks with each minix slice; deleted
+    // together with asio when the native backends land.
+    asio::io_context& io_context_access() { return loop_.raw(); }
 
     // RPC handlers
     nlohmann::json rpc_status()                                     const;
@@ -547,8 +551,15 @@ private:
     // enough to displace anything — caller should reject the tx.
     bool mempool_make_room_for(const chain::Transaction& tx);
 
+    // §minix net::EventLoop seam — the daemon event loop behind an interface
+    // (AsioEventLoop today; native IOCP/epoll/kqueue later). Declared BEFORE
+    // gossip_/timers: their initializers call loop_.raw(), which requires a
+    // constructed object (the old `asio::io_context io_` member sat AFTER
+    // gossip_, which only worked because binding a reference doesn't access
+    // the referent). Side benefit: members now destruct in the correct order
+    // (gossip_'s acceptor/sockets before the loop that services them).
+    net::AsioEventLoop              loop_;
     net::GossipNet                  gossip_;
-    asio::io_context                io_;
     std::vector<chain::AbortEvent>  current_aborts_;
     std::vector<size_t>             current_creator_indices_;
     std::vector<std::string>        current_creator_domains_;

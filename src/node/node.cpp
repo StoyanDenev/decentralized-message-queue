@@ -127,9 +127,9 @@ void Config::save(const std::string& path) const {
 Node::Node(const Config& cfg, determ::time::Clock& clock)
     : cfg_(cfg)
     , clock_(clock)
-    , gossip_(io_)
-    , contrib_timer_(io_)
-    , block_sig_timer_(io_) {
+    , gossip_(loop_.raw())
+    , contrib_timer_(loop_.raw())
+    , block_sig_timer_(loop_.raw()) {
 
     validator_.set_k_block_sigs(cfg.k_block_sigs);
     validator_.set_m_pool(cfg.m_creators);
@@ -595,7 +595,7 @@ void Node::run() {
 
     unsigned n = std::max(1u, std::thread::hardware_concurrency());
     for (unsigned i = 0; i < n; ++i)
-        threads_.emplace_back([this] { io_.run(); });
+        threads_.emplace_back([this] { loop_.run(); });
 
     // A9 / S-031 follow-on: spawn the async chain.save worker.
     // Sits idle on save_cv_ until enqueue_save() flips save_pending_.
@@ -608,7 +608,7 @@ void Node::run() {
     // multi-node cluster fires the first round before peers are reachable,
     // the contrib phase aborts (broadcast goes nowhere), and per-node
     // generations diverge; recovery never converges.
-    auto grace = std::make_shared<net::AsioTimer>(io_);
+    auto grace = std::make_shared<net::AsioTimer>(loop_.raw());
     grace->arm(std::chrono::milliseconds(1500), [this, grace] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (gossip_.peer_count() == 0) {
@@ -624,7 +624,7 @@ void Node::run() {
 
 void Node::stop() {
     if (running_.exchange(false)) {
-        io_.stop();
+        loop_.stop();
         for (auto& t : threads_) if (t.joinable()) t.join();
 
         // A9 / S-031 follow-on: wind down the save worker. Signal stop,
@@ -922,7 +922,7 @@ void Node::start_contrib_phase() {
 // (rev.9 S-009 commit-reveal); this placeholder only matters as a
 // per-round identifier in BlockSigMsg.
 //
-// The actual phase change + sig broadcast is deferred via asio::post.
+// The actual phase change + sig broadcast is deferred via loop_.post().
 // This breaks the synchronous call chain on M=K=1 chains where
 // finalize_round → apply_block → check_if_selected → start_contrib
 // would otherwise recurse without bound.
@@ -944,7 +944,7 @@ void Node::enter_block_sig_phase() {
         current_tx_root_, ordered_dh_inputs);
 
     Hash placeholder = crypto::sha256(current_delay_seed_);
-    asio::post(io_, [this, placeholder] {
+    loop_.post([this, placeholder] {
         std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (phase_ != ConsensusPhase::CONTRIB) return;
         start_block_sig_phase(placeholder);
