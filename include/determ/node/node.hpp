@@ -714,6 +714,13 @@ private:
     // (status/balance/account/block lookups dominate operational queries).
     mutable std::shared_mutex       state_mutex_;
     std::vector<std::thread>        threads_;
+    // Both run() (its tail join) and stop() (cross-thread shutdown) join
+    // threads_. Two threads joining the same std::thread concurrently is a
+    // race (std::system_error "no such process") — latent while the daemon
+    // only ever died by process kill, exposed by the in-process FA4
+    // harness's Node::stop(). One guarded helper serializes the two sites.
+    std::mutex                      threads_join_mutex_;
+    void join_loop_threads();
 
     // A9 / S-031 follow-on: async chain.save() worker.
     //

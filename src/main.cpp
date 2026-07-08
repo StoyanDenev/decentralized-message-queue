@@ -819,6 +819,14 @@ Additional in-process tests:
                                               both rendezvous orders, refused
                                               connect, write-after-close, and
                                               the two-loop multi-node shape
+  determ test-fa-liveness-virtual             FA4 liveness, real engine, in
+                                              process: 3 real Nodes over an
+                                              injected VirtualTransport (one
+                                              shared VirtualNetwork, no OS
+                                              sockets/processes) — all reach
+                                              height>=3 + finalized blocks
+                                              byte-identical across nodes
+                                              (weak-BFT K=2/M=3)
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               equivocation slashing —
@@ -25968,6 +25976,153 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": net-virtual "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA4 (F-1) liveness, real engine, in process: THREE real node::Node
+    // instances — the full production stack (GossipNet wire codec, contrib/
+    // block-sig rounds, sync grace, committee selection, chain apply) —
+    // run in ONE process over an injected VirtualEventLoop/VirtualTransport
+    // per node, sharing a VirtualNetwork instead of OS sockets. This is
+    // what the §Q2 injection seam + virtual backend were built for: the
+    // multi-node liveness property (blocks finalize and AGREE across
+    // nodes) as a hermetic unit test — no ports, no processes, no
+    // platform networking, FAST-eligible — where before it needed a live
+    // shell-orchestrated cluster. Weak-BFT K=2/M=3 (test_weak_3node's
+    // shape). Wall-clock timers still drive the rounds (virtual TIME is
+    // the next evolution); hermetic-not-yet-deterministic, so assertions
+    // are threshold liveness + prefix agreement, not byte traces.
+    if (cmd == "test-fa-liveness-virtual") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        constexpr int      kNodes        = 3;
+        constexpr uint64_t kTargetHeight = 3;
+
+        fs::path dir = fs::temp_directory_path() / "determ-fa-liveness-virtual";
+        std::error_code fec;
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+
+        // Genesis: 3 creators, each keyed + staked at min_stake (1000),
+        // weak BFT (K=2 of M=3 — one non-signer tolerated per block).
+        chain::GenesisConfig g;
+        g.chain_id     = "fa-liveness-virtual";
+        g.m_creators   = 3;
+        g.k_block_sigs = 2;
+        std::array<crypto::NodeKey, kNodes> keys;
+        for (int i = 0; i < kNodes; ++i) {
+            keys[i] = crypto::generate_node_key();
+            chain::GenesisCreator c;
+            c.domain        = "node" + std::to_string(i);
+            c.ed_pub        = keys[i].pub;
+            c.initial_stake = 1000;
+            g.initial_creators.push_back(c);
+        }
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+
+        // The in-process cluster substrate: one shared VirtualNetwork,
+        // one loop + transport pair per node, injected via the §Q2 seam.
+        // Declaration order is teardown order in reverse: loops outlive
+        // transports outlive nodes.
+        VirtualNetwork vnet;
+        std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+        std::vector<std::unique_ptr<VirtualTransport>> transports;
+        std::vector<std::unique_ptr<node::Node>>       nodes;
+        const uint16_t base_port = 7601;
+        for (int i = 0; i < kNodes; ++i) {
+            loops.push_back(std::make_unique<VirtualEventLoop>());
+            transports.push_back(
+                std::make_unique<VirtualTransport>(*loops[i], vnet));
+        }
+        for (int i = 0; i < kNodes; ++i) {
+            node::Config cfg;
+            cfg.domain       = "node" + std::to_string(i);
+            cfg.data_dir     = (dir / cfg.domain).string();
+            cfg.listen_port  = static_cast<uint16_t>(base_port + i);
+            cfg.key_path     = (dir / (cfg.domain + ".key")).string();
+            cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
+            cfg.genesis_path = gpath;
+            cfg.m_creators   = 3;
+            cfg.k_block_sigs = 2;
+            cfg.log_quiet    = true;
+            for (int p = 0; p < kNodes; ++p)
+                if (p != i)
+                    cfg.bootstrap_peers.push_back(
+                        "127.0.0.1:" + std::to_string(base_port + p));
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(keys[i], cfg.key_path);
+            nodes.push_back(std::make_unique<node::Node>(
+                cfg, determ::time::RealClock::instance(),
+                loops[i].get(), transports[i].get()));
+        }
+
+        // Staggered starts (the live-cluster boot shape): node i's
+        // outbound connects find every earlier node already listening, so
+        // the LAST node's connects alone complete the mesh — no reliance
+        // on a reconnect path.
+        std::vector<std::thread> runners;
+        for (int i = 0; i < kNodes; ++i) {
+            node::Node* n = nodes[i].get();
+            runners.emplace_back([n] { n->run(); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+
+        // Liveness: every node's REAL chain advances past kTargetHeight.
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        bool reached = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            uint64_t min_h = UINT64_MAX;
+            for (auto& n : nodes) {
+                const uint64_t h = n->rpc_status()["height"].get<uint64_t>();
+                min_h = std::min(min_h, h);
+            }
+            if (min_h >= kTargetHeight) { reached = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        check(reached,
+              "liveness: 3 real Nodes over VirtualTransport all reached height >= 3");
+
+        // Agreement: identical genesis identity + byte-identical finalized
+        // blocks 1..target on every node (fork-freedom over the real
+        // gossip path; state agreement follows from deterministic apply,
+        // pinned separately by the golden consensus vectors).
+        if (reached) {
+            const std::string g0 =
+                nodes[0]->rpc_status()["genesis"].get<std::string>();
+            bool genesis_agree = true;
+            for (auto& n : nodes)
+                genesis_agree &= n->rpc_status()["genesis"] == g0;
+            check(genesis_agree, "agreement: one genesis hash across all nodes");
+
+            bool blocks_agree = true;
+            for (uint64_t h = 1; h <= kTargetHeight; ++h) {
+                const std::string b0 = nodes[0]->rpc_block(h).dump();
+                for (int i = 1; i < kNodes; ++i)
+                    blocks_agree &= nodes[i]->rpc_block(h).dump() == b0;
+            }
+            check(blocks_agree,
+                  "agreement: blocks 1..3 byte-identical across all nodes (no fork)");
+        }
+
+        for (auto& n : nodes) n->stop();
+        for (auto& t : runners) t.join();
+        nodes.clear();        // before transports/loops (lifetime rule)
+        transports.clear();
+        loops.clear();
+        fs::remove_all(dir, fec);
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-liveness-virtual "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

@@ -640,13 +640,18 @@ void Node::run() {
         gossip_.broadcast(net::make_status_request());
     });
 
-    for (auto& t : threads_) t.join();
+    join_loop_threads();
+}
+
+void Node::join_loop_threads() {
+    std::lock_guard<std::mutex> lk(threads_join_mutex_);
+    for (auto& t : threads_) if (t.joinable()) t.join();
 }
 
 void Node::stop() {
     if (running_.exchange(false)) {
         loop_.stop();
-        for (auto& t : threads_) if (t.joinable()) t.join();
+        join_loop_threads();
 
         // A9 / S-031 follow-on: wind down the save worker. Signal stop,
         // notify the cv, join. After join, run one final synchronous
