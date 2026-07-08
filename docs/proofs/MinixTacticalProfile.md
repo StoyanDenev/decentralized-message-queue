@@ -326,6 +326,44 @@ pattern) replaced asio in `rpc_call`, both gossip-frame fetchers
 (`headers --peer`, `snapshot fetch`), and the dapp-subscribe stream reader;
 `src/rpc/rpc.cpp` and `src/main.cpp` no longer include asio at all.
 
+### 4.5d Status — the epoll reactor SHIPPED (`593ed56`): the POSIX daemon
+### is native too — NO asio type is constructed by the daemon on ANY platform
+
+`ReactorEventLoop`/`ReactorTimer`/`ReactorTransport` implement the seam on
+epoll per the §4.5 design (POSIX-only TUs, CMake-pruned on Windows; the
+kqueue policy split waits for a BSD/macOS gate): EPOLLONESHOT interest with
+registry-pinned dispatch (the close-races-completion serialization built by
+hand), resumable park-on-EAGAIN op state machines, the destructor-deferred
+::close(fd) that closes the fd-reuse stale-event hazard, poll()-parked sync
+half whose FB71 release is a plain cross-thread shutdown() (free on POSIX),
+and the tracked-thread candidate-loop connect shared with the IOCP design.
+The deadline-timer engine was extracted into a shared `net::TimerService`
+(both native loops delegate). `test-net-native` was genericized — the SAME
+22-assertion body runs against per-platform aliases and passed FIRST TRY on
+the reactor — and `native.hpp`'s POSIX branch flipped: the daemon now
+constructs Reactor* on POSIX and Iocp* on Windows. The Asio* backends
+survive ONLY as test-net-seam's contract pins until §7 step 4 deletes asio.
+
+**The 27-agent adversarial review earned its cost again: 2 real HIGH bugs
+the live clusters missed, both fixed pre-commit.** (1) run() executed
+posted closures inline mid-batch — a blocking posted closure (RpcServer
+sessions block for the connection's LIFETIME) held that thread's
+already-dequeued EPOLLONESHOT events hostage with NO possible re-delivery,
+silently freezing a gossip peer caught in the same batch; fixed with
+two-pass dispatch (all socket events before the single level-triggered wake
+entry). (2) stop() wrote a fixed 64 semaphore units vs Node's
+hardware_concurrency() run() threads — a >64-core host would hang at
+shutdown; fixed with IocpEventLoop-parity threads_in_run_ tracking. Both
+are exactly the class §4.5's risk list predicted for the reactor: correct
+per-fd logic, wrong loop-level orchestration — invisible to small fast
+clusters, real on big or unlucky deployments.
+
+Gate: Windows (5-target build, 22/22 on IOCP, live cluster, FAST 204/204)
+AND Linux/WSL2 GCC 13 (build clean, 22/22 on the reactor, live
+test_weak_3node + test_multinode + test_dapp_subscribe on the
+REACTOR-NATIVE daemon, ci_local FAST + guards). The ratchet now pins all
+reactor_* headers + timer_service.hpp asio-free.
+
 ### 4.5c Status — increment 2 SHIPPED (`6cd99de`): the Windows daemon
 ### runs on native IOCP
 
@@ -451,13 +489,13 @@ cross-check (how the C99 crypto is known correct).
    the dapp_subscribe subscriber, via a synchronous escape-hatch on
    `Connection` (§4.3b, §4.4 fit (1)). Gate: native cluster tests + goldens
    unchanged, both slices.
-3. **Native backends behind the seam** — **WINDOWS DONE: IOCP increment 1
-   SHIPPED (`b1c5056`, §4.5b) + increment 2, the daemon cutover, SHIPPED
-   (`6cd99de`, §4.5c)** — the Windows daemon's whole networking stack runs
-   on native IOCP via the `net/native.hpp` per-platform selector, gated by
-   both live clusters + goldens + FAST on the cut-over binary. Remaining:
-   the epoll/kqueue `ReactorTransport` (POSIX), then flip native.hpp's
-   POSIX branch.
+3. **Native backends behind the seam — DONE on both gated platforms:**
+   IOCP SHIPPED (`b1c5056` §4.5b + the `6cd99de` cutover §4.5c) and the
+   epoll reactor SHIPPED with its POSIX cutover in one increment
+   (`593ed56`, §4.5d) — the daemon constructs ZERO asio types on any
+   platform, gated by both live clusters + goldens + FAST on each
+   platform's native binary. Remaining in this step: kqueue only
+   (design-review-only until a BSD/macOS gate exists — §4.5).
 4. **Cut asio** — remove the FetchContent dep; daemon networks on native IOCP +
    epoll/kqueue only. **The CLI-blocking-clients slice of this step already
    SHIPPED (`b1c5056`): `net::SyncClient` replaced asio in `rpc_call` + the
