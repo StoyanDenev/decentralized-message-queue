@@ -43,7 +43,11 @@ underlying T-3's rate-limit composition).
 **Setup.** Let `RPC_SURFACE` denote the set of byte strings that arrive on
 a TCP connection accepted by `RpcServer::accept_loop` at
 `src/rpc/rpc.cpp:131-140`. Each request is delimited by a newline and
-read by `asio::read_until(*socket, buf, '\n', ec)` at line 158. Let
+read by `asio::read_until(*socket, buf, '\n', ec)` at line 158.
+
+> **Environment note (doc-consolidation inc.4 drift-repair).** The `asio` RPC socket API quoted in this proof (`asio::read_until`, `asio::streambuf`, `asio::write`, `asio::ip::tcp::socket`) describes the pre-migration RPC server. `asio` is deleted from the tree; `RpcServer` now runs on the native `net::Transport`/`net::EventLoop` seam (IOCP on Windows, epoll on POSIX — see `MinixTacticalProfile.md`). The walk-through and its layered-validation findings are retained as the finding's original context.
+
+Let
 `MUTATE_STATE` denote the set of `chain_`-mutating method names: `send`,
 `stake`, `unstake`, `register`, `submit_tx`, `submit_equivocation`. The
 remaining methods (`status`, `peers`, `balance`, `nonce`, `stake_info`,

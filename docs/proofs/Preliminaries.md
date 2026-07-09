@@ -249,12 +249,12 @@ Each validator runs a per-height state machine:
 
 ```
 IDLE ──(in_sync ∧ selected_for_committee)──> CONTRIB
-CONTRIB ──(K Phase-1 contribs received)──> BLOCK_SIG    // asio::post breaks recursion
+CONTRIB ──(K Phase-1 contribs received)──> BLOCK_SIG    // post() breaks recursion
 BLOCK_SIG ──(K Phase-2 BlockSigs received)──> apply_block ──> IDLE (next height)
 CONTRIB / BLOCK_SIG ──(timer fires before quorum)──> abort → reset_round (same height)
 ```
 
-Transitions are deterministic given message arrivals + timer expirations. The `enter_block_sig_phase` transition posts via `asio::post` to break the synchronous call chain — necessary for M=K=1 (single-validator) chains to avoid stack recursion.
+Transitions are deterministic given message arrivals + timer expirations. The `enter_block_sig_phase` transition posts via `net::EventLoop::post` (`asio::post` in earlier revisions — `asio` is deleted from the tree; the non-inline dispatch contract that breaks the chain is preserved by the native seam, see `MinixTacticalProfile.md`) to break the synchronous call chain — necessary for M=K=1 (single-validator) chains to avoid stack recursion.
 
 ---
 

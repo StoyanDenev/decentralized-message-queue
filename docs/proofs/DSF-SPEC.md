@@ -75,6 +75,8 @@ All Determ code that reads or sleeps on time consults the injected `Clock` insta
 
 **Decision: replace the `asio` socket layer with a `net::Transport` interface; production wraps asio, tests use `VirtualTransport`.**
 
+> **Environment note (doc-consolidation inc.4 drift-repair).** This §Q2 decision was realised differently from the sketch below: `asio` was not wrapped but **deleted** from the tree. Production now runs the native `net::Transport` backends directly — `IocpTransport` (Windows) and `ReactorTransport` (epoll/POSIX) — with no third-party transport library; the `AsioTransport` shown below never became the production default. See `MinixTacticalProfile.md` §4 for the delivered design. The `VirtualTransport` half of the decision did ship (`include/determ/net/virtual_transport.hpp`).
+
 ```cpp
 namespace determ::net {
 

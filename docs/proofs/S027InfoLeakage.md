@@ -403,7 +403,7 @@ The audit closes: no `std::cout` or `std::cerr` call site in the audit scope emi
 
 ### Finding F-1 (Third-party library log statements not in audit scope)
 
-The audit covers `src/node/*.cpp`, `src/rpc/*.cpp`, `src/net/*.cpp`, `src/chain/*.cpp` — the chain-owned production source. Third-party libraries linked into the binary include `libsodium` (Ed25519 + crypto primitives), OpenSSL (HMAC-SHA256, SHA-256), nlohmann::json (JSON parse/serialize), and asio (network I/O). These libraries were NOT enumerated for log call sites.
+The audit covers `src/node/*.cpp`, `src/rpc/*.cpp`, `src/net/*.cpp`, `src/chain/*.cpp` — the chain-owned production source. Third-party libraries linked into the binary include `libsodium` (Ed25519 + crypto primitives), OpenSSL (HMAC-SHA256, SHA-256), nlohmann::json (JSON parse/serialize), and asio (network I/O). These libraries were NOT enumerated for log call sites. *(Inc.4 drift-repair: `asio` has since been deleted from the tree — the daemon networks on the native `net::` IOCP/epoll backends, see `MinixTacticalProfile.md`; the asio row below is retained as the audit's original context. Removing a library can only shrink the third-party surface, so the finding's conclusion — no linked library adds a log surface — is unaffected.)*
 
 **Inspection note:** By inspection of each library's source / documentation:
 

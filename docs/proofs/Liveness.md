@@ -90,7 +90,7 @@ Under (L5) `T_round ≥ 2Δ + ε`, a round where all K committee members are liv
 **Proof.** A round's timeline:
 
 1. Phase 1 broadcast: each live `v_i` sends `ContribMsg`. Within `Δ` of round start, all `K` `ContribMsg`s reach all honest peers.
-2. Phase 1 → Phase 2 transition: triggered at K-of-K Phase-1 arrival, no wait (the asio::post breaks recursion, takes ~µs).
+2. Phase 1 → Phase 2 transition: triggered at K-of-K Phase-1 arrival, no wait (the recursion-breaking `net::EventLoop::post` — `asio::post` in earlier revisions, `asio` since deleted — takes ~µs).
 3. Phase 2 broadcast: each live `v_i` sends `BlockSigMsg` after computing the block digest. Within another `Δ` of Phase-2 start, all `K` `BlockSigMsg`s arrive.
 4. Finalization: triggered at K-of-K Phase-2 arrival, no wait.
 

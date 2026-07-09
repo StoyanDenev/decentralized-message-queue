@@ -55,6 +55,8 @@ where `r := rate_per_sec_` and `s := sweep_interval_sec_`. For the default confi
 
 ### 2.1 The asio io_context multi-threaded model
 
+> **Environment note (doc-consolidation inc.4 drift-repair) — model SUPERSEDED, theorems preserved.** The `asio::io_context` worker pool modelled in this section has been replaced by the native `net::EventLoop` seam (IOCP on Windows, epoll on POSIX); `asio` is deleted from the tree — see `MinixTacticalProfile.md`. T-1 (no deadlock), T-4 (linearizability), and T-5 (throughput ceiling) depend only on *N concurrent worker threads invoking `RateLimiter::consume()` with no per-handler serialization, mutually excluded by one `std::mutex`* — not on any asio-specific semantic. That substrate is explicitly preserved: `net::EventLoop::run()` carries the same documented MULTI-THREAD contract (N threads service one loop — `include/determ/net/event_loop.hpp`), and the node still spawns `hardware_concurrency()` workers pumping it via `loop_.run()` (`src/node/node.cpp:646-648`). The theorems below therefore hold unchanged under the native backends; the `io_context` naming is retained as the analysis's original context.
+
 `asio::io_context` is a thread-safe event-dispatch loop. A user-supplied set of threads call `io_.run()` and pull completion handlers off an internal queue. Each handler runs to completion on whichever thread happened to pick it up; the io_context does not pin a handler to a specific thread, and no per-handler serialization is provided unless the user explicitly wraps the handler in an `asio::strand`.
 
 Determ's node bootstrap at `src/node/node.cpp:586-588`:

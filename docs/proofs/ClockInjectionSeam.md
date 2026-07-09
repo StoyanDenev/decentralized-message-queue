@@ -137,7 +137,11 @@ self-test.
    parity and could silently fork digests. **Decision required before building.**
 4. **Increment 4 (`net::Transport`, §Q2):** `AsioTransport` (prod default) +
    `VirtualTransport` (sim: owns delivery order/latency/partition + drives the
-   timers off the scheduler).
+   timers off the scheduler). *(Inc.4 drift-repair: `asio` has since been
+   deleted from the tree — production networking is the native `net::` IOCP/epoll
+   backend behind `net::Transport`, not `AsioTransport`; see
+   `MinixTacticalProfile.md`. This owner-gated increment plan predates that;
+   `RealEngineFAHarness.md` records the self-contained path ultimately taken.)*
 5. **Increment 5:** sim `Clock` adapter + a scenario that drives a REAL
    Node/Validator/producer round, replacing the toy `SimState`.
 6. **Increment 6:** wire FA1/A1/FA6/FA7 as checkers over the real engine — the

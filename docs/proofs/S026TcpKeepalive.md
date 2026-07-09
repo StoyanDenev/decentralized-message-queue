@@ -29,6 +29,8 @@ The pre-S-026 surface was therefore a **long-tail resource leak** in the gossip 
 
 ### 1.2 The S-026 closure: SO_KEEPALIVE flag
 
+> **Environment note (doc-consolidation inc.4 drift-repair).** The `asio` socket API quoted throughout this closure (`asio::socket_base::keep_alive`, the `asio::async_read`/`async_write` completion lambdas, `asio::async_connect`) describes the pre-migration gossip transport. `asio` is deleted from the tree; the daemon now uses the native `net::Transport` seam (IOCP on Windows, epoll/kqueue on POSIX — see `MinixTacticalProfile.md`). The walk-through is retained as the finding's original context. (L-4 already frames the error-propagation path in native `epoll/kqueue/IOCP` terms.)
+
 The closure adds **two lines of effective code** at the start of `Peer::Peer` — a `socket_.set_option(asio::socket_base::keep_alive(true))` call wrapped in a try/catch. The asio option translates to a `setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one))` syscall, which sets a per-socket flag in the OS TCP stack. With the flag enabled, the kernel:
 
 1. Tracks the socket's idle time (no data sent or received in either direction).

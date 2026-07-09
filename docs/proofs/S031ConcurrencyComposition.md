@@ -53,6 +53,8 @@ Define the following critical sections:
 
 ### 2.1 The asio io_context multi-threaded model (extended Preliminaries §3)
 
+> **Environment note (doc-consolidation inc.4 drift-repair) — model SUPERSEDED, theorems preserved.** The `asio::io_context io_` member and its worker pool (described here and in §1) are replaced by the native `net::EventLoop` seam (IOCP/epoll; `asio` deleted — see `MinixTacticalProfile.md`). T-2 (read-write exclusion) and L-4 (no deadlock) depend only on *N concurrent worker threads taking `std::shared_mutex` locks in a fixed order* — a substrate the native seam explicitly preserves: `net::EventLoop::run()` keeps the same MULTI-THREAD contract (`include/determ/net/event_loop.hpp`) and the node still spawns `hardware_concurrency()` workers via `loop_.run()` (`src/node/node.cpp:646-648`); the gossip-out-of-lock property (§2.5) likewise survives, since `net::EventLoop::post()` retains the non-inline dispatch contract. The theorems below hold unchanged; the `io_context` naming is retained as the analysis's original context.
+
 Per `Preliminaries.md` §3 and `S014ConcurrencyAnalysis.md` §2.1, `asio::io_context` is a thread-safe event-dispatch loop. The node bootstrap at `src/node/node.cpp:586-588`:
 
 ```cpp

@@ -198,6 +198,8 @@ inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
 
 ### 3.2 The Peer::read_header / read_body chain
 
+> **Environment note (doc-consolidation inc.4 drift-repair).** The `asio::async_read` / `asio::buffer` calls quoted below describe the pre-migration transport. `asio` is deleted from the tree; the gossip framing now runs behind the native `net::Transport` seam (IOCP on Windows, epoll on POSIX — see `MinixTacticalProfile.md`). The code walk-through is retained as the finding's original context; the per-`MsgType` body-cap enforcement it analyses lives in the `Peer::read_header`/`read_body` framing logic, not in asio.
+
 The framing-layer guard at `src/net/peer.cpp:50-70`:
 
 ```cpp

@@ -53,7 +53,7 @@ Crucially: every save call after the first one captures **the latest chain state
 
 **Theorem T-4 (FlushOnExit Soundness).** `Node::stop` (`src/node/node.cpp:617-641`) sequences shutdown as follows:
 
-1. `running_.exchange(false)` + `io_.stop()` (line 619) — io_context worker threads will exit `io_.run()` once their current handler completes.
+1. `running_.exchange(false)` + `io_.stop()` (line 619) — the worker threads exit the loop once their current handler completes. *(Inc.4 drift-repair: `asio`/`io_context` is deleted from the tree; the worker pool is now the native `net::EventLoop`, spawned via `loop_.run()` — see `MinixTacticalProfile.md`. The `io_context` naming here and below is retained as the analysis's original context.)*
 2. `for (auto& t : threads_) if (t.joinable()) t.join();` (line 620) — join all io_context workers. No new `apply_block_locked` calls can be initiated after this point.
 3. `save_stop_.store(true)` (line 629) — set the shutdown flag.
 4. `save_cv_.notify_all()` (line 630) — wake the save worker if it's blocked in `save_cv_.wait`.
