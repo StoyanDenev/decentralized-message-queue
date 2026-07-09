@@ -290,6 +290,7 @@ add_executable(determ-light
   light/sign_tx.cpp
   light/pq_sign_tx.cpp
   light/audit_tx.cpp
+  light/ct_tx.cpp
   light/watch.cpp
   light/export.cpp
   light/verify_archive.cpp

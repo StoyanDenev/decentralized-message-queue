@@ -65,6 +65,7 @@
 #include "sign_tx.hpp"
 #include "pq_sign_tx.hpp"
 #include "audit_tx.hpp"
+#include "ct_tx.hpp"
 #include "watch.hpp"
 #include "export.hpp"
 #include "verify_archive.hpp"
@@ -359,6 +360,17 @@ void print_usage() {
         "                   --context <hex32> --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE LOG_AUDIT_ACCESS (TxType 16): post an on-chain\n"
         "      disclosure record. --epoch all = full-history sentinel.\n"
+        "  build-shield --keyfile <path> --blind-seed <hex> --amount <N>\n"
+        "               --fee <N> --nonce <N> [--out <file>]\n"
+        "      Build a SUBMITTABLE SHIELD (TxType 12): move PUBLIC amount from your\n"
+        "      transparent balance into a confidential note (§3.22). The blinding is\n"
+        "      derived from --blind-seed (>= 32 bytes, UNIQUE + high-entropy per note\n"
+        "      — reuse leaks the amount) — SAVE the seed + amount to spend it later.\n"
+        "  build-unshield --keyfile <path> --blind-seed <hex> --to <addr>\n"
+        "                 --amount <N> --fee <N> --nonce <N> [--out <file>]\n"
+        "      Build a SUBMITTABLE UNSHIELD (TxType 13): withdraw the note\n"
+        "      (amount, blind-seed) to transparent --to (§3.22b). The balance proof is\n"
+        "      context-bound to (from,to,nonce,amount). Verify with verify-ct-tx.\n"
         "  submit-tx --rpc-port <N> --tx-json <file>\n"
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
@@ -3358,6 +3370,102 @@ int cmd_log_audit_access(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "log-audit-access: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ─────────────────────── build-shield / build-unshield ──────────────────
+//
+// CTX-2 confidential on/off-ramp builders (light/ct_tx.cpp). Build + sign a
+// SUBMITTABLE SHIELD (transparent -> confidential) or UNSHIELD (confidential ->
+// transparent) tx. The note blinding is derived from --blind-seed (SAVE the
+// seed + amount to spend the note later). Verify a validator would accept the
+// result with `determ-light verify-ct-tx` / `determ verify-ct-tx`; submit via
+// `submit-tx`. Soundness: docs/proofs/AuditLayerSoundness.md is unrelated —
+// see CRYPTO-C99-SPEC §3.22 / §3.22b + docs/proofs/ (CT balance proofs).
+
+int cmd_build_shield(int argc, char** argv) {
+    std::string keyfile_path, seed_hex, out_path;
+    bool have_amount = false, have_fee = false, have_nonce = false;
+    uint64_t amount = 0, fee = 0, nonce = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile"    && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--blind-seed" && i + 1 < argc) seed_hex     = argv[++i];
+        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--out"        && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "build-shield: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || seed_hex.empty() || !have_amount || !have_fee || !have_nonce) {
+        std::cerr << "build-shield: --keyfile, --blind-seed <hex>, --amount, --fee, "
+                     "--nonce are required\n";
+        return 1;
+    }
+    try {
+        auto kf = load_light_keyfile(keyfile_path);
+        auto tx = build_shield_tx(kf, amount, from_hex(seed_hex), fee, nonce);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote SHIELD (amount=" << amount << ", note C="
+                      << tx["payload"].get<std::string>().substr(0, 16)
+                      << "..., hash=" << tx["hash"].get<std::string>().substr(0, 16)
+                      << "...) to " << out_path
+                      << "\n  SAVE your --blind-seed + amount to UNSHIELD/spend this note later.\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "build-shield: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int cmd_build_unshield(int argc, char** argv) {
+    std::string keyfile_path, seed_hex, to, out_path;
+    bool have_amount = false, have_fee = false, have_nonce = false;
+    uint64_t amount = 0, fee = 0, nonce = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile"    && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--blind-seed" && i + 1 < argc) seed_hex     = argv[++i];
+        else if (a == "--to"         && i + 1 < argc) to           = argv[++i];
+        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--out"        && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "build-unshield: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || seed_hex.empty() || to.empty()
+        || !have_amount || !have_fee || !have_nonce) {
+        std::cerr << "build-unshield: --keyfile, --blind-seed <hex>, --to, --amount, "
+                     "--fee, --nonce are required\n";
+        return 1;
+    }
+    try {
+        // Normalize an anon-shape recipient to canonical lowercase (S-028); other
+        // shapes pass through (same rule as sign-tx --to).
+        if (!to.empty()) {
+            std::string canonical = normalize_anon_address(to);
+            if (canonical != to) {
+                std::cerr << "build-unshield: --to is anon-shape but not canonical "
+                             "lowercase (S-028); got '" << to << "'\n";
+                return 1;
+            }
+        }
+        auto kf = load_light_keyfile(keyfile_path);
+        auto tx = build_unshield_tx(kf, amount, from_hex(seed_hex), to, fee, nonce);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote UNSHIELD (amount=" << amount << " -> " << to
+                      << ", hash=" << tx["hash"].get<std::string>().substr(0, 16)
+                      << "...) to " << out_path << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "build-unshield: " << e.what() << "\n";
         return 1;
     }
 }
@@ -7919,6 +8027,8 @@ int main(int argc, char** argv) {
         if (cmd == "pq-transfer")           return cmd_pq_transfer(sub_argc, sub_argv);
         if (cmd == "rotate-audit-key")      return cmd_rotate_audit_key(sub_argc, sub_argv);
         if (cmd == "log-audit-access")      return cmd_log_audit_access(sub_argc, sub_argv);
+        if (cmd == "build-shield")          return cmd_build_shield(sub_argc, sub_argv);
+        if (cmd == "build-unshield")        return cmd_build_unshield(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);

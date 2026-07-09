@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+//
+// determ-light CTX-2 confidential on/off-ramp builders — see ct_tx.hpp. The
+// 98-byte payload (C(33) || balance_proof(65)) + the signing_bytes layout match
+// the consensus accept-rule (src/node/validator.cpp SHIELD/UNSHIELD cases +
+// src/chain/chain.cpp apply) byte-for-byte, so a validator accepts exactly what
+// this builds.
+
+#include "ct_tx.hpp"
+#include <determ/crypto/keys.hpp>
+#include <determ/crypto/sha256.hpp>
+#include <determ/crypto/pedersen/pedersen.h>
+#include <determ/crypto/pedersen/balance.h>
+#include <determ/crypto/p256/p256.h>
+#include <determ/chain/shielded.hpp>   // unshield_spend_ctx_hash (inline)
+#include <determ/types.hpp>
+
+#include <array>
+#include <cstring>
+#include <stdexcept>
+
+namespace determ::light {
+
+using nlohmann::json;
+
+namespace {
+
+// TxType wire values — MUST match include/determ/chain/block.hpp.
+constexpr int TX_SHIELD   = 12;
+constexpr int TX_UNSHIELD = 13;
+
+// Canonical signing_bytes (== Transaction::signing_bytes; same layout the light
+// sign_tx / audit_tx paths reconstruct):
+//   u8(type) || from || 0x00 || to || 0x00 || u64_be(amount) || u64_be(fee)
+//            || u64_be(nonce) || payload
+std::vector<uint8_t> ct_signing_bytes(int type, const std::string& from,
+                                      const std::string& to, uint64_t amount,
+                                      uint64_t fee, uint64_t nonce,
+                                      const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> out;
+    out.reserve(1 + from.size() + to.size() + 2 + 24 + payload.size());
+    out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), from.begin(), from.end()); out.push_back(0);
+    out.insert(out.end(), to.begin(),   to.end());   out.push_back(0);
+    auto be64 = [&](uint64_t v){ for (int i = 7; i >= 0; --i) out.push_back((v >> (i*8)) & 0xFF); };
+    be64(amount); be64(fee); be64(nonce);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+// 32-byte big-endian encoding of a u64 — a valid scalar < n (top 24 bytes zero).
+std::array<uint8_t, 32> u64_scalar(uint64_t a) {
+    std::array<uint8_t, 32> s{};
+    for (int i = 0; i < 8; ++i) s[31 - i] = static_cast<uint8_t>((a >> (i*8)) & 0xFF);
+    return s;
+}
+
+// A canonical scalar < n from (dst, msg) via P256 hash_to_scalar (RFC 9380/9497).
+std::array<uint8_t, 32> derive_scalar(const char* dst, const std::vector<uint8_t>& msg) {
+    std::array<uint8_t, 32> out{};
+    if (determ_p256_hash_to_scalar(out.data(), msg.data(), msg.size(),
+            reinterpret_cast<const uint8_t*>(dst), std::strlen(dst)) != 0)
+        throw std::runtime_error("ct: hash_to_scalar failed");
+    return out;
+}
+
+// Build the 98-byte payload C(33) || balance_proof(65). ctx32==nullptr → SHIELD
+// (unbound proof); ctx32!=nullptr → UNSHIELD (bound to the spend context).
+std::vector<uint8_t> ct_payload(uint64_t amount,
+                                const std::vector<uint8_t>& blind_seed,
+                                const char* nonce_dst, const uint8_t* ctx32) {
+    // The note's confidentiality rests ENTIRELY on the blinding r, which is
+    // derived from `blind_seed`. A reused or low-entropy seed defeats amount
+    // hiding (adversarial review inc.CTX-2, MEDIUM): reusing a seed for two
+    // notes gives the same r, so C1-C2 = (v1-v2)*G leaks the amount difference,
+    // and a guessable seed lets an observer recompute v*G = C - r*H. Enforce a
+    // high-entropy floor here; the caller is responsible for UNIQUENESS.
+    if (blind_seed.size() < 32)
+        throw std::runtime_error("ct: --blind-seed must be >= 32 bytes (64 hex) of "
+                                 "high-entropy randomness, UNIQUE per note");
+    // r = the note blinding, derived from the caller's seed (always valid,
+    // nonzero w.h.p. — pedersen_commit rejects r==0 if the 2^-256 case hits).
+    auto r = derive_scalar("determ-ct-note-blind-v1", blind_seed);
+    auto v = u64_scalar(amount);
+    std::array<uint8_t, 33> C{};
+    if (determ_pedersen_commit(C.data(), v.data(), r.data()) != 0)
+        throw std::runtime_error("ct: pedersen_commit failed (invalid blinding)");
+    // E = C - amount*G (= r*H): one input commitment, no outputs, fee = amount —
+    // exactly the excess determ_shield_verify/unshield_verify recompute. NOTE:
+    // E is INDEPENDENT of the amount (E = r*H), so k below is a function of
+    // (r [, ctx]) only, not of the amount.
+    std::array<uint8_t, 33> E{};
+    if (determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, amount) != 0)
+        throw std::runtime_error("ct: balance excess failed (degenerate commitment)");
+    // Deterministic Schnorr nonce k = hash_to_scalar(dst || r || E [|| ctx]).
+    // Nonce-safety: a reuse leak needs the SAME k with a DIFFERENT Fiat-Shamir
+    // challenge c. Here c is the IDENTICAL function of the same inputs — for
+    // SHIELD c = H(E||T) depends only on r (so same k forces same c, i.e. the
+    // same proof, no independent equation); for UNSHIELD ctx enters BOTH k's
+    // preimage AND c, so any (from,to,nonce,amount) change flips k and c
+    // together. Cross-type SHIELD/UNSHIELD use distinct `nonce_dst`. Hence no
+    // same-k/different-c pair exists (collision 2^-256).
+    std::vector<uint8_t> kmsg(r.begin(), r.end());
+    kmsg.insert(kmsg.end(), E.begin(), E.end());
+    if (ctx32) kmsg.insert(kmsg.end(), ctx32, ctx32 + 32);
+    auto k = derive_scalar(nonce_dst, kmsg);
+    std::array<uint8_t, 65> proof{};
+    int rc = ctx32
+        ? determ_p256_balance_prove_bound(proof.data(), E.data(), r.data(), k.data(), ctx32)
+        : determ_p256_balance_prove(proof.data(), E.data(), r.data(), k.data());
+    if (rc != 0) throw std::runtime_error("ct: balance prove failed");
+    std::vector<uint8_t> payload;
+    payload.reserve(98);
+    payload.insert(payload.end(), C.begin(), C.end());
+    payload.insert(payload.end(), proof.begin(), proof.end());
+    return payload;   // 33 + 65 == 98
+}
+
+json sign_ct_tx(const LightKeyfile& kf, int type, const std::string& to,
+                uint64_t amount, uint64_t fee, uint64_t nonce,
+                const std::vector<uint8_t>& payload, const char* type_name) {
+    auto sb = ct_signing_bytes(type, kf.anon_address, to, amount, fee, nonce, payload);
+    Signature sig = determ::crypto::sign(kf.key, sb.data(), sb.size());
+    Hash tx_hash  = determ::crypto::sha256(sb.data(), sb.size());
+    return json{
+        {"type",      type},
+        {"type_name", type_name},
+        {"from",      kf.anon_address},
+        {"to",        to},
+        {"amount",    amount},
+        {"fee",       fee},
+        {"nonce",     nonce},
+        {"payload",   to_hex(payload.data(), payload.size())},
+        {"signature", to_hex(sig)},
+        {"sig",       to_hex(sig)},
+        {"hash",      to_hex(tx_hash)},
+    };
+}
+
+} // namespace
+
+json build_shield_tx(const LightKeyfile& kf, uint64_t amount,
+                     const std::vector<uint8_t>& blind_seed,
+                     uint64_t fee, uint64_t nonce) {
+    if (amount == 0) throw std::runtime_error("shield: --amount must be > 0");
+    auto payload = ct_payload(amount, blind_seed, "determ-ct-shield-nonce-v1", nullptr);
+    // SHIELD has no recipient: the note is the sender's own (to == "").
+    return sign_ct_tx(kf, TX_SHIELD, "", amount, fee, nonce, payload, "SHIELD");
+}
+
+json build_unshield_tx(const LightKeyfile& kf, uint64_t amount,
+                       const std::vector<uint8_t>& blind_seed,
+                       const std::string& to, uint64_t fee, uint64_t nonce) {
+    if (amount == 0)   throw std::runtime_error("unshield: --amount must be > 0");
+    if (amount < fee)  throw std::runtime_error("unshield: --amount must cover --fee");
+    if (to.empty())    throw std::runtime_error("unshield: --to is required");
+    // Bind the balance proof to the spend context (front-running defense): the
+    // exact digest the validator recomputes from the tx fields.
+    Hash ctx = determ::chain::unshield_spend_ctx_hash(kf.anon_address, to, nonce, amount);
+    auto payload = ct_payload(amount, blind_seed, "determ-ct-unshield-nonce-v1", ctx.data());
+    return sign_ct_tx(kf, TX_UNSHIELD, to, amount, fee, nonce, payload, "UNSHIELD");
+}
+
+} // namespace determ::light
