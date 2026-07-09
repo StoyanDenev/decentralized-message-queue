@@ -1095,6 +1095,15 @@ Additional in-process tests:
                                               state_root, account/stake/registry,
                                               A1 counters preserved; missing-file
                                               defensive empty Chain.
+  determ test-chain-store                     B1 chain-storage-v1: the O(1)
+                                              runtime save path — append-only
+                                              per-block files + manifest.
+                                              Store/legacy round-trip parity,
+                                              append-only pin, S-021 manifest
+                                              tamper gate, fail-closed missing
+                                              block file, legacy-save manifest
+                                              invalidation (no silent rewind),
+                                              graceful-stop pair equivalence.
   determ test-block-validator-basic           BlockValidator consensus-validation
                                               entry via public validate() —
                                               genesis short-circuits OK; bad
@@ -35986,6 +35995,211 @@ int main(int argc, char** argv) {
     //   - Empty creators set with non-genesis block: passes both these
     //     gates trivially (subsequent gates may reject)
     //
+    // B1 chain-storage-v1 (pre-launch register, 2026-07-09): the O(1)
+    // RUNTIME save path — save_incremental writes append-only per-block
+    // files (<path>.blocks/<i>.json) + a tiny manifest, instead of
+    // rewriting the whole chain.json under the save worker's shared_lock.
+    // Pins: store round-trip equals the legacy round-trip byte-for-byte
+    // (head/state agreement), APPEND-ONLY (a second incremental save does
+    // not touch already-persisted files), the S-021 head tamper gate on
+    // the manifest, fail-closed on a missing block file, load preference
+    // (manifest wins over a coexisting legacy file), and the stale-
+    // manifest invalidation invariant (legacy save() deletes the manifest
+    // so a legacy-only writer can never leave a store that silently
+    // REWINDS the chain on the next load).
+    if (cmd == "test-chain-store") {
+        using namespace determ;
+        using namespace determ::chain;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Same fixture shape as test-chain-save-load: alice genesis +
+        // one TRANSFER block; extend() appends one more spend so the
+        // incremental path has genuinely new blocks to persist.
+        auto build = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "chain-store-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 200;
+            cfg.initial_balances = {alice_bal, bob_bal};
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);
+            c.set_min_stake(1000);
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            return c;
+        };
+        auto extend = [](Chain& c, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 10; tx.fee = 1; tx.nonce = nonce;
+            Block b;
+            b.index = c.height(); b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        const fs::path base = fs::temp_directory_path() / "determ-test-chain-store";
+        std::error_code ec;
+        fs::remove_all(base, ec);
+        fs::create_directories(base);
+        const std::string path     = (base / "chain.json").string();
+        const fs::path    storedir = fs::path(path + ".blocks");
+        const fs::path    manifest = fs::path(path + ".manifest.json");
+
+        // 1. save_incremental writes one file per block + the manifest;
+        //    the legacy chain.json is NOT written by the incremental path.
+        {
+            Chain c = build();
+            c.save_incremental(path);
+            check(fs::exists(storedir / "0.json") && fs::exists(storedir / "1.json"),
+                  "store: one append-only file per block");
+            check(fs::exists(manifest),
+                  "store: manifest written");
+            check(!fs::exists(path),
+                  "store: legacy chain.json untouched by the incremental path");
+        }
+
+        // 2. Store round-trip: load() prefers the manifest and reproduces
+        //    head_hash + state_root + balances exactly.
+        {
+            Chain c = build();
+            c.save_incremental(path);
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+            check(r.height() == c.height(),      "store load: height preserved");
+            check(r.head_hash() == c.head_hash(),"store load: head_hash preserved");
+            check(r.compute_state_root() == c.compute_state_root(),
+                  "store load: state_root preserved");
+            check(r.balance("bob") == c.balance("bob"),
+                  "store load: balances preserved");
+        }
+
+        // 3. APPEND-ONLY: after the first save, corrupt 0.json with a
+        //    sentinel; a second incremental save (with new blocks) must
+        //    NOT rewrite it — only the new files + manifest change.
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
+            Chain c = build();
+            c.save_incremental(path);
+            { std::ofstream f(storedir / "0.json", std::ios::trunc); f << "SENTINEL"; }
+            extend(c, 1);
+            c.save_incremental(path);
+            std::ifstream f0(storedir / "0.json");
+            std::string s0((std::istreambuf_iterator<char>(f0)),
+                            std::istreambuf_iterator<char>());
+            check(s0 == "SENTINEL",
+                  "append-only: second incremental save does not rewrite persisted files");
+            check(fs::exists(storedir / "2.json"),
+                  "append-only: the new block DID get its own file");
+        }
+
+        // 4. Manifest head_hash tamper -> load rejects (S-021 gate).
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
+            Chain c = build();
+            c.save_incremental(path);
+            nlohmann::json m = nlohmann::json::parse(std::ifstream(manifest));
+            std::string h = m["head_hash"].get<std::string>();
+            h[0] = (h[0] == 'a') ? 'b' : 'a';
+            m["head_hash"] = h;
+            { std::ofstream f(manifest, std::ios::trunc); f << m.dump(2); }
+            bool rejected = false;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception&) { rejected = true; }
+            check(rejected, "tamper: manifest head_hash mismatch REJECTED");
+        }
+
+        // 5. Missing block file -> load rejects, fail-closed (never a
+        //    silent fallback to a possibly-stale legacy file).
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
+            Chain c = build();
+            c.save(path);              // a legacy file ALSO exists...
+            c.save_incremental(path);  // ...and the store on top
+            fs::remove(storedir / "1.json", ec);
+            bool rejected = false;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception&) { rejected = true; }
+            check(rejected,
+                  "fail-closed: missing block file rejects (no silent legacy fallback)");
+        }
+
+        // 6. Legacy compatibility: a plain chain.json (no manifest) loads
+        //    exactly as before, and the FIRST incremental save after a
+        //    legacy load persists every block (persisted_count_ reset).
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
+            fs::remove(path, ec);
+            Chain c = build();
+            c.save(path);
+            Chain r = Chain::load(path, 10);
+            check(r.head_hash() == c.head_hash(), "legacy: plain chain.json still loads");
+            r.save_incremental(path);
+            check(fs::exists(storedir / "0.json") && fs::exists(storedir / "1.json"),
+                  "legacy: first incremental save after a legacy load writes ALL blocks");
+        }
+
+        // 7. Stale-manifest invalidation: legacy save() DELETES the
+        //    manifest, so a legacy-only writer supersedes the store and
+        //    the next load takes the fresh legacy file — never a rewind
+        //    to the older store.
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec); fs::remove(path, ec);
+            Chain c = build();
+            c.save_incremental(path);          // store at height 2
+            extend(c, 1);
+            c.save(path);                       // legacy-only writer at height 3
+            check(!fs::exists(manifest),
+                  "invalidation: legacy save() removed the stale manifest");
+            Chain r = Chain::load(path, 10);
+            check(r.height() == c.height() && r.head_hash() == c.head_hash(),
+                  "invalidation: load takes the newer legacy file (no rewind)");
+        }
+
+        // 8. Graceful-stop equivalence: the pair (save + save_incremental,
+        //    the Node's stop() order) leaves BOTH stores loading to the
+        //    same chain.
+        {
+            fs::remove_all(storedir, ec); fs::remove(manifest, ec); fs::remove(path, ec);
+            Chain c = build();
+            c.save(path);
+            c.save_incremental(path);
+            Chain via_store = Chain::load(path, 10);       // manifest present -> store
+            fs::remove(manifest, ec);
+            Chain via_legacy = Chain::load(path, 10);      // forced legacy
+            check(via_store.head_hash() == via_legacy.head_hash()
+                  && via_store.compute_state_root() == via_legacy.compute_state_root(),
+                  "stop-order pair: store and legacy views load to the identical chain");
+        }
+
+        fs::remove_all(base, ec);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-store "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     // Defends against drift in the consensus-entry gate that would
     // either accept malformed blocks or reject valid ones — both
     // catastrophic for liveness vs safety respectively.

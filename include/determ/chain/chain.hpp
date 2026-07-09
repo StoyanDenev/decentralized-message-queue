@@ -477,6 +477,34 @@ public:
 
     void        save(const std::string& path) const;
 
+    // B1 (pre-launch register, 2026-07-09): chain-storage-v1 — the O(1)
+    // RUNTIME save path. Where save() rewrites the whole chain.json on every
+    // call (O(N) serialize+write under the save worker's shared_lock — the
+    // register's global-mutex/throughput offender), save_incremental()
+    // writes ONLY the blocks appended since the last incremental save, one
+    // append-only file per block:
+    //
+    //   <path>.blocks/<index>.json     one block, atomic tmp+rename, never
+    //                                  rewritten once written
+    //   <path>.manifest.json           tiny {format,height,head_hash},
+    //                                  atomic tmp+rename, written LAST so a
+    //                                  crash mid-save leaves the previous
+    //                                  consistent manifest (blocks beyond
+    //                                  the manifest height are ignored/
+    //                                  overwritten on the next save)
+    //
+    // <path> itself (the legacy full chain.json) is NOT written here — the
+    // Node writes it once at graceful stop() so every offline consumer
+    // (operator tools, determ-light verify-chain-file, test scripts that
+    // parse chain.json) keeps working unchanged. head_hash carries the same
+    // S-021 tamper gate as the legacy format: load recomputes the head
+    // digest after replay and rejects a mismatch.
+    //
+    // Reorg hook (A4/S-048, future): the store is append-only because sync
+    // is append-only today; the bounded head-reorg increment must rewrite
+    // the tail file + manifest and reset persisted_count_.
+    void        save_incremental(const std::string& path) const;
+
     // rev.9 B6.basic: serialize the chain's CURRENT STATE (accounts,
     // stakes, registrants, dedup set) plus the last `header_count`
     // blocks. Operators host this as a snapshot for fast bootstrap of
@@ -597,6 +625,16 @@ private:
     // to load once and read multiple fields from the same bundle.
     std::shared_ptr<const CommittedStateBundle>
                                                 committed_state_view_;
+
+    // B1 chain-storage-v1: how many leading blocks_ entries the block store
+    // (<path>.blocks/) already holds — save_incremental() writes only
+    // [persisted_count_, size). SAVE-THREAD-CONFINED: mutated only by
+    // save_incremental (single save worker; the final stop() save runs
+    // after the worker is joined) and by load (single-threaded startup),
+    // so no atomics needed. mutable because save_incremental is const.
+    // Reset to 0 by a legacy (full-file) load: the first incremental save
+    // after a legacy load writes every block once (one-time migration).
+    mutable size_t                              persisted_count_{0};
 
     uint64_t                                    block_subsidy_{0};
     // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy

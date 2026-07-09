@@ -2147,6 +2147,68 @@ void Chain::save(const std::string& path) const {
         throw std::runtime_error("Cannot rename chain tmp " + tmp_path
             + " → " + path + ": " + ec.message());
     }
+    // B1 chain-storage-v1 invariant: a legacy full save SUPERSEDES the block
+    // store — remove the sibling manifest so load() can never prefer a store
+    // that is now stale relative to this file (a stale-manifest preference
+    // would silently REWIND the chain). Writers that also maintain the store
+    // (the Node) call save_incremental() right after this, which re-writes a
+    // fresh manifest; every other legacy-only writer (CLI fixtures, external
+    // tools) automatically invalidates the store by saving. Orphaned block
+    // files are harmless: load() only reads what a manifest names.
+    std::error_code mec;
+    fs::remove(fs::path(path + ".manifest.json"), mec);   // ok if absent
+}
+
+namespace {
+// B1 chain-storage-v1 helpers: atomic small-file write (same tmp+rename
+// discipline as Chain::save) + the store/manifest path derivation. The
+// manifest and per-block files live BESIDE <path>, never AT it, so the
+// legacy chain.json consumers are untouched.
+void write_file_atomic(const fs::path& target, const std::string& content) {
+    fs::create_directories(target.parent_path());
+    fs::path tmp = target;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error(
+            "chain store: cannot write tmp file: " + tmp.string());
+        f << content;
+        f.flush();
+        if (!f) throw std::runtime_error(
+            "chain store: failed to flush tmp file: " + tmp.string());
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) throw std::runtime_error("chain store: cannot rename "
+        + tmp.string() + " → " + target.string() + ": " + ec.message());
+}
+fs::path store_dir_for(const std::string& path)    { return fs::path(path + ".blocks"); }
+fs::path manifest_path_for(const std::string& path){ return fs::path(path + ".manifest.json"); }
+} // namespace
+
+void Chain::save_incremental(const std::string& path) const {
+    // O(new blocks) per call: write only blocks_[persisted_count_, size)
+    // as one-file-per-block, then the tiny manifest LAST (atomic), so the
+    // store is always either the previous consistent (manifest, blocks)
+    // pair or the new one. Block files beyond the manifest height that a
+    // crash strands are harmless: load() reads exactly manifest.height
+    // files, and the next save overwrites them atomically.
+    const fs::path dir = store_dir_for(path);
+    for (size_t i = persisted_count_; i < blocks_.size(); ++i) {
+        write_file_atomic(dir / (std::to_string(i) + ".json"),
+                          blocks_[i].to_json().dump(2));
+    }
+    json m;
+    m["format"]    = "chain-blocks-v1";
+    m["height"]    = blocks_.size();
+    // Same S-021 gate as the legacy wrapped chain.json: the head digest
+    // transitively covers every prior block via the prev_hash chain +
+    // committee signatures; load() recomputes and rejects a mismatch.
+    m["head_hash"] = blocks_.empty()
+                      ? std::string{}
+                      : to_hex(blocks_.back().compute_hash());
+    write_file_atomic(manifest_path_for(path), m.dump(2));
+    persisted_count_ = blocks_.size();
 }
 
 Chain Chain::load(const std::string& path,
@@ -2154,6 +2216,67 @@ Chain Chain::load(const std::string& path,
                     uint32_t shard_count,
                     const Hash& shard_salt,
                     ShardId my_shard_id) {
+    // B1 chain-storage-v1: when a manifest exists, the block store is the
+    // RUNTIME truth — it is written on every save tick, while the legacy
+    // chain.json is written only at graceful stop(), so after a crash the
+    // store is strictly newer (never older) than the legacy file. A
+    // present-but-unreadable store is a HARD error, fail-closed (S-021
+    // stance): silently falling back to a possibly-stale chain.json could
+    // rewind the chain below already-gossiped state. Recovery from a
+    // genuinely destroyed store: the operator deletes <path>.manifest.json
+    // to force a legacy load (or resyncs from peers/snapshot).
+    const fs::path mpath = manifest_path_for(path);
+    if (fs::exists(mpath)) {
+        std::ifstream mf(mpath);
+        if (!mf) throw std::runtime_error(
+            "chain store: manifest exists but cannot be opened: " + mpath.string());
+        json m = json::parse(mf);
+        if (m.value("format", std::string{}) != "chain-blocks-v1")
+            throw std::runtime_error(
+                "chain store: unknown manifest format '"
+                + m.value("format", std::string{}) + "' in " + mpath.string());
+        const uint64_t height = m.value("height", uint64_t{0});
+        const std::string expected_head_hex = m.value("head_hash", std::string{});
+
+        Chain c;
+        c.block_subsidy_ = block_subsidy;
+        c.shard_count_   = shard_count;
+        c.shard_salt_    = shard_salt;
+        c.my_shard_id_   = my_shard_id;
+
+        const fs::path dir = store_dir_for(path);
+        for (uint64_t i = 0; i < height; ++i) {
+            const fs::path bpath = dir / (std::to_string(i) + ".json");
+            std::ifstream bf(bpath);
+            if (!bf) throw std::runtime_error(
+                "chain store: manifest height " + std::to_string(height)
+                + " but block file missing/unreadable: " + bpath.string());
+            Block b = Block::from_json(json::parse(bf));
+            c.apply_transactions(b);
+            c.blocks_.push_back(std::move(b));
+        }
+        // The store is already on disk up to `height` — the next
+        // save_incremental writes only genuinely new blocks.
+        c.persisted_count_ = c.blocks_.size();
+
+        // Same S-021 head gate as the legacy path: the recomputed head
+        // digest transitively covers every prior block.
+        if (!expected_head_hex.empty()) {
+            if (c.blocks_.empty())
+                throw std::runtime_error(
+                    "chain store: head_hash set but height is zero");
+            const std::string actual = to_hex(c.blocks_.back().compute_hash());
+            if (actual != expected_head_hex)
+                throw std::runtime_error(
+                    "chain store: head_hash mismatch (tampering or corruption?); "
+                    "stored=" + expected_head_hex + " computed=" + actual);
+        } else if (height != 0) {
+            throw std::runtime_error(
+                "chain store: non-zero height but empty head_hash");
+        }
+        return c;
+    }
+
     std::ifstream f(path);
     if (!f) {
         // No on-disk chain: return EMPTY chain so caller (Node) can decide

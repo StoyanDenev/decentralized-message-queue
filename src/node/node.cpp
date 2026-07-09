@@ -495,8 +495,12 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                 // is a no-op for genesis-skipped paths since there's
                 // no prior state to overwrite). Note: the snapshot
                 // file remains the canonical state seed; do not
-                // delete it.
+                // delete it. B1: save() invalidated any manifest from
+                // a previous run (a stale manifest would win over this
+                // fresh chain.json on the next load and REWIND); write
+                // the block store fresh from the restored chain.
                 chain_.save(cfg_.chain_path);
+                chain_.save_incremental(cfg_.chain_path);
                 goto chain_loaded;
             } catch (std::exception& e) {
                 std::cerr << "[node] snapshot restore failed: " << e.what()
@@ -700,8 +704,15 @@ void Node::stop() {
         //     loop before processing the flag.
         //  2. An apply landed between the worker's last save and
         //     stop() — no pending flag, but disk is stale.
-        // Both are made-good by writing once more here.
+        // Both are made-good by writing once more here. B1: write BOTH
+        // stores, in THIS order — the legacy full chain.json first (the
+        // graceful-stop compatibility artifact every offline consumer —
+        // operator tools, determ-light verify-chain-file, test scripts —
+        // parses; O(N) once at shutdown, off the hot path; it also
+        // invalidates any manifest), then save_incremental to re-write a
+        // fresh manifest so the next start loads from the block store.
         chain_.save(cfg_.chain_path);
+        chain_.save_incremental(cfg_.chain_path);
     }
 }
 
@@ -748,7 +759,24 @@ void Node::save_worker_loop() {
         if (!do_save) continue;
         try {
             std::shared_lock<std::shared_mutex> slk(state_mutex_);
-            chain_.save(cfg_.chain_path);
+            // B1 chain-storage-v1, staged migration:
+            //   SHORT chains (height <= kLegacyFullSaveMaxHeight): write
+            //   BOTH — the legacy full chain.json (kept per-tick fresh, so
+            //   the ~19 test/operator scripts that parse chain.json MID-RUN
+            //   or after a hard kill keep working byte-for-byte; the O(N)
+            //   cost is trivial at this scale) and then the block store
+            //   (save() invalidates the manifest, so the incremental write
+            //   must come second to re-manifest).
+            //   LONG chains: store-only — the true O(1) hot path, which is
+            //   exactly where the O(N) rewrite was the register's
+            //   throughput offender. Live reads on long chains use RPC;
+            //   the legacy file is refreshed at graceful stop().
+            if (chain_.height() <= kLegacyFullSaveMaxHeight) {
+                chain_.save(cfg_.chain_path);
+                chain_.save_incremental(cfg_.chain_path);
+            } else {
+                chain_.save_incremental(cfg_.chain_path);
+            }
         } catch (std::exception& e) {
             std::cerr << "[save worker] save failed: " << e.what() << "\n";
             // Don't terminate the loop — transient disk failures
