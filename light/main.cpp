@@ -71,6 +71,7 @@
 #include "account_history.hpp"
 #include "verify_tx_inclusion.hpp"
 #include "verify_state_root.hpp"
+#include "verify_ct.hpp"
 #include "persist.hpp"
 
 #include <determ/chain/block.hpp>
@@ -120,7 +121,17 @@ void print_usage() {
         "      Self-contained OFFLINE single-block verifier: STRUCTURE +\n"
         "      TX-ROOT (recompute compute_tx_root == stored) + SIGS (committee\n"
         "      Ed25519 over the INTERNALLY-recomputed block_digest — no operator\n"
-        "      digest needed, unlike determ-wallet block-verify). One PASS/FAIL.\n"
+        "      digest needed, unlike determ-wallet block-verify) + CT-PROOFS\n"
+        "      (A3: every SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER range/balance\n"
+        "      proof re-verified CLIENT-SIDE — CT validity not trusted to the\n"
+        "      committee). One PASS/FAIL.\n"
+        "  verify-ct-tx --file <tx.json> [--json]\n"
+        "      A3 single-tx client-side CT verification: SHIELD balance proof,\n"
+        "      UNSHIELD proof context-BOUND to the locally-recomputed\n"
+        "      (from,to,nonce,amount) digest, CONFIDENTIAL_TRANSFER DCT1\n"
+        "      range+balance + fee match + dup-input reject. Pure local crypto;\n"
+        "      note-SET (double-spend) facts stay with the daemon/state_root.\n"
+        "      Exit 0 VERIFIED, 3 INVALID (incl. non-CT tx), 1 usage.\n"
         "  verify-chain-file --in <headers> (--committee <file> |\n"
         "                    --committee-manifest <file>)\n"
         "                    [--genesis-hash <hex>] [--prev-hash <hex>]\n"
@@ -960,6 +971,37 @@ int cmd_block_verify(int argc, char** argv) {
         checks.push_back({"SIGS", "SKIP", "STRUCTURE failed — not attempted"});
     }
 
+    // ── CT-PROOFS ── A3: re-verify every confidential tx's range/balance
+    // proof CLIENT-SIDE (SIGS proves the committee signed this block;
+    // CT-PROOFS proves the confidential validity independent of the
+    // committee). Runs off the tx JSON, so a headers-shape input (no
+    // transactions[]) verifies vacuously with an explicit 0-count — the
+    // count in the detail line is the anti-silent-vacuity signal. Note-SET
+    // membership (double-spend) is NOT checkable statelessly — that half is
+    // anchored by the committee-signed state_root over the cn: leaves.
+    if (struct_ok) {
+        auto r = determ::light::verify_ct_transactions(block_json);
+        bool ok = r.ok();
+        std::string detail;
+        if (ok) {
+            detail = std::to_string(r.ct_txs) + " confidential tx(s) of "
+                   + std::to_string(r.total_txs) + " re-verified client-side"
+                   + (r.ct_txs == 0 ? " (none present — vacuous)" : "");
+        } else {
+            detail = std::to_string(r.failures.size()) + " of "
+                   + std::to_string(r.ct_txs) + " confidential tx(s) FAILED: tx["
+                   + std::to_string(r.failures[0].index) + "] "
+                   + r.failures[0].detail;
+        }
+        if (!json_out)
+            std::cout << "--- CT-PROOFS ---\n  " << (ok ? "OK: " : "FAIL: ")
+                      << detail << "\n";
+        checks.push_back({"CT-PROOFS", ok ? "PASS" : "FAIL", detail});
+        ok ? ++passed : ++failed;
+    } else {
+        checks.push_back({"CT-PROOFS", "SKIP", "STRUCTURE failed — not attempted"});
+    }
+
     bool overall = (failed == 0);
     if (json_out) {
         json j;
@@ -983,6 +1025,69 @@ int cmd_block_verify(int argc, char** argv) {
                   << " (" << passed << " passed, " << failed << " failed)\n";
     }
     return overall ? 0 : 2;
+}
+
+// ──────────────────── verify-ct-tx ──────────────────────────────────────
+
+// A3 client-side CT verification, single-tx form: re-run the confidential
+// accept-rule LOCALLY on one transaction JSON (Transaction::to_json shape,
+// or a {"tx":{...}} envelope). Pure local crypto — no daemon, no committee,
+// no pool state. What it proves / does not prove:
+//   PROVES     — the cryptographic CT validity the validator would check:
+//                SHIELD commitment/balance proof for the declared amount;
+//                UNSHIELD proof CONTEXT-BOUND to this exact
+//                (from,to,nonce,amount) — the locally-recomputed digest, so a
+//                redirected/replayed proof FAILS here just as at a validator;
+//                CONFIDENTIAL_TRANSFER DCT1 range+balance + fee match +
+//                intra-bundle duplicate-input rejection.
+//   NOT PROVED — note-SET facts (input unspent / output fresh): stateless.
+//                Signature validity: use validate-tx / the daemon for that.
+// Exit 0 = CT proof VERIFIED; 3 = INVALID (or not a confidential tx — this
+// command's verdict must never read as "verified" for a tx it cannot verify);
+// 1 = usage/parse/IO.
+int cmd_verify_ct_tx(int argc, char** argv) {
+    std::string file_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--file" && i + 1 < argc) file_path = argv[++i];
+        else if (a == "--json")                 json_out = true;
+        else {
+            std::cerr << "verify-ct-tx: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (file_path.empty()) {
+        std::cerr << "verify-ct-tx: --file <tx.json> is required\n";
+        return 1;
+    }
+    json tx_json;
+    try {
+        tx_json = read_json_file(file_path);
+    } catch (const std::exception& e) {
+        std::cerr << "verify-ct-tx: " << e.what() << "\n";
+        return 1;
+    }
+    if (tx_json.is_object() && tx_json.contains("tx") && tx_json["tx"].is_object())
+        tx_json = tx_json["tx"];
+
+    auto v = determ::light::verify_ct_tx_json(tx_json);
+    if (json_out) {
+        json j;
+        j["verdict"] = (v.is_ct && v.ok) ? "VERIFIED" : "INVALID";
+        j["type"]    = v.type;
+        j["is_confidential"] = v.is_ct;
+        j["detail"]  = v.detail;
+        std::cout << j.dump(2) << "\n";
+    } else if (v.is_ct && v.ok) {
+        std::cout << "VERIFIED: " << v.detail << "\n";
+    } else if (!v.is_ct) {
+        std::cout << "INVALID: not a confidential transaction (type "
+                  << v.type << ") — nothing this verifier can attest\n";
+    } else {
+        std::cout << "INVALID: " << v.detail << "\n";
+    }
+    return (v.is_ct && v.ok) ? 0 : 3;
 }
 
 // ──────────────────── verify-chain-file ────────────────────────────────
@@ -7681,6 +7786,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-headers")        return cmd_verify_headers(sub_argc, sub_argv);
         if (cmd == "verify-block-sigs")     return cmd_verify_block_sigs(sub_argc, sub_argv);
         if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
+        if (cmd == "verify-ct-tx")          return cmd_verify_ct_tx(sub_argc, sub_argv);
         if (cmd == "verify-chain-file")     return cmd_verify_chain_file(sub_argc, sub_argv);
         if (cmd == "committee-diff")        return cmd_committee_diff(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);
