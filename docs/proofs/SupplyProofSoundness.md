@@ -1,8 +1,6 @@
-> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
-
 # SupplyProofSoundness — trust-minimized `c:`-namespace supply-counter read soundness
 
-This document formalizes the security of a **trust-minimized supply-counter read** by the light client: the new `determ-light supply-trustless` command (sibling-agent work this round) lets an operator learn the chain's five A1 supply accumulators — `genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound` — from a *single untrusted daemon* and verify each locally against a committee-signed `state_root`, so that even a Byzantine daemon cannot make an honest light client act on a wrong supply figure. The read targets the **`c:` supply-counter namespace** of the S-033 state-commitment surface (which, at the wire/leaf level, is the composite `k:c:` sub-namespace inside the `k:` constants prefix — see §1.2).
+This document formalizes the security of a **trust-minimized supply-counter read** by the light client: the `determ-light supply-trustless` command (`cmd_supply_trustless`, `light/main.cpp`) lets an operator learn the chain's five A1 supply accumulators — `genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound` — from a *single untrusted daemon* and verify each locally against a committee-signed `state_root`, so that even a Byzantine daemon cannot make an honest light client act on a wrong supply figure. The read targets the **`c:` supply-counter namespace** of the S-033 state-commitment surface (which, at the wire/leaf level, is the composite `k:c:` sub-namespace inside the `k:` constants prefix — see §1.2).
 
 > **Implementation status: SHIPPED (R51, 2026-07-03) — the race this banner documented is CLOSED.** The command was first implemented in R41 and reverted over the cleartext-sourcing race (the five A1 counters increment every block, so a `chain_summary` cleartext fetched before the sequential proof round-trips systematically mismatched the proofs' committed values — `TAMPERED` against an *honest* daemon). It was re-landed with same-root binding, and in **R51 the prescribed daemon-side fix shipped**: `rpc_state_proof` now returns the raw counter value (`value_hex`/`value_u64`) for the `c:` namespace ATOMICALLY with the proof — the whole RPC holds `state_mutex_`, so value, proof, `state_root`, and `height` are one snapshot, and the field is attached only after a server-side self-check that `SHA256(u64_be(value))` equals the proof's `value_hash` (fail-closed on encoding drift; the accessor↔leaf correspondence is unit-pinned by `test-state-proof-namespaces` assertion 10). `supply-trustless` prefers the atomic value (falling back to the legacy `chain_summary` path against pre-R51 daemons, which retains the documented race) and the optional `total_supply` cross-check is now height-gated (compared only when a fresh `chain_summary`'s height equals the anchored height — skipped rather than falsely `VIOLATED` on a live chain). The trust argument is UNCHANGED: the atomic value must still hash to the Merkle-verified `value_hash` under the committee-anchored root — SU-1..SU-4 below apply verbatim; the daemon gained no new trust.
 
@@ -214,7 +212,7 @@ T-1 (coverage completeness) confirms the five `accumulated_*` / `genesis_total` 
 
 ### 5.4 `LightClientThreatModel.md` — the adversary model and read flow
 
-This proof specializes T-L3 (state-proof correctness) + T-L4 (composite read with race-window mitigation) from the `a:` namespace to `c:`. The adversary `A_daemon`, the fail-closed-exit operational statement (L-6), the genesis anchor (T-L1), and the per-block committee-sig verify (T-L2) are all inherited unchanged. SU-E's bound equals T-L4's up to the `5×` Merkle-term factor for the five-leaf read. The light client's `read_account_trustless` (`trustless_read.cpp:439-599`) is the structural template the sibling agent's `read_supply_trustless` follows with `namespace="c"`, repeated per counter against the same anchored head.
+This proof specializes T-L3 (state-proof correctness) + T-L4 (composite read with race-window mitigation) from the `a:` namespace to `c:`. The adversary `A_daemon`, the fail-closed-exit operational statement (L-6), the genesis anchor (T-L1), and the per-block committee-sig verify (T-L2) are all inherited unchanged. SU-E's bound equals T-L4's up to the `5×` Merkle-term factor for the five-leaf read. The light client's `read_account_trustless` (`trustless_read.cpp:439-599`) is the structural template the shipped `cmd_supply_trustless` (`light/main.cpp`) follows with `namespace="c"`, repeated per counter against the same anchored head.
 
 ### 5.5 `StakeProofSoundness.md` — the sibling namespace proof
 
@@ -267,15 +265,15 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | SU-3 | A1 apply-tail gate | `src/chain/chain.cpp:1397-1419` | `if (live_total_supply() != expected_total()) throw` — the chain-side enforcement SU-3 consumes (I-6 / T-12). |
 | SU-4 | `Node::rpc_state_proof` | `src/node/node.cpp:3287-3336` | `c:` namespace supported (l.3305); composite key `"k:c:"+NAME` (l.3308-3311); returns `state_root` + `leaf_count` in one envelope (l.3325-3335). |
 | SU-4 | `Chain::state_proof` | `src/chain/chain.cpp:435-462` | `leaf_count = leaves.size()` (l.456) from the same tree as the root. |
-| SU-E | `read_account_trustless` (template for `read_supply_trustless`) | `light/trustless_read.cpp:439-599` | The composite read skeleton; `supply-trustless` differs by `namespace="c"`, repeated per counter against the same head. |
+| SU-E | `read_account_trustless` (template for `cmd_supply_trustless`) | `light/trustless_read.cpp:439-599` | The composite read skeleton; `supply-trustless` differs by `namespace="c"`, repeated per counter against the same head. |
 | SU-1 | `Chain::compute_state_root` | `src/chain/chain.cpp:413-415` | `merkle_root(build_state_leaves())` — the root the committee transitively signs. |
 | SU-1 | state_proof RPC dispatch | `src/rpc/rpc.cpp:235-238` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
 
-**Tests** (the `c:` read shares the light-client + Merkle + supply test surface; the sibling agent adds an end-to-end `supply-trustless` script this round):
+**Tests** (the `c:` read shares the light-client + Merkle + supply test surface; `tools/test_light_supply_trustless.sh` is the shipped end-to-end script):
 
 | Test | Coverage |
 |---|---|
-| `tools/test_light_supply_trustless.sh` | SU-E end-to-end — the sibling-agent script this round; fetch + verify the five `c:` counters against a committee-signed root; daemon lies about a counter via tampered RPC → light-client detects mismatch. |
+| `tools/test_light_supply_trustless.sh` | SU-E end-to-end — fetch + verify the five `c:` counters against a committee-signed root; daemon lies about a counter via tampered RPC → light-client detects mismatch. |
 | `tools/test_light_balance_trustless.sh` / `tools/test_light_stake_trustless.sh` | T-L4 / SP-E sibling shapes; `supply-trustless` mirrors them with `namespace="c"`. |
 | `tools/test_light_verify_state_proof.sh` | SU-2 — happy path + tampered value_hash → FAIL + tampered sibling → FAIL + wrong state_root → FAIL. |
 | `tools/test_state_proof_namespaces.sh` | SU-2 leaf-key binding — cross-namespace swap (a `k:c:`-key with an `a:`/`s:`/bare-`k:`-value_hash) rejected. |
@@ -289,7 +287,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 ## 8. Status
 
 - **Spec.** Complete (this document). Analytic; changes no code.
-- **Implementation.** The `c:` namespace is already served by `Node::rpc_state_proof` (`node.cpp:3305-3311`) and committed by `build_state_leaves` (`chain.cpp:403-408`); the `determ-light supply-trustless` composite command is sibling-agent work this round, structurally identical to `read_account_trustless` with `namespace="c"`, repeated per counter against the same committee-anchored head.
+- **Implementation.** SHIPPED. The `c:` namespace is served by `Node::rpc_state_proof` (`node.cpp:3305-3311`) — since R51 with the raw counter value (`value_hex`/`value_u64`) returned atomically with the proof (see the status note above §1) — and committed by `build_state_leaves` (`chain.cpp:403-408`); the `determ-light supply-trustless` composite command is `cmd_supply_trustless` (`light/main.cpp`), structurally identical to `read_account_trustless` with `namespace="c"`, repeated per counter against the same committee-anchored head. End-to-end test: `tools/test_light_supply_trustless.sh`.
 - **Cryptographic assumptions used.** assumption A1 (Ed25519 EUF-CMA), A2 (SHA-256 collision / second-preimage resistance). No A3/A4 dependence beyond what T-L1's genesis anchor already carries.
 - **Adversary model.** `A_daemon` (malicious single daemon). Out of scope: `A_crypto`, `A_local`, `A_net`, `A_genesis` (inherited from `LightClientThreatModel.md` §2.2).
 - **Theorems.** SU-1 (committee-signed `state_root` binds the `c:` counter leaf — reduces to an assumption-A1 forgery on `h+1` or an A2 collision at `h`, via SR-1); SU-2 (`k:c:` Merkle inclusion soundness — MT-1/MT-3/MT-4 at the `k:c:` leaf, MT-2 domain separation for the composite-key binding); SU-3 (the verified counters let the light client recompute the A1 supply identity itself — consuming I-6 / T-12; no `a:`/`s:` analog); SU-4 (`leaf_count` cryptographically bound into the committed root via the root-wrapper hash — S-040 CLOSED, a forged count is rejected under A2). Corollary SU-E composes them with T-L1 + T-L2 to the same `≤ 2⁻⁹²` end-to-end bound as the balance/stake reads (up to a `5×` Merkle-term factor for the five-leaf read).
@@ -313,7 +311,8 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `include/determ/chain/chain.hpp:611-615` — counter fields.
 - `src/crypto/merkle.cpp:113-141` — `merkle_verify`.
 - `light/verify.cpp:330-396` — `verify_state_proof`.
-- `light/trustless_read.cpp:439-599` — `read_account_trustless` (template for `read_supply_trustless`); S-042 committee-binding via `committee_bound_state_root` (`light/trustless_read.cpp:335-437`).
+- `light/trustless_read.cpp:439-599` — `read_account_trustless` (template for `cmd_supply_trustless`); S-042 committee-binding via `committee_bound_state_root` (`light/trustless_read.cpp:335-437`).
+- `light/main.cpp` — `cmd_supply_trustless` (the shipped composite command).
 
 ### Companion proofs
 - `docs/proofs/Preliminaries.md` (F0) — §2.0 canonical labels + the "A1 unitary-supply invariant ≠ assumption A1" disambiguation; §2.1 SHA-256 (A2/A3); §2.2 Ed25519 EUF-CMA (assumption A1).

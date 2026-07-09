@@ -21,6 +21,7 @@
 | **v2.7 F2 view reconciliation** | **SHIPPED** (S-016 + S-030-D2 consensus closure; commits 850d2c3..48c4b45) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
 | **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03, then REMOVED from the tree 2026-07-09 — pre-launch register B2); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); **§3.15 daemon+light migration SHIPPED 2026-07-03** (consensus path OpenSSL-free; determ-light links zero OpenSSL; goldens byte-invariant on MSVC+GCC) — remaining OpenSSL surface is wallet-envelope + §Q9-test-oracle only (the 1c follow-up) | `proofs/CRYPTO-C99-SPEC.md` (`tla/FrostVerify.tla` deleted 2026-07-09, doc-consolidation inc.1) |
 | **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
+| **Trustless supply-counter read** | **SHIPPED** (R41 first landing, reverted; **re-landed + daemon-side atomic raw-value `state_proof` fix SHIPPED R51, 2026-07-03** — `determ-light supply-trustless` / `cmd_supply_trustless` in `light/main.cpp`, end-to-end `tools/test_light_supply_trustless.sh`; proof doc rejoined the shipped-proof set, FUTURE banner removed 2026-07-09) | `proofs/SupplyProofSoundness.md` |
 
 ---
 
@@ -36,7 +37,6 @@
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
 | **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
 | **Launch** — v1.1 mainnet (address-derivation decision **DECIDED 2026-07-03**: formula frozen as-is — DECISION-LOG) | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
-| **Trustless reads** — supply-counter trustless read (deferred) | `proofs/SupplyProofSoundness.md` — command reverted R41; needs daemon-side height-pinned counter read (or raw-value `state_proof`); soundness SU-1..SU-4 stands as the spec |
 | **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
 
 ---
