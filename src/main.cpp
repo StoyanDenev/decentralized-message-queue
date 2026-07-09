@@ -11,6 +11,7 @@
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
+#include <determ/crypto/viewkey/viewkey.h> // §3.24 A1 per-epoch view-key derivation
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
@@ -540,6 +541,10 @@ In-process tests (deterministic, no network):
                                               tools/vectors/*.json (python-
                                               vetted) byte-equal through the
                                               shipped C99 implementations
+  determ test-view-key-c99 [file]             §3.24 A1 per-epoch view-key
+                                              derivation: 14 frozen vectors
+                                              byte-equal (info + vk halves) +
+                                              fail-closed edges + determinism
   determ test-c99-api                         §3.11: determ::c99 C++ wrapper ==
                                               raw C99 API per primitive; AEAD
                                               nullopt-on-auth-failure + throw-
@@ -13220,6 +13225,112 @@ int main(int argc, char** argv) {
           check(Transaction::from_json(j).pq_auth.empty(), "non-PQ tx from_json leaves pq_auth empty"); }
 
         if (fail==0) std::cout << "  PASS: pq-transaction (PQ-native address + PQ_TRANSFER accept-rule) unit test\n";
+        return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-view-key-c99") {
+        // CRYPTO-C99-SPEC §3.24 — A1 per-epoch view-key derivation
+        // (determ_view_key_derive, src/crypto/viewkey/viewkey.c). The mapping
+        // was frozen python-first: tools/verify_view_key.py generated
+        // tools/vectors/view_key.json through an independent from-scratch
+        // RFC 5869 HKDF (gated on RFC 5869 Appendix A before writing). This
+        // gate recomputes every vector byte-for-byte through the shipped C —
+        // BOTH halves: the pinned info encoding (rebuilt here per the spec and
+        // compared against info_hex, then fed to determ_hkdf_sha256 directly)
+        // AND the end-to-end derive() output vs vk_hex. Plus the fail-closed
+        // edges (empty chain_id/addr, over-cap fields, NULL args) which must
+        // return -1 and leave the output untouched.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        // Frozen corpus: every vector through the shipped derive(), both halves.
+        {
+            std::string path = (argc>2)? argv[2] : "tools/vectors/view_key.json";
+            std::ifstream f(path);
+            if (!f) check(false, std::string("corpus present: ")+path);
+            else {
+                json doc; f >> doc; int n = 0;
+                for (auto& v : doc["vectors"]) {
+                    std::string name = v.value("name","?");
+                    auto sk   = unhex(v["view_master_sk_hex"].get<std::string>());
+                    std::string cid  = v["chain_id"].get<std::string>();
+                    std::string addr = v["addr"].get<std::string>();
+                    // epoch is a DECIMAL STRING in the corpus (max-u64 exceeds
+                    // double-exact JSON integers) — parse as u64.
+                    uint64_t epoch = std::stoull(v["epoch"].get<std::string>());
+
+                    // Half 1: rebuild info per the spec encoding and pin it
+                    // against the python oracle's info_hex, then run raw HKDF
+                    // over it (isolates encoding bugs from HKDF bugs).
+                    std::vector<uint8_t> info;
+                    auto put64 = [&](uint64_t x){ for(int i=7;i>=0;i--) info.push_back((uint8_t)(x>>(8*i))); };
+                    put64(cid.size());  info.insert(info.end(), cid.begin(),  cid.end());
+                    put64(addr.size()); info.insert(info.end(), addr.begin(), addr.end());
+                    put64(epoch);
+                    check(hx(info.data(), info.size()) == v["info_hex"].get<std::string>(),
+                          std::string("info encoding byte-equal: ")+name);
+                    static const uint8_t dst[] = "determ-view-key-v1";
+                    uint8_t raw[32];
+                    check(determ_hkdf_sha256(dst, sizeof(dst)-1, sk.data(), sk.size(),
+                                             info.data(), info.size(), raw, 32) == 0
+                              && hx(raw, 32) == v["vk_hex"].get<std::string>(),
+                          std::string("raw HKDF(info) == vk: ")+name);
+
+                    // Half 2: the shipped end-to-end derive().
+                    uint8_t vk[32];
+                    int rc = determ_view_key_derive(sk.data(),
+                                (const uint8_t*)cid.data(),  cid.size(),
+                                (const uint8_t*)addr.data(), addr.size(),
+                                epoch, vk);
+                    check(rc == 0 && hx(vk, 32) == v["vk_hex"].get<std::string>(),
+                          std::string("derive() byte-equal: ")+name);
+                    n++;
+                }
+                check(n == 14, "corpus complete (14 vectors)");
+            }
+        }
+
+        // Fail-closed edges: -1 and the output buffer untouched.
+        {
+            uint8_t sk[32]; for (int i=0;i<32;i++) sk[i]=(uint8_t)i;
+            const uint8_t cid[] = "determ-mainnet"; const uint8_t addr[] = "alice";
+            uint8_t vk[32]; memset(vk, 0xAA, 32);
+            uint8_t aa[32]; memset(aa, 0xAA, 32);
+            auto untouched = [&]{ return memcmp(vk, aa, 32) == 0; };
+            check(determ_view_key_derive(sk, cid, 0, addr, 5, 0, vk) == -1 && untouched(),
+                  "empty chain_id rejected, output untouched");
+            check(determ_view_key_derive(sk, cid, 14, addr, 0, 0, vk) == -1 && untouched(),
+                  "empty addr rejected, output untouched");
+            std::vector<uint8_t> big(257, 'a');
+            check(determ_view_key_derive(sk, big.data(), big.size(), addr, 5, 0, vk) == -1 && untouched(),
+                  "over-cap chain_id (257) rejected");
+            check(determ_view_key_derive(sk, cid, 14, big.data(), big.size(), 0, vk) == -1 && untouched(),
+                  "over-cap addr (257) rejected");
+            check(determ_view_key_derive(nullptr, cid, 14, addr, 5, 0, vk) == -1 && untouched(),
+                  "NULL sk rejected");
+            check(determ_view_key_derive(sk, nullptr, 14, addr, 5, 0, vk) == -1 && untouched(),
+                  "NULL chain_id rejected");
+            check(determ_view_key_derive(sk, cid, 14, nullptr, 5, 0, vk) == -1 && untouched(),
+                  "NULL addr rejected");
+            // Boundary: exactly-cap fields (256) are ACCEPTED (the cap is the
+            // buffer bound, not a policy edge).
+            std::vector<uint8_t> cap(256, 'a');
+            check(determ_view_key_derive(sk, cap.data(), cap.size(), cap.data(), cap.size(), 0, vk) == 0,
+                  "at-cap fields (256) accepted");
+            // Determinism: same inputs, byte-equal twice.
+            uint8_t vk2[32];
+            check(determ_view_key_derive(sk, cid, 14, addr, 5, 7, vk) == 0
+                      && determ_view_key_derive(sk, cid, 14, addr, 5, 7, vk2) == 0
+                      && memcmp(vk, vk2, 32) == 0,
+                  "determinism (derive twice byte-equal)");
+        }
+
+        if (fail==0) std::cout << "  PASS: view-key (A1 per-epoch derivation) unit test\n";
         return fail==0 ? 0 : 1;
     }
     if (cmd == "test-c99-vectors") {

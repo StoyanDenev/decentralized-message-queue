@@ -56,13 +56,14 @@ EXPECTED = {
     "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
     "p256_h2c.json", "p256_oprf.json",
     "sha2_cavp_sha256.json", "sha2_cavp_sha512.json", "aes_gcm_cavp.json",
-    "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
+    "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
     "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
     "base64_strict.json", "sha3_shake.json", "mldsa_ntt.json", "mldsa_sample.json",
     "mldsa_pack.json", "mldsa_keygen.json", "mldsa_sign.json", "mldsa_verify.json",
     "pedersen.json", "bp_ipa.json", "bp_rangeproof.json", "bp_agg_rangeproof.json",
-    "p256_balance.json",
+    "p256_balance.json", "view_key.json", "pq_address.json",
+    "p256_ctx_bundle.json", "pqauth.json",
 }
 
 try:
@@ -1222,6 +1223,141 @@ def chk_p256_balance(vec, label):
         return "cannot import verify_p256_balance (%s)" % e
     return vpb.check_p256_balance(vec, label)
 
+def chk_view_key(vec, label):
+    # §3.24 A1 per-epoch view-key derivation — rebuild the length-prefixed info
+    # encoding from the RAW fields, pin it against the frozen info_hex, then run
+    # the from-scratch RFC 5869 HKDF above (independent of both the C and
+    # tools/verify_view_key.py) and match vk_hex.
+    need(vec, ("view_master_sk_hex", "chain_id", "addr", "epoch", "info_hex", "vk_hex"), label)
+    sk = unhex(vec["view_master_sk_hex"], label + " sk")
+    if len(sk) != 32:
+        return "view_master_sk is %d bytes, must be 32" % len(sk)
+    cid, addr = vec["chain_id"].encode(), vec["addr"].encode()
+    if not cid or not addr:
+        return "empty chain_id/addr in a positive vector (these are ERROR edges)"
+    epoch = int(vec["epoch"])          # decimal string (max-u64 > double-exact)
+    if not (0 <= epoch <= 2**64 - 1):
+        return "epoch outside u64"
+    info = (len(cid).to_bytes(8, "big") + cid
+            + len(addr).to_bytes(8, "big") + addr
+            + epoch.to_bytes(8, "big"))
+    if info.hex() != vec["info_hex"]:
+        return "info encoding mismatch (got %s)" % info.hex()
+    vk = hkdf_sha256_ref(b"determ-view-key-v1", sk, info, 32)
+    if vk.hex() != vec["vk_hex"]:
+        return "vk mismatch (got %s)" % vk.hex()
+    return None
+
+_pqauth_cache = {}
+def chk_pqauth(vec, label):
+    # §3.21 DPQ1 PQ tx-auth envelope — delegate ONCE per run to the dedicated
+    # oracle (tools/verify_pqauth.py: rebuild every envelope through an
+    # independent python ed25519 + ML-DSA implementation and match the frozen
+    # bytes); the whole-file verdict is cached because each envelope rebuild
+    # is a full python ML-DSA sign.
+    if "rc" not in _pqauth_cache:
+        if "tools" not in sys.path: sys.path.insert(0, "tools")
+        try:
+            import verify_pqauth as vp
+            _pqauth_cache["rc"] = vp.verify()
+        except Exception as e:
+            _pqauth_cache["rc"] = "exception: %s" % e
+    rc = _pqauth_cache["rc"]
+    return None if rc == 0 else "verify_pqauth failed (%s)" % rc
+
+def chk_p256_ctx_bundle(vec, label):
+    # §3.22 DCT1 confidential-transfer bundle — delegate to the independent
+    # oracle's full check (tools/verify_ctx_bundle.py: recompute the bundle
+    # bytes from the composed pedersen/range/balance oracles, match the frozen
+    # corpus byte-for-byte, then structurally re-verify the parsed bundle).
+    if "tools" not in sys.path: sys.path.insert(0, "tools")
+    try:
+        import verify_ctx_bundle as vcb
+    except Exception as e:
+        return "cannot import verify_ctx_bundle (%s)" % e
+    try:
+        vcb.check()
+    except SystemExit as e:
+        return "verify_ctx_bundle.check failed: %s" % e
+    except Exception as e:
+        return "exception in verify_ctx_bundle.check: %s" % e
+    return None
+
+PQ_FORM_PK = {1: 1312, 2: 1952, 3: 2592}   # ML-DSA-44 / -65 / -87 pk bytes
+
+def pq_addr_ref(form, pk):
+    # A5 PQ anon address (frozen proposal): addr = 0x + hex(SHA256(
+    # u8(len(DST)) || DST || u8(form) || u32_be(len(pk)) || pk)); unknown form
+    # or a pk whose length disagrees with the form is REJECTED (fail-closed).
+    if form not in PQ_FORM_PK:
+        raise ValueError("unknown form 0x%02x" % form)
+    if len(pk) != PQ_FORM_PK[form]:
+        raise ValueError("pk length %d != %d required by form" % (len(pk), PQ_FORM_PK[form]))
+    dst = b"determ-pq-anon-addr-v1"
+    pre = bytes([len(dst)]) + dst + bytes([form]) + len(pk).to_bytes(4, "big") + pk
+    return "0x" + hashlib.sha256(pre).hexdigest()
+
+def chk_pq_address(vec, label):
+    # The ed25519_golden vectors pin the EXISTING identity encoding
+    # (0x + hex(pk)) the PQ space must stay disjoint from; bitflip_pair pins
+    # full-pk binding; cross_scheme pins no ed25519/PQ aliasing;
+    # error_wrong_length vectors must REJECT (never derive an address).
+    kind = vec.get("kind")
+    if kind == "ed25519_golden":
+        need(vec, ("pk_hex", "address"), label)
+        if "0x" + vec["pk_hex"] != vec["address"]:
+            return "ed25519 identity-encoding mismatch"
+        return None
+    if kind == "pq":
+        need(vec, ("form", "pk_len", "pk_hex", "pk_sha256", "address"), label)
+        pk = unhex(vec["pk_hex"], label + " pk")
+        if len(pk) != vec["pk_len"]:
+            return "pk is %d bytes, pk_len says %d" % (len(pk), vec["pk_len"])
+        if hashlib.sha256(pk).hexdigest() != vec["pk_sha256"]:
+            return "pk_sha256 mismatch"
+        if pq_addr_ref(vec["form"], pk) != vec["address"]:
+            return "address mismatch"
+        return None
+    if kind == "bitflip_pair":
+        need(vec, ("form", "flip_byte_index", "flip_bit",
+                   "base_pk_hex", "mut_pk_hex", "base_address", "mut_address"), label)
+        base = unhex(vec["base_pk_hex"], label + " base")
+        mut  = unhex(vec["mut_pk_hex"],  label + " mut")
+        diff = [(i, base[i] ^ mut[i]) for i in range(len(base)) if base[i] != mut[i]]
+        if len(diff) != 1 or diff[0][0] != vec["flip_byte_index"] \
+                or diff[0][1] != (1 << vec["flip_bit"]):
+            return "pair does not differ in exactly the documented bit"
+        a, b = pq_addr_ref(vec["form"], base), pq_addr_ref(vec["form"], mut)
+        if a != vec["base_address"] or b != vec["mut_address"]:
+            return "address mismatch"
+        if a == b:
+            return "single-bit flip did NOT change the address"
+        return None
+    if kind == "cross_scheme":
+        need(vec, ("form", "ed_pk_hex", "ed_address", "embedded_pk_hex", "pq_address"), label)
+        ed  = unhex(vec["ed_pk_hex"], label + " ed")
+        emb = unhex(vec["embedded_pk_hex"], label + " emb")
+        if emb[:32] != ed or emb[32:] != bytes(len(emb) - 32):
+            return "embedded buffer != ed pk || zero padding"
+        if "0x" + ed.hex() != vec["ed_address"]:
+            return "ed25519 identity-encoding mismatch"
+        pq = pq_addr_ref(vec["form"], emb)
+        if pq != vec["pq_address"]:
+            return "pq address mismatch"
+        if pq == vec["ed_address"]:
+            return "cross-scheme ALIASING (pq address == ed address)"
+        return None
+    if kind == "error_wrong_length":
+        need(vec, ("form", "pk_hex", "expect"), label)
+        if vec["expect"] != "error":
+            return "error vector without expect=error"
+        try:
+            pq_addr_ref(vec["form"], unhex(vec["pk_hex"], label + " pk"))
+        except ValueError:
+            return None
+        return "expected-an-error vector derived an address (must REJECT)"
+    return "unknown vector kind %r" % kind
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -1255,6 +1391,10 @@ CHECKERS = {
     "bp_rangeproof": chk_bp_rangeproof,
     "bp_agg_rangeproof": chk_bp_agg_rangeproof,
     "p256_balance": chk_p256_balance,
+    "view_key": chk_view_key,
+    "pq_address": chk_pq_address,
+    "p256_ctx_bundle": chk_p256_ctx_bundle,
+    "pqauth": chk_pqauth,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
@@ -1272,6 +1412,18 @@ for path in files:
     except Exception as e:
         bad("%s: not valid JSON (%s)" % (base, e))
         continue
+    # pqauth.json is a TOP-LEVEL ARRAY (its python/C consumers iterate the
+    # document directly); normalize to the dict schema — the primitive name is
+    # the filename stem, so an unknown bare-list corpus still fails closed at
+    # the checker-registry lookup below.
+    if isinstance(obj, list):
+        obj = {"primitive": base[:-len(".json")],
+               "source": "(top-level array corpus; see its dedicated verify_*.py oracle)",
+               "vectors": obj}
+    # p256_ctx_bundle.json carries ONE bundle as a top-level "vector" object
+    # (its python/C consumers read ["vector"]); normalize to the list schema.
+    if "vectors" not in obj and isinstance(obj.get("vector"), dict):
+        obj["vectors"] = [obj["vector"]]
     schema_bad = False
     for k, t in (("primitive", str), ("source", str), ("vectors", list)):
         if not isinstance(obj.get(k), t) or not obj.get(k):

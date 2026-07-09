@@ -185,6 +185,9 @@ add_library(determ-crypto-c99 STATIC
   # RFC 4648 Base64 (strict decode) — the 1c wallet-envelope codec, replacing
   # OpenSSL EVP_EncodeBlock/EVP_DecodeBlock (the wallet's last OpenSSL class).
   "${CMAKE_SOURCE_DIR}/src/crypto/base64/base64.c"
+  # §3.24 A1 per-epoch view-key derivation (HKDF-SHA256 composition, frozen
+  # python-first) — `determ test-view-key-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/viewkey/viewkey.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)
