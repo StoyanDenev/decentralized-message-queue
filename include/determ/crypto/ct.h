@@ -17,7 +17,7 @@
  *   - Use it for every compare where at least one operand is secret or
  *     secret-derived: AEAD tag verification (ChaCha20-Poly1305, AES-256-GCM),
  *     Ed25519 signature R-encoding acceptance, MAC checks.
- *   - Also use it on public-but-crypto-adjacent equality (e.g. FROST VSS /
+ *   - Also use it on public-but-crypto-adjacent equality (e.g. commitment /
  *     PoP point comparisons, whose operands are publicly recomputable group
  *     elements): uniform discipline costs nothing and removes the per-site
  *     "is this operand really public?" review burden.

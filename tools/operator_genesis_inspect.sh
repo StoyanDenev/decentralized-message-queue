@@ -14,8 +14,8 @@
 #      tool of choice, mirroring operator_genesis_dump.sh) for the fields
 #      verify-genesis omits: subsidy_mode / subsidy_pool_initial /
 #      zeroth_pool_initial, epoch_blocks, the per-balance supply total,
-#      and the v2 activation-height gates (v2_7_f2_active_from_height,
-#      v2_10_active_from_height) when those keys are present.
+#      and the v2 activation-height gate (v2_7_f2_active_from_height)
+#      when the key is present.
 #
 # Sibling positioning:
 #   * operator_genesis_dump.sh         — full parameter dump / compact /
@@ -277,9 +277,6 @@ v2_heights = []
 if "v2_7_f2_active_from_height" in raw:
     v2_heights.append(("v2.7 F2 view-reconciliation",
                        fmt_height(raw["v2_7_f2_active_from_height"])))
-if "v2_10_active_from_height" in raw:
-    v2_heights.append(("v2.10 threshold randomness",
-                       fmt_height(raw["v2_10_active_from_height"])))
 
 # ── Human summary ──────────────────────────────────────────────────────────
 print(f"=== Genesis summary (path: {in_path}) ===")

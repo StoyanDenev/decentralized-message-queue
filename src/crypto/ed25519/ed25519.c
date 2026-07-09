@@ -349,11 +349,11 @@ int determ_ed25519_verify(const u8 pk[32],
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
- * FROST-support primitives: scalar arithmetic mod L + Edwards group ops, exposed
- * so the C99 FROST-Ed25519 layer (src/crypto/frost/) can build threshold keygen /
+ * Scalar/group primitives: scalar arithmetic mod L + Edwards group ops, exposed
+ * as low-level building blocks (originally for the removed FROST layer —
  * signing on the same field/group code this module already validates. Scalars are
  * 32-byte little-endian, reduced mod L; points are 32-byte compressed encodings.
- * Declared in ed25519_group.h. See frost.c for the consumer.
+ * pre-launch register B2, 2026-07-09). Declared in ed25519_group.h.
  * ─────────────────────────────────────────────────────────────────────────── */
 
 static const u8 SC_ONE[32] = { 1 };
@@ -442,7 +442,7 @@ int determ_ed25519_point_add(u8 out[32], const u8 a[32], const u8 b[32]) {
 }
 
 /* 1 iff the 32-byte little-endian scalar s is canonical (s < L), else 0. Lets
- * higher layers (e.g. the FROST DKG proof-of-possession) apply the same anti-
+ * higher layers apply the same anti-
  * malleability gate the Ed25519 verifier uses on signature scalars. */
 int determ_ed25519_sc_is_canonical(const u8 s[32]) { return sc_lt_L(s); }
 

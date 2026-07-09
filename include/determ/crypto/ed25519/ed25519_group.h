@@ -1,7 +1,7 @@
 /* Determ C99-native Ed25519 group + scalar primitives — the low-level field/group
- * API the FROST-Ed25519 layer (src/crypto/frost/, CRYPTO-C99-SPEC §3.2 / RFC 9591)
+ * API for callers needing raw scalar/group ops (CRYPTO-C99-SPEC §3.2)
  * builds threshold keygen and signing on. Implemented in ed25519.c (same validated
- * field/group code as determ_ed25519_sign/_verify), exposed here so FROST does not
+ * field/group code as determ_ed25519_sign/_verify), exposed here so callers do not
  * re-vendor the curve.
  *
  * Scalars are 32-byte little-endian integers reduced mod L (the group order).
@@ -12,7 +12,7 @@
  * result; a decode of an off-curve encoding returns -1. Decode does NOT check
  * canonicality (a y >= q encoding is accepted leniently) — callers that need
  * the y < q / s < L gates use the explicit determ_ed25519_point_is_canonical /
- * determ_ed25519_sc_is_canonical witnesses below (as the FROST PoP verifier
+ * determ_ed25519_sc_is_canonical witnesses below (as a verifier
  * does).
  */
 #ifndef DETERM_CRYPTO_ED25519_GROUP_H

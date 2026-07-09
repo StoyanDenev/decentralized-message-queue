@@ -1,7 +1,7 @@
 /* Determ C99-native SHA-512 (FIPS 180-4 Section 6.4).
  * Part of the libsodium-free crypto stack (CRYPTO-C99-SPEC.md Section 3.1).
  * Validated against the OpenSSL backend + NIST KATs by `determ test-sha2-c99`.
- * SHA-512 is the hash RFC 8032 Ed25519 + RFC 9591 FROST H1..H5 build on. */
+ * SHA-512 is the hash RFC 8032 Ed25519 builds on. */
 #include "determ/crypto/sha2/sha2.h"
 #include "determ/crypto/secure_zero.h"
 #include <string.h>
@@ -65,7 +65,7 @@ static void sha512_block(uint64_t h[8], const uint8_t p[128]) {
         h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     }
     /* w holds key-derived material for keyed callers (HMAC-SHA-512, Ed25519
-     * seed-hash, FROST H1..H5); scrub it before the stack frame is reclaimed. */
+     * seed-hash); scrub it before the stack frame is reclaimed. */
     determ_secure_zero(w, sizeof w);
 }
 

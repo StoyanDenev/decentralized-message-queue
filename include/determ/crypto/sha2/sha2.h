@@ -4,8 +4,7 @@
  * (CRYPTO-C99-SPEC.md Section 3.1). One-shot SHA-256 / SHA-512, written in
  * portable C99 with no external dependency, consumable from C99 and from C++
  * (extern "C"). SHA-2 is the foundation the rest of the stack builds on:
- * RFC 8032 Ed25519 uses SHA-512, and the FROST H1..H5 challenge hashes
- * (RFC 9591) are SHA-512-based, so this unblocks the v2.10 work.
+ * RFC 8032 Ed25519 uses SHA-512.
  *
  * Correctness is gated two independent ways by `determ test-sha2-c99`:
  *   (1) byte-equal cross-validation against the daemon's current backend

@@ -7,7 +7,6 @@
 #include <determ/chain/block.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
-#include <determ/crypto/frost.hpp>
 #include <determ/crypto/merkle.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -17,7 +16,6 @@
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
 #include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
 #include <determ/crypto/rng/rng.h>            // §3.15: OS-entropy shim (replaces RAND_bytes)
-#include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
 #include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
@@ -40,9 +38,6 @@
 #include <determ/crypto/pedersen/balance.h>    // §3.19 inc.7: confidential-tx balance proof (P-256)
 #include <determ/crypto/pedersen/ctxbundle.h>  // §3.22: DCT1 confidential-transfer proof bundle
 #include <determ/chain/shielded.hpp>           // §3.22b: unshield_spend_ctx_hash
-#include <determ/crypto/ringsig/lsag.h>        // §3.23: LSAG linkable ring signature
-#include <determ/crypto/ringsig/clsag.h>       // §3.23b: CLSAG concise linkable ring sig
-#include <determ/crypto/ringsig/ringct_spend.h> // §3.23c: RingCT spend composition + transpose
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/pqauth.hpp>           // §3.21: DPQ1 post-quantum tx-authentication envelope
 #include <determ/crypto/pq_address.hpp>       // §3.21: PQ-native bearer address (inc.4)
@@ -533,22 +528,6 @@ In-process tests (deterministic, no network):
   determ test-p256-confidential-tx-c99        §3.19 inc.8: END-TO-END confidential-tx
                                               composition over P-256 (per-output range +
                                               balance; range catches OOR, balance inflation)
-  determ test-lsag-c99                        §3.23: LSAG linkable ring signature over
-                                              P-256 (input-unlinkability inc.1) — prove
-                                              membership in a ring of n keys without
-                                              revealing which + a key-image nullifier;
-                                              dual-oracle byte-freeze + linkability
-  determ test-clsag-c99                       §3.23b: CLSAG concise linkable ring
-                                              signature over P-256 (input-unlinkability
-                                              inc.2) — two key layers (spend + amount
-                                              commitment) folded into ONE concise ring
-                                              via hash aggregation (the RingCT primitive);
-                                              dual-oracle byte-freeze + linkability
-  determ test-ringct-spend-c99                §3.23c: LIBRARY-only RingCT spend-statement
-                                              composition — a commitment-transposition
-                                              proof (value-on-H <-> value-on-G bridge) +
-                                              a verifier composing CLSAG + the §3.22c DCT1
-                                              bundle end-to-end; dual-oracle byte-freeze
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -570,19 +549,16 @@ In-process tests (deterministic, no network):
                                               method, in-house — REPORTING
                                               tool, not pass/fail; --selftest
                                               is the suite-eligible piece)
-)" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
-                                              reconciliation primitives + FROST
-                                              verify. compute_view_root +
+)" << R"(  determ test-view-root                       v2.7 F2 view-reconciliation
+                                              primitives. compute_view_root +
                                               reconcile_union +
                                               reconcile_intersection +
                                               make_contrib_commitment v1-compat
                                               short-circuit + DTM-F2-v1 domain
                                               separator + S-018 wrong-type
                                               rejection on view lists +
-                                              frost_verify round-trip /
-                                              tamper / wrong-key rejection
-                                              (per F2-SPEC.md §Q1 and
-                                              RFC 9591 §3)
+                                              validator-side V21..V26 helpers
+                                              (per F2-SPEC.md §Q1)
   determ test-make-contrib-commitment-distinct  Exhaustive pin on
                                               make_contrib_commitment hash
                                               distinctness across every input
@@ -612,17 +588,6 @@ In-process tests (deterministic, no network):
                                               proposer_time rejects, legacy
                                               zero-time contribs keep the v1
                                               short-circuit, F2 views + TS compose
-  determ test-frost-types                     v2.10 Phase A: pin RFC 9591
-                                              type-layout assumptions for FROST
-                                              primitives — Identifier (uint16_t),
-                                              Scalar / Point (32 bytes),
-                                              FrostSig (64 bytes) + byte-parity
-                                              with PubKey / Signature + default
-                                              zero-init for Scalar / Point /
-                                              FrostSig / KeygenRound1Output /
-                                              LocalShare / CommitmentMap /
-                                              SignRound1Output (per RFC 9591 §3
-                                              and v2.10-DKG-SPEC.md)
   determ test-genesis                         compute_genesis_hash +
                                               make_genesis_block — chain
                                               identity origin (S-039 closed:
@@ -9841,6 +9806,33 @@ int main(int argc, char** argv) {
                   "decode_binary round-trip: type preserved");
         }
 
+        // 6b. Reserved envelope byte (offset 3) MUST be zero — the daemon
+        //     REJECTS non-zero fail-closed, the same contract the light
+        //     (`decode-wire`, MALFORMED exit 3) and wallet
+        //     (`decode-wire-frame`, exit 2) conformance decoders already
+        //     enforce. Pins the fix for the S-043-class asymmetry
+        //     ReservedDiscriminatorAudit.md §6 found: pre-fix the daemon
+        //     silently ignored the byte, so a mixed fleet disagreed on
+        //     frame validity. Same frame with reserved=0 decodes (control),
+        //     flipped byte throws.
+        {
+            Message m{MsgType::CONTRIB, {{"x", 1}}};
+            auto bytes = encode_binary(m);
+            check(bytes.size() > 4 && bytes[3] == 0x00,
+                  "encode_binary zeroes the reserved envelope byte");
+            auto tampered = bytes;
+            tampered[3] = 0x05;
+            bool rejected = false;
+            try { (void)decode_binary(tampered.data(), tampered.size()); }
+            catch (const std::exception&) { rejected = true; }
+            check(rejected,
+                  "decode_binary REJECTS non-zero reserved envelope byte (fail-closed, matches light/wallet)");
+            // Control: the untampered frame still decodes after the check.
+            Message ok = decode_binary(bytes.data(), bytes.size());
+            check(ok.type == MsgType::CONTRIB,
+                  "reserved-byte control: zero-reserved frame still decodes");
+        }
+
         // === Malformed input rejection ===
 
         // 7. Garbage bytes (not valid JSON, not valid binary envelope).
@@ -11460,8 +11452,7 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // v2.7 F2 + v2.10 Phase A combined regression: view-reconciliation
-    // primitives plus the first-shipped FROST primitive (frost_verify).
+    // v2.7 F2 regression: view-reconciliation primitives.
     //
     // F2 (compute_view_root + reconcile_union + reconcile_intersection):
     // the three primitives the consensus-layer view-reconciliation
@@ -11469,14 +11460,9 @@ int main(int argc, char** argv) {
     // Phase-1 commit (commit binding); reconcile_union is the canonical-
     // list builder for equivocation_events + abort_events; reconcile_-
     // intersection is the canonical-list builder for inbound_receipts.
-    // See docs/proofs/F2-SPEC.md Q1.
-    //
-    // v2.10 Phase A: frost_verify ships as a thin wrapper over the
-    // existing Ed25519 `verify` from src/crypto/keys.cpp (FROST aggregated
-    // sigs are structurally standard Ed25519 (R||z) sigs per RFC 9591
-    // §3). Round-trip + tamper + wrong-key assertions exercise the real
-    // path; the still-stubbed keygen/sign/aggregate primitives are
-    // PIN-tested to throw their Phase-A diagnostic.
+    // See docs/proofs/F2-SPEC.md Q1. (The v2.10 FROST assertions this
+    // handler once carried were removed with the FROST library — pre-launch
+    // register B2, 2026-07-09.)
 
     if (cmd == "test-rng-c99") {
         // Gate for the §3.15 OS-entropy shim (src/crypto/rng/). An RNG cannot
@@ -11538,12 +11524,12 @@ int main(int argc, char** argv) {
     if (cmd == "test-ed25519-scalar-reduce") {
         // Edge / boundary coverage for determ_ed25519_sc_reduce64 (the 64->32
         // scalar reduction mod L) + determ_ed25519_sc_is_canonical. The existing
-        // test-ed25519-c99 / test-frost-c99 exercise sc_reduce64 only on SHA-512
+        // test-ed25519-c99 exercises sc_reduce64 only on SHA-512
         // outputs / fuzzed seeds (happy path); this pins the PATHOLOGICAL-input
         // contract: the output is ALWAYS canonical (< L) for ANY 64-byte input,
         // with exact identities at 0, L, L-1, L+k, and small canonical values. A
         // bug here (non-canonical output, or wrong value at the L boundary) would
-        // corrupt every Ed25519 signature + FROST share, so it is a load-bearing
+        // corrupt every Ed25519 signature, so it is a load-bearing
         // primitive. Properties are checked WITHOUT an external oracle — the
         // group order L is a public constant and sc_is_canonical is the witness.
         int fail = 0;
@@ -11832,7 +11818,7 @@ int main(int argc, char** argv) {
             //    stays internal-only — exercised via gcm-tag-verify/aes-core) ──
             { "x25519-base",    "determ_x25519_base (secret = scalar; inventory target 8)",
               { "fix-scalar", "rnd-scalar" }, 1 },
-            { "sc-muladd",      "determ_ed25519_sc_muladd — the FROST z_i core (secret = all 3 operands; target 9)",
+            { "sc-muladd",      "determ_ed25519_sc_muladd (secret = all 3 operands; target 9)",
               { "fix-ops", "rnd-ops" }, 64 },
             { "hmac-sha512",    "determ_hmac_sha512 fixed msg (secret = 32B key; target 12)",
               { "fix-key", "rnd-key" }, 8 },
@@ -11840,12 +11826,6 @@ int main(int argc, char** argv) {
               { "fix-key", "rnd-key" }, 8 },
             { "pbkdf2",         "determ_pbkdf2_hmac_sha256, 8 iters (secret = 32B password; target 12)",
               { "fix-pwd", "rnd-pwd" }, 1 },
-            { "frost-reconstruct", "determ_frost_reconstruct t=3 (secret = the shares; target 9)",
-              { "fix-shares", "rnd-shares" }, 8 },
-            { "frost-dkg",      "determ_frost_dkg_commit t=3 (secret = the polynomial; target 9)",
-              { "fix-poly", "rnd-poly" }, 1 },
-            { "frost-sign-partial", "determ_frost_sign_partial t=3 pos=0 (secret = share + nonces; target 9)",
-              { "fix-secrets", "rnd-secrets" }, 1 },
             // ── the CT confidential-tx MSM (the 2026-07-06 zero-scalar-skip removal) ──
             // The two classes differ ONLY in whether the 2nd secret scalar is zero — the
             // exact contrast the removed skip would have leaked (it ran one fewer
@@ -11954,26 +11934,10 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 32; i++) { msm_nz1[i] = (uint8_t)(0x11 * (i % 7) + 3); msm_nz2[i] = (uint8_t)(0x22 + i); }
             msm_nz1[0] = 0; msm_nz2[0] = 0;   // top byte 0 => both < n and nonzero
         }
-        // Ed25519-domain scalar for the FROST targets: LE, top nibble masked
+        // Ed25519-domain scalar for the sc-muladd target: LE, top nibble masked
         // so the value stays < L (2^252 < L); pinned FIX values derive from
         // fixseed/fixscalar under the same mask.
         auto ed_rnd_scalar = [&](uint8_t* s) { rnd_fill(s, 32); s[31] &= 0x0f; };
-        // FROST fixtures: t=3 signer set {1,2,3}; signers 1..2 hold PINNED
-        // nonces (their D/E commitments are public protocol inputs); the
-        // probed secrets are signer 0's share + nonces. group_pk = any valid
-        // point (basemul of a pinned scalar) — the probe measures timing, not
-        // signature validity.
-        const int frost_xs[3] = { 1, 2, 3 };
-        uint8_t frost_fix3[3][32], frost_D[96], frost_E[96], frost_gpk[32];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 32; j++)
-                frost_fix3[i][j] = (uint8_t)(0x30 + 0x17 * i + j) & (j == 31 ? 0x0f : 0xff);
-        for (int i = 1; i < 3; i++) {                    // signers 1..2 pinned
-            determ_ed25519_point_basemul(frost_D + 32*i, frost_fix3[i]);
-            uint8_t etmp[32]; std::memcpy(etmp, frost_fix3[i], 32); etmp[0] ^= 0x55;
-            determ_ed25519_point_basemul(frost_E + 32*i, etmp);
-        }
-        determ_ed25519_point_basemul(frost_gpk, frost_fix3[0]);
         // Ed25519 group order L (little-endian) + the §5 target-7 boundary
         // scalars: L-1 (canonical max), L and 2L-1 (non-canonical).
         uint8_t Lle[32] = {0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
@@ -11993,7 +11957,6 @@ int main(int argc, char** argv) {
         // region (design §3.3), then `batch` back-to-back target calls inside.
         auto run_one = [&](size_t c) -> double {
             uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64], key[32];
-            uint8_t big96[96], Dl[96], El[96];   // FROST shares/poly/(share,d,e) + commitment lists
             uint8_t msm_s[64];                   // p256-msm-zeroskip: the 2 secret scalars
             // ---- setup (untimed) ----
             if (id == "ct-memcmp") {
@@ -12019,19 +11982,6 @@ int main(int argc, char** argv) {
                               std::memcpy(seed, fixseed, 32);     seed[31]   &= 0x0f;
                               std::memcpy(key, key32, 32);        key[31]    &= 0x0f; }
                 else { ed_rnd_scalar(scalar); ed_rnd_scalar(seed); ed_rnd_scalar(key); }
-            } else if (id == "frost-reconstruct" || id == "frost-dkg") {
-                if (c == 0) for (int i = 0; i < 3; i++) std::memcpy(big96 + 32*i, frost_fix3[i], 32);
-                else        for (int i = 0; i < 3; i++) ed_rnd_scalar(big96 + 32*i);
-            } else if (id == "frost-sign-partial") {
-                // big96 = signer 0's (share, d, e); its public D[0]/E[0]
-                // commitments are recomputed here, OUTSIDE the timed region.
-                if (c == 0) { std::memcpy(big96, frost_fix3[0], 32);
-                              std::memcpy(big96 + 32, frost_fix3[0], 32); big96[34] ^= 0x3c;
-                              std::memcpy(big96 + 64, frost_fix3[0], 32); big96[67] ^= 0xc3; }
-                else { ed_rnd_scalar(big96); ed_rnd_scalar(big96 + 32); ed_rnd_scalar(big96 + 64); }
-                std::memcpy(Dl, frost_D, 96); std::memcpy(El, frost_E, 96);
-                determ_ed25519_point_basemul(Dl, big96 + 32);
-                determ_ed25519_point_basemul(El, big96 + 64);
             } else if (id == "sc-canonical") {
                 if (c == 0)      std::memset(scalar, 0, 32);
                 else if (c == 1) std::memcpy(scalar, Lm1, 32);
@@ -12088,12 +12038,6 @@ int main(int argc, char** argv) {
                 else if (id == "hmac-sha512")     { sink += determ_hmac_sha512(key, 32, pt64, 64, out64); }
                 else if (id == "blake2b-keyed")   { sink += determ_blake2b(out64, 64, key, 32, pt64, 64); }
                 else if (id == "pbkdf2")          { sink += determ_pbkdf2_hmac_sha256(key, 32, aad, 8, 8, o32, 32); }
-                else if (id == "frost-reconstruct") sink += determ_frost_reconstruct(frost_xs, big96, 3, o32);
-                else if (id == "frost-dkg")       { uint8_t comm[96], pop[64];
-                                                    sink += determ_frost_dkg_commit(big96, 3, 1, comm, pop); }
-                else if (id == "frost-sign-partial") sink += determ_frost_sign_partial(
-                                                        frost_xs, 3, 0, big96, big96 + 32, big96 + 64,
-                                                        Dl, El, fixmsg, 64, frost_gpk, o32);
                 else if (id == "p256-msm-zeroskip") { uint8_t o33[33]; sink += determ_pedersen_msm(o33, msm_s, msm_pts, 2); }
             }
             uint64_t t1 = now_ticks();
@@ -12820,263 +12764,6 @@ int main(int argc, char** argv) {
         std::cout << (fail? "  FAIL: p256-ctx-bundle unit test\n" : "  PASS: p256-ctx-bundle unit test\n");
         return fail?1:0;
     }
-    if (cmd == "test-lsag-c99") {
-        // §3.23 LSAG linkable ring signature over NIST P-256 (input-unlinkability
-        // increment 1). Pins: sign→verify accepts; the DUAL-ORACLE byte-freeze vs
-        // tools/verify_lsag.py (key image + signature bytes); LINKABILITY (same key
-        // → same key image = the double-spend nullifier; different key → different
-        // image); and tamper / wrong-message / wrong-image / malformed reject.
-        int fail = 0;
-        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
-        auto setsc = [](uint8_t out[32], uint64_t v){ std::memset(out,0,32); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); };
-        auto pubkey = [&](uint64_t xv, uint8_t out33[33])->bool{
-            uint8_t x[32], P65[65]; setsc(x, xv);
-            return determ_p256_base_mul(P65, x)==0 && determ_p256_point_compress(out33, P65)==0; };
-
-        const uint64_t xs[4] = {0x1111,0x2222,0x3333,0x4444};
-        const size_t N = 4, ELL = 2;
-        std::vector<uint8_t> ring(N*33);
-        bool okr = true;
-        for (size_t i=0;i<N;i++) okr = okr && pubkey(xs[i], &ring[i*33]);
-        check(okr, "setup: built the ring pubkeys P_i = x_i*G");
-
-        const std::string msg = "spend note #7";
-        uint8_t xsig[32]; setsc(xsig, xs[ELL]);
-        const size_t slen = determ_lsag_sig_len(N);
-        std::vector<uint8_t> sig(slen), I(33);
-        check(determ_lsag_sign(sig.data(), slen, I.data(), (const uint8_t*)msg.data(), msg.size(),
-                               ring.data(), N, xsig, ELL)==0, "sign: produced a ring signature");
-
-        // Dual-oracle byte-freeze: an INDEPENDENT python reference (verify_lsag.py)
-        // reproduces this exact key image + signature from the same inputs.
-        const std::string EXP_IMG = "02e3aff154a04f37f08efebb8d85990c8f0d024be434d005be4ebcc8e329440c10";
-        const std::string EXP_SIG =
-            "b820d54ab9e4f2258b6daf6a2d6785e4325205c4d3412bcc7667fb2f7efc9a3f"
-            "dedd7420cec61722a320c756364282b33a46a3f3e4b611720640134254326280"
-            "0099c3392450c4ec8fe1042d457579dbce106ad6f80ff9a7b80d6522d5d26e33"
-            "9eaa30de3712c0010187064f58592fb540bf62ce9f51f5ed43efd2e4917b4ce5"
-            "8ee396e2dcc36f61c75378679c8cdd94bc3d5eabde9245d3025516b3856a9117";
-        check(to_hex(I.data(),33)==EXP_IMG, "dual-oracle: key image == python verify_lsag.py");
-        check(to_hex(sig.data(),slen)==EXP_SIG, "dual-oracle: signature bytes == python (byte-freeze)");
-
-        check(determ_lsag_verify((const uint8_t*)msg.data(), msg.size(), ring.data(), N,
-                                 I.data(), sig.data(), slen)==0, "verify ACCEPTS the honest ring signature");
-        { std::vector<uint8_t> I2(33);
-          check(determ_lsag_key_image(I2.data(), xsig, &ring[ELL*33])==0 && I2==I,
-                "key_image() standalone == the sign's key image"); }
-
-        // Linkability: same key, different message -> SAME image (the nullifier).
-        { const std::string m2="another spend"; std::vector<uint8_t> sig2(slen), I2(33);
-          determ_lsag_sign(sig2.data(), slen, I2.data(), (const uint8_t*)m2.data(), m2.size(), ring.data(), N, xsig, ELL);
-          check(I2==I, "LINKABILITY: same signing key -> SAME key image (double-spend nullifier)");
-          check(sig2!=sig, "signature changes with the message"); }
-        // Different key -> different image (unlinkable but distinct).
-        { uint8_t x0[32]; setsc(x0, xs[0]); std::vector<uint8_t> sig0(slen), I0(33);
-          determ_lsag_sign(sig0.data(), slen, I0.data(), (const uint8_t*)msg.data(), msg.size(), ring.data(), N, x0, 0);
-          check(I0!=I, "a different signing key -> a different key image"); }
-
-        { auto b=sig; b[40]^=1;
-          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I.data(),b.data(),slen)!=0, "tampered signature rejects"); }
-        { const std::string wm="different msg";
-          check(determ_lsag_verify((const uint8_t*)wm.data(),wm.size(),ring.data(),N,I.data(),sig.data(),slen)!=0, "wrong-message rejects"); }
-        { uint8_t x0[32]; setsc(x0,xs[0]); std::vector<uint8_t> I0(33); determ_lsag_key_image(I0.data(),x0,&ring[0]);
-          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I0.data(),sig.data(),slen)!=0, "wrong key image rejects"); }
-        { std::vector<uint8_t> b(slen-1,0);
-          check(determ_lsag_verify((const uint8_t*)msg.data(),msg.size(),ring.data(),N,I.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
-
-        std::cout << (fail? "  FAIL: lsag-c99 unit test\n" : "  PASS: lsag-c99 unit test\n");
-        return fail?1:0;
-    }
-    if (cmd == "test-clsag-c99") {
-        // §3.23b CLSAG concise linkable ring signature over NIST P-256 (input-
-        // unlinkability increment 2). Pins: sign→verify accepts; the DUAL-ORACLE
-        // byte-freeze vs tools/verify_clsag.py (key image I, aux image D, and the
-        // signature bytes); LINKABILITY (same spend key → same key image = the
-        // double-spend nullifier, independent of the pseudo-out / message); and
-        // tamper / wrong-message / wrong-aux-image / wrong-key-image / wrong-
-        // pseudo-out / malformed reject. Inputs are the frozen ring4/idx2 vector.
-        int fail = 0;
-        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
-        auto cat = [](const std::vector<std::string>& hs){ std::vector<uint8_t> v; for(auto&h:hs){auto b=from_hex(h); v.insert(v.end(),b.begin(),b.end());} return v; };
-        auto setsc = [](uint64_t v){ std::vector<uint8_t> out(32,0); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); return out; };
-
-        std::vector<uint8_t> ringP = cat({
-            "020dcc7648c78a3118f2612866fe83ef19f40304f623399e1211a10f2b3d1c05cf",
-            "03a62f048f367359809c2d46c2049d7d7bf268c3c073c472753cb18a24a8ad20b1",
-            "038570e95d85825286db92c78317679bdd8ffe3c90d0af84291bf64132b66fcc99",
-            "02a85b3aad6f3a346d85523141cb434e1caf4c642b2b3cc952cb07a635cb6a1df1"});
-        std::vector<uint8_t> ringC = cat({
-            "039c187c0e128b6ffb2944bd0a58655308317a138c3750371108a91fc3745f8ede",
-            "028569c67980f7e1ffbf10a1b80592891b6fcbddc59608f5860fb54fcbc0f7b1df",
-            "028027a151e81320f99ca7e22be72c24e26b9d14a9b9e81fb64a9086d1a6aadbf3",
-            "03ed221d077db1efa09bec84be5ebc6c0d49d38b3753a8933ec7396dc4a70a7fea"});
-        std::vector<uint8_t> coff = from_hex("031e0ad64bafb42b47ad5504f8fc6d19311c7769430814d79d7e403c55dcd48945");
-        std::vector<uint8_t> p    = from_hex("0000000000000000000000000000000000000000000000000000000000003333");
-        std::vector<uint8_t> z    = from_hex("0000000000000000000000000000000000000000000000000000000000000161");
-        const size_t N = 4, ELL = 2;
-        const std::string msg = "clsag spend note #7";
-
-        const size_t slen = determ_clsag_sig_len(N);
-        std::vector<uint8_t> sig(slen), I(33), D(33);
-        check(determ_clsag_sign(sig.data(), slen, I.data(), D.data(),
-                                (const uint8_t*)msg.data(), msg.size(),
-                                ringP.data(), ringC.data(), N, coff.data(),
-                                p.data(), z.data(), ELL)==0, "sign: produced a concise ring signature");
-
-        // Dual-oracle byte-freeze: an INDEPENDENT python reference (verify_clsag.py)
-        // reproduces this exact key image, aux image, and signature.
-        const std::string EXP_IMG = "02bb52567ad8c271b70c9e9e692de340fb412882101d380116b3d1cf43a923b8be";
-        const std::string EXP_D   = "03b3c4ddcb9c980ffa1ee0683fca36bb2bc7a3889a7bed5990a8310b4c181e7781";
-        const std::string EXP_SIG =
-            "abf36aa4e76b1540dbb90e7e0bbc6692aafc66f1a994510d720681442901d2cd"
-            "df64852f2ab153e9fd85512c7b1e030bef0282bbe2e24568a8d1cfb5d3a5f09d"
-            "c1832fb51f06d30f56d4d5fbe7098b5ffc6371b9f52ff63914aee8a2697b1c6f"
-            "c555614b43bfa8453eab4abdbc23740e0056b1eb4b3fc658888a5716654fe62b"
-            "0d36d2a11629792cb3bdbc7f0eecf782a96c8379dc5c7aec7ea94b4cc39dd20f";
-        check(to_hex(I.data(),33)==EXP_IMG, "dual-oracle: key image I == python verify_clsag.py");
-        check(to_hex(D.data(),33)==EXP_D,   "dual-oracle: aux image D == python verify_clsag.py");
-        check(to_hex(sig.data(),slen)==EXP_SIG, "dual-oracle: signature bytes == python (byte-freeze)");
-
-        check(determ_clsag_verify((const uint8_t*)msg.data(), msg.size(), ringP.data(), ringC.data(), N,
-                                  coff.data(), I.data(), D.data(), sig.data(), slen)==0,
-              "verify ACCEPTS the honest concise ring signature");
-        { std::vector<uint8_t> I2(33), D2(33);
-          check(determ_clsag_key_images(I2.data(), D2.data(), p.data(), z.data(), &ringP[ELL*33])==0 && I2==I && D2==D,
-                "key_images() standalone == the sign's I and D"); }
-
-        // Linkability: same spend key, different message -> SAME key image I (the
-        // nullifier is independent of the message and pseudo-out).
-        { const std::string m2="another spend"; std::vector<uint8_t> sig2(slen), I2(33), D2(33);
-          determ_clsag_sign(sig2.data(), slen, I2.data(), D2.data(), (const uint8_t*)m2.data(), m2.size(),
-                            ringP.data(), ringC.data(), N, coff.data(), p.data(), z.data(), ELL);
-          check(I2==I, "LINKABILITY: same spend key -> SAME key image (double-spend nullifier)");
-          check(sig2!=sig, "signature changes with the message"); }
-        // Different spend key (ring member 0, x=0x1111) -> different key image.
-        { std::vector<uint8_t> p0=setsc(0x1111), I0(33), D0(33);
-          determ_clsag_key_images(I0.data(), D0.data(), p0.data(), z.data(), &ringP[0]);
-          check(I0!=I, "a different spend key -> a different key image"); }
-
-        { auto b=sig; b[40]^=1;
-          check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),b.data(),slen)!=0, "tampered signature rejects"); }
-        { const std::string wm="different msg";
-          check(determ_clsag_verify((const uint8_t*)wm.data(),wm.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),sig.data(),slen)!=0, "wrong-message rejects"); }
-        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),I.data(),sig.data(),slen)!=0, "wrong aux image D rejects"); }
-        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),D.data(),D.data(),sig.data(),slen)!=0, "wrong key image I rejects"); }
-        { check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,ringC.data()/*wrong pseudo-out*/,I.data(),D.data(),sig.data(),slen)!=0, "wrong pseudo-out rejects"); }
-        { std::vector<uint8_t> b(slen-1,0);
-          check(determ_clsag_verify((const uint8_t*)msg.data(),msg.size(),ringP.data(),ringC.data(),N,coff.data(),I.data(),D.data(),b.data(),slen-1)!=0, "malformed length rejects"); }
-
-        std::cout << (fail? "  FAIL: clsag-c99 unit test\n" : "  PASS: clsag-c99 unit test\n");
-        return fail?1:0;
-    }
-    if (cmd == "test-ringct-spend-c99") {
-        // §3.23c RingCT spend-statement composition over NIST P-256 (input-
-        // unlinkability inc.3, LIBRARY-only). Pins: the commitment-transposition proof
-        // (the value-on-H <-> value-on-G bridge) — prove→verify + the DUAL-ORACLE
-        // byte-freeze vs tools/verify_ringct_spend.py + wrong-amount reject; and the
-        // full CLSAG→transpose→DCT1 spend verifier (accept the honest spend; reject a
-        // tamper of ANY layer / a wrong pseudo-out / a wrong message). Inputs are the
-        // frozen ring4/idx2 spend (amount A=3 -> outputs [1,1] + fee 1).
-        int fail = 0;
-        auto check = [&](bool ok, const std::string& m){ std::cout<<(ok?"  PASS: ":"  FAIL: ")<<m<<"\n"; if(!ok) fail=1; };
-        auto cat = [](const std::vector<std::string>& hs){ std::vector<uint8_t> v; for(auto&h:hs){auto b=from_hex(h); v.insert(v.end(),b.begin(),b.end());} return v; };
-        auto setsc = [](uint64_t v){ std::vector<uint8_t> out(32,0); for(int i=0;i<8;i++) out[31-i]=(uint8_t)(v>>(8*i)); return out; };
-
-        std::vector<uint8_t> ringP = cat({
-            "020dcc7648c78a3118f2612866fe83ef19f40304f623399e1211a10f2b3d1c05cf",
-            "03a62f048f367359809c2d46c2049d7d7bf268c3c073c472753cb18a24a8ad20b1",
-            "038570e95d85825286db92c78317679bdd8ffe3c90d0af84291bf64132b66fcc99",
-            "02a85b3aad6f3a346d85523141cb434e1caf4c642b2b3cc952cb07a635cb6a1df1"});
-        std::vector<uint8_t> ringC = cat({
-            "0229d45b849f92aa599c760c7e380c16af3b01786d190e8dcc172242b97f80b60e",
-            "02e756c4db19fe7a0fee7e35933ad6dedef1c389eb4305806e7411bf65ff8edbe6",
-            "02571a3a95c5b0e248040e550cc2cd9ca571371c80cd6864fd0cffa730ca3919e7",
-            "037fc1bde5d77a067004df831619cc22c981817473fa58a923127f26b64da4de8c"});
-        std::vector<uint8_t> coffH = from_hex("0248140fca4253aec596f001117a334fd62ec27b0b46b98ba273c8c779b95d8958");
-        std::vector<uint8_t> coffG = from_hex("02b630ea429d2954b1d2685fcc43cbebfcbd6876f5db8a2dff15992e0caeca2aee");
-        std::vector<uint8_t> I = from_hex("02bb52567ad8c271b70c9e9e692de340fb412882101d380116b3d1cf43a923b8be");
-        std::vector<uint8_t> D = from_hex("038e5f8e7448e12228dba07f680422842ff99190599d4e28813b6399af144808bc");
-        const std::string msg = "ringct spend note #7";
-        std::vector<uint8_t> vv = setsc(3), aa = setsc(0x0abc), bb = setsc(0x0d1f);
-
-        std::vector<uint8_t> clsag_sig = cat({
-            "8df873d26891f5bacd2961cb2ff3ec49b1dba8cdaf55b22327362aea186e3e44",
-            "c6523e45fae2799737b35051cbc3ff79c6e4644019d4c1e7d026d8b681d1b9e0",
-            "963920d87d79b3670cdaca93bb5020ca6f62fbb3c403d846ebff1eaf9c4f2ca1",
-            "415aedb228671ea25d13dc9381eb646681a0c2935e6d609413923547f46162df",
-            "cc4dfdf12bf414344786a1a5ce95f750c44eb27b13fd2fee0571a2bd462aae44"});
-        std::vector<uint8_t> transpose = cat({
-            "030de7f468d871598c584bf725344a1facb0f19b0a40e0a915431382aee18474",
-            "2c026197f290e32670d382faa700e83336413333f30c14ddab11820cbd227dcb",
-            "ae6966d6953dfa5633a0419df15137f7d643237eee0333f41e32621cabdc5e5c",
-            "c504ebe737da07fbea59764ea8e6c72a2b5017a364cf0dcc36fb7fb2c73cd958",
-            "bdfb737acd403cbb3ff1a33f00c9eb1f00fdbf291e8dd25be8cb93f17a792b94",
-            "55e4"});
-        std::vector<uint8_t> bundle = cat({
-            "44435431010204000000000000000102b630ea429d2954b1d2685fcc43cbebfc",
-            "bd6876f5db8a2dff15992e0caeca2aee027ccf978a4ba1e9b8e3d57a228ac0cb",
-            "314e52d8ac44dde60b085d926b2596cde7030e0f94a4809c991680acd0d09458",
-            "ba193144edf5d6d02988dd9032d316dc40a303f0310145a69d5e69c8b9fddd0c",
-            "fd178dabe63402710135f64900a49870c53d8b02c09184eec469460013deb773",
-            "e76fa77289ddff8dc783549aaf21d8a75b180858031a48a0109f683f6afd1490",
-            "d51b9b6824d8cb67d41ebc196f74912766d7a90e970312eb052bae004c6c8557",
-            "59d99694a19483666a2b5026679ef6097883ecd73e1a59f7ab6e9ae1abdfd4fd",
-            "d6edad375a477e7a5e540b838877e84f88774e24c8538b642b706a32e13cc674",
-            "a36694b224cf3e0dd057e700e6632201e86a1b76c35f18140377b179c9d4e2e5",
-            "2a195d7432e71814d614024d74e58469b06f364f30e40235b1987ea132ecec52",
-            "20a418a4c76079b2d070050f710696bedd70a25054b78a03654f06ea446819ba",
-            "7e6b94dd529ddb29a9f4b38560e860ef8c4cec2f1587043102b8f493f73b4107",
-            "2c58d6f9a436451050c169ca0e1835698eb73dbdc578696b4b02f0e618a9a893",
-            "7a135928f097e3fcfbe50afa979a06166a6f23d769907e6e6cd802191a7ccb26",
-            "eb24200ecd61a2a07d88d460785df684c7c2e9e86a7d959a2b7edc03e1f6a315",
-            "ce9562c4ce963bb45fcfb45f409246b6b0994815b5bdad4bb2d2211446b1f7d2",
-            "131775e413ddf94a978791ada7908a36aa8146f2a935fa347817df8e4f6e1c93",
-            "e006a6a2870f3eceaa4d6792dedef5918359b6b1c130ac9ce7eac29e03c651b2",
-            "4b3d04ac9f57d6bd7c530ad2a06d31fe0b767051a437338487d56811a135012e",
-            "5a912552be0f08cfca644783777b7ea6fd2d53c10456c79e42b43fa09c"});
-
-        // (1) transpose: prove -> byte-freeze + the two commitments it emits.
-        const std::string EXP_T =
-            "030de7f468d871598c584bf725344a1facb0f19b0a40e0a915431382aee18474"
-            "2c026197f290e32670d382faa700e83336413333f30c14ddab11820cbd227dcb"
-            "ae6966d6953dfa5633a0419df15137f7d643237eee0333f41e32621cabdc5e5c"
-            "c504ebe737da07fbea59764ea8e6c72a2b5017a364cf0dcc36fb7fb2c73cd958"
-            "bdfb737acd403cbb3ff1a33f00c9eb1f00fdbf291e8dd25be8cb93f17a792b94"
-            "55e4";
-        std::vector<uint8_t> tp(162), cH(33), cG(33);
-        check(determ_commit_transpose_prove(tp.data(), cH.data(), cG.data(),
-                                            vv.data(), aa.data(), bb.data())==0, "transpose: prove OK");
-        check(to_hex(tp.data(),162)==EXP_T, "dual-oracle: transpose proof == python (byte-freeze)");
-        check(cH==coffH, "transpose C_H == CLSAG pseudo-out coffset_H (value-on-H)");
-        check(cG==coffG, "transpose C_G == bundle input coffset_G (value-on-G)");
-        check(determ_commit_transpose_verify(coffH.data(), coffG.data(), transpose.data())==0,
-              "transpose: verify ACCEPTS the honest bridge");
-        check(determ_commit_transpose_verify(coffH.data(), coffH.data(), transpose.data())!=0,
-              "transpose: a WRONG-amount C_G (coffset_H reused) rejects");
-
-        // (2) the full RingCT spend statement — CLSAG -> transpose -> DCT1.
-        const size_t slen = determ_clsag_sig_len(4);
-        auto spend = [&](const uint8_t* m, size_t ml, const uint8_t* cH_, const uint8_t* sig,
-                         const uint8_t* tr, const uint8_t* bu, size_t bl)->int{
-            return determ_ringct_spend_verify(m, ml, ringP.data(), ringC.data(), 4, cH_,
-                                              I.data(), D.data(), sig, slen, tr, bu, bl); };
-        check(spend((const uint8_t*)msg.data(), msg.size(), coffH.data(), clsag_sig.data(),
-                    transpose.data(), bundle.data(), bundle.size())==0,
-              "spend: verify ACCEPTS the honest end-to-end RingCT spend");
-        { auto b=clsag_sig; b[40]^=1;
-          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),b.data(),transpose.data(),bundle.data(),bundle.size())!=0, "spend: tampered CLSAG rejects"); }
-        { auto b=transpose; b[70]^=1;
-          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),clsag_sig.data(),b.data(),bundle.data(),bundle.size())!=0, "spend: tampered transpose rejects"); }
-        { auto b=bundle; b[b.size()-1]^=1;
-          check(spend((const uint8_t*)msg.data(),msg.size(),coffH.data(),clsag_sig.data(),transpose.data(),b.data(),b.size())!=0, "spend: tampered bundle rejects"); }
-        check(spend((const uint8_t*)msg.data(),msg.size(),coffG.data(),clsag_sig.data(),transpose.data(),bundle.data(),bundle.size())!=0,
-              "spend: a WRONG pseudo-out (coffset_G as coffset_H) rejects");
-        { const std::string wm="wrong message";
-          check(spend((const uint8_t*)wm.data(),wm.size(),coffH.data(),clsag_sig.data(),transpose.data(),bundle.data(),bundle.size())!=0, "spend: wrong-message rejects"); }
-
-        std::cout << (fail? "  FAIL: ringct-spend-c99 unit test\n" : "  PASS: ringct-spend-c99 unit test\n");
-        return fail?1:0;
-    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
@@ -13559,7 +13246,7 @@ int main(int argc, char** argv) {
                                 "pedersen.json", "bp_ipa.json", "bp_rangeproof.json",
                                 "bp_agg_rangeproof.json", "p256_balance.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
-                                "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
+                                "aes_gcm_cavp.json",
                                 "aes_gcm_decrypt.json",
                                 "chacha20_poly1305_decrypt.json",
                                 "argon2id.json",
@@ -13928,66 +13615,6 @@ int main(int argc, char** argv) {
                         if (determ_p256_voprf_verify(pk33, blinded, eval_,
                                 storedproof.data(), mode) != 0) { ok=false; bad=name + " (verify)"; break; }
                     }
-                } else if (prim == "frost_ed25519_rfc9591") {
-                    // RFC 9591 E.1 — the byte-reproducible subset through the
-                    // shipped C99 FROST API: (a) keygen_trusted(sk, coeffs)
-                    // reproduces all n Shamir shares + the group public key
-                    // byte-exact; (b) reconstruct over the participant subset
-                    // recovers sk; (c) the RFC's aggregate signature verifies
-                    // under OUR from-scratch Ed25519 verifier; (d) our
-                    // frost_sign with the RFC's nonces + shares yields a
-                    // signature that ALSO verifies under the group key. The
-                    // signature bytes themselves are NOT compared: the Determ
-                    // binding-factor transcript is deliberately
-                    // domain-separated from RFC 9591 §4.4 (DETERM-FROST-RHO;
-                    // see src/crypto/frost/README.md), so R differs by design.
-                    int t = v["min_participants"], nmax = v["max_participants"];
-                    auto skv  = unhex(v["group_secret_key_hex"]);
-                    auto pkv  = unhex(v["group_public_key_hex"]);
-                    auto msgv = unhex(v["message_hex"]);
-                    auto sigv = unhex(v["sig_hex"]);
-                    std::vector<uint8_t> coeffs;
-                    for (auto& c : v["share_polynomial_coefficients_hex"]) {
-                        auto cb = unhex(c.get<std::string>());
-                        coeffs.insert(coeffs.end(), cb.begin(), cb.end());
-                    }
-                    std::vector<uint8_t> shares((size_t)nmax * 32), spks((size_t)nmax * 32);
-                    uint8_t gpk[32];
-                    if ((int)coeffs.size() != (t - 1) * 32 || skv.size() != 32
-                        || determ_frost_keygen_trusted(skv.data(), coeffs.data(), t, nmax,
-                               shares.data(), gpk, spks.data()) != 0
-                        || hx(gpk, 32) != v["group_public_key_hex"].get<std::string>()) { ok=false; bad=name + " (keygen group_pk)"; break; }
-                    for (auto& ps : v["participant_shares"]) {
-                        int id = ps["identifier"];
-                        if (hx(shares.data() + (size_t)(id - 1) * 32, 32)
-                                != ps["participant_share_hex"].get<std::string>()) { ok=false; bad=name + " (share f(" + std::to_string(id) + "))"; break; }
-                    }
-                    if (!ok) break;
-                    // reconstruct from the signing subset
-                    std::vector<int> xs; std::vector<uint8_t> sub;
-                    for (auto& pid : v["participant_list"]) {
-                        int id = pid; xs.push_back(id);
-                        sub.insert(sub.end(), shares.begin() + (size_t)(id-1)*32,
-                                              shares.begin() + (size_t)id*32);
-                    }
-                    uint8_t rec[32];
-                    if (determ_frost_reconstruct(xs.data(), sub.data(), t, rec) != 0
-                        || hx(rec, 32) != v["group_secret_key_hex"].get<std::string>()) { ok=false; bad=name + " (reconstruct)"; break; }
-                    if (sigv.size() != 64 || pkv.size() != 32
-                        || determ_ed25519_verify(pkv.data(), msgv.empty()?nullptr:msgv.data(),
-                               msgv.size(), sigv.data()) != 0) { ok=false; bad=name + " (rfc sig ed25519-verify)"; break; }
-                    std::vector<uint8_t> dsub, esub;
-                    for (auto& r1 : v["round_one_outputs"]) {
-                        auto dv = unhex(r1["hiding_nonce_hex"].get<std::string>());
-                        auto ev = unhex(r1["binding_nonce_hex"].get<std::string>());
-                        dsub.insert(dsub.end(), dv.begin(), dv.end());
-                        esub.insert(esub.end(), ev.begin(), ev.end());
-                    }
-                    uint8_t oursig[64];
-                    if (determ_frost_sign(xs.data(), sub.data(), dsub.data(), esub.data(), t,
-                            msgv.empty()?nullptr:msgv.data(), msgv.size(), gpk, oursig) != 0
-                        || determ_ed25519_verify(gpk, msgv.empty()?nullptr:msgv.data(),
-                               msgv.size(), oursig) != 0) { ok=false; bad=name + " (determ frost_sign w/ RFC nonces)"; break; }
                 } else if (prim == "sha3_shake") {
                     // R62 FIPS 202 corpus (python hashlib oracle — an
                     // independent Keccak), keyed on the per-vector "alg":
@@ -14368,7 +13995,7 @@ int main(int argc, char** argv) {
         // CRYPTO-C99-SPEC §3.10 — the two constant-time/hygiene primitives the
         // rest of the C99 stack builds on: determ_ct_memcmp (no-short-circuit
         // equality compare; consolidates the former per-module ct_eq16 /
-        // ct_verify_32 local helpers and frost.c's point-compare memcmps) and
+        // ct_verify_32 local helpers) and
         // determ_secure_zero (dead-store-elimination-proof wipe). These pins
         // are FUNCTIONAL (equality semantics, return-value contract, wipe
         // effect); the timing property itself is §3.12's dudect/ctgrind
@@ -15565,131 +15192,6 @@ int main(int argc, char** argv) {
                   "ContribMsg from_json: wrong-type view_eq_list throws S-018");
         }
 
-        // === v2.10 Phase A: FROST primitives ===
-        //
-        // FROST primitives are declared in `include/determ/crypto/frost.hpp`
-        // and live in `src/crypto/frost.cpp`. Phase A status as of this
-        // commit:
-        //
-        //   frost_verify           — SHIPPED: real implementation, delegates
-        //                            to the existing Ed25519 `verify` from
-        //                            src/crypto/keys.cpp (FROST aggregated
-        //                            sigs verify as standard Ed25519 sigs
-        //                            against the group pubkey per RFC 9591
-        //                            §3). Round-trip + tamper + wrong-key
-        //                            assertions land below.
-        //
-        //   frost_keygen_round1    — SCAFFOLDED: throws std::logic_error
-        //   frost_keygen_round2      with "Phase A not yet implemented"
-        //   frost_keygen_finalize    diagnostic until the RFC 9591 H1..H5
-        //   frost_sign_round1        sub-hash + polynomial-eval + Lagrange
-        //   frost_sign_round2        interpolation work lands.
-        //   frost_aggregate
-        //
-        // Shipping frost_verify first lets downstream consumers of v2.10
-        // (block-validation path; FA3 proof regression; threshold-rand
-        // integration in Phase D) be drafted against a working verify
-        // endpoint while the more complex primitives wait for their proper
-        // Phase A implementation. The throw-clean assertions below PIN the
-        // API contract for the still-stubbed primitives.
-
-        // 24. frost_keygen_round1 throws with diagnostic.
-        {
-            bool threw = false; std::string what;
-            try { (void)determ::crypto::frost::frost_keygen_round1(1, 2, 3); }
-            catch (const std::logic_error& e) { threw = true; what = e.what(); }
-            check(threw && what.find("Phase A") != std::string::npos,
-                  "frost_keygen_round1: scaffolded, throws Phase-A logic_error");
-        }
-
-        // 25. frost_sign_round1 throws with diagnostic.
-        {
-            bool threw = false; std::string what;
-            determ::crypto::frost::LocalShare ls{};
-            try { (void)determ::crypto::frost::frost_sign_round1(ls); }
-            catch (const std::logic_error& e) { threw = true; what = e.what(); }
-            check(threw && what.find("Phase A") != std::string::npos,
-                  "frost_sign_round1: scaffolded, throws Phase-A logic_error");
-        }
-
-        // 26. frost_aggregate throws with diagnostic.
-        {
-            bool threw = false; std::string what;
-            determ::crypto::frost::CommitmentMap cm;
-            std::vector<std::pair<determ::crypto::frost::Identifier,
-                                   determ::crypto::frost::Scalar>> partials;
-            std::vector<uint8_t> msg;
-            determ::crypto::frost::Point gpk{};
-            try { (void)determ::crypto::frost::frost_aggregate(
-                cm, partials, msg, gpk); }
-            catch (const std::logic_error& e) { threw = true; what = e.what(); }
-            check(threw && what.find("Phase A") != std::string::npos,
-                  "frost_aggregate: scaffolded, throws Phase-A logic_error");
-        }
-
-        // 27. frost_verify: real round-trip. Sign a known message with the
-        //     existing Ed25519 `sign` (this is what `frost_aggregate` will
-        //     produce in Phase A proper — an Ed25519 (R||z) sig over the
-        //     beacon-seed message under the group pubkey). frost_verify
-        //     adapts array types and delegates to `determ::crypto::verify`
-        //     per RFC 9591 §3.
-        {
-            auto key = determ::crypto::generate_node_key();
-            std::vector<uint8_t> msg = {'h','e','l','l','o',' ','v','2','.','1','0'};
-            auto ed_sig = determ::crypto::sign(key, msg.data(), msg.size());
-
-            // Adapt Signature → FrostSig (same 64 bytes; just type tags).
-            determ::crypto::frost::FrostSig fsig{};
-            for (size_t i = 0; i < ed_sig.size(); ++i) fsig[i] = ed_sig[i];
-
-            // Adapt PubKey → Point (same 32 bytes; same Ed25519 compression).
-            determ::crypto::frost::Point gpk{};
-            for (size_t i = 0; i < key.pub.size(); ++i) gpk[i] = key.pub[i];
-
-            // Round-trip: real sig + real pubkey + real msg → must verify.
-            check(determ::crypto::frost::frost_verify(fsig, gpk, msg),
-                  "frost_verify: round-trip with real Ed25519 sig PASSES");
-
-            // Tamper detection: flip one byte in the R portion.
-            auto tampered = fsig;
-            tampered[0] ^= 0x01;
-            check(!determ::crypto::frost::frost_verify(tampered, gpk, msg),
-                  "frost_verify: tampered signature byte REJECTED");
-
-            // Wrong-key detection: a different keypair must reject this sig.
-            auto other_key = determ::crypto::generate_node_key();
-            determ::crypto::frost::Point wrong_gpk{};
-            for (size_t i = 0; i < other_key.pub.size(); ++i)
-                wrong_gpk[i] = other_key.pub[i];
-            check(!determ::crypto::frost::frost_verify(fsig, wrong_gpk, msg),
-                  "frost_verify: wrong group pubkey REJECTED");
-
-            // Tampered message: extending the signed message must reject.
-            auto wrong_msg = msg;
-            wrong_msg.push_back('!');
-            check(!determ::crypto::frost::frost_verify(fsig, gpk, wrong_msg),
-                  "frost_verify: tampered message REJECTED");
-
-            // Empty-message edge case: sign over zero bytes is well-defined
-            // for Ed25519 and must verify under the same key.
-            std::vector<uint8_t> empty;
-            auto empty_sig = determ::crypto::sign(key, empty.data(), empty.size());
-            determ::crypto::frost::FrostSig fsig_empty{};
-            for (size_t i = 0; i < empty_sig.size(); ++i)
-                fsig_empty[i] = empty_sig[i];
-            check(determ::crypto::frost::frost_verify(fsig_empty, gpk, empty),
-                  "frost_verify: empty-message round-trip PASSES");
-        }
-
-        // 28. Type sizes match RFC 9591 expectations (Ed25519 scalar/point/sig).
-        {
-            check(sizeof(determ::crypto::frost::Scalar) == 32,
-                  "FROST Scalar size = 32 bytes (Ed25519 scalar mod L)");
-            check(sizeof(determ::crypto::frost::Point) == 32,
-                  "FROST Point size = 32 bytes (Ed25519 compressed point)");
-            check(sizeof(determ::crypto::frost::FrostSig) == 64,
-                  "FROST signature size = 64 bytes (Ed25519 R || z)");
-        }
 
         // === F2 sub-step 3: validator-side V21..V26 helpers ===
         //
@@ -16570,226 +16072,6 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": make-contrib-commitment-distinct "
                   << (fail == 0 ? "all assertions" : "had failures")
-                  << "\n";
-        return fail == 0 ? 0 : 1;
-    }
-    // v2.10 Phase A: pin RFC 9591 type-layout assumptions against the
-    // FROST API in include/determ/crypto/frost.hpp.
-    //
-    // RFC 9591 §3 fixes the on-the-wire sizes for Ed25519 (Scalar 32,
-    // Point 32, Signature 64). Our typedefs (Scalar, Point, FrostSig)
-    // alias std::array of the corresponding widths so they can be
-    // wire-compared / hashed / passed to libsodium primitives byte-for-
-    // byte. Any future change that altered those widths — e.g. adding
-    // a tag byte, switching to a curve with a different scalar field —
-    // would silently break interop with peer nodes. This test fixes
-    // those sizes at compile/run boundary.
-    //
-    // It also pins the byte-parity with the in-house PubKey / Signature
-    // aliases (both std::array of the same shape) — the Phase A
-    // adapters in `src/crypto/frost.cpp::frost_verify` rely on that
-    // parity to do byte-for-byte adaptation without copying field
-    // semantics.
-    //
-    // Finally it checks default-initialization is all-zero, which the
-    // KeygenRound1Output / LocalShare / CommitmentMap / SignRound1Output
-    // structs all rely on for deterministic zero-state construction
-    // before the round1/round2 / sign1/sign2 / aggregate primitives
-    // populate their fields.
-    if (cmd == "test-frost-types") {
-        using namespace determ;
-        using namespace determ::crypto::frost;
-        int fail = 0;
-        auto check = [&](bool cond, const char* msg) {
-            if (cond) std::cout << "  PASS: " << msg << "\n";
-            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
-        };
-
-        // === RFC 9591 §3 type sizes ===
-
-        // 1. Identifier is a 1..K share index. RFC 9591 uses uint16_t —
-        //    1..65535 valid, 0 reserved. Two-byte width is intentional:
-        //    bigger committees than uint8_t can index, and field
-        //    arithmetic (Lagrange interpolation) still fits in scalar
-        //    space without overflow on multiplications.
-        check(sizeof(Identifier) == 2,
-              "FROST Identifier size = 2 bytes (uint16_t per RFC 9591 §3)");
-
-        // 2. Scalar is the Ed25519 scalar field (mod L where L =
-        //    2^252 + 27742...). 32 bytes little-endian.
-        check(sizeof(Scalar) == 32,
-              "FROST Scalar size = 32 bytes (Ed25519 scalar mod L)");
-
-        // 3. Point is an Ed25519 compressed point. 32 bytes with sign
-        //    bit in the top byte's high bit.
-        check(sizeof(Point) == 32,
-              "FROST Point size = 32 bytes (Ed25519 compressed point)");
-
-        // 4. FrostSig is the canonical (R || z) Ed25519 signature:
-        //    32-byte point + 32-byte scalar.
-        check(sizeof(FrostSig) == 64,
-              "FROST signature size = 64 bytes (Ed25519 R || z)");
-
-        // === byte-parity with in-house Ed25519 aliases ===
-        //
-        // The Phase-A adapter in frost_verify treats Scalar/Point as
-        // bytewise-equal to PubKey, and FrostSig as bytewise-equal to
-        // Signature. The implementation does an element-by-element
-        // copy with the assumption that the sizes match. Pin that.
-
-        // 5. Scalar parity with PubKey (both 32 bytes — same width).
-        check(sizeof(Scalar) == sizeof(PubKey),
-              "FROST Scalar == PubKey size (32-byte parity)");
-
-        // 6. Point parity with PubKey (both 32 bytes — frost_verify
-        //    relies on this when adapting Ed25519 verify's PubKey
-        //    argument to the FROST Point group_pubkey).
-        check(sizeof(Point) == sizeof(PubKey),
-              "FROST Point == PubKey size (32-byte parity)");
-
-        // 7. FrostSig parity with Signature (both 64 bytes — same
-        //    adapter relies on this).
-        check(sizeof(FrostSig) == sizeof(Signature),
-              "FROST FrostSig == Signature size (64-byte parity)");
-
-        // === default-initialization is all-zero ===
-        //
-        // std::array<uint8_t, N>{} value-initializes every element to
-        // zero. The DKG-output / Sign-output structs rely on this to
-        // be in a defined zero-state until the round primitives
-        // populate their fields. Phase A scaffolding default-
-        // constructs these and later asserts zero-ness via the
-        // network code path.
-
-        // 8. Default-constructed Scalar is all-zero.
-        {
-            Scalar s{};
-            bool all_zero = true;
-            for (auto b : s) if (b != 0) { all_zero = false; break; }
-            check(all_zero, "default Scalar{} is all-zero");
-        }
-
-        // 9. Default-constructed Point is all-zero.
-        {
-            Point p{};
-            bool all_zero = true;
-            for (auto b : p) if (b != 0) { all_zero = false; break; }
-            check(all_zero, "default Point{} is all-zero");
-        }
-
-        // 10. Default-constructed FrostSig is all-zero.
-        {
-            FrostSig f{};
-            bool all_zero = true;
-            for (auto b : f) if (b != 0) { all_zero = false; break; }
-            check(all_zero, "default FrostSig{} is all-zero");
-        }
-
-        // === comparison semantics on FrostSig (std::array provides this) ===
-
-        // 11. Two default FrostSig{} compare equal.
-        {
-            FrostSig a{};
-            FrostSig b{};
-            check(a == b, "FrostSig: two default-constructed values compare equal");
-        }
-
-        // 12. FrostSig with one byte flipped compares unequal.
-        {
-            FrostSig a{};
-            FrostSig b{};
-            b[0] = 1;
-            check(a != b, "FrostSig: flipping one byte breaks equality");
-        }
-
-        // === Identifier MIN/MAX bounds ===
-        //
-        // RFC 9591 §3 reserves 0 (used as "no identifier" sentinel in
-        // some FROST variants) but 1..65535 are all valid shares. Our
-        // typedef is plain uint16_t so we can roundtrip any of those.
-
-        // 13. uint16_t bounds: 1 and 65535 both roundtrip cleanly.
-        {
-            Identifier lo = 1;
-            Identifier hi = 65535;
-            check(lo == 1, "Identifier holds the minimum valid index (1)");
-            check(hi == 65535, "Identifier holds the maximum uint16_t value (65535)");
-        }
-
-        // === Phase B struct: KeygenRound1Output ===
-
-        // 14. KeygenRound1Output default-constructs to empty commitments
-        //     and all-zero pop_sig + private_seed. This is the zero-
-        //     state the Phase B DKG ceremony expects before round1
-        //     populates the polynomial commitments + PoP.
-        {
-            KeygenRound1Output o{};
-            check(o.commitments.empty(),
-                  "KeygenRound1Output: default commitments is empty");
-            bool seed_zero = true;
-            for (auto b : o.private_seed) if (b != 0) { seed_zero = false; break; }
-            check(seed_zero,
-                  "KeygenRound1Output: default private_seed is all-zero");
-            bool pop_zero = true;
-            for (auto b : o.pop_sig) if (b != 0) { pop_zero = false; break; }
-            check(pop_zero,
-                  "KeygenRound1Output: default pop_sig is all-zero");
-        }
-
-        // === Phase B struct: LocalShare ===
-
-        // 15. LocalShare default-constructs to my_id=0, all-zero secret
-        //     + group_pubkey, empty verification_shares. my_id=0 is
-        //     the "uninitialized" sentinel; Phase B finalize sets it
-        //     to the real 1..K value.
-        {
-            LocalShare ls{};
-            check(ls.my_id == 0,
-                  "LocalShare: default my_id == 0 (uninitialized sentinel)");
-            bool ss_zero = true;
-            for (auto b : ls.secret_share) if (b != 0) { ss_zero = false; break; }
-            check(ss_zero,
-                  "LocalShare: default secret_share is all-zero");
-            bool gp_zero = true;
-            for (auto b : ls.group_pubkey) if (b != 0) { gp_zero = false; break; }
-            check(gp_zero,
-                  "LocalShare: default group_pubkey is all-zero");
-            check(ls.verification_shares.empty(),
-                  "LocalShare: default verification_shares is empty");
-        }
-
-        // === Phase D struct: CommitmentMap ===
-
-        // 16. CommitmentMap default-constructs to empty entries. The
-        //     Phase D signing path populates entries with (id, hiding,
-        //     binding) tuples per signer before frost_sign_round2.
-        {
-            CommitmentMap cm{};
-            check(cm.entries.empty(),
-                  "CommitmentMap: default entries is empty");
-        }
-
-        // === Phase D struct: SignRound1Output ===
-
-        // 17. SignRound1Output default-constructs to all-zero
-        //     commitments + nonces. Phase D round1 fills these with
-        //     fresh random nonces + their G-multiples.
-        {
-            SignRound1Output sr{};
-            bool hc_zero = true;
-            for (auto b : sr.hiding_commitment)  if (b != 0) { hc_zero = false; break; }
-            bool bc_zero = true;
-            for (auto b : sr.binding_commitment) if (b != 0) { bc_zero = false; break; }
-            bool hn_zero = true;
-            for (auto b : sr.hiding_nonce)       if (b != 0) { hn_zero = false; break; }
-            bool bn_zero = true;
-            for (auto b : sr.binding_nonce)      if (b != 0) { bn_zero = false; break; }
-            check(hc_zero && bc_zero && hn_zero && bn_zero,
-                  "SignRound1Output: all four fields default to all-zero");
-        }
-
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": frost-types " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

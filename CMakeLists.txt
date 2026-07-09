@@ -131,12 +131,9 @@ add_library(determ-crypto-c99 STATIC
   # §3.5 AES-256 + GCM (arithmetic S-box + branchless GHASH) — `determ test-aes-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c"
-  # §3.2 Ed25519 (gf[16] cswap-ladder, RFC 8032; includes the exposed
-  # scalar/group ops FROST builds on) — `determ test-ed25519-c99`.
+  # §3.2 Ed25519 (gf[16] cswap-ladder, RFC 8032; includes exposed
+  # scalar/group ops) — `determ test-ed25519-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c"
-  # §3.8 FROST-Ed25519 — LIBRARY-ONLY, not a chain primitive
-  # (docs/proofs/FROST_DEVIATION_NOTICE.md) — `determ test-frost-c99`.
-  "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c"
   # §3.3 X25519 (Montgomery cswap-ladder, RFC 7748) — `determ test-x25519-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c"
   # §3.6 BLAKE2b (RFC 7693) + Argon2id (RFC 9106) — `determ test-blake2b-c99`
@@ -161,20 +158,6 @@ add_library(determ-crypto-c99 STATIC
   # `determ test-p256-balance-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/balance.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ctxbundle.c"  # §3.22 DCT1 confidential-transfer bundle
-  # §3.23: LSAG linkable ring signature over P-256 (input-unlinkability inc.1 —
-  # CryptoNote membership + key-image nullifier) — pure composition over the P-256
-  # + RFC 9380 hash-to-curve public API; `determ test-lsag-c99`.
-  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/lsag.c"
-  # §3.23b: CLSAG concise linkable ring signature over P-256 (input-unlinkability
-  # inc.2 — Monero RingCT membership + balance; TWO key layers folded into ONE
-  # concise ring via hash aggregation) — pure composition over the same P-256 +
-  # RFC 9380 hash-to-curve public API; `determ test-clsag-c99`.
-  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/clsag.c"
-  # §3.23c: the LIBRARY-only RingCT spend-statement composition (input-unlinkability
-  # inc.3) — a commitment-transposition proof (the value-on-H <-> value-on-G bridge,
-  # a Schnorr AND-proof) + a verifier composing §3.23b CLSAG + §3.22c DCT1 end-to-end;
-  # `determ test-ringct-spend-c99`.
-  "${CMAKE_SOURCE_DIR}/src/crypto/ringsig/ringct_spend.c"
   # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
   # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"
@@ -377,7 +360,7 @@ if(DETERM_BUILD_CRYPTOTEST)
   )
   if(WIN32)
     target_link_libraries(determ-cryptotest PRIVATE crypt32)
-    # Mirror determ's stack reserve: the frost/p256 handlers carry large
+    # Mirror determ's stack reserve: the p256 handlers carry large
     # stack locals inherited verbatim from the monolithic dispatcher.
     target_link_options(determ-cryptotest PRIVATE /STACK:16777216)
   endif()

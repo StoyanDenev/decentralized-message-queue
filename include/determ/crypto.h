@@ -6,7 +6,7 @@
  * sketch predates the shipped raw-buffer APIs, and a second C-level signature
  * set over the same primitives would be churn without safety gain (the
  * type-safety layer lives in the C++ wrapper, crypto.hpp). Recorded as a Q5
- * deviation in the spec's §3.11 status, same convention as the X25519 / FROST
+ * deviation in the spec's §3.11 status, same convention as the X25519
  * shipped-name annotations inside Q5 itself.
  *
  * What you get (all C99, all validated byte-equal vs OpenSSL / libsodium /
@@ -23,12 +23,11 @@
  *   - determ_ct_memcmp + determ_secure_zero      (ct.h, secure_zero.h, §3.10)
  *
  * Deliberately NOT included:
- *   - FROST-Ed25519 (crypto/frost/frost.h) — retained as a LIBRARY but not a
- *     Determ chain primitive (docs/proofs/FROST_DEVIATION_NOTICE.md); callers
- *     opt in with an explicit include so library presence is never mistaken
- *     for protocol adoption.
- *   - The Ed25519 scalar/group primitives (ed25519/ed25519_group.h) — the
- *     FROST building blocks; explicit include for the same reason.
+ *   - The Ed25519 scalar/group primitives (ed25519/ed25519_group.h) —
+ *     low-level building blocks; explicit include so library presence is
+ *     never mistaken for protocol adoption. (FROST-Ed25519 and the RingCT
+ *     ring-signature library were REMOVED from the tree 2026-07-09 —
+ *     pre-launch register B2; docs/proofs/FROST_DEVIATION_NOTICE.md.)
  *   - §3.8c/§3.9 primitives (P-256, RFC 9497 OPRF) are shipped and included here.
  *     secp256k1 (former §3.7) was never implemented — P-256 supplants it.
  */

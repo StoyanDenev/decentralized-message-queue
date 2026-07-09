@@ -171,8 +171,9 @@ assert_eq "$RC" "1" "empty hex returns 1"
 echo
 echo "=== 8. Binary HELLO: envelope=binary, name=HELLO, cap=1MiB, accepted ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$HELLO_BIN" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$HELLO_BIN" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "binary HELLO exits 0"
 assert_eq "$(field "$J" envelope)"      "binary"   "binary HELLO: envelope=binary"
@@ -214,8 +215,9 @@ assert_eq "$(field "$J" per_type_cap)"  "$CAP_4M"          "binary HDRS: cap=4Mi
 echo
 echo "=== 14. JSON envelope: name=STATUS_RESPONSE, accepted ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$JSON_BODY" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$JSON_BODY" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "JSON envelope exits 0"
 assert_eq "$(field "$J" envelope)"      "json"            "JSON: envelope=json"
@@ -230,8 +232,9 @@ assert_eq "$(field "$J2" msg_type_name)" "STATUS_RESPONSE" "stdin JSON: name=STA
 echo
 echo "=== 16. Unknown first byte: accepted=false, exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$UNKNOWN_FIRST" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$UNKNOWN_FIRST" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "unknown first byte exits 2"
 assert_eq "$(field "$J" envelope)" "unknown" "unknown first byte: envelope=unknown"
@@ -240,8 +243,9 @@ assert_eq "$(field "$J" accepted)" "False"   "unknown first byte: not accepted"
 echo
 echo "=== 17. Binary unknown MsgType (99): accepted=false, exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$UNKNOWN_TYPE_BIN" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$UNKNOWN_TYPE_BIN" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "binary unknown MsgType exits 2"
 assert_eq "$(field "$J" msg_type_name)" "UNKNOWN" "unknown MsgType: name=UNKNOWN"
@@ -250,8 +254,9 @@ assert_eq "$(field "$J" accepted)"      "False"   "unknown MsgType: not accepted
 echo
 echo "=== 18. Binary bad reserved byte: reserved_ok=false, exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$BAD_RESERVED" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$BAD_RESERVED" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "bad reserved byte exits 2"
 assert_eq "$(field "$J" reserved_ok)" "False" "bad reserved: reserved_ok=false"
@@ -260,8 +265,9 @@ assert_eq "$(field "$J" accepted)"    "False" "bad reserved: not accepted"
 echo
 echo "=== 19. Binary truncated header (<4 bytes): exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$TRUNC_BIN" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$TRUNC_BIN" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "truncated header exits 2"
 assert_eq "$(field "$J" accepted)" "False" "truncated header: not accepted"
@@ -269,8 +275,9 @@ assert_eq "$(field "$J" accepted)" "False" "truncated header: not accepted"
 echo
 echo "=== 20. Binary unsupported version: exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$BAD_VER" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$BAD_VER" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "unsupported version exits 2"
 assert_eq "$(field "$J" accepted)" "False" "unsupported version: not accepted"
@@ -278,8 +285,9 @@ assert_eq "$(field "$J" accepted)" "False" "unsupported version: not accepted"
 echo
 echo "=== 21. JSON missing \"type\": exit 2 ==="
 set +e
-J=$("$WALLET" decode-wire-frame --in "$JSON_NOTYPE" --json 2>&1 | tr -d '\r')
+J=$("$WALLET" decode-wire-frame --in "$JSON_NOTYPE" --json 2>&1)
 RC=$?
+J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "JSON missing type exits 2"
 assert_eq "$(field "$J" accepted)" "False" "JSON missing type: not accepted"

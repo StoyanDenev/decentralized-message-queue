@@ -219,14 +219,6 @@ struct GenesisConfig {
     // explicitly disables; the chain stays on v1 commit shape forever).
     uint64_t                        v2_7_f2_active_from_height{0};
 
-    // v2.10 threshold randomness migration gate. Same pattern: block
-    // height at which DKG ceremony + FROST-Ed25519 threshold-aggregation
-    // activates. Default 0 = active from genesis. v2.10 implementation
-    // is in progress (per F2-V210-IMPLEMENTATION-PLAN.md phases A-F);
-    // until the FROST primitives land in src/crypto/frost.cpp this field
-    // is declared but the apply-path enforcement is no-op (pre-Phase-D).
-    uint64_t                        v2_10_active_from_height{0};
-
     // rev.9 R1: per-shard committee region pin. Empty = global pool
     // (backward-compat — existing deployments hash-stable). Non-empty
     // restricts this chain's K-committee selection to validators

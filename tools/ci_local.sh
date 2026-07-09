@@ -100,7 +100,7 @@ if [ "$SANITIZE" -eq 1 ]; then
             test-ed25519-scalar-reduce test-p256-oprf-c99 test-mldsa-c99 test-c99-vectors test-c99-api"
   # The 11 moved oracle subcommands (Minix §6) run on the UBSan determ-cryptotest.
   SAN_CMDS_CT="test-sha2-c99 test-blake2b-c99 test-sha3-c99 test-chacha20-c99 test-xchacha-c99 \
-            test-aes-c99 test-ed25519-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99 test-frost-c99"
+            test-aes-c99 test-ed25519-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99"
   san_fail=0
   for cmd in $SAN_CMDS; do
     if "$SANBIN" "$cmd" >/tmp/ubsan_out.txt 2>&1; then
@@ -168,7 +168,7 @@ FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; 
 echo "=== ci_local: offline doc-coherence guards ==="
 GUARDS_OK=1
 for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
-         test_proofs_index_complete test_frost_chain_guard; do
+         test_proofs_index_complete; do
   if [ -f "tools/$g.sh" ]; then
     if bash "tools/$g.sh" >/dev/null 2>&1; then
       echo "  PASS: $g"

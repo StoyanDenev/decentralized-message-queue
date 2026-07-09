@@ -45,7 +45,9 @@
 //   0       1     magic    = 0xB1
 //   1       1     version  = 0x01
 //   2       1     msg_type = MsgType (uint8_t)
-//   3       1     reserved = 0x00 (must be zero on encode; ignored on decode)
+//   3       1     reserved = 0x00 (must be zero on encode AND decode —
+//                 non-zero is rejected fail-closed, matching the light/wallet
+//                 conformance decoders; see decode_binary)
 //   4       N     payload (per msg_type)
 //
 // PAYLOAD: TRANSACTION (4×256-bit fixed frame, plan §A3 mechanism)
@@ -359,7 +361,17 @@ Message decode_binary(const uint8_t* data, size_t len) {
         throw std::runtime_error("binary_codec: unsupported binary version");
     Message m;
     m.type = static_cast<MsgType>(data[2]);
-    // data[3] reserved — ignored.
+    // data[3] reserved — MUST be zero, fail-closed. A non-zero byte means the
+    // frame was not produced by a conforming encoder (put_envelope_header
+    // always writes 0x00). Rejecting matches the independent light/wallet
+    // conformance decoders and closes the S-043-class validation asymmetry
+    // ReservedDiscriminatorAudit.md §6 found (pre-2026-07-09 the daemon
+    // silently ignored the byte while light/wallet rejected it, so a mixed
+    // fleet disagreed on frame validity). Keeps the byte genuinely reserved:
+    // a future use can only activate behind a version bump, never by a stray
+    // writer that older daemons would have silently tolerated.
+    if (data[3] != 0x00)
+        throw std::runtime_error("binary_codec: reserved envelope byte non-zero");
     const uint8_t* body = data + 4;
     size_t body_len = len - 4;
 

@@ -47,7 +47,7 @@ Phase 2 (live, skipped with --static-only):
   `determ help` order):
     test-ed25519-vectors  test-sha2-c99       test-chacha20-c99
     test-aes-c99          test-ed25519-c99    test-ed25519-scalar-reduce
-    test-frost-c99        test-x25519-c99     test-blake2b-c99
+    test-x25519-c99       test-blake2b-c99
     test-sha3-c99         test-mldsa-c99      test-xchacha-c99
     test-argon2id-c99     test-p256-c99       test-p256-h2c-c99
     test-p256-oprf-c99    test-pedersen-c99   test-bp-ipa-c99
@@ -172,7 +172,7 @@ echo "=== Phase 2: live battery ($DETERM) ==="
 # line from its src/main.cpp dispatch block (name = subcommand minus
 # the "test-" prefix), which is what the marker gate below greps.
 BATTERY="test-ed25519-vectors test-sha2-c99 test-chacha20-c99 test-aes-c99 \
-         test-ed25519-c99 test-ed25519-scalar-reduce test-frost-c99 \
+         test-ed25519-c99 test-ed25519-scalar-reduce \
          test-x25519-c99 test-blake2b-c99 test-sha3-c99 test-mldsa-c99 \
          test-xchacha-c99 test-argon2id-c99 test-p256-c99 test-p256-h2c-c99 \
          test-p256-oprf-c99 test-pedersen-c99 test-bp-ipa-c99 \
@@ -187,7 +187,7 @@ for t in $BATTERY; do
   # minix §6 split: the 11 dual-oracle movers run in determ-cryptotest (the
   # sole OpenSSL binary); everything else stays on the daemon. Per-command
   # routing — the battery deliberately mixes both.
-  case " test-aes-c99 test-ed25519-c99 test-frost-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99 test-sha3-c99 test-blake2b-c99 test-xchacha-c99 test-chacha20-c99 test-sha2-c99 " in
+  case " test-aes-c99 test-ed25519-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99 test-sha3-c99 test-blake2b-c99 test-xchacha-c99 test-chacha20-c99 test-sha2-c99 " in
     *" $t "*)
       if [ -z "${DETERM_CRYPTOTEST:-}" ]; then
         echo "operator_crypto_selftest: determ-cryptotest not built (needed for $t; build it or set DETERM_CRYPTOTEST_BIN)" >&2

@@ -19,8 +19,7 @@
 #     * timing (epoch_blocks) + merge/revert/grace thresholds
 #     * subsidy params (block_subsidy / subsidy_mode / lottery multiplier /
 #       subsidy_pool_initial / zeroth_pool_initial) + min_stake
-#     * v2 activation heights (v2_7_f2_active_from_height,
-#       v2_10_active_from_height)
+#     * v2 activation heights (v2_7_f2_active_from_height)
 #     * the identity counts verify-genesis surfaces (initial_creators,
 #       initial_balances, genesis_message), plus the computed genesis_hash
 #
@@ -333,8 +332,6 @@ def extract(vg, raw):
         # ── v2 activation heights ─────────────────────────────────────────
         "v2_7_f2_active_from_height":
                                fmt_height(g(raw, "v2_7_f2_active_from_height", 0)),
-        "v2_10_active_from_height":
-                               fmt_height(g(raw, "v2_10_active_from_height", 0)),
     }
     return fields
 
@@ -359,7 +356,7 @@ FIELD_ORDER = [
     "block_subsidy", "subsidy_mode", "lottery_jackpot_multiplier",
     "subsidy_pool_initial", "zeroth_pool_initial", "min_stake",
     # v2 activation heights
-    "v2_7_f2_active_from_height", "v2_10_active_from_height",
+    "v2_7_f2_active_from_height",
 ]
 
 def fmt_val(v):

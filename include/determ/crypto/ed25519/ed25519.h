@@ -1,5 +1,5 @@
 /* Determ C99-native Ed25519 (RFC 8032) — the EC prerequisite for the v2.10
- * FROST-Ed25519 threshold randomness (CRYPTO-C99-SPEC.md Section 3.2). Provides
+ * the Determ chain (CRYPTO-C99-SPEC.md Section 3.2). Provides
  * the scalar/point arithmetic + sign/verify the daemon previously had only via
  * OpenSSL's opaque EVP_PKEY_ED25519, with NO libsodium dependency.
  *
