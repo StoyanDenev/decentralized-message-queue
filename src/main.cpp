@@ -798,6 +798,14 @@ Additional in-process tests:
                                               both rendezvous orders, refused
                                               connect, write-after-close, and
                                               the two-loop multi-node shape
+  determ test-scheduler-timers                DeterministicSchedulerDesign.md
+                                              §2b inc.2: the loop-local VIRTUAL-
+                                              TIME timer source — deterministic,
+                                              wall-clock-free timers the no-thread
+                                              scheduler advances (fire order, ties,
+                                              cancel, reentrant re-arm, ready-work-
+                                              before-time, replay-identical; the
+                                              default TimerService path untouched)
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
                                               process: 5 real Nodes over an
                                               injected VirtualTransport (one
@@ -26182,6 +26190,178 @@ int main(int argc, char** argv) {
                   << ": fa-partition-virtual "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // DeterministicSchedulerDesign.md §2b increment 2: the loop-local
+    // VIRTUAL-TIME timer source on VirtualEventLoop — a deterministic,
+    // wall-clock-free timer queue the no-thread scheduler advances (the
+    // prerequisite for byte-reproducible FA4 + the deterministic S-048 repro).
+    // Additive + opt-in: the DEFAULT TimerService path (test-net-virtual) is
+    // untouched. Pure std, no OS resource, identical on MSVC + GCC.
+    if (cmd == "test-scheduler-timers") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // The canonical 3-timer schedule (delays 200/50/100 ms) driven to
+        // quiescence single-threaded, recording fire order + the virtual `now`
+        // at each fire. Reused by the determinism replay below.
+        auto run_schedule = [](std::vector<uint64_t>& trace,
+                               std::vector<uint64_t>& nows) {
+            VirtualEventLoop loop;
+            loop.enable_virtual_time();
+            loop.timer_schedule(std::chrono::milliseconds(200), [&] { trace.push_back(200); });
+            loop.timer_schedule(std::chrono::milliseconds(50),  [&] { trace.push_back(50); });
+            loop.timer_schedule(std::chrono::milliseconds(100), [&] { trace.push_back(100); });
+            loop.run_until_idle();                       // no ready closures yet
+            while (loop.advance_to_next_timer()) {
+                nows.push_back(loop.virtual_now_ms());
+                loop.run_until_idle();                   // ready work before next advance
+            }
+        };
+
+        // 1. Fire order == earliest-deadline first; virtual now tracks it; the
+        //    whole drive costs ~zero wall time (never slept the 200 ms — the
+        //    proof it is virtual, not the real TimerService).
+        {
+            std::vector<uint64_t> trace, nows;
+            auto t0 = std::chrono::steady_clock::now();
+            run_schedule(trace, nows);
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0).count();
+            check(trace == std::vector<uint64_t>({50, 100, 200}),
+                  "virtual timers fire earliest-deadline-first (50,100,200)");
+            check(nows == std::vector<uint64_t>({50, 100, 200}),
+                  "virtual now advances to each fired timer's deadline");
+            check(elapsed < 100,
+                  "the 200 ms schedule drains in ~0 wall time (virtual, not slept)");
+        }
+
+        // 2. enable + accessors on a fresh loop (default = NOT virtual).
+        {
+            VirtualEventLoop loop;
+            check(!loop.virtual_time_enabled(), "a fresh loop is NOT in virtual-time mode");
+            check(loop.virtual_now_ms() == 0, "virtual now starts at 0");
+            check(!loop.advance_to_next_timer(),
+                  "advance on an empty loop returns false (no-op)");
+            loop.enable_virtual_time();
+            check(loop.virtual_time_enabled(), "enable_virtual_time flips the mode");
+        }
+
+        // 3. Same-deadline ties fire in SCHEDULE (seq) order — the stable total
+        //    order a replay depends on (§3.3) — AND one advance fires exactly
+        //    ONE timer (not all due timers at that instant), so the scheduler
+        //    can interleave ready work between same-instant firings.
+        {
+            VirtualEventLoop loop; loop.enable_virtual_time();
+            std::vector<int> trace;
+            uint64_t idA = loop.timer_schedule(std::chrono::milliseconds(10), [&] { trace.push_back(1); });
+            loop.timer_schedule(std::chrono::milliseconds(10), [&] { trace.push_back(2); });
+            loop.timer_schedule(std::chrono::milliseconds(10), [&] { trace.push_back(3); });
+            check(idA != 0, "virtual timer ids are nonzero (0 is reserved)");
+            // ONE advance fires exactly the earliest ONE, even at a shared deadline.
+            loop.advance_to_next_timer();
+            check(trace == std::vector<int>({1}) && loop.pending_timer_count() == 2,
+                  "one advance fires exactly ONE same-deadline timer (single-fire, not batch)");
+            while (loop.advance_to_next_timer()) {}
+            check(trace == std::vector<int>({1, 2, 3}),
+                  "remaining same-deadline timers fire in schedule order (stable tie-break)");
+            check(loop.virtual_now_ms() == 10, "ties share the same virtual now (10)");
+        }
+
+        // 4. cancel by id suppresses; pending_timer_count tracks the queue;
+        //    double-cancel is idempotent.
+        {
+            VirtualEventLoop loop; loop.enable_virtual_time();
+            std::vector<int> trace;
+            loop.timer_schedule(std::chrono::milliseconds(5), [&] { trace.push_back(1); });
+            uint64_t id2 = loop.timer_schedule(std::chrono::milliseconds(6),
+                                               [&] { trace.push_back(2); });
+            loop.timer_schedule(std::chrono::milliseconds(7), [&] { trace.push_back(3); });
+            check(loop.pending_timer_count() == 3, "3 timers pending before cancel");
+            loop.timer_cancel(id2);
+            check(loop.pending_timer_count() == 2, "cancel removes one from the queue");
+            loop.timer_cancel(id2);   // idempotent
+            check(loop.pending_timer_count() == 2, "double-cancel is idempotent");
+            while (loop.advance_to_next_timer()) {}
+            check(trace == std::vector<int>({1, 3}), "the cancelled timer never fires (1,3)");
+        }
+
+        // 5. Reentrancy: a firing callback re-arms a NEW timer that fires on a
+        //    later advance at now+delay (fn runs OUTSIDE the timer lock).
+        {
+            VirtualEventLoop loop; loop.enable_virtual_time();
+            std::vector<uint64_t> trace;
+            loop.timer_schedule(std::chrono::milliseconds(10), [&] {
+                trace.push_back(loop.virtual_now_ms());          // 10
+                loop.timer_schedule(std::chrono::milliseconds(15), [&] {
+                    trace.push_back(loop.virtual_now_ms());      // 25
+                });
+            });
+            while (loop.advance_to_next_timer()) {}
+            check(trace == std::vector<uint64_t>({10, 25}),
+                  "a callback re-arms a timer that fires later at now+delay (10 -> 25)");
+        }
+
+        // 6. Discrete-event composition: a firing timer POSTS a closure;
+        //    run_until_idle drains it before the next time advance
+        //    ("ready work before time advances", §2c).
+        {
+            VirtualEventLoop loop; loop.enable_virtual_time();
+            std::vector<std::string> trace;
+            loop.timer_schedule(std::chrono::milliseconds(10), [&] {
+                trace.push_back("timer");
+                loop.post([&] { trace.push_back("posted"); });
+            });
+            loop.timer_schedule(std::chrono::milliseconds(20), [&] { trace.push_back("timer2"); });
+            loop.run_until_idle();
+            while (loop.advance_to_next_timer()) loop.run_until_idle();
+            check(trace == std::vector<std::string>({"timer", "posted", "timer2"}),
+                  "posted closures drain before the next timer fires (ready work first)");
+        }
+
+        // 7. Replay-twice-identical: the same schedule yields the same fire
+        //    trace + the same virtual-now sequence on a second run — the
+        //    determinism the whole scheduler rests on.
+        {
+            std::vector<uint64_t> t1, n1, t2, n2;
+            run_schedule(t1, n1);
+            run_schedule(t2, n2);
+            check(t1 == t2 && n1 == n2, "same schedule replays byte-identical (deterministic)");
+        }
+
+        // 8. LoopTimer — the real consumer — routes through the virtual source
+        //    unchanged (arm schedules a virtual timer; it fires at its virtual
+        //    deadline). Proves the seam, not just the raw queue.
+        {
+            VirtualEventLoop loop; loop.enable_virtual_time();
+            bool fired = false;
+            LoopTimer t(loop);
+            t.arm(std::chrono::milliseconds(30), [&] { fired = true; });
+            check(loop.pending_timer_count() == 1, "LoopTimer.arm scheduled a virtual timer");
+            while (loop.advance_to_next_timer()) {}
+            check(fired && loop.virtual_now_ms() == 30,
+                  "LoopTimer over the virtual source fires at its virtual deadline (30)");
+        }
+
+        // 9. Misuse guard: enable_virtual_time() AFTER a native timer was armed
+        //    THROWS — turning the silent id-alias / wall-clock-leak determinism
+        //    break (adversarial review inc.2, LOW) into a loud, immediate error.
+        {
+            VirtualEventLoop loop;   // default = native TimerService mode
+            loop.timer_schedule(std::chrono::milliseconds(100000), [] {});   // native; never fires (loop dropped)
+            bool threw = false;
+            try { loop.enable_virtual_time(); }
+            catch (const std::logic_error&) { threw = true; }
+            check(threw, "enable_virtual_time() after a native timer throws (misuse guard)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": scheduler-timers "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
     // §Q1 increment 2: the injected consensus clock drives the real engine's

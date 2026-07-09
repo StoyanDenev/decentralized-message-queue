@@ -81,6 +81,7 @@
 #include <determ/net/timer_service.hpp>
 #include <determ/net/transport.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -153,15 +154,40 @@ public:
     void run_until_idle();
 
     // ── Timer service (the EventLoop interface's timer half) ────────────
-    // REAL wall-clock deadlines via the shared net::TimerService deadline
-    // thread (virtual time is a later evolution of this backend) — the
-    // same shape as IocpEventLoop/ReactorEventLoop, so net::LoopTimer
-    // works over a VirtualEventLoop unchanged.
+    // DEFAULT: REAL wall-clock deadlines via the shared net::TimerService
+    // deadline thread — the same shape as IocpEventLoop/ReactorEventLoop, so
+    // net::LoopTimer works over a VirtualEventLoop unchanged.
+    // VIRTUAL-TIME MODE (enable_virtual_time(); DeterministicSchedulerDesign.md
+    // §2b, increment 2): timer_schedule inserts into a loop-local ORDERED queue
+    // keyed on a virtual `now` the harness advances, and NO TimerService /
+    // steady_clock / timer thread is ever touched — the deterministic drive.
+    // The branch is chosen ONCE at enable time; the DEFAULT (unset) path is
+    // byte-identical to before, so the native TimerService behaviour
+    // (test-net-virtual) is unchanged.
     uint64_t timer_schedule(std::chrono::milliseconds delay,
-                            std::function<void()> fn) override {
-        return timers_.schedule(delay, std::move(fn));
-    }
-    void timer_cancel(uint64_t id) override { timers_.cancel(id); }
+                            std::function<void()> fn) override;
+    void timer_cancel(uint64_t id) override;
+
+    // ── Deterministic virtual-time drive (increment 2, opt-in, test-only) ──
+    // Switch this loop to virtual-time timers. Call ONCE, before any timer is
+    // scheduled, and drive the loop single-threaded (run_until_idle +
+    // advance_to_next_timer); never mix with run() worker threads. Virtual
+    // `now` starts at 0 ms and advances ONLY via advance_to_next_timer.
+    void enable_virtual_time();
+    bool virtual_time_enabled() const { return virtual_time_; }
+
+    // Fire the SINGLE earliest-deadline virtual timer (ties broken by schedule
+    // order — a stable total order, §3.3), advancing virtual `now` to its
+    // deadline. Returns false when no virtual timer is pending. The fired
+    // callback runs OUTSIDE the timer lock, so it may re-arm/cancel timers or
+    // post() closures — drain those with run_until_idle before the next
+    // advance ("ready work before time advances", §2c). Virtual-time mode only.
+    bool advance_to_next_timer();
+
+    // Virtual `now` in ms since drive start (0 until the first advance).
+    uint64_t virtual_now_ms() const { return virtual_now_ms_; }
+    // Count of armed-but-unfired virtual timers.
+    std::size_t pending_timer_count() const;
 
 private:
     friend class VirtualNetwork;   // reads st_ to wire pair/listener posts
@@ -171,6 +197,32 @@ private:
     TimerService timers_{[st = st_](std::function<void()> fn) {
         st->post(std::move(fn));
     }};
+
+    // Virtual-time timer source (increment 2). Empty + unused unless
+    // enable_virtual_time() was called; a plain vector scanned for the min
+    // (deadline, seq) — N is tiny (a handful of consensus round timers), so
+    // linear is simpler than a heap and keeps cancel O(n) with no handle map.
+    struct VTimer {
+        uint64_t              deadline_ms;
+        uint64_t              seq;   // per-loop monotonic; stable tie-break (§3.3)
+        uint64_t              id;    // returned to LoopTimer; cancel key
+        std::function<void()> fn;
+    };
+    mutable std::mutex   vt_mu_;
+    std::vector<VTimer>  vtimers_;
+    uint64_t             virtual_now_ms_  = 0;
+    uint64_t             next_vtimer_seq_ = 0;
+    uint64_t             next_vtimer_id_  = 1;   // 0 reserved / never a valid id
+    bool                 virtual_time_    = false;
+    // Misuse guard: set true the first time a timer is scheduled on the DEFAULT
+    // (native TimerService) path. enable_virtual_time() THROWS if this is set —
+    // enabling virtual time after a native timer was already armed would strand
+    // that timer on the wall-clock deadline thread while the two id spaces alias
+    // (a silent determinism break; adversarial review inc.2, LOW). Relaxed
+    // atomic: written on the production timer-arm path (multiple loop threads),
+    // read only during single-threaded harness setup — a dead store in
+    // production (enable_virtual_time is never called there).
+    std::atomic<bool>    native_timer_used_{false};
 };
 
 // One end of an in-process pipe pair. Created only by the VirtualNetwork

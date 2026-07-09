@@ -1,13 +1,15 @@
 # Deterministic Scheduler Design — a no-thread virtual-time drive for the real consensus engine
 
-**Status: DESIGN-REVIEW; increment 1 SHIPPED, increments 2-5 design-only.** This is
+**Status: DESIGN-REVIEW; increments 1-2 SHIPPED, increments 3-5 design-only.** This is
 the design-review-first step the [KqueueReactorDesign.md](KqueueReactorDesign.md)
 discipline mandates for a change that touches shipped orchestration. **Increment 1
-(the additive, byte-invariant `VirtualEventLoop::run_until_idle()` — §4 table) is
-SHIPPED** (pure-std test backend, production `run()` untouched); the substantive
-scheduler (increments 2-5) stays design-only until the seam deltas below are
-agreed, and one item (§5, the Node no-self-thread mode) requires an OWNER decision
-because the smallest honest version of it touches the production `run()` path. The goal is a fully DETERMINISTIC single-thread scheduler
+(the additive, byte-invariant `VirtualEventLoop::run_until_idle()` — §4 table) and
+increment 2 (the loop-local VIRTUAL-TIME timer source, §2b/§4) are SHIPPED** (pure-std
+test backend, production `run()` + the native `TimerService` path both untouched);
+the remaining scheduler pieces (increments 3-5) stay design-only until the seam
+deltas below are agreed, and increment 3 (§5, the Node no-self-thread `start_external`)
+requires an OWNER decision because the smallest honest version of it touches the
+production `run()` path. The goal is a fully DETERMINISTIC single-thread scheduler
 that drives the REAL `node::Node` + `BlockValidator` + producer so Byzantine
 schedules replay byte-for-byte — closing the F-1/FA4 gap
 ([RealEngineFAHarness.md](RealEngineFAHarness.md) §5) and unblocking the reliable
@@ -144,14 +146,19 @@ worker pool.
 `steady_clock::now()` ([timer_service.hpp:116](../../include/determ/net/timer_service.hpp),
 [:124](../../include/determ/net/timer_service.hpp)) is the wall-clock leak. Two
 implementation shapes, pick one at build time:
-  - **Preferred: a loop-local virtual timer queue.** In deterministic mode
-    `VirtualEventLoop::timer_schedule` does NOT delegate to `TimerService`; it
-    inserts `{virtual_now + delay, id, fn}` into an ordered in-loop structure and
-    the scheduler (§d) pops due entries against a `virtual_now` it owns. No
-    `TimerService` change, no timer thread, no `steady_clock`. `LoopTimer`
-    ([loop_timer.hpp](../../include/determ/net/loop_timer.hpp)) is unaffected — it
-    only holds an id. This is the KqueueReactor §2 "recommendation (c)" instinct:
-    prefer the change that adds no new lifetime/liveness reasoning.
+  - **Preferred: a loop-local virtual timer queue. — SHIPPED (increment 2).** In
+    virtual-time mode (`enable_virtual_time()`) `VirtualEventLoop::timer_schedule`
+    does NOT delegate to `TimerService`; it inserts `{virtual_now + delay, seq, id,
+    fn}` into the loop-local `vtimers_` structure and `advance_to_next_timer()` (§d)
+    pops the earliest due entry against a `virtual_now_ms_` it owns. No
+    `TimerService` change, no timer thread, no `steady_clock` on the virtual path.
+    `LoopTimer` ([loop_timer.hpp](../../include/determ/net/loop_timer.hpp)) is
+    unaffected — it only holds an id and routes through the same seam
+    (`test-scheduler-timers` asserts it fires at its virtual deadline). This is the
+    KqueueReactor §2 "recommendation (c)" instinct: prefer the change that adds no
+    new lifetime/liveness reasoning. NOTE: increment 2 uses a PER-LOOP `seq`
+    counter (sufficient for the single-loop scope); the GLOBAL logical-time
+    sequence §3.4 needs is deferred to increment 4 (cross-loop order).
   - Alternative: inject a `Clock` into `TimerService` so its deadline math reads
     virtual time. Rejected for the same reason KqueueReactor rejected the
     `EVFILT_USER` retrigger chain — it keeps a real thread and a `wait_until`, so
@@ -300,7 +307,7 @@ reproducibly); the S-048 half remains owner-gated.
 | # | Increment | Gate |
 |---|---|---|
 | 1 | **`VirtualEventLoop::run_until_idle()`** — caller-thread drain, additive; re-drive an existing single-loop test (`test-net-virtual`) through it instead of a spawned thread — **SHIPPED** ([virtual_transport.cpp](../../src/net/virtual_transport.cpp) `run_until_idle`; `test-net-virtual` phase 1b asserts caller-thread FIFO drain == threaded `run()` order, mid-drain re-posts run to quiescence in the same call, empty-queue returns immediately) | goldens byte-identical + FAST 207/0 both platforms + the re-driven test byte-matches the threaded run ✓ |
-| 2 | **Virtual-time timer source** — loop-local ordered timer queue consulted by the poll, `virtual_now` advance-to-next-timer; a unit test arms 3 timers and asserts fixed fire order + zero wall time | FAST + timer-order test + `test-net-virtual` still green (native/`TimerService` path untouched) |
+| 2 | **Virtual-time timer source** — loop-local ordered timer queue consulted by the poll, `virtual_now` advance-to-next-timer — **SHIPPED** (`VirtualEventLoop::enable_virtual_time()` / `advance_to_next_timer()` / `virtual_now_ms()` / `pending_timer_count()` + the loop-local `vtimers_` queue keyed on virtual `now`; `timer_schedule`/`timer_cancel` branch to it only when enabled, else delegate to `TimerService` verbatim — [virtual_transport.cpp](../../src/net/virtual_transport.cpp). Ties broken by `(deadline, seq)` for a stable total order (§3.3); the fired callback runs OUTSIDE the timer lock so it may re-arm/cancel/`post`. Test `test-scheduler-timers` (21 assertions): earliest-deadline-first fire order, virtual-`now` tracking, ~0 wall time (never slept the 200 ms schedule), stable tie-break, SINGLE-fire-per-advance (not batch), nonzero ids, cancel + idempotent double-cancel, reentrant re-arm at `now+delay`, ready-work-before-time-advance, replay-twice-identical, LoopTimer-over-virtual, and the `enable_virtual_time()`-after-native misuse guard) | goldens byte-identical + **FAST 209/0 both platforms** + `test-net-virtual` still green (native/`TimerService` path untouched) ✓ |
 | 3 | **`Node::start_external()`** (§5 owner gate) — setup-only entry, spawns no loop/save threads; re-drive a SINGLE-node scenario (the `test-virtual-clock` shape, [main.cpp:26724](../../src/main.cpp)) deterministically | goldens + FAST + live `test_weak_3node` (production `run()` proven untouched) |
 | 4 | **Global multi-loop scheduler** (§3.4 decision) — merged logical-time order over N loops; re-drive `test-fa-liveness-virtual` deterministically, blocks 1..3 byte-identical | FAST + the deterministic run byte-matches across TWO invocations (the replay-twice-identical check) + live cluster unchanged |
 | 5 | **FA checkers + adversarial schedules** — FA1/A1/FA6/FA7 over real state each step w/ expect-violation self-tests; deterministic loss/partition/reorder schedules; deterministic S-048 repro | FAST + replay-twice-identical + each checker's planted-bug self-test RED-on-mutant |
@@ -349,11 +356,12 @@ per-step trace).
   until that lands — deterministic scheduling removes the flakiness, not the open
   defect.
 
-- **[VERIFY-AT-IMPLEMENTATION] TimerService untouched claim.** The preferred
+- **[VERIFIED — increment 2] TimerService untouched claim.** The shipped
   virtual-timer shape (§2b) keeps `TimerService` and its `steady_clock` for the
-  native backends and only BYPASSES it in the poll path. This must be proven by
-  re-running `test-net-virtual` (which exercises the real `TimerService`) green
-  after increment 2 — the native timer path must be byte-neutral, the same
+  native backends and only BYPASSES it when `enable_virtual_time()` was called
+  (the default `virtual_time_ == false` path delegates verbatim). CONFIRMED:
+  `test-net-virtual` (which exercises the real `TimerService`) is green after
+  increment 2 on both platforms — the native timer path is byte-neutral, the same
   "prove the refactor byte-neutral first" posture as KqueueReactor §7 step 1.
 
 - **[VERIFY-AT-IMPLEMENTATION] Blocking-consumer closures.** The header warns a

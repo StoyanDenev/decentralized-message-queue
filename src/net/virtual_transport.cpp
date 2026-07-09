@@ -167,6 +167,95 @@ void VirtualEventLoop::stop() {
     st_->cv.notify_all();
 }
 
+// ── Virtual-time timer source (DeterministicSchedulerDesign.md §2b, inc.2) ────
+// Additive + opt-in: the DEFAULT (virtual_time_ == false) path is byte-identical
+// to the shipped inline forms — it delegates straight to TimerService, so the
+// native timer behaviour (test-net-virtual) is untouched. Only enable_virtual_time()
+// flips a loop onto the deterministic queue, and only a harness holding the
+// concrete VirtualEventLoop can call it.
+
+uint64_t VirtualEventLoop::timer_schedule(std::chrono::milliseconds delay,
+                                          std::function<void()> fn) {
+    if (virtual_time_) {
+        // Deterministic path: insert into the loop-local ordered queue keyed on
+        // virtual `now`; the TimerService/steady_clock/timer thread are never
+        // touched. Single-threaded by contract, but guarded so a stray
+        // cross-thread arm cannot corrupt the vector.
+        std::lock_guard<std::mutex> lk(vt_mu_);
+        uint64_t id = next_vtimer_id_++;
+        uint64_t d  = delay.count() < 0 ? 0
+                                        : static_cast<uint64_t>(delay.count());
+        vtimers_.push_back(
+            VTimer{virtual_now_ms_ + d, next_vtimer_seq_++, id, std::move(fn)});
+        return id;
+    }
+    // Native (default) path — record that it was taken so a later
+    // enable_virtual_time() can refuse the mixed state (see the guard there).
+    native_timer_used_.store(true, std::memory_order_relaxed);
+    return timers_.schedule(delay, std::move(fn));
+}
+
+void VirtualEventLoop::timer_cancel(uint64_t id) {
+    if (virtual_time_) {
+        std::lock_guard<std::mutex> lk(vt_mu_);
+        for (auto it = vtimers_.begin(); it != vtimers_.end(); ++it) {
+            if (it->id == id) { vtimers_.erase(it); return; }
+        }
+        return;   // already fired / unknown id — cancel is idempotent
+    }
+    timers_.cancel(id);
+}
+
+void VirtualEventLoop::enable_virtual_time() {
+    // Flip the source BEFORE any timer is scheduled. timers_ (the TimerService)
+    // is left dormant — it lazily starts its thread only on first schedule(),
+    // which the virtual path never calls, so virtual mode spawns zero threads.
+    // Guard the documented precondition instead of only asserting it in prose:
+    // enabling AFTER a native timer was armed would leave that timer on the
+    // wall-clock thread (nondeterministic fire) while a later cancel(id) hits
+    // the wrong queue (aliased id spaces). Turn that silent determinism break
+    // into a loud, immediate error.
+    if (native_timer_used_.load(std::memory_order_relaxed)) {
+        throw std::logic_error(
+            "VirtualEventLoop::enable_virtual_time() called after a native timer "
+            "was already scheduled; call it before any timer op");
+    }
+    virtual_time_ = true;
+}
+
+bool VirtualEventLoop::advance_to_next_timer() {
+    std::function<void()> fn;
+    {
+        std::lock_guard<std::mutex> lk(vt_mu_);
+        if (vtimers_.empty()) return false;
+        // Earliest (deadline, seq): a stable total order (§3.3) — same-deadline
+        // ties fire in schedule order, so a replay from the same schedule fires
+        // the same sequence.
+        std::size_t best = 0;
+        for (std::size_t i = 1; i < vtimers_.size(); ++i) {
+            const VTimer& a = vtimers_[i];
+            const VTimer& b = vtimers_[best];
+            if (a.deadline_ms < b.deadline_ms ||
+                (a.deadline_ms == b.deadline_ms && a.seq < b.seq)) best = i;
+        }
+        // Virtual `now` never moves backwards: a timer armed in the past (e.g. a
+        // zero-delay re-arm at the current instant) fires at the current now.
+        if (vtimers_[best].deadline_ms > virtual_now_ms_)
+            virtual_now_ms_ = vtimers_[best].deadline_ms;
+        fn = std::move(vtimers_[best].fn);
+        vtimers_.erase(vtimers_.begin() + static_cast<std::ptrdiff_t>(best));
+    }
+    // Outside the lock: the callback may re-arm/cancel timers or post()
+    // closures (same discipline as run()'s invoke-outside-lock).
+    if (fn) fn();
+    return true;
+}
+
+std::size_t VirtualEventLoop::pending_timer_count() const {
+    std::lock_guard<std::mutex> lk(vt_mu_);
+    return vtimers_.size();
+}
+
 void VirtualEventLoop::post(std::function<void()> fn) {
     st_->post(std::move(fn));
 }
