@@ -356,6 +356,15 @@ std::vector<uint8_t> Block::signing_bytes() const {
         }
     }
 
+    // A6 / §7.5.1: bind signature_form ONLY when non-zero (the same
+    // zero-skip pattern). Two blocks that agree on every other field but
+    // differ in signature_form must have distinct hashes, so a relabelled
+    // sig array can never alias the Ed25519 form's hash. v1.1 blocks are
+    // all form 0 (validator fail-closes on anything else) → byte-identical.
+    if (signature_form != 0) {
+        b.append(static_cast<uint8_t>(signature_form));
+    }
+
     Hash h = b.finalize();
     return std::vector<uint8_t>(h.begin(), h.end());
 }
@@ -506,6 +515,10 @@ json Block::to_json() const {
         if (partner_subset_hash != zero)
             j["partner_subset_hash"] = to_hex(partner_subset_hash);
     }
+    // A6 / §7.5.1: serialize signature_form only when non-zero (form 0 =
+    // the shipped Ed25519 K-of-K default — omitted, byte-identical JSON).
+    if (signature_form != 0)
+        j["signature_form"] = static_cast<int>(signature_form);
 
     return j;
 }
@@ -644,6 +657,15 @@ Block Block::from_json(const json& j) {
     if (j.contains("state_root"))
         b.state_root =
             from_hex_arr<32>(json_require_hex(j, "state_root", 64));
+    // A6 / §7.5.1: absent key = form 0 (the pre-A6 encoding). S-018: a
+    // present key must be an in-range integer — out-of-range u8 fails closed
+    // here rather than truncating into a DIFFERENT (possibly accepted) form.
+    if (j.contains("signature_form")) {
+        int f = json_require<int>(j, "signature_form");
+        if (f < 0 || f > 0xFF)
+            throw std::runtime_error("block.signature_form out of u8 range");
+        b.signature_form = static_cast<uint8_t>(f);
+    }
 
     return b;
 }

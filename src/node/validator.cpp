@@ -26,6 +26,17 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     // pinned genesis hash in operator config.
     if (b.index == 0) return {true, ""};
 
+    // A6 / §7.5.1 fail-closed dispatch: only SIG_FORM_KK_ED25519 (0) is
+    // accepted at v1.1. Every reserved value (1 BLS-aggregate slot, 2 ML-DSA
+    // K-of-K, 0xFF forward-compat) and every unknown value rejects BEFORE any
+    // signature check runs — a block must never have its sig array verified
+    // under a different interpretation than its discriminator declares.
+    if (b.signature_form != SIG_FORM_KK_ED25519)
+        return {false, "block.signature_form = "
+                     + std::to_string(int(b.signature_form))
+                     + "; only SIG_KK_ED25519 (0) is accepted at v1.1 "
+                       "(reserved forms fail closed)"};
+
     if (auto r = check_prev_hash(b, chain);              !r.ok) return r;
     if (auto r = check_creators_registered(b, registry); !r.ok) return r;
     if (auto r = check_creator_selection(b, registry, chain); !r.ok) return r;

@@ -237,6 +237,12 @@ enum class TxType : uint8_t {
     LOG_AUDIT_ACCESS = 16,
 };
 
+// A6 / §7.5.1 Block.signature_form values. Only SIG_FORM_KK_ED25519 is
+// accepted at v1.1 (validator fail-closes on everything else, incl. 0xFF).
+inline constexpr uint8_t SIG_FORM_KK_ED25519          = 0;
+inline constexpr uint8_t SIG_FORM_BLS12_381_AGGREGATE = 1;   // reserved slot
+inline constexpr uint8_t SIG_FORM_MLDSA_KK            = 2;   // reserved (PQ target)
+
 // A2 payload sizes (validator shape gates; apply re-checks defensively).
 inline constexpr size_t AUDIT_KEY_PAYLOAD_SIZE = 32;              // ROTATE set-form
 inline constexpr size_t AUDIT_LOG_PAYLOAD_SIZE = 8 + 32 + 32;     // LOG record
@@ -585,6 +591,19 @@ struct Block {
     // blocks and the gate short-circuited per the backward-compat
     // shim ("if state_root != zero verify").
     Hash state_root{};
+
+    // A6 / §7.5.1 (pre-launch register A5+A6, owner 2026-07-09: the PQ
+    // freeze's block-signature discriminator). Gates how creator_block_sigs[]
+    // is interpreted. 0 = SIG_FORM_KK_ED25519 (the shipped K-of-K Ed25519
+    // array — today's only form); reserved: 1 = SIG_FORM_BLS12_381_AGGREGATE
+    // (slot reserved; BLS itself remains rejected per V2-DESIGN), 2 =
+    // SIG_FORM_MLDSA_KK (the PQ committee-signature migration target), 0xFF =
+    // forward-compat reject. DORMANT at v1.1: the validator FAIL-CLOSES on any
+    // non-zero value, and zero is elided from JSON + hash/digest (the
+    // partner_subset_hash zero-skip pattern), so every existing chain, golden
+    // and fixture is byte-identical. The slot ships now so a future form
+    // activation is a value change, not a wire-format break (no-migrations).
+    uint8_t signature_form{0};
 
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.

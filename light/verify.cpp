@@ -187,6 +187,15 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     if (!b.creator_proposer_times.empty()) {
         h.append(b.timestamp);
     }
+    // A6 / §7.5.1: bind signature_form when non-zero, exactly mirroring
+    // producer.cpp::compute_block_digest's trailing conditional append. The
+    // scalar survives the rpc_headers strip, so light and node digest the
+    // identical value; form-0 (every v1.1 block) appends nothing → v1
+    // digest. Field order matches the node: ..., partner_subset_hash,
+    // timestamp, signature_form.
+    if (b.signature_form != 0) {
+        h.append(static_cast<uint8_t>(b.signature_form));
+    }
     return h.finalize();
 }
 

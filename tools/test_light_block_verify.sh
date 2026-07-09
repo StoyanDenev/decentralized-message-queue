@@ -18,7 +18,7 @@
 # Assertions:
 #   1. block-info + validators produce fixtures.
 #   2. block-verify (text) PASS on a real block, exit 0; every check PASS.
-#   3. --json: audit=PASS, passed==3.
+#   3. --json: audit=PASS, passed==4 (STRUCTURE + TX-ROOT + SIGS + CT-PROOFS).
 #   4. NEGATIVE: tampered tx_root -> TX-ROOT FAIL, exit 2.
 #   5. NEGATIVE: tampered creator_block_sig -> SIGS FAIL, exit 2.
 #   6. NEGATIVE: wrong committee pubkey -> SIGS FAIL, exit 2.
@@ -135,7 +135,11 @@ echo "$OUT" | grep -q "BLOCK-VERIFY: PASS" && assert true "summary PASS" || asse
 echo "$OUT" | grep -Eq "STRUCTURE PASS" && echo "$OUT" | grep -Eq "TX-ROOT   PASS" && echo "$OUT" | grep -Eq "SIGS      PASS" \
   && assert true "STRUCTURE + TX-ROOT + SIGS all PASS" || assert false "STRUCTURE + TX-ROOT + SIGS all PASS"
 
-echo; echo "=== 5. --json: audit=PASS, passed==3 ==="
+# A3 (2026-07-09): block-verify gained a 4th check CT-PROOFS (STRUCTURE +
+# TX-ROOT + SIGS + CT-PROOFS), so a clean block now reports passed==4. A
+# real cluster block carries no confidential txs, so CT-PROOFS passes
+# vacuously; assert it explicitly so a future silently-dropped check surfaces.
+echo; echo "=== 5. --json: audit=PASS, passed==4 (incl. A3 CT-PROOFS) ==="
 set +e
 J=$($DETERM_LIGHT block-verify --block $T/block.json --committee $T/committee.json --json 2>/dev/null); JRC=$?
 set -e
@@ -143,9 +147,9 @@ JOK=$(echo "$J" | python -c "
 import json,sys
 try:
   d=json.loads(sys.stdin.read()); m={c['check']:c['verdict'] for c in d.get('checks',[])}
-  print('true' if d.get('audit')=='PASS' and d.get('passed')==3 and m.get('SIGS')=='PASS' else 'false')
+  print('true' if d.get('audit')=='PASS' and d.get('passed')==4 and m.get('SIGS')=='PASS' and m.get('CT-PROOFS')=='PASS' else 'false')
 except Exception: print('false')")
-assert "$JOK" "--json audit=PASS passed=3"
+assert "$JOK" "--json audit=PASS passed=4 (SIGS + CT-PROOFS PASS)"
 assert "$([ $JRC -eq 0 ] && echo true || echo false)" "--json exit 0"
 
 echo; echo "=== 6. NEGATIVE: tampered tx_root -> TX-ROOT FAIL exit 2 ==="

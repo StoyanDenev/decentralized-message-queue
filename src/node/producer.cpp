@@ -700,6 +700,18 @@ Hash compute_block_digest(const Block& b) {
     if (!b.creator_proposer_times.empty()) {
         h.append(b.timestamp);
     }
+    // A6 / §7.5.1: bind signature_form ONLY when non-zero — the committee's
+    // Phase-2 signatures then cover the discriminator that says how those
+    // very signatures are to be interpreted, so a post-sign relabel of the
+    // sig array changes the digest and the signatures no longer verify.
+    // DETERMINISTIC (a block field, not a gossip-async view), so raw binding
+    // is safe per the S-030-D2 §3.2 argument. v1.1 blocks are all form 0
+    // (validator fail-closes on non-zero) → byte-identical v1 digest. Field
+    // order: inbound, eq, abort, partner_subset_hash, timestamp,
+    // signature_form.
+    if (b.signature_form != 0) {
+        h.append(static_cast<uint8_t>(b.signature_form));
+    }
     return h.finalize();
 }
 

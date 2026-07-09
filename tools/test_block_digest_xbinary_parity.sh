@@ -110,7 +110,9 @@ set -u
 cd "$(dirname "$0")/.."
 
 # Post-F-7: light binds the SAME append set as producer (full byte-parity).
-PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP"
+# A6 (2026-07-09): + the trailing conditional SIG_FORM (signature_form bound
+# when non-zero — the §7.5.1 discriminator; 16 tokens).
+PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM"
 LIGHT_SEQ="$PRODUCER_SEQ"
 # The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
@@ -176,6 +178,8 @@ extract_tokens() {
       # ── merged-block conditional tail (BOTH binaries) ──
       else if (line ~ /\.append\(b\.partner_subset_hash\)/) print "PARTNER_SUBSET"
       else if (line ~ /\.append\(b\.timestamp\)/)           print "TIMESTAMP"
+      # A6 §7.5.1: the signature_form discriminator (bound when non-zero).
+      else if (line ~ /\.append\(static_cast<uint8_t>\(b\.signature_form\)\)/) print "SIG_FORM"
 
       # Any unclassified append inside the body is drift — surface it.
       else if (line ~ /\.append\(/) print "APPEND_UNKNOWN"
@@ -314,6 +318,9 @@ Hash compute_block_digest(const Block& b) {
     if (!b.creator_proposer_times.empty()) {
         h.append(b.timestamp);
     }
+    if (b.signature_form != 0) {
+        h.append(static_cast<uint8_t>(b.signature_form));
+    }
     return h.finalize();
 }
 EOF
@@ -356,6 +363,9 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     }
     if (!b.creator_proposer_times.empty()) {
         h.append(b.timestamp);
+    }
+    if (b.signature_form != 0) {
+        h.append(static_cast<uint8_t>(b.signature_form));
     }
     return h.finalize();
 }

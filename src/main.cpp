@@ -1154,6 +1154,12 @@ Additional in-process tests:
                                               conserved (fee leaves pool, A1),
                                               tamper/double-spend no-op, and the
                                               duplicate-input INFLATION GUARD.
+  determ test-block-signature-form            A6 §7.5.1 Block.signature_form:
+                                              zero-skip wire round-trip (form 0
+                                              elided, byte-identical), S-018
+                                              range guards, hash + digest
+                                              distinctness, validator fail-
+                                              closed dispatch (1/2/0xFF reject)
   determ test-audit-keys                      A2 audit layer: ROTATE_AUDIT_KEY
                                               set/rotate/clear lifecycle (ak:
                                               leaf appears/updates/REMOVED),
@@ -37202,6 +37208,99 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-audit-keys\n" : "  PASS: test-audit-keys\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-block-signature-form") {
+        // A6 / §7.5.1 (pre-launch register A5+A6, 2026-07-09): the
+        // Block.signature_form discriminator — zero-skip wire round-trip
+        // (form 0 elided, byte-identical pre-A6 JSON), S-018 range guards,
+        // hash + digest distinctness (a relabelled sig array cannot alias the
+        // Ed25519 form's hash), and the validator's fail-closed dispatch
+        // (every non-zero form rejected BEFORE any signature check). Cross-
+        // binary digest parity is pinned by the FB62 static guard.
+        using namespace determ;
+        using namespace determ::chain;
+        using determ::node::BlockValidator;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === 1. Zero-skip wire round-trip ===
+        {
+            Block b; b.index = 3;
+            json j0 = b.to_json();
+            check(!j0.contains("signature_form"),
+                  "wire: form 0 (default) is ELIDED from JSON (byte-identical pre-A6)");
+            check(Block::from_json(j0).signature_form == 0,
+                  "wire: absent key round-trips to form 0");
+            b.signature_form = SIG_FORM_MLDSA_KK;
+            json j2 = b.to_json();
+            check(j2.contains("signature_form") && j2["signature_form"] == 2,
+                  "wire: non-zero form serialized");
+            check(Block::from_json(j2).signature_form == SIG_FORM_MLDSA_KK,
+                  "wire: non-zero form round-trips");
+        }
+
+        // === 2. S-018 range guards (out-of-u8 fails closed, never truncates
+        //        into a DIFFERENT form) ===
+        {
+            Block base; json j = base.to_json();
+            auto throws_on = [&](int v) {
+                json bad = j; bad["signature_form"] = v;
+                try { Block::from_json(bad); return false; }
+                catch (const std::exception&) { return true; }
+            };
+            check(throws_on(256), "range: signature_form 256 rejected (would truncate to 0)");
+            check(throws_on(-1),  "range: signature_form -1 rejected");
+        }
+
+        // === 3. Hash + digest distinctness / zero-skip identity ===
+        {
+            Block a; a.index = 5; a.timestamp = 42;
+            Block b = a; b.signature_form = SIG_FORM_MLDSA_KK;
+            Block c = a;                 // second form-0 copy
+            check(a.compute_hash() != b.compute_hash(),
+                  "hash: form 0 vs form 2 blocks have DISTINCT hashes (no relabel aliasing)");
+            check(a.compute_hash() == c.compute_hash(),
+                  "hash: form 0 is hash-identical to the pre-A6 encoding (zero-skip)");
+            check(node::compute_block_digest(a) != node::compute_block_digest(b),
+                  "digest: committee-signed digest binds the discriminator (non-zero)");
+            check(node::compute_block_digest(a) == node::compute_block_digest(c),
+                  "digest: form 0 keeps the byte-identical v1 digest");
+        }
+
+        // === 4. Validator fail-closed dispatch ===
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "sigform-test"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            Chain chain; chain.append(make_genesis_block(cfg));
+            determ::node::NodeRegistry reg;
+            BlockValidator v;
+            auto reject_msg = [&](uint8_t form) {
+                Block b; b.index = 1; b.prev_hash = chain.head().compute_hash();
+                b.creators = {"val"};
+                b.signature_form = form;
+                auto r = v.validate(b, chain, reg);
+                return r.ok ? std::string("(ACCEPTED)") : r.error;
+            };
+            check(reject_msg(SIG_FORM_BLS12_381_AGGREGATE).find("signature_form") != std::string::npos,
+                  "validator: reserved form 1 (BLS slot) rejected at the discriminator gate");
+            check(reject_msg(SIG_FORM_MLDSA_KK).find("signature_form") != std::string::npos,
+                  "validator: reserved form 2 (ML-DSA) rejected at the discriminator gate");
+            check(reject_msg(0xFF).find("signature_form") != std::string::npos,
+                  "validator: forward-compat 0xFF rejected at the discriminator gate");
+            std::string m0 = reject_msg(SIG_FORM_KK_ED25519);
+            check(m0.find("signature_form") == std::string::npos,
+                  "validator: form 0 passes the discriminator gate (fails later on other checks)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-block-signature-form\n"
+                           : "  PASS: test-block-signature-form\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-unshield") {
