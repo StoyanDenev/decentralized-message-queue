@@ -394,9 +394,9 @@ EIP-1559 (Ethereum's 2021 fee market upgrade) solved these with base-fee + prior
 
 ---
 
-## 6. Post-v2 architectural optimizations (from `docs/Improvements.md` C99 spec)
+## 6. Post-v2 architectural optimizations (originally sketched in `docs/Improvements.md`, deleted 2026-07-09)
 
-A separate design candidate document at `docs/Improvements.md` outlines four wire-format / consensus optimizations targeting a hypothetical post-v2 chain. Each is captured here individually with the standard classification + deferral rationale. The no-migrations constraint discussion that classifies "Breaking" improvements is in §7.1 below.
+A separate design-candidate document at `docs/Improvements.md` outlined four wire-format / consensus optimizations targeting a hypothetical post-v2 chain, with aspirational C99 struct sketches (BLS12-381 header/ContribMsg layouts). That document was deleted 2026-07-09 (doc-consolidation inc.3 — git history is the archive); the entries below are the canonical — and more current — record of all four items (§6.3's reclassification to §11.3 Out-of-scope, 2026-06-03, postdates the deleted sketch, which still framed dedup as a live candidate). The no-migrations constraint discussion that classifies "Breaking" improvements is in §7.1 below.
 
 ### 6.1 BLS signature aggregation (aggregate Phase-2 commit-sigs) — MODERN-profile only
 
@@ -414,7 +414,7 @@ The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519`
 
 **Dependencies (MODERN variant).** Production-grade C99 BLS12-381 implementation + audited pairing primitives + project-policy decision to expand crypto-curve roster + `signature_form` schema addition at v1.0 genesis (so post-v1.0 MODERN-profile chains can opt into BLS aggregation via the discriminator without breaking legacy validators that already expect the field).
 
-**Related.** `docs/Improvements.md` §1; v2.10 (FROST-Ed25519 — already provides aggregation in the threshold-randomness path but on curve25519, not BLS12-381); PRIV-3 curve-follows-profile precedent in v2.22-PRIVACY-SPEC.md; CRYPTO-C99-SPEC.md C99-11 profile bundling.
+**Related.** `docs/Improvements.md` §1 (deleted 2026-07-09, inc.3 — git history); v2.10 (FROST-Ed25519 — already provides aggregation in the threshold-randomness path but on curve25519, not BLS12-381); PRIV-3 curve-follows-profile precedent in v2.22-PRIVACY-SPEC.md; CRYPTO-C99-SPEC.md C99-11 profile bundling.
 
 **Note for v1.0 schema-shape decision.** If the project ever intends to adopt BLS aggregation in MODERN-profile deployments post-v1.0, the `signature_form` discriminator field must ship in the v1.0 block-header schema (default `SIG_KK_ED25519`). Without that field in v1.0 genesis, adding it later requires schema migration — forbidden under no-migrations. Decision is binary: either ship the discriminator pre-v1.0 (preserves future optionality) or close off BLS aggregation as a v3-only candidate (loses optionality but simpler v1.0 schema). Flag this choice for explicit decision before v1.0 schema freeze.
 
@@ -428,7 +428,7 @@ The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519`
 
 **Dependencies.** `Config::finalization_mode` knob added to genesis schema + apply-time gate dispatching on the mode + BFT-quorum bitset validator. No new crypto primitives (compatible with both Ed25519 K-of-K and §7.1 BLS aggregation).
 
-**Related.** `docs/Improvements.md` §2 (annotated as OPTIONAL); existing BFT-escalation per `docs/proofs/S025BFTEscalationSoundness.md` (R34A7) — the 4-gate escalation is a strictly *temporary* liveness mode triggered by abort threshold; §7.2 would make BFT-mode the steady-state default for opt-in deployments. The two are complementary: a deployment running in `unanimous_k` mode still escalates to BFT-mode under stress; a deployment running in `bft_quorum_2f1` mode operates at the BFT threshold continuously without escalation gates.
+**Related.** `docs/Improvements.md` §2 (annotated as OPTIONAL; deleted 2026-07-09, inc.3 — git history); existing BFT-escalation per `docs/proofs/S025BFTEscalationSoundness.md` (R34A7) — the 4-gate escalation is a strictly *temporary* liveness mode triggered by abort threshold; §7.2 would make BFT-mode the steady-state default for opt-in deployments. The two are complementary: a deployment running in `unanimous_k` mode still escalates to BFT-mode under stress; a deployment running in `bft_quorum_2f1` mode operates at the BFT threshold continuously without escalation gates.
 
 ### 6.3 Data deduplication `deduplicated_tx_root` — MOVED TO §11.3 (2026-06-03)
 
@@ -446,7 +446,7 @@ The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519`
 
 **Dependencies.** Production-grade IBLT / Minisketch C99 implementation + audit; mempool-size measurements demonstrating the saving is load-bearing for real deployments; spec for sketch-decode-failure fallback (when peers' mempool delta exceeds sketch capacity).
 
-**Related.** `docs/Improvements.md` §4; v2.6 (gossip-out-of-lock — already addresses Phase-1 gossip latency, an adjacent concern); S-022 wire-format caps proof; §7.5 schema-freeze decision.
+**Related.** `docs/Improvements.md` §4 (deleted 2026-07-09, inc.3 — git history); v2.6 (gossip-out-of-lock — already addresses Phase-1 gossip latency, an adjacent concern); S-022 wire-format caps proof; §7.5 schema-freeze decision.
 
 ### 6.5 Composition notes
 

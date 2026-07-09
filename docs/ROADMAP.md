@@ -66,6 +66,12 @@ resolved and recorded in `proofs/DECISION-LOG.md` 2026-05-24 review-week entries
 docs, and its crypto direction was superseded 2026-07-07. `DOC-TIERING-PLAN.md` — executed, see
 banner note above.)*
 
+*(Deleted 2026-07-09, doc-consolidation inc.3 — git history is the archive: `Improvements.md`
+(docs root — NOT `proofs/Improvements.md`, which stays) — aspirational C99 struct sketches for
+four unscheduled post-v2 optimizations (BLS aggregation, 2F+1 Quorum Liveness, dedup tx_root,
+IBLT/Minisketch contribs); all four items remain individually recorded, in more current form,
+in `proofs/Improvements.md` §6.1–§6.4 + §7.1/§7.2 + the §7.5/§7.6 discriminator decisions.)*
+
 ---
 
 *Authority: Stoyan Denev. This index is maintained by hand; tier assignments are the
