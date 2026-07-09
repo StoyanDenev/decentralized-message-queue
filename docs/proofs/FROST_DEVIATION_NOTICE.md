@@ -94,3 +94,7 @@ This NOTICE is authoritative for the project. Any document in `docs/proofs/`, `d
 ---
 
 *End of NOTICE. Append-only beyond this point — corrections only, no retroactive modification of the provenance statement above.*
+
+## 8. Amendment 2026-07-09 — module DELETED from the tree (pre-launch register B2)
+
+**Authority: Stoyan Denev, pre-launch decision register item B2 (jointly A7), 2026-07-09 — `PRE-LAUNCH-DECISIONS.md`.** The frozen module is now **DELETED from the tree entirely**: `src/crypto/frost/`, the C++ bridge (`frost.cpp` / `frost.hpp` headers), together with the RingCT/LSAG/CLSAG ring-signature library (`src/crypto/ringsig/` + headers) and their test surfaces (`test-frost-c99`, `test-frost-types`, `test-lsag-c99`, `test-clsag-c99`, `test-ringct-spend-c99`, wrappers, vectors, and python oracles). Git history preserves the code; the audit and soundness documents remain in `docs/proofs/` as the retained design record. This supersedes §6's FROZEN-retention: audit history now lives in git plus the retained docs, and the test-infrastructure retention reason lapsed with the tests' removal. **Re-adding FROST (or the ring-signature library) is a normal reviewed feature; the deviation discipline in §3–§4 stays in force.**

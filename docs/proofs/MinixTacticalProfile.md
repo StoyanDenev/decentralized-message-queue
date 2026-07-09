@@ -450,7 +450,8 @@ strict UTF-8 (it is the outermost consumer of every peer-supplied byte).
 
 Executed exactly as designed (byte-invariant, zero coverage lost): all 11
 moved outputs diffed BYTE-IDENTICAL against pre-split baselines; both in-place
-C99 swaps PASS; the operator battery routes per-command (26/26); the ratchet
+C99 swaps PASS; the operator battery routes per-command (25/25 — was 26/26
+until the register-B2 FROST purge removed test-frost-c99, 2026-07-09); the ratchet
 is a ZERO-exception pin; FAST 203/0, goldens, and a live cluster all green —
 and `determ.exe` contains zero "openssl" strings. The design as implemented:
 a new top-level `cryptotest/main.cpp` (mirroring `wallet/`, `light/`) with a

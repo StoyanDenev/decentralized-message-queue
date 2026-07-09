@@ -1,6 +1,8 @@
 # FA-Crypto — `frost_verify` soundness via Ed25519 delegation (RFC 9591 §3)
 
-> **BACKEND MIGRATED (2026-07-03, §3.15) — read every `EVP_PKEY_ED25519` below as the C99 verifier that replaced it.** `determ::crypto::verify` (`src/crypto/keys.cpp:82`) now calls the from-scratch **`determ_ed25519_verify`** (the §3.15 C99 Ed25519), NOT OpenSSL `EVP_PKEY_ED25519` — the daemon has no OpenSSL runtime dependency (OpenSSL survives only as the byte-equality test oracle). The C99 verifier implements the identical RFC 8032 §5.1.7 cofactored verify equation and is byte-equal to the prior OpenSSL path (proven: `CryptoBackendMigrationSoundness.md` + the `test-ed25519-c99` KATs), so this proof's soundness (L-1 / L-2 / T-1) is **unchanged** — it rests on the verify *equation*, which is identical; only the implementing library changed. FROST itself is **library-only / frozen** (`FROST_DEVIATION_NOTICE.md`).
+> **BACKEND MIGRATED (2026-07-03, §3.15) — read every `EVP_PKEY_ED25519` below as the C99 verifier that replaced it.** `determ::crypto::verify` (`src/crypto/keys.cpp:82`) now calls the from-scratch **`determ_ed25519_verify`** (the §3.15 C99 Ed25519), NOT OpenSSL `EVP_PKEY_ED25519` — the daemon has no OpenSSL runtime dependency (OpenSSL survives only as the byte-equality test oracle). The C99 verifier implements the identical RFC 8032 §5.1.7 cofactored verify equation and is byte-equal to the prior OpenSSL path (proven: `CryptoBackendMigrationSoundness.md` + the `test-ed25519-c99` KATs), so this proof's soundness (L-1 / L-2 / T-1) is **unchanged** — it rests on the verify *equation*, which is identical; only the implementing library changed. FROST itself was **library-only / frozen** (`FROST_DEVIATION_NOTICE.md`) — and has since been removed from the tree entirely (next banner).
+
+> **MODULE REMOVED FROM TREE 2026-07-09 (pre-launch register B2+A7, `PRE-LAUNCH-DECISIONS.md`).** The FROST code this document analyses (`frost.cpp`, `frost.hpp`, the C99 module) was deleted from the tree; git history preserves it; this document is the retained design record.
 
 This document proves that Determ's `frost_verify` — the first FROST-Ed25519 primitive shipped under v2.10 Phase A — is sound under RFC 9591 (FROST-Ed25519, May 2024). The implementation is a thin delegation to the existing `determ::crypto::verify` (an OpenSSL `EVP_PKEY_ED25519` verify), and the proof formalizes the standard fact that an aggregated FROST-Ed25519 signature is structurally indistinguishable from a single-party Ed25519 `(R, z)` signature against the group public key.
 
@@ -130,7 +132,7 @@ determ::crypto::verify(pub, data, len, sig) = 1
 
 ### Theorem T-1 from L-1 + L-2
 
-*Proof.* Forward direction (⇐): suppose `sig = R ‖ z` was produced by a valid t-of-K FROST aggregation over `msg` under `group_pubkey`. By L-1, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. By L-2, `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. Inspecting `src/crypto/frost.cpp:101–118` (this document §4): `frost_verify` adapts `FrostSig → Signature` and `Point → PubKey` via bytewise copy (both type pairs are 64-byte and 32-byte arrays respectively; the `static_assert`s on lines 108 and 113 pin this), then returns the wrapper call. So `frost_verify(sig, group_pubkey, msg) = determ::crypto::verify(pub, data, len, sig) = 1`. ✓
+*Proof.* Forward direction (⇐): suppose `sig = R ‖ z` was produced by a valid t-of-K FROST aggregation over `msg` under `group_pubkey`. By L-1, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. By L-2, `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. Inspecting `frost.cpp:101–118` (this document §4): `frost_verify` adapts `FrostSig → Signature` and `Point → PubKey` via bytewise copy (both type pairs are 64-byte and 32-byte arrays respectively; the `static_assert`s on lines 108 and 113 pin this), then returns the wrapper call. So `frost_verify(sig, group_pubkey, msg) = determ::crypto::verify(pub, data, len, sig) = 1`. ✓
 
 Backward direction (⇒): suppose `frost_verify(sig, group_pubkey, msg) = 1`. By the same code-trace, this means `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. By L-2, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. Under A1 (Ed25519 EUF-CMA), the only ways for the verify equation to hold are: (a) `sig` was produced by signing `msg` with the secret key matching `group_pubkey` (which in the threshold setting is the master secret, computable only by t-of-K cooperating committee members per the DKG output; see `v2.10-DKG-SPEC.md` §2.2 Q2 trustless dealer), or (b) the adversary forged the signature (probability `≤ 2⁻¹²⁸` per attempt by A1). In case (a), by RFC 9591 §3 Theorem 1's completeness direction (RFC 9591 §5.1, second half of the proof), `sig` must equal the canonical aggregate of some valid t-of-K partial-signature set. Case (b) is the negligible branch. ✓
 
@@ -152,7 +154,7 @@ Combining: `frost_verify(sig, group_pubkey, msg) = 1` iff `sig` was produced by 
 
 ## 4. Implementation citation
 
-The `frost_verify` implementation is at `src/crypto/frost.cpp:101–118`:
+The `frost_verify` implementation was at `frost.cpp:101–118`:
 
 ```cpp
 bool frost_verify(const FrostSig& sig,

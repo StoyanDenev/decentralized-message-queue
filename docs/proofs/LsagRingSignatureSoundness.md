@@ -1,4 +1,5 @@
 > **TIER: NEAR-TERM — 1.0.x in-flight.** Committed/imminent but NOT yet shipped; not part of the 1.0-authoritative set. Roadmap index: docs/ROADMAP.md
+> **LIBRARY REMOVED FROM TREE 2026-07-09 (pre-launch register B2, jointly A7, `PRE-LAUNCH-DECISIONS.md`).** The ring-signature module this document analyses (the `ringsig` library) was deleted from the tree; git history preserves the code; this document is the retained design record.
 
 # LsagRingSignatureSoundness — §3.23 LSAG linkable ring signature over P-256: unforgeable + anonymous-within-the-ring + a deterministic key-image nullifier / library-primitive-first / dual-oracle byte-frozen
 

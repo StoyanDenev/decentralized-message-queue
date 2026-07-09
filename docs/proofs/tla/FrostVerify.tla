@@ -1,4 +1,5 @@
 \* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+\* MODULE REMOVED FROM TREE 2026-07-09 (pre-launch register B2+A7): the FROST code this spec models was deleted from the tree; git history preserves it; this spec is the retained design record.
 
 --------------------------- MODULE FrostVerify ---------------------------
 (*
@@ -10,7 +11,7 @@ module is syntactically self-contained and ready for `tlc -config
 FrostVerify.tla` once a companion `.cfg` is supplied.
 
 Scope. Formalizes the soundness of `determ::crypto::frost::frost_verify`
-at `src/crypto/frost.cpp:101-118`, the first FROST-Ed25519 primitive
+at `frost.cpp:101-118`, the first FROST-Ed25519 primitive
 shipped under v2.10 Phase A. The implementation is a thin delegation
 to the existing `determ::crypto::verify` (an OpenSSL `EVP_PKEY_ED25519`
 verify), and the proof formalizes the standard fact — RFC 9591 §3 +
@@ -62,7 +63,7 @@ the analytic proof (T-1 + corollaries) establishes:
         `msg.size() == 0`; this invariant guards against any future
         regression that would split the verify path on message length.
   INV-6 (TypeContract): the structural type contract pinned by the
-        two `static_assert` clauses at `src/crypto/frost.cpp:108` /
+        two `static_assert` clauses at `frost.cpp:108` /
         `:113`: a FrostSig is bytewise-identical in shape to an
         Ed25519 Signature (64 bytes), and a Point is bytewise-
         identical to a PubKey (32 bytes). Modeled at the TLA+ layer
@@ -82,7 +83,7 @@ Modeling scope (kept tractable for TLC):
   * `FrostSig` is modeled as a 64-element sequence over `Bytes`; a
     `Point` (group public key) is a 32-element sequence over `Bytes`.
     This matches the C++ `std::array<uint8_t, 64>` and `std::array
-    <uint8_t, 32>` typedefs at `include/determ/crypto/frost.hpp:60-62`.
+    <uint8_t, 32>` typedefs at `frost.hpp:60-62`.
   * `Ed25519Verify(pub, msg, sig)` is the abstract EUF-CMA verify
     predicate from Preliminaries §2.2 A2. The spec axiomatizes its
     soundness contract via the `valid_pairs` set; that set captures
@@ -94,7 +95,7 @@ Modeling scope (kept tractable for TLC):
     the joint extension of both sets (RFC 9591 §3 Theorem 1; this
     proof §2.1, §3 L-1).
   * `FrostVerify(sig, group_pub, msg)` is the function under test —
-    by direct code reading of `src/crypto/frost.cpp:101-118`, it
+    by direct code reading of `frost.cpp:101-118`, it
     delegates bytewise to `Ed25519Verify`.
   * The Bytes universe is bounded for TLC (a 2-element set suffices
     for the spec-layer invariants; the underlying RFC equation is
@@ -119,10 +120,10 @@ Cross-references:
   - RFC 9591 §3 (FROST aggregation correctness)
   - RFC 9591 §6.6 (Ed25519 ciphersuite — locks aggregate to Ed25519)
   - RFC 8032 §5.1.7 (Ed25519 cofactored verify equation)
-  - src/crypto/frost.cpp:101-118 (the function under test)
+  - frost.cpp:101-118 (the function under test)
   - src/crypto/keys.cpp:79-91 (the underlying determ::crypto::verify
     that frost_verify delegates to)
-  - include/determ/crypto/frost.hpp:60-62 (Identifier / Scalar / Point
+  - frost.hpp:60-62 (Identifier / Scalar / Point
     / FrostSig type definitions)
   - src/main.cpp scenario 27 (test-view-root regression for the
     five corollaries; cited in FrostVerifyDelegation.md §5)
@@ -147,7 +148,7 @@ ASSUME ConfigOK ==
 \* RFC 9591 §6.6 + RFC 8032 §5.1.7 fix the encoded sizes:
 \*   FrostSig    = 64 bytes (R || z)
 \*   GroupPubKey = 32 bytes (compressed Edwards point)
-\* The two `static_assert` clauses at src/crypto/frost.cpp:108 and
+\* The two `static_assert` clauses at frost.cpp:108 and
 \* :113 pin this at compile time; we lift them to the spec layer as
 \* sequence-length predicates.
 
@@ -223,7 +224,7 @@ Ed25519Verify(pub, msg, sig) ==
 \* §4. FrostVerify (the function under test).
 \* -----------------------------------------------------------------
 \*
-\* The Determ implementation at src/crypto/frost.cpp:101-118 is:
+\* The Determ implementation at frost.cpp:101-118 is:
 \*
 \*   bool frost_verify(const FrostSig& sig,
 \*                     const Point& group_pubkey,
@@ -500,7 +501,7 @@ INV_EmptyMsgWellDefined ==
        verify_log[i].result \in BOOLEAN
 
 \* INV-6 (TypeContract): the structural type contract from the two
-\* static_asserts at src/crypto/frost.cpp:108 / :113. Every FrostSig
+\* static_asserts at frost.cpp:108 / :113. Every FrostSig
 \* in the model is a 64-element sequence over Bytes; every
 \* GroupPubKey is a 32-element sequence. The C++ side enforces this
 \* at compile time via sizeof equality with Signature (64) and

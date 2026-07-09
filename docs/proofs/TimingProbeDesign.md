@@ -311,7 +311,7 @@ header takes.)
 | 6 Ed25519 secret path | `ed25519-pubkey`, `ed25519-sign` | Yes — fix-vs-random seed + low/high-Hamming scalar classes |
 | 7 `sc_lt_L` | `sc-canonical` | Yes — the 5 boundary classes {0, L−1, L, 2L−1, random} |
 | 8 X25519 | `x25519`, `x25519-base` | Yes — low-order public points excluded from secret-class runs per the inventory |
-| 9 FROST entry points | `frost-sign-partial`, `frost-dkg`, `frost-reconstruct`, `sc-muladd` | Yes (library-only scope note above) |
+| 9 FROST entry points | `frost-sign-partial`, `frost-dkg`, `frost-reconstruct`, `sc-muladd` | Was yes (library-only scope note above); the FROST module was removed from the tree 2026-07-09 (register B2), retiring the FROST probe targets |
 | 10 Argon2id scoped check | — | **No.** Not a timing claim at all: it is an address-trace identity assertion. Implementable in-house WITHOUT valgrind as a deterministic instrumented-build test (record the `ref_index` sequence for two passwords, assert byte-identical for pass 0 / slice < 2) — that variant IS deterministic and belongs in the regular suite, as a separate follow-up, not in this probe |
 | 11 Per-target re-validation | (policy) | Yes — a re-run policy over targets 2–9, not a new target; see §6 |
 | 12 Keyed-hash length-only | `hmac-sha256`, `hmac-sha512`, `blake2b-keyed`, `pbkdf2` | Yes — fix-vs-random key/password at pinned lengths |
@@ -495,7 +495,8 @@ all already anticipated by the inventory:
   source-level CT verdicts the probe complements (§5.4).
 - [FROST_DEVIATION_NOTICE.md](FROST_DEVIATION_NOTICE.md) — §4, the
   external/AI-introduced-dependency discipline behind §1's flag; also the
-  library-only scope of the target-9 FROST probes.
+  library-only scope of the target-9 FROST probes (module removed from the
+  tree 2026-07-09, register B2 — those probe targets are retired).
 - `include/determ/crypto/ct.h` + `tools/test_ct_c99.sh` —
   the functional pins for `determ_ct_memcmp`; target 1 converts them into the
   timing claim.

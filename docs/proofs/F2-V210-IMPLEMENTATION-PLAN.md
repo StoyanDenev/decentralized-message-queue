@@ -1,4 +1,5 @@
 > **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+> **MODULE REMOVED FROM TREE 2026-07-09 (pre-launch register B2+A7, `PRE-LAUNCH-DECISIONS.md`).** The FROST code this document covers was deleted from the tree; git history preserves it; this document is the retained design record.
 
 # v2.7 F2 + v2.10 implementation plan
 

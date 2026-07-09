@@ -346,9 +346,9 @@ adds nothing secret-dependent (fixed base point).
 ### 2.8 frost — FROST-Ed25519 keygen / two-round sign / DKG / PSS
 
 **File:** `src/crypto/frost/frost.c`. (Status note: per `FROST_DEVIATION_NOTICE.md`
-and the CRYPTO-C99-SPEC.md header notice, FROST is retained as a library OUTSIDE
-the v1.1 consensus path; its CT posture is inventoried here because the code
-ships in the stack.)
+and the CRYPTO-C99-SPEC.md header notice, the FROST module was library-only OUTSIDE
+the v1.1 consensus path and was REMOVED from the tree 2026-07-09 (register B2);
+this CT inventory is the retained design record.)
 
 **Secret inputs.** The trusted-dealer group secret + polynomial coefficients
 (`determ_frost_keygen_trusted`); every participant share `s_i` (and the

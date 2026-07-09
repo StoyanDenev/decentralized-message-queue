@@ -1,4 +1,5 @@
 > **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+> **MODULE REMOVED FROM TREE 2026-07-09 (pre-launch register B2+A7, `PRE-LAUNCH-DECISIONS.md`).** The FROST code this document covers was deleted from the tree; git history preserves it; this document is the retained design record.
 
 # v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness — REMOVED FROM v1.1 SCOPE 2026-06-07
 
@@ -164,8 +165,8 @@ partials, so one withholding adversary cannot bias the result.
 
 | Surface | Location | Notes |
 |---|---|---|
-| `frost_verify` | `src/crypto/frost.cpp:101-118` | Only real FROST primitive. Bytewise-adapts `FrostSig→Signature`, `Point→PubKey` (two `static_assert`s pin 64/32-byte shapes) and delegates to `determ::crypto::verify` (`src/crypto/keys.cpp:79-91`, OpenSSL `EVP_PKEY_ED25519`). Sound per `FrostVerifyDelegation.md` T-1. |
-| FROST API header | `include/determ/crypto/frost.hpp:1-179` | Full type + struct + signature surface per RFC 9591 §3: `Identifier`/`Scalar`/`Point`/`FrostSig` typedefs; `KeygenRound1Output`/`KeygenRound2Output`/`LocalShare`/`SignRound1Output`/`CommitmentMap`; keygen/sign/aggregate/verify declarations. API is stable; only `frost.cpp` changes as primitives land. |
+| `frost_verify` | `frost.cpp:101-118` | Only real FROST primitive. Bytewise-adapts `FrostSig→Signature`, `Point→PubKey` (two `static_assert`s pin 64/32-byte shapes) and delegates to `determ::crypto::verify` (`src/crypto/keys.cpp:79-91`, OpenSSL `EVP_PKEY_ED25519`). Sound per `FrostVerifyDelegation.md` T-1. |
+| FROST API header | `frost.hpp:1-179` | Full type + struct + signature surface per RFC 9591 §3: `Identifier`/`Scalar`/`Point`/`FrostSig` typedefs; `KeygenRound1Output`/`KeygenRound2Output`/`LocalShare`/`SignRound1Output`/`CommitmentMap`; keygen/sign/aggregate/verify declarations. API is stable; only `frost.cpp` changes as primitives land. |
 | Activation gate field | `include/determ/chain/genesis.hpp:216` | `uint64_t v2_10_active_from_height{0}` declared, parallel to the shipped `v2_7_f2_active_from_height` (line 208). Comment (lines 210-216) states apply-path enforcement is **no-op until Phase D** (no producer/validator branch reads it yet). |
 
 ### Stubbed (throw `std::logic_error("v2.10 Phase A not yet implemented: <fn>")`)

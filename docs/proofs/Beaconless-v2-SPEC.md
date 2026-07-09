@@ -280,8 +280,9 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 >   simplification only while the accepted abort⇒re-roll posture holds.
 >
 > FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md`
-> (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible
-> DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard
+> (2026-06-07) — the FROST C99 code was retained **only as a library** (audit history) and then DELETED
+> from the tree 2026-07-09 (pre-launch register B2), never in the chain path or the v1.1
+> formal-verification surface. Cross-shard
 > randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST.
 > Manifest/committee-log co-signing use K-of-K Ed25519, not FROST.
 

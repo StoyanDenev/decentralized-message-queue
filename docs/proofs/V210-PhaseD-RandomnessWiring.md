@@ -1,5 +1,6 @@
 > **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
-> **SUPERSEDED 2026-06-07 — see `FROST_DEVIATION_NOTICE.md`.** FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST. This document is HISTORICAL: it analysed wiring FROST into block randomness; FROST is no longer on any chain path. The retained block beacon is the v1.x MPDH commit-reveal.
+> **SUPERSEDED 2026-06-07 — see `FROST_DEVIATION_NOTICE.md`.** FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code was retained **only as a library** (audit history) and then DELETED from the tree 2026-07-09 (pre-launch register B2), never in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST. This document is HISTORICAL: it analysed wiring FROST into block randomness; FROST is no longer on any chain path. The retained block beacon is the v1.x MPDH commit-reveal.
+> **MODULE REMOVED FROM TREE 2026-07-09 (pre-launch register B2+A7, `PRE-LAUNCH-DECISIONS.md`).** The FROST code this document covers was deleted from the tree; git history preserves it; this document is the retained design record.
 
 # v2.10 Phase D — wiring FROST into the block-randomness path (expansion) — DE-SCOPED
 
@@ -10,8 +11,9 @@
 > one construction-level property that would justify the threshold machinery (BLS-style
 > uniqueness / unbiasable-by-construction) FROST does not provide. FROST is **removed from
 > the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) —
-> the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer
-> use), not in the chain path or the v1.1 formal-verification surface. Cross-shard
+> the FROST C99 code was retained **only as a library** (audit history) and then DELETED
+> from the tree 2026-07-09 (pre-launch register B2), never in the chain path or the v1.1
+> formal-verification surface. Cross-shard
 > randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH),
 > not FROST. Read the body below as the analysis behind this decision, not as an active
 > work plan.

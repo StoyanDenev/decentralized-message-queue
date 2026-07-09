@@ -16,7 +16,7 @@
 | Item | Status | Docs |
 |---|---|---|
 | **v2.7 F2 view reconciliation** | **SHIPPED** (S-016 + S-030-D2 consensus closure; commits 850d2c3..48c4b45) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
-| **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); **§3.15 daemon+light migration SHIPPED 2026-07-03** (consensus path OpenSSL-free; determ-light links zero OpenSSL; goldens byte-invariant on MSVC+GCC) — remaining OpenSSL surface is wallet-envelope + §Q9-test-oracle only (the 1c follow-up) | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
+| **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03, then REMOVED from the tree 2026-07-09 — pre-launch register B2); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); **§3.15 daemon+light migration SHIPPED 2026-07-03** (consensus path OpenSSL-free; determ-light links zero OpenSSL; goldens byte-invariant on MSVC+GCC) — remaining OpenSSL surface is wallet-envelope + §Q9-test-oracle only (the 1c follow-up) | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
 | **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
 
 ---
@@ -28,7 +28,7 @@
 | **Scaling** — beaconless cross-shard architecture | `proofs/Beaconless-v2-SPEC.md` (cross-shard randomness now **MPDH commit-reveal**, §Q6, 2026-06-07) |
 | **Privacy** — confidential transactions | `proofs/v2.22-PRIVACY-SPEC.md`, `proofs/PFS_DEPLOYMENT_GUIDANCE.md` — implementation **DE-SCOPED 2026-07-03** (design record only; DECISION-LOG) |
 | **Identity** — distributed IdP / DSSO + key rotation | Theme 9 / v2.25 (in `V2-DESIGN.md`), `proofs/v2.26-ROTATION-SPEC.md` |
-| **Threshold crypto** — DKG ceremony | `proofs/v2.10-DKG-SPEC.md` — **block-beacon DE-SCOPED**; FROST module **FROZEN 2026-07-03** (FROST_DEVIATION_NOTICE §6 amendment — retained for audit history + test coverage only; no consumer claim) |
+| **Threshold crypto** — DKG ceremony | `proofs/v2.10-DKG-SPEC.md` — **block-beacon DE-SCOPED**; FROST module **FROZEN 2026-07-03**, then **REMOVED from the tree 2026-07-09** (pre-launch register B2; FROST_DEVIATION_NOTICE §8 — docs + git history are the design record) |
 | **Post-quantum** — Dilithium/Falcon migration | v2.8 (in `V2-DESIGN.md`) |
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
 | **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
@@ -42,7 +42,7 @@
 
 | Item | Outcome |
 |---|---|
-| **v2.10 FROST-as-block-beacon** | **De-scoped** — the v1 **MPDH commit-reveal** block beacon is retained (not a bias upgrade over FA3; lacks BLS-style uniqueness). The FROST C99 primitives are retained for non-beacon uses. See `proofs/V210-PhaseD-RandomnessWiring.md` §9, `proofs/V210ImplementationRoadmap.md`, and `proofs/DECISION-LOG.md` 2026-06-07. |
+| **v2.10 FROST-as-block-beacon** | **De-scoped** — the v1 **MPDH commit-reveal** block beacon is retained (not a bias upgrade over FA3; lacks BLS-style uniqueness). The FROST C99 primitives were retained for a time as a frozen library, then removed from the tree 2026-07-09 (pre-launch register B2). See `proofs/V210-PhaseD-RandomnessWiring.md` §9, `proofs/V210ImplementationRoadmap.md`, and `proofs/DECISION-LOG.md` 2026-06-07. |
 
 ---
 
