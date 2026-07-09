@@ -590,13 +590,15 @@ BlockValidator::Result BlockValidator::check_transactions(
             // locked but no apply path runs.
             return {false, "REGION_CHANGE tx type is reserved for future use"};
         } else if (from_anon) {
-            // TRANSFER and §3.22 SHIELD / §3.22b UNSHIELD are allowed from
-            // anonymous (bearer) accounts; everything else (register/stake/gov)
-            // needs a domain.
+            // TRANSFER, the §3.22 confidential family, and the A2 audit txs
+            // (ROTATE_AUDIT_KEY / LOG_AUDIT_ACCESS — the CT audit layer's
+            // primary users ARE bearer accounts) are allowed from anonymous
+            // accounts; everything else (register/stake/gov) needs a domain.
             if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD
-                && tx.type != TxType::UNSHIELD && tx.type != TxType::CONFIDENTIAL_TRANSFER)
-                return {false, "anonymous accounts may only TRANSFER, SHIELD, UNSHIELD "
-                               "or CONFIDENTIAL_TRANSFER (got "
+                && tx.type != TxType::UNSHIELD && tx.type != TxType::CONFIDENTIAL_TRANSFER
+                && tx.type != TxType::ROTATE_AUDIT_KEY && tx.type != TxType::LOG_AUDIT_ACCESS)
+                return {false, "anonymous accounts may only TRANSFER, SHIELD, UNSHIELD, "
+                               "CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY or LOG_AUDIT_ACCESS (got "
                              + std::to_string(int(tx.type)) + ")"};
             pk = parse_anon_pubkey(tx.from);
         } else {
@@ -1157,6 +1159,40 @@ BlockValidator::Result BlockValidator::check_transactions(
             }
             break;
         }
+        case TxType::ROTATE_AUDIT_KEY: {
+            // A2: payload = 32-byte audit view-master pubkey (SET) or empty
+            // (CLEAR). No value moves — amount must be 0 and `to` empty
+            // (fail-closed: reject accidental semantics rather than ignore).
+            if (!tx.payload.empty()
+                && tx.payload.size() != AUDIT_KEY_PAYLOAD_SIZE)
+                return {false, "ROTATE_AUDIT_KEY payload must be 32 bytes (set) "
+                               "or empty (clear)"};
+            if (tx.amount != 0)
+                return {false, "ROTATE_AUDIT_KEY amount must be 0 (fee-only tx)"};
+            if (!tx.to.empty())
+                return {false, "ROTATE_AUDIT_KEY `to` must be empty"};
+            break;
+        }
+        case TxType::LOG_AUDIT_ACCESS: {
+            // A2: payload = epoch_u64_BE(8) || auditor_pk(32) || context_hash(32),
+            // exactly 72 bytes. Owner-signed disclosure record; fee-only.
+            if (tx.payload.size() != AUDIT_LOG_PAYLOAD_SIZE)
+                return {false, "LOG_AUDIT_ACCESS payload must be 72 bytes "
+                               "(epoch_u64_be || auditor_pk32 || context_hash32)"};
+            if (tx.amount != 0)
+                return {false, "LOG_AUDIT_ACCESS amount must be 0 (fee-only tx)"};
+            if (!tx.to.empty())
+                return {false, "LOG_AUDIT_ACCESS `to` must be empty"};
+            break;
+        }
+        default:
+            // Fail-closed on unknown tx-type discriminators (the W-1/S-039
+            // posture: an unrecognized enum value must never be accepted-and-
+            // silently-skipped — before this default, an unknown type passed
+            // validation and no-op'd at apply, diverging the validator's
+            // nonce simulation from apply's).
+            return {false, "unknown tx type "
+                         + std::to_string(int(tx.type)) + " (fail-closed)"};
         }
     }
     return {true, ""};

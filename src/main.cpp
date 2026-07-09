@@ -1154,6 +1154,13 @@ Additional in-process tests:
                                               conserved (fee leaves pool, A1),
                                               tamper/double-spend no-op, and the
                                               duplicate-input INFLATION GUARD.
+  determ test-audit-keys                      A2 audit layer: ROTATE_AUDIT_KEY
+                                              set/rotate/clear lifecycle (ak:
+                                              leaf appears/updates/REMOVED),
+                                              LOG_AUDIT_ACCESS counting (al:
+                                              leaf), fee-only accounting + A1,
+                                              malformed-shape apply skips,
+                                              snapshot round-trip of both maps
   determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
                                               variants produce equivalent state;
                                               head()/at() empty-chain throw
@@ -37043,6 +37050,158 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-shield\n" : "  PASS: test-shield\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-audit-keys") {
+        // A2 audit layer CONSENSUS test (pre-launch register A2, 2026-07-09):
+        // ROTATE_AUDIT_KEY set/rotate/clear lifecycle on the ak: leaf,
+        // LOG_AUDIT_ACCESS disclosure counting on the al: leaf, fee-only
+        // accounting (A1 intact), apply-level fail-closed skips for every
+        // malformed shape, state-proof observability of both leaves, and the
+        // JSON-snapshot round-trip of both maps. State-root invariance for
+        // audit-free chains is pinned by the FAST golden corpus (this test
+        // additionally asserts the leaves are ABSENT until used).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        const uint64_t kAliceBal = 1000, kFee = 1;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg;
+            cfg.chain_id = "audit-test"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = kAliceBal;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        auto rotate_tx = [&](std::vector<uint8_t> payload, uint64_t nonce) {
+            Transaction tx; tx.type = TxType::ROTATE_AUDIT_KEY;
+            tx.from = "alice"; tx.to = ""; tx.amount = 0; tx.fee = kFee;
+            tx.nonce = nonce; tx.payload = std::move(payload);
+            return tx;
+        };
+        auto log_tx = [&](uint64_t epoch, uint64_t nonce) {
+            Transaction tx; tx.type = TxType::LOG_AUDIT_ACCESS;
+            tx.from = "alice"; tx.to = ""; tx.amount = 0; tx.fee = kFee;
+            tx.nonce = nonce;
+            tx.payload.assign(AUDIT_LOG_PAYLOAD_SIZE, 0);
+            for (int i = 0; i < 8; i++) tx.payload[7 - i] = uint8_t(epoch >> (8 * i));
+            for (int i = 0; i < 32; i++) tx.payload[8 + i]  = uint8_t(0x40 + i);  // auditor pk
+            for (int i = 0; i < 32; i++) tx.payload[40 + i] = uint8_t(0x80 + i);  // context hash
+            return tx;
+        };
+        auto append_block = [&](Chain& c, std::vector<Transaction> txs) -> bool {
+            // height() == blocks_.size(), so it IS the next block's index.
+            Block b; b.index = c.height(); b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"};
+            b.transactions = std::move(txs);
+            try { c.append(b); } catch (const std::exception& e) {
+                std::cout << "  (append threw: " << e.what() << ")\n"; return false; }
+            return true;
+        };
+        std::vector<uint8_t> pk1(32), pk2(32);
+        for (int i = 0; i < 32; i++) { pk1[i] = uint8_t(0xA0 + i); pk2[i] = uint8_t(0xB0 + i); }
+        auto hex_of = [&](const std::vector<uint8_t>& v) {
+            static const char* H = "0123456789abcdef"; std::string s;
+            for (auto b : v) { s.push_back(H[b >> 4]); s.push_back(H[b & 0xf]); }
+            return s;
+        };
+        auto leaf_key = [](const std::string& k) {
+            return std::vector<uint8_t>(k.begin(), k.end());
+        };
+
+        // === 1. Audit-free chain: no key, no count, no ak:/al: leaves ===
+        Chain c;
+        c.append(make_genesis_block(make_cfg()));
+        check(!c.audit_key("alice").has_value() && c.audit_log_count("alice") == 0,
+              "feature-off: genesis has no audit key + zero disclosure count");
+        check(!c.state_proof(leaf_key("ak:alice")).has_value()
+                  && !c.state_proof(leaf_key("al:alice")).has_value(),
+              "feature-off: no ak:/al: leaves in the state tree");
+        const uint64_t alice0 = c.balance("alice");
+        const Hash     root0  = c.compute_state_root();
+
+        // === 2. SET: ROTATE_AUDIT_KEY publishes the standing key ===
+        check(append_block(c, {rotate_tx(pk1, 0)}), "set: block applied (A1 intact)");
+        check(c.audit_key("alice") == hex_of(pk1), "set: audit_key == published pk");
+        check(c.balance("alice") == alice0 - kFee, "set: fee-only debit (no value moved)");
+        check(c.state_proof(leaf_key("ak:alice")).has_value(), "set: ak:alice leaf provable");
+        check(c.compute_state_root() != root0, "set: state root changed (observable)");
+        check(c.expected_total() == c.live_total_supply(), "set: A1 supply identity holds");
+
+        // === 3. ROTATE: a second key replaces the first ===
+        check(append_block(c, {rotate_tx(pk2, 1)}), "rotate: block applied");
+        check(c.audit_key("alice") == hex_of(pk2), "rotate: audit_key == the NEW pk");
+
+        // === 4. CLEAR: empty payload revokes; the leaf disappears ===
+        check(append_block(c, {rotate_tx({}, 2)}), "clear: block applied");
+        check(!c.audit_key("alice").has_value(), "clear: standing key revoked");
+        check(!c.state_proof(leaf_key("ak:alice")).has_value(), "clear: ak:alice leaf REMOVED");
+
+        // === 5. LOG_AUDIT_ACCESS: disclosure records count up ===
+        check(append_block(c, {log_tx(7, 3)}), "log: epoch-scoped record applied");
+        check(c.audit_log_count("alice") == 1, "log: count == 1");
+        check(append_block(c, {log_tx(AUDIT_EPOCH_ALL, 4)}),
+              "log: full-history (sentinel) record applied");
+        check(c.audit_log_count("alice") == 2, "log: count == 2");
+        check(c.state_proof(leaf_key("al:alice")).has_value(), "log: al:alice leaf provable");
+        check(c.balance("alice") == alice0 - 5 * kFee,
+              "accounting: exactly 5 fees debited across the whole lifecycle");
+        check(c.expected_total() == c.live_total_supply(), "accounting: A1 still holds");
+
+        // === 6. Apply-level fail-closed skips (validator is authoritative;
+        //        these pin the belt-and-suspenders re-checks) ===
+        {
+            Chain c2; c2.append(make_genesis_block(make_cfg()));
+            uint64_t a0 = c2.balance("alice");
+            auto skip_case = [&](Transaction tx, const char* what) {
+                check(append_block(c2, {tx}), what);
+                check(!c2.audit_key("alice").has_value()
+                          && c2.audit_log_count("alice") == 0
+                          && c2.balance("alice") == a0,
+                      "  ... and the malformed tx was SKIPPED (no key/count/debit)");
+            };
+            { auto t = rotate_tx(std::vector<uint8_t>(31, 1), 0);
+              skip_case(t, "skip: 31-byte ROTATE payload"); }
+            { auto t = rotate_tx(pk1, 0); t.amount = 5;
+              skip_case(t, "skip: ROTATE with non-zero amount"); }
+            { auto t = rotate_tx(pk1, 0); t.to = "0x" + std::string(64, 'b');
+              skip_case(t, "skip: ROTATE with non-empty to"); }
+            { auto t = log_tx(1, 0); t.payload.pop_back();
+              skip_case(t, "skip: 71-byte LOG payload"); }
+            { auto t = log_tx(1, 0); t.amount = 1;
+              skip_case(t, "skip: LOG with non-zero amount"); }
+        }
+
+        // === 7. JSON-snapshot round-trip of both maps ===
+        {
+            json snap = c.serialize_state(0);
+            check(snap.contains("audit_log_counts") && !snap.contains("audit_keys"),
+                  "snapshot: counts serialized; CLEARED key map omitted (conditional)");
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.audit_log_count("alice") == 2 && !r.audit_key("alice").has_value(),
+                  "snapshot: restore reproduces count + cleared key");
+            check(r.compute_state_root() == c.compute_state_root(),
+                  "snapshot: restored state root byte-identical");
+        }
+        {
+            // A chain with a LIVE key must serialize + restore it too.
+            Chain c3; c3.append(make_genesis_block(make_cfg()));
+            append_block(c3, {rotate_tx(pk1, 0)});
+            json snap = c3.serialize_state(0);
+            check(snap.contains("audit_keys"), "snapshot: live key map serialized");
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.audit_key("alice") == hex_of(pk1)
+                      && r.compute_state_root() == c3.compute_state_root(),
+                  "snapshot: restored live key + byte-identical root");
+        }
+
+        std::cout << (fail ? "  FAIL: test-audit-keys\n" : "  PASS: test-audit-keys\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-unshield") {

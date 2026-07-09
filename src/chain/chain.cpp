@@ -427,6 +427,23 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         leaves.push_back({k_with_prefix("cn:", key), hash_bytes(b)});
     }
 
+    // A2 standing audit keys ("ak:" + addr): value = SHA256(pubkey_bytes).
+    // Emitted only while a key is SET (ROTATE_AUDIT_KEY clear removes the
+    // leaf), so an audit-free chain's state root is byte-identical.
+    for (auto& [addr, pk_hex] : audit_keys_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> pk = from_hex(pk_hex);
+        b.append(pk.data(), pk.size());
+        leaves.push_back({k_with_prefix("ak:", addr), hash_bytes(b)});
+    }
+    // A2 disclosure counters ("al:" + addr): value = SHA256(count_LE).
+    // Emitted only when > 0 (the map only ever holds incremented entries).
+    for (auto& [addr, count] : audit_log_count_) {
+        crypto::SHA256Builder b;
+        b.append(count);
+        leaves.push_back({k_with_prefix("al:", addr), hash_bytes(b)});
+    }
+
     return leaves;
 }
 
@@ -635,6 +652,10 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         dapp_registry_          = std::move(*s.dapp_registry);
     if (s.shielded_pool)
         shielded_pool_          = std::move(*s.shielded_pool);   // §3.22 (lazy)
+    if (s.audit_keys)
+        audit_keys_             = std::move(*s.audit_keys);      // A2 (lazy)
+    if (s.audit_log_count)
+        audit_log_count_        = std::move(*s.audit_log_count); // A2 (lazy)
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
@@ -696,6 +717,14 @@ void Chain::apply_transactions(const Block& b) {
         if (!__snapshot.shielded_pool)
             __snapshot.shielded_pool = shielded_pool_;
     };
+    auto __ensure_audit_keys = [&]() {             // A2 (lazy)
+        if (!__snapshot.audit_keys)
+            __snapshot.audit_keys = audit_keys_;
+    };
+    auto __ensure_audit_log_count = [&]() {        // A2 (lazy)
+        if (!__snapshot.audit_log_count)
+            __snapshot.audit_log_count = audit_log_count_;
+    };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
     // effective_height <= this block's index BEFORE replaying the block.
@@ -742,6 +771,8 @@ void Chain::apply_transactions(const Block& b) {
         accumulated_inbound_ = 0;
         accumulated_outbound_= 0;
         accumulated_shielded_= 0;   // §3.22 (genesis is always shield-free)
+        audit_keys_.clear();        // A2 (genesis is always audit-free)
+        audit_log_count_.clear();
         // Genesis-time invariant trivially holds (live == genesis_total).
         return;
     }
@@ -903,6 +934,37 @@ void Chain::apply_transactions(const Block& b) {
             // Σv_out + fee >= fee, so accumulated_shielded_ >= fee -> no underflow.
             accumulated_shielded_ -= bundle_fee;
             total_fees += tx.fee;
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::ROTATE_AUDIT_KEY: {
+            // A2: set (payload = 32-byte pubkey) or clear (payload empty) the
+            // account's standing audit key. Fee-only; no value moves. The
+            // validator is the authoritative shape gate (amount==0, to empty,
+            // payload length); this is the belt-and-suspenders re-check.
+            if (!tx.payload.empty()
+                && tx.payload.size() != AUDIT_KEY_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_audit_keys();
+            if (tx.payload.empty()) audit_keys_.erase(tx.from);
+            else audit_keys_[tx.from] = to_hex(tx.payload.data(),
+                                               tx.payload.size());
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::LOG_AUDIT_ACCESS: {
+            // A2: on-chain disclosure record. The tx in chain history IS the
+            // record (epoch || auditor_pk || context_hash, owner-signed);
+            // state only tracks the per-account count so light clients can
+            // trustlessly read "N disclosures" from the al: leaf.
+            if (tx.payload.size() != AUDIT_LOG_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_audit_log_count();
+            audit_log_count_[tx.from]++;
             sender.next_nonce++;
             break;
         }
@@ -1771,6 +1833,19 @@ json Chain::serialize_state(uint32_t header_count) const {
         snap["shielded_pool"] = cn;
     }
 
+    // A2: same conditional-emission discipline — an audit-free chain's
+    // snapshot JSON stays byte-identical to a pre-A2 one.
+    if (!audit_keys_.empty()) {
+        json ak = json::array();
+        for (auto& [a, pk] : audit_keys_) ak.push_back({{"a", a}, {"pk", pk}});
+        snap["audit_keys"] = ak;
+    }
+    if (!audit_log_count_.empty()) {
+        json al = json::array();
+        for (auto& [a, n] : audit_log_count_) al.push_back({{"a", a}, {"n", n}});
+        snap["audit_log_counts"] = al;
+    }
+
     // S-032 cache: persist the Phase-1 abort accumulator so a
     // snapshot-bootstrapped node doesn't have to rebuild it from the log.
     json abort_arr = json::array();
@@ -1898,6 +1973,12 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     if (snap.contains("shielded_pool") && snap["shielded_pool"].is_array())
         for (auto& e : snap["shielded_pool"])
             c.shielded_pool_[e.value("c", std::string{})] = e.value("h", uint64_t{0});
+    if (snap.contains("audit_keys") && snap["audit_keys"].is_array())        // A2
+        for (auto& e : snap["audit_keys"])
+            c.audit_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});
+    if (snap.contains("audit_log_counts") && snap["audit_log_counts"].is_array())
+        for (auto& e : snap["audit_log_counts"])
+            c.audit_log_count_[e.value("a", std::string{})] = e.value("n", uint64_t{0});
     // genesis_total deferred until after accounts/stakes load so legacy
     // snapshots (without the field) can fall back to live sum.
 

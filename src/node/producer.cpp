@@ -1054,6 +1054,14 @@ Block build_body(
             // accounting is a no-op; apply verifies the bundle + consumes/produces
             // the notes authoritatively.
             break;
+        case TxType::ROTATE_AUDIT_KEY:
+        case TxType::LOG_AUDIT_ACCESS: {
+            // A2 audit txs are fee-only (validator enforces amount==0/to empty);
+            // provisional accounting debits just the fee.
+            if (sb < tx.fee) continue;
+            sb -= tx.fee;
+            break;
+        }
         }
         nn++;
         b.transactions.push_back(tx);

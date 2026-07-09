@@ -214,7 +214,35 @@ enum class TxType : uint8_t {
     // unlinkable (named inputs) and no on-chain output-secret delivery — see
     // ShieldedPoolSoundness NC-7/NC-8. Additive + state-root-invariant.
     CONFIDENTIAL_TRANSFER = 14,
+    // A2 audit layer (pre-launch register A2, owner 2026-07-09): publish /
+    // rotate / revoke the account's standing audit key. payload = the 32-byte
+    // audit view-master pubkey to SET, or EMPTY to CLEAR (revoke standing
+    // derivation rights); any other length is rejected. amount must be 0 and
+    // `to` must be empty (no value moves — fee only). Owner-signed by the
+    // account itself (anon/bearer accounts included — the CT audit layer's
+    // primary users). State: the "ak:" + addr leaf, emitted ONLY while a key
+    // is set, so a chain that never rotates an audit key is byte-identical
+    // (additive + state-root-invariant, like SHIELD).
+    ROTATE_AUDIT_KEY = 15,
+    // A2 audit layer: on-chain record of a view-key disclosure event ("audit
+    // the auditors"). payload = epoch_u64_BE(8; 0xFFFF_FFFF_FFFF_FFFF = the
+    // full-history/view-master disclosure sentinel) || auditor_pk(32) ||
+    // context_hash(32) — exactly 72 bytes. amount must be 0 and `to` empty.
+    // Owner-signed by the DISCLOSING account. The tx in chain history IS the
+    // audit record; apply additionally increments the "al:" + addr disclosure
+    // counter leaf (emitted only when >0) so light clients can trustlessly
+    // read "this account has N recorded disclosures". Does NOT require a
+    // standing ak: key — ad-hoc disclosures to a non-standing regulator are
+    // legitimate (the A2 dual-mode model).
+    LOG_AUDIT_ACCESS = 16,
 };
+
+// A2 payload sizes (validator shape gates; apply re-checks defensively).
+inline constexpr size_t AUDIT_KEY_PAYLOAD_SIZE = 32;              // ROTATE set-form
+inline constexpr size_t AUDIT_LOG_PAYLOAD_SIZE = 8 + 32 + 32;     // LOG record
+// LOG_AUDIT_ACCESS epoch sentinel: the disclosure covered the FULL history
+// (view_master_sk / all epochs), not a single epoch window.
+inline constexpr uint64_t AUDIT_EPOCH_ALL = UINT64_MAX;
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use
 // cases (atomic swaps, bundled transfers) without exposing the chain

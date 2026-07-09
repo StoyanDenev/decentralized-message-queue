@@ -454,6 +454,17 @@ public:
     bool     shielded_note_exists(const std::string& commitment_hex) const {
         return shielded_pool_.count(commitment_hex) != 0;
     }
+    // A2 audit layer reads (RPC/test surface; the trustless path is the
+    // "ak:"/"al:" leaves via state_proof).
+    std::optional<std::string> audit_key(const std::string& addr) const {
+        auto it = audit_keys_.find(addr);
+        if (it == audit_keys_.end()) return std::nullopt;
+        return it->second;
+    }
+    uint64_t audit_log_count(const std::string& addr) const {
+        auto it = audit_log_count_.find(addr);
+        return it == audit_log_count_.end() ? 0 : it->second;
+    }
     // expected_total = the value the TRANSPARENT live sum must equal post-apply.
     // §3.22: value moved into the confidential pool (accumulated_shielded_) leaves
     // the transparent live sum, so it is subtracted here. Total real supply =
@@ -605,6 +616,16 @@ private:
     // (additive: zero state-root leaves). Lazy-snapshotted (most blocks don't
     // touch it).
     std::map<std::string, uint64_t>             shielded_pool_;
+
+    // A2 audit layer. audit_keys_: addr -> lowercase hex of the account's
+    // standing 32-byte audit view-master pubkey (set/rotated/cleared by
+    // ROTATE_AUDIT_KEY). audit_log_count_: addr -> number of LOG_AUDIT_ACCESS
+    // disclosure records the account has posted (the records themselves live
+    // in chain history; this counter makes "N disclosures" light-readable via
+    // the "al:" leaf). Both empty on any audit-free chain (additive: zero
+    // state-root leaves). Lazy-snapshotted.
+    std::map<std::string, std::string>          audit_keys_;
+    std::map<std::string, uint64_t>             audit_log_count_;
 
     // A9 Phase 2C: single lock-free committed view bundling accounts,
     // stakes, and registrants. Published at every successful apply
@@ -767,6 +788,8 @@ private:
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
         std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
         std::optional<std::map<std::string, uint64_t>>      shielded_pool;   // §3.22 (lazy)
+        std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)
+        std::optional<std::map<std::string, uint64_t>>      audit_log_count; // A2 (lazy)
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>
