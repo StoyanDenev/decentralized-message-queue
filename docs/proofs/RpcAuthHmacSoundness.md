@@ -402,4 +402,4 @@ This proof was added in the current review pass as part of the analytic-closure 
 - `docs/proofs/Preliminaries.md` §2.1 (SHA-256 / H1), §2.3 (CSPRNG / uniform-key assumption referenced as K_random).
 - `docs/proofs/EquivocationSlashing.md` (FA6) — companion proof on EUF-CMA-style soundness against an honest-key forgery (citation-style template).
 - `docs/proofs/MakeContribCommitmentBackwardCompat.md` — companion proof; structural-disjointness lemma style used in L-3 + L-4.
-- `docs/proofs/FrostVerifyDelegation.md` — companion proof; delegation-to-underlying-primitive style mirrored here (HMAC primitive delegated to OpenSSL `HMAC(EVP_sha256(), ...)`).
+- `FrostVerifyDelegation.md` (deleted 2026-07-09 — git history) — companion proof; delegation-to-underlying-primitive style mirrored here (HMAC primitive delegated to OpenSSL `HMAC(EVP_sha256(), ...)`).

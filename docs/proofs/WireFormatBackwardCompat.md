@@ -322,7 +322,7 @@ The cross-reference structure is:
 - `SECURITY.md` §S-039 — the maintenance-discipline backstop for future unbinded-field cases.
 - `tools/test_genesis.sh` + `tools/test_block_hash.sh` — the operational regression that catches R-1 + R-4 violations.
 
-The expected next field-add under this discipline is the v2.10 threshold-randomness commitment (per `v2.10-DKG-SPEC.md`): the per-epoch DKG output would become a new `Block::signing_bytes` field, gated on `if (epoch_threshold_pubkey != Point{})`. The proof above generalizes to that case without modification.
+A hypothetical next field-add under this discipline was the v2.10 threshold-randomness commitment (per the since-de-scoped-and-deleted `v2.10-DKG-SPEC.md`; the example stays illustrative only): the per-epoch DKG output would become a new `Block::signing_bytes` field, gated on `if (epoch_threshold_pubkey != Point{})`. The proof above generalizes to that case without modification.
 
 ---
 

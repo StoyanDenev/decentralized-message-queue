@@ -7,7 +7,7 @@
 **Companion documents:**
 - `SECURITY.md` §S-035 — the underlying audit finding
 - `plan.md` §A10 — NH1 Stage 1 testing infrastructure (DSF subsumes streams 1 + 2)
-- `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md` — Phase A through D specs whose Byzantine-bug discovery DSF accelerates
+- `F2-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md` — Phase A through D specs whose Byzantine-bug discovery DSF accelerates
 
 ---
 

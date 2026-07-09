@@ -90,7 +90,6 @@ multiple FA theorems.
 | `test-shard-routing` | FA7 (cross-shard destination routing) | salted SHA-256 determinism + uniformity + salt-sensitivity |
 | `test-shard-routing-determinism` | FA7 (cross-shard destination routing) | deterministic replay invariant on `shard_id_for_address` across (addr,count,salt) probes |
 | `test-anon-address` | S-028 (case normalization) | wallet helpers — `is_anon_address` / `normalize_anon_address` / `parse_anon_pubkey` |
-| `test-frost-types` | FB23 (FrostVerify TLA+) / v2.10 DKG | Point / FrostSig 32 / 64-byte type contract for FROST-Ed25519 |
 | `test-encoding` | wire format foundation | `to_hex` / `from_hex` / `from_hex_arr<N>` round-trip + `to_string` enums + `now_unix` |
 
 ### 2.2 Chain commitment + identity (15 tests)
@@ -407,7 +406,6 @@ coverage; companion to each FA-Apply-N analytic.)
 ### 4.3 Single-test coverage
 
 - **FB22 (F2 view reconciliation)** — `test-view-root`.
-- **FB23 (FrostVerify)** — `test-frost-types`.
 - **FB24 (MakeContribCommitment)** — `test-make-contrib-commitment-distinct`.
 - **FB25 (RateLimiter eviction)** — `test-rate-limiter-bucket`.
 - **FB29 (BlockTimestampMonotonic)** — `test-time-monotonicity`.
@@ -416,7 +414,6 @@ coverage; companion to each FA-Apply-N analytic.)
 - **S-004 (keyfile at-rest)** — `test-envelope`.
 - **S-018 wire-format foundation** — `test-s018-json-validation` (direct), plus the 7 derivative tests in 4.1.
 - **S-032 (registry rebuild cache)** — `test-abort-event-apply` (S-032 abort_records cache assertion).
-- **v2.10 DKG / FrostVerify** — `test-frost-types`.
 - **v2.2 light-client** — `test-state-proof`, `test-state-proof-namespaces`.
 
 ### 4.4 Zero coverage in 136-seed (per §3)
@@ -710,8 +707,7 @@ F-1 / §3.2 zero-coverage items.
 - `JsonValidationSoundness.md` (S-018), `S014RateLimiterSoundness.md`
   (S-014), `S020CommitteeSelection.md` (S-020), `S029ForkChoiceSoundness.md`
   (S-029), `S033StateRootNamespaceCoverage.md` (S-033),
-  `MakeContribCommitmentBackwardCompat.md` (v2.7 F2),
-  `FrostVerifyDelegation.md` (FB23).
+  `MakeContribCommitmentBackwardCompat.md` (v2.7 F2).
 
 ### Companion specifications
 

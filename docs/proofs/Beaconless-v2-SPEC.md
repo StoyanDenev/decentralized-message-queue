@@ -7,7 +7,7 @@
 **Companion documents:**
 - `plan.md` "Future: Beaconless cross-shard architecture (v2)" — original problem statement and constraint discussion
 - `V2-DESIGN.md` Themes 1-9 — the architecture Beaconless v2 inherits from
-- `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md` — sibling spec docs in the cascade-resolution pattern
+- `F2-SPEC.md`, `v2.22-PRIVACY-SPEC.md` — sibling spec docs in the cascade-resolution pattern
 - `CrossShardReceipts.md` — FA7 cross-shard atomicity proof (gets updated under beaconless)
 - `RegionalSharding.md` — current beacon-based sharding architecture (Beaconless v2 replaces the beacon role)
 

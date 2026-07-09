@@ -190,7 +190,7 @@
 
 **Improvement.** Per-validator ECVRF on Ed25519 (Option A) for committee selection randomness. Composes with v2.10 threshold-sig aggregation.
 
-**Deferred reason.** Post-v2; not on the Phase A-D critical path. (Updated per the MPDH-adoption decision: the v2.10 FROST-as-block-beacon is **de-scoped** — the v1 MPDH commit-reveal beacon is retained, `V210-PhaseD-RandomnessWiring.md` §9. Grinding bias is already closed by FA3 (`SelectiveAbort.md`); residual abort is accepted under MPDH via re-roll + suspension slashing. A per-output VRF remains a future *additive* hardening on the retained MPDH beacon — it no longer "composes with v2.10 threshold-sig aggregation." Block-beacon design authority: Stoyan Denev.)
+**Deferred reason.** Post-v2; not on the Phase A-D critical path. (Updated per the MPDH-adoption decision: the v2.10 FROST-as-block-beacon is **de-scoped** — the v1 MPDH commit-reveal beacon is retained, `FROST_DEVIATION_NOTICE.md` §9. Grinding bias is already closed by FA3 (`SelectiveAbort.md`); residual abort is accepted under MPDH via re-roll + suspension slashing. A per-output VRF remains a future *additive* hardening on the retained MPDH beacon — it no longer "composes with v2.10 threshold-sig aggregation." Block-beacon design authority: Stoyan Denev.)
 
 **Classification.** Additive (flag-day activation; pre-v2.9 chain remains valid).
 

@@ -13,8 +13,8 @@
 **Companion documents:**
 - `../MOTIVATION.md` — project's public-interest mandate linking design decisions to the originating problem (per `docs/Confrontation_against_public_unjustice_i.odt`)
 - `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
-- `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md`, `v2.26-ROTATION-SPEC.md` — sibling spec docs that this plan executes against
-- `V210ImplementationRoadmap.md` — HISTORICAL. v2.10 FROST chain-wiring removed from v1.1 scope 2026-06-07 per `FROST_DEVIATION_NOTICE.md`. Document retained for audit history.
+- `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md`, `v2.26-ROTATION-SPEC.md` — sibling spec docs that this plan executes against
+- `V210ImplementationRoadmap.md` — HISTORICAL. v2.10 FROST chain-wiring removed from v1.1 scope 2026-06-07 per `FROST_DEVIATION_NOTICE.md`. Document deleted 2026-07-09 (doc-consolidation inc.1 — git history).
 - `FROST_DEVIATION_NOTICE.md` — provenance record establishing FROST removal from v1.1 chain consensus path 2026-06-07. Load-bearing for any future threshold-signature proposal.
 - `C99CryptoStackAudit.md` — adversarial audit of the libsodium-free C99 cryptographic primitives shipped under `src/crypto/{sha2,chacha20,aes}/`; 18 findings remediated per commit `2e0058b`
 - `DECISION-LOG.md` — backward-looking deliberation history for the decisions this plan executes
@@ -100,7 +100,7 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 
 | Decision | Effort | Notes |
 |---|---|---|
-| DKG-1..5 (all v2.10 decisions) | per v2.10-DKG-SPEC.md | curve25519 family; libsodium-vendored |
+| DKG-1..5 (all v2.10 decisions) | per v2.10-DKG-SPEC.md (deleted 2026-07-09 — git history) | curve25519 family; libsodium-vendored |
 | **Bundle effort** | ~2-3 weeks | Confirm against spec total |
 
 **Depends on:** Foundation

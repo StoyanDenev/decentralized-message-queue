@@ -34,7 +34,7 @@ entire source of the recurring "is this still consistent?" churn.
 - `docs/proofs/F2ViewReconciliationAnalysis.md` — F2 primitives + invariants
 - `docs/proofs/S030-D2-Analysis.md` — block-digest field-coverage (F2 closes it)
 - `docs/proofs/tla/F2ViewReconciliation.tla`, `tla/MakeContribCommitment.tla`,
-  `tla/MakeBlockSigPrimitive.tla`, `tla/MergeEventAcceptGate.tla`, `tla/FrostVerify.tla`
+  `tla/MakeBlockSigPrimitive.tla`, `tla/MergeEventAcceptGate.tla` (`tla/FrostVerify.tla` deleted 2026-07-09, doc-consolidation inc.1)
 - `docs/proofs/CRYPTO-C99-SPEC.md` — C99 stack (Phase 0 shipped; later phases near-term)
 - `docs/proofs/RpcAuthReplayWindowSoundness.md` — HMAC anti-replay window (v2.16+ extension)
 - `docs/proofs/SupplyProofSoundness.md` — **reconcile** (classified T2 "spec deferred", but
@@ -46,9 +46,7 @@ entire source of the recurring "is this still consistent?" churn.
 - `docs/V2-DESIGN.md` — full v2 design space (10 of 25 shipped; rest future)
 - `docs/V2-DAPP-DESIGN.md` — DApp themes (v2.18/v2.19 substrate shipped; rest future)
 - `docs/proofs/Beaconless-v2-SPEC.md` — beaconless cross-shard architecture
-- `docs/proofs/v2.10-DKG-SPEC.md` — threshold-randomness DKG (block-beacon **de-scoped**; FROST module **FROZEN 2026-07-03**, NOTICE §6 amendment — design record only)
-- `docs/proofs/V210-PhaseD-RandomnessWiring.md` — FROST block-beacon wiring (**de-scoped**, historical)
-- `docs/proofs/V210ImplementationRoadmap.md` — v2.10 roadmap (block-beacon **de-scoped**)
+- *(v2.10 set DELETED 2026-07-09, doc-consolidation inc.1: `v2.10-DKG-SPEC.md`, `V210-PhaseD-RandomnessWiring.md`, `V210ImplementationRoadmap.md` — git history; absorbed residue in `docs/proofs/FROST_DEVIATION_NOTICE.md` §9)*
 - `docs/proofs/v2.22-PRIVACY-SPEC.md` — confidential transactions
 - `docs/proofs/v2.26-ROTATION-SPEC.md` — on-chain key rotation
 - `docs/proofs/PFS_DEPLOYMENT_GUIDANCE.md` — PFS regulatory framework (for v2.22)
@@ -60,8 +58,9 @@ entire source of the recurring "is this still consistent?" churn.
 ## Tier 4 — process / rationale archive → mark "not coherence-maintained", retain
 
 - `docs/proofs/DECISION-LOG.md`, `docs/proofs/Improvements.md` (+ `docs/Improvements.md` dup),
-  `docs/proofs/IMPLEMENTATION-SEQUENCING.md`, `docs/proofs/F2-V210-IMPLEMENTATION-PLAN.md`,
+  `docs/proofs/IMPLEMENTATION-SEQUENCING.md`,
   `docs/proofs/MAINNET_READINESS.md`, `docs/proofs/PRE-IMPLEMENTATION-REVIEW.md`
+  (`docs/proofs/F2-V210-IMPLEMENTATION-PLAN.md` deleted 2026-07-09, doc-consolidation inc.1)
 - Guidance: `docs/proofs/DAPP_SDK_GUIDANCE.md`, `docs/proofs/ECONOMICS_CONFIG_GUIDANCE.md`
 - Indexes / maps: `docs/README.md`, `docs/proofs/README.md`, `docs/UNIT-TESTS.md`,
   `docs/proofs/UnitTestCoverageMap.md`, `docs/proofs/LightClientCompositionMap.md`,
@@ -101,7 +100,7 @@ decisions stop leaking into T3) at near-zero merge/link risk.
 - Scaling    → Beaconless-v2-SPEC (cross-shard randomness now MPDH, §Q6)
 - Privacy    → v2.22-PRIVACY-SPEC, PFS_DEPLOYMENT_GUIDANCE
 - Identity   → Theme 9 DSSO / v2.25, v2.26-ROTATION-SPEC
-- Threshold  → v2.10-DKG-SPEC  (block-beacon DE-SCOPED; FROST FROZEN 2026-07-03 — design record only)
+- Threshold  → *(v2.10-DKG-SPEC deleted 2026-07-09, inc.1 — block-beacon was DE-SCOPED; record: FROST_DEVIATION_NOTICE §9 + git)*
 - Post-quantum → v2.8  (in V2-DESIGN)
 - Tooling    → DSF-SPEC (deterministic simulation)
 - Portability→ C99-MINIX-PORT

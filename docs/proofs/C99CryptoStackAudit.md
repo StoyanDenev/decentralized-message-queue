@@ -777,7 +777,7 @@ required to confirm.
 **Verdict: 0 Critical / 0 High / 0 confirmed findings — all four dimensions
 clean.** Secret-preservation and zero-hole-soundness returned no findings at all:
 the `Δ=Σδ_i`, `Δ(0)=0 ⇒ g(0)=s` preservation argument and the `C_0=[0]B` zero-hole
-proof were both confirmed sound (see `FrostThresholdSoundness.md` T-6). The
+proof were both confirmed sound (see `FrostThresholdSoundness.md` T-6 — doc deleted 2026-07-09, git history). The
 reconstruction reuse (`determ_frost_reconstruct`), the Feldman-VSS reuse for refresh
 shares (`determ_frost_dkg_verify_share`, which sees `C_0=identity` transparently),
 and the caller-side `s'_j = s_j + Σ_i δ_i(j)` scalar sum were all confirmed correct.
