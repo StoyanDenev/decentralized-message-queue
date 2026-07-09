@@ -13191,14 +13191,37 @@ int main(int argc, char** argv) {
         auto kp = determ::c99::mldsa::keygen(determ::c99::mldsa::ParamSet::ML_DSA_65, mseed);
         std::string pqaddr = make_pq_anon_address(0x02, kp.pk);
 
-        // Address module: round-trip + shape + disjoint from the Ed25519 anon space.
-        check(is_pq_anon_address(pqaddr), "is_pq_anon_address(make(...))");
-        check(pq_anon_address_form(pqaddr)==0x02, "form byte == 0x02");
-        check(parse_pq_anon_pubkey(pqaddr)==kp.pk, "parse recovers the ML-DSA pubkey");
-        check(!is_anon_address(pqaddr), "PQ address is NOT an Ed25519 anon address (disjoint)");
-        check(!is_pq_anon_address("0x"+std::string(64,'a')), "Ed25519 anon addr is NOT a PQ address");
-        check(!is_pq_anon_address(pqaddr.substr(0,pqaddr.size()-2)), "truncated PQ addr rejected");
-        check(!is_pq_anon_address("0x04"+pqaddr.substr(4)), "bad form byte rejected");
+        // A5 HASH address (Option A) — the address is a 66-char commitment to
+        // (form, pubkey), NOT invertible. Module contract:
+        check(is_pq_anon_address(pqaddr), "hash addr has the 0x+64hex PQ shape");
+        check(pqaddr == make_pq_anon_address(0x02, kp.pk), "make is deterministic (recompute == pqaddr)");
+        // Collision-resistance signal: a one-byte-changed pubkey yields a
+        // completely different address (the whole key is hashed, no truncation).
+        { auto pk2 = kp.pk; pk2[0]^=1;
+          check(make_pq_anon_address(0x02, pk2) != pqaddr, "single-bit pk flip changes the address"); }
+        // The form is part of the PREIMAGE, not the address: the same key under a
+        // different form hashes elsewhere (guards cross-scheme aliasing). ML-DSA
+        // pk lengths differ per form, so re-pad to the 44 length to isolate form.
+        { auto kp44 = determ::c99::mldsa::keygen(determ::c99::mldsa::ParamSet::ML_DSA_44, mseed);
+          check(make_pq_anon_address(0x01, kp44.pk) != pqaddr, "form is domain-separated in the hash"); }
+        // Shape gate: rejects non-66-char / missing-0x / non-hex.
+        check(!is_pq_anon_address(pqaddr.substr(0,pqaddr.size()-2)), "truncated (64-char) rejected");
+        check(!is_pq_anon_address(pqaddr+"ab"), "over-length (68-char) rejected");
+        check(!is_pq_anon_address("0y"+pqaddr.substr(2)), "missing 0x prefix rejected");
+        check(!is_pq_anon_address("0x"+std::string(63,'a')+"g"), "non-hex digit rejected");
+        // SHAPE COLLISION IS INTENTIONAL: a hash PQ address IS also Ed25519-anon-
+        // shaped now — the two families share the 66-char string space and are
+        // separated by TX TYPE at the router, never by shape (register A5 / Q1).
+        check(is_anon_address(pqaddr), "hash PQ address shares the Ed25519 anon shape (routing is by type)");
+        // pq_scheme_to_form: pure schemes map 1:1; hybrid/unknown -> 0 (invalid).
+        check(pq_scheme_to_form(0x02)==0x02 && pq_scheme_to_form(0x01)==0x01
+              && pq_scheme_to_form(0x03)==0x03, "scheme->form maps the three pure ML-DSA schemes");
+        check(pq_scheme_to_form(0x12)==0 && pq_scheme_to_form(0x99)==0, "scheme->form: hybrid/unknown -> 0");
+        // make throws on a length/form mismatch.
+        { bool threw=false;
+          std::vector<uint8_t> shortpk(kp.pk.begin(), kp.pk.begin()+10);
+          try { make_pq_anon_address(0x02, shortpk); } catch(...) { threw=true; }
+          check(threw, "make rejects a wrong-length pubkey"); }
 
         // Build + sign a valid PQ_TRANSFER (envelope over the real signing_bytes).
         Transaction tx;
@@ -13236,6 +13259,31 @@ int main(int argc, char** argv) {
           auto j=t2.to_json();
           check(!j.contains("pq_auth"), "non-PQ tx to_json omits pq_auth (byte-identical)");
           check(Transaction::from_json(j).pq_auth.empty(), "non-PQ tx from_json leaves pq_auth empty"); }
+
+        // A5 DUAL-ORACLE: the frozen corpus (tools/vectors/pq_address.json) was
+        // generated python-first (verify_pq_address.py). Recompute every "pq"
+        // vector's address through the shipped C make_pq_anon_address and require
+        // byte-equality — this is what ties the C hash formula to the python one.
+        {
+            std::string path = "tools/vectors/pq_address.json";
+            std::ifstream f(path);
+            if (!f) check(false, std::string("corpus present: ")+path);
+            else {
+                json doc; f >> doc; int n = 0;
+                auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+                    for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+                for (auto& v : doc["vectors"]) {
+                    if (v.value("kind","") != "pq") continue;
+                    uint8_t form = (uint8_t)v["form"].get<int>();
+                    auto pk = unhex(v["pk_hex"].get<std::string>());
+                    if (make_pq_anon_address(form, pk) != v["address"].get<std::string>()) {
+                        check(false, std::string("corpus byte-equal: ")+v.value("name","?"));
+                    }
+                    n++;
+                }
+                check(n >= 10, "corpus cross-check: all pq vectors byte-equal to the python oracle");
+            }
+        }
 
         if (fail==0) std::cout << "  PASS: pq-transaction (PQ-native address + PQ_TRANSFER accept-rule) unit test\n";
         return fail==0 ? 0 : 1;

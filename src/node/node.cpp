@@ -3769,9 +3769,15 @@ json Node::rpc_submit_tx(const json& tx_json) {
             "anon addresses MUST be lowercase: got '" + tx.to
           + "', expected '" + normalize_anon_address(tx.to) + "'");
     }
-    // §3.21 S-028 for PQ-native bearer addresses (same rationale as anon: the
-    // signed signing_bytes embed from/to byte-for-byte, so we reject rather than
-    // normalize). from is also consensus-enforced canonical in verify_pq_transaction.
+    // §3.21 S-028 for PQ-native HASH addresses (A5, Option A). Same rationale as
+    // anon: the signed signing_bytes embed from/to byte-for-byte, so reject
+    // rather than normalize; from is also consensus-enforced canonical in
+    // verify_pq_transaction. Since the hash address shares the 66-char 0x+hex
+    // shape with the Ed25519 anon address (and normalize_pq_anon_address ==
+    // normalize_anon_address for that shape), these two checks are now REDUNDANT
+    // with the anon-canonicalization checks above — kept as harmless defense in
+    // depth so the PQ-specific error message survives if the anon path ever
+    // narrows.
     if (is_pq_anon_address(tx.from) && tx.from != normalize_pq_anon_address(tx.from)) {
         throw std::runtime_error(
             "submitted PQ tx.from is non-canonical (uppercase hex); PQ addresses "

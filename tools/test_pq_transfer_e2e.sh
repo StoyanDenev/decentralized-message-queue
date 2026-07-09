@@ -27,9 +27,16 @@ rc=0
 pass(){ echo "  PASS: $1"; }
 fail(){ echo "  FAIL: $1"; rc=1; }
 
-# 1: derive the PQ address.
+# 1: derive the PQ address. A5 (2026-07-09): the PQ address is the Option-A
+# HASH form — a 66-char "0x"+64hex commitment to (form, ML-DSA pubkey), NOT the
+# old bearer form. It shares the Ed25519 anon-address shape by design (routing
+# is by tx type); the pq-transfer step below proves the address commits to the
+# derived key end-to-end.
 ADDR=$($DETERM_LIGHT pq-address --scheme mldsa65 --mldsa-seed "$MS" 2>/dev/null)
-if [ "${ADDR:0:4}" = "0x02" ] && [ ${#ADDR} -eq 3908 ]; then pass "pq-address (ML-DSA-65 bearer, 3908 chars)"; else fail "pq-address shape ('${ADDR:0:12}...' len ${#ADDR})"; fi
+if [ "${ADDR:0:2}" = "0x" ] && [ ${#ADDR} -eq 66 ] \
+   && [[ "${ADDR:2}" =~ ^[0-9a-f]{64}$ ]]; then
+  pass "pq-address (ML-DSA-65 hash form, 66 chars, canonical lowercase)"
+else fail "pq-address shape ('${ADDR:0:12}...' len ${#ADDR})"; fi
 
 # 2: produce a submittable PQ_TRANSFER.
 if $DETERM_LIGHT pq-transfer --to "$TO" --amount 100 --fee 1 --nonce 0 \

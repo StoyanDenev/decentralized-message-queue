@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/crypto/pq_address.hpp>
-#include <determ/crypto.hpp>   // determ::c99::mldsa::pk_bytes
-#include <determ/types.hpp>    // to_hex, from_hex
+#include <determ/crypto.hpp>       // determ::c99::mldsa::pk_bytes
+#include <determ/crypto/sha256.hpp>
+#include <determ/types.hpp>        // to_hex
 #include <stdexcept>
+
+// A5 hash PQ address (Option A, frozen at genesis 2026-07-09). The address
+// formula is byte-identical to the python oracle tools/verify_pq_address.py
+// (frozen corpus tools/vectors/pq_address.json) — this C is the shipped
+// implementation; the vector-file gate (test_c99_vector_files.sh pq_address
+// checker) is the dual-oracle. See include/determ/crypto/pq_address.hpp.
 
 namespace determ {
 
 namespace {
+constexpr char PQ_ADDR_DST[] = "determ-pq-anon-addr-v1";
+constexpr size_t PQ_ADDR_DST_LEN = sizeof(PQ_ADDR_DST) - 1;   // no NUL: 22
+
 bool is_hex_ch(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
@@ -23,37 +33,51 @@ size_t pq_form_pk_bytes(uint8_t form) {
     return 0;
 }
 
+uint8_t pq_scheme_to_form(uint8_t scheme) {
+    // pqauth pure ML-DSA scheme bytes 0x01/0x02/0x03 map 1:1 to the address
+    // form bytes; hybrid schemes (0x10+) and everything else map to 0 (an
+    // invalid form — a PQ-native account has no Ed25519 in its trust path).
+    switch (scheme) {
+        case 0x01: return 0x01;
+        case 0x02: return 0x02;
+        case 0x03: return 0x03;
+    }
+    return 0;
+}
+
 bool is_pq_anon_address(const std::string& s) {
-    // "0x" + 2 hex form digits + exactly 2*pk_bytes(form) hex body digits.
-    if (s.size() < 4) return false;
+    // The hash address shape: "0x" + exactly 64 hex digits (case-insensitive).
+    // Deliberately identical to the Ed25519 anon-address shape — routing is by
+    // tx type, never by this predicate (see the header note).
+    if (s.size() != 66) return false;
     if (s[0] != '0' || s[1] != 'x') return false;
-    if (!is_hex_ch(s[2]) || !is_hex_ch(s[3])) return false;
-    const uint8_t form = static_cast<uint8_t>(std::stoul(s.substr(2, 2), nullptr, 16));
-    const size_t pkb = pq_form_pk_bytes(form);
-    if (pkb == 0) return false;
-    if (s.size() != 2 + 2 + 2 * pkb) return false;   // 0x | form | body — fixed per form
-    for (size_t i = 4; i < s.size(); ++i)
+    for (size_t i = 2; i < s.size(); ++i)
         if (!is_hex_ch(s[i])) return false;
     return true;
 }
 
-int pq_anon_address_form(const std::string& s) {
-    if (!is_pq_anon_address(s)) return -1;
-    return static_cast<int>(std::stoul(s.substr(2, 2), nullptr, 16));
-}
-
-std::vector<uint8_t> parse_pq_anon_pubkey(const std::string& s) {
-    if (!is_pq_anon_address(s))
-        throw std::invalid_argument("not a pq anon address: " + s.substr(0, 12) + "...");
-    return from_hex(s.substr(4));   // from_hex is case-insensitive (std::stoul base 16)
-}
-
 std::string make_pq_anon_address(uint8_t form, const std::vector<uint8_t>& pubkey) {
-    if (pq_form_pk_bytes(form) == 0)
+    const size_t pkb = pq_form_pk_bytes(form);
+    if (pkb == 0)
         throw std::invalid_argument("pq address: unknown form byte");
-    if (pubkey.size() != pq_form_pk_bytes(form))
+    if (pubkey.size() != pkb)
         throw std::invalid_argument("pq address: pubkey length != form pk_bytes");
-    return "0x" + to_hex(&form, 1) + to_hex(pubkey.data(), pubkey.size());
+
+    // preimage = u8(len(DST)) || DST || u8(form) || u32_be(len(pk)) || pk
+    crypto::SHA256Builder b;
+    const uint8_t dst_len = static_cast<uint8_t>(PQ_ADDR_DST_LEN);
+    b.append(&dst_len, 1);
+    b.append(reinterpret_cast<const uint8_t*>(PQ_ADDR_DST), PQ_ADDR_DST_LEN);
+    b.append(&form, 1);
+    const uint32_t pklen = static_cast<uint32_t>(pubkey.size());
+    const uint8_t pklen_be[4] = {
+        static_cast<uint8_t>(pklen >> 24), static_cast<uint8_t>(pklen >> 16),
+        static_cast<uint8_t>(pklen >> 8),  static_cast<uint8_t>(pklen)
+    };
+    b.append(pklen_be, 4);
+    b.append(pubkey.data(), pubkey.size());
+    Hash h = b.finalize();
+    return "0x" + to_hex(h.data(), h.size());
 }
 
 std::string normalize_pq_anon_address(const std::string& s) {
