@@ -12731,6 +12731,37 @@ int main(int argc, char** argv) {
                              && determ_rangeproof_verify(Vb.data(),pb.data(),n)!=0;   // v=2^n out of range rejects
             check(o3, "RANGE VIOLATION (output = 2^n): that output's RANGE proof rejects");
         }
+        // §3.22c blinding-excess helper: with LARGE (hash_to_scalar) blindings —
+        // where the tiny-uint64 shortcut Σr_in−Σr_out over/underflows — the mod-n
+        // x = determ_p256_balance_blinding_excess makes the balance proof
+        // round-trip, and a WRONG x rejects. This is the scalar arithmetic a real
+        // confidential-tx builder needs (light build-ct-transfer / CTX-2).
+        {
+            auto hts=[&](uint8_t out[32], const char* dst, uint32_t idx)->int{
+                uint8_t msg[4]={(uint8_t)(idx>>24),(uint8_t)(idx>>16),(uint8_t)(idx>>8),(uint8_t)idx};
+                return determ_p256_hash_to_scalar(out,msg,4,(const uint8_t*)dst,std::strlen(dst)); };
+            auto commitr=[&](uint8_t o33[33],uint64_t v,const uint8_t r[32])->int{
+                uint8_t vs[32]; setsc(vs,v); return determ_pedersen_commit(o33,vs,r); };
+            // Balanced 2-in-2-out with full-width blindings: v_in {5,3} v_out {6,1} fee 1.
+            uint8_t rin[2*32], rout[2*32], Ci2[2*33], Co2[2*33];
+            bool okd = hts(&rin[0],"determ-ct-test-rin",0)==0 && hts(&rin[32],"determ-ct-test-rin",1)==0
+                    && hts(&rout[0],"determ-ct-test-rout",0)==0 && hts(&rout[32],"determ-ct-test-rout",1)==0
+                    && commitr(&Ci2[0],5,&rin[0])==0  && commitr(&Ci2[33],3,&rin[32])==0
+                    && commitr(&Co2[0],6,&rout[0])==0 && commitr(&Co2[33],1,&rout[32])==0;
+            uint8_t xexc[32], Eh[33], k2[32], pf[DETERM_P256_BALANCE_PROOF_BYTES];
+            setsc(k2, 0x7abc);
+            bool okx = okd
+                    && determ_p256_balance_blinding_excess(xexc, rin, 2, rout, 2)==0
+                    && determ_p256_balance_excess(Eh, Ci2,2, Co2,2, 1)==0
+                    && determ_p256_balance_prove(pf, Eh, xexc, k2)==0
+                    && determ_p256_balance_verify(Eh, pf)==0;
+            check(okx, "balance_blinding_excess: x=(Sr_in-Sr_out) mod n over LARGE blindings verifies the balance proof");
+            uint8_t xbad[32]; std::memcpy(xbad,xexc,32); xbad[31]^=1;
+            uint8_t pfb[DETERM_P256_BALANCE_PROOF_BYTES];
+            bool okxb = okx && determ_p256_balance_prove(pfb, Eh, xbad, k2)==0
+                            && determ_p256_balance_verify(Eh, pfb)!=0;
+            check(okxb, "balance_blinding_excess: a wrong excess x rejects (binds the true dlog base H)");
+        }
         std::cout << (fail? "  FAIL: p256-confidential-tx-c99 unit test\n" : "  PASS: p256-confidential-tx-c99 unit test\n");
         return fail?1:0;
     }

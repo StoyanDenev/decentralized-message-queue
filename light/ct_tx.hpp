@@ -57,4 +57,39 @@ nlohmann::json build_unshield_tx(const LightKeyfile& kf, uint64_t amount,
                                  const std::string& to,
                                  uint64_t fee, uint64_t nonce);
 
+// A confidential note: its PUBLIC value + the blinding SEED it was minted with.
+// The blinding is r = hash_to_scalar("determ-ct-note-blind-v1", blind_seed) —
+// the SAME derivation build_shield_tx uses, so a note created by build-shield is
+// a valid CONFIDENTIAL_TRANSFER input given its (value, seed).
+struct CtNote {
+    uint64_t             value;
+    std::vector<uint8_t> blind_seed;   // >= 32 bytes, unique + high-entropy
+};
+
+// CONFIDENTIAL_TRANSFER (TxType 14, §3.22c): confidential -> confidential. Spends
+// the `inputs` notes and mints the `outputs` notes; pool -> pool (no transparent
+// movement — to="", amount=0). The DCT1 bundle carries ONE aggregated range proof
+// over the m outputs (n=64 bits each) + a balance proof; ALL Bulletproof + Schnorr
+// randomness is DERIVED from `nonce_seed` (mixed with tx_nonce), deterministic, no
+// RNG. The build self-verifies the bundle before emitting. Balance MUST hold:
+// Σ inputs.value = Σ outputs.value + fee.
+//
+// CALLER RESPONSIBILITIES (unenforceable offline):
+//   * `nonce_seed` MUST be >= 32 bytes of HIGH-ENTROPY randomness, UNIQUE per
+//     transfer. Reusing it across DISTINCT transfers voids the range proof's
+//     zero-knowledge (the sL/sR/tau blinding can be recovered from two proofs)
+//     AND reuses the balance Schnorr nonce k — leaking + linking amounts, exactly
+//     as blind_seed reuse defeats a note's hiding. (tx_nonce is mixed in as
+//     defense-in-depth, but do not rely on it — supply a fresh nonce_seed.)
+//   * each output note's blind_seed likewise >= 32 bytes + unique (it becomes a
+//     spendable note; communicate (value, blind_seed) to the recipient).
+// Throws on imbalance, a <32-byte seed, n_in outside 1..255, or an output count m
+// not in {1, 2, 4} (m*64 must be a power of two <= 256; pad to 4 to split into 3).
+nlohmann::json build_confidential_transfer_tx(const LightKeyfile& kf,
+                                              const std::vector<CtNote>& inputs,
+                                              const std::vector<CtNote>& outputs,
+                                              uint64_t fee,
+                                              const std::vector<uint8_t>& nonce_seed,
+                                              uint64_t tx_nonce);
+
 } // namespace determ::light

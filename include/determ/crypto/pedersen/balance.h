@@ -65,6 +65,22 @@ int determ_p256_balance_prove_bound(uint8_t proof[65], const uint8_t E_in[33],
 int determ_p256_balance_verify_bound(const uint8_t E_in[33], const uint8_t proof[65],
                                      const uint8_t ctx32[32]);
 
+/* CRYPTO-C99-SPEC.md §3.22c helper — the BLINDING EXCESS scalar for a
+ * confidential transfer's balance proof: x = (Σ r_in − Σ r_out) mod n. When the
+ * amounts balance (Σ v_in = Σ v_out + fee), x IS the discrete log base H of the
+ * point excess E = Σ C_in − Σ C_out − fee·G (from determ_p256_balance_excess),
+ * so a confidential-tx builder computes x with this, then proves E = x·H via
+ * determ_p256_balance_prove. r_in / r_out are n_in / n_out consecutive 32-byte
+ * blinding scalars, each canonical in [0, n) (e.g. from determ_p256_hash_to_scalar).
+ * Writes x to x_out[32]. Returns 0 (x != 0, the normal case), 1 (x == 0 — the
+ * excess is zero, so E is the group identity and the tx cannot be balance-proven;
+ * pick blindings so it is nonzero), or -1 on n_in == 0 / NULL r_in. This is the
+ * ONLY blinding arithmetic a builder needs; it reuses balance.c's internal
+ * add-mod-n / negate-mod-n and touches NO sealed core. Deterministic. */
+int determ_p256_balance_blinding_excess(uint8_t x_out[32],
+                                        const uint8_t *r_in,  size_t n_in,
+                                        const uint8_t *r_out, size_t n_out);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

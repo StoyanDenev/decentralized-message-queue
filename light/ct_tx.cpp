@@ -12,6 +12,8 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/pedersen/pedersen.h>
 #include <determ/crypto/pedersen/balance.h>
+#include <determ/crypto/pedersen/rangeproof.h>
+#include <determ/crypto/pedersen/ctxbundle.h>
 #include <determ/crypto/p256/p256.h>
 #include <determ/chain/shielded.hpp>   // unshield_spend_ctx_hash (inline)
 #include <determ/types.hpp>
@@ -29,6 +31,25 @@ namespace {
 // TxType wire values — MUST match include/determ/chain/block.hpp.
 constexpr int TX_SHIELD   = 12;
 constexpr int TX_UNSHIELD = 13;
+constexpr int TX_CONFIDENTIAL_TRANSFER = 14;
+
+// DCT1 range-proof bit width. n=64 covers all u64 amounts; m*n <= 256 caps m<=4.
+constexpr std::size_t CT_RANGE_BITS = 64;
+
+// A canonical scalar < n from (dst, seed || u32_be(index)) — for the per-index
+// Bulletproof randomness vectors (sL, sR).
+std::array<uint8_t, 32> derive_scalar_i(const char* dst,
+                                        const std::vector<uint8_t>& seed,
+                                        uint32_t i) {
+    std::vector<uint8_t> msg = seed;
+    msg.push_back(static_cast<uint8_t>(i >> 24)); msg.push_back(static_cast<uint8_t>(i >> 16));
+    msg.push_back(static_cast<uint8_t>(i >> 8));  msg.push_back(static_cast<uint8_t>(i));
+    std::array<uint8_t, 32> out{};
+    if (determ_p256_hash_to_scalar(out.data(), msg.data(), msg.size(),
+            reinterpret_cast<const uint8_t*>(dst), std::strlen(dst)) != 0)
+        throw std::runtime_error("ct: hash_to_scalar failed");
+    return out;
+}
 
 // Canonical signing_bytes (== Transaction::signing_bytes; same layout the light
 // sign_tx / audit_tx paths reconstruct):
@@ -160,6 +181,118 @@ json build_unshield_tx(const LightKeyfile& kf, uint64_t amount,
     Hash ctx = determ::chain::unshield_spend_ctx_hash(kf.anon_address, to, nonce, amount);
     auto payload = ct_payload(amount, blind_seed, "determ-ct-unshield-nonce-v1", ctx.data());
     return sign_ct_tx(kf, TX_UNSHIELD, to, amount, fee, nonce, payload, "UNSHIELD");
+}
+
+json build_confidential_transfer_tx(const LightKeyfile& kf,
+                                    const std::vector<CtNote>& inputs,
+                                    const std::vector<CtNote>& outputs,
+                                    uint64_t fee,
+                                    const std::vector<uint8_t>& nonce_seed,
+                                    uint64_t tx_nonce) {
+    const std::size_t n_in = inputs.size(), m = outputs.size();
+    const std::size_t n = CT_RANGE_BITS;
+    if (n_in < 1)   throw std::runtime_error("ct-transfer: at least one input note is required");
+    if (n_in > 255) throw std::runtime_error("ct-transfer: at most 255 input notes (the DCT1 header count is a u8)");
+    // m*n must be a POWER OF TWO <= 256 for the aggregated IPA — with n=64 that
+    // is m in {1,2,4} (m=3 -> 192 is not a power of two). Reject m=3 up front with
+    // a clear message rather than a misleading "bad (m,n)" from the range proof.
+    if (m != 1 && m != 2 && m != 4)
+        throw std::runtime_error("ct-transfer: outputs must be 1, 2, or 4 (m*64 must be a power of two "
+                                 "<= 256; to split into 3, pad to 4 with a 0-value note)");
+    if (nonce_seed.size() < 32)
+        throw std::runtime_error("ct-transfer: --nonce-seed must be >= 32 bytes of high-entropy randomness, "
+                                 "UNIQUE per transfer (reuse voids the range-proof zero-knowledge AND reuses "
+                                 "the balance Schnorr nonce, leaking + linking amounts)");
+
+    // Balance MUST hold (else the balance proof cannot verify): Σv_in = Σv_out + fee.
+    uint64_t sum_in = 0, sum_out = 0;
+    for (auto& x : inputs)  { if (sum_in  > UINT64_MAX - x.value) throw std::runtime_error("ct-transfer: input value sum overflow");  sum_in  += x.value; }
+    for (auto& x : outputs) { if (sum_out > UINT64_MAX - x.value) throw std::runtime_error("ct-transfer: output value sum overflow"); sum_out += x.value; }
+    if (sum_out > UINT64_MAX - fee || sum_in != sum_out + fee)
+        throw std::runtime_error("ct-transfer: unbalanced (Σ inputs must equal Σ outputs + fee)");
+
+    // Note blindings — SAME DST as build-shield, so a shielded note spends here.
+    std::vector<std::array<uint8_t,32>> r_in(n_in), r_out(m);
+    for (std::size_t j = 0; j < n_in; ++j) {
+        if (inputs[j].blind_seed.size() < 32) throw std::runtime_error("ct-transfer: an input blind-seed is < 32 bytes");
+        r_in[j] = derive_scalar("determ-ct-note-blind-v1", inputs[j].blind_seed);
+    }
+    for (std::size_t j = 0; j < m; ++j) {
+        if (outputs[j].blind_seed.size() < 32) throw std::runtime_error("ct-transfer: an output blind-seed is < 32 bytes");
+        r_out[j] = derive_scalar("determ-ct-note-blind-v1", outputs[j].blind_seed);
+    }
+
+    // Input commitments C_in = commit(v_in, r_in).
+    std::vector<uint8_t> C_in(n_in * 33);
+    for (std::size_t j = 0; j < n_in; ++j) {
+        auto v = u64_scalar(inputs[j].value);
+        if (determ_pedersen_commit(&C_in[j*33], v.data(), r_in[j].data()) != 0)
+            throw std::runtime_error("ct-transfer: input commitment failed (invalid blinding)");
+    }
+
+    // ONE aggregated range proof over the m outputs; gammas = r_out so the proof's
+    // value commitments V == the output commitments C_out (composition identity).
+    std::vector<uint64_t> vals(m);
+    std::vector<uint8_t>  gammas(m * 32);
+    for (std::size_t j = 0; j < m; ++j) {
+        vals[j] = outputs[j].value;
+        std::memcpy(&gammas[j*32], r_out[j].data(), 32);
+    }
+    // Bind the Bulletproof + Schnorr randomness to THIS tx (defense-in-depth vs
+    // accidental nonce_seed reuse across transfers): the effective seed mixes the
+    // caller seed with the tx nonce, so two transfers that (mistakenly) reuse the
+    // same nonce_seed but carry different nonces still get distinct proof nonces.
+    std::vector<uint8_t> eff_seed = nonce_seed;
+    for (int i = 7; i >= 0; --i) eff_seed.push_back(static_cast<uint8_t>((tx_nonce >> (i*8)) & 0xFF));
+    auto alpha = derive_scalar("determ-ct-bp-alpha", eff_seed);
+    auto rho   = derive_scalar("determ-ct-bp-rho",   eff_seed);
+    auto tau1  = derive_scalar("determ-ct-bp-tau1",  eff_seed);
+    auto tau2  = derive_scalar("determ-ct-bp-tau2",  eff_seed);
+    std::vector<uint8_t> sL(m * n * 32), sR(m * n * 32);
+    for (std::size_t i = 0; i < m * n; ++i) {
+        auto l = derive_scalar_i("determ-ct-bp-sL", eff_seed, static_cast<uint32_t>(i));
+        auto r = derive_scalar_i("determ-ct-bp-sR", eff_seed, static_cast<uint32_t>(i));
+        std::memcpy(&sL[i*32], l.data(), 32);
+        std::memcpy(&sR[i*32], r.data(), 32);
+    }
+    std::size_t agglen = determ_agg_rangeproof_proof_len(m, n);
+    if (agglen == 0) throw std::runtime_error("ct-transfer: bad (m,n) for the range proof");
+    std::vector<uint8_t> C_out(m * 33), agg(agglen);
+    if (determ_agg_rangeproof_prove(C_out.data(), agg.data(), vals.data(), gammas.data(),
+            alpha.data(), rho.data(), tau1.data(), tau2.data(),
+            sL.data(), sR.data(), m, n) != 0)
+        throw std::runtime_error("ct-transfer: aggregated range proof failed");
+
+    // Balance proof: E = ΣC_in − ΣC_out − fee·G ; x = (Σr_in − Σr_out) mod n.
+    std::vector<uint8_t> rin_flat(n_in * 32), rout_flat(m * 32);
+    for (std::size_t j = 0; j < n_in; ++j) std::memcpy(&rin_flat[j*32],  r_in[j].data(),  32);
+    for (std::size_t j = 0; j < m;    ++j) std::memcpy(&rout_flat[j*32], r_out[j].data(), 32);
+    std::array<uint8_t,32> x{};
+    int xr = determ_p256_balance_blinding_excess(x.data(), rin_flat.data(), n_in, rout_flat.data(), m);
+    if (xr == 1) throw std::runtime_error("ct-transfer: zero blinding excess (pick different seeds)");
+    if (xr != 0) throw std::runtime_error("ct-transfer: blinding excess computation failed");
+    std::array<uint8_t,33> E{};
+    if (determ_p256_balance_excess(E.data(), C_in.data(), n_in, C_out.data(), m, fee) != 0)
+        throw std::runtime_error("ct-transfer: balance excess point failed");
+    auto k = derive_scalar("determ-ct-bp-balk", eff_seed);
+    std::array<uint8_t,65> bproof{};
+    if (determ_p256_balance_prove(bproof.data(), E.data(), x.data(), k.data()) != 0)
+        throw std::runtime_error("ct-transfer: balance proof failed");
+
+    // Serialize the DCT1 bundle + SELF-VERIFY before emit (never ship an invalid one).
+    std::size_t blen = determ_ctx_bundle_len(n_in, m, n);
+    if (blen == 0) throw std::runtime_error("ct-transfer: bad bundle parameters");
+    std::vector<uint8_t> bundle(blen);
+    if (determ_ctx_bundle_serialize(bundle.data(), blen, C_in.data(), n_in,
+            C_out.data(), m, n, fee, agg.data(), bproof.data()) != 0)
+        throw std::runtime_error("ct-transfer: bundle serialize failed");
+    if (determ_ctx_bundle_verify(bundle.data(), blen) != 0)
+        throw std::runtime_error("ct-transfer: built bundle failed self-verify (internal error)");
+
+    // Pool -> pool: to="" and amount=0 (both ignored by the validator/apply); the
+    // PUBLIC fee must equal the bundle's fee (validator enforces tx.fee==bundle_fee).
+    return sign_ct_tx(kf, TX_CONFIDENTIAL_TRANSFER, "", 0, fee, tx_nonce, bundle,
+                      "CONFIDENTIAL_TRANSFER");
 }
 
 } // namespace determ::light

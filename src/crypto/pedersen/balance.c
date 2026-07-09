@@ -144,3 +144,23 @@ int determ_p256_balance_verify_bound(const uint8_t E_in[PT], const uint8_t proof
     if (determ_pedersen_msm(rhs, sc2, pt2, 2) != 0) return -1;    /* T + c*E */
     return (memcmp(lhs, rhs, PT) == 0) ? 0 : -1;
 }
+
+/* §3.22c: x = (Σ r_in − Σ r_out) mod n — the balance-proof blinding excess.
+ * Reuses the file-local add_mod_n / negate_mod_n (inputs assumed canonical < n,
+ * per the header contract). See balance.h. */
+int determ_p256_balance_blinding_excess(uint8_t x_out[SC],
+                                        const uint8_t *r_in,  size_t n_in,
+                                        const uint8_t *r_out, size_t n_out) {
+    if (n_in == 0 || r_in == NULL) return -1;
+    uint8_t acc[SC]; memset(acc, 0, SC);                 /* acc = 0 (< n) */
+    for (size_t i = 0; i < n_in; i++)
+        add_mod_n(acc, acc, r_in + i * SC);              /* acc += r_in[i] */
+    for (size_t j = 0; j < n_out; j++) {
+        uint8_t neg[SC];
+        negate_mod_n(neg, r_out + j * SC);               /* neg = (n − r_out[j]) */
+        add_mod_n(acc, acc, neg);                        /* acc −= r_out[j] */
+    }
+    memcpy(x_out, acc, SC);
+    int nz = 0; for (int i = 0; i < SC; i++) if (acc[i]) { nz = 1; break; }
+    return nz ? 0 : 1;   /* 1 = zero excess (E is the identity → unprovable) */
+}

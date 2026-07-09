@@ -371,6 +371,14 @@ void print_usage() {
         "      Build a SUBMITTABLE UNSHIELD (TxType 13): withdraw the note\n"
         "      (amount, blind-seed) to transparent --to (§3.22b). The balance proof is\n"
         "      context-bound to (from,to,nonce,amount). Verify with verify-ct-tx.\n"
+        "  build-ct-transfer --keyfile <path> --spec <file> [--out <file>]\n"
+        "      Build a SUBMITTABLE CONFIDENTIAL_TRANSFER (TxType 14, §3.22c): spend the\n"
+        "      input notes -> new output notes (pool->pool). --spec JSON: {inputs:\n"
+        "      [{value,blind_seed}], outputs:[{value,blind_seed}], fee, nonce_seed,\n"
+        "      tx_nonce}. Balance MUST hold (Σin = Σout + fee); 1, 2, or 4 outputs.\n"
+        "      nonce_seed + every blind_seed must be >= 32 bytes, UNIQUE + high-\n"
+        "      entropy (reuse leaks/links amounts). Verify with verify-ct-tx; SAVE\n"
+        "      each output (value,blind_seed) so the recipient can spend it.\n"
         "  submit-tx --rpc-port <N> --tx-json <file>\n"
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
@@ -3466,6 +3474,65 @@ int cmd_build_unshield(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "build-unshield: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ───────────────────────── build-ct-transfer ────────────────────────────
+//
+// CTX-2 confidential -> confidential builder. Reads a JSON --spec describing the
+// input notes (value + blind_seed), the output notes, the public fee, the
+// Bulletproof nonce_seed, and the tx nonce, and emits a submittable
+// CONFIDENTIAL_TRANSFER (DCT1 bundle). Balance must hold. Verify with verify-ct-tx.
+int cmd_build_ct_transfer(int argc, char** argv) {
+    std::string keyfile_path, spec_path, out_path;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile" && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--spec"    && i + 1 < argc) spec_path    = argv[++i];
+        else if (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "build-ct-transfer: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || spec_path.empty()) {
+        std::cerr << "build-ct-transfer: --keyfile and --spec <file> are required\n"
+                     "  spec JSON: {\"inputs\":[{\"value\":N,\"blind_seed\":\"hex\"},...],\n"
+                     "             \"outputs\":[{\"value\":N,\"blind_seed\":\"hex\"},...],\n"
+                     "             \"fee\":N,\"nonce_seed\":\"hex\",\"tx_nonce\":N}\n"
+                     "  balance MUST hold: sum(inputs.value) == sum(outputs.value) + fee\n";
+        return 1;
+    }
+    try {
+        std::ifstream f(spec_path);
+        if (!f) { std::cerr << "build-ct-transfer: cannot read " << spec_path << "\n"; return 1; }
+        nlohmann::json spec; f >> spec;
+        auto parse_notes = [](const nlohmann::json& arr) {
+            std::vector<determ::light::CtNote> v;
+            for (const auto& e : arr) {
+                determ::light::CtNote note;
+                note.value      = e.at("value").get<uint64_t>();
+                note.blind_seed = from_hex(e.at("blind_seed").get<std::string>());
+                v.push_back(std::move(note));
+            }
+            return v;
+        };
+        auto inputs     = parse_notes(spec.at("inputs"));
+        auto outputs    = parse_notes(spec.at("outputs"));
+        uint64_t fee    = spec.at("fee").get<uint64_t>();
+        auto nonce_seed = from_hex(spec.at("nonce_seed").get<std::string>());
+        uint64_t txn    = spec.at("tx_nonce").get<uint64_t>();
+        auto kf = load_light_keyfile(keyfile_path);
+        auto tx = build_confidential_transfer_tx(kf, inputs, outputs, fee, nonce_seed, txn);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote CONFIDENTIAL_TRANSFER (" << inputs.size() << " in -> "
+                      << outputs.size() << " out, fee=" << fee << ", hash="
+                      << tx["hash"].get<std::string>().substr(0, 16) << "...) to " << out_path
+                      << "\n  SAVE each output's (value, blind_seed) so the recipient can spend it.\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "build-ct-transfer: " << e.what() << "\n";
         return 1;
     }
 }
@@ -8029,6 +8096,7 @@ int main(int argc, char** argv) {
         if (cmd == "log-audit-access")      return cmd_log_audit_access(sub_argc, sub_argv);
         if (cmd == "build-shield")          return cmd_build_shield(sub_argc, sub_argv);
         if (cmd == "build-unshield")        return cmd_build_unshield(sub_argc, sub_argv);
+        if (cmd == "build-ct-transfer")     return cmd_build_ct_transfer(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
