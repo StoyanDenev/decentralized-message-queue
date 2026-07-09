@@ -251,7 +251,7 @@ The validator NEVER tolerates unknown discriminator values, including `0xFF`. Fo
 
 | Discriminator | Default (v1.0 accepted) | Rejected at v1.0 | Diagnostic on reject |
 |---|---|---|---|
-| `Block.signature_form` | `SIG_KK_ED25519 = 0` | `SIG_BLS12_381_AGGREGATE = 1`, `SIG_DILITHIUM_KK = 2`, all other non-zero u8 (incl 0xFF) | `block.signature_form = <value>; only SIG_KK_ED25519 (0) is accepted at v1.0` |
+| `Block.signature_form` | `SIG_KK_ED25519 = 0` | `SIG_BLS12_381_AGGREGATE = 1`, `SIG_MLDSA_KK = 2`, all other non-zero u8 (incl 0xFF) | `block.signature_form = <value>; only SIG_KK_ED25519 (0) is accepted at v1.1` (AS-BUILT; register A6 / commit `9093189` — the shipped `validator.cpp` string says **v1.1**, and the enum name is `SIG_FORM_MLDSA_KK`, the FIPS-204 name for Dilithium. See `BlockSignatureFormSoundness.md` SF-4.) |
 | `Account.view_key_mechanism` | `OTPK_STREAM = 0` | `FSE = 1`, `PUNCTURABLE = 2`, all other non-zero u8 (incl 0xFF) | `account.view_key_mechanism = <value>; only OTPK_STREAM (0) is accepted at v1.0` |
 | `Account.audit_model` | `KEY_DISCLOSURE = 0` | `TRUSTED_ISSUER = 1`, `ZK_BASED_AUDIT = 2`, `NO_AUDIT = 3`, all other non-zero u8 (incl 0xFF) | `account.audit_model = <value>; only KEY_DISCLOSURE (0) is accepted at v1.0` |
 | `manifest.randomness_aggregation_form` | `THRESHOLD_SIG_ACCUMULATOR = 0` | `VRF_PER_SHARD = 1`, all other non-zero u8 (incl 0xFF) | `manifest.randomness_aggregation_form = <value>; only THRESHOLD_SIG_ACCUMULATOR (0) is accepted at v1.0` |

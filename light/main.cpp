@@ -64,6 +64,7 @@
 #include "keyfile.hpp"
 #include "sign_tx.hpp"
 #include "pq_sign_tx.hpp"
+#include "audit_tx.hpp"
 #include "watch.hpp"
 #include "export.hpp"
 #include "verify_archive.hpp"
@@ -349,6 +350,15 @@ void print_usage() {
         "      Build a canonical, SUBMITTABLE PQ_TRANSFER (§3.21): derives the PQ-native\n"
         "      `from` address, signs a DPQ1 envelope over signing_bytes; feed --out to\n"
         "      submit-tx. Verify a validator would accept it with `determ verify-pq-tx`.\n"
+        "  rotate-audit-key --keyfile <path> {--pubkey <hex32>|--clear}\n"
+        "                   --fee <N> --nonce <N> [--out <file>]\n"
+        "      Build a SUBMITTABLE ROTATE_AUDIT_KEY (TxType 15): set or clear the\n"
+        "      account's standing audit view-master key. Account-Ed25519-signed,\n"
+        "      fee-only (AuditLayerSoundness.md). Feed --out to submit-tx.\n"
+        "  log-audit-access --keyfile <path> --epoch {<N>|all} --auditor <hex32>\n"
+        "                   --context <hex32> --fee <N> --nonce <N> [--out <file>]\n"
+        "      Build a SUBMITTABLE LOG_AUDIT_ACCESS (TxType 16): post an on-chain\n"
+        "      disclosure record. --epoch all = full-history sentinel.\n"
         "  submit-tx --rpc-port <N> --tx-json <file>\n"
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
@@ -3252,6 +3262,102 @@ int cmd_sign_tx(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "sign-tx: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ─────────────────── rotate-audit-key / log-audit-access ────────────────
+//
+// A2 audit-layer client tooling (pre-launch register A2). Build + sign a
+// submittable ROTATE_AUDIT_KEY (set/clear the account's standing audit key)
+// or LOG_AUDIT_ACCESS (post a disclosure record). Both are fee-only,
+// account-Ed25519-signed; the consensus half is in verify/apply
+// (docs/proofs/AuditLayerSoundness.md). Emits a `Transaction::from_json`-
+// compatible envelope (submit via `submit-tx`).
+
+int cmd_rotate_audit_key(int argc, char** argv) {
+    std::string keyfile_path, pubkey_hex, out_path;
+    bool have_fee = false, have_nonce = false, clear = false;
+    uint64_t fee = 0, nonce = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile" && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--pubkey"  && i + 1 < argc) pubkey_hex   = argv[++i];
+        else if (a == "--clear")                   clear        = true;
+        else if (a == "--fee"     && i + 1 < argc) { fee   = parse_u64("--fee",   argv[++i]); have_fee   = true; }
+        else if (a == "--nonce"   && i + 1 < argc) { nonce = parse_u64("--nonce", argv[++i]); have_nonce = true; }
+        else if (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "rotate-audit-key: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || !have_fee || !have_nonce) {
+        std::cerr << "rotate-audit-key: --keyfile, --fee, --nonce are required "
+                     "(and exactly one of --pubkey <hex32> / --clear)\n";
+        return 1;
+    }
+    if (clear == !pubkey_hex.empty()) {
+        std::cerr << "rotate-audit-key: give EXACTLY one of --pubkey <hex32> "
+                     "(set) or --clear (revoke)\n";
+        return 1;
+    }
+    try {
+        auto kf = load_light_keyfile(keyfile_path);
+        std::optional<std::vector<uint8_t>> pk;
+        if (!clear) pk = from_hex(pubkey_hex);
+        auto tx = build_rotate_audit_key_tx(kf, pk, fee, nonce);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote ROTATE_AUDIT_KEY ("
+                      << (clear ? "clear" : "set") << ", hash="
+                      << tx["hash"].get<std::string>().substr(0, 16)
+                      << "...) to " << out_path << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "rotate-audit-key: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int cmd_log_audit_access(int argc, char** argv) {
+    std::string keyfile_path, epoch_str, auditor_hex, context_hex, out_path;
+    bool have_fee = false, have_nonce = false;
+    uint64_t fee = 0, nonce = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile" && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--epoch"   && i + 1 < argc) epoch_str    = argv[++i];
+        else if (a == "--auditor" && i + 1 < argc) auditor_hex  = argv[++i];
+        else if (a == "--context" && i + 1 < argc) context_hex  = argv[++i];
+        else if (a == "--fee"     && i + 1 < argc) { fee   = parse_u64("--fee",   argv[++i]); have_fee   = true; }
+        else if (a == "--nonce"   && i + 1 < argc) { nonce = parse_u64("--nonce", argv[++i]); have_nonce = true; }
+        else if (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "log-audit-access: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || epoch_str.empty() || auditor_hex.empty()
+        || context_hex.empty() || !have_fee || !have_nonce) {
+        std::cerr << "log-audit-access: --keyfile, --epoch, --auditor, --context, "
+                     "--fee, --nonce are required (--epoch <n>|all)\n";
+        return 1;
+    }
+    try {
+        // --epoch accepts a number OR "all" (the full-history sentinel).
+        uint64_t epoch = (epoch_str == "all" || epoch_str == "ALL")
+            ? UINT64_MAX : parse_u64("--epoch", epoch_str);
+        auto kf = load_light_keyfile(keyfile_path);
+        auto tx = build_log_audit_access_tx(kf, epoch, from_hex(auditor_hex),
+                                            from_hex(context_hex), fee, nonce);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote LOG_AUDIT_ACCESS (epoch="
+                      << (epoch == UINT64_MAX ? "all" : std::to_string(epoch))
+                      << ", hash=" << tx["hash"].get<std::string>().substr(0, 16)
+                      << "...) to " << out_path << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "log-audit-access: " << e.what() << "\n";
         return 1;
     }
 }
@@ -7811,6 +7917,8 @@ int main(int argc, char** argv) {
         if (cmd == "pq-verify-tx")          return cmd_pq_verify_tx(sub_argc, sub_argv);
         if (cmd == "pq-address")            return cmd_pq_address(sub_argc, sub_argv);
         if (cmd == "pq-transfer")           return cmd_pq_transfer(sub_argc, sub_argv);
+        if (cmd == "rotate-audit-key")      return cmd_rotate_audit_key(sub_argc, sub_argv);
+        if (cmd == "log-audit-access")      return cmd_log_audit_access(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);

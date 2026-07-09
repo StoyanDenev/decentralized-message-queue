@@ -498,6 +498,12 @@ In-process tests (deterministic, no network):
                                               accept-rule to a tx file (0 verified
                                               / 3 invalid) — the loop closer for
                                               determ-light pq-transfer
+  determ verify-audit-tx --file <tx.json>     A2: apply the audit-layer accept-
+                                              check (ROTATE_AUDIT_KEY / LOG_AUDIT_
+                                              ACCESS: anon-sig + shape) to a tx file
+                                              (0 verified / 3 invalid) — the loop
+                                              closer for determ-light rotate-audit-
+                                              key / log-audit-access
   determ test-argon2id-c99                    v2.10 Phase 0: libsodium-free C99
                                               Argon2id (RFC 9106) vs libsodium
                                               crypto_pwhash_argon2id KATs
@@ -13172,6 +13178,53 @@ int main(int argc, char** argv) {
             std::cout << "INVALID: not an authentic PQ_TRANSFER\n";
             return 3;
         } catch (const std::exception& e) { std::cerr << "verify-pq-tx: " << e.what() << "\n"; return 1; }
+    }
+    if (cmd == "verify-audit-tx") {
+        // A2 — context-free accept-check for an audit-layer tx (ROTATE_AUDIT_KEY
+        // / LOG_AUDIT_ACCESS) built by `determ-light rotate-audit-key` /
+        // `log-audit-access`. Mirrors the validator's anon-account path exactly
+        // (src/node/validator.cpp:603-623 + the shape gates in
+        // src/chain/chain.cpp): from must be anon-shape, amount==0, to empty,
+        // payload length matches the type, and the Ed25519 sig over
+        // signing_bytes verifies under the pubkey the address IS. Stateless
+        // (no nonce/balance) — it confirms authenticity + shape, not ledger
+        // acceptance. Exit 0 = VERIFIED, 3 = INVALID, 1 = usage/parse.
+        std::string path;
+        for (int i = 2; i < argc; i++) { std::string a = argv[i];
+            if (a == "--file" && i + 1 < argc) path = argv[++i]; }
+        if (path.empty()) { std::cerr << "verify-audit-tx: --file <tx.json> is required\n"; return 1; }
+        try {
+            std::ifstream f(path);
+            if (!f) { std::cerr << "verify-audit-tx: cannot read " << path << "\n"; return 1; }
+            json j; f >> j;
+            auto tx = determ::chain::Transaction::from_json(j);
+            auto reject = [](const std::string& why){
+                std::cout << "INVALID: " << why << "\n"; return 3; };
+            if (tx.type != determ::chain::TxType::ROTATE_AUDIT_KEY
+                && tx.type != determ::chain::TxType::LOG_AUDIT_ACCESS)
+                return reject("not an audit-layer tx (type must be 15 or 16)");
+            if (!determ::is_anon_address(tx.from))
+                return reject("from is not an anon (bearer) account");
+            if (tx.amount != 0 || !tx.to.empty())
+                return reject("audit tx must be fee-only (amount==0, to empty)");
+            if (tx.type == determ::chain::TxType::ROTATE_AUDIT_KEY) {
+                if (!tx.payload.empty()
+                    && tx.payload.size() != determ::chain::AUDIT_KEY_PAYLOAD_SIZE)
+                    return reject("ROTATE_AUDIT_KEY payload must be empty (clear) or 32 bytes (set)");
+            } else {
+                if (tx.payload.size() != determ::chain::AUDIT_LOG_PAYLOAD_SIZE)
+                    return reject("LOG_AUDIT_ACCESS payload must be 72 bytes");
+            }
+            auto pk = determ::parse_anon_pubkey(tx.from);
+            auto sb = tx.signing_bytes();
+            if (!determ::crypto::verify(pk, sb, tx.sig))
+                return reject("Ed25519 signature does not verify under the from address");
+            const char* name = (tx.type == determ::chain::TxType::ROTATE_AUDIT_KEY)
+                ? "ROTATE_AUDIT_KEY" : "LOG_AUDIT_ACCESS";
+            std::cout << "VERIFIED: authentic " << name << " (from " << tx.from.substr(0, 18)
+                      << "... nonce=" << tx.nonce << " fee=" << tx.fee << ")\n";
+            return 0;
+        } catch (const std::exception& e) { std::cerr << "verify-audit-tx: " << e.what() << "\n"; return 1; }
     }
     if (cmd == "test-pq-transaction") {
         // §3.21 inc.4 — the PQ-native BEARER address (determ::pq_address) + the
