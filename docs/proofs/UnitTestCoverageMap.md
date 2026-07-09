@@ -715,8 +715,9 @@ F-1 / §3.2 zero-coverage items.
   (Option 2 closure target).
 - `IMPLEMENTATION-SEQUENCING.md` — phase-by-phase rollout order for
   remaining FA / S items.
-- `MAINNET_READINESS.md` — production-readiness gates including
-  Option 1 / Option 2 status.
+- `IMPLEMENTATION-SEQUENCING.md` §4.4 — production-readiness gates including
+  Option 1 / Option 2 status (the `MAINNET_READINESS.md` tracking scaffold was
+  deleted 2026-07-09, doc-consolidation inc.2 — git history).
 
 ### Source / test infrastructure
 

@@ -88,7 +88,7 @@ Several decisions from this session look like ordinary engineering trade-offs bu
 | `docs/proofs/DAPP_SDK_GUIDANCE.md` | Browser-side crypto strategy per profile (Smart-client web UI for FIPS deployments) |
 | `docs/proofs/DECISION-LOG.md` | Public deliberation record (Kerckhoffs's principle applied to the design process itself) |
 | `docs/proofs/IMPLEMENTATION-SEQUENCING.md` | Public execution plan |
-| `docs/proofs/MAINNET_READINESS.md` | Public mainnet-readiness criteria (no opaque "we'll launch when we feel ready") |
+| `docs/proofs/IMPLEMENTATION-SEQUENCING.md` §4.4 + `docs/proofs/DECISION-LOG.md` 2026-05-24 | Public mainnet-readiness criteria (no opaque "we'll launch when we feel ready") — the `MAINNET_READINESS.md` tracking scaffold was deleted 2026-07-09 (never populated; git history); the criteria + sole-declaration-authority record lives at the cited sections, and the beta model is single-soak-at-feature-complete per the pre-launch register (D4, 2026-07-09) |
 
 Memory entries that encode the public-interest constraints:
 - `dlt-pre-mainnet-status` — confirms pre-mainnet posture (architectural decisions made before live-chain commitment)

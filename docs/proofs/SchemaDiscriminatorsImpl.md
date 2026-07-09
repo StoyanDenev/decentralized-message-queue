@@ -8,7 +8,7 @@
 - `DECISION-LOG.md` 2026-05-24 §"Improvements.md §7.5 (pre-v1.0-schema-freeze optionality)" + §"Improvements.md §7.6 (discriminator-coherence verification)" + §"Improvements.md §7.5 completion (7.5.6 + 7.5.7)" — auditable narrative.
 - `IMPLEMENTATION-SEQUENCING.md` §2.3 (pre-bundle discriminators table) + Bundle 3 / Bundle 5 entries — sequencing-side artifact: these discriminators land BEFORE any review-week bundle to lock the v1.0 genesis schema shape.
 - `WireFormatBackwardCompat.md` — unified zero-skip backward-compat theorem (T-1..T-3); the §7.5 discriminators compose with that contract by adopting the same fail-closed-on-unknown-value posture.
-- `MAINNET_READINESS.md` — readiness criteria; this implementation work feeds the "pre-bundle schema discriminators landed" checklist item.
+- `IMPLEMENTATION-SEQUENCING.md` §4.4 — readiness criteria; this implementation work feeds the "pre-bundle schema discriminators landed" checklist item. (The `MAINNET_READINESS.md` tracking scaffold was deleted 2026-07-09, doc-consolidation inc.2 — git history.)
 
 **Audience.** Implementation threads landing the seven discriminator fields; reviewers asking "does the validator dispatch logic match the SHIP decision?"; future planning sessions evaluating whether a post-v1.0 enhancement is still reachable via the discriminator mechanism.
 
@@ -676,7 +676,7 @@ The trade-off accepted: per-field discriminators add ~6-10 bytes per record (per
 
 **Test coverage.** Once shipped, ~8-12 new tests in `tools/test_*.sh` per §8. Adding to the FAST=1 regression count.
 
-**Mainnet readiness gate.** Per `MAINNET_READINESS.md`, the "pre-bundle schema discriminators landed" item is a v1.0 readiness criterion. Until this work is shipped, v1.0 cannot launch (the discriminator slots would be missing from genesis, foreclosing post-mainnet enhancements that depend on them per the no-migrations constraint).
+**Mainnet readiness gate.** Per the readiness-criteria record (`IMPLEMENTATION-SEQUENCING.md` §4.4; the `MAINNET_READINESS.md` scaffold was deleted 2026-07-09 — git history), the "pre-bundle schema discriminators landed" item is a v1.0 readiness criterion. Until this work is shipped, v1.0 cannot launch (the discriminator slots would be missing from genesis, foreclosing post-mainnet enhancements that depend on them per the no-migrations constraint).
 
 ---
 

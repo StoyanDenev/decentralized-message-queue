@@ -105,7 +105,7 @@ The fixed 1024-bit tx frame carries `[amount][fee][nonce][reserved]` as its 256-
 
 ## 4. Spec-level slots — the §7.5 pre-genesis discriminator catalog
 
-None of the seven §7.5 discriminators exists in code (verified by tree-wide grep; [SchemaDiscriminatorsImpl.md](SchemaDiscriminatorsImpl.md) §10 concurs: "Implementation. Pending."). They are nonetheless genesis-schema surface: Bundle 0 is a MAINNET_READINESS criterion, so **these verdicts decide what Bundle 0 builds**. A spec-level DROP costs zero bytes anywhere — it is an edit to the catalog + sequencing docs — but several reverse pieces of the 2026-05-24/06-03 SHIP sweep and are marked ⚠ for owner confirmation, exactly as B4's newer razor entitles.
+None of the seven §7.5 discriminators exists in code (verified by tree-wide grep; [SchemaDiscriminatorsImpl.md](SchemaDiscriminatorsImpl.md) §10 concurs: "Implementation. Pending."). They are nonetheless genesis-schema surface: Bundle 0 is a v1.1 readiness criterion (`IMPLEMENTATION-SEQUENCING.md` §4.4; the `MAINNET_READINESS.md` scaffold was deleted 2026-07-09 — git history), so **these verdicts decide what Bundle 0 builds**. A spec-level DROP costs zero bytes anywhere — it is an edit to the catalog + sequencing docs — but several reverse pieces of the 2026-05-24/06-03 SHIP sweep and are marked ⚠ for owner confirmation, exactly as B4's newer razor entitles.
 
 ### 4.1 S-1 `Block.signature_form` — KEEP (owner-decided, A6)
 

@@ -12,14 +12,14 @@
 
 **Companion documents:**
 - `../MOTIVATION.md` — project's public-interest mandate linking design decisions to the originating problem (per `docs/Confrontation_against_public_unjustice_i.odt`)
-- `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
+- `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved). Document deleted 2026-07-09 (doc-consolidation inc.2 — git history); the decisions it queued are recorded in `DECISION-LOG.md` 2026-05-24 review-week entries + the per-spec docs.
 - `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md`, `v2.26-ROTATION-SPEC.md` — sibling spec docs that this plan executes against
 - `V210ImplementationRoadmap.md` — HISTORICAL. v2.10 FROST chain-wiring removed from v1.1 scope 2026-06-07 per `FROST_DEVIATION_NOTICE.md`. Document deleted 2026-07-09 (doc-consolidation inc.1 — git history).
 - `FROST_DEVIATION_NOTICE.md` — provenance record establishing FROST removal from v1.1 chain consensus path 2026-06-07. Load-bearing for any future threshold-signature proposal.
 - `C99CryptoStackAudit.md` — adversarial audit of the libsodium-free C99 cryptographic primitives shipped under `src/crypto/{sha2,chacha20,aes}/`; 18 findings remediated per commit `2e0058b`
 - `DECISION-LOG.md` — backward-looking deliberation history for the decisions this plan executes
 - `Improvements.md` — forward-looking enhancement queue (post-v1.0 items deferred from this plan; rejected alternatives; research items; pre-v1.0-schema-freeze discriminator decisions per §7.5)
-- `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration
+- `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration. Document deleted 2026-07-09 (doc-consolidation inc.2 — git history): it was a never-populated scaffold; the criteria + declaration-authority record is §4.4 below + `DECISION-LOG.md` 2026-05-24/2026-06-06, and its open-ended-beta model was superseded by the owner's single-soak-at-feature-complete decision (`PRE-LAUNCH-DECISIONS.md` D4, 2026-07-09).
 - `PFS_DEPLOYMENT_GUIDANCE.md` — operator-facing PFS regulatory framework
 - `DAPP_SDK_GUIDANCE.md` — DApp-developer-facing browser-side crypto strategy per profile
 - `ECONOMICS_CONFIG_GUIDANCE.md` — operator-facing recommended-defaults pattern for the three-policy economic configuration (minimal block_subsidy + 1/K priority-tip split + EIP-1559-style base-fee with 50% utilization target); composes with `Improvements.md §5.7` genesis validation + `§5.8` base-fee mechanism
@@ -293,7 +293,7 @@ Phase D (gated on Phase B/C + v2 + v2.26 substantially shipped + DSF):
 - v2.26 (chain-level key rotation): ~10-11 days (parallelizable with Bundle 5)
 - Phase D wall-clock ≈ Bundle 5 at **~3-4 months** (v2.26 fits within)
 
-**Total review-week implementation horizon: ~6.5-8 months** from start to Phase D completion. Plus open-ended beta (per §4.4 QA strategy) → mainnet declaration when MAINNET_READINESS criteria converge.
+**Total review-week implementation horizon: ~6.5-8 months** from start to Phase D completion. Plus beta (per §4.4 QA strategy; the open-ended model was superseded 2026-07-09 by the single-soak-at-feature-complete decision, `PRE-LAUNCH-DECISIONS.md` D4) → mainnet declaration when the §4.4 readiness criteria converge.
 
 Net change vs. pre-DSSO-as-DApp estimate:
 - DSSO substrate (v2.25) removed from critical path: saves ~6-9 weeks
@@ -364,7 +364,7 @@ Per `v2.26-ROTATION-SPEC.md` §5 (work units totaling ~10-11 days):
 2. **Bug-finding trajectory** — new Sev-1 bug discovery rate at 0 for sustained window; zero open Sev-1 bugs for 60+ days
 3. **Subsystem zero-bug windows** — load-bearing subsystems (consensus, crypto, wallet, manifest, confidential-tx apply path) show zero known bugs for defined window
 
-Specific numeric thresholds populated pre-beta. Tracking artifact: `MAINNET_READINESS.md` (created 2026-05-24).
+Specific numeric thresholds populated pre-beta. Tracking artifact: `MAINNET_READINESS.md` (created 2026-05-24; deleted 2026-07-09, doc-consolidation inc.2 — it remained an unpopulated scaffold, and this §4.4 + `DECISION-LOG.md` are the criteria record. Beta model superseded 2026-07-09: ONE clean soak at full feature-complete, `PRE-LAUNCH-DECISIONS.md` D4).
 
 **Implications worth noting explicitly.**
 

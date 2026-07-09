@@ -6,7 +6,10 @@
 > 1.0-authoritative set — `README.md`, `PROTOCOL.md`, `SECURITY.md`, `WHITEPAPER-v1.x.md`,
 > `CLI-REFERENCE.md`, `QUICKSTART.md`, and the `proofs/` that back shipped code.
 >
-> Tiering rationale + the full per-file inventory: `docs/DOC-TIERING-PLAN.md`.
+> Tiering: the label-in-place plan (`DOC-TIERING-PLAN.md`, a proposal doc) was EXECUTED —
+> this ROADMAP index + the per-file tier banners are the on-disk truth, guarded by
+> `tools/test_doc_tier_check.sh`; physical relocation (its Phase 3) was not adopted. The
+> proposal doc was deleted 2026-07-09 (doc-consolidation inc.2 — git history is the archive).
 > Design deliberation trail: `proofs/DECISION-LOG.md` and `proofs/Improvements.md`.
 
 ---
@@ -49,12 +52,22 @@
 ## Rationale archive (process / meta — retained, not coherence-maintained)
 
 `proofs/DECISION-LOG.md` · `proofs/Improvements.md` · `proofs/IMPLEMENTATION-SEQUENCING.md` ·
-`proofs/MAINNET_READINESS.md` ·
-`proofs/PRE-IMPLEMENTATION-REVIEW.md` · `proofs/DAPP_SDK_GUIDANCE.md` ·
+`proofs/DAPP_SDK_GUIDANCE.md` ·
 `proofs/ECONOMICS_CONFIG_GUIDANCE.md` · `proofs/UnitTestCoverageMap.md` ·
 `proofs/LightClientCompositionMap.md` · `proofs/tla/CHECK-RESULTS.md` · `UNIT-TESTS.md`
 
+*(Deleted 2026-07-09, doc-consolidation inc.2 — git history is the archive: `MAINNET_READINESS.md`
+— a never-populated tracking scaffold; the declaration authority + three readiness-criteria
+categories remain recorded in `proofs/IMPLEMENTATION-SEQUENCING.md` §4.4 + `proofs/DECISION-LOG.md`
+2026-05-24/2026-06-06, and the open-ended-beta model it tracked was superseded by the owner's
+single-soak-at-feature-complete decision, pre-launch register D4, 2026-07-09.
+`PRE-IMPLEMENTATION-REVIEW.md` — the review-week checklist; all 40+ decisions it queued are
+resolved and recorded in `proofs/DECISION-LOG.md` 2026-05-24 review-week entries + the per-spec
+docs, and its crypto direction was superseded 2026-07-07. `DOC-TIERING-PLAN.md` — executed, see
+banner note above.)*
+
 ---
 
-*Authority: Stoyan Denev. This index is maintained by hand; tier assignments come from
-`docs/DOC-TIERING-PLAN.md`. Not co-authored by the AI assistant.*
+*Authority: Stoyan Denev. This index is maintained by hand; tier assignments are the
+per-file tier banners (the executed `DOC-TIERING-PLAN.md` proposal — deleted 2026-07-09,
+git history). Not co-authored by the AI assistant.*
