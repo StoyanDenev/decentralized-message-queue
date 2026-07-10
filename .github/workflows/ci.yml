@@ -1,10 +1,16 @@
 # Determ CI — the push-triggered form of tools/ci_local.sh (same content):
-# build all three binaries + run the FAST=1 suite + the offline doc-coherence
-# guards, on a clean Linux runner and a clean Windows/MSVC runner.
+# build the five binaries (determ, determ-wallet, determ-light,
+# determ-cryptotest, determ-dsf) + run the FAST=1 suite + the offline
+# doc-coherence guards, on a clean Linux runner and a clean Windows/MSVC runner.
 #
-# INERT until this file reaches a GitHub remote with Actions enabled — it was
-# committed as part of the 1a second-platform-gate decision (2026-07-03); the
-# local WSL2 run via tools/ci_local.sh is the primary gate on the dev box.
+# The local WSL2 run via tools/ci_local.sh is the primary gate on the dev box;
+# this workflow is the pushed mirror of it (repo:
+# github.com/StoyanDenev/decentralized-message-queue, Actions enabled).
+#
+# Runner images are PINNED to explicit versions (not *-latest): a rolling
+# runner image is the classic cause of a green->red flip on a no-code (docs)
+# commit, since the toolchain/system packages move underneath the build. Bump
+# these deliberately, not implicitly.
 name: ci
 
 on:
@@ -13,42 +19,78 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Cancel a superseded in-flight run when new commits land on the same ref —
+# a batch push of many commits then only pays for the final state.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+      # Cache the FetchContent-built OpenSSL test-oracle tree (the sole vendored
+      # dependency after the asio deletion / JSON vendoring). Keyed on
+      # CMakeLists.txt so a dependency change invalidates it; a miss just
+      # rebuilds OpenSSL from source (the pre-cache behaviour).
+      - name: Cache OpenSSL (_deps)
+        uses: actions/cache@v4
+        with:
+          path: build-linux/_deps
+          key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-openssl-deps-
       - name: Install python cryptography (vector-gate oracle)
-        run: python3 -m pip install --user cryptography argon2-cffi pynacl
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --user cryptography argon2-cffi pynacl
       - name: Build + FAST + guards
         run: bash tools/ci_local.sh --jobs 4
 
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Cache OpenSSL (_deps)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-openssl-deps-
       - name: Install python cryptography (vector-gate oracle)
-        run: python -m pip install cryptography argon2-cffi pynacl
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install cryptography argon2-cffi pynacl
       - name: Build + FAST + guards
         shell: bash
         run: bash tools/ci_local.sh --jobs 4
 
   # UBSan pass over the consensus surface — the undefined-behavior net for
   # the state_root-fork class (2026-07-03). UBSan is scoped to Determ's own
-  # targets (-DDETERM_UBSAN=ON), so the vendored deps are not instrumented.
+  # targets (-DDETERM_UBSAN=ON), so the vendored OpenSSL is not instrumented.
   # Separate job: Linux/GCC-only.
   ubsan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The UBSan pass compiles the ~14k-line main.cpp at RelWithDebInfo with
     # -fsanitize=undefined AND builds the vendored OpenSSL from source on a clean
     # runner; the first Actions run hit the 90-min wall (SIGTERM/143) before the
-    # build finished. Give it headroom (the dev-box WSL2 run is the fast gate).
+    # build finished. Give it headroom (the dev-box WSL2 run is the fast gate),
+    # and cache the OpenSSL tree so the from-source build is paid once per
+    # CMakeLists change rather than every run.
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+      - name: Cache OpenSSL (_deps, UBSan tree)
+        uses: actions/cache@v4
+        with:
+          path: build-linux-ubsan/_deps
+          key: ${{ runner.os }}-openssl-deps-ubsan-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-openssl-deps-ubsan-
       - name: Install python cryptography (vector-gate oracle)
-        run: python3 -m pip install --user cryptography argon2-cffi pynacl
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --user cryptography argon2-cffi pynacl
       - name: UBSan build + run consensus subcommands
         run: bash tools/ci_local.sh --sanitize --jobs 4
