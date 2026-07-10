@@ -166,6 +166,19 @@ struct GenesisConfig {
     // Genesis-pinned (mutable post-genesis only via A5 PARAM_CHANGE).
     uint64_t                        min_stake{1000};
 
+    // D1: per-deployment CONFIDENTIAL-TX (shielded-pool) master switch.
+    // Default TRUE preserves the §3.22/§3.22b/§3.22c SHIELD / UNSHIELD /
+    // CONFIDENTIAL_TRANSFER accept behaviour. A chain that sets this FALSE
+    // rejects all three tx types at the (authoritative) validator accept-rule
+    // (submit + block validation), so no confidential tx is ever included — a
+    // deployment with no need for the CT layer (or under a regulatory ban on
+    // amount-hiding) turns it off wholesale. Genesis-pinned + consensus-critical:
+    // it is mixed into compute_genesis_hash ONLY when disabled (§ make_genesis_block)
+    // so CT-enabled chains keep byte-identical genesis hashes, while a chain that
+    // differs on the flag computes a DIFFERENT hash — two operators cannot silently
+    // diverge (one accepting a CT tx the other rejects). Immutable post-genesis.
+    bool                            confidential_tx_enabled{true};
+
     // A5 Phase 3: economic policy fields promoted from static constants
     // in params.hpp to genesis-pinned, governance-mutable parameters.
     // Defaults preserve pre-A5 behavior. Backward-compat: pre-Phase-3

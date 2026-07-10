@@ -208,6 +208,10 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         validator_.set_shard_id(cfg_.shard_id);
         validator_.set_committee_region(cfg_.committee_region);
         validator_.set_sharding_mode(cfg_.sharding_mode);
+        // D1: mirror the CT master switch from genesis (authoritative source).
+        // Default true => CT accepted (unchanged); a genesis that disabled it
+        // makes the validator reject SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER.
+        validator_.set_confidential_tx_enabled(gcfg.confidential_tx_enabled);
         // §Q1: keep the validator's freshness gate on the node's injected
         // clock across reconfig too (RealClock default => byte-identical).
         validator_.set_clock(clock_);

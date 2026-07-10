@@ -56,6 +56,12 @@ public:
     //              (R7 will install the apply path).
     void set_sharding_mode(ShardingMode m) { sharding_mode_ = m; }
 
+    // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
+    // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
+    // accepted (unchanged). false = all three rejected at this (authoritative,
+    // submit + block) accept-rule, so no confidential tx is ever included.
+    void set_confidential_tx_enabled(bool e) { confidential_tx_enabled_ = e; }
+
     // A5: governance mode mirrored from genesis. 0 = uncontrolled
     // (PARAM_CHANGE rejected outright); 1 = governed (PARAM_CHANGE
     // validated against keyholder set + threshold over a whitelisted
@@ -150,6 +156,10 @@ private:
     // TimingProfile. Default CURRENT preserves legacy behavior for any
     // call site that constructs BlockValidator without an explicit setter.
     ShardingMode sharding_mode_{ShardingMode::CURRENT};
+    // D1: CT layer master switch, mirrored from GenesisConfig. Default true so
+    // any call site that constructs BlockValidator without the setter keeps the
+    // pre-D1 behaviour (CT accepted).
+    bool         confidential_tx_enabled_{true};
     // A5: governance state mirrored from genesis.
     uint8_t      governance_mode_{0};
     std::vector<PubKey> param_keyholders_{};

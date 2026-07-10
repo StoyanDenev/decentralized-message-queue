@@ -533,6 +533,35 @@ BlockValidator::Result BlockValidator::check_transactions(
             return {false, "Zeroth pool is a pseudo-account; no tx may "
                           "originate from " + std::string(ZEROTH_ADDRESS)};
 
+        // D1: the CONFIDENTIAL-TX master switch. When a deployment disables the
+        // shielded pool at genesis, reject the three confidential tx types here
+        // — the authoritative accept-rule (submit + block validation) — before
+        // any signature/proof work, so no confidential tx ever enters a valid
+        // block. Fail-closed + genesis-pinned, so all nodes agree.
+        if (!confidential_tx_enabled_
+            && (tx.type == TxType::SHIELD
+                || tx.type == TxType::UNSHIELD
+                || tx.type == TxType::CONFIDENTIAL_TRANSFER)) {
+            return {false, "confidential-tx layer is disabled on this chain "
+                           "(genesis confidential_tx_enabled=false); "
+                           "SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER not accepted"};
+        }
+
+        // S-049: reject any tx whose transparent debit (amount + fee) overflows
+        // u64 before it can reach apply. Unchecked, the wrap makes the apply-side
+        // `cost = amount + fee` collapse to ~0, so a zero-balance sender moves
+        // value it never had while the recipient is credited the full amount —
+        // mint-from-nothing (CVE-2010-5139 class), and the A1 supply assertion
+        // is blind to it (mod-2^64, injected delta a multiple of 2^64). This is
+        // the authoritative fail-closed accept-rule; apply re-checks and skips
+        // on overflow (belt-and-suspenders). NOTE: STAKE carries its staked
+        // amount in the payload, not tx.amount; that payload+fee overflow is
+        // caught deterministically at apply — a skipped tx identical on every
+        // node, so no state-root divergence.
+        if (tx.amount > UINT64_MAX - tx.fee)
+            return {false, "tx amount+fee overflows u64 (S-049 mint guard) from: "
+                           + tx.from};
+
         // §3.21: a PQ_TRANSFER carries no Ed25519 `sig` — it is authenticated by
         // its DPQ1 envelope (ML-DSA) bound to the PQ-native `from` address. The
         // shared accept-rule (S-043 one-helper) does the whole auth check; the tx

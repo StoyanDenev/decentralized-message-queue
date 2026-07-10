@@ -1473,14 +1473,30 @@ Additional in-process tests:
                                               not strictly greater); UINT64_MAX
                                               fee naturally rejected (cost
                                               > balance without overflow);
-                                              cost-wraparound throws S-007
-                                              + A9 atomic-apply rollback;
+                                              cost-wraparound SKIPS the tx at
+                                              the S-049 checked debit (no
+                                              throw, no mint, no state change);
                                               multi-tx fee distribution to
                                               3 creators exact-divide (no
                                               dust); empty block fee_pool=0
                                               flows subsidy-only to creators
                                               (accumulated_subsidy unchanged
                                               by absent fee_pool).
+  determ test-value-overflow-mint             S-049 mint guard — the apply path
+                                              never lets amount+fee overflow u64
+                                              mint value from nothing (CVE-2010-
+                                              5139 class). Overflow TRANSFER /
+                                              STAKE / SHIELD skip with no debit +
+                                              nonce NOT advanced; legit TRANSFER
+                                              byte-identical; per-block fee
+                                              accumulation overflow rejects the
+                                              block (checked total_fees throws).
+  determ test-ct-disable-flag                 D1 shielded-pool master switch —
+                                              GenesisConfig.confidential_tx_
+                                              enabled default true is byte-
+                                              invariant; disabling flips the
+                                              genesis hash (S-039) + JSON
+                                              round-trips (absent→true).
   determ test-state-proof-value-hash          Light-client value-encoding
                                               contract — pins that a proof's
                                               value_hash EQUALS the SHA-256 of
@@ -31645,8 +31661,9 @@ int main(int argc, char** argv) {
     // maximum-fee-within-balance (drains sender to zero), fee + amount
     // > balance (apply-time reject via the `cost > balance` check),
     // fee == balance with amount=0 (boundary admit), UINT64_MAX fee
-    // (natural reject via overflowed cost; cost-wraparound rollback
-    // contract), explicit per-creator distribution accounting with
+    // (natural reject via non-wrapping huge cost; cost-wraparound now
+    // SKIPS the tx at the S-049 checked debit — no throw, no mint),
+    // explicit per-creator distribution accounting with
     // exact-divide N=3 (no dust), and empty-block fee_pool = 0
     // (subsidy-only credit). Pins behavior at chain.cpp:742-769
     // (TRANSFER cost gate + total_fees accumulator) and
@@ -31869,21 +31886,22 @@ int main(int argc, char** argv) {
                   "tx was skipped pre-`total_fees +=`");
         }
 
-        // === Scenario 5b: cost-wraparound → S-007 throw + rollback ===
+        // === Scenario 5b: cost-wraparound → S-049 skip (no throw) ===
         //
-        // amount=2, fee=UINT64_MAX-1. cost = 2 + UINT64_MAX - 1 = 0
-        // (mod 2^64). dave=1000; 1000 < 0 is FALSE ⇒ tx admitted.
-        // sender.balance -= 0 (no change); recipient += 2 (would
-        // succeed); total_fees += UINT64_MAX - 1 (succeeds). But at
-        // distribution time, per_creator = UINT64_MAX - 1 and
-        // checked_add_u64(alice.balance, UINT64_MAX-1) overflows
-        // (1000 + UINT64_MAX-1 > UINT64_MAX), throwing S-007. The
-        // apply_transactions catch handler restores the entry-time
-        // snapshot, so all balances are exactly as before the
-        // (failed) append call.
+        // amount=2, fee=UINT64_MAX-1. cost = 2 + (UINT64_MAX-1) overflows u64.
+        // Pre-S-049 this wrapped `cost` to 0, admitted the tx (1000 < 0 false),
+        // debited ~nothing and (in this narrow case) only blew up LATER at
+        // fee-distribution when per_creator = UINT64_MAX-1 overflowed a
+        // creator's credit and threw S-007 — an incidental catch that did NOT
+        // cover the general mint (a modest fee would have minted `amount` to
+        // the recipient silently). S-049 now rejects the overflow at the
+        // debit-side checked add: the tx is SKIPPED (continue) with no throw
+        // and no state change — dave keeps 1000, bob is NOT credited the 2, no
+        // fee accrues. This is strictly stronger than the old distribution-time
+        // trip: it catches EVERY overflowing amount+fee, not just fees large
+        // enough to overflow a creator payout.
         //
-        // 1 assertion that append THROWS + 2 assertions that state is
-        // fully rolled back. Total: 3 assertions for 5b.
+        // 4 assertions: no throw + dave/bob/creators all unchanged (skip).
         {
             Chain c;
             c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/1000)));
@@ -31902,15 +31920,18 @@ int main(int argc, char** argv) {
                 threw = true;
             }
 
-            check(threw,
-                  "(5b) cost wraps to 0 → S-007 overflow at per-creator "
-                  "distribution → append THROWS");
+            check(!threw,
+                  "(5b) cost-wraparound: amount+fee overflow SKIPS the tx at "
+                  "the S-049 checked debit — append does NOT throw");
             check(c.balance("dave") == 1000,
-                  "(5b) Apply rollback: dave balance unchanged after "
-                  "thrown append (A9 atomic-apply contract)");
-            check(c.balance("alice") == 1000 && c.balance("bob") == 500,
-                  "(5b) Apply rollback: alice + bob balances unchanged "
-                  "after thrown append");
+                  "(5b) S-049 skip: dave balance unchanged (no near-zero "
+                  "debit slipped through the wrapped cost gate)");
+            check(c.balance("bob") == 500,
+                  "(5b) S-049 skip: bob NOT credited the amount (the mint "
+                  "vector is closed — tx skipped before any credit)");
+            check(c.balance("alice") == 1000,
+                  "(5b) S-049 skip: creator alice unchanged (no fee accrued "
+                  "from a skipped tx)");
         }
 
         // === Scenario 6: Multi-tx fee distribution across N creators ===
@@ -47053,6 +47074,258 @@ int main(int argc, char** argv) {
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": empty-genesis-edge ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // S-049 regression: the apply path must NEVER let amount+fee overflow u64
+    // mint value from nothing (CVE-2010-5139 class). An attacker picks
+    // amount ~ 2^64-fee so the unchecked `cost = amount + fee` wraps to ~0, the
+    // balance gate passes on a near-zero debit, and the recipient is credited
+    // the FULL amount. The fix rejects/skips the tx at the checked debit on
+    // every value-moving apply site (TRANSFER/PQ_TRANSFER, SHIELD, STAKE,
+    // DAPP_CALL) with NO state change, and the validator refuses it fail-closed.
+    // This test drives the apply path directly (chain.append applies without
+    // sig validation) and pins: overflow -> no mint, no debit, nonce NOT
+    // advanced; the legitimate path is byte-identical; per-block fee
+    // accumulation is overflow-guarded too.
+    if (cmd == "test-value-overflow-mint") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            if (!cond) fail++;
+        };
+        const uint64_t MAXU = UINT64_MAX;
+
+        auto fresh_chain = [](uint64_t alice_bal) {
+            Block g;
+            g.index = 0; g.prev_hash = Hash{}; g.timestamp = 0;
+            g.cumulative_rand = Hash{}; g.creators.clear();
+            GenesisAlloc a; a.domain = "alice"; a.balance = alice_bal; a.stake = 0;
+            g.initial_state.push_back(a);
+            GenesisAlloc b; b.domain = "bob"; b.balance = 0; b.stake = 0;
+            g.initial_state.push_back(b);
+            return Chain(g);
+        };
+        auto base_block = [](Chain& c) {
+            Block tb;
+            tb.index = c.height();
+            tb.prev_hash = c.head_hash();
+            tb.timestamp = 1;
+            tb.cumulative_rand = Hash{};
+            return tb;
+        };
+
+        // === Scenario 1: TRANSFER amount+fee overflow -> no mint ===
+        {
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            Transaction tx;
+            tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+            tx.amount = MAXU - 4;   // amount + fee(10) overflows u64
+            tx.fee = 10;
+            tx.nonce = chain.next_nonce("alice");
+            tx.payload = {};
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            chain.append(tb);
+            check(chain.balance("bob") == 0,
+                  "(1) TRANSFER overflow: recipient NOT credited (no mint)");
+            check(chain.balance("alice") == 100,
+                  "(1) TRANSFER overflow: sender NOT debited (cost did not wrap)");
+            check(chain.next_nonce("alice") == 0,
+                  "(1) TRANSFER overflow: tx skipped, sender nonce NOT advanced");
+        }
+
+        // === Scenario 2: legitimate TRANSFER still applies (byte-invariant) ===
+        {
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            Transaction tx;
+            tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+            tx.amount = 25; tx.fee = 0;
+            tx.nonce = chain.next_nonce("alice");
+            tx.payload = {};
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            chain.append(tb);
+            check(chain.balance("alice") == 75 && chain.balance("bob") == 25
+                      && chain.next_nonce("alice") == 1,
+                  "(2) Legit TRANSFER (no overflow): applies unchanged "
+                  "(alice=75, bob=25, nonce=1) — fix is byte-invariant for "
+                  "the normal path");
+        }
+
+        // === Scenario 3: STAKE amount+fee overflow -> no free stake ===
+        // STAKE carries its staked amount in an 8-byte LE payload; free stake
+        // would be free consensus weight, so this is the highest-value site.
+        {
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            uint64_t sv = MAXU - 4;               // payload amount; +fee(10) overflows
+            std::vector<uint8_t> pl(8);
+            for (int i = 0; i < 8; ++i) pl[i] = uint8_t((sv >> (8 * i)) & 0xFF);
+            Transaction tx;
+            tx.type = TxType::STAKE; tx.from = "alice"; tx.to = "";
+            tx.amount = 0; tx.fee = 10;
+            tx.nonce = chain.next_nonce("alice");
+            tx.payload = pl;
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            chain.append(tb);
+            check(chain.stake("alice") == 0,
+                  "(3) STAKE overflow: no stake minted (locked weight stays 0)");
+            check(chain.balance("alice") == 100 && chain.next_nonce("alice") == 0,
+                  "(3) STAKE overflow: balance unchanged + nonce NOT advanced "
+                  "(tx skipped before any state mutation)");
+        }
+
+        // === Scenario 4: SHIELD amount+fee overflow -> no phantom note ===
+        // The checked debit runs BEFORE the payload/proof checks, so a dummy
+        // payload still exercises the guard; the phantom note (which UNSHIELD
+        // would later withdraw) is never created.
+        {
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            Transaction tx;
+            tx.type = TxType::SHIELD; tx.from = "alice"; tx.to = "";
+            tx.amount = MAXU - 4; tx.fee = 10;
+            tx.nonce = chain.next_nonce("alice");
+            tx.payload = {};                       // dummy; never reached
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            chain.append(tb);
+            check(chain.balance("alice") == 100 && chain.next_nonce("alice") == 0,
+                  "(4) SHIELD overflow: sender not debited + nonce not advanced "
+                  "(no phantom confidential note credited to the pool)");
+        }
+
+        // === Scenario 5: per-block fee accumulation overflow -> block rejected ===
+        // Two legitimately-payable fees whose sum exceeds u64: the checked
+        // `total_fees += tx.fee` throws, so the whole block is rejected rather
+        // than silently wrapping the creator payout (deflation).
+        {
+            Block g;
+            g.index = 0; g.prev_hash = Hash{}; g.timestamp = 0;
+            g.cumulative_rand = Hash{}; g.creators.clear();
+            GenesisAlloc a; a.domain = "alice"; a.balance = MAXU; a.stake = 0;
+            GenesisAlloc b; b.domain = "bob"; b.balance = MAXU; b.stake = 0;
+            g.initial_state.push_back(a);
+            g.initial_state.push_back(b);
+            Chain chain(g);
+            Block tb = base_block(chain);
+            Transaction t1;
+            t1.type = TxType::TRANSFER; t1.from = "alice"; t1.to = "carol";
+            t1.amount = 0; t1.fee = MAXU - 1; t1.nonce = chain.next_nonce("alice");
+            t1.payload = {}; t1.hash = t1.compute_hash();
+            Transaction t2;
+            t2.type = TxType::TRANSFER; t2.from = "bob"; t2.to = "carol";
+            t2.amount = 0; t2.fee = 5; t2.nonce = chain.next_nonce("bob");
+            t2.payload = {}; t2.hash = t2.compute_hash();
+            tb.transactions.push_back(t1);
+            tb.transactions.push_back(t2);
+            bool threw = false;
+            try { chain.append(tb); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "(5) Fee accumulation overflow: block whose per-tx fees sum "
+                  "past 2^64 is rejected (checked total_fees throws)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": value-overflow-mint ", stdout);
+        std::fputs(fail == 0 ? "all assertions (S-049)" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // D1: the confidential-tx (shielded-pool) master switch. A deployment can
+    // disable SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER at genesis via
+    // GenesisConfig.confidential_tx_enabled=false. The flag is genesis-pinned:
+    // default (true) is byte-invariant (no hash mixin, existing goldens hold);
+    // disabling mixes a domain-separated tag so the genesis hash DIFFERS —
+    // S-039 consensus-safety (agreement on the flag ⟺ agreement on the hash).
+    // The validator then rejects the three confidential tx types fail-closed
+    // (authoritative accept-rule); this test pins the genesis-hash + json half
+    // (the deterministic surface). The reject path shares the accept-rule loop
+    // with the A5 governance / D1-disable guards and is exercised end-to-end by
+    // a CT-disabled cluster.
+    if (cmd == "test-ct-disable-flag") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            if (!cond) fail++;
+        };
+
+        auto base_cfg = []() {
+            GenesisConfig c;
+            c.chain_id = "ct-disable-flag-test";
+            GenesisCreator gc;
+            gc.domain = "alice";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x11 + i);
+            gc.initial_stake = 1000;
+            c.initial_creators.push_back(gc);
+            c.initial_balances.push_back({"alice", uint64_t{1000}});
+            return c;
+        };
+
+        // Default (enabled) is deterministic.
+        GenesisConfig enabled = base_cfg();
+        check(enabled.confidential_tx_enabled == true,
+              "(1) GenesisConfig default: confidential_tx_enabled == true");
+        Hash h_en_1 = make_genesis_block(enabled).compute_hash();
+        Hash h_en_2 = make_genesis_block(enabled).compute_hash();
+        check(h_en_1 == h_en_2,
+              "(1) enabled genesis hash is deterministic across builds");
+
+        // Disabling flips the flag AND the genesis hash (S-039 safety), and is
+        // itself deterministic.
+        GenesisConfig disabled = base_cfg();
+        disabled.confidential_tx_enabled = false;
+        Hash h_dis_1 = make_genesis_block(disabled).compute_hash();
+        Hash h_dis_2 = make_genesis_block(disabled).compute_hash();
+        check(h_dis_1 == h_dis_2,
+              "(2) disabled genesis hash is deterministic across builds");
+        check(h_en_1 != h_dis_1,
+              "(2) disabling confidential_tx flips the genesis hash "
+              "(S-039: agreement on the flag ⟺ agreement on the hash)");
+
+        // JSON round-trip: default omits the key (byte-invariant config files);
+        // disabled emits confidential_tx_enabled=false and survives reload.
+        {
+            auto j_en  = enabled.to_json();
+            auto j_dis = disabled.to_json();
+            check(!j_en.contains("confidential_tx_enabled"),
+                  "(3) to_json omits the key when enabled (default → absent, "
+                  "existing genesis files unchanged)");
+            check(j_dis.contains("confidential_tx_enabled")
+                      && j_dis["confidential_tx_enabled"].get<bool>() == false,
+                  "(3) to_json emits confidential_tx_enabled=false when disabled");
+            GenesisConfig round = GenesisConfig::from_json(j_dis);
+            check(round.confidential_tx_enabled == false,
+                  "(3) from_json round-trips the disabled flag");
+            GenesisConfig round_en = GenesisConfig::from_json(j_en);
+            check(round_en.confidential_tx_enabled == true,
+                  "(3) from_json defaults the flag to true when the key is "
+                  "absent (backward-compatible load of pre-D1 genesis files)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": ct-disable-flag ", stdout);
+        std::fputs(fail == 0 ? "all assertions (D1)" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
         return fail == 0 ? 0 : 1;

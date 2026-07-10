@@ -65,7 +65,7 @@ json GenesisConfig::to_json() const {
     }
     json keyholders = json::array();
     for (auto& k : param_keyholders) keyholders.push_back(to_hex(k));
-    return {
+    json out = {
         {"chain_id",                 chain_id},
         {"genesis_message",          genesis_message},
         {"m_creators",               m_creators},
@@ -96,6 +96,10 @@ json GenesisConfig::to_json() const {
         {"initial_creators",         creators},
         {"initial_balances",         balances}
     };
+    // D1: emit the CT-disable flag ONLY when set (disabled), so a CT-enabled
+    // (default) chain's genesis JSON stays byte-identical to pre-flag files.
+    if (!confidential_tx_enabled) out["confidential_tx_enabled"] = false;
+    return out;
 }
 
 GenesisConfig GenesisConfig::from_json(const json& j) {
@@ -173,6 +177,9 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{1});  // S-045: default 1 (was 5)
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
     c.min_stake                = j.value("min_stake",                uint64_t{1000});
+    // D1: CT layer enabled by default; absent key -> true (pre-flag genesis
+    // files load byte-identically as CT-enabled).
+    c.confidential_tx_enabled  = j.value("confidential_tx_enabled",  true);
     c.suspension_slash         = j.value("suspension_slash",         uint64_t{10});
     c.unstake_delay            = j.value("unstake_delay",            uint64_t{1000});
     c.merge_threshold_blocks   = j.value("merge_threshold_blocks",   uint32_t{100});
@@ -420,6 +427,17 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         rb.append(static_cast<uint64_t>(cfg.merge_threshold_blocks));
         rb.append(static_cast<uint64_t>(cfg.revert_threshold_blocks));
         rb.append(static_cast<uint64_t>(cfg.merge_grace_blocks));
+    }
+    // D1: the CONFIDENTIAL-TX disable flag is consensus-critical — two operators
+    // who differ on it must NOT compute the same genesis_hash (one accepts a
+    // SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER the other rejects → a silent fork).
+    // Bind it with the same "mix only when non-default" idiom as the fields
+    // above so CT-ENABLED (default) chains keep byte-identical genesis hashes,
+    // while a DISABLED chain mixes a distinct domain-tagged marker → a distinct
+    // hash. Presence of the tag (vs its absence) is the whole signal, so a bare
+    // tag suffices; domain-separated so it can never alias an adjacent mix.
+    if (!cfg.confidential_tx_enabled) {
+        rb.append(std::string("DTM-genesis-ct-disabled-v1"));
     }
     // S-039 closure: bind ALL consensus-critical operational parameters
     // into the genesis hash UNCONDITIONALLY. Pre-fix these governed

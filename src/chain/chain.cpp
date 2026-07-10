@@ -786,8 +786,12 @@ void Chain::apply_transactions(const Block& b) {
 
     auto charge_fee = [&](AccountState& acct, uint64_t fee) {
         if (acct.balance < fee) return false;
+        // S-049: keep the fee-only debit path's total_fees accumulation on the
+        // same checked add as the value-moving cases (throw -> block rejected
+        // rather than a silently-wrapped creator payout). Byte-invariant for
+        // any block whose retained fees sum < 2^64.
+        if (!checked_add_u64(total_fees, fee, &total_fees)) return false;
         acct.balance -= fee;
-        total_fees   += fee;
         return true;
     };
 
@@ -801,7 +805,15 @@ void Chain::apply_transactions(const Block& b) {
         switch (tx.type) {
         case TxType::PQ_TRANSFER:   // §3.21: identical apply semantics to TRANSFER
         case TxType::TRANSFER: {
-            uint64_t cost = tx.amount + tx.fee;
+            // S-049: amount+fee must not overflow u64. Unchecked, an attacker
+            // picks amount ~ 2^64-fee so `cost` wraps to ~0, the balance gate
+            // passes on a near-zero debit, yet the recipient is credited the
+            // full amount below -- mint-from-nothing (CVE-2010-5139 class). The
+            // A1 supply assertion is blind to it (mod-2^64, injected delta is a
+            // multiple of 2^64). Skip on overflow -> no state change, matching
+            // the balance-too-low `continue` immediately after.
+            uint64_t cost;
+            if (!checked_add_u64(tx.amount, tx.fee, &cost)) continue;
             if (sender.balance < cost) continue;
             sender.balance -= cost;
             // rev.9 B3: cross-shard TRANSFER debits sender locally; the
@@ -825,7 +837,9 @@ void Chain::apply_transactions(const Block& b) {
                 // Fee stays here (accrues to creators below).
                 block_outbound += tx.amount;
             }
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             sender.next_nonce++;
             break;
         }
@@ -836,7 +850,12 @@ void Chain::apply_transactions(const Block& b) {
             // Belt-and-suspenders re-verify (the block validator is the
             // authoritative accept-rule); skip on any failure, like TRANSFER does.
             uint64_t A = tx.amount;
-            uint64_t cost = A + tx.fee;
+            // S-049: A+fee overflow would wrap `cost` to ~0 and mint a phantom
+            // confidential note of value A (accumulated_shielded_ += A below),
+            // later withdrawn as a near-2^64 transparent balance via UNSHIELD.
+            // Skip on overflow (no state change).
+            uint64_t cost;
+            if (!checked_add_u64(A, tx.fee, &cost)) continue;
             if (sender.balance < cost) continue;
             if (tx.payload.size() != 98) continue;
             if (determ_shield_verify(tx.payload.data(), tx.payload.size(), A) != 0) continue;
@@ -844,7 +863,9 @@ void Chain::apply_transactions(const Block& b) {
             __ensure_shielded_pool();
             if (shielded_pool_.count(ckey)) continue;           // duplicate commitment
             sender.balance -= cost;
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             shielded_pool_[ckey] = height;                      // add unspent note
             accumulated_shielded_ += A;                         // A left the transparent live sum
             sender.next_nonce++;
@@ -876,9 +897,13 @@ void Chain::apply_transactions(const Block& b) {
             Hash ctx = unshield_spend_ctx_hash(tx.from, tx.to, tx.nonce, A);
             if (determ_unshield_verify(tx.payload.data(), tx.payload.size(),
                                        A, ctx.data()) != 0) continue;
-            // Pedersen binding guarantees A equals the amount C was SHIELDed with,
-            // so accumulated_shielded_ >= A and this cannot underflow (A1 would
-            // throw if it ever did).
+            // Pedersen binding guarantees A equals the amount C was SHIELDed
+            // with, and the SHIELD debit is S-049-checked so accumulated_shielded_
+            // is credited exactly A on the way in — hence accumulated_shielded_ >= A
+            // here and the subtraction cannot underflow. (Note: the A1 supply
+            // assertion is a mod-2^64 identity — it flags non-2^64-multiple drift
+            // but is NOT a general underflow catch; the binding + checked debit are
+            // the real guarantee, not A1.)
             shielded_pool_.erase(note);
             accumulated_shielded_ -= A;
             uint64_t credit = A - tx.fee;
@@ -888,7 +913,9 @@ void Chain::apply_transactions(const Block& b) {
                     "S-007: UNSHIELD credit would overflow recipient balance (to="
                     + tx.to + ")");
             }
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             sender.next_nonce++;
             break;
         }
@@ -931,9 +958,15 @@ void Chain::apply_transactions(const Block& b) {
             for (auto& k : in_keys)  shielded_pool_.erase(k);
             for (auto& k : out_keys) shielded_pool_[k] = height;
             // Pedersen binding: Σv_in (== the consumed notes' shield values) =
-            // Σv_out + fee >= fee, so accumulated_shielded_ >= fee -> no underflow.
+            // Σv_out + fee >= fee, and every consumed note was credited into
+            // accumulated_shielded_ at its S-049-checked SHIELD, so
+            // accumulated_shielded_ >= fee here and the subtraction cannot
+            // underflow. (A1 is a mod-2^64 identity, not a general underflow
+            // catch — the binding + checked debits are the guarantee.)
             accumulated_shielded_ -= bundle_fee;
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             sender.next_nonce++;
             break;
         }
@@ -1060,12 +1093,18 @@ void Chain::apply_transactions(const Block& b) {
             uint64_t amount = 0;
             for (int i = 0; i < 8; ++i)
                 amount |= uint64_t(tx.payload[i]) << (8 * i);
-            uint64_t cost = amount + tx.fee;
+            // S-049: amount+fee overflow would wrap `cost` to ~0 and mint free
+            // stake (locked consensus weight) from a zero balance -- worse than
+            // a plain transfer, since stake is committee power. Skip on overflow.
+            uint64_t cost;
+            if (!checked_add_u64(amount, tx.fee, &cost)) continue;
             if (sender.balance < cost) continue;
             sender.balance -= cost;
             __ensure_stakes();
             stakes_[tx.from].locked += amount;
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             sender.next_nonce++;
             break;
         }
@@ -1409,7 +1448,9 @@ void Chain::apply_transactions(const Block& b) {
             }
             // All structural checks pass — apply the debit/credit/
             // nonce. Same semantics as TRANSFER's same-shard leg.
-            uint64_t cost = tx.amount + tx.fee;
+            // S-049: amount+fee overflow -> skip (no mint). See TRANSFER above.
+            uint64_t cost;
+            if (!checked_add_u64(tx.amount, tx.fee, &cost)) continue;
             if (sender.balance < cost) continue;  // skip whole tx
             sender.balance -= cost;
             auto& rcv = accounts_[tx.to].balance;
@@ -1418,7 +1459,9 @@ void Chain::apply_transactions(const Block& b) {
                     "S-007: DAPP_CALL credit would overflow recipient "
                     "balance (to=" + tx.to + ")");
             }
-            total_fees += tx.fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
             sender.next_nonce++;
             break;
         }
