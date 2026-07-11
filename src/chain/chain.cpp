@@ -1782,6 +1782,17 @@ void Chain::revert_head() {
     restore_state_snapshot(std::move(*prev_head_snapshot_));
     prev_head_snapshot_.reset();
     blocks_.pop_back();
+    // A4.2 (adversarial-review finding 8): keep the append-only block store
+    // consistent after a reorg. persisted_count_ counts blocks written to the
+    // store; left > blocks_.size() the next save_incremental writes NOTHING
+    // (its loop is [persisted_count_, size)) while the manifest names the new
+    // head — a restart would then load the STALE reverted block and throw the
+    // head_hash-mismatch guard. Clamping forces save_incremental to REWRITE the
+    // tail file for the block that next occupies this index (the reorg winner).
+    // Save-thread-confined field, but revert runs under the node's unique
+    // state_mutex_, mutually exclusive with the save worker's shared_lock.
+    if (persisted_count_ > blocks_.size())
+        persisted_count_ = blocks_.size();
     publish_committed_view();
 }
 

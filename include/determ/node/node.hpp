@@ -783,6 +783,26 @@ private:
     void listen_and_connect();
     void arm_startup_grace();
 
+    // A4 / S-048 (BoundedReorgDesign.md A4.2): evaluate a same-height
+    // competitor against the current head; if Chain::resolve_fork prefers it,
+    // perform the depth-1 reorg (revert_head → validate against H-1 → append
+    // the winner, or restore the old head if the competitor fails validation).
+    // Called under state_mutex_ from apply_block_locked's stale-index branch,
+    // only for b.index == height()-1. Fail-closed at every step: structural
+    // gates (same parent, distinct content, resolve_fork winner, revertible
+    // head) run BEFORE any state mutation; a validation failure after the
+    // revert re-applies the old head verbatim (deterministic apply — it
+    // already applied once). All honest peers run the same deterministic
+    // resolve_fork, so they converge on the same winner.
+    void maybe_reorg_to_locked(const chain::Block& incoming);
+
+    // A4.2: the post-append bookkeeping shared by the normal accept path and
+    // the reorg path — factored out of apply_block_locked VERBATIM (same
+    // order) so the normal path stays byte-identical: mempool drop + stale-
+    // nonce sweep, registry rebuild, round/timer reset, equivocation-evidence
+    // + inbound-receipt pruning, async save, subscriber fan-out, accept log.
+    void post_append_bookkeeping_locked(const chain::Block& b);
+
     // S-047: one retry tick's worth of idempotent round-state
     // re-broadcast (abort-event tail + own contrib + own block sig).
     // Every consensus message was originally a ONE-SHOT broadcast; a

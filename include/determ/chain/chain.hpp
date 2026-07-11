@@ -528,9 +528,11 @@ public:
     // S-021 tamper gate as the legacy format: load recomputes the head
     // digest after replay and rejects a mismatch.
     //
-    // Reorg hook (A4/S-048, future): the store is append-only because sync
-    // is append-only today; the bounded head-reorg increment must rewrite
-    // the tail file + manifest and reset persisted_count_.
+    // Reorg hook (A4/S-048): DONE (A4.2). revert_head() clamps persisted_count_
+    // down to blocks_.size(), so the next save_incremental REWRITES the tail
+    // block file for the reorg winner + the manifest — a reorg-then-restart
+    // reloads the winner, not the stale reverted block (test-chain-revert-head
+    // persistence case). The store is otherwise append-only.
     void        save_incremental(const std::string& path) const;
 
     // rev.9 B6.basic: serialize the chain's CURRENT STATE (accounts,

@@ -815,6 +815,14 @@ Additional in-process tests:
                                               logical-time drive, SCHEDULE
                                               determinism (block count + vnow;
                                               content byte-replay needs the RNG seam)
+  determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
+                                              wiring + depth-1 head reorg. A
+                                              non-producing follower is fed a
+                                              producer block + a same-height
+                                              competitor over real gossip and
+                                              reorgs to the resolve_fork winner
+                                              (WINNER/REPLAY/LOSER/INVALID);
+                                              deterministic byte-replay
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
                                               process: 5 real Nodes over an
                                               injected VirtualTransport (one
@@ -26977,6 +26985,220 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
+
+    // A4 / S-048 (BoundedReorgDesign.md A4.3): the DETERMINISTIC S-048 reorg
+    // reproduction — the gate the pre-launch register names for the A4.2 node
+    // wiring. The node under test is a NON-PRODUCING FOLLOWER (its domain is not
+    // a genesis creator, so it never self-produces — there is NO round cascade,
+    // so injection is race-free and the whole scenario replays byte-for-byte).
+    // A separate producer node (the sole creator) makes ONE real block at the
+    // head height deterministically (VirtualClock + SeededRng); the competitor
+    // is re-signed from it with the PRODUCTION formulas in the S-048 abort-race
+    // shape (same creator + same parent, a different committed proposer_time).
+    // The follower is fed the producer's block then the competitor over the REAL
+    // gossip → on_block → apply_block_locked path, and must reorg to
+    // Chain::resolve_fork's winner (or keep its head when the competitor loses
+    // the tie-break or is invalid). Scenarios: WINNER (reorg), REPLAY (identical-
+    // seed rerun byte-identical), LOSER (head kept), INVALID (garbage Phase-1 sig
+    // ⇒ validation after the revert fails ⇒ old head restored, fail-closed).
+    if (cmd == "test-node-reorg-s048") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool c, const char* m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        constexpr int64_t kT0 = 1700000000;
+        std::error_code fec;
+
+        crypto::NodeKey keyP = crypto::generate_node_key();   // producer / creator
+        crypto::NodeKey keyF = crypto::generate_node_key();   // follower (non-creator)
+
+        auto write_genesis = [&](const fs::path& dir) -> std::string {
+            chain::GenesisConfig g;
+            g.chain_id      = "reorg-s048";
+            g.m_creators    = 1;
+            g.k_block_sigs  = 1;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            chain::GenesisCreator gc;
+            gc.domain = "prod"; gc.ed_pub = keyP.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            const std::string gp = (dir / "genesis.json").string();
+            g.save(gp);
+            return gp;
+        };
+        auto uniq = [&](const std::string& tag) {
+            return fs::temp_directory_path() /
+                ("determ-reorg-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+        };
+
+        // Produce ONE real block at height 1, deterministically (SeededRng).
+        auto produce_block1 = [&](uint64_t seed) -> chain::Block {
+            fs::path dir = uniq("prod");
+            fs::remove_all(dir, fec); fs::create_directories(dir);
+            const std::string gp = write_genesis(dir);
+            node::Config cfg;
+            cfg.domain="prod"; cfg.data_dir=(dir/"prod").string();
+            cfg.listen_port=7663; cfg.key_path=(dir/"prod.key").string();
+            cfg.chain_path=(dir/"prod"/"chain.json").string(); cfg.genesis_path=gp;
+            cfg.m_creators=1; cfg.k_block_sigs=1; cfg.log_quiet=true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(keyP, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            auto tr = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vc(kT0);
+            crypto::SeededRng rng(seed);
+            auto node = std::make_unique<node::Node>(cfg, vc, loop.get(), tr.get(), rng);
+            node->start_external();
+            auto height = [&] { return node->rpc_status()["height"].get<uint64_t>(); };
+            int guard = 0;
+            while (height() < 2 && guard++ < 2000000) {
+                if (loop->run_ready(64) == 0 && !loop->advance_to_next_timer()) break;
+            }
+            chain::Block b1 = chain::Block::from_json(node->rpc_block(1));
+            node->stop(); node.reset(); tr.reset(); loop.reset();
+            fs::remove_all(dir, fec);
+            return b1;
+        };
+
+        // Re-sign a same-height competitor from a produced block: bump the
+        // committed proposer_time (≤30s to stay in the validator window) and
+        // rebuild BOTH the Phase-1 commit sig (S-043: binds proposer_time) and
+        // the block-digest sig. Grind delta until resolve_fork picks the wanted
+        // side. corrupt_sig garbles the commit sig (structural winner, invalid).
+        auto craft = [&](const chain::Block& base, bool want_winner,
+                         bool corrupt_sig, bool& ok) -> chain::Block {
+            ok = false; chain::Block out;
+            auto vr = [](const std::vector<Hash>& v, size_t i) {
+                return i < v.size() ? v[i] : Hash{};
+            };
+            for (uint64_t delta = 1; delta <= 30 && !ok; ++delta) {
+                chain::Block c = base;
+                c.creator_proposer_times[0] += delta;
+                c.timestamp = c.creator_proposer_times[0];   // median of K=1
+                Hash commit = node::make_contrib_commitment(
+                    c.index, c.prev_hash, c.creator_tx_lists[0], c.creator_dh_inputs[0],
+                    vr(c.creator_view_eq_roots,0), vr(c.creator_view_abort_roots,0),
+                    vr(c.creator_view_inbound_roots,0), c.creator_proposer_times[0]);
+                c.creator_ed_sigs[0] = crypto::sign(keyP, commit.data(), commit.size());
+                if (corrupt_sig) c.creator_ed_sigs[0][0] ^= 0xFF;
+                Hash digest = node::compute_block_digest(c);
+                c.creator_block_sigs[0] = crypto::sign(keyP, digest.data(), digest.size());
+                const chain::Block& w = chain::Chain::resolve_fork(base, c);
+                if ((&w == &c) == want_winner) { out = c; ok = true; }
+            }
+            return out;
+        };
+
+        struct FollowResult { bool accepted=false; bool reorged=false; Hash head{}; };
+
+        // The node under test: a non-creator follower fed block1 then comp.
+        auto run_follower = [&](const chain::Block& block1,
+                                const chain::Block& comp) -> FollowResult {
+            FollowResult r;
+            fs::path dir = uniq("foll");
+            fs::remove_all(dir, fec); fs::create_directories(dir);
+            const std::string gp = write_genesis(dir);
+            node::Config cfg;
+            cfg.domain="follower"; cfg.data_dir=(dir/"foll").string();
+            cfg.listen_port=7664; cfg.key_path=(dir/"foll.key").string();
+            cfg.chain_path=(dir/"foll"/"chain.json").string(); cfg.genesis_path=gp;
+            cfg.m_creators=1; cfg.k_block_sigs=1; cfg.log_quiet=true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(keyF, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            auto tr = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vc(kT0);   // follower doesn't produce → RealRng ok
+            auto node = std::make_unique<node::Node>(cfg, vc, loop.get(), tr.get());
+            node->start_external();
+            auto height = [&] { return node->rpc_status()["height"].get<uint64_t>(); };
+            auto peers  = [&] { return node->rpc_status()["peer_count"].get<uint64_t>(); };
+            // The follower never self-produces, so ready-work drains to empty.
+            auto drain = [&] { int g=0; while (loop->run_ready(64) > 0 && g++ < 200000) {} };
+
+            VirtualTransport pt(*loop, vnet);
+            GossipNet peer(pt);
+            peer.set_log_quiet(true);
+            peer.set_hello("prod", 1);
+            peer.connect("127.0.0.1", cfg.listen_port);
+            { int g=0; while (peers() < 1 && g++ < 200000) {
+                if (loop->run_ready(64) == 0 && !loop->advance_to_next_timer()) break; } }
+
+            peer.broadcast(net::make_block(block1)); drain();
+            r.accepted = (height() == 2);
+
+            peer.broadcast(net::make_block(comp)); drain();
+            auto hb = chain::Block::from_json(node->rpc_block(height() - 1));
+            r.head = hb.compute_hash();
+            r.reorged = (r.head == comp.compute_hash()) && height() == 2;
+
+            node->stop(); node.reset(); tr.reset(); loop.reset();
+            fs::remove_all(dir, fec);
+            return r;
+        };
+
+        // ── Scenario 1: WINNER — the deterministic S-048 reorg ──────────────
+        chain::Block b1 = produce_block1(42);
+        bool ok_w = false;
+        chain::Block win = craft(b1, /*want_winner=*/true, false, ok_w);
+        check(ok_w,
+              "crafted a validly-signed same-height competitor that WINS "
+              "resolve_fork (same creator + parent, different committed time)");
+        FollowResult s1 = run_follower(b1, win);
+        check(s1.accepted,
+              "follower accepted the producer's block at the head height "
+              "(normal gossip → on_block → validate → append)");
+        check(s1.reorged,
+              "S-048 REORG: the follower replaced its head with the resolve_fork "
+              "winner at the SAME height (depth-1, via the real gossip path)");
+
+        // ── Scenario 2: REPLAY — byte-identical repro (the register's gate) ─
+        chain::Block b1b = produce_block1(42);
+        check(b1b.compute_hash() == b1.compute_hash(),
+              "DETERMINISTIC producer: an identical-seed rerun makes the "
+              "byte-identical base block (SeededRng closes the RNG seam)");
+        bool ok_w2 = false;
+        chain::Block win2 = craft(b1b, true, false, ok_w2);
+        FollowResult s2 = run_follower(b1b, win2);
+        check(ok_w2 && win2.compute_hash() == win.compute_hash()
+                  && s2.reorged && s2.head == s1.head,
+              "DETERMINISTIC repro: the whole fork + reorg replays IDENTICALLY "
+              "on the identical seed (replay-twice-identical)");
+
+        // ── Scenario 3: LOSER — our head wins, competitor dropped ───────────
+        bool ok_l = false;
+        chain::Block los = craft(b1, /*want_winner=*/false, false, ok_l);
+        FollowResult s3 = run_follower(b1, los);
+        check(ok_l && s3.accepted && !s3.reorged
+                  && s3.head == b1.compute_hash(),
+              "LOSER competitor (resolve_fork prefers the current head) is "
+              "dropped — no reorg, head unchanged");
+
+        // ── Scenario 4: INVALID winner — fail-closed restore ────────────────
+        bool ok_i = false;
+        chain::Block inv = craft(b1, /*want_winner=*/true, /*corrupt_sig=*/true, ok_i);
+        FollowResult s4 = run_follower(b1, inv);
+        check(ok_i && s4.accepted && !s4.reorged
+                  && s4.head == b1.compute_hash(),
+              "INVALID competitor (wins the structural tie-break but carries a "
+              "garbage Phase-1 sig) is REJECTED after the revert and the old head "
+              "is restored verbatim (fail-closed)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": node-reorg-s048 "
+                  << (fail == 0 ? "all assertions (A4.2+A4.3)" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
     // the stake-lifecycle complement to STAKE (covered in
     // test-chain-apply-block). DEREGISTER sets a randomized
@@ -32920,6 +33142,44 @@ int main(int argc, char** argv) {
             c.revert_head();
             check(!c.has_revertible_head(),
                   "has_revertible_head() == false after revert (snapshot consumed)");
+        }
+
+        // === persistence after reorg (A4.2 review finding 8): save → reorg →
+        //     save → RELOAD must yield the WINNER tail, not the stale reverted
+        //     block. Without the persisted_count_ clamp in revert_head, the
+        //     second save_incremental writes nothing (its range is empty) while
+        //     the manifest names the new head, so load() would replay the stale
+        //     tail and throw the head_hash-mismatch guard. ===
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-revert-persist-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, ec); fs::create_directories(dir);
+            const std::string path = (dir / "chain.json").string();
+
+            Chain c;
+            c.append(make_genesis_block(cfg));   // h1 genesis
+            add_transfer(c, 1, 100, 0);          // h2 block1
+            add_transfer(c, 2, 50, 1);           // h3 block2 (the reverted head)
+            c.save_incremental(path);            // store through block2
+            const Hash reverted_head = c.head_hash();
+
+            c.revert_head();                     // back to h2
+            add_transfer(c, 2, 70, 1);           // h3' block2' (the winner: distinct)
+            const Hash winner_head = c.head_hash();
+            c.save_incremental(path);            // must REWRITE the tail (clamp)
+
+            Chain reloaded = Chain::load(path);
+            check(reloaded.height() == 3
+                      && reloaded.head_hash() == winner_head
+                      && reloaded.head_hash() != reverted_head,
+                  "persistence after reorg: reload yields the WINNER tail, not the "
+                  "stale reverted block (persisted_count_ clamp rewrites the tail "
+                  "file + manifest — no restart head-hash-mismatch)");
+            fs::remove_all(dir, ec);
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

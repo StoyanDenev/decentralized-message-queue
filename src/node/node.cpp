@@ -2017,6 +2017,12 @@ void Node::apply_block_locked(const chain::Block& b) {
                 }
             }
         }
+        // A4 / S-048: the HEAD height (and only the head height — depth-1) is
+        // reorg-eligible. A competitor at b.index == height()-1 that shares
+        // the head's parent and wins Chain::resolve_fork replaces the head;
+        // everything else in this branch stays a duplicate/stale drop.
+        if (chain_.height() >= 2 && b.index == chain_.height() - 1)
+            maybe_reorg_to_locked(b);
         return;
     }
 
@@ -2028,7 +2034,13 @@ void Node::apply_block_locked(const chain::Block& b) {
     }
 
     chain_.append(b);
+    post_append_bookkeeping_locked(b);
+}
 
+// A4.2: the post-append bookkeeping shared by the normal accept path and the
+// reorg path — factored VERBATIM out of apply_block_locked (same order), so
+// the normal path is byte-identical. See the decl comment in node.hpp.
+void Node::post_append_bookkeeping_locked(const chain::Block& b) {
     // Drop applied txs from the mempool, keyed by both indices.
     for (auto& tx : b.transactions) {
         tx_store_.erase(tx.hash);
@@ -2145,6 +2157,89 @@ void Node::apply_block_locked(const chain::Block& b) {
     }
 
     check_if_selected();
+}
+
+// A4 / S-048 (BoundedReorgDesign.md A4.2): same-height fork choice + depth-1
+// head reorg. Precondition (enforced by the caller): b.index == height()-1
+// and height() >= 2. Called under state_mutex_.
+void Node::maybe_reorg_to_locked(const chain::Block& incoming) {
+    // ── Structural gates (NO state mutation) ────────────────────────────────
+    // (1) A genuine same-height fork shares the head's PARENT. Anything else
+    //     is a stale/foreign block — drop (the pre-A4 behavior).
+    const chain::Block& cur = chain_.head();
+    if (incoming.prev_hash != cur.prev_hash) return;
+    // (2) Distinct content — a byte-identical duplicate is not a fork.
+    const Hash cur_hash = cur.compute_hash();
+    const Hash inc_hash = incoming.compute_hash();
+    if (cur_hash == inc_hash) return;
+    // (3) Deterministic winner (S-029 ranking: heaviest sig set → fewer
+    //     abort_events → smallest block hash). Every honest peer evaluates the
+    //     SAME pure function of the two blocks, so all converge on one winner
+    //     regardless of arrival order. If our head wins, keep it.
+    const chain::Block& winner = chain::Chain::resolve_fork(cur, incoming);
+    if (&winner != &incoming) return;
+    // (4) Depth-1 capability: without a retained pre-head snapshot the chain
+    //     cannot revert (fresh bootstrap, or head already reverted once) —
+    //     decline rather than throw. The node stays on its head; the S-047
+    //     retry keeps re-offering the winner, so a later head (which retains
+    //     a snapshot) re-opens the path for the NEXT fork.
+    if (!chain_.has_revertible_head()) {
+        std::cerr << "[node] S-048 reorg declined at h=" << incoming.index
+                  << ": no revertible head (bootstrap/already-reverted)\n";
+        return;
+    }
+
+    // ── The reorg (revert → validate → append winner | restore old head) ────
+    // Copy the head BEFORE the revert: the reference dies on pop_back, and a
+    // validation failure must be able to restore it verbatim.
+    chain::Block old_head = cur;
+    chain_.revert_head();   // state is now exactly H-1
+
+    // Validate the competitor against the H-1 state it claims to extend —
+    // the same call the normal accept path makes, with the chain now AT the
+    // competitor's parent (registry included: REGISTER/DEREGISTER effects of
+    // the reverted head are gone, which is the correct H-1 view).
+    auto reg = NodeRegistry::build_from_chain(chain_, incoming.index);
+    auto res = validator_.validate(incoming, chain_, reg);
+    if (!res.ok) {
+        // Fail-closed: the competitor won resolve_fork on its CLAIMED sig
+        // set but does not actually verify (Byzantine/garbage sigs). Restore
+        // the old head — it validated when first applied and apply is
+        // deterministic, so this append cannot fail. Net effect: no change.
+        chain_.append(old_head);
+        std::cerr << "[node] S-048 reorg REJECTED at h=" << incoming.index
+                  << " (competitor invalid: " << res.error
+                  << ") — head restored\n";
+        return;
+    }
+
+    chain_.append(incoming);
+
+    // Return the reverted head's txs to the mempool: any tx NOT in the new
+    // head would otherwise be silently lost. Inserted through the maps
+    // directly (admission policy already passed once); the stale-nonce sweep
+    // inside post_append_bookkeeping_locked immediately drops any that the
+    // new head made stale (same sender+nonce consumed by a different tx).
+    for (const auto& tx : old_head.transactions) {
+        bool in_new = false;
+        for (const auto& ntx : incoming.transactions)
+            if (ntx.hash == tx.hash) { in_new = true; break; }
+        if (!in_new && tx.nonce >= chain_.next_nonce(tx.from)) {
+            tx_store_[tx.hash] = tx;
+            tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+        }
+    }
+
+    std::cerr << "[node] S-048 REORG at h=" << incoming.index
+              << ": replaced head (deterministic resolve_fork winner)\n";
+
+    // Same post-append bookkeeping as a normal accept: mempool drop + sweep,
+    // registry rebuild, round/timer reset, evidence + receipt pruning, async
+    // save, subscriber fan-out (subscribers see the block at this height
+    // AGAIN with the new content — inherent to a reorg), epoch log, role
+    // broadcasts (announcing the winner helps stuck peers converge),
+    // check_if_selected against the new head.
+    post_append_bookkeeping_locked(incoming);
 }
 
 void Node::on_block(const chain::Block& b) {
