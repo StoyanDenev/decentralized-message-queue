@@ -92,6 +92,23 @@ public:
     bool             empty() const  { return blocks_.empty(); }
     Hash             head_hash() const;
 
+    // A4 / S-048 depth-1 head reorg (BoundedReorgDesign.md). revert_head()
+    // undoes EXACTLY the current head: it restores the state that existed
+    // immediately before the head was applied (the A9 faithful-rollback
+    // snapshot that apply_transactions already computes, retained on success)
+    // and drops the head block, then republishes the lock-free committed view.
+    // Preconditions (fail-closed, both throw std::runtime_error):
+    //   - height() >= 2 (never reverts genesis — the depth-1 finality floor);
+    //   - a retained pre-head snapshot exists (set only by a successful
+    //     apply_transactions and CONSUMED here, so a second revert without an
+    //     intervening apply is refused — this is the depth-1 bound).
+    // has_revertible_head() reports whether revert_head() would succeed, so the
+    // node can decline a reorg it cannot perform rather than throw.
+    void             revert_head();
+    bool             has_revertible_head() const {
+        return blocks_.size() >= 2 && prev_head_snapshot_.has_value();
+    }
+
     // ─── State accessors ────────────────────────────────────────────────────
     uint64_t balance(const std::string& domain)    const;
     uint64_t next_nonce(const std::string& domain) const;
@@ -817,6 +834,24 @@ private:
     };
     StateSnapshot create_state_snapshot() const;
     void          restore_state_snapshot(StateSnapshot&& s);
+
+    // A4 / S-048: the state as it existed immediately before the CURRENT head
+    // was applied — retained by apply_transactions on success so revert_head()
+    // can restore it (a depth-1 head reorg). Some(S) IFF S is exactly the state
+    // before blocks_.back(); nullopt when there is no revertible head — a
+    // freshly-constructed or restore_from_snapshot-bootstrapped chain (no replay),
+    // genesis-only (the height<2 guard refuses anyway), or immediately after a
+    // revert. NOTE: a file/store load() DOES replay blocks through
+    // apply_transactions, so prev_head_snapshot_ is Some after a load — a valid
+    // pre-last-block image, so a post-load revert is legitimate. Reset by any
+    // non-incremental blocks_ rewind (atomic_scope rollback) so a stale snapshot
+    // can never drive a revert.
+    std::optional<StateSnapshot> prev_head_snapshot_;
+
+    // Build + atomic_store the lock-free CommittedStateBundle for RPC readers.
+    // Shared by apply_transactions (on commit) and revert_head (on reorg) so the
+    // published view never lags the actual head.
+    void publish_committed_view();
 
     void apply_transactions(const Block& b);
 };

@@ -1012,6 +1012,13 @@ Additional in-process tests:
                                               A1 at every boundary, subsidy
                                               linear accrual, state_root
                                               mutation, determinism
+  determ test-chain-revert-head               A4/S-048 A4.1: the depth-1
+                                              head-reorg primitive
+                                              (BoundedReorgDesign.md) —
+                                              revert_head restores exact
+                                              pre-head state, is bounded to one
+                                              block, refuses genesis, supports
+                                              re-apply (the reorg replacement)
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -32766,6 +32773,161 @@ int main(int argc, char** argv) {
     // for individual ops; this test fills the gap of CHAIN-LEVEL
     // continuity invariants across many heights — the property that
     // makes replay/snapshot/light-client all reliable.
+    // A4 / S-048 increment 1: the Chain depth-1 head-reorg PRIMITIVE
+    // (BoundedReorgDesign.md A4.1). revert_head() must restore the state that
+    // existed immediately before the head was applied (byte-identical), drop the
+    // head, and be bounded to exactly one block (a second revert without an
+    // intervening apply, and reverting genesis, are both refused). No node/gossip
+    // wiring yet — that is A4.2.
+    if (cmd == "test-chain-revert-head") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "revert-head-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation ab, bb;
+        ab.domain = "alice"; ab.balance = 1000;
+        bb.domain = "bob";   bb.balance = 200;
+        cfg.initial_balances = {ab, bb};
+
+        auto add_transfer = [&](Chain& c, uint64_t idx, uint64_t amt, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = amt; tx.fee = 1; tx.nonce = nonce;
+            Block b;
+            b.index = idx;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === restore exactness: revert_head brings back the pre-head state ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));   // height 1
+            add_transfer(c, 1, 100, 0);          // height 2: alice 900, bob 300, nonce 1
+
+            // Capture the FULL observable H-1 (=height-2) state we will revert to.
+            // compute_state_root() is the merkle over ALL ten state namespaces,
+            // so its equality is a single strong check that nothing leaked.
+            const uint64_t h_before     = c.height();
+            const Hash     hash_before  = c.head_hash();
+            const Hash     root_before  = c.compute_state_root();
+            const uint64_t alice_before = c.balance("alice");
+            const uint64_t bob_before   = c.balance("bob");
+            const uint64_t nonce_before = c.next_nonce("alice");
+            const uint64_t stake_before = c.stake("alice");
+
+            add_transfer(c, 2, 50, 1);           // height 3: alice 850 (fee back), bob 350, nonce 2
+            check(c.height() == 3 && c.balance("alice") == 850 && c.balance("bob") == 350,
+                  "setup: applying a second head advances to height 3 (alice 850, bob 350)");
+
+            c.revert_head();                     // back to the captured height-2 state
+            check(c.height() == h_before
+                      && c.head_hash() == hash_before
+                      && c.compute_state_root() == root_before
+                      && c.balance("alice") == alice_before
+                      && c.balance("bob") == bob_before
+                      && c.next_nonce("alice") == nonce_before
+                      && c.stake("alice") == stake_before,
+                  "revert_head restores the EXACT pre-head state (height, head_hash, "
+                  "state_root over all namespaces, balances, nonce, stake byte-identical)");
+
+            // === depth-1 bound: a second revert without an apply is refused ===
+            bool threw = false;
+            try { c.revert_head(); } catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "a second revert_head with NO intervening apply is refused "
+                  "(depth-1 bound: the retained snapshot was consumed)");
+
+            // === re-apply after revert: the chain is usable; a DIFFERENT winner
+            //     block can be applied at the reverted height ===
+            add_transfer(c, 2, 70, 1);           // height 3': alice 830 (fee back), bob 370
+            check(c.height() == 3 && c.balance("alice") == 830 && c.balance("bob") == 370,
+                  "after revert, a DIFFERENT block applies cleanly at the head height "
+                  "(alice 830, bob 370) — the reorg-replacement path works");
+        }
+
+        // === genesis finality floor: never revert below H-1 (here, genesis) ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));   // height 1 (genesis only)
+            bool threw = false;
+            try { c.revert_head(); } catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "revert_head at height 1 refuses (genesis is the depth-1 finality "
+                  "floor — a reorg never rewrites at or below H-1)");
+        }
+
+        // === lazy-container restore: a head that mutates a DEFERRED container
+        //     (stakes_ via a STAKE tx) reverts exactly — exercises the lazy
+        //     snapshot-capture path the TRANSFER-only case above does not (that
+        //     one only touches the eagerly-copied accounts_) ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));   // height 1: alice stake 500
+            add_transfer(c, 1, 10, 0);           // height 2: a non-trivial base state
+            const Hash     root_before  = c.compute_state_root();
+            const uint64_t stake_before = c.stake("alice");
+            const uint64_t bal_before   = c.balance("alice");
+
+            Transaction st;
+            st.type = TxType::STAKE;
+            st.from = "alice"; st.fee = 1; st.nonce = 1;
+            st.payload.resize(8);                 // STAKE amount = 8-byte LE payload
+            uint64_t stake_amt = 100;
+            for (int i = 0; i < 8; ++i)
+                st.payload[i] = uint8_t((stake_amt >> (8 * i)) & 0xff);
+            Block b;
+            b.index = 2;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(st);
+            c.append(b);                          // height 3: stakes_ mutated
+            check(c.stake("alice") > stake_before,
+                  "setup: a STAKE head mutates the LAZY stakes_ container");
+
+            c.revert_head();
+            check(c.stake("alice") == stake_before
+                      && c.balance("alice") == bal_before
+                      && c.compute_state_root() == root_before,
+                  "revert_head restores a LAZY-captured container (stakes_) exactly "
+                  "— stake, balance, and full state_root back to the pre-STAKE state");
+        }
+
+        // === has_revertible_head() tracks the retained snapshot ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(!c.has_revertible_head(),
+                  "has_revertible_head() == false at genesis-only height 1");
+            add_transfer(c, 1, 100, 0);
+            check(c.has_revertible_head(),
+                  "has_revertible_head() == true after applying a head block");
+            c.revert_head();
+            check(!c.has_revertible_head(),
+                  "has_revertible_head() == false after revert (snapshot consumed)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-revert-head "
+                  << (fail == 0 ? "all assertions (A4.1)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     if (cmd == "test-multi-block-chain") {
         using namespace determ;
         using namespace determ::chain;

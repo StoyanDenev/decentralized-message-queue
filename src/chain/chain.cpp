@@ -569,6 +569,10 @@ bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
             if (blocks_.size() > blocks_size_at_entry) {
                 blocks_.resize(blocks_size_at_entry);
             }
+            // A4: this rewind moved blocks_ out from under any snapshot an inner
+            // append retained; drop it so revert_head() can never restore a
+            // snapshot that no longer matches the head (fail-closed).
+            prev_head_snapshot_.reset();
         }
         return keep;
     } catch (...) {
@@ -576,6 +580,7 @@ bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
         if (blocks_.size() > blocks_size_at_entry) {
             blocks_.resize(blocks_size_at_entry);
         }
+        prev_head_snapshot_.reset();   // A4: see the !keep branch above
         throw;
     }
 }
@@ -1715,6 +1720,36 @@ void Chain::apply_transactions(const Block& b) {
     // make_shared + single atomic_store per commit; three map copies
     // happen inside the make_shared. The bundle's contents are const,
     // so readers can't accidentally mutate the shared snapshot.
+    publish_committed_view();   // A4: factored out; reused by revert_head()
+    } catch (...) {
+        // A9 Phase 1: any throw from the apply body leaves the chain
+        // exactly as it was at entry. Restore in-place, then re-raise
+        // so the caller (Chain::append, then up through the validator
+        // / producer path) still sees the failure. Without this catch,
+        // a mid-apply throw (invariant assertion, arithmetic overflow,
+        // bug) would leave state partially mutated — the next apply
+        // call would operate on inconsistent data and silently corrupt
+        // the chain. committed_accounts_view_ is unchanged on rollback
+        // because the atomic_store at the success path didn't execute.
+        restore_state_snapshot(std::move(__snapshot));
+        throw;
+    }
+    // A4 / S-048: the apply committed. __snapshot holds exactly the state
+    // before THIS block (the A9 faithful full-rollback image — accounts eager,
+    // changed containers lazily captured, everything else unchanged), so it IS
+    // the H-1 state. Retain it as the single revertible pre-head snapshot for a
+    // possible depth-1 head reorg; this overwrites any prior retained snapshot
+    // (only the most-recent head is revertible). Cheap: a move, no copy.
+    prev_head_snapshot_ = std::move(__snapshot);
+}
+
+// ─── A4 / S-048: lock-free view publish + depth-1 head reorg ──────────────────
+
+// Build + atomic_store the CommittedStateBundle read by the *_lockfree
+// accessors. Factored verbatim out of apply_transactions's commit path (so that
+// path is byte-identical) and reused by revert_head() so the published view
+// never lags the actual head after a reorg.
+void Chain::publish_committed_view() {
     auto __bundle = std::make_shared<CommittedStateBundle>();
     __bundle->accounts      = accounts_;
     __bundle->stakes        = stakes_;
@@ -1729,19 +1764,25 @@ void Chain::apply_transactions(const Block& b) {
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-    } catch (...) {
-        // A9 Phase 1: any throw from the apply body leaves the chain
-        // exactly as it was at entry. Restore in-place, then re-raise
-        // so the caller (Chain::append, then up through the validator
-        // / producer path) still sees the failure. Without this catch,
-        // a mid-apply throw (invariant assertion, arithmetic overflow,
-        // bug) would leave state partially mutated — the next apply
-        // call would operate on inconsistent data and silently corrupt
-        // the chain. committed_accounts_view_ is unchanged on rollback
-        // because the atomic_store at the success path didn't execute.
-        restore_state_snapshot(std::move(__snapshot));
-        throw;
-    }
+}
+
+// Depth-1 head reorg (BoundedReorgDesign.md). Undo EXACTLY the current head:
+// restore the retained pre-head (H-1) state and drop the head block, then
+// republish the committed view. Fail-closed on both preconditions.
+void Chain::revert_head() {
+    if (blocks_.size() < 2)
+        throw std::runtime_error(
+            "revert_head: refusing to revert genesis (depth-1 finality floor)");
+    if (!prev_head_snapshot_)
+        throw std::runtime_error(
+            "revert_head: no retained pre-head snapshot (depth-1: already "
+            "reverted, or head not applied via apply_transactions)");
+    // Restore H-1 state, then CONSUME the snapshot: a second revert without an
+    // intervening apply finds none and is refused — this is the depth-1 bound.
+    restore_state_snapshot(std::move(*prev_head_snapshot_));
+    prev_head_snapshot_.reset();
+    blocks_.pop_back();
+    publish_committed_view();
 }
 
 // ─── Fork resolution ─────────────────────────────────────────────────────────
