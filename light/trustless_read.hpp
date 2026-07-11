@@ -252,9 +252,19 @@ build_genesis_committee(const determ::chain::GenesisConfig& cfg);
 // change). This is the sound, reader-side fix for the S-042 head-read regression
 // (the daemon serves the proof at the head, whose root is not yet bindable). With
 // max_wait_seconds=0 the head case fails closed immediately, exactly as before.
+//
+// `out_committee_block_hash` (optional): when non-null, on success it receives
+// the COMMITTEE-BOUND recomputed block_hash of the anchor — the same hash the
+// successor's committee signature commits (successor.prev_hash). This is the
+// ONLY committee-attested hash of the anchor block; the daemon-reported
+// `block_hash` header FIELD is NOT attested and must never be used as a trust
+// anchor. Callers that pin a full block body to the anchor (e.g. verify-ct-block
+// re-verifying the block's confidential txs) MUST pin against THIS value, not the
+// reported field, or the pin is circular. Untouched on the throw paths.
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const nlohmann::json& committee_json,
                                        uint64_t anchor_index,
-                                       uint64_t max_wait_seconds = 0);
+                                       uint64_t max_wait_seconds = 0,
+                                       std::string* out_committee_block_hash = nullptr);
 
 } // namespace determ::light

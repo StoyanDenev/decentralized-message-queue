@@ -134,6 +134,17 @@ void print_usage() {
         "      range+balance + fee match + dup-input reject. Pure local crypto;\n"
         "      note-SET (double-spend) facts stay with the daemon/state_root.\n"
         "      Exit 0 VERIFIED, 3 INVALID (incl. non-CT tx), 1 usage.\n"
+        "  verify-ct-block --rpc-port <N> --genesis <file> --height <H>\n"
+        "                  [--wait <s>] [--json]\n"
+        "      A3 RPC-driven CT block verifier — the composed anchored form of\n"
+        "      block-verify. Fetches block[H] from a live daemon and proves, in\n"
+        "      ONE command against the pinned genesis: (1) ANCHOR — H chains to\n"
+        "      genesis + is committee-attested (verify-state-root / S-042); (2)\n"
+        "      BODY-PIN — the full body recomputes to that committee-anchored\n"
+        "      block_hash (a doctored body fails closed); (3) CT-PROOFS — every\n"
+        "      confidential tx re-verified CLIENT-SIDE. Committee is DERIVED from\n"
+        "      genesis (no --committee file). --wait forwards to the head-anchor\n"
+        "      poll. Exit 0 OK, 3 anchor/pin/CT failure, 1 usage/transport.\n"
         "  verify-chain-file --in <headers> (--committee <file> |\n"
         "                    --committee-manifest <file>)\n"
         "                    [--genesis-hash <hex>] [--prev-hash <hex>]\n"
@@ -3223,6 +3234,182 @@ int cmd_verify_state_root(int argc, char** argv) {
         return r.ok ? 0 : 1;
     } catch (const std::exception& e) {
         std::cerr << "verify-state-root: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ─────────────────────────── verify-ct-block ────────────────────────────
+// A3 composition (register A3 backlog: "a composed anchored verify-ct-block
+// --rpc convenience"). Fetch block[H] from a LIVE daemon and, in ONE trustless
+// command, prove three things against the pinned genesis:
+//
+//   (1) ANCHOR   — header[H] chains to the pinned genesis by an unbroken
+//                  prev_hash walk and is committee-attested (verify_state_root_at
+//                  — the S-042 successor-binding primitive). Yields the
+//                  committee-anchored block_hash(H).
+//   (2) BODY-PIN — the FULL block the daemon serves recomputes to EXACTLY that
+//                  committee-anchored block_hash. A doctored body (swapped /
+//                  injected tx) changes compute_hash → fail-closed. This is the
+//                  same full-block-recompute trust step trustless_read / verify-
+//                  chain rely on; it binds transactions[] to the committee sig.
+//   (3) CT-PROOFS— every confidential tx in the (now committee-authenticated)
+//                  body re-verifies its range/balance proof CLIENT-SIDE
+//                  (verify_ct_transactions — the A3 accept-rule mirror).
+//
+// This is the RPC-driven form of the offline `block-verify` (which runs off a
+// block+committee FILE): here the committee is DERIVED from the pinned genesis
+// (untrusted-daemon posture) and the block is fetched + anchored, not supplied.
+// Adds NO new crypto — pure composition of shipped, audited primitives. Honest
+// scope unchanged: CRYPTOGRAPHIC validity only. Note-SET / double-spend
+// rejection stays anchored by the committee-signed state_root over cn: leaves —
+// this proves the block is real + its CT proofs are valid, not that its input
+// notes were unspent. Proof: docs/proofs/CtBlockVerificationComposition.md.
+int cmd_verify_ct_block(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path;
+    uint64_t height = 0, wait_seconds = 0;
+    bool have_port = false, have_height = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) { port = parse_u16("--rpc-port", argv[++i]); have_port = true; }
+        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--height"   && i + 1 < argc) { height = parse_u64("--height", argv[++i]); have_height = true; }
+        else if (a == "--wait"     && i + 1 < argc) wait_seconds = parse_u64("--wait", argv[++i]);
+        else if (a == "--json")                     json_out = true;
+        else {
+            std::cerr << "verify-ct-block: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_height) {
+        std::cerr << "verify-ct-block: --rpc-port, --genesis, --height are required\n";
+        return 1;
+    }
+    try {
+        // Pin the chain identity + derive the committee from genesis (NOT a
+        // user-supplied committee file — the untrusted-daemon posture).
+        auto genesis        = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-ct-block: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // (1) ANCHOR — genesis-chain walk + committee attestation (S-042).
+        auto sr = verify_state_root_at(rpc, committee_seed,
+                                       genesis_hash_hex, height, wait_seconds);
+        if (!sr.ok) {
+            if (json_out) {
+                json out = {{"height", height}, {"committee_verified", false},
+                            {"ok", false}, {"detail", "ANCHOR failed: " + sr.detail}};
+                std::cout << out.dump() << "\n";
+            } else {
+                std::cerr << "verify-ct-block: ANCHOR failed: " << sr.detail << "\n";
+            }
+            return 3;
+        }
+
+        // (2) BODY-PIN — fetch the full block and require its recomputed
+        //     block_hash == the committee-anchored block_hash from (1).
+        json full = rpc.call("block", {{"index", height}});
+        if (!full.is_object()
+            || (full.contains("error") && !full["error"].is_null())) {
+            std::string d = (full.is_object() && full.contains("error"))
+                          ? full["error"].dump()
+                          : "daemon returned no block object";
+            if (json_out) {
+                std::cout << json{{"height", height}, {"committee_verified", true},
+                                  {"ok", false},
+                                  {"detail", "full-block fetch failed: " + d}}.dump() << "\n";
+            } else {
+                std::cerr << "verify-ct-block: full-block fetch failed: " << d << "\n";
+            }
+            return 3;
+        }
+        std::string body_hash;
+        try {
+            determ::chain::Block fb = determ::chain::Block::from_json(full);
+            body_hash = to_hex(fb.compute_hash());
+        } catch (const std::exception& e) {
+            if (json_out) {
+                std::cout << json{{"height", height}, {"committee_verified", true},
+                                  {"ok", false},
+                                  {"detail", std::string("malformed full block: ") + e.what()}}.dump() << "\n";
+            } else {
+                std::cerr << "verify-ct-block: malformed full block: " << e.what() << "\n";
+            }
+            return 3;
+        }
+        if (body_hash != sr.block_hash_hex) {
+            std::string d = "BODY-PIN mismatch: full-block hash " + body_hash
+                          + " != committee-anchored block_hash " + sr.block_hash_hex
+                          + " (daemon served a body inconsistent with the signed header)";
+            if (json_out) {
+                std::cout << json{{"height", height}, {"committee_verified", true},
+                                  {"body_pinned", false}, {"ok", false},
+                                  {"detail", d}}.dump() << "\n";
+            } else {
+                std::cerr << "verify-ct-block: " << d << "\n";
+            }
+            return 3;
+        }
+
+        // (3) CT-PROOFS — re-verify every confidential tx client-side. A
+        //     block with no CT txs verifies vacuously with an explicit
+        //     0-count (the anti-silent-vacuity signal).
+        auto ct = determ::light::verify_ct_transactions(full);
+        bool ok = ct.ok();
+
+        if (json_out) {
+            json out = {
+                {"height",             height},
+                {"genesis_pin",        genesis_hash_hex},
+                {"committee_verified", true},
+                {"sigs_verified",      sr.sigs_verified},
+                {"committee_size",     sr.committee_size},
+                {"block_hash",         sr.block_hash_hex},
+                {"body_pinned",        true},
+                {"total_txs",          ct.total_txs},
+                {"ct_txs",             ct.ct_txs},
+                {"ct_verified",        ct.verified},
+                {"ok",                 ok},
+            };
+            if (!ok) {
+                json fails = json::array();
+                for (auto& f : ct.failures)
+                    fails.push_back({{"index", f.index}, {"type", f.type},
+                                     {"detail", f.detail}});
+                out["ct_failures"] = fails;
+            }
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << (ok ? "OK\n" : "FAIL\n")
+                      << "  genesis pin:        matches (" << genesis_hash_hex << ")\n"
+                      << "  height:             " << height << "\n";
+            if (height == 0)
+                std::cout << "  anchor:             genesis hash (block 0 has no committee sigs)\n";
+            else
+                std::cout << "  committee sigs:     " << sr.sigs_verified
+                          << " of " << sr.committee_size
+                          << " (successor-attested; block_hash chained from genesis)\n";
+            std::cout << "  body pin:           full-block hash == committee-anchored block_hash ("
+                      << sr.block_hash_hex.substr(0, 16) << "...)\n"
+                      << "  CT-PROOFS:          " << ct.verified << " of " << ct.ct_txs
+                      << " confidential tx(s) re-verified client-side"
+                      << (ct.ct_txs == 0 ? " (none present — vacuous)" : "")
+                      << " [" << ct.total_txs << " tx total]\n";
+            if (!ok) {
+                std::cout << "  CT-PROOFS FAILURES:\n";
+                for (auto& f : ct.failures)
+                    std::cout << "    tx[" << f.index << "] type " << f.type
+                              << ": " << f.detail << "\n";
+            }
+        }
+        return ok ? 0 : 3;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-ct-block: " << e.what() << "\n";
         return 1;
     }
 }
@@ -8068,6 +8255,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-block-sigs")     return cmd_verify_block_sigs(sub_argc, sub_argv);
         if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
         if (cmd == "verify-ct-tx")          return cmd_verify_ct_tx(sub_argc, sub_argv);
+        if (cmd == "verify-ct-block")       return cmd_verify_ct_block(sub_argc, sub_argv);
         if (cmd == "verify-chain-file")     return cmd_verify_chain_file(sub_argc, sub_argv);
         if (cmd == "committee-diff")        return cmd_committee_diff(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);

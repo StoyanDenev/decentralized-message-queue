@@ -191,9 +191,14 @@ StateRootResult verify_state_root_at(
         // here — the head has no signed successor yet — which is INTENDED.
         json committee_json = build_committee_json(committee_seed);
         try {
+            // Capture the COMMITTEE-BOUND recomputed block_hash (not the daemon-
+            // reported header field set at res.block_hash_hex above): the helper
+            // binds it via successor.prev_hash, so it is the only attested hash
+            // of block[H]. Overwriting block_hash_hex with it makes the field a
+            // sound anchor for a caller pinning a full body (verify-ct-block).
             std::string attested =
                 committee_bound_state_root(rpc, committee_json, height,
-                                           max_wait_seconds);
+                                           max_wait_seconds, &res.block_hash_hex);
             res.state_root_hex = attested;
             res.state_root_present = !attested.empty();
             res.committee_verified = true;

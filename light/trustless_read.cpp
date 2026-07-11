@@ -547,7 +547,8 @@ AnchoredHead anchored_head(
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const json& committee_json,
                                        uint64_t anchor_index,
-                                       uint64_t max_wait_seconds) {
+                                       uint64_t max_wait_seconds,
+                                       std::string* out_committee_block_hash) {
     // 1. Fetch the FULL block at anchor_index (NOT the stripped header).
     //    The full body carries the heavy fields signing_bytes needs, so
     //    block_hash = compute_hash() is recomputable locally — the
@@ -643,7 +644,10 @@ std::string committee_bound_state_root(RpcClient& rpc,
               "state_root); the committee never signed this state");
     }
 
-    // 6. Bound. Report the anchor's state_root (empty if zero/unpopulated).
+    // 6. Bound. Surface the committee-attested block_hash (recomputed_hex — the
+    //    one the successor's committee sig commits) to callers that pin a full
+    //    body to it; then report the anchor's state_root (empty if zero).
+    if (out_committee_block_hash) *out_committee_block_hash = recomputed_hex;
     Hash zero{};
     return (b.state_root != zero) ? to_hex(b.state_root) : std::string{};
 }
