@@ -8,6 +8,7 @@
 #include <determ/net/gossip.hpp>
 #include <determ/net/native.hpp>
 #include <determ/time/clock.hpp>
+#include <determ/crypto/rng_source.hpp>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -189,10 +190,21 @@ public:
     // std::invalid_argument) lets a harness drive the REAL engine over an
     // in-memory VirtualTransport — deterministic multi-node liveness traces
     // (FA4) without sockets. Injected referents must outlive the Node.
+    //
+    // A4 RNG injection (the entropy analogue of the clock seam): the ONE
+    // per-round draw that enters block content — the Phase-1 commit-reveal
+    // dh_secret — reads through `rng`. Defaults to the process-wide RealRng
+    // (verbatim determ_rng_bytes), so the daemon and every produced byte are
+    // unchanged. A harness supplies a deterministic crypto::SeededRng so the
+    // real engine replays a Byzantine schedule byte-for-byte (the S-048 reorg
+    // reproduction, DeterministicSchedulerDesign.md §3). The referent must
+    // outlive the Node. NOT paired with loop/transport — an unrelated axis.
     explicit Node(const Config& cfg,
                   determ::time::Clock& clock = determ::time::RealClock::instance(),
                   net::EventLoop* loop = nullptr,
-                  net::Transport* transport = nullptr);
+                  net::Transport* transport = nullptr,
+                  determ::crypto::RngSource& rng =
+                      determ::crypto::RealRng::instance());
     ~Node();
 
     void run();
@@ -546,6 +558,10 @@ private:
     // after cfg_ — no -Wreorder, no dependency on other members). RealClock by
     // default; consensus-time reads go through clock_.unix_seconds().
     determ::time::Clock&  clock_;
+    // A4 injected RNG (same shape as clock_, next in declaration + init order).
+    // RealRng by default; the sole per-round block-content draw (the Phase-1
+    // dh_secret in start_contrib_phase) goes through rng_.fill().
+    determ::crypto::RngSource& rng_;
     crypto::NodeKey       key_;
     chain::Chain          chain_;
     NodeRegistry          registry_;

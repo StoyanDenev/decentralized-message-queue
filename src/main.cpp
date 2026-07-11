@@ -17,6 +17,7 @@
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
 #include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
 #include <determ/crypto/rng/rng.h>            // §3.15: OS-entropy shim (replaces RAND_bytes)
+#include <determ/crypto/seeded_rng.hpp>       // A4: deterministic test-only RngSource
 #include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
@@ -26725,10 +26726,12 @@ int main(int argc, char** argv) {
     // virtual_now_ms advanced past the 1500ms grace deadline, proving logical
     // time (not steady_clock) drove the rounds; (3) SCHEDULE DETERMINISM — two
     // independent externally-driven runs reach the SAME virtual time and produce
-    // the SAME block COUNT. (Block-CONTENT byte-replay is a separate seam: each
-    // round draws a fresh commit-reveal secret from OS entropy, so a
-    // deterministic-RNG injection is the remaining piece for a fully
-    // byte-deterministic S-048 reorg repro — see the note at the assertion.)
+    // the SAME block COUNT; (4) teardown-before-grace regression (the dtor
+    // vtimers_ drain); (5) A4 RNG SEAM — with a deterministic crypto::SeededRng
+    // injected, block CONTENT is now byte-replayable too (two same-seed runs are
+    // byte-identical; a different seed diverges), which is the last prerequisite
+    // for a fully byte-deterministic S-048 reorg repro. Production (RealRng, the
+    // ctor default) is untouched — the seam only swaps the source under a harness.
     if (cmd == "test-scheduler-external") {
         using namespace determ;
         using namespace determ::net;
@@ -26746,7 +26749,8 @@ int main(int argc, char** argv) {
         // Uses the SAME key across calls so a deterministic engine yields
         // byte-identical blocks.
         auto drive_once =
-            [&](const crypto::NodeKey& key, const std::string& tag, uint64_t target)
+            [&](const crypto::NodeKey& key, const std::string& tag, uint64_t target,
+                crypto::RngSource* rng = nullptr)
             -> std::pair<std::vector<std::string>, uint64_t> {
             fs::path dir = fs::temp_directory_path() /
                 ("determ-sched-ext-" + tag + "-" +
@@ -26787,8 +26791,13 @@ int main(int argc, char** argv) {
             loop->enable_virtual_time();   // BEFORE the Node arms any timer
             auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
             determ::time::VirtualClock vclock(kT0);
-            auto node = std::make_unique<node::Node>(
-                cfg, vclock, loop.get(), transport.get());
+            // A4 RNG seam: inject the deterministic source when provided, else
+            // the ctor defaults to RealRng (the production OS-CSPRNG path).
+            auto node = rng
+                ? std::make_unique<node::Node>(
+                      cfg, vclock, loop.get(), transport.get(), *rng)
+                : std::make_unique<node::Node>(
+                      cfg, vclock, loop.get(), transport.get());
 
             node->start_external();        // no loop thread, no save thread, no block
 
@@ -26855,8 +26864,8 @@ int main(int argc, char** argv) {
         // tracked as its own (consensus-adjacent) decision.
         check(fp1.size() == fp2.size() && !fp1.empty(),
               "two externally-driven runs produce the SAME block COUNT — the "
-              "logical-time SCHEDULE is deterministic (block-content byte-replay "
-              "needs the RNG seam; see comment)");
+              "logical-time SCHEDULE is deterministic on the RealRng path "
+              "(block-content byte-replay is delivered by the RNG seam below)");
         if (fp1.size() != fp2.size()) {
             std::cout << "    (schedule divergence: run1 blocks=" << fp1.size()
                       << " run2 blocks=" << fp2.size() << ")\n";
@@ -26929,6 +26938,30 @@ int main(int argc, char** argv) {
                   "start_external armed the grace as a pending virtual timer, and "
                   "tearing the loop down with it UNfired completed cleanly (dtor "
                   "drains vtimers_ under lock — no re-entrant erase-mid-destruction)");
+        }
+
+        // A4 RNG seam — the payoff: with a DETERMINISTIC RngSource injected, the
+        // block CONTENT that inc.3 could NOT reproduce becomes byte-identical.
+        // Two runs sharing the same key AND the same SeededRng seed now replay
+        // byte-for-byte (the prerequisite the inc.3 NOTE above called out). The
+        // production path stays untouched: RealRng (the ctor default, used by
+        // every run above and by the daemon) still draws fresh OS entropy, so
+        // this proves the SEAM works without changing production behaviour.
+        {
+            crypto::SeededRng seed42a(static_cast<uint64_t>(42));
+            auto [sf1, sv1] = drive_once(key, "seed42a", target, &seed42a);
+            crypto::SeededRng seed42b(static_cast<uint64_t>(42));
+            auto [sf2, sv2] = drive_once(key, "seed42b", target, &seed42b);
+            check(!sf1.empty() && sf1 == sf2 && sv1 == sv2,
+                  "two SEEDED runs (same key + same seed) replay BYTE-IDENTICAL "
+                  "blocks — the RNG seam delivers block-content determinism "
+                  "(closes the gap the inc.3 NOTE documented)");
+
+            crypto::SeededRng seed99(static_cast<uint64_t>(99));
+            auto [sf3, sv3] = drive_once(key, "seed99", target, &seed99);
+            check(!sf3.empty() && sf3 != sf1,
+                  "a DIFFERENT seed yields DIFFERENT blocks — the injected seed "
+                  "actually drives the dh_secret (the determinism is non-vacuous)");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

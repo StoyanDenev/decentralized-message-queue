@@ -137,9 +137,11 @@ void check_injection_pair(net::EventLoop* loop, net::Transport* transport) {
 } // namespace
 
 Node::Node(const Config& cfg, determ::time::Clock& clock,
-           net::EventLoop* loop, net::Transport* transport)
+           net::EventLoop* loop, net::Transport* transport,
+           determ::crypto::RngSource& rng)
     : cfg_((check_injection_pair(loop, transport), cfg))
     , clock_(clock)
+    , rng_(rng)
     , owned_loop_(loop ? nullptr
                        : std::make_unique<net::NativeEventLoop>())
     , owned_transport_(
@@ -959,9 +961,12 @@ void Node::start_contrib_phase() {
     // Phase 1, so they cannot precompute the eventual delay_output
     // (which depends on all K secrets).
     Hash my_secret{};
-    // §3.15: OS CSPRNG via the C99 shim (was OpenSSL RAND_bytes). Entropy
+    // §3.15 / A4 RNG seam: the ONE per-round draw that enters block content,
+    // routed through the injected rng_ (RealRng = verbatim determ_rng_bytes on
+    // the production path, so the daemon's bytes are unchanged; a harness may
+    // inject a deterministic SeededRng for a byte-replayable schedule). Entropy
     // failure stays fatal — a predictable dh_secret breaks the commit-reveal.
-    if (determ_rng_bytes(my_secret.data(), 32) != 0)
+    if (rng_.fill(my_secret.data(), 32) != 0)
         throw std::runtime_error("OS entropy source failed for dh_secret");
     current_round_secret_ = my_secret;
     Hash my_commit = crypto::SHA256Builder{}

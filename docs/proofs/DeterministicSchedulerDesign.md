@@ -279,12 +279,30 @@ genuinely NEW algorithm here; everything else is additive plumbing.
    deliberately injected long stall risks it, and that is a scenario-authoring
    constraint to document, not an engine change.
 
+8. **The Phase-1 commit-reveal `dh_secret` — block-CONTENT entropy — SHIPPED as an
+   injected seam.** The one per-round draw that enters block bytes (and thus
+   `cumulative_rand` → the block hash → `resolve_fork`'s "smallest block hash"
+   tie-break) was `determ_rng_bytes` at
+   [node.cpp:964](../../src/node/node.cpp) (the sole such draw — node keygen is
+   once-per-setup; the dapp-subscriber id and genesis salt never enter a block).
+   It now reads through an injected `crypto::RngSource& rng_` (the entropy
+   analogue of `clock_`): production defaults to `RealRng` (verbatim
+   `determ_rng_bytes` — byte-neutral, adversarial-review-confirmed), and a harness
+   injects `crypto::SeededRng` (a byte-portable SHA256(seed‖counter) stream) so a
+   Byzantine schedule replays byte-for-byte. `test-scheduler-external` assertions
+   5–6 prove same-seed → byte-identical blocks and different-seed → different
+   blocks. This is the LAST substrate piece for a byte-deterministic S-048 reorg
+   repro; the reorg wiring (A4 proper) builds on it.
+   ([rng_source.hpp](../../include/determ/crypto/rng_source.hpp),
+   [seeded_rng.hpp](../../include/determ/crypto/seeded_rng.hpp))
+
 ## 4. What it unblocks + the gate plan
 
 **Byte-reproducible FA4.** With (1) the virtual scheduler, (2) a shared
-`VirtualClock`, (3) the virtual transport, and (4) the fault model already shipped,
-a scenario replays byte-for-byte from a seed: same closure order, same timer
-firings, same drop sequence, same digests. Over that substrate the FA1/A1/FA6/FA7
+`VirtualClock`, (3) the virtual transport, (4) the fault model, and (5) the RNG
+seam (§3.8 — the per-round `dh_secret` now injectable) all shipped, a scenario
+replays byte-for-byte from a seed: same closure order, same timer firings, same
+drop sequence, same block content, same digests. Over that substrate the FA1/A1/FA6/FA7
 checkers run against the REAL engine state after each scheduler step
 (ClockInjectionSeam.md §5 defines this as the concrete closure of F-1/FA4), each
 paired with an `expect_violation` planted-bug self-test — the non-vacuity +
