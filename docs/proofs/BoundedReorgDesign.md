@@ -1,6 +1,17 @@
 # Bounded Head-Reorg Design — wiring `resolve_fork` to close S-048 (A4)
 
-**Status: DESIGN-REVIEW; increment 1 (chain depth-1 revert primitive) implemented next.**
+**Status: A4.1–A4.3 SHIPPED — S-048 CLOSED at the node level. A4.4 (sync-path
+rejoiner) + A4.5 (persistence — the tail-file rewrite half; the `persisted_count_`
+reset landed in A4.2) remain.** The depth-1 head reorg is wired into the live
+accept path: a node that applied a minority same-height block now reorgs to
+`resolve_fork`'s deterministic winner (commit `e22d857`). Direct evidence: the
+5-node `test-fa-liveness-virtual` cluster is 10/10 with `[node] S-048 REORG …
+replaced head` firing and zero "cannot reorg" markers; `test-node-reorg-s048`
+is the deterministic WINNER/REPLAY/LOSER/INVALID repro. Byte-neutral for normal
+operation (FAST 216/0 both platforms — the reorg is a strict no-op on the
+gossip-duplicate stream). Original design-review context follows.
+
+**Status (original): DESIGN-REVIEW; increment 1 (chain depth-1 revert primitive) implemented next.**
 This is the design-review-first step the [KqueueReactorDesign.md](KqueueReactorDesign.md)
 / [DeterministicSchedulerDesign.md](DeterministicSchedulerDesign.md) discipline
 mandates for a change to shipped consensus orchestration. The owner authorized the
@@ -75,11 +86,11 @@ converge on the same winner.
 
 | # | Increment | Gate |
 |---|---|---|
-| A4.1 | **Chain depth-1 revert primitive** — `snapshot_prev_head_` captured before each head apply; `revert_head()` = restore + `pop_back()` + republish view; a hard guard that it only ever reverts the single head. Pure chain-layer, no node wiring yet. | a unit test asserts: apply H, capture root; apply H+1; `revert_head()` restores byte-identical H state (accounts/stakes/registry/roots) + `height()` drops by 1 + a second `revert_head()` is refused (depth-1 guard). FAST both platforms. |
-| A4.2 | **Node wiring** — `resolve_fork` in the same-height branch + revert→append the winner, depth-1 guarded; post-reorg bookkeeping (reverted txs → mempool, registry rebuild, round/timer reset, equivocation + inbound-receipt redo, subscriber fan-out). | live 2-node cluster: force a same-height fork, assert both nodes converge on `resolve_fork`'s winner; FAST; goldens byte-identical (no change on the no-fork path). |
-| A4.3 | **Deterministic S-048 repro harness** — a byte-deterministic in-process scenario (SeededRng + virtual scheduler): two nodes partition, each finalizes a different head, heal, assert the minority node reorgs to the winner and both tips are byte-identical; replay-twice-identical. | the repro is RED before A4.2, GREEN after; replay-twice-identical; both platforms. |
-| A4.4 | **Sync-path rejoiner** — a node restarted holding a minority tail fetches + accepts the one-block replacement (today it hits `prev_hash mismatch` forever). | the REJOIN phase of `test-fa-liveness-virtual` converges instead of printing the KNOWN-OPEN S-048 marker; live cluster kill-recover loop. |
-| A4.5 | **Persistence on reorg** — `save_incremental` rewrites the tail block file + manifest and resets `persisted_count_` (the in-code TODO); crash-consistency ordering (manifest-last). | a save→reorg→reload test: the reloaded chain has the winner tail, not the reverted block. |
+| A4.1 ✅ | **Chain depth-1 revert primitive** — `prev_head_snapshot_` (the A9 rollback snapshot) retained on apply-success; `revert_head()` = restore + `pop_back()` + republish view; fail-closed on genesis + double-revert. **SHIPPED `d661d05`.** | `test-chain-revert-head` (11 assertions): exact restore incl. `compute_state_root()` + the lazy-`stakes_` path, depth-1 refuse-second, genesis floor, re-apply, `has_revertible_head()`, + the A4.2 persistence case. FAST 216/0 both platforms; review GO. |
+| A4.2 ✅ | **Node wiring** — `Node::maybe_reorg_to_locked` calls `resolve_fork` in the same-height branch + revert→validate-against-H-1→append the winner (or restore the old head on invalid), depth-1 guarded; `post_append_bookkeeping_locked` factored verbatim (byte-neutral normal path); reverted txs → mempool; `revert_head` clamps `persisted_count_` (review finding 8). **SHIPPED `e22d857`.** | live 5-node `test-fa-liveness-virtual` 10/10 with `S-048 REORG` firing + zero stuck markers; FAST 216/0 both platforms (byte-neutral no-op on duplicates); adversarial review GO. |
+| A4.3 ✅ | **Deterministic S-048 repro** — a non-producing follower is fed a producer block + a same-height competitor over real gossip and must reorg to the winner; WINNER/REPLAY/LOSER/INVALID via `SeededRng` (§3.8 seam). **SHIPPED `e22d857`.** | `test-node-reorg-s048` — RED without A4.2, GREEN after; replay-twice-identical; both platforms. |
+| A4.4 | **Sync-path rejoiner** — a node restarted holding a minority tail fetches + accepts the one-block replacement (today it hits `prev_hash mismatch` forever). Optional hardening (review finding 4): a cheap pre-revert structural sig-slot check to cap Byzantine revert-amplification. | the REJOIN phase of `test-fa-liveness-virtual` converges instead of printing the KNOWN-OPEN S-048 marker; live cluster kill-recover loop. |
+| A4.5 | **Persistence on reorg (tail rewrite)** — the `persisted_count_` reset landed in A4.2 (a reorg-then-restart already reloads the winner, gated by `test-chain-revert-head`'s persistence case); A4.5 is the remaining crash-consistency ordering + manifest-last hardening for a live daemon reorg-during-save. | a live save→reorg→restart node test. |
 
 The recurring gate is the one every consensus increment uses: **goldens
 byte-identical + FAST + live cluster**, strengthened here by the **deterministic
