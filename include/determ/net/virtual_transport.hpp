@@ -153,6 +153,18 @@ public:
     // untouched. NOT thread-safe against a concurrent run() on the same loop.
     void run_until_idle();
 
+    // Bounded-step variant (increment 3): process AT MOST `max_closures` ready
+    // closures from the FIFO on the calling thread, then return the number
+    // actually run. Same order + semantics as run_until_idle, but never drains
+    // to quiescence — the driver of a SELF-PRODUCING node (e.g. an M=K=1 chain
+    // whose finalize re-posts the next round with no timer gate between blocks)
+    // must NOT drain to quiescence (there is none) — it steps a bounded batch,
+    // inspects state (chain height, etc.), and repeats. `max_closures == 0`
+    // runs nothing and returns 0. Backend-specific / test-only, like
+    // run_until_idle; production always uses the threaded run(). Byte-invariant.
+    // NOT thread-safe against a concurrent run() on the same loop.
+    std::size_t run_ready(std::size_t max_closures);
+
     // ── Timer service (the EventLoop interface's timer half) ────────────
     // DEFAULT: REAL wall-clock deadlines via the shared net::TimerService
     // deadline thread — the same shape as IocpEventLoop/ReactorEventLoop, so

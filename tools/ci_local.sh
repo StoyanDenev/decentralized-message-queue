@@ -14,11 +14,15 @@
 #   tools/ci_local.sh [--build-dir DIR] [--skip-build] [--jobs N]
 #   tools/ci_local.sh --sanitize [--jobs N]   # UBSan pass over the consensus
 #                                             # surface (Linux/GCC-only, heavier)
+#   tools/ci_local.sh --asan [--jobs N]       # ASan pass over the in-process
+#                                             # net/scheduler surface (memory
+#                                             # safety; Linux/GCC-only, heavier)
 #   tools/ci_local.sh --help
 #
 # From Windows, run it inside WSL2:
 #   wsl -d Ubuntu -- bash -lc 'cd /mnt/c/sauromatae && tools/ci_local.sh'
 #   wsl -d Ubuntu -- bash -lc 'cd /mnt/c/sauromatae && tools/ci_local.sh --sanitize'
+#   wsl -d Ubuntu -- bash -lc 'cd /mnt/c/sauromatae && tools/ci_local.sh --asan'
 #
 # Defaults: build dir is `build-linux` on Linux/macOS, `build` on Windows
 # (so the Linux tree never clashes with the MSVC multi-config tree).
@@ -34,6 +38,7 @@ JOBS=$( (command -v nproc >/dev/null && nproc) || echo 4 )
 SKIP_BUILD=0
 BUILD_DIR=""
 SANITIZE=0
+ASAN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --help|-h)
@@ -43,6 +48,7 @@ while [ $# -gt 0 ]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --jobs) JOBS="$2"; shift 2 ;;
     --sanitize) SANITIZE=1; shift ;;
+    --asan) ASAN=1; shift ;;
     *) echo "unknown arg: $1 (see --help)"; exit 1 ;;
   esac
 done
@@ -120,6 +126,51 @@ if [ "$SANITIZE" -eq 1 ]; then
   done
   [ "$san_fail" -eq 0 ] && { echo ""; echo "PASS: ci-local --sanitize (UBSan) clean over the consensus surface"; exit 0; }
   echo ""; echo "FAIL: ci-local --sanitize (UBSan) found undefined behavior"; exit 1
+fi
+
+# ── ASan mode (--asan): the MEMORY-SAFETY companion to --sanitize. UBSan is blind
+# to the heap/lifetime class — use-after-free, heap-buffer-overflow, and the
+# re-entrant-container-mutation-during-destruction shape that the net/scheduler
+# teardown paths can hit (a self-owning virtual timer torn down before it fires).
+# Same target-scoped discipline (-DDETERM_ASAN=ON instruments only Determ's own
+# targets; OpenSSL/asio/json stay uninstrumented and cached). Runs the in-process
+# net/scheduler/consensus subcommands — the ones that build+destroy real Nodes,
+# loops, and transports in-process, where a lifetime bug actually executes.
+# Linux/GCC-only, OPT-IN (heavier than the fast gate), not part of the default pass.
+if [ "$ASAN" -eq 1 ]; then
+  ASAN_DIR="build-linux-asan"
+  echo "=== ci_local --asan: ASan build of determ ($ASAN_DIR) ==="
+  cmake -B "$ASAN_DIR" -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDETERM_ASAN=ON \
+    >/dev/null 2>&1 || { echo "FAIL: ASan configure"; exit 1; }
+  # Same -j2 cap + -O1 (from CMakeLists) as the UBSan build: shadow-memory
+  # instrumentation on the ~15k-line main.cpp TU peaks several GB.
+  ASAN_JOBS=2; [ "$JOBS" -lt 2 ] && ASAN_JOBS="$JOBS"
+  cmake --build "$ASAN_DIR" --config RelWithDebInfo -j "$ASAN_JOBS" --target determ \
+    2>&1 | grep -iE "error:" && { echo "FAIL: ASan build error"; exit 1; }
+  ASANBIN=$(find "$ASAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
+  [ -x "$ASANBIN" ] || { echo "FAIL: ASan determ binary not found"; exit 1; }
+  # abort_on_error=1 turns any ASan report into a non-zero exit the loop below
+  # catches; detect_leaks=0 (the daemon subcommands intentionally leave some
+  # process-lifetime singletons — leaks are out of scope for this teardown gate).
+  export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:print_stacktrace=1"
+  echo "=== ci_local --asan: run in-process net/scheduler/consensus surface under ASan ==="
+  # The subcommands that construct + tear down real Nodes/loops/transports in a
+  # single process — where a use-after-free / re-entrant-teardown bug executes.
+  ASAN_CMDS="test-scheduler-external test-scheduler-timers test-virtual-clock \
+             test-net-virtual test-fa-liveness-virtual test-fa-partition-virtual \
+             test-state-root-determinism test-genesis-determinism"
+  asan_fail=0
+  for cmd in $ASAN_CMDS; do
+    if "$ASANBIN" "$cmd" >/tmp/asan_out.txt 2>&1; then
+      echo "  PASS(asan): $cmd"
+    else
+      echo "  FAIL(asan): $cmd"
+      grep -iE "ERROR: AddressSanitizer|heap-use-after-free|heap-buffer-overflow|SUMMARY|freed by" /tmp/asan_out.txt | head -5
+      asan_fail=1
+    fi
+  done
+  [ "$asan_fail" -eq 0 ] && { echo ""; echo "PASS: ci-local --asan (ASan) clean over the in-process net/scheduler surface"; exit 0; }
+  echo ""; echo "FAIL: ci-local --asan (ASan) found a memory-safety error"; exit 1
 fi
 
 case "$(uname -s)" in

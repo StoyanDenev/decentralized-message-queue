@@ -806,6 +806,14 @@ Additional in-process tests:
                                               cancel, reentrant re-arm, ready-work-
                                               before-time, replay-identical; the
                                               default TimerService path untouched)
+  determ test-scheduler-external              §2b inc.3: Node::start_external —
+                                              a REAL M=K=1 Node driven with NO
+                                              loop/save thread; the caller advances
+                                              virtual time (run_ready + advance_to_
+                                              next_timer). Asserts self-production,
+                                              logical-time drive, SCHEDULE
+                                              determinism (block count + vnow;
+                                              content byte-replay needs the RNG seam)
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
                                               process: 5 real Nodes over an
                                               injected VirtualTransport (one
@@ -26702,6 +26710,230 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": virtual-clock "
                   << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // deterministic-scheduler inc.3: Node::start_external() — the no-self-thread
+    // entry. A single M=K=1 Node is constructed on an injected VirtualEventLoop
+    // (enable_virtual_time) + VirtualTransport + VirtualClock, started via
+    // start_external() (NO loop thread, NO save thread, NO block), and driven
+    // ENTIRELY by the caller advancing logical time (run_until_idle +
+    // advance_to_next_timer). Pins: (1) the node self-produces blocks under
+    // pure external drive — every round's contrib/block-sig timer fires only
+    // because the driver advances virtual time (no wall-clock worker); (2)
+    // virtual_now_ms advanced past the 1500ms grace deadline, proving logical
+    // time (not steady_clock) drove the rounds; (3) SCHEDULE DETERMINISM — two
+    // independent externally-driven runs reach the SAME virtual time and produce
+    // the SAME block COUNT. (Block-CONTENT byte-replay is a separate seam: each
+    // round draws a fresh commit-reveal secret from OS entropy, so a
+    // deterministic-RNG injection is the remaining piece for a fully
+    // byte-deterministic S-048 reorg repro — see the note at the assertion.)
+    if (cmd == "test-scheduler-external") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        constexpr int64_t kT0 = 1700000000;
+        std::error_code fec;
+
+        // Drive one externally-scheduled M=K=1 node to `target` height and
+        // return (per-height block-JSON fingerprints, virtual_now_ms reached).
+        // Uses the SAME key across calls so a deterministic engine yields
+        // byte-identical blocks.
+        auto drive_once =
+            [&](const crypto::NodeKey& key, const std::string& tag, uint64_t target)
+            -> std::pair<std::vector<std::string>, uint64_t> {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-sched-ext-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            chain::GenesisConfig g;
+            g.chain_id      = "sched-ext";
+            g.m_creators    = 1;
+            g.k_block_sigs  = 1;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            chain::GenesisCreator gc;
+            gc.domain        = "node0";
+            gc.ed_pub        = key.pub;
+            gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            node::Config cfg;
+            cfg.domain       = "node0";
+            cfg.data_dir     = (dir / "node0").string();
+            cfg.listen_port  = 7661;
+            cfg.key_path     = (dir / "node0.key").string();
+            cfg.chain_path   = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath;
+            cfg.m_creators   = 1;
+            cfg.k_block_sigs = 1;
+            cfg.log_quiet    = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(key, cfg.key_path);
+
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();   // BEFORE the Node arms any timer
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vclock(kT0);
+            auto node = std::make_unique<node::Node>(
+                cfg, vclock, loop.get(), transport.get());
+
+            node->start_external();        // no loop thread, no save thread, no block
+
+            auto height = [&] {
+                return node->rpc_status()["height"].get<uint64_t>();
+            };
+            // Single-threaded logical-time drive with a BOUNDED batch per step:
+            // an M=K=1 node satisfies its own contrib+sig quorum synchronously,
+            // so finalize re-posts the next round with no timer gate between
+            // blocks — run_until_idle would never return. Each step runs a small
+            // batch of ready closures (so the height check below actually runs);
+            // when no ready work remains, fire the next virtual timer (this is
+            // how the initial 1500ms grace fires + how any genuinely timer-gated
+            // wait advances logical time). Stop at target height, or when there
+            // is neither ready work nor a pending timer (a real stall).
+            int guard = 0;
+            while (height() < target && guard++ < 2000000) {
+                std::size_t ran = loop->run_ready(64);
+                if (ran == 0 && !loop->advance_to_next_timer()) break;
+            }
+
+            std::vector<std::string> fps;
+            const uint64_t top = height();
+            for (uint64_t h = 1; h < top; ++h) {
+                auto b = node->rpc_block(h);
+                fps.push_back(b.is_null() ? std::string("<null>") : b.dump());
+            }
+            const uint64_t vnow = loop->virtual_now_ms();
+
+            node->stop();
+            node.reset();
+            transport.reset();
+            loop.reset();
+            fs::remove_all(dir, fec);
+            return {fps, vnow};
+        };
+
+        // ONE key shared by both runs → a deterministic engine must replay
+        // byte-identically.
+        crypto::NodeKey key = crypto::generate_node_key();
+        const uint64_t target = 5;   // genesis=0; drive to height 5 ⇒ blocks 1..4
+
+        auto [fp1, vnow1] = drive_once(key, "r1", target);
+        check(fp1.size() >= 4,
+              "externally-driven node self-produced >=4 blocks with NO loop thread "
+              "(advance_to_next_timer drove every round)");
+        check(vnow1 >= 1500,
+              "virtual_now advanced past the 1500ms grace deadline — logical time, "
+              "not steady_clock, drove the rounds");
+
+        auto [fp2, vnow2] = drive_once(key, "r2", target);
+        // SCHEDULE determinism — what start_external + virtual time deliver: the
+        // externally-driven logical-time schedule is reproducible, so both runs
+        // take the same steps to the same virtual time and produce the SAME
+        // NUMBER of blocks.
+        //
+        // NOTE (block-CONTENT determinism is a SEPARATE seam): the block BYTES
+        // are NOT yet reproducible — each round draws a fresh Phase-1
+        // commit-reveal secret from OS entropy (determ_rng_bytes in
+        // start_contrib_phase), so the dh_input and thus the block bytes differ
+        // run-to-run. Byte-identical replay additionally requires a
+        // deterministic-RNG seam seeding that secret; that is the remaining
+        // prerequisite for a fully byte-deterministic S-048 reorg repro and is
+        // tracked as its own (consensus-adjacent) decision.
+        check(fp1.size() == fp2.size() && !fp1.empty(),
+              "two externally-driven runs produce the SAME block COUNT — the "
+              "logical-time SCHEDULE is deterministic (block-content byte-replay "
+              "needs the RNG seam; see comment)");
+        if (fp1.size() != fp2.size()) {
+            std::cout << "    (schedule divergence: run1 blocks=" << fp1.size()
+                      << " run2 blocks=" << fp2.size() << ")\n";
+        }
+        check(vnow1 == vnow2,
+              "both runs reached the SAME virtual time (identical logical-time schedule)");
+
+        // Teardown-before-grace regression (the ~VirtualEventLoop vtimers_ drain):
+        // start_external() arms the 1500ms startup grace as a SELF-OWNING timer
+        // (its only owner is its own scheduled fn). Destroy the loop while that
+        // grace is STILL PENDING — i.e. WITHOUT advancing virtual time to 1500ms,
+        // exactly the shape of an isolated / never-selected node torn down in an
+        // A4 fault scenario. Before the dtor drained vtimers_ under vt_mu_, the
+        // grace's ~LoopTimer → timer_cancel() re-entered vtimers_ mid-destruction
+        // (UB — caught by the ASan gate; a silent survive on Release). Reaching
+        // the assertion proves the teardown completed cleanly.
+        {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-sched-ext-teardown-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            chain::GenesisConfig g;
+            g.chain_id      = "sched-ext";
+            g.m_creators    = 1;
+            g.k_block_sigs  = 1;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            chain::GenesisCreator gc;
+            gc.domain        = "node0";
+            gc.ed_pub        = key.pub;
+            gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            node::Config cfg;
+            cfg.domain       = "node0";
+            cfg.data_dir     = (dir / "node0").string();
+            cfg.listen_port  = 7662;
+            cfg.key_path     = (dir / "node0.key").string();
+            cfg.chain_path   = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath;
+            cfg.m_creators   = 1;
+            cfg.k_block_sigs = 1;
+            cfg.log_quiet    = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(key, cfg.key_path);
+
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vclock(kT0);
+            auto node = std::make_unique<node::Node>(
+                cfg, vclock, loop.get(), transport.get());
+
+            node->start_external();   // arms the grace; DO NOT advance time
+            const std::size_t pending = loop->pending_timer_count();
+
+            node->stop();
+            node.reset();
+            transport.reset();
+            loop.reset();             // <- destroys vtimers_ with grace pending
+            fs::remove_all(dir, fec);
+
+            check(pending >= 1,
+                  "start_external armed the grace as a pending virtual timer, and "
+                  "tearing the loop down with it UNfired completed cleanly (dtor "
+                  "drains vtimers_ under lock — no re-entrant erase-mid-destruction)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": scheduler-external "
+                  << (fail == 0 ? "all assertions (inc.3)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

@@ -123,6 +123,24 @@ VirtualEventLoop::~VirtualEventLoop() {
     // teardown posts land harmlessly in a stopped queue and are dropped
     // by ~State when the last ref goes.
     st_->drain();
+    // inc.3: drain the VIRTUAL-time timer queue with the same move-out-under-
+    // lock discipline. A self-owning timer — one whose only owner is its own
+    // scheduled fn, e.g. the startup grace armed by a node driven via
+    // start_external() and torn down BEFORE virtual time reaches its deadline
+    // (an isolated / never-selected node in an A4 fault scenario) — runs
+    // ~LoopTimer → timer_cancel(vtimers_) the instant its fn is destroyed. If
+    // that destruction happened during the member-wise destruction of vtimers_,
+    // the re-entrant cancel would erase() from the vector mid-destruction (UB).
+    // Swapping the queue into a local under vt_mu_ and letting it destroy with
+    // the lock RELEASED means any such re-entrant cancel locks vt_mu_ and scans
+    // an already-empty vtimers_ (an idempotent no-op). Native-path loops keep
+    // vtimers_ empty, so this is a two-empty-vector swap for them.
+    std::vector<VTimer> drop_timers;
+    {
+        std::lock_guard<std::mutex> lk(vt_mu_);
+        drop_timers.swap(vtimers_);
+    }
+    // `drop_timers` destroyed here, vt_mu_ released.
 }
 
 void VirtualEventLoop::run() {
@@ -157,6 +175,26 @@ void VirtualEventLoop::run_until_idle() {
         fn();
         lk.lock();
     }
+}
+
+std::size_t VirtualEventLoop::run_ready(std::size_t max_closures) {
+    // inc.3 bounded-step drive: like run_until_idle but caps the number of
+    // ready closures processed, so a self-producing node's unbounded re-post
+    // cascade can be advanced in inspectable batches instead of hanging a
+    // drain-to-quiescence call. Same FIFO order; re-posts land at the back and
+    // are eligible within the SAME call only if the cap has room.
+    State& s = *st_;
+    std::unique_lock<std::mutex> lk(s.mu);
+    std::size_t ran = 0;
+    while (!s.stopped && !s.q.empty() && ran < max_closures) {
+        std::function<void()> fn = std::move(s.q.front());
+        s.q.pop_front();
+        lk.unlock();
+        fn();
+        lk.lock();
+        ++ran;
+    }
+    return ran;
 }
 
 void VirtualEventLoop::stop() {

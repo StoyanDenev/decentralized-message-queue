@@ -619,8 +619,10 @@ Node::~Node() {
     if (save_thread_.joinable()) save_thread_.join();
 }
 
-void Node::run() {
-    running_ = true;
+// inc.3: the network-setup steps shared by run() and start_external().
+// gossip listen + connect the bootstrap/role peer lists. Factored out of
+// run() verbatim (same order) so run() stays byte-identical.
+void Node::listen_and_connect() {
     gossip_.listen(cfg_.listen_port);
 
     auto connect_addrs = [this](const std::vector<std::string>& addrs) {
@@ -639,6 +641,32 @@ void Node::run() {
     // state. SINGLE-role chains ignore both lists.
     if (cfg_.chain_role == ChainRole::SHARD) connect_addrs(cfg_.beacon_peers);
     if (cfg_.chain_role == ChainRole::BEACON) connect_addrs(cfg_.shard_peers);
+}
+
+// inc.3: arm the startup grace timer (shared by run() and start_external()).
+// The grace NativeTimer routes through loop_, so under a virtual-time loop it
+// fires only when the driver advances logical time to 1500ms.
+void Node::arm_startup_grace() {
+    // Initial sync probe with a startup grace period: give bootstrap peers
+    // a chance to connect before we engage consensus. Without this, a fresh
+    // multi-node cluster fires the first round before peers are reachable,
+    // the contrib phase aborts (broadcast goes nowhere), and per-node
+    // generations diverge; recovery never converges.
+    auto grace = std::make_shared<net::NativeTimer>(loop_);
+    grace->arm(std::chrono::milliseconds(1500), [this, grace] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        if (gossip_.peer_count() == 0) {
+            state_ = SyncState::IN_SYNC;
+            check_if_selected();
+            return;
+        }
+        gossip_.broadcast(net::make_status_request());
+    });
+}
+
+void Node::run() {
+    running_ = true;
+    listen_and_connect();
 
     {
         // Spawn under the same mutex join_loop_threads() takes: a
@@ -658,23 +686,22 @@ void Node::run() {
     // joined in stop() after save_stop_ is set and save_cv_ is notified.
     save_thread_ = std::thread([this] { save_worker_loop(); });
 
-    // Initial sync probe with a startup grace period: give bootstrap peers
-    // a chance to connect before we engage consensus. Without this, a fresh
-    // multi-node cluster fires the first round before peers are reachable,
-    // the contrib phase aborts (broadcast goes nowhere), and per-node
-    // generations diverge; recovery never converges.
-    auto grace = std::make_shared<net::NativeTimer>(loop_);
-    grace->arm(std::chrono::milliseconds(1500), [this, grace] {
-        std::unique_lock<std::shared_mutex> lk(state_mutex_);
-        if (gossip_.peer_count() == 0) {
-            state_ = SyncState::IN_SYNC;
-            check_if_selected();
-            return;
-        }
-        gossip_.broadcast(net::make_status_request());
-    });
+    arm_startup_grace();
 
     join_loop_threads();
+}
+
+// inc.3: the no-self-thread entry — see the node.hpp contract. Identical
+// startup to run() (listen + connect + grace arm) but spawns NO loop worker
+// threads, NO async save worker, and does NOT block. The caller drives loop_
+// (a virtual-time VirtualEventLoop) itself via run_until_idle() /
+// advance_to_next_timer(), so a scenario replays byte-identically with no
+// wall-clock worker concurrency. Persistence is off in this mode (no save
+// worker); stop() still performs the final synchronous save if called.
+void Node::start_external() {
+    running_ = true;
+    listen_and_connect();
+    arm_startup_grace();
 }
 
 void Node::join_loop_threads() {

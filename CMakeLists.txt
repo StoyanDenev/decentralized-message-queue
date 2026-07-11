@@ -13,6 +13,15 @@ set(CMAKE_C_STANDARD 11)
 # (the state_root-fork class, DECISION-LOG 2026-07-03). GCC/Clang only.
 option(DETERM_UBSAN "Instrument Determ's own targets with UBSan (GCC/Clang)" OFF)
 
+# ── DETERM_ASAN: the memory-safety companion to DETERM_UBSAN. Same target-scoped
+# discipline (only determ + determ-crypto-c99, vendored deps left uninstrumented
+# so the OpenSSL tree still caches). AddressSanitizer catches the heap/lifetime
+# class UBSan does not — use-after-free, heap-buffer-overflow, and re-entrant
+# container mutation during destruction (e.g. the net/scheduler teardown paths:
+# the VirtualEventLoop timer/closure queues drained under lock at ~dtor). GCC/
+# Clang only; wired into tools/ci_local.sh --asan.
+option(DETERM_ASAN "Instrument Determ's own targets with ASan (GCC/Clang)" OFF)
+
 include(FetchContent)
 
 # The vendored OpenSSL fork (janbar/openssl-cmake) declares a pre-3.5
@@ -243,6 +252,16 @@ if(DETERM_UBSAN)
   target_compile_options(determ            PRIVATE -fsanitize=undefined -O1)
   target_link_options(determ               PRIVATE -fsanitize=undefined)
   message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan (-O1)")
+endif()
+
+# ASan on Determ's own code only (see the DETERM_ASAN option above). -O1 for the
+# same per-TU compiler-memory reason as the UBSan block (main.cpp is ~15k lines).
+# Frame-pointers kept for readable teardown/heap reports.
+if(DETERM_ASAN)
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_compile_options(determ            PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_link_options(determ               PRIVATE -fsanitize=address)
+  message(STATUS "DETERM_ASAN: determ + determ-crypto-c99 instrumented with ASan (-O1)")
 endif()
 
 # ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────

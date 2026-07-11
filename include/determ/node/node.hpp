@@ -196,6 +196,22 @@ public:
     ~Node();
 
     void run();
+
+    // Deterministic-scheduler inc.3: the no-self-thread entry. Does exactly
+    // what run() does for startup (gossip listen + connect peers + arm the
+    // startup grace timer) but SPAWNS NO loop worker threads, spawns NO async
+    // save thread, and does NOT block — it returns immediately, leaving the
+    // caller to DRIVE loop_ itself. Intended for an in-process harness that
+    // injected a VirtualEventLoop with enable_virtual_time() (+ a VirtualClock)
+    // so it can advance logical time deterministically via run_until_idle() /
+    // advance_to_next_timer() on the concrete loop — no wall-clock worker
+    // concurrency, so a scenario replays byte-identically. run() is UNTOUCHED
+    // (both share the same private setup helpers below); persistence is simply
+    // off in this mode (no save worker) — call stop() before teardown, which
+    // still performs the final synchronous save if the caller wants it.
+    // NOT for production: the daemon uses run().
+    void start_external();
+
     // Cross-thread-safe + idempotent, but NOT a completion barrier: a
     // second concurrent stop() (including the destructor's) may return
     // while the first is still mid-teardown. An embedding harness that
@@ -739,6 +755,17 @@ private:
     // harness's Node::stop(). One guarded helper serializes the two sites.
     std::mutex                      threads_join_mutex_;
     void join_loop_threads();
+
+    // inc.3: the startup steps SHARED by run() and start_external(), factored
+    // out so run() stays byte-identical (it calls these in the same order it
+    // used to inline them). listen_and_connect: gossip_.listen + connect the
+    // bootstrap/role peer lists. arm_startup_grace: arm the 1500ms grace timer
+    // whose lambda engages consensus (peer-less → IN_SYNC + check_if_selected;
+    // else broadcast a status request). The grace NativeTimer routes through
+    // loop_, so under a virtual-time loop it fires only when the driver
+    // advances logical time to 1500ms.
+    void listen_and_connect();
+    void arm_startup_grace();
 
     // S-047: one retry tick's worth of idempotent round-state
     // re-broadcast (abort-event tail + own contrib + own block sig).
