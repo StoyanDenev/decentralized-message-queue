@@ -341,6 +341,16 @@ public:
     void     set_revert_threshold_blocks(uint32_t n) { revert_threshold_blocks_ = n; }
     uint32_t merge_grace_blocks()     const { return merge_grace_blocks_; }
     void     set_merge_grace_blocks(uint32_t n)     { merge_grace_blocks_ = n; }
+    // D3.3b: epoch length in blocks, genesis-pinned (GenesisConfig.epoch_blocks,
+    // default 1000, mixed into the genesis hash). Chain needs it to detect the
+    // epoch boundary at which the `cc:` committee checkpoint is frozen during
+    // apply_transactions. It is a plain routing-style field (mirrors shard_count_):
+    // NOT emitted as a state-root const_leaf — an unconditional leaf would change
+    // every CURRENT chain's state_root (S-039). Must be set BEFORE any replay so
+    // the fold-in freezes at the same boundary the producer used (Chain::load
+    // 6th param / snapshot restore). 0 = disabled (no epoch boundary ever fires).
+    uint32_t epoch_blocks()           const { return epoch_blocks_; }
+    void     set_epoch_blocks(uint32_t n)           { epoch_blocks_ = n; }
 
     // R4 Phase 2+4: per-shard merge state. Keys are shard_ids currently
     // in the MERGED (refugee) state; values are (partner_id,
@@ -619,7 +629,8 @@ public:
                        uint64_t block_subsidy = 0,
                        uint32_t shard_count = 1,
                        const Hash& shard_salt = Hash{},
-                       ShardId my_shard_id = 0);
+                       ShardId my_shard_id = 0,
+                       uint32_t epoch_blocks = 0);   // D3.3b: set before replay
 
     // A9 Phase 2D: composable-tx scope primitive. Runs `fn` with the
     // chain in a tentative state; on `fn` returning true, the
@@ -764,6 +775,10 @@ private:
     uint32_t                                    merge_threshold_blocks_{100};
     uint32_t                                    revert_threshold_blocks_{200};
     uint32_t                                    merge_grace_blocks_{10};
+    // D3.3b: genesis-pinned epoch length (blocks). Default 0 = disabled; the
+    // node sets it from GenesisConfig.epoch_blocks (default 1000). Plain field,
+    // NOT a state-root leaf (see set_epoch_blocks doc). Set before replay.
+    uint32_t                                    epoch_blocks_{0};
     // R4 Phase 2: per-shard merge state. key = shard_id currently
     // absorbed into a partner; value = partner shard. Mutated only
     // by MERGE_EVENT apply (BEGIN inserts, END erases).

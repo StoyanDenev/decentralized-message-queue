@@ -459,13 +459,17 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
     }
     chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy,
                                   genesis_shard_count, genesis_shard_salt,
-                                  genesis_my_shard);
+                                  genesis_my_shard, cfg_.epoch_blocks);
     chain_.set_min_stake(genesis_min_stake);
     chain_.set_suspension_slash(genesis_suspension_slash);
     chain_.set_unstake_delay(genesis_unstake_delay);
     chain_.set_merge_threshold_blocks(genesis_merge_threshold);
     chain_.set_revert_threshold_blocks(genesis_revert_threshold);
     chain_.set_merge_grace_blocks(genesis_merge_grace);
+    // D3.3b: the genesis-pinned epoch length. Passed to load() above too so it
+    // is present BEFORE the internal replay's fold-in; re-set here to cover the
+    // path where load() returned an empty chain (no replay ran).
+    chain_.set_epoch_blocks(cfg_.epoch_blocks);
     chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
                               genesis_my_shard);
 
@@ -534,6 +538,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
             chain_.set_merge_threshold_blocks(genesis_merge_threshold);
             chain_.set_revert_threshold_blocks(genesis_revert_threshold);
             chain_.set_merge_grace_blocks(genesis_merge_grace);
+            chain_.set_epoch_blocks(cfg_.epoch_blocks);  // D3.3b
             chain_.set_shard_routing(genesis_shard_count,
                                        genesis_shard_salt,
                                        genesis_my_shard);

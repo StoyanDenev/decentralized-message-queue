@@ -2608,7 +2608,8 @@ Chain Chain::load(const std::string& path,
                     uint64_t block_subsidy,
                     uint32_t shard_count,
                     const Hash& shard_salt,
-                    ShardId my_shard_id) {
+                    ShardId my_shard_id,
+                    uint32_t epoch_blocks) {
     // B1 chain-storage-v1: when a manifest exists, the block store is the
     // RUNTIME truth — it is written on every save tick, while the legacy
     // chain.json is written only at graceful stop(), so after a crash the
@@ -2636,6 +2637,7 @@ Chain Chain::load(const std::string& path,
         c.shard_count_   = shard_count;
         c.shard_salt_    = shard_salt;
         c.my_shard_id_   = my_shard_id;
+        c.epoch_blocks_  = epoch_blocks;  // D3.3b: before replay so the fold-in
 
         const fs::path dir = store_dir_for(path);
         for (uint64_t i = 0; i < height; ++i) {
@@ -2684,6 +2686,7 @@ Chain Chain::load(const std::string& path,
         c.shard_count_   = shard_count;
         c.shard_salt_    = shard_salt;
         c.my_shard_id_   = my_shard_id;
+        c.epoch_blocks_  = epoch_blocks;  // D3.3b (empty chain: no replay yet)
         return c;
     }
     json j = json::parse(f);
@@ -2693,6 +2696,7 @@ Chain Chain::load(const std::string& path,
     c.shard_count_   = shard_count;
     c.shard_salt_    = shard_salt;
     c.my_shard_id_   = my_shard_id;
+    c.epoch_blocks_  = epoch_blocks;    // D3.3b: before replay (same reason)
 
     // S-021: accept both formats:
     //   * legacy: top-level JSON array of blocks (pre-S-021 chain.json).
