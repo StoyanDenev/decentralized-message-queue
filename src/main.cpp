@@ -1028,6 +1028,13 @@ Additional in-process tests:
                                               pre-head state, is bounded to one
                                               block, refuses genesis, supports
                                               re-apply (the reorg replacement)
+  determ test-chain-reorg-save-crash          A4/S-048 A4.5: reorg-during-save
+                                              crash-consistency — a reorg rewrites
+                                              the tail block file in place; proves
+                                              the pre-fix crash window bricks
+                                              load() and the shrink-manifest-first
+                                              ordering makes every crash window
+                                              reload a consistent chain
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -27014,8 +27021,20 @@ int main(int argc, char** argv) {
         constexpr int64_t kT0 = 1700000000;
         std::error_code fec;
 
-        crypto::NodeKey keyP = crypto::generate_node_key();   // producer / creator
-        crypto::NodeKey keyF = crypto::generate_node_key();   // follower (non-creator)
+        // DETERMINISTIC keys (NOT generate_node_key()'s OS entropy). resolve_fork's
+        // tie-break falls through to the smallest BLOCK HASH, which depends on the
+        // creator's Ed25519 signatures; with random keys whether a crafted
+        // competitor wins/loses is effectively random per run, so craft()'s 30-delta
+        // grind fails ~10% of the time and this S-048 gate flakes. Fixed seeds +
+        // deterministic RFC-8032 Ed25519 make the whole repro byte-reproducible.
+        auto det_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (int i = 0; i < 32; ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey keyP = det_key(0xA0);   // producer / creator
+        crypto::NodeKey keyF = det_key(0x40);   // follower (non-creator)
 
         auto write_genesis = [&](const fs::path& dir) -> std::string {
             chain::GenesisConfig g;
@@ -33211,6 +33230,185 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-revert-head "
                   << (fail == 0 ? "all assertions (A4.1)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-chain-reorg-save-crash") {
+        // A4/S-048 A4.5: a head reorg REWRITES the tail block file in place
+        // (revert_head clamps persisted_count_ below the on-disk manifest
+        // height), so the next save is no longer append-only. This test proves
+        // (1) the DANGER is real — a crash between the tail rewrite and the
+        // manifest update bricks load() on a head_hash mismatch — and (2) the
+        // shrink-manifest-first ordering makes EVERY crash window reload a
+        // consistent chain. It uses the chain::testonly crash seam to throw at
+        // each atomic file boundary of the real save_incremental.
+        using namespace determ;
+        using namespace determ::chain;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "reorg-save-crash-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation ab, bb;
+        ab.domain = "alice"; ab.balance = 1000;
+        bb.domain = "bob";   bb.balance = 200;
+        cfg.initial_balances = {ab, bb};
+
+        auto add_transfer = [&](Chain& c, uint64_t idx, uint64_t amt, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = amt; tx.fee = 1; tx.nonce = nonce;
+            Block b;
+            b.index = idx;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        auto fresh_dir = [&](const std::string& tag) {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-reorg-crash-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
+            return dir;
+        };
+
+        // Build a chain persisted through height 3 (head = OLD block O), then
+        // reorg in memory to a distinct height-3 winner W. The chain is left
+        // in the reorg-pending state: persisted_count_ == 2 (clamped by
+        // revert_head) while the on-disk manifest still names height 3 / O.
+        auto build_reorged = [&](const std::string& path,
+                                 Hash& reverted, Hash& floor, Hash& winner) {
+            Chain c;
+            c.append(make_genesis_block(cfg));   // h1
+            add_transfer(c, 1, 100, 0);          // h2 (the finality floor H-1)
+            add_transfer(c, 2, 50, 1);           // h3 = OLD head O
+            c.save_incremental(path);            // store {manifest h3/O, blocks 0..2}
+            reverted = c.head_hash();
+            c.revert_head();                     // back to h2
+            floor = c.head_hash();               // the H-1 finality-floor head
+            add_transfer(c, 2, 70, 1);           // h3' = WINNER W (distinct tail)
+            winner = c.head_hash();
+            return c;
+        };
+
+        // === (1) DANGER PROOF: the pre-fix ordering (tail rewrite BEFORE the
+        //     manifest) bricks the store. Reconstruct that exact crash window by
+        //     hand — manifest still {h3, head=O} while <2>.json has been rewritten
+        //     to the winner — and assert load() fails closed on head_hash mismatch. ===
+        {
+            auto dir = fresh_dir("danger");
+            const std::string path = (dir / "chain.json").string();
+            Hash reverted, floor, winner;
+            Chain c = build_reorged(path, reverted, floor, winner);
+            const fs::path tail = fs::path(path + ".blocks") / "2.json";
+            {
+                std::ofstream f(tail, std::ios::binary | std::ios::trunc);
+                f << c.head().to_json().dump(2);   // c.head() == winner W
+            }
+            bool threw = false; std::string what;
+            try { Chain::load(path); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("head_hash mismatch") != std::string::npos,
+                  "DANGER PROOF: manifest{h3,head=OLD} beside a tail file rewritten "
+                  "to the WINNER bricks load() with a head_hash mismatch — the exact "
+                  "window the A4.5 shrink-first ordering eliminates");
+            std::error_code ec; fs::remove_all(dir, ec);
+        }
+
+        // === (2) FIX PROOF: drive the REAL save_incremental after a reorg and
+        //     crash it at each atomic file boundary. Post-fix write order is:
+        //       #0 shrink-manifest{h2}  #1 tail <2>.json=W  #2 final manifest{h3,W}
+        //     Every resulting on-disk state must load a CONSISTENT chain:
+        //       crash@0 -> OLD @ h3 (nothing written yet)
+        //       crash@1 -> floor @ h2 (manifest shrunk; stale <2>.json=O ignored)
+        //       crash@2 -> floor @ h2 (manifest still h2; stale <2>.json=W ignored)
+        //     Never a head_hash-mismatch brick. ===
+        struct CrashCase { int after; uint64_t exp_h; int exp_head; const char* desc; };
+        // exp_head: 0 = OLD (reverted), 1 = floor (H-1), 2 = winner
+        const CrashCase cases[] = {
+            {0, 3, 0, "crash BEFORE the shrink manifest reloads the OLD head at h3 "
+                      "(pre-save store intact — a consistent, if stale, chain)"},
+            {1, 2, 1, "crash AFTER the shrink manifest but before the tail rewrite "
+                      "reloads the H-1 finality floor at h2 (the stale old tail file "
+                      "is beyond the shrunk height, so load ignores it)"},
+            {2, 2, 1, "crash AFTER the tail rewrite but before the final manifest "
+                      "reloads the H-1 floor at h2 (the rewritten winner tail is beyond "
+                      "the shrunk height — never a manifest/tail head_hash mismatch)"},
+        };
+        for (const auto& cc : cases) {
+            auto dir = fresh_dir(std::string("fix") + std::to_string(cc.after));
+            const std::string path = (dir / "chain.json").string();
+            Hash reverted, floor, winner;
+            Chain c = build_reorged(path, reverted, floor, winner);
+
+            determ::chain::testonly::set_save_crash_countdown(cc.after);
+            bool threw = false;
+            try { c.save_incremental(path); } catch (const std::exception&) { threw = true; }
+            determ::chain::testonly::set_save_crash_countdown(-1);
+
+            Hash expected = cc.exp_head == 0 ? reverted
+                          : cc.exp_head == 1 ? floor : winner;
+            bool loaded_ok = false; Hash got{};
+            try { Chain rl = Chain::load(path); loaded_ok = true; got = rl.head_hash();
+                  // also assert the loaded height matches
+                  loaded_ok = (rl.height() == cc.exp_h); }
+            catch (const std::exception&) { loaded_ok = false; }
+            check(threw && loaded_ok && got == expected, cc.desc);
+            std::error_code ec; fs::remove_all(dir, ec);
+        }
+
+        // === (3) FULL COMPLETION: with the seam disarmed the reorg save finishes
+        //     and reload yields the WINNER at h3 (the happy path). ===
+        {
+            auto dir = fresh_dir("complete");
+            const std::string path = (dir / "chain.json").string();
+            Hash reverted, floor, winner;
+            Chain c = build_reorged(path, reverted, floor, winner);
+            c.save_incremental(path);            // disarmed: shrink + tail + manifest
+            Chain rl = Chain::load(path);
+            check(rl.height() == 3 && rl.head_hash() == winner
+                      && rl.head_hash() != reverted,
+                  "FULL COMPLETION: a disarmed reorg save reloads the WINNER at h3, "
+                  "not the stale reverted block");
+            std::error_code ec; fs::remove_all(dir, ec);
+        }
+
+        // === (4) RECOVERY: after a crash mid-reorg-save (window #1, store at h2),
+        //     a SUBSEQUENT save completes the reorg and reload yields the WINNER —
+        //     the daemon that crashed mid-save converges on the next save tick. ===
+        {
+            auto dir = fresh_dir("recover");
+            const std::string path = (dir / "chain.json").string();
+            Hash reverted, floor, winner;
+            Chain c = build_reorged(path, reverted, floor, winner);
+            determ::chain::testonly::set_save_crash_countdown(1);   // crash after shrink
+            try { c.save_incremental(path); } catch (const std::exception&) {}
+            determ::chain::testonly::set_save_crash_countdown(-1);
+            c.save_incremental(path);            // retry completes the reorg
+            Chain rl = Chain::load(path);
+            check(rl.height() == 3 && rl.head_hash() == winner,
+                  "RECOVERY: a save retried after a mid-reorg-save crash completes "
+                  "the reorg (reload yields the WINNER at h3)");
+            std::error_code ec; fs::remove_all(dir, ec);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-reorg-save-crash "
+                  << (fail == 0 ? "all assertions (A4.5)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

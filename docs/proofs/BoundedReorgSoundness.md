@@ -256,6 +256,55 @@ to-be-reverted head → `revert_head` → apply a distinct winner → save → `
 yields height 3 with the **winner** head hash, not the reverted one
 (`src/main.cpp:33147-33183`).
 
+**A4.5 — crash-consistency of the in-place tail rewrite.** REORG-6 above closes
+the *steady-state* window (a clean reorg-then-restart reloads the winner), but
+the rewrite itself is no longer append-only: after a reorg
+`persisted_count_ == N-1` while the on-disk manifest still names height `N` with
+the OLD head `O`, so the next `save_incremental` overwrites the in-range file
+`<N-1>.json = O → W` at an index the current manifest's `head_hash` covers. A
+process crash between that block rewrite and the final manifest write would leave
+`manifest{N, O}` beside `<N-1>.json = W`, which `load()`'s S-021 head gate rejects
+as a mismatch — a **fail-closed brick** (the store cannot boot, no silent legacy
+fallback). A4.5 closes this by tracking `persisted_manifest_height_` — the height
+the on-disk manifest currently claims, set to `blocks_.size()` at the end of
+`save_incremental` and in `load()`, and **NOT** clamped by `revert_head`
+(`include/determ/chain/chain.hpp`, `src/chain/chain.cpp` save_incremental /
+load / revert_head). When `persisted_manifest_height_ > persisted_count_` (a
+reorg since the last save), `save_incremental` writes a **shrink manifest** to
+`persisted_count_` *first*, then the tail rewrite, then the final manifest. The
+three atomic (tmp+rename) writes are, in order: **S** = manifest `{N-1, hash(H-1)}`,
+**B** = `<N-1>.json = W`, **M** = manifest `{N, W}`. Every crash boundary reloads
+a consistent chain: before **S** the store is the untouched pre-save `{N, O}`
+(load = O@N); after **S** the manifest names `N-1` and the stale/rewritten
+`<N-1>.json` is out of the `[0, N-1)` read range, so load = `blocks_[N-2]` @ N-1;
+after **M** load = W@N. The load key is that index `persisted_count_-1 = N-2` is
+the **H-1 finality floor**, which the depth-1 bound proves is never reverted
+(`revert_head` refuses at `size()<2` and refuses a second revert without an
+intervening apply — REORG-1), so the shrink manifest's `head_hash` always covers
+an on-disk block file that is unchanged. Byte-neutral for production: the shrink
+fires only when a reorg has clamped `persisted_count_`; the normal append path
+takes the `persisted_manifest_height_ == persisted_count_` branch and is
+unchanged, and the `write_file_atomic` crash seam (`g_save_crash_countdown`,
+default `-1`) is one relaxed atomic load that is always negative — identical
+output bytes. **Witness.** `test-chain-reorg-save-crash` (6 assertions): a DANGER
+PROOF reconstructing the pre-fix `{N,O}`+`<N-1>.json=W` state and asserting
+`load()` throws the head_hash mismatch, then a FIX PROOF that drives the *real*
+`save_incremental` through the crash seam at each atomic boundary (crash before
+**S**, after **S**, after **B**, full completion, and recovery on a retried save)
+and asserts each reloads a consistent chain. Adversarial-review GO with the
+closed-window enumeration independently re-derived (zero surviving findings).
+
+**Residuals (documented, non-blocking).** (a) The argument is a *process-crash*
+model, not power-loss: it assumes rename ordering with no `fsync`, which is the
+**same** assumption the pre-existing manifest-last append-only scheme already
+relied on — A4.5 extends that model to the reorg case rather than weakening it;
+`fsync`/power-loss durability remains a store-wide non-goal. (b) On short chains
+(`height <= kLegacyFullSaveMaxHeight`) the save worker calls `Chain::save()`
+(which writes the full legacy `chain.json` and removes the sibling manifest) then
+`save_incremental` (which re-creates it); a crash after the shrink but before the
+final manifest can reload height `N-1` even though `chain.json` holds `N` — still
+consistent and self-re-syncing on the next save tick, never a brick.
+
 ## REORG-7 — SUPPLY SAFETY (S-049 interaction): no arithmetic on revert, checked arithmetic on re-apply
 
 **Claim.** The reorg cannot mint, burn, or overflow value: the revert performs

@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <set>   // §3.22c CONFIDENTIAL_TRANSFER input/output dedup
 #include <cstdio>
+#include <atomic>   // A4.5 crash-consistency test seam (g_save_crash_countdown)
 
 namespace determ::chain {
 
@@ -2340,7 +2341,25 @@ namespace {
 // discipline as Chain::save) + the store/manifest path derivation. The
 // manifest and per-block files live BESIDE <path>, never AT it, so the
 // legacy chain.json consumers are untouched.
+// A4.5 crash-consistency TEST SEAM. -1 (default) disables it: production
+// pays only a single relaxed atomic load per file write that is always -1,
+// so the on-disk bytes and behaviour are unchanged. When set >= 0 (only by
+// the test-only setter below), write_file_atomic throws just before its Nth
+// call from now (0 = before the very next write), letting
+// test-chain-reorg-save-crash simulate a process crash at each atomic file
+// boundary of a reorg save and assert the store still loads consistently.
+std::atomic<int> g_save_crash_countdown{-1};
+
 void write_file_atomic(const fs::path& target, const std::string& content) {
+    {
+        int cd = g_save_crash_countdown.load(std::memory_order_relaxed);
+        if (cd >= 0) {
+            if (cd == 0)
+                throw std::runtime_error(
+                    "A4.5-test: simulated crash before write of " + target.string());
+            g_save_crash_countdown.store(cd - 1, std::memory_order_relaxed);
+        }
+    }
     fs::create_directories(target.parent_path());
     fs::path tmp = target;
     tmp += ".tmp";
@@ -2362,6 +2381,16 @@ fs::path store_dir_for(const std::string& path)    { return fs::path(path + ".bl
 fs::path manifest_path_for(const std::string& path){ return fs::path(path + ".manifest.json"); }
 } // namespace
 
+// A4.5 crash-consistency test seam setter (declared in chain.hpp). Not used
+// on any production path — only test-chain-reorg-save-crash arms it. The
+// anon-namespace counter has internal linkage but is visible to this same
+// translation unit, so this externally-linked function can drive it.
+namespace testonly {
+void set_save_crash_countdown(int n) {
+    g_save_crash_countdown.store(n, std::memory_order_relaxed);
+}
+} // namespace testonly
+
 void Chain::save_incremental(const std::string& path) const {
     // O(new blocks) per call: write only blocks_[persisted_count_, size)
     // as one-file-per-block, then the tiny manifest LAST (atomic), so the
@@ -2370,6 +2399,34 @@ void Chain::save_incremental(const std::string& path) const {
     // crash strands are harmless: load() reads exactly manifest.height
     // files, and the next save overwrites them atomically.
     const fs::path dir = store_dir_for(path);
+
+    // A4.5 (reorg-during-save crash-consistency). Normally the block writes
+    // below are strictly append-only (indices >= the manifest's height), so
+    // a crash mid-loop only strands harmless higher-index files and the
+    // manifest still consistently names the old head. A head reorg breaks
+    // that: revert_head() clamped persisted_count_ below the on-disk manifest
+    // height, so the loop is about to overwrite an IN-RANGE tail file (the
+    // one the current manifest's head_hash covers) with the reorg winner. A
+    // crash between that overwrite and the final manifest rewrite would leave
+    // manifest{height N, head=OLD} beside <N-1>.json=WINNER, and load()
+    // rejects the head_hash mismatch as tampering — a fail-closed brick.
+    // Guard: when the manifest is ahead of persisted_count_, first shrink it
+    // to persisted_count_ (dropping the reference to the file about to be
+    // rewritten). After the shrink, every block file the manifest names is
+    // unchanged on disk (index persisted_count_-1 is the finality floor H-1,
+    // never reverted under the depth-1 bound), so a crash in any subsequent
+    // window reloads a consistent shorter chain and re-syncs the head.
+    if (persisted_manifest_height_ > persisted_count_) {
+        json sm;
+        sm["format"]    = "chain-blocks-v1";
+        sm["height"]    = persisted_count_;
+        sm["head_hash"] = persisted_count_ == 0
+                          ? std::string{}
+                          : to_hex(blocks_[persisted_count_ - 1].compute_hash());
+        write_file_atomic(manifest_path_for(path), sm.dump(2));
+        persisted_manifest_height_ = persisted_count_;
+    }
+
     for (size_t i = persisted_count_; i < blocks_.size(); ++i) {
         write_file_atomic(dir / (std::to_string(i) + ".json"),
                           blocks_[i].to_json().dump(2));
@@ -2385,6 +2442,7 @@ void Chain::save_incremental(const std::string& path) const {
                       : to_hex(blocks_.back().compute_hash());
     write_file_atomic(manifest_path_for(path), m.dump(2));
     persisted_count_ = blocks_.size();
+    persisted_manifest_height_ = blocks_.size();
 }
 
 Chain Chain::load(const std::string& path,
@@ -2434,6 +2492,9 @@ Chain Chain::load(const std::string& path,
         // The store is already on disk up to `height` — the next
         // save_incremental writes only genuinely new blocks.
         c.persisted_count_ = c.blocks_.size();
+        // A4.5: the on-disk manifest names exactly this height, so the
+        // shrink-first guard is a no-op until a reorg clamps persisted_count_.
+        c.persisted_manifest_height_ = c.blocks_.size();
 
         // Same S-021 head gate as the legacy path: the recomputed head
         // digest transitively covers every prior block.

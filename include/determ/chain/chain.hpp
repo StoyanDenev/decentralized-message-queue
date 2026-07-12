@@ -528,11 +528,16 @@ public:
     // S-021 tamper gate as the legacy format: load recomputes the head
     // digest after replay and rejects a mismatch.
     //
-    // Reorg hook (A4/S-048): DONE (A4.2). revert_head() clamps persisted_count_
-    // down to blocks_.size(), so the next save_incremental REWRITES the tail
-    // block file for the reorg winner + the manifest — a reorg-then-restart
-    // reloads the winner, not the stale reverted block (test-chain-revert-head
-    // persistence case). The store is otherwise append-only.
+    // Reorg hook (A4/S-048): DONE (A4.2 + A4.5). revert_head() clamps
+    // persisted_count_ down to blocks_.size(), so the next save_incremental
+    // REWRITES the tail block file for the reorg winner + the manifest — a
+    // reorg-then-restart reloads the winner, not the stale reverted block
+    // (test-chain-revert-head persistence case). A4.5 makes that in-place
+    // rewrite crash-consistent: when persisted_manifest_height_ > persisted_count_
+    // (a reorg since the last save), save_incremental shrinks the manifest to
+    // persisted_count_ BEFORE overwriting the in-range tail file, so a crash
+    // between the block rewrite and the final manifest can never brick the
+    // store on a head_hash mismatch. The store is otherwise append-only.
     void        save_incremental(const std::string& path) const;
 
     // rev.9 B6.basic: serialize the chain's CURRENT STATE (accounts,
@@ -675,6 +680,19 @@ private:
     // Reset to 0 by a legacy (full-file) load: the first incremental save
     // after a legacy load writes every block once (one-time migration).
     mutable size_t                              persisted_count_{0};
+
+    // A4.5 (reorg-during-save crash-consistency): the height the on-disk
+    // manifest currently claims. Equals persisted_count_ except in the window
+    // between a head reorg and the next save: revert_head() clamps
+    // persisted_count_ down (so the next save REWRITES the tail block file in
+    // place) but does NOT touch this — the manifest on disk still names the
+    // OLD head until the save fixes it. save_incremental() uses the gap
+    // (persisted_manifest_height_ > persisted_count_) to shrink the manifest
+    // BEFORE overwriting the in-range tail file, so a crash mid-rewrite can
+    // never leave the manifest naming a head whose block file no longer
+    // matches (which load() would reject as a head_hash mismatch = a
+    // fail-closed brick). SAVE-THREAD-CONFINED, same as persisted_count_.
+    mutable size_t                              persisted_manifest_height_{0};
 
     uint64_t                                    block_subsidy_{0};
     // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy
@@ -857,5 +875,14 @@ private:
 
     void apply_transactions(const Block& b);
 };
+
+// A4.5 crash-consistency TEST SEAM (not a production API). Arms an internal
+// counter so the next `n` block-store writes succeed and the (n+1)th throws,
+// simulating a process crash at a chosen atomic file boundary of a reorg
+// save. -1 disarms it. Only test-chain-reorg-save-crash calls this; the
+// production save path always runs with it disarmed (byte-identical output).
+namespace testonly {
+void set_save_crash_countdown(int n);
+} // namespace testonly
 
 } // namespace determ::chain
