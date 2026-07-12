@@ -762,6 +762,37 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
     lottery_jackpot_multiplier_ = s.lottery_jackpot_multiplier;
 }
 
+// D3.3b: freeze the eligible-validator pool as of `at_index`. This is a
+// hoisted, Chain-visible copy of NodeRegistry::build_from_chain's eligibility
+// predicate (registry.cpp:42-64) — same four gates, same params.hpp suspension
+// constants — emitting CommitteeMember{domain, ed_pub, region} straight from the
+// registrants_ map. The two predicate bodies MUST stay byte-identical forever
+// (a divergence forks the cc: leaf vs the live selection filter); the shared
+// suspension constants (params.hpp, D3.3b step0) collapse the worst drift
+// vector. registrants_ is a std::map<std::string,...> so iteration is already
+// domain-sorted → the emitted vector is canonical without an extra sort.
+std::vector<Chain::CommitteeMember>
+Chain::freeze_epoch_committee(uint64_t at_index) const {
+    auto is_suspended = [&](const std::string& domain) -> bool {
+        auto it = abort_records_.find(domain);
+        if (it == abort_records_.end()) return false;
+        const auto& ar = it->second;
+        uint64_t exp = std::min(ar.count - 1, MAX_ABORT_EXPONENT);
+        uint64_t len = std::min(BASE_SUSPENSION_BLOCKS * (uint64_t(1) << exp),
+                                 MAX_SUSPENSION_BLOCKS);
+        return at_index <= ar.last_block + len;
+    };
+    std::vector<CommitteeMember> out;
+    for (const auto& [domain, r] : registrants_) {
+        if (r.active_from > at_index)                     continue;
+        if (at_index >= r.inactive_from)                  continue;
+        if (min_stake_ > 0 && stake(domain) < min_stake_) continue;
+        if (is_suspended(domain))                         continue;
+        out.push_back(CommitteeMember{domain, r.ed_pub, r.region});
+    }
+    return out;
+}
+
 void Chain::apply_transactions(const Block& b) {
     // A9 Phase 1: snapshot at entry; restore on any throw before re-raising.
     // Guarantees observers see either the full block applied or no
@@ -811,6 +842,10 @@ void Chain::apply_transactions(const Block& b) {
     auto __ensure_audit_log_count = [&]() {        // A2 (lazy)
         if (!__snapshot.audit_log_count)
             __snapshot.audit_log_count = audit_log_count_;
+    };
+    auto __ensure_committee_checkpoints = [&]() {  // D3.3b (lazy)
+        if (!__snapshot.committee_checkpoints)
+            __snapshot.committee_checkpoints = committee_checkpoints_;
     };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
@@ -1748,6 +1783,35 @@ void Chain::apply_transactions(const Block& b) {
         throw std::runtime_error(buf);
     }
 
+    // D3.3b Site A: epoch-rotation committee checkpoint fold-in. When THIS
+    // block is the last of an epoch (its index is the rand-anchor
+    // E·epoch_blocks − 1, i.e. (index+1) % epoch_blocks == 0), freeze epoch E's
+    // eligible pool into the `cc:` state namespace. MUST run BEFORE the S-033
+    // recompute just below so compute_state_root() sees the new cc: leaf and
+    // binds it into this block's declared state_root. EXTENDED-only
+    // (shard_count_ > 1): SINGLE chains never fold ⇒ zero cc: leaves ⇒
+    // byte-identical state_root (the shipped D3.3a invariant). A pure function
+    // of b.index + committed state (no wall-clock, no node state) so live-apply,
+    // gossip-apply, and Chain::load replay all fold identically; an A4
+    // revert_head across the boundary restores the pre-fold map from
+    // __snapshot (captured by __ensure_committee_checkpoints) and a re-append
+    // re-folds the same checkpoint (add_committee_checkpoint overwrites ⇒
+    // idempotent). Epoch 0 is intentionally NOT folded: the genesis ctor runs
+    // before the node sets epoch_blocks_/shard_count_, so a genesis fold would
+    // diverge bootstrap-vs-reload; the first checkpoint is epoch 1 at block
+    // epoch_blocks−1. An absent epoch-0 checkpoint is fail-closed at the D3.6
+    // admission gate (an epoch-0 distress just can't be authenticated), never a
+    // fork.
+    if (shard_count_ > 1 && epoch_blocks_ > 0
+        && (b.index + 1) % epoch_blocks_ == 0) {
+        __ensure_committee_checkpoints();
+        EpochIndex E = (b.index + 1) / epoch_blocks_;
+        EpochCommitteeCheckpoint cp;
+        cp.epoch_rand = b.cumulative_rand;
+        cp.members    = freeze_epoch_committee(b.index);
+        add_committee_checkpoint(E, std::move(cp));
+    }
+
     // S-033 / v2.1 foundation: state-root verification. Block may carry a
     // commitment to state-after-apply. If non-zero, re-derive locally
     // and reject on mismatch. Pre-S-033 blocks carry zero state_root
@@ -1988,6 +2052,14 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["merge_threshold_blocks"]  = merge_threshold_blocks_;
     snap["revert_threshold_blocks"] = revert_threshold_blocks_;
     snap["merge_grace_blocks"]      = merge_grace_blocks_;
+    // D3.3b: genesis-pinned epoch length. Emitted ONLY when non-zero — it is
+    // not a state-root leaf, so a CURRENT/SINGLE chain (epoch_blocks_ == 0,
+    // as every pre-D3.3b test chain is) serializes byte-identically to before
+    // (existing snapshot goldens unchanged). A live EXTENDED node carries the
+    // genesis value here so restore re-pins it before subsequent boundary
+    // blocks fold their cc: checkpoints.
+    if (epoch_blocks_ != 0)
+        snap["epoch_blocks"] = epoch_blocks_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
     snap["shard_id"]      = my_shard_id_;
@@ -2171,6 +2243,11 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.merge_threshold_blocks_  = snap.value("merge_threshold_blocks",  uint32_t{100});
     c.revert_threshold_blocks_ = snap.value("revert_threshold_blocks", uint32_t{200});
     c.merge_grace_blocks_      = snap.value("merge_grace_blocks",      uint32_t{10});
+    // D3.3b: genesis-pinned epoch length; absent (default 0) on every pre-D3.3b
+    // and CURRENT/SINGLE snapshot, so restore is byte-invariant for them. Set
+    // before the tail-block replay so a snapshot-bootstrapped EXTENDED node
+    // folds subsequent boundary blocks at the same boundary the producer used.
+    c.epoch_blocks_  = snap.value("epoch_blocks", uint32_t{0});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
     c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",

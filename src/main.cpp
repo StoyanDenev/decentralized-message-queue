@@ -1051,6 +1051,11 @@ Additional in-process tests:
                                               reconstruction circularity-breaker);
                                               state-root + ring + snapshot
                                               inheritance + byte-neutrality
+)" << R"(  determ test-committee-fold                  D3.3b (S-036): the EXTENDED
+                                              epoch-rotation fold-in inside
+                                              apply_transactions — fires at the
+                                              boundary, freezes the pool, SINGLE
+                                              byte-neutral, reload + reorg stable
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -11218,6 +11223,147 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": shard-tip-namespace "
                   << (fail == 0 ? "all assertions (D3.2)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-committee-fold") {
+        // D3.3b (ShardTipMergeDesign.md §9.3): the EXTENDED-only epoch-rotation
+        // fold-in inside Chain::apply_transactions (Site A). Proves the fold
+        // FIRES at the epoch boundary on an EXTENDED chain, freezes the correct
+        // eligible pool + epoch_rand, is byte-neutral on SINGLE, is gated off by
+        // epoch_blocks==0, binds into state_root, survives a Chain::load replay
+        // identically, and is A4-reorg-idempotent (the H-1 __ensure lambda).
+        using namespace determ;
+        using namespace determ::chain;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "committee-fold-test";
+        auto mk_creator = [&](const std::string& dom, uint8_t fill, uint64_t stk) {
+            GenesisCreator c; c.domain = dom; c.initial_stake = stk;
+            for (auto& b : c.ed_pub) b = fill;
+            return c;
+        };
+        // Stakes >= the DEFAULT min_stake (1000). We deliberately leave min_stake
+        // at its default so the Chain::load reload path (which does not thread
+        // min_stake and defaults it to 1000) freezes the SAME eligible set the
+        // producer did — modelling the supported EXTENDED config. A non-default
+        // min_stake chain has the same reload constraint as ANY non-default
+        // min_stake chain (the pre-existing min_stake const_leaf, not D3.3b; see
+        // ShardTipMergeDesign.md §9.3).
+        cfg.initial_creators = { mk_creator("alice", 0x11, 2000),
+                                 mk_creator("bob",   0x22, 2000),
+                                 mk_creator("carol", 0x33, 2000) };
+        for (const char* d : {"alice", "bob", "carol"}) {
+            GenesisAllocation a; a.domain = d; a.balance = 1000;
+            cfg.initial_balances.push_back(a);
+        }
+        // Build a chain with a given shard_count/epoch_blocks. Params set BEFORE
+        // genesis apply (mirrors Chain::load, which sets them before replay).
+        // min_stake left at the default 1000 (matches the reload path).
+        auto build = [&](uint32_t shard_count, uint32_t epoch_blocks) {
+            Chain c;
+            c.set_shard_routing(shard_count, Hash{}, 0);
+            c.set_epoch_blocks(epoch_blocks);
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+        // Append an empty (creator-less, tx-less) block carrying a chosen
+        // cumulative_rand and a zero state_root (which skips the S-033 recompute
+        // — the fold fires regardless, before that check).
+        auto add_block = [&](Chain& c, uint8_t rand_fill) {
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head_hash();
+            b.timestamp = 1700000000 + int64_t(b.index);
+            for (auto& x : b.cumulative_rand) x = rand_fill;
+            c.append(std::move(b));
+        };
+
+        // === EXTENDED: the fold fires exactly at the boundary ===
+        {
+            Chain c = build(4, 4);   // epoch_blocks=4 → boundary at block index 3
+            check(c.committee_checkpoints().empty(),
+                  "EXTENDED: no checkpoint at genesis");
+            add_block(c, 0x01);      // index 1
+            add_block(c, 0x02);      // index 2
+            check(c.committee_checkpoints().empty(),
+                  "EXTENDED: no checkpoint before the boundary (idx 1,2)");
+            add_block(c, 0xEE);      // index 3 → (3+1)%4==0 → freeze epoch 1
+            check(c.committee_checkpoints().count(1) == 1,
+                  "EXTENDED: epoch 1 checkpoint folded at block 3 (the boundary)");
+            const auto& cp = c.committee_checkpoints().at(1);
+            check(cp.members.size() == 3,
+                  "fold froze all 3 eligible members (stake 2000 >= default min_stake)");
+            check(cp.members.size() == 3 && cp.members[0].domain == "alice"
+                  && cp.members[1].domain == "bob" && cp.members[2].domain == "carol",
+                  "frozen members are domain-sorted (canonical)");
+            bool rand_ok = true;
+            for (auto x : cp.epoch_rand) if (x != 0xEE) rand_ok = false;
+            check(rand_ok, "epoch_rand == the boundary block's cumulative_rand");
+        }
+
+        // === SINGLE: never folds (shard_count==1 gate) — byte-neutrality ===
+        {
+            Chain c = build(1, 4);
+            add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
+            check(c.committee_checkpoints().empty(),
+                  "SINGLE: no fold ever (shard_count==1) — the byte-neutral gate");
+        }
+
+        // === epoch_blocks==0 disables the fold even on EXTENDED ===
+        {
+            Chain c = build(4, 0);
+            add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
+            check(c.committee_checkpoints().empty(),
+                  "epoch_blocks==0 disables the fold (no boundary ever fires)");
+        }
+
+        // === the frozen leaf binds into state_root + survives a load replay ===
+        {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-cfold-" + std::to_string(
+                    static_cast<unsigned long long>(
+                        std::chrono::steady_clock::now().time_since_epoch().count())));
+            std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
+            const std::string cp = (dir / "chain.json").string();
+            Chain c = build(4, 4);
+            add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
+            const Hash root = c.compute_state_root();
+            c.save(cp); c.save_incremental(cp);
+            // Reload with the SAME epoch_blocks so load-replay re-folds identically.
+            Chain r = Chain::load(cp, /*subsidy=*/0, /*shard_count=*/4,
+                                  Hash{}, /*my_shard=*/0, /*epoch_blocks=*/4);
+            check(r.committee_checkpoints().count(1) == 1,
+                  "Chain::load replay re-folds epoch 1 (no S-033 throw on EXTENDED reload)");
+            check(r.compute_state_root() == root,
+                  "reloaded state_root == pre-save (cc: leaf bound + reproduced)");
+            fs::remove_all(dir, ec);
+        }
+
+        // === A4 reorg idempotence: revert across the boundary + re-append ===
+        {
+            Chain c = build(4, 4);
+            add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
+            const Hash root_before = c.compute_state_root();
+            check(c.committee_checkpoints().count(1) == 1, "pre-revert: epoch 1 present");
+            c.revert_head();         // revert the boundary block (index 3)
+            check(c.committee_checkpoints().empty(),
+                  "revert_head across the boundary rolls back the checkpoint (H-1 lambda)");
+            add_block(c, 0xEE);      // re-append an identical boundary block
+            check(c.committee_checkpoints().count(1) == 1
+                  && c.compute_state_root() == root_before,
+                  "re-append re-folds the identical checkpoint + state_root (reorg idempotent)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": committee-fold "
+                  << (fail == 0 ? "all assertions (D3.3b)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

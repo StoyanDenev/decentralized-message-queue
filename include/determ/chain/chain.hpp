@@ -926,6 +926,18 @@ private:
     StateSnapshot create_state_snapshot() const;
     void          restore_state_snapshot(StateSnapshot&& s);
 
+    // D3.3b: freeze the eligible-validator POOL as of `at_index`, for the
+    // epoch-rotation committee checkpoint (Site A fold-in). A pure function of
+    // committed Chain state (registrants_/stake()/min_stake_/abort_records_) —
+    // it applies build_from_chain's EXACT 4-predicate filter (active window +
+    // stake floor + abort suspension) reading the SAME params.hpp suspension
+    // constants the node-side NodeRegistry::build_from_chain uses, so the frozen
+    // set can never drift from the live selection filter. Region-UNfiltered
+    // (the region filter stays on the read side); members are domain-sorted
+    // (registrants_ is an ordered map). Lives in Chain (not moved from the node
+    // layer) because build_from_chain reads only Chain accessors.
+    std::vector<CommitteeMember> freeze_epoch_committee(uint64_t at_index) const;
+
     // A4 / S-048: the state as it existed immediately before the CURRENT head
     // was applied — retained by apply_transactions on success so revert_head()
     // can restore it (a depth-1 head reorg). Some(S) IFF S is exactly the state
