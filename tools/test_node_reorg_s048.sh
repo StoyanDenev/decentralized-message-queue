@@ -15,7 +15,10 @@
 #   5. REPLAY: the whole fork+reorg replays byte-identically (register gate);
 #   6. LOSER competitor is dropped (head unchanged);
 #   7-8. INVALID competitor (garbage Phase-1 sig) is rejected after the revert
-#        and the old head restored verbatim (fail-closed).
+#        and the old head restored verbatim (fail-closed);
+#   9. A4.4 SYNC rejoiner — a same-height winner delivered over the
+#      CHAIN_RESPONSE sync path (not gossip) is adopted via the reorg (the
+#      restarted-minority-tail convergence path).
 #
 # Run from repo root: bash tools/test_node_reorg_s048.sh
 set -u

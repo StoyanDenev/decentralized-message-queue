@@ -2178,6 +2178,21 @@ void Node::maybe_reorg_to_locked(const chain::Block& incoming) {
     //     regardless of arrival order. If our head wins, keep it.
     const chain::Block& winner = chain::Chain::resolve_fork(cur, incoming);
     if (&winner != &incoming) return;
+    // (3b) Cheap pre-revert well-formedness (adversarial-review finding 4:
+    //      resolve_fork ranks on the COUNT of non-zero block sigs without
+    //      verifying them, so a Byzantine peer could pad a malformed block to
+    //      win the tie-break and force the O(state) revert + re-apply before
+    //      the post-revert crypto check rejects it). A legitimate block has
+    //      exactly one sig slot per creator; reject a size-mismatched block
+    //      here, with NO revert. (Full sig verification stays post-revert —
+    //      the competitor is a sibling of our head, so it cannot pass
+    //      check_prev_hash until the chain is actually at H-1; padding WITHIN
+    //      the creator count remains bounded + fail-closed, A4.4 note.)
+    if (incoming.creator_block_sigs.size() != incoming.creators.size()) {
+        std::cerr << "[node] S-048 reorg declined at h=" << incoming.index
+                  << ": malformed competitor (sig/creator size mismatch)\n";
+        return;
+    }
     // (4) Depth-1 capability: without a retained pre-head snapshot the chain
     //     cannot revert (fresh bootstrap, or head already reverted once) —
     //     decline rather than throw. The node stays on its head; the S-047
@@ -2685,14 +2700,35 @@ void Node::on_chain_response(const std::vector<chain::Block>& blocks,
         return;
     }
 
+    const uint64_t h_before = chain_.height();
+    const Hash head_before = chain_.empty() ? Hash{} : chain_.head_hash();
+
     for (auto& b : blocks) {
-        // Apply each block; if any fails validation, drop the peer for this
-        // sync session and re-probe.
-        if (b.index != chain_.height()) continue;        // out-of-range chunk
-        apply_block_locked(b);
+        // Forward block at our tip → normal append path.
+        if (b.index == chain_.height()) {
+            apply_block_locked(b);
+        // A4.4 (S-048 rejoiner): a block AT our head height (index == height()-1)
+        // is a same-height competitor for our current head — route it through
+        // apply_block_locked's stale-index branch so maybe_reorg_to_locked can
+        // adopt it if it wins resolve_fork (a byte-identical duplicate no-ops).
+        // This is how a restarted node holding a minority tail converges.
+        } else if (chain_.height() >= 2 && b.index == chain_.height() - 1) {
+            apply_block_locked(b);
+        }
+        // else: out-of-range chunk (gap or already-buried) — skip.
     }
 
-    if (has_more) {
+    // "Progressed" = the head advanced OR changed identity (a same-height reorg
+    // changes head_hash without changing height). Only keep pulling from this
+    // peer while we make progress: a chunk that neither advances nor reorgs
+    // (e.g. a Byzantine peer feeding non-applying blocks) must NOT spin — fall
+    // through to start_sync_if_behind, which re-broadcasts so a different peer
+    // can answer. This bounds the reorg-path work a peer can force.
+    const bool progressed =
+        chain_.height() != h_before ||
+        (!chain_.empty() && chain_.head_hash() != head_before);
+
+    if (has_more && progressed) {
         sync_peer_ = peer;
         request_next_chunk();
     } else {
@@ -2767,7 +2803,18 @@ void Node::start_sync_if_behind() {
 
 void Node::request_next_chunk() {
     // state_mutex_ held by caller.
-    auto msg = net::make_get_chain(chain_.height(), 64);
+    // A4.4 (S-048 rejoiner): request from height()-1, NOT height(). A node
+    // restarted holding a minority same-height tail has a head M at index H-1
+    // that differs from the network's winner W at H-1; asking from H would only
+    // ever fetch blocks [H, …] whose prev_hash is hash(W) ≠ hash(M), so every
+    // one fails prev_hash validation forever (the S-048 rejoin wall). Asking
+    // from H-1 delivers W itself; on_chain_response routes a block at
+    // height()-1 into apply_block_locked's same-height branch → maybe_reorg_
+    // to_locked adopts the resolve_fork winner, and the subsequent [H, …] then
+    // apply cleanly. On the no-fork path the H-1 block is a byte-identical
+    // duplicate the reorg check drops (one re-fetched block per chunk — ~1/64).
+    uint64_t from = chain_.height() > 0 ? chain_.height() - 1 : 0;
+    auto msg = net::make_get_chain(from, 64);
     if (sync_peer_) {
         try { sync_peer_->send(msg); } catch (...) { sync_peer_ = nullptr; }
     } else {

@@ -821,8 +821,9 @@ Additional in-process tests:
                                               producer block + a same-height
                                               competitor over real gossip and
                                               reorgs to the resolve_fork winner
-                                              (WINNER/REPLAY/LOSER/INVALID);
-                                              deterministic byte-replay
+                                              (WINNER/REPLAY/LOSER/INVALID +
+                                              A4.4 SYNC rejoiner via CHAIN_
+                                              RESPONSE); deterministic byte-replay
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
                                               process: 5 real Nodes over an
                                               injected VirtualTransport (one
@@ -27101,7 +27102,8 @@ int main(int argc, char** argv) {
 
         // The node under test: a non-creator follower fed block1 then comp.
         auto run_follower = [&](const chain::Block& block1,
-                                const chain::Block& comp) -> FollowResult {
+                                const chain::Block& comp,
+                                bool via_sync = false) -> FollowResult {
             FollowResult r;
             fs::path dir = uniq("foll");
             fs::remove_all(dir, fec); fs::create_directories(dir);
@@ -27136,7 +27138,21 @@ int main(int argc, char** argv) {
             peer.broadcast(net::make_block(block1)); drain();
             r.accepted = (height() == 2);
 
-            peer.broadcast(net::make_block(comp)); drain();
+            if (via_sync) {
+                // A4.4: deliver the competitor inside a CHAIN_RESPONSE (the sync
+                // path), NOT a gossip BLOCK — the block at index height()-1 must
+                // route through on_chain_response → apply_block_locked → reorg.
+                // This is the RESTARTED-node-with-a-minority-tail convergence
+                // path (a real rejoiner requests from height()-1, gets the
+                // winner at that index, and adopts it).
+                nlohmann::json cr;
+                cr["blocks"]   = nlohmann::json::array({ comp.to_json() });
+                cr["has_more"] = false;
+                peer.broadcast({ net::MsgType::CHAIN_RESPONSE, cr });
+            } else {
+                peer.broadcast(net::make_block(comp));
+            }
+            drain();
             auto hb = chain::Block::from_json(node->rpc_block(height() - 1));
             r.head = hb.compute_hash();
             r.reorged = (r.head == comp.compute_hash()) && height() == 2;
@@ -27193,9 +27209,19 @@ int main(int argc, char** argv) {
               "garbage Phase-1 sig) is REJECTED after the revert and the old head "
               "is restored verbatim (fail-closed)");
 
+        // ── Scenario 5: SYNC-PATH rejoiner (A4.4) — the winner arrives via a
+        //    CHAIN_RESPONSE (not gossip), the path a restarted node holding a
+        //    minority tail hits. The block at height()-1 must route through
+        //    on_chain_response → reorg. ─────────────────────────────────────
+        FollowResult s5 = run_follower(b1, win, /*via_sync=*/true);
+        check(s5.accepted && s5.reorged && s5.head == win.compute_hash(),
+              "A4.4 SYNC rejoiner: a same-height winner delivered over the "
+              "CHAIN_RESPONSE sync path (index == height()-1) is adopted via the "
+              "reorg — the restarted-minority-tail node converges");
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": node-reorg-s048 "
-                  << (fail == 0 ? "all assertions (A4.2+A4.3)" : "had failures")
+                  << (fail == 0 ? "all assertions (A4.2-A4.4)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
