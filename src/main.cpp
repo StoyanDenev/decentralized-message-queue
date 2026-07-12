@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
 #include <determ/node/producer.hpp>
+#include <determ/node/committee_pool.hpp>   // D3.3b-read: test-committee-pin
 #include <determ/rpc/rpc.hpp>
 #include <determ/chain/chain.hpp>
 #include <determ/chain/block.hpp>
@@ -1056,6 +1057,11 @@ Additional in-process tests:
                                               apply_transactions — fires at the
                                               boundary, freezes the pool, SINGLE
                                               byte-neutral, reload + reorg stable
+)" << R"(  determ test-committee-pin                   D3.3b-read (S-036): shared
+                                              committee_pool POOL + IDENTITY
+                                              helpers — frozen pool + frozen-first
+                                              pubkey keep a mid-epoch-drifted
+                                              member valid; SINGLE/epoch-0 fall back
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -11223,6 +11229,130 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": shard-tip-namespace "
                   << (fail == 0 ? "all assertions (D3.2)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-committee-pin") {
+        // D3.3b-read (ShardTipMergeDesign.md §9.4): the shared committee_pool
+        // helpers that let producer + validator resolve the SAME committee POOL
+        // and creator IDENTITY from the frozen cc: checkpoint on an EXTENDED
+        // chain — so a member that drifts (deregisters / unstakes / suspends)
+        // MID-EPOCH stays a valid committee member until the next epoch, and a
+        // block naming it still verifies. Tests the helpers directly (no
+        // consensus wiring — that lands in the pin increment); present-head
+        // "drift" is simulated by raising min_stake AFTER the fold, which
+        // excludes the frozen members from build_from_chain while the frozen
+        // checkpoint retains them.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "committee-pin-test";
+        auto mk_creator = [&](const std::string& dom, uint8_t fill, uint64_t stk) {
+            GenesisCreator c; c.domain = dom; c.initial_stake = stk;
+            for (auto& b : c.ed_pub) b = fill;
+            return c;
+        };
+        cfg.initial_creators = { mk_creator("alice", 0x11, 2000),
+                                 mk_creator("bob",   0x22, 2000),
+                                 mk_creator("carol", 0x33, 2000) };
+        for (const char* d : {"alice", "bob", "carol"}) {
+            GenesisAllocation a; a.domain = d; a.balance = 1000;
+            cfg.initial_balances.push_back(a);
+        }
+        auto build = [&](uint32_t shard_count, uint32_t epoch_blocks) {
+            Chain c;
+            c.set_shard_routing(shard_count, Hash{}, 0);
+            c.set_epoch_blocks(epoch_blocks);
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+        auto add_block = [&](Chain& c, uint8_t rand_fill) {
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head_hash();
+            b.timestamp = 1700000000 + int64_t(b.index);
+            for (auto& x : b.cumulative_rand) x = rand_fill;
+            c.append(std::move(b));
+        };
+        auto domains = [](const std::vector<NodeEntry>& v) {
+            std::vector<std::string> d;
+            for (auto& e : v) d.push_back(e.domain);
+            return d;
+        };
+
+        // EXTENDED chain, fold epoch 1 (block index 3, epoch_blocks=4).
+        Chain c = build(4, 4);
+        add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
+        check(c.committee_checkpoints().count(1) == 1,
+              "setup: epoch 1 checkpoint present");
+
+        // === gate ===
+        check(committee_pin_active(c, 1),
+              "committee_pin_active true on EXTENDED + epoch 1 + checkpoint");
+        check(!committee_pin_active(c, 0),
+              "committee_pin_active FALSE for epoch 0 (never folded)");
+        {
+            Chain single = build(1, 4);
+            add_block(single, 0x01); add_block(single, 0x02); add_block(single, 0xEE);
+            check(!committee_pin_active(single, 1),
+                  "committee_pin_active FALSE on SINGLE (shard_count==1)");
+        }
+
+        // === Case A: NO drift — frozen pool == present-head pool ===
+        NodeRegistry ph_a = NodeRegistry::build_from_chain(c, c.height());
+        auto pinned_a = select_committee_pool(c, ph_a, 1, "");
+        check(domains(pinned_a) == domains(ph_a.eligible_in_region("")),
+              "no drift: select_committee_pool == present-head eligible_in_region "
+              "(byte-identical pool, same domain order)");
+        check(pinned_a.size() == 3, "no drift: pool has all 3 members");
+
+        // === Case B: DRIFT — raise min_stake so present-head drops all 3, but
+        // the frozen checkpoint (frozen at min_stake=1000) retains them ===
+        c.set_min_stake(3000);   // members staked 2000 < 3000
+        NodeRegistry ph_b = NodeRegistry::build_from_chain(c, c.height());
+        check(ph_b.eligible_in_region("").empty(),
+              "drift: present-head registry now EXCLUDES all 3 (stake 2000 < 3000)");
+        auto pinned_b = select_committee_pool(c, ph_b, 1, "");
+        check(pinned_b.size() == 3,
+              "drift FIX: select_committee_pool still returns the 3 FROZEN members "
+              "(the case the pin is FOR)");
+        check(domains(pinned_b) == std::vector<std::string>({"alice","bob","carol"}),
+              "drift FIX: frozen pool is domain-sorted alice,bob,carol");
+
+        // === identity resolution under drift (frozen-first) ===
+        auto pk = resolve_committee_member_pubkey(c, ph_b, 1, "bob");
+        bool pk_ok = pk.has_value();
+        if (pk_ok) for (auto x : *pk) if (x != 0x22) pk_ok = false;
+        check(pk_ok,
+              "drift FIX: resolve_committee_member_pubkey(bob) == frozen ed_pub "
+              "(0x22), though present-head find(bob) is null");
+        check(!ph_b.find("bob").has_value(),
+              "drift: present-head find(bob) IS null (the halt the identity pin avoids)");
+        check(committee_member_registered(c, ph_b, 1, "carol"),
+              "drift FIX: committee_member_registered(carol) true via frozen set");
+        check(!ph_b.contains("carol"),
+              "drift: present-head contains(carol) is false");
+
+        // === present-head fallback for a NON-committee domain (equivocator slash) ===
+        auto pk_none = resolve_committee_member_pubkey(c, ph_b, 1, "mallory");
+        check(!pk_none.has_value(),
+              "unknown domain resolves to nullopt at both frozen + present-head");
+
+        // === epoch-0 + SINGLE fall back to present-head (byte-identical) ===
+        auto pinned_e0 = select_committee_pool(c, ph_a, 0, "");
+        check(domains(pinned_e0) == domains(ph_a.eligible_in_region("")),
+              "epoch 0: select_committee_pool falls back to present-head");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": committee-pin "
+                  << (fail == 0 ? "all assertions (D3.3b-read helper)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 
