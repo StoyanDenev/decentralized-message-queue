@@ -1040,6 +1040,11 @@ Additional in-process tests:
                                               exact size/region-len decode gates
                                               (the on-chain distress-attestation
                                               substrate; byte-neutral)
+  determ test-shard-tip-namespace             D3.2 (S-036): the t: SHARD_TIP
+                                              distress-record state ring —
+                                              state-root binding + bounded ring
+                                              + snapshot inheritance + empty-set
+                                              byte-neutrality
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -11073,6 +11078,140 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": shard-tip-record "
                   << (fail == 0 ? "all assertions (D3.1)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-shard-tip-namespace") {
+        // D3.2 (ShardTipMergeDesign.md §9): the `t:` on-chain SHARD_TIP
+        // distress-record ring — state-root binding + bounded ring + snapshot
+        // round-trip (the snapshot inheritance the S-036 closure depends on),
+        // and the empty-set byte-neutrality that keeps a non-EXTENDED / healthy
+        // chain's state_root unchanged.
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "shard-tip-namespace-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+        cfg.initial_balances = {ab};
+        auto fresh = [&]() { Chain c; c.append(make_genesis_block(cfg)); return c; };
+
+        auto rec = [](uint32_t sid, uint64_t h, uint32_t ec,
+                      uint8_t sig_fill, const std::string& region) {
+            ShardTipRecord r;
+            r.source_shard_id = sid; r.height = h; r.eligible_count = ec;
+            r.region = region;
+            for (auto& b : r.committee_sig_root) b = sig_fill;
+            return r;
+        };
+
+        // === empty-set byte-neutrality: an empty ring emits zero t: leaves, so
+        //     state_root == a genesis chain that never saw the D3.2 code path ===
+        {
+            Chain a = fresh(), b = fresh();
+            check(a.shard_tip_records().empty() &&
+                  a.compute_state_root() == b.compute_state_root(),
+                  "empty t: ring: state_root of two fresh chains is identical "
+                  "(zero t: leaves — the non-EXTENDED byte-neutrality invariant)");
+        }
+
+        // === non-vacuity: a t: record actually changes state_root ===
+        {
+            Chain a = fresh(), b = fresh();
+            const Hash root_empty = a.compute_state_root();
+            b.add_shard_tip_record(rec(3, 100, 5, 0xAB, "us-east"));
+            check(b.compute_state_root() != root_empty,
+                  "adding a t: record changes state_root (the leaf is bound, "
+                  "not inert)");
+        }
+
+        // === determinism: identical record SETS → identical state_root
+        //     regardless of insertion order (the map sorts by shard,height) ===
+        {
+            Chain a = fresh(), b = fresh();
+            a.add_shard_tip_record(rec(3, 100, 5, 0x11, "us-east"));
+            a.add_shard_tip_record(rec(3, 101, 4, 0x22, "us-east"));
+            a.add_shard_tip_record(rec(7, 50,  9, 0x33, "eu-west"));
+            // b: same three, reverse order
+            b.add_shard_tip_record(rec(7, 50,  9, 0x33, "eu-west"));
+            b.add_shard_tip_record(rec(3, 101, 4, 0x22, "us-east"));
+            b.add_shard_tip_record(rec(3, 100, 5, 0x11, "us-east"));
+            check(a.shard_tip_records().size() == 3 &&
+                  a.compute_state_root() == b.compute_state_root(),
+                  "identical t: record sets inserted in different orders yield "
+                  "the identical state_root (deterministic across nodes)");
+        }
+
+        // === bounded ring: at most revert_threshold_blocks records PER shard;
+        //     the lowest-height records are pruned on overflow ===
+        {
+            Chain a = fresh();
+            a.set_revert_threshold_blocks(3);
+            for (uint64_t h = 10; h < 15; ++h)               // 5 records, shard 7
+                a.add_shard_tip_record(rec(7, h, 1, 0x44, "r"));
+            a.add_shard_tip_record(rec(9, 100, 1, 0x55, "r")); // a different shard
+            // shard 7 keeps only the 3 highest heights (12,13,14); shard 9 keeps 1
+            bool ring_ok = a.shard_tip_records().size() == 4
+                && a.shard_tip_records().count({7, 12}) == 1
+                && a.shard_tip_records().count({7, 13}) == 1
+                && a.shard_tip_records().count({7, 14}) == 1
+                && a.shard_tip_records().count({7, 10}) == 0
+                && a.shard_tip_records().count({7, 11}) == 0
+                && a.shard_tip_records().count({9, 100}) == 1;
+            check(ring_ok,
+                  "bounded ring: shard 7 pruned to its 3 highest heights "
+                  "(revert_threshold_blocks), shard 9 untouched — per-shard bound");
+        }
+
+        // === snapshot round-trip: the t: ring is serialized + inherited by a
+        //     snapshot-bootstrapped chain (records + state_root identical) ===
+        {
+            Chain a = fresh();
+            a.add_shard_tip_record(rec(3, 100, 5, 0xAB, "us-east"));
+            a.add_shard_tip_record(rec(3, 101, 4, 0xCD, "us-east"));
+            a.add_shard_tip_record(rec(7, 50,  9, 0xEF, "eu-west"));
+            const Hash root_a = a.compute_state_root();
+
+            json snap = a.serialize_state(16);
+            Chain b = Chain::restore_from_snapshot(snap);
+
+            bool records_match = b.shard_tip_records().size() == 3;
+            for (auto& [k, r] : a.shard_tip_records()) {
+                auto it = b.shard_tip_records().find(k);
+                records_match = records_match && it != b.shard_tip_records().end()
+                    && it->second.eligible_count == r.eligible_count
+                    && it->second.region == r.region
+                    && it->second.committee_sig_root == r.committee_sig_root;
+            }
+            check(records_match && b.compute_state_root() == root_a,
+                  "snapshot round-trip: a restored (snapshot-bootstrapped) chain "
+                  "inherits the t: ring exactly + reproduces the same state_root");
+        }
+
+        // === empty ring omitted from the snapshot (no drift on a healthy chain) ===
+        {
+            Chain a = fresh();
+            json snap = a.serialize_state(16);
+            check(!snap.contains("shard_tip_records"),
+                  "an empty t: ring is omitted from serialize_state (no snapshot "
+                  "bloat / no drift for a chain that never recorded distress)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shard-tip-namespace "
+                  << (fail == 0 ? "all assertions (D3.2)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

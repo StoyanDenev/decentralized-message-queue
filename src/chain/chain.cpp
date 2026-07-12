@@ -261,6 +261,26 @@ void Chain::stage_param_change(uint64_t effective_height,
 // — any change to the leaf-encoding scheme MUST be the same for both
 // or proofs won't verify against the state_root. Keeping them in one
 // function is the invariant.
+// D3.2 (ShardTipMergeDesign.md §9): insert a distress record and enforce the
+// bounded ring — keep at most revert_threshold_blocks_ records per source shard,
+// dropping that shard's lowest-height record on overflow. Deterministic: the map
+// is sorted by (source_shard_id, height), so all nodes prune identically.
+void Chain::add_shard_tip_record(const ShardTipRecord& rec) {
+    const ShardId s = rec.source_shard_id;
+    shard_tip_records_[{s, rec.height}] = rec;
+
+    const size_t bound = revert_threshold_blocks_ ? revert_threshold_blocks_ : 1;
+    size_t count = 0;
+    for (auto it = shard_tip_records_.lower_bound({s, uint64_t{0}});
+         it != shard_tip_records_.end() && it->first.first == s; ++it)
+        ++count;
+    while (count > bound) {
+        // lower_bound({s,0}) is that shard's lowest-height record (oldest).
+        shard_tip_records_.erase(shard_tip_records_.lower_bound({s, uint64_t{0}}));
+        --count;
+    }
+}
+
 std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     std::vector<crypto::MerkleLeaf> leaves;
     leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
@@ -361,6 +381,26 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         b.append(static_cast<uint64_t>(info.partner_id));
         b.append(static_cast<uint64_t>(info.refugee_region.size()));
         b.append(info.refugee_region);
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // shard_tip_records_  (D3.2, key = "t:" + shard_id_be4 + height_be8)
+    // The `t:` distress-record ring binds the on-chain SHARD_TIP attestations
+    // into state_root so the MERGE_EVENT BEGIN admission gate (D3.6) verifies
+    // against committed, snapshot-inherited records. Empty ring ⇒ zero leaves ⇒
+    // byte-identical state_root (the non-EXTENDED / healthy invariant).
+    for (auto& [key_pair, rec] : shard_tip_records_) {
+        std::vector<uint8_t> key;
+        key.reserve(2 + 4 + 8);
+        key.push_back('t'); key.push_back(':');
+        for (int i = 3; i >= 0; --i)
+            key.push_back((rec.source_shard_id >> (8*i)) & 0xff);
+        for (int i = 7; i >= 0; --i)
+            key.push_back((rec.height >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
+        b.append(static_cast<uint64_t>(rec.eligible_count));
+        b.append(static_cast<uint64_t>(rec.region.size()));
+        b.append(rec.region);
+        b.append(rec.committee_sig_root.data(), rec.committee_sig_root.size());
         leaves.push_back({std::move(key), hash_bytes(b)});
     }
     // pending_param_changes_  (key = "p:" + eff_be8 + idx_be4)
@@ -654,6 +694,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         merge_state_            = std::move(*s.merge_state);
     if (s.applied_inbound_receipts)
         applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
+    if (s.shard_tip_records)       // D3.2 (Some only once D3.5 mutates it in apply)
+        shard_tip_records_      = std::move(*s.shard_tip_records);
     if (s.dapp_registry)
         dapp_registry_          = std::move(*s.dapp_registry);
     if (s.shielded_pool)
@@ -1969,6 +2011,24 @@ json Chain::serialize_state(uint32_t header_count) const {
     }
     snap["merge_state"] = merge_arr;
 
+    // D3.2: persist the `t:` SHARD_TIP distress-record ring so a
+    // snapshot-bootstrapped node INHERITS the committed records — the property
+    // the S-036 closure depends on (a MERGE_EVENT admission gate must see the
+    // same records on archive and snapshot nodes). Omitted entirely when empty.
+    if (!shard_tip_records_.empty()) {
+        json tip_arr = json::array();
+        for (auto& [key_pair, rec] : shard_tip_records_) {
+            tip_arr.push_back({
+                {"source_shard_id",    rec.source_shard_id},
+                {"height",             rec.height},
+                {"eligible_count",     rec.eligible_count},
+                {"region",             rec.region},
+                {"committee_sig_root", to_hex(rec.committee_sig_root)},
+            });
+        }
+        snap["shard_tip_records"] = tip_arr;
+    }
+
     // S-037 closure: dapp_registry_ contributes to state_root via the
     // `d:` namespace (build_state_leaves) but was previously absent from
     // the JSON snapshot. Result: a DApp-active chain failed the S-033
@@ -2133,6 +2193,22 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             info.refugee_region = m.value("refugee_region",
                                             std::string{});
             c.merge_state_.insert({s, std::move(info)});
+        }
+    }
+    // D3.2: restore the `t:` SHARD_TIP distress-record ring so a
+    // snapshot-bootstrapped node inherits the committed records (via
+    // add_shard_tip_record, which re-applies the ring bound — a no-op here
+    // since the serialized set already respects it).
+    if (snap.contains("shard_tip_records")) {
+        for (auto& r : json_require_array(snap, "shard_tip_records")) {
+            ShardTipRecord rec;
+            rec.source_shard_id    = r.value("source_shard_id", ShardId{0});
+            rec.height             = r.value("height", uint64_t{0});
+            rec.eligible_count     = r.value("eligible_count", uint32_t{0});
+            rec.region             = r.value("region", std::string{});
+            rec.committee_sig_root = from_hex_arr<32>(
+                r.value("committee_sig_root", std::string(64, '0')));
+            c.add_shard_tip_record(rec);
         }
     }
     // S-032: restore the Phase-1 abort accumulator. Older snapshots

@@ -376,6 +376,20 @@ public:
         return out;
     }
 
+    // D3.2 (ShardTipMergeDesign.md §9): the on-chain SHARD_TIP distress-record
+    // ring. Committed into `state_root` under the `t:` namespace so a
+    // MERGE_EVENT BEGIN's under-quorum claim (D3.6) is verifiable against
+    // committed, snapshot-inherited records. Keyed by (source_shard_id, height),
+    // sorted → deterministic iteration; a bounded ring of the last
+    // `revert_threshold_blocks` records PER source shard caps state growth
+    // (older records for that shard are pruned deterministically on overflow).
+    using ShardTipRecordMap = std::map<std::pair<ShardId, uint64_t>, ShardTipRecord>;
+    const ShardTipRecordMap& shard_tip_records() const { return shard_tip_records_; }
+    // Insert `rec` (keyed by its own source_shard_id + height), then prune that
+    // shard's oldest record if it now exceeds the `revert_threshold_blocks`
+    // ring bound. Wired into apply (beacon block-summary fold-in) in D3.5.
+    void add_shard_tip_record(const ShardTipRecord& rec);
+
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
     // At the start of each apply_transactions(b), pending entries with
@@ -730,6 +744,10 @@ private:
     // Populated during apply (also during replay via load), consulted
     // by producer + validator to guarantee exactly-once credit.
     std::set<std::pair<ShardId, Hash>>           applied_inbound_receipts_;
+    // D3.2: the `t:` on-chain SHARD_TIP distress-record ring (S-036 closure).
+    // Mutated by add_shard_tip_record (apply-side fold-in wired in D3.5); a `t:`
+    // state-root leaf per record; snapshot round-tripped like merge_state_.
+    ShardTipRecordMap                            shard_tip_records_{};
 
     // A1: unitary-balance invariant counters. genesis_total_ is set once
     // by the index-0 apply branch (or by snapshot restore). The others
@@ -823,6 +841,7 @@ private:
         std::optional<std::map<std::string, AbortRecord>>   abort_records;
         std::optional<MergeStateMap>                        merge_state;
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
+        std::optional<ShardTipRecordMap>                    shard_tip_records;   // D3.2 (lazy)
         std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
         std::optional<std::map<std::string, uint64_t>>      shielded_pool;   // §3.22 (lazy)
         std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)
