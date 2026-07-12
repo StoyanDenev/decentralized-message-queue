@@ -460,7 +460,8 @@ existing golden, and needs re-scoping.
 | **D3.2 ✅** | `t:` state namespace + bounded ring + snapshot round-trip — **SHIPPED**. `shard_tip_records_` map keyed by (source_shard_id, height); `build_state_leaves` emits a `t:` leaf per record (`SHA256(eligible_count ‖ region ‖ committee_sig_root)`); `add_shard_tip_record` enforces a per-shard ring of `revert_threshold_blocks`; serialize/restore + StateSnapshot field mirror `merge_state_`. Empty ring ⇒ zero leaves + omitted from the snapshot. | `test-shard-tip-namespace` (6 assertions): empty-set byte-neutrality; a record changes `state_root`; order-independent determinism; per-shard ring prune (lowest heights dropped); snapshot inheritance (restored chain = same records + same `state_root`); empty ring omitted. FAST 219/0 both platforms; snapshot-full-determinism + state-root goldens byte-identical. |
 | **D3.3a ✅** | **`cc:` epoch committee-checkpoint substrate — SHIPPED.** `committee_checkpoints_` = `std::map<EpochIndex, {epoch_rand:32B, members:[{domain, ed_pub, region}]}>`; `add_committee_checkpoint` canonicalizes members domain-sorted + enforces a `kCommitteeCheckpointRing`(=16)-epoch ring; a `cc:` state-root leaf per epoch; serialize/restore + StateSnapshot field (snapshot inheritance). Empty ring ⇒ zero leaves ⇒ byte-identical. **Prefix is `cc:` (not `c:` — `k:c:` is the counter namespace, §9.2).** Populated only by D3.3b (EXTENDED). | `test-committee-checkpoint` (6 assertions): empty-set byte-neutrality; a checkpoint changes `state_root`; member-order-independent determinism (canonicalized); bounded ring; snapshot round-trip (restored chain = same checkpoints + same `state_root`); empty ring omitted. FAST 220/0 both platforms; state-root + snapshot goldens byte-identical. |
 | **D3.3b-write ✅** | **Chain-layer epoch-rotation fold-in — SHIPPED** (steps 0-3; §9.3). The write-side that POPULATES the `cc:` ring on EXTENDED chains, inside `Chain::apply_transactions` (FR-1: the only mutator common to ctor-genesis + append + both store-reload replays). **step0** (`924859f`) hoisted the 3 suspension constants to `chain/params.hpp` (H-4 drift-fork guard). **step1** (`df89677`) pinned `epoch_blocks_` onto Chain (member + accessors + 6th `Chain::load` param set before replay + node wiring; a plain field, NOT a `const_leaf` — H-2). **step2+3** (`e221147`) added `Chain::freeze_epoch_committee(at_index)` (Option B private helper, build_from_chain's exact 4-predicate filter), the `__ensure_committee_checkpoints` lazy-capture lambda (H-1 reorg/rollback safety), and **Site A only**: freeze epoch `E` at the last block of `E−1` (`(b.index+1)%epoch_blocks_==0`, gated `shard_count_>1 && epoch_blocks_>0`, `epoch_rand=b.cumulative_rand`, `members=freeze_epoch_committee(b.index)`), placed before the S-033 recompute so the `cc:` leaf binds. **Site B (genesis epoch 0) was DROPPED**: the genesis ctor applies before the node sets `epoch_blocks_`/`shard_count_`, so a genesis fold would diverge bootstrap-vs-reload; the first checkpoint is epoch 1 at block `epoch_blocks−1`, and an absent epoch-0 checkpoint is fail-closed at the D3.6 gate (never a fork). `epoch_blocks_` round-trips through the snapshot, emitted only when non-zero (byte-neutral). | `test-committee-fold` (13 assertions): fold fires exactly at the boundary; freezes the right pool + `epoch_rand`; SINGLE never folds; `epoch_blocks==0` disables it; `cc:` leaf binds into `state_root` + a `Chain::load` replay re-folds identically (no S-033 throw); A4 revert+re-append idempotent. FAST **221/0 BOTH platforms** (MSVC + WSL2/GCC); every SINGLE/CURRENT golden byte-identical. |
-| **D3.3b-read** | **`shard_count()>1`-gated selection pin** (steps 4-5, PENDING). Pin the read side at `check_if_selected` (node.cpp:857), `on_shard_tip` (node.cpp:1724), validator `check_creator_selection` (validator.cpp:86): when `chain_.shard_count()>1`, resolve epoch `E`'s pool from `committee_checkpoints()[E]` (NOT `build_from_chain(anchor)`, which stays present-head-contaminated — the S-036 circularity the checkpoint breaks) then apply the existing region-filter + abort-exclusion + seed-mix. H-3: unify on the chain-visible `shard_count()>1` (not the node-only `sharding_mode`) + a genesis-load `EXTENDED⇔shard_count>1` fail-closed assertion. SINGLE byte-identical (never enters the gate). **Known constraint** (pre-existing, not D3.3b): EXTENDED chains must use default `min_stake` — a non-default `min_stake` chain has the same `Chain::load` reload limitation as any non-default-`min_stake` chain (the `min_stake` `const_leaf`). | FAST both platforms (SINGLE goldens byte-identical) + a LIVE EXTENDED cluster (committee selection is a liveness surface) + EXTENDED-golden re-bless + 2-lens adversarial review, before commit. |
+| **D3.3b-read STEP 0 ✅** | **Shared `committee_pool` POOL + IDENTITY helpers — SHIPPED** (`3e35e0d`; §9.4 RP-2). `include/determ/node/committee_pool.hpp` + `.cpp`: `committee_pin_active` (gate == fold gate), `select_committee_pool` (POOL, frozen-only, region-filter mirroring `eligible_in_region`), `resolve_committee_member_pubkey` / `committee_member_registered` (IDENTITY, frozen-first + present-head fallback). Unwired ⇒ byte-neutral. | `test-committee-pin` (15 assertions): the gate (SINGLE/epoch-0 off); no-drift byte-equality with present-head (same domain order); the DRIFT FIX (a min_stake-raised present-head drops a member that the frozen pool + frozen-first pubkey keep valid). FAST 222/0 both platforms. |
+| **D3.3b-read STEP 1-3** | **The selection PIN wiring** (§9.4 RP-1/RP-3, PENDING — the first EXTENDED behaviour change). STEP 1+2 atomic: POOL pin at `check_if_selected` (node.cpp:862) + `check_creator_selection` (validator.cpp:86) + `check_abort_certs` (validator.cpp:234) via `select_committee_pool`; IDENTITY pin at the 6 validator block-acceptance sites (validator.cpp:69/161/326/362/388/482) via the identity helpers (+`const Chain&` on 4 check-fn signatures) — mandatory because pool-only is fork/HALT-broken under mid-epoch drift (RP-1); + the genesis `(sharding_mode==EXTENDED)⇔(shard_count>1)` fail-closed assertion (RP-4). STEP 3: the 5 node.cpp gossip identity sites (liveness, deferrable). `on_shard_tip` DEFERS to D3.5 (beacon holds the wrong checkpoints — RP-3). **Suspension takes effect at the next epoch boundary — bounded, NOT a safety hole (RP-5).** | FAST both platforms (SINGLE + drift-free EXTENDED byte-identical) + `test-committee-pin` extended to block level (drifted-frozen creator's block passes; pool-only REJECTS) + fixture audit + a LIVE EXTENDED cluster (≥3 region-pinned shards, mid-epoch churn → single head) + EXTENDED-golden re-bless + 2-lens adversarial review, before commit. |
 | **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |
 | **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
 | **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
@@ -623,3 +624,96 @@ verify: an epoch-boundary reorg reproduces identical ring + `state_root`; a ≥2
 chain reloads via chain-blocks-v1 with no S-033 throw; a `shard_count_==1` chain's `state_root`
 stays byte-identical pre/post-D3.3b (extends main.cpp:11270). Gates: FAST both platforms +
 LIVE EXTENDED cluster + EXTENDED-golden re-bless + 2-lens adversarial review before commit.
+
+### §9.4 Read-side selection pin (2026-07-12) — the D3.3b-read design (two Workflows, code-grounded)
+
+Two feasibility Workflows (3 parallel probes + a resolver each, all re-read against the
+tree) resolved *how* committee SELECTION reads the frozen `cc:` checkpoint. The headline:
+the increment table's "pin the 3 read sites" undercounted — pinning only the **pool** is
+not merely liveness-broken but **fork/HALT-broken**, because creator IDENTITY (pubkey /
+registration) still resolves present-head. **This §9.4 supersedes §9.2 point-2's
+`sharding_mode`-gate wording** (the gate is the chain-visible `chain.shard_count()>1`).
+
+**RP-1 — the halt hazard (why identity must move too).** The `registry` a validator uses is
+`NodeRegistry::build_from_chain(chain, b.index)` (node.cpp:2034; reorg path 2222), and the
+node's `registry_` is `build_from_chain(chain_, height())` (node.cpp:576/2066) — both
+return **eligible-only** entries (registry.cpp:60-64), so `registry.find/contains(d)` is
+null/false for any domain that deregistered / unstaked / abort-suspended present-head. Under
+a pool-only pin, `b.creators` are drawn from the FROZEN set, which can still name such a
+member → present-head `find` fails → the block is rejected by every validator → **shard
+HALT** (or fork if peers resolve differently). So creator identity MUST also resolve from
+the frozen `CommitteeMember.ed_pub`.
+
+**RP-2 — two shared helpers, one gate (shipped STEP 0, `3e35e0d`).**
+`include/determ/node/committee_pool.hpp` + `src/node/committee_pool.cpp`, all gated on
+`committee_pin_active(chain,epoch) == chain.shard_count()>1 && epoch>=1 &&
+committee_checkpoints().count(epoch)` (mirrors the fold gate exactly; chain-visible ⇒
+replay-deterministic): (a) `select_committee_pool` — the POOL, **frozen-ONLY** (it defines
+selection), region-filtered mirroring `eligible_in_region` exactly (empty ⇒ all; else
+`==`; order-preserving — frozen members are domain-sorted like `build_from_chain`'s insert
+order, so `select_m_creators` indices match); (b) `resolve_committee_member_pubkey` /
+`committee_member_registered` — IDENTITY, **frozen-FIRST then present-head fallback** (a
+mid-epoch-drifted member verifies on its frozen key; a non-committee / cross-epoch
+equivocator stays slashable). Two different sets (pool = frozen-only, identity =
+frozen∪present-head) ⇒ a single augmented registry cannot serve both. `test-committee-pin`
+(15 assertions) proves the gate, the no-drift byte-equality with present-head, and the
+DRIFT FIX. Off the pinned path (SINGLE, epoch 0, pruned epoch) everything falls back to
+present-head, byte-identical.
+
+**RP-3 — scope (three tiers).**
+- **MANDATORY, ship atomically (fork-critical):** POOL pin at the 3 local-shard sites +
+  refugee branches — `check_if_selected` (node.cpp:862,873), `check_creator_selection`
+  (validator.cpp:86,96), `check_abort_certs` (validator.cpp:234,241); IDENTITY pin at the 6
+  validator block-acceptance sites — `check_creators_registered` (69), tx-commitments (161),
+  abort-cert claimer (326), equivocator (362), dh-secrets (388), block-sigs (482) — each
+  via the shared helpers, adding `const chain::Chain& chain` to the 4 check-fn signatures;
+  the genesis fail-closed assertion.
+- **RECOMMENDED same increment (liveness, not fork-critical, deferrable):** IDENTITY pin at
+  the 5 node.cpp gossip handlers (1450/1546/1574/2444/2609) — without them an honest
+  drifted member is spuriously aborted every block for the rest of the epoch (bounded
+  degradation, all nodes drop identically ⇒ no fork).
+- **DEFERRED to D3.5 / OUT of scope:** `on_shard_tip` (node.cpp:1729) + `on_beacon_header`
+  (1638) — the BEACON holds only `latest_shard_tips_` + its OWN `chain_`, whose
+  `committee_checkpoints()` are the WRONG set; pinning it to the beacon's own checkpoints
+  would be a BUG. It needs D3.4 `eligible_count` transport + D3.5 source K-of-K. Tx-sender
+  `registry.find(tx.from)` (validator.cpp:645/678/893/1119) stays present-head. Informational
+  displays (node.cpp:2135 log, 2888 next_creators) may stay present-head; `rpc_committee`
+  (3156) is a recommended operator-truth mirror only.
+
+**RP-4 — the genesis fail-closed assertion.** `sharding_mode` is a `NodeConfig` field
+(node.hpp:129), NOT in `GenesisConfig`; `initial_shard_count` IS (genesis.hpp:214). Add to
+the existing `switch(cfg_.sharding_mode)` at node.cpp:295-354: the EXTENDED arm already
+throws on `initial_shard_count<3`; add `initial_shard_count>1 ⇒ throw` to the NONE and
+CURRENT arms, giving `(sharding_mode==EXTENDED) ⇔ (shard_count>1)`. Pure startup throw —
+never changes apply behavior (SINGLE byte-neutral). Caveat: it newly rejects any pre-existing
+NONE/CURRENT genesis with `shard_count>1` (intended fail-closed) — audit fixtures first.
+
+**RP-5 — the suspension-timing tradeoff (owner-relevant, but NOT a safety hole).** Per-epoch
+freezing means abort-SUSPENSION (and mid-epoch deregister / unstake) of a frozen member
+takes effect at the **next epoch boundary (E+1)**, not immediately — the member stays in
+`checkpoint[E].members` and remains selectable for the rest of epoch E. This is **inherent to
+the per-epoch checkpoint mechanism the owner authorized** (full closure via per-height
+snapshots) and is **not a safety regression**: (1) equivocation — the safety-critical fault —
+is still detected + slashed IMMEDIATELY and independently of committee membership
+(`check_equivocation_events` verifies the two conflicting sigs cryptographically;
+`on_equivocation_evidence` gossips it; apply forfeits full stake); (2) a member gone
+unavailable mid-epoch is still excluded PER ROUND via the `current_aborts_` / `b.abort_events`
+path (independent of the frozen pool); (3) BFT escalation still guarantees progress each
+block. The ONLY delayed effect is the chain-baked exponential-backoff SUSPENSION that avoids
+*re-selecting* a known-faulty (but non-equivocating) node — bounded to ≤ `epoch_blocks`
+blocks of one-extra-abort-round-per-block before it takes hold at E+1. A bounded
+liveness/throughput tradeoff, the standard epoch-committee posture (frozen validator set per
+epoch; slashing immediate; membership changes at boundaries).
+
+**Implementation steps (STEP 0 shipped `3e35e0d`):** STEP 0 ✅ the shared `committee_pool`
+helpers + `test-committee-pin` (unwired, byte-neutral). STEP 1+2 (atomic) the POOL pin (3
+sites) + IDENTITY pin (6 validator sites, +`const Chain&` on 4 signatures) + genesis
+assertion. STEP 3 the 5 node.cpp gossip identity sites. Gates for STEP 1+2: FAST both
+platforms (SINGLE byte-identical); `test-committee-pin` extended to block level (a produced
+block naming a drifted frozen member passes `check_creator_selection` + `check_creators_registered`
++ `check_block_sigs` + `check_abort_certs`, and the pool-only variant REJECTS it); a fixture
+audit (no NONE/CURRENT genesis with `shard_count>1`); a **LIVE EXTENDED cluster** (≥3
+region-pinned shards, small `epoch_blocks`, mid-epoch registrant/stake/abort churn → single
+head, zero stuck, drifted-but-frozen honest member keeps participating); EXTENDED-golden
+**re-bless** (only drift-exhibiting goldens; SINGLE + drift-free EXTENDED stay byte-identical);
+2-lens adversarial review — before commit.
