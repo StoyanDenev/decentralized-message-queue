@@ -390,6 +390,37 @@ public:
     // ring bound. Wired into apply (beacon block-summary fold-in) in D3.5.
     void add_shard_tip_record(const ShardTipRecord& rec);
 
+    // D3.3a (ShardTipMergeDesign.md §9): the on-chain epoch COMMITTEE CHECKPOINT.
+    // A frozen eligible-validator set as of an epoch's rand-anchor, committed into
+    // state_root under the `cc:` namespace, so a SHARD committee at a past height
+    // is reconstructible with ZERO history replay — the circularity-breaker the
+    // S-036 closure needs (the feasibility verdict: build_from_chain(anchor) stays
+    // present-head-contaminated on stake/suspension, so the pin must read this
+    // frozen set, not recompute it). A single global (region-UNfiltered) set per
+    // epoch; consumers region-filter at re-derivation. `epoch_rand` is carried so a
+    // snapshot-bootstrapped node (which keeps only the tail-16 block headers) can
+    // recompute the committee seed without the anchor header. Populated only in
+    // EXTENDED mode by the D3.3b epoch-rotation fold-in ⇒ empty (zero `cc:` leaves,
+    // byte-identical state_root) on every CURRENT/SINGLE chain.
+    struct CommitteeMember {
+        std::string domain{};
+        PubKey      ed_pub{};
+        std::string region{};        // empty = global pool
+    };
+    struct EpochCommitteeCheckpoint {
+        Hash                         epoch_rand{};   // cumulative_rand at the rand-anchor
+        std::vector<CommitteeMember> members{};      // domain-sorted, region-UNfiltered
+    };
+    using CommitteeCheckpointMap = std::map<EpochIndex, EpochCommitteeCheckpoint>;
+    const CommitteeCheckpointMap& committee_checkpoints() const { return committee_checkpoints_; }
+    // Insert/replace the checkpoint for `epoch`, then prune the ring to the most
+    // recent kCommitteeCheckpointRing epochs (deterministic — the map is
+    // epoch-sorted). Populated by the D3.3b EXTENDED-gated epoch-rotation fold-in.
+    void add_committee_checkpoint(EpochIndex epoch, EpochCommitteeCheckpoint snap);
+    // Ring depth in EPOCHS. Generous default covering the deepest merge/reorg
+    // lookback for reasonable epoch_blocks; a substrate tuning point for D3.3b.
+    static constexpr size_t kCommitteeCheckpointRing = 16;
+
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
     // At the start of each apply_transactions(b), pending entries with
@@ -748,6 +779,11 @@ private:
     // Mutated by add_shard_tip_record (apply-side fold-in wired in D3.5); a `t:`
     // state-root leaf per record; snapshot round-tripped like merge_state_.
     ShardTipRecordMap                            shard_tip_records_{};
+    // D3.3a: the `cc:` epoch committee-checkpoint ring (S-036 closure). Populated
+    // only in EXTENDED mode (D3.3b fold-in); a `cc:` state-root leaf per epoch;
+    // snapshot round-tripped so a snapshot-bootstrapped node inherits the frozen
+    // committee sets it needs to re-derive past shard committees with zero replay.
+    CommitteeCheckpointMap                       committee_checkpoints_{};
 
     // A1: unitary-balance invariant counters. genesis_total_ is set once
     // by the index-0 apply branch (or by snapshot restore). The others
@@ -842,6 +878,7 @@ private:
         std::optional<MergeStateMap>                        merge_state;
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
         std::optional<ShardTipRecordMap>                    shard_tip_records;   // D3.2 (lazy)
+        std::optional<CommitteeCheckpointMap>               committee_checkpoints; // D3.3a (lazy)
         std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
         std::optional<std::map<std::string, uint64_t>>      shielded_pool;   // §3.22 (lazy)
         std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)

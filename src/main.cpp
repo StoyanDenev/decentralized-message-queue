@@ -1045,6 +1045,12 @@ Additional in-process tests:
                                               state-root binding + bounded ring
                                               + snapshot inheritance + empty-set
                                               byte-neutrality
+  determ test-committee-checkpoint            D3.3a (S-036): the cc: epoch
+                                              committee-checkpoint ring — frozen
+                                              eligible set per epoch (the
+                                              reconstruction circularity-breaker);
+                                              state-root + ring + snapshot
+                                              inheritance + byte-neutrality
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -11212,6 +11218,143 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": shard-tip-namespace "
                   << (fail == 0 ? "all assertions (D3.2)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-committee-checkpoint") {
+        // D3.3a (ShardTipMergeDesign.md §9): the `cc:` epoch committee-checkpoint
+        // ring — the circularity-breaker substrate for the S-036 closure. State-
+        // root binding + bounded ring + snapshot inheritance (a snapshot-
+        // bootstrapped node must inherit the frozen committee sets) + empty-set
+        // byte-neutrality. Populated only in EXTENDED mode (D3.3b); here we drive
+        // the container directly.
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "committee-checkpoint-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+        cfg.initial_balances = {ab};
+        auto fresh = [&]() { Chain c; c.append(make_genesis_block(cfg)); return c; };
+
+        auto member = [](const std::string& dom, uint8_t pk_fill,
+                         const std::string& region) {
+            Chain::CommitteeMember m;
+            m.domain = dom; m.region = region;
+            for (auto& b : m.ed_pub) b = pk_fill;
+            return m;
+        };
+        auto ckpt = [&](uint8_t rand_fill,
+                        std::vector<Chain::CommitteeMember> members) {
+            Chain::EpochCommitteeCheckpoint cp;
+            for (auto& b : cp.epoch_rand) b = rand_fill;
+            cp.members = std::move(members);
+            return cp;
+        };
+
+        // === empty ring byte-neutrality ===
+        {
+            Chain a = fresh(), b = fresh();
+            check(a.committee_checkpoints().empty() &&
+                  a.compute_state_root() == b.compute_state_root(),
+                  "empty cc: ring: two fresh chains share a state_root (zero cc: "
+                  "leaves — the non-EXTENDED byte-neutrality invariant)");
+        }
+
+        // === non-vacuity ===
+        {
+            Chain a = fresh(), b = fresh();
+            const Hash root_empty = a.compute_state_root();
+            b.add_committee_checkpoint(5, ckpt(0xAB,
+                {member("alice", 0x10, "us-east"), member("bob", 0x20, "us-east")}));
+            check(b.compute_state_root() != root_empty,
+                  "adding a cc: checkpoint changes state_root (the leaf is bound)");
+        }
+
+        // === determinism: member insertion order does not matter (canonicalized) ===
+        {
+            Chain a = fresh(), b = fresh();
+            a.add_committee_checkpoint(9, ckpt(0x33,
+                {member("alice", 0x1, "r"), member("bob", 0x2, "r"),
+                 member("carol", 0x3, "r")}));
+            b.add_committee_checkpoint(9, ckpt(0x33,
+                {member("carol", 0x3, "r"), member("alice", 0x1, "r"),
+                 member("bob", 0x2, "r")}));   // reverse member order
+            check(a.compute_state_root() == b.compute_state_root(),
+                  "member-order-independent: add_committee_checkpoint canonicalizes "
+                  "to domain-sorted, so the cc: leaf hash is deterministic");
+        }
+
+        // === bounded ring: at most kCommitteeCheckpointRing epochs retained ===
+        {
+            Chain a = fresh();
+            const size_t N = Chain::kCommitteeCheckpointRing + 4;
+            for (uint64_t e = 1; e <= N; ++e)
+                a.add_committee_checkpoint(e, ckpt(uint8_t(e), {member("x", 0x5, "r")}));
+            bool ring_ok = a.committee_checkpoints().size()
+                               == Chain::kCommitteeCheckpointRing
+                && a.committee_checkpoints().count(N) == 1              // newest kept
+                && a.committee_checkpoints().count(N - Chain::kCommitteeCheckpointRing + 1) == 1
+                && a.committee_checkpoints().count(1) == 0              // oldest pruned
+                && a.committee_checkpoints().count(N - Chain::kCommitteeCheckpointRing) == 0;
+            check(ring_ok,
+                  "bounded ring: only the most recent kCommitteeCheckpointRing "
+                  "epochs survive; the oldest are pruned deterministically");
+        }
+
+        // === snapshot round-trip: checkpoints inherited + state_root reproduced ===
+        {
+            Chain a = fresh();
+            a.add_committee_checkpoint(2, ckpt(0xAA,
+                {member("alice", 0x11, "us-east"), member("bob", 0x22, "eu-west")}));
+            a.add_committee_checkpoint(3, ckpt(0xBB, {member("carol", 0x33, "ap")}));
+            const Hash root_a = a.compute_state_root();
+
+            json snap = a.serialize_state(16);
+            Chain b = Chain::restore_from_snapshot(snap);
+
+            bool ck_match = b.committee_checkpoints().size() == 2;
+            for (auto& [epoch, cp] : a.committee_checkpoints()) {
+                auto it = b.committee_checkpoints().find(epoch);
+                ck_match = ck_match && it != b.committee_checkpoints().end()
+                    && it->second.epoch_rand == cp.epoch_rand
+                    && it->second.members.size() == cp.members.size();
+                if (it != b.committee_checkpoints().end())
+                    for (size_t i = 0; i < cp.members.size(); ++i)
+                        ck_match = ck_match
+                            && it->second.members[i].domain == cp.members[i].domain
+                            && it->second.members[i].ed_pub == cp.members[i].ed_pub
+                            && it->second.members[i].region == cp.members[i].region;
+            }
+            check(ck_match && b.compute_state_root() == root_a,
+                  "snapshot round-trip: a restored chain inherits the cc: ring "
+                  "(epoch_rand + members exact) + reproduces the same state_root");
+        }
+
+        // === empty ring omitted from serialize_state ===
+        {
+            Chain a = fresh();
+            json snap = a.serialize_state(16);
+            check(!snap.contains("committee_checkpoints"),
+                  "an empty cc: ring is omitted from serialize_state (no bloat / "
+                  "no drift for a CURRENT/SINGLE chain)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": committee-checkpoint "
+                  << (fail == 0 ? "all assertions (D3.3a)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

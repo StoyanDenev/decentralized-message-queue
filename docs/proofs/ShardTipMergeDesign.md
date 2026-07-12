@@ -1,6 +1,6 @@
 # On-chain SHARD_TIP records — closing S-036 (D3 / v2.11)
 
-**Status: MECHANISM DECIDED (§9) — implementing. D3.1 + D3.2 SHIPPED; D3.3 next (the load-bearing `c:` epoch checkpoint + selection-pool pin — verify its non-EXTENDED byte-neutrality first).** Owner
+**Status: MECHANISM DECIDED (§9) — implementing. D3.1 + D3.2 + D3.3a SHIPPED; D3.3b next (the `sharding_mode==EXTENDED`-gated selection pin + epoch-rotation fold-in). See §9.2 for the feasibility-verdict corrections (gate on `sharding_mode==EXTENDED` not role; the pin READS the `cc:` checkpoint, not `build_from_chain(anchor)`; the leaf prefix is `cc:` not `c:`).** Owner
 forks F-1…F-4 were decided (see §5); the mandated adversarial design-review (§8)
 found the F-4 trust model unsound (a validator cannot re-derive a source committee
 at a past height — `NodeRegistry::build_from_chain` reads present-head caches,
@@ -458,7 +458,8 @@ existing golden, and needs re-scoping.
 |---|---|---|
 | **D3.1 ✅** | `ShardTipRecord` struct + encode/decode — **SHIPPED**. 49-byte base (source_shard_id·4 + height·8 + eligible_count·4 + committee_sig_root·32 + region_len·1 + region), exhaustive decode gates mirroring `MergeEvent::decode` (size floor, region-len ≤ 32, exact trailing bytes). No apply/validator/digest touch. | `test-shard-tip-record` (9 assertions): round-trip preserves every field; empty + max-32 region; all-0xFF no truncation; determinism; rejects < 49 / region_len>32 / size-mismatch. FAST 218/0 both platforms; zero golden change. |
 | **D3.2 ✅** | `t:` state namespace + bounded ring + snapshot round-trip — **SHIPPED**. `shard_tip_records_` map keyed by (source_shard_id, height); `build_state_leaves` emits a `t:` leaf per record (`SHA256(eligible_count ‖ region ‖ committee_sig_root)`); `add_shard_tip_record` enforces a per-shard ring of `revert_threshold_blocks`; serialize/restore + StateSnapshot field mirror `merge_state_`. Empty ring ⇒ zero leaves + omitted from the snapshot. | `test-shard-tip-namespace` (6 assertions): empty-set byte-neutrality; a record changes `state_root`; order-independent determinism; per-shard ring prune (lowest heights dropped); snapshot inheritance (restored chain = same records + same `state_root`); empty ring omitted. FAST 219/0 both platforms; snapshot-full-determinism + state-root goldens byte-identical. |
-| **D3.3** | **`c:` epoch checkpoint namespace + the selection-pool pin** (load-bearing; MUST precede producer/gate work). Container + ordered-set canonical encode + `build_state_leaves` emission + snapshot round-trip + epoch ring prune, folded at `node.cpp:2125`; pin `on_shard_tip` + shard producer selection to the epoch anchor. **Verify the pin's non-EXTENDED byte-neutrality first.** | `test-epoch-checkpoint`: two nodes identical `state_root`; a **snapshot-bootstrapped** node reconstructs committee-at-`h` identical to a contemporaneous `on_shard_tip` derivation; non-EXTENDED emits zero `c:` leaves + byte-identical goldens; SINGLE-mode selection unchanged. Adversarial review (snapshot-inheritance + inductive anchor + pin scoping). |
+| **D3.3a ✅** | **`cc:` epoch committee-checkpoint substrate — SHIPPED.** `committee_checkpoints_` = `std::map<EpochIndex, {epoch_rand:32B, members:[{domain, ed_pub, region}]}>`; `add_committee_checkpoint` canonicalizes members domain-sorted + enforces a `kCommitteeCheckpointRing`(=16)-epoch ring; a `cc:` state-root leaf per epoch; serialize/restore + StateSnapshot field (snapshot inheritance). Empty ring ⇒ zero leaves ⇒ byte-identical. **Prefix is `cc:` (not `c:` — `k:c:` is the counter namespace, §9.2).** Populated only by D3.3b (EXTENDED). | `test-committee-checkpoint` (6 assertions): empty-set byte-neutrality; a checkpoint changes `state_root`; member-order-independent determinism (canonicalized); bounded ring; snapshot round-trip (restored chain = same checkpoints + same `state_root`); empty ring omitted. FAST 220/0 both platforms; state-root + snapshot goldens byte-identical. |
+| **D3.3b** | **The `sharding_mode==EXTENDED`-gated selection pin + epoch-rotation fold-in** (§9.2 corrections). Fold-in freezes epoch E's checkpoint when appending the LAST block of epoch E−1 (`(height+1) % epoch_blocks == 0`), capturing `epoch_rand = head.cumulative_rand` + `members = build_from_chain(chain_, height())` — head == rand-anchor so it is contamination-free. The pin at `check_if_selected` (node.cpp:857), `on_shard_tip` (node.cpp:1724), and validator `check_creator_selection` (validator.cpp:86), gated `sharding_mode==EXTENDED`, READS the committed `cc:` member set (NOT `build_from_chain(anchor)`, which stays present-head-contaminated) then applies the existing region-filter + abort-exclusion + seed-mix. SINGLE left byte-identical (never enters the gate). | FAST both platforms (SINGLE goldens byte-identical) + a LIVE EXTENDED cluster (committee selection is a liveness surface) + EXTENDED-golden re-bless + 2-lens adversarial review, before commit. |
 | **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |
 | **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
 | **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
@@ -471,5 +472,39 @@ reintroduces the exact snapshot-node history-absence break that kills M-A. Full 
 set (bounded: ~1-2 epochs × one epoch's eligible domains) is the sound choice. The
 selection-pool pin is inside the owner's authorized full-closure scope (EXTENDED-only,
 no pre-D3 EXTENDED production chain) and is a net correctness improvement.
+
+### §9.2 Feasibility-verdict corrections (2026-07-12) — three fixes to the §9 mechanism
+
+A code-grounded feasibility Workflow verified the pin + specified the checkpoint and
+surfaced three corrections that would otherwise have been consensus bugs:
+
+1. **`build_from_chain(anchor)` does NOT reconstruct — the pin must read the `cc:`
+   checkpoint.** `NodeRegistry::build_from_chain(chain, at_index)` gates only
+   `active_from`/`inactive_from`; it reads `stake()` and `abort_records()` **present-head**
+   (`src/node/registry.cpp:42-63`). So `build_from_chain(chain_, epoch_anchor)` evaluated at
+   a later head still drifts if a member's stake/suspension changed mid-epoch — it does not
+   achieve checkpoint-reconstructibility. The pin therefore sources the frozen member set
+   from `committee_checkpoints_[current_epoch]` (D3.3a), not from a re-computation.
+2. **Gate on `sharding_mode == EXTENDED`, NOT `chain_role == SHARD` / `shard_count_`.**
+   `on_shard_tip` is BEACON-role-only (`node.cpp:1692`), so a `SHARD`-role gate would leave
+   the beacon verifier (`node.cpp:1724`) on the present-head pool — the exact divergence the
+   pin closes. `sharding_mode` is carried on both the node (`cfg_.sharding_mode`) and the
+   validator (`sharding_mode_`), role-agnostic, and is `CURRENT` in SINGLE → every gated
+   branch is skipped in SINGLE (byte-identical). CONFIRMED break case: with default
+   `epoch_blocks=1000`, an unconditional pin gives a SINGLE golden under height 1000
+   `epoch_anchor==0` → the genesis-only pool → a different committee (`select_m_creators` over
+   a different `avail_domains`, `node.cpp:922`) → a different digest → every such golden breaks.
+3. **Leaf prefix is `cc:`, not `c:`.** `c:` already appears as the A1 counter leaves
+   (`k_with_prefix("k:","c:genesis_total")` → wire key `"k:c:…"`, `src/chain/chain.cpp`);
+   a bare top-level `"c:"` is byte-safe (differs in byte 0) but a confusion footgun, so the
+   checkpoint uses `cc:`. The §9 body's "`c:`" wording is superseded by `cc:`.
+
+Fold-in timing (D3.3b): freeze epoch E's checkpoint when appending the **last block of epoch
+E−1** (`(height+1) % epoch_blocks == 0`), so `head` == the rand-anchor block
+`E·epoch_blocks − 1` and `build_from_chain(head)` is a contamination-free pure function whose
+pool anchor equals the seed anchor (`current_epoch_rand`/`resolve_epoch_rand` read
+`epoch_start − 1`). NOT the existing observability hook at `node.cpp:2120-2130`
+(`height % epoch_blocks == 1`, one block too late — it would bake the present-head drift into
+the leaf). Epoch 0 is folded at genesis (genesis-anchored, matching `current_epoch_rand`).
 
 **D3.1 + D3.2 remain valid substrate under this mechanism and proceed now.**

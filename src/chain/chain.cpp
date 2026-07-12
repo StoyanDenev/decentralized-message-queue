@@ -281,6 +281,20 @@ void Chain::add_shard_tip_record(const ShardTipRecord& rec) {
     }
 }
 
+// D3.3a (ShardTipMergeDesign.md §9): store an epoch committee-checkpoint and
+// enforce the bounded ring (retain the most recent kCommitteeCheckpointRing
+// epochs). Members are canonicalized to domain-sorted order so the cc: leaf
+// hash is deterministic regardless of how the caller assembled the set.
+void Chain::add_committee_checkpoint(EpochIndex epoch, EpochCommitteeCheckpoint snap) {
+    std::sort(snap.members.begin(), snap.members.end(),
+              [](const CommitteeMember& a, const CommitteeMember& b) {
+                  return a.domain < b.domain;
+              });
+    committee_checkpoints_[epoch] = std::move(snap);
+    while (committee_checkpoints_.size() > kCommitteeCheckpointRing)
+        committee_checkpoints_.erase(committee_checkpoints_.begin());   // lowest epoch
+}
+
 std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     std::vector<crypto::MerkleLeaf> leaves;
     leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
@@ -401,6 +415,29 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         b.append(static_cast<uint64_t>(rec.region.size()));
         b.append(rec.region);
         b.append(rec.committee_sig_root.data(), rec.committee_sig_root.size());
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // committee_checkpoints_  (D3.3a, key = "cc:" + epoch_be8)
+    // The `cc:` epoch committee-checkpoint binds the frozen eligible set into
+    // state_root so a past shard committee is reconstructible with zero replay.
+    // Members are domain-sorted (add_committee_checkpoint canonicalizes) so the
+    // value hash is deterministic. Empty ring ⇒ zero leaves ⇒ byte-identical.
+    for (auto& [epoch, snap] : committee_checkpoints_) {
+        std::vector<uint8_t> key;
+        key.reserve(3 + 8);
+        key.push_back('c'); key.push_back('c'); key.push_back(':');
+        for (int i = 7; i >= 0; --i)
+            key.push_back((epoch >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
+        b.append(snap.epoch_rand.data(), snap.epoch_rand.size());
+        b.append(static_cast<uint64_t>(snap.members.size()));
+        for (auto& m : snap.members) {
+            b.append(static_cast<uint64_t>(m.domain.size()));
+            b.append(m.domain);
+            b.append(m.ed_pub.data(), m.ed_pub.size());
+            b.append(static_cast<uint64_t>(m.region.size()));
+            b.append(m.region);
+        }
         leaves.push_back({std::move(key), hash_bytes(b)});
     }
     // pending_param_changes_  (key = "p:" + eff_be8 + idx_be4)
@@ -696,6 +733,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
     if (s.shard_tip_records)       // D3.2 (Some only once D3.5 mutates it in apply)
         shard_tip_records_      = std::move(*s.shard_tip_records);
+    if (s.committee_checkpoints)   // D3.3a (Some only once D3.3b folds in apply)
+        committee_checkpoints_  = std::move(*s.committee_checkpoints);
     if (s.dapp_registry)
         dapp_registry_          = std::move(*s.dapp_registry);
     if (s.shielded_pool)
@@ -2029,6 +2068,29 @@ json Chain::serialize_state(uint32_t header_count) const {
         snap["shard_tip_records"] = tip_arr;
     }
 
+    // D3.3a: persist the `cc:` epoch committee-checkpoint ring so a
+    // snapshot-bootstrapped node inherits the frozen committee sets it needs to
+    // re-derive past shard committees with zero replay. Omitted when empty
+    // (every CURRENT/SINGLE chain) ⇒ no snapshot change.
+    if (!committee_checkpoints_.empty()) {
+        json cc_arr = json::array();
+        for (auto& [epoch, cp] : committee_checkpoints_) {
+            json members = json::array();
+            for (auto& m : cp.members)
+                members.push_back({
+                    {"domain", m.domain},
+                    {"ed_pub", to_hex(m.ed_pub)},
+                    {"region", m.region},
+                });
+            cc_arr.push_back({
+                {"epoch",      epoch},
+                {"epoch_rand", to_hex(cp.epoch_rand)},
+                {"members",    members},
+            });
+        }
+        snap["committee_checkpoints"] = cc_arr;
+    }
+
     // S-037 closure: dapp_registry_ contributes to state_root via the
     // `d:` namespace (build_state_leaves) but was previously absent from
     // the JSON snapshot. Result: a DApp-active chain failed the S-033
@@ -2209,6 +2271,27 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             rec.committee_sig_root = from_hex_arr<32>(
                 r.value("committee_sig_root", std::string(64, '0')));
             c.add_shard_tip_record(rec);
+        }
+    }
+    // D3.3a: restore the `cc:` epoch committee-checkpoint ring (snapshot
+    // inheritance — via add_committee_checkpoint, which canonicalizes + re-bounds).
+    if (snap.contains("committee_checkpoints")) {
+        for (auto& cp : json_require_array(snap, "committee_checkpoints")) {
+            EpochIndex epoch = cp.value("epoch", EpochIndex{0});
+            Chain::EpochCommitteeCheckpoint ecc;
+            ecc.epoch_rand = from_hex_arr<32>(
+                cp.value("epoch_rand", std::string(64, '0')));
+            if (cp.contains("members")) {
+                for (auto& m : json_require_array(cp, "members")) {
+                    Chain::CommitteeMember cm;
+                    cm.domain = m.value("domain", std::string{});
+                    cm.ed_pub = from_hex_arr<32>(
+                        m.value("ed_pub", std::string(64, '0')));
+                    cm.region = m.value("region", std::string{});
+                    ecc.members.push_back(std::move(cm));
+                }
+            }
+            c.add_committee_checkpoint(epoch, std::move(ecc));
         }
     }
     // S-032: restore the Phase-1 abort accumulator. Older snapshots
