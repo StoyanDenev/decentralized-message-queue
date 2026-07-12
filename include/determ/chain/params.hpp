@@ -22,6 +22,20 @@ using ShardingMode = ::determ::ShardingMode;
 inline constexpr uint64_t MIN_STAKE     = 1000;
 inline constexpr uint64_t UNSTAKE_DELAY = 1000;   // blocks past inactive_from before stake unlocks
 
+// Abort-punishment suspension parameters. A Phase-1 (round==1) abort
+// suspends a domain from creator selection for BASE * 2^(count-1) blocks,
+// capped at MAX_SUSPENSION_BLOCKS with the exponent capped at
+// MAX_ABORT_EXPONENT. Defined here (chain-visible) rather than in
+// node/registry.hpp so that BOTH the node-side selection filter
+// (NodeRegistry::build_from_chain) and any chain-layer consumer
+// (Chain::freeze_epoch_committee, D3.3b) read one authoritative
+// definition — a divergence between the live filter and a frozen
+// committee checkpoint would be a state_root fork. node/registry.hpp
+// re-exports these into determ::node via `using` for source compatibility.
+inline constexpr uint64_t BASE_SUSPENSION_BLOCKS = 10;
+inline constexpr uint64_t MAX_SUSPENSION_BLOCKS  = 10'000;
+inline constexpr uint64_t MAX_ABORT_EXPONENT     = 10;   // 2^10 = 1024
+
 // E1: Zeroth pool pseudo-account address. Anon-style format (0x + 64 hex
 // chars), but encodes an all-zero pubkey — a low-order point on
 // curve25519 that has no usable Ed25519 private key. Any tx claiming

@@ -3,6 +3,7 @@
 #pragma once
 #include <determ/types.hpp>
 #include <determ/chain/chain.hpp>
+#include <determ/chain/params.hpp>
 #include <string>
 #include <vector>
 #include <optional>
@@ -16,9 +17,12 @@ static constexpr uint64_t REGISTRATION_DELAY_WINDOW = 10;
 
 // Abort punishment: exponential suspension from creator selection.
 // Suspension length = BASE * 2^(abort_count - 1), capped at MAX.
-static constexpr uint64_t BASE_SUSPENSION_BLOCKS = 10;
-static constexpr uint64_t MAX_SUSPENSION_BLOCKS  = 10'000;
-static constexpr uint64_t MAX_ABORT_EXPONENT     = 10;   // 2^10 = 1024
+// D3.3b: the authoritative definitions now live in determ/chain/params.hpp
+// (chain-visible) so a chain-layer committee freeze cannot drift from this
+// node-side filter; re-exported here for source compatibility.
+using determ::chain::BASE_SUSPENSION_BLOCKS;
+using determ::chain::MAX_SUSPENSION_BLOCKS;
+using determ::chain::MAX_ABORT_EXPONENT;
 
 struct NodeEntry {
     std::string domain;
