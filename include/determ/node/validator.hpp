@@ -101,18 +101,25 @@ public:
 
 private:
     Result check_prev_hash(const chain::Block& b, const chain::Chain& chain) const;
-    Result check_creators_registered(const chain::Block& b, const NodeRegistry& registry) const;
+    // D3.3b-read: the creator POOL + IDENTITY checks below resolve committee
+    // membership + pubkeys through the frozen cc: checkpoint on EXTENDED chains
+    // (committee_pool.hpp), so each takes `chain`.
+    Result check_creators_registered(const chain::Block& b, const NodeRegistry& registry,
+                                     const chain::Chain& chain) const;
     Result check_creator_selection(const chain::Block& b, const NodeRegistry& registry,
                                    const chain::Chain& chain) const;
-    Result check_creator_tx_commitments(const chain::Block& b, const NodeRegistry& registry) const;
-    Result check_creator_dh_secrets(const chain::Block& b, const NodeRegistry& registry) const;
+    Result check_creator_tx_commitments(const chain::Block& b, const NodeRegistry& registry,
+                                        const chain::Chain& chain) const;
+    Result check_creator_dh_secrets(const chain::Block& b, const NodeRegistry& registry,
+                                    const chain::Chain& chain) const;
     Result check_delay(const chain::Block& b) const;
     Result check_block_sigs(const chain::Block& b, const NodeRegistry& registry,
                              const chain::Chain& chain) const;
     Result check_abort_certs(const chain::Block& b, const chain::Chain& chain,
                               const NodeRegistry& registry) const;
     Result check_equivocation_events(const chain::Block& b,
-                                       const NodeRegistry& registry) const;
+                                       const NodeRegistry& registry,
+                                       const chain::Chain& chain) const;
     // rev.9 B3.2: cross_shard_receipts must match the cross-shard
     // subset of transactions[] in order, with consistent fields.
     // SINGLE chains expect an empty receipts list.

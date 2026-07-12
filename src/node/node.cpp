@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
+#include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
@@ -314,6 +315,18 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                         "tag (creator '" + gc.domain + "' has region='"
                         + gc.region + "')");
                 }
+            }
+            // D3.3b-read (RP-4): NONE is a single-chain posture, so a genesis
+            // with initial_shard_count>1 is nonsensical AND would spuriously
+            // arm the shard_count>1 committee-checkpoint fold + selection pin on
+            // a chain the operator declared single. Fail closed. (CURRENT
+            // multishard stays valid — the pin gates on the chain-visible
+            // shard_count()>1, not sharding_mode, and handles it correctly.)
+            if (gcfg.initial_shard_count > 1) {
+                throw std::runtime_error(
+                    "sharding_mode=none forbids initial_shard_count>1 (got "
+                    + std::to_string(gcfg.initial_shard_count)
+                    + "); shard_count>1 requires sharding_mode=current or extended");
             }
             break;
         case ShardingMode::CURRENT:
@@ -859,7 +872,12 @@ void Node::check_if_selected() {
     // (the default) yields the full pool — pre-R2 behavior preserved
     // exactly. Non-empty restricts the pool to validators whose
     // self-declared region matches.
-    auto nodes = registry_.eligible_in_region(cfg_.committee_region);
+    // D3.3b-read: on EXTENDED the POOL comes from the frozen committee
+    // checkpoint for the current epoch (so the committee this producer selects
+    // EQUALS the one the checkpoint records + every validator re-derives). On
+    // SINGLE/epoch-0/absent this is byte-identical to registry_.eligible_in_region.
+    EpochIndex cur_epoch = current_epoch_index();
+    auto nodes = select_committee_pool(chain_, registry_, cur_epoch, cfg_.committee_region);
     // R4 Phase 4: under-quorum stress branch. When this shard absorbs
     // refugees from another shard (per Chain::merge_state_), extend
     // the eligible pool with validators tagged with each refugee's
@@ -870,7 +888,7 @@ void Node::check_if_selected() {
         (void)refugee_shard;
         if (refugee_region.empty() || refugee_region == cfg_.committee_region)
             continue;
-        auto refugees = registry_.eligible_in_region(refugee_region);
+        auto refugees = select_committee_pool(chain_, registry_, cur_epoch, refugee_region);
         for (auto& r : refugees) {
             bool dup = false;
             for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
@@ -2884,9 +2902,13 @@ json Node::rpc_status() const {
     j["bft_block_count"] = bft_blocks;
     j["tx_count"]        = total_txs;
 
-    // rev.9 R2: status preview of "next_creators" must mirror the same
-    // region-filtered pool that check_if_selected operates on.
-    auto nodes = registry_.eligible_in_region(cfg_.committee_region);
+    // rev.9 R2 / D3.3b-read: status preview of "next_creators" reads the same
+    // region-filtered POOL that check_if_selected operates on — the frozen
+    // committee checkpoint on EXTENDED, present-head otherwise. (This preview is
+    // approximate on the SEED/count: it uses head cumulative_rand + M rather
+    // than the epoch seed + K, so it is a hint, not the exact committee.)
+    auto nodes = select_committee_pool(chain_, registry_, current_epoch_index(),
+                                       cfg_.committee_region);
     if (!chain_.empty() && nodes.size() >= cfg_.m_creators) {
         Hash rand = chain_.head().cumulative_rand;
         try {
@@ -3154,9 +3176,11 @@ json Node::rpc_committee() const {
     if (chain_.empty()) return arr;
 
     auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
-    // rev.9 R2: rpc_committee must mirror check_if_selected's pool so
-    // the displayed committee matches what producers actually run.
-    auto pool = reg.eligible_in_region(cfg_.committee_region);
+    // rev.9 R2 / D3.3b-read: rpc_committee mirrors check_if_selected's pool so
+    // the displayed committee matches what producers actually run — the frozen
+    // committee checkpoint on EXTENDED (else present-head via the fallback).
+    auto pool = select_committee_pool(chain_, reg, current_epoch_index(),
+                                      cfg_.committee_region);
     if (pool.empty()) return arr;
 
     // Mirror check_if_selected's seed derivation so the result matches

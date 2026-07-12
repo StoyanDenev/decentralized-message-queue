@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
+#include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL + IDENTITY
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD / §3.22b UNSHIELD accept-rules
@@ -38,12 +39,12 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
                        "(reserved forms fail closed)"};
 
     if (auto r = check_prev_hash(b, chain);              !r.ok) return r;
-    if (auto r = check_creators_registered(b, registry); !r.ok) return r;
+    if (auto r = check_creators_registered(b, registry, chain); !r.ok) return r;
     if (auto r = check_creator_selection(b, registry, chain); !r.ok) return r;
-    if (auto r = check_creator_tx_commitments(b, registry); !r.ok) return r;
-    if (auto r = check_creator_dh_secrets(b, registry);  !r.ok) return r;
+    if (auto r = check_creator_tx_commitments(b, registry, chain); !r.ok) return r;
+    if (auto r = check_creator_dh_secrets(b, registry, chain);  !r.ok) return r;
     if (auto r = check_abort_certs(b, chain, registry);  !r.ok) return r;
-    if (auto r = check_equivocation_events(b, registry); !r.ok) return r;
+    if (auto r = check_equivocation_events(b, registry, chain); !r.ok) return r;
     if (auto r = check_delay(b);                         !r.ok) return r;
     if (auto r = check_block_sigs(b, registry, chain);   !r.ok) return r;
     if (auto r = check_cumulative_rand(b, chain);        !r.ok) return r;
@@ -64,9 +65,13 @@ BlockValidator::Result BlockValidator::check_prev_hash(const Block& b,
 }
 
 BlockValidator::Result BlockValidator::check_creators_registered(
-    const Block& b, const NodeRegistry& registry) const {
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
+    // D3.3b-read: on an EXTENDED chain the committee is FROZEN per epoch, so a
+    // creator drawn from checkpoint[E] counts as registered even if it
+    // deregistered/unstaked mid-epoch (frozen-first, present-head fallback).
+    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (auto& d : b.creators) {
-        if (!registry.contains(d))
+        if (!committee_member_registered(chain, registry, epoch, d))
             return {false, "creator not registered or not staked: " + d};
     }
     return {true, ""};
@@ -83,7 +88,12 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     // rev.9 R2: filter the eligible pool by this chain's
     // committee_region. Empty region (default) yields the full pool —
     // identical to pre-R2 sorted_nodes() output.
-    auto   nodes     = registry.eligible_in_region(committee_region_);
+    // D3.3b-read: epoch_index hoisted above the pool so select_committee_pool
+    // can key the frozen checkpoint. On EXTENDED it returns checkpoint[E]'s
+    // members (region-filtered); on SINGLE/epoch-0/absent it is byte-identical
+    // to registry.eligible_in_region.
+    EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+    auto   nodes     = select_committee_pool(chain, registry, epoch_index, committee_region_);
     // R4 Phase 4: under-quorum stress branch. If this shard currently
     // absorbs refugee shards (per Chain::merge_state_), extend the
     // eligible pool with validators from each refugee region. Refugees
@@ -93,18 +103,16 @@ BlockValidator::Result BlockValidator::check_creator_selection(
         (void)refugee_shard;
         if (refugee_region.empty() || refugee_region == committee_region_)
             continue;
-        auto refugees = registry.eligible_in_region(refugee_region);
+        auto refugees = select_committee_pool(chain, registry, epoch_index, refugee_region);
         for (auto& r : refugees) {
             bool dup = false;
             for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
             if (!dup) nodes.push_back(r);
         }
     }
-    EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
-    (void)epoch_index;
     // m = K-committee size (b.creators.size()). Permitted values:
     //   MD blocks:  m == k_block_sigs_ (full K).
     //   BFT blocks: m == ceil(2*k_block_sigs_/3) (escalated, smaller committee).
@@ -148,7 +156,7 @@ BlockValidator::Result BlockValidator::check_creator_selection(
 }
 
 BlockValidator::Result BlockValidator::check_creator_tx_commitments(
-    const Block& b, const NodeRegistry& registry) const {
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
 
     if (b.creator_tx_lists.size()  != b.creators.size())
         return {false, "creator_tx_lists size != creators size"};
@@ -157,9 +165,12 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
     if (b.creator_dh_inputs.size() != b.creators.size())
         return {false, "creator_dh_inputs size != creators size"};
 
+    // D3.3b-read: resolve creator pubkeys from the frozen committee on EXTENDED
+    // (so a mid-epoch-drifted member verifies on its frozen key).
+    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (size_t i = 0; i < b.creators.size(); ++i) {
-        auto e = registry.find(b.creators[i]);
-        if (!e) return {false, "creator not found: " + b.creators[i]};
+        auto pk = resolve_committee_member_pubkey(chain, registry, epoch, b.creators[i]);
+        if (!pk) return {false, "creator not found: " + b.creators[i]};
 
         const auto& list = b.creator_tx_lists[i];
         for (size_t k = 1; k < list.size(); ++k) {
@@ -192,7 +203,7 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
                                                 vr_at(b.creator_view_abort_roots, i),
                                                 vr_at(b.creator_view_inbound_roots, i),
                                                 pt_at(b.creator_proposer_times, i));
-        if (!verify(e->pubkey, commit.data(), commit.size(), b.creator_ed_sigs[i]))
+        if (!verify(*pk, commit.data(), commit.size(), b.creator_ed_sigs[i]))
             return {false, "creator commit sig invalid: " + b.creators[i]};
     }
 
@@ -228,24 +239,24 @@ BlockValidator::Result BlockValidator::check_abort_certs(
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
     Hash prev_hash = chain.head_hash();
-    // rev.9 R2: same region filter as check_creator_selection — must
-    // mirror exactly so abort-cert reconstruction sees the same pool
-    // the producer committed to.
-    auto nodes     = registry.eligible_in_region(committee_region_);
+    // rev.9 R2 / D3.3b-read: same frozen POOL as check_creator_selection — must
+    // mirror exactly so abort-cert reconstruction sees the same pool the
+    // producer committed to (the abort events are for THIS block's height, so
+    // epoch_index is the same epoch).
+    auto nodes     = select_committee_pool(chain, registry, epoch_index, committee_region_);
     // R4 Phase 4: same stress-branch extension as check_creator_selection.
     for (auto& [refugee_shard, refugee_region] :
          chain.shards_absorbed_by(shard_id_)) {
         (void)refugee_shard;
         if (refugee_region.empty() || refugee_region == committee_region_)
             continue;
-        auto refugees = registry.eligible_in_region(refugee_region);
+        auto refugees = select_committee_pool(chain, registry, epoch_index, refugee_region);
         for (auto& r : refugees) {
             bool dup = false;
             for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
             if (!dup) nodes.push_back(r);
         }
     }
-    (void)epoch_index;
 
     // Per-event committee size: at step i, BEFORE applying ae[i], the
     // committee size is determined by the same escalation rule as
@@ -323,12 +334,12 @@ BlockValidator::Result BlockValidator::check_abort_certs(
             if (!seen_claimers.insert(m_.claimer).second)
                 return {false, "duplicate claimer in cert"};
 
-            auto e = registry.find(m_.claimer);
-            if (!e) return {false, "claimer not found in registry"};
+            auto ck = resolve_committee_member_pubkey(chain, registry, epoch_index, m_.claimer);
+            if (!ck) return {false, "claimer not found in registry"};
 
             Hash digest = node::make_abort_claim_message(m_.block_index, m_.round,
                                                           m_.prev_hash, m_.missing_creator);
-            if (!verify(e->pubkey, digest.data(), digest.size(), m_.ed_sig))
+            if (!verify(*ck, digest.data(), digest.size(), m_.ed_sig))
                 return {false, "claim sig invalid from " + m_.claimer};
         }
 
@@ -348,7 +359,12 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 // equivocator isn't registered, the block_index doesn't match, or either
 // signature fails to verify.
 BlockValidator::Result BlockValidator::check_equivocation_events(
-    const Block& b, const NodeRegistry& registry) const {
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
+    // D3.3b-read: resolve the equivocator's key frozen-first with present-head
+    // fallback — a frozen committee member equivocating this epoch resolves from
+    // the checkpoint, and a non-committee / cross-epoch slashing target still
+    // resolves present-head (the fallback keeps it slashable).
+    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
         const auto& ev = b.equivocation_events[i];
 
@@ -359,15 +375,15 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_a == sig_b (same signature)"};
 
-        auto entry = registry.find(ev.equivocator);
-        if (!entry)
+        auto ek = resolve_committee_member_pubkey(chain, registry, epoch, ev.equivocator);
+        if (!ek)
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] equivocator not in registry: " + ev.equivocator};
 
-        if (!verify(entry->pubkey, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+        if (!verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_a does not verify against equivocator's key"};
-        if (!verify(entry->pubkey, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+        if (!verify(*ek, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_b does not verify against equivocator's key"};
     }
@@ -381,15 +397,17 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
 // is signed in Phase 1 (by creator_ed_sigs[i]), so any post-Phase-1
 // substitution of secret_i would fail this check.
 BlockValidator::Result BlockValidator::check_creator_dh_secrets(
-    const Block& b, const NodeRegistry& registry) const {
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     if (b.creator_dh_secrets.size() != b.creators.size())
         return {false, "creator_dh_secrets size != creators size"};
+    // D3.3b-read: creator key from the frozen committee (EXTENDED).
+    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (size_t i = 0; i < b.creators.size(); ++i) {
-        auto e = registry.find(b.creators[i]);
-        if (!e) return {false, "creator not found: " + b.creators[i]};
+        auto pk = resolve_committee_member_pubkey(chain, registry, epoch, b.creators[i]);
+        if (!pk) return {false, "creator not found: " + b.creators[i]};
         Hash expected = SHA256Builder{}
             .append(b.creator_dh_secrets[i])
-            .append(e->pubkey.data(), e->pubkey.size())
+            .append(pk->data(), pk->size())
             .finalize();
         if (expected != b.creator_dh_inputs[i])
             return {false, "creator_dh_secret[" + std::to_string(i)
@@ -471,6 +489,9 @@ BlockValidator::Result BlockValidator::check_block_sigs(
     Hash digest = compute_block_digest(b);
     Signature zero_sig{};
 
+    // D3.3b-read: creator keys from the frozen committee (EXTENDED) so a
+    // mid-epoch-drifted member's block sig verifies on its frozen key.
+    EpochIndex sig_epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     size_t signed_count = 0;
     for (size_t i = 0; i < b.creators.size(); ++i) {
         // Sentinel: all-zero sig means "did not sign in time". MD requires
@@ -479,9 +500,9 @@ BlockValidator::Result BlockValidator::check_block_sigs(
         // happening to be all zeros) is ~2^-512, negligible.
         if (b.creator_block_sigs[i] == zero_sig) continue;
 
-        auto e = registry.find(b.creators[i]);
-        if (!e) return {false, "creator not found: " + b.creators[i]};
-        if (!verify(e->pubkey, digest.data(), digest.size(), b.creator_block_sigs[i]))
+        auto pk = resolve_committee_member_pubkey(chain, registry, sig_epoch, b.creators[i]);
+        if (!pk) return {false, "creator not found: " + b.creators[i]};
+        if (!verify(*pk, digest.data(), digest.size(), b.creator_block_sigs[i]))
             return {false, "block sig invalid: " + b.creators[i]};
         ++signed_count;
     }
