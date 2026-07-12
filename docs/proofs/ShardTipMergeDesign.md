@@ -459,7 +459,7 @@ existing golden, and needs re-scoping.
 | **D3.1 ✅** | `ShardTipRecord` struct + encode/decode — **SHIPPED**. 49-byte base (source_shard_id·4 + height·8 + eligible_count·4 + committee_sig_root·32 + region_len·1 + region), exhaustive decode gates mirroring `MergeEvent::decode` (size floor, region-len ≤ 32, exact trailing bytes). No apply/validator/digest touch. | `test-shard-tip-record` (9 assertions): round-trip preserves every field; empty + max-32 region; all-0xFF no truncation; determinism; rejects < 49 / region_len>32 / size-mismatch. FAST 218/0 both platforms; zero golden change. |
 | **D3.2 ✅** | `t:` state namespace + bounded ring + snapshot round-trip — **SHIPPED**. `shard_tip_records_` map keyed by (source_shard_id, height); `build_state_leaves` emits a `t:` leaf per record (`SHA256(eligible_count ‖ region ‖ committee_sig_root)`); `add_shard_tip_record` enforces a per-shard ring of `revert_threshold_blocks`; serialize/restore + StateSnapshot field mirror `merge_state_`. Empty ring ⇒ zero leaves + omitted from the snapshot. | `test-shard-tip-namespace` (6 assertions): empty-set byte-neutrality; a record changes `state_root`; order-independent determinism; per-shard ring prune (lowest heights dropped); snapshot inheritance (restored chain = same records + same `state_root`); empty ring omitted. FAST 219/0 both platforms; snapshot-full-determinism + state-root goldens byte-identical. |
 | **D3.3a ✅** | **`cc:` epoch committee-checkpoint substrate — SHIPPED.** `committee_checkpoints_` = `std::map<EpochIndex, {epoch_rand:32B, members:[{domain, ed_pub, region}]}>`; `add_committee_checkpoint` canonicalizes members domain-sorted + enforces a `kCommitteeCheckpointRing`(=16)-epoch ring; a `cc:` state-root leaf per epoch; serialize/restore + StateSnapshot field (snapshot inheritance). Empty ring ⇒ zero leaves ⇒ byte-identical. **Prefix is `cc:` (not `c:` — `k:c:` is the counter namespace, §9.2).** Populated only by D3.3b (EXTENDED). | `test-committee-checkpoint` (6 assertions): empty-set byte-neutrality; a checkpoint changes `state_root`; member-order-independent determinism (canonicalized); bounded ring; snapshot round-trip (restored chain = same checkpoints + same `state_root`); empty ring omitted. FAST 220/0 both platforms; state-root + snapshot goldens byte-identical. |
-| **D3.3b** | **The `sharding_mode==EXTENDED`-gated selection pin + epoch-rotation fold-in** (§9.2 corrections). Fold-in freezes epoch E's checkpoint when appending the LAST block of epoch E−1 (`(height+1) % epoch_blocks == 0`), capturing `epoch_rand = head.cumulative_rand` + `members = build_from_chain(chain_, height())` — head == rand-anchor so it is contamination-free. The pin at `check_if_selected` (node.cpp:857), `on_shard_tip` (node.cpp:1724), and validator `check_creator_selection` (validator.cpp:86), gated `sharding_mode==EXTENDED`, READS the committed `cc:` member set (NOT `build_from_chain(anchor)`, which stays present-head-contaminated) then applies the existing region-filter + abort-exclusion + seed-mix. SINGLE left byte-identical (never enters the gate). | FAST both platforms (SINGLE goldens byte-identical) + a LIVE EXTENDED cluster (committee selection is a liveness surface) + EXTENDED-golden re-bless + 2-lens adversarial review, before commit. |
+| **D3.3b** | **Chain-layer epoch-rotation fold-in + `shard_count()>1`-gated selection pin** (§9.3 resolution supersedes §9.2's node-side phrasing). Fold-in lives **inside `Chain::apply_transactions`** (the only mutator common to ctor-genesis + append + both store-reload replays + node paths — FR-1), at two sites gated `shard_count_ > 1 && epoch_blocks_ > 0`: Site A freezes epoch `E` at the last block of `E−1` (`(b.index+1)%epoch_blocks_==0`, `epoch_rand=b.cumulative_rand`, `members=freeze_epoch_committee(b.index)`), Site B folds epoch 0 in the genesis branch. `freeze_epoch_committee` = a private Chain helper (Option B, no move/no cross-layer include). Prereqs: pin `epoch_blocks_` onto Chain **before replay, no `const_leaf`** (H-2); add a `__ensure_committee_checkpoints` lazy-capture lambda (H-1); de-dup the 3 suspension constants into params.hpp (H-4). The read-side pin at `check_if_selected` (node.cpp:857), `on_shard_tip` (node.cpp:1724), validator `check_creator_selection` (validator.cpp:86) gates on `chain_.shard_count()>1` (H-3, unified with the fold gate) + a genesis-load `EXTENDED⇔shard_count>1` assertion, READS `committee_checkpoints()[E]` (NOT `build_from_chain(anchor)`), then applies region-filter + abort-exclusion + seed-mix. SINGLE byte-identical (never folds, never pins). | FAST both platforms (SINGLE goldens byte-identical incl. main.cpp:11270 empty-`cc:` invariant) + an epoch-boundary reorg reproducing identical ring+`state_root` + a ≥2-epoch EXTENDED chain-blocks-v1 reload with no S-033 throw + a LIVE EXTENDED cluster (committee selection is a liveness surface) + EXTENDED-golden re-bless + 2-lens adversarial review, before commit. |
 | **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |
 | **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
 | **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
@@ -508,3 +508,109 @@ pool anchor equals the seed anchor (`current_epoch_rand`/`resolve_epoch_rand` re
 the leaf). Epoch 0 is folded at genesis (genesis-anchored, matching `current_epoch_rand`).
 
 **D3.1 + D3.2 remain valid substrate under this mechanism and proceed now.**
+
+### §9.3 Fold-in placement resolution (2026-07-12) — the D3.3b `cc:` populate must live in the CHAIN apply path
+
+A second code-grounded Workflow (3 parallel probes + a resolver, all re-read against
+the tree) resolved *where* the D3.3b fold-in mutates `committee_checkpoints_` and how
+`epoch_blocks` reaches the Chain layer byte-neutrally. This supersedes §9.2's implicit
+"`build_from_chain(chain_, height())` after append" phrasing with a precise, fork-safe
+insertion.
+
+**FR-1 — the fold-in MUST live inside `Chain::apply_transactions`, not a Node hook.**
+`apply_transactions` (chain.cpp:765) is the *only* per-block mutator common to all five
+committed-state paths: ctor-genesis (chain.cpp:47, **direct** call — bypasses `append`),
+`Chain::append` (54), store-reload replay (2648), legacy `chain.json` replay (2717), and
+the node append/reorg paths. `append` is **not** sufficient — the ctor and both `load`
+loops call `apply_transactions` directly. The node hook `post_append_bookkeeping_locked`
+(node.cpp:2037/2257) runs on the live/reorg paths only, so a node-side fold leaves
+`committee_checkpoints_` empty after a chain-blocks-v1 reload → the `cc:` leaves (D3.3a,
+already in `state_root`) differ → the S-033 recompute-and-reject (chain.cpp:1762-1774)
+throws → **the node cannot reload its own EXTENDED chain.** CONFIRMED hard break.
+
+**FR-2 — two insertion sites, pure functions of the block.**
+- *Site A (steady state):* end of the `apply_transactions` try-body, before
+  `publish_committed_view()` (chain.cpp:1805), gated
+  `shard_count_ > 1 && epoch_blocks_ > 0 && (b.index + 1) % epoch_blocks_ == 0`; freeze
+  epoch `E = (b.index+1)/epoch_blocks_` with `epoch_rand = b.cumulative_rand` (read off
+  the block being applied — the rand anchor `E·epoch_blocks−1`, no `blocks_` lookup) and
+  `members = freeze_epoch_committee(b.index)`.
+- *Site B (epoch 0):* the genesis branch, before the early `return` (~chain.cpp:864),
+  gated `shard_count_ > 1 && epoch_blocks_ > 0`; freeze epoch 0 (genesis-anchored).
+
+**FR-3 — reorg is safe by construction.** `revert_head → restore_state_snapshot` already
+restores `committee_checkpoints_` (chain.cpp:736-737, wired by D3.3a). A re-appended
+resolve_fork winner re-enters `apply_transactions` with the same `b.index` / committed maps
+/ `b.cumulative_rand` → identical `freeze_epoch_committee` output → identical `cc:` leaf →
+`state_root` matches. `add_committee_checkpoint` overwrites `[E]` (idempotent) — **contingent
+on hazard H-1 below.**
+
+**FR-4 — eligible-set layering = Option B (a private Chain helper), NOT moving
+`build_from_chain`.** `NodeRegistry::build_from_chain` (registry.cpp:25-78) reads only four
+Chain accessors (`registrants()/stake()/min_stake()/abort_records()`) + `at_index` — a pure
+function of committed Chain state. But *moving* it is over-scoped (~11 node/validator + ~30
+test call sites consume the node-layer `NodeRegistry` return type → a layering inversion),
+and `chain.cpp #include node/registry.hpp` closes a node→chain→node cycle. **Add instead a
+~15-20-line private `Chain::freeze_epoch_committee(uint64_t at_index) const →
+std::vector<CommitteeMember>`** that iterates `registrants_` applying the identical
+4-predicate filter via `this->` and emits `CommitteeMember{domain, ed_pub, region}` straight
+from the map key + `RegistryEntry`. The checkpoint is region-**UN**filtered; region-filter +
+seed-mix stay on the read side. `select_m_creators` is untouched (it consumes the pool, it
+does not freeze it). **`at_index = b.index` is the frozen, permanent convention** (block
+applied but not yet in `blocks_`; a registrant with `active_from == b.index+1` is correctly
+excluded until epoch E begins).
+
+**Five fork-class hazards (all must be handled in D3.3b):**
+- **H-1 (fork-class): add a `__ensure_committee_checkpoints()` lazy-capture lambda.**
+  `apply_transactions` has ensure-lambdas for stakes/registrants/abort_records/merge_state/…
+  (chain.cpp:779-814) but **none** for `committee_checkpoints_`. `create_state_snapshot`
+  captures lazily (the `StateSnapshot` field is `std::optional`; restore at 736-737 only fires
+  when `Some`). Without an ensure-lambda called *before* the fold mutates the map, a
+  failed-apply rollback (catch at 1816) **or an A4 revert across an epoch boundary** will not
+  restore the pre-fold map → `state_root` corruption. Easy to miss; itself fork-class.
+- **H-2 (fork-class): `epoch_blocks` must be a genesis-pinned Chain member set BEFORE replay
+  — threaded like `block_subsidy_`'s CONSTRUCTION path but, unlike `block_subsidy_`, NOT
+  emitted as a `const_leaf`.** Today it is node/validator-only (`cfg_.epoch_blocks`,
+  validator.cpp:103); it defaults to **1000**, never 0 (genesis.cpp:191, node.cpp:101) and is
+  already genesis-hash-bound (genesis.cpp:469). Add `uint32_t epoch_blocks_{0}` to Chain and
+  set it *before* the replay loops on every reloading path — ctor from `GenesisConfig`; a new
+  `Chain::load` param at chain.cpp:2635-2638 / 2683-2695; serialize+restore in
+  `serialize_state`/`restore_from_snapshot` before that path's own state_root verify
+  (chain.cpp:2394-2399) — exactly the `block_subsidy_` "must be set before replay" precedent
+  (chain.cpp:2691). A post-`load` node setter runs too late for the internal replay's S-033
+  recompute. **CORRECTION to the resolver's own phrasing:** it said "mirror `block_subsidy_`
+  … NOT a `const_leaf`," but `block_subsidy_` **IS** a `const_leaf` (chain.cpp:467). The
+  intent stands and is what matters: `epoch_blocks_` must be threaded like `block_subsidy_`
+  for *construction/load/snapshot* yet **must NOT be emitted as a leaf** — an unconditional
+  `const_leaf("epoch_blocks", …)` would grow every CURRENT chain's leaf set by one → S-033
+  throw on first reload (S-039 break). No leaf is needed; the `cc:` leaves already bind the
+  freeze outcome.
+- **H-3 (gate unification): the fold gate is `shard_count_ > 1` (chain-visible), and the D3.3b
+  READ-side pin must gate on the SAME `chain_.shard_count() > 1`, not the node's
+  `sharding_mode`.** `shard_count_` is already a Chain member set before replay AND already a
+  `const_leaf` (chain.cpp:477), so the gate adds zero byte-surface and reuses the shipped
+  "empty `cc:` ⇒ byte-identical" invariant (chain.hpp:403, main.cpp:11270). §9.2's point-2
+  said gate on `sharding_mode==EXTENDED`; that is right for *role-agnosticism* but Chain
+  cannot see `sharding_mode` during replay — so the authoritative predicate that `state_root`
+  commits is `shard_count_ > 1`, and the read side must pin to it too. Add a fail-closed
+  genesis-load assertion `(_sharding_mode==EXTENDED) ⇔ (shard_count > 1)` so no chain can have
+  `shard_count>1` under a CURRENT-posture node.
+- **H-4 (drift-fork): de-dup the three suspension constants.**
+  `BASE_SUSPENSION_BLOCKS / MAX_SUSPENSION_BLOCKS / MAX_ABORT_EXPONENT` live ONLY in
+  include/determ/node/registry.hpp:19-21. `freeze_epoch_committee`'s `is_suspended` filter must read the
+  SAME definitions `build_from_chain` uses; a copied literal becomes a latent `state_root`
+  fork the instant the node constants are retuned. Move them to
+  `include/determ/chain/params.hpp` (already included by registry.cpp:5); both consumers
+  reference the one definition.
+- **H-5 (do NOT reuse the observability hook).** node.cpp:2125-2135 fires at
+  `(height-1) % epoch_blocks == 0` (one block late, present-head, node-only) — the WRONG
+  anchor. Leave it a pure log.
+
+**Revised D3.3b step order:** (0) de-dup suspension constants → (1) pin `epoch_blocks_` onto
+Chain (member + load-param + snapshot, no leaf) → (2) add the `__ensure_committee_checkpoints`
+lambda → (3) add `freeze_epoch_committee` + the two fold sites → (4) pin the 3 read sites to
+`committee_checkpoints()[E]`, gated `shard_count()>1`, + the genesis-load assertion → (5)
+verify: an epoch-boundary reorg reproduces identical ring + `state_root`; a ≥2-epoch EXTENDED
+chain reloads via chain-blocks-v1 with no S-033 throw; a `shard_count_==1` chain's `state_root`
+stays byte-identical pre/post-D3.3b (extends main.cpp:11270). Gates: FAST both platforms +
+LIVE EXTENDED cluster + EXTENDED-golden re-bless + 2-lens adversarial review before commit.
