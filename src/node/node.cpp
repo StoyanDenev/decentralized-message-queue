@@ -1465,12 +1465,15 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     if (!in_creators(msg.missing_creator)) return;
     if (msg.claimer == msg.missing_creator) return;
 
-    auto entry = registry_.find(msg.claimer);
-    if (!entry) return;
+    // D3.3b-read STEP 3: resolve the claimer's key frozen-first (a frozen
+    // committee member that drifted present-head mid-epoch still verifies).
+    auto ck = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.claimer);
+    if (!ck) return;
 
     Hash digest = make_abort_claim_message(msg.block_index, msg.round,
                                              msg.prev_hash, msg.missing_creator);
-    if (!crypto::verify(entry->pubkey, digest.data(), digest.size(), msg.ed_sig)) {
+    if (!crypto::verify(*ck, digest.data(), digest.size(), msg.ed_sig)) {
         std::cerr << "[node] invalid AbortClaim sig from " << msg.claimer << "\n";
         return;
     }
@@ -1561,11 +1564,12 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
                        m_.claimer) == current_creator_domains_.end()) return;
         if (!seen_claimers.insert(m_.claimer).second) return;
 
-        auto e = registry_.find(m_.claimer);
-        if (!e) return;
+        auto ck = resolve_committee_member_pubkey(chain_, registry_,
+                                                  current_epoch_index(), m_.claimer);
+        if (!ck) return;
         Hash digest = make_abort_claim_message(m_.block_index, m_.round,
                                                   m_.prev_hash, m_.missing_creator);
-        if (!crypto::verify(e->pubkey, digest.data(), digest.size(), m_.ed_sig))
+        if (!crypto::verify(*ck, digest.data(), digest.size(), m_.ed_sig))
             return;
     }
     if (seen_claimers.size() < needed) return;
@@ -1589,12 +1593,15 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     if (ev.digest_a == ev.digest_b) return;
     if (ev.sig_a == ev.sig_b)       return;
 
-    auto entry = registry_.find(ev.equivocator);
-    if (!entry) return;
+    // D3.3b-read STEP 3: frozen-first, present-head fallback (a non-committee /
+    // cross-epoch equivocator still resolves present-head and stays slashable).
+    auto ek = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), ev.equivocator);
+    if (!ek) return;
 
-    if (!crypto::verify(entry->pubkey, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+    if (!crypto::verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
         return;
-    if (!crypto::verify(entry->pubkey, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+    if (!crypto::verify(*ek, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
         return;
 
     for (auto& e : pending_equivocation_evidence_) {
@@ -2459,8 +2466,12 @@ void Node::on_contrib(const ContribMsg& msg) {
     // set; rejecting would lose the message permanently (no retransmit).
     // Instead, we accept any signer that's in the registry. enter_block_sig_phase
     // looks up pending_contribs_[d] for each selected creator at use time.
-    auto entry = registry_.find(msg.signer);
-    if (!entry) return;
+    // D3.3b-read STEP 3: signer key frozen-first (the present-head fallback
+    // preserves the "accept any registry signer" behaviour for a contrib that
+    // arrives before this node computed its committee).
+    auto sk = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.signer);
+    if (!sk) return;
 
     // v2.7 F2 sub-step 2: thread the message's view-roots into the commit
     // hash. For v1 / F2-not-yet-active contribs, msg.view_*_root are all
@@ -2486,7 +2497,7 @@ void Node::on_contrib(const ContribMsg& msg) {
     // pre-feature commitment via the helper's short-circuit, like the all-zero
     // view roots. Output is byte-identical to the full field-form call.
     Hash commit = make_contrib_commitment(msg);
-    if (!crypto::verify(entry->pubkey, commit.data(), commit.size(), msg.ed_sig)) {
+    if (!crypto::verify(*sk, commit.data(), commit.size(), msg.ed_sig)) {
         std::cerr << "[node] invalid Contrib sig from " << msg.signer << "\n";
         return;
     }
@@ -2624,8 +2635,11 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                   current_creator_domains_.end(), msg.signer)
         == current_creator_domains_.end()) return;
 
-    auto entry = registry_.find(msg.signer);
-    if (!entry) return;
+    // D3.3b-read STEP 3: signer key frozen-first (mid-epoch-drifted committee
+    // member still verifies on its frozen key).
+    auto sk = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.signer);
+    if (!sk) return;
 
     // If we haven't reached BLOCK_SIG yet, buffer for replay.
     if (phase_ != ConsensusPhase::BLOCK_SIG) {
@@ -2662,7 +2676,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          inbound_snapshot);
     Hash digest = compute_block_digest(tentative);
 
-    if (!crypto::verify(entry->pubkey, digest.data(), digest.size(), msg.ed_sig)) {
+    if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {
         std::cerr << "[node] invalid BlockSig from " << msg.signer << "\n";
         return;
     }
@@ -2677,7 +2691,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     }
     Hash expected_commit = crypto::SHA256Builder{}
         .append(msg.dh_secret)
-        .append(entry->pubkey.data(), entry->pubkey.size())
+        .append(sk->data(), sk->size())
         .finalize();
     if (expected_commit != cit->second.dh_input) {
         std::cerr << "[node] BlockSig dh_secret/commit mismatch from "
