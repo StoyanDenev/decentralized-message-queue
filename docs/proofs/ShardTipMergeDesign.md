@@ -370,3 +370,106 @@ reconciliation** as the fold-in-set rule (finding 4). OR choose a different D3 s
 partial mitigation for launch). Files the decision references:
 `src/node/registry.cpp:25-78`, `src/node/producer.cpp:610-672`,
 `src/node/node.cpp:1690-1797`.
+
+### 8.1 Owner decision (2026-07-12) — FULL CLOSURE via per-height reconstruction
+
+**The owner chose the largest scope: build the per-height historical-state
+capability so a validator CAN retroactively re-derive a past committee — enabling
+trustless S-036 *closure*, not merely strong mitigation.** This directly attacks
+finding 1's root cause (present-head-only registry caches). With
+`eligible_in_region(region)` reconstructible AS OF a past height `h`, the merge
+validator re-derives the source committee at `h` deterministically from committed
+state, re-runs the §2 K-of-K verification, and confirms the under-quorum predicate
+without trusting the beacon — closing `A_beacon_forge` outright.
+
+This **supersedes findings 1–3's "strongly-mitigated ceiling"**: that ceiling
+existed *because* past state was unreconstructible; per-height reconstruction
+removes the ceiling. Findings 4 (digest reconciliation of any beacon-committed
+tip set) and 5 (byte-neutrality scoping, fail-closed absence, net-new-field
+discipline) still stand and must be honored.
+
+**The new design question (mechanism sub-round, §9).** "Per-height snapshots"
+naively = O(heights × domains) state explosion; the affordable sound mechanism is
+resolved in §9.
+
+## 9. Mechanism decision (2026-07-12, feasibility-Workflow grounded) — Hybrid M-B + M-C
+
+**M-A (pure replay) is REJECTED — unsound AND infeasible.** `restore_from_snapshot`
+(`src/chain/chain.cpp:2189-2193`) rebuilds `blocks_` from only the tail
+`header_count = 16` headers (`serialize_state` `:2015-2022`); a snapshot-bootstrapped
+node physically lacks `blocks_[0..h]`, so `build_from_chain_at(h)` is *uncomputable*
+there while a full-archive node computes it — wire that into MERGE_BEGIN admission
+and two honest validators diverge = **consensus split**. Independently, one
+admission needs ~100 committee re-derivations each O(h·T) = O(100·H·T) synchronous
+per validator = a validation-path DoS. **The decisive constraint: every input to
+the merge gate must travel inside committed state / the snapshot — that is the only
+thing archive and snapshot nodes provably share.**
+
+**The circularity is intrinsic and forces M-B.** Authenticating a source K-of-K sig
+at `h` requires re-running `select_m_creators` (`src/crypto/random.cpp:70-86`, a pure
+function of the *exact ordered eligible pool* at `h`) — which `build_from_chain`
+cannot supply from present-head caches. M-C alone does NOT break this (a source-signed
+count is only worth the verifier's ability to authenticate the signers = the same
+historical-pool dependency, plus a rogue-registered-signer forge). The only artifact
+that severs it is a **genesis-anchored, inductively-signed per-epoch committee /
+eligible-set checkpoint committed into `state_root`** (M-B) — inherited through the
+snapshot, it resurrects the design's V-commit path (finding 1 killed V-commit
+*because* reconstruction was impossible; the checkpoint makes fold-in verification a
+pure function of committed state).
+
+**The two new on-chain artifacts (both gated `shard_count_ > 1` ⇒ non-EXTENDED emits
+zero leaves ⇒ `state_root` byte-identical):**
+- **(A) `c:` epoch committee/eligible-set checkpoint** — container
+  `std::map<EpochIndex, EligibleSetSnapshot>` where the snapshot is the **ordered**
+  `(domain, ed_pub, region)` eligible set as of the epoch anchor (the exact input
+  `select_m_creators` consumes). Leaf `"c:" + epoch_be8` = `SHA256(canonical_encode(
+  ordered_set))`. Folded at the epoch-rotation hook (`node.cpp:2125`), round-tripped
+  through `serialize_state`/`restore_from_snapshot` like `merge_state_`; bounded ring
+  (cover `revert_threshold_blocks`=200 back). Genesis pins epoch-0 (`K_0`); each
+  checkpoint is folded by a beacon block signed by that epoch's committee,
+  authenticated by the *prior* committed checkpoint — inductively back to genesis.
+- **(B) `eligible_count: u32` source-signed digest-bound `Block` field** — the source
+  committee computes `eligible_in_region(region)` at its own head (contemporaneously
+  correct, finding 2) and K-of-K signs it via `compute_block_digest`. Net-new
+  digest-bound field, **conditionally appended only when `shard_count_ > 1`**
+  (mirroring the `producer.cpp:640-672` conditional-append), threaded through
+  `compute_block_digest` / `to_json`/`from_json` / the `light/verify.cpp` digest
+  mirror, with an empty-vector ⇒ no-append byte-neutrality proof. Turns finding 3 on
+  its head: the count is now the source committee's *signed self-report*, and (A)
+  makes those signers authenticatable at any past `h`.
+
+**Load-bearing selection-pool pin.** Today the selection *randomness* is
+epoch-anchored (`node.cpp:1716-1721`) but the selection *pool* is read at present head
+(`node.cpp:1724` `build_from_chain(chain_, chain_.height())`) — so committee-at-`h`
+drifts with mid-epoch churn and is NOT reconstructible from a single checkpoint. **Pin
+the shard-committee pool to the epoch anchor** (`build_from_chain(chain_,
+beacon_anchor_height)`) in the shard producer's selection and in `on_shard_tip` — this
+makes committee membership epoch-stable ⇒ reconstructible from ONE `c:` checkpoint with
+zero replay, and removes a latent present-head nondeterminism. ⚠️ **This is a
+consensus-behavior change; its byte-neutrality claim (that it touches only the
+EXTENDED/shard-scoped selection, not SINGLE-mode block production) MUST be verified
+against the code at D3.3 before it lands** — if the pinned path is shared with
+SINGLE-mode committee selection, this breaks the non-EXTENDED invariant + every
+existing golden, and needs re-scoping.
+
+### Revised increment plan (supersedes §6)
+
+| # | Increment | Gate |
+|---|---|---|
+| **D3.1** | `ShardTipRecord` struct + encode/decode (CLEARED). Exhaustive decode gates mirroring `MergeEvent::decode`; no apply/validator/digest touch. | `test-shard-tip-record` round-trip; malformed/overlong/short/bad-region → nullopt; FAST both platforms; zero golden change. |
+| **D3.2** | `t:` state namespace + bounded ring + snapshot round-trip (CLEARED). Empty-set ⇒ zero leaves. | `test-shard-tip-namespace`: identical `state_root` across two nodes; empty-set byte-neutrality; deterministic ring prune; genesis-roundtrip + snapshot-full-determinism green. |
+| **D3.3** | **`c:` epoch checkpoint namespace + the selection-pool pin** (load-bearing; MUST precede producer/gate work). Container + ordered-set canonical encode + `build_state_leaves` emission + snapshot round-trip + epoch ring prune, folded at `node.cpp:2125`; pin `on_shard_tip` + shard producer selection to the epoch anchor. **Verify the pin's non-EXTENDED byte-neutrality first.** | `test-epoch-checkpoint`: two nodes identical `state_root`; a **snapshot-bootstrapped** node reconstructs committee-at-`h` identical to a contemporaneous `on_shard_tip` derivation; non-EXTENDED emits zero `c:` leaves + byte-identical goldens; SINGLE-mode selection unchanged. Adversarial review (snapshot-inheritance + inductive anchor + pin scoping). |
+| **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |
+| **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
+| **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
+| **D3.7** | **Deterministic S-036 falsifier** — `SeededRng` + virtual harness: healthy source + captured beacon false-window MERGE_BEGIN → **rejected**; genuinely-distressed source (contiguous sub-`2K` + checkpoint-authenticated sigs) → **accepted**; **rogue-registered-signer** → rejected by the `c:` selection check; **snapshot-node vs archive-node admission → identical verdict**. FORGE/WINNER/REPLAY cases. | red on pre-D3.6, green after; replay-twice-identical; LIVE EXTENDED merge still fires on legitimate distress. |
+| **D3.8** | **Docs + proof** `ShardTipMergeSoundness.md` (encode round-trip; `t:`+`c:` determinism; empty-set/non-EXTENDED byte-neutrality; epoch-checkpoint inductive authentication back to `K_0`; source-count unforgeability; snapshot/archive admission agreement; historical-accept-predicate soundness; blast radius). Flip SECURITY.md S-036 + `S036UnderQuorumMerge.md` F-1 → **CLOSED**; fix the stale `validator.cpp:772-776` citations. | proofs-index + link-check + doc-tier + citation-bounds green. |
+
+**Residual owner sub-fork: none.** The one candidate (full ordered eligible-set per
+epoch vs a registry-delta + intra-epoch replay) is not a real fork — the delta option
+reintroduces the exact snapshot-node history-absence break that kills M-A. Full ordered
+set (bounded: ~1-2 epochs × one epoch's eligible domains) is the sound choice. The
+selection-pool pin is inside the owner's authorized full-closure scope (EXTENDED-only,
+no pre-D3 EXTENDED production chain) and is a net correctness improvement.
+
+**D3.1 + D3.2 remain valid substrate under this mechanism and proceed now.**
