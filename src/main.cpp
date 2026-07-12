@@ -1035,6 +1035,11 @@ Additional in-process tests:
                                               load() and the shrink-manifest-first
                                               ordering makes every crash window
                                               reload a consistent chain
+  determ test-shard-tip-record                D3.1 (S-036): ShardTipRecord
+                                              canonical codec — round-trip +
+                                              exact size/region-len decode gates
+                                              (the on-chain distress-attestation
+                                              substrate; byte-neutral)
 )" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
@@ -10968,6 +10973,109 @@ int main(int argc, char** argv) {
     // below 2K and the shard merges with its modular-next neighbor.
     // Wire format must round-trip byte-for-byte across all node
     // implementations or the apply path diverges across shards.
+    if (cmd == "test-shard-tip-record") {
+        // D3.1 (ShardTipMergeDesign.md §9): the ShardTipRecord canonical codec —
+        // the on-chain distress-attestation substrate that closes S-036. Mirrors
+        // the MergeEvent::decode discipline: exact size + region-len gates, no
+        // semantic checks (those live in the validator). Byte-neutral: this is a
+        // pure struct/codec, no apply/validator/digest touch.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto make_rec = [](uint32_t sid, uint64_t h, uint32_t ec,
+                           uint8_t sig_fill, const std::string& region) {
+            ShardTipRecord r;
+            r.source_shard_id = sid; r.height = h; r.eligible_count = ec;
+            r.region = region;
+            for (auto& b : r.committee_sig_root) b = sig_fill;
+            return r;
+        };
+        auto eq = [](const ShardTipRecord& a, const ShardTipRecord& b) {
+            return a.source_shard_id == b.source_shard_id && a.height == b.height
+                && a.eligible_count == b.eligible_count
+                && a.committee_sig_root == b.committee_sig_root
+                && a.region == b.region;
+        };
+
+        // === round-trip: every field survives byte-for-byte ===
+        {
+            ShardTipRecord r = make_rec(7, 123456789ULL, 42, 0xAB, "us-east");
+            auto enc = r.encode();
+            check(enc.size() == 49 + r.region.size(),
+                  "encode size == 49 + region_len (source_shard_id4 + height8 + "
+                  "eligible_count4 + committee_sig_root32 + region_len1 + region)");
+            auto dec = ShardTipRecord::decode(enc);
+            check(dec.has_value() && eq(*dec, r),
+                  "round-trip preserves source_shard_id / height / eligible_count / "
+                  "committee_sig_root / region exactly");
+        }
+
+        // === empty region round-trips (base 49-byte record) ===
+        {
+            ShardTipRecord r = make_rec(0, 0, 0, 0x00, "");
+            auto enc = r.encode();
+            check(enc.size() == 49, "empty-region record encodes to exactly 49 bytes");
+            auto dec = ShardTipRecord::decode(enc);
+            check(dec.has_value() && eq(*dec, r) && dec->region.empty(),
+                  "empty-region record round-trips (region stays empty)");
+        }
+
+        // === max region (32 bytes) round-trips ===
+        {
+            ShardTipRecord r = make_rec(0xFFFFFFFFu, 0xFFFFFFFFFFFFFFFFULL,
+                                        0xFFFFFFFFu, 0xFF, std::string(32, 'z'));
+            auto enc = r.encode();
+            auto dec = ShardTipRecord::decode(enc);
+            check(dec.has_value() && eq(*dec, r),
+                  "max-value record (all-0xFF fields + 32-byte region) round-trips "
+                  "— no field-width truncation");
+        }
+
+        // === determinism: identical record → byte-identical encode ===
+        {
+            ShardTipRecord r = make_rec(3, 99, 5, 0x11, "eu-west");
+            check(r.encode() == r.encode(),
+                  "encode is deterministic (identical record → identical bytes)");
+        }
+
+        // === decode gate: too-short buffer (< 49) is rejected ===
+        {
+            std::vector<uint8_t> tooShort(48, 0);
+            check(!ShardTipRecord::decode(tooShort).has_value(),
+                  "decode rejects a buffer shorter than the 49-byte base");
+        }
+
+        // === decode gate: region_len > 32 is rejected ===
+        {
+            ShardTipRecord r = make_rec(1, 2, 3, 0x22, "abc");
+            auto enc = r.encode();
+            enc[48] = 33;                    // claim region_len = 33 (> 32)
+            enc.resize(49 + 33, 0);          // make the size consistent with the claim
+            check(!ShardTipRecord::decode(enc).has_value(),
+                  "decode rejects region_len > 32 (the <= 32-byte region rule)");
+        }
+
+        // === decode gate: size != 49 + region_len (trailing bytes) is rejected ===
+        {
+            ShardTipRecord r = make_rec(1, 2, 3, 0x33, "xy");
+            auto enc = r.encode();           // size == 49 + 2
+            enc.push_back(0);                // one stray trailing byte
+            check(!ShardTipRecord::decode(enc).has_value(),
+                  "decode rejects a size mismatch vs the declared region_len "
+                  "(exact trailing-byte gate, like MergeEvent::decode)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shard-tip-record "
+                  << (fail == 0 ? "all assertions (D3.1)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     if (cmd == "test-merge-event-codec") {
         using namespace determ;
         using namespace determ::chain;

@@ -199,6 +199,39 @@ std::optional<MergeEvent> MergeEvent::decode(const std::vector<uint8_t>& p) {
     return ev;
 }
 
+// ─── ShardTipRecord (D3.1 / ShardTipMergeDesign.md §9) ───────────────────────
+std::vector<uint8_t> ShardTipRecord::encode() const {
+    std::vector<uint8_t> out;
+    out.reserve(49 + region.size());
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((source_shard_id >> (8 * i)) & 0xff));
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<uint8_t>((height         >> (8 * i)) & 0xff));
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((eligible_count >> (8 * i)) & 0xff));
+    out.insert(out.end(), committee_sig_root.begin(), committee_sig_root.end());
+    out.push_back(static_cast<uint8_t>(region.size()));
+    out.insert(out.end(), region.begin(), region.end());
+    return out;
+}
+
+std::optional<ShardTipRecord> ShardTipRecord::decode(const std::vector<uint8_t>& p) {
+    if (p.size() < 49) return std::nullopt;
+    size_t rlen = p[48];
+    if (rlen > 32)     return std::nullopt;
+    if (p.size() != 49 + rlen) return std::nullopt;
+    ShardTipRecord r;
+    for (int i = 0; i < 4; ++i)
+        r.source_shard_id |= uint32_t(p[i])      << (8 * i);
+    for (int i = 0; i < 8; ++i)
+        r.height          |= uint64_t(p[4  + i]) << (8 * i);
+    for (int i = 0; i < 4; ++i)
+        r.eligible_count  |= uint32_t(p[12 + i]) << (8 * i);
+    std::copy(p.begin() + 16, p.begin() + 48, r.committee_sig_root.begin());
+    r.region.assign(reinterpret_cast<const char*>(p.data() + 49), rlen);
+    return r;
+}
+
 // ─── CrossShardReceipt ───────────────────────────────────────────────────────
 
 json CrossShardReceipt::to_json() const {

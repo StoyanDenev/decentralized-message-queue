@@ -1,18 +1,18 @@
 # On-chain SHARD_TIP records — closing S-036 (D3 / v2.11)
 
-**Status: DESIGN-REVIEW COMPLETE — D3.1+D3.2 CLEARED; D3.3+ BLOCKED ON A 5TH
-OWNER FORK.** Owner forks F-1…F-4 were decided (see §5); the mandated adversarial
-design-review (§8) then found that the F-4 trust model and the §4 "working
-resolution" are **unsound as written** — a validator cannot deterministically
-re-derive a source shard's committee at a past height (`NodeRegistry::build_from_chain`
-reads present-head caches; `src/node/registry.cpp:25-78`), so S-036 cannot be
-trustlessly *closed*, only *strongly mitigated*, and the fold-in set needs a
-net-new F2-style reconciliation mechanism outside F-1…F-4 scope. **The §3–§4 trust
-model below is superseded by §8; read §8 first.** The owner authorized the work in
-the pre-launch register (D3, 2026-07-09): *launch posture = EXTENDED → build
-on-chain SHARD_TIP records (v2.11), close S-036* — the "close" target is what §8's
-5th fork revises. This remains the design-review-first step the project mandates
-for shipped-consensus changes (cf. [BoundedReorgDesign.md](BoundedReorgDesign.md) /
+**Status: MECHANISM DECIDED (§9) — implementing. D3.1 SHIPPED; D3.2 next.** Owner
+forks F-1…F-4 were decided (see §5); the mandated adversarial design-review (§8)
+found the F-4 trust model unsound (a validator cannot re-derive a source committee
+at a past height — `NodeRegistry::build_from_chain` reads present-head caches,
+`src/node/registry.cpp:25-78`); the owner then chose **full closure via per-height
+reconstruction** (§8.1), and the feasibility Workflow resolved the mechanism (§9):
+a `c:` epoch committee-checkpoint (M-B) + an `eligible_count` source-signed
+digest-bound field (M-C) + a selection-pool pin — reconstruct committee-at-`h` with
+zero replay, so S-036 is trustlessly **closed**. **§9 is the live design; §3–§8 are
+the superseded design + review history (read §9 for the current plan).** The owner
+authorized the work in the pre-launch register (D3, 2026-07-09). This remains the
+design-review-first step the project mandates for shipped-consensus changes (cf.
+[BoundedReorgDesign.md](BoundedReorgDesign.md) /
 [DeterministicSchedulerDesign.md](DeterministicSchedulerDesign.md)).
 
 Reference convention: bare `§` are this doc; `S-036`/`S-030` are `docs/SECURITY.md`;
@@ -456,7 +456,7 @@ existing golden, and needs re-scoping.
 
 | # | Increment | Gate |
 |---|---|---|
-| **D3.1** | `ShardTipRecord` struct + encode/decode (CLEARED). Exhaustive decode gates mirroring `MergeEvent::decode`; no apply/validator/digest touch. | `test-shard-tip-record` round-trip; malformed/overlong/short/bad-region → nullopt; FAST both platforms; zero golden change. |
+| **D3.1 ✅** | `ShardTipRecord` struct + encode/decode — **SHIPPED**. 49-byte base (source_shard_id·4 + height·8 + eligible_count·4 + committee_sig_root·32 + region_len·1 + region), exhaustive decode gates mirroring `MergeEvent::decode` (size floor, region-len ≤ 32, exact trailing bytes). No apply/validator/digest touch. | `test-shard-tip-record` (9 assertions): round-trip preserves every field; empty + max-32 region; all-0xFF no truncation; determinism; rejects < 49 / region_len>32 / size-mismatch. FAST 218/0 both platforms; zero golden change. |
 | **D3.2** | `t:` state namespace + bounded ring + snapshot round-trip (CLEARED). Empty-set ⇒ zero leaves. | `test-shard-tip-namespace`: identical `state_root` across two nodes; empty-set byte-neutrality; deterministic ring prune; genesis-roundtrip + snapshot-full-determinism green. |
 | **D3.3** | **`c:` epoch checkpoint namespace + the selection-pool pin** (load-bearing; MUST precede producer/gate work). Container + ordered-set canonical encode + `build_state_leaves` emission + snapshot round-trip + epoch ring prune, folded at `node.cpp:2125`; pin `on_shard_tip` + shard producer selection to the epoch anchor. **Verify the pin's non-EXTENDED byte-neutrality first.** | `test-epoch-checkpoint`: two nodes identical `state_root`; a **snapshot-bootstrapped** node reconstructs committee-at-`h` identical to a contemporaneous `on_shard_tip` derivation; non-EXTENDED emits zero `c:` leaves + byte-identical goldens; SINGLE-mode selection unchanged. Adversarial review (snapshot-inheritance + inductive anchor + pin scoping). |
 | **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |

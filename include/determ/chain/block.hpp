@@ -411,6 +411,45 @@ struct MergeEvent {
     static std::optional<MergeEvent> decode(const std::vector<uint8_t>& p);
 };
 
+// D3.1 (ShardTipMergeDesign.md §9): a compact on-chain distress attestation for a
+// source shard — the fold-in RESULT a beacon commits after contemporaneously
+// verifying a source SHARD_TIP against the `c:` epoch committee checkpoint (§9).
+// It is NOT a whole block (that is the `MsgType::SHARD_TIP=13` gossip) and NOT the
+// spec's `ShardTipPayload`; it is bound into `state_root` under the `t:` namespace
+// (D3.2), carried as a beacon block-summary field (D3.5), and read by the
+// MERGE_EVENT BEGIN admission gate (D3.6) so a merge's under-quorum claim becomes
+// independently verifiable instead of a self-asserted `evidence_window_start`.
+//
+// Wire format (canonical, little-endian; variable size = 49 + region_len):
+//   [source_shard_id: u32 LE]
+//   [height: u64 LE]                 // the source-shard block height attested
+//   [eligible_count: u32 LE]         // eligible_in_region(region) at `height`
+//   [committee_sig_root: 32 bytes]   // hash binding the source committee's K-of-K
+//                                    // signature over the source block, verified
+//                                    // at fold-in against the `c:` checkpoint (§9)
+//   [region_len: u8]                 // <= 32
+//   [region: utf8 bytes, region_len bytes]
+//
+// `region` binds the count's scope (eligible_in_region is region-local); same
+// [a-z0-9-_], <= 32-byte rule the MERGE_EVENT region uses. Encoded/decoded by
+// these helpers so the apply path, the producer, and the validator share one
+// byte-counting definition (the MergeEvent discipline).
+struct ShardTipRecord {
+    uint32_t     source_shard_id{0};
+    uint64_t     height{0};
+    uint32_t     eligible_count{0};
+    Hash         committee_sig_root{};
+    std::string  region{};
+
+    // Canonical serialization; order + endianness fixed, no version byte.
+    std::vector<uint8_t> encode() const;
+    // Decode the canonical form. Returns std::nullopt on size mismatch or a
+    // region_len exceeding 32. (No further semantic checks here — those live in
+    // the validator, exactly as MergeEvent::decode leaves partner/window checks
+    // to the caller.)
+    static std::optional<ShardTipRecord> decode(const std::vector<uint8_t>& p);
+};
+
 struct CrossShardReceipt {
     ShardId      src_shard{0};
     ShardId      dst_shard{0};
