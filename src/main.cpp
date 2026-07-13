@@ -1233,6 +1233,11 @@ Additional in-process tests:
                                               range guards, hash + digest
                                               distinctness, validator fail-
                                               closed dispatch (1/2/0xFF reject)
+  determ test-eligible-count                  D3.4 §S-036 Block.eligible_count:
+                                              zero-skip wire round-trip (count 0
+                                              elided, byte-identical), u32 range
+                                              guard, hash+digest binding, tamper
+                                              breaks the K-of-K signed digest
   determ test-audit-keys                      A2 audit layer: ROTATE_AUDIT_KEY
                                               set/rotate/clear lifecycle (ak:
                                               leaf appears/updates/REMOVED),
@@ -39211,6 +39216,93 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-block-signature-form\n"
                            : "  PASS: test-block-signature-form\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-eligible-count") {
+        // D3.4 / S-036 (v2.11): the Block.eligible_count source-committee self-
+        // report — zero-skip wire round-trip (count 0 elided, byte-identical
+        // pre-D3.4 JSON), u32 range guard, and hash + digest zero-skip identity
+        // + binding (a tampered count changes BOTH the digest the K-of-K sig
+        // covers AND the block hash). Cross-binary digest parity (node vs
+        // light_compute_block_digest) is pinned by test_block_digest_xbinary_
+        // parity.sh; the field is bound in both mirrors, field order last.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === 1. Zero-skip wire round-trip ===
+        {
+            Block b; b.index = 4;
+            json j0 = b.to_json();
+            check(!j0.contains("eligible_count"),
+                  "wire: count 0 (default) is ELIDED from JSON (byte-identical pre-D3.4)");
+            check(Block::from_json(j0).eligible_count == 0,
+                  "wire: absent key round-trips to count 0");
+            b.eligible_count = 5;
+            json j2 = b.to_json();
+            check(j2.contains("eligible_count") && j2["eligible_count"] == 5,
+                  "wire: non-zero count serialized");
+            check(Block::from_json(j2).eligible_count == 5,
+                  "wire: non-zero count round-trips");
+            Block bmax; bmax.eligible_count = 0xFFFFFFFFu;
+            check(Block::from_json(bmax.to_json()).eligible_count == 0xFFFFFFFFu,
+                  "wire: u32 max count round-trips without truncation");
+        }
+
+        // === 2. Range guard (out-of-u32 fails closed, never truncates into a
+        //        SMALLER count that could spuriously read as distressed) ===
+        {
+            Block base; json j = base.to_json();
+            auto throws_on = [&](uint64_t v) {
+                json bad = j; bad["eligible_count"] = v;
+                try { Block::from_json(bad); return false; }
+                catch (const std::exception&) { return true; }
+            };
+            check(throws_on(0x100000000ull), "range: count 2^32 rejected (would truncate to 0)");
+            check(throws_on(0xFFFFFFFFFFull), "range: count 2^40 rejected");
+        }
+
+        // === 3. Hash + digest zero-skip identity / binding ===
+        {
+            Block a; a.index = 7; a.timestamp = 99;
+            Block b = a; b.eligible_count = 3;   // "distressed" self-report
+            Block c = a;                          // second count-0 copy
+            check(a.compute_hash() != b.compute_hash(),
+                  "hash: count 0 vs count 3 blocks have DISTINCT hashes (bound in signing_bytes)");
+            check(a.compute_hash() == c.compute_hash(),
+                  "hash: count 0 is hash-identical to the pre-D3.4 encoding (zero-skip)");
+            check(node::compute_block_digest(a) != node::compute_block_digest(b),
+                  "digest: committee-signed digest binds the count (non-zero)");
+            check(node::compute_block_digest(a) == node::compute_block_digest(c),
+                  "digest: count 0 keeps the byte-identical v1 digest");
+        }
+
+        // === 4. Tamper: a post-sign count change breaks both bindings, so the
+        //        carried K-of-K signature can no longer verify (fail-closed) ===
+        {
+            Block honest; honest.index = 9; honest.eligible_count = 2;   // < 2K distress
+            Block tampered = honest; tampered.eligible_count = 8;        // forged "healthy"
+            check(node::compute_block_digest(honest) != node::compute_block_digest(tampered),
+                  "tamper: forging count 2 -> 8 changes the signed digest (sigs would fail)");
+            check(honest.compute_hash() != tampered.compute_hash(),
+                  "tamper: the forged count also changes the block hash");
+        }
+
+        // === 5. Determinism: the count is a pure block field, so two
+        //        independent digests over equal blocks agree (no gossip-async) ===
+        {
+            Block a; a.index = 11; a.eligible_count = 6;
+            Block b; b.index = 11; b.eligible_count = 6;
+            check(node::compute_block_digest(a) == node::compute_block_digest(b),
+                  "determinism: equal blocks -> identical digest (raw-bind safe)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-eligible-count\n"
+                           : "  PASS: test-eligible-count\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-unshield") {

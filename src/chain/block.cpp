@@ -398,6 +398,18 @@ std::vector<uint8_t> Block::signing_bytes() const {
         b.append(static_cast<uint8_t>(signature_form));
     }
 
+    // D3.4 / S-036: bind eligible_count into the block hash ONLY when non-zero
+    // (the same zero-skip pattern as signature_form / partner_subset_hash). Two
+    // blocks that agree on every other field but differ in the source's self-
+    // reported count get DISTINCT hashes, so the count is part of block identity
+    // — belt-and-suspenders alongside the compute_block_digest binding (which is
+    // what the K-of-K signatures actually cover). Zero (every SINGLE / CURRENT /
+    // BEACON / pre-feature block) appends nothing → byte-identical hash. Widened
+    // to u64 to match the canonical field encoding used in the digest mirrors.
+    if (eligible_count != 0) {
+        b.append(static_cast<uint64_t>(eligible_count));
+    }
+
     Hash h = b.finalize();
     return std::vector<uint8_t>(h.begin(), h.end());
 }
@@ -552,6 +564,11 @@ json Block::to_json() const {
     // the shipped Ed25519 K-of-K default — omitted, byte-identical JSON).
     if (signature_form != 0)
         j["signature_form"] = static_cast<int>(signature_form);
+    // D3.4 / S-036: serialize eligible_count only when non-zero (zero = the
+    // SINGLE/CURRENT/BEACON default — omitted, byte-identical JSON). A produced
+    // SHARD block always carries >= K >= 1, so zero unambiguously means absent.
+    if (eligible_count != 0)
+        j["eligible_count"] = eligible_count;
 
     return j;
 }
@@ -698,6 +715,15 @@ Block Block::from_json(const json& j) {
         if (f < 0 || f > 0xFF)
             throw std::runtime_error("block.signature_form out of u8 range");
         b.signature_form = static_cast<uint8_t>(f);
+    }
+    // D3.4 / S-036: parse eligible_count when present (u32; absent = zero). An
+    // out-of-range value fails closed rather than truncating into a smaller
+    // count that could spuriously read as "distressed" (< 2K) downstream.
+    if (j.contains("eligible_count")) {
+        uint64_t ec = json_require<uint64_t>(j, "eligible_count");
+        if (ec > 0xFFFFFFFFull)
+            throw std::runtime_error("block.eligible_count out of u32 range");
+        b.eligible_count = static_cast<uint32_t>(ec);
     }
 
     return b;

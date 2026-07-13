@@ -548,6 +548,14 @@ private:
     // multiple chains.
     EpochIndex current_epoch_index() const;
     Hash       current_epoch_rand()  const;
+    // D3.4 / S-036: the source shard's contemporaneous
+    // eligible_in_region(committee_region) count, written into the block the
+    // committee produces (Block::eligible_count) so the K-of-K signature
+    // attests it. Non-zero ONLY for a SHARD-role producer under EXTENDED
+    // (shard_count > 1); SINGLE / CURRENT / BEACON return 0 (field elided,
+    // block byte-identical). A pure function of registry_ at the current head,
+    // so every honest committee member computes the identical value.
+    uint32_t   current_source_eligible_count() const;
     void handle_contrib_timeout();
     void handle_block_sig_timeout();
     void reset_round();

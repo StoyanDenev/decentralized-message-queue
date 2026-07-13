@@ -464,7 +464,7 @@ existing golden, and needs re-scoping.
 | **D3.3b-read STEP 1+2 ✅** | **The selection PIN wiring — SHIPPED** (`be9303a`; §9.4 RP-1/RP-3, the first EXTENDED behaviour change). POOL pin at `check_if_selected` (node.cpp) + `check_creator_selection` (validator.cpp:86, epoch_index hoisted) + `check_abort_certs` (validator.cpp:234) via `select_committee_pool` (+ refugee branches); IDENTITY pin at the 6 validator block-acceptance sites (validator.cpp:69/161/326/362/388/482) via `resolve_committee_member_pubkey`/`committee_member_registered` (+`const Chain&` on 4 check-fn signatures) — mandatory because pool-only is fork/HALT-broken under mid-epoch drift (RP-1); genesis `sharding_mode=NONE ⇒ initial_shard_count==1` fail-closed guard (RP-4, NONE-arm only — CURRENT-multishard stays valid, the pin gates on `shard_count()` not `sharding_mode`). Review-driven fix: RPC previews `next_creators`/`rpc_committee` routed through `select_committee_pool` (operator-truth). | Build clean MSVC + WSL2/GCC; **FAST 222/0 BOTH platforms** (every SINGLE/CURRENT golden byte-identical — zero production regression); `test-committee-pin` proves the helper drift FIX; **adversarial Review Workflow (10 agents): ZERO confirmed fork/safety defects** (5 findings REFUTED as documented bounded-liveness asymmetries; 1 CONFIRMED RPC-preview drift FIXED). |
 | **D3.3b-read STEP 3 ✅** | **Node gossip-identity pin — SHIPPED** (`0a85595`). The 5 node.cpp gossip verifiers (`on_abort_claim`, `on_abort_event`, `on_equivocation_evidence`, `on_contrib`, `on_block_sig_locked`) now resolve committee-member keys frozen-first via `resolve_committee_member_pubkey(chain_, registry_, current_epoch_index(), …)`, so a mid-epoch-drifted honest member keeps participating instead of being spuriously aborted per round (the bounded-liveness gap the STEP-1+2 review flagged — no fork). Present-head fallback preserves every prior behaviour. `on_shard_tip` (node.cpp:1747) beacon re-derivation DEFERS to D3.4/D3.5 (the beacon holds the wrong checkpoints — RP-3). | Build clean MSVC + WSL2/GCC; **FAST 222/0 BOTH platforms** (byte-neutral for SINGLE/CURRENT via the fallback — all FA-liveness/gossip tests unchanged). **The producer+validator+gossip identity/pool pin is now COMPLETE.** |
 | **D3.3b-read EXTENDED gate ✅** | **The LIVE EXTENDED cluster gate — VERIFIED** (`3e01640`, `tools/test_extended_epoch_committee.sh`). A real 3-node multi-process SHARD+EXTENDED cluster (M=K=3 us-east, `initial_shard_count=3`, `epoch_blocks=4`) CROSSES epoch boundaries, so committee selection runs on the FROZEN `cc:` checkpoint (`committee_pin_active`==true). Verified run: height 16 / **epoch_index 4** (4 boundaries crossed), **all 3 nodes agree on a settled block — SINGLE head, NO FORK**, sustained liveness, committees well-formed K=3. This is the end-to-end proof that the producer-selected frozen committee == the one every validator re-derives. **D3.3b-read is now fully verified.** (Remaining nice-to-have, non-blocking: a unit-level block-acceptance DANGER/FIX under injected mid-epoch drift; the helper drift-FIX is already proven by `test-committee-pin`, and the live cluster exercises the frozen path end-to-end.) | SINGLE/CURRENT goldens byte-identical + FAST 222/0 both platforms + this LIVE EXTENDED boundary-crossing cluster (single head, no fork, epoch_index≥1). Shared harness pattern with the D3.5 beacon-emission gate. |
-| **D3.4** | **`eligible_count` digest-bound source-block field** — conditional-append gated `shard_count_ > 1`; threaded through digest/json/light mirror; source populates + K-of-K signs. | empty-vector ⇒ no digest append proven; non-EXTENDED goldens byte-identical; a source signs + a beacon re-derives the same digest; FAST both platforms. |
+| **D3.4 ✅** | **`eligible_count` u32 digest-bound source-block field — SHIPPED.** A net-new `Block::eligible_count` = the source shard committee's contemporaneous `registry_.eligible_in_region(committee_region)` at the block head. Populated ONLY by `Node::current_source_eligible_count()` (node.cpp), gated **`chain_role==SHARD && sharding_mode==EXTENDED`** (RP-4/§9.2-pt2 — see the review-fix note below); threaded as a defaulted trailing `build_body` param to the 3 node.cpp producer sites. Bound with a zero-skip conditional append (`if != 0`, widened to u64, appended LAST) in ALL THREE digest/hash sites — `compute_block_digest` (producer.cpp), `light_compute_block_digest` (light/verify.cpp mirror), AND `Block::signing_bytes()` (block.cpp, shared into determ-light) — so the K-of-K committee signature attests the count AND it is part of block identity (the `signature_form`/`partner_subset_hash` precedent). `to_json`/`from_json` emit/parse only when non-zero (u32 range-guarded, fail-closed on overflow). A produced SHARD block always has eligible_count ≥ K ≥ 1, so zero is an unambiguous "unpopulated" sentinel. **The count is CONTEMPORANEOUS present-head eligibility (the distress metric), NOT the epoch-frozen D3.3b selection pool — finding-2 keeps these distinct.** Value-correctness vs the registry is deferred to D3.5 fold-in + D3.6 admission; D3.4 only BINDS it. | `test-eligible-count` (14 assertions): zero-skip wire round-trip (count 0 elided → byte-identical pre-D3.4 JSON); u32 range guard (2^32/2^40 fail closed); u32-max round-trip; hash + digest zero-skip identity (count 0 ≡ pre-feature) AND binding (count 3 ≠ count 0); tamper (forging 2→8 changes BOTH the signed digest and the block hash); determinism (equal blocks → identical digest). The two digest mirrors kept byte-parity by `test_block_digest_xbinary_parity.sh` (+ ELIGIBLE_COUNT token, 17-token canonical seq, SELFTEST green). **FAST 223/0 BOTH platforms** (MSVC + WSL2/GCC); every SINGLE/CURRENT block hash/digest/roundtrip/state-root golden byte-identical; adversarial-review Workflow (6-lens finders + per-finding refute-by-default verify) GO. |
 | **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
 | **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
 | **D3.7** | **Deterministic S-036 falsifier** — `SeededRng` + virtual harness: healthy source + captured beacon false-window MERGE_BEGIN → **rejected**; genuinely-distressed source (contiguous sub-`2K` + checkpoint-authenticated sigs) → **accepted**; **rogue-registered-signer** → rejected by the `c:` selection check; **snapshot-node vs archive-node admission → identical verdict**. FORGE/WINNER/REPLAY cases. | red on pre-D3.6, green after; replay-twice-identical; LIVE EXTENDED merge still fires on legitimate distress. |
@@ -476,6 +476,48 @@ reintroduces the exact snapshot-node history-absence break that kills M-A. Full 
 set (bounded: ~1-2 epochs × one epoch's eligible domains) is the sound choice. The
 selection-pool pin is inside the owner's authorized full-closure scope (EXTENDED-only,
 no pre-D3 EXTENDED production chain) and is a net correctness improvement.
+
+### §9.5 D3.4 review + the RP-4 gate correction (2026-07-13) — `shard_count()>1` → `sharding_mode==EXTENDED`
+
+The D3.4 adversarial-review Workflow (6 diverse-lens finders + per-finding refute-by-
+default verify) surfaced ONE unanimous critical defect (confirmed by 5 lenses
+independently, 6 confirmed findings, 1 refuted): the first-cut D3.4 gate keyed the
+`eligible_count` self-report on **`chain_.shard_count() > 1`**, mirroring D3.3b's
+`committee_pin_active`. That is WRONG for a byte-affecting field. **`ShardingMode::CURRENT`
+is a shipped MULTI-shard mode** — `PROFILE_REGIONAL` (`params.hpp`) is `chain_role==SHARD
++ sharding_mode==CURRENT` with `shard_count>1`, and the CURRENT genesis arm permits
+`initial_shard_count>1` (only NONE forbids it). So a CURRENT-multishard block passed the
+bare `shard_count>1` gate → got a non-zero `eligible_count` → diverged its hash/digest/JSON
+from the pre-D3.4 form → **broke every regional golden AND hard-forks a rolling upgrade of a
+live regional cluster**. This is exactly the §9.2-pt2 warning ("gate on `sharding_mode ==
+EXTENDED`, NOT `chain_role` / `shard_count_`") that RP-4 encoded but the first-cut helper
+mis-implemented. **Fix:** `Node::current_source_eligible_count()` now gates on
+`chain_role==SHARD && sharding_mode==EXTENDED` (the RP-4 assertion is NOT added to the
+CURRENT genesis arm — that would wrongly forbid the supported PROFILE_REGIONAL; the gate,
+not a genesis reject, is the fix).
+
+**Ridealong — the same bug class in the shipped D3.3b fold.** The chain-layer epoch-committee
+fold (`cc:` leaf, D3.3b-write) gates on `shard_count_>1 && epoch_blocks_>0` — and the Chain
+CANNOT see `sharding_mode`. Since the node set `chain_.epoch_blocks_` *unconditionally*, a
+CURRENT-multishard chain also folded a `cc:` leaf past its first epoch boundary → `state_root`
+divergence (latent: the shipped `test-committee-fold` only exercised SINGLE, and
+`test_regional_shards` never crossed block 1000). **Fix:** the node now hands the Chain a
+non-zero `epoch_blocks` ONLY under EXTENDED (`chain_epoch_blocks = EXTENDED ? cfg_.epoch_blocks
+: 0`), so under CURRENT the fold's own `epoch_blocks_>0` gate is false → no fold → no `cc:`
+leaf → `committee_pin_active` false (no checkpoint) → the read pin falls back to present-head.
+`chain_.epoch_blocks_` is consumed ONLY by the fold; `current_epoch_index()` reads
+`cfg_.epoch_blocks` at the node, so the node's epoch counter is unaffected.
+
+**Regression (the review's flagged coverage gap):** `tools/test_current_multishard_byte_neutral.sh`
+— a live 3-node CURRENT (`sharding_mode=1`) + SHARD cluster, `initial_shard_count=3`, empty
+region, `epoch_blocks=4`, crossing 4 epoch boundaries: asserts **no block carries
+`eligible_count`**, the node's `epoch_index` advanced (non-vacuous), sustained liveness, and
+NO fork. RED on the pre-fix tree, GREEN after. The EXTENDED twin
+(`test_extended_epoch_committee.sh`) still folds + keeps a single head (fix preserves EXTENDED).
+The refuted finding (a maximally-distressed EXTENDED block with live `eligible_in_region==0`
+yielding `eligible_count==0`, indistinguishable from unpopulated) is a DOWNSTREAM D3.6
+distress-detection semantics point (absence/0 = silence = a legitimate merge trigger per §3.5),
+not a D3.4 byte-neutrality break — tracked for D3.6, out of scope here.
 
 ### §9.2 Feasibility-verdict corrections (2026-07-12) — three fixes to the §9 mechanism
 

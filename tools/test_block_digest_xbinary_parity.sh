@@ -111,8 +111,10 @@ cd "$(dirname "$0")/.."
 
 # Post-F-7: light binds the SAME append set as producer (full byte-parity).
 # A6 (2026-07-09): + the trailing conditional SIG_FORM (signature_form bound
-# when non-zero — the §7.5.1 discriminator; 16 tokens).
-PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM"
+# when non-zero — the §7.5.1 discriminator). D3.4 (2026-07-13): + the trailing
+# conditional ELIGIBLE_COUNT (the source shard's eligible_count self-report,
+# bound when non-zero — §S-036; 17 tokens).
+PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT"
 LIGHT_SEQ="$PRODUCER_SEQ"
 # The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
@@ -180,6 +182,9 @@ extract_tokens() {
       else if (line ~ /\.append\(b\.timestamp\)/)           print "TIMESTAMP"
       # A6 §7.5.1: the signature_form discriminator (bound when non-zero).
       else if (line ~ /\.append\(static_cast<uint8_t>\(b\.signature_form\)\)/) print "SIG_FORM"
+      # D3.4 §S-036: the source shard eligible_count self-report (bound when
+      # non-zero; widened to u64 to match the canonical field encoding).
+      else if (line ~ /\.append\(static_cast<uint64_t>\(b\.eligible_count\)\)/) print "ELIGIBLE_COUNT"
 
       # Any unclassified append inside the body is drift — surface it.
       else if (line ~ /\.append\(/) print "APPEND_UNKNOWN"
@@ -321,6 +326,9 @@ Hash compute_block_digest(const Block& b) {
     if (b.signature_form != 0) {
         h.append(static_cast<uint8_t>(b.signature_form));
     }
+    if (b.eligible_count != 0) {
+        h.append(static_cast<uint64_t>(b.eligible_count));
+    }
     return h.finalize();
 }
 EOF
@@ -366,6 +374,9 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     }
     if (b.signature_form != 0) {
         h.append(static_cast<uint8_t>(b.signature_form));
+    }
+    if (b.eligible_count != 0) {
+        h.append(static_cast<uint64_t>(b.eligible_count));
     }
     return h.finalize();
 }

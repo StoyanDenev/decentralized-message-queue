@@ -470,19 +470,32 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         genesis_shard_count = gcfg_opt->initial_shard_count;
         genesis_my_shard    = gcfg_opt->shard_id;
     }
+    // D3.4/D3.3b (RP-4): the epoch-committee fold + `cc:` state leaf (and the
+    // read-side committee pin it feeds) are EXTENDED-only. The Chain layer can't
+    // see sharding_mode, so its fold gates on epoch_blocks_ > 0 — hand it a
+    // non-zero epoch length ONLY under EXTENDED. A CURRENT chain, INCLUDING
+    // multi-shard CURRENT (PROFILE_REGIONAL = SHARD+CURRENT, shard_count>1), then
+    // keeps chain_.epoch_blocks_ == 0 → the fold never fires → no `cc:` leaf →
+    // state_root byte-identical, and committee_pin_active stays false (no
+    // checkpoint) → the read pin falls back to present-head. epoch_blocks_ on the
+    // Chain is consumed ONLY by the D3.3b fold; current_epoch_index() reads
+    // cfg_.epoch_blocks at the node, and the validator keeps its own copy.
+    const uint32_t chain_epoch_blocks =
+        (cfg_.sharding_mode == ShardingMode::EXTENDED) ? cfg_.epoch_blocks : 0;
     chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy,
                                   genesis_shard_count, genesis_shard_salt,
-                                  genesis_my_shard, cfg_.epoch_blocks);
+                                  genesis_my_shard, chain_epoch_blocks);
     chain_.set_min_stake(genesis_min_stake);
     chain_.set_suspension_slash(genesis_suspension_slash);
     chain_.set_unstake_delay(genesis_unstake_delay);
     chain_.set_merge_threshold_blocks(genesis_merge_threshold);
     chain_.set_revert_threshold_blocks(genesis_revert_threshold);
     chain_.set_merge_grace_blocks(genesis_merge_grace);
-    // D3.3b: the genesis-pinned epoch length. Passed to load() above too so it
-    // is present BEFORE the internal replay's fold-in; re-set here to cover the
-    // path where load() returned an empty chain (no replay ran).
-    chain_.set_epoch_blocks(cfg_.epoch_blocks);
+    // D3.3b: the genesis-pinned epoch length (EXTENDED-only, see chain_epoch_blocks
+    // above). Passed to load() above too so it is present BEFORE the internal
+    // replay's fold-in; re-set here to cover the path where load() returned an
+    // empty chain (no replay ran). CURRENT/NONE hand 0 → fold inert, byte-neutral.
+    chain_.set_epoch_blocks(chain_epoch_blocks);
     chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
                               genesis_my_shard);
 
@@ -551,7 +564,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
             chain_.set_merge_threshold_blocks(genesis_merge_threshold);
             chain_.set_revert_threshold_blocks(genesis_revert_threshold);
             chain_.set_merge_grace_blocks(genesis_merge_grace);
-            chain_.set_epoch_blocks(cfg_.epoch_blocks);  // D3.3b
+            chain_.set_epoch_blocks(chain_epoch_blocks);  // D3.3b (EXTENDED-only)
             chain_.set_shard_routing(genesis_shard_count,
                                        genesis_shard_salt,
                                        genesis_my_shard);
@@ -1107,6 +1120,29 @@ EpochIndex Node::current_epoch_index() const {
     return chain_.height() / cfg_.epoch_blocks;
 }
 
+uint32_t Node::current_source_eligible_count() const {
+    // D3.4 / S-036: only a SHARD-role producer under EXTENDED self-reports a
+    // region-eligible count. A BEACON is not a "source shard" (it aggregates,
+    // it doesn't attest its own quorum); SINGLE/NONE is unsharded; and CURRENT
+    // — even MULTI-shard CURRENT (PROFILE_REGIONAL is chain_role==SHARD +
+    // sharding_mode==CURRENT with shard_count>1) — is NOT part of the S-036
+    // under-quorum-merge model and must stay byte-identical. So the gate keys on
+    // sharding_mode==EXTENDED, NOT chain_.shard_count()>1 (§9.2-pt2 / RP-4): a
+    // bare shard_count()>1 gate would fire on CURRENT-multishard and diverge its
+    // hash/digest/JSON, breaking every regional golden AND hard-forking a
+    // rolling upgrade of a live regional cluster. All non-EXTENDED roles return
+    // 0 → Block::eligible_count is elided from JSON + the digest, byte-identical.
+    // The count is the CONTEMPORANEOUS present-head eligibility (the distress
+    // metric — how many validators are available for this region NOW), NOT the
+    // epoch-frozen selection pool (D3.3b): finding-2 keeps these distinct. It is
+    // a pure function of registry_ at the current head, so every honest member
+    // of the committee derives the identical value and the K-of-K digest agrees.
+    if (cfg_.chain_role != ChainRole::SHARD)          return 0;
+    if (cfg_.sharding_mode != ShardingMode::EXTENDED) return 0;
+    return static_cast<uint32_t>(
+        registry_.eligible_in_region(cfg_.committee_region).size());
+}
+
 Hash Node::current_epoch_rand() const {
     if (chain_.empty()) return Hash{};
     if (cfg_.epoch_blocks == 0) return chain_.head().cumulative_rand;
@@ -1166,7 +1202,9 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          ordered_contribs, delay_output,
                                          cfg_.m_creators, mode, proposer,
                                          pending_equivocation_evidence_,
-                                         inbound_snapshot);
+                                         inbound_snapshot,
+                                         /*ordered_secrets=*/{},
+                                         current_source_eligible_count());
 
     // v2.1 / S-033 activation: populate state_root from the post-apply
     // state. Dry-run apply on a Chain copy to compute the commitment
@@ -1281,7 +1319,8 @@ void Node::try_finalize_round() {
                                     cfg_.m_creators, mode, proposer,
                                     pending_equivocation_evidence_,
                                     inbound_snapshot,
-                                    ordered_secrets);
+                                    ordered_secrets,
+                                    current_source_eligible_count());
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     // S-038 closure: populate body.state_root with the post-apply state
@@ -2673,7 +2712,9 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          current_delay_output_,
                                          cfg_.m_creators, mode_local, proposer_local,
                                          pending_equivocation_evidence_,
-                                         inbound_snapshot);
+                                         inbound_snapshot,
+                                         /*ordered_secrets=*/{},
+                                         current_source_eligible_count());
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {

@@ -94,7 +94,7 @@ Hash compute_view_root(const std::vector<Hash>& items) {
 
 }  // namespace
 
-// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:619-704) — keep in sync.
+// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:619-731) — keep in sync.
 //
 // Computes the digest the K-of-K committee signs in Phase 2. The light
 // client must recompute this byte-for-byte to verify each committee
@@ -195,6 +195,15 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     // timestamp, signature_form.
     if (b.signature_form != 0) {
         h.append(static_cast<uint8_t>(b.signature_form));
+    }
+    // D3.4 / S-036: bind the source shard's eligible_count when non-zero,
+    // exactly mirroring producer.cpp::compute_block_digest's trailing append.
+    // The u32 count survives the rpc_headers strip, so light and node digest
+    // the identical value (widened to u64 to match the node's canonical field
+    // encoding); zero (every SINGLE/CURRENT/BEACON block) appends nothing → v1
+    // digest. Field order matches the node: ..., signature_form, eligible_count.
+    if (b.eligible_count != 0) {
+        h.append(static_cast<uint64_t>(b.eligible_count));
     }
     return h.finalize();
 }

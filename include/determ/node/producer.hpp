@@ -428,6 +428,14 @@ chain::Block build_body(
     // pre-Phase-2 tentative digest computation; populated at finalize
     // when K BlockSigMsgs have arrived. delay_output is recomputed
     // from these (compute_block_rand) when non-empty.
-    const std::vector<Hash>&                  ordered_secrets = {});
+    const std::vector<Hash>&                  ordered_secrets = {},
+    // D3.4 / S-036: the source shard committee's contemporaneous
+    // eligible_in_region(committee_region) count at this block's head. The
+    // caller (a SHARD-role producer under EXTENDED) computes it; SINGLE /
+    // CURRENT / BEACON callers pass 0 (the default), so the field is elided
+    // from JSON + the digest and the block stays byte-identical. Written into
+    // Block::eligible_count verbatim; compute_block_digest binds it when non-
+    // zero, so the K-of-K signature attests the source's own count.
+    uint32_t                                  eligible_count = 0);
 
 } // namespace determ::node

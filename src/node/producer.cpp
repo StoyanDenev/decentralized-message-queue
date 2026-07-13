@@ -712,6 +712,22 @@ Hash compute_block_digest(const Block& b) {
     if (b.signature_form != 0) {
         h.append(static_cast<uint8_t>(b.signature_form));
     }
+    // D3.4 / S-036: bind the source shard's contemporaneous eligible_count ONLY
+    // when non-zero, so the K-of-K committee's Phase-2 signatures attest to it —
+    // a captured beacon that later fabricates a false MERGE_BEGIN cannot present
+    // a source-signed count that contradicts the committed value (it lacks the
+    // source committee's keys), and a post-sign tamper changes the digest so the
+    // signatures no longer verify. DETERMINISTIC (a pure function of the source
+    // registry at head — every honest committee member computes the identical
+    // eligible_in_region(region), like partner_subset_hash, not a gossip-async
+    // view), so raw binding is safe per S-030-D2 §3.2. Zero (SINGLE / CURRENT /
+    // BEACON / pre-feature) appends nothing → byte-identical v1 digest. Widened
+    // to u64 to match the canonical field encoding (light mirror identical).
+    // Field order: inbound, eq, abort, partner_subset_hash, timestamp,
+    // signature_form, eligible_count.
+    if (b.eligible_count != 0) {
+        h.append(static_cast<uint64_t>(b.eligible_count));
+    }
     return h.finalize();
 }
 
@@ -816,13 +832,18 @@ Block build_body(
     const std::string&                 bft_proposer_domain,
     const std::vector<EquivocationEvent>& equivocation_events,
     const std::vector<CrossShardReceipt>& inbound_receipts,
-    const std::vector<Hash>&              ordered_secrets) {
+    const std::vector<Hash>&              ordered_secrets,
+    uint32_t                              eligible_count) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
     b.prev_hash           = chain.empty() ? Hash{} : chain.head_hash();
     b.timestamp           = now_unix();
     b.creators            = creator_domains;
+    // D3.4 / S-036: the source shard's contemporaneous eligible-in-region
+    // self-report (0 for SINGLE/CURRENT/BEACON → elided from JSON + digest,
+    // block byte-identical). compute_block_digest binds it when non-zero.
+    b.eligible_count      = eligible_count;
 
     // Per-creator Phase-1 evidence in selection order.
     for (auto& c : contribs) {

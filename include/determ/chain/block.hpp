@@ -644,6 +644,31 @@ struct Block {
     // activation is a value change, not a wire-format break (no-migrations).
     uint8_t signature_form{0};
 
+    // D3.4 / S-036 (v2.11): the source shard committee's contemporaneous
+    // self-report of `eligible_in_region(committee_region)` at this block's
+    // head — how many validators were eligible to serve this region's
+    // committee when this block was produced. The distress metric the beacon's
+    // MERGE_BEGIN historical-witness check (D3.6) reads: a shard is "under
+    // quorum" for a merge when eligible_count < 2K contiguously. Because the
+    // K-of-K committee signs compute_block_digest (which binds this field when
+    // non-zero), the count is the SOURCE committee's SIGNED attestation — a
+    // captured beacon cannot fabricate a false count (it lacks the source
+    // committee's keys). See ShardTipMergeDesign.md §3.1 / §9(B).
+    //
+    // Populated ONLY by a SHARD-role producer under EXTENDED (shard_count > 1);
+    // a produced block always has eligible_count >= K >= 1, so zero uniquely
+    // means "unpopulated" (SINGLE / CURRENT / BEACON / pre-feature). DORMANT
+    // for every such chain: zero is elided from JSON + the digest (the
+    // signature_form / partner_subset_hash zero-skip pattern), so every
+    // existing chain, golden and fixture is byte-identical. Bound into BOTH the
+    // K-of-K signed digest (compute_block_digest — what the committee signatures
+    // cover, so a post-sign tamper changes the digest and the sigs no longer
+    // verify) AND the block hash (signing_bytes — so the count is part of block
+    // identity, matching the signature_form / partner_subset_hash precedent).
+    // The value's correctness against the real registry is enforced later, at
+    // beacon fold-in (D3.5) + MERGE_BEGIN admission (D3.6); D3.4 only binds it.
+    uint32_t eligible_count{0};
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;
