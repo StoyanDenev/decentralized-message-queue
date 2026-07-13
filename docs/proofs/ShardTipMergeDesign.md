@@ -584,6 +584,27 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     keyed by (shard,height) (NOT `latest_shard_tips_`, a last-value register); signed Phase-1 view
     = FULL-CONTENT hash of each record tuple; **full-K `reconcile_intersection`** (never a
     threshold); new digest/contrib fields conditional-on-empty.
+    - **D3.5d-i ✅ SHIPPED** — the SIGNED-VIEW SUBSTRATE (the S-043-class piece). `ContribMsg`
+      gains `view_shardtip_root`/`view_shardtip_list`; `make_contrib_commitment` binds the root
+      behind its own **`DTM-STV-v1`** domain tag AFTER the `DTM-TS-v1` proposer_time tail, ONLY
+      when non-zero (every non-beacon / pre-D3.5 contrib keeps a byte-identical commitment); the
+      msg-form overload carries it (covers `Node::on_contrib`); the validator field-form recompute
+      (validator.cpp:200) passes `vr_at(b.creator_view_shardtip_roots, i)` — the S-043 symmetry
+      edit. `Block` gains `creator_view_shardtip_roots`/`_lists`, emitted under their OWN
+      `any_shardtip_root` gate (authenticated via `creator_ed_sigs` → `signing_bytes`, so NO
+      compute_block_digest / light-mirror / parity-token change is needed — that is why the light
+      digest is untouched). `validate_contrib_view_roots` was refactored into two INDEPENDENT
+      presence-gated groups (F2 eq/abort/inbound V21-V24; shard-tip V21 cap + **V25** root==list)
+      so a shard-tip-only contrib is not spuriously rejected by `compute_view_root([]) != Hash{}`.
+      `build_body` pushes the per-creator view (empty until D3.5d-ii fills the buffer → byte-neutral).
+      `test-contrib-wire-verify` extended 9→18 assertions (sign → wire → msg-form recompute →
+      verify; the pre-D3.5 8-arg recompute REJECTS; transit tamper rejects; byte-neutral for
+      non-shard-tip contribs; V25 accept/reject). FAST 225/0 both platforms; adversarial-review
+      Workflow clean.
+    - **D3.5d-ii** (next) the RECONCILIATION WIRING: the `pending_shard_tip_records_` buffer +
+      `on_shard_tip` population; `make_contrib` Phase-1 call-site passes the buffer view;
+      `build_body` folds `reconcile_intersection(b.creator_view_shardtip_lists)`; a new validator
+      `check_shardtip_reconciliation` enforcing `shard_tip_records ⊆ intersection`.
 - **LAYER 2 (D3.5e) — the reopened 5th OWNER FORK; do NOT proceed without owner GO.** A `sc:`
   cross-chain source-committee-checkpoint transport: source shards PUSH their K-of-K-signed per-
   epoch `cc:` checkpoints to the beacon; the beacon commits them under a new `sc:` namespace,

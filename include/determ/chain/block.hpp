@@ -539,6 +539,17 @@ struct Block {
     // fields — see docs/proofs/EqAbortViewDigestExtension.md.
     std::vector<std::vector<Hash>>    creator_view_eq_lists;
     std::vector<std::vector<Hash>>    creator_view_abort_lists;
+    // D3.5d SHARD_TIP view reconciliation (S-036 Layer 1): per-creator shard-tip
+    // view roots + the LISTS behind them (full-content hash per pending record).
+    // Carried so the validator can re-derive reconcile_intersection and enforce
+    // that shard_tip_records is the committee-wide intersection (D3.5d-ii).
+    // Authenticated exactly like the other view fields: root[i] ==
+    // compute_view_root(list[i]) AND root[i] is bound into creator i's signed
+    // Phase-1 commit (DTM-STV-v1), so they need no separate digest binding.
+    // Empty on every non-beacon / pre-D3.5 block (Block::to_json omits them,
+    // preserving byte-identical block hashes / digests / state roots).
+    std::vector<Hash>                 creator_view_shardtip_roots;
+    std::vector<std::vector<Hash>>    creator_view_shardtip_lists;
     // S-030-D2 timestamp reconciliation: per-creator committed local times
     // (committee order, parallel to creators). Each entry is the proposer_time
     // creator i bound into its Phase-1 commit (authenticated by

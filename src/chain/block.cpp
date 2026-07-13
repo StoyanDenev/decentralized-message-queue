@@ -531,6 +531,25 @@ json Block::to_json() const {
         j["creator_view_abort_lists"] = jval;
     }
 
+    // D3.5d: emit the shard-tip view roots + lists under their OWN any-nonzero
+    // gate (independent of the F2 any_view_root block above — a beacon block may
+    // carry a shard-tip view with no eq/abort/inbound view). Every non-beacon /
+    // pre-D3.5 block omits them entirely, keeping a byte-identical block JSON.
+    bool any_shardtip_root = false;
+    for (auto& h : creator_view_shardtip_roots) if (h != Hash{}) { any_shardtip_root = true; break; }
+    if (any_shardtip_root) {
+        json jstr = json::array();
+        for (auto& h : creator_view_shardtip_roots) jstr.push_back(to_hex(h));
+        j["creator_view_shardtip_roots"] = jstr;
+        json jstl = json::array();
+        for (auto& list : creator_view_shardtip_lists) {
+            json one = json::array();
+            for (auto& h : list) one.push_back(to_hex(h));
+            jstl.push_back(one);
+        }
+        j["creator_view_shardtip_lists"] = jstl;
+    }
+
     // S-030-D2 timestamp reconciliation: per-creator committed times. Emitted
     // only when present (production reconciled blocks); pre-feature / legacy /
     // test blocks omit the field entirely, so their JSON stays byte-identical.
@@ -685,6 +704,19 @@ Block Block::from_json(const json& j) {
             std::vector<Hash> list;
             for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
             b.creator_view_abort_lists.push_back(std::move(list));
+        }
+    }
+    // D3.5d shard-tip view roots + lists (optional; absent on non-beacon / pre-
+    // D3.5 blocks → empty vectors, nothing bound). Mirrors the inbound parse.
+    if (j.contains("creator_view_shardtip_roots")) {
+        for (auto& h : json_require_array(j, "creator_view_shardtip_roots"))
+            b.creator_view_shardtip_roots.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("creator_view_shardtip_lists")) {
+        for (auto& one : json_require_array(j, "creator_view_shardtip_lists")) {
+            std::vector<Hash> list;
+            for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
+            b.creator_view_shardtip_lists.push_back(std::move(list));
         }
     }
     if (j.contains("creator_dh_secrets")) {

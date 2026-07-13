@@ -66,6 +66,16 @@ json ContribMsg::to_json() const {
     // so legacy / test contribs that don't commit a time keep byte-identical
     // JSON (and the make_contrib_commitment v1 short-circuit).
     if (proposer_time != 0) out["proposer_time"] = proposer_time;
+    // D3.5d shard-tip view: emit ONLY when present (own gate, independent of the
+    // F2 has_view block above — a beacon contrib may carry a shard-tip view with
+    // no eq/abort/inbound view, and every non-beacon contrib omits it entirely
+    // for byte-identical JSON).
+    if (!is_zero_hash(view_shardtip_root) || !view_shardtip_list.empty()) {
+        out["view_shardtip_root"] = to_hex(view_shardtip_root);
+        json st_arr = json::array();
+        for (auto& h : view_shardtip_list) st_arr.push_back(to_hex(h));
+        out["view_shardtip_list"] = st_arr;
+    }
     return out;
 }
 
@@ -137,6 +147,17 @@ ContribMsg ContribMsg::from_json(const json& j) {
                 "(got " + std::string(j["view_inbound_list"].type_name()) + ")");
         for (auto& h : j["view_inbound_list"])
             m.view_inbound_list.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    // D3.5d shard-tip view (own optional block, mirrors view_inbound above).
+    if (j.contains("view_shardtip_root"))
+        m.view_shardtip_root = from_hex_arr<32>(json_require_hex(j, "view_shardtip_root", 64));
+    if (j.contains("view_shardtip_list")) {
+        if (!j["view_shardtip_list"].is_array())
+            throw std::runtime_error(
+                "S-018: CONTRIB field 'view_shardtip_list' must be a JSON array "
+                "(got " + std::string(j["view_shardtip_list"].type_name()) + ")");
+        for (auto& h : j["view_shardtip_list"])
+            m.view_shardtip_list.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
 
     m.ed_sig   = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
@@ -229,7 +250,8 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               const Hash& view_eq_root,
                               const Hash& view_abort_root,
                               const Hash& view_inbound_root,
-                              uint64_t proposer_time) {
+                              uint64_t proposer_time,
+                              const Hash& view_shardtip_root) {
     SHA256Builder inner;
     for (auto& h : sorted_tx_hashes) inner.append(h);
     Hash inner_root = inner.finalize();
@@ -274,6 +296,17 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
         b.append(std::string("DTM-TS-v1"));
         b.append(proposer_time);
     }
+    // D3.5d shard-tip view reconciliation: bind the member's committed shard-tip
+    // view root when non-zero, AFTER the proposer_time tail, behind its own
+    // domain separator so it can't be confused with an F2 view root, the v1
+    // pre-image, or the timestamp tail. Zero (every non-beacon / pre-D3.5
+    // contrib) appends nothing → byte-identical commitment. The Phase-1
+    // signature over this commitment is what stops a beacon committee member
+    // from equivocating on the shard-tip set it later folds to the intersection.
+    if (!is_zero_hash(view_shardtip_root)) {
+        b.append(std::string("DTM-STV-v1"));
+        b.append(view_shardtip_root);
+    }
     return b.finalize();
 }
 
@@ -285,7 +318,7 @@ Hash make_contrib_commitment(const ContribMsg& m) {
     return make_contrib_commitment(m.block_index, m.prev_hash, m.tx_hashes,
                                     m.dh_input, m.view_eq_root,
                                     m.view_abort_root, m.view_inbound_root,
-                                    m.proposer_time);
+                                    m.proposer_time, m.view_shardtip_root);
 }
 
 // S-030-D2: deterministic lower-median of K committed proposer times. Sorts a
@@ -445,46 +478,69 @@ bool is_zero_hash_(const Hash& h) {
 bool validate_contrib_view_roots(const ContribMsg& msg, std::string* reason) {
     auto set_reason = [&](const char* m) { if (reason) *reason = m; };
 
-    // v1-compat short-circuit: all roots zero AND all lists empty is a
-    // valid pre-F2 contrib (no view binding). The caller (validator
-    // height-gate logic) decides whether to ACCEPT this at the current
-    // height; this helper just confirms it's well-formed.
-    bool all_roots_zero = is_zero_hash_(msg.view_eq_root)
-                       && is_zero_hash_(msg.view_abort_root)
-                       && is_zero_hash_(msg.view_inbound_root);
-    bool all_lists_empty = msg.view_eq_list.empty()
-                        && msg.view_abort_list.empty()
-                        && msg.view_inbound_list.empty();
-    if (all_roots_zero && all_lists_empty) return true;
+    // ── F2 group (eq / abort / inbound) ──────────────────────────────────────
+    // v1-compat short-circuit: this group is ABSENT when all three roots are
+    // zero AND all three lists empty (a valid pre-F2 contrib). When absent, its
+    // V21-V24 checks are skipped — critical because compute_view_root([]) is a
+    // non-zero empty root, so running V22-V24 against the group's zero roots
+    // would spuriously reject a contrib that carries ONLY a shard-tip view.
+    // make_contrib always sets all three F2 roots together (any_view), so a
+    // legitimate F2 contrib is never half-present.
+    bool f2_absent = is_zero_hash_(msg.view_eq_root)
+                  && is_zero_hash_(msg.view_abort_root)
+                  && is_zero_hash_(msg.view_inbound_root)
+                  && msg.view_eq_list.empty()
+                  && msg.view_abort_list.empty()
+                  && msg.view_inbound_list.empty();
+    if (!f2_absent) {
+        // V21: bandwidth cap on each list per F2-SPEC.md §Q3.
+        if (msg.view_eq_list.size()      > F2_VIEW_LIST_CAP) {
+            set_reason("V21: view_eq_list exceeds F2_VIEW_LIST_CAP");
+            return false;
+        }
+        if (msg.view_abort_list.size()   > F2_VIEW_LIST_CAP) {
+            set_reason("V21: view_abort_list exceeds F2_VIEW_LIST_CAP");
+            return false;
+        }
+        if (msg.view_inbound_list.size() > F2_VIEW_LIST_CAP) {
+            set_reason("V21: view_inbound_list exceeds F2_VIEW_LIST_CAP");
+            return false;
+        }
+        // V22..V24: each root must equal compute_view_root over its list.
+        // Member can't equivocate between Phase-1 commit and Phase-2 reveal:
+        // the root was bound into make_contrib_commitment + signed.
+        if (compute_view_root(msg.view_eq_list)      != msg.view_eq_root) {
+            set_reason("V22: view_eq_root does not match list");
+            return false;
+        }
+        if (compute_view_root(msg.view_abort_list)   != msg.view_abort_root) {
+            set_reason("V23: view_abort_root does not match list");
+            return false;
+        }
+        if (compute_view_root(msg.view_inbound_list) != msg.view_inbound_root) {
+            set_reason("V24: view_inbound_root does not match list");
+            return false;
+        }
+    }
 
-    // V21: bandwidth cap on each list per F2-SPEC.md §Q3.
-    if (msg.view_eq_list.size()      > F2_VIEW_LIST_CAP) {
-        set_reason("V21: view_eq_list exceeds F2_VIEW_LIST_CAP");
-        return false;
-    }
-    if (msg.view_abort_list.size()   > F2_VIEW_LIST_CAP) {
-        set_reason("V21: view_abort_list exceeds F2_VIEW_LIST_CAP");
-        return false;
-    }
-    if (msg.view_inbound_list.size() > F2_VIEW_LIST_CAP) {
-        set_reason("V21: view_inbound_list exceeds F2_VIEW_LIST_CAP");
-        return false;
-    }
-
-    // V22..V24: each root must equal compute_view_root over its list.
-    // Member can't equivocate between Phase-1 commit and Phase-2 reveal:
-    // the root was bound into make_contrib_commitment + signed.
-    if (compute_view_root(msg.view_eq_list)      != msg.view_eq_root) {
-        set_reason("V22: view_eq_root does not match list");
-        return false;
-    }
-    if (compute_view_root(msg.view_abort_list)   != msg.view_abort_root) {
-        set_reason("V23: view_abort_root does not match list");
-        return false;
-    }
-    if (compute_view_root(msg.view_inbound_list) != msg.view_inbound_root) {
-        set_reason("V24: view_inbound_root does not match list");
-        return false;
+    // ── D3.5d shard-tip group (independent of the F2 group above) ─────────────
+    // Absent when the root is zero AND the list is empty; a beacon contrib may
+    // carry a shard-tip view with no eq/abort/inbound view (and vice versa), so
+    // this group has its own presence gate. When present: cap (V21) + the same
+    // anti-equivocation root==list binding (V25). The root was bound into
+    // make_contrib_commitment (DTM-STV-v1) + signed, so a member can't reveal a
+    // different shard-tip view in Phase 2 than it committed in Phase 1.
+    bool st_absent = is_zero_hash_(msg.view_shardtip_root)
+                  && msg.view_shardtip_list.empty();
+    if (!st_absent) {
+        if (msg.view_shardtip_list.size() > F2_VIEW_LIST_CAP) {
+            set_reason("V21: view_shardtip_list exceeds F2_VIEW_LIST_CAP");
+            return false;
+        }
+        if (compute_view_root(msg.view_shardtip_list) != msg.view_shardtip_root) {
+            set_reason("V25: view_shardtip_root does not match list");
+            return false;
+        }
     }
     return true;
 }
@@ -781,7 +837,8 @@ ContribMsg make_contrib(const NodeKey& key,
                          const std::vector<Hash>& view_eq_list,
                          const std::vector<Hash>& view_abort_list,
                          const std::vector<Hash>& view_inbound_list,
-                         uint64_t proposer_time) {
+                         uint64_t proposer_time,
+                         const std::vector<Hash>& view_shardtip_list) {
     ContribMsg m;
     m.block_index   = block_index;
     m.signer        = domain;
@@ -820,10 +877,19 @@ ContribMsg make_contrib(const NodeKey& key,
     }
     // else: m.view_X_root stays Hash{} (zero); m.view_X_list stays empty.
 
+    // D3.5d shard-tip view: canonicalize + root under its OWN gate (independent
+    // of any_view — a beacon may carry a shard-tip view with no eq/abort/inbound
+    // view, and vice versa). Empty (every non-beacon contrib) leaves
+    // view_shardtip_root zero → the DTM-STV-v1 tail is not appended.
+    if (!view_shardtip_list.empty()) {
+        m.view_shardtip_list = canonicalize(view_shardtip_list);
+        m.view_shardtip_root = compute_view_root(m.view_shardtip_list);
+    }
+
     Hash commit = make_contrib_commitment(
         block_index, prev_hash, m.tx_hashes, dh_input,
         m.view_eq_root, m.view_abort_root, m.view_inbound_root,
-        m.proposer_time);
+        m.proposer_time, m.view_shardtip_root);
     m.ed_sig = sign(key, commit.data(), commit.size());
     return m;
 }
@@ -889,6 +955,12 @@ Block build_body(
         // the block's evidence set (subset-of-union).
         b.creator_view_eq_lists.push_back(c.view_eq_list);
         b.creator_view_abort_lists.push_back(c.view_abort_list);
+        // D3.5d: carry each creator's shard-tip view root + LIST so the validator
+        // can re-derive reconcile_intersection and enforce that
+        // Block::shard_tip_records is the committee-wide intersection (D3.5d-ii).
+        // Empty for every non-beacon contrib (Block::to_json then omits them).
+        b.creator_view_shardtip_roots.push_back(c.view_shardtip_root);
+        b.creator_view_shardtip_lists.push_back(c.view_shardtip_list);
         // S-030-D2 timestamp reconciliation: carry each member's committed
         // local time (selection order, parallel to creators).
         b.creator_proposer_times.push_back(c.proposer_time);

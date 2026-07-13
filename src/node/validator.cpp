@@ -197,12 +197,19 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
         auto pt_at = [](const std::vector<uint64_t>& v, size_t idx) -> uint64_t {
             return idx < v.size() ? v[idx] : 0;
         };
+        // D3.5d: recompute WITH creator i's committed shard-tip view root too, so
+        // the Phase-1 sig authenticates it (S-043 discipline — a verifier that
+        // omits a bound field recomputes the WRONG commitment and rejects every
+        // production block). Absent (non-beacon block, size 0) -> zero root -> the
+        // make_contrib_commitment shard-tip short-circuit reproduces the byte-
+        // identical commitment. Tampering the root then fails this sig check.
         Hash commit = make_contrib_commitment(b.index, b.prev_hash, list,
                                                 b.creator_dh_inputs[i],
                                                 vr_at(b.creator_view_eq_roots, i),
                                                 vr_at(b.creator_view_abort_roots, i),
                                                 vr_at(b.creator_view_inbound_roots, i),
-                                                pt_at(b.creator_proposer_times, i));
+                                                pt_at(b.creator_proposer_times, i),
+                                                vr_at(b.creator_view_shardtip_roots, i));
         if (!verify(*pk, commit.data(), commit.size(), b.creator_ed_sigs[i]))
             return {false, "creator commit sig invalid: " + b.creators[i]};
     }

@@ -203,7 +203,7 @@ The existing timestamp TLA+ companion is **FB29, `tla/BlockTimestampMonotonic.tl
 | `tla/BlockTimestampMonotonic.tla` (FB29) | `docs/proofs/tla/BlockTimestampMonotonic.tla` | existing timestamp TLA+ companion (digest surface now reconciled) — spec, TLC-checked (see tla/CHECK-RESULTS.md) |
 | commit `f99eeb8` | git | the implementing commit (`feat(consensus): bind timestamp into compute_block_digest via median reconciliation`) |
 | `determ test-timestamp-reconciliation` | `tools/test_timestamp_reconciliation.sh` | 16 assertions (incl. K=7 f=2 Byzantine robustness) — empirical pin of T-1..T-5 |
-| `determ test-contrib-wire-verify` | `tools/test_contrib_wire_verify.sh` | 9 assertions — the sign → wire → gossip-receiver-recompute → verify chain (the S-043 regression class: the 7-arg no-TS recompute MUST reject; transit tamper rejects; v1 zero-time short-circuit; F2+TS composition) |
+| `determ test-contrib-wire-verify` | `tools/test_contrib_wire_verify.sh` | 18 assertions — the sign → wire → gossip-receiver-recompute → verify chain (the S-043 regression class: the 7-arg no-TS recompute MUST reject; transit tamper rejects; v1 zero-time short-circuit; F2+TS composition). Extended by D3.5d with the shard-tip view binding (DTM-STV-v1): msg-form recompute verifies, the pre-D3.5 8-arg recompute REJECTS, transit tamper rejects, the msg-form == 8-arg form is byte-neutral for non-shard-tip contribs, and validate_contrib_view_roots V25 accepts a well-formed / rejects a mismatched shard-tip view |
 
 ---
 

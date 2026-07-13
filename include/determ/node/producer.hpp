@@ -52,6 +52,19 @@ struct ContribMsg {
     std::vector<Hash>  view_inbound_list;   // sorted, capped at 64 per Q3
     // ─── end v2.7 F2 ────────────────────────────────────────────────────────
 
+    // ─── D3.5d SHARD_TIP view reconciliation (S-036 Layer 1) ─────────────────
+    // A 5th reconciled dimension, parallel to the F2 inbound-receipt view but
+    // for beacon-carried ShardTipRecords. Each committee member commits its
+    // Phase-1 view of the pending shard-tip set (a full-content hash per
+    // record); the assembler folds the K views to the INTERSECTION (the
+    // reconciled set that becomes Block::shard_tip_records), and the validator
+    // re-derives the same intersection. Bound into make_contrib_commitment ONLY
+    // when non-zero, behind its own DTM-STV-v1 domain tag AFTER the proposer_time
+    // tail — so every non-beacon / pre-D3.5 contrib keeps a byte-identical
+    // commitment. Cap: F2_VIEW_LIST_CAP per §Q3, same as the other view lists.
+    Hash               view_shardtip_root{}; // root over sorted shard-tip view
+    std::vector<Hash>  view_shardtip_list;   // sorted, capped at F2_VIEW_LIST_CAP
+
     // ─── S-030-D2 timestamp reconciliation field ────────────────────────────
     // Each committee member commits its local wall-clock (now_unix) at Phase-1
     // commit time. At the Phase 1→2 boundary the assembler reconciles the K
@@ -159,7 +172,13 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               // Bound ONLY when non-zero — a zero keeps the
                               // byte-identical pre-feature commitment, exactly
                               // like the all-zero view-root short-circuit above.
-                              uint64_t proposer_time = 0);
+                              uint64_t proposer_time = 0,
+                              // D3.5d: the member's committed shard-tip view
+                              // root. Bound ONLY when non-zero, behind its own
+                              // DTM-STV-v1 tag AFTER the proposer_time tail —
+                              // zero (every non-beacon contrib) appends nothing
+                              // and keeps the byte-identical commitment.
+                              const Hash& view_shardtip_root = Hash{});
 
 // Message-form overload (S-043 hardening): recompute the commitment a given
 // ContribMsg was signed over, extracting EVERY bound field from the message
@@ -387,7 +406,12 @@ ContribMsg make_contrib(const crypto::NodeKey& key,
                          // (now_unix). Stored in the ContribMsg + bound into the
                          // Phase-1 commitment when non-zero. Default 0 = legacy /
                          // test contribs (byte-identical v1 commitment).
-                         uint64_t proposer_time = 0);
+                         uint64_t proposer_time = 0,
+                         // D3.5d: the member's Phase-1 shard-tip view (full-
+                         // content hash per pending record). Empty (the default,
+                         // every non-beacon contrib) leaves view_shardtip_root
+                         // zero → byte-identical commitment.
+                         const std::vector<Hash>& view_shardtip_list = {});
 
 BlockSigMsg make_block_sig(const crypto::NodeKey& key,
                             const std::string& domain,

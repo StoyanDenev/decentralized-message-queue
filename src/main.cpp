@@ -45284,6 +45284,62 @@ int main(int argc, char** argv) {
         check(!crypto::verify(key.pub, fNoTs.data(), fNoTs.size(), fr.ed_sig),
               "F2-view contrib WITHOUT the TS re-bind rejected");
 
+        // ── 7. D3.5d shard-tip view (DTM-STV-v1): SAME S-043 class as the TS
+        //       tail above. The sender binds view_shardtip_root into the signed
+        //       commitment; on_contrib recomputes via the msg-form overload
+        //       make_contrib_commitment(msg) — which MUST include it. This
+        //       section is the sign->wire->msg-form-recompute->verify chain for
+        //       the shard-tip binding, so a future edit that drops it from the
+        //       overload fails here rather than in a multi-node liveness outage.
+        std::vector<Hash> st(2); st[0][0] = 0x5A; st[1][0] = 0x5B;
+        ContribMsg s = make_contrib(key, "node-test", 44, prev, 0,
+                                     txs, dh, {}, {}, {}, TS, st);
+        check(s.view_shardtip_root != Hash{},
+              "make_contrib computes a non-zero shard-tip view root");
+        nlohmann::json sj = s.to_json();
+        check(sj.contains("view_shardtip_root") && sj.contains("view_shardtip_list"),
+              "shard-tip view present on the JSON wire");
+        ContribMsg sr = ContribMsg::from_json(sj);
+        check(sr.view_shardtip_root == s.view_shardtip_root
+              && sr.view_shardtip_list == s.view_shardtip_list,
+              "wire roundtrip preserves the shard-tip view root + list");
+        // 7c. Production on_contrib path (msg-form overload) verifies.
+        Hash sc = make_contrib_commitment(sr);
+        check(crypto::verify(key.pub, sc.data(), sc.size(), sr.ed_sig),
+              "msg-form recompute verifies the sender's sig (shard-tip bound)");
+        // 7d. THE REGRESSION CLASS: an 8-arg recompute (TS but no shard-tip)
+        //     must REJECT — proves the DTM-STV-v1 tail is load-bearing.
+        Hash sNoStv = make_contrib_commitment(
+            sr.block_index, sr.prev_hash, sr.tx_hashes, sr.dh_input,
+            sr.view_eq_root, sr.view_abort_root, sr.view_inbound_root,
+            sr.proposer_time);
+        check(!crypto::verify(key.pub, sNoStv.data(), sNoStv.size(), sr.ed_sig),
+              "pre-D3.5 recompute WITHOUT the shard-tip re-bind REJECTED");
+        // 7e. Transit tamper of view_shardtip_root fails authentication.
+        ContribMsg st2 = sr;
+        st2.view_shardtip_root[0] ^= 0x01;
+        Hash stc = make_contrib_commitment(st2);
+        check(!crypto::verify(key.pub, stc.data(), stc.size(), st2.ed_sig),
+              "transit-tampered shard-tip root rejected");
+        // 7f. Byte-neutrality: a NON-shard-tip contrib's msg-form commitment is
+        //     byte-identical to the pre-D3.5 8-arg field form (zero root → no
+        //     DTM-STV-v1 append). r is the section-1 v1+TS contrib (no shard-tip).
+        Hash rMsg = make_contrib_commitment(r);
+        Hash r8   = make_contrib_commitment(
+            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.view_eq_root, r.view_abort_root, r.view_inbound_root,
+            r.proposer_time);
+        check(rMsg == r8,
+              "non-shard-tip contrib: msg-form == 8-arg field form (byte-neutral)");
+        // 7g. V25 accepts a well-formed shard-tip view; rejects a list/root mismatch.
+        std::string vr_reason;
+        check(validate_contrib_view_roots(sr, &vr_reason),
+              "validate_contrib_view_roots accepts a well-formed shard-tip view");
+        ContribMsg sbad = sr;
+        sbad.view_shardtip_root[0] ^= 0xFF;  // root no longer matches list
+        check(!validate_contrib_view_roots(sbad, &vr_reason),
+              "V25 rejects a shard-tip root that does not match its list");
+
         std::cout << (fail == 0 ? "PASS" : "FAIL")
                   << ": contrib-wire-verify "
                   << (fail == 0 ? "all assertions" : "had failures")
