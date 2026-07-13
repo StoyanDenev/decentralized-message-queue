@@ -300,12 +300,22 @@ is a *substrate-present* claim, not a behavioral one — see LIMITS.
 
 ## LIMITS — what this argument does NOT cover
 
+> **UPDATE (D3.4–D3.8 shipped):** the consensus half enumerated below is now
+> **built and proven separately** in `ShardTipMergeClosureSoundness.md`
+> (STMC-1…STMC-7). This substrate document is unchanged in scope — it still proves
+> ONLY the D3.1+D3.2+D3.3a byte-neutral substrate — but the "not built" / "future
+> work" phrasing in the bullets below is superseded: read them as the *substrate's*
+> boundary, and see the companion for the shipped closure. S-036 is now **STRONGLY
+> MITIGATED** (the reachable exploit is fail-closed), **not CLOSED** — trustless
+> closure remains the owner-gated Layer-2 D3.5e.
+
 - **This proves only the shipped byte-neutral substrate, NOT the S-036 closure.**
   D3.1 + D3.2 + D3.3a give the *containers, codec, state-root leaves, rings, and
-  snapshot round-trip*. The mechanism that actually closes `A_beacon_forge` — a
-  merge validator verifying an under-quorum window from committed records — is
-  **not built**. S-036 remains a *partial mitigation* in SECURITY.md
-  (`docs/SECURITY.md:1484`, `:1582`); do not read this document as closing it.
+  snapshot round-trip*. The mechanism that closes `A_beacon_forge` on the reachable
+  path — a merge validator fail-closing an under-quorum window against committed
+  records — is proven in `ShardTipMergeClosureSoundness.md` (STMC-5), not here.
+  S-036 is **STRONGLY MITIGATED** in SECURITY.md
+  (`docs/SECURITY.md:1484`, `:1582`); do not read *this* document as closing it.
 - **The consensus half is PENDING and its soundness is future work:**
   - **D3.3b** — the `sharding_mode == EXTENDED`-gated selection-pool pin +
     epoch-rotation `cc:` fold-in (`ShardTipMergeDesign.md:462`, §9.2). This is a
