@@ -465,17 +465,22 @@ existing golden, and needs re-scoping.
 | **D3.3b-read STEP 3 ✅** | **Node gossip-identity pin — SHIPPED** (`0a85595`). The 5 node.cpp gossip verifiers (`on_abort_claim`, `on_abort_event`, `on_equivocation_evidence`, `on_contrib`, `on_block_sig_locked`) now resolve committee-member keys frozen-first via `resolve_committee_member_pubkey(chain_, registry_, current_epoch_index(), …)`, so a mid-epoch-drifted honest member keeps participating instead of being spuriously aborted per round (the bounded-liveness gap the STEP-1+2 review flagged — no fork). Present-head fallback preserves every prior behaviour. `on_shard_tip` (node.cpp:1747) beacon re-derivation DEFERS to D3.4/D3.5 (the beacon holds the wrong checkpoints — RP-3). | Build clean MSVC + WSL2/GCC; **FAST 222/0 BOTH platforms** (byte-neutral for SINGLE/CURRENT via the fallback — all FA-liveness/gossip tests unchanged). **The producer+validator+gossip identity/pool pin is now COMPLETE.** |
 | **D3.3b-read EXTENDED gate ✅** | **The LIVE EXTENDED cluster gate — VERIFIED** (`3e01640`, `tools/test_extended_epoch_committee.sh`). A real 3-node multi-process SHARD+EXTENDED cluster (M=K=3 us-east, `initial_shard_count=3`, `epoch_blocks=4`) CROSSES epoch boundaries, so committee selection runs on the FROZEN `cc:` checkpoint (`committee_pin_active`==true). Verified run: height 16 / **epoch_index 4** (4 boundaries crossed), **all 3 nodes agree on a settled block — SINGLE head, NO FORK**, sustained liveness, committees well-formed K=3. This is the end-to-end proof that the producer-selected frozen committee == the one every validator re-derives. **D3.3b-read is now fully verified.** (Remaining nice-to-have, non-blocking: a unit-level block-acceptance DANGER/FIX under injected mid-epoch drift; the helper drift-FIX is already proven by `test-committee-pin`, and the live cluster exercises the frozen path end-to-end.) | SINGLE/CURRENT goldens byte-identical + FAST 222/0 both platforms + this LIVE EXTENDED boundary-crossing cluster (single head, no fork, epoch_index≥1). Shared harness pattern with the D3.5 beacon-emission gate. |
 | **D3.4 ✅** | **`eligible_count` u32 digest-bound source-block field — SHIPPED.** A net-new `Block::eligible_count` = the source shard committee's contemporaneous `registry_.eligible_in_region(committee_region)` at the block head. Populated ONLY by `Node::current_source_eligible_count()` (node.cpp), gated **`chain_role==SHARD && sharding_mode==EXTENDED`** (RP-4/§9.2-pt2 — see the review-fix note below); threaded as a defaulted trailing `build_body` param to the 3 node.cpp producer sites. Bound with a zero-skip conditional append (`if != 0`, widened to u64, appended LAST) in ALL THREE digest/hash sites — `compute_block_digest` (producer.cpp), `light_compute_block_digest` (light/verify.cpp mirror), AND `Block::signing_bytes()` (block.cpp, shared into determ-light) — so the K-of-K committee signature attests the count AND it is part of block identity (the `signature_form`/`partner_subset_hash` precedent). `to_json`/`from_json` emit/parse only when non-zero (u32 range-guarded, fail-closed on overflow). A produced SHARD block always has eligible_count ≥ K ≥ 1, so zero is an unambiguous "unpopulated" sentinel. **The count is CONTEMPORANEOUS present-head eligibility (the distress metric), NOT the epoch-frozen D3.3b selection pool — finding-2 keeps these distinct.** Value-correctness vs the registry is deferred to D3.5 fold-in + D3.6 admission; D3.4 only BINDS it. | `test-eligible-count` (14 assertions): zero-skip wire round-trip (count 0 elided → byte-identical pre-D3.4 JSON); u32 range guard (2^32/2^40 fail closed); u32-max round-trip; hash + digest zero-skip identity (count 0 ≡ pre-feature) AND binding (count 3 ≠ count 0); tamper (forging 2→8 changes BOTH the signed digest and the block hash); determinism (equal blocks → identical digest). The two digest mirrors kept byte-parity by `test_block_digest_xbinary_parity.sh` (+ ELIGIBLE_COUNT token, 17-token canonical seq, SELFTEST green). **FAST 223/0 BOTH platforms** (MSVC + WSL2/GCC); every SINGLE/CURRENT block hash/digest/roundtrip/state-root golden byte-identical; adversarial-review Workflow (6-lens finders + per-finding refute-by-default verify) GO. |
-| **D3.5** | **Beacon producer emission (V-commit + F2 reconciliation)** — fold distress + sparse-liveness records from a **reconciled** tip set (signed Phase-1 shard-tip views + intersection, mirroring `validator.cpp:1372-1378` + the non-zero-view-root append `node.cpp:984-1009`); fold-in re-derives the source committee from `c:` + verifies source K-of-K over the block incl. `eligible_count`; unverifiable ⇒ beacon block INVALID; emit `t:` leaf. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE: zero records + unchanged `state_root`; two beacons with divergent `latest_shard_tips_` still produce the identical reconciled set (no S-047 digest wedge). Adversarial review of the reconciliation. |
+| **D3.5** ⚠️ | **Beacon producer emission — SPLIT into Layer 1 (D3.5a-d, byte-neutral, ships now) + Layer 2 (D3.5e, OWNER-GATED) by the §9.6 feasibility finding.** ~~"fold-in re-derives the source committee from `c:` + verifies source K-of-K"~~ is **UNIMPLEMENTABLE as written** — the beacon holds only its OWN `committee_checkpoints_` (the beacon committee), and the compact `ShardTipRecord` carries no source block/sigs; re-deriving via `select_committee_pool`/`chain.committee_checkpoints()` inside `on_shard_tip` resolves the BEACON's own committee ⇒ a deterministic-but-semantically-WRONG accept. **Layer 1 (D3.5a `shard_tip_records` Block field + digest binding; D3.5b `t:` fold + reorg-safe lazy-capture; D3.5c BEACON&&EXTENDED-gated emission; D3.5d F2 reconciliation over an ACCUMULATING `pending_shard_tip_records_` buffer, full-content-hashed Phase-1 view, full-K intersection):** the source K-of-K rides the CONTEMPORANEOUS `on_shard_tip` check, and the beacon commits the RESULT (`t:` leaf) → S-036 **strongly mitigated**. **Layer 2 (D3.5e, the reopened 5th fork):** a `sc:` cross-chain source-committee-checkpoint transport + beacon-genesis per-shard `K_0^s` trust root → S-036 **closed**. | LIVE EXTENDED: records appear when a shard drops below `2K`; SINGLE/CURRENT: zero records + unchanged `state_root` (gate BEACON&&EXTENDED, never `shard_count()>1` — RP-4/§9.5 on the beacon side); two beacons with divergent tips produce the identical reconciled set (no S-047 wedge). Adversarial review of the reconciliation. |
 | **D3.6** | **`validate_merge_event_historical` admission gate** in the MERGE_EVENT BEGIN branch (EXTENDED-only, BEGIN-only, after the shipped arithmetic bounds): read committed `t:` over the window; accept only on contiguous sub-`2K` source-attested coverage; **uniform fail-closed on any absent in-window record** (`A_beacon_omit`); fail-closed if the window predates the ring. | D3.7 repro red→green; `test_under_quorum_merge.sh` still green; FAST both platforms. |
 | **D3.7** | **Deterministic S-036 falsifier** — `SeededRng` + virtual harness: healthy source + captured beacon false-window MERGE_BEGIN → **rejected**; genuinely-distressed source (contiguous sub-`2K` + checkpoint-authenticated sigs) → **accepted**; **rogue-registered-signer** → rejected by the `c:` selection check; **snapshot-node vs archive-node admission → identical verdict**. FORGE/WINNER/REPLAY cases. | red on pre-D3.6, green after; replay-twice-identical; LIVE EXTENDED merge still fires on legitimate distress. |
 | **D3.8** | **Docs + proof** `ShardTipMergeSoundness.md` (encode round-trip; `t:`+`c:` determinism; empty-set/non-EXTENDED byte-neutrality; epoch-checkpoint inductive authentication back to `K_0`; source-count unforgeability; snapshot/archive admission agreement; historical-accept-predicate soundness; blast radius). Flip SECURITY.md S-036 + `S036UnderQuorumMerge.md` F-1 → **CLOSED**; fix the stale `validator.cpp:772-776` citations. | proofs-index + link-check + doc-tier + citation-bounds green. |
 
-**Residual owner sub-fork: none.** The one candidate (full ordered eligible-set per
-epoch vs a registry-delta + intra-epoch replay) is not a real fork — the delta option
-reintroduces the exact snapshot-node history-absence break that kills M-A. Full ordered
-set (bounded: ~1-2 epochs × one epoch's eligible domains) is the sound choice. The
-selection-pool pin is inside the owner's authorized full-closure scope (EXTENDED-only,
-no pre-D3 EXTENDED production chain) and is a net correctness improvement.
+**Residual owner sub-fork: ⚠️ REOPENED (this §9 line was WRONG — see §9.6).** The
+claim below addressed only the SHARD's self-verification (D3.3b, sound). It silently
+assumed the same `cc:` machinery lets a BEACON re-derive a SOURCE shard's committee-at-
+height — it does NOT (the beacon holds only its OWN `committee_checkpoints_`; three
+independent code-confirmed causes in §9.6). So trustless S-036 closure needs a genuine
+5th owner fork, and the owner's prior "full closure" mandate was made under this
+falsified no-fork premise. Superseded text kept for provenance: ~~"The one candidate
+(full ordered eligible-set per epoch vs a registry-delta + intra-epoch replay) is not a
+real fork … the selection-pool pin is inside the owner's authorized full-closure scope
+… a net correctness improvement."~~ (That remains true of the D3.3b SHARD pin; it is the
+BEACON-verifies-SOURCE step that carries the reopened fork.)
 
 ### §9.5 D3.4 review + the RP-4 gate correction (2026-07-13) — `shard_count()>1` → `sharding_mode==EXTENDED`
 
@@ -518,6 +523,82 @@ The refuted finding (a maximally-distressed EXTENDED block with live `eligible_i
 yielding `eligible_count==0`, indistinguishable from unpopulated) is a DOWNSTREAM D3.6
 distress-detection semantics point (absence/0 = silence = a legitimate merge trigger per §3.5),
 not a D3.4 byte-neutrality break — tracked for D3.6, out of scope here.
+
+### §9.6 D3.5 feasibility finding (2026-07-13) — the reopened 5th owner fork + the Layer 1 / Layer 2 split
+
+A code-grounded feasibility Workflow (4 probes + a high-effort resolver) on the D3.5 fold-in
+soundness crux (§4) reached a decision-forcing conclusion: **full trustless S-036 closure is
+NOT dischargeable on the shipped D3.1-D3.4 substrate**, and the §9 "Residual owner sub-fork:
+none" line was WRONG (§9 corrected above). `Node::on_shard_tip` (node.cpp:1759-1866) cannot
+reconstruct the SOURCE shard's committee-at-height as a pure function of committed BEACON state
+— three independent, code-confirmed causes:
+1. **Pool from the wrong registry.** It derives the pool from `build_from_chain(chain_,
+   chain_.height())` (node.cpp:1793) — the BEACON's own registrants at PRESENT head — and
+   verifies sigs against `beacon_reg.find(creator).pubkey` (node.cpp:1847) = "the beacon said
+   so." Beacon and shard are separate state machines sharing only genesis; post-genesis each
+   applies its own REGISTER/DEREGISTER/STAKE/UNSTAKE/slash, so the pools diverge (cross-chain
+   delta tracking is the UNIMPLEMENTED "B2c.2-full", node.cpp:1670 — adversary-controllable).
+2. **Per-chain suspension.** `abort_records()` is beacon-round-scoped, not shard-round-scoped,
+   so even an identical registrant set yields a different eligible pool.
+3. **No source trust root.** `committee_checkpoints_` is one per-chain map holding the BEACON
+   committee (chain.cpp:293/1811); beacon genesis pins no per-source-shard `K_0^s`. The `cc:`
+   checkpoint resurrects V-commit for a chain verifying ITS OWN committee (D3.3b) — NOT for a
+   beacon verifying a SOURCE committee. (This is the conflation the §9 no-fork line made; the
+   D3.3b-read STEP 3 row already deferred `on_shard_tip` to D3.5 for exactly this, RP-3.)
+
+**Resolution — ship in two layers:**
+- **LAYER 1 (D3.5a-d) — implementable NOW, byte-neutral, no new owner decision, a prerequisite
+  for BOTH options.** The beacon verifies each source tip CONTEMPORANEOUSLY in `on_shard_tip`
+  (post-D3.4 the K-of-K digest covers `eligible_count`), and commits the RESULT (`t:` leaf +
+  count) into `state_root`; D3.6 admission re-derives NOTHING. The fold set is made deterministic
+  across divergent beacon co-signers by transplanting the shipped F2 inbound-receipt machinery.
+  Lands S-036 at **STRONGLY MITIGATED** (residual = a SUSTAINED captured-beacon-committee over
+  the merge window + source-key-compromise + the source-registry-divergence attack + `A_beacon_omit`
+  withhold — strictly harder than today's single-block fabrication).
+  - **D3.5a** `std::vector<ShardTipRecord> shard_tip_records` Block field; empty-skip root bound
+    LAST in all 3 digest mirrors + `signing_bytes` + the parity guard (18th token). Unpopulated ⇒
+    byte-identical (twin of the D3.4 `eligible_count` step).
+  - **D3.5b** `Chain::apply_transactions` folds the vector via the shipped `add_shard_tip_record`
+    ring → `t:` leaves; **MANDATORY reorg-safe `__ensure_shard_tip_records()` lazy-capture** (twin
+    of `__ensure_committee_checkpoints`, chain.cpp:1807) — else A4 `revert_head`/failed-apply
+    rollback corrupts `state_root`. Content-driven, NO `shard_count_` gate.
+  - **D3.5c** the SOLE byte-affecting step: `build_body` populates the vector ONLY when
+    `chain_role==BEACON && sharding_mode==EXTENDED` (copy the D3.4 gate verbatim — **never
+    `shard_count()>1`**, which would hard-fork a legal CURRENT-multishard PROFILE_REGIONAL beacon).
+  - **D3.5d** F2 reconciliation (else S-047 wedge): a NEW ACCUMULATING `pending_shard_tip_records_`
+    keyed by (shard,height) (NOT `latest_shard_tips_`, a last-value register); signed Phase-1 view
+    = FULL-CONTENT hash of each record tuple; **full-K `reconcile_intersection`** (never a
+    threshold); new digest/contrib fields conditional-on-empty.
+- **LAYER 2 (D3.5e) — the reopened 5th OWNER FORK; do NOT proceed without owner GO.** A `sc:`
+  cross-chain source-committee-checkpoint transport: source shards PUSH their K-of-K-signed per-
+  epoch `cc:` checkpoints to the beacon; the beacon commits them under a new `sc:` namespace,
+  inductively authenticated back to each source shard's genesis committee `K_0^s` **pinned into
+  BEACON GENESIS** (a genesis-format change ⇒ a coordinated migration, NOT rolling-upgrade-neutral
+  on an existing EXTENDED beacon), snapshot-inherited; `on_shard_tip` re-derives the source
+  committee from `sc:[source,E].members` RE-SEEDED from committed `beacon_rand` (NOT the source
+  `cc:.epoch_rand`, which is mis-set to the shard block's own rand, chain.cpp:1810). Upgrades
+  S-036 strongly-mitigated → **CLOSED**.
+
+**Owner decision (put to Stoyan):** **Option A** authorize the 5th fork (D3.5e `sc:` transport +
+beacon-genesis `K_0^s` migration) → S-036 CLOSED, at the cost of a genesis migration + a new
+cross-chain protocol + its own review + a live multi-shard→beacon cluster gate. **Option B** ship
+Layer 1 only → S-036 STRONGLY MITIGATED, zero new trust root, no migration; correct SECURITY.md
+S-036 + `S036UnderQuorumMerge.md` F-1 to "strongly mitigated" and widen the §4 residual to include
+the source-registry-divergence attack. The prior "full closure" mandate was made under the now-
+falsified §9 no-fork belief; Option A is its true cost, Option B the honest fallback. **Layer 1
+(D3.5a-d) is a prerequisite either way.**
+
+**Pre-code hazards (the D3.3b §9.2 analog — each would be a consensus bug):** the D3.5c emission
+gate MUST be `BEACON&&EXTENDED` not `shard_count()>1` (RP-4 replayed on the beacon); D3.5b MUST add
+the reorg-safe lazy-capture twin; the fold + Phase-1 view MUST read the accumulating
+`pending_shard_tip_records_` (a (shard,height) key unanimous in Phase-1 can be non-materializable
+at Phase-2 from the last-value `latest_shard_tips_` register → fork); the Phase-1 view element MUST
+be a full-CONTENT hash (key-only lets source equivocation fold two different `t:` values behind one
+unanimous key); use full-K intersection never a threshold; the shard→region map (`shard_committee_regions_`,
+node.cpp:454) is manifest-FILE config not committed state — a region-filtered fold verdict needs it
+committed to beacon genesis/state first; bind in ALL THREE digest mirrors + add the parity token;
+D3.6 must fail-closed uniformly on any absent in-window record (`A_beacon_omit`, survives Layer 1,
+closes only under Option A).
 
 ### §9.2 Feasibility-verdict corrections (2026-07-12) — three fixes to the §9 mechanism
 
