@@ -926,7 +926,8 @@ Block build_body(
     const std::vector<EquivocationEvent>& equivocation_events,
     const std::vector<CrossShardReceipt>& inbound_receipts,
     const std::vector<Hash>&              ordered_secrets,
-    uint32_t                              eligible_count) {
+    uint32_t                              eligible_count,
+    const std::vector<chain::ShardTipRecord>& shard_tip_candidates) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
@@ -1221,6 +1222,32 @@ Block build_body(
             && !f2_inbound_intersection.count(hash_cross_shard_receipt(r)))
             continue;
         b.inbound_receipts.push_back(r);
+    }
+
+    // D3.5d-ii / S-036 Layer 1: fold the committee-agreed shard-tip records. Only
+    // records whose full-content hash lies in the reconcile_intersection of the K
+    // members' committed Phase-1 shard-tip views (creator_view_shardtip_lists,
+    // carried above) are included — the deterministic full-K rule that makes
+    // Block::shard_tip_records a pure function of the signed contribs (so every
+    // co-signer assembles the identical set → identical digest, no S-047 wedge).
+    // shard_tip_candidates is empty on every non-BEACON / non-EXTENDED caller
+    // (Node::shard_tip_records_eligible_for_inclusion returns {}), so the loop is
+    // a no-op there and the block stays byte-identical. Candidates arrive in
+    // (source_shard_id, height) map order → b.shard_tip_records is canonically
+    // ordered. Already-committed records are skipped (the t: fold is idempotent,
+    // but re-folding a committed record would bloat the block needlessly).
+    if (!shard_tip_candidates.empty()) {
+        std::set<Hash> st_intersection;
+        {
+            auto isect = reconcile_intersection(b.creator_view_shardtip_lists);
+            st_intersection.insert(isect.begin(), isect.end());
+        }
+        for (auto& rec : shard_tip_candidates) {
+            if (!st_intersection.count(hash_shard_tip(rec))) continue;
+            if (chain.shard_tip_records().count({rec.source_shard_id, rec.height}))
+                continue;
+            b.shard_tip_records.push_back(rec);
+        }
     }
 
     return b;

@@ -556,6 +556,14 @@ private:
     // block byte-identical). A pure function of registry_ at the current head,
     // so every honest committee member computes the identical value.
     uint32_t   current_source_eligible_count() const;
+    // D3.5d-ii (S-036 Layer 1): the BEACON's snapshot of pending_shard_tip_records_
+    // eligible to fold into this block, in (source_shard_id, height) map order.
+    // Returns {} unless chain_role==BEACON && sharding_mode==EXTENDED (RP-4: NEVER
+    // shard_count()>1 — CURRENT-multishard PROFILE_REGIONAL must stay byte-identical).
+    // The SAME set feeds both the Phase-1 shard-tip view (make_contrib) and the
+    // build_body reconcile candidates, so the assembler can materialize every
+    // record in the committee-wide intersection (the anti-wedge invariant).
+    std::vector<chain::ShardTipRecord> shard_tip_records_eligible_for_inclusion() const;
     void handle_contrib_timeout();
     void handle_block_sig_timeout();
     void reset_round();
@@ -741,6 +749,32 @@ private:
     // Erased alongside pending_inbound_receipts_ on receipt apply.
     std::map<std::pair<ShardId, Hash>, uint64_t>
         pending_inbound_first_seen_;
+
+    // D3.5d-ii (S-036 Layer 1): ACCUMULATING beacon buffer of contemporaneously-
+    // verified source-shard tip records, keyed by (source_shard_id, height).
+    // UNLIKE the last-value latest_shard_tips_ register above, this retains every
+    // distinct (shard,height) the beacon has verified-but-not-yet-folded, so a
+    // (shard,height) the K co-creators agreed on in Phase-1 is still materializable
+    // at build_body (the §9.6 non-materializability hazard). Populated by
+    // on_shard_tip after the K-of-K verify, gated BEACON && EXTENDED. Pruned ONLY
+    // by a SOURCE-TIP-RELATIVE staleness window (height + revert_threshold_blocks <=
+    // shard tip height), NEVER a fixed count ring and NEVER on fold-in — a reverted-
+    // then-reappended block must re-materialize the identical reconciled set (in-
+    // memory node state, not snapshotted/reverted). Empty on every non-beacon path.
+    std::map<std::pair<ShardId, uint64_t>, chain::ShardTipRecord>
+        pending_shard_tip_records_;
+
+    // D3.5d-ii: the PER-ROUND frozen snapshot of the eligible shard-tip candidates,
+    // taken ONCE at Phase-1 (start_contrib) and reused at every build_body site this
+    // round (start_block_sig_phase, try_finalize_round, on_block_sig_locked). Because
+    // pending_shard_tip_records_ is pruned asynchronously by on_shard_tip mid-round,
+    // reading it live at each build site could drop a record all K committed in
+    // Phase-1 from one co-creator's candidate set → divergent shard_tip_records →
+    // divergent digest → an S-047 round wedge on the distress path. The snapshot
+    // makes the fold a pure function of THIS round's Phase-1: candidate set ⊇ the
+    // signed view ⊇ the committee intersection, so every co-signer folds the
+    // identical full intersection. Empty on every non-BEACON / non-EXTENDED node.
+    std::vector<chain::ShardTipRecord> round_shard_tip_candidates_;
 
     // §minix net::Timer seam — the deadline timers are net::LoopTimer over
     // the (possibly injected) event loop. Timers are pure scheduling (not

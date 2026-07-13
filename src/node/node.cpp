@@ -1052,12 +1052,37 @@ void Node::start_contrib_phase() {
     // production blocks. (A DSF VirtualClock must be seeded to a realistic
     // non-zero epoch: proposer_time == 0 is the legacy sentinel that DISABLES
     // reconciliation, unbinding the timestamp — see virtual_clock.hpp.)
+    // D3.5d-ii (S-036 Layer 1): commit this beacon's Phase-1 view of the shard-tip
+    // records eligible to fold. INDEPENDENT of the f2_active_from_height gate above
+    // (D3.5d-i split validate_contrib_view_roots into two independent presence-gated
+    // groups, so this works below F2 activation) and gated BEACON && EXTENDED via the
+    // helper. The FULL-CONTENT hash (hash_shard_tip = SHA256(rec.encode())) so a
+    // source equivocating on (shard,height) yields two different hashes. The SAME
+    // helper feeds build_body's fold candidates → the assembler can materialize every
+    // intersection member (the anti-wedge invariant). Empty on every non-beacon path
+    // → make_contrib leaves view_shardtip_root zero → byte-identical commitment.
+    // Snapshot the eligible candidate set ONCE here (Phase-1) and reuse it at every
+    // build_body site this round — see round_shard_tip_candidates_ (node.hpp). The
+    // signed view below is derived from the SAME snapshot, so the committee
+    // intersection ⊆ this node's signed view == its candidate set, and the fold
+    // (intersection ∩ candidates == intersection) is identical across co-signers.
+    round_shard_tip_candidates_ = shard_tip_records_eligible_for_inclusion();
+    std::vector<Hash> f2_shardtip_view;
+    {
+        f2_shardtip_view.reserve(round_shard_tip_candidates_.size());
+        for (const auto& rec : round_shard_tip_candidates_)
+            f2_shardtip_view.push_back(hash_shard_tip(rec));
+        std::sort(f2_shardtip_view.begin(), f2_shardtip_view.end());
+        if (f2_shardtip_view.size() > F2_VIEW_LIST_CAP)
+            f2_shardtip_view.resize(F2_VIEW_LIST_CAP);
+    }
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
                                           snap, my_commit,
                                           f2_eq_view, f2_abort_view, f2_inbound_view,
-                                          static_cast<uint64_t>(clock_.unix_seconds()));
+                                          static_cast<uint64_t>(clock_.unix_seconds()),
+                                          f2_shardtip_view);
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 
@@ -1143,6 +1168,30 @@ uint32_t Node::current_source_eligible_count() const {
         registry_.eligible_in_region(cfg_.committee_region).size());
 }
 
+std::vector<chain::ShardTipRecord>
+Node::shard_tip_records_eligible_for_inclusion() const {
+    std::vector<chain::ShardTipRecord> out;
+    // RP-4/§9.5: gate on BEACON && EXTENDED, NEVER shard_count()>1 — a
+    // CURRENT-multishard PROFILE_REGIONAL beacon must stay byte-identical.
+    if (cfg_.chain_role != ChainRole::BEACON)          return out;
+    if (cfg_.sharding_mode != ShardingMode::EXTENDED)  return out;
+    // F-1 emission policy (owner-decided): DISTRESS-triggered — a source shard is
+    // recorded only when its contemporaneous eligible_count fell below the merge
+    // quorum 2K (K == the chain-wide committee size cfg_.k_block_sigs). A healthy
+    // source (eligible_count >= 2K) is NOT folded, so a healthy EXTENDED beacon
+    // emits an empty shard_tip_records set = byte-identical to a pre-D3.5 EXTENDED
+    // block. eligible_count is D3.4 digest-bound (source-signed) and k_block_sigs is
+    // genesis-fixed, so this predicate is deterministic across the beacon committee.
+    // (Sparse-healthy liveness cadence — a periodic proof-of-life record — is a
+    // future additive refinement; it does not affect safety.) Records are returned
+    // in (source_shard_id, height) map order → canonical.
+    const uint64_t distress_threshold = 2ull * cfg_.k_block_sigs;
+    for (auto& kv : pending_shard_tip_records_)
+        if (kv.second.eligible_count < distress_threshold)
+            out.push_back(kv.second);
+    return out;
+}
+
 Hash Node::current_epoch_rand() const {
     if (chain_.empty()) return Hash{};
     if (cfg_.epoch_blocks == 0) return chain_.head().cumulative_rand;
@@ -1204,7 +1253,8 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          pending_equivocation_evidence_,
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
-                                         current_source_eligible_count());
+                                         current_source_eligible_count(),
+                                         round_shard_tip_candidates_);
 
     // v2.1 / S-033 activation: populate state_root from the post-apply
     // state. Dry-run apply on a Chain copy to compute the commitment
@@ -1320,7 +1370,8 @@ void Node::try_finalize_round() {
                                     pending_equivocation_evidence_,
                                     inbound_snapshot,
                                     ordered_secrets,
-                                    current_source_eligible_count());
+                                    current_source_eligible_count(),
+                                    round_shard_tip_candidates_);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     // S-038 closure: populate body.state_root with the post-apply state
@@ -1861,6 +1912,58 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     }
 
     latest_shard_tips_[shard_id] = tip;
+
+    // D3.5d-ii (S-036 Layer 1): record the contemporaneously-verified tip into the
+    // ACCUMULATING buffer so it can be F2-reconciled across the beacon committee and
+    // folded into a beacon block (D3.5c). Gated EXTENDED (BEACON is guaranteed by the
+    // early return above); a CURRENT-multishard PROFILE_REGIONAL beacon never accrues
+    // records → byte-identical. committee_sig_root is a deterministic PURE FUNCTION of
+    // the just-verified tip (no beacon-local state), so every honest beacon co-signer
+    // builds a byte-identical record → the full-content reconcile_intersection
+    // converges (the anti-wedge invariant). See ShardTipMergeDesign.md §9.6.
+    if (cfg_.sharding_mode == ShardingMode::EXTENDED) {
+        // Commitment to the ACTUAL K-of-K signature SET the beacon just verified; the
+        // zero-skip byte-matches the verify loop above so it binds exactly the
+        // validated subset (BFT tips carry fewer than K non-zero sigs).
+        std::vector<Hash> sig_hashes;
+        for (const auto& s : tip.creator_block_sigs) {
+            if (s == zero_sig) continue;
+            crypto::SHA256Builder sb;
+            sb.append(s.data(), s.size());
+            sig_hashes.push_back(sb.finalize());
+        }
+        Hash sig_set_root = compute_view_root(sig_hashes);
+
+        crypto::SHA256Builder cb;
+        cb.append(std::string("determ-shardtip-v1"));         // domain tag (§3.3)
+        cb.append(static_cast<uint64_t>(shard_id));            // source_shard_id
+        cb.append(static_cast<uint64_t>(tip.index));           // height
+        cb.append(static_cast<uint64_t>(tip.eligible_count));  // D3.4 source-signed count
+        cb.append(static_cast<uint64_t>(shard_region.size()));
+        cb.append(shard_region);                               // region (may be "")
+        cb.append(digest);                                     // == compute_block_digest(tip): the K-of-K signed message
+        cb.append(sig_set_root);                               // commitment to the actual K-of-K sigs
+        Hash committee_sig_root = cb.finalize();
+
+        chain::ShardTipRecord rec{
+            shard_id, tip.index, tip.eligible_count, committee_sig_root, shard_region };
+        pending_shard_tip_records_[{shard_id, tip.index}] = rec;
+
+        // Source-tip-relative staleness prune: drop this shard's records more than
+        // revert_threshold_blocks below its own tip (past the fold/revert window, so
+        // already committed or permanently ineligible). NEVER a fixed count ring (which
+        // could drop a still-in-window intersection member) and NEVER on fold-in (a
+        // reverted-then-reappended block must re-materialize the identical set).
+        const uint64_t W = chain_.revert_threshold_blocks();
+        for (auto it = pending_shard_tip_records_.lower_bound({shard_id, uint64_t{0}});
+             it != pending_shard_tip_records_.end() && it->first.first == shard_id; ) {
+            if (it->first.second + W <= tip.index)
+                it = pending_shard_tip_records_.erase(it);
+            else
+                ++it;
+        }
+    }
+
     std::cout << "[node] verified shard tip: shard=" << shard_id
               << " block=" << tip.index << " sigs=" << signed_count << "\n";
 }
@@ -2714,7 +2817,8 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          pending_equivocation_evidence_,
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
-                                         current_source_eligible_count());
+                                         current_source_eligible_count(),
+                                         round_shard_tip_candidates_);
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {

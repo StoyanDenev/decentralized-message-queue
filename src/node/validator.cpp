@@ -52,6 +52,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_cross_shard_receipts(b, chain);   !r.ok) return r;
     if (auto r = check_inbound_receipts(b, chain);       !r.ok) return r;
     if (auto r = check_eqabort_reconciliation(b, chain); !r.ok) return r;
+    if (auto r = check_shardtip_reconciliation(b, chain); !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
     return {true, ""};
 }
@@ -1405,6 +1406,59 @@ BlockValidator::Result BlockValidator::check_inbound_receipts(
                              + "] not in committee-view intersection"};
         }
     }
+    return {true, ""};
+}
+
+BlockValidator::Result BlockValidator::check_shardtip_reconciliation(
+    const Block& b, const Chain& chain) const {
+    (void)chain;   // reserved; the t: fold is idempotent so no already-committed check here
+
+    // D3.5d-ii byte-neutrality gate: shard_tip_records is an EXTENDED-only S-036
+    // field. Gate on sharding_mode_ (the validator has no chain_role; shard_count()
+    // cannot distinguish CURRENT-multishard PROFILE_REGIONAL, which must stay
+    // byte-identical — RP-4/§9.5). CRITICAL: guard ONLY b.shard_tip_records (the
+    // record SET), NEVER the outer creator_view_shardtip_* vectors — build_body
+    // unconditionally pushes one (zero) entry per creator, so on a non-EXTENDED
+    // chain those OUTER vectors are non-empty (only the ELEMENTS are zero), and the
+    // producer self-applies its in-memory body before to_json strips them; an outer
+    // .empty() test would reject block 1 on every SINGLE/CURRENT chain. This mirrors
+    // check_inbound_receipts, which guards only b.inbound_receipts.
+    if (sharding_mode_ != ShardingMode::EXTENDED) {
+        if (!b.shard_tip_records.empty())
+            return {false, "shard_tip_records non-empty on non-EXTENDED chain"};
+        return {true, ""};
+    }
+    if (b.shard_tip_records.empty()) return {true, ""};
+
+    // Authenticate each carried list against its signed root (already bound into
+    // creator i's Phase-1 commit, verified in check_creator_tx_commitments), with
+    // the zero-root v1 sentinel guard (compute_view_root([]) is the non-zero empty
+    // root — a zero root requires an empty list, do NOT recompute). Same shape as
+    // check_inbound_receipts.
+    if (b.creator_view_shardtip_lists.size() != b.creators.size())
+        return {false, "shard-tip: creator_view_shardtip_lists size != creators size"};
+    for (size_t i = 0; i < b.creator_view_shardtip_lists.size(); ++i) {
+        Hash root = (i < b.creator_view_shardtip_roots.size())
+                  ? b.creator_view_shardtip_roots[i] : Hash{};
+        bool zero = true;
+        for (auto c : root) if (c) { zero = false; break; }
+        if (zero) {
+            if (!b.creator_view_shardtip_lists[i].empty())
+                return {false, "shard-tip: creator_view_shardtip_lists[" + std::to_string(i)
+                             + "] non-empty list under zero (v1) root"};
+            continue;
+        }
+        if (compute_view_root(b.creator_view_shardtip_lists[i]) != root)
+            return {false, "shard-tip: creator_view_shardtip_lists[" + std::to_string(i)
+                         + "] does not match committed root"};
+    }
+    // Every committed record must lie in the full-K committee-view intersection.
+    std::vector<Hash> isect = reconcile_intersection(b.creator_view_shardtip_lists);
+    std::set<Hash> iset(isect.begin(), isect.end());
+    for (size_t i = 0; i < b.shard_tip_records.size(); ++i)
+        if (!iset.count(hash_shard_tip(b.shard_tip_records[i])))
+            return {false, "shard-tip: shard_tip_records[" + std::to_string(i)
+                         + "] not in committee-view intersection"};
     return {true, ""};
 }
 

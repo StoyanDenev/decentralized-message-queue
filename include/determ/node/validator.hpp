@@ -139,6 +139,17 @@ private:
     // compute_block_digest binding. See docs/proofs/EqAbortViewDigestExtension.md.
     Result check_eqabort_reconciliation(const chain::Block& b,
                                          const chain::Chain& chain) const;
+    // D3.5d-ii / S-036 Layer 1: Block::shard_tip_records must be a SUBSET of the
+    // committee-wide reconcile_intersection of the members' committed Phase-1
+    // shard-tip views (creator_view_shardtip_lists, authenticated against the
+    // signed roots). Gated on sharding_mode_==EXTENDED (the validator has no
+    // chain_role; shard_count() cannot distinguish CURRENT-multishard). NO
+    // source-committee re-verification — that is discharged contemporaneously in
+    // Node::on_shard_tip and is not reconstructible from committed beacon state
+    // (§9.6); the full-K intersection proves all K members ran it on identical
+    // content. See docs/proofs/ShardTipMergeDesign.md §9.6.
+    Result check_shardtip_reconciliation(const chain::Block& b,
+                                          const chain::Chain& chain) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;

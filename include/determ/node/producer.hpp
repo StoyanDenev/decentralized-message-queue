@@ -259,6 +259,12 @@ std::vector<Hash> reconcile_intersection(
 Hash hash_equivocation_event(const chain::EquivocationEvent& e);
 Hash hash_abort_event(const chain::AbortEvent& e);
 Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r);
+// D3.5d: full-content hash of a shard-tip record = SHA256(rec.encode()). The
+// Phase-1 shard-tip VIEW element + the digest-root leaf (D3.5a). Declared here so
+// the validator TU (check_shardtip_reconciliation) links against the producer.cpp
+// definition. Full-content (not key-only) so a source equivocating on
+// (shard,height) yields two different hashes → excluded from the intersection.
+Hash hash_shard_tip(const chain::ShardTipRecord& r);
 
 // === Validator-side F2 checks (V21..V26 per F2-SPEC.md) ===
 //
@@ -460,6 +466,12 @@ chain::Block build_body(
     // from JSON + the digest and the block stays byte-identical. Written into
     // Block::eligible_count verbatim; compute_block_digest binds it when non-
     // zero, so the K-of-K signature attests the source's own count.
-    uint32_t                                  eligible_count = 0);
+    uint32_t                                  eligible_count = 0,
+    // D3.5d-ii / S-036 Layer 1: the BEACON assembler's candidate shard-tip records
+    // (its pending_shard_tip_records_ snapshot). build_body folds only those whose
+    // hash lies in reconcile_intersection(creator_view_shardtip_lists) — the
+    // committee-wide agreed set — into Block::shard_tip_records. Empty (the default;
+    // every non-BEACON / non-EXTENDED caller) → no fold → block byte-identical.
+    const std::vector<chain::ShardTipRecord>& shard_tip_candidates = {});
 
 } // namespace determ::node

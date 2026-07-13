@@ -1062,6 +1062,12 @@ Additional in-process tests:
                                               apply_transactions — content-driven
                                               (no shard gate), empty byte-neutral,
                                               state_root bound, reload + reorg safe
+)" << R"(  determ test-shardtip-reconciliation         D3.5d-ii (S-036): build_body folds
+                                              shard_tip_records = committee-wide
+                                              reconcile_intersection of Phase-1
+                                              views ∩ candidates (full-K, empty
+                                              byte-neutral) + committee_sig_root
+                                              pure-function/order-independence
 )" << R"(  determ test-committee-pin                   D3.3b-read (S-036): shared
                                               committee_pool POOL + IDENTITY
                                               helpers — frozen pool + frozen-first
@@ -11509,6 +11515,167 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": committee-fold "
                   << (fail == 0 ? "all assertions (D3.3b)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-shardtip-reconciliation") {
+        // D3.5d-ii (ShardTipMergeDesign.md §9.6): the build_body shard-tip fold —
+        // Block::shard_tip_records is the committee-wide reconcile_intersection of the
+        // K members' Phase-1 shard-tip views (creator_view_shardtip_lists) ∩ the
+        // assembler's candidates, so it is a pure function of the signed contribs (no
+        // S-047 wedge). Empty candidates → empty set (byte-neutral). Plus hash_shard_tip
+        // determinism + the committee_sig_root pure-function / order-independence
+        // property (the anti-wedge invariant every beacon co-signer must reproduce).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto mkrec = [](uint32_t sid, uint64_t h, uint32_t ec,
+                        const std::string& reg, uint8_t fill) {
+            ShardTipRecord r; r.source_shard_id = sid; r.height = h;
+            r.eligible_count = ec; r.region = reg;
+            for (size_t i = 0; i < r.committee_sig_root.size(); ++i)
+                r.committee_sig_root[i] = uint8_t(fill + i);
+            return r;
+        };
+        ShardTipRecord r1 = mkrec(0, 10, 1, "us-east", 0xA0);
+        ShardTipRecord r2 = mkrec(1, 20, 2, "us-west", 0xB0);
+        ShardTipRecord r3 = mkrec(2, 30, 0, "eu",      0xC0);
+
+        // --- hash_shard_tip determinism (the view element + digest leaf) ---
+        check(node::hash_shard_tip(r1) == node::hash_shard_tip(r1),
+              "hash_shard_tip deterministic");
+        check(node::hash_shard_tip(r1) != node::hash_shard_tip(r2),
+              "hash_shard_tip distinguishes records");
+        {
+            ShardTipRecord r1b = r1; r1b.committee_sig_root[0] ^= 0x01;
+            check(node::hash_shard_tip(r1) != node::hash_shard_tip(r1b),
+                  "hash_shard_tip binds committee_sig_root (full content, not key-only)");
+        }
+
+        // --- build_body fold: reconcile_intersection ∩ candidates ---
+        GenesisConfig gcfg;
+        gcfg.chain_id = "shardtip-recon-test";
+        GenesisCreator c0; c0.domain = "alice"; c0.initial_stake = 2000;
+        for (auto& b : c0.ed_pub) b = 0x11;
+        gcfg.initial_creators = { c0 };
+        Chain chain; chain.set_shard_routing(1, Hash{}, 0);
+        chain.append(make_genesis_block(gcfg));
+
+        crypto::NodeKey k1 = crypto::generate_node_key();
+        crypto::NodeKey k2 = crypto::generate_node_key();
+        crypto::NodeKey k3 = crypto::generate_node_key();
+        Hash prev = chain.head_hash();
+        Hash dh{}; dh[0] = 0x55;
+        std::vector<Hash> txs;
+
+        auto mk_contrib = [&](crypto::NodeKey& k, const std::string& dom,
+                              const std::vector<ShardTipRecord>& view) {
+            std::vector<Hash> st;
+            for (auto& r : view) st.push_back(node::hash_shard_tip(r));
+            return node::make_contrib(k, dom, chain.height(), prev, 0, txs, dh,
+                                       {}, {}, {}, 0, st);
+        };
+        auto do_build = [&](const std::vector<node::ContribMsg>& contribs,
+                            const std::vector<ShardTipRecord>& candidates) {
+            std::map<Hash, Transaction> store;
+            std::vector<std::string> doms = {"n1", "n2", "n3"};
+            return node::build_body(store, chain, {}, doms, contribs, Hash{}, 3,
+                                     ConsensusMode::MUTUAL_DISTRUST, "", {}, {}, {},
+                                     0, candidates);
+        };
+        auto folded_has = [&](const Block& b, const ShardTipRecord& r) {
+            for (auto& x : b.shard_tip_records)
+                if (node::hash_shard_tip(x) == node::hash_shard_tip(r)) return true;
+            return false;
+        };
+
+        std::vector<ShardTipRecord> all = {r1, r2, r3};
+        {   // unanimous → all fold
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build(cs, all);
+            check(b.shard_tip_records.size() == 3,
+                  "build_body folds the full unanimous intersection (3/3)");
+        }
+        {   // r3 missing from n3's view → excluded (full-K, never a threshold)
+            std::vector<ShardTipRecord> two = {r1, r2};
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", two) };
+            Block b = do_build(cs, all);
+            check(folded_has(b, r1) && folded_has(b, r2) && !folded_has(b, r3),
+                  "build_body excludes a record not in EVERY member's view (full-K)");
+        }
+        {   // no candidates → empty set (byte-neutral emission)
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build(cs, {});
+            check(b.shard_tip_records.empty(),
+                  "build_body with no candidates folds nothing (byte-neutral)");
+        }
+        {   // one empty view (a non-beacon contrib) → empty intersection → fail-closed
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", {}),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build(cs, all);
+            check(b.shard_tip_records.empty(),
+                  "one empty view empties the intersection (fail-closed)");
+        }
+
+        // --- committee_sig_root pure-function property (the on_shard_tip formula,
+        //     replicated: it must be order-independent over the sig set + bind the
+        //     source_shard_id + the actual K-of-K signature set) ---
+        auto sig_root = [](uint32_t sid, uint64_t h, uint32_t ec,
+                           const std::string& region, const Hash& tip_digest,
+                           const std::vector<Signature>& sigs) {
+            std::vector<Hash> sh;
+            Signature zero{};
+            for (auto& s : sigs) {
+                if (s == zero) continue;
+                crypto::SHA256Builder sb; sb.append(s.data(), s.size());
+                sh.push_back(sb.finalize());
+            }
+            Hash sig_set_root = node::compute_view_root(sh);
+            crypto::SHA256Builder cb;
+            cb.append(std::string("determ-shardtip-v1"));
+            cb.append(static_cast<uint64_t>(sid));
+            cb.append(static_cast<uint64_t>(h));
+            cb.append(static_cast<uint64_t>(ec));
+            cb.append(static_cast<uint64_t>(region.size()));
+            cb.append(region);
+            cb.append(tip_digest);
+            cb.append(sig_set_root);
+            return cb.finalize();
+        };
+        {
+            Hash td{}; td[0] = 0x77;
+            Signature sA{}; sA[0] = 0x01;
+            Signature sB{}; sB[0] = 0x02;
+            Signature z{};
+            Hash root1 = sig_root(1, 5, 3, "r", td, {sA, sB, z});
+            Hash root2 = sig_root(1, 5, 3, "r", td, {sB, sA, z});  // reordered + zero-skip
+            check(root1 == root2,
+                  "committee_sig_root order-independent over the sig set (zero-skip)");
+            Hash root3 = sig_root(1, 5, 3, "r", td, {sA, z, z});   // different sig set
+            check(root1 != root3,
+                  "committee_sig_root binds the actual K-of-K signature set");
+            Hash root4 = sig_root(2, 5, 3, "r", td, {sA, sB, z});  // different shard
+            check(root1 != root4, "committee_sig_root binds source_shard_id");
+            Hash root5 = sig_root(1, 5, 3, "r", td, {sA, sB, z});  // identical inputs
+            check(root1 == root5,
+                  "committee_sig_root is a pure function of the tip (co-signers agree)");
+        }
+
+        std::cout << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shardtip-reconciliation "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

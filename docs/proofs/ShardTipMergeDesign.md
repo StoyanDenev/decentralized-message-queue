@@ -635,13 +635,27 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
         reverted-then-reappended block must re-materialize the identical set).** Reorg-safe with NO
         new `__ensure` lambda: the buffer is in-memory node state (not snapshotted); the chain-side
         `t:` ring already reverts via the shipped D3.5b `__ensure_shard_tip_records` lazy-capture.
+        **PER-ROUND SNAPSHOT (D3.5d-ii adversarial-review finding — a CONFIRMED S-047 wedge on the
+        distress path): the staleness prune fires ASYNCHRONOUSLY in `on_shard_tip` (gossip-driven,
+        mid-round), unlike the inbound buffer which evicts only at apply. So the eligible candidate
+        set MUST NOT be re-read live at each of the four round sites (Phase-1 view + the 3 build_body
+        sites) — a boundary record all K committed in Phase-1 could be evicted from one co-creator's
+        buffer between its Phase-1 and its build_body, shrinking its candidate set below the committee
+        intersection → divergent `shard_tip_records` → divergent digest → the round can't gather K
+        matching sigs. RESOLUTION: snapshot the eligible set ONCE at Phase-1 into a per-round member
+        `round_shard_tip_candidates_` and reuse it at all three build sites; the signed Phase-1 view
+        is derived from the SAME snapshot. Then `intersection ⊆ signed view == candidate set`
+        structurally, so every co-signer folds `intersection ∩ candidates == intersection` (the full
+        set) regardless of buffer drift — a pure function of THIS round's Phase-1. The async prune
+        keeps bounding memory without touching the in-flight round.**
       - **(3) Phase-1 view + make_contrib.** In `start_contrib`, an INDEPENDENT `f2_shardtip_view`
         block OUTSIDE the `block_index >= f2_active_from_height()` gate (D3.5d-i split the shard-tip
         validator group to be presence-gated, not height-gated), gated `BEACON && EXTENDED`: push
         `hash_shard_tip(rec) = SHA256(rec.encode())` (FULL-CONTENT, never key-only — key-only lets a
-        source equivocate two `t:` values behind one unanimous key) for each record from the SAME
-        `shard_tip_records_eligible_for_inclusion()` helper that build_body uses (the materializability
-        invariant: intersection ⊆ the assembler's own signed view ⊆ its buffer), sort, cap at
+        source equivocate two `t:` values behind one unanimous key) for each record from the per-round
+        `round_shard_tip_candidates_` snapshot (see (2)) — NOT a live helper re-read — so the signed
+        view and the build_body candidate set are the identical frozen set (the materializability
+        invariant: intersection ⊆ the assembler's own signed view == its candidate set), sort, cap at
         `F2_VIEW_LIST_CAP`. Pass as the 12th `make_contrib` arg (node.cpp:1055).
       - **(4) build_body fold + emission gate.** New BEACON helper
         `shard_tip_records_eligible_for_inclusion()` mirroring `current_source_eligible_count`
