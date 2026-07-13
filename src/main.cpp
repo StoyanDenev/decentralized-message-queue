@@ -1057,6 +1057,11 @@ Additional in-process tests:
                                               apply_transactions — fires at the
                                               boundary, freezes the pool, SINGLE
                                               byte-neutral, reload + reorg stable
+)" << R"(  determ test-shard-tip-fold                  D3.5b (S-036): the apply-path
+                                              shard_tip_records -> t: fold inside
+                                              apply_transactions — content-driven
+                                              (no shard gate), empty byte-neutral,
+                                              state_root bound, reload + reorg safe
 )" << R"(  determ test-committee-pin                   D3.3b-read (S-036): shared
                                               committee_pool POOL + IDENTITY
                                               helpers — frozen pool + frozen-first
@@ -11504,6 +11509,130 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": committee-fold "
                   << (fail == 0 ? "all assertions (D3.3b)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-shard-tip-fold") {
+        // D3.5b (ShardTipMergeDesign.md §9.6): the apply-path fold that populates
+        // the `t:` state namespace from a Block's shard_tip_records inside
+        // Chain::apply_transactions. Proves the fold FIRES from b.shard_tip_records
+        // (CONTENT-DRIVEN — NO shard_count_ gate, unlike the cc: fold), emits
+        // nothing for an empty set (byte-neutral), binds into state_root, survives
+        // a Chain::load replay identically, and is A4-reorg-safe via the
+        // __ensure_shard_tip_records lazy-capture (revert_head restores the pre-fold
+        // ring; re-append re-folds the identical records + state_root).
+        using namespace determ;
+        using namespace determ::chain;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "shard-tip-fold-test";
+        GenesisCreator c0; c0.domain = "alice"; c0.initial_stake = 2000;
+        for (auto& b : c0.ed_pub) b = 0x11;
+        cfg.initial_creators = { c0 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 1000;
+        cfg.initial_balances.push_back(ga);
+
+        auto mkrec = [](uint32_t sid, uint64_t h, uint32_t ec, const std::string& reg) {
+            ShardTipRecord r; r.source_shard_id = sid; r.height = h;
+            r.eligible_count = ec; r.region = reg;
+            for (size_t i = 0; i < r.committee_sig_root.size(); ++i)
+                r.committee_sig_root[i] = uint8_t(sid + i);
+            return r;
+        };
+        // A SINGLE chain on purpose: the fold is content-driven, NOT shard-gated,
+        // so it must fire from b.shard_tip_records even with shard_count==1.
+        auto build = [&]() {
+            Chain c; c.set_shard_routing(1, Hash{}, 0);
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+        // Append a block carrying a chosen record set + zero state_root (which skips
+        // the S-033 recompute — the fold fires before that check, like add_block in
+        // test-committee-fold).
+        auto add_block = [&](Chain& c, std::vector<ShardTipRecord> recs, uint8_t rand_fill) {
+            Block b; b.index = c.height(); b.prev_hash = c.head_hash();
+            b.timestamp = 1700000000 + int64_t(b.index);
+            for (auto& x : b.cumulative_rand) x = rand_fill;
+            b.shard_tip_records = std::move(recs);
+            c.append(std::move(b));
+        };
+
+        // === the fold fires from b.shard_tip_records (content-driven, SINGLE) ===
+        {
+            Chain c = build();
+            check(c.shard_tip_records().empty(), "no records at genesis");
+            add_block(c, { mkrec(1, 10, 3, "us-east"), mkrec(2, 20, 1, "") }, 0x01);
+            check(c.shard_tip_records().size() == 2,
+                  "fold fired from b.shard_tip_records (content-driven, SINGLE — no shard gate)");
+            check(c.shard_tip_records().count({1, 10}) == 1
+                  && c.shard_tip_records().count({2, 20}) == 1,
+                  "both records land keyed by (source_shard_id, height)");
+        }
+
+        // === empty set folds nothing + is state-root byte-neutral ===
+        {
+            Chain c = build();
+            const Hash root0 = c.compute_state_root();
+            add_block(c, {}, 0x02);
+            check(c.shard_tip_records().empty(), "empty record set folds zero t: leaves");
+            check(c.compute_state_root() == root0,
+                  "empty-set block leaves state_root byte-identical (byte-neutral fold gate)");
+        }
+
+        // === a record set CHANGES state_root (t: leaf bound) ===
+        {
+            Chain c = build();
+            const Hash root0 = c.compute_state_root();
+            add_block(c, { mkrec(7, 70, 2, "ap") }, 0x03);
+            check(c.compute_state_root() != root0,
+                  "a folded record changes state_root (the t: leaf is bound)");
+        }
+
+        // === state_root binding survives a Chain::load replay ===
+        {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-stfold-" + std::to_string(
+                    static_cast<unsigned long long>(
+                        std::chrono::steady_clock::now().time_since_epoch().count())));
+            std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
+            const std::string cp = (dir / "chain.json").string();
+            Chain c = build();
+            add_block(c, { mkrec(1, 10, 3, "us-east"), mkrec(2, 20, 1, "") }, 0x01);
+            const Hash root = c.compute_state_root();
+            c.save(cp); c.save_incremental(cp);
+            Chain r = Chain::load(cp, /*subsidy=*/0, /*shard_count=*/1,
+                                  Hash{}, /*my_shard=*/0, /*epoch_blocks=*/0);
+            check(r.shard_tip_records().size() == 2,
+                  "Chain::load replay re-folds the record set from the saved block");
+            check(r.compute_state_root() == root,
+                  "reloaded state_root == pre-save (t: leaves bound + reproduced)");
+            fs::remove_all(dir, ec);
+        }
+
+        // === A4 reorg safety: revert restores the pre-fold ring; re-append idempotent ===
+        {
+            Chain c = build();
+            add_block(c, { mkrec(1, 10, 3, "us-east") }, 0x01);  // block 1: 1 record
+            const Hash root_before = c.compute_state_root();
+            check(c.shard_tip_records().size() == 1, "pre-revert: 1 folded record");
+            c.revert_head();
+            check(c.shard_tip_records().empty(),
+                  "revert_head rolls back the fold to the pre-fold ring (__ensure lazy-capture)");
+            add_block(c, { mkrec(1, 10, 3, "us-east") }, 0x01);  // re-append identical
+            check(c.shard_tip_records().size() == 1
+                  && c.compute_state_root() == root_before,
+                  "re-append re-folds the identical record + state_root (reorg idempotent)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shard-tip-fold "
+                  << (fail == 0 ? "all assertions (D3.5b)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

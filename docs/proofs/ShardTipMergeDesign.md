@@ -566,10 +566,17 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     line that the xbinary-parity extractor misreads as a digest append + the terminal finalize;
     and `to_hex` has only `(ptr,len)`/fixed-array overloads (no `std::vector`), so encode() bytes
     hex via `to_hex(enc.data(), enc.size())`.
-  - **D3.5b** `Chain::apply_transactions` folds the vector via the shipped `add_shard_tip_record`
-    ring → `t:` leaves; **MANDATORY reorg-safe `__ensure_shard_tip_records()` lazy-capture** (twin
-    of `__ensure_committee_checkpoints`, chain.cpp:1807) — else A4 `revert_head`/failed-apply
-    rollback corrupts `state_root`. Content-driven, NO `shard_count_` gate.
+  - **D3.5b ✅ SHIPPED** `Chain::apply_transactions` folds `b.shard_tip_records` via the shipped
+    `add_shard_tip_record` ring → `t:` leaves, placed before the S-033 recompute so the leaves
+    bind into `state_root`; the reorg-safe `__ensure_shard_tip_records()` lazy-capture (twin of
+    `__ensure_committee_checkpoints`) snapshots the pre-fold ring into `__snapshot` so both the
+    failed-apply `catch` (`restore_state_snapshot`) and A4 `revert_head` (via `prev_head_snapshot_`)
+    restore it — D3.2 already wired the `restore` side (chain.cpp:734-735). CONTENT-DRIVEN, NO
+    `shard_count_` gate: an empty vector folds zero leaves (only a BEACON+EXTENDED producer
+    populates it at D3.5c), so SINGLE/CURRENT stay byte-identical. `test-shard-tip-fold` (11
+    assertions: content-driven fire on SINGLE, empty-set byte-neutral, a record changes state_root,
+    Chain::load replay re-folds, revert_head rolls back the ring + re-append idempotent). FAST
+    225/0; state-root + snapshot goldens byte-identical.
   - **D3.5c** the SOLE byte-affecting step: `build_body` populates the vector ONLY when
     `chain_role==BEACON && sharding_mode==EXTENDED` (copy the D3.4 gate verbatim — **never
     `shard_count()>1`**, which would hard-fork a legal CURRENT-multishard PROFILE_REGIONAL beacon).

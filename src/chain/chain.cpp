@@ -847,6 +847,10 @@ void Chain::apply_transactions(const Block& b) {
         if (!__snapshot.committee_checkpoints)
             __snapshot.committee_checkpoints = committee_checkpoints_;
     };
+    auto __ensure_shard_tip_records = [&]() {  // D3.5b (lazy)
+        if (!__snapshot.shard_tip_records)
+            __snapshot.shard_tip_records = shard_tip_records_;
+    };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
     // effective_height <= this block's index BEFORE replaying the block.
@@ -1781,6 +1785,27 @@ void Chain::apply_transactions(const Block& b) {
             (unsigned long long)accumulated_slashed_,
             (unsigned long long)accumulated_outbound_);
         throw std::runtime_error(buf);
+    }
+
+    // D3.5b: fold THIS block's shard-tip-record set into the `t:` state
+    // namespace (D3.2 ring/leaf/snapshot substrate). CONTENT-DRIVEN — unlike the
+    // cc: fold there is NO shard_count_ gate: an empty vector emits zero
+    // add_shard_tip_record calls ⇒ zero `t:` leaves, and only a BEACON producer
+    // under EXTENDED ever populates b.shard_tip_records (D3.5c), so every SINGLE/
+    // CURRENT/non-beacon block stays byte-identical. MUST run BEFORE the S-033
+    // recompute just below so compute_state_root() sees the new `t:` leaves and
+    // binds them into this block's declared state_root. A pure function of
+    // b.shard_tip_records + committed state (add_shard_tip_record is deterministic
+    // and idempotent under the per-shard ring — it overwrites the (shard,height)
+    // key), so live-apply, gossip-apply, and Chain::load replay all fold
+    // identically; an A4 revert_head across the fold restores the pre-fold map
+    // from __snapshot (captured by __ensure_shard_tip_records) and a re-append
+    // re-folds the same records. Placed before the cc: fold purely for grouping;
+    // the two folds are independent (neither reads the other's map).
+    if (!b.shard_tip_records.empty()) {
+        __ensure_shard_tip_records();
+        for (auto& rec : b.shard_tip_records)
+            add_shard_tip_record(rec);
     }
 
     // D3.3b Site A: epoch-rotation committee checkpoint fold-in. When THIS
