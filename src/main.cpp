@@ -1062,6 +1062,12 @@ Additional in-process tests:
                                               apply_transactions — content-driven
                                               (no shard gate), empty byte-neutral,
                                               state_root bound, reload + reorg safe
+)" << R"(  determ test-s036-merge-witness              D3.7 (S-036): the MERGE_BEGIN
+                                              historical-witness falsifier —
+                                              beacon accepts contiguous sub-2K
+                                              distress, rejects every fabrication
+                                              (absent/gap/healthy/thr==0/pre-ring),
+                                              shard fail-closes MERGE_EVENT
 )" << R"(  determ test-shardtip-reconciliation         D3.5d-ii (S-036): build_body folds
                                               shard_tip_records = committee-wide
                                               reconcile_intersection of Phase-1
@@ -11515,6 +11521,142 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": committee-fold "
                   << (fail == 0 ? "all assertions (D3.3b)" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-s036-merge-witness") {
+        // D3.7 / S-036 falsifier: the D3.6 MERGE_BEGIN historical-witness admission
+        // gate. On a BEACON, a MERGE_BEGIN is accepted ONLY when the committed `t:`
+        // records show contiguous sub-2K distress over the source-shard window; every
+        // fabrication (absent record, gap, healthy-in-window, threshold==0, pre-ring)
+        // is fail-closed; and MERGE_EVENT on any non-BEACON chain is fail-closed
+        // entirely (the reachable-exploit fix). Drives check_transactions in isolation
+        // via the D3.7 test seam — no signed committee block needed.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic keypair for the sender domain "node1" (a genesis creator, so
+        // NodeRegistry::build_from_chain registers its pubkey → the tx sig verifies).
+        crypto::NodeKey key;
+        for (size_t i = 0; i < key.priv_seed.size(); ++i) key.priv_seed[i] = uint8_t(0x40 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        auto mkrec = [](uint32_t sid, uint64_t h, uint32_t ec) {
+            ShardTipRecord r; r.source_shard_id = sid; r.height = h;
+            r.eligible_count = ec; r.region = "us-east";
+            for (size_t i = 0; i < r.committee_sig_root.size(); ++i)
+                r.committee_sig_root[i] = uint8_t(h + i);
+            return r;
+        };
+        // Fresh chain + validator per scenario. records seeds the t: ring; threshold
+        // sets merge_threshold_blocks (source-height window length); revert_thr sets the
+        // per-shard ring depth; role sets the validator chain_role. 2K = 4 (k=2).
+        auto run = [&](const std::vector<ShardTipRecord>& records, uint32_t threshold,
+                       uint32_t revert_thr, ChainRole role,
+                       uint64_t window_start) -> BlockValidator::Result {
+            GenesisConfig cfg;
+            cfg.chain_id = "s036-merge-witness";
+            GenesisCreator c0; c0.domain = "node1"; c0.initial_stake = 2000;
+            c0.ed_pub = key.pub;
+            cfg.initial_creators = { c0 };
+            GenesisAllocation ga; ga.domain = "node1"; ga.balance = 1000;
+            cfg.initial_balances.push_back(ga);
+            Chain chain; chain.append(make_genesis_block(cfg));
+            chain.set_merge_threshold_blocks(threshold);
+            chain.set_merge_grace_blocks(2);
+            chain.set_revert_threshold_blocks(revert_thr);
+            for (auto& r : records) chain.add_shard_tip_record(r);
+            NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+
+            MergeEvent ev;
+            ev.event_type = MergeEvent::BEGIN;
+            ev.shard_id = 0; ev.partner_id = 1;
+            ev.effective_height = 500;                 // >= b.index(100) + grace(2)
+            ev.evidence_window_start = window_start;
+            ev.merging_shard_region = "us-east";
+
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "node1"; tx.to = "node1";
+            tx.amount = 0; tx.fee = 0; tx.nonce = 0;
+            tx.payload = ev.encode();
+            auto sb = tx.signing_bytes();
+            tx.sig = crypto::sign(key, sb.data(), sb.size());
+
+            Block b; b.index = 100; b.transactions = { tx };
+            BlockValidator v;
+            v.set_chain_role(role);
+            v.set_sharding_mode(ShardingMode::EXTENDED);
+            v.set_k_block_sigs(2);   // 2K = 4
+            v.set_shard_id(0);
+            return v.check_transactions_for_test(b, chain, reg);
+        };
+
+        const uint32_t T = 5;   // source-height window [0, 5)
+        {   // A — genuine distress: every in-window height sub-2K (eligible=3 < 4)
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, T, 20, ChainRole::BEACON, 0);
+            check(r.ok, "A: genuine contiguous sub-2K distress ACCEPTED");
+        }
+        {   // B1 — no records at all
+            auto r = run({}, T, 20, ChainRole::BEACON, 0);
+            check(!r.ok && r.error.find("A_beacon_omit") != std::string::npos,
+                  "B1: no records REJECTED (A_beacon_omit)");
+        }
+        {   // B2 — gap at h=2 (proves contiguity)
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) if (h != 2) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, T, 20, ChainRole::BEACON, 0);
+            check(!r.ok && r.error.find("height 2") != std::string::npos,
+                  "B2: window gap REJECTED at the missing height");
+        }
+        {   // B3 — a healthy (>= 2K) record inside the window
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, h == 2 ? 4 : 3));
+            auto r = run(recs, T, 20, ChainRole::BEACON, 0);
+            check(!r.ok && r.error.find("attests healthy") != std::string::npos,
+                  "B3: healthy in-window record REJECTED");
+        }
+        {   // B4 — window predates the retained ring (low heights pruned)
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            for (uint64_t h = 100; h < 103; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, T, 3, ChainRole::BEACON, 0);   // ring keeps last 3 → 100,101,102
+            check(!r.ok && r.error.find("A_beacon_omit") != std::string::npos,
+                  "B4: window predating the ring REJECTED (pruned == absent)");
+        }
+        {   // B5 — merge_threshold_blocks == 0 (a zero-block window proves nothing)
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, 0, 20, ChainRole::BEACON, 0);
+            check(!r.ok && r.error.find("merge_threshold_blocks==0") != std::string::npos,
+                  "B5: threshold==0 REJECTED");
+        }
+        {   // C — the D3.6 reachable-exploit fix: non-BEACON fail-closes MERGE_EVENT
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, T, 20, ChainRole::SHARD, 0);
+            check(!r.ok && r.error.find("valid only on a BEACON") != std::string::npos,
+                  "C: MERGE_EVENT on a non-BEACON chain FAIL-CLOSED (reachable-exploit fix)");
+        }
+        {   // A2 — determinism: the genuine-accept verdict is identical on re-run
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r1 = run(recs, T, 20, ChainRole::BEACON, 0);
+            auto r2 = run(recs, T, 20, ChainRole::BEACON, 0);
+            check(r1.ok && r2.ok, "A2: genuine-accept is deterministic (twice identical)");
+        }
+
+        std::cout << (fail == 0 ? "PASS" : "FAIL")
+                  << ": s036-merge-witness "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
 

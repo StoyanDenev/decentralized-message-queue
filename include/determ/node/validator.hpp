@@ -64,6 +64,16 @@ public:
     // call site that constructs BlockValidator without the setter.
     void set_chain_role(ChainRole r) { chain_role_ = r; }
 
+    // D3.7 / S-036 test seam: run the per-tx admission checks (incl. the D3.6
+    // MERGE_EVENT historical-witness gate) in isolation so the falsifier can drive
+    // accept/reject scenarios without assembling a fully-signed committee block.
+    // Const, read-only — byte-identical to the check_transactions the block
+    // validator already runs; no consensus behaviour change.
+    Result check_transactions_for_test(const chain::Block& b, const chain::Chain& chain,
+                                        const NodeRegistry& registry) const {
+        return check_transactions(b, chain, registry);
+    }
+
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
     // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
     // accepted (unchanged). false = all three rejected at this (authoritative,
