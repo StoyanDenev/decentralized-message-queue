@@ -211,6 +211,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         validator_.set_shard_id(cfg_.shard_id);
         validator_.set_committee_region(cfg_.committee_region);
         validator_.set_sharding_mode(cfg_.sharding_mode);
+        validator_.set_chain_role(cfg_.chain_role);   // D3.6 / S-036: beacon-only MERGE_EVENT gate
         // D1: mirror the CT master switch from genesis (authoritative source).
         // Default true => CT accepted (unchanged); a genesis that disabled it
         // makes the validator reject SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER.
@@ -2495,6 +2496,19 @@ size_t Node::mempool_count_from(const std::string& sender) const {
 //   2. Global cap + eviction feasibility (most expensive; only run if
 //      sender-quota passes).
 std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
+    // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event; the validator
+    // fail-closes it on every non-BEACON chain (block.hpp: "valid only under
+    // BEACON chain role"). Reject it here at mempool admission on a non-BEACON
+    // node so a shard-submitted MERGE_EVENT never ENTERS the pool — otherwise the
+    // producer would keep re-including a queued-but-block-invalid tx and the chain
+    // would STALL (block validation rejects the BLOCK, not the pooled tx). Runs on
+    // both the RPC-submit and gossip channels (the shared admission gate).
+    if (tx.type == chain::TxType::MERGE_EVENT
+        && cfg_.chain_role != ChainRole::BEACON) {
+        return "MERGE_EVENT is valid only on a BEACON chain (S-036: a shard "
+               "cannot verify the historical distress witness)";
+    }
+
     // Check if this tx would REPLACE an existing one at (from, nonce).
     // A replace doesn't add to the mempool count — same slot, same sender.
     auto existing_it = tx_by_account_nonce_.find({tx.from, tx.nonce});

@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# R4 — MERGE_EVENT end-to-end smoke test.
+# D3.6 / S-036 — MERGE_EVENT is fail-closed on SHARD chains.
 #
-# What this verifies:
-#   1. submit-merge-event CLI produces a canonical MergeEvent payload
-#      wrapped in a Transaction, signed by a registered domain.
-#   2. The validator accepts the tx (EXTENDED + shape + charset).
-#   3. apply_transactions inserts (shard_id → {partner_id, region})
-#      into Chain::merge_state_ when partner == (shard+1) mod S.
-#   4. The state persists into snapshot JSON's "merge_state" array.
-#   5. A second MERGE_EVENT (event=end) erases the entry.
+# HISTORY: this was the R4 MERGE_EVENT smoke test that submitted a MERGE_BEGIN to
+# a SHARD and asserted the shard ACCEPTED + applied it (populating merge_state_).
+# D3.6 (S-036) reversed that: MERGE_EVENT is a BEACON-coordinated event
+# (block.hpp: "valid only under BEACON chain role"), and a shard cannot verify the
+# historical distress witness (the `t:` records are beacon-only state). Accepting a
+# shard-submitted MERGE_BEGIN would admit a FABRICATED-distress committee dilution
+# unchecked — the reachable S-036 exploit. So the validator now fail-closes
+# MERGE_EVENT on every non-BEACON chain (validator.cpp MERGE_EVENT branch,
+# chain_role != BEACON -> reject).
 #
-# What this does NOT verify (Phase 6 work):
-#   * Auto-detection by beacon (eligible_in_region < 2K observation
-#     window emitting MERGE_BEGIN automatically).
-#   * S-036 witness-window historical validation at apply time.
-#   * Cross-shard receipt routing across BEGIN/END boundaries.
+# What this verifies NOW:
+#   1. A shard-submitted MERGE_BEGIN NEVER populates merge_state_ (the fabricated
+#      merge is rejected at block validation — the reachable exploit is closed).
+#   2. The chain keeps advancing past the submit (the rejected tx does not stall
+#      block production — same handling as any other chain-invalid tx type, e.g.
+#      REGION_CHANGE / PARAM_CHANGE-uncontrolled).
+#
+# The BEACON-path historical witness (accept genuine distress / reject fabricated)
+# is the deterministic in-process falsifier (D3.7); the beacon merge flow itself is
+# owner-gated Layer-2 work.
 #
 # Topology: 1 SHARD chain (shard_id=0, region=us-east, S=3 satisfies
 # the EXTENDED >=3 gate). 4 validators all online (M=4, K=3) — which is
@@ -205,126 +211,56 @@ SUBMIT_OUT=$($DETERM submit-merge-event \
   --rpc-port 8771 2>&1)
 SUBMIT_RC=$?
 echo "$SUBMIT_OUT" | tail -4 | sed 's/^/  | /'
-if [ "$SUBMIT_RC" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q '"queued"'; then
-  fail_hard "MERGE_BEGIN submit rejected (rc=$SUBMIT_RC)"
-fi
+# The mempool may QUEUE the tx (rejection then happens at block validation) or
+# reject it up-front — either is fine. The security assertion below is that the
+# shard NEVER APPLIES it (merge_state stays empty) and that it does not stall.
+echo "  (submit result noted; the block-validation fail-close is the real gate)"
 
 echo
-echo "=== 7. Wait for tx inclusion + a few more blocks ==="
-INCLUDED_BEGIN=false
-for _ in $(seq 1 60); do
+echo "=== 7. Wait several blocks — the rejected MERGE_EVENT must NOT stall ==="
+# Same handling as any chain-invalid tx (REGION_CHANGE / PARAM_CHANGE-uncontrolled
+# / CT-disabled): the fail-closed MERGE_EVENT never enters a valid block, and block
+# production keeps advancing. A stall here would be a real liveness regression.
+CHAIN_ADVANCED=false
+for _ in $(seq 1 90); do
   H=$($DETERM status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
-  if [ "$H" -gt $((H_BEFORE + 3)) ] 2>/dev/null; then INCLUDED_BEGIN=true; break; fi
+  if [ "$H" -gt $((H_BEFORE + 4)) ] 2>/dev/null; then CHAIN_ADVANCED=true; break; fi
   sleep 0.5
 done
-if ! $INCLUDED_BEGIN; then
-  fail_hard "chain stalled after MERGE_BEGIN submit (height=$H, want > $((H_BEFORE + 3)))"
+if ! $CHAIN_ADVANCED; then
+  fail_hard "chain STALLED after the shard MERGE_BEGIN submit (height=$H, want > $((H_BEFORE + 4))) — a fail-closed MERGE_EVENT must not halt block production"
 fi
 
 echo
-echo "=== 8. Snapshot + verify merge_state populated ==="
-$DETERM snapshot create --out $T/snap_begin.json --rpc-port 8771 2>&1 | tail -1
+echo "=== 8. Snapshot + verify merge_state stayed EMPTY (fabricated merge NOT applied) ==="
+$DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -1
 MERGE_COUNT=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap_begin.json'))
+    s = json.load(open('$T/snap.json'))
     print(len(s.get('merge_state', [])))
-except Exception as e:
-    print(0)")
-MERGE_FIRST=$(python -c "
-import json
-try:
-    s = json.load(open('$T/snap_begin.json'))
-    m = s.get('merge_state', [])
-    if m:
-        print('shard={} partner={} region={}'.format(
-            m[0].get('shard_id','?'),
-            m[0].get('partner_id','?'),
-            m[0].get('refugee_region','?')))
-    else:
-        print('(empty)')
-except Exception as e:
-    print('error: '+str(e))")
-echo "  merge_state entries: $MERGE_COUNT"
-echo "  first entry: $MERGE_FIRST"
-
-echo
-echo "=== 9. Submit MERGE_END(shard=0, partner=1) and verify state clears ==="
-H_AFTER_BEGIN=$($DETERM status --rpc-port 8771 2>/dev/null \
-                | python -c "import sys,json
-try: print(json.load(sys.stdin)['height'])
-except: pass")
-# Same empty-var arithmetic hazard as H_BEFORE: fail hard on dead RPC.
-if [ -z "$H_AFTER_BEGIN" ]; then
-  fail_hard "status RPC dead before MERGE_END submit"
+except Exception:
+    print(-1)")
+echo "  merge_state entries: $MERGE_COUNT (want 0 — shard fail-closed the merge)"
+# Best-effort diagnostic: the D3.6 reject reason should appear in a node log.
+if grep -rhq "MERGE_EVENT valid only on a BEACON" $T/n*/log 2>/dev/null; then
+  echo "  ok: node log shows the D3.6 BEACON-only reject reason"
 fi
-END_EFF=$((H_AFTER_BEGIN + 20))
-SUBMIT_END_OUT=$($DETERM submit-merge-event \
-  --priv "$PRIV1" \
-  --from node1 \
-  --event end \
-  --shard-id 0 --partner-id 1 \
-  --effective-height "$END_EFF" \
-  --evidence-window-start 0 \
-  --fee 0 \
-  --rpc-port 8771 2>&1)
-SUBMIT_END_RC=$?
-echo "$SUBMIT_END_OUT" | tail -4 | sed 's/^/  | /'
-if [ "$SUBMIT_END_RC" -ne 0 ] || ! echo "$SUBMIT_END_OUT" | grep -q '"queued"'; then
-  fail_hard "MERGE_END submit rejected (rc=$SUBMIT_END_RC)"
-fi
-
-INCLUDED_END=false
-for _ in $(seq 1 60); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
-       | python -c "import sys,json
-try: print(json.load(sys.stdin).get('height',0))
-except: print(0)")
-  if [ "$H" -gt "$((H_AFTER_BEGIN + 3))" ] 2>/dev/null; then INCLUDED_END=true; break; fi
-  sleep 0.5
-done
-if ! $INCLUDED_END; then
-  fail_hard "chain stalled after MERGE_END submit (height=$H, want > $((H_AFTER_BEGIN + 3)))"
-fi
-
-$DETERM snapshot create --out $T/snap_end.json --rpc-port 8771 2>&1 | tail -1
-MERGE_COUNT_END=$(python -c "
-import json
-try:
-    s = json.load(open('$T/snap_end.json'))
-    print(len(s.get('merge_state', [])))
-except: print(-1)")
-echo "  merge_state entries after END: $MERGE_COUNT_END"
 
 echo
 echo "=== Test summary ==="
-PASS_BEGIN=false
-PASS_END=false
-if [ "$MERGE_COUNT" = "1" ] && \
-   echo "$MERGE_FIRST" | grep -q "shard=0" && \
-   echo "$MERGE_FIRST" | grep -q "partner=1" && \
-   echo "$MERGE_FIRST" | grep -q "region=us-east"; then
-  PASS_BEGIN=true
-fi
-# De-vacuated: END only counts if BEGIN actually applied — an empty
-# merge_state on a chain where MERGE_BEGIN never landed must NOT read
-# as a successful erase. Assert the 1 -> 0 transition.
-if $PASS_BEGIN && [ "$MERGE_COUNT_END" = "0" ]; then PASS_END=true; fi
-
-if $PASS_BEGIN && $PASS_END; then
-  echo "  ok: submit-merge-event CLI accepted"
-  echo "  ok: validator EXTENDED-mode gate passed"
-  echo "  ok: MERGE_BEGIN inserted {shard=0, partner=1, region=us-east}"
-  echo "  ok: snapshot persisted merge_state"
-  echo "  ok: MERGE_END erased the entry (1 -> 0)"
+if [ "$MERGE_COUNT" = "0" ] && $CHAIN_ADVANCED; then
+  echo "  ok: chain advanced past the submit (a fail-closed tx does not stall)"
+  echo "  ok: merge_state stayed EMPTY — the shard fail-closed the fabricated"
+  echo "       MERGE_BEGIN (D3.6 / S-036: the reachable committee-dilution exploit"
+  echo "       is closed; MERGE_EVENT is beacon-coordinated only)"
   echo "  PASS: test_under_quorum_merge"
   exit 0
 else
-  echo "  begin merge_state count: $MERGE_COUNT (want 1), entry: $MERGE_FIRST"
-  echo "  end merge_state count: $MERGE_COUNT_END (want 0, conditioned on BEGIN)"
-  echo "  FAIL: test_under_quorum_merge (BEGIN_ok=$PASS_BEGIN END_ok=$PASS_END)"
+  echo "  merge_state count: $MERGE_COUNT (want 0), chain_advanced=$CHAIN_ADVANCED"
+  echo "  FAIL: test_under_quorum_merge (shard did NOT fail-close the merge, or the chain stalled)"
   exit 1
 fi

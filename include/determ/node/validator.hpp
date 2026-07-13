@@ -56,6 +56,14 @@ public:
     //              (R7 will install the apply path).
     void set_sharding_mode(ShardingMode m) { sharding_mode_ = m; }
 
+    // D3.6 / S-036: this chain's role, mirrored from GenesisConfig. MERGE_EVENT is
+    // a BEACON-coordinated event (block.hpp: "valid only under BEACON chain role")
+    // — the historical distress witness it needs (the `t:` records) is BEACON-only
+    // state, so a shard cannot verify it. The validator fail-closes MERGE_EVENT on
+    // every non-BEACON chain. Default SINGLE preserves legacy behaviour for any
+    // call site that constructs BlockValidator without the setter.
+    void set_chain_role(ChainRole r) { chain_role_ = r; }
+
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
     // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
     // accepted (unchanged). false = all three rejected at this (authoritative,
@@ -174,6 +182,10 @@ private:
     // TimingProfile. Default CURRENT preserves legacy behavior for any
     // call site that constructs BlockValidator without an explicit setter.
     ShardingMode sharding_mode_{ShardingMode::CURRENT};
+    // D3.6 / S-036: this chain's role. Default SINGLE (never BEACON) so a validator
+    // constructed without set_chain_role never runs the beacon-only MERGE_EVENT
+    // witness path — byte-neutral for every legacy call site.
+    ChainRole chain_role_{ChainRole::SINGLE};
     // D1: CT layer master switch, mirrored from GenesisConfig. Default true so
     // any call site that constructs BlockValidator without the setter keeps the
     // pre-D1 behaviour (CT accepted).

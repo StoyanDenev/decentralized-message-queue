@@ -842,6 +842,23 @@ BlockValidator::Result BlockValidator::check_transactions(
             //     (start >= 0, start + threshold <= current).
             //   * effective_height must be >= block.index + grace
             //     (committees observe the transition before it fires).
+            // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event
+            // (block.hpp: "valid only under BEACON chain role; rejected
+            // elsewhere"). Fail-close it on every non-BEACON chain: the
+            // historical distress witness a MERGE_BEGIN needs (the `t:` records)
+            // is BEACON-only state (emission gate node.cpp = BEACON&&EXTENDED, so
+            // a shard's `t:` ring is always empty), so a shard CANNOT verify a
+            // merge — accepting a shard-submitted MERGE_BEGIN would admit a
+            // fabricated-distress committee dilution unchecked (the reachable
+            // S-036 exploit). This reconciles the code to the long-standing
+            // block.hpp doc. The under-quorum merge feature is dormant until a
+            // beacon-coordinated merge flow (beacon emitter + beacon->shard
+            // propagation) exists — the owner-gated Layer-2 piece.
+            if (chain_role_ != ChainRole::BEACON) {
+                return {false, "MERGE_EVENT valid only on a BEACON chain "
+                               "(S-036: a shard cannot verify the historical "
+                               "distress witness)"};
+            }
             if (sharding_mode_ != ShardingMode::EXTENDED) {
                 return {false, "MERGE_EVENT tx requires "
                                "sharding_mode=extended"};
@@ -874,29 +891,52 @@ BlockValidator::Result BlockValidator::check_transactions(
                              + std::to_string(b.index + grace) + ")"};
             }
             if (ev->event_type == MergeEvent::BEGIN) {
-                // Evidence window must lie entirely in committed
-                // history. Reject obviously-forged windows (future
-                // start, or window extending past the containing
-                // block).
+                // D3.6 / S-036 historical-witness admission gate (BEACON-only,
+                // guaranteed by the chain_role gate above). The distress window
+                // [evidence_window_start, + merge_threshold_blocks) is indexed in
+                // SOURCE-shard heights — the `t:` key space (rec.height = the
+                // source shard's tip.index). Accept only when EVERY in-window
+                // height carries a committed sub-2K distress record for the source
+                // shard; fail-closed on any absent record (A_beacon_omit / window
+                // predates the retained ring) or any record attesting health
+                // (>= 2K). Contiguity is automatic: iterating every integer height
+                // with absent->reject == "contiguous sub-2K coverage".
                 //
-                // S-036 tighten: check `evidence_window_start <= b.index`
-                // up-front so the threshold-arithmetic check that
-                // follows cannot be bypassed by integer overflow
-                // (an attacker setting evidence_window_start near
-                // UINT64_MAX could make the sum wrap below b.index
-                // and falsely pass the original check; this leading
-                // bound rejects that case before the addition).
-                if (ev->evidence_window_start > b.index) {
-                    return {false, "MERGE_EVENT BEGIN evidence_window_start "
-                                 + std::to_string(ev->evidence_window_start)
-                                 + " is in the future (block height "
-                                 + std::to_string(b.index) + ")"};
+                // This SUPERSEDES the old `evidence_window_start` vs `b.index`
+                // arithmetic bound: that compared the SOURCE-height window against
+                // the BEACON (containing-block) height and — since shards outrun
+                // the beacon — false-rejected legitimate windows. The witness loop
+                // is the precise, source-axis check; b.index is no longer used.
+                if (threshold == 0) {
+                    return {false, "MERGE_EVENT BEGIN: merge_threshold_blocks==0 "
+                                   "(a zero-block window proves no distress)"};
                 }
-                if (threshold > 0
-                    && ev->evidence_window_start + threshold > b.index) {
-                    return {false, "MERGE_EVENT BEGIN evidence window "
-                                   "extends past block height "
-                                 + std::to_string(b.index)};
+                // Overflow guard (evidence_window_start is attacker-controlled):
+                // reject a start that wraps the u64 window terminus, else the loop
+                // `h < start + threshold` is vacuously empty -> false accept.
+                if (ev->evidence_window_start + threshold
+                        < ev->evidence_window_start) {
+                    return {false, "MERGE_EVENT BEGIN: evidence_window_start + "
+                                   "merge_threshold_blocks overflows u64"};
+                }
+                const uint64_t k2 = 2ull * static_cast<uint64_t>(k_block_sigs_);
+                const auto& recs = chain.shard_tip_records();
+                for (uint64_t h = ev->evidence_window_start;
+                     h < ev->evidence_window_start + threshold; ++h) {
+                    auto it = recs.find({ev->shard_id, h});
+                    if (it == recs.end()) {
+                        return {false, "MERGE_EVENT BEGIN: no committed shard-tip "
+                                       "distress record for source shard "
+                                     + std::to_string(ev->shard_id)
+                                     + " at height " + std::to_string(h)
+                                     + " (A_beacon_omit fail-closed)"};
+                    }
+                    if (it->second.eligible_count >= k2) {
+                        return {false, "MERGE_EVENT BEGIN: source shard "
+                                     + std::to_string(ev->shard_id)
+                                     + " attests healthy (eligible_count >= 2K) "
+                                       "at height " + std::to_string(h)};
+                    }
                 }
             }
             // Modular arithmetic check (partner == (shard+1) mod
