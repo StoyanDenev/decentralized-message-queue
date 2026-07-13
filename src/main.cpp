@@ -1238,6 +1238,11 @@ Additional in-process tests:
                                               elided, byte-identical), u32 range
                                               guard, hash+digest binding, tamper
                                               breaks the K-of-K signed digest
+  determ test-shard-tip-records               D3.5a §S-036 Block.shard_tip_records:
+                                              zero-skip wire round-trip (empty
+                                              elided, byte-identical), order-
+                                              independent digest+hash root, tamper
+                                              (mutate/add) breaks both bindings
   determ test-audit-keys                      A2 audit layer: ROTATE_AUDIT_KEY
                                               set/rotate/clear lifecycle (ak:
                                               leaf appears/updates/REMOVED),
@@ -39303,6 +39308,114 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-eligible-count\n"
                            : "  PASS: test-eligible-count\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-shard-tip-records") {
+        // D3.5a / S-036 (v2.11): the Block.shard_tip_records set — zero-skip wire
+        // round-trip (empty ⇒ elided from JSON, byte-identical pre-D3.5a), the
+        // order-independent digest+hash root (a stripped/reordered record after
+        // signing changes both bindings so the K-of-K sigs no longer verify), and
+        // per-record decode fail-closed. The producer↔light digest parity for the
+        // new conditional append is pinned by test_block_digest_xbinary_parity.sh.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mkrec = [](uint32_t sid, uint64_t h, uint32_t ec, const std::string& reg) {
+            ShardTipRecord r; r.source_shard_id = sid; r.height = h;
+            r.eligible_count = ec; r.region = reg;
+            for (size_t i = 0; i < r.committee_sig_root.size(); ++i)
+                r.committee_sig_root[i] = uint8_t(sid + i);
+            return r;
+        };
+
+        // === 1. Zero-skip wire round-trip ===
+        {
+            Block b; b.index = 4;
+            json j0 = b.to_json();
+            check(!j0.contains("shard_tip_records"),
+                  "wire: empty set is ELIDED from JSON (byte-identical pre-D3.5a)");
+            check(Block::from_json(j0).shard_tip_records.empty(),
+                  "wire: absent key round-trips to empty set");
+            b.shard_tip_records = { mkrec(1, 10, 3, "us-east"), mkrec(2, 20, 1, "") };
+            json j2 = b.to_json();
+            check(j2.contains("shard_tip_records") && j2["shard_tip_records"].size() == 2,
+                  "wire: non-empty set serialized as an array");
+            Block rt = Block::from_json(j2);
+            check(rt.shard_tip_records.size() == 2
+                  && rt.shard_tip_records[0].source_shard_id == 1
+                  && rt.shard_tip_records[0].eligible_count == 3
+                  && rt.shard_tip_records[0].region == "us-east"
+                  && rt.shard_tip_records[1].height == 20,
+                  "wire: every record field round-trips");
+        }
+
+        // === 2. malformed record fails closed ===
+        {
+            Block base; base.shard_tip_records = { mkrec(1, 10, 3, "us-east") };
+            json j = base.to_json();
+            j["shard_tip_records"][0] = "00";   // too short to decode
+            bool threw = false;
+            try { Block::from_json(j); } catch (const std::exception&) { threw = true; }
+            check(threw, "range: a malformed record hex fails closed (never silently dropped)");
+        }
+
+        // === 3. hash + digest zero-skip identity / binding ===
+        {
+            Block a; a.index = 7; a.timestamp = 99;
+            Block b = a; b.shard_tip_records = { mkrec(1, 10, 3, "us-east") };
+            Block c = a;   // second empty copy
+            check(a.compute_hash() != b.compute_hash(),
+                  "hash: empty vs 1-record blocks have DISTINCT hashes (bound in signing_bytes)");
+            check(a.compute_hash() == c.compute_hash(),
+                  "hash: empty set is hash-identical to the pre-D3.5a encoding (zero-skip)");
+            check(node::compute_block_digest(a) != node::compute_block_digest(b),
+                  "digest: committee-signed digest binds the record set (non-empty)");
+            check(node::compute_block_digest(a) == node::compute_block_digest(c),
+                  "digest: empty set keeps the byte-identical v1 digest");
+        }
+
+        // === 4. order-independence (the root is over a SET) ===
+        {
+            Block ab; ab.index = 8;
+            ab.shard_tip_records = { mkrec(1, 10, 3, "us-east"), mkrec(2, 20, 1, "eu") };
+            Block ba; ba.index = 8;
+            ba.shard_tip_records = { mkrec(2, 20, 1, "eu"), mkrec(1, 10, 3, "us-east") };
+            check(node::compute_block_digest(ab) == node::compute_block_digest(ba),
+                  "order: swapping record order keeps the SAME digest (root over a set)");
+            check(ab.compute_hash() == ba.compute_hash(),
+                  "order: swapping record order keeps the SAME hash");
+        }
+
+        // === 5. tamper: mutating / adding a record breaks both bindings ===
+        {
+            Block honest; honest.index = 9;
+            honest.shard_tip_records = { mkrec(1, 10, 2, "us-east") };
+            Block tampered = honest;
+            tampered.shard_tip_records[0].eligible_count = 8;    // forged "healthy"
+            check(node::compute_block_digest(honest) != node::compute_block_digest(tampered),
+                  "tamper: mutating a record changes the signed digest (sigs would fail)");
+            check(honest.compute_hash() != tampered.compute_hash(),
+                  "tamper: mutating a record also changes the block hash");
+            Block added = honest;
+            added.shard_tip_records.push_back(mkrec(3, 30, 1, ""));
+            check(node::compute_block_digest(honest) != node::compute_block_digest(added),
+                  "tamper: ADDING a record changes the signed digest");
+        }
+
+        // === 6. determinism ===
+        {
+            Block a; a.index = 11; a.shard_tip_records = { mkrec(5, 50, 4, "ap") };
+            Block b; b.index = 11; b.shard_tip_records = { mkrec(5, 50, 4, "ap") };
+            check(node::compute_block_digest(a) == node::compute_block_digest(b),
+                  "determinism: equal blocks -> identical digest");
+        }
+
+        std::cout << (fail ? "  FAIL: test-shard-tip-records\n"
+                           : "  PASS: test-shard-tip-records\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-unshield") {

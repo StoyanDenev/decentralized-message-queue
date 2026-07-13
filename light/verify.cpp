@@ -60,6 +60,15 @@ Hash hash_cross_shard_receipt(const determ::chain::CrossShardReceipt& r) {
     return b.finalize();
 }
 
+// D3.5a / S-036: full-content hash of one ShardTipRecord = SHA256 over its
+// canonical D3.1 encode() — the light mirror of producer.cpp::hash_shard_tip.
+Hash hash_shard_tip(const determ::chain::ShardTipRecord& r) {
+    auto enc = r.encode();
+    SHA256Builder b;
+    b.append(enc.data(), enc.size());
+    return b.finalize();
+}
+
 Hash hash_equivocation_event(const determ::chain::EquivocationEvent& e) {
     SHA256Builder b;
     b.append(std::string("DTM-F2-EQ-v1"));
@@ -204,6 +213,18 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     // digest. Field order matches the node: ..., signature_form, eligible_count.
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+    }
+    // D3.5a / S-036: bind the shard-tip-record set when non-empty, exactly mirroring
+    // producer.cpp::compute_block_digest — ONE order-independent root over the
+    // per-record SHA256(rec.encode()), via the file-local compute_view_root mirror.
+    // Empty (every SINGLE/CURRENT/BEACON block + every pre-D3.5c EXTENDED block)
+    // appends nothing → v1 digest. Field order matches the node: …, signature_form,
+    // eligible_count, shard_tip_records.
+    if (!b.shard_tip_records.empty()) {
+        std::vector<Hash> tkeys;
+        tkeys.reserve(b.shard_tip_records.size());
+        for (auto& r : b.shard_tip_records) tkeys.push_back(hash_shard_tip(r));
+        h.append(compute_view_root(tkeys));
     }
     return h.finalize();
 }

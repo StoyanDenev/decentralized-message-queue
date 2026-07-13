@@ -367,6 +367,18 @@ Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r) {
     return b.finalize();
 }
 
+// D3.5a / S-036: full-content hash of one ShardTipRecord = SHA256 over its
+// canonical D3.1 encode(). Used to build the order-independent digest root over a
+// block's shard_tip_records set (twin of hash_cross_shard_receipt). Kept a helper
+// (not inlined) so compute_block_digest carries no inline .append(/.finalize() the
+// cross-binary parity guard would misread.
+Hash hash_shard_tip(const chain::ShardTipRecord& r) {
+    auto enc = r.encode();
+    SHA256Builder b;
+    b.append(enc.data(), enc.size());
+    return b.finalize();
+}
+
 // `compute_view_root` produces the canonical Merkle root over a sorted SET
 // of hash items. Same shape as `compute_tx_root` (which also dedupes via
 // std::set + appends in canonical order) so a view-root over the same
@@ -727,6 +739,21 @@ Hash compute_block_digest(const Block& b) {
     // signature_form, eligible_count.
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+    }
+    // D3.5a / S-036: bind the beacon's shard-tip-record set into the K-of-K signed
+    // digest ONLY when non-empty, as ONE order-independent root over the per-record
+    // SHA256(rec.encode()) — the SAME removal-gap closure the F2 inbound root gives:
+    // a relayer that STRIPS/reorders a record after the committee signs changes the
+    // digest so the signatures no longer verify. DETERMINISTIC — the fold set is a
+    // D3.5d F2 intersection every honest beacon co-signer reproduces, so raw binding
+    // is safe (S-030-D2 §3.2). Empty (every non-beacon / non-EXTENDED block, and every
+    // EXTENDED block pre-D3.5c) appends nothing → byte-identical v1 digest. Field
+    // order: …, timestamp, signature_form, eligible_count, shard_tip_records.
+    if (!b.shard_tip_records.empty()) {
+        std::vector<Hash> tkeys;
+        tkeys.reserve(b.shard_tip_records.size());
+        for (auto& r : b.shard_tip_records) tkeys.push_back(hash_shard_tip(r));
+        h.append(compute_view_root(tkeys));
     }
     return h.finalize();
 }

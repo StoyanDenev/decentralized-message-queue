@@ -113,8 +113,10 @@ cd "$(dirname "$0")/.."
 # A6 (2026-07-09): + the trailing conditional SIG_FORM (signature_form bound
 # when non-zero — the §7.5.1 discriminator). D3.4 (2026-07-13): + the trailing
 # conditional ELIGIBLE_COUNT (the source shard's eligible_count self-report,
-# bound when non-zero — §S-036; 17 tokens).
-PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT"
+# bound when non-zero — §S-036). D3.5a (2026-07-13): + the trailing conditional
+# SHARD_TIP_RECORDS (the beacon's shard-tip-record set root, bound when non-empty
+# — §S-036; 18 tokens).
+PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT SHARD_TIP_RECORDS"
 LIGHT_SEQ="$PRODUCER_SEQ"
 # The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
@@ -173,6 +175,10 @@ extract_tokens() {
       else if (line ~ /\.append\(compute_view_root\(ikeys\)\)/) print "INBOUND_ROOT"
       else if (line ~ /\.append\(compute_view_root\(ekeys\)\)/) print "EQ_ROOT"
       else if (line ~ /\.append\(compute_view_root\(akeys\)\)/) print "ABORT_ROOT"
+      # D3.5a §S-036: the beacon shard-tip-record set root, disambiguated by its
+      # keys vector `tkeys` (like ikeys/ekeys/akeys). MUST precede the
+      # VIEW_ROOT_UNKNOWN catch below, else it would be flagged as drift.
+      else if (line ~ /\.append\(compute_view_root\(tkeys\)\)/) print "SHARD_TIP_RECORDS"
       # Any OTHER compute_view_root append (renamed keys vec) must NOT silently
       # vanish — flag it so a reordered/renamed root surfaces as drift.
       else if (line ~ /\.append\(compute_view_root\(/) print "VIEW_ROOT_UNKNOWN"
@@ -329,6 +335,11 @@ Hash compute_block_digest(const Block& b) {
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
     }
+    if (!b.shard_tip_records.empty()) {
+        std::vector<Hash> tkeys;
+        for (auto& r : b.shard_tip_records) tkeys.push_back(hash_shard_tip(r));
+        h.append(compute_view_root(tkeys));
+    }
     return h.finalize();
 }
 EOF
@@ -377,6 +388,11 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     }
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+    }
+    if (!b.shard_tip_records.empty()) {
+        std::vector<Hash> tkeys;
+        for (auto& r : b.shard_tip_records) tkeys.push_back(hash_shard_tip(r));
+        h.append(compute_view_root(tkeys));
     }
     return h.finalize();
 }

@@ -3,6 +3,7 @@
 #include <determ/chain/block.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
+#include <set>
 
 namespace determ::chain {
 
@@ -272,6 +273,25 @@ CrossShardReceipt CrossShardReceipt::from_json(const json& j) {
 
 // ─── Block ───────────────────────────────────────────────────────────────────
 
+// D3.5a / S-036: one order-independent commitment over a block's ShardTipRecord
+// set — SHA256 over the dedup-sorted set of per-record SHA256(rec.encode()). This
+// replicates compute_view_root(...) (producer.cpp:377: a std::set<Hash> fed into a
+// rolling SHA256) at the chain layer, so Block::signing_bytes binds the SAME root
+// value the node's compute_block_digest + the light mirror bind. Callers skip the
+// append on an empty set, so the empty-set value is never used.
+static Hash shard_tip_records_root(const std::vector<ShardTipRecord>& recs) {
+    std::set<Hash> keys;
+    for (auto& r : recs) {
+        auto enc = r.encode();
+        SHA256Builder rb;
+        rb.append(enc.data(), enc.size());
+        keys.insert(rb.finalize());
+    }
+    SHA256Builder b;
+    for (auto& k : keys) b.append(k);
+    return b.finalize();
+}
+
 std::vector<uint8_t> Block::signing_bytes() const {
     SHA256Builder b;
     b.append(static_cast<uint64_t>(index));
@@ -408,6 +428,16 @@ std::vector<uint8_t> Block::signing_bytes() const {
     // to u64 to match the canonical field encoding used in the digest mirrors.
     if (eligible_count != 0) {
         b.append(static_cast<uint64_t>(eligible_count));
+    }
+
+    // D3.5a / S-036: bind the shard-tip-record set into the block hash ONLY when
+    // non-empty (same empty-skip pattern). Bound as ONE order-independent root, so
+    // a stripped/reordered record after signing yields a distinct hash. Empty (every
+    // SINGLE / CURRENT / BEACON / pre-feature block, and every EXTENDED block until
+    // D3.5c populates it) appends nothing → byte-identical. Field order (all last):
+    // …, signature_form, eligible_count, shard_tip_records.
+    if (!shard_tip_records.empty()) {
+        b.append(shard_tip_records_root(shard_tip_records));
     }
 
     Hash h = b.finalize();
@@ -569,6 +599,16 @@ json Block::to_json() const {
     // SHARD block always carries >= K >= 1, so zero unambiguously means absent.
     if (eligible_count != 0)
         j["eligible_count"] = eligible_count;
+    // D3.5a / S-036: serialize the shard-tip-record set only when non-empty (each
+    // element the hex of its canonical D3.1 encode()); omitted ⇒ byte-identical JSON.
+    if (!shard_tip_records.empty()) {
+        json arr = json::array();
+        for (auto& r : shard_tip_records) {
+            auto enc = r.encode();
+            arr.push_back(to_hex(enc.data(), enc.size()));
+        }
+        j["shard_tip_records"] = arr;
+    }
 
     return j;
 }
@@ -724,6 +764,15 @@ Block Block::from_json(const json& j) {
         if (ec > 0xFFFFFFFFull)
             throw std::runtime_error("block.eligible_count out of u32 range");
         b.eligible_count = static_cast<uint32_t>(ec);
+    }
+    // D3.5a / S-036: parse the shard-tip-record set (hex of each canonical encode()).
+    // Fail closed on a malformed / over-long record rather than silently dropping it.
+    if (j.contains("shard_tip_records")) {
+        for (auto& e : json_require_array(j, "shard_tip_records")) {
+            auto dec = ShardTipRecord::decode(from_hex(e.get<std::string>()));
+            if (!dec) throw std::runtime_error("block.shard_tip_records: malformed record");
+            b.shard_tip_records.push_back(*dec);
+        }
     }
 
     return b;

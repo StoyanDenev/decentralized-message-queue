@@ -669,6 +669,24 @@ struct Block {
     // beacon fold-in (D3.5) + MERGE_BEGIN admission (D3.6); D3.4 only binds it.
     uint32_t eligible_count{0};
 
+    // D3.5a / S-036 (v2.11): the beacon's per-block set of source-shard distress +
+    // sparse-liveness attestations (D3.1 ShardTipRecord). A BEACON producer under
+    // EXTENDED folds these into `t:` state leaves (D3.5b) so the MERGE_BEGIN
+    // historical-witness check (D3.6) reads a committed, source-committee-attested
+    // distress record instead of the beacon's self-asserted evidence window. Bound
+    // into the K-of-K signed digest (compute_block_digest) + the block hash
+    // (signing_bytes) as ONE order-independent root over SHA256(rec.encode()) —
+    // so a relayer that STRIPS/reorders a record after the committee signs changes
+    // the digest and the signatures no longer verify (the same removal-gap closure
+    // as the F2 inbound-receipt root). DORMANT until D3.5c populates it: empty ⇒
+    // no append in any of the three mirrors ⇒ every SINGLE/CURRENT/BEACON/pre-
+    // feature block is byte-identical. Only a BEACON producer under EXTENDED ever
+    // sets it (never gated on shard_count()>1 — RP-4/§9.5). The reconciled set that
+    // populates it (D3.5d) is a deterministic F2 intersection so beacon co-signers
+    // agree; each record's source K-of-K is verified contemporaneously at
+    // on_shard_tip, not re-derived at fold-in (§9.6, Layer 1).
+    std::vector<ShardTipRecord> shard_tip_records;
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;

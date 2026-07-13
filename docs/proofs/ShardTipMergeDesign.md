@@ -555,9 +555,17 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
   Lands S-036 at **STRONGLY MITIGATED** (residual = a SUSTAINED captured-beacon-committee over
   the merge window + source-key-compromise + the source-registry-divergence attack + `A_beacon_omit`
   withhold — strictly harder than today's single-block fabrication).
-  - **D3.5a** `std::vector<ShardTipRecord> shard_tip_records` Block field; empty-skip root bound
-    LAST in all 3 digest mirrors + `signing_bytes` + the parity guard (18th token). Unpopulated ⇒
-    byte-identical (twin of the D3.4 `eligible_count` step).
+  - **D3.5a ✅ SHIPPED** `std::vector<ShardTipRecord> shard_tip_records` Block field; empty-skip
+    root (`compute_view_root` over per-record `SHA256(rec.encode())` via a `hash_shard_tip`
+    helper) bound LAST in all 3 digest mirrors + `signing_bytes` + the parity guard (18th token,
+    `SHARD_TIP_RECORDS`). Unpopulated (`build_body` does not set it yet) ⇒ byte-identical (twin of
+    the D3.4 `eligible_count` step). `test-shard-tip-records` (15 assertions incl. order-independence
+    + tamper); MSVC FAST 224/0; every block hash/digest/roundtrip/state-root golden byte-identical.
+    Ridealong lessons: the per-record hash must be a `hash_shard_tip` HELPER, not an inline
+    `SHA256Builder{}.append(...).finalize()` — the latter carries a `.append(`+`.finalize()` on one
+    line that the xbinary-parity extractor misreads as a digest append + the terminal finalize;
+    and `to_hex` has only `(ptr,len)`/fixed-array overloads (no `std::vector`), so encode() bytes
+    hex via `to_hex(enc.data(), enc.size())`.
   - **D3.5b** `Chain::apply_transactions` folds the vector via the shipped `add_shard_tip_record`
     ring → `t:` leaves; **MANDATORY reorg-safe `__ensure_shard_tip_records()` lazy-capture** (twin
     of `__ensure_committee_checkpoints`, chain.cpp:1807) — else A4 `revert_head`/failed-apply
