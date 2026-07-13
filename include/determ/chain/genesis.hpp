@@ -241,6 +241,22 @@ struct GenesisConfig {
     // genesis hashes.
     std::string                     committee_region{};
 
+    // D3.5e-1 (S-036 Layer 2): the GENESIS-COMMITTED shard→region map for a
+    // BEACON chain — the committed replacement for the node-local
+    // shard_manifest.json whose sole consumer is the on_shard_tip region
+    // filter. Committing it makes the shard-tip verdict's region input part
+    // of the chain identity: two beacon validators can no longer verify
+    // different committees because their manifest FILES differ. Sorted by
+    // shard_id (canonical), each region normalized with the committee_region
+    // rules. Empty = absent (backward-compat — every existing genesis file
+    // hashes byte-identically; the manifest file remains the CURRENT/dev
+    // fallback). Validation at load: non-empty only on chain_role==BEACON,
+    // requires epoch_blocks >= 2 (epoch 1's rand anchor would otherwise be
+    // the genesis block, which BEACON_HEADER gossip can never carry), every
+    // shard_id < initial_shard_count, duplicates rejected. Mixed into
+    // compute_genesis_hash behind its own domain tag when non-empty.
+    std::vector<std::pair<ShardId, std::string>> shard_regions{};
+
     // A5: governance mode. 0 = uncontrolled (consensus constants are
     // genesis-pinned and immutable forever; current behavior — preserves
     // byte-identical hashes for existing genesis files). 1 = governed

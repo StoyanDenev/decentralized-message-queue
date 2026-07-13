@@ -708,24 +708,93 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
         the re-derivation bug. S-036 after D3.5d-ii+D3.5c: **STRONGLY MITIGATED** (residuals:
         `source_shard_id` not digest-bound; source-committee membership not re-verifiable — both
         Layer-2 / D3.5e).
-- **LAYER 2 (D3.5e) — the reopened 5th OWNER FORK; do NOT proceed without owner GO.** A `sc:`
-  cross-chain source-committee-checkpoint transport: source shards PUSH their K-of-K-signed per-
-  epoch `cc:` checkpoints to the beacon; the beacon commits them under a new `sc:` namespace,
-  inductively authenticated back to each source shard's genesis committee `K_0^s` **pinned into
-  BEACON GENESIS** (a genesis-format change ⇒ a coordinated migration, NOT rolling-upgrade-neutral
-  on an existing EXTENDED beacon), snapshot-inherited; `on_shard_tip` re-derives the source
-  committee from `sc:[source,E].members` RE-SEEDED from committed `beacon_rand` (NOT the source
-  `cc:.epoch_rand`, which is mis-set to the shard block's own rand, chain.cpp:1810). Upgrades
-  S-036 strongly-mitigated → **CLOSED**.
-
-**Owner decision (put to Stoyan):** **Option A** authorize the 5th fork (D3.5e `sc:` transport +
-beacon-genesis `K_0^s` migration) → S-036 CLOSED, at the cost of a genesis migration + a new
-cross-chain protocol + its own review + a live multi-shard→beacon cluster gate. **Option B** ship
-Layer 1 only → S-036 STRONGLY MITIGATED, zero new trust root, no migration; correct SECURITY.md
-S-036 + `S036UnderQuorumMerge.md` F-1 to "strongly mitigated" and widen the §4 residual to include
-the source-registry-divergence attack. The prior "full closure" mandate was made under the now-
-falsified §9 no-fork belief; Option A is its true cost, Option B the honest fallback. **Layer 1
-(D3.5a-d) is a prerequisite either way.**
+- **LAYER 2 (D3.5e) — GO (owner Option-A 2026-07-13 + owner 2026-07-14 "there is no migration —
+  the network will not be started before the full design of all the layers and DApps is finished",
+  so genesis-format changes are ordinary pre-launch design work). ARCHITECTURE RESOLVED 2026-07-14
+  by a 3-probe + xhigh-resolver design Workflow: BEACON-SIDE FREEZE — the cross-chain PUSH sketch
+  below is SUPERSEDED.** The shard-tip verdict becomes a pure function of COMMITTED BEACON STATE
+  plus tip-carried content, with zero cross-chain protocol:
+  - **(1) Genesis-committed region map** — `GenesisConfig::shard_regions` (shard_id → region),
+    S-039 conditional hash mix (`DTM-genesis-shard-regions-v1`, absent ⇒ byte-identical genesis
+    hash), replacing the uncommitted node-local `shard_manifest.json` whose sole consumer is
+    `on_shard_tip` (node.cpp:1852-1853). Validation: non-empty only when `chain_role==BEACON`;
+    `epoch_blocks>=2` required when non-empty (epoch 1's anchor would otherwise be genesis, which
+    `beacon_headers_` can never carry); `genesis-tool build-sharded` emits the map AND hard-asserts
+    `map[s] == shard_s.committee_region` (drift ⇒ permanent tip rejection).
+  - **(2) Frozen verdict inputs** — `on_shard_tip` re-pointed at the beacon's OWN `cc:[E]`
+    checkpoint (which ALREADY folds on a BEACON+EXTENDED chain — the D3.3b fold's
+    `shard_count_>1 && epoch_blocks_>0` gate is satisfied there): pool via the shipped
+    `select_committee_pool` (frozen-first); rand = `cc:[E].epoch_rand` (byte-equal to the
+    committed anchor `chain_.at(E*epoch_blocks-1).cumulative_rand`); sig pubkeys FROZEN-ONLY (no
+    present-head fallback on the tip path — `resolve_committee_member_pubkey`'s fallback is
+    correct for slashing, wrong here); refugee-region pool extension re-derived from the beacon's
+    OWN committed merge state (`chain_.shards_absorbed_by` — MERGE_EVENTs are beacon-chain txs),
+    mirroring check_if_selected node.cpp:900-911 (the shipped asymmetry makes post-merge tips
+    unverifiable — exactly the S-036 scenario); EXTENDED && epoch≥1 && `cc:[E]` absent ⇒ BUFFER
+    the tip until the fold (the head-rand fallback node.cpp:1839-1840 is the COMMON case — shards
+    outrun the beacon — and is permanently non-re-verifiable); epoch 0 verifies for
+    `latest_shard_tips_` liveness only, never creates `t:` records (the D3.6 posture).
+  - **(3) Contemporaneous seam repair (a REAL shipped bug)** — the shard side anchors its epoch
+    rand OFF-BY-ONE: `beacon_headers_[epoch_start-1]` (node.cpp:1210 producer + :383 validator
+    provider) is beacon block INDEX `epoch_start` (headers append from expected index 1,
+    node.cpp:1730-1732), while `on_shard_tip` (:1842), the `cc:` fold (chain.cpp:1830-1835), and
+    the documented convention (node.cpp:2293-2296) anchor on INDEX `epoch_start-1`. The SHARD side
+    is the deviant: epoch≥1 verification structurally fails on adjacent-block rand divergence — it
+    never fired because NO shipped test crosses an epoch boundary with a live beacon+shard pair.
+    Fix the indexing + replace the shard's epoch≥1 local-rand fallback (node.cpp:1213-1215) with
+    wait-for-anchor (a restarted shard with an empty in-memory `beacon_headers_` otherwise forks
+    its own consensus via the silent fallback).
+  - **(4) Witness-carrying fold re-verification — the CLOSED-maker.** Today the fold applies
+    records with ZERO checks (`add_shard_tip_record` unconditional, chain.cpp:1805-1809) and D3.6
+    reads only presence + eligible_count — so a fully-Byzantine K-of-K beacon committee fabricates
+    records WITHOUT ever calling `on_shard_tip`; pinning `on_shard_tip`'s inputs alone denies that
+    adversary NOTHING. A beacon block carrying a distress `ShardTipRecord` must also carry a
+    `ShardTipWitness` (the tip's digest-preimage header fields + the non-zero K sig set),
+    verified in the UNIVERSAL block-check path that every honest node — committee or not — runs on
+    gossip-apply: re-derive the expected committee from `cc:[E]` + the genesis map + the committed
+    anchor rand + committed merge state + witness abort events; recompute the digest FROM THE
+    PREIMAGE and check the height/shard_id/eligible_count bindings INSIDE it (a witness carrying
+    only (digest, sigs) lets a genuine healthy digest be reused under a fabricated eligible_count);
+    verify K sigs from frozen ed_pubs; recompute `committee_sig_root` == `rec.committee_sig_root`;
+    fail-closed. Plus an auditor CLI (`verify-shardtip-records --rpc`, the verify-ct-block
+    composition pattern) for third-party retroactive falsification within the 16-epoch `cc:` ring
+    (archive replay beyond it).
+  - **(5) Source digest binding** — `source_shard_id` appended to `compute_block_digest` riding
+    the D3.4 `eligible_count` conditional (eligible_count>0 is the EXTENDED-source discriminator);
+    all three mirrors + the parity token; closes same-region cross-shard tip replay (the digest
+    binds no shard_id today, producer.cpp:687-698).
+  - **AUTHORITATIVE-COMMITTEE INVARIANT (launch-required):** the EXTENDED shard committee for
+    (shard,E) is DEFINED as the beacon-derived object. Registration affecting EXTENDED committees
+    happens on the BEACON chain (the stated production intent). The gossip filter
+    (gossip.cpp:139-144) means REGISTER never crosses chains, so until B2c.2-full (shard-side pool
+    re-pointing at beacon-carried registry deltas — a named launch-required follow-on) registries
+    coincide by build-sharded genesis-mirroring; any divergence is FAIL-CLOSED (honest tips
+    rejected — a liveness loss, never a false accept).
+  - **Why the PUSH is rejected:** (a) the pushed object is the shard's OWN `cc:` checkpoint —
+    self-attested by the very committee whose honesty S-036 questions; the `K_0^s` induction
+    proves signing-history continuity, not honesty; (b) nothing in the verdict function consumes
+    shard-chain state — pool/rand/region/K are all beacon-local or tip-carried, so the transported
+    object is redundant; (c) the shard-side `cc:.epoch_rand` is MIS-SET (chain.cpp:1835 stores the
+    folding chain's own block rand — on a shard NOT the beacon rand its selection seeds from;
+    dormant today since only `.members` is consumed; never seed a re-derivation from a SHARD
+    checkpoint's epoch_rand); (d) it adds a wire protocol + F2 reconciliation + `sc:` namespace +
+    snapshot/reorg surface for data every beacon derives deterministically from committed state
+    (KISS). `K_0^s` genesis pins are dropped entirely — they existed solely to authenticate the
+    push chain. NOTE: `sc:[s,E]` survives only as a DERIVED VIEW = region_filter(`cc:[E].members`,
+    genesis_map[s]) — no new leaf, no new fold, no state_root re-bless.
+  - **Increments:** D3.5e-1 genesis substrate → e-2 node load + mode commitment (manifest legal
+    only when genesis carries no map; both-present-and-differing ⇒ startup fail-close; EXTENDED
+    missing-entry ⇒ fail-closed, not the silent region-"" full-pool degrade) → e-3 seam repair →
+    e-4 beacon verdict pin (+ falsifier: a creator with valid present-head registration but absent
+    from `cc:[E]` is REJECTED) → e-5 the FIRST live gate that HARD-GATES on successful tip
+    verification across an epoch boundary (no shipped test does — which is why the off-by-one
+    never fired), 8-12 runs both platforms → e-6 source digest binding (EXTENDED-golden re-bless)
+    → e-7 witness fold re-verification + auditor CLI (full 3-lens review) → e-8 docs/proofs/flip
+    (STMC-8/-9; SECURITY.md S-036 → CLOSED with the fine print: DENIED = a fully-Byzantine K-of-K
+    beacon committee can no longer commit fabricated distress network-wide; RESIDUALS = beacon
+    Sybil/key-compromise of the derived committee itself, beacon omission/censorship power
+    (always fail-closed), light-client trust pending the auditor CLI, epoch-0 bootstrap
+    unauthenticatable-and-fail-closed, registry-divergence liveness until B2c.2-full).
 
 **Pre-code hazards (the D3.3b §9.2 analog — each would be a consensus bug):** the D3.5c emission
 gate MUST be `BEACON&&EXTENDED` not `shard_count()>1` (RP-4 replayed on the beacon); D3.5b MUST add

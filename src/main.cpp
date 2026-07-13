@@ -5217,6 +5217,31 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
         chain::GenesisConfig beacon = base;
         beacon.chain_role = ChainRole::BEACON;
         beacon.shard_id   = 0;
+        // D3.5e-1 (S-036 Layer 2): an EXTENDED beacon genesis COMMITS the
+        // shard→region map (`beacon_shard_regions`) — the committed input to
+        // shard-tip verification, replacing the node-local shard_manifest
+        // file. Sourced from the SAME shard_regions build input that sets
+        // each shard's committee_region below, so map[s] ==
+        // shard_s.committee_region BY CONSTRUCTION (the shard loop
+        // hard-asserts it — drift means the beacon filters one region while
+        // the shard's validators filter another = permanent tip rejection).
+        // CURRENT/NONE builds emit no map (byte-identical to pre-D3.5e).
+        if (mode == ShardingMode::EXTENDED) {
+            if (base.epoch_blocks < 2) {
+                std::cerr << "build-sharded: sharding_mode=extended requires "
+                             "epoch_blocks >= 2 (got "
+                          << base.epoch_blocks
+                          << ") — with epoch_blocks=1, epoch 1's rand anchor "
+                             "is the genesis block, which BEACON_HEADER "
+                             "gossip can never carry (D3.5e)\n";
+                return 1;
+            }
+            for (uint32_t s = 0; s < base.initial_shard_count; ++s) {
+                std::string r = shard_regions.empty() ? base.committee_region
+                                                      : shard_regions[s];
+                beacon.shard_regions.emplace_back(s, r);
+            }
+        }
         std::string beacon_path = path + ".beacon.json";
         beacon.save(beacon_path);
         Hash beacon_hash = chain::compute_genesis_hash(beacon);
@@ -5241,6 +5266,19 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
             // must be "" under non-EXTENDED).
             if (!shard_regions.empty()) {
                 shard.committee_region = shard_regions[s];
+            }
+            // D3.5e-1 hard-assert: the beacon's committed map entry must
+            // equal this shard's own genesis committee_region — both are
+            // built from the same input above, so a mismatch here means the
+            // builder itself drifted (a bug, not an operator error).
+            if (mode == ShardingMode::EXTENDED
+                && (s >= beacon.shard_regions.size()
+                    || beacon.shard_regions[s].first != s
+                    || beacon.shard_regions[s].second != shard.committee_region)) {
+                std::cerr << "build-sharded: INTERNAL map drift — "
+                             "beacon_shard_regions[" << s << "] != shard "
+                          << s << " committee_region\n";
+                return 1;
             }
             std::string shard_path = path + ".shard" + std::to_string(s) + ".json";
             shard.save(shard_path);
@@ -39252,6 +39290,92 @@ int main(int argc, char** argv) {
                   "SHARD chain: bootstraps to height 1 after genesis");
             check(!c.empty(),
                   "SHARD chain: not empty after genesis");
+        }
+
+        // === D3.5e-1: the genesis-committed shard→region map ===
+
+        // 9. Byte-neutrality: an EMPTY map is byte-identical to pre-D3.5e —
+        //    the same config with and without the field yields ONE hash.
+        {
+            auto cfg = make_cfg(ChainRole::BEACON, 0, 3);
+            Hash h_before = compute_genesis_hash(cfg);
+            cfg.shard_regions.clear();   // explicit no-op
+            check(compute_genesis_hash(cfg) == h_before,
+                  "D3.5e map: empty shard_regions is byte-identical (S-039 "
+                  "conditional mix — every existing genesis unchanged)");
+        }
+
+        // 10. Hash sensitivity: the map binds — present != absent, and two
+        //     different maps differ.
+        {
+            auto cfg = make_cfg(ChainRole::BEACON, 0, 3);
+            cfg.epoch_blocks = 4;
+            Hash h_absent = compute_genesis_hash(cfg);
+            cfg.shard_regions = {{0, "us-east"}, {1, "eu-west"}, {2, "ap-se"}};
+            Hash h_map = compute_genesis_hash(cfg);
+            check(h_map != h_absent,
+                  "D3.5e map: non-empty shard_regions binds into the genesis hash");
+            auto cfg2 = cfg;
+            cfg2.shard_regions[1].second = "eu-north";
+            check(compute_genesis_hash(cfg2) != h_map,
+                  "D3.5e map: two beacons differing in one region get distinct "
+                  "hashes (a manifest-file divergence can no longer be silent)");
+        }
+
+        // 11. JSON round-trip: to_json emits `beacon_shard_regions` only when
+        //     non-empty; from_json restores the map (sorted) + the hash.
+        {
+            auto cfg = make_cfg(ChainRole::BEACON, 0, 3);
+            cfg.epoch_blocks = 4;
+            check(!cfg.to_json().contains("beacon_shard_regions"),
+                  "D3.5e map: empty map elided from genesis JSON");
+            cfg.shard_regions = {{2, "ap-se"}, {0, "us-east"}, {1, "eu-west"}};
+            std::sort(cfg.shard_regions.begin(), cfg.shard_regions.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            auto rt = GenesisConfig::from_json(cfg.to_json());
+            check(rt.shard_regions == cfg.shard_regions,
+                  "D3.5e map: beacon_shard_regions JSON round-trips (canonical "
+                  "shard_id order)");
+            check(compute_genesis_hash(rt) == compute_genesis_hash(cfg),
+                  "D3.5e map: round-tripped config reproduces the genesis hash");
+        }
+
+        // 12. Validation fail-closes: non-BEACON role, epoch_blocks<2,
+        //     duplicate shard_id, shard_id >= initial_shard_count.
+        {
+            auto reject = [&](GenesisConfig cfg, const char* why) {
+                bool threw = false;
+                try { (void)GenesisConfig::from_json(cfg.to_json()); }
+                catch (std::exception&) { threw = true; }
+                check(threw, why);
+            };
+            auto base = make_cfg(ChainRole::BEACON, 0, 3);
+            base.epoch_blocks = 4;
+            base.shard_regions = {{0, "us-east"}};
+
+            auto bad_role = base; bad_role.chain_role = ChainRole::SHARD;
+            reject(bad_role,
+                   "D3.5e map: rejected on a non-BEACON chain (the map is the "
+                   "beacon's committed tip-verification input)");
+            auto bad_epoch = base; bad_epoch.epoch_blocks = 1;
+            reject(bad_epoch,
+                   "D3.5e map: rejected with epoch_blocks<2 (epoch 1's anchor "
+                   "would be genesis, unreachable via BEACON_HEADER)");
+            auto bad_sid = base; bad_sid.shard_regions = {{7, "us-east"}};
+            reject(bad_sid,
+                   "D3.5e map: rejected shard_id >= initial_shard_count");
+            // Duplicate detection happens at JSON parse (the canonical-set
+            // guard), so craft the JSON directly.
+            {
+                auto j = base.to_json();
+                j["beacon_shard_regions"] = nlohmann::json::array(
+                    {{{"shard_id", 0}, {"committee_region", "us-east"}},
+                     {{"shard_id", 0}, {"committee_region", "eu-west"}}});
+                bool threw = false;
+                try { (void)GenesisConfig::from_json(j); }
+                catch (std::exception&) { threw = true; }
+                check(threw, "D3.5e map: rejected duplicate shard_id entries");
+            }
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

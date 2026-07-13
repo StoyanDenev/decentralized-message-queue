@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
+#include <set>
 
 namespace determ::chain {
 
@@ -99,6 +100,17 @@ json GenesisConfig::to_json() const {
     // D1: emit the CT-disable flag ONLY when set (disabled), so a CT-enabled
     // (default) chain's genesis JSON stays byte-identical to pre-flag files.
     if (!confidential_tx_enabled) out["confidential_tx_enabled"] = false;
+    // D3.5e-1: emit the shard→region map ONLY when non-empty, so every
+    // existing genesis file stays byte-identical. Same entry shape as the
+    // node-local shard_manifest.json it replaces.
+    if (!shard_regions.empty()) {
+        json arr = json::array();
+        for (auto& [sid, region] : shard_regions) {
+            arr.push_back(json{{"shard_id",         sid},
+                               {"committee_region", region}});
+        }
+        out["beacon_shard_regions"] = arr;
+    }
     return out;
 }
 
@@ -200,6 +212,61 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.committee_region = normalize_region(j.value("committee_region",
                                                     std::string{}),
                                             "committee_region");
+
+    // D3.5e-1 (S-036 Layer 2): the genesis-committed shard→region map.
+    // Absent (every existing genesis file) = empty = byte-identical hashing.
+    // JSON key is `beacon_shard_regions` — deliberately DISTINCT from the
+    // `shard_regions` STRING-array key that build-sharded consumes as
+    // positional build-time INPUT (test_tactical.sh), so the two shapes can
+    // never alias through GenesisConfig::load.
+    if (j.contains("beacon_shard_regions")) {
+        std::set<ShardId> seen;
+        for (auto& entry : json_require_array(j, "beacon_shard_regions")) {
+            if (!entry.is_object()) {
+                throw std::runtime_error(
+                    "genesis: beacon_shard_regions entries must be objects");
+            }
+            ShardId sid = entry.value("shard_id", ShardId{0});
+            std::string region = normalize_region(
+                entry.value("committee_region", std::string{}),
+                "beacon_shard_regions.committee_region");
+            if (!seen.insert(sid).second) {
+                throw std::runtime_error(
+                    "genesis: beacon_shard_regions duplicate shard_id="
+                    + std::to_string(sid));
+            }
+            c.shard_regions.emplace_back(sid, std::move(region));
+        }
+        // Canonical order: sorted by shard_id, so the hash mix below is a
+        // pure function of the SET regardless of JSON entry order.
+        std::sort(c.shard_regions.begin(), c.shard_regions.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (!c.shard_regions.empty()) {
+            if (c.chain_role != ChainRole::BEACON) {
+                throw std::runtime_error(
+                    "genesis: beacon_shard_regions is valid only on a BEACON chain "
+                    "(chain_role=1) — it is the committed input to the "
+                    "beacon's shard-tip verification (S-036 Layer 2)");
+            }
+            if (c.epoch_blocks < 2) {
+                throw std::runtime_error(
+                    "genesis: beacon_shard_regions requires epoch_blocks >= 2 — "
+                    "with epoch_blocks=1, epoch 1's rand anchor is the "
+                    "genesis block, which BEACON_HEADER gossip can never "
+                    "carry (an unfixable producer/verifier asymmetry)");
+            }
+            for (auto& [sid, region] : c.shard_regions) {
+                (void)region;
+                if (sid >= c.initial_shard_count) {
+                    throw std::runtime_error(
+                        "genesis: beacon_shard_regions shard_id="
+                        + std::to_string(sid)
+                        + " >= initial_shard_count="
+                        + std::to_string(c.initial_shard_count));
+                }
+            }
+        }
+    }
 
     // A5: governance mode. Absent / 0 = uncontrolled (default, byte-
     // identical to pre-A5 genesis files: keyholders empty, threshold 0,
@@ -438,6 +505,22 @@ Block make_genesis_block(const GenesisConfig& cfg) {
     // tag suffices; domain-separated so it can never alias an adjacent mix.
     if (!cfg.confidential_tx_enabled) {
         rb.append(std::string("DTM-genesis-ct-disabled-v1"));
+    }
+    // D3.5e-1 (S-036 Layer 2): the shard→region map is consensus-critical on
+    // a BEACON chain — it is the committed region input to shard-tip
+    // verification, so two beacons that differ on it must NOT share a
+    // genesis hash (one verifies a committee the other rejects). Mixed only
+    // when non-empty (the "mix only when non-default" idiom above): every
+    // existing genesis file keeps a byte-identical hash. Entries are in
+    // canonical shard_id order (from_json sorts), each length-prefixed.
+    if (!cfg.shard_regions.empty()) {
+        rb.append(std::string("DTM-genesis-shard-regions-v1"));
+        rb.append(static_cast<uint64_t>(cfg.shard_regions.size()));
+        for (auto& [sid, region] : cfg.shard_regions) {
+            rb.append(static_cast<uint64_t>(sid));
+            rb.append(static_cast<uint8_t>(region.size()));
+            rb.append(region);
+        }
     }
     // S-039 closure: bind ALL consensus-critical operational parameters
     // into the genesis hash UNCONDITIONALLY. Pre-fix these governed
