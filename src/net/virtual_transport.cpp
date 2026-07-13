@@ -294,6 +294,24 @@ std::size_t VirtualEventLoop::pending_timer_count() const {
     return vtimers_.size();
 }
 
+bool VirtualEventLoop::next_virtual_deadline_ms(uint64_t& out) const {
+    std::lock_guard<std::mutex> lk(vt_mu_);
+    if (vtimers_.empty()) return false;
+    // The min DEADLINE — identical to the (deadline, seq) winner
+    // advance_to_next_timer fires to, since seq only breaks deadline ties and
+    // the global scheduler compares deadlines across loops.
+    uint64_t best = vtimers_[0].deadline_ms;
+    for (std::size_t i = 1; i < vtimers_.size(); ++i)
+        if (vtimers_[i].deadline_ms < best) best = vtimers_[i].deadline_ms;
+    out = best;
+    return true;
+}
+
+void VirtualEventLoop::set_virtual_now_ms(uint64_t now_ms) {
+    std::lock_guard<std::mutex> lk(vt_mu_);
+    if (now_ms > virtual_now_ms_) virtual_now_ms_ = now_ms;   // forward-only
+}
+
 void VirtualEventLoop::post(std::function<void()> fn) {
     st_->post(std::move(fn));
 }

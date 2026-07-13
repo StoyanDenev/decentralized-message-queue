@@ -60,6 +60,9 @@
 // both platforms — exercised by test-net-virtual and driving the FA4
 // in-process multi-node harness.
 #include <determ/net/virtual_transport.hpp>
+// Deterministic-scheduler inc.4: the global multi-loop driver over N
+// VirtualEventLoops (test-scheduler-multiloop).
+#include <determ/net/virtual_scheduler.hpp>
 // §Q1: the harness-driven injected clock — drives the real engine's
 // digest-bound wall time under a chosen virtual value (test-virtual-clock).
 #include <determ/time/virtual_clock.hpp>
@@ -816,6 +819,13 @@ Additional in-process tests:
                                               logical-time drive, SCHEDULE
                                               determinism (block count + vnow;
                                               content byte-replay needs the RNG seam)
+  determ test-scheduler-multiloop             §3.4 inc.4: the GLOBAL multi-loop
+                                              scheduler — 5 real Nodes (3-of-5) on
+                                              one frozen VirtualClock, driven with
+                                              NO threads by net::GlobalScheduler.
+                                              Asserts liveness + no-fork agreement +
+                                              replay-twice-identical (per-node head/
+                                              state_root + block list + action trace)
   determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
                                               wiring + depth-1 head reorg. A
                                               non-producing follower is fed a
@@ -28104,6 +28114,231 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": scheduler-external "
                   << (fail == 0 ? "all assertions (inc.3)" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // deterministic-scheduler inc.4: the GLOBAL multi-loop scheduler
+    // (DeterministicSchedulerDesign.md §3.4 / inc.4). Generalizes the inc.3
+    // single-node external drive to a 3-of-5 (M=5, K=3) cluster: FIVE real
+    // node::Node instances, each on its own virtual-time VirtualEventLoop,
+    // sharing ONE VirtualNetwork + ONE FROZEN VirtualClock, each with a distinct
+    // fixed-seed identity key AND a distinct fixed crypto::SeededRng, all started
+    // via start_external() (NO loop threads, NO save threads) and driven ENTIRELY
+    // by net::GlobalScheduler: fixpoint-drain ready work across all loops, then
+    // fire the single global-earliest virtual timer (lockstepping every loop's
+    // virtual now first). Pins:
+    //   (1) LIVENESS — 5 nodes reach blocks 1..3 under pure external drive (the
+    //       cross-loop contribs/sigs are delivered as ready work, so a 3-of-5
+    //       round completes with no wall thread);
+    //   (2) AGREEMENT — blocks 1..3 are byte-identical across all 5 nodes (no
+    //       fork);
+    //   (3) REPLAY-TWICE-IDENTICAL — the inc.4 signature: two same-seed runs
+    //       reach identical per-node terminal head_hash + state_root, an
+    //       identical ordered block list (diff-localizer), AND an identical
+    //       scheduler action trace (the only signal that catches a schedule
+    //       interleave that diverges yet converges to the same chain).
+    // The clock is FROZEN at kT0 (never advanced): round timing rides the loops'
+    // virtual now, while every proposer_time == kT0 == the validator's clock, so
+    // the ±30s freshness diff is 0 and the run is trivially deterministic — the
+    // same frozen-clock multi-block property inc.3 already relies on. Production
+    // (RealClock, RealRng, threaded run()) is untouched; the two VirtualEventLoop
+    // accessors the scheduler adds (next_virtual_deadline_ms / set_virtual_now_ms)
+    // are virtual-time-only with no production caller. The threaded
+    // test-fa-liveness-virtual is left as-is.
+    if (cmd == "test-scheduler-multiloop") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        constexpr int      kNodes        = 5;
+        constexpr int      kK            = 3;
+        constexpr uint64_t kTargetBlocks = 3;          // drive to height >= 4
+        constexpr int64_t  kT0           = 1700000000; // >=1.5e9 dodges the sentinel
+        std::error_code fec;
+
+        // Deterministic distinct identity keys (NOT generate_node_key's OS
+        // entropy — that is exactly the test-node-reorg-s048 flake class: random
+        // keys move committee selection + the resolve_fork smallest-hash
+        // tie-break). Fixed 32-byte seeds, spaced so no two overlap in range.
+        auto det_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (int i = 0; i < 32; ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const uint8_t bases[kNodes] = {0x11, 0x33, 0x55, 0x77, 0x99};
+
+        struct RunResult {
+            bool reached = false;
+            bool agree   = false;
+            std::vector<std::string> head_hash;   // per node, terminal
+            std::vector<std::string> state_root;  // per node, terminal
+            std::vector<std::string> blocks;      // node0 blocks 1..3 (diff-localizer)
+            std::string trace_hash;               // SHA256 of the scheduler trace
+        };
+
+        auto run_once = [&](const std::string& tag) -> RunResult {
+            RunResult R;
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-sched-multiloop-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            std::array<crypto::NodeKey, kNodes> keys;
+            chain::GenesisConfig g;
+            g.chain_id      = "scheduler-multiloop";
+            g.m_creators    = kNodes;
+            g.k_block_sigs  = kK;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            for (int i = 0; i < kNodes; ++i) {
+                keys[i] = det_key(bases[i]);
+                chain::GenesisCreator c;
+                c.domain        = "node" + std::to_string(i);
+                c.ed_pub        = keys[i].pub;
+                c.initial_stake = 1000;
+                g.initial_creators.push_back(c);
+            }
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            // ONE frozen clock + ONE network shared by all 5 nodes.
+            determ::time::VirtualClock vclock(kT0);
+            VirtualNetwork vnet;
+            std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+            std::vector<std::unique_ptr<VirtualTransport>> transports;
+            std::vector<std::unique_ptr<crypto::SeededRng>> rngs;
+            std::vector<std::unique_ptr<node::Node>>        nodes;
+            const uint16_t base_port = 7601;
+
+            for (int i = 0; i < kNodes; ++i) {
+                loops.push_back(std::make_unique<VirtualEventLoop>());
+                loops[i]->enable_virtual_time();   // BEFORE the Node arms any timer
+                transports.push_back(
+                    std::make_unique<VirtualTransport>(*loops[i], vnet));
+                // Distinct fixed per-node RNG: each node's sole block-content draw
+                // (the Phase-1 dh_secret) differs like a real node, yet replays.
+                rngs.push_back(std::make_unique<crypto::SeededRng>(
+                    static_cast<uint64_t>(i + 1)));
+            }
+            for (int i = 0; i < kNodes; ++i) {
+                node::Config cfg;
+                cfg.domain       = "node" + std::to_string(i);
+                cfg.data_dir     = (dir / cfg.domain).string();
+                cfg.listen_port  = static_cast<uint16_t>(base_port + i);
+                cfg.key_path     = (dir / (cfg.domain + ".key")).string();
+                cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
+                cfg.genesis_path = gpath;
+                cfg.m_creators   = kNodes;
+                cfg.k_block_sigs = kK;
+                cfg.log_quiet    = true;
+                for (int p = 0; p < kNodes; ++p)
+                    if (p != i)
+                        cfg.bootstrap_peers.push_back(
+                            "127.0.0.1:" + std::to_string(base_port + p));
+                fs::create_directories(cfg.data_dir);
+                crypto::save_node_key(keys[i], cfg.key_path);
+                nodes.push_back(std::make_unique<node::Node>(
+                    cfg, vclock, loops[i].get(), transports[i].get(), *rngs[i]));
+            }
+            // Strict index order: a connect to a not-yet-listening peer is
+            // refused, but the lower-triangle connects (j<i, already listening)
+            // complete the full 5-node mesh.
+            for (int i = 0; i < kNodes; ++i) nodes[i]->start_external();
+
+            std::vector<VirtualEventLoop*> lp;
+            lp.reserve(kNodes);
+            for (auto& l : loops) lp.push_back(l.get());
+            GlobalScheduler sched(std::move(lp));
+
+            auto height = [&](int i) {
+                return nodes[i]->rpc_status()["height"].get<uint64_t>();
+            };
+            auto min_h = [&] {
+                uint64_t m = UINT64_MAX;
+                for (int i = 0; i < kNodes; ++i) m = std::min(m, height(i));
+                return m;
+            };
+            R.reached = sched.run_until([&] { return min_h() >= kTargetBlocks + 1; });
+
+            for (int i = 0; i < kNodes; ++i) {
+                R.head_hash.push_back(
+                    nodes[i]->rpc_status().value("head_hash", std::string()));
+                R.state_root.push_back(
+                    nodes[i]->rpc_state_root().value("state_root", std::string()));
+            }
+            // Agreement over blocks 1..3, referenced to node0.
+            R.agree = true;
+            const uint64_t top0 = height(0);
+            for (uint64_t h = 1; h <= kTargetBlocks && h < top0; ++h) {
+                const nlohmann::json b0 = nodes[0]->rpc_block(h);
+                R.blocks.push_back(b0.is_null() ? std::string("<null>") : b0.dump());
+                for (int i = 1; i < kNodes; ++i) {
+                    const nlohmann::json bi = nodes[i]->rpc_block(h);
+                    if (bi.is_null() || b0.is_null() || bi.dump() != b0.dump())
+                        R.agree = false;
+                }
+            }
+            {
+                const std::string& tr = sched.trace();
+                crypto::SHA256Builder tb;
+                tb.append(reinterpret_cast<const uint8_t*>(tr.data()), tr.size());
+                const Hash th = tb.finalize();
+                R.trace_hash = to_hex(th.data(), th.size());
+            }
+
+            for (int i = kNodes - 1; i >= 0; --i) nodes[i]->stop();
+            nodes.clear();
+            rngs.clear();
+            transports.clear();
+            loops.clear();
+            fs::remove_all(dir, fec);
+            return R;
+        };
+
+        // ── Run 1: liveness + fork-freedom ──────────────────────────────
+        RunResult r1 = run_once("r1");
+        check(r1.reached,
+              "liveness: 5 nodes (3-of-5) under the global scheduler finalized "
+              "blocks 1..3 with NO threads (cross-loop contribs/sigs delivered "
+              "as ready work)");
+        check(r1.agree,
+              "agreement: blocks 1..3 byte-identical across all 5 nodes (no fork)");
+
+        // ── Run 2: replay-twice-identical (the inc.4 signature) ─────────
+        RunResult r2 = run_once("r2");
+        bool heads_eq = r2.reached && r1.head_hash.size() == r2.head_hash.size();
+        for (std::size_t i = 0; heads_eq && i < r1.head_hash.size(); ++i)
+            if (r1.head_hash[i].empty() || r1.head_hash[i] != r2.head_hash[i])
+                heads_eq = false;
+        bool roots_eq = r1.state_root.size() == r2.state_root.size();
+        for (std::size_t i = 0; roots_eq && i < r1.state_root.size(); ++i)
+            if (r1.state_root[i].empty() || r1.state_root[i] != r2.state_root[i])
+                roots_eq = false;
+        check(heads_eq,
+              "replay: two same-seed runs reach an identical per-node terminal "
+              "head_hash (transitively commits every block + state_root)");
+        check(roots_eq,
+              "replay: two same-seed runs reach an identical per-node terminal "
+              "state_root");
+        check(!r1.blocks.empty() && r1.blocks == r2.blocks,
+              "replay: the ordered per-height block list is identical "
+              "(diff-localizer)");
+        check(!r1.trace_hash.empty() && r1.trace_hash == r2.trace_hash,
+              "replay: the scheduler action-trace is identical — the global "
+              "SCHEDULE is deterministic (the property inc.4 introduces)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": scheduler-multiloop "
+                  << (fail == 0 ? "all assertions (inc.4)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

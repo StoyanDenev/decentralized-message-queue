@@ -2295,10 +2295,14 @@ void Node::post_append_bookkeeping_locked(const chain::Block& b) {
     // and committee selection at the next round reads it), log the
     // transition + the freshly-derived committee. Operators can use
     // this to trace rotation.
-    if (cfg_.epoch_blocks > 0
+    if (!cfg_.log_quiet
+        && cfg_.epoch_blocks > 0
         && chain_.height() > 0
         && (chain_.height() - 1) % cfg_.epoch_blocks == 0
         && chain_.height() > 1) {
+        // S-027: gate this observability line behind log_quiet=false, like the
+        // per-block accept line above — operators who want fewer logs (and every
+        // quiet in-process harness) should not see it.
         EpochIndex new_epoch = current_epoch_index();
         size_t pool_size = NodeRegistry::build_from_chain(
                                 chain_, chain_.height()).size();

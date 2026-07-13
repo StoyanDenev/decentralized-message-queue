@@ -201,6 +201,24 @@ public:
     // Count of armed-but-unfired virtual timers.
     std::size_t pending_timer_count() const;
 
+    // ── Global multi-loop drive support (increment 4, opt-in, test-only) ──
+    // Report the earliest pending virtual-timer deadline WITHOUT firing it (the
+    // same (deadline, seq)-min advance_to_next_timer would select). Returns
+    // false and leaves `out` untouched when no virtual timer is pending. The
+    // global scheduler peeks every loop, picks the global-min deadline, and
+    // advances exactly one — so it needs to compare deadlines without firing.
+    // Virtual-time mode only; byte-invariant (no production caller).
+    bool next_virtual_deadline_ms(uint64_t& out) const;
+
+    // Forward-only lockstep of THIS loop's virtual `now` to a global value. The
+    // global scheduler calls it on EVERY loop at each time-advance so a loop
+    // that arms a timer between advances computes its deadline from the current
+    // GLOBAL now, not a stale per-loop now — a lagging loop would otherwise
+    // past-date the deadline and move logical time backwards (§3.4). No-op if
+    // `now_ms <= virtual_now_ms_`. Virtual-time mode only; the single-loop
+    // drivers (inc.2/inc.3) never call it, so their behaviour is unchanged.
+    void set_virtual_now_ms(uint64_t now_ms);
+
 private:
     friend class VirtualNetwork;   // reads st_ to wire pair/listener posts
 
