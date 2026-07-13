@@ -424,9 +424,14 @@ struct MergeEvent {
 //   [source_shard_id: u32 LE]
 //   [height: u64 LE]                 // the source-shard block height attested
 //   [eligible_count: u32 LE]         // eligible_in_region(region) at `height`
-//   [committee_sig_root: 32 bytes]   // hash binding the source committee's K-of-K
-//                                    // signature over the source block, verified
-//                                    // at fold-in against the `c:` checkpoint (§9)
+//   [committee_sig_root: 32 bytes]   // beacon-computed commitment binding the source
+//                                    // committee's K-of-K signature SET over the source
+//                                    // block digest (D3.5d-ii §9.6 contemporaneous-verdict
+//                                    // model). NOT re-derived at fold-in — re-running the
+//                                    // §2 committee derivation there resolves the BEACON's
+//                                    // OWN committee (a wrong accept); the source-committee
+//                                    // membership check is contemporaneous in on_shard_tip
+//                                    // and Layer-2 (D3.5e `sc:`) makes it re-verifiable.
 //   [region_len: u8]                 // <= 32
 //   [region: utf8 bytes, region_len bytes]
 //
