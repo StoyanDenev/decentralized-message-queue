@@ -179,6 +179,16 @@ prior K-of-K-signed beacon block and bound into `state_root`), this check is
 
 ### 3.5 Liveness beacon — distinguishing "silent" from "healthy"
 
+> **⚠ SUPERSEDED by the as-built D3.6 gate (`1fda852`).** The sparse healthy-liveness
+> beacon below is NOT emitted (a deferred additive refinement — `node.cpp`
+> `shard_tip_records_eligible_for_inclusion` folds only sub-2K distress records). The
+> shipped D3.6 admission gate treats absence UNIFORMLY as fail-closed: any absent
+> in-window `t:` record ⇒ **REJECT** (`A_beacon_omit`), never a "legitimate silent
+> trigger" — the beacon is the sole emitter and could withhold to manufacture silence,
+> so silence can never justify a merge. The distress predicate therefore reduces to
+> "every in-window height carries a committed sub-2K record" (contiguity automatic).
+> Retained below only for the F-1-policy rationale; the operative rule is §3.4 + §9.
+
 On-demand-on-distress (F-1) means a healthy shard writes no records. To keep
 "shard went silent" distinguishable from "shard healthy", the beacon also folds a
 sparse healthy record (cadence ~`merge_threshold_blocks / 2`) for each tracked

@@ -2496,17 +2496,22 @@ size_t Node::mempool_count_from(const std::string& sender) const {
 //   2. Global cap + eviction feasibility (most expensive; only run if
 //      sender-quota passes).
 std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
-    // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event; the validator
-    // fail-closes it on every non-BEACON chain (block.hpp: "valid only under
-    // BEACON chain role"). Reject it here at mempool admission on a non-BEACON
-    // node so a shard-submitted MERGE_EVENT never ENTERS the pool — otherwise the
-    // producer would keep re-including a queued-but-block-invalid tx and the chain
-    // would STALL (block validation rejects the BLOCK, not the pooled tx). Runs on
-    // both the RPC-submit and gossip channels (the shared admission gate).
+    // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event whose historical
+    // distress witness (the `t:` records) is BEACON && EXTENDED state — the block
+    // validator fail-closes it on every non-BEACON chain AND on a BEACON that isn't
+    // EXTENDED. Reject it here at mempool admission whenever this node is not
+    // BEACON && EXTENDED so a tx the block validator would reject never ENTERS the
+    // pool — otherwise the producer keeps re-including a queued-but-block-invalid tx
+    // and the chain STALLS (block validation rejects the BLOCK, not the pooled tx).
+    // The gate MATCHES the block-validator gate exactly (non-BEACON → chain_role
+    // reject; BEACON but non-EXTENDED → sharding_mode reject), closing both
+    // stall-class vectors. Runs on both the RPC-submit and gossip channels.
     if (tx.type == chain::TxType::MERGE_EVENT
-        && cfg_.chain_role != ChainRole::BEACON) {
-        return "MERGE_EVENT is valid only on a BEACON chain (S-036: a shard "
-               "cannot verify the historical distress witness)";
+        && (cfg_.chain_role != ChainRole::BEACON
+            || cfg_.sharding_mode != ShardingMode::EXTENDED)) {
+        return "MERGE_EVENT is valid only on a BEACON+EXTENDED chain (S-036: a "
+               "shard cannot verify the historical distress witness, and a "
+               "non-EXTENDED beacon holds no `t:` distress records)";
     }
 
     // Check if this tx would REPLACE an existing one at (from, nonce).

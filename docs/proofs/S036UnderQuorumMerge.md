@@ -60,6 +60,18 @@ Per the R4 design (`UnderQuorumMerge.md` §1):
 
 ### 1.4 The v2.11 closure path
 
+> **⚠ SUPERSEDED — the as-built D3 SHARD_TIP arc (D3.1–D3.7) does NOT use a MergeMonitor FSM.** The
+> shipped S-036 mitigation reads the committed `t:` shard-tip distress records over the SOURCE-shard
+> window `[evidence_window_start, evidence_window_start + merge_threshold_blocks)` and admits a
+> `MERGE_BEGIN` only on contiguous sub-2K coverage (uniform fail-closed on any absent record) — there
+> is NO FSM, NO `{NORMAL, STRESS_CANDIDATE, …}` state machine, and NO `[evidence_window_start,
+> effective_height)` replay. And the reachable exploit is closed by FAIL-CLOSING `MERGE_EVENT` on
+> every non-BEACON+EXTENDED chain (D3.6, `1fda852`), not by the FSM below. S-036 is **STRONGLY
+> MITIGATED, not CLOSED** — trustless closure is the owner-gated Layer 2 (D3.5e). The T-5 language
+> below (an FSM replay reaching `MERGE_PENDING`) describes the RETIRED design; the operative spec is
+> `ShardTipMergeDesign.md` §3.4/§9, the shipped soundness is `ShardTipMergeSoundness.md`, and the
+> posture is `docs/SECURITY.md` S-036. Retained here for provenance.
+
 V2-DESIGN.md §v2.11 specifies the deterministic beacon-side MergeMonitor FSM that closes S-036 fully:
 
 1. Each beacon-tracked shard has a `MergeMonitor[s]` with states `{NORMAL, STRESS_CANDIDATE, STRESS_CONFIRMED, MERGE_PENDING, MERGED, RECOVERY_CANDIDATE, RECOVERY_CONFIRMED}`.
