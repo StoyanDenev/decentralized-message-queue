@@ -601,10 +601,89 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
       verify; the pre-D3.5 8-arg recompute REJECTS; transit tamper rejects; byte-neutral for
       non-shard-tip contribs; V25 accept/reject). FAST 225/0 both platforms; adversarial-review
       Workflow clean.
-    - **D3.5d-ii** (next) the RECONCILIATION WIRING: the `pending_shard_tip_records_` buffer +
-      `on_shard_tip` population; `make_contrib` Phase-1 call-site passes the buffer view;
-      `build_body` folds `reconcile_intersection(b.creator_view_shardtip_lists)`; a new validator
-      `check_shardtip_reconciliation` enforcing `shard_tip_records ⊆ intersection`.
+    - **D3.5d-ii** (next) the RECONCILIATION WIRING — **full implementation spec settled by a
+      design-pass Workflow (3 probes → synthesis → adversarial critic, 2026-07-13); the critic
+      caught a 🔴 CRITICAL pre-code self-halt bug, folded into the spec below.** All new emission is
+      empty off `BEACON && EXTENDED`, so every non-EXTENDED path stays byte-identical.
+      - **(1) `committee_sig_root` derivation + construction.** In `Node::on_shard_tip`, AFTER the
+        K-of-K success (node.cpp:1861) and BEFORE the `latest_shard_tips_` store (:1863), gated
+        `sharding_mode == EXTENDED` (BEACON is guaranteed by the :1761 early return). It MUST be a
+        deterministic pure function of the gossiped tip ALONE (any beacon-local input → co-signers
+        build divergent record bytes → intersection empties or the block digest diverges = S-047
+        wedge). Formula (all ints via `SHA256Builder::append(uint64_t)` = fixed BE8 per
+        sha256.cpp:37; region length-prefixed exactly as the shipped `t:` leaf value chain.cpp:414):
+        `sig_set_root = compute_view_root({SHA256(sig.bytes) : sig ∈ tip.creator_block_sigs, sig != 0})`
+        (the zero-skip MUST byte-match the verify loop node.cpp:1846 so it binds exactly the
+        validated subset — BFT tips carry < K non-zero sigs); then
+        `committee_sig_root = SHA256("determ-shardtip-v1" ‖ shard_id_u64 ‖ tip.index_u64 ‖
+        eligible_count_u64 ‖ region_len_u64 ‖ region ‖ compute_block_digest(tip) ‖ sig_set_root)`
+        (reuse the `digest` already computed at :1842). **RECOMMENDED: this Probe-1 superset** (binds
+        the real signed digest + the actual sig set) over the minimal `= compute_block_digest(tip)`,
+        for `t:`-leaf-format stability across the Layer-1→Layer-2 boundary (a formula change at
+        D3.5e = a hard fork of every committed `t:` leaf; the superset is the stable Layer-2 hook).
+        The record is buffered (NOT `latest_shard_tips_`) in `pending_shard_tip_records_`.
+      - **(2) buffer.** `std::map<std::pair<ShardId,uint64_t>, chain::ShardTipRecord>
+        pending_shard_tip_records_` beside `pending_inbound_receipts_` (node.hpp:722), under
+        `state_mutex_`. ACCUMULATING keyed by (source_shard_id, height) — a last-value register makes
+        a Phase-1-unanimous height non-materializable at Phase-2 → fork. NO `first_seen` twin (that
+        exists only for the S-016 latency heuristic; the shard-tip path's sole determinism mechanism
+        is the full-K reconcile). **EVICTION (critic correction — this IS consensus-critical, not
+        "mempool hygiene"): prune ONLY by a SOURCE-TIP-RELATIVE staleness window —
+        evict shard-S records with `height ≤ latest_shard_tips_[S].index − revert_threshold_blocks`,
+        NEVER a fixed count ring (which could drop a still-in-window intersection member mid-round →
+        an evicting beacon diverges its `shard_tip_records_root` → wedge) and NEVER on fold-in (a
+        reverted-then-reappended block must re-materialize the identical set).** Reorg-safe with NO
+        new `__ensure` lambda: the buffer is in-memory node state (not snapshotted); the chain-side
+        `t:` ring already reverts via the shipped D3.5b `__ensure_shard_tip_records` lazy-capture.
+      - **(3) Phase-1 view + make_contrib.** In `start_contrib`, an INDEPENDENT `f2_shardtip_view`
+        block OUTSIDE the `block_index >= f2_active_from_height()` gate (D3.5d-i split the shard-tip
+        validator group to be presence-gated, not height-gated), gated `BEACON && EXTENDED`: push
+        `hash_shard_tip(rec) = SHA256(rec.encode())` (FULL-CONTENT, never key-only — key-only lets a
+        source equivocate two `t:` values behind one unanimous key) for each record from the SAME
+        `shard_tip_records_eligible_for_inclusion()` helper that build_body uses (the materializability
+        invariant: intersection ⊆ the assembler's own signed view ⊆ its buffer), sort, cap at
+        `F2_VIEW_LIST_CAP`. Pass as the 12th `make_contrib` arg (node.cpp:1055).
+      - **(4) build_body fold + emission gate.** New BEACON helper
+        `shard_tip_records_eligible_for_inclusion()` mirroring `current_source_eligible_count`
+        (node.cpp:1123): returns `{}` unless `chain_role==BEACON && sharding_mode==EXTENDED`
+        (**RP-4: NEVER `shard_count()>1`** — CURRENT-multishard PROFILE_REGIONAL is reachable),
+        else the (shard,height)-ordered buffer values, filtered by the F-1 **distress policy**
+        (`eligible_count < 2K` on-demand + §3.5 sparse-healthy cadence — owner-decided F-1, so
+        healthy MULTI-shard EXTENDED intentionally accrues `t:` leaves ⇒ hard byte-neutrality is
+        scoped to non-EXTENDED). New trailing `= {}` `build_body` param threaded to ALL THREE call
+        sites (node.cpp:1200/1315/2709 — a missed site silently never folds). After the creator loop
+        (producer.cpp:962): `isect = reconcile_intersection(b.creator_view_shardtip_lists)` (FULL-K,
+        never a threshold); for each candidate whose `hash_shard_tip ∈ isect` and NOT already in
+        `chain.shard_tip_records()` (idempotent skip), push to `b.shard_tip_records` (map order →
+        canonical).
+      - **(5) validator `check_shardtip_reconciliation`** (validator.hpp:133; hook at validator.cpp:54
+        after `check_eqabort_reconciliation`; declare `hash_shard_tip` in producer.hpp near :261 —
+        currently defined only at producer.cpp:408, the validator TU won't link otherwise). Gate on
+        `sharding_mode_ == EXTENDED` (validator has no `chain_role`; `shard_count()` can't
+        distinguish CURRENT-multishard). **🔴 CRITICAL (critic): the non-EXTENDED branch must guard
+        ONLY `b.shard_tip_records` (the record SET), NEVER the outer `creator_view_shardtip_*`
+        vectors** — `build_body` unconditionally pushes K (zero) entries so the OUTER vectors are
+        non-empty on non-EXTENDED chains (only the ELEMENTS are zero), and the producer self-applies
+        its own in-memory `body` (node.cpp:1349→2099) before `to_json` strips them, so an outer
+        `.empty()` test rejects block 1 on EVERY SINGLE/CURRENT chain — invisible to an EXTENDED-only
+        test plan (the EXTENDED-healthy path early-returns before the guard). Mirror
+        `check_inbound_receipts` (validator.cpp:1339) which guards only `b.inbound_receipts`. EXTENDED
+        branch: authenticate each `creator_view_shardtip_lists[i]` against `[i]` root with the
+        zero-root v1 sentinel (skip `compute_view_root` on a zero root — `compute_view_root([])` is
+        the non-zero empty root, mirror validator.cpp:1388), then `b.shard_tip_records[i]:
+        hash_shard_tip ∈ reconcile_intersection` (⊆, subset). **NO source-committee re-verification**
+        — that is unimplementable from committed beacon state (§9.6) and would re-derive the BEACON's
+        own committee (a deterministic-but-WRONG accept); the V-commit is discharged
+        contemporaneously at each member's `on_shard_tip` before a tip enters its buffer, and the
+        full-K intersection proves all K ran it on byte-identical content. Unlike inbound, NO
+        "already-committed" reject (the `t:` fold is idempotent).
+      - **Test-plan gap (critic):** the CRITICAL bug needs a **non-EXTENDED (SINGLE + CURRENT)
+        live-produce-and-self-apply** assertion, else it ships green. Ridealong: fix the stale
+        `block.hpp:427-429` `committee_sig_root` doc ("verified at fold-in against the `c:`
+        checkpoint" → the contemporaneous-verdict model) so a future implementer can't reintroduce
+        the re-derivation bug. S-036 after D3.5d-ii+D3.5c: **STRONGLY MITIGATED** (residuals:
+        `source_shard_id` not digest-bound; source-committee membership not re-verifiable — both
+        Layer-2 / D3.5e).
 - **LAYER 2 (D3.5e) — the reopened 5th OWNER FORK; do NOT proceed without owner GO.** A `sc:`
   cross-chain source-committee-checkpoint transport: source shards PUSH their K-of-K-signed per-
   epoch `cc:` checkpoints to the beacon; the beacon commits them under a new `sc:` namespace,
