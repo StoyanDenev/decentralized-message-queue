@@ -78,7 +78,9 @@
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>          // bft_committee_size (D3.5e-7e)
 #include <determ/crypto/keys.hpp>
+#include <determ/crypto/random.hpp>         // epoch_committee_seed / select_m_creators (D3.5e-7e)
 #include <determ/crypto/sha256.hpp>
 #include <determ/types.hpp>
 #include <nlohmann/json.hpp>
@@ -95,7 +97,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <map>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -145,6 +149,21 @@ void print_usage() {
         "      confidential tx re-verified CLIENT-SIDE. Committee is DERIVED from\n"
         "      genesis (no --committee file). --wait forwards to the head-anchor\n"
         "      poll. Exit 0 OK, 3 anchor/pin/CT failure, 1 usage/transport.\n"
+        "  verify-shardtip-records --rpc-port <N> --genesis <file> --height <H>\n"
+        "                  [--wait <s>] [--json]\n"
+        "      S-036 third-party auditor of the shard-tip distress-record fold.\n"
+        "      For BEACON block[H], proves against the pinned genesis: (1) ANCHOR\n"
+        "      + (2) BODY-PIN (as verify-ct-block), then for each folded record —\n"
+        "      (3) CC-PIN the source-epoch committee checkpoint (cc:[E]) to the\n"
+        "      committee-signed state_root, and (4) re-verify the record's full-\n"
+        "      tip witness (frozen-committee K-of-K sigs + committee_sig_root) —\n"
+        "      the exact validator check_shardtip_witnesses run off an untrusted\n"
+        "      daemon. A fabricated distress record fails closed. 0 records =\n"
+        "      vacuously OK. Requires cc:[E] within the 16-epoch ring and a\n"
+        "      genesis-committed beacon_shard_regions map (a legacy manifest-only\n"
+        "      beacon's region map is node-local/uncommitted — invisible under the\n"
+        "      untrusted-daemon posture — so records are conservatively rejected).\n"
+        "      Exit 0 OK, 3 anchor/pin/witness failure, 1 usage/transport.\n"
         "  verify-chain-file --in <headers> (--committee <file> |\n"
         "                    --committee-manifest <file>)\n"
         "                    [--genesis-hash <hex>] [--prev-hash <hex>]\n"
@@ -3411,6 +3430,430 @@ int cmd_verify_ct_block(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "verify-ct-block: " << e.what() << "\n";
         return 1;
+    }
+}
+
+// ─────────────────────── verify-shardtip-records ────────────────────────
+//
+// D3.5e-7e / S-036 Layer 2 — the THIRD-PARTY auditor that closes the light-
+// client trust residual of the shard-tip distress-record fold. It re-runs, off
+// an untrusted daemon, the exact check validator.cpp::check_shardtip_witnesses
+// runs at block accept: every ShardTipRecord folded into a BEACON block must
+// carry its full-tip witness, and that witness must re-verify against the
+// beacon's OWN committed cc:[E_source] committee checkpoint — the frozen source
+// committee. A fully-Byzantine K-of-K beacon that fabricates a distress record
+// cannot produce a witness whose K-of-K sigs verify against the FROZEN source
+// committee, so the auditor rejects it, matching every honest node.
+//
+// Composition (adds NO new crypto — all shipped, audited primitives):
+//   (1) ANCHOR   — verify_state_root_at: genesis pin + [0,H] prev_hash walk +
+//                  committee-sig verification of header[H] (S-042 successor
+//                  binding) → the committee-anchored block_hash(H).
+//   (2) BODY-PIN — fetch the FULL block; its recomputed compute_hash() must
+//                  equal the committee-anchored block_hash. signing_bytes binds
+//                  shard_tip_witnesses_root (e-7c), so this authenticates the
+//                  folded records[] AND witnesses[] against the committee sig.
+//   (3) CC-PIN   — for each record's source epoch E_source, fetch the cc:[E]
+//                  checkpoint CONTENT (cc_checkpoint RPC — UNTRUSTED), recompute
+//                  the cc: leaf hash from that preimage, and Merkle-verify the
+//                  "cc"-namespace state_proof for E against the COMMITTEE-SIGNED
+//                  state_root (committee_bound_state_root — never the bare header
+//                  field, which compute_block_digest excludes). A pass makes the
+//                  frozen epoch_rand + member list committee-attested.
+//   (4) WITNESS  — with the now-trusted cc: pool the auditor re-derives the
+//                  frozen source committee (epoch_committee_seed + select_m_
+//                  creators, region-filtered), verifies the witness's K-of-K
+//                  sigs over light_compute_block_digest(witness) against the
+//                  frozen member keys, recomputes committee_sig_root, and
+//                  requires it == the carried record's committee_sig_root, plus
+//                  the anti-reuse binds (index/source_shard_id/eligible_count)
+//                  and the genesis-committed region.
+//
+// Scope: cc:[E] must still be within the daemon's 16-epoch checkpoint ring at
+// the current head (else the state_proof returns not_found → fail-closed
+// UNVERIFIABLE, never a false ACCEPT). Archive-replay beyond the ring is a
+// future extension. Honest scope: CRYPTOGRAPHIC provenance of the fold only —
+// this proves each folded record was attested by the genuine frozen source
+// committee, closing the beacon-fabrication hole; it does not opine on whether
+// the source shard's underlying distress was "real" (that is the source
+// committee's K-of-K responsibility, which this transitively anchors).
+// Proof: docs/proofs/ShardTipMergeClosureSoundness.md §9.6.
+namespace {
+
+// A cc:[E] checkpoint whose preimage has been PINNED to a committee-signed
+// state_root (step 3). members are in the checkpoint's stored (domain-sorted)
+// order — identical to select_committee_pool's frozen-path iteration order.
+struct CcTrustedCheckpoint {
+    Hash                                                   epoch_rand{};
+    std::vector<std::tuple<std::string, PubKey, std::string>> members;  // domain, ed_pub, region
+};
+
+// Local mirror of producer.cpp::compute_view_root (set-dedup + concat SHA256).
+// determ-light does not link producer.cpp, and verify.cpp's copy is file-local;
+// this is byte-identical (same primitive both sides recompute).
+Hash shardtip_view_root(const std::vector<Hash>& items) {
+    std::set<Hash> u(items.begin(), items.end());
+    crypto::SHA256Builder b;
+    for (auto& h : u) b.append(h);
+    return b.finalize();
+}
+
+} // namespace
+
+int cmd_verify_shardtip_records(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path;
+    uint64_t height = 0, wait_seconds = 0;
+    bool have_port = false, have_height = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) { port = parse_u16("--rpc-port", argv[++i]); have_port = true; }
+        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--height"   && i + 1 < argc) { height = parse_u64("--height", argv[++i]); have_height = true; }
+        else if (a == "--wait"     && i + 1 < argc) wait_seconds = parse_u64("--wait", argv[++i]);
+        else if (a == "--json")                     json_out = true;
+        else {
+            std::cerr << "verify-shardtip-records: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_height) {
+        std::cerr << "verify-shardtip-records: --rpc-port, --genesis, --height are required\n";
+        return 1;
+    }
+
+    auto fail = [&](int code, const std::string& detail) -> int {
+        if (json_out)
+            std::cout << json{{"height", height}, {"ok", false},
+                              {"detail", detail}}.dump() << "\n";
+        else
+            std::cerr << "verify-shardtip-records: " << detail << "\n";
+        return code;
+    };
+
+    try {
+        // Pin the chain identity + derive the genesis committee (untrusted-daemon
+        // posture — NOT a user-supplied committee file).
+        auto genesis        = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        const uint64_t eb   = genesis.epoch_blocks;
+        const size_t   K    = genesis.k_block_sigs;
+        const bool     bft_enabled = genesis.bft_enabled;
+        // Genesis-committed shard→region map (authoritative; built identically to
+        // node.cpp:490 `committed[sid]=region`, no normalization). A missing
+        // entry yields "" (the CURRENT-compat global pool).
+        std::map<ShardId, std::string> shard_regions;
+        for (auto& kv : genesis.shard_regions) shard_regions[kv.first] = kv.second;
+
+        // committee_json for committee_bound_state_root (the cc-pin anchor).
+        json committee_json;
+        {
+            json arr = json::array();
+            for (auto& [domain_, pk] : committee_seed)
+                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
+            committee_json = json{{"members", arr}};
+        }
+
+        RpcClient rpc(port);
+        if (!rpc.open()) return fail(1, rpc.last_error());
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // (1) ANCHOR — committee-attested block_hash(H).
+        auto sr = verify_state_root_at(rpc, committee_seed,
+                                       genesis_hash_hex, height, wait_seconds);
+        if (!sr.ok) return fail(3, "ANCHOR failed: " + sr.detail);
+
+        // (2) BODY-PIN — the full block recomputes to the committee-anchored hash.
+        json full = rpc.call("block", {{"index", height}});
+        if (!full.is_object()
+            || (full.contains("error") && !full["error"].is_null()))
+            return fail(3, "full-block fetch failed");
+        determ::chain::Block fb;
+        try {
+            fb = determ::chain::Block::from_json(full);
+        } catch (const std::exception& e) {
+            return fail(3, std::string("malformed full block: ") + e.what());
+        }
+        if (to_hex(fb.compute_hash()) != sr.block_hash_hex)
+            return fail(3, "BODY-PIN mismatch: full-block hash != committee-anchored "
+                           "block_hash (daemon served a body inconsistent with the "
+                           "signed header)");
+
+        // Structural: records[] and witnesses[] are now committee-authenticated.
+        const size_t n_rec = fb.shard_tip_records.size();
+        const size_t n_wit = fb.shard_tip_witnesses.size();
+        if (n_rec != n_wit)
+            return fail(3, "record/witness count mismatch (" + std::to_string(n_rec)
+                         + "/" + std::to_string(n_wit) + ") — a committee-authenticated "
+                           "block must carry one witness per folded record");
+
+        // Explicit EXTENDED gate (defense-in-depth, mirrors the node's
+        // committee_pin_active shard_count()>1 predicate). An honest fold only
+        // happens on a sharded chain; a single-shard genesis that nonetheless
+        // carries committee-authenticated records is malformed. Rejecting here
+        // removes the auditor's reliance on cc:[E] being unfetchable to fail
+        // closed, so a future chain.cpp fold-condition change cannot open a
+        // light-vs-node verdict divergence. e-7e adversarial-review LOW finding.
+        if (n_rec > 0 && genesis.initial_shard_count <= 1)
+            return fail(3, "block folds shard-tip records but genesis initial_shard_count<=1 "
+                           "(not an EXTENDED chain) — malformed");
+
+        // Per-source-epoch trusted cc: cache (pin each E once).
+        std::map<EpochIndex, CcTrustedCheckpoint> cc_cache;
+        Signature zero_sig{};
+        json records_out = json::array();
+
+        for (size_t i = 0; i < n_rec; ++i) {
+            const determ::chain::ShardTipRecord& rec = fb.shard_tip_records[i];
+            const determ::chain::Block&          w   = fb.shard_tip_witnesses[i];
+
+            // (0) LEAF invariant on the witness.
+            if (!w.shard_tip_records.empty() || !w.shard_tip_witnesses.empty())
+                return fail(3, "record[" + std::to_string(i) + "]: witness is not a leaf block");
+
+            // (anti-reuse) the record's claims must be read from INSIDE the
+            // witness digest preimage (index/source_shard_id/eligible_count all
+            // bound into compute_block_digest).
+            if (w.index != rec.height)
+                return fail(3, "record[" + std::to_string(i) + "]: witness.index != rec.height");
+            if (w.source_shard_id != rec.source_shard_id)
+                return fail(3, "record[" + std::to_string(i) + "]: witness.source_shard_id mismatch");
+            if (w.eligible_count != rec.eligible_count)
+                return fail(3, "record[" + std::to_string(i) + "]: witness.eligible_count mismatch");
+
+            const EpochIndex Es = eb ? (rec.height / eb) : 0;
+            // Explicit epoch>=1 gate (mirrors committee_pin_active's epoch>=1
+            // predicate). Epoch 0 is intentionally never frozen (chain.cpp never
+            // folds cc:[0]), so a record claiming Es==0 can never carry a pinnable
+            // checkpoint — reject up front rather than lean on cc:[0] absence.
+            if (Es == 0)
+                return fail(3, "record[" + std::to_string(i) + "]: source epoch 0 has no "
+                               "pinnable committee checkpoint (epoch 0 is never frozen)");
+
+            // (3) region from the GENESIS-committed map, bound against rec.region.
+            std::string region;
+            if (auto it = shard_regions.find(rec.source_shard_id); it != shard_regions.end())
+                region = it->second;
+            if (rec.region != region)
+                return fail(3, "record[" + std::to_string(i) + "]: region '" + rec.region
+                             + "' != genesis-committed region '" + region + "' for shard "
+                             + std::to_string(rec.source_shard_id));
+
+            // (3) CC-PIN — fetch + pin cc:[Es] once per epoch.
+            auto cit = cc_cache.find(Es);
+            if (cit == cc_cache.end()) {
+                // (a) cc:[Es] checkpoint CONTENT (UNTRUSTED).
+                json cc = rpc.call("cc_checkpoint", {{"epoch", Es}});
+                if (!cc.is_object() || (cc.contains("error") && !cc["error"].is_null()))
+                    return fail(3, "record[" + std::to_string(i) + "]: cc:[" + std::to_string(Es)
+                                 + "] not served (epoch-0 / not-yet-folded / pruned from the "
+                                   "16-epoch ring) — fail-closed UNVERIFIABLE");
+                CcTrustedCheckpoint ck;
+                try {
+                    ck.epoch_rand = from_hex_arr<32>(cc.at("epoch_rand").get<std::string>());
+                    for (auto& m : cc.at("members")) {
+                        PubKey pub = from_hex_arr<32>(m.at("ed_pub").get<std::string>());
+                        ck.members.emplace_back(m.at("domain").get<std::string>(), pub,
+                                                m.at("region").get<std::string>());
+                    }
+                } catch (const std::exception& e) {
+                    return fail(3, "record[" + std::to_string(i) + "]: malformed cc_checkpoint: "
+                                 + e.what());
+                }
+                // (b) recompute the cc: leaf value from the preimage (== chain.cpp
+                //     build_state_leaves cc: exactly).
+                crypto::SHA256Builder lb;
+                lb.append(ck.epoch_rand.data(), ck.epoch_rand.size());
+                lb.append(static_cast<uint64_t>(ck.members.size()));
+                for (auto& [dom, pub, reg] : ck.members) {
+                    lb.append(static_cast<uint64_t>(dom.size()));
+                    lb.append(dom);
+                    lb.append(pub.data(), pub.size());
+                    lb.append(static_cast<uint64_t>(reg.size()));
+                    lb.append(reg);
+                }
+                Hash cc_leaf_value = lb.finalize();
+
+                // (c) the "cc" state_proof, bound to that leaf value + pinned to a
+                //     committee-signed state_root.
+                std::vector<uint8_t> eb8(8);
+                { uint64_t t = Es; for (int j = 7; j >= 0; --j) { eb8[j] = (uint8_t)(t & 0xff); t >>= 8; } }
+                json proof = rpc.call("state_proof",
+                                      {{"namespace", "cc"}, {"key", to_hex(eb8.data(), eb8.size())}});
+                if (!proof.is_object()
+                    || (proof.contains("error") && !proof["error"].is_null()))
+                    return fail(3, "record[" + std::to_string(i) + "]: cc:[" + std::to_string(Es)
+                                 + "] state_proof not_found — fail-closed UNVERIFIABLE");
+                // KEY-BIND (F-6 class, [[light-stake-read-key-bind-gap]]): the
+                // epoch lives ONLY in the leaf KEY ("cc:"+epoch_be8), NOT the
+                // value preimage (chain.cpp build_state_leaves cc: hashes only
+                // epoch_rand‖members). verify_state_proof Merkle-checks whatever
+                // key_bytes the daemon supplies, so WITHOUT this bind a Byzantine
+                // daemon serves a REAL committed cc:[E_other] leaf under a
+                // fabricated-epoch record — value_hash + Merkle both pass and the
+                // auditor verifies the witness against the WRONG (attacker-chosen)
+                // frozen committee. Single-leaf readers need BOTH key-bind AND
+                // value-hash-bind. e-7e adversarial-review HIGH finding.
+                std::vector<uint8_t> want_key;
+                want_key.reserve(3 + 8);
+                want_key.push_back('c'); want_key.push_back('c'); want_key.push_back(':');
+                want_key.insert(want_key.end(), eb8.begin(), eb8.end());
+                if (proof.value("key_bytes", std::string{})
+                        != to_hex(want_key.data(), want_key.size()))
+                    return fail(3, "record[" + std::to_string(i) + "]: cc: proof.key_bytes != "
+                                   "cc:[" + std::to_string(Es) + "] — daemon served a DIFFERENT "
+                                   "epoch's committee checkpoint (epoch-substitution attempt)");
+                std::string proof_value_hash = proof.value("value_hash", std::string{});
+                if (proof_value_hash != to_hex(cc_leaf_value))
+                    return fail(3, "record[" + std::to_string(i) + "]: cc_checkpoint content does "
+                                   "NOT hash to the cc:[" + std::to_string(Es) + "] leaf value "
+                                   "(daemon served an inconsistent checkpoint)");
+                std::string proof_root = proof.value("state_root", std::string{});
+                uint64_t    proof_height = proof.value("height", uint64_t{0});
+                if (proof_height == 0)
+                    return fail(3, "record[" + std::to_string(i) + "]: cc: proof has no height");
+                std::string attested = determ::light::committee_bound_state_root(
+                    rpc, committee_json, proof_height - 1, wait_seconds);
+                if (attested != proof_root)
+                    return fail(3, "record[" + std::to_string(i) + "]: cc: proof.state_root is NOT "
+                                   "the committee-attested root at index "
+                                 + std::to_string(proof_height - 1) + " — unattested root");
+                auto vsp = verify_state_proof(proof, attested);
+                if (!vsp.ok)
+                    return fail(3, "record[" + std::to_string(i) + "]: cc: Merkle verification "
+                                   "failed: " + vsp.detail);
+                cit = cc_cache.emplace(Es, std::move(ck)).first;
+            }
+            const CcTrustedCheckpoint& ck = cit->second;
+
+            // (4) WITNESS — re-derive the frozen committee + verify K-of-K sigs +
+            //     recompute committee_sig_root (mirrors shardtip_verify.cpp 36-146).
+            // Mode-eligibility gate: a BFT-declared witness lowers the bar to
+            // ceil(2K/3); reject it outright on a chain that never enabled BFT.
+            const bool is_bft = (w.consensus_mode == determ::chain::ConsensusMode::BFT);
+            if (is_bft && !bft_enabled)
+                return fail(3, "record[" + std::to_string(i) + "]: witness is BFT but genesis "
+                               "bft_enabled=false — no reduced-quorum source attestation");
+            const size_t expected_k = is_bft ? determ::chain::bft_committee_size(K) : K;
+
+            // Frozen pool + pubkeys (region-filtered, checkpoint stored order).
+            std::vector<std::string>      pool;
+            std::map<std::string, PubKey> frozen_pub;
+            for (auto& [dom, pub, reg] : ck.members) {
+                if (!region.empty() && reg != region) continue;
+                pool.push_back(dom);
+                frozen_pub[dom] = pub;
+            }
+            std::set<std::string> excluded;
+            for (auto& ae : w.abort_events) excluded.insert(ae.aborting_node);
+            std::vector<std::string> avail;
+            for (auto& dom : pool) if (!excluded.count(dom)) avail.push_back(dom);
+
+            if (avail.size() < expected_k)
+                return fail(3, "record[" + std::to_string(i) + "]: insufficient frozen pool to "
+                               "derive committee");
+            if (w.creators.size() != expected_k)
+                return fail(3, "record[" + std::to_string(i) + "]: witness creators count != "
+                               "expected_k");
+
+            Hash rand = crypto::epoch_committee_seed(ck.epoch_rand, rec.source_shard_id);
+            for (auto& ae : w.abort_events)
+                rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
+            auto indices = crypto::select_m_creators(rand, avail.size(), expected_k);
+            for (size_t j = 0; j < expected_k; ++j)
+                if (avail[indices[j]] != w.creators[j])
+                    return fail(3, "record[" + std::to_string(i) + "]: creator[" + std::to_string(j)
+                                 + "] mismatch vs frozen-committee derivation");
+
+            if (w.creator_block_sigs.size() != w.creators.size())
+                return fail(3, "record[" + std::to_string(i) + "]: creator_block_sigs size != "
+                               "creators size");
+            Hash digest = light_compute_block_digest(w);
+            size_t signed_count = 0;
+            for (size_t j = 0; j < w.creators.size(); ++j) {
+                if (w.creator_block_sigs[j] == zero_sig) continue;
+                auto pit = frozen_pub.find(w.creators[j]);
+                if (pit == frozen_pub.end())
+                    return fail(3, "record[" + std::to_string(i) + "]: creator '" + w.creators[j]
+                                 + "' is not a frozen committee member");
+                if (!crypto::verify(pit->second, digest.data(), digest.size(),
+                                    w.creator_block_sigs[j]))
+                    return fail(3, "record[" + std::to_string(i) + "]: invalid sig from '"
+                                 + w.creators[j] + "'");
+                ++signed_count;
+            }
+            if (signed_count < expected_k)
+                return fail(3, "record[" + std::to_string(i) + "]: insufficient sigs ("
+                             + std::to_string(signed_count) + "/" + std::to_string(expected_k) + ")");
+
+            std::vector<Hash> sig_hashes;
+            for (const auto& s : w.creator_block_sigs) {
+                if (s == zero_sig) continue;
+                crypto::SHA256Builder sb;
+                sb.append(s.data(), s.size());
+                sig_hashes.push_back(sb.finalize());
+            }
+            Hash sig_set_root = shardtip_view_root(sig_hashes);
+
+            crypto::SHA256Builder cb;
+            cb.append(std::string("determ-shardtip-v1"));
+            cb.append(static_cast<uint64_t>(rec.source_shard_id));
+            cb.append(static_cast<uint64_t>(w.index));
+            cb.append(static_cast<uint64_t>(w.eligible_count));
+            cb.append(static_cast<uint64_t>(region.size()));
+            cb.append(region);
+            cb.append(digest);
+            cb.append(sig_set_root);
+            Hash recomputed = cb.finalize();
+            if (recomputed != rec.committee_sig_root)
+                return fail(3, "record[" + std::to_string(i) + "]: committee_sig_root recomputed "
+                               "from the frozen-committee witness != carried record");
+
+            records_out.push_back({
+                {"index",             i},
+                {"source_shard_id",   rec.source_shard_id},
+                {"source_height",     rec.height},
+                {"source_epoch",      Es},
+                {"region",            region},
+                {"eligible_count",    rec.eligible_count},
+                {"committee_size",    expected_k},
+                {"sigs_verified",     signed_count},
+                {"consensus_mode",    is_bft ? "BFT" : "MD"},
+                {"committee_sig_root", to_hex(rec.committee_sig_root)},
+                {"verified",          true},
+            });
+        }
+
+        // 0 records = vacuously verified (an anti-silent-vacuity 0-count).
+        if (json_out) {
+            std::cout << json{
+                {"height",             height},
+                {"genesis_pin",        genesis_hash_hex},
+                {"committee_verified", true},
+                {"body_pinned",        true},
+                {"initial_shard_count", genesis.initial_shard_count},
+                {"records_total",      n_rec},
+                {"records_verified",   records_out.size()},
+                {"records",            records_out},
+                {"ok",                 true},
+            }.dump() << "\n";
+        } else {
+            std::cout << "verify-shardtip-records: OK — block " << height
+                      << " committee-verified + body-pinned; "
+                      << n_rec << " shard-tip record(s) "
+                      << (n_rec ? "re-verified against the frozen source committees"
+                                : "(none folded — vacuously verified)") << "\n";
+            for (auto& r : records_out)
+                std::cout << "  record[" << r["index"] << "] shard "
+                          << r["source_shard_id"] << " @ h" << r["source_height"]
+                          << " (epoch " << r["source_epoch"] << ", region '"
+                          << r["region"].get<std::string>() << "'): "
+                          << r["sigs_verified"] << "/" << r["committee_size"] << " frozen sigs, "
+                          << r["consensus_mode"].get<std::string>() << " — VERIFIED\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        return fail(1, e.what());
     }
 }
 
@@ -8256,6 +8699,7 @@ int main(int argc, char** argv) {
         if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
         if (cmd == "verify-ct-tx")          return cmd_verify_ct_tx(sub_argc, sub_argv);
         if (cmd == "verify-ct-block")       return cmd_verify_ct_block(sub_argc, sub_argv);
+        if (cmd == "verify-shardtip-records") return cmd_verify_shardtip_records(sub_argc, sub_argv);
         if (cmd == "verify-chain-file")     return cmd_verify_chain_file(sub_argc, sub_argv);
         if (cmd == "committee-diff")        return cmd_committee_diff(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);

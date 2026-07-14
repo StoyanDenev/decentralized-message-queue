@@ -4489,8 +4489,13 @@ json Node::rpc_state_proof(const std::string& ns,
         k.reserve(2 + composite.size());
         k.push_back('k'); k.push_back(':');
         k.insert(k.end(), composite.begin(), composite.end());
-    } else if (ns == "i" || ns == "m" || ns == "p") {
+    } else if (ns == "i" || ns == "m" || ns == "p" || ns == "cc" || ns == "t") {
         // Composite-key namespaces: `key` is the hex of the binary body.
+        // D3.5e-7e adds `cc` (epoch committee checkpoint, body = epoch_be8 →
+        // leaf "cc:"+epoch_be8) and `t` (shard-tip distress record, body =
+        // shard_be4 + height_be8 → leaf "t:"+shard_be4+height_be8) so the
+        // verify-shardtip-records auditor can PIN the frozen committee + a
+        // folded record against a committee-signed state_root.
         std::vector<uint8_t> body;
         try {
             body = from_hex(key);
@@ -4500,21 +4505,23 @@ json Node::rpc_state_proof(const std::string& ns,
         }
         // Enforce the exact body width so a malformed query can't silently
         // alias a different leaf (lengths per build_state_leaves).
-        const size_t want = (ns == "i") ? (8 + 32)   // src_be8 + tx_hash[32]
-                          : (ns == "m") ? 4           // shard_be4
-                                        : (8 + 4);    // eff_be8 + idx_be4
+        const size_t want = (ns == "i")  ? (8 + 32)   // src_be8 + tx_hash[32]
+                          : (ns == "m")  ? 4           // shard_be4
+                          : (ns == "p")  ? (8 + 4)     // eff_be8 + idx_be4
+                          : (ns == "cc") ? 8           // epoch_be8
+                                         : (4 + 8);    // t: shard_be4 + height_be8
         if (body.size() != want) {
             return {{"error", "composite key wrong length"},
                     {"namespace",      ns},
                     {"expected_bytes", want},
                     {"got_bytes",      body.size()}};
         }
-        k.reserve(2 + body.size());
-        k.push_back(ns[0]);
+        k.reserve(ns.size() + 1 + body.size());
+        k.insert(k.end(), ns.begin(), ns.end());   // "cc" is a 2-char prefix
         k.push_back(':');
         k.insert(k.end(), body.begin(), body.end());
     } else {
-        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|i|m|p"}};
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|i|m|p|cc|t"}};
     }
 
     auto proof_opt = chain_.state_proof(k);
@@ -4574,6 +4581,32 @@ json Node::rpc_state_proof(const std::string& ns,
         }
     }
     return resp;
+}
+
+json Node::rpc_cc_checkpoint(uint64_t epoch) const {
+    // D3.5e-7e / S-036: serve the cc:[epoch] frozen committee checkpoint
+    // CONTENT (the preimage of the cc: state leaf). Read-only; consensus-inert.
+    // The auditor treats this as UNTRUSTED daemon output and pins it: it
+    // recomputes SHA256(epoch_rand ‖ u64(members.size) ‖ per-member[
+    // u64(domain.size)‖domain‖ed_pub(32)‖u64(region.size)‖region]) — the exact
+    // build_state_leaves cc: value — and verifies the "cc"-namespace
+    // state_proof for this epoch against a committee-signed state_root.
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    const auto& ccs = chain_.committee_checkpoints();
+    auto it = ccs.find(epoch);
+    if (it == ccs.end()) {
+        return {{"error", "not_found"}, {"epoch", epoch},
+                {"retained_epochs", ccs.size()}};
+    }
+    json members = json::array();
+    for (const auto& m : it->second.members) {
+        members.push_back({{"domain", m.domain},
+                           {"ed_pub", to_hex(m.ed_pub)},
+                           {"region", m.region}});
+    }
+    return {{"epoch",      epoch},
+            {"epoch_rand", to_hex(it->second.epoch_rand)},
+            {"members",    std::move(members)}};
 }
 
 json Node::rpc_register() {

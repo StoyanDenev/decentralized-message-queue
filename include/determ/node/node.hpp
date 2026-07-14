@@ -319,6 +319,13 @@ public:
     //   (i/m/p) need composite keys and are not yet exposed by RPC.
     nlohmann::json rpc_state_proof(const std::string& ns,
                                        const std::string& key)      const;
+    // D3.5e-7e / S-036: the cc:[epoch] committee-checkpoint CONTENT read — the
+    // frozen epoch_rand + member list (domain/ed_pub/region) the auditor CLI
+    // needs to re-derive a past shard committee. UNTRUSTED on its own: the
+    // caller PINS it by recomputing the cc: leaf hash from this preimage and
+    // verifying the "cc"-namespace state_proof against a committee-signed
+    // state_root (verify-shardtip-records does exactly that).
+    nlohmann::json rpc_cc_checkpoint(uint64_t epoch)                const;
     nlohmann::json rpc_stake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_unstake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_nonce(const std::string& domain)             const;

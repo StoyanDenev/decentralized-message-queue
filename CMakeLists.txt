@@ -331,6 +331,9 @@ add_executable(determ-light
   src/crypto/merkle.cpp
   src/crypto/keys.cpp
   src/crypto/sha256.cpp
+  src/crypto/random.cpp          # D3.5e-7e: epoch_committee_seed + select_m_creators
+                                 # (the verify-shardtip-records committee re-derivation;
+                                 # standalone — deps are sha256 + <algorithm> only)
   src/crypto/pqauth.cpp          # §3.21 DPQ1 PQ tx-auth envelope (determ::pqauth)
   src/crypto/pq_address.cpp      # §3.21 PQ-native bearer address (pq-address / pq-transfer)
   src/chain/block.cpp
