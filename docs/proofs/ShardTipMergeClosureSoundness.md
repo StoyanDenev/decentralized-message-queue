@@ -411,7 +411,7 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   (frozen `cc:[shard_epoch]` pool + genesis-committed region map + committed epoch rand
   + frozen ed_pubs), NO cross-chain protocol and NO per-shard trust root (see
   `ShardTipMergeDesign.md` §9.6, rewritten). **Shipped so far, all byte-neutral, FAST
-  228/0 both platforms:** D3.5e-1 genesis-committed `beacon_shard_regions` map
+  230/0 both platforms:** D3.5e-1 genesis-committed `beacon_shard_regions` map
   (`e488a73`); D3.5e-2 the map authoritative at beacon load (`97d4236`); D3.5e-3 the
   shard-side epoch-rand off-by-one seam repair (`c319ce5`); D3.5e-4 the `on_shard_tip`
   verdict pin onto frozen committed state (`80d3d97`); D3.5e-6 the `source_shard_id`
@@ -420,12 +420,25 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   `on_shard_tip` rejecting any tip whose signed source shard != the claimed gossip shard,
   closing the same-region cross-shard tip replay (two shards in one `committee_region`
   share the beacon-derived committee); 3-lens adversarial review CLEAN (byte-neutrality +
-  replay-soundness SOUND + mirror-parity). **Remaining:** e-5 the first live gate (a beacon
-  verifying a shard tip across an epoch boundary — the empirical validation of e-3+e-4+e-6),
-  e-7 the witness-carrying fold re-verification (the actual CLOSED-maker: every honest full
-  node re-verifies each folded record against committed `cc:` state on gossip-apply) +
-  auditor CLI, e-8 the flip. Until e-8, `docs/SECURITY.md` §S-036 stays **STRONGLY
-  MITIGATED**; do not flip it to CLOSED on this document.
+  replay-soundness SOUND + mirror-parity). **D3.5e-7a…e-7d — the actual CLOSED-maker at the
+  node level (SHIPPED):** the chain.cpp fold accepted `ShardTipRecord`s UNCONDITIONALLY, so a
+  fully-Byzantine K-of-K beacon could commit fabricated distress records network-wide without
+  ever calling `on_shard_tip`. e-7a a dormant full-tip `ShardTipWitness` schema; e-7b the
+  shared verify core `verify_shard_tip_committee_sig_root` (`src/node/shardtip_verify.cpp`,
+  extracted VERBATIM from `on_shard_tip`); e-7c the producer emission gate; e-7d the UNIVERSAL
+  validator gate `check_shardtip_witnesses` — every honest node re-verifies each folded record
+  against the beacon's OWN committed `cc:[E_source]` at block-accept before `apply` folds it, so
+  a fabricated record's block is rejected network-wide (`test-shardtip-witness-verify`, 15
+  assertions, 12 fabrication axes; adversarial review found + fixed a HIGH BFT-quorum bypass —
+  the mode-eligibility gate folded INTO the shared helper). **D3.5e-7e — the light-client trust
+  residual (SHIPPED, `752d356`):** `determ-light verify-shardtip-records` re-runs
+  `check_shardtip_witnesses` off an UNTRUSTED daemon (ANCHOR + BODY-PIN + CC-PIN the `cc:[E]`
+  checkpoint to a committee-signed root + frozen-committee witness re-verify), so a third party
+  can trustlessly refute a fabricated fold; adversarial review found + fixed a HIGH F-6-class
+  epoch-substitution (CC-PIN now binds `key_bytes`, not just `value_hash`). **Remaining:** e-5
+  the first live gate (a beacon verifying a shard tip across an epoch boundary — the empirical
+  validation of the whole ladder), then e-7f the flip. Until e-7f, `docs/SECURITY.md` §S-036
+  stays **STRONGLY MITIGATED**; do not flip it to CLOSED on this document.
 - **`revert_threshold_blocks` ring depth vs. window.** STMC-5's fail-close on a
   window predating the retained ring is *correct* (an unprovable window is rejected),
   but this document does not argue that the ring depth (default 200) *suffices* to
