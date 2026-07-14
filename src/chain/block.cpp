@@ -428,6 +428,14 @@ std::vector<uint8_t> Block::signing_bytes() const {
     // to u64 to match the canonical field encoding used in the digest mirrors.
     if (eligible_count != 0) {
         b.append(static_cast<uint64_t>(eligible_count));
+        // D3.5e-6 / S-036: bind the SOURCE SHARD IDENTITY into block identity too,
+        // riding the same EXTENDED-source gate (eligible_count != 0 fires for every
+        // produced source block incl. shard 0). Keeps the block hash in lockstep
+        // with the K-of-K digest (producer.cpp compute_block_digest) so a tip that
+        // is replayed under a different claimed shard has both a mismatched signed
+        // digest AND a distinct block identity. Field order: …, eligible_count,
+        // source_shard_id.
+        b.append(static_cast<uint64_t>(source_shard_id));
     }
 
     // D3.5a / S-036: bind the shard-tip-record set into the block hash ONLY when
@@ -616,8 +624,16 @@ json Block::to_json() const {
     // D3.4 / S-036: serialize eligible_count only when non-zero (zero = the
     // SINGLE/CURRENT/BEACON default — omitted, byte-identical JSON). A produced
     // SHARD block always carries >= K >= 1, so zero unambiguously means absent.
-    if (eligible_count != 0)
+    if (eligible_count != 0) {
         j["eligible_count"] = eligible_count;
+        // D3.5e-6 / S-036: serialize source_shard_id under the SAME gate so a
+        // reloaded/gossiped EXTENDED source block reconstructs the exact
+        // digest-bound value. Coupled to eligible_count (never source_shard_id != 0)
+        // because shard 0's legitimate source_shard_id is 0 yet must round-trip;
+        // conversely a non-EXTENDED block (eligible_count == 0) omits it and stays
+        // byte-identical regardless of any in-memory shard id.
+        j["source_shard_id"] = source_shard_id;
+    }
     // D3.5a / S-036: serialize the shard-tip-record set only when non-empty (each
     // element the hex of its canonical D3.1 encode()); omitted ⇒ byte-identical JSON.
     if (!shard_tip_records.empty()) {
@@ -796,6 +812,17 @@ Block Block::from_json(const json& j) {
         if (ec > 0xFFFFFFFFull)
             throw std::runtime_error("block.eligible_count out of u32 range");
         b.eligible_count = static_cast<uint32_t>(ec);
+    }
+    // D3.5e-6 / S-036: parse source_shard_id when present (u32; absent = zero).
+    // Fail closed on an out-of-range value rather than truncating into a different
+    // shard id that could spoof a region-mate tip. Independent of eligible_count on
+    // the parse side (a hand-authored JSON may carry either), but the two are
+    // emitted together by to_json and bound together by the digest/hash.
+    if (j.contains("source_shard_id")) {
+        uint64_t sid = json_require<uint64_t>(j, "source_shard_id");
+        if (sid > 0xFFFFFFFFull)
+            throw std::runtime_error("block.source_shard_id out of u32 range");
+        b.source_shard_id = static_cast<uint32_t>(sid);
     }
     // D3.5a / S-036: parse the shard-tip-record set (hex of each canonical encode()).
     // Fail closed on a malformed / over-long record rather than silently dropping it.

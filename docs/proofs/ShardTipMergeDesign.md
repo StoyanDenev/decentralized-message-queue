@@ -805,10 +805,24 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     `verified shard tip` at epoch>=1, 8-12 runs both platforms. e-1..e-4 are byte-neutral because NO
     shipped test drives a BEACON+EXTENDED node across an epoch boundary receiving tips — e-5 is the
     first, so it is the empirical validation of the whole frozen-verdict path (correctness already
-    established by the per-increment adversarial reviews). → e-6 source digest binding
-    (EXTENDED-golden re-bless) → e-7 witness fold re-verification + auditor CLI + the pre-existing
-    refugee/absorbed-shard pool-extension gap in `on_shard_tip` (full 3-lens review) → e-8
-    docs/proofs/flip
+    established by the per-increment adversarial reviews).
+    **D3.5e-6 ✅ SHIPPED** the SOURCE DIGEST BINDING — new `Block::source_shard_id` (u32) bound into
+    the K-of-K signed digest (producer `compute_block_digest`) + block hash (`signing_bytes`) + light
+    mirror (`light_compute_block_digest`), all riding the D3.4 `eligible_count != 0` gate (so shard 0's
+    legitimate id 0 still binds; the gate is EXACTLY "EXTENDED source block" since
+    `current_source_eligible_count` is non-zero iff `chain_role==SHARD && sharding_mode==EXTENDED`);
+    populated in `build_body` from `chain.my_shard_id()` (== `cfg_.shard_id` == the broadcast `sid`, so
+    a legit tip never self-rejects); `on_shard_tip` REJECTS any tip whose signed `source_shard_id` !=
+    the claimed gossip shard id — closing the same-region cross-shard tip replay (two shards in one
+    `committee_region` share the beacon-derived pool, so a region-mate's signed tip would otherwise
+    verify byte-for-byte). Byte-neutral for every non-EXTENDED block (FAST **228/0 both platforms**; the
+    static parity token `test_block_digest_xbinary_parity.sh` gains SOURCE_SHARD_ID and stays producer
+    == light; EXTENDED clusters `test_extended_epoch_committee` + `test_zero_trust_cross_chain` still
+    reach consensus on the re-blessed digest); `test-eligible-count` +10 assertions (coupling / replay
+    closure / shard-0 / range). 3-lens adversarial review (byte-neutrality + mirror-parity +
+    replay-soundness). → e-7 witness fold re-verification + auditor CLI + the pre-existing
+    refugee/absorbed-shard pool-extension gap in `on_shard_tip` (full 3-lens review) → e-5 the live
+    epoch-boundary tip-verification gate → e-8 docs/proofs/flip
     (STMC-8/-9; SECURITY.md S-036 → CLOSED with the fine print: DENIED = a fully-Byzantine K-of-K
     beacon committee can no longer commit fabricated distress network-wide; RESIDUALS = beacon
     Sybil/key-compromise of the derived committee itself, beacon omission/censorship power

@@ -414,13 +414,18 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   228/0 both platforms:** D3.5e-1 genesis-committed `beacon_shard_regions` map
   (`e488a73`); D3.5e-2 the map authoritative at beacon load (`97d4236`); D3.5e-3 the
   shard-side epoch-rand off-by-one seam repair (`c319ce5`); D3.5e-4 the `on_shard_tip`
-  verdict pin onto frozen committed state (`80d3d97`). **Remaining:** e-5 the first live
-  gate (a beacon verifying a shard tip across an epoch boundary — the empirical
-  validation of e-3+e-4), e-6 `source_shard_id` digest binding, e-7 the witness-carrying
-  fold re-verification (the actual CLOSED-maker: every honest full node re-verifies each
-  folded record against committed `cc:` state on gossip-apply) + auditor CLI, e-8 the
-  flip. Until e-8, `docs/SECURITY.md` §S-036 stays **STRONGLY MITIGATED**; do not flip it
-  to CLOSED on this document.
+  verdict pin onto frozen committed state (`80d3d97`); D3.5e-6 the `source_shard_id`
+  digest binding — a new K-of-K-signed `Block::source_shard_id` (bound across the three
+  digest mirrors + block hash + JSON round-trip under the `eligible_count != 0` gate) with
+  `on_shard_tip` rejecting any tip whose signed source shard != the claimed gossip shard,
+  closing the same-region cross-shard tip replay (two shards in one `committee_region`
+  share the beacon-derived committee); 3-lens adversarial review CLEAN (byte-neutrality +
+  replay-soundness SOUND + mirror-parity). **Remaining:** e-5 the first live gate (a beacon
+  verifying a shard tip across an epoch boundary — the empirical validation of e-3+e-4+e-6),
+  e-7 the witness-carrying fold re-verification (the actual CLOSED-maker: every honest full
+  node re-verifies each folded record against committed `cc:` state on gossip-apply) +
+  auditor CLI, e-8 the flip. Until e-8, `docs/SECURITY.md` §S-036 stays **STRONGLY
+  MITIGATED**; do not flip it to CLOSED on this document.
 - **`revert_threshold_blocks` ring depth vs. window.** STMC-5's fail-close on a
   window predating the retained ring is *correct* (an unprovable window is rejected),
   but this document does not argue that the ring depth (default 200) *suffices* to

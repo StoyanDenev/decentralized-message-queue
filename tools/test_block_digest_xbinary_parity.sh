@@ -116,7 +116,10 @@ cd "$(dirname "$0")/.."
 # bound when non-zero — §S-036). D3.5a (2026-07-13): + the trailing conditional
 # SHARD_TIP_RECORDS (the beacon's shard-tip-record set root, bound when non-empty
 # — §S-036; 18 tokens).
-PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT SHARD_TIP_RECORDS"
+# D3.5e-6 (2026-07-14): + SOURCE_SHARD_ID (the producing shard's identity, bound
+# alongside ELIGIBLE_COUNT under the same EXTENDED-source gate — §S-036 Layer 2;
+# closes same-region cross-shard tip replay; 19 tokens).
+PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT SOURCE_SHARD_ID SHARD_TIP_RECORDS"
 LIGHT_SEQ="$PRODUCER_SEQ"
 # The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
@@ -191,6 +194,10 @@ extract_tokens() {
       # D3.4 §S-036: the source shard eligible_count self-report (bound when
       # non-zero; widened to u64 to match the canonical field encoding).
       else if (line ~ /\.append\(static_cast<uint64_t>\(b\.eligible_count\)\)/) print "ELIGIBLE_COUNT"
+      # D3.5e-6 §S-036: the source shard identity, bound alongside eligible_count
+      # under the SAME EXTENDED-source gate (u64-widened to match). Closes the
+      # same-region cross-shard tip replay.
+      else if (line ~ /\.append\(static_cast<uint64_t>\(b\.source_shard_id\)\)/) print "SOURCE_SHARD_ID"
 
       # Any unclassified append inside the body is drift — surface it.
       else if (line ~ /\.append\(/) print "APPEND_UNKNOWN"
@@ -334,6 +341,7 @@ Hash compute_block_digest(const Block& b) {
     }
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+        h.append(static_cast<uint64_t>(b.source_shard_id));
     }
     if (!b.shard_tip_records.empty()) {
         std::vector<Hash> tkeys;
@@ -388,6 +396,7 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     }
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+        h.append(static_cast<uint64_t>(b.source_shard_id));
     }
     if (!b.shard_tip_records.empty()) {
         std::vector<Hash> tkeys;

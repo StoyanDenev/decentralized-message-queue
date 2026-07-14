@@ -238,7 +238,12 @@ inline Message make_beacon_header(const chain::Block& b) {
 }
 inline Message make_shard_tip(ShardId shard_id, const chain::Block& tip) {
     // Shard tip wrapped with its shard_id so the beacon can dispatch
-    // committee derivation correctly. Block itself doesn't carry shard_id.
+    // committee derivation correctly. The envelope `shard_id` is the
+    // DISPATCH key (which region's committee to select); as of D3.5e-6 the
+    // block ALSO carries a K-of-K-signed `source_shard_id` (tip.to_json emits
+    // it under the eligible_count gate), and on_shard_tip rejects any tip whose
+    // signed source_shard_id != this envelope shard_id — closing same-region
+    // cross-shard tip replay.
     return {MsgType::SHARD_TIP, {
         {"shard_id", shard_id},
         {"tip",      tip.to_json()}

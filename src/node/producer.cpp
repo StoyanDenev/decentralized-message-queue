@@ -792,9 +792,23 @@ Hash compute_block_digest(const Block& b) {
     // BEACON / pre-feature) appends nothing → byte-identical v1 digest. Widened
     // to u64 to match the canonical field encoding (light mirror identical).
     // Field order: inbound, eq, abort, partner_subset_hash, timestamp,
-    // signature_form, eligible_count.
+    // signature_form, eligible_count, source_shard_id.
+    //
+    // D3.5e-6 / S-036: bind the SOURCE SHARD IDENTITY into the same K-of-K signed
+    // digest, riding the eligible_count gate (a produced EXTENDED source block
+    // always has eligible_count >= K >= 1, so `eligible_count != 0` is the exact
+    // "this is an EXTENDED source block" discriminator — and it fires for shard 0
+    // too, whose source_shard_id is the legitimate value 0). Without this, two
+    // shards sharing a committee_region share the same beacon-derived committee, so
+    // a tip block signed by region R's committee for shard A verifies byte-for-byte
+    // as a tip for a region-mate shard B (on_shard_tip selects the pool by region,
+    // not shard) — a same-region cross-shard tip replay. Binding source_shard_id
+    // makes the committee attest WHICH shard it signed for; on_shard_tip then
+    // rejects any tip whose signed source_shard_id != the claimed shard. u64-widened
+    // to match eligible_count's encoding (all three digest mirrors identical).
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+        h.append(static_cast<uint64_t>(b.source_shard_id));
     }
     // D3.5a / S-036: bind the beacon's shard-tip-record set into the K-of-K signed
     // digest ONLY when non-empty, as ONE order-independent root over the per-record
@@ -938,6 +952,13 @@ Block build_body(
     // self-report (0 for SINGLE/CURRENT/BEACON → elided from JSON + digest,
     // block byte-identical). compute_block_digest binds it when non-zero.
     b.eligible_count      = eligible_count;
+    // D3.5e-6 / S-036: bind the producing shard's identity alongside eligible_count.
+    // Set ONLY when eligible_count is populated (an EXTENDED source block) so a
+    // non-EXTENDED block keeps source_shard_id == 0 = elided everywhere. my_shard_id()
+    // is the producer's own shard; for shard 0 the value is a legitimate 0 that the
+    // eligible_count != 0 gate still binds + serializes (see block.hpp).
+    if (eligible_count != 0)
+        b.source_shard_id = chain.my_shard_id();
 
     // Per-creator Phase-1 evidence in selection order.
     for (auto& c : contribs) {

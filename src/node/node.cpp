@@ -2014,6 +2014,22 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
         return;
     }
 
+    // D3.5e-6 (S-036 Layer 2): the SIGNED source-shard binding. The K-of-K sigs
+    // just verified cover compute_block_digest(tip), which binds tip.source_shard_id
+    // (eligible_count != 0 ⇒ EXTENDED source block, the D3.4/e-6 gate). Two shards
+    // sharing a committee_region share this exact beacon-derived pool, so a tip
+    // validly signed by region R's committee FOR shard A would otherwise verify
+    // byte-for-byte when gossiped under a region-mate shard B's id. Reject any tip
+    // whose committee-attested source_shard_id != the claimed gossip shard id. Gated
+    // on eligible_count != 0 so a CURRENT-multishard beacon's tips (eligible_count 0,
+    // source_shard_id unbound) stay byte-identical to pre-e6 behavior.
+    if (tip.eligible_count != 0 && tip.source_shard_id != shard_id) {
+        std::cerr << "[node] shard tip: signed source_shard_id ("
+                  << tip.source_shard_id << ") != claimed shard (" << shard_id
+                  << ") — cross-shard tip replay rejected\n";
+        return;
+    }
+
     latest_shard_tips_[shard_id] = tip;
 
     // D3.5d-ii (S-036 Layer 1): record the contemporaneously-verified tip into the

@@ -213,6 +213,11 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     // digest. Field order matches the node: ..., signature_form, eligible_count.
     if (b.eligible_count != 0) {
         h.append(static_cast<uint64_t>(b.eligible_count));
+        // D3.5e-6 / S-036: mirror producer.cpp's source_shard_id append so a light
+        // client re-derives the identical committee-signed digest for an EXTENDED
+        // source tip. source_shard_id survives the rpc_headers strip (it is a plain
+        // u32 block field), riding the same eligible_count gate.
+        h.append(static_cast<uint64_t>(b.source_shard_id));
     }
     // D3.5a / S-036: bind the shard-tip-record set when non-empty, exactly mirroring
     // producer.cpp::compute_block_digest — ONE order-independent root over the

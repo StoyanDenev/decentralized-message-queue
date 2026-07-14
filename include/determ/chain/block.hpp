@@ -685,6 +685,25 @@ struct Block {
     // beacon fold-in (D3.5) + MERGE_BEGIN admission (D3.6); D3.4 only binds it.
     uint32_t eligible_count{0};
 
+    // D3.5e-6 / S-036 (v2.11 Layer 2): the identity of the shard that PRODUCED this
+    // block, bound into the K-of-K signed digest so a committee attests WHICH shard
+    // it signed a tip for. Two shards sharing a `committee_region` share the same
+    // beacon-derived committee (the pool is region-keyed, D3.3b), so without this a
+    // tip signed by region R's committee for shard A verifies byte-for-byte as a tip
+    // for a region-mate shard B — a same-region cross-shard tip replay. on_shard_tip
+    // rejects any tip whose signed source_shard_id != the claimed gossip shard id.
+    //
+    // Set ONLY on a produced EXTENDED source block (chain.my_shard_id(), gated on
+    // eligible_count != 0 in build_body); 0 for SINGLE/CURRENT/BEACON/pre-feature.
+    // Bound + serialized under the SAME eligible_count != 0 gate as its D3.4 sibling
+    // — NOT `source_shard_id != 0`, because shard 0's legitimate id is 0 and must
+    // still round-trip and bind. A produced source block always has eligible_count
+    // >= K >= 1, so that gate is the exact "EXTENDED source block" discriminator and
+    // every non-source block stays byte-identical (elided from JSON + digest + hash).
+    // Bound into BOTH compute_block_digest (what the sigs cover) AND signing_bytes
+    // (block identity), mirroring the eligible_count / signature_form precedent.
+    uint32_t source_shard_id{0};
+
     // D3.5a / S-036 (v2.11): the beacon's per-block set of source-shard distress +
     // sparse-liveness attestations (D3.1 ShardTipRecord). A BEACON producer under
     // EXTENDED folds these into `t:` state leaves (D3.5b) so the MERGE_BEGIN

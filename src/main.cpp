@@ -40103,6 +40103,56 @@ int main(int argc, char** argv) {
                   "determinism: equal blocks -> identical digest (raw-bind safe)");
         }
 
+        // === 6. D3.5e-6 / S-036 Layer 2: source_shard_id binding, COUPLED to the
+        //        eligible_count != 0 gate (NOT source_shard_id != 0, so shard 0's
+        //        legitimate id still binds + round-trips). Closes the same-region
+        //        cross-shard tip replay: a tip signed by region R's committee for
+        //        shard A must not verify as a tip for a region-mate shard B. ===
+        {
+            // (a) COUPLING / byte-neutrality: source_shard_id is inert unless
+            //     eligible_count != 0 — a block with a stray source id but count 0
+            //     is hash-, digest- AND JSON-identical to the pre-e6 encoding.
+            Block z; z.index = 13; z.timestamp = 42;
+            Block zi = z; zi.source_shard_id = 7;    // stray id, count still 0
+            check(z.compute_hash() == zi.compute_hash(),
+                  "e6 couple: source_shard_id inert when eligible_count==0 (hash-identical)");
+            check(node::compute_block_digest(z) == node::compute_block_digest(zi),
+                  "e6 couple: source_shard_id inert when eligible_count==0 (digest-identical)");
+            check(!zi.to_json().contains("source_shard_id"),
+                  "e6 couple: source_shard_id ELIDED from JSON when eligible_count==0");
+
+            // (b) REPLAY CLOSURE: with eligible_count set, two EXTENDED source
+            //     blocks that differ ONLY in source_shard_id get DISTINCT digests
+            //     and hashes — a region-mate's signed tip cannot masquerade.
+            Block sa; sa.index = 13; sa.timestamp = 42; sa.eligible_count = 5; sa.source_shard_id = 0;
+            Block sb = sa; sb.source_shard_id = 3;
+            check(node::compute_block_digest(sa) != node::compute_block_digest(sb),
+                  "e6 replay: shard 0 vs shard 3 tips (same content) have DISTINCT signed digests");
+            check(sa.compute_hash() != sb.compute_hash(),
+                  "e6 replay: differing source_shard_id also yields DISTINCT block hashes");
+
+            // (c) SHARD 0 is a legitimate value under the count gate: it binds
+            //     (append 0) and round-trips — the reason the gate is eligible_count,
+            //     not source_shard_id.
+            check(node::compute_block_digest(sa) != node::compute_block_digest(z),
+                  "e6 shard0: an EXTENDED shard-0 block (count!=0) differs from a count-0 block");
+            json ja = sa.to_json();
+            check(ja.contains("source_shard_id") && ja["source_shard_id"] == 0,
+                  "e6 wire: shard-0 source id serialized under the count gate");
+            check(Block::from_json(ja).source_shard_id == 0,
+                  "e6 wire: shard-0 source id round-trips");
+            json jb = sb.to_json();
+            check(jb["source_shard_id"] == 3 && Block::from_json(jb).source_shard_id == 3,
+                  "e6 wire: non-zero source id serialized + round-trips");
+
+            // (d) RANGE guard: an out-of-u32 source id fails closed (never truncates
+            //     into a different shard that could spoof a region-mate).
+            json bad = jb; bad["source_shard_id"] = 0x100000000ull;
+            bool threw = false;
+            try { Block::from_json(bad); } catch (const std::exception&) { threw = true; }
+            check(threw, "e6 range: source_shard_id 2^32 rejected (would truncate)");
+        }
+
         std::cout << (fail ? "  FAIL: test-eligible-count\n"
                            : "  PASS: test-eligible-count\n");
         return fail ? 1 : 0;
