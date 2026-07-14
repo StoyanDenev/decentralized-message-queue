@@ -1051,6 +1051,13 @@ Additional in-process tests:
                                               exact size/region-len decode gates
                                               (the on-chain distress-attestation
                                               substrate; byte-neutral)
+  determ test-shardtip-witness-codec          D3.5e-7a (S-036): the shard-tip
+                                              WITNESS carrier codec — round-trip,
+                                              empty-elision byte-neutrality,
+                                              signing_bytes anti-strip (NOT
+                                              digest-bound), order-independence,
+                                              depth-1 leaf/DoS guard (dormant
+                                              schema)
   determ test-shard-tip-namespace             D3.2 (S-036): the t: SHARD_TIP
                                               distress-record state ring —
                                               state-root binding + bounded ring
@@ -11171,6 +11178,131 @@ int main(int argc, char** argv) {
                   << ": shard-tip-record "
                   << (fail == 0 ? "all assertions (D3.1)" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-shardtip-witness-codec") {
+        // D3.5e-7a (ShardTipMergeDesign.md §9.6 pt4): the shard-tip WITNESS carrier
+        // codec — DORMANT schema. Block::shard_tip_witnesses (full source tip Blocks,
+        // index-aligned to shard_tip_records) round-trips through JSON, binds into the
+        // block HASH (signing_bytes, anti-strip) but NOT the digest, is order-
+        // independent, elides when empty (byte-neutral), and enforces the depth-1
+        // leaf invariant (a witness carries neither witnesses nor records — the DoS +
+        // nesting guard). No producer/validator/fold touch at e-7a.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto make_rec = [](uint32_t sid, uint64_t h, uint32_t ec,
+                           uint8_t sig_fill, const std::string& region) {
+            ShardTipRecord r;
+            r.source_shard_id = sid; r.height = h; r.eligible_count = ec;
+            r.region = region;
+            for (auto& b : r.committee_sig_root) b = sig_fill;
+            return r;
+        };
+        // A plausible LEAF source tip: eligible_count!=0 (EXTENDED source) so it
+        // exercises the e-6 source_shard_id append too; empty records + witnesses.
+        auto make_leaf = [](uint64_t idx, uint32_t ssid, uint32_t ec) {
+            Block w; w.index = idx; w.timestamp = 100 + (int64_t)idx;
+            w.eligible_count = ec; w.source_shard_id = ssid;
+            w.creators = {"alice", "bob"};
+            for (auto& c : w.creators) (void)c;
+            return w;
+        };
+
+        Block beacon; beacon.index = 50; beacon.timestamp = 999;
+        beacon.shard_tip_records   = { make_rec(3, 12, 1, 0x11, "us-east"),
+                                       make_rec(5, 20, 2, 0x22, "eu-west") };
+        beacon.shard_tip_witnesses = { make_leaf(12, 3, 1), make_leaf(20, 5, 2) };
+
+        // === 1. round-trip preserves the witness set ===
+        {
+            json j = beacon.to_json();
+            check(j.contains("shard_tip_witnesses")
+                  && j["shard_tip_witnesses"].is_array()
+                  && j["shard_tip_witnesses"].size() == 2,
+                  "wire: 2 witnesses serialized as an array");
+            Block rt = Block::from_json(j);
+            check(rt.shard_tip_witnesses.size() == 2,
+                  "wire: witness count round-trips");
+            check(rt.shard_tip_witnesses.size() == 2
+                  && rt.shard_tip_witnesses[0].compute_hash() == beacon.shard_tip_witnesses[0].compute_hash()
+                  && rt.shard_tip_witnesses[1].compute_hash() == beacon.shard_tip_witnesses[1].compute_hash(),
+                  "wire: each witness Block round-trips byte-identically");
+            check(rt.compute_hash() == beacon.compute_hash(),
+                  "wire: the carrier block hash round-trips");
+        }
+
+        // === 2. empty-elision + byte-neutrality (dormant off the distress path) ===
+        {
+            Block plain; plain.index = 50; plain.timestamp = 999;
+            check(!plain.to_json().contains("shard_tip_witnesses"),
+                  "byteneutral: empty witnesses ELIDED from JSON");
+            Block plain2 = plain; plain2.shard_tip_witnesses.clear();
+            check(plain.compute_hash() == plain2.compute_hash(),
+                  "byteneutral: an empty witness vector adds nothing to the block hash");
+        }
+
+        // === 3. anti-strip binding (signing_bytes) — a stripped/forged/added witness
+        //        yields a DISTINCT block hash so no honest prev_hash chain commits it ===
+        {
+            Block stripped = beacon; stripped.shard_tip_witnesses.pop_back();
+            check(stripped.compute_hash() != beacon.compute_hash(),
+                  "antistrip: dropping a witness changes the block hash");
+            Block forged = beacon;
+            forged.shard_tip_witnesses[0].timestamp += 1;   // mutate a witness
+            check(forged.compute_hash() != beacon.compute_hash(),
+                  "antistrip: forging a witness changes the block hash");
+            Block added = beacon;
+            added.shard_tip_witnesses.push_back(make_leaf(99, 9, 3));
+            check(added.compute_hash() != beacon.compute_hash(),
+                  "antistrip: adding a witness changes the block hash");
+        }
+
+        // === 4. order-independence (set-based root) — swapping the aligned pairs
+        //        keeps the block hash identical ===
+        {
+            Block swapped; swapped.index = 50; swapped.timestamp = 999;
+            swapped.shard_tip_records   = { beacon.shard_tip_records[1],   beacon.shard_tip_records[0] };
+            swapped.shard_tip_witnesses = { beacon.shard_tip_witnesses[1], beacon.shard_tip_witnesses[0] };
+            check(swapped.compute_hash() == beacon.compute_hash(),
+                  "order: witness+record roots are order-independent (set-based)");
+        }
+
+        // === 5. NOT digest-bound — the witness set changes the hash but NOT the
+        //        committee-signed digest (the decisive layering choice) ===
+        {
+            Block nowit = beacon; nowit.shard_tip_witnesses.clear();
+            check(node::compute_block_digest(nowit) == node::compute_block_digest(beacon),
+                  "layering: witnesses do NOT change compute_block_digest (signing_bytes-only)");
+        }
+
+        // === 6. depth-1 LEAF guard — a witness carrying nested witnesses or its own
+        //        records is rejected at from_json (DoS + nesting closure) ===
+        {
+            json j = beacon.to_json();
+            json nested = j;
+            nested["shard_tip_witnesses"][0]["shard_tip_witnesses"]
+                = json::array({ make_leaf(1, 1, 1).to_json() });
+            bool threw = false;
+            try { Block::from_json(nested); } catch (const std::exception&) { threw = true; }
+            check(threw, "guard: a witness carrying nested shard_tip_witnesses is REJECTED (depth-1 DoS)");
+
+            json withrec = j;
+            auto enc = make_rec(1, 1, 1, 0x01, "r").encode();
+            withrec["shard_tip_witnesses"][0]["shard_tip_records"]
+                = json::array({ to_hex(enc.data(), enc.size()) });
+            bool threw2 = false;
+            try { Block::from_json(withrec); } catch (const std::exception&) { threw2 = true; }
+            check(threw2, "guard: a witness carrying its own shard_tip_records is REJECTED (leaf invariant)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-shardtip-witness-codec\n"
+                           : "  PASS: test-shardtip-witness-codec\n");
+        return fail ? 1 : 0;
     }
 
     if (cmd == "test-shard-tip-namespace") {

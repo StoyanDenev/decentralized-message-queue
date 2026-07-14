@@ -292,6 +292,21 @@ static Hash shard_tip_records_root(const std::vector<ShardTipRecord>& recs) {
     return b.finalize();
 }
 
+// D3.5e-7 / S-036: one order-independent root over the shard-tip WITNESS set, keyed
+// on each witness's full block identity (compute_hash). Bound into signing_bytes so a
+// relayer that strips/reorders/forges a witness yields a distinct block hash (the
+// anti-strip closure). Uses compute_hash — chain-lib-local, no node/digest dependency;
+// a witness is a leaf (empty shard_tip_witnesses) so its own signing_bytes skips this
+// append and the recursion terminates at depth ≤ 2. Callers skip the append on an
+// empty set, so the empty-set value is never used.
+static Hash shard_tip_witnesses_root(const std::vector<Block>& ws) {
+    std::set<Hash> keys;
+    for (auto& w : ws) keys.insert(w.compute_hash());
+    SHA256Builder b;
+    for (auto& k : keys) b.append(k);
+    return b.finalize();
+}
+
 std::vector<uint8_t> Block::signing_bytes() const {
     SHA256Builder b;
     b.append(static_cast<uint64_t>(index));
@@ -446,6 +461,18 @@ std::vector<uint8_t> Block::signing_bytes() const {
     // …, signature_form, eligible_count, shard_tip_records.
     if (!shard_tip_records.empty()) {
         b.append(shard_tip_records_root(shard_tip_records));
+    }
+
+    // D3.5e-7 / S-036: bind the shard-tip WITNESS set into the block hash ONLY when
+    // non-empty (same empty-skip pattern), as ONE order-independent root over each
+    // witness's compute_hash. This is the ANTI-STRIP closure — a relayer that
+    // strips/reorders/forges a witness yields a distinct block hash that no honest
+    // node's prev_hash chain commits to. NOT bound into compute_block_digest (the
+    // Byzantine-beacon-signed value is not the witness's trust anchor). Empty on
+    // every non-distress block ⇒ appends nothing ⇒ byte-identical. Field order (all
+    // last): …, eligible_count, source_shard_id, shard_tip_records, shard_tip_witnesses.
+    if (!shard_tip_witnesses.empty()) {
+        b.append(shard_tip_witnesses_root(shard_tip_witnesses));
     }
 
     Hash h = b.finalize();
@@ -644,11 +671,25 @@ json Block::to_json() const {
         }
         j["shard_tip_records"] = arr;
     }
+    // D3.5e-7 / S-036: serialize the shard-tip WITNESS set only when non-empty (each
+    // element the full source tip Block via its own to_json); omitted ⇒ byte-identical
+    // JSON. Index-aligned to shard_tip_records.
+    if (!shard_tip_witnesses.empty()) {
+        json arr = json::array();
+        for (auto& w : shard_tip_witnesses) arr.push_back(w.to_json());
+        j["shard_tip_witnesses"] = arr;
+    }
 
     return j;
 }
 
 Block Block::from_json(const json& j) {
+    // D3.5e-7: the public entry allows a beacon block to carry witnesses; each
+    // witness is a LEAF parsed with allow_witnesses=false (see the overload).
+    return Block::from_json(j, /*allow_witnesses=*/true);
+}
+
+Block Block::from_json(const json& j, bool allow_witnesses) {
     // S-018: required Block fields fetched through json_require<T> /
     // json_require_hex so a malformed BLOCK gossip message produces a
     // diagnostic naming the failing field. Optional fields keep the
@@ -831,6 +872,23 @@ Block Block::from_json(const json& j) {
             auto dec = ShardTipRecord::decode(from_hex(e.get<std::string>()));
             if (!dec) throw std::runtime_error("block.shard_tip_records: malformed record");
             b.shard_tip_records.push_back(*dec);
+        }
+    }
+    // D3.5e-7 / S-036: parse the shard-tip WITNESS set (each a full source tip
+    // Block). Depth-1 DoS guard: a witness is a LEAF — parsed with
+    // allow_witnesses=false so a nested `shard_tip_witnesses` throws BEFORE the
+    // recursive descent (bounds parse depth ≤ 2). Also reject a witness carrying its
+    // own records (only a beacon block folds records; a source tip never does).
+    if (j.contains("shard_tip_witnesses")) {
+        if (!allow_witnesses)
+            throw std::runtime_error(
+                "block.shard_tip_witnesses: a witness must be a leaf block (no nested witnesses)");
+        for (auto& e : json_require_array(j, "shard_tip_witnesses")) {
+            Block w = Block::from_json(e, /*allow_witnesses=*/false);
+            if (!w.shard_tip_records.empty())
+                throw std::runtime_error(
+                    "block.shard_tip_witnesses: a witness must carry empty shard_tip_records");
+            b.shard_tip_witnesses.push_back(std::move(w));
         }
     }
 

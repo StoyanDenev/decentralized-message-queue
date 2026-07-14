@@ -722,6 +722,38 @@ struct Block {
     // on_shard_tip, not re-derived at fold-in (§9.6, Layer 1).
     std::vector<ShardTipRecord> shard_tip_records;
 
+    // D3.5e-7 / S-036 (v2.11 Layer 2): the witness-carrying fold RE-VERIFICATION —
+    // the CLOSED-maker. Index-aligned 1:1 to `shard_tip_records`: each folded
+    // distress record MUST carry the FULL source tip Block that authenticates it, so
+    // every honest node (committee or not) can re-derive the expected source
+    // committee from the beacon's OWN committed `cc:[E_source]` checkpoint + the
+    // genesis shard→region map + the committed epoch rand, recompute
+    // compute_block_digest(witness) FROM THE PREIMAGE, cross-check the
+    // height/source_shard_id/eligible_count bindings INSIDE it (a witness of only
+    // (digest,sigs) would let a genuine HEALTHY digest be reused under a fabricated
+    // distress count), verify the K-of-K sigs against FROZEN ed_pubs, and recompute
+    // `committee_sig_root` == rec.committee_sig_root. Without this a fully-Byzantine
+    // K-of-K BEACON committee fabricates distress records WITHOUT ever calling
+    // on_shard_tip; pinning on_shard_tip's inputs (e-1..e-6) denies that adversary
+    // nothing. The witness is the whole Block (not a header subset) so the
+    // re-verifier calls compute_block_digest VERBATIM — a subset would silently drop
+    // a digest GATE VECTOR (creator_view_eq_roots / creator_view_abort_roots /
+    // creator_proposer_times) and diverge. A witness is a LEAF: it MUST carry empty
+    // shard_tip_records AND empty shard_tip_witnesses (from_json + the validator
+    // enforce depth-1; the nesting guard also bounds a parse-recursion DoS).
+    //
+    // Bound into the block HASH (signing_bytes) ONLY — one order-independent root
+    // over each witness's compute_hash() — NOT into compute_block_digest: the digest
+    // is what the (potentially Byzantine) BEACON signs, so it is not the witness's
+    // trust anchor (the SOURCE committee sigs INSIDE the witness are); hash-binding
+    // is equivalent anti-strip (a stripped/forged witness changes compute_hash → the
+    // block fails its gossiped identity / the next block's prev_hash), and it needs
+    // NO light-mirror or digest-parity-token change. DORMANT until e-7c populates it:
+    // empty ⇒ elided from JSON + zero append in signing_bytes ⇒ every
+    // SINGLE/CURRENT/BEACON/non-distress block is byte-identical. Only a BEACON
+    // producer under EXTENDED carrying a non-empty shard_tip_records sets it.
+    std::vector<Block> shard_tip_witnesses;
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;
@@ -731,6 +763,11 @@ struct Block {
 
     nlohmann::json to_json() const;
     static Block   from_json(const nlohmann::json& j);
+    // D3.5e-7: internal overload. A carried witness is a LEAF block; the public
+    // entry allows witnesses, but each witness is parsed with allow_witnesses=false
+    // so a nested `shard_tip_witnesses` throws BEFORE the recursive descent — this
+    // bounds parse depth at ≤ 2 and blocks a recursion/size DoS.
+    static Block   from_json(const nlohmann::json& j, bool allow_witnesses);
 };
 
 } // namespace determ::chain

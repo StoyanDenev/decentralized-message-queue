@@ -222,6 +222,14 @@ target_link_libraries(determ PRIVATE
 
 if(WIN32)
   target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
+  if(MSVC)
+    # src/main.cpp is the single-TU dispatcher: hundreds of mutually-exclusive
+    # `if (cmd == ...)` test/CLI branches in one object file. It has crossed the
+    # COFF per-object section limit (C1128) as the S-036 suite grew; /bigobj lifts
+    # the 2^16 section cap to 2^32. Compile-only, zero codegen/ABI effect —
+    # production bytes + all goldens are unchanged (GCC has no such limit).
+    target_compile_options(determ PRIVATE /bigobj)
+  endif()
   # MSVC defaults to a 1 MB stack; the in-process test handlers
   # (test-atomic-scope, test-overflow-paths, test-time-monotonicity,
   # test-chain-prev-hash-link, test-state-root-determinism, etc.)
