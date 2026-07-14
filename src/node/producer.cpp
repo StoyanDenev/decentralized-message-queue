@@ -941,7 +941,8 @@ Block build_body(
     const std::vector<CrossShardReceipt>& inbound_receipts,
     const std::vector<Hash>&              ordered_secrets,
     uint32_t                              eligible_count,
-    const std::vector<chain::ShardTipRecord>& shard_tip_candidates) {
+    const std::vector<chain::ShardTipRecord>& shard_tip_candidates,
+    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
@@ -1267,7 +1268,28 @@ Block build_body(
             if (!st_intersection.count(hash_shard_tip(rec))) continue;
             if (chain.shard_tip_records().count({rec.source_shard_id, rec.height}))
                 continue;
+            // D3.5e-7c / S-036 Layer 2: attach the record's WITNESS (the full source
+            // tip Block) index-aligned. A record whose witness is MISSING, NON-LEAF,
+            // or MISMATCHED against the record's own fields is DROPPED — an
+            // unwitnessable record must never fold (every honest e-7d validator
+            // would reject the whole block, and a non-leaf witness would make the
+            // block unparseable at from_json). None of these can fire for the real
+            // caller (on_shard_tip buffers record + leaf-guarded witness atomically
+            // under one key); they are fail-safe guards for a drifted/legacy caller.
+            // Dropping keeps the set ⊆ the committee intersection, so the e-7d
+            // ⊆-reconciliation twin still accepts. Witnesses stay index-aligned to
+            // shard_tip_records by pushing both under the same condition.
+            auto wit = shard_tip_witnesses.find({rec.source_shard_id, rec.height});
+            if (wit == shard_tip_witnesses.end()) continue;
+            const chain::Block& w = wit->second;
+            if (!w.shard_tip_records.empty() || !w.shard_tip_witnesses.empty())
+                continue;                                    // non-leaf: never carry
+            if (w.index != rec.height
+                || w.source_shard_id != rec.source_shard_id
+                || w.eligible_count  != rec.eligible_count)
+                continue;                                    // mismatched pair
             b.shard_tip_records.push_back(rec);
+            b.shard_tip_witnesses.push_back(w);
         }
     }
 

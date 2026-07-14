@@ -764,6 +764,20 @@ private:
     std::map<std::pair<ShardId, uint64_t>, chain::ShardTipRecord>
         pending_shard_tip_records_;
 
+    // D3.5e-7c (S-036 Layer 2): the WITNESS buffer — the full source tip Block behind
+    // each pending record, written ATOMICALLY beside pending_shard_tip_records_ in
+    // on_shard_tip (same key, same prune), so every candidate record this beacon can
+    // fold has its authenticating witness materializable at build_body. The witness
+    // is what the e-7 universal re-verification (check_shardtip_witnesses) re-derives
+    // the frozen source committee against — without it a folded record is a bare
+    // beacon self-assertion (the S-036 hole). A buffered tip is a LEAF by the
+    // on_shard_tip guard (empty shard_tip_records + shard_tip_witnesses — a source
+    // tip never folds), so a carried witness can never poison the beacon block's
+    // own wire parse (the from_json depth-1 guard). In-memory node state, never
+    // snapshotted (the CARRIED witness in the block is the durable copy).
+    std::map<std::pair<ShardId, uint64_t>, chain::Block>
+        pending_shard_tip_witnesses_;
+
     // D3.5d-ii: the PER-ROUND frozen snapshot of the eligible shard-tip candidates,
     // taken ONCE at Phase-1 (start_contrib) and reused at every build_body site this
     // round (start_block_sig_phase, try_finalize_round, on_block_sig_locked). Because
@@ -775,6 +789,14 @@ private:
     // signed view ⊇ the committee intersection, so every co-signer folds the
     // identical full intersection. Empty on every non-BEACON / non-EXTENDED node.
     std::vector<chain::ShardTipRecord> round_shard_tip_candidates_;
+
+    // D3.5e-7c: the aligned PER-ROUND witness snapshot — the witnesses for exactly
+    // this round's candidates, frozen at the same Phase-1 instant (same wedge
+    // rationale as round_shard_tip_candidates_). build_body attaches these
+    // index-aligned to the reconciled shard_tip_records; a record whose witness is
+    // missing is DROPPED (fail-safe: an unwitnessable record is never folded —
+    // cannot fire in practice since record+witness are written atomically).
+    std::map<std::pair<ShardId, uint64_t>, chain::Block> round_shard_tip_witnesses_;
 
     // §minix net::Timer seam — the deadline timers are net::LoopTimer over
     // the (possibly injected) event loop. Timers are pure scheduling (not

@@ -11902,13 +11902,31 @@ int main(int argc, char** argv) {
             return node::make_contrib(k, dom, chain.height(), prev, 0, txs, dh,
                                        {}, {}, {}, 0, st);
         };
-        auto do_build = [&](const std::vector<node::ContribMsg>& contribs,
-                            const std::vector<ShardTipRecord>& candidates) {
+        // D3.5e-7c: each candidate record needs its aligned WITNESS (the full source
+        // tip Block) or build_body DROPS it (an unwitnessable record must never
+        // fold). mkwit builds the leaf tip a record would have been derived from
+        // (index=height, source_shard_id, eligible_count — the alignment fields).
+        auto mkwit = [](const ShardTipRecord& r) {
+            Block w; w.index = r.height; w.timestamp = 7;
+            w.source_shard_id = r.source_shard_id;
+            w.eligible_count  = r.eligible_count;
+            return w;
+        };
+        auto do_build_w = [&](const std::vector<node::ContribMsg>& contribs,
+                              const std::vector<ShardTipRecord>& candidates,
+                              const std::map<std::pair<ShardId, uint64_t>, Block>& wits) {
             std::map<Hash, Transaction> store;
             std::vector<std::string> doms = {"n1", "n2", "n3"};
             return node::build_body(store, chain, {}, doms, contribs, Hash{}, 3,
                                      ConsensusMode::MUTUAL_DISTRUST, "", {}, {}, {},
-                                     0, candidates);
+                                     0, candidates, wits);
+        };
+        auto do_build = [&](const std::vector<node::ContribMsg>& contribs,
+                            const std::vector<ShardTipRecord>& candidates) {
+            std::map<std::pair<ShardId, uint64_t>, Block> wits;
+            for (auto& r : candidates)
+                wits[{r.source_shard_id, r.height}] = mkwit(r);
+            return do_build_w(contribs, candidates, wits);
         };
         auto folded_has = [&](const Block& b, const ShardTipRecord& r) {
             for (auto& x : b.shard_tip_records)
@@ -11949,6 +11967,56 @@ int main(int argc, char** argv) {
             Block b = do_build(cs, all);
             check(b.shard_tip_records.empty(),
                   "one empty view empties the intersection (fail-closed)");
+        }
+
+        // --- D3.5e-7c: the WITNESS attach — every folded record carries its full
+        //     source tip Block index-aligned; an unwitnessable record never folds ---
+        {   // unanimous + witnesses → 3 records with 3 ALIGNED witnesses
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build(cs, all);
+            bool aligned = b.shard_tip_witnesses.size() == b.shard_tip_records.size();
+            for (size_t i = 0; aligned && i < b.shard_tip_records.size(); ++i) {
+                aligned = b.shard_tip_witnesses[i].index == b.shard_tip_records[i].height
+                       && b.shard_tip_witnesses[i].source_shard_id
+                              == b.shard_tip_records[i].source_shard_id
+                       && b.shard_tip_witnesses[i].eligible_count
+                              == b.shard_tip_records[i].eligible_count;
+            }
+            check(b.shard_tip_records.size() == 3 && aligned,
+                  "e7c: every folded record carries its INDEX-ALIGNED witness (3/3)");
+        }
+        {   // NO witnesses supplied → nothing folds (fail-safe, never fail-open)
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build_w(cs, all, {});
+            check(b.shard_tip_records.empty() && b.shard_tip_witnesses.empty(),
+                  "e7c: a record with NO witness is DROPPED (unwitnessable never folds)");
+        }
+        {   // a MISMATCHED witness (forged eligible_count) → that record dropped
+            std::map<std::pair<ShardId, uint64_t>, Block> wits;
+            for (auto& r : all) wits[{r.source_shard_id, r.height}] = mkwit(r);
+            wits[{r2.source_shard_id, r2.height}].eligible_count += 5;   // drift r2's pair
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build_w(cs, all, wits);
+            check(folded_has(b, r1) && !folded_has(b, r2) && folded_has(b, r3)
+                      && b.shard_tip_witnesses.size() == 2,
+                  "e7c: a MISMATCHED record/witness pair is DROPPED (others fold)");
+        }
+        {   // a NON-LEAF witness (carries its own records) → dropped, never carried
+            std::map<std::pair<ShardId, uint64_t>, Block> wits;
+            for (auto& r : all) wits[{r.source_shard_id, r.height}] = mkwit(r);
+            wits[{r1.source_shard_id, r1.height}].shard_tip_records.push_back(r3);
+            std::vector<node::ContribMsg> cs = {
+                mk_contrib(k1, "n1", all), mk_contrib(k2, "n2", all),
+                mk_contrib(k3, "n3", all) };
+            Block b = do_build_w(cs, all, wits);
+            check(!folded_has(b, r1) && folded_has(b, r2) && folded_has(b, r3),
+                  "e7c: a NON-LEAF witness is never carried (its record is dropped)");
         }
 
         // --- committee_sig_root pure-function property (the on_shard_tip formula,

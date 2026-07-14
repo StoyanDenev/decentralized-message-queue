@@ -472,6 +472,16 @@ chain::Block build_body(
     // hash lies in reconcile_intersection(creator_view_shardtip_lists) — the
     // committee-wide agreed set — into Block::shard_tip_records. Empty (the default;
     // every non-BEACON / non-EXTENDED caller) → no fold → block byte-identical.
-    const std::vector<chain::ShardTipRecord>& shard_tip_candidates = {});
+    const std::vector<chain::ShardTipRecord>& shard_tip_candidates = {},
+    // D3.5e-7c / S-036 Layer 2: the witnesses for the candidates, keyed by
+    // (source_shard_id, height) — the Node's round_shard_tip_witnesses_ snapshot.
+    // For each reconciled record build_body attaches the aligned full-tip witness
+    // into Block::shard_tip_witnesses; a record whose witness is MISSING, NON-LEAF,
+    // or MISMATCHED (index/source/eligible_count) is DROPPED — an unwitnessable
+    // record must never fold (every honest e-7d validator would reject the block;
+    // cannot fire in practice: record + witness are buffered atomically in
+    // on_shard_tip). Empty by default → any legacy caller folding records without
+    // witnesses folds NOTHING (fail-safe, not fail-open).
+    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses = {});
 
 } // namespace determ::node

@@ -1112,6 +1112,17 @@ void Node::start_contrib_phase() {
     // intersection ⊆ this node's signed view == its candidate set, and the fold
     // (intersection ∩ candidates == intersection) is identical across co-signers.
     round_shard_tip_candidates_ = shard_tip_records_eligible_for_inclusion();
+    // D3.5e-7c: freeze the aligned WITNESSES for this round's candidates at the same
+    // Phase-1 instant (the same anti-wedge rationale as the candidate snapshot —
+    // pending_shard_tip_witnesses_ is pruned asynchronously by on_shard_tip
+    // mid-round). Every candidate has its witness by construction (record + witness
+    // are written atomically under one key in on_shard_tip).
+    round_shard_tip_witnesses_.clear();
+    for (const auto& rec : round_shard_tip_candidates_) {
+        auto wit = pending_shard_tip_witnesses_.find({rec.source_shard_id, rec.height});
+        if (wit != pending_shard_tip_witnesses_.end())
+            round_shard_tip_witnesses_[wit->first] = wit->second;
+    }
     std::vector<Hash> f2_shardtip_view;
     {
         f2_shardtip_view.reserve(round_shard_tip_candidates_.size());
@@ -1231,9 +1242,28 @@ Node::shard_tip_records_eligible_for_inclusion() const {
     // future additive refinement; it does not affect safety.) Records are returned
     // in (source_shard_id, height) map order → canonical.
     const uint64_t distress_threshold = 2ull * cfg_.k_block_sigs;
-    for (auto& kv : pending_shard_tip_records_)
-        if (kv.second.eligible_count < distress_threshold)
-            out.push_back(kv.second);
+    for (auto& kv : pending_shard_tip_records_) {
+        if (kv.second.eligible_count >= distress_threshold) continue;
+        // D3.5e-7c producer emission gate (the honest-beacon self-stall fix): only
+        // fold a record whose SOURCE epoch has a pinned `cc:[E_s]` checkpoint — the
+        // exact precondition the e-7d universal witness re-verification requires.
+        // Epoch-0 / cc-pruned records are unwitnessable (their committee cannot be
+        // re-derived from committed state; the D3.6 fail-closed posture) so an
+        // honest beacon must never fold them, else every honest validator rejects
+        // its block. Producer (building H, head H−1) and validator (validating H,
+        // head H−1) evaluate committee_pin_active over the IDENTICAL committed
+        // prefix → they agree by construction → no self-stall, no fork. A skipped
+        // DISTRESS record stays buffered and is re-considered every round; the
+        // on_shard_tip prune RETAINS it past the W window until its epoch pins or
+        // becomes hopeless (ring-evicted / >ring ahead — the fail-closed drops),
+        // and a DEAD shard's final records are intentionally retained as merge
+        // evidence (its tip stops advancing, so the source-relative prune never
+        // fires — bounded at ≤ W records for that shard).
+        const EpochIndex Es = cfg_.epoch_blocks
+            ? (kv.second.height / cfg_.epoch_blocks) : 0;
+        if (!committee_pin_active(chain_, Es)) continue;
+        out.push_back(kv.second);
+    }
     return out;
 }
 
@@ -1316,7 +1346,7 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
-                                         round_shard_tip_candidates_);
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_);
 
     // v2.1 / S-033 activation: populate state_root from the post-apply
     // state. Dry-run apply on a Chain copy to compute the commitment
@@ -1433,7 +1463,7 @@ void Node::try_finalize_round() {
                                     inbound_snapshot,
                                     ordered_secrets,
                                     current_source_eligible_count(),
-                                    round_shard_tip_candidates_);
+                                    round_shard_tip_candidates_, round_shard_tip_witnesses_);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     // S-038 closure: populate body.state_root with the post-apply state
@@ -1891,6 +1921,20 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     // 4. consensus_mode permitted.
     if (tip.consensus_mode == chain::ConsensusMode::BFT && !cfg_.bft_enabled) return;
 
+    // 4b. D3.5e-7c LEAF guard: a SOURCE tip never carries shard_tip_records (only a
+    // BEACON producer folds them) nor shard_tip_witnesses (only a BEACON producer
+    // attaches them). Reject a tip carrying either — closing the POISON-WITNESS
+    // vector: a Byzantine source committee could otherwise K-of-K-sign a tip whose
+    // non-empty records/witnesses ride into this beacon's witness buffer, get
+    // carried in a folded beacon block, and make that block UNPARSEABLE on every
+    // honest node (the Block::from_json depth-1 leaf guard throws) — a beacon
+    // liveness attack. Fail-closed here, before any buffering.
+    if (!tip.shard_tip_records.empty() || !tip.shard_tip_witnesses.empty()) {
+        std::cerr << "[node] shard tip: non-leaf tip (carries records/witnesses) "
+                     "rejected: shard=" << shard_id << " block=" << tip.index << "\n";
+        return;
+    }
+
     // 5. Derive expected committee. Epoch is determined by shard's block index.
     EpochIndex shard_epoch = (cfg_.epoch_blocks > 0)
         ? (tip.index / cfg_.epoch_blocks)
@@ -1954,19 +1998,61 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
         chain::ShardTipRecord rec{
             shard_id, tip.index, tip.eligible_count, *csr, shard_region };
         pending_shard_tip_records_[{shard_id, tip.index}] = rec;
+        // D3.5e-7c: buffer the FULL tip as the record's WITNESS, atomically beside
+        // the record (same key). The tip is a LEAF (guard 4b), so carrying it in a
+        // folded beacon block can never trip the from_json depth-1 guard. This is
+        // what build_body attaches index-aligned so every honest node can re-verify
+        // the record against the frozen cc:[E] committee (the S-036 CLOSED-maker).
+        pending_shard_tip_witnesses_[{shard_id, tip.index}] = tip;
 
         // Source-tip-relative staleness prune: drop this shard's records more than
         // revert_threshold_blocks below its own tip (past the fold/revert window, so
         // already committed or permanently ineligible). NEVER a fixed count ring (which
         // could drop a still-in-window intersection member) and NEVER on fold-in (a
         // reverted-then-reappended block must re-materialize the identical set).
+        // The witness buffer is pruned in LOCKSTEP (same keys) so record ↔ witness
+        // stay atomically paired.
+        //
+        // D3.5e-7c RETENTION (adversarial-review finding): a pin-BLOCKED DISTRESS
+        // record past the W window is TEMPORARILY ineligible, not permanently — the
+        // e-7c emission gate holds it back only until the BEACON's OWN cc:[Es] fold
+        // catches up, and under sustained source>beacon height skew (> W blocks)
+        // plain W eviction would drop every record before its epoch ever pins,
+        // suppressing a legitimate distress merge indefinitely. So a distress record
+        // is retained past W until its source epoch either PINS (normal semantics
+        // resume: it folds, then evicts) or becomes HOPELESS: (a) the beacon passed
+        // Es but the ring evicted cc:[Es] — folds only append the current boundary
+        // epoch, so it can never reappear; or (b) Es is more than the ring size
+        // AHEAD of the beacon's newest fold — bounds retention memory under
+        // unbounded skew, symmetric with (a)'s past-side posture. Both hopeless
+        // cases are the documented fail-closed drop (deployment-tuning obligation:
+        // keep beacon cadence within ~ring×epoch_blocks of the shards). Healthy
+        // records (never fold candidates) and the epoch_blocks==0 legacy config
+        // (nothing ever pins) keep the plain W eviction. Node-local buffer policy —
+        // consensus-safe: the F2 intersection reconciles any per-member divergence.
         const uint64_t W = chain_.revert_threshold_blocks();
+        const uint64_t distress_threshold = 2ull * cfg_.k_block_sigs;
+        const auto& ccs = chain_.committee_checkpoints();
+        const EpochIndex e_max = ccs.empty() ? 0 : ccs.rbegin()->first;
         for (auto it = pending_shard_tip_records_.lower_bound({shard_id, uint64_t{0}});
              it != pending_shard_tip_records_.end() && it->first.first == shard_id; ) {
-            if (it->first.second + W <= tip.index)
+            if (it->first.second + W <= tip.index) {
+                bool retain = false;
+                if (cfg_.epoch_blocks > 0
+                    && it->second.eligible_count < distress_threshold) {
+                    const EpochIndex Es = it->first.second / cfg_.epoch_blocks;
+                    const bool pinned   = committee_pin_active(chain_, Es);
+                    const bool hopeless =
+                        (!ccs.empty() && e_max >= Es && !ccs.count(Es))
+                        || (Es > e_max + chain::Chain::kCommitteeCheckpointRing);
+                    retain = !pinned && !hopeless;
+                }
+                if (retain) { ++it; continue; }
+                pending_shard_tip_witnesses_.erase(it->first);
                 it = pending_shard_tip_records_.erase(it);
-            else
+            } else {
                 ++it;
+            }
         }
     }
 
@@ -2852,7 +2938,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
-                                         round_shard_tip_candidates_);
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_);
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {
