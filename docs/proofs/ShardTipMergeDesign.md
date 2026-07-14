@@ -841,11 +841,31 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     derivation + K-of-K sig verify + `committee_sig_root` moved VERBATIM into
     `node::verify_shard_tip_committee_sig_root` (`src/node/shardtip_verify.{hpp,cpp}`) so the beacon and
     the e-7d validator gate can never drift; byte-neutral (on_shard_tip unchanged; FAST 229/0 both
-    platforms; EXTENDED cluster + all shard-tip tests green). **NEXT → e-7c** the producer emission (THE
-    byte-affecting step: `on_shard_tip` buffers the full tip per record; `shard_tip_records_eligible_for_inclusion`
-    gains the `committee_pin_active` gate; `build_body` populates aligned witnesses — re-blesses distress
-    EXTENDED block HASHES only, needs a live distress cluster) → e-7d validator gate
-    (`check_shardtip_witnesses`, byte-neutral verdict-only) → e-7e auditor CLI
+    platforms; EXTENDED cluster + all shard-tip tests green).
+    **D3.5e-7c ✅ SHIPPED (`4a83bc1`)** the PRODUCER EMISSION — `on_shard_tip` guard 4b rejects a
+    NON-LEAF tip (a source tip never carries records/witnesses; closes the POISON-WITNESS beacon
+    liveness attack where a Byzantine source committee signs a tip whose carried records would make
+    the folded beacon block unparseable at `from_json`); the verified tip is buffered as the record's
+    witness ATOMICALLY under one (shard,height) key, pruned in lockstep;
+    `shard_tip_records_eligible_for_inclusion` gains the `committee_pin_active(Es)` emission gate (an
+    unwitnessable epoch-0/unpinned record must never fold — producer at head H−1 and the e-7d
+    validator at head H−1 agree by construction, no self-stall); Phase-1 freezes
+    `round_shard_tip_witnesses_` beside the candidate snapshot (anti-wedge); `build_body` attaches the
+    aligned witness per reconciled record and DROPS a missing/non-leaf/mismatched pair (fail-safe,
+    set stays ⊆ the intersection). **3-lens adversarial review: 2 confirmed findings BOTH fixed
+    pre-commit** — (medium) sustained source>beacon height skew > W suppressed distress folds
+    indefinitely → RETENTION: a pin-blocked distress record survives the W prune until its epoch pins
+    or becomes hopeless (cc:[Es] ring-evicted, or Es > newest fold + `kCommitteeCheckpointRing` —
+    both bounds tied to the ring constant, both documented fail-closed; deployment-tuning note: keep
+    beacon cadence within ~ring×epoch_blocks of shards); (low) the "age out" comment was false for a
+    DEAD shard → a dead shard's final records are intentionally retained as merge evidence (≤ W,
+    bounded). REFUTED-with-note: witness bytes are hash-bound not digest-bound, so a per-fold
+    adversarial gossip race can force a benign one-block A4 reorg (same-height siblings converge via
+    the shipped S-048 resolve_fork) — a WITNESS-IDENTITY binding is a hardening candidate for e-7d.
+    Byte-neutral (no shipped test folds distress records — e-5 is the first): FAST 229/0 both
+    platforms; both EXTENDED clusters green; `test-shardtip-reconciliation` 11→15 assertions.
+    **NEXT → e-7d** the validator gate (`check_shardtip_witnesses`, byte-neutral verdict-only; needs
+    `set_beacon_shard_regions` on BlockValidator; weigh the witness-identity hardening) → e-7e auditor CLI
     (`verify-shardtip-records --rpc` + a `cc:` member-list RPC + `cc:` state-proof namespace) → e-7f
     docs + SECURITY S-036 flip. Also pending: e-5 the live epoch-boundary tip-verification gate; the
     orthogonal `on_shard_tip` refugee/absorbed-shard pool-extension fix (no-op for distress records, NOT
