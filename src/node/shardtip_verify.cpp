@@ -22,7 +22,22 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
     const std::string&       region,
     ShardId                  shard_id,
     size_t                   k_block_sigs,
+    bool                     bft_enabled,
     const chain::Block&      tip) {
+
+    // MODE-ELIGIBILITY GATE (VERBATIM from on_shard_tip node.cpp — the gate the
+    // caller ran there before this function existed; folded IN so no caller can
+    // drop it). A BFT-declared tip lowers expected_k to bft_committee_size (ceil
+    // 2K/3), so a chain that has NOT enabled per-height BFT escalation must reject a
+    // consensus_mode==BFT tip outright — otherwise a Byzantine beacon could carry a
+    // fabricated-distress source tip signed by only ceil(2K/3) of the frozen source
+    // committee and it would pass the K-of-K verify at a reduced bar (S-036 reopened
+    // at a 2K/3 collusion threshold). e-7d adversarial-review HIGH finding.
+    if (tip.consensus_mode == chain::ConsensusMode::BFT && !bft_enabled) {
+        std::cerr << "[node] shard tip: BFT consensus_mode but bft not enabled — "
+                     "rejected (no reduced-quorum source attestation)\n";
+        return std::nullopt;
+    }
 
     // ── beacon epoch rand (VERBATIM from on_shard_tip) ──────────────────────────
     Hash beacon_rand;

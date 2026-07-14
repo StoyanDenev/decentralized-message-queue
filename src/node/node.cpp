@@ -503,6 +503,35 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                       << shard_committee_regions_.size()
                       << " entries from GENESIS (committed, authoritative)\n";
         }
+        // D3.5e-7d: mirror the (now-final) shard→region map into the validator so
+        // check_shardtip_witnesses region-filters the frozen source pool + binds
+        // rec.region against the SAME authoritative view on_shard_tip used —
+        // committed map when present, else the manifest-loaded map (both fixed at
+        // startup; genesis-constant, replay-safe, no wire). Empty on every
+        // non-beacon / unsharded node → every lookup yields "" (global pool),
+        // and the check never runs there anyway (records only fold on a
+        // BEACON+EXTENDED chain).
+        validator_.set_beacon_shard_regions(shard_committee_regions_);
+
+        // D3.5e-7d ops warning (adversarial-review low finding): as of e-7d the
+        // shard→region map is CONSENSUS-CRITICAL — check_shardtip_witnesses binds
+        // rec.region against it at block accept. On the LEGACY manifest-only path
+        // (no genesis-committed beacon_shard_regions), the map is node-local with
+        // NO cross-node consistency enforcement, so a divergent/stale
+        // shard_manifest.json silently stalls this node the first time a distress
+        // record for a mis-mapped shard folds. The committed map (build-sharded
+        // genesis) is immune. Warn loudly so an operator migrating regions can't
+        // ship a silent split-brain; the committed map is the supported path.
+        if (gcfg.chain_role == ChainRole::BEACON
+            && !has_committed_map && !shard_committee_regions_.empty()) {
+            std::cerr << "[node] WARNING: EXTENDED beacon using a MANIFEST-ONLY "
+                         "shard→region map (no genesis-committed beacon_shard_regions). "
+                         "As of D3.5e-7d this map is consensus-critical (bound at block "
+                         "accept); a shard_manifest.json that disagrees with the "
+                         "producing committee will stall this node at distress-fold "
+                         "time. Prefer a genesis-committed map (genesis-tool "
+                         "build-sharded).\n";
+        }
 
         gcfg_opt = std::move(gcfg);
     }
@@ -1965,7 +1994,7 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     auto csr = verify_shard_tip_committee_sig_root(
         chain_, beacon_reg, shard_epoch,
         static_cast<uint64_t>(cfg_.epoch_blocks),
-        shard_region, shard_id, cfg_.k_block_sigs, tip);
+        shard_region, shard_id, cfg_.k_block_sigs, cfg_.bft_enabled, tip);
     if (!csr) return;
 
     // D3.5e-6 (S-036 Layer 2): the SIGNED source-shard binding. The K-of-K sigs

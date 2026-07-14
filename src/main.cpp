@@ -1058,6 +1058,15 @@ Additional in-process tests:
                                               digest-bound), order-independence,
                                               depth-1 leaf/DoS guard (dormant
                                               schema)
+  determ test-shardtip-witness-verify         D3.5e-7d (S-036): the UNIVERSAL
+                                              witness re-verification falsifier —
+                                              a genuine frozen-committee-signed
+                                              record+witness ACCEPTED; no-witness /
+                                              forged-sig / (digest,sigs)-reuse /
+                                              unpinned-epoch / forged-region /
+                                              tampered-root / height-mismatch /
+                                              non-EXTENDED all REJECTED
+                                              (the CLOSED-maker gate)
   determ test-shard-tip-namespace             D3.2 (S-036): the t: SHARD_TIP
                                               distress-record state ring —
                                               state-root binding + bounded ring
@@ -11302,6 +11311,287 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-shardtip-witness-codec\n"
                            : "  PASS: test-shardtip-witness-codec\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-shardtip-witness-verify") {
+        // D3.5e-7d (ShardTipMergeDesign.md §9.6 pt4): the UNIVERSAL witness
+        // re-verification falsifier — the S-036 CLOSED-maker's consumption side.
+        // Drives BlockValidator::check_shardtip_witnesses in isolation via the
+        // _for_test const seam against a REAL frozen committee: a chain whose
+        // cc:[1] checkpoint holds two real-keyed members, and a source tip
+        // genuinely K-of-K-signed by them. Proves a genuine distress record+witness
+        // is ACCEPTED, and that every fabrication axis a Byzantine beacon has —
+        // no witness, forged sigs, (digest,sigs)-reuse under a fabricated count,
+        // unpinned epoch, forged region, tampered committee_sig_root, non-leaf
+        // witness, record/witness height mismatch — is REJECTED fail-closed.
+        using namespace determ;
+        using namespace determ::chain;
+        using determ::node::NodeRegistry;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // THREE REAL committee keypairs (deterministic seeds). A 3-member pool with
+        // K=2 makes the pool a proper SUPERSET of the selected committee, so the
+        // frozen-committee-SELECTION check (which specific K of the pool) is
+        // falsifiable — a wrong-but-frozen subset must be REJECTED even though its
+        // members are all frozen (the sig check alone would pass them).
+        std::map<std::string, crypto::NodeKey> keys;
+        {
+            uint8_t base = 0x50;
+            for (const char* d : {"alice", "bob", "carol"}) {
+                crypto::NodeKey k;
+                for (size_t i = 0; i < k.priv_seed.size(); ++i)
+                    k.priv_seed[i] = uint8_t(base + i);
+                determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+                keys[d] = k;
+                base += 0x30;
+            }
+        }
+
+        // EXTENDED beacon chain with cc:[1] frozen at block 3 (epoch_blocks=4) —
+        // the test-committee-fold fixture with REAL ed_pubs.
+        GenesisConfig gcfg;
+        gcfg.chain_id = "shardtip-witness-verify-test";
+        for (const char* d : {"alice", "bob", "carol"}) {
+            GenesisCreator c; c.domain = d; c.initial_stake = 2000; c.ed_pub = keys[d].pub;
+            gcfg.initial_creators.push_back(c);
+            GenesisAllocation ga; ga.domain = d; ga.balance = 1000;
+            gcfg.initial_balances.push_back(ga);
+        }
+        Chain chain;
+        chain.set_shard_routing(4, Hash{}, 0);
+        chain.set_epoch_blocks(4);
+        chain.append(make_genesis_block(gcfg));
+        for (uint8_t i = 1; i <= 3; ++i) {
+            Block blk;
+            blk.index     = chain.height();
+            blk.prev_hash = chain.head_hash();
+            blk.timestamp = 1700000000 + int64_t(i);
+            for (auto& x : blk.cumulative_rand) x = (i == 3) ? 0xEE : i;
+            chain.append(std::move(blk));
+        }
+        check(chain.committee_checkpoints().count(1) == 1
+                  && chain.committee_checkpoints().at(1).members.size() == 3,
+              "fixture: cc:[1] frozen at the epoch boundary (3 real-keyed members)");
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+
+        const ShardId SID = 0;
+        const uint32_t K  = 2;
+        const std::vector<std::string> POOL = {"alice", "bob", "carol"};  // frozen, sorted
+        // The selected committee for (SID, epoch 1) — derived EXACTLY as the frozen
+        // verdict derives it, so the test signs with the RIGHT subset.
+        auto selected_creators = [&]() {
+            Hash beacon_rand = chain.committee_checkpoints().at(1).epoch_rand;
+            Hash rand = crypto::epoch_committee_seed(beacon_rand, SID);
+            auto idx = crypto::select_m_creators(rand, POOL.size(), K);
+            std::vector<std::string> out;
+            for (auto i2 : idx) out.push_back(POOL[i2]);
+            return out;
+        };
+        // A source tip signed by an ARBITRARY creator set (genuine = the selected
+        // one; a fabrication test can pass a wrong-but-frozen subset / BFT mode).
+        auto make_tip = [&](uint64_t height, uint32_t ec,
+                            const std::vector<std::string>& creators,
+                            ConsensusMode mode = ConsensusMode::MUTUAL_DISTRUST) {
+            Block tip;
+            tip.index = height; tip.timestamp = 4242;
+            tip.eligible_count = ec; tip.source_shard_id = SID;
+            tip.consensus_mode = mode;
+            tip.creators = creators;
+            Hash digest = node::compute_block_digest(tip);
+            for (auto& dom : tip.creators)
+                tip.creator_block_sigs.push_back(
+                    crypto::sign(keys[dom], digest.data(), digest.size()));
+            return tip;
+        };
+        auto make_signed_tip = [&](uint64_t height, uint32_t ec) {
+            return make_tip(height, ec, selected_creators());
+        };
+        // The record an honest beacon would build (the on_shard_tip formula).
+        auto make_rec = [&](const Block& tip, const std::string& region) {
+            std::vector<Hash> sh;
+            Signature zero{};
+            for (auto& s : tip.creator_block_sigs) {
+                if (s == zero) continue;
+                crypto::SHA256Builder sb; sb.append(s.data(), s.size());
+                sh.push_back(sb.finalize());
+            }
+            Hash sig_set_root = node::compute_view_root(sh);
+            crypto::SHA256Builder cb;
+            cb.append(std::string("determ-shardtip-v1"));
+            cb.append(static_cast<uint64_t>(SID));
+            cb.append(static_cast<uint64_t>(tip.index));
+            cb.append(static_cast<uint64_t>(tip.eligible_count));
+            cb.append(static_cast<uint64_t>(region.size()));
+            cb.append(region);
+            cb.append(node::compute_block_digest(tip));
+            cb.append(sig_set_root);
+            ShardTipRecord r;
+            r.source_shard_id = SID; r.height = tip.index;
+            r.eligible_count = tip.eligible_count;
+            r.committee_sig_root = cb.finalize(); r.region = region;
+            return r;
+        };
+        auto make_validator = [&]() {
+            node::BlockValidator v;
+            v.set_sharding_mode(ShardingMode::EXTENDED);
+            v.set_chain_role(ChainRole::BEACON);
+            v.set_k_block_sigs(K);
+            v.set_epoch_blocks(4);
+            v.set_beacon_shard_regions({});   // shard 0 → "" (global pool)
+            return v;
+        };
+        auto run = [&](const Block& beacon_block,
+                       node::BlockValidator* vp = nullptr) {
+            node::BlockValidator v = vp ? *vp : make_validator();
+            return v.check_shardtip_witnesses_for_test(beacon_block, chain, reg);
+        };
+
+        Block tip = make_signed_tip(5, 1);        // genuine DISTRESS tip (1 < 2K=4)
+        ShardTipRecord rec = make_rec(tip, "");
+        Block bb; bb.index = 100;
+        bb.shard_tip_records   = { rec };
+        bb.shard_tip_witnesses = { tip };
+
+        // === 1. GENUINE distress record + witness → ACCEPTED ===
+        {
+            auto r = run(bb);
+            check(r.ok, "genuine: real frozen-committee-signed record+witness ACCEPTED");
+        }
+        // === 2. NO witness (a pre-e7 Byzantine fold) → REJECTED ===
+        {
+            Block b2 = bb; b2.shard_tip_witnesses.clear();
+            auto r = run(b2);
+            check(!r.ok && r.error.find("count mismatch") != std::string::npos,
+                  "fabricated: record WITHOUT witness REJECTED (count mismatch)");
+        }
+        // === 3. FORGED sigs (not the frozen committee's) → REJECTED ===
+        {
+            Block b2 = bb;
+            b2.shard_tip_witnesses[0].creator_block_sigs[0][0] ^= 0x01;
+            auto r = run(b2);
+            check(!r.ok && r.error.find("verification failed") != std::string::npos,
+                  "forged: corrupted committee signature REJECTED (frozen-sig verify)");
+        }
+        // === 4. (digest,sigs)-REUSE: a genuine HEALTHY tip under a fabricated
+        //        distress record → REJECTED both ways ===
+        {
+            Block healthy = make_signed_tip(6, 4);        // genuinely signed, ec=4 (>=2K)
+            ShardTipRecord fake = make_rec(healthy, "");
+            fake.eligible_count = 1;                       // fabricate distress
+            Block b2; b2.index = 100;
+            b2.shard_tip_records = { fake }; b2.shard_tip_witnesses = { healthy };
+            auto r = run(b2);
+            check(!r.ok && r.error.find("eligible_count") != std::string::npos,
+                  "reuse(a): healthy witness under a fabricated distress count REJECTED");
+            // (b) rewrite the witness's count to match the fake record → the
+            // recomputed digest diverges from what the committee signed.
+            Block rewritten = healthy; rewritten.eligible_count = 1;
+            Block b3; b3.index = 100;
+            b3.shard_tip_records = { fake }; b3.shard_tip_witnesses = { rewritten };
+            auto r3 = run(b3);
+            check(!r3.ok && r3.error.find("verification failed") != std::string::npos,
+                  "reuse(b): rewriting the witness count breaks the signed digest REJECTED");
+        }
+        // === 5. UNPINNED epoch (no cc:[2]) → fail-closed REJECT ===
+        {
+            Block tip9 = tip; tip9.index = 9;              // epoch 2; sigs now stale (unchecked)
+            ShardTipRecord rec9 = rec; rec9.height = 9;
+            Block b2; b2.index = 100;
+            b2.shard_tip_records = { rec9 }; b2.shard_tip_witnesses = { tip9 };
+            auto r = run(b2);
+            check(!r.ok && r.error.find("not pinned") != std::string::npos,
+                  "unpinned: record in an unfolded epoch REJECTED (fail-closed)");
+        }
+        // === 6. FORGED region (≠ the genesis-committed map) → REJECTED ===
+        {
+            ShardTipRecord recR = make_rec(tip, "us-east");
+            Block b2; b2.index = 100;
+            b2.shard_tip_records = { recR }; b2.shard_tip_witnesses = { tip };
+            auto r = run(b2);
+            check(!r.ok && r.error.find("region") != std::string::npos,
+                  "region: record region != genesis-committed map REJECTED");
+        }
+        // === 7. Tampered committee_sig_root → REJECTED ===
+        {
+            Block b2 = bb; b2.shard_tip_records[0].committee_sig_root[0] ^= 0x01;
+            auto r = run(b2);
+            check(!r.ok && r.error.find("committee_sig_root mismatch") != std::string::npos,
+                  "tamper: forged committee_sig_root REJECTED (recompute mismatch)");
+        }
+        // === 8. Record/witness HEIGHT mismatch (anti-reuse binding) → REJECTED ===
+        {
+            Block b2 = bb; b2.shard_tip_records[0].height = 6;
+            auto r = run(b2);
+            check(!r.ok && r.error.find("index != rec.height") != std::string::npos,
+                  "anti-reuse: witness.index != rec.height REJECTED");
+        }
+        // === 9. Non-EXTENDED chain smuggling witnesses → REJECTED ===
+        {
+            node::BlockValidator v = make_validator();
+            v.set_sharding_mode(ShardingMode::CURRENT);
+            auto r = run(bb, &v);
+            check(!r.ok && r.error.find("non-EXTENDED") != std::string::npos,
+                  "mode: shard_tip_witnesses on a non-EXTENDED chain REJECTED");
+        }
+        // === 10. e-7d review HIGH finding: a consensus_mode==BFT witness on a
+        //        NON-bft-enabled chain must be REJECTED — else its expected_k drops
+        //        to ceil(2K/3) and a Byzantine beacon could carry a fabricated
+        //        distress record signed by a reduced source quorum. ===
+        {
+            Block bft = make_tip(5, 1, selected_creators(), ConsensusMode::BFT);
+            ShardTipRecord rbft = make_rec(bft, "");
+            Block b2; b2.index = 100;
+            b2.shard_tip_records = { rbft }; b2.shard_tip_witnesses = { bft };
+            node::BlockValidator v = make_validator();
+            v.set_bft_enabled(false);
+            auto r = run(b2, &v);
+            check(!r.ok && r.error.find("verification failed") != std::string::npos,
+                  "BFT-gate: a BFT-mode witness on a non-bft-enabled chain REJECTED "
+                  "(no reduced-quorum source attestation)");
+            // And when bft IS enabled, the same genuinely-signed BFT tip verifies —
+            // the gate is mode-eligibility, not a blanket BFT ban.
+            node::BlockValidator v2 = make_validator();
+            v2.set_bft_enabled(true);
+            check(run(b2, &v2).ok,
+                  "BFT-gate: the SAME BFT witness ACCEPTED when bft IS enabled");
+        }
+        // === 11. WRONG-BUT-FROZEN committee subset → REJECTED (the frozen-committee
+        //        SELECTION check — a wrong K of the pool whose members are all frozen
+        //        would pass the sig verify but is not the SELECTED committee). ===
+        {
+            std::vector<std::string> sel = selected_creators();
+            // A wrong K-subset in reverse pool order ({carol, bob}); guaranteed
+            // different from the selected set since |POOL|=3 > K=2 (either a
+            // different membership or a different order — both are "not selected").
+            std::vector<std::string> wrong;
+            for (auto it = POOL.rbegin(); it != POOL.rend() && wrong.size() < K; ++it)
+                wrong.push_back(*it);
+            bool differs = (wrong != sel);
+            Block wtip = make_tip(5, 1, wrong);    // signed by the WRONG frozen subset
+            ShardTipRecord wrec = make_rec(wtip, "");
+            Block b2; b2.index = 100;
+            b2.shard_tip_records = { wrec }; b2.shard_tip_witnesses = { wtip };
+            auto r = run(b2);
+            check(differs && !r.ok && r.error.find("verification failed") != std::string::npos,
+                  "selection: a WRONG-but-frozen committee subset REJECTED "
+                  "(committee selection enforced, not just frozen membership)");
+        }
+        // === 12. Record/witness SOURCE_SHARD_ID mismatch (the e-6 anti-replay
+        //        binding, re-enforced here) → REJECTED ===
+        {
+            Block b2 = bb; b2.shard_tip_records[0].source_shard_id = 3;
+            auto r = run(b2);
+            check(!r.ok && r.error.find("source_shard_id") != std::string::npos,
+                  "anti-reuse: witness.source_shard_id != rec.source_shard_id REJECTED");
+        }
+
+        std::cout << (fail ? "  FAIL: test-shardtip-witness-verify\n"
+                           : "  PASS: test-shardtip-witness-verify\n");
         return fail ? 1 : 0;
     }
 

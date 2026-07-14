@@ -45,6 +45,7 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
     const std::string&       region,
     ShardId                  shard_id,
     size_t                   k_block_sigs,
+    bool                     bft_enabled,
     const chain::Block&      tip);
 
 } // namespace determ::node

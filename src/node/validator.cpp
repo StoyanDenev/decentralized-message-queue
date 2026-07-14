@@ -3,6 +3,7 @@
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL + IDENTITY
+#include <determ/node/shardtip_verify.hpp>  // D3.5e-7d: the shared shard-tip verify core
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD / §3.22b UNSHIELD accept-rules
@@ -53,6 +54,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_inbound_receipts(b, chain);       !r.ok) return r;
     if (auto r = check_eqabort_reconciliation(b, chain); !r.ok) return r;
     if (auto r = check_shardtip_reconciliation(b, chain); !r.ok) return r;
+    if (auto r = check_shardtip_witnesses(b, chain, registry); !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
     return {true, ""};
 }
@@ -1575,6 +1577,116 @@ BlockValidator::Result BlockValidator::check_eqabort_reconciliation(
         for (auto& a : b.abort_events) keys.push_back(hash_abort_event(a));
         if (auto r = check_dim(b.creator_view_abort_lists, b.creator_view_abort_roots,
                                keys, "creator_view_abort_lists"); !r.ok) return r;
+    }
+    return {true, ""};
+}
+
+BlockValidator::Result BlockValidator::check_shardtip_witnesses(
+        const Block& b, const Chain& chain, const NodeRegistry& registry) const {
+    // D3.5e-7d / S-036 Layer 2 — the UNIVERSAL fold re-verification (the
+    // CLOSED-maker). Pre-e7d the chain.cpp:~1805 fold applied carried
+    // ShardTipRecords with ZERO checks, so a fully-Byzantine K-of-K BEACON
+    // committee could commit fabricated distress records network-wide without
+    // ever calling on_shard_tip. This check runs on EVERY honest node at block
+    // accept, BEFORE apply folds the records: each record must carry its
+    // index-aligned full-tip witness, and the witness must re-verify against the
+    // beacon's OWN committed cc:[E_source] state via the e-7b shared helper —
+    // the byte-identical code the honest beacon ran contemporaneously. A
+    // Byzantine beacon that fabricates a record cannot produce a witness whose
+    // K-of-K sigs verify against the FROZEN source committee, so the block is
+    // rejected. Fail-closed everywhere; every rejection is a liveness loss
+    // (an unwitnessable record not admitted), never a safety hole.
+    //
+    // Cheap on the common path: every non-distress block carries empty
+    // records + witnesses and returns after two empty() checks.
+    if (sharding_mode_ != ShardingMode::EXTENDED) {
+        // RP-4: a non-EXTENDED chain never folds records; a block smuggling
+        // witnesses there is malformed (records are checked by the D3.5b fold
+        // gate + reconciliation; the witness field must be empty too).
+        if (!b.shard_tip_witnesses.empty())
+            return {false, "shard_tip_witnesses non-empty on a non-EXTENDED chain"};
+        return {true, ""};
+    }
+    if (b.shard_tip_records.empty()) {
+        if (!b.shard_tip_witnesses.empty())
+            return {false, "shard_tip_witnesses without shard_tip_records"};
+        return {true, ""};
+    }
+    if (b.shard_tip_witnesses.size() != b.shard_tip_records.size())
+        return {false, "shard_tip witness/record count mismatch ("
+                     + std::to_string(b.shard_tip_witnesses.size()) + "/"
+                     + std::to_string(b.shard_tip_records.size())
+                     + ") — every folded record must carry its witness"};
+
+    const uint64_t eb = epoch_blocks_;
+    for (size_t i = 0; i < b.shard_tip_records.size(); ++i) {
+        const chain::ShardTipRecord& rec = b.shard_tip_records[i];
+        const Block&                 w   = b.shard_tip_witnesses[i];
+
+        // (0) LEAF invariant (defense-in-depth: from_json already enforced it on
+        // the wire; a locally-constructed block must obey it too).
+        if (!w.shard_tip_records.empty() || !w.shard_tip_witnesses.empty())
+            return {false, "shard_tip witness[" + std::to_string(i)
+                         + "] is not a leaf block"};
+
+        // (1) ANTI-REUSE: the record's claims must be READ FROM INSIDE the
+        // witness's digest preimage. Without this, a genuine HEALTHY tip's
+        // (digest, sigs) could be reused under a record fabricating a distress
+        // eligible_count. index/source_shard_id/eligible_count are all bound
+        // into compute_block_digest (index always; the latter two under the
+        // D3.4/e-6 eligible_count != 0 gate that every produced source block
+        // satisfies), so a witness that passes (4) attests exactly these values.
+        if (w.index != rec.height)
+            return {false, "shard_tip witness[" + std::to_string(i)
+                         + "].index != rec.height"};
+        if (w.source_shard_id != rec.source_shard_id)
+            return {false, "shard_tip witness[" + std::to_string(i)
+                         + "].source_shard_id != rec.source_shard_id"};
+        if (w.eligible_count != rec.eligible_count)
+            return {false, "shard_tip witness[" + std::to_string(i)
+                         + "].eligible_count != rec.eligible_count"};
+
+        // (2) EPOCH PIN — fail-closed on an unpinned cc:[E_source] (epoch-0 /
+        // not-yet-folded / ring-pruned / epoch_blocks==0). An honest producer
+        // never folds such a record (the e-7c emission gate evaluates the same
+        // predicate over the same committed prefix at head H−1), so this only
+        // ever rejects a Byzantine beacon's block. Deterministic across live /
+        // archive / snapshot nodes: committee_pin_active is a pure function of
+        // the committed prefix, and this check runs only at first accept.
+        const EpochIndex Es = eb ? (rec.height / eb) : 0;
+        if (!committee_pin_active(chain, Es))
+            return {false, "shard_tip record[" + std::to_string(i)
+                         + "]: cc:[" + std::to_string(Es)
+                         + "] not pinned (epoch-0/pruned/unfolded) — fail-closed"};
+
+        // (3) REGION from the GENESIS-COMMITTED map (authoritative; a missing
+        // entry yields "" = the CURRENT-compat global pool) and bind rec.region
+        // — the committee_sig_root recompute below uses THIS region, so a
+        // region-forged record cannot steer the pool or the root.
+        std::string region;
+        if (auto it = beacon_shard_regions_.find(rec.source_shard_id);
+            it != beacon_shard_regions_.end()) region = it->second;
+        if (rec.region != region)
+            return {false, "shard_tip record[" + std::to_string(i)
+                         + "].region != genesis-committed region for shard "
+                         + std::to_string(rec.source_shard_id)};
+
+        // (4) The FROZEN committee derivation + K-of-K sig verify +
+        // committee_sig_root recompute — the e-7b SHARED helper (byte-identical
+        // to on_shard_tip's contemporaneous verdict, so beacon and re-verifier
+        // can never drift). We call it ONLY under committee_pin_active (step 2),
+        // so the pool + rand are pure functions of committed cc: state; the
+        // present-head `registry` param is unread on that path.
+        auto csr = verify_shard_tip_committee_sig_root(
+            chain, registry, Es, eb, region,
+            rec.source_shard_id, k_block_sigs_, bft_enabled_, w);
+        if (!csr)
+            return {false, "shard_tip witness[" + std::to_string(i)
+                         + "]: frozen-committee/signature verification failed"};
+        if (*csr != rec.committee_sig_root)
+            return {false, "shard_tip record[" + std::to_string(i)
+                         + "]: committee_sig_root mismatch (recomputed from the "
+                           "witness != carried record)"};
     }
     return {true, ""};
 }

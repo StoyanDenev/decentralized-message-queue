@@ -7,6 +7,7 @@
 #include <determ/time/clock.hpp>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -64,6 +65,16 @@ public:
     // call site that constructs BlockValidator without the setter.
     void set_chain_role(ChainRole r) { chain_role_ = r; }
 
+    // D3.5e-7d / S-036 Layer 2: the beacon's GENESIS-COMMITTED shard→region map
+    // (GenesisConfig::shard_regions), mirrored from the Node exactly like
+    // set_chain_role / set_committee_region — genesis-constant, replay-safe, no
+    // wire. check_shardtip_witnesses reads it to (a) region-filter the frozen
+    // source-committee pool and (b) bind rec.region against the authoritative
+    // map entry (a missing entry yields "" — the CURRENT-compat global pool).
+    void set_beacon_shard_regions(std::map<ShardId, std::string> m) {
+        beacon_shard_regions_ = std::move(m);
+    }
+
     // D3.7 / S-036 test seam: run the per-tx admission checks (incl. the D3.6
     // MERGE_EVENT historical-witness gate) in isolation so the falsifier can drive
     // accept/reject scenarios without assembling a fully-signed committee block.
@@ -72,6 +83,16 @@ public:
     Result check_transactions_for_test(const chain::Block& b, const chain::Chain& chain,
                                         const NodeRegistry& registry) const {
         return check_transactions(b, chain, registry);
+    }
+
+    // D3.5e-7d / S-036 test seam: run the universal witness re-verification in
+    // isolation (the same const-forwarder pattern as check_transactions_for_test)
+    // so the falsifier can drive fabricated/forged/reuse/unpinned scenarios
+    // without assembling a fully-signed beacon block.
+    Result check_shardtip_witnesses_for_test(const chain::Block& b,
+                                             const chain::Chain& chain,
+                                             const NodeRegistry& registry) const {
+        return check_shardtip_witnesses(b, chain, registry);
     }
 
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
@@ -168,6 +189,25 @@ private:
     // content. See docs/proofs/ShardTipMergeDesign.md §9.6.
     Result check_shardtip_reconciliation(const chain::Block& b,
                                           const chain::Chain& chain) const;
+    // D3.5e-7d / S-036 Layer 2: the UNIVERSAL witness re-verification — the
+    // CLOSED-maker. Every honest node (committee member or not) re-verifies each
+    // carried ShardTipRecord against its index-aligned full-tip witness BEFORE the
+    // block is accepted (and therefore before the t: fold applies it): re-derive
+    // the frozen source committee from the beacon's OWN committed cc:[E_source]
+    // (via the e-7b shared helper — the exact code on_shard_tip ran), recompute
+    // compute_block_digest(witness) FROM THE PREIMAGE, cross-check the record's
+    // height/source_shard_id/eligible_count INSIDE it (the anti-reuse binding),
+    // verify the K-of-K sigs against FROZEN ed_pubs, and require the recomputed
+    // committee_sig_root == rec.committee_sig_root. Runs ONCE at accept
+    // (apply_block_locked / the A4 reorg path); Chain::load replay and snapshot
+    // restore trust the already-gated block — identical to check_block_sigs — so
+    // reject-on-unpinned cannot fork archive vs snapshot nodes. Fail-closed on an
+    // unpinned cc:[E_source] (epoch-0 / pruned): an honest producer never emits
+    // such a record (the e-7c emission gate evaluates the same predicate over the
+    // same committed prefix), so rejection only ever denies a Byzantine beacon.
+    Result check_shardtip_witnesses(const chain::Block& b,
+                                    const chain::Chain& chain,
+                                    const NodeRegistry& registry) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;
@@ -196,6 +236,9 @@ private:
     // constructed without set_chain_role never runs the beacon-only MERGE_EVENT
     // witness path — byte-neutral for every legacy call site.
     ChainRole chain_role_{ChainRole::SINGLE};
+    // D3.5e-7d: the genesis-committed shard→region map (empty default = every
+    // lookup yields "" = the CURRENT-compat global pool).
+    std::map<ShardId, std::string> beacon_shard_regions_{};
     // D1: CT layer master switch, mirrored from GenesisConfig. Default true so
     // any call site that constructs BlockValidator without the setter keeps the
     // pre-D1 behaviour (CT accepted).
