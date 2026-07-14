@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
 #include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL
+#include <determ/node/shardtip_verify.hpp>  // D3.5e-7b: shared shard-tip verify core
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
@@ -1894,28 +1895,6 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     EpochIndex shard_epoch = (cfg_.epoch_blocks > 0)
         ? (tip.index / cfg_.epoch_blocks)
         : 0;
-    Hash beacon_rand;
-    if (committee_pin_active(chain_, shard_epoch)) {
-        // D3.5e-4: on the pinned path the epoch rand is the FROZEN
-        // cc:[shard_epoch] leaf value — self-contained in committed `cc:` state
-        // (the exact value the e-7 witness re-check + the auditor CLI re-derive
-        // from). Provably == chain_.at(shard_epoch*epoch_blocks-1).cumulative_rand
-        // by the fold construction (chain.cpp freeze stores epoch_rand =
-        // cumulative_rand at the anchor), so this is byte-identical to the legacy
-        // read below — but robust if historical blocks are ever pruned within the
-        // 16-epoch checkpoint ring, when block anchor-1 may no longer exist.
-        beacon_rand = chain_.committee_checkpoints().at(shard_epoch).epoch_rand;
-    } else {
-        // Off the pinned path (epoch 0 / not-yet-folded / CURRENT): the legacy
-        // block-anchored read (chain.at(anchor-1), head-rand for epoch 0).
-        uint64_t beacon_anchor_height =
-            shard_epoch * (cfg_.epoch_blocks ? cfg_.epoch_blocks : 1);
-        if (beacon_anchor_height == 0 || beacon_anchor_height > chain_.height()) {
-            beacon_rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
-        } else {
-            beacon_rand = chain_.at(beacon_anchor_height - 1).cumulative_rand;
-        }
-    }
 
     auto beacon_reg = NodeRegistry::build_from_chain(chain_, chain_.height());
     // R2 / D3.5e-1: the shard's committee_region comes from the beacon's
@@ -1927,92 +1906,23 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
         auto it = shard_committee_regions_.find(shard_id);
         if (it != shard_committee_regions_.end()) shard_region = it->second;
     }
-    // D3.5e-4 (S-036 Layer 2) — the VERDICT POOL is FROZEN: on an EXTENDED
-    // beacon inside epoch>=1 with the `cc:[shard_epoch]` checkpoint folded,
-    // select_committee_pool returns the frozen committee members region-filtered
-    // (== the derived sc:[shard,epoch] view) instead of the beacon's PRESENT-HEAD
-    // registry — so the shard-tip verdict is a pure function of COMMITTED beacon
-    // state (retroactively reconstructible, the Layer-2 closure property). It
-    // falls back to present-head eligible_in_region on epoch 0 / a pruned or
-    // not-yet-folded checkpoint (bootstrap; byte-identical to pre-D3.5e, and the
-    // beacon's present-head verdict there is fail-closed by the e-7 witness
-    // re-check on non-committee nodes). committee_pin_active is false on a
-    // CURRENT-multishard beacon (epoch_blocks handed as 0 → no cc: fold) → the
-    // fallback keeps it byte-identical. Matches the beacon rand anchor above
-    // (chain_.at(epoch_start-1) == cc:[shard_epoch].epoch_rand by construction).
-    auto pool_nodes = select_committee_pool(chain_, beacon_reg,
-                                            shard_epoch, shard_region);
 
-    std::set<std::string> excluded;
-    for (auto& ae : tip.abort_events) excluded.insert(ae.aborting_node);
-    std::vector<std::string> avail;
-    for (auto& nd : pool_nodes) {
-        if (!excluded.count(nd.domain)) avail.push_back(nd.domain);
-    }
-
-    size_t k_full = cfg_.k_block_sigs;
-    size_t k_bft  = chain::bft_committee_size(k_full);   // shared helper (S-043 hygiene)
-    size_t expected_k = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
-    if (avail.size() < expected_k) {
-        std::cerr << "[node] shard tip: insufficient pool to derive committee for shard="
-                  << shard_id << "\n";
-        return;
-    }
-    if (tip.creators.size() != expected_k) {
-        std::cerr << "[node] shard tip: creators size (" << tip.creators.size()
-                  << ") != expected_k (" << expected_k << ")\n";
-        return;
-    }
-
-    Hash rand = crypto::epoch_committee_seed(beacon_rand, shard_id);
-    for (auto& ae : tip.abort_events) {
-        rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
-    }
-    auto indices = crypto::select_m_creators(rand, avail.size(), expected_k);
-    for (size_t i = 0; i < expected_k; ++i) {
-        if (avail[indices[i]] != tip.creators[i]) {
-            std::cerr << "[node] shard tip: creators[" << i << "] mismatch ('"
-                      << tip.creators[i] << "' vs derived '"
-                      << avail[indices[i]] << "')\n";
-            return;
-        }
-    }
-
-    // 6. Signature verification — D3.5e-4 FROZEN-ONLY pubkeys. Verify each
-    // creator's signature against the ed_pub from the FROZEN pool it was
-    // selected from, NOT the present-head registry: a committee member that
-    // rotates its key mid-epoch signed the tip with the FROZEN key, so a
-    // present-head lookup would spuriously reject a valid tip (or, worse, accept
-    // a rotated-key forgery). Every creator passed the domain match above, so it
-    // is present in pool_nodes; a domain absent from the frozen pool is
-    // fail-closed (the falsifier: present-head-registered but not-frozen ⇒
-    // rejected — already caught at the committee match, belt-and-suspenders
-    // here). On the present-head fallback path (epoch 0 / no cc:) pool_nodes ==
-    // the present-head eligible pool, so this is byte-identical to beacon_reg.
-    std::map<std::string, PubKey> frozen_pub;
-    for (auto& nd : pool_nodes) frozen_pub[nd.domain] = nd.pubkey;
-
-    if (tip.creator_block_sigs.size() != tip.creators.size()) return;
-    Hash digest = compute_block_digest(tip);
-    Signature zero_sig{};
-    size_t signed_count = 0;
-    for (size_t i = 0; i < tip.creators.size(); ++i) {
-        if (tip.creator_block_sigs[i] == zero_sig) continue;
-        auto pit = frozen_pub.find(tip.creators[i]);
-        if (pit == frozen_pub.end()) return;   // not a frozen committee member
-        if (!crypto::verify(pit->second, digest.data(), digest.size(),
-                              tip.creator_block_sigs[i])) {
-            std::cerr << "[node] shard tip: invalid sig from " << tip.creators[i] << "\n";
-            return;
-        }
-        ++signed_count;
-    }
-    size_t required = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
-    if (signed_count < required) {
-        std::cerr << "[node] shard tip: insufficient sigs (" << signed_count
-                  << "/" << required << ")\n";
-        return;
-    }
+    // 6. D3.5e-4 + D3.5e-7b — derive the FROZEN source committee, verify the K-of-K
+    // sigs against its frozen ed_pubs, and compute the committee_sig_root, via the
+    // ONE shared decision point (verify_shard_tip_committee_sig_root, extracted
+    // VERBATIM from here). The universal fold re-verification gate (e-7d
+    // BlockValidator::check_shardtip_witnesses) calls the SAME helper, so the
+    // beacon's contemporaneous verdict and every honest node's later re-verification
+    // can never derive a different committee or root. nullopt (with a diagnostic on
+    // stderr) ⇒ committee/sig failure ⇒ drop the tip. On the pinned path the pool +
+    // rand are frozen `cc:[shard_epoch]` (present-head-independent, the Layer-2
+    // reconstructibility property); off it (epoch 0 / pruned / CURRENT) the present-
+    // head fallback keeps it byte-identical to pre-D3.5e.
+    auto csr = verify_shard_tip_committee_sig_root(
+        chain_, beacon_reg, shard_epoch,
+        static_cast<uint64_t>(cfg_.epoch_blocks),
+        shard_region, shard_id, cfg_.k_block_sigs, tip);
+    if (!csr) return;
 
     // D3.5e-6 (S-036 Layer 2): the SIGNED source-shard binding. The K-of-K sigs
     // just verified cover compute_block_digest(tip), which binds tip.source_shard_id
@@ -2036,36 +1946,13 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     // ACCUMULATING buffer so it can be F2-reconciled across the beacon committee and
     // folded into a beacon block (D3.5c). Gated EXTENDED (BEACON is guaranteed by the
     // early return above); a CURRENT-multishard PROFILE_REGIONAL beacon never accrues
-    // records → byte-identical. committee_sig_root is a deterministic PURE FUNCTION of
-    // the just-verified tip (no beacon-local state), so every honest beacon co-signer
-    // builds a byte-identical record → the full-content reconcile_intersection
-    // converges (the anti-wedge invariant). See ShardTipMergeDesign.md §9.6.
+    // records → byte-identical. committee_sig_root (*csr) is a deterministic PURE
+    // FUNCTION of the just-verified tip (no beacon-local state), so every honest
+    // beacon co-signer builds a byte-identical record → the full-content
+    // reconcile_intersection converges (the anti-wedge invariant). See §9.6.
     if (cfg_.sharding_mode == ShardingMode::EXTENDED) {
-        // Commitment to the ACTUAL K-of-K signature SET the beacon just verified; the
-        // zero-skip byte-matches the verify loop above so it binds exactly the
-        // validated subset (BFT tips carry fewer than K non-zero sigs).
-        std::vector<Hash> sig_hashes;
-        for (const auto& s : tip.creator_block_sigs) {
-            if (s == zero_sig) continue;
-            crypto::SHA256Builder sb;
-            sb.append(s.data(), s.size());
-            sig_hashes.push_back(sb.finalize());
-        }
-        Hash sig_set_root = compute_view_root(sig_hashes);
-
-        crypto::SHA256Builder cb;
-        cb.append(std::string("determ-shardtip-v1"));         // domain tag (§3.3)
-        cb.append(static_cast<uint64_t>(shard_id));            // source_shard_id
-        cb.append(static_cast<uint64_t>(tip.index));           // height
-        cb.append(static_cast<uint64_t>(tip.eligible_count));  // D3.4 source-signed count
-        cb.append(static_cast<uint64_t>(shard_region.size()));
-        cb.append(shard_region);                               // region (may be "")
-        cb.append(digest);                                     // == compute_block_digest(tip): the K-of-K signed message
-        cb.append(sig_set_root);                               // commitment to the actual K-of-K sigs
-        Hash committee_sig_root = cb.finalize();
-
         chain::ShardTipRecord rec{
-            shard_id, tip.index, tip.eligible_count, committee_sig_root, shard_region };
+            shard_id, tip.index, tip.eligible_count, *csr, shard_region };
         pending_shard_tip_records_[{shard_id, tip.index}] = rec;
 
         // Source-tip-relative staleness prune: drop this shard's records more than
@@ -2083,6 +1970,12 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
         }
     }
 
+    // signed_count for the diagnostic — the count of non-zero K-of-K sigs the helper
+    // just verified (identical value; recomputed here since the loop moved into the
+    // shared verify core).
+    size_t signed_count = 0;
+    { Signature zero_sig{};
+      for (const auto& s : tip.creator_block_sigs) if (!(s == zero_sig)) ++signed_count; }
     std::cout << "[node] verified shard tip: shard=" << shard_id
               << " block=" << tip.index << " sigs=" << signed_count << "\n";
 }
