@@ -59,9 +59,21 @@
 # introduced here; a partial wait-for-anchor gate was prototyped and REVERTED
 # because closing it correctly needs the B2c.2-full header-sync increment
 # (adversarial review: 3 confirmed HIGH — restart/late-join/mixed-config
-# permanent stall). The staged boot + FAST-beacon/SLOW-shard timing keep the
-# anchor ahead often enough that the full fold ladder usually completes; when
-# the race wedges the shard, NO fold appears and the test SKIPs (below).
+# permanent stall).
+#
+# EMPIRICAL STATUS ON THE COMMITTED BINARY (be honest): with this topology the
+# wedge fires at the FIRST epoch boundary in essentially every run — the shard
+# reaches its first epoch>=1 block (height == epoch_blocks) before the anchor
+# reliably lands (it must boot early to catch header 1 contiguously, so it
+# cannot also wait for the anchor without the reverted gate). So on the
+# committed tree THIS TEST CURRENTLY SKIPS (no fold completes live). The full
+# 9/9 ladder PASS was observed ONLY with the reverted wait-for-anchor prototype;
+# e-5 will begin PASSing reliably once B2c.2-full lands. Today it still (a)
+# proves the ANCHOR path up to the boundary live, (b) documents + detects the
+# wedge (SKIP-clean, never a false green), and (c) hard-FAILs only if a fold DID
+# appear yet the trustless auditor rejected it. The S-036 CLOSURE property
+# (a fabricated distress record is rejected) is proven deterministically
+# in-process by e-7d (test-shardtip-witness-verify, 12 axes) + e-7e regardless.
 #
 # Outcome discipline:
 #   * SKIP (exit 0) — environment starvation (chains too slow to cross the

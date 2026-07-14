@@ -801,10 +801,13 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     **D3.5e-5 ✅ SHIPPED (best-effort live validator, `tools/test_shardtip_live_fold.sh`):** the
     FIRST live epoch-boundary fold — a UNIFIED-pool 2-beacon (us-east) + 3-shard (eu-west) EXTENDED
     cluster (`epoch_blocks=4`, K=2<M=3 so selection is rand-dependent = a real e-3 falsifier)
-    verifies the whole ladder LIVE when it runs: distress tip beacon-verified → folded (record +
-    witness) → accepted by BOTH beacon validators (e-7d live) → committed as a `t:` leaf → and
-    re-verified by the trustless `verify-shardtip-records` auditor (`ok:true` vs the frozen source
-    committee — e-7e's first live positive path). **It found a real PRE-EXISTING liveness residual:**
+    verifies the whole ladder LIVE **when it completes**: distress tip beacon-verified → folded
+    (record + witness) → accepted by BOTH beacon validators (e-7d live) → committed as a `t:` leaf →
+    and re-verified by the trustless `verify-shardtip-records` auditor (`ok:true` vs the frozen
+    source committee — e-7e's first live positive path). **Honest empirical status: on the committed
+    binary the test SKIPs** — the wedge below fires at the first epoch boundary in ~every run; the
+    9/9 PASS was seen only with the reverted wait-for-anchor prototype, and e-5 PASSes reliably only
+    after B2c.2-full. **It found a real PRE-EXISTING liveness residual:**
     a beacon-fed EXTENDED shard has no beacon-anchor RE-ACQUISITION path (`beacon_headers_` in-memory,
     contiguous-from-1, no `BEACON_HEADER_REQUEST` — the **B2c.2-full** follow-on already named at the
     top of this section + `current_epoch_rand`), so under adverse epoch-anchor timing the shard

@@ -440,8 +440,12 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   a real 2-beacon (us-east) + 3-shard (eu-west) EXTENDED cluster in which a genuinely sub-2K-
   distressed shard's tip is beacon-verified, folded (record+witness), accepted by both beacon
   validators, committed as a `t:` leaf, AND re-verified by the trustless `verify-shardtip-records`
-  auditor (`ok:true`, records vs the frozen source committee) — the whole ladder confirmed live
-  when it runs. It **found a real pre-existing LIVENESS residual**: a beacon-fed EXTENDED shard has
+  auditor (`ok:true`, records vs the frozen source committee) — the whole ladder, when it completes.
+  **Empirical status (honest): on the committed binary this test SKIPs** — the anchor-timing wedge
+  (below) fires at the first epoch boundary in essentially every run, so the live fold does not
+  complete; the full 9/9 ladder PASS was observed only with the reverted wait-for-anchor prototype,
+  and e-5 will PASS reliably once B2c.2-full lands. It **found a real pre-existing LIVENESS residual**:
+  a beacon-fed EXTENDED shard has
   no beacon-anchor RE-ACQUISITION path (`beacon_headers_` in-memory, contiguous-from-1, no
   `BEACON_HEADER_REQUEST` — the code's deferred **B2c.2-full** follow-on), so under adverse epoch-
   anchor timing the shard self-wedges on `creator[i] mismatch` and its distress tips become
