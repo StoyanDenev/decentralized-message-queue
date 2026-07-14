@@ -377,10 +377,14 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         if (cfg_.chain_role == ChainRole::SHARD) {
             validator_.set_external_epoch_rand_provider(
                 [this](uint64_t epoch_start_height) -> std::optional<Hash> {
-                    if (epoch_start_height == 0) return std::nullopt;
-                    if (epoch_start_height > beacon_headers_.size())
+                    // D3.5e-3: anchor = BEACON block INDEX epoch_start-1;
+                    // beacon_headers_[j] == INDEX j+1, so that block is at
+                    // position epoch_start-2. MUST equal current_epoch_rand's
+                    // formula EXACTLY (shard producer/validator consistency).
+                    if (epoch_start_height < 2) return std::nullopt;
+                    if (epoch_start_height - 1 > beacon_headers_.size())
                         return std::nullopt;
-                    return beacon_headers_[epoch_start_height - 1].cumulative_rand;
+                    return beacon_headers_[epoch_start_height - 2].cumulative_rand;
                 });
         }
 
@@ -1243,10 +1247,27 @@ Hash Node::current_epoch_rand() const {
     // same committee. Bootstrap fallback (no header yet) → local chain;
     // shard registry mirrors beacon at genesis so it produces a valid
     // committee until the first beacon header lands.
+    //
+    // D3.5e-3 (S-036 Layer 2) — anchor OFF-BY-ONE FIX: the epoch rand anchor
+    // is BEACON block INDEX epoch_start-1 (the convention the beacon's
+    // on_shard_tip, the `cc:` fold chain.cpp, and the epoch-boundary comment
+    // below all share). `beacon_headers_[j]` holds beacon block INDEX j+1
+    // (on_beacon_header appends from expected index 1), so INDEX epoch_start-1
+    // sits at position epoch_start-2. The prior `beacon_headers_[epoch_start-1]`
+    // read INDEX epoch_start — one block too FAR, so every epoch>=1 shard-tip
+    // would fail the beacon's epoch_start-1 verification (never observed: no
+    // test crosses an EXTENDED epoch boundary with a live beacon+shard pair).
+    // The validator provider (node.cpp ~379) uses the IDENTICAL formula, so the
+    // shard's own producer/validator agree and its consensus stays fork-free;
+    // the only change is that the beacon-derived committee now MATCHES the
+    // beacon. When the anchor header has not yet arrived the shard falls back to
+    // its own chain rand below — the beacon then fail-closes that (non-derivable)
+    // tip (a liveness loss, never a false accept) until header persistence +
+    // wait-for-anchor land as the named B2c.2-full follow-on.
     if (cfg_.chain_role == ChainRole::SHARD
-        && epoch_start > 0
-        && epoch_start <= beacon_headers_.size()) {
-        return beacon_headers_[epoch_start - 1].cumulative_rand;
+        && epoch_start >= 2
+        && epoch_start - 1 <= beacon_headers_.size()) {
+        return beacon_headers_[epoch_start - 2].cumulative_rand;
     }
 
     if (epoch_start == 0)        return chain_.head().cumulative_rand;
