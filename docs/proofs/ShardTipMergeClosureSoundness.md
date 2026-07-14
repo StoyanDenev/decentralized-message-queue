@@ -402,12 +402,25 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   `src/node/registry.cpp` `build_from_chain` reads present-head caches). STMC-1's
   `eligible_count` unforgeability is scoped to the *source block's* K-of-K digest,
   NOT to a beacon re-check of source identity.
-- **Trustless closure is the owner-gated Layer-2 work item (D3.5e).** Closing the
-  above requires an `sc:` cross-chain source-committee transport + a BEACON-GENESIS
-  per-shard `K_0^s` trust root — a coordinated genesis **migration**, NOT a
-  rolling-upgrade-neutral change (`ShardTipMergeDesign.md` §9.6 LAYER 2). Until it
-  ships, `docs/SECURITY.md` §S-036 stays **STRONGLY MITIGATED**; do not flip it to
-  CLOSED on this document.
+- **Trustless closure is the Layer-2 work item (D3.5e) — UNDERWAY (2026-07-14).**
+  **The migration framing above is SUPERSEDED:** the owner ruled the network launches
+  only after the full design of all layers + DApps is complete, so genesis-format
+  changes are ordinary pre-launch design work, not a migration; and a code-grounded
+  design Workflow replaced the old `sc:`-transport + `K_0^s` sketch with a **BEACON-SIDE
+  FREEZE** — the shard-tip verdict becomes a pure function of committed BEACON state
+  (frozen `cc:[shard_epoch]` pool + genesis-committed region map + committed epoch rand
+  + frozen ed_pubs), NO cross-chain protocol and NO per-shard trust root (see
+  `ShardTipMergeDesign.md` §9.6, rewritten). **Shipped so far, all byte-neutral, FAST
+  228/0 both platforms:** D3.5e-1 genesis-committed `beacon_shard_regions` map
+  (`e488a73`); D3.5e-2 the map authoritative at beacon load (`97d4236`); D3.5e-3 the
+  shard-side epoch-rand off-by-one seam repair (`c319ce5`); D3.5e-4 the `on_shard_tip`
+  verdict pin onto frozen committed state (`80d3d97`). **Remaining:** e-5 the first live
+  gate (a beacon verifying a shard tip across an epoch boundary — the empirical
+  validation of e-3+e-4), e-6 `source_shard_id` digest binding, e-7 the witness-carrying
+  fold re-verification (the actual CLOSED-maker: every honest full node re-verifies each
+  folded record against committed `cc:` state on gossip-apply) + auditor CLI, e-8 the
+  flip. Until e-8, `docs/SECURITY.md` §S-036 stays **STRONGLY MITIGATED**; do not flip it
+  to CLOSED on this document.
 - **`revert_threshold_blocks` ring depth vs. window.** STMC-5's fail-close on a
   window predating the retained ring is *correct* (an unprovable window is rejected),
   but this document does not argue that the ring depth (default 200) *suffices* to

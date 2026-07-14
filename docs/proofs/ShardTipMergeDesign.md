@@ -782,14 +782,33 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     (KISS). `K_0^s` genesis pins are dropped entirely — they existed solely to authenticate the
     push chain. NOTE: `sc:[s,E]` survives only as a DERIVED VIEW = region_filter(`cc:[E].members`,
     genesis_map[s]) — no new leaf, no new fold, no state_root re-bless.
-  - **Increments:** D3.5e-1 genesis substrate → e-2 node load + mode commitment (manifest legal
-    only when genesis carries no map; both-present-and-differing ⇒ startup fail-close; EXTENDED
-    missing-entry ⇒ fail-closed, not the silent region-"" full-pool degrade) → e-3 seam repair →
-    e-4 beacon verdict pin (+ falsifier: a creator with valid present-head registration but absent
-    from `cc:[E]` is REJECTED) → e-5 the FIRST live gate that HARD-GATES on successful tip
-    verification across an epoch boundary (no shipped test does — which is why the off-by-one
-    never fired), 8-12 runs both platforms → e-6 source digest binding (EXTENDED-golden re-bless)
-    → e-7 witness fold re-verification + auditor CLI (full 3-lens review) → e-8 docs/proofs/flip
+  - **Increments (status 2026-07-14, all byte-neutral to date, FAST 228/0 both platforms):**
+    **D3.5e-1 ✅ SHIPPED (`e488a73`)** genesis substrate — `GenesisConfig::shard_regions`
+    (`beacon_shard_regions` JSON, S-039 conditional mix, BEACON-only + `epoch_blocks>=2` +
+    bounds/dup validation; `build-sharded` emits + hard-asserts `map[s]==shard_s.region`;
+    test-genesis-sharded +4). **D3.5e-2 ✅ SHIPPED (`97d4236`)** node load + mode commitment — the
+    committed map is authoritative at beacon load, satisfies the EXTENDED shard-map requirement
+    (manifest FILE optional), a conflicting manifest is a startup fail-close;
+    `test_shard_manifest.sh` +2 cases. **D3.5e-3 ✅ SHIPPED (`c319ce5`)** seam repair — the
+    shard-side epoch-rand OFF-BY-ONE (`beacon_headers_[epoch_start-1]`=INDEX epoch_start →
+    `[epoch_start-2]`=INDEX epoch_start-1, the beacon/`cc:`-fold anchor); BOTH shard sites
+    (producer `current_epoch_rand` + validator provider) identical, adversarial-verify CONFIRMED.
+    **D3.5e-4 ✅ SHIPPED (`80d3d97`)** the beacon VERDICT PIN — `on_shard_tip` derives the expected
+    committee from FROZEN committed state: POOL via `select_committee_pool` (frozen `cc:[shard_epoch]`
+    region-filtered = the derived sc: view), PUBKEY frozen-only (key-rotation-correct + two-layer
+    falsifier: present-head-registered-but-not-frozen ⇒ rejected), RAND from the `cc:` leaf directly;
+    high-effort adversarial review CONFIRMED byte-neutrality + soundness + no new defect.
+    **NEXT → e-5** the FIRST live gate that HARD-GATES on successful tip verification across an
+    epoch boundary (no shipped test does — which is why e-3's off-by-one never fired): a UNIFIED-pool
+    beacon+shard cluster (same creators both genesis, K<M so selection is rand-dependent = a real
+    e-3 falsifier, `epoch_blocks=4` crossing a boundary = exercises e-4's frozen `cc:` path), assert
+    `verified shard tip` at epoch>=1, 8-12 runs both platforms. e-1..e-4 are byte-neutral because NO
+    shipped test drives a BEACON+EXTENDED node across an epoch boundary receiving tips — e-5 is the
+    first, so it is the empirical validation of the whole frozen-verdict path (correctness already
+    established by the per-increment adversarial reviews). → e-6 source digest binding
+    (EXTENDED-golden re-bless) → e-7 witness fold re-verification + auditor CLI + the pre-existing
+    refugee/absorbed-shard pool-extension gap in `on_shard_tip` (full 3-lens review) → e-8
+    docs/proofs/flip
     (STMC-8/-9; SECURITY.md S-036 → CLOSED with the fine print: DENIED = a fully-Byzantine K-of-K
     beacon committee can no longer commit fabricated distress network-wide; RESIDUALS = beacon
     Sybil/key-compromise of the derived committee itself, beacon omission/censorship power
