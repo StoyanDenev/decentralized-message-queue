@@ -864,8 +864,28 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     the shipped S-048 resolve_fork) — a WITNESS-IDENTITY binding is a hardening candidate for e-7d.
     Byte-neutral (no shipped test folds distress records — e-5 is the first): FAST 229/0 both
     platforms; both EXTENDED clusters green; `test-shardtip-reconciliation` 11→15 assertions.
-    **NEXT → e-7d** the validator gate (`check_shardtip_witnesses`, byte-neutral verdict-only; needs
-    `set_beacon_shard_regions` on BlockValidator; weigh the witness-identity hardening) → e-7e auditor CLI
+    **D3.5e-7d ✅ SHIPPED (`c409bab`) — S-036 CLOSED end to end (the threat model flips here).**
+    `BlockValidator::check_shardtip_witnesses` runs on EVERY honest node at block accept, BEFORE apply
+    folds carried records into `t:`: per pair — leaf invariant → anti-reuse (index/source_shard_id/
+    eligible_count read from the digest preimage) → epoch-pin fail-closed → genesis-map region bind →
+    the e-7b shared helper (frozen `cc:[Es]` pool + rand + ed_pubs, K-of-K over
+    `compute_block_digest(witness)`) → `committee_sig_root` recompute-and-compare. Runs once at accept
+    (Chain::load/snapshot trust the gated block → fork-free). A fully-Byzantine K-of-K beacon that
+    fabricates a distress record now has its block REJECTED network-wide — it cannot forge a witness the
+    frozen source committee signed. `set_beacon_shard_regions` mirrors the same authoritative map
+    `on_shard_tip` uses. **3-lens adversarial review: 1 HIGH + 2 low, ALL fixed pre-commit** — (HIGH)
+    the shared helper picked `expected_k = ceil(2K/3)` for a `consensus_mode==BFT` witness with NO
+    `bft_enabled` gate, so on a non-bft chain a Byzantine beacon could carry a fabricated-distress tip
+    declared BFT and pass at a reduced source quorum (S-036 reopened) → the mode-eligibility gate is
+    folded INTO the shared helper (new `bool bft_enabled` param, both call sites pass it) so no caller
+    can drop it; (low) the legacy manifest-only region map is now consensus-critical → a loud startup
+    WARNING (committed map is the supported path); (low) test-adequacy → the fixture grew to a 3-member
+    frozen committee (pool > K, so the committee-SELECTION branch is falsifiable) + BFT-bypass /
+    wrong-frozen-subset / source_shard_id-mismatch falsifiers. `test-shardtip-witness-verify` (15
+    assertions) drives the gate against a REAL frozen committee: genuine ACCEPT + 12 fabrication axes
+    REJECTED + a BFT-enabled-accept positive control. Byte-neutral (no shipped test folds distress
+    records; e-5 is the first live gate): FAST 230/0 both platforms; both EXTENDED clusters green.
+    **NEXT → e-7e** the auditor CLI (`verify-shardtip-records --rpc` + a `cc:` member-list RPC +
     (`verify-shardtip-records --rpc` + a `cc:` member-list RPC + `cc:` state-proof namespace) → e-7f
     docs + SECURITY S-036 flip. Also pending: e-5 the live epoch-boundary tip-verification gate; the
     orthogonal `on_shard_tip` refugee/absorbed-shard pool-extension fix (no-op for distress records, NOT
