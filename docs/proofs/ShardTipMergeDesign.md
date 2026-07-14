@@ -820,9 +820,36 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     == light; EXTENDED clusters `test_extended_epoch_committee` + `test_zero_trust_cross_chain` still
     reach consensus on the re-blessed digest); `test-eligible-count` +10 assertions (coupling / replay
     closure / shard-0 / range). 3-lens adversarial review (byte-neutrality + mirror-parity +
-    replay-soundness). → e-7 witness fold re-verification + auditor CLI + the pre-existing
-    refugee/absorbed-shard pool-extension gap in `on_shard_tip` (full 3-lens review) → e-5 the live
-    epoch-boundary tip-verification gate → e-8 docs/proofs/flip
+    replay-soundness).
+    **D3.5e-7 = the WITNESS-CARRYING FOLD RE-VERIFICATION (the CLOSED-maker) — UNDERWAY.** Design
+    resolved by a code-grounded Workflow (4 probes → adversarial critic → max-effort resolver): the
+    fold at chain.cpp:1805 accepts `ShardTipRecord`s UNCONDITIONALLY, so a fully-Byzantine K-of-K
+    BEACON committee fabricates distress WITHOUT ever calling `on_shard_tip` (pinning e-1..e-6 inputs
+    denies it nothing). Fix = each folded record carries the FULL source tip `Block` witness, re-verified
+    against the beacon's OWN committed `cc:[E_source]` in the universal validator path. KEY design calls:
+    the witness is the **full Block** (a header subset would drop a `compute_block_digest` GATE VECTOR —
+    `creator_view_eq_roots` / `creator_view_abort_roots` / `creator_proposer_times`); bound into the
+    block HASH (`signing_bytes`) ONLY, **not** the digest (the Byzantine-beacon-signed digest is not the
+    witness's trust anchor; hash-binding is equivalent anti-strip and needs no light-mirror change);
+    verified ONCE at accept in the validator (`Chain::load`/snapshot trust the gated block → fork-free);
+    reject-on-unpinned + a producer `committee_pin_active` emission gate (they agree over the same
+    committed prefix → no self-stall). **D3.5e-7a ✅ SHIPPED (`23679db`)** the dormant carrier schema —
+    `Block::shard_tip_witnesses` + JSON round-trip (empty-elided, depth-1 nested-witness/records DoS
+    guard) + `signing_bytes` anti-strip root; `test-shardtip-witness-codec` (13 assertions); `/bigobj`
+    for main.cpp's COFF limit; FAST 229/0 both platforms, all goldens byte-identical.
+    **D3.5e-7b ✅ SHIPPED (`2d999be`)** the shared verify-core extraction — `on_shard_tip`'s committee
+    derivation + K-of-K sig verify + `committee_sig_root` moved VERBATIM into
+    `node::verify_shard_tip_committee_sig_root` (`src/node/shardtip_verify.{hpp,cpp}`) so the beacon and
+    the e-7d validator gate can never drift; byte-neutral (on_shard_tip unchanged; FAST 229/0 both
+    platforms; EXTENDED cluster + all shard-tip tests green). **NEXT → e-7c** the producer emission (THE
+    byte-affecting step: `on_shard_tip` buffers the full tip per record; `shard_tip_records_eligible_for_inclusion`
+    gains the `committee_pin_active` gate; `build_body` populates aligned witnesses — re-blesses distress
+    EXTENDED block HASHES only, needs a live distress cluster) → e-7d validator gate
+    (`check_shardtip_witnesses`, byte-neutral verdict-only) → e-7e auditor CLI
+    (`verify-shardtip-records --rpc` + a `cc:` member-list RPC + `cc:` state-proof namespace) → e-7f
+    docs + SECURITY S-036 flip. Also pending: e-5 the live epoch-boundary tip-verification gate; the
+    orthogonal `on_shard_tip` refugee/absorbed-shard pool-extension fix (no-op for distress records, NOT
+    an e-7 soundness dependency). → e-8 docs/proofs/flip
     (STMC-8/-9; SECURITY.md S-036 → CLOSED with the fine print: DENIED = a fully-Byzantine K-of-K
     beacon committee can no longer commit fabricated distress network-wide; RESIDUALS = beacon
     Sybil/key-compromise of the derived committee itself, beacon omission/censorship power
