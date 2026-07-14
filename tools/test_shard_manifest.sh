@@ -207,12 +207,81 @@ with open('$T/beacon_no_manifest/config.json','w') as f: json.dump(c,f,indent=2)
 "
 # Explicitly NO manifest file in this data_dir. Start should fail.
 START_OUT=$($DETERM start --config $T/beacon_no_manifest/config.json 2>&1 || true)
-if echo "$START_OUT" | grep -q "requires shard_manifest"; then
-  echo "  ok: fail-closed — beacon refuses to start without manifest"
+if echo "$START_OUT" | grep -q "requires a shard→region map"; then
+  echo "  ok: fail-closed — beacon refuses to start without a map (committed or manifest)"
 else
   echo "  bad: beacon (EXTENDED) without manifest did not error as expected"
   echo "  Got:"
   echo "$START_OUT" | sed 's/^/    | /'
+  FAILS=$((FAILS+1))
+fi
+
+# ── D3.5e-2: the GENESIS-COMMITTED shard→region map (beacon_shard_regions) ──
+# is authoritative when present, replacing the node-local manifest file.
+echo
+echo "=== 5. D3.5e-2: genesis-committed shard→region map ==="
+# A beacon genesis that COMMITS the map (epoch_blocks default 1000 >= 2).
+cat > $T/beacon_map_gen.json <<EOF
+{
+  "chain_id": "test-shard-manifest-map",
+  "m_creators": 1,
+  "k_block_sigs": 1,
+  "block_subsidy": 10,
+  "chain_role": 1,
+  "initial_shard_count": 3,
+  "beacon_shard_regions": [
+    {"shard_id": 0, "committee_region": "us-east"},
+    {"shard_id": 1, "committee_region": "eu-west"},
+    {"shard_id": 2, "committee_region": "ap-se"}
+  ],
+  "initial_creators": [
+$(cat $T/beacon_p.json | tr -d '\n')
+  ],
+  "initial_balances": []
+}
+EOF
+$DETERM genesis-tool build $T/beacon_map_gen.json | tail -1
+BEACON_MAP_GHASH=$(cat $T/beacon_map_gen.json.hash)
+
+# (a) committed map + NO manifest file: the node loads the map from GENESIS.
+mkdir -p $T/beacon_map
+$DETERM init --data-dir $T/beacon_map --profile global_test 2>&1 > /dev/null
+python -c "
+import json
+with open('$T/beacon_map/config.json') as f: c = json.load(f)
+c['genesis_path'] = '$PROJECT_ROOT/$T/beacon_map_gen.json'
+c['genesis_hash'] = '$BEACON_MAP_GHASH'
+c['chain_path']   = '$PROJECT_ROOT/$T/beacon_map/chain.json'
+c['key_path']     = '$PROJECT_ROOT/$T/beacon_map/node_key.json'
+c['data_dir']     = '$PROJECT_ROOT/$T/beacon_map'
+c['listen_port']  = 7798
+c['rpc_port']     = 8798
+with open('$T/beacon_map/config.json','w') as f: json.dump(c,f,indent=2)
+"
+$DETERM start --config $T/beacon_map/config.json > $T/beacon_map/log 2>&1 &
+MAP_PID=$!
+sleep 3
+kill $MAP_PID 2>/dev/null; wait $MAP_PID 2>/dev/null
+if grep -q "from GENESIS (committed, authoritative)" $T/beacon_map/log; then
+  echo "  ok: committed map loaded from genesis (authoritative, no manifest file)"
+else
+  echo "  bad: beacon did not log the genesis-committed map"
+  tail -8 $T/beacon_map/log 2>/dev/null | sed 's/^/    | /'
+  FAILS=$((FAILS+1))
+fi
+
+# (b) committed map + a CONFLICTING manifest file: startup MUST fail-close.
+cat > $T/beacon_map/shard_manifest.json <<EOF
+{"shards":[{"shard_id":0,"committee_region":"us-WEST"},
+           {"shard_id":1,"committee_region":"eu-west"},
+           {"shard_id":2,"committee_region":"ap-se"}]}
+EOF
+CONFLICT_OUT=$($DETERM start --config $T/beacon_map/config.json 2>&1 || true)
+if echo "$CONFLICT_OUT" | grep -q "conflicts with the genesis-committed"; then
+  echo "  ok: fail-closed — a manifest file that disagrees with the committed map is rejected"
+else
+  echo "  bad: conflicting manifest did not fail-close"
+  echo "$CONFLICT_OUT" | sed 's/^/    | /'
   FAILS=$((FAILS+1))
 fi
 

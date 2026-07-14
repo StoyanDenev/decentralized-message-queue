@@ -389,6 +389,13 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         // enforcement matters); optional under CURRENT (where every shard
         // has committee_region == "" anyway). Manifest path defaults to
         // <data_dir>/shard_manifest.json if cfg_.shard_manifest_path is empty.
+        // D3.5e-2: a genesis-committed shard→region map SATISFIES the EXTENDED
+        // manifest requirement — the manifest FILE becomes optional (loaded
+        // only for the conflict check below). The legacy manifest-required
+        // path is unchanged when the genesis carries no map.
+        const bool has_committed_map =
+            (cfg_.chain_role == ChainRole::BEACON
+             && !gcfg.shard_regions.empty());
         if (cfg_.chain_role == ChainRole::BEACON) {
             std::string mpath = cfg_.shard_manifest_path;
             if (mpath.empty() && !cfg_.data_dir.empty())
@@ -397,14 +404,15 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                 (cfg_.sharding_mode == ShardingMode::EXTENDED);
             std::ifstream mf(mpath);
             if (!mf) {
-                if (extended) {
+                if (extended && !has_committed_map) {
                     throw std::runtime_error(
-                        "beacon (EXTENDED) requires shard_manifest at '"
-                        + mpath + "' — file not found. Set "
-                        "shard_manifest_path in config.json or pass "
-                        "--shard-manifest <path>");
+                        "beacon (EXTENDED) requires a shard→region map: either "
+                        "the genesis-committed `beacon_shard_regions` "
+                        "(authoritative, S-036 Layer 2) or a shard_manifest at '"
+                        + mpath + "'. Neither found. Set shard_manifest_path in "
+                        "config.json or pass --shard-manifest <path>.");
                 }
-                // CURRENT / NONE: silent skip (region filter is a no-op anyway).
+                // CURRENT / NONE (or EXTENDED with a committed map): skip.
             } else {
                 json mj;
                 try { mj = json::parse(mf); }
@@ -458,6 +466,37 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                           << shard_committee_regions_.size() << " entries from "
                           << mpath << "\n";
             }
+        }
+
+        // D3.5e-2 (S-036 Layer 2): the GENESIS-COMMITTED shard→region map is
+        // AUTHORITATIVE when present — the committed replacement for the
+        // node-local shard_manifest.json (whose region input to on_shard_tip
+        // was un-committed, so two beacons could silently verify different
+        // committees). A BEACON that carries `beacon_shard_regions` in its
+        // genesis uses it as the source of truth; a coexisting manifest FILE
+        // that DISAGREES is a startup fail-close (the operator must not leave
+        // a stale file that contradicts chain identity). The legacy
+        // manifest-only path is unchanged when the genesis carries no map, so
+        // every existing EXTENDED test is byte-neutral until the map is built
+        // in by `genesis-tool build-sharded` (D3.5e-1) + the verdict pin
+        // consumes it (D3.5e-4).
+        if (has_committed_map) {
+            std::map<ShardId, std::string> committed;
+            for (auto& [sid, region] : gcfg.shard_regions)
+                committed[sid] = region;
+            if (!shard_committee_regions_.empty()
+                && shard_committee_regions_ != committed) {
+                throw std::runtime_error(
+                    "beacon: the shard_manifest file conflicts with the "
+                    "genesis-committed beacon_shard_regions map. Remove the "
+                    "manifest file — the committed map is authoritative "
+                    "(S-036 Layer 2); a stale file that disagrees with chain "
+                    "identity is a startup error, not a silent override.");
+            }
+            shard_committee_regions_ = std::move(committed);
+            std::cout << "[node] shard→region map: "
+                      << shard_committee_regions_.size()
+                      << " entries from GENESIS (committed, authoritative)\n";
         }
 
         gcfg_opt = std::move(gcfg);
