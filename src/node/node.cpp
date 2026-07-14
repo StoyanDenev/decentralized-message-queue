@@ -1894,25 +1894,54 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     EpochIndex shard_epoch = (cfg_.epoch_blocks > 0)
         ? (tip.index / cfg_.epoch_blocks)
         : 0;
-    uint64_t beacon_anchor_height = shard_epoch * (cfg_.epoch_blocks ? cfg_.epoch_blocks : 1);
     Hash beacon_rand;
-    if (beacon_anchor_height == 0 || beacon_anchor_height > chain_.height()) {
-        beacon_rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
+    if (committee_pin_active(chain_, shard_epoch)) {
+        // D3.5e-4: on the pinned path the epoch rand is the FROZEN
+        // cc:[shard_epoch] leaf value — self-contained in committed `cc:` state
+        // (the exact value the e-7 witness re-check + the auditor CLI re-derive
+        // from). Provably == chain_.at(shard_epoch*epoch_blocks-1).cumulative_rand
+        // by the fold construction (chain.cpp freeze stores epoch_rand =
+        // cumulative_rand at the anchor), so this is byte-identical to the legacy
+        // read below — but robust if historical blocks are ever pruned within the
+        // 16-epoch checkpoint ring, when block anchor-1 may no longer exist.
+        beacon_rand = chain_.committee_checkpoints().at(shard_epoch).epoch_rand;
     } else {
-        beacon_rand = chain_.at(beacon_anchor_height - 1).cumulative_rand;
+        // Off the pinned path (epoch 0 / not-yet-folded / CURRENT): the legacy
+        // block-anchored read (chain.at(anchor-1), head-rand for epoch 0).
+        uint64_t beacon_anchor_height =
+            shard_epoch * (cfg_.epoch_blocks ? cfg_.epoch_blocks : 1);
+        if (beacon_anchor_height == 0 || beacon_anchor_height > chain_.height()) {
+            beacon_rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
+        } else {
+            beacon_rand = chain_.at(beacon_anchor_height - 1).cumulative_rand;
+        }
     }
 
     auto beacon_reg = NodeRegistry::build_from_chain(chain_, chain_.height());
-    // R2: filter pool by this shard's committee_region (from manifest).
-    // Missing entry / empty manifest yields region == "" which
-    // eligible_in_region treats as "full pool" — preserves CURRENT-mode
-    // backward-compat where every shard is global.
+    // R2 / D3.5e-1: the shard's committee_region comes from the beacon's
+    // shard→region map. Under D3.5e-2 that map is the GENESIS-COMMITTED
+    // beacon_shard_regions (authoritative); a missing entry yields "" (global
+    // pool), preserving CURRENT-mode backward-compat.
     std::string shard_region;
     {
         auto it = shard_committee_regions_.find(shard_id);
         if (it != shard_committee_regions_.end()) shard_region = it->second;
     }
-    auto pool_nodes = beacon_reg.eligible_in_region(shard_region);
+    // D3.5e-4 (S-036 Layer 2) — the VERDICT POOL is FROZEN: on an EXTENDED
+    // beacon inside epoch>=1 with the `cc:[shard_epoch]` checkpoint folded,
+    // select_committee_pool returns the frozen committee members region-filtered
+    // (== the derived sc:[shard,epoch] view) instead of the beacon's PRESENT-HEAD
+    // registry — so the shard-tip verdict is a pure function of COMMITTED beacon
+    // state (retroactively reconstructible, the Layer-2 closure property). It
+    // falls back to present-head eligible_in_region on epoch 0 / a pruned or
+    // not-yet-folded checkpoint (bootstrap; byte-identical to pre-D3.5e, and the
+    // beacon's present-head verdict there is fail-closed by the e-7 witness
+    // re-check on non-committee nodes). committee_pin_active is false on a
+    // CURRENT-multishard beacon (epoch_blocks handed as 0 → no cc: fold) → the
+    // fallback keeps it byte-identical. Matches the beacon rand anchor above
+    // (chain_.at(epoch_start-1) == cc:[shard_epoch].epoch_rand by construction).
+    auto pool_nodes = select_committee_pool(chain_, beacon_reg,
+                                            shard_epoch, shard_region);
 
     std::set<std::string> excluded;
     for (auto& ae : tip.abort_events) excluded.insert(ae.aborting_node);
@@ -1949,16 +1978,29 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
         }
     }
 
-    // 6. Signature verification.
+    // 6. Signature verification — D3.5e-4 FROZEN-ONLY pubkeys. Verify each
+    // creator's signature against the ed_pub from the FROZEN pool it was
+    // selected from, NOT the present-head registry: a committee member that
+    // rotates its key mid-epoch signed the tip with the FROZEN key, so a
+    // present-head lookup would spuriously reject a valid tip (or, worse, accept
+    // a rotated-key forgery). Every creator passed the domain match above, so it
+    // is present in pool_nodes; a domain absent from the frozen pool is
+    // fail-closed (the falsifier: present-head-registered but not-frozen ⇒
+    // rejected — already caught at the committee match, belt-and-suspenders
+    // here). On the present-head fallback path (epoch 0 / no cc:) pool_nodes ==
+    // the present-head eligible pool, so this is byte-identical to beacon_reg.
+    std::map<std::string, PubKey> frozen_pub;
+    for (auto& nd : pool_nodes) frozen_pub[nd.domain] = nd.pubkey;
+
     if (tip.creator_block_sigs.size() != tip.creators.size()) return;
     Hash digest = compute_block_digest(tip);
     Signature zero_sig{};
     size_t signed_count = 0;
     for (size_t i = 0; i < tip.creators.size(); ++i) {
         if (tip.creator_block_sigs[i] == zero_sig) continue;
-        auto e = beacon_reg.find(tip.creators[i]);
-        if (!e) return;
-        if (!crypto::verify(e->pubkey, digest.data(), digest.size(),
+        auto pit = frozen_pub.find(tip.creators[i]);
+        if (pit == frozen_pub.end()) return;   // not a frozen committee member
+        if (!crypto::verify(pit->second, digest.data(), digest.size(),
                               tip.creator_block_sigs[i])) {
             std::cerr << "[node] shard tip: invalid sig from " << tip.creators[i] << "\n";
             return;
