@@ -798,14 +798,26 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     region-filtered = the derived sc: view), PUBKEY frozen-only (key-rotation-correct + two-layer
     falsifier: present-head-registered-but-not-frozen ⇒ rejected), RAND from the `cc:` leaf directly;
     high-effort adversarial review CONFIRMED byte-neutrality + soundness + no new defect.
-    **NEXT → e-5** the FIRST live gate that HARD-GATES on successful tip verification across an
-    epoch boundary (no shipped test does — which is why e-3's off-by-one never fired): a UNIFIED-pool
-    beacon+shard cluster (same creators both genesis, K<M so selection is rand-dependent = a real
-    e-3 falsifier, `epoch_blocks=4` crossing a boundary = exercises e-4's frozen `cc:` path), assert
-    `verified shard tip` at epoch>=1, 8-12 runs both platforms. e-1..e-4 are byte-neutral because NO
-    shipped test drives a BEACON+EXTENDED node across an epoch boundary receiving tips — e-5 is the
-    first, so it is the empirical validation of the whole frozen-verdict path (correctness already
-    established by the per-increment adversarial reviews).
+    **D3.5e-5 ✅ SHIPPED (best-effort live validator, `tools/test_shardtip_live_fold.sh`):** the
+    FIRST live epoch-boundary fold — a UNIFIED-pool 2-beacon (us-east) + 3-shard (eu-west) EXTENDED
+    cluster (`epoch_blocks=4`, K=2<M=3 so selection is rand-dependent = a real e-3 falsifier)
+    verifies the whole ladder LIVE when it runs: distress tip beacon-verified → folded (record +
+    witness) → accepted by BOTH beacon validators (e-7d live) → committed as a `t:` leaf → and
+    re-verified by the trustless `verify-shardtip-records` auditor (`ok:true` vs the frozen source
+    committee — e-7e's first live positive path). **It found a real PRE-EXISTING liveness residual:**
+    a beacon-fed EXTENDED shard has no beacon-anchor RE-ACQUISITION path (`beacon_headers_` in-memory,
+    contiguous-from-1, no `BEACON_HEADER_REQUEST` — the **B2c.2-full** follow-on already named at the
+    top of this section + `current_epoch_rand`), so under adverse epoch-anchor timing the shard
+    produces an epoch≥1 block from the fallback rand and self-wedges on `creator[i] mismatch`, its
+    tips then un-verifiable. A partial "wait-for-anchor" gate (producer defer + validator reject +
+    header wake) was prototyped and **REVERTED** — a 3-lens adversarial-review Workflow returned 3
+    CONFIRMED HIGH (restart/late-join permanent stall; anchor-rejected block never re-delivered;
+    consensus validity keyed to per-node `beacon_peers` config → mixed-config/beacon-dials-shard
+    split). The residual is LIVENESS/operational, not SAFETY (no cross-node fork reachable; S-036
+    closure is proven in-process by e-7d/e-7e + live by e-5 when the anchor is ahead). So the test is
+    SKIP-clean on the wedge (never a false green), hard-FAIL only if a fold appears but the trustless
+    auditor rejects it. The correct fix is the B2c.2-full header-sync increment (owner-gated), done
+    BEFORE any wait-for-anchor gate. See `ShardTipMergeClosureSoundness.md` §Limitations.
     **D3.5e-6 ✅ SHIPPED** the SOURCE DIGEST BINDING — new `Block::source_shard_id` (u32) bound into
     the K-of-K signed digest (producer `compute_block_digest`) + block hash (`signing_bytes`) + light
     mirror (`light_compute_block_digest`), all riding the D3.4 `eligible_count != 0` gate (so shard 0's
@@ -885,9 +897,12 @@ reconstruct the SOURCE shard's committee-at-height as a pure function of committ
     assertions) drives the gate against a REAL frozen committee: genuine ACCEPT + 12 fabrication axes
     REJECTED + a BFT-enabled-accept positive control. Byte-neutral (no shipped test folds distress
     records; e-5 is the first live gate): FAST 230/0 both platforms; both EXTENDED clusters green.
-    **NEXT → e-7e** the auditor CLI (`verify-shardtip-records --rpc` + a `cc:` member-list RPC +
-    (`verify-shardtip-records --rpc` + a `cc:` member-list RPC + `cc:` state-proof namespace) → e-7f
-    docs + SECURITY S-036 flip. Also pending: e-5 the live epoch-boundary tip-verification gate; the
+    **e-7e ✅ SHIPPED** (`752d356`) the auditor CLI `verify-shardtip-records --rpc` +
+    `cc_checkpoint` RPC + `cc`/`t` state-proof namespaces (review fixed a HIGH F-6 epoch-substitution:
+    CC-PIN now binds `key_bytes`); **e-5 ✅ SHIPPED** (best-effort live validator — see the D3.5e-5
+    entry above; the whole ladder confirmed live + a real B2c.2-full liveness residual found, the
+    partial wait-for-anchor reverted). **NEXT → e-7f** docs + SECURITY S-036 flip (SAFETY axis CLOSED,
+    carrying the honest-fold anchor-timing LIVENESS residual → B2c.2-full). Also pending: the
     orthogonal `on_shard_tip` refugee/absorbed-shard pool-extension fix (no-op for distress records, NOT
     an e-7 soundness dependency). → e-8 docs/proofs/flip
     (STMC-8/-9; SECURITY.md S-036 → CLOSED with the fine print: DENIED = a fully-Byzantine K-of-K

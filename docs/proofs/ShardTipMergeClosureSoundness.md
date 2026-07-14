@@ -435,10 +435,27 @@ public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
   `check_shardtip_witnesses` off an UNTRUSTED daemon (ANCHOR + BODY-PIN + CC-PIN the `cc:[E]`
   checkpoint to a committee-signed root + frozen-committee witness re-verify), so a third party
   can trustlessly refute a fabricated fold; adversarial review found + fixed a HIGH F-6-class
-  epoch-substitution (CC-PIN now binds `key_bytes`, not just `value_hash`). **Remaining:** e-5
-  the first live gate (a beacon verifying a shard tip across an epoch boundary — the empirical
-  validation of the whole ladder), then e-7f the flip. Until e-7f, `docs/SECURITY.md` §S-036
-  stays **STRONGLY MITIGATED**; do not flip it to CLOSED on this document.
+  epoch-substitution (CC-PIN now binds `key_bytes`, not just `value_hash`). **D3.5e-5 — the
+  first LIVE epoch-boundary fold, best-effort (SHIPPED as `tools/test_shardtip_live_fold.sh`):**
+  a real 2-beacon (us-east) + 3-shard (eu-west) EXTENDED cluster in which a genuinely sub-2K-
+  distressed shard's tip is beacon-verified, folded (record+witness), accepted by both beacon
+  validators, committed as a `t:` leaf, AND re-verified by the trustless `verify-shardtip-records`
+  auditor (`ok:true`, records vs the frozen source committee) — the whole ladder confirmed live
+  when it runs. It **found a real pre-existing LIVENESS residual**: a beacon-fed EXTENDED shard has
+  no beacon-anchor RE-ACQUISITION path (`beacon_headers_` in-memory, contiguous-from-1, no
+  `BEACON_HEADER_REQUEST` — the code's deferred **B2c.2-full** follow-on), so under adverse epoch-
+  anchor timing the shard self-wedges on `creator[i] mismatch` and its distress tips become
+  un-verifiable. A partial "wait-for-anchor" gate was prototyped and **REVERTED** (3-lens review:
+  3 CONFIRMED HIGH — restart/late-join/mixed-config permanent stall; the correct fix is the
+  B2c.2-full header-sync increment first). This residual is **LIVENESS/operational, not SAFETY**:
+  adversarial review confirmed no cross-node fork is reachable, and the S-036 CLOSURE property (a
+  fabricated distress record is rejected) is proven deterministically in-process by e-7d
+  (`test-shardtip-witness-verify`, 12 fabrication axes) + e-7e and end-to-end live by e-5 when the
+  anchor stays ahead. So the test is SKIP-clean on the wedge (never a false green), hard-FAIL only
+  if a fold appears but the trustless auditor rejects it. **Remaining:** e-7f the flip — S-036's
+  SAFETY axis may flip CLOSED (fabrication rejected, node + light client + live) carrying the
+  honest-fold LIVENESS-under-adverse-anchor-timing as an explicit residual → B2c.2-full. Until
+  e-7f, `docs/SECURITY.md` §S-036 stays **STRONGLY MITIGATED**; do not flip it here.
 - **`revert_threshold_blocks` ring depth vs. window.** STMC-5's fail-close on a
   window predating the retained ring is *correct* (an unprovable window is rejected),
   but this document does not argue that the ring depth (default 200) *suffices* to
