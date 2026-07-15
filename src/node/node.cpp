@@ -1560,11 +1560,88 @@ void Node::rebroadcast_round_state_locked() {
         gossip_.broadcast(net::make_block_sig(s));
 }
 
+// S-050 stall valve. The S-047 retry re-DELIVERS round messages, but a
+// round can wedge on deterministic mutual REJECTION, which re-delivery
+// cannot heal. Reproduced live (test-fa-partition-virtual under CI-grade
+// CPU contention, 2026-07-15): two abort quorums for the same round formed
+// CONCURRENTLY against different creators; the hash-chained abort tail
+// then forked by ADOPTION ORDER across nodes, the re-derived committees
+// and delay_outputs diverged, every BlockSig was dropped as
+// "mismatched delay_output", and — with only one claim-eligible node left
+// per height view — the max(2,K-1) abort-claim quorum became
+// unsatisfiable. An absorbing livelock on a CLEAN network.
+//
+// The valve makes the wedge non-absorbing via a TWO-WINDOW trip rule,
+// each window driven by an observed failure mode of a simpler design:
+//
+//   SOFT (5 s): no block applied AND the abort tail IMMOBILE — the
+//     deterministic-reject fork livelock's signature (nothing moves at
+//     all). Abort-tail movement (a quorum formed or an event adopted)
+//     restarts the soft window: killing a round mid-abort-recovery
+//     resets it back to the base committee that still CONTAINS the dead/
+//     unreachable member the abort was routing around, and the recovery
+//     restarts from zero — a reproduced valve-induced groundhog loop.
+//   HARD (30 s): no block applied, PERIOD. An abort-churn loop (abort →
+//     reselect → abort, zero blocks forever) extends the soft window
+//     indefinitely, so churn alone must not defer the valve forever.
+//
+// Both windows are WALL-CLOCK, not tick counts, so the trip points do not
+// scale with the configured timer period (a 25-tick threshold validated
+// at 200 ms timers silently became 25 s at 1 s timers — too slow to
+// converge inside a liveness budget). The tick minimum only certifies
+// that round timers are genuinely firing.
+//
+// Blocks self-certify (a block's abort events are validated from the block
+// itself, never from the receiver's round state), so a local scratch reset
+// cannot affect safety; the cost is at worst a re-issued volley. A reset
+// node with an empty tail re-adopts a peer's abort events from the S-047
+// relay in that peer's CHAIN order — converging on one history instead of
+// holding a fork. The valve also broadcasts a STATUS_REQUEST (the startup
+// probe is one-shot, node.cpp arm_startup_grace) and arms stalled_resync_
+// so start_sync_if_behind treats any positive gap as sync-worthy: a stall
+// is equally the signature of a node stranded 1-2 blocks behind after a
+// missed block broadcast, which the normal tolerance-5 window ignores.
+static constexpr size_t kRoundStallMinTicks   = 3;
+static constexpr auto   kRoundStallSoftWindow = std::chrono::seconds(5);
+static constexpr auto   kRoundStallHardWindow = std::chrono::seconds(30);
+
+bool Node::maybe_stall_reset_locked() {
+    const auto now = std::chrono::steady_clock::now();
+    if (round_stall_ticks_++ == 0) {
+        stall_since_       = now;
+        stall_soft_since_  = now;
+        stall_abort_count_ = current_aborts_.size();
+    }
+    // Abort machinery advancing? Give the recovery room (soft restart) —
+    // unless the hard window says this is churn that never lands a block.
+    if (current_aborts_.size() != stall_abort_count_ &&
+        now - stall_since_ < kRoundStallHardWindow) {
+        stall_abort_count_ = current_aborts_.size();
+        stall_soft_since_  = now;
+        return false;
+    }
+    if (round_stall_ticks_ < kRoundStallMinTicks) return false;
+    if (now - stall_soft_since_ < kRoundStallSoftWindow &&
+        now - stall_since_     < kRoundStallHardWindow) return false;
+    round_stall_ticks_ = 0;              // restart the cycle after firing
+    std::cout << "[node] S-050 round stall (no block; abort tail immobile "
+                 "or hard window): resetting round state, re-probing peers\n";
+    contrib_timer_.cancel();
+    block_sig_timer_.cancel();
+    current_aborts_.clear();
+    reset_round();
+    stalled_resync_ = true;
+    gossip_.broadcast(net::make_status_request());
+    check_if_selected();
+    return true;
+}
+
 void Node::handle_contrib_timeout() {
     // Stale queued expiry: cancel() can lose against an already-popped
     // deadline (timer_service.hpp header) — the phase gate makes that
     // window harmless.
     if (phase_ != ConsensusPhase::CONTRIB) return;
+    if (maybe_stall_reset_locked()) return;   // S-050 valve consumed this expiry
     std::string missing = find_first_missing(current_creator_domains_,
         [&](const std::string& d) {
             return pending_contribs_.find(d) != pending_contribs_.end();
@@ -1616,6 +1693,7 @@ void Node::handle_block_sig_timeout() {
     // proposer eliminates the silent-fork race (different peers picking
     // different K-subsets).
     if (phase_ != ConsensusPhase::BLOCK_SIG) return;   // stale queued expiry
+    if (maybe_stall_reset_locked()) return;   // S-050 valve consumed this expiry
     auto mode = current_mode();
     size_t required = required_block_sigs(mode, current_creator_domains_.size());
     if (pending_block_sigs_.size() >= required) {
@@ -2238,6 +2316,10 @@ void Node::reset_round() {
     current_delay_seed_  = Hash{};
     current_delay_output_= Hash{};
     phase_ = ConsensusPhase::IDLE;
+    // S-050 note: the stall counter is deliberately NOT cleared here.
+    // reset_round runs on every abort transition, and an abort-churn loop
+    // (abort → reselect → abort, zero blocks) must not suppress the valve —
+    // only a BLOCK APPLY (post_append_bookkeeping_locked) clears it.
 }
 
 // ─── Event Handlers ──────────────────────────────────────────────────────────
@@ -2362,6 +2444,10 @@ void Node::post_append_bookkeeping_locked(const chain::Block& b) {
     contrib_timer_.cancel();
     block_sig_timer_.cancel();
     reset_round();
+    // S-050: a block applied — the ONLY event that counts as progress for
+    // the stall valve (abort transitions deliberately don't clear it).
+    round_stall_ticks_ = 0;
+    stalled_resync_    = false;
 
     // Drop equivocation evidence that was just baked into this block
     // (slashing already applied to the equivocator's stake in
@@ -3104,7 +3190,11 @@ void Node::start_sync_if_behind() {
     uint64_t max_h = chain_.height();
     for (auto& [_, h] : peer_heights_) max_h = std::max(max_h, h);
 
-    constexpr uint64_t TOLERANCE = 5;
+    // S-050: after a stall-valve reset, ANY positive gap is sync-worthy —
+    // the stalled node may be stranded 1-2 blocks behind after a missed
+    // block broadcast, which the normal tolerance window is designed to
+    // ignore (a block in flight is not "behind"). Cleared on block apply.
+    const uint64_t TOLERANCE = stalled_resync_ ? 0 : 5;
     if (chain_.height() + TOLERANCE >= max_h) {
         if (state_ != SyncState::IN_SYNC) {
             state_ = SyncState::IN_SYNC;

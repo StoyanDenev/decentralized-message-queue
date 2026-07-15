@@ -145,6 +145,15 @@ for t in tools/test_*.sh; do
     if echo "$LAST" | grep -qE "^\s*FAIL:"; then
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$t")
+        # QUIET captures output instead of teeing it — but a FAILING test's
+        # output is the diagnosis, and swallowing it leaves a CI log that
+        # names the red test with zero evidence of WHICH assertion fired
+        # (observed live: the fa-partition-virtual CI red was undebuggable
+        # from the Actions log). Failures always print.
+        if [ "${QUIET:-0}" = "1" ]; then
+            echo "  ── failing test output (QUIET=1 suppressed the live tee) ──"
+            echo "$OUT"
+        fi
     elif echo "$LAST" | grep -qE "^\s*PASS:"; then
         PASS_COUNT=$((PASS_COUNT + 1))
     else
@@ -152,6 +161,10 @@ for t in tools/test_*.sh; do
         echo "  (no PASS:/FAIL: marker in final 10 lines — counted as failure)"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$t (no marker)")
+        if [ "${QUIET:-0}" = "1" ]; then
+            echo "  ── markerless test output (QUIET=1 suppressed the live tee) ──"
+            echo "$OUT"
+        fi
     fi
     echo
 done

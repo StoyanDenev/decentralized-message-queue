@@ -574,6 +574,13 @@ private:
     void handle_contrib_timeout();
     void handle_block_sig_timeout();
     void reset_round();
+    // S-050 stall valve (see the definition comment in node.cpp): counts
+    // consecutive round-timeout expiries with zero progress; past the
+    // threshold, locally resets the round scratch state (INCLUDING the
+    // abort tail) back to the canonical post-head state and re-probes
+    // peers. Returns true when it fired (the caller's expiry is consumed).
+    // Caller must hold state_mutex_.
+    bool maybe_stall_reset_locked();
     void apply_block_locked(const chain::Block& b);
 
     Config                cfg_;
@@ -824,6 +831,23 @@ private:
     SyncState                                state_{SyncState::SYNCING};
     std::map<std::string, uint64_t>          peer_heights_;
     std::shared_ptr<net::Peer>               sync_peer_;
+
+    // S-050 stall valve state. round_stall_ticks_ counts contrib/block-sig
+    // timeout expiries since the last APPLIED BLOCK (the only progress
+    // event that clears it — post_append_bookkeeping_locked; abort
+    // transitions deliberately do not, or an abort-churn loop would
+    // suppress the valve). stall_since_ anchors the wall-clock window so
+    // the trip point is timer-period-independent. stalled_resync_ makes
+    // the next start_sync_if_behind treat ANY positive height gap as
+    // sync-worthy (tolerance 0 instead of 5): a stall is exactly the
+    // signal that the node may be stranded 1-2 blocks behind, which the
+    // normal tolerance window is designed to ignore. Cleared on block
+    // apply.
+    size_t                                   round_stall_ticks_{0};
+    std::chrono::steady_clock::time_point    stall_since_{};      // hard-window anchor
+    std::chrono::steady_clock::time_point    stall_soft_since_{}; // soft-window anchor
+    size_t                                   stall_abort_count_{0};
+    bool                                     stalled_resync_{false};
 
     std::atomic<bool>               running_{false};
     // S-031 partial mitigation: shared_mutex permits N concurrent readers
