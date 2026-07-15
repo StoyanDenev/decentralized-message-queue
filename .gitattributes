@@ -1,0 +1,22 @@
+# Line-ending discipline.
+#
+# third_party/ is VENDORED, byte-pinned code: the minix dependency-surface
+# ratchet (tools/test_minix_dependency_surface.sh) SHA-256-pins
+# third_party/nlohmann/json.hpp, so git must NEVER rewrite its bytes.
+# Without this rule, a checkout on a machine with core.autocrlf=true (the
+# Git-for-Windows default on the GitHub windows-2022 runner) converts the
+# header to CRLF, the hash flips (9bea4c80... -> 853b2eb3...), and the ratchet
+# goes red on CI while staying green on every autocrlf=false dev box —
+# exactly the failure observed on the first full Actions run.
+third_party/** -text
+
+# Shell scripts must stay LF: bash parses a CRLF shebang/line as part of the
+# token ("\r: command not found" class). Git Bash happens to tolerate most of
+# it, but pin it rather than rely on that.
+*.sh text eol=lf
+
+# CMake + workflow files: LF for cross-platform hash/diff stability.
+CMakeLists.txt text eol=lf
+*.cmake text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
