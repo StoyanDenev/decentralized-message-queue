@@ -41,10 +41,20 @@ jobs:
           path: build-linux/_deps
           key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: ${{ runner.os }}-openssl-deps-
+      # PIN the interpreter instead of using the runner's SYSTEM python3.
+      # ubuntu-24.04 ships Python 3.12 marked EXTERNALLY-MANAGED (PEP 668), so
+      # `python3 -m pip install [--user] …` against the system interpreter exits
+      # non-zero ("externally-managed-environment") and kills the job before a
+      # single line is compiled. setup-python provides a standalone (non-marked)
+      # interpreter where pip works normally — and pins the version, matching
+      # this file's pin-don't-roll discipline for the runner images.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --user cryptography argon2-cffi pynacl
+          python -m pip install --upgrade pip
+          python -m pip install cryptography argon2-cffi pynacl
       - name: Build + FAST + guards
         run: bash tools/ci_local.sh --jobs 4
 
@@ -59,6 +69,12 @@ jobs:
           path: build/_deps
           key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: ${{ runner.os }}-openssl-deps-
+      # Same pinned interpreter as the linux job (windows-2022's bundled python
+      # is not externally-managed, so this is for version determinism, not a
+      # PEP 668 fix).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
         run: |
           python -m pip install --upgrade pip
@@ -88,9 +104,14 @@ jobs:
           path: build-linux-ubsan/_deps
           key: ${{ runner.os }}-openssl-deps-ubsan-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: ${{ runner.os }}-openssl-deps-ubsan-
+      # Same PEP 668 fix as the linux job (ubuntu-24.04's system python3 is
+      # EXTERNALLY-MANAGED, so a bare `pip install` there exits non-zero).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --user cryptography argon2-cffi pynacl
+          python -m pip install --upgrade pip
+          python -m pip install cryptography argon2-cffi pynacl
       - name: UBSan build + run consensus subcommands
         run: bash tools/ci_local.sh --sanitize --jobs 4
