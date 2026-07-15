@@ -84,8 +84,38 @@ if [ "$SANITIZE" -eq 1 ]; then
   # Minix §6 split: the 11 pure-oracle test-*-c99 subcommands live in the
   # standalone determ-cryptotest binary — build it under UBSan alongside determ
   # so the full c99-crypto surface stays in the sanitize net.
-  cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$SAN_JOBS" --target determ determ-cryptotest \
-    2>&1 | grep -iE "error:|runtime error" && { echo "FAIL: UBSan build error"; exit 1; }
+  #
+  # GATE ON CMAKE'S OWN EXIT CODE, never a grep over the pipe (the run_all.sh
+  # lesson, relearned here): `cmake --build … | grep -iE "error:" && fail` both
+  # (a) SWALLOWED the real linker diagnostics — undefined-reference /
+  # "No space left on device" / oom-kill lines contain no "error:" substring,
+  # so the first red ubsan Actions run showed ONLY the useless
+  # "collect2: error: ld returned 1" summary — and (b) would IGNORE a failure
+  # whose output matches nothing, letting the binary-find below pick up a
+  # STALE determ from a prior build (a false green). Log the full build output
+  # and print its tail on failure so a red CI run is self-diagnosing.
+  #
+  # Targets built SEQUENTIALLY: linking a UBSan+RelWithDebInfo determ (the
+  # 53k-line main.cpp TU) peaks several GB of ld RSS; overlapping it with the
+  # determ-cryptotest link/compiles is exactly the OOM class that -j4 already
+  # hit on the 16 GB GitHub runner (the SIGTERM/143 note above). Compile
+  # parallelism within each target keeps -j$SAN_JOBS; only the giant links
+  # stop overlapping.
+  for tgt in determ determ-cryptotest; do
+    if ! cmake --build "$SAN_DIR" --config RelWithDebInfo -j "$SAN_JOBS" --target "$tgt" \
+         >"$SAN_DIR/build-$tgt.log" 2>&1; then
+      echo "FAIL: UBSan build error ($tgt) — last 30 log lines:"
+      tail -30 "$SAN_DIR/build-$tgt.log"
+      exit 1
+    fi
+  done
+  # Post-hoc scan (the old grep's one legitimate job): a UBSan runtime report
+  # emitted DURING the build (e.g. an instrumented generator run) is a finding.
+  if grep -iq "runtime error" "$SAN_DIR"/build-determ.log "$SAN_DIR"/build-determ-cryptotest.log; then
+    echo "FAIL: UBSan runtime error during build:"
+    grep -i "runtime error" "$SAN_DIR"/build-*.log | head -5
+    exit 1
+  fi
   SANBIN=$(find "$SAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
   [ -x "$SANBIN" ] || { echo "FAIL: UBSan determ binary not found"; exit 1; }
   SANBIN_CT=$(find "$SAN_DIR" -maxdepth 2 -name determ-cryptotest -type f -perm -u+x | head -1)
@@ -145,8 +175,15 @@ if [ "$ASAN" -eq 1 ]; then
   # Same -j2 cap + -O1 (from CMakeLists) as the UBSan build: shadow-memory
   # instrumentation on the ~15k-line main.cpp TU peaks several GB.
   ASAN_JOBS=2; [ "$JOBS" -lt 2 ] && ASAN_JOBS="$JOBS"
-  cmake --build "$ASAN_DIR" --config RelWithDebInfo -j "$ASAN_JOBS" --target determ \
-    2>&1 | grep -iE "error:" && { echo "FAIL: ASan build error"; exit 1; }
+  # Exit-code gate + logged output (same fix as the UBSan path above — the
+  # grep-gate both swallowed real diagnostics and could false-green a failure
+  # whose output matched nothing).
+  if ! cmake --build "$ASAN_DIR" --config RelWithDebInfo -j "$ASAN_JOBS" --target determ \
+       >"$ASAN_DIR/build-determ.log" 2>&1; then
+    echo "FAIL: ASan build error — last 30 log lines:"
+    tail -30 "$ASAN_DIR/build-determ.log"
+    exit 1
+  fi
   ASANBIN=$(find "$ASAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
   [ -x "$ASANBIN" ] || { echo "FAIL: ASan determ binary not found"; exit 1; }
   # abort_on_error=1 turns any ASan report into a non-zero exit the loop below

@@ -258,7 +258,14 @@ if(DETERM_UBSAN)
   # -j cap in tools/ci_local.sh --sanitize.
   target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=undefined -O1)
   target_compile_options(determ            PRIVATE -fsanitize=undefined -O1)
-  target_link_options(determ               PRIVATE -fsanitize=undefined)
+  # The UBSan RUNTIME must be linked into every executable that links the
+  # instrumented static lib, or the final link dies with undefined
+  # __ubsan_handle_* references — exactly what every clean-checkout CI run
+  # hits via determ-cryptotest (an incremental local tree whose lib objects
+  # predate instrumentation masks it). INTERFACE on the lib propagates the
+  # flag to ALL its consumers instead of hand-listing each executable.
+  target_link_options(determ-crypto-c99 INTERFACE -fsanitize=undefined)
+  target_link_options(determ            PRIVATE -fsanitize=undefined)
   message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan (-O1)")
 endif()
 
@@ -268,7 +275,10 @@ endif()
 if(DETERM_ASAN)
   target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
   target_compile_options(determ            PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
-  target_link_options(determ               PRIVATE -fsanitize=address)
+  # Same runtime-propagation rule as the UBSan block above: any executable
+  # linking the instrumented lib needs -fsanitize=address at link time.
+  target_link_options(determ-crypto-c99 INTERFACE -fsanitize=address)
+  target_link_options(determ            PRIVATE -fsanitize=address)
   message(STATUS "DETERM_ASAN: determ + determ-crypto-c99 instrumented with ASan (-O1)")
 endif()
 
