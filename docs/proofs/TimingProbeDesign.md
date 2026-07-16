@@ -18,12 +18,20 @@ p256-sc-mul (generators upgraded post-R47 to full-range [1, n) secret
 scalars with an n-prefix FIX class — the original scalar[0] &= 0x0f masking
 would have blinded the probe to P256-CT-1-class short-circuit leaks) plus
 the rest of the §3.2 CLI surface (`--seconds`, `--batch`, `--csv`,
-`--json`); tranche 4 added x25519-base, sc-muladd (the FROST z_i core),
-hmac-sha512, blake2b-keyed, pbkdf2, frost-reconstruct, frost-dkg, and
-frost-sign-partial — 23 targets total, closing the §4 id list except the
-dedicated `ghash` id (a static internal to aes_gcm.c, exercised indirectly
-via gcm-tag-verify/aes-core; exporting it for measurement alone was
-rejected per KISS). `--selftest` (the §5.5 bit-exact
+`--json`); tranche 4 added x25519-base, sc-muladd, hmac-sha512,
+blake2b-keyed, pbkdf2 (the three tranche-4 FROST targets — frost-reconstruct/
+frost-dkg/frost-sign-partial — were REMOVED with FROST itself in the B2 purge,
+so no FROST id remains in the registry); a demonstration target
+p256-msm-zeroskip (the 2026-07-06 CT zero-scalar-skip removal); and tranche 5
+(D2) the two INTEGRATED confidential-tx proof-generation targets
+p256-balance-prove (secret = the blinding excess x) and rangeproof-prove
+(secret = the hidden amount v) — 23 live targets total, closing the §4 id
+list except the dedicated `ghash` id (a static internal to aes_gcm.c,
+exercised indirectly via gcm-tag-verify/aes-core; exporting it for measurement
+alone was rejected per KISS) and the ML-DSA PQ path (deliberately not a
+fix-vs-random target — it is Fiat-Shamir-with-aborts, so total-sign timing is
+data-dependent by construction; its per-iteration CT rests on audit + ACVP KAT
+byte-identity, the ff-modexp treatment — see TimingProbeCTPQCoverage.md). `--selftest` (the §5.5 bit-exact
 statistics fixture) is in the regular suite as
 `tools/test_ct_timing_selftest.sh`; measurement mode stays out of run_all.sh
 per §3.1. First measured runs on the dev host (MSVC -O2, rdtsc): max |t|

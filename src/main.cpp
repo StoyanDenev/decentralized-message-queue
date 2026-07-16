@@ -13585,6 +13585,36 @@ int main(int argc, char** argv) {
             { "p256-msm-zeroskip", "determ_pedersen_msm 2 terms — CT zero-scalar handling "
               "(classes differ only in whether the 2nd scalar is zero)",
               { "both-nonzero", "one-zero" }, 1 },
+            // ── tranche 5 (D2): the INTEGRATED confidential-tx PROOF-GENERATION
+            //    path — one level up from the primitives above. The secret each
+            //    probes is the value a confidential tx hides: the blinding
+            //    factor (balance PoK) and the amount (range proof). Both prove-
+            //    functions are DETERMINISTIC in their inputs (no rejection loop),
+            //    so a fix-vs-random contrast is a clean Welch-t leak detector.
+            { "p256-balance-prove", "determ_p256_balance_prove — CT confidential-tx balance "
+              "PoK (secret = the blinding excess x; E, nonce k held fixed so only x·"
+              "arithmetic varies)",
+              { "fix-x", "rnd-x" }, 1 },
+            // The range proof's secret is the AMOUNT v: v enters via v·g and the
+            // n-bit decomposition into the l/r polynomial vectors — the surface
+            // that must not leak the hidden value's magnitude via timing. All
+            // prover randomness (gamma/alpha/rho/tau1/tau2/sL/sR) is held fixed
+            // so ONLY v changes between classes. n = 32 bits; heavy (Bulletproofs
+            // + IPA) — pass --seconds or a small --samples for a quick read.
+            { "rangeproof-prove", "determ_rangeproof_prove n=32 — CT confidential-tx range "
+              "proof (secret = the amount v; all blindings held fixed)",
+              { "fix-v", "rnd-v" }, 1 },
+            // ── PQ path (ML-DSA) — deliberately NOT a fix-vs-random target ────
+            // ML-DSA.Sign is Fiat-Shamir-WITH-ABORTS: the rejection-sampling
+            // iteration count is data-dependent by construction (FIPS 204), so
+            // total-signature time legitimately varies with (sk, M') and a fix-
+            // vs-random Welch-t would be dominated by that documented, non-key-
+            // leaking variance — not by an exploitable leak. Keygen rej-samples
+            // s1/s2 the same way. So the PQ path's constant-time property is the
+            // PER-ITERATION arithmetic (the inc.1 CT-hardened chknorm + center),
+            // verified by AUDIT + the ACVP KAT byte-identity, NOT by this probe —
+            // exactly the treatment the 3072-bit ff modexp gets above. See
+            // TimingProbeCTPQCoverage.md and ConstantTimeInventory §2.10.
         };
 
         if (sub == "--list") {
@@ -13682,6 +13712,38 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 32; i++) { msm_nz1[i] = (uint8_t)(0x11 * (i % 7) + 3); msm_nz2[i] = (uint8_t)(0x22 + i); }
             msm_nz1[0] = 0; msm_nz2[0] = 0;   // top byte 0 => both < n and nonzero
         }
+        // Fixtures for the tranche-5 integrated-CT targets.
+        // balance-prove: a fixed decodable E (compress of 3G), a fixed nonzero
+        // nonce k, and a fixed blinding x for the FIX class. E and k are held
+        // constant across both classes so ONLY x varies (the CT surface is the
+        // c·x mod-n multiply + k+.. add; there is no x·point mult in prove).
+        uint8_t bal_E[33], bal_k[32], bal_x_fix[32];
+        {
+            uint8_t p65[65], s[32];
+            std::memset(s, 0, 32); s[31] = 3; determ_p256_base_mul(p65, s);
+            determ_p256_point_compress(bal_E, p65);
+            for (int i = 0; i < 32; i++) { bal_k[i] = (uint8_t)(0x31 + i); bal_x_fix[i] = (uint8_t)(0x5a + i); }
+            bal_k[0] = 0; bal_x_fix[0] = 0;   // top byte 0 => < n and nonzero
+        }
+        // rangeproof-prove (n=32): all prover randomness fixed; only v changes.
+        constexpr size_t RP_N = 32;
+        uint8_t rp_gamma[32], rp_alpha[32], rp_rho[32], rp_tau1[32], rp_tau2[32];
+        uint8_t rp_sL[RP_N * 32], rp_sR[RP_N * 32];
+        for (int i = 0; i < 32; i++) {
+            rp_gamma[i] = (uint8_t)(0x13 + i); rp_alpha[i] = (uint8_t)(0x27 + i);
+            rp_rho[i]   = (uint8_t)(0x39 + i); rp_tau1[i]  = (uint8_t)(0x4b + i);
+            rp_tau2[i]  = (uint8_t)(0x5d + i);
+        }
+        rp_gamma[0] = rp_alpha[0] = rp_rho[0] = rp_tau1[0] = rp_tau2[0] = 0;  // each < n
+        for (size_t j = 0; j < RP_N; j++)
+            for (int i = 0; i < 32; i++) {
+                rp_sL[j*32 + i] = (uint8_t)((0x11 * (j % 5)) + i + 1);
+                rp_sR[j*32 + i] = (uint8_t)((0x07 * (j % 7)) + i + 2);
+                if (i == 0) { rp_sL[j*32] = 0; rp_sR[j*32] = 0; }             // < n
+            }
+        const size_t rp_len = determ_rangeproof_proof_len(RP_N);
+        std::vector<uint8_t> rp_proof(rp_len ? rp_len : 1);
+        const uint64_t rp_v_fix = 0x00c0ffeeULL;   // a fixed in-[0,2^32) amount
         // Ed25519-domain scalar for the sc-muladd target: LE, top nibble masked
         // so the value stays < L (2^252 < L); pinned FIX values derive from
         // fixseed/fixscalar under the same mask.
@@ -13706,6 +13768,7 @@ int main(int argc, char** argv) {
         auto run_one = [&](size_t c) -> double {
             uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64], key[32];
             uint8_t msm_s[64];                   // p256-msm-zeroskip: the 2 secret scalars
+            uint64_t rp_v = 0;                   // rangeproof-prove: the secret amount
             // ---- setup (untimed) ----
             if (id == "ct-memcmp") {
                 std::memcpy(bufB, bufA, 32);
@@ -13758,6 +13821,14 @@ int main(int argc, char** argv) {
                 std::memcpy(msm_s, msm_nz1, 32);
                 if (c == 0) std::memcpy(msm_s + 32, msm_nz2, 32);   // both scalars nonzero
                 else        std::memset(msm_s + 32, 0, 32);          // 2nd scalar zero
+            } else if (id == "p256-balance-prove") {
+                // scalar := the secret blinding x (fixed vs full-range random).
+                if (c == 0) std::memcpy(scalar, bal_x_fix, 32);
+                else        p256_rnd_scalar(scalar);
+            } else if (id == "rangeproof-prove") {
+                // rp_v := the secret amount v (fixed vs random in [0, 2^32)).
+                if (c == 0) rp_v = rp_v_fix;
+                else        rp_v = ((uint64_t)rng()) & 0xffffffffULL;
             }
             // ---- timed region ----
             uint64_t t0 = now_ticks();
@@ -13787,6 +13858,12 @@ int main(int argc, char** argv) {
                 else if (id == "blake2b-keyed")   { sink += determ_blake2b(out64, 64, key, 32, pt64, 64); }
                 else if (id == "pbkdf2")          { sink += determ_pbkdf2_hmac_sha256(key, 32, aad, 8, 8, o32, 32); }
                 else if (id == "p256-msm-zeroskip") { uint8_t o33[33]; sink += determ_pedersen_msm(o33, msm_s, msm_pts, 2); }
+                else if (id == "p256-balance-prove") { uint8_t pf[65];
+                                                       sink += determ_p256_balance_prove(pf, bal_E, scalar, bal_k); }
+                else if (id == "rangeproof-prove")  { uint8_t V33[33];
+                                                       sink += determ_rangeproof_prove(V33, rp_proof.data(), rp_v,
+                                                           rp_gamma, rp_alpha, rp_rho, rp_tau1, rp_tau2,
+                                                           rp_sL, rp_sR, RP_N); }
             }
             uint64_t t1 = now_ticks();
             return (double)(t1 - t0) / (double)batch;
