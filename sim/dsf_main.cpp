@@ -74,7 +74,7 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree] --list\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet] --list\n"
         "                                 (register + list/run N seed-driven variants)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
@@ -92,6 +92,9 @@ int main(int argc, char** argv) {
     register_generated_scenarios(scenarios, 0x4A17E5ull, 6,   // increment-6 §Q5 2nd template (agreement)
                                  "gen_agree", true,
                                  determ::sim::GenTemplate::Agreement);
+    register_generated_scenarios(scenarios, 0x7B3D91ull, 6,   // increment-7 §Q5 3rd template (ratchet)
+                                 "gen_ratchet", true,
+                                 determ::sim::GenTemplate::Ratchet);
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
@@ -142,6 +145,8 @@ int main(int argc, char** argv) {
         const determ::sim::GenTemplate tmpl =
             (template_name == "agree" || template_name == "agreement")
                 ? determ::sim::GenTemplate::Agreement
+          : (template_name == "ratchet")
+                ? determ::sim::GenTemplate::Ratchet
                 : determ::sim::GenTemplate::Broadcast;
         register_generated_scenarios(scenarios, seed,
                                      static_cast<int>(generate_count),

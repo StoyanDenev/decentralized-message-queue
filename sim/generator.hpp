@@ -270,16 +270,142 @@ inline Scenario make_agreement_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 7: a THIRD generator template — monotone RATCHET (non-regression) ──
+//
+// The §Q7 BFT-escalation / commit-index family: a value that must only ever
+// ADVANCE, never regress, even under Byzantine leader + faults. A leader ramps
+// a ceiling 0→CEIL and re-floods it; each follower keeps a monotone high-water
+// mark `hi = max(hi, v)` AND a "committed" value `cur`. An HONEST follower sets
+// `cur = hi` (commit the high-water), so `cur == hi` always and the committed
+// value never regresses — robust by construction under any drawn drop/dup/
+// latency/jitter profile (max-latching is idempotent + reorder-immune, exactly
+// like Broadcast's SET(total) and Agreement's first-write-wins). So every
+// generated variant PASSES. `correct` controls the FOLLOWER apply + the leader
+// tail: true = honest (commit = high-water; leader ramps then holds CEIL);
+// false = the planted bug used by the self-test — the follower commits the RAW
+// last-seen value (`cur = v`, no max) AND the Byzantine leader sends a DECREASING
+// tail after the ceiling, so a raw committer's `cur` drops BELOW its own
+// high-water: `ratchet_no_regress` MUST fire (deterministically, on a fixed
+// zero-latency profile — no network reorder needed).
+inline Scenario make_ratchet_variant(int idx, const GenParams& p,
+                                     bool correct, bool self_test,
+                                     const char* name_prefix = "gen_ratchet") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_regress_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a follower commits the RAW last-seen value (no "
+                      "max) and a Byzantine leader sends a decreasing tail, so the "
+                      "committed value regresses below its high-water. "
+                      "ratchet_no_regress MUST fire. ")
+        : std::string("generated monotone-ratchet variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p, correct](Simulator& sim) {
+        sim.add_node("leader");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f, correct](const Message& m) {
+                if (m.kind != "ADVANCE") return;
+                Node& self = sim.state().nodes[f];
+                const int64_t v = static_cast<int64_t>(m.payload);
+                if (v > self.kv["hi"]) self.kv["hi"] = v;      // monotone high-water
+                self.kv["cur"] = correct ? self.kv["hi"]       // honest: commit HW
+                                         : v;                  // BUG: commit raw
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["ceil"] = 0;
+        const int followers = p.followers;
+
+        // SAFETY: no follower's committed value is below its own high-water mark
+        // (i.e. the commit never regressed). Honest commit == hi; the raw-commit
+        // bug lets cur < hi after a lower value arrives post-higher.
+        sim.props().add("ratchet_no_regress", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    auto ih = n.kv.find("hi"), ic = n.kv.find("cur");
+                    const int64_t hi  = ih == n.kv.end() ? 0 : ih->second;
+                    const int64_t cur = ic == n.kv.end() ? 0 : ic->second;
+                    if (cur < hi) {
+                        if (d) *d = id + " cur=" + std::to_string(cur) +
+                                    " < high-water=" + std::to_string(hi) +
+                                    " (regressed)";
+                        return false;
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: every follower's high-water advances to the leader's ceiling.
+        sim.props().add("ratchet_advanced", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t ceil = st.scalars.count("ceil")
+                                     ? st.scalars.at("ceil") : 0;
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    ++seen;
+                    auto it = n.kv.find("hi");
+                    const int64_t hi = it == n.kv.end() ? 0 : it->second;
+                    if (hi != ceil) {
+                        if (d) *d = id + " high-water=" + std::to_string(hi) +
+                                    " != ceil=" + std::to_string(ceil);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p, correct](Simulator& sim) {
+        // Ramp the ceiling 0 -> 30 (5 steps of 6, by 100ms), then re-flood it
+        // 30x (every 25ms) — drop-tolerant convergence, same shape as Broadcast.
+        for (int i = 0; i < 5; ++i)
+            sim.after(vt_ms(20 * (i + 1)),
+                      [&sim]() { sim.state().scalars["ceil"] += 6; });
+        for (int t = 0; t < 30; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p]() {
+                const int64_t c = sim.state().scalars["ceil"];
+                for (int i = 0; i < p.followers; ++i)
+                    sim.send("leader", "f" + std::to_string(i), "ADVANCE",
+                             static_cast<uint64_t>(c));
+            });
+        // Byzantine (self-test): after the ceiling holds, send a DECREASING tail.
+        // A raw committer ends BELOW its high-water; a monotone one is immune.
+        if (!correct)
+            for (int t = 0; t < 10; ++t)
+                sim.after(vt_ms(25 * (31 + t)), [&sim, p]() {
+                    for (int i = 0; i < p.followers; ++i)
+                        sim.send("leader", "f" + std::to_string(i), "ADVANCE", 3u);
+                });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
-// (no-split + decide). Both draw the SAME randomized fault profiles.
-enum class GenTemplate { Broadcast, Agreement };
+// (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
+// (no-regress + advance). All draw the SAME randomized fault profiles.
+enum class GenTemplate { Broadcast, Agreement, Ratchet };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
-    return tmpl == GenTemplate::Agreement
-        ? make_agreement_variant(idx, p, correct, self_test, prefix)
-        : make_broadcast_variant(idx, p, correct, self_test, prefix);
+    switch (tmpl) {
+        case GenTemplate::Agreement:
+            return make_agreement_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::Ratchet:
+            return make_ratchet_variant(idx, p, correct, self_test, prefix);
+        default:
+            return make_broadcast_variant(idx, p, correct, self_test, prefix);
+    }
 }
 
 // Register `count` generated variants of `tmpl` from `gen_seed`, plus (unless
@@ -304,6 +430,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
     bug.base_latency = 0; bug.jitter = 0;
     if (tmpl == GenTemplate::Agreement) {
         bug.followers = 4; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; equivocation is the bug
+    } else if (tmpl == GenTemplate::Ratchet) {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; raw-commit + decreasing tail is the bug
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
