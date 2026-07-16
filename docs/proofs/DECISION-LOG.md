@@ -1362,3 +1362,61 @@ Three owner decisions made during a live review of the just-shipped input-unlink
 **Cross-decision implication.** The **§3.20 Z_p* ff-stack** (`ffgroup`/`ffipa`/`ffrangeproof`/`ffbalance`/`ff_confidential_tx`, ~5 files + tests) is now **consumer-less**. Deletion vs keep-as-optional-conservative-backend is **PENDING owner confirmation** (they chose reuse-P-256 but did not answer the delete-Z_p* question). This also resolves the §Q10 per-curve amount-handshake ECDH inconsistency (MODERN amount handshake = X25519, FIPS = P-256) — that reconciliation + the ~112 T-OPAQUE→DLT-A doc refs are follow-on sweeps, not yet done. Docs reconciled to D3 (params.hpp / README / v2.22-PRIVACY-SPEC / PRE-IMPLEMENTATION-REVIEW) 2026-07-07.
 
 **Governance note.** D1-D3 are direction decisions (not code). No consensus code changed; this entry + the doc corrections capture them. Nothing pushed.
+
+---
+
+## 2026-07-09 — Pre-launch decision review (17 items) + DSSO/DApp catalog + v1.1/v1.2 split
+
+### Full launch-scope lock: 17 last-mile items decided; DSSO + reference-DApp catalog added; application layer split across v1.1 / v1.2
+
+**Question.** A one-by-one pre-launch review (working doc `PRE-LAUNCH-DECISIONS.md`) resolved every open decision + simplification/reliability/security item for the launch. Two follow-on scope questions then arose: (1) add DSSO + the full nine-DApp reference catalog so all DApps share one identity layer? (2) if so, ship all nine together, or split on the zk-VM boundary?
+
+**Decisions (Stoyan 2026-07-09).**
+
+1. **17 last-mile items — all decided** (per-item record in `PRE-LAUNCH-DECISIONS.md`). Highlights: CT view-key/audit = Option C per-epoch HKDF + FULL dual-mode audit (`LOG_AUDIT_ACCESS` + `audit_view_master_pk`/`ROTATE_AUDIT_KEY`); confidential light-read = FULL client-side verification; S-048 = wire `resolve_fork` + bounded one-block head-reorg (owner sign-off granted); PQ freeze = hash-based PQ anon-address + `signature_form` {Ed25519 K-of-K, ML-DSA} at genesis; B1 one-file-per-block storage; B2 purge FROST + RingCT libraries; B3 rewrite v2.22 as-built (increment 1 of a one-consolidated-design-doc / 100%-provable-security program); B4 pre-genesis reserved-bit audit; C2 full adversarial FA/DSF sweep; D1 shielded-pool audit + per-deployment CT disable flag; D2 extend ct-timing-probe to integrated CT+PQ; D3 launch posture = EXTENDED → build on-chain SHARD_TIP (v2.11), close S-036; D4 one clean beta soak at feature-complete. **Dropped:** A7 RingCT wiring (library removed under B2), A8 hierarchical sharding (dropped outright — flat ~200-500-shard ceiling is the design limit). First DApp = provably-fair Liberty Bell lottery, which consumes the CT+audit stack end-to-end.
+
+2. **DSSO + full DApp catalog added; DSSO is the shared identity layer.** DSSO (Bundle A, DLT-A composition over already-shipped X25519 + DAPP_CALL + light-client — zero new crypto) is pulled into the launch; all nine reference DApps authenticate through it.
+
+3. **Application layer SPLIT on the zk-VM boundary.**
+   - **v1.1 wave:** DSSO + Tier-1 DApps (D.1 gambling, D.2 B2B, D.3 journalism, D.5 government random-selection, D.9 Merritt voting) — need only DSSO + chain primitives. Pulls in three currently-unbuilt gating primitives: **v2.26 ROTATE_KEY** (D.2, D.3), **v2.15 multi-sig** (D.2), **v2.22 PFS / PRIV-6 OTPK** (D.3).
+   - **v1.2 wave:** Bundle B zk-VM (~3-6 months) + Tier-2 DApps (D.4 AI-agent, D.6 private rollup, D.7 verifiable AI inference, D.8 anonymous credentials). Off the v1.1 critical path.
+
+**Rationale.** Tier-1 is the mission-aligned set (per `MOTIVATION.md`: government/elections + commercial) and reuses the CT/audit/identity stack already in flight. The zk-VM is a ~3-6-month substrate that would otherwise dominate the schedule and gate four DApps. Splitting keeps v1.1 at a ~3.5-5-month feature-complete horizon and makes v1.2 a clean, zk-VM-gated boundary that iterates under DApp-layer freedom (no chain no-migrations exposure for the DApps themselves; only the zk-VM anchor/settlement primitive touches consensus, reviewed then).
+
+**Cross-decision implication.** DSSO's dependencies (X25519, DAPP_CALL, light-client) are all shipped, so DSSO is NOT build-blocked — it should start early, parallel with the core, not sit behind Phase 1. Of the three gating primitives: v2.26 ROTATE_KEY already has `v2.26-ROTATION-SPEC.md`; v2.22 PFS/OTPK design is in `v2.22-PRIVACY-SPEC.md` (PRIV-6) + `PFS_DEPLOYMENT_GUIDANCE.md` (confirm coverage survived the B3 as-built rewrite); **v2.15 multi-sig has no spec** — stubbed 2026-07-09 (`PHASE2-PRIMITIVES-KICKOFF.md`) for owner review per the AI-drafted-design discipline. D.1/D.5/D.9 need only DSSO + already-shipped primitives and are the fastest Tier-1 validations.
+
+**Files updated.** `PRE-LAUNCH-DECISIONS.md` (CLOSED + scope-addition E1-E7); this entry; `V1.1-PLAN.md` (split status banner); NEW `docs/proofs/PHASE2-PRIMITIVES-KICKOFF.md` (v2.15 multi-sig stub + v2.26/v2.22 pointers + impl checklists). Authority: Stoyan Denev.
+
+---
+
+---
+
+## 2026-07-15 — DSSO T-OPRF re-based to t-of-n verifiable T-OPRF on P-256 (DLT-B); `v2.25-DSSO-DAPP-SPEC.md` created as the single authoritative DSSO doc
+
+### D1-rev: DLT-A's X25519 T-OPRF leg replaced; assertion leg kept and its attestation claim sharpened
+
+**Question.** DLT-A (2026-06-07; reaffirmed 2026-07-07 D1) specified the DSSO T-OPRF leg as "X25519 threshold DH, additive n-of-n shares, aggregate via group multiplication — zero new crypto primitives." A coherence review against the shipped API and the B3 100%-provable-security goal found three defects. Which mechanism ships?
+
+**Findings that forced the question.**
+1. **Not implementable as specified.** The shipped X25519 module (`include/determ/crypto/x25519/x25519.h`) exposes exactly two functions — clamped, x-only scalar multiplication. Additive-share aggregation needs point addition; OPRF unblinding needs *unclamped* multiplication by `r^{-1} mod ℓ`; "blinded password as an X25519 point" needs a hash-to-curve. None exist in that module, so the "zero new primitives" claim held only for a stack that could not run the protocol.
+2. **No proof.** An OPRF over a cofactor-8, x-only group has no published security argument; RFC 9497 restricts OPRF suites to prime-order group abstractions for exactly this reason. This is the same class of gap the B3 program exists to eliminate.
+3. **No byzantine verifiability, no liveness slack.** Additive n-of-n lets a single byzantine operator silently corrupt the joint output (undetectable without per-response proofs) and a single offline operator halt all logins.
+
+**Options.** (A) Keep X25519 — add the missing group operations and author a custom security proof. **(B) DLT-B** — same two-leg composition; the T-OPRF leg moves to the **shipped P-256 RFC 9497 VOPRF stack** (§3.9b): t-of-n user-dealt Shamir shares, per-response DLEQ verification against block-anchored share pubkeys, client-side Lagrange recombination. (C) Restore FROST-based T-OPAQUE.
+
+**Choice.** (B) DLT-B. Owner decision 2026-07-15 ("use the better direction"), following the in-session T-OPAQUE t-of-n analysis (any-t-of-n sufficiency; no predefined evaluation order).
+
+**Why not A/C.** A builds and audits new curve code plus a novel proof to avoid a stack that is already shipped, KAT-gated against genuine RFC 9380/9497 vectors, and proof-carrying (2HashDH — Jarecki–Kiayias–Krawczyk 2014; threshold form TOPPSS — Jarecki–Kiayias–Krawczyk–Xu 2017; Gap-OMDH, ROM) — a pure loss under KISS + B3. C reopens the FROST freeze for a *signature* layer DSSO does not need: the assertion attestation remains the chain's existing K-of-K block signature (leg 2 unchanged), and FROST was never the OPRF.
+
+**What DLT-B changes / preserves.**
+- **Preserves:** the two-leg structure; the block-anchored assertion leg verbatim; the "already-shipped primitives only, zero new hardness assumptions" property — now on the stack where it is actually true (P-256: `point_add`, `_inv_mod_n`, RFC 9380 H2C, RFC 9497 OPRF/VOPRF all shipped and gated).
+- **Changes:** OPRF curve X25519 → profile-agnostic P-256 (extends D3's reuse-P-256 logic; MODERN keeps X25519/XChaCha for share-envelope transport only); additive n-of-n → **t-of-n dial** (recommended default t = n−1; t is a stated secrecy/liveness trade-off — t colluders can offline-grind that user's password); per-response **DLEQ verifiability** (byzantine operators detected, not absorbed); **user-as-dealer** Shamir at registration (per-user OPRF key; no DKG, no PSS, no VSS complaint round — inconsistent dealing only self-DoSes the dealer's own account); restores the T-OPAQUE-shaped **envelope** (OPAQUE's envelope construction, JKX 2018) sealing a dedicated `cred_sk`, with **no AKE** — the chain-anchored assertion replaces it, and no threshold-AKE claim is made (no published proof exists).
+- **Sharpened claim (leg 2):** the K-of-K block signature attests **inclusion/ordering/timestamp** of the assertion tx, NOT authentication truth; assertion truth reduces to Ed25519 EUF-CMA under the block-anchored `cred_pk`. The prior "the block signature IS the threshold attestation" phrasing conflated the two; consequence stated precisely: a malicious operator coalition can censor but cannot mint an assertion.
+
+**Doc-consolidation implication (B3).** NEW `docs/proofs/v2.25-DSSO-DAPP-SPEC.md` is the **single** DSSO mechanism doc; every other document now carries a pointer, not mechanism detail. The pending "~112 T-OPAQUE→DLT-A reference sweep" (2026-07-07 entry) largely dissolves: DLT-B *is* a T-OPAQUE-shaped composition (T-OPRF + envelope, minus AKE), so surviving "T-OPAQUE" references are correct-in-kind and the spec defines the term precisely.
+
+**Provenance discipline (`FROST_DEVIATION_NOTICE.md` §4).** AI-analyzed proposal (Claude Fable, this session), owner-accepted. Four-bar check: (1) insufficiency of status quo — findings 1–3 above; (2) Stoyan-traced requirement — Theme 9 DSSO + the B3 goal (owner-authored register) + the original mutual-distrust-IdP framing; (3) formal-verification cost — zero: no chain-surface change, DApp-layer protocol code over already-gated primitives; (4) no-migrations cost — none engaged: DApp layer stays iterable.
+
+**Files updated.** NEW `v2.25-DSSO-DAPP-SPEC.md`; `V1.1-PLAN.md` (§0 property row + Bundle A reworked to DLT-B, mechanism text replaced by spec pointer); `Improvements.md` §8.1; `V2-DESIGN.md` (v2.25 status row, Theme 9 banner, v2.10-cascade bullet, Phase C row); `CRYPTO-C99-SPEC.md` (profile matrix row, §3.9b consumer note, §3.7 parenthetical); `SECURITY.md` (two status lines); `WHITEPAPER-v1.x.md`; `Beaconless-v2-SPEC.md` (two banner lines); `IMPLEMENTATION-SEQUENCING.md` (banner clause); `DAPP_SDK_GUIDANCE.md` (maintained rows only — ARCHIVE body untouched); `README.md` (locked-property #2 + DSSO section); `PRE-LAUNCH-DECISIONS.md` §E1 (mechanism paragraph, dated revision note); `include/determ/chain/params.hpp` (MODERN-profile comment); `FROST_DEVIATION_NOTICE.md` §10 amendment (append-only). Historical records (2026-06-07 / 2026-07-07 entries, quarantined substrate sections, plan.md ristretto-era text) intentionally NOT rewritten.
+
+**Authority:** Stoyan Denev (owner decision relayed in-session 2026-07-15; recorded by Claude Fable at his direction — same recording pattern as the 2026-06-07 and 2026-07-07 entries).

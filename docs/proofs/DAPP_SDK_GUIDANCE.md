@@ -1,6 +1,6 @@
 > **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
 
-> **SUPERSEDED — crypto substrate (2026-07-07).** This doc's MODERN-profile native-client stack (§3) is written around a **secp256k1 / libsecp256k1 / libsecp256k1-zkp / FROST** plan that was **never built and is abandoned**. Reality (per `DECISION-LOG.md` 2026-07-07 D1/D3, 2026-07-03; `CRYPTO-C99-SPEC.md` §3.8c/§3.9b/§3.19): the owner **rejected secp256k1** (a Koblitz curve) — **no `src/crypto/secp256k1*` exists**. All prime-order / Bulletproof / Pedersen / confidential-tx work is over **NIST P-256** (`src/crypto/pedersen/`, §3.19; `src/crypto/p256/`, §3.8c). **FROST is FROZEN** (removed from the chain path 2026-07-03). DSSO uses **DLT-A** (a T-OPRF, not FROST-based T-OPAQUE): the **FIPS** DSSO OPRF is **NIST P-256 voprf** (RFC 9497, §3.9b); the **MODERN** DSSO OPRF is **X25519 T-OPRF**. `ristretto255` was never used. Read every `secp256k1`/`libsecp256k1-zkp`/`FROST` mention below as the abandoned intended architecture; only the corrected per-profile OPRF rows in §3.3/§4/§6 have been updated in place — the rest of this ARCHIVE file is retained for rationale, not rewritten.
+> **SUPERSEDED — crypto substrate (2026-07-07).** This doc's MODERN-profile native-client stack (§3) is written around a **secp256k1 / libsecp256k1 / libsecp256k1-zkp / FROST** plan that was **never built and is abandoned**. Reality (per `DECISION-LOG.md` 2026-07-07 D1/D3, 2026-07-03; `CRYPTO-C99-SPEC.md` §3.8c/§3.9b/§3.19): the owner **rejected secp256k1** (a Koblitz curve) — **no `src/crypto/secp256k1*` exists**. All prime-order / Bulletproof / Pedersen / confidential-tx work is over **NIST P-256** (`src/crypto/pedersen/`, §3.19; `src/crypto/p256/`, §3.8c). **FROST is FROZEN** (removed from the chain path 2026-07-03). DSSO uses **DLT-B** (a t-of-n T-OPRF + envelope, not FROST-based T-OPAQUE): the DSSO OPRF is **profile-agnostic NIST P-256** (RFC 9497 VOPRF, §3.9b, thresholdized per `v2.25-DSSO-DAPP-SPEC.md`; DECISION-LOG 2026-07-15 — the earlier MODERN X25519-T-OPRF split is superseded). `ristretto255` was never used. Read every `secp256k1`/`libsecp256k1-zkp`/`FROST` mention below as the abandoned intended architecture; only the corrected per-profile OPRF rows in §3.3/§4/§6 have been updated in place — the rest of this ARCHIVE file is retained for rationale, not rewritten.
 
 # DApp SDK guidance — browser-side crypto strategy
 
@@ -126,7 +126,7 @@ All of those operations are wire-format crypto. They live in the native client. 
 | Pedersen commitment operations | libsecp256k1-zkp | Per PRIV-2 |
 | XChaCha20-Poly1305 AEAD | libsodium | Per PRIV-3 |
 | Argon2id passphrase KDF | Argon2 reference (P-H-C) | Per C99-11 |
-| OPRF (MODERN DSSO, DLT-A; future) | X25519 T-OPRF (per DECISION-LOG 2026-07-07 D1 — NOT secp256k1) | Per CRYPTO-C99 DSSO-OPRF profile matrix |
+| OPRF (DSSO, DLT-B; future) | NIST P-256 T-OPRF — profile-agnostic (per DECISION-LOG 2026-07-15; `v2.25-DSSO-DAPP-SPEC.md` — NOT secp256k1, NOT X25519) | Per CRYPTO-C99 DSSO-OPRF profile matrix |
 
 ### 3.4 IPC bridge
 
@@ -159,10 +159,10 @@ Per `Improvements.md §8.1`, DSSO is a chain-aware DApp shipping post-v1.0. DSSO
 
 | Profile | DSSO browser client |
 |---|---|
-| FIPS | Standalone web UI using SJCL: NIST P-256 OPRF (RFC 9497, CRYPTO-C99 §3.9b — the DSSO DLT-A OPRF leg) + AES-256-GCM AEAD + PBKDF2 + HKDF wrapper. All DSSO/DLT-A coordination via DAPP_CALL through SJCL HTTP/WebSocket. |
-| MODERN | Native DLT client provides X25519 T-OPRF (DLT-A, per DECISION-LOG 2026-07-07 D1 — NOT secp256k1) + XChaCha20-Poly1305 + Argon2id + HKDF. Web UI uses SJCL for UI concerns; the DSSO/DLT-A flow goes through the IPC bridge to native. |
+| FIPS | Standalone web UI using SJCL: NIST P-256 T-OPRF (RFC 9497 VOPRF, CRYPTO-C99 §3.9b, thresholdized per `v2.25-DSSO-DAPP-SPEC.md` — the DSSO DLT-B OPRF leg) + AES-256-GCM AEAD + PBKDF2 + HKDF wrapper. All DSSO/DLT-B coordination via DAPP_CALL through SJCL HTTP/WebSocket. |
+| MODERN | Native DLT client provides the SAME profile-agnostic P-256 T-OPRF (DLT-B, per DECISION-LOG 2026-07-15 — NOT secp256k1, NOT X25519) + XChaCha20-Poly1305 + Argon2id + HKDF. Web UI uses SJCL for UI concerns; the DSSO/DLT-B flow goes through the IPC bridge to native. |
 
-This composition is internally consistent: DSSO assertions verify against on-chain committee pubkeys (resolved via state_proof RPC) regardless of profile; only the user-facing DSSO/DLT-A OPRF substrate differs per profile (FIPS = NIST P-256 voprf §3.9b, MODERN = X25519 T-OPRF).
+This composition is internally consistent: DSSO assertions verify via light-client block-sig + inclusion proofs plus the user's credential signature (`v2.25-DSSO-DAPP-SPEC.md` §5) regardless of profile; the T-OPRF substrate is the same profile-agnostic P-256 stack — only the AEAD/KDF envelope choices differ per profile.
 
 ---
 
@@ -219,7 +219,7 @@ Items NOT needed by this guidance (resolved):
 
 Items still needed (open ecosystem work, post-v1.0):
 - ⏳ FIPS-profile Dilithium JS library (when v2.8 ships)
-- ⏳ FIPS-profile DSSO DLT-A primitives on top of SJCL NIST P-256 OPRF (RFC 9497, §3.9b) (when DSSO ships as DApp)
+- ⏳ DSSO DLT-B primitives (both profiles) on top of SJCL NIST P-256 OPRF (RFC 9497, §3.9b; t-of-n per `v2.25-DSSO-DAPP-SPEC.md`) (when DSSO ships as DApp)
 - ⏳ Native client packaging + IPC bridge spec (Bundle 5 era; operator deliverable)
 
 ---

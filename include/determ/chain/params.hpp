@@ -101,8 +101,10 @@ inline constexpr uint64_t SUSPENSION_SLASH = 10;
 //           transactions ride the profile-agnostic P-256 shielded pool (§3.22) —
 //           the same wired backend FIPS uses; MODERN adds NO separate ZK curve
 //           (secp256k1 never built; a big-prime Z_p* backend was considered and
-//           removed 2026-07-07). X25519 T-OPRF for the DSSO
-//           DApp (DLT-A). Faster + safer with random nonces; not FIPS-validated.
+//           removed 2026-07-07). The DSSO DApp's T-OPRF rides the same
+//           profile-agnostic P-256 stack (DLT-B, t-of-n RFC 9497 VOPRF —
+//           docs/proofs/v2.25-DSSO-DAPP-SPEC.md; X25519 is share-envelope
+//           transport only). Faster + safer with random nonces; not FIPS-validated.
 //           Default for non-FIPS deployments.
 //
 //   FIPS:   FIPS-ALIGNED posture — AES-256-GCM AEAD (FIPS 197 + SP 800-38D),

@@ -203,3 +203,90 @@ Several items below already have a spec-recommended answer — for those the rea
 **Dropped/removed:** A7 RingCT wiring (library removed under B2), A8 hierarchical sharding (dropped outright — flat ceiling is the design limit).
 
 **First DApp (owner requirement):** a provably-fair lottery remake of the **Liberty Bell slot machine** — consumes the CT + audit + light-verification stack end-to-end.
+
+---
+
+## Scope addition — 2026-07-09 (owner): DSSO + full 9-DApp catalog into launch
+
+**Decision (owner, 2026-07-09).** Pull **DSSO (Bundle A)** into the launch as the shared identity layer, and add **all nine reference DApps (D.1–D.9)** to the plan, each authenticating through DSSO. This reverses the post-1.0 deferral of the application layer and reinstates the maximalist `V1.1-PLAN.md` vision. Everything in this section is **0% built today.**
+
+### E1. DSSO (Bundle A) — the shared identity substrate
+
+**[Mechanism revised 2026-07-15: DLT-A → DLT-B — `DECISION-LOG.md` 2026-07-15; spec `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`.]** DLT-B composition: t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack (joint password evaluation, per-share DLEQ-verified; user-dealt Shamir shares, no DKG) + block-anchored DAPP_CALL assertion (the chain's K-of-K block signature attests *inclusion*; assertion truth is anchored to the user's credential signature). Uses only already-shipped primitives — Ed25519, P-256 §3.9b, DAPP_CALL, light-client verifier — **zero new crypto**. Ships as a Theme-7 DApp, so it can iterate post-mainnet free of the no-migrations constraint, and multiple DSSO providers can federate. **~4–6 weeks.** Every DApp below authenticates through it.
+
+### E2. Tier-1 DApps — DSSO + chain primitives (no zk-VM)
+
+| DApp | Also needs (build status) | Effort |
+|---|---|---|
+| D.1 Regulated gambling (Liberty Bell) | commit-reveal randomness ✅ · confidential ✅ · `LOG_AUDIT_ACCESS` (building, A2) · DSSO | ~3–4 wk |
+| D.2 B2B settlement | confidential ✅ · **multi-sig ❌** · **ROTATE_KEY ❌** · DSSO | ~3–4 wk + primitives |
+| D.3 Journalism source-protection | **PFS/PRIV-6 OTPK ❌** · **ROTATE_KEY ❌** · DSSO | ~3–4 wk + primitives |
+| D.5 Government random-selection | commit-reveal randomness ✅ · audit (building) · DSSO | ~3–4 wk |
+| D.9 Merritt-witness voting | Merritt-witness pattern · confidential ✅ · randomness ✅ · audit · DSSO | ~3–4 wk |
+
+### E3. Tier-2 DApps — additionally require Bundle B zk-VM (~3–6 months, 0% built)
+
+| DApp | Needs | Effort (after zk-VM) |
+|---|---|---|
+| D.4 AI-agent infrastructure | DSSO · **ROTATE_KEY ❌** · PFS · audit · **zk-VM** | ~4–6 wk |
+| D.6 Private payment rollup | **zk-VM** · state_root ✅ · DSSO | ~3–4 wk |
+| D.7 Verifiable AI inference | **zk-VM** · DSSO · audit | ~3–4 wk |
+| D.8 Anonymous credential issuance | **zk-VM** · DSSO · selective-disclosure ZK | ~3–4 wk |
+
+### E4. Enabling primitives the catalog forces in (all 0% today)
+
+- **DSSO (Bundle A)** ~4–6 wk — the shared identity layer (the direct ask).
+- **v2.26 ROTATE_KEY** — needed by D.2, D.3, D.4.
+- **v2.15 multi-sig** — needed by D.2.
+- **v2.22 PFS / PRIV-6 OTPK** — needed by D.3, D.4 (separate from the CT view-key layer now building under A1/A2).
+- **Bundle B zk-VM** ~3–6 months — needed by D.4, D.6, D.7, D.8. **The long pole.**
+
+### E5. Revised timeline
+
+| Layer | Adds | Running horizon (feature-complete) |
+|---|---|---|
+| Launch core (17-item plan) | — | ~1.5–2.5 months |
+| + DSSO + Tier-1 DApps + their primitives (ROTATE_KEY, multi-sig, OTPK) | ~+2–3 months (parallel; bounded by DSSO→DApp chain + missing primitives) | ~3.5–5 months |
+| + zk-VM (Bundle B) + Tier-2 DApps | ~+4–7 months (zk-VM ~3–6 mo is the long pole, then 4 DApps parallel) | **~7–10 months** |
+
+Then the single beta soak (D4) on top.
+
+### E6. The dominant lever — one decision left
+
+"All nine" splits cleanly along the zk-VM line:
+
+- **Tier-1 (D.1/D.2/D.3/D.5/D.9)** need only DSSO + a few chain primitives → ~+2–3 months. This is the mission-aligned set (gambling, B2B, journalism, government random-selection, elections) and reuses what you're already building.
+- **Tier-2 (D.4/D.6/D.7/D.8)** need the zk-VM (~3–6 months) → they *are* the schedule.
+
+**Recommendation:** split the wave — **DSSO + Tier-1 in v1.1** (mission-aligned, no zk-VM), **Tier-2 + zk-VM as v1.2** once the verifiable-compute substrate lands. If you genuinely want all nine in a single launch, that's a deliberate **~7–10-month** horizon driven almost entirely by the zk-VM — a fine call, but make it with the number in view.
+
+**Decision (owner, 2026-07-09): SPLIT.** DSSO + Tier-1 DApps (D.1/D.2/D.3/D.5/D.9) ship in the **v1.1** wave; the zk-VM (Bundle B) + Tier-2 DApps (D.4/D.6/D.7/D.8) become **v1.2**.
+
+- **v1.1 application scope** (feature-complete target ~3.5–5 months): DSSO (~4–6 wk) + D.1/D.2/D.3/D.5/D.9, plus the primitives they force in — **v2.26 ROTATE_KEY** (D.2, D.3), **v2.15 multi-sig** (D.2), **v2.22 PFS/PRIV-6 OTPK** (D.3), all 0% today.
+- **v1.2 (deferred):** Bundle B zk-VM (~3–6 mo) + D.4/D.6/D.7/D.8. Clean boundary — everything past v1.1 gates on the zk-VM substrate; it is off the v1.1 critical path and iterates under DApp-layer freedom (only the zk-VM anchor/settlement primitive touches consensus, reviewed then).
+
+### E7. Re-sequenced v1.1 execution (core + application layer)
+
+Beta is one clean soak at full feature-complete (D4), so the whole v1.1 scope below precedes beta start.
+
+**Phase 1 — core (already sequenced above; in flight):** B2 purge → B3 spec rewrite → B4 reserved-bit audit → B1 storage → A1+A2 CT view-key/audit → A3 full light-read → A5+A6 PQ freeze → A4 S-048 head-reorg → D3 SHARD_TIP.
+
+**Phase 2 — application primitives** (parallel with late Phase 1; each is a DApp prerequisite):
+
+- **v2.26 ROTATE_KEY** — gates D.2, D.3
+- **v2.15 multi-sig** — gates D.2
+- **v2.22 PFS / PRIV-6 OTPK** — gates D.3; composes with the A1/A2 view-key work
+
+**Phase 3 — DSSO (Bundle A)** ~4–6 wk — gates every DApp. Deps (X25519, DAPP_CALL, light-client) are already shipped, so it can start early, in parallel with Phase 1/2.
+
+**Phase 4 — Tier-1 DApps** (parallel once DSSO + each one's primitives land):
+
+- **D.1 Liberty Bell gambling** — flagship; needs the Phase-1 CT + audit stack
+- **D.5 government random-selection** — lightest; DSSO + shipped randomness
+- **D.9 Merritt-witness voting** — DSSO + confidential + randomness
+- **D.2 B2B settlement** — after ROTATE_KEY + multi-sig
+- **D.3 journalism source-protection** — after ROTATE_KEY + OTPK
+
+**Phase 5 — verification + beta:** D1 shielded-pool audit (CT flag-gated) + D2 ct-probe + C2 adversarial sweep → one clean beta soak (D4) over the full v1.1 surface including the five DApps.
+
+**v1.2 (post-mainnet):** zk-VM substrate (spec → stack vendoring → state-anchor → settlement bridge → prover network) → D.4/D.6/D.7/D.8.

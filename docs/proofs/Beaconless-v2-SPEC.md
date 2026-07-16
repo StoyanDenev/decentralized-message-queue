@@ -18,7 +18,7 @@
 This spec covers ONLY the architectural removal of the beacon as a special role and the redistribution of beacon functions across shards. It does NOT cover:
 
 - New consensus mechanism — Beaconless v2 reuses the existing K-of-K mutual-distrust consensus per shard. Only the cross-shard coordination layer changes.
-- New cryptographic primitives — none for randomness: cross-shard randomness uses the v1 **MPDH commit-reveal** beacon (no per-shard DKG), plus v2.1 state Merkle root and v2.2 light-client proofs (all already-shipped). Manifest + committee-log co-signing use **K-of-K Ed25519** signatures (already shipped). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST.
+- New cryptographic primitives — none for randomness: cross-shard randomness uses the v1 **MPDH commit-reveal** beacon (no per-shard DKG), plus v2.1 state Merkle root and v2.2 light-client proofs (all already-shipped). Manifest + committee-log co-signing use **K-of-K Ed25519** signatures (already shipped). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-B** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `v2.25-DSSO-DAPP-SPEC.md`, DECISION-LOG 2026-07-15), not FROST.
 - Horizontal-scale beyond ~hundreds of shards — Beaconless v2 raises the practical ceiling from ~50 to ~200-500 shards via lazy validation; beyond that, additional sharding-of-sharding work is a v3 concern.
 - Cross-deployment interop — Beaconless v2 is intra-deployment only. Cross-deployment bridges remain v2.23's scope (which also uses light-client mesh, so the infrastructures align).
 
@@ -283,7 +283,8 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 > (2026-06-07) — the FROST C99 code was retained **only as a library** (audit history) and then DELETED
 > from the tree 2026-07-09 (pre-launch register B2), never in the chain path or the v1.1
 > formal-verification surface. Cross-shard
-> randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST.
+> randomness uses **commit-reveal aggregation**; DSSO uses **DLT-B** (t-of-n T-OPRF on the shipped
+> P-256 RFC 9497 VOPRF stack — `v2.25-DSSO-DAPP-SPEC.md`, DECISION-LOG 2026-07-15), not FROST.
 > Manifest/committee-log co-signing use K-of-K Ed25519, not FROST.
 
 ---

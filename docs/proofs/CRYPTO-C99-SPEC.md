@@ -479,7 +479,7 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 | Prime-order group | **NIST P-256** (profile-agnostic; secp256k1 rejected 2026-07-07) | **NIST P-256 (FIPS 186-5)** |
 | ECDH (v2.22 amount handshake; v2.24 audit-key exchange) | **X25519 ECDH** (the MODERN KX primitive, consistent with the X25519 KX row above) | **NIST P-256 ECDH (SP 800-56A)** |
 | **Confidential transactions (v2.22 Bulletproofs)** | ✅ Available | ✅ Available (§3.22 P-256 shielded pool; FIPS-approved primitives, but the ZK construction is NOT a FIPS-validated algorithm) |
-| Theme 9 DSSO OPRF (v2.25) | **X25519 T-OPRF** (DLT-A; see DECISION-LOG 2026-07-07) | **NIST P-256 voprf** |
+| Theme 9 DSSO OPRF (v2.25) | **NIST P-256 T-OPRF — profile-agnostic** (DLT-B: t-of-n over the RFC 9497 P256-SHA256 VOPRF, §3.9b; `v2.25-DSSO-DAPP-SPEC.md`, DECISION-LOG 2026-07-15) | **NIST P-256 T-OPRF (same — profile-agnostic)** |
 
 **Caveat: FIPS confidential-tx runs on non-NIST-standardized ZK constructions.** Both `tactical` (military / defense) and `cluster` (in-house enterprise / financial services / regulated) FIPS deployments CAN use v2.22 confidential transactions — they run on the §3.22 P-256 shielded pool (Pedersen + Bulletproofs over NIST P-256; NAMED-input model — the §3.23 ring-signature input-unlinkability library was never consensus-wired and was REMOVED 2026-07-09 under register B2). Those are built on FIPS-approved primitives (P-256 + SHA-256), but NIST has not standardized zero-knowledge range proofs, so the CONSTRUCTIONS are not themselves FIPS-validated algorithms; a deployment requiring per-operation CMVP validation treats them as out-of-module and may fall back to clear-amount TRANSFER + v2.24 audit hooks. Crypto is a POSTURE, not a code switch — the one binary contains all of it (params.hpp / DECISION-LOG 2026-07-03).
 
@@ -614,7 +614,9 @@ Original plan (retained for the deviation record):
 
 > **DE-SCOPED (2026-07-03, authority: Stoyan Denev — `DECISION-LOG.md 2026-07-03`).**
 > No consumer exists: v2.22 confidential transactions is FUTURE-tier design-only
-> (zero code) and DSSO was re-based to X25519 DLT-A (2026-06-07). Vendoring
+> (zero code) and DSSO was re-based to X25519 DLT-A (2026-06-07; re-based
+> again to profile-agnostic P-256 DLT-B 2026-07-15 — still no secp256k1
+> consumer). Vendoring
 > ~9K LOC of third-party curve code would add a lifetime audit obligation for
 > nothing shipped. The section below is retained as the design record; reviving
 > it requires a new decision with a real consumer.
@@ -732,6 +734,17 @@ re-verified by two independent pure-python RFC 9497 implementations
 implemented from the FETCHED RFC text, not memory. Remaining for the wider
 §3.9 (out of the §3.9b single-element scope): batch (m>1) proofs, the POPRF
 mode (0x02), and — if a distinct consumer appears — the §3.9a secp256k1 OPRF.
+
+**Consumer (2026-07-15): DSSO DLT-B.** The DSSO DApp's t-of-n T-OPRF
+(`v2.25-DSSO-DAPP-SPEC.md`; DECISION-LOG 2026-07-15) thresholdizes THIS module,
+profile-agnostically: operator-side per-share evaluation reuses `_evaluate` +
+`_voprf_prove`/`_verify` with the share pubkey in the key slot (statement
+`log_G(PK_i) = log_B(Z_i)` — the same single-element DLEQ); client-side
+Lagrange recombination + unblinding use `_point_mul`/`_point_add` +
+`_inv_mod_n`. Protocol code only — adds NO primitive and NO hardness
+assumption beyond this section's (Gap-OMDH, ROM). Green gates before Bundle A
+merge: spec §10 G1 (t-of-n == direct-Evaluate identity) + G2 (per-share DLEQ
+reject paths), extending the existing `test-p256-oprf-c99` surface.
 
 Original plan (retained):
 
