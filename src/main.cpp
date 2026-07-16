@@ -826,6 +826,13 @@ Additional in-process tests:
                                               Asserts liveness + no-fork agreement +
                                               replay-twice-identical (per-node head/
                                               state_root + block list + action trace)
+  determ test-fa-adversarial-deterministic    inc.5: ADVERSARIAL schedules on the
+                                              inc.4 substrate — 10% loss, {4}|{1}
+                                              partition, heal + S-050 valve re-probe,
+                                              ALL hard gates (loss liveness was
+                                              non-gating under wall clocks), plus
+                                              replay-twice byte-identity over the
+                                              whole adversarial schedule
   determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
                                               wiring + depth-1 head reorg. A
                                               non-producing follower is fed a
@@ -28968,6 +28975,270 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": scheduler-multiloop "
                   << (fail == 0 ? "all assertions (inc.4)" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // DeterministicSchedulerDesign inc.5: ADVERSARIAL schedules on the inc.4
+    // deterministic substrate — the "reliable loss-liveness gate" the wall-clock
+    // FA4 harness could only run as a non-gating diagnostic. Everything the
+    // wall-clock version had to hedge (budgets, quiescence barriers, freeze
+    // windows) is exact here: one thread, virtual loop time, a frozen-then-
+    // stepped consensus VirtualClock, per-node SeededRng, and per-link seeded
+    // drop RNGs advanced in scheduler order — so the ENTIRE adversarial run
+    // replays byte-for-byte, and every liveness property is a HARD gate.
+    //
+    //   Phase 1 — LOSS LIVENESS (hard): 10% per-frame drop on every link;
+    //     the cluster must still finalize +2 blocks (S-047 retry re-delivers,
+    //     timers fire under virtual time — no wall-clock budget to blow) and
+    //     stay fork-free byte-for-byte.
+    //   Phase 2 — PARTITION (hard): node4 isolated; the 4-node majority must
+    //     finalize +2 (abort/reselect routes around it deterministically);
+    //     node4 must hold a byte-identical PREFIX of the majority chain.
+    //   Phase 3 — HEAL + S-050 VALVE (hard): after heal, node4 is stranded
+    //     below the majority. Stepping the consensus VirtualClock past the
+    //     valve windows (the valve reads clock_.steady_now(), the §Q1 seam)
+    //     must trip Node::maybe_stall_reset_locked deterministically: the
+    //     stall probe + tolerance-0 sync + the A4.4 chunk path re-converge
+    //     node4 onto the majority chain — the deterministic regression for
+    //     the S-050 stall valve's re-probe half (the wall-clock partition
+    //     harness can only print this as a NOTE).
+    //   Phase 4 — REPLAY (hard): the whole adversarial schedule run twice is
+    //     byte-identical (terminal per-node head_hash + state_root + the
+    //     scheduler action-trace hash) — inc.5's determinism signature.
+    if (cmd == "test-fa-adversarial-deterministic") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        constexpr int     kNodes = 5;
+        constexpr int     kK     = 3;
+        constexpr int64_t kT0    = 1700000000;   // sentinel-safe epoch
+        std::error_code fec;
+
+        auto det_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (int i = 0; i < 32; ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const uint8_t bases[kNodes] = {0x11, 0x33, 0x55, 0x77, 0x99};
+
+        struct RunResult {
+            bool loss_live = false, loss_agree = false;
+            bool part_live = false, part_prefix = false;
+            bool heal_recovered = false;
+            std::vector<std::string> head_hash, state_root;
+            std::string trace_hash;
+        };
+
+        auto run_once = [&](const std::string& tag) -> RunResult {
+            RunResult R;
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-fa-adv-det-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            std::array<crypto::NodeKey, kNodes> keys;
+            chain::GenesisConfig g;
+            g.chain_id      = "fa-adversarial-det";
+            g.m_creators    = kNodes;
+            g.k_block_sigs  = kK;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            for (int i = 0; i < kNodes; ++i) {
+                keys[i] = det_key(bases[i]);
+                chain::GenesisCreator c;
+                c.domain        = "node" + std::to_string(i);
+                c.ed_pub        = keys[i].pub;
+                c.initial_stake = 1000;
+                g.initial_creators.push_back(c);
+            }
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            determ::time::VirtualClock vclock(kT0);
+            VirtualNetwork vnet;
+            std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+            std::vector<std::unique_ptr<VirtualTransport>> transports;
+            std::vector<std::unique_ptr<crypto::SeededRng>> rngs;
+            std::vector<std::unique_ptr<node::Node>>        nodes;
+            const uint16_t base_port = 7681;
+
+            for (int i = 0; i < kNodes; ++i) {
+                loops.push_back(std::make_unique<VirtualEventLoop>());
+                loops[i]->enable_virtual_time();
+                transports.push_back(
+                    std::make_unique<VirtualTransport>(*loops[i], vnet));
+                // node4 = partition group 1 (inert until partition() fires).
+                transports[i]->set_partition_group(i == 4 ? 1 : 0);
+                rngs.push_back(std::make_unique<crypto::SeededRng>(
+                    static_cast<uint64_t>(i + 1)));
+            }
+            for (int i = 0; i < kNodes; ++i) {
+                node::Config cfg;
+                cfg.domain       = "node" + std::to_string(i);
+                cfg.data_dir     = (dir / cfg.domain).string();
+                cfg.listen_port  = static_cast<uint16_t>(base_port + i);
+                cfg.key_path     = (dir / (cfg.domain + ".key")).string();
+                cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
+                cfg.genesis_path = gpath;
+                cfg.m_creators   = kNodes;
+                cfg.k_block_sigs = kK;
+                cfg.log_quiet    = true;
+                for (int p = 0; p < kNodes; ++p)
+                    if (p != i)
+                        cfg.bootstrap_peers.push_back(
+                            "127.0.0.1:" + std::to_string(base_port + p));
+                fs::create_directories(cfg.data_dir);
+                crypto::save_node_key(keys[i], cfg.key_path);
+                nodes.push_back(std::make_unique<node::Node>(
+                    cfg, vclock, loops[i].get(), transports[i].get(), *rngs[i]));
+            }
+            for (int i = 0; i < kNodes; ++i) nodes[i]->start_external();
+
+            std::vector<VirtualEventLoop*> lp;
+            lp.reserve(kNodes);
+            for (auto& l : loops) lp.push_back(l.get());
+            GlobalScheduler sched(std::move(lp));
+
+            auto height = [&](int i) {
+                return nodes[i]->rpc_status()["height"].get<uint64_t>();
+            };
+            auto min_h = [&](int lo, int hi) {
+                uint64_t m = UINT64_MAX;
+                for (int i = lo; i < hi; ++i) m = std::min(m, height(i));
+                return m;
+            };
+            auto agree_upto = [&](int lo, int hi, uint64_t top) {
+                for (uint64_t h = 1; h <= top; ++h) {
+                    const nlohmann::json b0 = nodes[lo]->rpc_block(h);
+                    if (b0.is_null()) return false;
+                    const std::string d0 = b0.dump();
+                    for (int i = lo + 1; i < hi; ++i) {
+                        const nlohmann::json bi = nodes[i]->rpc_block(h);
+                        if (bi.is_null() || bi.dump() != d0) return false;
+                    }
+                }
+                return true;
+            };
+
+            // ── Phase 0: clean steady state to height ≥ 2 ────────────────
+            (void)sched.run_until([&] { return min_h(0, kNodes) >= 2; });
+
+            // ── Phase 1: LOSS LIVENESS (hard gate) ───────────────────────
+            vnet.set_loss(100);   // 10% per-frame, every link, both directions
+            const uint64_t h_loss0 = min_h(0, kNodes);
+            R.loss_live = sched.run_until(
+                [&] { return min_h(0, kNodes) >= h_loss0 + 2; });
+            // SETTLED-chain agreement: compare strictly BELOW every head
+            // (a node at height H holds indices 0..H-1; its head H-1 can
+            // legitimately be one half of an in-flight same-height race
+            // pair the S-048 reorg heals on the next delivery — the run's
+            // own log shows "S-048 REORG" firing. Below the head, a block
+            // is prev_hash-extended and depth-1 reorgs cannot reach it.)
+            R.loss_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
+            vnet.set_loss(0);
+
+            // ── Phase 2: PARTITION (hard gate) ───────────────────────────
+            vnet.partition({1});
+            const uint64_t maj0 = min_h(0, kNodes - 1);
+            R.part_live = sched.run_until(
+                [&] { return min_h(0, kNodes - 1) >= maj0 + 2; });
+            const uint64_t h4 = height(4);
+            // node4's SETTLED prefix (strictly below its head, index h4-1)
+            // must be byte-identical to the majority's. The head itself can
+            // be the losing half of a boundary same-height race pair that
+            // node4 — isolated — cannot yet reorg away (the wall-clock
+            // harness's head−1 pin, exact here); the heal phase then shows
+            // the A4 reorg replacing it (the run logs "S-048 REORG").
+            R.part_prefix = true;
+            for (uint64_t h = 1; h + 1 < h4 && R.part_prefix; ++h) {
+                const nlohmann::json b4 = nodes[4]->rpc_block(h);
+                const nlohmann::json bm = nodes[0]->rpc_block(h);
+                if (b4.is_null() || bm.is_null() || b4.dump() != bm.dump())
+                    R.part_prefix = false;
+            }
+
+            // ── Phase 3: HEAL + S-050 valve re-probe (hard gate) ─────────
+            // node4 is stranded ≥2 below the majority with no block broadcast
+            // coming (the majority's rounds exclude it via abort history at
+            // ITS height). Its own round at the stale height stalls; stepping
+            // the consensus clock past the valve windows trips the stall
+            // valve, whose STATUS_REQUEST + tolerance-0 sync + A4.4 chunk
+            // fetch re-converge it. The clock is stepped in ≤10s increments
+            // (well under the validator's ±30s freshness gate) at scheduler-
+            // quiescent points, as virtual_clock.hpp prescribes.
+            vnet.heal();
+            for (int round = 0; round < 20 && !R.heal_recovered; ++round) {
+                vclock.advance(10);
+                R.heal_recovered = sched.run_until(
+                    [&] { return height(4) >= min_h(0, kNodes - 1); },
+                    4096, 200000);
+            }
+
+            for (int i = 0; i < kNodes; ++i) {
+                R.head_hash.push_back(
+                    nodes[i]->rpc_status().value("head_hash", std::string()));
+                R.state_root.push_back(
+                    nodes[i]->rpc_state_root().value("state_root", std::string()));
+            }
+            {
+                const std::string& tr = sched.trace();
+                crypto::SHA256Builder tb;
+                tb.append(reinterpret_cast<const uint8_t*>(tr.data()), tr.size());
+                const Hash th = tb.finalize();
+                R.trace_hash = to_hex(th.data(), th.size());
+            }
+
+            for (int i = kNodes - 1; i >= 0; --i) nodes[i]->stop();
+            nodes.clear();
+            rngs.clear();
+            transports.clear();
+            loops.clear();
+            fs::remove_all(dir, fec);
+            return R;
+        };
+
+        RunResult r1 = run_once("r1");
+        check(r1.loss_live,
+              "loss liveness (HARD, was non-gating under wall clocks): +2 blocks "
+              "finalized under 10% per-frame loss on every link");
+        check(r1.loss_agree,
+              "loss fork-freedom: all 5 nodes byte-agree on every finalized block");
+        check(r1.part_live,
+              "partition liveness: the 4-node majority finalized +2 with node4 "
+              "isolated (deterministic abort/reselect)");
+        check(r1.part_prefix,
+              "partition safety: node4's held chain is a byte-identical prefix "
+              "of the majority's");
+        check(r1.heal_recovered,
+              "S-050 valve regression: after heal, stepping the injected clock "
+              "past the stall windows re-probes + re-syncs node4 onto the "
+              "majority chain (deterministic)");
+
+        RunResult r2 = run_once("r2");
+        bool replay_eq = r2.loss_live == r1.loss_live &&
+                         r2.heal_recovered == r1.heal_recovered &&
+                         r1.head_hash == r2.head_hash &&
+                         r1.state_root == r2.state_root &&
+                         !r1.trace_hash.empty() &&
+                         r1.trace_hash == r2.trace_hash;
+        check(replay_eq,
+              "replay: the ENTIRE adversarial schedule (loss + partition + heal "
+              "+ valve) is byte-identical across two same-seed runs (terminal "
+              "heads, state_roots, scheduler trace hash)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-adversarial-deterministic "
+                  << (fail == 0 ? "all assertions (inc.5)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

@@ -93,20 +93,20 @@ The retry heals a node that is **participating in the round** but missed a messa
 
 ## 5. Implementation cross-reference
 
-| This document | Source |
+| This document | Source (anchors refreshed 2026-07-17 after the S-050 valve insertions shifted `node.cpp`) |
 |---|---|
-| Relay of full round state | `src/node/node.cpp:1245-1253` |
-| Re-arming Phase-1 handler + phase gate | `src/node/node.cpp:1255-1259`, `:1282-1286` |
-| Re-arming Phase-2 handler + phase gate | `src/node/node.cpp:1299`, `:1310`, `:1334-1338` |
-| AbortEvent dedup + inline-claim author verify | `src/node/node.cpp:1441-1442`, `:1450-1451`, `:1467-1474` |
-| Contrib admission + S-006 core-commit gate | `src/node/node.cpp:2281-2282`, `:2315`, `:2338-2343`, `:2370-2373` |
-| Core-vs-F2-view comment (no false positive) | `src/node/node.cpp:2328-2337` |
-| Generation gate (`aborts_gen`) | `src/node/node.cpp:2248` |
-| BlockSig admission + per-signer bound | `src/node/node.cpp:2416-2418`, `:2481`, `:2398-2407` |
-| Round/round-end cancels (no stale leak) | `src/node/node.cpp:975-976`, `:1153`, `:1867`, `:1976-1979` |
+| Relay of full round state | `src/node/node.cpp:1553-1561` |
+| Re-arming Phase-1 handler + phase gate | `src/node/node.cpp:1648-1649`, `:1673-1676` |
+| Re-arming Phase-2 handler + phase gate | `src/node/node.cpp:1700-1701`, `:1726-1729` |
+| AbortEvent dedup + inline-claim author verify | `src/node/node.cpp:1835-1836`, `:1842`, `:1864-1867` |
+| Contrib admission + S-006 core-commit gate | `src/node/node.cpp:2973`, `:2887-2894` |
+| Generation gate (`aborts_gen`) | `src/node/node.cpp:2844` |
+| BlockSig admission + per-signer bound | `src/node/node.cpp:2922-2946`, `:2907-2916` |
+| Round/round-end cancels (no stale leak) | `src/node/node.cpp:1196`, `:1459`, `:2449-2450` |
 | Cancel-races-expiry window | `include/determ/net/timer_service.hpp:14-21`, `:62-73` |
-| Abort-claim quorum floor | `include/determ/chain/params.hpp:140` |
-| One-shot `STATUS_REQUEST` (scope boundary) | `src/node/node.cpp:659` |
+| Abort-claim quorum floor | `include/determ/chain/params.hpp:156-160` |
+| `STATUS_REQUEST` probes: one-shot startup + S-050 stall-valve re-probe | `src/node/node.cpp:770`, `:1639` |
+| S-050 stall valve (the deterministic-rejection complement) | `src/node/node.cpp:1608-1642`; `RoundStallValveSoundness.md` |
 | Assumptions A1/A2/H2/H5 | `docs/proofs/Preliminaries.md` (§2.1/§2.2, H2 line 140, H5 line 146) |
 
 ---

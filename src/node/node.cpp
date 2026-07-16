@@ -1606,7 +1606,12 @@ static constexpr auto   kRoundStallSoftWindow = std::chrono::seconds(5);
 static constexpr auto   kRoundStallHardWindow = std::chrono::seconds(30);
 
 bool Node::maybe_stall_reset_locked() {
-    const auto now = std::chrono::steady_clock::now();
+    // Windows measured on the INJECTED clock's non-digest scheduling read
+    // (clock.hpp: "timeouts, freshness deltas") — RealClock delegates
+    // verbatim to steady_clock::now() so production behavior is identical,
+    // and a virtual-time harness can trip the valve deterministically by
+    // advancing its VirtualClock (the §Q1 injectable-time discipline).
+    const auto now = clock_.steady_now();
     if (round_stall_ticks_++ == 0) {
         stall_since_       = now;
         stall_soft_since_  = now;
