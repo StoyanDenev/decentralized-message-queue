@@ -390,11 +390,130 @@ inline Scenario make_ratchet_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 8: a FOURTH generator template — quorum/threshold COMMIT ──
+//
+// The §Q7 quorum/threshold family: an action fires only once a THRESHOLD of
+// DISTINCT participants has assented (DKG needs T shares; BFT-commit needs
+// 2f+1 pre-votes; a merge needs a quorum). A set of ACK sources each ack a
+// single "collector"; the collector counts DISTINCT senders (a set keyed on
+// the sender id, so duplicate acks from the same source do NOT inflate the
+// tally) and commits exactly once that distinct count reaches quorum
+// K = floor(N/2)+1. Distinct-set insertion is idempotent under duplication
+// and order-immune, so — like Broadcast's monotone-max and Agreement's
+// first-write-wins — every generated variant is robust under any drawn
+// drop/dup/latency/jitter profile and is expected to PASS (it eventually
+// reaches quorum, and it never commits below it). `correct` controls the
+// collector's tally: true = count DISTINCT senders (honest); false = the
+// planted bug used by the self-test — the collector counts RAW acks
+// (duplicates included), so under forced duplication a SINGLE source's acks
+// drive the raw tally to K while only ONE distinct sender has assented, and
+// the collector commits below quorum: `quorum_no_early_commit` MUST fire.
+inline Scenario make_quorum_variant(int idx, const GenParams& p,
+                                    bool correct, bool self_test,
+                                    const char* name_prefix = "gen_quorum") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_underquorum_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a collector counts RAW acks (duplicates "
+                      "included) instead of distinct senders, so forced "
+                      "duplication drives a single source's acks to quorum and "
+                      "it commits below the distinct threshold. "
+                      "quorum_no_early_commit MUST fire. ")
+        : std::string("generated quorum/threshold-commit variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p, correct](Simulator& sim) {
+        const int64_t K = p.followers / 2 + 1;   // simple-majority quorum
+        // The collector counts assent and commits at quorum. Honest: tally =
+        // DISTINCT senders (a set); bug: tally = RAW acks (dup-inflatable).
+        // committed_distinct records the TRUE distinct count at commit time
+        // (the same set-scan for both variants), which is what SAFETY audits.
+        sim.add_node("collector", [&sim, K, correct](const Message& m) {
+            if (m.kind != "ACK") return;
+            Node& self = sim.state().nodes["collector"];
+            self.kv["src_" + m.from] = 1;            // record distinct sender
+            self.kv["raw"] += 1;                     // raw acks (dup-inflatable)
+            int64_t distinct = 0;                    // true distinct-set size
+            for (const auto& [k, v] : self.kv)
+                if (v != 0 && k.rfind("src_", 0) == 0) ++distinct;
+            const int64_t tally = correct ? distinct : self.kv["raw"];
+            if (self.kv["committed"] == 0 && tally >= K) {
+                self.kv["committed"] = 1;
+                self.kv["committed_distinct"] = distinct;
+            }
+        });
+        for (int i = 0; i < p.followers; ++i)
+            sim.add_node("f" + std::to_string(i));   // ack sources (send only)
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+
+        // SAFETY: the collector never commits with fewer than K DISTINCT
+        // assenters. The raw-counting bug lets duplicates carry it over the
+        // line with only one true sender.
+        sim.props().add("quorum_no_early_commit", PropKind::SAFETY,
+            [K](const SimState& st, std::string* d) {
+                auto it = st.nodes.find("collector");
+                if (it == st.nodes.end()) return true;
+                const Node& c = it->second;
+                auto cm = c.kv.find("committed");
+                if (cm == c.kv.end() || cm->second == 0) return true; // not yet
+                auto cd = c.kv.find("committed_distinct");
+                const int64_t distinct = cd == c.kv.end() ? 0 : cd->second;
+                if (distinct < K) {
+                    if (d) *d = "collector committed at distinct=" +
+                                std::to_string(distinct) + " < quorum K=" +
+                                std::to_string(K);
+                    return false;
+                }
+                return true;
+            });
+        // LIVENESS: the collector eventually reaches quorum and commits.
+        sim.props().add("quorum_commits", PropKind::LIVENESS,
+            [](const SimState& st, std::string* d) {
+                auto it = st.nodes.find("collector");
+                if (it == st.nodes.end()) {
+                    if (d) *d = "no collector node";
+                    return false;
+                }
+                auto cm = it->second.kv.find("committed");
+                if (cm == it->second.kv.end() || cm->second == 0) {
+                    if (d) *d = "collector never reached quorum";
+                    return false;
+                }
+                return true;
+            });
+    };
+
+    s.run = [p, correct](Simulator& sim) {
+        // Each source re-acks the collector 30x (every 25ms), drop-tolerant.
+        // Honest: all N sources ack -> distinct reaches N >= K -> quorum.
+        // Bug (self-test): ONLY f0 acks, but forced dup inflates the RAW
+        // counter to K while distinct stays 1 -> a raw-counting collector
+        // commits below quorum -> quorum_no_early_commit fires.
+        const int sources = correct ? p.followers : 1;
+        for (int t = 0; t < 30; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, sources]() {
+                for (int i = 0; i < sources; ++i)
+                    sim.send("f" + std::to_string(i), "collector", "ACK", 0);
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
-// (no-regress + advance). All draw the SAME randomized fault profiles.
-enum class GenTemplate { Broadcast, Agreement, Ratchet };
+// (no-regress + advance); Quorum = §Q7 quorum/threshold-commit
+// (no-early-commit + reaches-quorum). All draw the SAME randomized fault
+// profiles.
+enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -403,6 +522,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_agreement_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::Ratchet:
             return make_ratchet_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::Quorum:
+            return make_quorum_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -432,6 +553,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 4; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; equivocation is the bug
     } else if (tmpl == GenTemplate::Ratchet) {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; raw-commit + decreasing tail is the bug
+    } else if (tmpl == GenTemplate::Quorum) {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; a single source's raw acks reach K=2 at distinct=1
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
