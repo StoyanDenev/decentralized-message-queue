@@ -74,7 +74,7 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] [--gen-seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition] --list\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--gen-seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition|rotation] --list\n"
         "                                 (register + list/run N seed-driven variants;\n"
         "                                  --gen-seed pins the drawn fault PROFILES so\n"
         "                                  --seed can vary the fault REALIZATION alone —\n"
@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
     register_generated_scenarios(scenarios, 0x8A15C6ull, 6,   // increment-12 §Q5 8th template (partition/heal split-brain)
                                  "gen_partition", true,
                                  determ::sim::GenTemplate::PartitionHeal);
+    register_generated_scenarios(scenarios, 0x9B27E1ull, 6,   // increment-14 §Q5 9th template (rotation fairness)
+                                 "gen_rotation", true,
+                                 determ::sim::GenTemplate::Rotation);
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
@@ -190,6 +193,8 @@ int main(int argc, char** argv) {
                 ? determ::sim::GenTemplate::CrashRecover
           : (template_name == "partition" || template_name == "partheal")
                 ? determ::sim::GenTemplate::PartitionHeal
+          : (template_name == "rotation" || template_name == "rotate")
+                ? determ::sim::GenTemplate::Rotation
                 : determ::sim::GenTemplate::Broadcast;
         register_generated_scenarios(scenarios, gen_seed,
                                      static_cast<int>(generate_count),

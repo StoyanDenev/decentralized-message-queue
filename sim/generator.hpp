@@ -1058,6 +1058,138 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 14: a NINTH generator template — committee-rotation FAIRNESS ──
+//
+// The §Q7 selective-abort / committee-selection-bias family (the inc-2/3
+// `no_selection_bias` checker, now under generated fault profiles): a leader
+// runs R=12 selection rounds and must rotate FAIRLY over the N candidates.
+// The honest selector is a deterministic round-robin sel(r) = r % N, so no
+// candidate is ever assigned more than ceil(rounds/N) selections at any
+// point of the ramp — bias-free by construction. The leader re-floods every
+// completed round's SELECTED(round) notification to its chosen candidate;
+// candidates dedup by round id, so duplication never inflates a tally and
+// drop is healed by the re-flood (12 divides evenly by every drawn N in
+// {2,3,4}, so the final fair share is exact). `correct` controls the
+// SELECTOR: true = fair round-robin; false = the planted bug used by the
+// self-test — a biased selector that starves candidate f0 (its turns are
+// given to f1), so f1's distinct-round tally exceeds the fair ceiling:
+// `rotation_no_bias` MUST fire.
+inline Scenario make_rotation_variant(int idx, const GenParams& p,
+                                      bool correct, bool self_test,
+                                      const char* name_prefix = "gen_rotation") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_bias_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a biased selector starves candidate f0 "
+                      "(its round-robin turns go to f1), so f1's selection "
+                      "tally exceeds the fair ceiling ceil(rounds/N). "
+                      "rotation_no_bias MUST fire. ")
+        : std::string("generated rotation-fairness variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p](Simulator& sim) {
+        sim.add_node("leader");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f](const Message& m) {
+                if (m.kind != "SELECTED") return;
+                Node& self = sim.state().nodes[f];
+                // Dedup by round id: a re-flooded / duplicated notification
+                // never inflates the tally.
+                const std::string key = "sel_" + std::to_string(m.payload);
+                if (self.kv[key] == 0) {
+                    self.kv[key] = 1;
+                    self.kv["count"] += 1;
+                }
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["rounds"] = 0;
+        const int followers = p.followers;
+
+        // SAFETY: no candidate's distinct-round tally ever exceeds the fair
+        // ceiling ceil(rounds/N) — a fair round-robin assigns at most that
+        // many rounds to any candidate at every point of the ramp; only a
+        // biased selector can push one candidate past it.
+        sim.props().add("rotation_no_bias", PropKind::SAFETY,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t rounds = st.scalars.count("rounds")
+                                       ? st.scalars.at("rounds") : 0;
+                const int64_t fair_cap =
+                    (rounds + followers - 1) / followers;   // ceil(rounds/N)
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    auto it = n.kv.find("count");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c > fair_cap) {
+                        if (d) *d = id + " selected " + std::to_string(c) +
+                                    " times > fair ceiling " +
+                                    std::to_string(fair_cap) + " of " +
+                                    std::to_string(rounds) + " rounds (bias)";
+                        return false;
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: all 12 rounds ran AND every candidate holds EXACTLY its
+        // fair share 12/N (12 divides evenly by every drawn N in 2..4).
+        sim.props().add("rotation_fair_complete", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t rounds = st.scalars.count("rounds")
+                                       ? st.scalars.at("rounds") : 0;
+                if (rounds != 12) {
+                    if (d) *d = "rounds=" + std::to_string(rounds) + " != 12";
+                    return false;
+                }
+                const int64_t share = 12 / followers;
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    ++seen;
+                    auto it = n.kv.find("count");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c != share) {
+                        if (d) *d = id + " selected " + std::to_string(c) +
+                                    " times != fair share " +
+                                    std::to_string(share);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p, correct](Simulator& sim) {
+        // Complete 12 selection rounds, one every 20ms (rounds = 12 by 240ms).
+        for (int r = 0; r < 12; ++r)
+            sim.after(vt_ms(20 * (r + 1)),
+                      [&sim]() { sim.state().scalars["rounds"] += 1; });
+        // Re-flood every completed round's SELECTED notification 40x (every
+        // 25ms) — drop-tolerant; dedup-by-round makes re-delivery harmless.
+        // Honest selector: fair round-robin r % N. Biased (self-test):
+        // f0's turns go to f1.
+        for (int t = 0; t < 40; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p, correct]() {
+                const int64_t rounds = sim.state().scalars["rounds"];
+                for (int64_t r = 0; r < rounds; ++r) {
+                    int sel = static_cast<int>(r % p.followers);
+                    if (!correct && sel == 0) sel = 1;   // BUG: starve f0
+                    sim.send("leader", "f" + std::to_string(sel), "SELECTED",
+                             static_cast<uint64_t>(r));
+                }
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
@@ -1067,9 +1199,10 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
 // F2 view reconciliation (no-phantom + complete-merge); CrashRecover = §Q7
 // crash-recovery replay (no-replay + converge-after-recovery);
 // PartitionHeal = §Q7 partition-quorum split-brain (no-minority-commit +
-// both-commit-after-heal). All draw the SAME randomized fault profiles.
+// both-commit-after-heal); Rotation = §Q7 committee-selection fairness
+// (no-bias + exact-fair-share). All draw the SAME randomized fault profiles.
 enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation,
-                         Reconcile, CrashRecover, PartitionHeal };
+                         Reconcile, CrashRecover, PartitionHeal, Rotation };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -1088,6 +1221,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_crashrec_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::PartitionHeal:
             return make_partition_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::Rotation:
+            return make_rotation_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -1127,6 +1262,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the recovery replay double-apply is the bug
     } else if (tmpl == GenTemplate::PartitionHeal) {
         bug.followers = 4; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the mis-set K-1 minority quorum is the bug
+    } else if (tmpl == GenTemplate::Rotation) {
+        bug.followers = 3; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the f0-starving biased selector is the bug
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
