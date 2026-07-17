@@ -2,7 +2,7 @@
 
 # DSF Generator-Template Family
 
-A source-faithful consolidation of the eight DSF generator templates (`sim/generator.hpp`, wired in `sim/dsf_main.cpp`, gated by `tools/test_dsf_inc{4,6,7,8,9,10,11,12}.sh`). This document is the reference for the template pattern and the recipe for the next one. With inc-11 (crash/recover) and inc-12 (partition/heal), the generator exercises EVERY fault dimension the simulator models: message faults (drop/dup/latency/jitter), node crash/recovery, and link partitions.
+A source-faithful consolidation of the nine DSF generator templates (`sim/generator.hpp`, wired in `sim/dsf_main.cpp`, gated by `tools/test_dsf_inc{4,6,7,8,9,10,11,12,14}.sh`; the inc-13 `--gen-seed` CLI decoupling is gated by `test_dsf_inc13.sh`). This document is the reference for the template pattern and the recipe for the next one. With inc-11 (crash/recover) and inc-12 (partition/heal), the generator exercises EVERY fault dimension the simulator models: message faults (drop/dup/latency/jitter), node crash/recovery, and link partitions; with inc-14 (rotation fairness) every §Q7 checker family recorded in this document's recipe has a generated counterpart.
 
 ---
 
@@ -21,7 +21,7 @@ The discipline is plain: a green checker that never fires is worthless. A SAFETY
 
 ## 2. The shared fault profile
 
-All eight templates draw from the SAME distribution. `draw_params` (verbatim from `sim/generator.hpp`) fills a `GenParams` from the generator PRNG:
+All nine templates draw from the SAME distribution. `draw_params` (verbatim from `sim/generator.hpp`) fills a `GenParams` from the generator PRNG:
 
 | Field          | Draw                              | Range / set             |
 |----------------|-----------------------------------|-------------------------|
@@ -31,11 +31,11 @@ All eight templates draw from the SAME distribution. `draw_params` (verbatim fro
 | `drop`         | `kDrops[g.next_below(6)]`         | `{0.0,0.1,0.2,0.3,0.4,0.5}` |
 | `dup`          | `kDups[g.next_below(3)]`          | `{0.0, 0.5, 1.0}`       |
 
-Every field routes through the generator PRNG `g`, so the whole profile is a deterministic function of the generator seed. The two-seed model holds across all templates: the fault **parameters** (this profile) are a function of the generator seed baked in at registration; the fault **realization** (which individual messages drop/duplicate at run time) is a function of the run `--seed`. Both are deterministic. Each family draws from its OWN `SplitMix64(gen_seed)`, so adding a new family never changes a prior family's drawn profiles.
+Every field routes through the generator PRNG `g`, so the whole profile is a deterministic function of the generator seed. The two-seed model holds across all templates: the fault **parameters** (this profile) are a function of the generator seed baked in at registration; the fault **realization** (which individual messages drop/duplicate at run time) is a function of the run `--seed`. Both are deterministic. Each family draws from its OWN `SplitMix64(gen_seed)`, so adding a new family never changes a prior family's drawn profiles. Since inc-13 the two seeds are also decoupled ON THE CLI: `--generate N --gen-seed G --seed S` pins the drawn profile set to G while S varies the realization independently (one profile, many realizations — the coverage the collapsed single-seed form could not reach); omitted, `--gen-seed` collapses to `--seed`, byte-identical to the pre-inc-13 behavior.
 
 ---
 
-## 3. The eight templates
+## 3. The nine templates
 
 Each template is robust because its honest apply has an algebraic property — idempotent, monotone, or reorder-immune — that neutralizes the drawn drop/dup/latency/jitter. That property, not the invariant, is what makes every honest variant pass. The self-test replaces exactly that property with a fragile alternative and shows the invariant fires.
 
@@ -111,6 +111,15 @@ Each template is robust because its honest apply has an algebraic property — i
 - **Self-test** `gen_splitbrain_selftest` — the inc-3 `single_decision` bug class under generated profiles: `col_b`'s effective quorum mis-set to K-1, exactly its reachable minority, so it commits WHILE PARTITIONED. Fixed profile: `followers=4, drop=0.0, dup=0.0`.
 - **Baked prefix** `gen_partition`.
 
+### 3.9 Rotation — §Q7 committee-selection fairness
+
+- **Honest mechanism.** The inc-2/3 `no_selection_bias` family under generated profiles: a leader runs 12 selection rounds and rotates over the N candidates with a deterministic round-robin `sel(r) = r % N`; every completed round's `SELECTED(round)` notification is re-flooded, and candidates dedup by round id.
+- **Why robust.** Round-robin assigns no candidate more than ceil(rounds/N) selections at ANY point of the ramp; dedup-by-round makes duplication harmless; the re-flood heals drop; 12 divides evenly by every drawn N in {2,3,4}, so the final fair share is exact.
+- **SAFETY** `rotation_no_bias` — no candidate's distinct-round tally exceeds the fair ceiling ceil(rounds/N).
+- **LIVENESS** `rotation_fair_complete` — REQUIRES `rounds == 12` AND every candidate holds EXACTLY 12/N (vacuity-proof).
+- **Self-test** `gen_bias_selftest` — a biased selector starves `f0` (its turns go to `f1`), so `f1`'s tally exceeds the fair ceiling; fires early ("f1 selected 2 > fair ceiling 1 of 2 rounds"). Fixed profile: `followers=3, drop=0.0, dup=0.0`.
+- **Baked prefix** `gen_rotation`.
+
 ---
 
 ## 4. Wiring
@@ -118,7 +127,7 @@ Each template is robust because its honest apply has an algebraic property — i
 Verbatim from `sim/generator.hpp` and `sim/dsf_main.cpp`:
 
 - **Builders.** Each template is a `make_<name>_variant(idx, p, correct, self_test, prefix)` that returns a `Scenario{setup, run, check}`. `setup` adds nodes, applies the drawn `GenParams` to the network (`set_base_latency/jitter/drop_rate/dup_rate`), and registers the SAFETY + LIVENESS invariants; `run` drives the leader/sources; `check` is a no-op. `correct` selects the honest vs. bugged apply; `self_test` sets `s.expect_violation` and picks the self-test name.
-- **Catalogue.** `enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation, Reconcile, CrashRecover, PartitionHeal };`
+- **Catalogue.** `enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation, Reconcile, CrashRecover, PartitionHeal, Rotation };`
 - **Dispatcher.** `make_variant(tmpl, idx, p, correct, self_test, prefix)` switches on `GenTemplate` (default → Broadcast).
 - **Registration.** `register_generated_scenarios(out, gen_seed, count, prefix, with_selftest, tmpl)` seeds a `SplitMix64(gen_seed)`, draws `count` honest variants (`correct=true, self_test=false`), and — when `with_selftest` — appends exactly one self-test on a FIXED profile (`correct=false, self_test=true`) so the violation is guaranteed rather than seed-luck. The fixed profile branches per template (§3 gives each).
 - **Baked sets** (`dsf_main.cpp`). Six honest sets of 6, each with its self-test:
@@ -130,7 +139,8 @@ Verbatim from `sim/generator.hpp` and `sim/dsf_main.cpp`:
   - Reconcile — seed `0x6E8B29`, prefix `gen_recon`, `GenTemplate::Reconcile` → `gen_recon_00..05` + `gen_phantom_selftest`.
   - CrashRecover — seed `0x7F44D3`, prefix `gen_crashrec`, `GenTemplate::CrashRecover` → `gen_crashrec_00..05` + `gen_replay_selftest`.
   - PartitionHeal — seed `0x8A15C6`, prefix `gen_partition`, `GenTemplate::PartitionHeal` → `gen_partition_00..05` + `gen_splitbrain_selftest`.
-- **CLI.** `--generate N [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition]` registers `N` variants of the chosen template from the run `--seed`, with `with_selftest=false`, named `gen_run_00..0(N-1)`. `--template` maps `agree`/`agreement` → Agreement, `ratchet` → Ratchet, `quorum` → Quorum, `conserve`/`conservation` → Conservation, `recon`/`reconcile`/`reconciliation` → Reconcile, `crashrec`/`crashrecover` → CrashRecover, `partition`/`partheal` → PartitionHeal, else Broadcast.
+  - Rotation — seed `0x9B27E1`, prefix `gen_rotation`, `GenTemplate::Rotation` → `gen_rotation_00..05` + `gen_bias_selftest`.
+- **CLI.** `--generate N [--gen-seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition|rotation]` registers `N` variants of the chosen template, with `with_selftest=false`, named `gen_run_00..0(N-1)`; the profile draw is seeded by `--gen-seed` when given, else by the run `--seed` (inc-13). `--template` maps `agree`/`agreement` → Agreement, `ratchet` → Ratchet, `quorum` → Quorum, `conserve`/`conservation` → Conservation, `recon`/`reconcile`/`reconciliation` → Reconcile, `crashrec`/`crashrecover` → CrashRecover, `partition`/`partheal` → PartitionHeal, `rotation`/`rotate` → Rotation, else Broadcast.
 - **Sweep runner.** `tools/operator_dsf_sweep.sh` (operator tool, not a commit gate) realizes the §Q6 "CI runs N variants overnight" contract: every template × deterministically-derived sweep seeds, each variant gated on exit code + the non-vacuous pass marker, one byte-diff replay check per (template, seed) pair, exact repro command lines on failure.
 
 ---
@@ -139,7 +149,7 @@ Verbatim from `sim/generator.hpp` and `sim/dsf_main.cpp`:
 
 Identical `(scenario-or-generate-args, --seed, --template)` ⇒ byte-identical trace. No wall-clock, no OS RNG anywhere in the loop. Re-run the printed seed to reproduce any failure exactly. On a violation the runner prints the reproducing `--scenario … --seed …` (+ `--trace`) command; a self-test's expected violation is the SUCCESS condition (exit 0).
 
-Each template has a shell wrapper (`tools/test_dsf_inc4.sh` broadcast, `inc6` agreement, `inc7` ratchet, `inc8` quorum, `inc9` conservation, `inc10` reconciliation, `inc11` crash/recover, `inc12` partition/heal). Build-agnostic (SKIP-clean if `determ-dsf` is not built), they assert:
+Each template has a shell wrapper (`tools/test_dsf_inc4.sh` broadcast, `inc6` agreement, `inc7` ratchet, `inc8` quorum, `inc9` conservation, `inc10` reconciliation, `inc11` crash/recover, `inc12` partition/heal, `inc14` rotation; `inc13` gates the `--gen-seed` decoupling itself). Build-agnostic (SKIP-clean if `determ-dsf` is not built), they assert:
 
 1. `--list` membership — all 6 baked variants + the named self-test.
 2. Per-variant run-determinism — identical trace across two runs at a fixed seed.
@@ -153,9 +163,9 @@ Each template has a shell wrapper (`tools/test_dsf_inc4.sh` broadcast, `inc6` ag
 
 ## 6. Recipe for the next template
 
-The eight templates are one code pattern. To add a ninth:
+The nine templates are one code pattern. To add a tenth:
 
-1. **Pick an untapped §Q7 family** (e.g. selective-abort committee bias, equivocation-slashing lifecycle — receipt conservation and F2 view reconciliation shipped as inc-9/inc-10; crash/recover and partition/heal as inc-11/inc-12). Templates may also use the crash/recover and partition seams with a DETERMINISTIC index-derived schedule (no PRNG), as inc-11/inc-12 do — the fault window must be provably non-vacuous via the LIVENESS predicate (require the crash/heal counters in it).
+1. **Pick an untapped §Q7 family.** Every family this document has recorded as a candidate is now shipped (receipt conservation inc-9, F2 view reconciliation inc-10, crash/recover inc-11, partition/heal inc-12, selection bias inc-14 — the equivocation-slashing lifecycle stays a hand-written inc-2 scenario because its checker keys on evidence CONTENT, not a fault-robust apply); new families should come from new production invariants as they land. Templates may use the crash/recover and partition seams with a DETERMINISTIC index-derived schedule (no PRNG), as inc-11/inc-12 do — the fault window must be provably non-vacuous via the LIVENESS predicate (require the crash/heal/round counters in it).
 2. **Define a robust honest apply** whose algebra neutralizes drop/dup/latency/jitter — idempotent, monotone, or order-immune. This is the load-bearing property, NOT the invariant. If you cannot name why the honest apply is robust under any drawn profile, the template is not ready.
 3. **Write SAFETY + LIVENESS invariants** as pure functions of `const SimState&`, each with a `std::string* d` violation detail.
 4. **Add `make_<x>_variant(idx, p, correct, self_test, prefix)`** returning a `Scenario{setup, run, check}`; branch `correct` between the honest apply and the planted bug.
