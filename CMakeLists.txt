@@ -197,6 +197,9 @@ add_library(determ-crypto-c99 STATIC
   # §3.24 A1 per-epoch view-key derivation (HKDF-SHA256 composition, frozen
   # python-first) — `determ test-view-key-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/viewkey/viewkey.c"
+  # NC-8 encrypted-note delivery (shielded Option A): ephemeral-static ECIES
+  # over P-256 (ECDH + HKDF-SHA256 + ChaCha20-Poly1305) — `determ test-enote-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/enote/enote.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)

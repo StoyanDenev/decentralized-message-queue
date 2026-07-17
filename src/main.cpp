@@ -14,6 +14,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
 #include <determ/crypto/viewkey/viewkey.h> // §3.24 A1 per-epoch view-key derivation
+#include <determ/crypto/enote/enote.h>     // NC-8 encrypted-note delivery (shielded Option A)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
@@ -557,6 +558,10 @@ In-process tests (deterministic, no network):
                                               derivation: 14 frozen vectors
                                               byte-equal (info + vk halves) +
                                               fail-closed edges + determinism
+  determ test-enote-c99 [file]                NC-8 encrypted-note delivery
+                                              (shielded Option A): ECIES over
+                                              P-256 — roundtrip/tamper/wrong-key
+                                              + dual-oracle KAT (enote.json)
   determ test-c99-api                         §3.11: determ::c99 C++ wrapper ==
                                               raw C99 API per primitive; AEAD
                                               nullopt-on-auth-failure + throw-
@@ -15291,6 +15296,142 @@ int main(int argc, char** argv) {
         }
 
         if (fail==0) std::cout << "  PASS: view-key (A1 per-epoch derivation) unit test\n";
+        return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-enote-c99") {
+        // NC-8 encrypted-note delivery (shielded Option A) — the ephemeral-static
+        // ECIES over P-256 in src/crypto/enote/enote.c. Gates: seal→open
+        // roundtrip (incl. empty + a real 40-byte v‖r note), determinism,
+        // wrong-key rejection with output untouched, tamper rejection on each
+        // wire region (ephemeral / ct / tag), malformed/NULL fail-closed, the
+        // structural wire shape, AND the dual-oracle KAT corpus
+        // (tools/vectors/enote.json, produced byte-independently by
+        // tools/verify_enote.py: seal == ct_hex byte-for-byte + open recovers).
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        // Recipient + ephemeral keypairs (small scalars are < n, valid).
+        uint8_t rsk[32], esk[32], rpub65[65], rpub33[33];
+        for (int i=0;i<32;i++){ rsk[i]=(uint8_t)(i+1); esk[i]=(uint8_t)(0x40+i); }
+        check(determ_p256_base_mul(rpub65, rsk) == 0
+                  && determ_p256_point_compress(rpub33, rpub65) == 0,
+              "recipient keypair derived");
+
+        // A real note plaintext: value(8, BE) ‖ blinding(32) = 40 bytes.
+        std::vector<uint8_t> note(40);
+        for (int i=0;i<40;i++) note[i]=(uint8_t)(0x11*i + 3);
+
+        // Roundtrip (40-byte note) + structural shape.
+        std::vector<uint8_t> ct(note.size()+DETERM_ENOTE_OVERHEAD);
+        size_t ctlen=0;
+        check(determ_enote_seal(rpub33, note.data(), note.size(), esk, ct.data(), &ctlen) == 0
+                  && ctlen == note.size()+DETERM_ENOTE_OVERHEAD,
+              "seal: ok, out_len == ptlen + 49");
+        check(ct[0]==0x02 || ct[0]==0x03, "seal: ephemeral pubkey is a compressed point");
+        {
+            std::vector<uint8_t> rec(note.size()); size_t rl=0;
+            check(determ_enote_open(rsk, ct.data(), ctlen, rec.data(), &rl) == 0
+                      && rl == note.size() && rec == note,
+                  "open: recovers the exact note plaintext");
+        }
+        // Determinism: same (R, pt, e) ⇒ byte-identical ciphertext.
+        {
+            std::vector<uint8_t> ct2(note.size()+DETERM_ENOTE_OVERHEAD); size_t c2=0;
+            check(determ_enote_seal(rpub33, note.data(), note.size(), esk, ct2.data(), &c2) == 0
+                      && c2==ctlen && ct2==ct,
+                  "seal: deterministic (byte-equal twice)");
+        }
+        // Empty plaintext roundtrips (out is exactly the 49-byte overhead).
+        {
+            std::vector<uint8_t> e0(DETERM_ENOTE_OVERHEAD); size_t l0=0;
+            uint8_t dummy=0; size_t rl=123;
+            check(determ_enote_seal(rpub33, nullptr, 0, esk, e0.data(), &l0) == 0 && l0==DETERM_ENOTE_OVERHEAD,
+                  "seal: empty plaintext ⇒ 49 bytes");
+            check(determ_enote_open(rsk, e0.data(), l0, &dummy, &rl) == 0 && rl==0,
+                  "open: empty plaintext roundtrips (pt_len 0)");
+        }
+        // Wrong key: -1, output untouched (the scan 'not mine' signal).
+        {
+            uint8_t wsk[32]; for(int i=0;i<32;i++) wsk[i]=(uint8_t)(0x80+i);
+            std::vector<uint8_t> rec(note.size(), 0xEE), keep(note.size(), 0xEE); size_t rl=99;
+            check(determ_enote_open(wsk, ct.data(), ctlen, rec.data(), &rl) == -1 && rec==keep,
+                  "open: wrong key rejected, output untouched");
+        }
+        // Tamper each wire region ⇒ -1 (ephemeral point, ciphertext, tag).
+        {
+            size_t sites[3] = {0, DETERM_ENOTE_EPH_LEN, ctlen-1};
+            const char* names[3] = {"ephemeral pubkey","ciphertext body","auth tag"};
+            for (int k=0;k<3;k++){
+                std::vector<uint8_t> t(ct.begin(), ct.begin()+ctlen);
+                t[sites[k]] ^= 0x01;
+                std::vector<uint8_t> rec(note.size()); size_t rl=0;
+                check(determ_enote_open(rsk, t.data(), t.size(), rec.data(), &rl) == -1,
+                      std::string("open: tamper in ")+names[k]+" rejected");
+            }
+        }
+        // Malformed / NULL fail-closed.
+        {
+            std::vector<uint8_t> rec(64); size_t rl=0;
+            check(determ_enote_open(rsk, ct.data(), DETERM_ENOTE_OVERHEAD-1, rec.data(), &rl) == -1,
+                  "open: in_len < 49 rejected");
+            check(determ_enote_open(nullptr, ct.data(), ctlen, rec.data(), &rl) == -1,
+                  "open: NULL sk rejected");
+            uint8_t o[64]; size_t ol=0;
+            check(determ_enote_seal(nullptr, note.data(), note.size(), esk, o, &ol) == -1,
+                  "seal: NULL recipient rejected");
+            // A bad recipient point (not on curve) is rejected at seal.
+            uint8_t badpub[33]; memset(badpub, 0xFF, 33); badpub[0]=0x02;
+            check(determ_enote_seal(badpub, note.data(), note.size(), esk, o, &ol) == -1,
+                  "seal: off-curve recipient rejected");
+        }
+        // Dual-oracle KAT corpus (byte-for-byte vs the independent python oracle).
+        {
+            std::string path = (argc>2)? argv[2] : "tools/vectors/enote.json";
+            std::ifstream f(path);
+            if (!f) check(false, std::string("corpus present: ")+path);
+            else {
+                json doc; f >> doc; int n=0;
+                for (auto& v : doc["vectors"]) {
+                    std::string name = v.value("name","?");
+                    auto sk  = unhex(v["recipient_sk_hex"].get<std::string>());
+                    auto pub = unhex(v["recipient_pub_hex"].get<std::string>());
+                    auto e   = unhex(v["eph_sk_hex"].get<std::string>());
+                    auto pt  = unhex(v["pt_hex"].get<std::string>());
+                    auto ctv = unhex(v["ct_hex"].get<std::string>());
+                    // Recipient pub is a pure function of the sk — pin it.
+                    uint8_t p65[65], p33[33];
+                    bool kok = determ_p256_base_mul(p65, sk.data())==0
+                               && determ_p256_point_compress(p33, p65)==0
+                               && hx(p33,33)==v["recipient_pub_hex"].get<std::string>();
+                    check(kok, std::string("KAT pub == base_mul(sk): ")+name);
+                    // seal must reproduce the oracle ciphertext byte-for-byte.
+                    std::vector<uint8_t> out(pt.size()+DETERM_ENOTE_OVERHEAD); size_t ol=0;
+                    bool sok = determ_enote_seal(pub.data(), pt.empty()?nullptr:pt.data(), pt.size(),
+                                                 e.data(), out.data(), &ol)==0
+                               && ol==ctv.size()
+                               && std::vector<uint8_t>(out.begin(), out.begin()+ol)==ctv;
+                    check(sok, std::string("KAT seal byte-equal: ")+name);
+                    // and open must recover the plaintext (size rec >= 1 so
+                    // .data() is never NULL on the empty-note vector).
+                    std::vector<uint8_t> rec(pt.size() ? pt.size() : 1); size_t rl=0;
+                    bool ook = determ_enote_open(sk.data(), ctv.data(), ctv.size(),
+                                                 rec.data(), &rl)==0
+                               && rl==pt.size()
+                               && std::equal(pt.begin(), pt.end(), rec.begin());
+                    check(ook, std::string("KAT open recovers: ")+name);
+                    n++;
+                }
+                check(n==5, "corpus complete (5 vectors)");
+            }
+        }
+
+        if (fail==0) std::cout << "  PASS: enote (NC-8 encrypted-note delivery) unit test\n";
         return fail==0 ? 0 : 1;
     }
     if (cmd == "test-c99-vectors") {
