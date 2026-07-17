@@ -507,13 +507,134 @@ inline Scenario make_quorum_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 9: a FIFTH generator template — cross-shard receipt CONSERVATION ──
+//
+// The §Q7 cross-shard receipt-conservation family (the production FA7
+// no-double-credit rule: an applied-receipt registry keyed on receipt id).
+// A source issues receipts with unique ids and re-floods them; each ledger
+// credits a receipt EXACTLY ONCE, keyed on its id (`r_<id>`), so a duplicated
+// or re-delivered receipt never inflates the credited total — robust by
+// construction under any drawn drop/dup/latency/jitter profile (per-id
+// dedup is idempotent under duplication and reorder-immune; the re-flood
+// makes it drop-tolerant, exactly like Broadcast's SET(total)). So every
+// generated variant PASSES: it never credits more than was issued, and it
+// eventually credits everything. `correct` controls the ledger's apply:
+// true = credit-once keyed on receipt id (honest); false = the planted bug
+// used by the self-test — the ledger counts RAW deliveries (no id dedup),
+// so the very first re-delivery (forced dup and/or the re-flood) drives
+// `credited` above the issued total: `conserve_no_double_credit` MUST fire.
+inline Scenario make_conservation_variant(int idx, const GenParams& p,
+                                          bool correct, bool self_test,
+                                          const char* name_prefix = "gen_conserve") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_doublecredit_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a ledger counts RAW receipt deliveries (no "
+                      "id dedup) under forced duplication, so a re-delivered "
+                      "receipt double-credits and the credited total exceeds "
+                      "what was issued. conserve_no_double_credit MUST fire. ")
+        : std::string("generated receipt-conservation variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p, correct](Simulator& sim) {
+        sim.add_node("source");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f, correct](const Message& m) {
+                if (m.kind != "CREDIT") return;
+                Node& self = sim.state().nodes[f];
+                const std::string key = "r_" + std::to_string(m.payload);
+                if (correct) {
+                    // Credit-once keyed on receipt id (the FA7 registry rule).
+                    if (self.kv[key] == 0) {
+                        self.kv[key] = 1;
+                        self.kv["credited"] += 1;
+                    }
+                } else {
+                    self.kv[key] = 1;
+                    self.kv["credited"] += 1;   // BUG: raw count, dup-inflatable
+                }
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["issued_receipts"] = 0;
+        const int followers = p.followers;
+
+        // SAFETY: no ledger's credited total ever exceeds the receipts issued.
+        sim.props().add("conserve_no_double_credit", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                const int64_t issued = st.scalars.count("issued_receipts")
+                                       ? st.scalars.at("issued_receipts") : 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "source") continue;
+                    auto it = n.kv.find("credited");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c > issued) {
+                        if (d) *d = id + " credited=" + std::to_string(c) +
+                                    " > issued=" + std::to_string(issued) +
+                                    " (double-credit)";
+                        return false;
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: every ledger eventually credits every issued receipt.
+        sim.props().add("conserve_all_credited", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t issued = st.scalars.count("issued_receipts")
+                                       ? st.scalars.at("issued_receipts") : 0;
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "source") continue;
+                    ++seen;
+                    auto it = n.kv.find("credited");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c != issued) {
+                        if (d) *d = id + " credited=" + std::to_string(c) +
+                                    " != issued=" + std::to_string(issued);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p](Simulator& sim) {
+        // Issue 5 receipts (ids 1..5), one every 20ms.
+        for (int i = 0; i < 5; ++i)
+            sim.after(vt_ms(20 * (i + 1)),
+                      [&sim]() { sim.state().scalars["issued_receipts"] += 1; });
+        // Re-flood every issued receipt id 30x (every 25ms) — drop-tolerant;
+        // re-delivery is harmless for an honest credit-once ledger and is
+        // exactly what detonates the raw-counting bug.
+        for (int t = 0; t < 30; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p]() {
+                const int64_t issued = sim.state().scalars["issued_receipts"];
+                for (int64_t id = 1; id <= issued; ++id)
+                    for (int i = 0; i < p.followers; ++i)
+                        sim.send("source", "f" + std::to_string(i), "CREDIT",
+                                 static_cast<uint64_t>(id));
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
 // (no-regress + advance); Quorum = §Q7 quorum/threshold-commit
-// (no-early-commit + reaches-quorum). All draw the SAME randomized fault
-// profiles.
-enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum };
+// (no-early-commit + reaches-quorum); Conservation = §Q7 cross-shard
+// receipt conservation (no-double-credit + all-credited). All draw the
+// SAME randomized fault profiles.
+enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -524,6 +645,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_ratchet_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::Quorum:
             return make_quorum_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::Conservation:
+            return make_conservation_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -555,6 +678,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; raw-commit + decreasing tail is the bug
     } else if (tmpl == GenTemplate::Quorum) {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; a single source's raw acks reach K=2 at distinct=1
+    } else if (tmpl == GenTemplate::Conservation) {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; raw counting credits the first re-delivery
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
