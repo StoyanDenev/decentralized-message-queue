@@ -514,11 +514,15 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
     if (dup) P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
     const uint32_t lat =
         P.link ? P.link->latency_ms.load(std::memory_order_relaxed) : 0;
-    if (lat > 0 && P.link->net) {
+    if (lat > 0 && P.link->net && P.link->net->drive_attached()) {
         // inc.10: the frame is held by the NETWORK until its arrival time;
         // the write still completes NOW (bytes left the host). A dup copy
-        // shares the arrival and lands back-to-back (consecutive seq), the
-        // same shape as the immediate path.
+        // shares the arrival with a consecutive seq — same-link order
+        // preserved, though other deliveries/drains may run between the
+        // two delivery events (unlike the immediate path's contiguity).
+        // Gated on drive_attached(): with no deterministic drive, nothing
+        // ever fires pending entries, so latency MUST fall through to
+        // immediate delivery (review finding — the silent-blackhole trap).
         P.link->n_delayed.fetch_add(1, std::memory_order_relaxed);
         P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
         if (dup)
@@ -603,7 +607,7 @@ bool VirtualConnection::write_all(const void* buf, std::size_t n) {
     if (dup) P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
     const uint32_t lat =
         P.link ? P.link->latency_ms.load(std::memory_order_relaxed) : 0;
-    if (lat > 0 && P.link->net) {
+    if (lat > 0 && P.link->net && P.link->net->drive_attached()) {
         P.link->n_delayed.fetch_add(1, std::memory_order_relaxed);
         P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
         if (dup)
@@ -870,6 +874,27 @@ bool VirtualNetwork::next_delivery_ms(uint64_t& out) {
     if (pending_.empty()) return false;
     out = pending_.begin()->first.first;
     return true;
+}
+
+void VirtualNetwork::flush_pending() {
+    // Repeated deliver_next drains in (arrival, seq) order; each iteration
+    // re-checks emptiness under mu_, so deliveries that would schedule new
+    // pending entries (none today — delivery never sends) stay safe.
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (pending_.empty()) return;
+        }
+        deliver_next();
+    }
+}
+
+std::size_t VirtualNetwork::latency_diversity() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::set<uint32_t> vals;
+    for (auto& lf : links_)
+        vals.insert(lf->latency_ms.load(std::memory_order_relaxed));
+    return vals.size();
 }
 
 void VirtualNetwork::deliver_next() {

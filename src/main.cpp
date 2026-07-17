@@ -29500,15 +29500,33 @@ int main(int argc, char** argv) {
             // scheduler as global events interleaved with the consensus
             // round timers.
             vnet.set_latency(5, 30);
+            // Heterogeneity witness (review): >= 2 distinct per-link
+            // latencies means cross-link reorder is structurally possible —
+            // a constant-latency regression (every link equal) cannot fake
+            // the reorder claim.
+            const bool lat_hetero = vnet.latency_diversity() >= 2;
             uint64_t h_lat0 = 0;
             for (int i = 0; i < kNodes; ++i)
                 h_lat0 = std::max(h_lat0, height(i));
             R.lat_live = sched.run_until(
                 [&] { observe_all(); return min_h(0, kNodes) >= h_lat0 + 2; });
             R.lat_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
+            // Flush BEFORE disabling: a stranded pending frame delivered
+            // after newer immediate frames on the same link would violate
+            // per-connection FIFO (review) — and the terminal signature
+            // must not depend on undelivered in-flight state.
+            vnet.flush_pending();
+            // Settle the flushed deliveries' completions: ready-work
+            // fixpoint only — no timer fires, logical time does not move.
+            for (bool ran = true; ran;) {
+                ran = false;
+                for (auto& l : loops) ran |= l->run_ready(4096) > 0;
+                observe_all();
+            }
             vnet.set_latency(0, 0);
             const auto fc_lat = vnet.fault_counts();
-            R.lat_witness   = fc_lat.delayed > fc_combo.delayed;
+            R.lat_witness = lat_hetero &&
+                            fc_lat.delayed > fc_combo.delayed;
             R.fc_dropped    = fc_lat.dropped;
             R.fc_blocked    = fc_lat.blocked;
             R.fc_duplicated = fc_lat.duplicated;
@@ -29597,9 +29615,11 @@ int main(int argc, char** argv) {
               "witnesses firing in-phase");
         check(r1.lat_live && r1.lat_agree && r1.lat_witness,
               "latency/reorder (inc.10): +2 NEW blocks finalized with "
-              "heterogeneous 5-30ms per-link constant latency (cross-link "
-              "arrival reorder, per-connection FIFO preserved), all 5 nodes "
-              "byte-agreeing, delayed-frames witness firing in-phase");
+              "heterogeneous 5-30ms per-link constant latency (>=2 distinct "
+              "link latencies witnessed — cross-link arrival reorder, "
+              "per-connection FIFO preserved, pending flushed before "
+              "disable), all 5 nodes byte-agreeing, delayed-frames witness "
+              "firing in-phase");
 
         RunResult r2 = run_once("r2");
         bool replay_eq = r2.loss_live == r1.loss_live &&

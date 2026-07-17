@@ -57,7 +57,13 @@ public:
     // to arrivals). With no network attached, or zero configured latency
     // (no pending entries ever exist), behavior is byte-identical to
     // before. The network must outlive the scheduler drive.
-    void attach_network(VirtualNetwork* net) { net_ = net; }
+    void attach_network(VirtualNetwork* net) {
+        net_ = net;
+        // Arms the latency model: until a drive is attached the write path
+        // falls through to immediate delivery, so an unattached network can
+        // never silently blackhole latencied frames (review finding).
+        if (net_) net_->mark_drive_attached();
+    }
 
     // The furthest global logical time (ms) advanced to so far.
     uint64_t now_ms() const { return global_now_ms_; }

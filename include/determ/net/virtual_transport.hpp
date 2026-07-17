@@ -377,10 +377,37 @@ public:
     // die before pairs; the pending entry pins the Pair) and fired by the
     // GlobalScheduler via next_delivery_ms()/deliver_next() in
     // (arrival, seq) order — seq preserves per-link send order at equal
-    // arrival times. Requires the deterministic drive: under the THREADED
-    // backend latency is IGNORED (frames deliver immediately) — wall-clock
-    // latency is deliberately not modeled.
+    // arrival times. Latency takes effect ONLY once a deterministic drive
+    // has attached (GlobalScheduler::attach_network → mark_drive_attached);
+    // with no drive attached — the threaded backend — frames deliver
+    // IMMEDIATELY (enforced in the write path, not just documented: a
+    // pending entry nothing ever fires would be a silent blackhole).
+    // Wall-clock latency is deliberately not modeled. Lowering or disabling
+    // latency while frames still pend can deliver a stranded older frame
+    // AFTER a newer immediate frame on the SAME link (a per-connection
+    // FIFO violation) — call flush_pending() first; the harness does.
     void set_latency(uint32_t min_ms, uint32_t max_ms);
+
+    // Deliver every pending frame NOW, in (arrival, seq) order, regardless
+    // of arrival time — the flush that makes a latency reconfiguration
+    // FIFO-safe. Deterministic (a fixed point in the schedule).
+    void flush_pending();
+
+    // Number of DISTINCT per-link latency values currently assigned across
+    // all links — the heterogeneity witness (>= 2 means cross-link reorder
+    // is structurally possible; a constant-latency regression cannot fake
+    // it). Test-facing observability only.
+    std::size_t latency_diversity();
+
+    // Called by GlobalScheduler::attach_network. Before this, the latency
+    // model is inert (immediate delivery), so a harness that forgets to
+    // attach cannot silently blackhole frames.
+    void mark_drive_attached() {
+        drive_attached_.store(true, std::memory_order_relaxed);
+    }
+    bool drive_attached() const {
+        return drive_attached_.load(std::memory_order_relaxed);
+    }
 
     // Deterministic-drive hooks for delayed deliveries (used by
     // GlobalScheduler; no production caller). set_virtual_now_ms is the
@@ -479,6 +506,7 @@ private:
     std::map<std::pair<uint64_t, uint64_t>, PendingDelivery> pending_;
     uint64_t net_now_ms_   = 0;
     uint64_t delivery_seq_ = 0;
+    std::atomic<bool> drive_attached_{false};
     // Called by the write path (holds the owning Pair::mu) to hand off a
     // latencied frame. Lock order: Pair::mu -> network mu_ is the ALLOWED
     // direction; deliver_next() therefore pops under mu_ and RELEASES it
