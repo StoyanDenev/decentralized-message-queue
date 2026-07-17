@@ -14,12 +14,23 @@
 #       and byte-diffs the traces (§Q6: identical (generate-args, seed,
 #       template, scenario) => byte-identical trace).
 #
+# --realizations R (default 1): profiles were previously only ever run at ONE
+# realization — the collapsed --seed drove both the fault-PROFILE draw and the
+# fault REALIZATION — but the inc-13 --gen-seed flag decouples them, so with
+# R >= 2 each variant runs R times per (template, sweep-seed) pair: --gen-seed S
+# pins the drawn profile set while --seed sweeps S, S+1, ..., S+R-1 over the
+# realization. Each of the R runs is gated exactly like a single run (exit 0 +
+# the non-vacuous pass marker); the replay spot check stays once per pair.
+# R = 1 keeps the classic collapsed single-seed invocation (no --gen-seed
+# passed), byte-for-byte identical to the pre-option behavior.
+#
 # Every failure prints the EXACT reproduction command line, and the final
 # summary repeats all repro lines in a REPRO block. On failure the trace
 # directory is PRESERVED and its path printed.
 #
 # Seed derivation is fully deterministic (no $RANDOM, no wall clock):
-#   seed_i = seed_base + i * 0x9E37        (rendered as 0x-hex)
+#   seed_i = seed_base + i * 0x9E37              (rendered as 0x-hex)
+#   realization seed_k = seed_i + k, k = 0..R-1  (--realizations R, 0x-hex)
 #
 # NOTE: this is an OPERATOR tool, not a commit gate. The commit gates for
 # the DSF harness are tools/test_dsf_inc*.sh.
@@ -32,17 +43,23 @@
 #   tools/operator_dsf_sweep.sh                       # full default sweep
 #   tools/operator_dsf_sweep.sh --quick               # smoke: 1 seed, 3 variants
 #   tools/operator_dsf_sweep.sh --templates quorum,ratchet --seeds 8
+#   tools/operator_dsf_sweep.sh --templates broadcast --seeds 2 --realizations 5
 #   tools/operator_dsf_sweep.sh --bin build/Release/determ-dsf.exe --seed-base 0xBEEF
 #
 # Options:
 #   --bin PATH        determ-dsf binary (default: $DETERM_DSF_BIN, then the
 #                     standard build-tree discovery chain)
 #   --templates CSV   generator templates to sweep (default: broadcast,agree,
-#                     ratchet,quorum,conserve,recon,crashrec,partition)
+#                     ratchet,quorum,conserve,recon,crashrec,partition,rotation)
 #   --variants N      generated variants per (template, seed)   (default: 6)
 #   --seeds M         sweep seeds per template                   (default: 4)
 #   --seed-base HEX   first sweep seed, 0x-hex or decimal        (default: 0xC1)
-#   --quick           shorthand for --seeds 1 --variants 3
+#   --realizations R  fault-realization runs per variant         (default: 1)
+#                     R >= 2: --gen-seed S pins the profile draw, --seed
+#                     sweeps S..S+R-1; R = 1: classic collapsed single-seed
+#                     invocation, no --gen-seed passed (see above)
+#   --quick           shorthand for --seeds 1 --variants 3 (does NOT change
+#                     --realizations)
 #   --trace-dir DIR   where replay traces go (default: a mktemp dir, removed
 #                     on a green sweep; PRESERVED if any failure occurred)
 #   --help            this text
@@ -61,18 +78,19 @@ cd "$(dirname "$0")/.."
 # binary actually maps (dsf_main.cpp routes agree|agreement -> Agreement,
 # ratchet -> Ratchet, quorum -> Quorum, conserve|conservation -> Conservation,
 # recon|reconcile|reconciliation -> Reconcile, crashrec|crashrecover ->
-# CrashRecover, partition|partheal -> PartitionHeal, anything else ->
+# CrashRecover, partition|partheal -> PartitionHeal, rotation|rotate ->
+# Rotation, anything else ->
 # Broadcast, silently — hence the local validation).
-DEFAULT_TEMPLATES="broadcast,agree,ratchet,quorum,conserve,recon,crashrec,partition"
-KNOWN_TEMPLATES="broadcast agree agreement ratchet quorum conserve conservation recon reconcile reconciliation crashrec crashrecover partition partheal"
+DEFAULT_TEMPLATES="broadcast,agree,ratchet,quorum,conserve,recon,crashrec,partition,rotation"
+KNOWN_TEMPLATES="broadcast agree agreement ratchet quorum conserve conservation recon reconcile reconciliation crashrec crashrecover partition partheal rotation rotate"
 
 SEED_STRIDE=0x9E37   # deterministic sweep-seed stride (see header)
 
 usage() {
   cat <<EOF
 Usage: operator_dsf_sweep.sh [--bin PATH] [--templates CSV] [--variants N]
-                             [--seeds M] [--seed-base HEX] [--quick]
-                             [--trace-dir DIR]
+                             [--seeds M] [--seed-base HEX] [--realizations R]
+                             [--quick] [--trace-dir DIR]
 
 Operational half of the DSF-SPEC §Q6 contract: "CI runs N variants
 overnight; a failed variant seed reproduces it bit-for-bit." Sweeps the
@@ -81,10 +99,16 @@ overnight; a failed variant seed reproduces it bit-for-bit." Sweeps the
 one replay-determinism byte-diff per (template, seed) pair. Every
 failure prints its exact reproduction command line.
 
+With --realizations R >= 2 each variant runs R times: --gen-seed S pins
+the drawn fault PROFILES while --seed sweeps S..S+R-1 over the fault
+REALIZATION (profiles were previously only ever run at one realization;
+the inc-13 --gen-seed flag decouples the two draws).
+
 Examples:
   tools/operator_dsf_sweep.sh                       # full default sweep
   tools/operator_dsf_sweep.sh --quick               # smoke: 1 seed, 3 variants
   tools/operator_dsf_sweep.sh --templates quorum,ratchet --seeds 8
+  tools/operator_dsf_sweep.sh --templates broadcast --seeds 2 --realizations 5
 
 Options:
   --bin PATH        determ-dsf binary (default: \$DETERM_DSF_BIN, then the
@@ -94,7 +118,11 @@ Options:
   --variants N      variants per (template, seed)          (default: 6)
   --seeds M         sweep seeds per template               (default: 4)
   --seed-base HEX   first sweep seed, 0x-hex or decimal    (default: 0xC1)
-  --quick           shorthand for --seeds 1 --variants 3
+  --realizations R  realization runs per variant           (default: 1)
+                    R = 1 keeps the classic single-seed invocation
+                    (no --gen-seed passed), byte-for-byte identical
+  --quick           shorthand for --seeds 1 --variants 3 (leaves
+                    --realizations unchanged)
   --trace-dir DIR   replay-trace dir (default: mktemp dir, removed on a
                     green sweep; PRESERVED if any failure occurred)
   -h, --help        this text
@@ -115,6 +143,7 @@ TEMPLATES_CSV="$DEFAULT_TEMPLATES"
 VARIANTS=6
 SEEDS=4
 SEED_BASE="0xC1"
+REALIZATIONS=1
 TRACE_DIR=""
 TRACE_DIR_IS_TEMP=0
 
@@ -136,6 +165,7 @@ while [ $# -gt 0 ]; do
     --variants)    need_val "$1" $#; VARIANTS="$2"; shift 2 ;;
     --seeds)       need_val "$1" $#; SEEDS="$2"; shift 2 ;;
     --seed-base)   need_val "$1" $#; SEED_BASE="$2"; shift 2 ;;
+    --realizations) need_val "$1" $#; REALIZATIONS="$2"; shift 2 ;;
     --quick)       SEEDS=1; VARIANTS=3; shift ;;
     --trace-dir)   need_val "$1" $#; TRACE_DIR="$2"; shift 2 ;;
     *) echo "operator_dsf_sweep: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -151,8 +181,12 @@ case "$SEEDS" in ""|*[!0-9]*)
   echo "operator_dsf_sweep: --seeds must be a positive integer (got '$SEEDS')" >&2
   exit 2 ;;
 esac
-if [ "$VARIANTS" -lt 1 ] || [ "$SEEDS" -lt 1 ]; then
-  echo "operator_dsf_sweep: --variants and --seeds must be >= 1" >&2
+case "$REALIZATIONS" in ""|*[!0-9]*)
+  echo "operator_dsf_sweep: --realizations must be a positive integer (got '$REALIZATIONS')" >&2
+  exit 2 ;;
+esac
+if [ "$VARIANTS" -lt 1 ] || [ "$SEEDS" -lt 1 ] || [ "$REALIZATIONS" -lt 1 ]; then
+  echo "operator_dsf_sweep: --variants, --seeds and --realizations must be >= 1" >&2
   exit 2
 fi
 
@@ -240,6 +274,9 @@ trap cleanup EXIT
 echo "=== DSF sweep: templates [$TEMPLATES], $SEEDS seed(s) from $SEED_BASE, $VARIANTS variant(s) each ==="
 echo "    bin: $BIN"
 echo "    trace dir: $TRACE_DIR"
+if [ "$REALIZATIONS" -ge 2 ]; then
+  echo "    realizations: $REALIZATIONS per variant (--gen-seed pins the profile draw)"
+fi
 echo ""
 
 PASS_MARKER='invariant\(s\) held over [1-9][0-9]* steps'
@@ -247,51 +284,87 @@ PASS_MARKER='invariant\(s\) held over [1-9][0-9]* steps'
 for T in $TEMPLATES; do
   i=0
   while [ "$i" -lt "$SEEDS" ]; do
-    S="$(printf '0x%x' $(( SEED_BASE_NUM + i * SEED_STRIDE )))"
+    S_NUM=$(( SEED_BASE_NUM + i * SEED_STRIDE ))
+    S="$(printf '0x%x' "$S_NUM")"
 
     # (a) run every generated variant (without --quiet so the non-vacuous
-    #     pass marker is grep-able).
+    #     pass marker is grep-able). With --realizations R >= 2, each variant
+    #     runs R times: --gen-seed $S pins the drawn fault profiles while
+    #     --seed sweeps S..S+R-1 over the fault realization (deterministic
+    #     derivation, 0x-hex via printf). R = 1 keeps the classic collapsed
+    #     single-seed invocation, byte-for-byte identical (no --gen-seed).
+    #     A variant counts toward pair_pass only if ALL its realizations pass.
     pair_pass=0
     v=0
     while [ "$v" -lt "$VARIANTS" ]; do
       NAME="$(printf 'gen_run_%02d' "$v")"
-      TOTAL=$((TOTAL + 1))
-      OUT="$("$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario "$NAME" 2>&1)"
-      rc=$?
-      if [ "$rc" -eq 0 ] && printf '%s\n' "$OUT" | grep -qE "$PASS_MARKER"; then
-        PASSES=$((PASSES + 1))
+      vfails=0
+      k=0
+      while [ "$k" -lt "$REALIZATIONS" ]; do
+        TOTAL=$((TOTAL + 1))
+        if [ "$REALIZATIONS" -eq 1 ]; then
+          OUT="$("$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario "$NAME" 2>&1)"
+          rc=$?
+          REPRO="\"$BIN\" --generate $VARIANTS --seed $S --template $T --scenario $NAME"
+          FAIL_AT="$T @$S $NAME"
+        else
+          RSEED="$(printf '0x%x' $(( S_NUM + k )))"
+          OUT="$("$BIN" --generate "$VARIANTS" --gen-seed "$S" --seed "$RSEED" --template "$T" --scenario "$NAME" 2>&1)"
+          rc=$?
+          REPRO="\"$BIN\" --generate $VARIANTS --gen-seed $S --seed $RSEED --template $T --scenario $NAME"
+          FAIL_AT="$T @$S $NAME realization seed=$RSEED"
+        fi
+        if [ "$rc" -eq 0 ] && printf '%s\n' "$OUT" | grep -qE "$PASS_MARKER"; then
+          PASSES=$((PASSES + 1))
+        else
+          FAILURES=$((FAILURES + 1))
+          vfails=$((vfails + 1))
+          REPRO_LINES+=("$REPRO")
+          echo "  FAIL: $FAIL_AT (exit $rc)"
+          printf '%s\n' "$OUT" | sed 's/^/    | /'
+          echo "    reproduce: $REPRO"
+        fi
+        k=$((k + 1))
+      done
+      if [ "$vfails" -eq 0 ]; then
         pair_pass=$((pair_pass + 1))
-      else
-        FAILURES=$((FAILURES + 1))
-        REPRO="\"$BIN\" --generate $VARIANTS --seed $S --template $T --scenario $NAME"
-        REPRO_LINES+=("$REPRO")
-        echo "  FAIL: $T @$S $NAME (exit $rc)"
-        printf '%s\n' "$OUT" | sed 's/^/    | /'
-        echo "    reproduce: $REPRO"
       fi
       v=$((v + 1))
     done
 
     # (b) one replay-determinism spot check per (T, S): trace gen_run_00
-    #     twice and byte-diff (§Q6 bit-for-bit contract).
+    #     twice and byte-diff (§Q6 bit-for-bit contract). Stays once per
+    #     pair regardless of --realizations (one realization suffices —
+    #     realization 0, run seed $S, profile draw pinned by --gen-seed
+    #     when R >= 2).
     TOTAL=$((TOTAL + 1))
     TA="$TRACE_DIR/${T}_${S}_a.trace"
     TB="$TRACE_DIR/${T}_${S}_b.trace"
-    "$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TA" --quiet >/dev/null 2>&1
-    "$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TB" --quiet >/dev/null 2>&1
+    if [ "$REALIZATIONS" -eq 1 ]; then
+      "$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TA" --quiet >/dev/null 2>&1
+      "$BIN" --generate "$VARIANTS" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TB" --quiet >/dev/null 2>&1
+      RREPRO="\"$BIN\" --generate $VARIANTS --seed $S --template $T --scenario gen_run_00 --trace <path>  # run twice, byte-diff ($TA vs $TB)"
+    else
+      "$BIN" --generate "$VARIANTS" --gen-seed "$S" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TA" --quiet >/dev/null 2>&1
+      "$BIN" --generate "$VARIANTS" --gen-seed "$S" --seed "$S" --template "$T" --scenario gen_run_00 --trace "$TB" --quiet >/dev/null 2>&1
+      RREPRO="\"$BIN\" --generate $VARIANTS --gen-seed $S --template $T --seed $S --scenario gen_run_00 --trace <path>  # run twice, byte-diff ($TA vs $TB)"
+    fi
     replay="replay ok"
     if [ -s "$TA" ] && diff -q "$TA" "$TB" >/dev/null 2>&1; then
       PASSES=$((PASSES + 1))
     else
       FAILURES=$((FAILURES + 1))
       replay="REPLAY DIVERGED"
-      REPRO="\"$BIN\" --generate $VARIANTS --seed $S --template $T --scenario gen_run_00 --trace <path>  # run twice, byte-diff ($TA vs $TB)"
-      REPRO_LINES+=("$REPRO")
+      REPRO_LINES+=("$RREPRO")
       echo "  FAIL: $T @$S replay-determinism (trace empty or byte-diff mismatch)"
-      echo "    reproduce: $REPRO"
+      echo "    reproduce: $RREPRO"
     fi
 
-    echo "  $T @$S: $pair_pass/$VARIANTS pass, $replay"
+    if [ "$REALIZATIONS" -eq 1 ]; then
+      echo "  $T @$S: $pair_pass/$VARIANTS pass, $replay"
+    else
+      echo "  $T @$S: $pair_pass/$VARIANTS x$REALIZATIONS realizations pass, $replay"
+    fi
     i=$((i + 1))
   done
 done
