@@ -29648,6 +29648,20 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions (inc.5/7/8/10)"
                                 : "had failures")
                   << "\n";
+        // inc.11: machine-parseable replay signature for the cross-toolchain
+        // determinism diff (tools/operator_fa_determinism_diff.sh). One
+        // line, versioned prefix, FULL hashes — two binaries that produce
+        // the same schedule byte-for-byte print identical lines.
+        if (argc > 2 && std::string(argv[2]) == "--signature") {
+            std::cout << "SIGNATURE v1 adversarial trace=" << r1.trace_hash
+                      << " faults=" << r1.fc_dropped << ','
+                      << r1.fc_blocked << ',' << r1.fc_duplicated << ','
+                      << r1.fc_delayed;
+            for (int i = 0; i < kNodes; ++i)
+                std::cout << " n" << i << '=' << r1.head_hash[i] << ':'
+                          << r1.state_root[i];
+            std::cout << "\n";
+        }
         return fail == 0 ? 0 : 1;
     }
 
@@ -30008,6 +30022,16 @@ int main(int argc, char** argv) {
                   << ": fa-crash-deterministic "
                   << (fail == 0 ? "all assertions (inc.6/8)" : "had failures")
                   << "\n";
+        // inc.11: cross-toolchain replay signature (see the adversarial
+        // handler's emission for the format contract).
+        if (argc > 2 && std::string(argv[2]) == "--signature") {
+            std::cout << "SIGNATURE v1 crash kill=" << r1.h_kill
+                      << " trace=" << r1.trace_hash;
+            for (int i = 0; i < kNodes; ++i)
+                std::cout << " n" << i << '=' << r1.head_hash[i] << ':'
+                          << r1.state_root[i];
+            std::cout << "\n";
+        }
         return fail == 0 ? 0 : 1;
     }
 
