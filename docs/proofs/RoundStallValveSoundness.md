@@ -72,16 +72,16 @@ Only a block apply clears the stall cycle: `post_append_bookkeeping_locked` sets
 
 ---
 
-## 4. The OPEN boundary: S-051 pool-exhaustion halt (owner-gated)
+## 4. The former boundary: S-051 pool-exhaustion halt (DECIDED — Option B, 2026-07-17)
 
-The valve's precondition — round timers firing — fails exactly when **no round can start**. S-051 is that class, found in the same CI-contention round and **OPEN**:
+The valve's precondition — round timers firing — fails exactly when **no round can start**. S-051 is that class, found in the same CI-contention round. It was OPEN when this valve shipped; it is now **DECIDED and implemented** (Option B partial eligibility floor, `EligibilityFloorDesign.md` §7). The mechanics that made it the valve's boundary:
 
 1. Every Phase-1 (round==1) abort baked into a block suspends the aborted domain from selection for `min(BASE_SUSPENSION_BLOCKS · 2^min(count−1, MAX_ABORT_EXPONENT), MAX_SUSPENSION_BLOCKS)` blocks — `NodeRegistry::build_from_chain`'s `is_suspended` (`src/node/registry.cpp:43-51`), constants `BASE_SUSPENSION_BLOCKS = 10`, `MAX_SUSPENSION_BLOCKS = 10'000`, `MAX_ABORT_EXPONENT = 10` (`include/determ/chain/params.hpp:35-37`).
 2. Suspension expiry is measured in **block index** (`at_index <= ar.last_block + len`, `registry.cpp:50`), not time.
 3. Under CPU starvation, **spurious** abort quorums (two starved nodes co-timing-out on a healthy third) accumulate suspensions. Once the eligible pool falls below the committee size, `check_if_selected` returns without starting a round (`avail_domains.size() < k_use`, `src/node/node.cpp:1017`).
 4. No round ⇒ no phase timers ⇒ **the S-050 valve never fires**; no blocks ⇒ `at_index` never advances ⇒ **suspensions never expire**. A permanent, uniform-height halt. Reproduced twice in 30 runs pre-mitigation (majority frozen at 5,5,5,5 / 8,8,8,8; `AdversarialTransportHarness.md` §3.4).
 
-**Fix constraint (why it is owner-gated).** Any eligibility change (e.g. a deterministic floor that ignores suspensions when the pool would drop below K) must land **byte-identically** on three surfaces, or the change itself forks `state_root`:
+**Fix constraint (what the shipped fix had to satisfy).** Any eligibility change (the shipped Option-B floor re-admits the least-guilty suspended domains when the pool would drop below K) must land **byte-identically** on the mirror surfaces, or the change itself forks `state_root`. The fix meets this by routing all surfaces through ONE shared body (`include/determ/chain/eligibility_floor.hpp`) rather than three parallel edits:
 
 | Surface | Site |
 |---|---|
@@ -89,7 +89,7 @@ The valve's precondition — round timers firing — fails exactly when **no rou
 | Block validation | the validator consumes the registry built by that same filter (`registry_` rebuilt at `src/node/node.cpp:2447`; committee/abort checks at `src/node/validator.cpp:43-52`, `:231`) |
 | D3.3b frozen committee checkpoints | `Chain::freeze_epoch_committee` (`src/chain/chain.cpp:774-794`), whose `is_suspended` (`:776-784`) is a hoisted copy that "MUST stay byte-identical forever" (comment `:766-773`); folded into checkpoints at `:1830-1837` |
 
-The shared `params.hpp` constants (D3.3b step0, comment `params.hpp:25-34`) collapse the constant-drift vector but not the predicate-drift vector. Until the protocol fix lands, the mitigations are harness-side (longer phase timers push the spurious co-timeouts into the far tail; §3.4) and operational detection (§5). **Status: OPEN.**
+The shared `params.hpp` constants (D3.3b step0, comment `params.hpp:25-34`) collapsed the constant-drift vector; the Option-B floor (`eligibility_floor.hpp`) now collapses the predicate-drift vector too, so the "byte-identical forever" hand-copy obligation is discharged by construction. **Status: DECIDED — Option B implemented 2026-07-17** (`EligibilityFloorDesign.md` §7). The operator detector (§5) remains useful for the narrower idle-off-committee boundary below and as defense-in-depth; the harness-side 2 s timers stay in place.
 
 A second, narrower boundary carried over from `AdversarialTransportHarness.md` §3.3: an **idle off-committee** node runs no round timers, so the valve never fires for it; its recovery remains operational (restart/resync).
 
@@ -141,5 +141,5 @@ The exit-code extension (siblings use 0/1/2) is deliberate and documented in the
 ## 7. Status
 
 - **S-050: FIXED** (commit `48bc54f`). Safety: C-1–C-4 — the valve reset is scratch-only, emits no consensus message, is phase-gated and lock-serialized, and only lowers a sync *trigger* threshold. Recovery: R-1–R-3 — bounded time-to-fire while round timers run, non-absorption of the round-state-fork wedge; fleet convergence is an **empirical record** (5/30 → 0/30 wedge-class, both platforms), **not a liveness theorem**, and this document claims nothing stronger.
-- **S-051: OPEN, owner-gated.** Pool exhaustion halts rounds entirely, which is outside the valve's precondition by construction (§4). The fix is a state_root-fork-sensitive protocol change that must land identically on three surfaces; until then, detection is operational (`tools/operator_stall_watch.sh`, exit 3).
+- **S-051: DECIDED — Option B, implemented 2026-07-17** (`EligibilityFloorDesign.md` §7). Pool exhaustion halts rounds entirely, outside the valve's precondition by construction (§4); the state_root-fork-sensitive protocol fix landed identically across the mirror surfaces via one shared body (`eligibility_floor.hpp`). Operator detection (`tools/operator_stall_watch.sh`, exit 3) is retained as defense-in-depth and for the idle-off-committee boundary. Residual: the live CPU-starvation-schedule re-run + the `docs/SECURITY.md` status flip (owner).
 - **Boundaries carried forward:** idle off-committee nodes (no timers, no valve; §4); a schedule adversary that re-creates the adverse adoption race on every valve cycle is outside the empirical record (§3).

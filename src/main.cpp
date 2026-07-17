@@ -3,6 +3,7 @@
 #include <determ/node/node.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/node/committee_pool.hpp>   // D3.3b-read: test-committee-pin
+#include <determ/chain/eligibility_floor.hpp>  // S-051: test-eligibility-floor
 #include <determ/rpc/rpc.hpp>
 #include <determ/chain/chain.hpp>
 #include <determ/chain/block.hpp>
@@ -780,6 +781,10 @@ Additional in-process tests:
                                               full stake forfeit +
                                               deregistration (inactive_from)
                                               + A1 invariant
+  determ test-eligibility-floor               S-051 Option-B eligibility
+                                              floor — fill-to-K ascending
+                                              lift order, dormancy, k=0
+                                              disable, 3-mirror equivalence
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -24957,6 +24962,382 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": abort-event-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-051 Option B "eligibility floor" — partial floor, fill to K (owner
+    // decision 2026-07-17; EligibilityFloorDesign.md §3-B/§4). Validates the
+    // ONE shared implementation (eligibility_floor.hpp) through BOTH consensus
+    // mirrors plus the pinned-pool fallback:
+    //   - dormancy: the lift set is EMPTY whenever >= K domains are eligible,
+    //     so every healthy state filters byte-identically to pre-S-051
+    //   - fill-to-K: exactly K - |eligible| suspensions lifted in ascending
+    //     (count, last_block, domain) order — least-chronic offender first
+    //   - candidates must be base-eligible (the stake gate still binds)
+    //   - k == 0 disables the floor (unwired tool paths; also the pre-fix
+    //     S-051 halt baseline: |pool| < K with nothing lifted)
+    //   - three-mirror equivalence: NodeRegistry::build_from_chain ==
+    //     Chain::freeze_epoch_committee (the D3.3b `cc:` freeze) at every
+    //     (K, at_index); select_committee_pool's unpinned fallback == the
+    //     registry pool (its pinned path reads the frozen members verbatim)
+    // Abort accumulators are planted by applying REAL round-1 AbortEvent
+    // blocks — the same apply path production uses, no state poking.
+    if (cmd == "test-eligibility-floor") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: 6 genesis creators. dA..dE hold stake 2000 (safely above
+        // min_stake 1000 after slashing); dP holds 1005 so ONE slash of 10
+        // drops it below the stake floor — a suspended-but-NOT-base-eligible
+        // domain the floor must never lift.
+        GenesisConfig cfg;
+        cfg.chain_id = "eligibility-floor-test";
+        auto mk = [](const std::string& d, uint64_t stake, uint8_t tag) {
+            GenesisCreator g;
+            g.domain = d;
+            for (size_t i = 0; i < g.ed_pub.size(); ++i)
+                g.ed_pub[i] = uint8_t(tag + i);
+            g.initial_stake = stake;
+            return g;
+        };
+        cfg.initial_creators = {mk("dA", 2000, 0x10), mk("dB", 2000, 0x20),
+                                mk("dC", 2000, 0x30), mk("dD", 2000, 0x40),
+                                mk("dE", 2000, 0x50), mk("dP", 1005, 0x60)};
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+
+        // Blocks 1..12; round-1 aborts at 5(dA), 10(dA), 11(dC), 12(dB+dP).
+        // Resulting accumulators (BASE_SUSPENSION_BLOCKS=10, exp=count-1):
+        //   dA {count 2, last 10} → suspended through 30 (len 20)
+        //   dB {count 1, last 12} → suspended through 22
+        //   dC {count 1, last 11} → suspended through 21
+        //   dP {count 1, last 12} → suspended through 22, stake 995 < 1000
+        auto abort_of = [](const std::string& d, uint8_t h) {
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = d;
+            ae.event_hash = Hash{};
+            ae.event_hash[0] = h;  // distinct per event
+            return ae;
+        };
+        for (uint64_t h = 1; h <= 12; ++h) {
+            Block b;
+            b.index = h;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"dA"};
+            if (h == 5)  b.abort_events.push_back(abort_of("dA", 1));
+            if (h == 10) b.abort_events.push_back(abort_of("dA", 2));
+            if (h == 11) b.abort_events.push_back(abort_of("dC", 3));
+            if (h == 12) {
+                b.abort_events.push_back(abort_of("dB", 4));
+                b.abort_events.push_back(abort_of("dP", 5));
+            }
+            c.append(b);
+        }
+
+        // === Fixture sanity: accumulators via the real apply path ===
+        {
+            const auto& ar = c.abort_records();
+            check(ar.at("dA").count == 2 && ar.at("dA").last_block == 10,
+                  "fixture: dA {count 2, last 10}");
+            check(ar.at("dB").count == 1 && ar.at("dB").last_block == 12,
+                  "fixture: dB {count 1, last 12}");
+            check(ar.at("dC").count == 1 && ar.at("dC").last_block == 11,
+                  "fixture: dC {count 1, last 11}");
+            check(ar.at("dP").count == 1 && ar.at("dP").last_block == 12,
+                  "fixture: dP {count 1, last 12}");
+            check(c.stake("dP") == 995,
+                  "fixture: dP slashed to 995 (below min_stake 1000)");
+        }
+
+        // === Suspension-formula regression (shared helper, exact windows) ===
+        {
+            const auto& ar = c.abort_records();
+            check(suspension_active(ar, "dA", 13) &&
+                  suspension_active(ar, "dA", 30),
+                  "formula: dA suspended through 30 (count 2 → len 2*BASE)");
+            check(!suspension_active(ar, "dA", 31),
+                  "formula: dA expires at 31");
+            check(suspension_active(ar, "dC", 21) &&
+                  !suspension_active(ar, "dC", 22),
+                  "formula: dC window is exactly (11, 21]");
+            check(suspension_active(ar, "dB", 22) &&
+                  !suspension_active(ar, "dB", 23),
+                  "formula: dB window is exactly (12, 22]");
+            check(!suspension_active(ar, "dZ", 13),
+                  "formula: unknown domain never suspended");
+        }
+
+        auto stake_of = [&](const std::string& d) { return c.stake(d); };
+        auto lifted_at = [&](uint64_t at, uint32_t k) {
+            return eligibility_floor_lifted(c.registrants(), c.abort_records(),
+                                            stake_of, c.min_stake(), at, k);
+        };
+        auto registry_domains = [&](uint64_t at) {
+            std::vector<std::string> out;
+            for (const auto& e :
+                 node::NodeRegistry::build_from_chain(c, at).sorted_nodes())
+                out.push_back(e.domain);
+            return out;
+        };
+        auto freeze_domains = [&](uint64_t at) {
+            std::vector<std::string> out;
+            for (const auto& m : c.freeze_epoch_committee(at))
+                out.push_back(m.domain);
+            return out;
+        };
+
+        // === k == 0: floor disabled (pre-fix halt baseline) ===
+        {
+            check(c.k_block_sigs() == 0,
+                  "baseline: chain carries no K pin by default");
+            check(lifted_at(13, 0).empty(),
+                  "k == 0 disables the floor outright");
+            check(registry_domains(13) ==
+                      std::vector<std::string>({"dD", "dE"}),
+                  "k == 0: pool {dD,dE} — the pre-S-051 exhaustion shape");
+        }
+
+        // === Dormancy at the exactly-K boundary ===
+        c.set_k_block_sigs(2);
+        {
+            check(lifted_at(13, 2).empty(),
+                  "K == 2: |eligible| == K → floor dormant (boundary)");
+            check(registry_domains(13) ==
+                      std::vector<std::string>({"dD", "dE"}),
+                  "K == 2: suspended domains stay excluded (pre-S-051 filter)");
+        }
+
+        // === Fill-to-K: the hand-computed ascending lift order ===
+        c.set_k_block_sigs(3);
+        {
+            auto lifted = lifted_at(13, 3);
+            check(lifted.size() == 1 && lifted.count("dC") == 1,
+                  "K == 3: exactly one lift, dC — (1,11,dC) < (1,12,dB) < (2,10,dA)");
+            check(registry_domains(13) ==
+                      std::vector<std::string>({"dC", "dD", "dE"}),
+                  "K == 3: pool filled to exactly K ({dC,dD,dE})");
+        }
+
+        // === Lift candidates must be base-eligible (stake gate binds) ===
+        c.set_k_block_sigs(5);
+        {
+            check(lifted_at(13, 5) ==
+                      std::set<std::string>({"dA", "dB", "dC"}),
+                  "K == 5: lifts {dA,dB,dC}; dP NOT a candidate (stake 995)");
+            check(registry_domains(13) ==
+                      std::vector<std::string>({"dA", "dB", "dC", "dD", "dE"}),
+                  "K == 5: pool == all base-eligible domains; dP excluded");
+        }
+
+        // === Exhausted candidates: pool stays short, formation still gates ===
+        c.set_k_block_sigs(6);
+        {
+            check(lifted_at(13, 6).size() == 3,
+                  "K == 6: all 3 candidates lifted; nothing more to lift");
+            check(registry_domains(13).size() == 5,
+                  "K == 6: pool size 5 < K — the floor cannot invent domains");
+        }
+
+        // === Dormancy restored by natural expiry ===
+        c.set_k_block_sigs(3);
+        {
+            check(lifted_at(22, 3).empty(),
+                  "at 22: dC expired → 3 eligible >= K → dormant (dB stays suspended)");
+            check(registry_domains(22) ==
+                      std::vector<std::string>({"dC", "dD", "dE"}),
+                  "at 22: pool {dC,dD,dE} via natural expiry, not the floor");
+            check(registry_domains(31) ==
+                      std::vector<std::string>({"dA", "dB", "dC", "dD", "dE"}),
+                  "at 31: all suspensions expired; dP alone stake-blocked");
+        }
+
+        // === Surplus-with-candidates dormancy: the unsigned-underflow witness ===
+        // At at=22 with K=2 the pool is in SURPLUS (eligible {dC,dD,dE}=3 > K)
+        // AND candidates exist (dB still suspended through 22). This is the one
+        // state that isolates the `if (eligible >= k) return lifted;` guard
+        // BEFORE the unsigned `need = k - eligible`: drop that guard (or weaken
+        // >= to ==) and need wraps mod 2^64, lifting EVERY candidate — the §3-A
+        // full-jailbreak the dormancy contract forbids. The three-mirror loop
+        // below cannot catch this (both mirrors call the same shared body, so
+        // they wrap identically and compare equal); only a DIRECT assertion on
+        // the lift set / pool does.
+        c.set_k_block_sigs(2);
+        {
+            check(lifted_at(22, 2).empty(),
+                  "K==2 at 22: surplus WITH a live candidate (dB) → floor dormant "
+                  "(underflow guard holds)");
+            check(registry_domains(22) ==
+                      std::vector<std::string>({"dC", "dD", "dE"}),
+                  "K==2 at 22: pool excludes the suspended candidate (no wrap-lift)");
+        }
+
+        // === Three-mirror equivalence (the permanent anti-drift gate) ===
+        {
+            bool equal = true;
+            for (uint32_t k : {0u, 2u, 3u, 5u, 6u}) {
+                c.set_k_block_sigs(k);
+                for (uint64_t at : {uint64_t(13), uint64_t(22), uint64_t(31)})
+                    if (registry_domains(at) != freeze_domains(at))
+                        equal = false;
+            }
+            check(equal,
+                  "three-mirror: build_from_chain == freeze_epoch_committee "
+                  "for every (K, at_index)");
+
+            c.set_k_block_sigs(3);
+            auto reg  = node::NodeRegistry::build_from_chain(c, 13);
+            auto pool = node::select_committee_pool(c, reg, 0, "");
+            check(pool.size() == reg.size(),
+                  "three-mirror: select_committee_pool unpinned fallback == "
+                  "the registry pool");
+        }
+
+        // === Purity: identical inputs → identical lift set ===
+        {
+            c.set_k_block_sigs(3);
+            check(lifted_at(13, 3) == lifted_at(13, 3),
+                  "purity: repeated evaluation is bit-identical");
+        }
+
+        // === EXTENDED floor-active epoch fold: save → load → replay (§5.3) ===
+        // Everything above proves the floor ARITHMETIC through the two consensus
+        // mirrors IN MEMORY. This section proves the other half of the mirror the
+        // design doc §5.3 names: a floor-active D3.3b epoch fold — the ONLY
+        // production caller of freeze_epoch_committee — binds its LIFTED committee
+        // into the cc: state leaf + state_root, and a fresh node re-deriving that
+        // history via Chain::load with the SAME genesis-pinned K reproduces it
+        // byte-for-byte, while a node that LOST K (the 7th load param defaulted to
+        // 0) folds a floor-DISABLED committee and is fail-closed at S-033 — not
+        // silently forked. This is the gate a dropped/misordered k_block_sigs_
+        // assignment in any Chain::load branch (chain.cpp:2742/2792/2803) turns RED.
+        {
+            namespace fs = std::filesystem;
+            GenesisConfig gc;
+            gc.chain_id = "eligibility-floor-extended";
+            gc.initial_creators = {mk("dA", 2000, 0x10), mk("dB", 2000, 0x20),
+                                   mk("dC", 2000, 0x30)};
+            const uint32_t SHARDS = 4, EPOCH = 8, K = 3;  // boundary at index 7 (epoch 1)
+
+            // Drive dA..dC over blocks 1..7; suspend dC with a round-1 abort at
+            // block 2 (count=1, last_block=2, window (2,12] ⇒ suspended at the
+            // boundary index 7). At the fold eligible={dA,dB}=2 < K=3 ⇒ the floor
+            // lifts dC ⇒ frozen committee = {dA,dB,dC}. Same discipline as
+            // test-committee-fold: params set BEFORE genesis apply, mirroring load.
+            auto drive = [&](uint32_t k_pin) {
+                Chain x;
+                x.set_shard_routing(SHARDS, Hash{}, 0);
+                x.set_epoch_blocks(EPOCH);
+                x.set_k_block_sigs(k_pin);
+                x.append(make_genesis_block(gc));
+                for (uint64_t h = 1; h <= 7; ++h) {
+                    Block b;
+                    b.index = h;
+                    b.prev_hash = x.head_hash();
+                    b.timestamp = 1700000000 + int64_t(h);
+                    b.creators = {"dA"};                 // fee routing / A1 balance
+                    for (auto& r : b.cumulative_rand) r = uint8_t(0xE0 + h);
+                    if (h == 2) b.abort_events.push_back(abort_of("dC", 7));
+                    x.append(std::move(b));
+                }
+                return x;
+            };
+
+            Chain live = drive(K);
+            check(live.committee_checkpoints().count(1) == 1,
+                  "EXTENDED: epoch-1 checkpoint folded at the boundary (idx 7)");
+            {
+                std::vector<std::string> m;
+                for (auto& e : live.committee_checkpoints().at(1).members)
+                    m.push_back(e.domain);
+                check(m == std::vector<std::string>({"dA", "dB", "dC"}),
+                      "floor-active fold froze the LIFTED committee {dA,dB,dC}");
+            }
+            // The floor is genuinely ACTIVE, not vacuously full: the same history
+            // folded with K=0 freezes only the base-eligible pair.
+            {
+                Chain k0 = drive(0);
+                std::vector<std::string> m;
+                for (auto& e : k0.committee_checkpoints().at(1).members)
+                    m.push_back(e.domain);
+                check(m == std::vector<std::string>({"dA", "dB"}),
+                      "control: K=0 fold freezes {dA,dB} — the floor materially changed cc:");
+            }
+
+            // Bind the floor-active cc: leaf into a committed state_root: a
+            // post-boundary block (idx 8, no fold) declares the root so the
+            // reload's S-033 recompute is EXERCISED (not the zero-root skip).
+            const Hash root = live.compute_state_root();
+            {
+                Block b8;
+                b8.index = 8;
+                b8.prev_hash = live.head_hash();
+                b8.timestamp = 1700000008;
+                b8.creators = {"dA"};
+                for (auto& r : b8.cumulative_rand) r = 0xF8;   // (8+1)%8 != 0 ⇒ no fold
+                b8.state_root = root;
+                live.append(std::move(b8));
+            }
+
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-efloor-" + std::to_string(static_cast<unsigned long long>(
+                    std::chrono::steady_clock::now().time_since_epoch().count())));
+            std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
+            const std::string cpath = (dir / "chain.json").string();
+            live.save(cpath); live.save_incremental(cpath);
+
+            // Correct-K reload: replay re-folds with the floor active, reproduces
+            // the lifted committee + root, and block 8's S-033 gate accepts.
+            {
+                Chain r = Chain::load(cpath, /*subsidy=*/0, SHARDS, Hash{},
+                                      /*my_shard=*/0, EPOCH, /*k_block_sigs=*/K);
+                check(r.k_block_sigs() == K,
+                      "Chain::load carries the genesis-pinned K (7th param round-trips)");
+                std::vector<std::string> m;
+                for (auto& e : r.committee_checkpoints().at(1).members)
+                    m.push_back(e.domain);
+                check(m == std::vector<std::string>({"dA", "dB", "dC"}),
+                      "reload re-folds the floor-active committee {dA,dB,dC} identically");
+                check(r.compute_state_root() == root,
+                      "reload state_root == pre-save (floor-active cc: leaf reproduced)");
+            }
+
+            // Lost-K reload: the SAME on-disk history re-derived with K defaulted
+            // to 0 folds the floor-DISABLED committee, so block 8's bound root no
+            // longer matches — fail-closed S-033 rejection, NOT a silent fork.
+            {
+                bool threw = false;
+                try {
+                    Chain::load(cpath, /*subsidy=*/0, SHARDS, Hash{},
+                                /*my_shard=*/0, EPOCH);   // 7th param defaults to 0
+                } catch (const std::exception&) { threw = true; }
+                check(threw,
+                      "lost-K reload (K defaulted 0) is fail-closed at S-033, not forked");
+            }
+
+            // Snapshot parity: K travels IN the snapshot too (like epoch_blocks),
+            // so restore_from_snapshot is self-sufficient — a snapshot-
+            // bootstrapped EXTENDED node re-pins K before its next boundary fold
+            // without relying on the node-layer convergence setter.
+            {
+                nlohmann::json sj = live.serialize_state();
+                check(sj.contains("k_block_sigs") && sj["k_block_sigs"] == K,
+                      "serialize_state carries genesis-pinned K (non-zero)");
+                Chain rs = Chain::restore_from_snapshot(sj);
+                check(rs.k_block_sigs() == K,
+                      "restore_from_snapshot re-pins K (self-sufficient, no node setter)");
+            }
+            fs::remove_all(dir, ec);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": eligibility-floor "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: apply-side handling of EquivocationEvent (FA6

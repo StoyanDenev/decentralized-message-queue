@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/chain/chain.hpp>
 #include <determ/chain/registration_delay.hpp>
+#include <determ/chain/eligibility_floor.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -762,32 +763,29 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
     lottery_jackpot_multiplier_ = s.lottery_jackpot_multiplier;
 }
 
-// D3.3b: freeze the eligible-validator pool as of `at_index`. This is a
-// hoisted, Chain-visible copy of NodeRegistry::build_from_chain's eligibility
-// predicate (registry.cpp:42-64) — same four gates, same params.hpp suspension
-// constants — emitting CommitteeMember{domain, ed_pub, region} straight from the
-// registrants_ map. The two predicate bodies MUST stay byte-identical forever
-// (a divergence forks the cc: leaf vs the live selection filter); the shared
-// suspension constants (params.hpp, D3.3b step0) collapse the worst drift
-// vector. registrants_ is a std::map<std::string,...> so iteration is already
+// D3.3b: freeze the eligible-validator pool as of `at_index`. Historically a
+// hoisted, byte-identical copy of NodeRegistry::build_from_chain's eligibility
+// predicate; since S-051 BOTH surfaces call the SAME shared definitions
+// (eligibility_floor.hpp: domain_eligible + eligibility_floor_lifted), so the
+// old "two bodies MUST stay byte-identical forever" drift vector no longer
+// exists — there is one body. Emits CommitteeMember{domain, ed_pub, region}
+// straight from the registrants_ map; std::map iteration is already
 // domain-sorted → the emitted vector is canonical without an extra sort.
+// S-051 Option B: a frozen checkpoint at an exhausted boundary includes the
+// floor-lifted domains identically to the live filter (k_block_sigs_ is the
+// genesis-pinned K, 0 = floor disabled on unwired tool paths).
 std::vector<Chain::CommitteeMember>
 Chain::freeze_epoch_committee(uint64_t at_index) const {
-    auto is_suspended = [&](const std::string& domain) -> bool {
-        auto it = abort_records_.find(domain);
-        if (it == abort_records_.end()) return false;
-        const auto& ar = it->second;
-        uint64_t exp = std::min(ar.count - 1, MAX_ABORT_EXPONENT);
-        uint64_t len = std::min(BASE_SUSPENSION_BLOCKS * (uint64_t(1) << exp),
-                                 MAX_SUSPENSION_BLOCKS);
-        return at_index <= ar.last_block + len;
-    };
+    auto stake_of = [&](const std::string& d) { return stake(d); };
+    const auto lifted = eligibility_floor_lifted(
+        registrants_, abort_records_, stake_of, min_stake_, at_index,
+        k_block_sigs_);
     std::vector<CommitteeMember> out;
     for (const auto& [domain, r] : registrants_) {
-        if (r.active_from > at_index)                     continue;
-        if (at_index >= r.inactive_from)                  continue;
-        if (min_stake_ > 0 && stake(domain) < min_stake_) continue;
-        if (is_suspended(domain))                         continue;
+        if (!domain_eligible(domain, r, abort_records_, stake_of, min_stake_,
+                             at_index)
+            && lifted.count(domain) == 0)
+            continue;
         out.push_back(CommitteeMember{domain, r.ed_pub, r.region});
     }
     return out;
@@ -2085,6 +2083,18 @@ json Chain::serialize_state(uint32_t header_count) const {
     // blocks fold their cc: checkpoints.
     if (epoch_blocks_ != 0)
         snap["epoch_blocks"] = epoch_blocks_;
+    // S-051: genesis-pinned committee size K (the eligibility-floor threshold).
+    // Same non-leaf, emit-only-when-nonzero discipline as epoch_blocks above:
+    // every pre-S-051 / non-floor chain (k_block_sigs_ == 0) serializes
+    // byte-identically (snapshot goldens unchanged). Carried so a
+    // snapshot-bootstrapped EXTENDED node re-pins K before its next boundary
+    // fold WITHOUT depending on the node-layer convergence setter — parity with
+    // epoch_blocks, which is serialized for exactly this restore-before-fold
+    // reason. (The node path still config-pins K after restore, genesis
+    // authoritative; this makes restore_from_snapshot self-sufficient for tool
+    // callers and defense-in-depth for the fold.)
+    if (k_block_sigs_ != 0)
+        snap["k_block_sigs"] = k_block_sigs_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
     snap["shard_id"]      = my_shard_id_;
@@ -2273,6 +2283,12 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // before the tail-block replay so a snapshot-bootstrapped EXTENDED node
     // folds subsequent boundary blocks at the same boundary the producer used.
     c.epoch_blocks_  = snap.value("epoch_blocks", uint32_t{0});
+    // S-051: genesis-pinned K, same restore-before-replay discipline as
+    // epoch_blocks above (absent ⇒ default 0 = floor disabled, byte-invariant
+    // for every pre-S-051 snapshot). A snapshot-bootstrapped EXTENDED node thus
+    // re-pins K before any tail-block boundary fold; the node layer additionally
+    // config-pins it at the chain_loaded convergence label (genesis authoritative).
+    c.k_block_sigs_  = snap.value("k_block_sigs", uint32_t{0});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
     c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",
@@ -2711,7 +2727,8 @@ Chain Chain::load(const std::string& path,
                     uint32_t shard_count,
                     const Hash& shard_salt,
                     ShardId my_shard_id,
-                    uint32_t epoch_blocks) {
+                    uint32_t epoch_blocks,
+                    uint32_t k_block_sigs) {
     // B1 chain-storage-v1: when a manifest exists, the block store is the
     // RUNTIME truth — it is written on every save tick, while the legacy
     // chain.json is written only at graceful stop(), so after a crash the
@@ -2740,6 +2757,7 @@ Chain Chain::load(const std::string& path,
         c.shard_salt_    = shard_salt;
         c.my_shard_id_   = my_shard_id;
         c.epoch_blocks_  = epoch_blocks;  // D3.3b: before replay so the fold-in
+        c.k_block_sigs_  = k_block_sigs;  // S-051: before replay (floor verdict)
 
         const fs::path dir = store_dir_for(path);
         for (uint64_t i = 0; i < height; ++i) {
@@ -2789,6 +2807,7 @@ Chain Chain::load(const std::string& path,
         c.shard_salt_    = shard_salt;
         c.my_shard_id_   = my_shard_id;
         c.epoch_blocks_  = epoch_blocks;  // D3.3b (empty chain: no replay yet)
+        c.k_block_sigs_  = k_block_sigs;  // S-051 (same)
         return c;
     }
     json j = json::parse(f);
@@ -2799,6 +2818,7 @@ Chain Chain::load(const std::string& path,
     c.shard_salt_    = shard_salt;
     c.my_shard_id_   = my_shard_id;
     c.epoch_blocks_  = epoch_blocks;    // D3.3b: before replay (same reason)
+    c.k_block_sigs_  = k_block_sigs;    // S-051: before replay (floor verdict)
 
     // S-021: accept both formats:
     //   * legacy: top-level JSON array of blocks (pre-S-021 chain.json).

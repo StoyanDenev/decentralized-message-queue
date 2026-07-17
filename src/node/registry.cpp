@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/node/registry.hpp>
 #include <determ/chain/block.hpp>
+#include <determ/chain/eligibility_floor.hpp>
 #include <determ/chain/params.hpp>
 #include <algorithm>
 #include <map>
@@ -39,29 +40,34 @@ NodeRegistry NodeRegistry::build_from_chain(const chain::Chain& chain, uint64_t 
     //
     // Only Phase-1 (round=1) aborts feed suspension; the cache mirrors
     // that filter (apply_transactions only increments on round==1).
+    // The eligibility predicate + suspension formula live in ONE shared
+    // definition (eligibility_floor.hpp) also consumed by
+    // Chain::freeze_epoch_committee — the S-051 hard precondition that
+    // replaced the two formerly byte-identical predicate copies.
     const auto& abort_records = chain.abort_records();
-    auto is_suspended = [&](const std::string& domain) -> bool {
-        auto it = abort_records.find(domain);
-        if (it == abort_records.end()) return false;
-        auto& ar = it->second;
-        uint64_t exp = std::min(ar.count - 1, MAX_ABORT_EXPONENT);
-        uint64_t len = std::min(BASE_SUSPENSION_BLOCKS * (uint64_t(1) << exp),
-                                 MAX_SUSPENSION_BLOCKS);
-        return at_index <= ar.last_block + len;
-    };
 
     // rev.8 follow-on: per-chain min_stake (default 1000 for
     // STAKE_INCLUSION, 0 for DOMAIN_INCLUSION). Skip the stake gate
     // entirely when 0 — any registered+active+non-suspended domain is
     // eligible.
     uint64_t threshold = chain.min_stake();
+    auto stake_of = [&](const std::string& d) { return chain.stake(d); };
+
+    // S-051 Option B partial floor: when fewer than K domains pass the
+    // full filter, `lifted` names the suspended-but-otherwise-eligible
+    // domains (ascending count/last_block/domain) re-admitted to bring
+    // the pool to exactly K. Empty in every healthy state and whenever
+    // the chain carries no K pin (k_block_sigs() == 0 on tool paths).
+    const auto lifted = chain::eligibility_floor_lifted(
+        chain.registrants(), abort_records, stake_of, threshold, at_index,
+        chain.k_block_sigs());
 
     NodeRegistry reg;
     for (auto& [domain, r] : chain.registrants()) {
-        if (r.active_from > at_index)            continue;
-        if (at_index >= r.inactive_from)         continue;
-        if (threshold > 0 && chain.stake(domain) < threshold) continue;
-        if (is_suspended(domain))                continue;
+        if (!chain::domain_eligible(domain, r, abort_records, stake_of,
+                                    threshold, at_index)
+            && lifted.count(domain) == 0)
+            continue;
 
         NodeEntry e;
         e.domain        = domain;

@@ -351,6 +351,18 @@ public:
     // 6th param / snapshot restore). 0 = disabled (no epoch boundary ever fires).
     uint32_t epoch_blocks()           const { return epoch_blocks_; }
     void     set_epoch_blocks(uint32_t n)           { epoch_blocks_ = n; }
+    // S-051: committee size K, genesis-pinned (GenesisConfig.k_block_sigs).
+    // Chain carries it ONLY as the eligibility-floor trigger threshold
+    // (eligibility_floor.hpp) consumed by freeze_epoch_committee and, via
+    // the accessor, NodeRegistry::build_from_chain. Same routing-style
+    // non-leaf treatment as epoch_blocks_ (S-039: no unconditional
+    // state-root leaf). Must be set BEFORE any replay that could cross an
+    // epoch fold (Chain::load 7th param / node wiring), for the same
+    // reason as epoch_blocks_: a fold replayed with a different floor
+    // verdict would freeze a different `cc:` checkpoint. 0 = floor
+    // disabled (pre-S-051 behavior; tool paths that never set it).
+    uint32_t k_block_sigs()           const { return k_block_sigs_; }
+    void     set_k_block_sigs(uint32_t k)           { k_block_sigs_ = k; }
 
     // R4 Phase 2+4: per-shard merge state. Keys are shard_ids currently
     // in the MERGED (refugee) state; values are (partner_id,
@@ -430,6 +442,18 @@ public:
     // Ring depth in EPOCHS. Generous default covering the deepest merge/reorg
     // lookback for reasonable epoch_blocks; a substrate tuning point for D3.3b.
     static constexpr size_t kCommitteeCheckpointRing = 16;
+
+    // D3.3b: freeze the eligible-validator POOL as of `at_index`, for the
+    // epoch-rotation committee checkpoint (Site A fold-in). A pure const
+    // function of committed Chain state (registrants_ / stake() / min_stake_ /
+    // abort_records_ / k_block_sigs_) — it applies the SAME shared
+    // eligibility predicate + S-051 Option-B floor (eligibility_floor.hpp)
+    // that NodeRegistry::build_from_chain uses, so the frozen set can never
+    // drift from the live selection filter. Region-UNfiltered (the region
+    // filter stays on the read side); members are domain-sorted (registrants_
+    // is an ordered map). Public so the three-mirror equivalence gate
+    // (test-eligibility-floor) can compare it against build_from_chain.
+    std::vector<CommitteeMember> freeze_epoch_committee(uint64_t at_index) const;
 
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
@@ -630,7 +654,11 @@ public:
                        uint32_t shard_count = 1,
                        const Hash& shard_salt = Hash{},
                        ShardId my_shard_id = 0,
-                       uint32_t epoch_blocks = 0);   // D3.3b: set before replay
+                       uint32_t epoch_blocks = 0,    // D3.3b: set before replay
+                       uint32_t k_block_sigs = 0);   // S-051: same reason — a
+                                                     // fold replayed with a
+                                                     // different floor verdict
+                                                     // freezes a different cc:
 
     // A9 Phase 2D: composable-tx scope primitive. Runs `fn` with the
     // chain in a tentative state; on `fn` returning true, the
@@ -779,6 +807,10 @@ private:
     // node sets it from GenesisConfig.epoch_blocks (default 1000). Plain field,
     // NOT a state-root leaf (see set_epoch_blocks doc). Set before replay.
     uint32_t                                    epoch_blocks_{0};
+    // S-051: genesis-pinned committee size K (the eligibility-floor
+    // threshold). Default 0 = floor disabled. Plain field, NOT a
+    // state-root leaf (see set_k_block_sigs doc). Set before replay.
+    uint32_t                                    k_block_sigs_{0};
     // R4 Phase 2: per-shard merge state. key = shard_id currently
     // absorbed into a partner; value = partner shard. Mutated only
     // by MERGE_EVENT apply (BEGIN inserts, END erases).
@@ -925,18 +957,6 @@ private:
     };
     StateSnapshot create_state_snapshot() const;
     void          restore_state_snapshot(StateSnapshot&& s);
-
-    // D3.3b: freeze the eligible-validator POOL as of `at_index`, for the
-    // epoch-rotation committee checkpoint (Site A fold-in). A pure function of
-    // committed Chain state (registrants_/stake()/min_stake_/abort_records_) —
-    // it applies build_from_chain's EXACT 4-predicate filter (active window +
-    // stake floor + abort suspension) reading the SAME params.hpp suspension
-    // constants the node-side NodeRegistry::build_from_chain uses, so the frozen
-    // set can never drift from the live selection filter. Region-UNfiltered
-    // (the region filter stays on the read side); members are domain-sorted
-    // (registrants_ is an ordered map). Lives in Chain (not moved from the node
-    // layer) because build_from_chain reads only Chain accessors.
-    std::vector<CommitteeMember> freeze_epoch_committee(uint64_t at_index) const;
 
     // A4 / S-048: the state as it existed immediately before the CURRENT head
     // was applied — retained by apply_transactions on success so revert_head()

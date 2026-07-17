@@ -558,7 +558,8 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         (cfg_.sharding_mode == ShardingMode::EXTENDED) ? cfg_.epoch_blocks : 0;
     chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy,
                                   genesis_shard_count, genesis_shard_salt,
-                                  genesis_my_shard, chain_epoch_blocks);
+                                  genesis_my_shard, chain_epoch_blocks,
+                                  cfg_.k_block_sigs);   // S-051 floor K
     chain_.set_min_stake(genesis_min_stake);
     chain_.set_suspension_slash(genesis_suspension_slash);
     chain_.set_unstake_delay(genesis_unstake_delay);
@@ -673,6 +674,15 @@ chain_loaded:
     // converge here, so every path picks it up. 0 = active from genesis;
     // UINT64_MAX = never (chain stays on the v1 commit shape).
     chain_.set_f2_active_from_height(genesis_f2_active);
+    // S-051: the genesis-consistent committee size K = the eligibility-floor
+    // threshold, ALL sharding modes (the reproduced halt was on unsharded
+    // clusters). Same convergence-label discipline as f2 above: K is config-
+    // pinned, NOT persisted in snapshots, and restore_from_snapshot at the
+    // branch above REPLACES chain_ — so only this post-convergence site (plus
+    // the load() param, which must precede the internal replay's fold-in)
+    // guarantees every construction path carries K before the first
+    // eligibility read (build_from_chain below) or live fold.
+    chain_.set_k_block_sigs(cfg_.k_block_sigs);
     registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);
