@@ -74,8 +74,11 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition] --list\n"
-        "                                 (register + list/run N seed-driven variants)\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--gen-seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition] --list\n"
+        "                                 (register + list/run N seed-driven variants;\n"
+        "                                  --gen-seed pins the drawn fault PROFILES so\n"
+        "                                  --seed can vary the fault REALIZATION alone —\n"
+        "                                  omitted, both collapse to --seed as before)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
         "seed to reproduce any failure.\n";
@@ -114,6 +117,7 @@ int main(int argc, char** argv) {
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
     std::string seed_str    = "0x1";    // default deterministic seed
+    std::string gen_seed_str;            // --gen-seed: pin the profile draw
     uint64_t    max_events  = 0;         // 0 => framework default cap
     bool        quiet       = false;
     bool        want_list   = false;
@@ -135,6 +139,7 @@ int main(int argc, char** argv) {
         else if (a == "--help" || a == "-h") { print_usage(); return 0; }
         else if (a == "--scenario") { scenario_name = need("--scenario"); }
         else if (a == "--seed")     { seed_str      = need("--seed"); }
+        else if (a == "--gen-seed") { gen_seed_str  = need("--gen-seed"); }
         else if (a == "--trace")    { trace_path    = need("--trace"); }
         else if (a == "--max-events") { max_events  = std::stoull(need("--max-events")); }
         else if (a == "--quiet")    { quiet = true; }
@@ -152,13 +157,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // §Q5/§Q6: --generate N registers N variants seeded by the run --seed, named
-    // gen_run_00..0(N-1). --template picks the generator template (the alias
-    // chain below is the authoritative map; print_usage lists the names). Same
-    // (--generate N, --seed S, --template T) => the same variant set on any
-    // host; each is then runnable / listable. An unknown name falls back to
-    // Broadcast — operator tooling validates names locally (operator_dsf_sweep).
+    // §Q5/§Q6: --generate N registers N variants named gen_run_00..0(N-1).
+    // --template picks the generator template (the alias chain below is the
+    // authoritative map; print_usage lists the names). The PROFILE draw is
+    // seeded by --gen-seed when given, else by the run --seed (the classic
+    // collapsed single-seed form) — so `--gen-seed G --seed S` pins one drawn
+    // profile set G while varying the fault REALIZATION S independently:
+    // same (--generate N, --gen-seed G, --template T) => the same variant set
+    // on any host, runnable under any number of run seeds. An unknown
+    // template name falls back to Broadcast — operator tooling validates
+    // names locally (operator_dsf_sweep).
     if (generate_count > 0) {
+        uint64_t gen_seed = seed;
+        if (!gen_seed_str.empty() && !parse_seed(gen_seed_str, gen_seed)) {
+            std::cerr << "error: bad --gen-seed '" << gen_seed_str
+                      << "' (want 0xHEX or decimal)\n";
+            return 2;
+        }
         const determ::sim::GenTemplate tmpl =
             (template_name == "agree" || template_name == "agreement")
                 ? determ::sim::GenTemplate::Agreement
@@ -176,7 +191,7 @@ int main(int argc, char** argv) {
           : (template_name == "partition" || template_name == "partheal")
                 ? determ::sim::GenTemplate::PartitionHeal
                 : determ::sim::GenTemplate::Broadcast;
-        register_generated_scenarios(scenarios, seed,
+        register_generated_scenarios(scenarios, gen_seed,
                                      static_cast<int>(generate_count),
                                      "gen_run", /*with_selftest=*/false, tmpl);
     }
