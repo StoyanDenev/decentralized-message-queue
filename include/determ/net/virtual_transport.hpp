@@ -364,6 +364,20 @@ public:
     // Remove any partition (loss unaffected; clear it via set_loss(0)).
     void heal();
 
+    // Fault-delivery WITNESS totals (inc.9), summed over every link that has
+    // ever existed in this network: frames actually dropped by the loss
+    // model, blocked by a partition gate, and duplicated by the dup model.
+    // Test-facing observability only — never read on the delivery path. A
+    // fault phase asserts its fault FIRED (delta across the phase > 0):
+    // without the witness, a silently no-opped fault (a zeroed roll, an
+    // always-open gate) greens the phase vacuously, since a clean network
+    // trivially satisfies liveness and agreement. Deterministic under the
+    // GlobalScheduler drive, so replay can also pin the exact totals.
+    struct FaultCounts {
+        uint64_t dropped = 0, blocked = 0, duplicated = 0;
+    };
+    FaultCounts fault_counts();
+
 private:
     friend class VirtualTransport;
     friend class VirtualAcceptor;

@@ -7,9 +7,11 @@
 # wall-clock loops per platform to reproduce, and its failover gate had to be
 # weakened to a 3-of-4 MAJORITY (pre-A4, a survivor stranded on a minority
 # same-height fork could not reorg). Here the same crash runs under the inc.4
-# GlobalScheduler: the kill lands at a deterministic drain boundary with the
-# dead node's final sends still queued on SOME survivor loops — the S-047
-# asymmetric-death shape — and the whole schedule replays byte-for-byte.
+# GlobalScheduler: the kill lands at a deterministic drain boundary and the
+# whole schedule replays byte-for-byte; any of the dead node's in-flight
+# sends left queued on survivor loops at that boundary are delivered AFTER
+# the death (the S-047 asymmetric-death INGREDIENT — seed-dependent, not
+# asserted; the hard gates below do not rely on it).
 #
 # Assertions (all hard):
 #   1. STEADY STATE — all 5 nodes reach height 3 under the deterministic

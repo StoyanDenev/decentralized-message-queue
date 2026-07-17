@@ -29122,9 +29122,14 @@ int main(int argc, char** argv) {
     // still reaches its diagnostics; expect-violation self-tests (the DSF
     // planted-bug-twin discipline) prove the checker actually fires.
     struct FaStepMonitor {
-        std::map<uint64_t, std::string> canonical;    // settled idx -> dump
+        // settled idx -> {canonical dump, node that pinned it}. Provenance
+        // makes the printed violation trustworthy for triage: the FIRST
+        // observer pins, and the pinner is not necessarily the honest side
+        // (review) — a divergence report names both parties.
+        std::map<uint64_t, std::pair<std::string, int>> canonical;
         std::map<int, uint64_t>         last_height;  // per-node watermark
         std::vector<std::string>        violations;
+        uint64_t                        probe_seq = 0;
 
         void violation(std::string v) {
             if (violations.size() < 16) violations.push_back(std::move(v));
@@ -29137,6 +29142,38 @@ int main(int argc, char** argv) {
                 violation("height decreased on node" + std::to_string(i) +
                           " (" + std::to_string(lh) + " -> " +
                           std::to_string(h) + ")");
+            // A1 supply at EVERY observation (review): gating it on height
+            // growth silently skipped height-stalled nodes — e.g. the
+            // partitioned node4 for an entire phase.
+            {
+                const nlohmann::json s = n.rpc_chain_summary(0);
+                if (s["total_supply"] != s["expected_total"])
+                    violation("supply invariant broke on node" +
+                              std::to_string(i) + ": total_supply=" +
+                              s["total_supply"].dump() + " expected_total=" +
+                              s["expected_total"].dump());
+            }
+            // Rolling immutability probe (review): re-fetch ONE already-
+            // pinned index per observation and byte-compare against its pin.
+            // Without it, an index below every watermark is never read
+            // again, so an in-place rewrite of settled history (the
+            // >depth-1-reorg class) would be invisible to the incremental
+            // walk. One probe per observation — read-only, deterministic
+            // (probe_seq advances with the deterministic observation
+            // sequence), EVENTUAL coverage across the pinned prefix.
+            if (!canonical.empty()) {
+                auto pit = canonical.begin();
+                std::advance(pit, static_cast<std::ptrdiff_t>(
+                                      probe_seq++ % canonical.size()));
+                if (pit->first + 1 < h) {  // probed idx settled on THIS node
+                    const nlohmann::json b = n.rpc_block(pit->first);
+                    if (b.is_null() || b.dump() != pit->second.first)
+                        violation("settled-block rewrite at index " +
+                                  std::to_string(pit->first) + " on node" +
+                                  std::to_string(i) + " (pinned by node" +
+                                  std::to_string(pit->second.second) + ")");
+                }
+            }
             if (h <= lh) return;               // nothing new settled
             last_height[i] = h;
             // Settled = indices 1..h-2 (genesis is golden-vector-pinned;
@@ -29152,18 +29189,13 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 const std::string d = b.dump();
-                auto ins = canonical.emplace(idx, d);
-                if (!ins.second && ins.first->second != d)
+                auto ins = canonical.emplace(idx, std::make_pair(d, i));
+                if (!ins.second && ins.first->second.first != d)
                     violation("settled-block divergence at index " +
                               std::to_string(idx) + " on node" +
-                              std::to_string(i));
+                              std::to_string(i) + " vs pin by node" +
+                              std::to_string(ins.first->second.second));
             }
-            const nlohmann::json s = n.rpc_chain_summary(0);
-            if (s["total_supply"] != s["expected_total"])
-                violation("supply invariant broke on node" +
-                          std::to_string(i) + ": total_supply=" +
-                          s["total_supply"].dump() + " expected_total=" +
-                          s["expected_total"].dump());
         }
         bool clean() const { return violations.empty(); }
         bool has(const char* needle) const {
@@ -29173,17 +29205,22 @@ int main(int argc, char** argv) {
         }
         // Expect-violation self-test against a LIVE node: plant a corrupted
         // canonical entry + a rolled-back watermark into a fresh monitor and
-        // require both checker branches to fire. Proves non-vacuity — a
-        // monitor that silently no-ops can never green this.
+        // require all three checker branches to fire (the rolling rewrite
+        // probe, the walk divergence compare, and the height-rollback
+        // check). Proves the checker LOGIC is non-vacuous; observation
+        // WIRING coverage is gated separately by the harness (every node
+        // observed, canonical non-empty — review).
         static bool self_test(determ::node::Node& n) {
             FaStepMonitor probe;
-            probe.canonical[1] = "planted-corrupt-bytes";
-            probe.observe(0, n);   // walks settled 1..h-2 -> divergence @1
-            const bool caught_div = probe.has("divergence");
+            probe.canonical[1] = {"planted-corrupt-bytes", -1};
+            probe.observe(0, n);   // probe hits idx 1 -> rewrite; walk
+                                   // reaches idx 1 -> divergence
+            const bool caught_rewrite = probe.has("rewrite");
+            const bool caught_div     = probe.has("divergence");
             probe.last_height[0] = UINT64_MAX;
             probe.observe(0, n);   // h < watermark -> rollback
             const bool caught_rollback = probe.has("height decreased");
-            return caught_div && caught_rollback;
+            return caught_rewrite && caught_div && caught_rollback;
         }
     };
 
@@ -29216,8 +29253,17 @@ int main(int argc, char** argv) {
             bool heal_recovered = false;
             bool dup_live = false, dup_agree = false;
             bool mon_clean = false, mon_selftest = false;
+            bool mon_coverage = false;
             size_t mon_violations = 0;
             std::string mon_first;
+            // inc.9 fault-delivery witnesses: each fault phase must show its
+            // fault actually FIRED (a silently no-opped fault greens the
+            // phase vacuously — RED-on-mutant verified).
+            bool loss_witness = false, part_witness = false,
+                 dup_witness = false;
+            bool combo_live = false, combo_agree = false,
+                 combo_witness = false;
+            uint64_t fc_dropped = 0, fc_blocked = 0, fc_duplicated = 0;
             std::vector<std::string> head_hash, state_root;
             std::string trace_hash;
         };
@@ -29303,6 +29349,11 @@ int main(int argc, char** argv) {
                 return m;
             };
             auto agree_upto = [&](int lo, int hi, uint64_t top) {
+                // Vacuity guard (review): an empty range must not read as
+                // agreement — with the paired liveness gate failed, top can
+                // be 0 and a skipped loop would print a green fork-freedom
+                // PASS for a phase that finalized nothing.
+                if (top < 1) return false;
                 for (uint64_t h = 1; h <= top; ++h) {
                     const nlohmann::json b0 = nodes[lo]->rpc_block(h);
                     if (b0.is_null()) return false;
@@ -29327,6 +29378,7 @@ int main(int argc, char** argv) {
                 [&] { observe_all(); return min_h(0, kNodes) >= 2; });
 
             // ── Phase 1: LOSS LIVENESS (hard gate) ───────────────────────
+            const auto fc0 = vnet.fault_counts();
             vnet.set_loss(100);   // 10% per-frame, every link, both directions
             const uint64_t h_loss0 = min_h(0, kNodes);
             R.loss_live = sched.run_until(
@@ -29339,6 +29391,8 @@ int main(int argc, char** argv) {
             // is prev_hash-extended and depth-1 reorgs cannot reach it.)
             R.loss_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
             vnet.set_loss(0);
+            const auto fc_loss = vnet.fault_counts();
+            R.loss_witness = fc_loss.dropped > fc0.dropped;
 
             // ── Phase 2: PARTITION (hard gate) ───────────────────────────
             vnet.partition({1});
@@ -29359,6 +29413,9 @@ int main(int argc, char** argv) {
                 if (b4.is_null() || bm.is_null() || b4.dump() != bm.dump())
                     R.part_prefix = false;
             }
+
+            const auto fc_part = vnet.fault_counts();
+            R.part_witness = fc_part.blocked > fc_loss.blocked;
 
             // ── Phase 3: HEAL + S-050 valve re-probe (hard gate) ─────────
             // node4 is stranded ≥2 below the majority with no block broadcast
@@ -29388,15 +29445,55 @@ int main(int argc, char** argv) {
             // (a double-apply or dup-triggered equivocation claim would
             // break the settled-agreement check).
             vnet.set_dup(300);
-            const uint64_t h_dup0 = min_h(0, kNodes);
+            // Baseline on the MAX height (review): a min baseline could be
+            // satisfied by laggards syncing blocks finalized BEFORE the
+            // fault — max+2 forces two NEW rounds under duplication,
+            // adopted by every node.
+            uint64_t h_dup0 = 0;
+            for (int i = 0; i < kNodes; ++i)
+                h_dup0 = std::max(h_dup0, height(i));
             R.dup_live = sched.run_until(
                 [&] { observe_all(); return min_h(0, kNodes) >= h_dup0 + 2; });
             R.dup_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
             vnet.set_dup(0);
+            const auto fc_dup = vnet.fault_counts();
+            R.dup_witness = fc_dup.duplicated > fc_part.duplicated;
+
+            // ── Phase 5: COMPOSED loss + dup (hard gate, review) ─────────
+            // 10% drop and 30% dup simultaneously — the only regime where
+            // roll_drop and roll_dup interleave draws on the SHARED
+            // per-link rng (a delivered frame consumes two draws, a dropped
+            // frame one). The composed draw stream is pinned by the replay
+            // signature (exact fault counts + trace hash), so a future
+            // reordering of the rolls or a per-fault rng split cannot
+            // silently change composed-run bytes. Both witnesses must fire
+            // IN-phase.
+            vnet.set_loss(100);
+            vnet.set_dup(300);
+            uint64_t h_combo0 = 0;
+            for (int i = 0; i < kNodes; ++i)
+                h_combo0 = std::max(h_combo0, height(i));
+            R.combo_live = sched.run_until(
+                [&] { observe_all(); return min_h(0, kNodes) >= h_combo0 + 2; });
+            R.combo_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
+            vnet.set_loss(0);
+            vnet.set_dup(0);
+            const auto fc_combo = vnet.fault_counts();
+            R.combo_witness = fc_combo.dropped > fc_dup.dropped &&
+                              fc_combo.duplicated > fc_dup.duplicated;
+            R.fc_dropped    = fc_combo.dropped;
+            R.fc_blocked    = fc_combo.blocked;
+            R.fc_duplicated = fc_combo.duplicated;
 
             // inc.8 verdicts: the monitor across the WHOLE schedule + the
-            // expect-violation self-test against a live node.
+            // expect-violation self-test against a live node. Coverage
+            // (review): mon_clean is trivially true if observation wiring
+            // is dropped — require every node observed + a non-empty
+            // canonical prefix, so a silently unwired monitor cannot green.
             R.mon_clean      = mon.clean();
+            R.mon_coverage   = mon.last_height.size() ==
+                                   static_cast<size_t>(kNodes) &&
+                               !mon.canonical.empty();
             R.mon_violations = mon.violations.size();
             if (!mon.clean()) R.mon_first = mon.violations.front();
             R.mon_selftest   = FaStepMonitor::self_test(*nodes[0]);
@@ -29447,23 +29544,39 @@ int main(int argc, char** argv) {
         check(r1.dup_agree,
               "dup fork-freedom: all 5 nodes byte-agree on every settled block "
               "(no double-apply / dup-triggered divergence)");
-        check(r1.mon_clean,
+        check(r1.mon_clean && r1.mon_coverage,
               "FA step-monitor (inc.8): zero invariant violations at every "
               "drain boundary of the whole schedule (settled-prefix "
-              "agreement+immutability, height monotonicity, A1 "
-              "supply==expected)");
+              "agreement + rolling rewrite probe, height monotonicity, "
+              "per-observation A1 supply==expected; coverage-gated: all 5 "
+              "nodes observed, canonical non-empty)");
         if (!r1.mon_clean)
             std::cout << "    first violation: " << r1.mon_first << "\n";
         check(r1.mon_selftest,
-              "FA step-monitor self-test: planted settled-block divergence + "
-              "planted height rollback are both caught (non-vacuous)");
+              "FA step-monitor self-test: planted rewrite (rolling probe) + "
+              "planted walk divergence + planted height rollback are ALL "
+              "caught (non-vacuous checker logic)");
+        check(r1.loss_witness && r1.part_witness && r1.dup_witness,
+              "fault witnesses (inc.9): every fault phase actually FIRED its "
+              "fault (frames dropped > 0 in the loss phase, blocked > 0 in "
+              "the partition phase, duplicated > 0 in the dup phase) — a "
+              "silently no-opped fault can no longer green a phase vacuously");
+        check(r1.combo_live && r1.combo_agree && r1.combo_witness,
+              "composed loss+dup (review): +2 NEW blocks finalized with 10% "
+              "drop and 30% dup active simultaneously (interleaved draws on "
+              "the shared per-link rng), all 5 nodes byte-agreeing, both "
+              "witnesses firing in-phase");
 
         RunResult r2 = run_once("r2");
         bool replay_eq = r2.loss_live == r1.loss_live &&
                          r2.heal_recovered == r1.heal_recovered &&
                          r2.dup_live == r1.dup_live &&
+                         r2.combo_live == r1.combo_live &&
                          r2.mon_clean == r1.mon_clean &&
                          r2.mon_violations == r1.mon_violations &&
+                         r2.fc_dropped == r1.fc_dropped &&
+                         r2.fc_blocked == r1.fc_blocked &&
+                         r2.fc_duplicated == r1.fc_duplicated &&
                          r1.head_hash == r2.head_hash &&
                          r1.state_root == r2.state_root &&
                          !r1.trace_hash.empty() &&
@@ -29471,7 +29584,8 @@ int main(int argc, char** argv) {
         check(replay_eq,
               "replay: the ENTIRE adversarial schedule (loss + partition + heal "
               "+ valve + dup) is byte-identical across two same-seed runs "
-              "(terminal heads, state_roots, scheduler trace hash)");
+              "(terminal heads, state_roots, scheduler trace hash, exact "
+              "fault-delivery counts)");
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-adversarial-deterministic "
@@ -29485,9 +29599,12 @@ int main(int argc, char** argv) {
     // dimension the threaded failover harness (test-fa-liveness-virtual)
     // samples only probabilistically (the S-047 wedge modes needed 12+
     // wall-clock loops per platform to reproduce). Here the kill lands at a
-    // deterministic drain boundary with node4's final sends still queued on
-    // survivor loops — delivered AFTER the death, the S-047 asymmetric-death
-    // shape — and replays byte-for-byte. Post-A4 the failover gate is
+    // deterministic drain boundary and replays byte-for-byte; any of node4's
+    // in-flight sends left queued on survivor loops at that boundary are
+    // delivered AFTER the death (the S-047 asymmetric-death INGREDIENT —
+    // whether the pinned schedule leaves such messages pending is
+    // seed-dependent and not asserted; the hard gates below do not rely on
+    // it). Post-A4 the failover gate is
     // STRONGER than the threaded harness's 3-of-4 majority gate: ALL FOUR
     // survivors must pass the kill baseline (a survivor stranded on a
     // minority same-height fork now reorgs via A4; a straggler past sync
@@ -29530,6 +29647,7 @@ int main(int argc, char** argv) {
             bool failover_live = false, failover_agree = false;
             bool rejoin_caught_up = false, outage_agree = false;
             bool mon_clean = false, mon_selftest = false;
+            bool mon_coverage = false;
             size_t mon_violations = 0;
             std::string mon_first;
             uint64_t h_kill = 0;
@@ -29616,6 +29734,11 @@ int main(int argc, char** argv) {
                 return m;
             };
             auto agree_upto = [&](int lo, int hi, uint64_t top) {
+                // Vacuity guard (review): an empty range must not read as
+                // agreement — with the paired liveness gate failed, top can
+                // be 0 and a skipped loop would print a green fork-freedom
+                // PASS for a phase that finalized nothing.
+                if (top < 1) return false;
                 for (uint64_t h = 1; h <= top; ++h) {
                     const nlohmann::json b0 = nodes[lo]->rpc_block(h);
                     if (b0.is_null()) return false;
@@ -29740,8 +29863,15 @@ int main(int argc, char** argv) {
             }
 
             // inc.8 verdicts: monitor across crash+failover+rejoin + the
-            // expect-violation self-test against a live node.
+            // expect-violation self-test against a live node. Coverage
+            // (review): every node observed, canonical non-empty AND
+            // extending past the kill baseline (post-kill blocks pinned) —
+            // a silently unwired monitor cannot green.
             R.mon_clean      = mon.clean();
+            R.mon_coverage   = mon.last_height.size() ==
+                                   static_cast<size_t>(kNodes) &&
+                               !mon.canonical.empty() &&
+                               mon.canonical.rbegin()->first >= R.h_kill;
             R.mon_violations = mon.violations.size();
             if (!mon.clean()) R.mon_first = mon.violations.front();
             R.mon_selftest   = FaStepMonitor::self_test(*nodes[0]);
@@ -29786,16 +29916,19 @@ int main(int argc, char** argv) {
         check(r1.outage_agree,
               "rejoin: a block finalized during the outage is byte-identical "
               "on the rejoined node");
-        check(r1.mon_clean,
+        check(r1.mon_clean && r1.mon_coverage,
               "FA step-monitor (inc.8): zero invariant violations at every "
               "drain boundary across crash+failover+rejoin (settled-prefix "
-              "agreement+immutability incl. the rejoiner's re-adopted bytes, "
-              "height monotonicity, A1 supply==expected)");
+              "agreement + rolling rewrite probe incl. the rejoiner's "
+              "re-adopted bytes, height monotonicity, per-observation A1 "
+              "supply==expected; coverage-gated: all 5 nodes observed, "
+              "canonical extends past the kill baseline)");
         if (!r1.mon_clean)
             std::cout << "    first violation: " << r1.mon_first << "\n";
         check(r1.mon_selftest,
-              "FA step-monitor self-test: planted settled-block divergence + "
-              "planted height rollback are both caught (non-vacuous)");
+              "FA step-monitor self-test: planted rewrite (rolling probe) + "
+              "planted walk divergence + planted height rollback are ALL "
+              "caught (non-vacuous checker logic)");
 
         RunResult r2 = run_once("r2");
         bool replay_eq = r2.steady == r1.steady &&

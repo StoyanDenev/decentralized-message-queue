@@ -42,6 +42,19 @@ struct VirtualNetwork::LinkFlags {
     std::atomic<bool>     ba{true};          // deliver side1 -> side0
     std::atomic<uint32_t> drop_permille{0};  // 0 = lossless
     std::atomic<uint32_t> dup_permille{0};   // 0 = no duplication
+    // Fault-delivery WITNESS counters (inc.9): how many frames this link
+    // actually dropped / partition-blocked / duplicated. Test-facing
+    // observability only — never read on the delivery path, so they cannot
+    // change behavior; relaxed atomics because the threaded harnesses sum
+    // them from the harness thread while loop threads write. They exist so
+    // a fault phase can assert its fault FIRED (delta > 0): a silently
+    // no-opped fault (a zeroed roll, an always-open gate) otherwise greens
+    // the phase vacuously — the clean network trivially satisfies liveness
+    // and agreement. RED-on-mutant verified: zeroing the three fault
+    // branches turns exactly the witness checks red.
+    std::atomic<uint64_t> n_dropped{0};
+    std::atomic<uint64_t> n_blocked{0};
+    std::atomic<uint64_t> n_dup{0};
     int      group0 = 0;   // accept-side group  (immutable)
     int      group1 = 0;   // connect-side group (immutable)
     uint64_t rng    = 0;   // xorshift64 state; advanced under owning Pair::mu
@@ -454,7 +467,16 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
     // peer inbox — a packet lost downstream. Whole-frame granularity: one
     // async_write == one Peer message, so this drops exactly one message and
     // never splits a frame. Default policy (gate open, 0 loss) never drops.
-    if (P.link && (!P.link->gate(side_) || P.link->roll_drop())) {
+    // The gate-then-roll order (and roll-only-if-open) is the same
+    // short-circuit the original combined condition had; the split exists
+    // only to attribute the witness counters (inc.9).
+    if (P.link && !P.link->gate(side_)) {
+        P.link->n_blocked.fetch_add(1, std::memory_order_relaxed);
+        me.loop->post([cb = std::move(cb), n] { cb({}, n); });
+        return;
+    }
+    if (P.link && P.link->roll_drop()) {
+        P.link->n_dropped.fetch_add(1, std::memory_order_relaxed);
         me.loop->post([cb = std::move(cb), n] { cb({}, n); });
         return;
     }
@@ -464,8 +486,10 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
     // (whole-frame granularity ⇒ the receiver reads the same complete Peer
     // message a second time — the S-047 redelivery class; see set_dup).
     // Only delivered frames roll: a dropped frame was never sent twice.
-    if (P.link && P.link->roll_dup())
+    if (P.link && P.link->roll_dup()) {
+        P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
         peer.inbox.insert(peer.inbox.end(), p, p + n);
+    }
     // Whole-span completion first, then the peer's now-satisfiable parked
     // read — a fixed post order so single-threaded loops trace
     // deterministically.
@@ -520,15 +544,25 @@ bool VirtualConnection::write_all(const void* buf, std::size_t n) {
     // Fault model (see async_write): a partitioned/dropped frame "sends"
     // (returns true — bytes left the host) but is not delivered. The sync
     // half isn't on the gossip path, so this matters only if a future sync
-    // consumer runs under fault injection; kept for parity.
-    if (P.link && (!P.link->gate(side_) || P.link->roll_drop())) return true;
+    // consumer runs under fault injection; kept for parity (witness
+    // counters included).
+    if (P.link && !P.link->gate(side_)) {
+        P.link->n_blocked.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    if (P.link && P.link->roll_drop()) {
+        P.link->n_dropped.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     peer.inbox.insert(peer.inbox.end(), p, p + n);
     // Duplication parity with async_write (sync consumers are off the gossip
     // path; kept so a future sync consumer under fault injection behaves
     // consistently).
-    if (P.link && P.link->roll_dup())
+    if (P.link && P.link->roll_dup()) {
+        P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
         peer.inbox.insert(peer.inbox.end(), p, p + n);
+    }
     deliver_locked(P, peer);
     return true;
 }
@@ -732,6 +766,17 @@ bool VirtualNetwork::link_blocked_locked(int ga, int gb) const {
     const bool a_in = partition_a_.count(ga) != 0;
     const bool b_in = partition_a_.count(gb) != 0;
     return a_in != b_in;   // straddles the boundary
+}
+
+VirtualNetwork::FaultCounts VirtualNetwork::fault_counts() {
+    FaultCounts fc;
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto& lf : links_) {
+        fc.dropped    += lf->n_dropped.load(std::memory_order_relaxed);
+        fc.blocked    += lf->n_blocked.load(std::memory_order_relaxed);
+        fc.duplicated += lf->n_dup.load(std::memory_order_relaxed);
+    }
+    return fc;
 }
 
 void VirtualNetwork::set_dup(uint32_t permille) {
