@@ -833,6 +833,15 @@ Additional in-process tests:
                                               non-gating under wall clocks), plus
                                               replay-twice byte-identity over the
                                               whole adversarial schedule
+  determ test-fa-crash-deterministic          inc.6: deterministic node CRASH +
+                                              RESTART-REJOIN on the inc.4 substrate
+                                              — kill node4 at a drain boundary (the
+                                              S-047 asymmetric-death shape), ALL-4
+                                              survivor liveness (stronger than the
+                                              threaded majority gate, post-A4),
+                                              settled fork-freedom, same-identity
+                                              rejoin over the real sync path, plus
+                                              replay-twice byte-identity
   determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
                                               wiring + depth-1 head reorg. A
                                               non-producing follower is fed a
@@ -29316,6 +29325,303 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-adversarial-deterministic "
                   << (fail == 0 ? "all assertions (inc.5)" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // Scheduler inc.6 (DeterministicSchedulerDesign.md): DETERMINISTIC node
+    // CRASH + RESTART-REJOIN under the inc.4 GlobalScheduler — the fault
+    // dimension the threaded failover harness (test-fa-liveness-virtual)
+    // samples only probabilistically (the S-047 wedge modes needed 12+
+    // wall-clock loops per platform to reproduce). Here the kill lands at a
+    // deterministic drain boundary with node4's final sends still queued on
+    // survivor loops — delivered AFTER the death, the S-047 asymmetric-death
+    // shape — and replays byte-for-byte. Post-A4 the failover gate is
+    // STRONGER than the threaded harness's 3-of-4 majority gate: ALL FOUR
+    // survivors must pass the kill baseline (a survivor stranded on a
+    // minority same-height fork now reorgs via A4; a straggler past sync
+    // tolerance is recovered by the S-050 valve, whose wall-clock windows
+    // ride the injected clock — stepped in ≤10s increments at scheduler-
+    // quiescent points, per virtual_clock.hpp). The live loop set changes at
+    // the crash and again at the rejoin, so each phase gets a FRESH
+    // GlobalScheduler over exactly the live loops (a loop's virtual now
+    // persists across schedulers; set_virtual_now_ms is forward-only, so a
+    // new scheduler continues global time from the loops' deadlines); the
+    // replay signature hashes the CONCATENATED phase traces. The crashed
+    // loop4 is excluded from every later scheduler and never drained again —
+    // the threaded harness's "stop()-permanent loop" model; posts targeting
+    // it are dropped at its dtor drain.
+    if (cmd == "test-fa-crash-deterministic") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        constexpr int     kNodes = 5;
+        constexpr int     kK     = 3;
+        constexpr int64_t kT0    = 1700000000;   // sentinel-safe epoch
+        std::error_code fec;
+
+        auto det_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (int i = 0; i < 32; ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const uint8_t bases[kNodes] = {0x21, 0x43, 0x65, 0x87, 0xA9};
+
+        struct RunResult {
+            bool steady = false;
+            bool failover_live = false, failover_agree = false;
+            bool rejoin_caught_up = false, outage_agree = false;
+            uint64_t h_kill = 0;
+            std::vector<std::string> head_hash, state_root;
+            std::string trace_hash;
+        };
+
+        auto run_once = [&](const std::string& tag) -> RunResult {
+            RunResult R;
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-fa-crash-det-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            std::array<crypto::NodeKey, kNodes> keys;
+            chain::GenesisConfig g;
+            g.chain_id      = "fa-crash-det";
+            g.m_creators    = kNodes;
+            g.k_block_sigs  = kK;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            for (int i = 0; i < kNodes; ++i) {
+                keys[i] = det_key(bases[i]);
+                chain::GenesisCreator c;
+                c.domain        = "node" + std::to_string(i);
+                c.ed_pub        = keys[i].pub;
+                c.initial_stake = 1000;
+                g.initial_creators.push_back(c);
+            }
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            determ::time::VirtualClock vclock(kT0);
+            VirtualNetwork vnet;
+            std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+            std::vector<std::unique_ptr<VirtualTransport>> transports;
+            std::vector<std::unique_ptr<crypto::SeededRng>> rngs;
+            std::vector<std::unique_ptr<node::Node>>        nodes;
+            const uint16_t base_port = 7691;
+
+            auto make_cfg = [&](int i) {
+                node::Config cfg;
+                cfg.domain       = "node" + std::to_string(i);
+                cfg.data_dir     = (dir / cfg.domain).string();
+                cfg.listen_port  = static_cast<uint16_t>(base_port + i);
+                cfg.key_path     = (dir / (cfg.domain + ".key")).string();
+                cfg.chain_path   = (dir / cfg.domain / "chain.json").string();
+                cfg.genesis_path = gpath;
+                cfg.m_creators   = kNodes;
+                cfg.k_block_sigs = kK;
+                cfg.log_quiet    = true;
+                for (int p = 0; p < kNodes; ++p)
+                    if (p != i)
+                        cfg.bootstrap_peers.push_back(
+                            "127.0.0.1:" + std::to_string(base_port + p));
+                return cfg;
+            };
+
+            for (int i = 0; i < kNodes; ++i) {
+                loops.push_back(std::make_unique<VirtualEventLoop>());
+                loops[i]->enable_virtual_time();
+                transports.push_back(
+                    std::make_unique<VirtualTransport>(*loops[i], vnet));
+                rngs.push_back(std::make_unique<crypto::SeededRng>(
+                    static_cast<uint64_t>(i + 1)));
+            }
+            for (int i = 0; i < kNodes; ++i) {
+                node::Config cfg = make_cfg(i);
+                fs::create_directories(cfg.data_dir);
+                crypto::save_node_key(keys[i], cfg.key_path);
+                nodes.push_back(std::make_unique<node::Node>(
+                    cfg, vclock, loops[i].get(), transports[i].get(), *rngs[i]));
+            }
+            for (int i = 0; i < kNodes; ++i) nodes[i]->start_external();
+
+            auto height = [&](int i) {
+                return nodes[i]->rpc_status()["height"].get<uint64_t>();
+            };
+            auto min_h = [&](int lo, int hi) {
+                uint64_t m = UINT64_MAX;
+                for (int i = lo; i < hi; ++i) m = std::min(m, height(i));
+                return m;
+            };
+            auto agree_upto = [&](int lo, int hi, uint64_t top) {
+                for (uint64_t h = 1; h <= top; ++h) {
+                    const nlohmann::json b0 = nodes[lo]->rpc_block(h);
+                    if (b0.is_null()) return false;
+                    const std::string d0 = b0.dump();
+                    for (int i = lo + 1; i < hi; ++i) {
+                        const nlohmann::json bi = nodes[i]->rpc_block(h);
+                        if (bi.is_null() || bi.dump() != d0) return false;
+                    }
+                }
+                return true;
+            };
+
+            std::string trace_all;
+
+            // ── Phase A: steady state, then KILL at the drain boundary ───
+            {
+                std::vector<VirtualEventLoop*> lp;
+                lp.reserve(kNodes);
+                for (auto& l : loops) lp.push_back(l.get());
+                GlobalScheduler sa(std::move(lp));
+                R.steady = sa.run_until([&] { return min_h(0, kNodes) >= 3; });
+                trace_all += sa.trace();
+            }
+            R.h_kill = min_h(0, 4);                     // survivor baseline
+            const uint64_t h4_at_kill = height(4);      // node4's held count
+
+            // CRASH node4: stop() (final synchronous save = the on-disk tail
+            // its restart loads) then destroy. The dtor's gossip teardown
+            // posts EOF aborts onto the survivor loops — drained in phase B,
+            // deterministically. Its own loop is now stop()-permanent.
+            nodes[4]->stop();
+            nodes[4].reset();
+
+            // ── Phase B: FAILOVER — ALL FOUR survivors gate (post-A4) ────
+            {
+                GlobalScheduler sb(std::vector<VirtualEventLoop*>{
+                    loops[0].get(), loops[1].get(),
+                    loops[2].get(), loops[3].get()});
+                auto past_kill = [&] { return min_h(0, 4) >= R.h_kill + 3; };
+                R.failover_live = sb.run_until(past_kill, 4096, 1000000);
+                // Valve fallback: a straggler stranded below sync tolerance
+                // needs the S-050 stall valve (inc.5 phase-3 shape).
+                for (int r = 0; r < 20 && !R.failover_live; ++r) {
+                    vclock.advance(10);
+                    R.failover_live = sb.run_until(past_kill, 4096, 200000);
+                }
+                // SETTLED-chain agreement, strictly below every survivor
+                // head (a head can be one half of an in-flight same-height
+                // race pair the A4 reorg heals on the next delivery).
+                R.failover_agree = agree_upto(0, 4, min_h(0, 4) - 2);
+                trace_all += sb.trace();
+            }
+
+            // ── Phase C: REJOIN — same identity, fresh substrate ─────────
+            // New loop + transport (the old acceptor's port was unregistered
+            // by the Node dtor). Lockstep the fresh loop onto the cluster's
+            // virtual now BEFORE the node arms its grace timer, so its
+            // deadlines are dated consistently with the survivors' (the
+            // inc.4 construction-time lockstep discipline).
+            {
+                loops.push_back(std::make_unique<VirtualEventLoop>());
+                loops.back()->enable_virtual_time();
+                uint64_t vnow = 0;
+                for (int i = 0; i < 4; ++i)
+                    vnow = std::max(vnow, loops[i]->virtual_now_ms());
+                loops.back()->set_virtual_now_ms(vnow);
+                transports.push_back(std::make_unique<VirtualTransport>(
+                    *loops.back(), vnet));
+                rngs.push_back(std::make_unique<crypto::SeededRng>(99));
+                nodes[4] = std::make_unique<node::Node>(
+                    make_cfg(4), vclock, loops.back().get(),
+                    transports.back().get(), *rngs.back());
+                nodes[4]->start_external();
+
+                GlobalScheduler sc(std::vector<VirtualEventLoop*>{
+                    loops[0].get(), loops[1].get(), loops[2].get(),
+                    loops[3].get(), loops.back().get()});
+                // Fixed target (no moving-goalpost chase): the survivor min
+                // at rejoin start, already >= h_kill + 3.
+                const uint64_t rejoin_target = min_h(0, 4);
+                auto caught = [&] { return height(4) >= rejoin_target; };
+                R.rejoin_caught_up = sc.run_until(caught, 4096, 1000000);
+                for (int r = 0; r < 20 && !R.rejoin_caught_up; ++r) {
+                    vclock.advance(10);
+                    R.rejoin_caught_up = sc.run_until(caught, 4096, 200000);
+                }
+                // A block finalized while node4 was DEAD must now be byte-
+                // identical on the rejoiner: index h4_at_kill is the FIRST
+                // block node4 did not hold at death (it held 0..count-1).
+                // Reference = the HIGHEST survivor. Null-checked so an
+                // out-of-range null==null can never green this.
+                int ref = 0; uint64_t ref_h = 0;
+                for (int i = 0; i < 4; ++i)
+                    if (height(i) > ref_h) { ref_h = height(i); ref = i; }
+                const nlohmann::json b4 = nodes[4]->rpc_block(h4_at_kill);
+                const nlohmann::json br = nodes[ref]->rpc_block(h4_at_kill);
+                R.outage_agree = !b4.is_null() && !br.is_null() &&
+                                 b4.dump() == br.dump();
+                trace_all += sc.trace();
+            }
+
+            for (int i = 0; i < kNodes; ++i) {
+                R.head_hash.push_back(
+                    nodes[i]->rpc_status().value("head_hash", std::string()));
+                R.state_root.push_back(
+                    nodes[i]->rpc_state_root().value("state_root", std::string()));
+            }
+            {
+                crypto::SHA256Builder tb;
+                tb.append(reinterpret_cast<const uint8_t*>(trace_all.data()),
+                          trace_all.size());
+                const Hash th = tb.finalize();
+                R.trace_hash = to_hex(th.data(), th.size());
+            }
+
+            for (int i = kNodes - 1; i >= 0; --i) if (nodes[i]) nodes[i]->stop();
+            nodes.clear();
+            rngs.clear();
+            transports.clear();
+            loops.clear();
+            fs::remove_all(dir, fec);
+            return R;
+        };
+
+        RunResult r1 = run_once("r1");
+        check(r1.steady, "steady state: all 5 nodes reached height 3 under the "
+                         "deterministic drive");
+        check(r1.failover_live,
+              "failover liveness (HARD, all-4 — stronger than the threaded "
+              "majority gate): every survivor finalized +3 past the kill "
+              "baseline (S-047 abort/reselect + A4 reorg, deterministic)");
+        check(r1.failover_agree,
+              "failover fork-freedom: the 4 survivors byte-agree on every "
+              "settled block");
+        check(r1.rejoin_caught_up,
+              "rejoin: node4's identity restarted on fresh substrate caught "
+              "up to the survivor chain over the REAL sync path "
+              "(deterministic)");
+        check(r1.outage_agree,
+              "rejoin: a block finalized during the outage is byte-identical "
+              "on the rejoined node");
+
+        RunResult r2 = run_once("r2");
+        bool replay_eq = r2.steady == r1.steady &&
+                         r2.failover_live == r1.failover_live &&
+                         r2.rejoin_caught_up == r1.rejoin_caught_up &&
+                         r1.h_kill == r2.h_kill &&
+                         r1.head_hash == r2.head_hash &&
+                         r1.state_root == r2.state_root &&
+                         !r1.trace_hash.empty() &&
+                         r1.trace_hash == r2.trace_hash;
+        check(replay_eq,
+              "replay: the ENTIRE crash/failover/rejoin schedule is "
+              "byte-identical across two same-seed runs (kill height, "
+              "terminal heads, state_roots, concatenated scheduler trace "
+              "hash)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fa-crash-deterministic "
+                  << (fail == 0 ? "all assertions (inc.6)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
