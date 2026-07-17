@@ -1,6 +1,6 @@
 # Real-Engine FA Harness — closing F-1/FA4 over the actual consensus engine
 
-**Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice OPENED with increment 6, `test-fa-liveness-virtual` (§5) — real multi-node liveness+agreement in process; adversarial-schedule traces (virtual time) remain. This is the
+**Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice OPENED with increment 6, `test-fa-liveness-virtual` (§5) — real multi-node liveness+agreement in process; increment 7 added `test-fa-partition-virtual`. The adversarial-schedule (virtual-time) remainder has since SHIPPED as the DETERMINISTIC scheduler family, [DeterministicSchedulerDesign.md](DeterministicSchedulerDesign.md) increments 1-9 — its OWN numbering, distinct from this doc's — `test-fa-adversarial-deterministic` + `test-fa-crash-deterministic` with per-step FA checkers and fault witnesses. This is the
 **self-contained path** chosen by the owner (AskUserQuestion, 2026-07-07) for the
 DSF §Q1/§Q2 goal: rather than link the real engine into `determ-dsf` (which would
 drag asio + OpenSSL and reverse its self-contained property — see

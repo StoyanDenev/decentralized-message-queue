@@ -1,19 +1,25 @@
 # Deterministic Scheduler Design — a no-thread virtual-time drive for the real consensus engine
 
-**Status: increments 1-4 SHIPPED, increment 5 design-only.** This is
+**Status: increments 1-8 SHIPPED.** This is
 the design-review-first step the [KqueueReactorDesign.md](KqueueReactorDesign.md)
 discipline mandates for a change that touches shipped orchestration. **Increment 1
 (the additive, byte-invariant `VirtualEventLoop::run_until_idle()` — §4 table),
 increment 2 (the loop-local VIRTUAL-TIME timer source, §2b/§4), increment 3
 (the Node no-self-thread `start_external()` + bounded-step `run_ready()`, §4 table),
-and increment 4 (the GLOBAL multi-loop scheduler `net::GlobalScheduler` + the two
+increment 4 (the GLOBAL multi-loop scheduler `net::GlobalScheduler` + the two
 additive `VirtualEventLoop` accessors `next_virtual_deadline_ms` /
-`set_virtual_now_ms`, §3.4/§4 table) are SHIPPED** (pure-std test backend,
+`set_virtual_now_ms`, §3.4/§4 table), increment 5 (ADVERSARIAL schedules —
+`test-fa-adversarial-deterministic`: loss/partition/heal + S-050 valve re-probe,
+ALL hard gates), increment 6 (deterministic CRASH + RESTART-REJOIN —
+`test-fa-crash-deterministic`), increment 7 (the `VirtualNetwork::set_dup`
+frame-duplication fault + dup phase), and increment 8 (the per-step FA CHECKERS —
+`FaStepMonitor` riding every drain-boundary predicate of both harnesses, with
+expect-violation self-tests) are SHIPPED** (pure-std test backend,
 production `run()` + the native `TimerService` path both untouched — the inc.3
 `run()` refactor is a pure verbatim helper extraction, adversarial-review-confirmed
-byte-neutral; the inc.4 accessors are virtual-time-only with zero production caller);
-only increment 5 (the FA checkers + adversarial schedules over the deterministic
-base) stays design-only. Increment 3 shipped under an explicit OWNER decision (the
+byte-neutral; the inc.4 accessors are virtual-time-only with zero production
+caller; the inc.7 fault default consumes no RNG draw, byte-invariant; the inc.8
+monitor is read-only, schedule-neutral). Increment 3 shipped under an explicit OWNER decision (the
 inc.3→A4→D3 chain) because the smallest honest version of it touches the production
 `run()` path; increment 4 needed no fresh gate (scheduler infra over the concrete
 loop + a re-driven test, the same class as inc.1/inc.2). The goal is a fully DETERMINISTIC single-thread scheduler
@@ -321,15 +327,17 @@ only NONDETERMINISTICALLY under wall timers. With inc.4 the GlobalScheduler make
 chosen loss/reorder schedule produce the fork ON DEMAND. **And S-048 is now CLOSED
 (A4 `maybe_reorg_to_locked`, BoundedReorgSoundness.md), so this is no longer a
 "repro for the pending fix" but a REGRESSION that the A4 depth-1 reorg HEALS the
-loss-induced fork deterministically** — the inc.5 payoff, now fully unblocked.
+loss-induced fork deterministically** — the inc.5 payoff, SHIPPED (the loss phase
+of `test-fa-adversarial-deterministic` logs the in-run `S-048 REORG` heals, and
+its settled-agreement gate proves they converge).
 
 **Reliable loss-liveness gate — now fully unblocked.** Was a NON-gating diagnostic
 for TWO reasons (AdversarialTransportHarness.md §3.1/§3.2): "not assertable while
 S-048 is open" AND wall-timer convergence flakiness. **Both halves are now
 resolved:** inc.4's deterministic schedule removes the flakiness (a fixed schedule
 converges or does not, reproducibly — witnessed by the 12/12 stability loop), and
-S-048 is CLOSED (A4). The reliable loss-liveness gate is therefore inc.5 work over
-the shipped deterministic base, no longer blocked on anything.
+S-048 is CLOSED (A4). The reliable loss-liveness gate SHIPPED in inc.5 as
+`test-fa-adversarial-deterministic`'s Phase-1 HARD gate.
 
 **Phased increment plan** (smallest safe first, each with its gate):
 
@@ -339,7 +347,10 @@ the shipped deterministic base, no longer blocked on anything.
 | 2 | **Virtual-time timer source** — loop-local ordered timer queue consulted by the poll, `virtual_now` advance-to-next-timer — **SHIPPED** (`VirtualEventLoop::enable_virtual_time()` / `advance_to_next_timer()` / `virtual_now_ms()` / `pending_timer_count()` + the loop-local `vtimers_` queue keyed on virtual `now`; `timer_schedule`/`timer_cancel` branch to it only when enabled, else delegate to `TimerService` verbatim — [virtual_transport.cpp](../../src/net/virtual_transport.cpp). Ties broken by `(deadline, seq)` for a stable total order (§3.3); the fired callback runs OUTSIDE the timer lock so it may re-arm/cancel/`post`. Test `test-scheduler-timers` (21 assertions): earliest-deadline-first fire order, virtual-`now` tracking, ~0 wall time (never slept the 200 ms schedule), stable tie-break, SINGLE-fire-per-advance (not batch), nonzero ids, cancel + idempotent double-cancel, reentrant re-arm at `now+delay`, ready-work-before-time-advance, replay-twice-identical, LoopTimer-over-virtual, and the `enable_virtual_time()`-after-native misuse guard) | goldens byte-identical + **FAST 209/0 both platforms** + `test-net-virtual` still green (native/`TimerService` path untouched) ✓ |
 | 3 | **`Node::start_external()`** (§5 owner gate) — setup-only entry, spawns no loop/save threads — **SHIPPED** (owner GO for the inc.3→A4→D3 chain). `run()` was refactored by extracting two private helpers `listen_and_connect()` + `arm_startup_grace()` that `run()` now calls in the **same order** it previously inlined them (a pure verbatim extraction — production `run()` byte-neutral, independently confirmed by adversarial review); `start_external()` = `running_=true` + those two helpers, then returns (no loop threads, no save thread, no block). A bounded-step drive primitive `VirtualEventLoop::run_ready(size_t)` was added because an M=K=1 self-quorum node's finalize re-posts the next round with no timer gate — `run_until_idle()` would never return; the driver steps a batch, checks height, and fires the next virtual timer when ready work is exhausted. Test `test-scheduler-external` (5 assertions): self-produces ≥4 blocks with NO loop thread, `virtual_now` advances past the 1500 ms grace (logical time drove it), SCHEDULE determinism (two runs → same block count + same `vnow`), and a teardown-before-grace regression. **Block-CONTENT byte-replay is a SEPARATE seam** (see §3 hazard: each round draws a fresh Phase-1 commit-reveal secret from OS entropy — `determ_rng_bytes` in `start_contrib_phase` — so block bytes differ run-to-run; a deterministic-RNG injection is the remaining prerequisite for inc.5's fully byte-deterministic S-048 repro, tracked as its own consensus-adjacent decision). Teardown hazard found+fixed during review: `~VirtualEventLoop` now drains `vtimers_` with the same move-out-under-lock discipline as the closure queue, so a self-owning grace timer torn down UNfired (an isolated/never-selected A4 node) cannot re-enter `timer_cancel` on the vector mid-destruction (UB) — new `DETERM_ASAN` gate ([`ci_local.sh --asan`](../../tools/ci_local.sh)) covers this class. | goldens + FAST 214/0 both platforms + adversarial review (production `run()` proven untouched) + ASan clean ✓ |
 | 4 | **Global multi-loop scheduler** (§3.4 decision) — **SHIPPED.** `net::GlobalScheduler` ([virtual_scheduler.hpp](../../include/determ/net/virtual_scheduler.hpp)) imposes ONE global logical-time order over N `VirtualEventLoop`s: FIXPOINT-drain ready work across ALL loops in index order (cross-loop transport deliveries are `State::post` ready work, not timers, so this settles every message before time advances), then fire the SINGLE global-earliest virtual timer (tie: lowest loop index) after lockstepping EVERY loop's virtual `now` onto the global clock. Two additive `VirtualEventLoop` accessors enable it — `next_virtual_deadline_ms(uint64_t&)` (peek the min deadline without firing) + `set_virtual_now_ms(uint64_t)` (forward-only global-clock lockstep, the §3.4-hazard fix: a lagging loop that arms a timer mid-drain would otherwise past-date it and move logical time backwards) — both virtual-time-only with ZERO production caller. The §3.4 decision landed as the fixed-loop-index fixpoint sweep (a deterministic total order that replays identically) with NO global-seq-stamp on `State::post` (deferred to inc.5 with per-link latency). Test `test-scheduler-multiloop`: FIVE real `node::Node`s (M=5, K=3) on one FROZEN `VirtualClock` + distinct fixed-seed identity keys + distinct fixed `SeededRng`, driven with NO threads — asserts LIVENESS (blocks 1..3 finalized), no-fork AGREEMENT (blocks 1..3 byte-identical across all 5), and REPLAY-TWICE-IDENTICAL (per-node terminal `head_hash` + `state_root` + ordered block list + a scheduler action-trace hash — the last catches an interleave that diverges yet converges). Clock FROZEN at kT0: round timing rides loop virtual-`now`, every `proposer_time == kT0 ==` the validator's clock (0 skew, always valid, trivially deterministic — the same frozen-clock multi-block property inc.3 relies on). Ridealong: gated the epoch-boundary observability `std::cout` (node.cpp) behind `!log_quiet`, consistent with the S-027 per-block-accept gate (console-only, byte-neutral). | goldens byte-identical + **FAST 228/0 both platforms** + replay-twice-identical (assertion b) + a **12/12 stability loop** (deterministic ⇒ 100% reproducible, vs the ~10% flake of the probabilistic threaded harness) + `test-fa-liveness-virtual`/`test-net-virtual`/`test-scheduler-timers` still green (the two accessors are byte-neutral to production `run()`) ✓ |
-| 5 | **FA checkers + adversarial schedules** — FA1/A1/FA6/FA7 over real state each step w/ expect-violation self-tests; deterministic loss/partition/reorder schedules; deterministic S-048 repro | FAST + replay-twice-identical + each checker's planted-bug self-test RED-on-mutant |
+| 5 | **Adversarial schedules** — **SHIPPED** as `test-fa-adversarial-deterministic` (src/main.cpp): 10% per-frame loss on every link, the {4}\|{1} delivery partition, heal + the S-050 stall-valve re-probe (the valve's wall-clock windows ride the injected `clock_.steady_now()` — the §Q1 seam — stepped in ≤10 s increments at scheduler-quiescent points, inside the validator's ±30 s freshness gate), each a HARD gate — including the loss liveness that was non-gating under wall clocks — plus replay-twice byte-identity over the WHOLE schedule (terminal per-node `head_hash` + `state_root` + the scheduler action-trace hash). The loss phase deterministically produces and A4-heals same-height races (the in-run `S-048 REORG` markers): the "heals-under-loss regression" this section promised. | FAST 231/0 both platforms at ship + replay-twice-identical + wrapper `tools/test_fa_adversarial_deterministic.sh` ✓ |
+| 6 | **Deterministic CRASH + RESTART-REJOIN** — **SHIPPED** as `test-fa-crash-deterministic` (src/main.cpp): node4 killed at a deterministic drain boundary (any of its in-flight sends left queued on survivor loops are delivered after the death — the S-047 asymmetric-death INGREDIENT, seed-dependent and not asserted; the crash fault the threaded harness needed 12+ wall-clock loops to sample); ALL-4 survivor liveness (+3 past the kill baseline — STRONGER than the threaded 3-of-4 majority gate, enabled by the A4 reorg + an S-050 valve fallback); settled-prefix fork-freedom; same-identity rejoin on fresh loop/transport (old acceptor port unregistered by the Node dtor; the fresh loop lockstepped onto the cluster's virtual now BEFORE its grace timer arms) over the REAL `GET_CHAIN`/`CHAIN_RESPONSE` sync path, adopting an outage block byte-identically. The live loop set changes at the crash and the rejoin, so each phase drives a FRESH `GlobalScheduler` over exactly the live loops (a loop's virtual now persists; `set_virtual_now_ms` is forward-only); the replay signature hashes the CONCATENATED phase traces. The crashed loop goes `stop()`-permanent (the threaded harness's model) and is never drained again. | MSVC 8/8 stability + Linux GCC + wrapper `tools/test_fa_crash_deterministic.sh` + FAST 240/0 both platforms ✓ |
+| 7 | **`VirtualNetwork::set_dup`** — **SHIPPED**: per-link whole-frame DUPLICATION (per-mille, same scope/seeding as `set_loss`; a delivered frame lands in the peer inbox twice back-to-back = the receiver reads the SAME complete Peer message again — the application-level redelivery class the S-047 retry produces routinely, forced at the transport for EVERY message kind). Rate 0 consumes NO RNG draw (byte-invariant default; earlier phases replay identically); dropped frames are not rolled for duplication. `test-fa-adversarial-deterministic` gained a 30%-dup phase gating liveness + settled fork-freedom (receiver dedup/idempotency). | both platforms + byte-neutrality re-runs (`test-net-virtual`, crash, multiloop unchanged) + FAST 240/0 ✓ |
+| 8 | **Per-step FA checkers** — **SHIPPED** as `FaStepMonitor` (src/main.cpp, shared by both deterministic harnesses), hardened per its own adversarial review: a READ-ONLY monitor riding every `run_until` done() predicate — FA1 settled-prefix agreement (the first observer of a settled index — strictly below the head, the A4 depth-1 bound — pins canonical bytes WITH provenance; later first-walk divergence, incl. a rejoiner adopting wrong bytes, is a violation) plus a ROLLING REWRITE PROBE (one already-pinned index re-fetched and byte-compared per observation — EVENTUAL, not instantaneous, coverage of in-place rewrites of settled history; without it a pinned index below every watermark would never be read again), per-node height monotonicity (a deliberate restart erases that node's watermark), and the A1 supply equality (`rpc_chain_summary` `total_supply == expected_total`) at EVERY observation, height-stalled nodes included. Schedule neutrality is STRUCTURAL (no posts, no timers, shared-lock reads only); the in-run replay gates witness determinism-WITH-observation, not neutrality vs. the pre-monitor schedule — nothing pins cross-commit schedule bytes, and nothing needs to. Each harness gates an expect-violation SELF-TEST (planted rewrite + planted walk divergence + planted height rollback must ALL be caught) plus a COVERAGE gate (all nodes observed, canonical non-empty / extending past the kill baseline — a silently unwired monitor cannot green). | both platforms + monitor-clean + coverage + self-test hard checks + replay-twice-identical incl. monitor verdicts + FAST 240/0 ✓ |
 
 The recurring gate across 3-5 is the one KqueueReactor §7 and every prior net
 increment used: **goldens byte-identical + FAST + live cluster**, here strengthened
@@ -349,33 +360,30 @@ per-step trace).
 
 ## 5. Risks / open questions
 
-- **[OWNER DECISION] Node no-self-thread mode touches `run()`.** The honest
-  minimal version needs the setup of `run()` ([node.cpp:614-670](../../src/node/node.cpp))
-  WITHOUT the thread spawns ([:642-644](../../src/node/node.cpp)) and blocking join
-  ([:669](../../src/node/node.cpp)). Cleanest is a new `start_external()` that
+- **[RESOLVED — increment 3 SHIPPED under the owner's inc.3→A4→D3 GO.]** The
+  recommended first option landed: `start_external()` over two verbatim-extracted
+  helpers, production `run()` byte-neutral (adversarial-review-confirmed). Kept
+  below as the original decision record. The honest
+  minimal version needs the setup of `run()` without the thread spawns and
+  blocking join. Cleanest is a new `start_external()` that
   shares the setup body with `run()` via a common helper — but extracting that
   helper edits the production `run()` even if behavior is byte-identical. This is
   the same class of owner-gated fork as ClockInjectionSeam.md §6 increment 3
   (whether to link the real engine into `determ-dsf`): a production-path edit for a
-  test-only capability. **Not decided:** add `start_external()` (small `run()`
+  test-only capability. Options were: add `start_external()` (small `run()`
   refactor, proven byte-neutral by the live gate) vs. a bolder mode flag on `run()`
-  vs. keeping the harness on threads and abandoning full determinism. Recommend the
-  first, gated exactly like the shipped increments; needs the owner's yes before
-  any `node.cpp` line changes.
+  vs. keeping the harness on threads and abandoning full determinism.
 
-- **[OWNER-ADJACENT] `save_thread_` suppression.** `save_worker_loop`
-  ([node.cpp:726](../../src/node/node.cpp)) is a second wall-time thread and a
-  second `state_mutex_` reader. Deterministic mode must not spawn it
-  ([node.cpp:651](../../src/node/node.cpp)). Options: a mode flag that skips the
-  spawn (production edit), or a config that makes save synchronous, or accept that
-  the scenario disables persistence. Tied to the same `run()` decision above.
+- **[RESOLVED with increment 3] `save_thread_` suppression.** `start_external()`
+  spawns neither loop threads nor the save worker; `stop()`'s final synchronous
+  save covers persistence for a deterministic run (increment 6's rejoiner relies
+  on exactly that on-disk tail).
 
-- **[DESIGN] Global cross-loop order (§3.4).** Merged sequence-stamped queue vs.
-  round-robin + per-link latency. The former is the smallest correct thing (one
-  total order, no latency model); the latter is a richer adversarial knob. **Not
-  decided** — recommend shipping the sequence-stamped total order first and layering
-  latency later, mirroring how the fault model shipped loss/partition before any
-  timing knob.
+- **[RESOLVED with increment 4] Global cross-loop order (§3.4).** Landed as the
+  fixed-loop-index fixpoint sweep — one deterministic total order, NO
+  global-seq-stamp on `State::post` and no latency model. The adversarial knobs
+  shipped instead as delivery faults (loss, partition, duplication — increment 7);
+  a per-link latency model remains unshipped and would be its own increment.
 
 - **[SCOPE] S-048 fix is separate and owner-gated.** This scheduler unblocks the
   DETERMINISTIC REPRODUCTION of the S-048 same-height fork
