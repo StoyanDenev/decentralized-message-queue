@@ -26,6 +26,7 @@
 // REALIZATION (which individual messages drop) is a function of the run --seed,
 // as for every DSF scenario. Both are deterministic.
 #pragma once
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -701,7 +702,12 @@ inline Scenario make_reconcile_variant(int idx, const GenParams& p,
                 for (const auto& [id, n] : st.nodes) {
                     if (id == "src_a" || id == "src_b") continue;
                     for (const auto& [k, v] : n.kv) {
-                        if (v == 0 || k.rfind("e_", 0) != 0) continue;
+                        // Entry keys are exactly "e_<digits>"; the digit guard
+                        // keeps a future non-entry "e_*" bookkeeping key from
+                        // parsing to 0 and false-firing the invariant.
+                        if (v == 0 || k.rfind("e_", 0) != 0 || k.size() < 3 ||
+                            !std::isdigit(static_cast<unsigned char>(k[2])))
+                            continue;
                         const int64_t eid = std::strtoll(k.c_str() + 2,
                                                          nullptr, 10);
                         if (eid < 1 || eid > hi) {
@@ -789,10 +795,10 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
 }
 
 // Register `count` generated variants of `tmpl` from `gen_seed`, plus (unless
-// with_selftest is false) a single template-specific self-test that proves a
-// generated fault profile surfaces a real bug: `gen_overcount_selftest`
-// (Broadcast, non-idempotent apply under forced dup) or `gen_disagree_selftest`
-// (Agreement, an equivocating leader over first-write-wins deciders).
+// with_selftest is false) a single template-specific self-test that proves the
+// template's checker fires on the planted bug it targets — one twin per
+// template, on the FIXED profile chosen in the per-template branch below (so
+// the violation is guaranteed by construction, never seed-luck).
 inline void register_generated_scenarios(std::vector<Scenario>& out,
                                          uint64_t gen_seed, int count,
                                          const char* name_prefix = "gen_broadcast",

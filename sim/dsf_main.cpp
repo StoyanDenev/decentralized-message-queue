@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
     bool        quiet       = false;
     bool        want_list   = false;
     uint64_t    generate_count = 0;      // --generate N: N seed-driven variants
-    std::string template_name = "broadcast";  // --template broadcast|agree
+    std::string template_name = "broadcast";  // --template (see print_usage for the alias list)
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -147,9 +147,11 @@ int main(int argc, char** argv) {
     }
 
     // §Q5/§Q6: --generate N registers N variants seeded by the run --seed, named
-    // gen_run_00..0(N-1). --template picks the generator template (broadcast |
-    // agree). Same (--generate N, --seed S, --template T) => the same variant set
-    // on any host; each is then runnable / listable.
+    // gen_run_00..0(N-1). --template picks the generator template (the alias
+    // chain below is the authoritative map; print_usage lists the names). Same
+    // (--generate N, --seed S, --template T) => the same variant set on any
+    // host; each is then runnable / listable. An unknown name falls back to
+    // Broadcast — operator tooling validates names locally (operator_dsf_sweep).
     if (generate_count > 0) {
         const determ::sim::GenTemplate tmpl =
             (template_name == "agree" || template_name == "agreement")
