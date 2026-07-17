@@ -91,19 +91,25 @@ else
 fi
 
 # ── assertion 4: run seed varies the realization under a pinned profile ───────
+# The trace's FIRST line embeds the run seed (SCENARIO ... seed=0xS), so a
+# whole-file diff differs unconditionally and would gate nothing. Strip the
+# banner (tail -n +2) and compare the trace BODIES — only a genuinely
+# different fault realization makes those diverge.
 diffed=0
 for v in gen_run_00 gen_run_01 gen_run_02 gen_run_03 gen_run_04 gen_run_05; do
     "$DSF" --generate 6 --gen-seed 0xAA --seed 0x1 --scenario "$v" --trace "$TMPD/${v}_s1.log" --quiet >/dev/null 2>&1
     "$DSF" --generate 6 --gen-seed 0xAA --seed 0x2 --scenario "$v" --trace "$TMPD/${v}_s2.log" --quiet >/dev/null 2>&1
-    if [ -s "$TMPD/${v}_s1.log" ] && ! diff -q "$TMPD/${v}_s1.log" "$TMPD/${v}_s2.log" >/dev/null 2>&1; then
+    tail -n +2 "$TMPD/${v}_s1.log" > "$TMPD/${v}_s1.body" 2>/dev/null
+    tail -n +2 "$TMPD/${v}_s2.log" > "$TMPD/${v}_s2.body" 2>/dev/null
+    if [ -s "$TMPD/${v}_s1.body" ] && ! diff -q "$TMPD/${v}_s1.body" "$TMPD/${v}_s2.body" >/dev/null 2>&1; then
         diffed=1
         break
     fi
 done
 if [ "$diffed" -eq 1 ]; then
-    ok "run seed varies the fault realization under a pinned profile ($v traces differ @0x1 vs @0x2)"
+    ok "run seed varies the fault realization under a pinned profile ($v trace BODIES differ @0x1 vs @0x2, banner stripped)"
 else
-    fail "no generated variant's trace differed across run seeds (realization not seed-driven?)"
+    fail "no generated variant's trace body differed across run seeds (realization not seed-driven?)"
 fi
 
 # ── assertion 5: full-tuple replay is byte-identical + non-vacuous ────────────
@@ -132,6 +138,30 @@ fi
 [ "$?" -eq 2 ] && ok "garbage --gen-seed exits 2" || fail "garbage --gen-seed did not exit 2"
 "$DSF" --generate 6 --list --gen-seed >/dev/null 2>&1
 [ "$?" -eq 2 ] && ok "dangling --gen-seed exits 2" || fail "dangling --gen-seed did not exit 2"
+# Validation is UNCONDITIONAL (symmetric with --seed): garbage exits 2 even
+# without --generate, and an explicitly EMPTY value cannot silently collapse.
+"$DSF" --scenario gen_rotation_00 --seed 0xA6 --gen-seed zzz >/dev/null 2>&1
+[ "$?" -eq 2 ] && ok "garbage --gen-seed WITHOUT --generate exits 2" || fail "garbage --gen-seed without --generate did not exit 2"
+"$DSF" --generate 6 --gen-seed "" --list >/dev/null 2>&1
+[ "$?" -eq 2 ] && ok "explicitly empty --gen-seed exits 2" || fail "explicitly empty --gen-seed did not exit 2"
+
+# ── assertion 8: a failing generated variant's repro hint reproduces ──────────
+# Force a liveness FAIL via --max-events truncation; the printed "reproduce
+# with:" line must carry the FULL tuple (--generate/--gen-seed/--template).
+OUT="$("$DSF" --generate 6 --gen-seed 0xCAFE --seed 0x2 --template rotation --scenario gen_run_00 --max-events 30 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] \
+   && echo "$OUT" | grep -q -- "--generate 6" \
+   && echo "$OUT" | grep -q -- "--gen-seed 0xcafe" \
+   && echo "$OUT" | grep -q -- "--template rotation"; then
+    ok "FAIL repro hint carries the full tuple (--generate/--gen-seed/--template)"
+else
+    fail "FAIL repro hint incomplete under the decoupled form (rc=$rc)"
+fi
+if echo "$OUT" | grep -q "gen-seed 0xcafe"; then
+    ok "run banner surfaces the explicit gen-seed"
+else
+    fail "run banner missing the explicit gen-seed"
+fi
 
 echo ""
 if [ "$FAILS" -eq 0 ]; then

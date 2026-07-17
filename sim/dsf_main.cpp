@@ -121,6 +121,9 @@ int main(int argc, char** argv) {
     std::string trace_path = "off";     // default: no trace file
     std::string seed_str    = "0x1";    // default deterministic seed
     std::string gen_seed_str;            // --gen-seed: pin the profile draw
+    bool        gen_seed_given = false;  // set in the parse loop (an empty
+                                         // value must error, not silently
+                                         // collapse to --seed)
     uint64_t    max_events  = 0;         // 0 => framework default cap
     bool        quiet       = false;
     bool        want_list   = false;
@@ -137,14 +140,29 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--list")          { want_list = true; }
-        else if (a == "--generate") { generate_count = std::stoull(need("--generate")); }
+        else if (a == "--generate") {
+            const std::string v = need("--generate");
+            if (!parse_seed(v, generate_count)) {
+                std::cerr << "error: bad --generate '" << v
+                          << "' (want a count)\n";
+                return 2;
+            }
+        }
         else if (a == "--template") { template_name = need("--template"); }
         else if (a == "--help" || a == "-h") { print_usage(); return 0; }
         else if (a == "--scenario") { scenario_name = need("--scenario"); }
         else if (a == "--seed")     { seed_str      = need("--seed"); }
-        else if (a == "--gen-seed") { gen_seed_str  = need("--gen-seed"); }
+        else if (a == "--gen-seed") { gen_seed_str  = need("--gen-seed");
+                                      gen_seed_given = true; }
         else if (a == "--trace")    { trace_path    = need("--trace"); }
-        else if (a == "--max-events") { max_events  = std::stoull(need("--max-events")); }
+        else if (a == "--max-events") {
+            const std::string v = need("--max-events");
+            if (!parse_seed(v, max_events)) {
+                std::cerr << "error: bad --max-events '" << v
+                          << "' (want a count)\n";
+                return 2;
+            }
+        }
         else if (a == "--quiet")    { quiet = true; }
         else {
             std::cerr << "error: unknown argument '" << a << "'\n";
@@ -160,6 +178,17 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // --gen-seed is validated UNCONDITIONALLY (symmetric with --seed: garbage
+    // — including an explicitly empty value — always exits 2, even when the
+    // flag is inert because --generate is absent). It defaults to the run
+    // seed: the classic collapsed single-seed form.
+    uint64_t gen_seed = seed;
+    if (gen_seed_given && !parse_seed(gen_seed_str, gen_seed)) {
+        std::cerr << "error: bad --gen-seed '" << gen_seed_str
+                  << "' (want 0xHEX or decimal)\n";
+        return 2;
+    }
+
     // §Q5/§Q6: --generate N registers N variants named gen_run_00..0(N-1).
     // --template picks the generator template (the alias chain below is the
     // authoritative map; print_usage lists the names). The PROFILE draw is
@@ -171,12 +200,6 @@ int main(int argc, char** argv) {
     // template name falls back to Broadcast — operator tooling validates
     // names locally (operator_dsf_sweep).
     if (generate_count > 0) {
-        uint64_t gen_seed = seed;
-        if (!gen_seed_str.empty() && !parse_seed(gen_seed_str, gen_seed)) {
-            std::cerr << "error: bad --gen-seed '" << gen_seed_str
-                      << "' (want 0xHEX or decimal)\n";
-            return 2;
-        }
         const determ::sim::GenTemplate tmpl =
             (template_name == "agree" || template_name == "agreement")
                 ? determ::sim::GenTemplate::Agreement
@@ -222,6 +245,14 @@ int main(int argc, char** argv) {
                       static_cast<unsigned long long>(s));
         return std::string(buf);
     };
+    // Banner seed token: when a --gen-seed was EXPLICITLY given on a generate
+    // run, surface it alongside the run seed so a failing generated variant's
+    // output carries the full reproducing pair. The collapsed / baked paths
+    // print exactly the classic single-seed token (byte-identical output).
+    const std::string seed_banner =
+        (gen_seed_given && generate_count > 0)
+            ? hex_seed(seed) + " gen-seed " + hex_seed(gen_seed)
+            : hex_seed(seed);
 
     // Wire the trace writer.
     TraceWriter trace;
@@ -236,7 +267,7 @@ int main(int argc, char** argv) {
     }
 
     if (!quiet) {
-        std::cout << "[seed " << hex_seed(seed) << "] running "
+        std::cout << "[seed " << seed_banner << "] running "
                   << sc->name << "...\n";
     }
 
@@ -271,7 +302,7 @@ int main(int argc, char** argv) {
         // Self-test: a violation is the SUCCESS condition.
         if (violated) {
             if (!quiet) {
-                std::cout << "[seed " << hex_seed(seed)
+                std::cout << "[seed " << seed_banner
                           << "] PASS (self-test): expected violation fired\n";
                 for (const auto& v : sim.props().violations())
                     std::cout << "    [" << to_string(v.kind) << "] "
@@ -282,7 +313,7 @@ int main(int argc, char** argv) {
             trace.close();
             return 0;
         }
-        std::cerr << "[seed " << hex_seed(seed)
+        std::cerr << "[seed " << seed_banner
                   << "] FAIL: expected a violation but none fired "
                      "(checker did not catch the planted bug)\n";
         trace.close();
@@ -291,7 +322,7 @@ int main(int argc, char** argv) {
 
     // Normal scenario: any violation is a failure.
     if (violated) {
-        std::cerr << "[seed " << hex_seed(seed) << "] FAIL: "
+        std::cerr << "[seed " << seed_banner << "] FAIL: "
                   << sim.props().violations().size()
                   << " invariant violation(s) in " << sc->name << "\n";
         for (const auto& v : sim.props().violations()) {
@@ -299,7 +330,16 @@ int main(int argc, char** argv) {
                       << " @vtime=" << v.vtime << " step=" << v.step
                       << " :: " << v.detail << "\n";
         }
-        std::cerr << "  reproduce with: determ-dsf --scenario " << sc->name
+        // The hint must be the FULL reproducing tuple: a generated variant
+        // does not exist without its --generate/--gen-seed/--template args.
+        std::cerr << "  reproduce with: determ-dsf ";
+        if (generate_count > 0) {
+            std::cerr << "--generate " << generate_count
+                      << " --gen-seed " << hex_seed(gen_seed) << " ";
+            if (template_name != "broadcast")
+                std::cerr << "--template " << template_name << " ";
+        }
+        std::cerr << "--scenario " << sc->name
                   << " --seed " << hex_seed(seed);
         if (trace_path != "off" && trace_path != "-")
             std::cerr << " --trace " << trace_path;
@@ -309,7 +349,7 @@ int main(int argc, char** argv) {
     }
 
     if (!quiet) {
-        std::cout << "[seed " << hex_seed(seed) << "] OK: " << sc->name
+        std::cout << "[seed " << seed_banner << "] OK: " << sc->name
                   << " — " << sim.props().count()
                   << " invariant(s) held over " << sim.state().step
                   << " steps\n";
