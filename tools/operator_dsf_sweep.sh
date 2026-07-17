@@ -38,7 +38,7 @@
 #   --bin PATH        determ-dsf binary (default: $DETERM_DSF_BIN, then the
 #                     standard build-tree discovery chain)
 #   --templates CSV   generator templates to sweep (default: broadcast,agree,
-#                     ratchet,quorum,conserve,recon)
+#                     ratchet,quorum,conserve,recon,crashrec,partition)
 #   --variants N      generated variants per (template, seed)   (default: 6)
 #   --seeds M         sweep seeds per template                   (default: 4)
 #   --seed-base HEX   first sweep seed, 0x-hex or decimal        (default: 0xC1)
@@ -60,10 +60,11 @@ cd "$(dirname "$0")/.."
 # DEFAULT_TEMPLATES: what a bare sweep runs. KNOWN_TEMPLATES: every name the
 # binary actually maps (dsf_main.cpp routes agree|agreement -> Agreement,
 # ratchet -> Ratchet, quorum -> Quorum, conserve|conservation -> Conservation,
-# recon|reconcile|reconciliation -> Reconcile, anything else -> Broadcast,
-# silently — hence the local validation).
-DEFAULT_TEMPLATES="broadcast,agree,ratchet,quorum,conserve,recon"
-KNOWN_TEMPLATES="broadcast agree agreement ratchet quorum conserve conservation recon reconcile reconciliation"
+# recon|reconcile|reconciliation -> Reconcile, crashrec|crashrecover ->
+# CrashRecover, partition|partheal -> PartitionHeal, anything else ->
+# Broadcast, silently — hence the local validation).
+DEFAULT_TEMPLATES="broadcast,agree,ratchet,quorum,conserve,recon,crashrec,partition"
+KNOWN_TEMPLATES="broadcast agree agreement ratchet quorum conserve conservation recon reconcile reconciliation crashrec crashrecover partition partheal"
 
 SEED_STRIDE=0x9E37   # deterministic sweep-seed stride (see header)
 
