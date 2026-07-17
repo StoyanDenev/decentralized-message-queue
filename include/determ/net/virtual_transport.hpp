@@ -334,6 +334,21 @@ public:
     // nondeterminism.
     void set_loss(uint32_t permille);
 
+    // Per-link message-DUPLICATION probability in PER-MILLE (0..1000), same
+    // scope/seeding as set_loss. A duplicated frame is enqueued into the peer
+    // inbox TWICE back-to-back: with the gossip path's whole-frame
+    // granularity (one async_write == one length-prefixed Peer message) the
+    // receiver sees the SAME complete message a second time — the
+    // application-level REDELIVERY class the S-047 retry produces routinely
+    // (relayed round state is byte-identical to the original), so this fault
+    // stresses exactly the receiver dedup/idempotency the consensus layer
+    // claims. (TCP itself never delivers duplicate bytes; this is not a
+    // packet-level model.) A frame the loss model drops is not rolled for
+    // duplication. Default 0 consumes NO RNG draw per frame, so enabling
+    // duplication in a later phase cannot perturb the byte-identical replay
+    // of earlier phases.
+    void set_dup(uint32_t permille);
+
     // Partition: every link whose two endpoint groups STRADDLE the boundary
     // (one in `side_a`, the other not) has delivery blocked BOTH ways;
     // non-straddling links deliver normally. Applies to current AND future
@@ -402,6 +417,7 @@ private:
     std::vector<std::shared_ptr<LinkFlags>> links_;   // fault registry (all pairs)
     std::set<int> partition_a_;                        // empty = no partition
     uint32_t      loss_permille_   = 0;                // 0 = lossless
+    uint32_t      dup_permille_    = 0;                // 0 = no duplication
     uint16_t next_auto_port_   = 30000;   // listen(0) auto-assignment
     uint16_t next_pseudo_port_ = 50000;   // remote_endpoint() pair ids
 };

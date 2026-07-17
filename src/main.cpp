@@ -826,13 +826,14 @@ Additional in-process tests:
                                               Asserts liveness + no-fork agreement +
                                               replay-twice-identical (per-node head/
                                               state_root + block list + action trace)
-  determ test-fa-adversarial-deterministic    inc.5: ADVERSARIAL schedules on the
+  determ test-fa-adversarial-deterministic    inc.5/7: ADVERSARIAL schedules on the
                                               inc.4 substrate — 10% loss, {4}|{1}
                                               partition, heal + S-050 valve re-probe,
-                                              ALL hard gates (loss liveness was
-                                              non-gating under wall clocks), plus
-                                              replay-twice byte-identity over the
-                                              whole adversarial schedule
+                                              30% frame duplication (receiver
+                                              redelivery idempotency), ALL hard
+                                              gates (loss liveness was non-gating
+                                              under wall clocks), plus replay-twice
+                                              byte-identity over the whole schedule
   determ test-fa-crash-deterministic          inc.6: deterministic node CRASH +
                                               RESTART-REJOIN on the inc.4 substrate
                                               — kill node4 at a drain boundary (the
@@ -29119,6 +29120,7 @@ int main(int argc, char** argv) {
             bool loss_live = false, loss_agree = false;
             bool part_live = false, part_prefix = false;
             bool heal_recovered = false;
+            bool dup_live = false, dup_agree = false;
             std::vector<std::string> head_hash, state_root;
             std::string trace_hash;
         };
@@ -29270,6 +29272,22 @@ int main(int argc, char** argv) {
                     4096, 200000);
             }
 
+            // ── Phase 4: DUPLICATION (hard gate, inc.7) ──────────────────
+            // 30% per-frame duplication on every link, both directions: the
+            // receiver reads byte-identical repeated Peer messages — the
+            // S-047 redelivery class (the retry relays stored round state
+            // verbatim), here forced at the transport so EVERY message kind
+            // is redelivered, not just retried round state. Receiver
+            // dedup/idempotency must keep the cluster live AND fork-free
+            // (a double-apply or dup-triggered equivocation claim would
+            // break the settled-agreement check).
+            vnet.set_dup(300);
+            const uint64_t h_dup0 = min_h(0, kNodes);
+            R.dup_live = sched.run_until(
+                [&] { return min_h(0, kNodes) >= h_dup0 + 2; });
+            R.dup_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
+            vnet.set_dup(0);
+
             for (int i = 0; i < kNodes; ++i) {
                 R.head_hash.push_back(
                     nodes[i]->rpc_status().value("head_hash", std::string()));
@@ -29309,22 +29327,30 @@ int main(int argc, char** argv) {
               "S-050 valve regression: after heal, stepping the injected clock "
               "past the stall windows re-probes + re-syncs node4 onto the "
               "majority chain (deterministic)");
+        check(r1.dup_live,
+              "dup liveness (inc.7): +2 blocks finalized under 30% per-frame "
+              "duplication on every link (receiver redelivery idempotency, "
+              "every message kind)");
+        check(r1.dup_agree,
+              "dup fork-freedom: all 5 nodes byte-agree on every settled block "
+              "(no double-apply / dup-triggered divergence)");
 
         RunResult r2 = run_once("r2");
         bool replay_eq = r2.loss_live == r1.loss_live &&
                          r2.heal_recovered == r1.heal_recovered &&
+                         r2.dup_live == r1.dup_live &&
                          r1.head_hash == r2.head_hash &&
                          r1.state_root == r2.state_root &&
                          !r1.trace_hash.empty() &&
                          r1.trace_hash == r2.trace_hash;
         check(replay_eq,
               "replay: the ENTIRE adversarial schedule (loss + partition + heal "
-              "+ valve) is byte-identical across two same-seed runs (terminal "
-              "heads, state_roots, scheduler trace hash)");
+              "+ valve + dup) is byte-identical across two same-seed runs "
+              "(terminal heads, state_roots, scheduler trace hash)");
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-adversarial-deterministic "
-                  << (fail == 0 ? "all assertions (inc.5)" : "had failures")
+                  << (fail == 0 ? "all assertions (inc.5/7)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

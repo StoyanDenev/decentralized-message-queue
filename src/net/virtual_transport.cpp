@@ -41,6 +41,7 @@ struct VirtualNetwork::LinkFlags {
     std::atomic<bool>     ab{true};          // deliver side0 -> side1
     std::atomic<bool>     ba{true};          // deliver side1 -> side0
     std::atomic<uint32_t> drop_permille{0};  // 0 = lossless
+    std::atomic<uint32_t> dup_permille{0};   // 0 = no duplication
     int      group0 = 0;   // accept-side group  (immutable)
     int      group1 = 0;   // connect-side group (immutable)
     uint64_t rng    = 0;   // xorshift64 state; advanced under owning Pair::mu
@@ -50,6 +51,18 @@ struct VirtualNetwork::LinkFlags {
     // seeded non-zero at creation.
     bool roll_drop() {
         const uint32_t d = drop_permille.load(std::memory_order_relaxed);
+        if (d == 0) return false;
+        uint64_t x = rng;
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;   // xorshift64
+        rng = x;
+        return (x % 1000u) < d;
+    }
+    // Same draw discipline for the duplication model (caller holds the owning
+    // Pair::mu; rolled only for frames that WILL be delivered). Rate 0
+    // consumes no draw, so phases run before set_dup() replay byte-identically
+    // whether or not a later phase enables duplication.
+    bool roll_dup() {
+        const uint32_t d = dup_permille.load(std::memory_order_relaxed);
         if (d == 0) return false;
         uint64_t x = rng;
         x ^= x << 13; x ^= x >> 7; x ^= x << 17;   // xorshift64
@@ -447,6 +460,12 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
     }
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     peer.inbox.insert(peer.inbox.end(), p, p + n);
+    // Fault model: a duplicated frame lands in the inbox TWICE back-to-back
+    // (whole-frame granularity ⇒ the receiver reads the same complete Peer
+    // message a second time — the S-047 redelivery class; see set_dup).
+    // Only delivered frames roll: a dropped frame was never sent twice.
+    if (P.link && P.link->roll_dup())
+        peer.inbox.insert(peer.inbox.end(), p, p + n);
     // Whole-span completion first, then the peer's now-satisfiable parked
     // read — a fixed post order so single-threaded loops trace
     // deterministically.
@@ -505,6 +524,11 @@ bool VirtualConnection::write_all(const void* buf, std::size_t n) {
     if (P.link && (!P.link->gate(side_) || P.link->roll_drop())) return true;
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     peer.inbox.insert(peer.inbox.end(), p, p + n);
+    // Duplication parity with async_write (sync consumers are off the gossip
+    // path; kept so a future sync consumer under fault injection behaves
+    // consistently).
+    if (P.link && P.link->roll_dup())
+        peer.inbox.insert(peer.inbox.end(), p, p + n);
     deliver_locked(P, peer);
     return true;
 }
@@ -690,6 +714,7 @@ VirtualNetwork::make_pair_locked(
     lf->group0 = accept_group;
     lf->group1 = connect_group;
     lf->drop_permille.store(loss_permille_, std::memory_order_relaxed);
+    lf->dup_permille.store(dup_permille_, std::memory_order_relaxed);
     lf->rng = (static_cast<uint64_t>(pseudo) << 1) | 1ull;
     if (link_blocked_locked(accept_group, connect_group)) {
         lf->ab.store(false, std::memory_order_relaxed);
@@ -707,6 +732,14 @@ bool VirtualNetwork::link_blocked_locked(int ga, int gb) const {
     const bool a_in = partition_a_.count(ga) != 0;
     const bool b_in = partition_a_.count(gb) != 0;
     return a_in != b_in;   // straddles the boundary
+}
+
+void VirtualNetwork::set_dup(uint32_t permille) {
+    if (permille > 1000) permille = 1000;
+    std::lock_guard<std::mutex> lk(mu_);
+    dup_permille_ = permille;
+    for (auto& lf : links_)
+        lf->dup_permille.store(permille, std::memory_order_relaxed);
 }
 
 void VirtualNetwork::set_loss(uint32_t permille) {

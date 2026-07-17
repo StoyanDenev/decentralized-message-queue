@@ -23,7 +23,13 @@
 #      clock_.steady_now(), the §Q1 seam): stall re-probe + tolerance-0 sync +
 #      the A4.4 chunk path re-converge the stranded node4 onto the majority
 #      chain — deterministic, where the wall-clock harness could only NOTE it;
-#   6. REPLAY — the whole adversarial schedule run twice is byte-identical
+#   6. DUP LIVENESS + FORK-FREEDOM (inc.7) — +2 blocks finalized under 30%
+#      per-frame DUPLICATION on every link (VirtualNetwork::set_dup): the
+#      receiver reads byte-identical repeated Peer messages — the S-047
+#      redelivery class forced at the transport for EVERY message kind — and
+#      the dedup/idempotent handlers must hold liveness with all 5 nodes
+#      still byte-agreeing on every settled block;
+#   7. REPLAY — the whole adversarial schedule run twice is byte-identical
 #      (terminal per-node head_hash + state_root + scheduler trace hash).
 #
 # In-process (no cluster) — FAST-eligible.
@@ -33,7 +39,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== fa-adversarial-deterministic: loss/partition/heal/valve under the global scheduler (inc.5) ==="
+echo "=== fa-adversarial-deterministic: loss/partition/heal/valve/dup under the global scheduler (inc.5/7) ==="
 OUT=$($DETERM test-fa-adversarial-deterministic 2>&1)
 echo "$OUT"
 
