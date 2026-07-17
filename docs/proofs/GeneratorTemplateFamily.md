@@ -104,9 +104,9 @@ Each template is robust because its honest apply has an algebraic property — i
 
 ### 3.8 PartitionHeal — §Q7 partition-quorum split-brain
 
-- **Honest mechanism.** The first template to exercise the NetModel PARTITION seam (link cuts decided at SEND time, healed later). Two quorum collectors observe the same N ack sources: `col_a` keeps full connectivity; `col_b` is cut from the ceil(N/2) MAJORITY of sources for a deterministic window `[10ms, 396ms)` — leaving exactly `floor(N/2) = K-1` reachable senders, one short of quorum, for every drawn follower count. The honest minority-side collector therefore CANNOT commit while partitioned and commits only after the heal.
+- **Honest mechanism.** The first template to exercise the NetModel PARTITION seam (link cuts decided at SEND time, healed later). Two quorum collectors observe the same N ack sources: `col_a` keeps full connectivity; `col_b` is cut from ceil(N/2) of the N sources for a deterministic window `[10ms, 396ms)` — leaving exactly `floor(N/2) = K-1` reachable senders, one short of quorum, for every drawn follower count (for even N the cut is exactly half; the K-1 < K arithmetic is what matters). The honest minority-side collector therefore CANNOT commit while partitioned and commits only after the heal.
 - **Why robust.** Distinct-sender counting makes duplication useless as a quorum-faker; drop only delays; post-heal `col_b` needs only ONE of the previously cut senders across ~24 remaining re-acks. The `healed` scalar flips at 395ms, BEFORE the links reopen at 396ms, so a legitimate post-heal commit can never be misrecorded as pre-heal.
-- **SAFETY** `part_no_minority_commit` — `col_b` never commits while partitioned from the majority (recorded at commit time via `committed_preheal`).
+- **SAFETY** `part_no_minority_commit` — `col_b` never commits while its cut links are up (recorded at commit time via `committed_preheal`).
 - **LIVENESS** `part_both_commit` — REQUIRES `healed == 1` (the partition window can never go vacuous) AND both collectors reached quorum.
 - **Self-test** `gen_splitbrain_selftest` — the inc-3 `single_decision` bug class under generated profiles: `col_b`'s effective quorum mis-set to K-1, exactly its reachable minority, so it commits WHILE PARTITIONED. Fixed profile: `followers=4, drop=0.0, dup=0.0`.
 - **Baked prefix** `gen_partition`.

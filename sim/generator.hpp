@@ -921,9 +921,11 @@ inline Scenario make_crashrec_variant(int idx, const GenParams& p,
 // The §Q7 partition-quorum family — the first generated template to exercise
 // the NetModel's PARTITION seam (link-level cuts decided at send time, healed
 // later). Two quorum collectors observe the same N ack sources; col_a keeps
-// full connectivity, col_b is cut from the MAJORITY (ceil(N/2)) of sources
-// for a deterministic window, leaving it exactly floor(N/2) = K-1 reachable
-// senders — one short of the K = floor(N/2)+1 quorum. An honest minority-side
+// full connectivity, col_b is cut from ceil(N/2) of the N sources for a
+// deterministic window, leaving it exactly floor(N/2) = K-1 reachable
+// senders — one short of the K = floor(N/2)+1 quorum (for even N the cut is
+// exactly half; the K-1 < K arithmetic is what matters, and it holds for
+// every drawn N). An honest minority-side
 // collector therefore CANNOT commit while partitioned (distinct-sender
 // counting makes dup useless as a quorum-faker), and commits only after the
 // heal — the split-brain-avoidance property. The partition window is a pure
@@ -945,8 +947,8 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
     s.description = (self_test
         ? std::string("SELF-TEST: the minority-side collector's effective "
                       "quorum is mis-set to K-1 (exactly its reachable "
-                      "minority), so it commits WHILE PARTITIONED from the "
-                      "majority. part_no_minority_commit MUST fire. ")
+                      "sender count), so it commits WHILE PARTITIONED. "
+                      "part_no_minority_commit MUST fire. ")
         : std::string("generated partition/heal split-brain variant — ")) +
         gen_params_str(p);
     s.expect_violation = self_test;
@@ -968,7 +970,9 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
                 }
                 if (self.kv["committed"] == 0 && self.kv["distinct"] >= thresh) {
                     self.kv["committed"] = 1;
-                    const int64_t healed = sim.state().scalars["healed"];
+                    // .at(): the scalar is pre-seeded in setup; a missing seed
+                    // must crash loudly, not silently insert 0.
+                    const int64_t healed = sim.state().scalars.at("healed");
                     self.kv["committed_preheal"] = (healed == 0) ? 1 : 0;
                 }
             });
@@ -983,16 +987,16 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
         sim.net().set_dup_rate(p.dup);
         sim.state().scalars["healed"] = 0;
 
-        // SAFETY: the minority-side collector never commits while partitioned
-        // from the majority. The mis-set-quorum bug commits at K-1 pre-heal.
+        // SAFETY: the minority-side collector never commits while its cut
+        // links are up. The mis-set-quorum bug commits at K-1 pre-heal.
         sim.props().add("part_no_minority_commit", PropKind::SAFETY,
             [](const SimState& st, std::string* d) {
                 auto it = st.nodes.find("col_b");
                 if (it == st.nodes.end()) return true;
                 auto ph = it->second.kv.find("committed_preheal");
                 if (ph != it->second.kv.end() && ph->second == 1) {
-                    if (d) *d = "col_b committed WHILE PARTITIONED from the "
-                                "majority (split-brain)";
+                    if (d) *d = "col_b committed WHILE PARTITIONED "
+                                "(split-brain)";
                     return false;
                 }
                 return true;
@@ -1026,7 +1030,7 @@ inline Scenario make_partition_variant(int idx, const GenParams& p,
 
     s.run = [p](Simulator& sim) {
         // Deterministic partition window (no PRNG): at 10ms cut col_b from
-        // the ceil(N/2) majority sources; heal at 396ms (the healed flag is
+        // ceil(N/2) of the N sources; heal at 396ms (the healed flag is
         // raised at 395ms, BEFORE the links reopen, so a legitimate post-heal
         // commit can never be misrecorded as pre-heal). Acks re-flood to
         // 1000ms, so col_b has ~24 post-heal attempts even at drop=0.5.

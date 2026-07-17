@@ -5,7 +5,7 @@
 # Increment 11 brought the crash/recover seam into the generator; increment 12
 # brings the PARTITION seam (NetModel link cuts, decided at send time, healed
 # later). Two quorum collectors observe the same N ack sources; col_a keeps
-# full connectivity, col_b is cut from the ceil(N/2) MAJORITY of sources for a
+# full connectivity, col_b is cut from ceil(N/2) of the N sources for a
 # deterministic window, leaving it exactly K-1 reachable senders — one short
 # of quorum. An honest minority-side collector CANNOT commit while partitioned
 # (distinct-sender counting defeats dup) and commits only after the heal.
@@ -89,11 +89,17 @@ for s in $PTVARS; do
 done
 
 # ── assertion 3: the partition seam demonstrably fires (trace-level) ──────────
-NP="$(grep -c 'partition' "$TMPD/gen_partition_00_a.log" 2>/dev/null || echo 0)"
+# Anchor on the trace kind column (' DROP partition') — a bare 'partition' grep
+# would also match the SCENARIO header line (the scenario NAME contains
+# "partition"), making the >=1 gate vacuous. grep -c always prints a count for
+# a readable file, so default only the missing-file case (no `|| echo 0`,
+# which would double-emit "0\n0" on zero matches and break the -ge test).
+NP="$(grep -c ' DROP partition' "$TMPD/gen_partition_00_a.log" 2>/dev/null)"
+NP="${NP:-0}"
 if [ "$NP" -ge 1 ]; then
     ok "gen_partition_00 trace shows $NP partition-reason drops (partition seam exercised)"
 else
-    fail "gen_partition_00 trace shows NO partition drops (seam not exercised)"
+    fail "gen_partition_00 trace shows NO partition-reason drops (seam not exercised)"
 fi
 
 # ── assertion 4: the self-test fires the no-minority-commit checker ───────────

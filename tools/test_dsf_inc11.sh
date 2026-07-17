@@ -88,8 +88,13 @@ for s in $CRVARS; do
 done
 
 # ── assertion 3: the crash seam demonstrably fires (trace-level) ──────────────
-NC="$(grep -c 'CRASH'   "$TMPD/gen_crashrec_00_a.log" 2>/dev/null || echo 0)"
-NR="$(grep -c 'RECOVER' "$TMPD/gen_crashrec_00_a.log" 2>/dev/null || echo 0)"
+# Anchored on the trace kind column; grep -c always prints a count for a
+# readable file, so default only the missing-file case (no `|| echo 0`, which
+# would double-emit "0\n0" on zero matches and break the -eq/-ge tests).
+NC="$(grep -c ' CRASH '   "$TMPD/gen_crashrec_00_a.log" 2>/dev/null)"
+NR="$(grep -c ' RECOVER ' "$TMPD/gen_crashrec_00_a.log" 2>/dev/null)"
+NC="${NC:-0}"
+NR="${NR:-0}"
 if [ "$NC" -ge 1 ] && [ "$NR" -ge 1 ] && [ "$NC" -eq "$NR" ]; then
     ok "gen_crashrec_00 trace shows $NC CRASH + $NR RECOVER events (crash seam exercised)"
 else
