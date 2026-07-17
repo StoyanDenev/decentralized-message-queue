@@ -163,17 +163,17 @@ src/crypto/
 │   └── p256.c                  #   prime-order workhorse. Supplants the never-built secp256k1 for
 │                               #   Bulletproofs (../pedersen/), OPRF/VOPRF (RFC 9497 P256-SHA256),
 │                               #   hash-to-curve (RFC 9380 SSWU), and all prime-order needs.
-├── frost/                      # FROST-Ed25519 from RFC 9591
-│   ├── frost_keygen.c
-│   ├── frost_sign.c
-│   ├── frost_aggregate.c
-│   ├── frost_pss_refresh.c
-│   └── frost.h
-├── ringsig/                    # SHIPPED: §3.23 input-unlinkability ring signatures (LSAG/CLSAG/RingCT over P-256)
-│   ├── lsag.c
-│   ├── clsag.c
-│   └── ringct_spend.c          #   (OPRF/VOPRF is NOT its own module — it ships inside p256/ as
-│                               #    RFC 9497 P256-SHA256; hash-to-curve is RFC 9380 SSWU for P-256, also in p256/)
+├── frost/                      # REMOVED 2026-07-09 (register B2) — was FROST-Ed25519 (RFC 9591):
+│                               #   trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen +
+│                               #   threshold sign whose aggregate is a plain Ed25519 sig. Deleted
+│                               #   from the tree; design record = the §3.8 removal note +
+│                               #   FROST_DEVIATION_NOTICE.md. (was: frost_keygen.c / frost_sign.c /
+│                               #    frost_aggregate.c / frost_pss_refresh.c / frost.h)
+├── ringsig/                    # REMOVED 2026-07-09 (register B2) — was §3.23 input-unlinkability
+│                               #   ring signatures (LSAG/CLSAG/RingCT over P-256). Deleted from the
+│                               #   tree; design record = the §3.23 removal note. (was: lsag.c /
+│                               #   clsag.c / ringct_spend.c.) OPRF/VOPRF is NOT its own module — it
+│                               #    ships inside p256/ as RFC 9497 P256-SHA256; h2c is RFC 9380 SSWU, in p256/)
 ├── ct/                         # Constant-time primitives
 │   ├── ct_compare.c
 │   ├── ct_select.c
