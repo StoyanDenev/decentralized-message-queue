@@ -27,6 +27,7 @@
 // as for every DSF scenario. Both are deterministic.
 #pragma once
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include "scenario.hpp"
@@ -627,14 +628,147 @@ inline Scenario make_conservation_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 10: a SIXTH generator template — F2 view RECONCILIATION ──
+//
+// The §Q7 F2 view-reconciliation family (the production no_phantom_evidence
+// rule: a reconciler merging two peers' views must never hold evidence that
+// exists in NEITHER source view). Two sources each flood their half of a
+// growing entry universe (src_a the odd ids, src_b the even ids); each
+// reconciler merges by union-keyed-on-entry-id (`e_<id>`), so re-delivery
+// and reorder never fabricate or duplicate evidence — robust by construction
+// under any drawn drop/dup/latency/jitter profile (union-by-id is idempotent
+// under duplication and reorder-immune; the re-flood makes it drop-tolerant).
+// So every generated variant PASSES: it never holds an entry outside the
+// issued universe, and it eventually merges the complete universe from both
+// sources. `correct` controls the reconciler's apply: true = honest
+// union-by-id; false = the planted bug used by the self-test — on every
+// merge the reconciler ALSO fabricates a phantom entry (id+100) that no
+// source ever issued: `recon_no_phantom` MUST fire (deterministically, on a
+// clean-delivery profile — the bug is in the apply, not the network).
+inline Scenario make_reconcile_variant(int idx, const GenParams& p,
+                                       bool correct, bool self_test,
+                                       const char* name_prefix = "gen_recon") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_phantom_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a reconciler fabricates a phantom entry "
+                      "(id+100, issued by NO source view) on every merge. "
+                      "recon_no_phantom MUST fire. ")
+        : std::string("generated view-reconciliation variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p, correct](Simulator& sim) {
+        sim.add_node("src_a");
+        sim.add_node("src_b");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f, correct](const Message& m) {
+                if (m.kind != "ENTRY") return;
+                Node& self = sim.state().nodes[f];
+                const int64_t id = static_cast<int64_t>(m.payload);
+                // Honest: union keyed on entry id (idempotent, reorder-immune).
+                const std::string key = "e_" + std::to_string(id);
+                if (self.kv[key] == 0) {
+                    self.kv[key] = 1;
+                    self.kv["merged"] += 1;
+                }
+                if (!correct) {
+                    // BUG: fabricate evidence present in NO source view.
+                    const std::string ph = "e_" + std::to_string(id + 100);
+                    if (self.kv[ph] == 0) {
+                        self.kv[ph] = 1;
+                        self.kv["merged"] += 1;
+                    }
+                }
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["issued_hi"] = 0;   // issued universe = ids 1..issued_hi
+        const int followers = p.followers;
+
+        // SAFETY: no reconciler holds an entry outside the issued universe.
+        sim.props().add("recon_no_phantom", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                const int64_t hi = st.scalars.count("issued_hi")
+                                   ? st.scalars.at("issued_hi") : 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "src_a" || id == "src_b") continue;
+                    for (const auto& [k, v] : n.kv) {
+                        if (v == 0 || k.rfind("e_", 0) != 0) continue;
+                        const int64_t eid = std::strtoll(k.c_str() + 2,
+                                                         nullptr, 10);
+                        if (eid < 1 || eid > hi) {
+                            if (d) *d = id + " holds phantom entry e_" +
+                                        std::to_string(eid) +
+                                        " outside issued 1.." +
+                                        std::to_string(hi);
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: every reconciler merges the complete issued universe.
+        sim.props().add("recon_complete", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t hi = st.scalars.count("issued_hi")
+                                   ? st.scalars.at("issued_hi") : 0;
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "src_a" || id == "src_b") continue;
+                    ++seen;
+                    auto it = n.kv.find("merged");
+                    const int64_t m = it == n.kv.end() ? 0 : it->second;
+                    if (m != hi) {
+                        if (d) *d = id + " merged=" + std::to_string(m) +
+                                    " != issued=" + std::to_string(hi);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p](Simulator& sim) {
+        // Grow the issued universe to 6 entries (one every 20ms). src_a owns
+        // the odd ids, src_b the even ids — two genuinely distinct views.
+        for (int i = 0; i < 6; ++i)
+            sim.after(vt_ms(20 * (i + 1)),
+                      [&sim]() { sim.state().scalars["issued_hi"] += 1; });
+        // Each source re-floods its half of the issued universe 30x (every
+        // 25ms) — drop-tolerant; re-delivery is harmless for union-by-id.
+        for (int t = 0; t < 30; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p]() {
+                const int64_t hi = sim.state().scalars["issued_hi"];
+                for (int64_t id = 1; id <= hi; ++id) {
+                    const char* src = (id % 2 == 1) ? "src_a" : "src_b";
+                    for (int i = 0; i < p.followers; ++i)
+                        sim.send(src, "f" + std::to_string(i), "ENTRY",
+                                 static_cast<uint64_t>(id));
+                }
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
 // (no-regress + advance); Quorum = §Q7 quorum/threshold-commit
 // (no-early-commit + reaches-quorum); Conservation = §Q7 cross-shard
-// receipt conservation (no-double-credit + all-credited). All draw the
-// SAME randomized fault profiles.
-enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation };
+// receipt conservation (no-double-credit + all-credited); Reconcile = §Q7
+// F2 view reconciliation (no-phantom + complete-merge). All draw the SAME
+// randomized fault profiles.
+enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation,
+                         Reconcile };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -647,6 +781,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_quorum_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::Conservation:
             return make_conservation_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::Reconcile:
+            return make_reconcile_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -680,6 +816,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; a single source's raw acks reach K=2 at distinct=1
     } else if (tmpl == GenTemplate::Conservation) {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; raw counting credits the first re-delivery
+    } else if (tmpl == GenTemplate::Reconcile) {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the fabricated phantom entry is the bug
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
