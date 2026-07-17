@@ -74,7 +74,7 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec] --list\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec|partition] --list\n"
         "                                 (register + list/run N seed-driven variants)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
@@ -107,6 +107,9 @@ int main(int argc, char** argv) {
     register_generated_scenarios(scenarios, 0x7F44D3ull, 6,   // increment-11 §Q5 7th template (crash/recover replay)
                                  "gen_crashrec", true,
                                  determ::sim::GenTemplate::CrashRecover);
+    register_generated_scenarios(scenarios, 0x8A15C6ull, 6,   // increment-12 §Q5 8th template (partition/heal split-brain)
+                                 "gen_partition", true,
+                                 determ::sim::GenTemplate::PartitionHeal);
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
@@ -170,6 +173,8 @@ int main(int argc, char** argv) {
                 ? determ::sim::GenTemplate::Reconcile
           : (template_name == "crashrec" || template_name == "crashrecover")
                 ? determ::sim::GenTemplate::CrashRecover
+          : (template_name == "partition" || template_name == "partheal")
+                ? determ::sim::GenTemplate::PartitionHeal
                 : determ::sim::GenTemplate::Broadcast;
         register_generated_scenarios(scenarios, seed,
                                      static_cast<int>(generate_count),

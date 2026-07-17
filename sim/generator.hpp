@@ -916,6 +916,144 @@ inline Scenario make_crashrec_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 12: an EIGHTH generator template — PARTITION/HEAL split-brain ──
+//
+// The §Q7 partition-quorum family — the first generated template to exercise
+// the NetModel's PARTITION seam (link-level cuts decided at send time, healed
+// later). Two quorum collectors observe the same N ack sources; col_a keeps
+// full connectivity, col_b is cut from the MAJORITY (ceil(N/2)) of sources
+// for a deterministic window, leaving it exactly floor(N/2) = K-1 reachable
+// senders — one short of the K = floor(N/2)+1 quorum. An honest minority-side
+// collector therefore CANNOT commit while partitioned (distinct-sender
+// counting makes dup useless as a quorum-faker), and commits only after the
+// heal — the split-brain-avoidance property. The partition window is a pure
+// function of the topology (no PRNG), layered under the drawn drop/dup/
+// latency/jitter profile. `correct` controls col_b's quorum: true = K
+// (honest); false = the planted bug used by the self-test — col_b's
+// effective quorum is mis-set to K-1, exactly its reachable minority, so it
+// commits WHILE PARTITIONED: `part_no_minority_commit` MUST fire (the same
+// bug the hand-written inc-3 `single_decision` self-test plants, now under
+// generated fault profiles).
+inline Scenario make_partition_variant(int idx, const GenParams& p,
+                                       bool correct, bool self_test,
+                                       const char* name_prefix = "gen_partition") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_splitbrain_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: the minority-side collector's effective "
+                      "quorum is mis-set to K-1 (exactly its reachable "
+                      "minority), so it commits WHILE PARTITIONED from the "
+                      "majority. part_no_minority_commit MUST fire. ")
+        : std::string("generated partition/heal split-brain variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p, correct](Simulator& sim) {
+        const int64_t K = p.followers / 2 + 1;          // majority quorum
+        const int64_t Kb = correct ? K : K - 1;          // BUG: minority quorum
+        // A quorum collector: counts DISTINCT ack senders, commits once at
+        // its threshold, and records whether the commit happened while the
+        // partition was still up (scalars["healed"] == 0).
+        auto add_collector = [&sim](const std::string& cid, int64_t thresh) {
+            sim.add_node(cid, [&sim, cid, thresh](const Message& m) {
+                if (m.kind != "ACK") return;
+                Node& self = sim.state().nodes[cid];
+                const std::string key = "s_" + m.from;
+                if (self.kv[key] == 0) {
+                    self.kv[key] = 1;
+                    self.kv["distinct"] += 1;
+                }
+                if (self.kv["committed"] == 0 && self.kv["distinct"] >= thresh) {
+                    self.kv["committed"] = 1;
+                    const int64_t healed = sim.state().scalars["healed"];
+                    self.kv["committed_preheal"] = (healed == 0) ? 1 : 0;
+                }
+            });
+        };
+        add_collector("col_a", K);
+        add_collector("col_b", Kb);
+        for (int i = 0; i < p.followers; ++i)
+            sim.add_node("f" + std::to_string(i));       // ack sources
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["healed"] = 0;
+
+        // SAFETY: the minority-side collector never commits while partitioned
+        // from the majority. The mis-set-quorum bug commits at K-1 pre-heal.
+        sim.props().add("part_no_minority_commit", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                auto it = st.nodes.find("col_b");
+                if (it == st.nodes.end()) return true;
+                auto ph = it->second.kv.find("committed_preheal");
+                if (ph != it->second.kv.end() && ph->second == 1) {
+                    if (d) *d = "col_b committed WHILE PARTITIONED from the "
+                                "majority (split-brain)";
+                    return false;
+                }
+                return true;
+            });
+        // LIVENESS: the heal happened AND both collectors reached quorum —
+        // the majority side during or after the window, the minority side
+        // once the healed links let a majority sender through.
+        sim.props().add("part_both_commit", PropKind::LIVENESS,
+            [](const SimState& st, std::string* d) {
+                const int64_t healed = st.scalars.count("healed")
+                                       ? st.scalars.at("healed") : 0;
+                if (healed != 1) {
+                    if (d) *d = "heal path vacuous: partition never healed";
+                    return false;
+                }
+                for (const char* cid : {"col_a", "col_b"}) {
+                    auto it = st.nodes.find(cid);
+                    if (it == st.nodes.end()) {
+                        if (d) *d = std::string(cid) + " missing";
+                        return false;
+                    }
+                    auto cm = it->second.kv.find("committed");
+                    if (cm == it->second.kv.end() || cm->second == 0) {
+                        if (d) *d = std::string(cid) + " never reached quorum";
+                        return false;
+                    }
+                }
+                return true;
+            });
+    };
+
+    s.run = [p](Simulator& sim) {
+        // Deterministic partition window (no PRNG): at 10ms cut col_b from
+        // the ceil(N/2) majority sources; heal at 396ms (the healed flag is
+        // raised at 395ms, BEFORE the links reopen, so a legitimate post-heal
+        // commit can never be misrecorded as pre-heal). Acks re-flood to
+        // 1000ms, so col_b has ~24 post-heal attempts even at drop=0.5.
+        const int cut = (p.followers + 1) / 2;
+        sim.after(vt_ms(10), [&sim, cut]() {
+            for (int i = 0; i < cut; ++i)
+                sim.net().partition("f" + std::to_string(i), "col_b");
+        });
+        sim.after(vt_ms(395), [&sim]() { sim.state().scalars["healed"] = 1; });
+        sim.after(vt_ms(396), [&sim, cut]() {
+            for (int i = 0; i < cut; ++i)
+                sim.net().heal("f" + std::to_string(i), "col_b");
+        });
+        // Every source re-acks BOTH collectors 40x (every 25ms).
+        for (int t = 0; t < 40; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p]() {
+                for (int i = 0; i < p.followers; ++i) {
+                    const std::string f = "f" + std::to_string(i);
+                    sim.send(f, "col_a", "ACK", 0);
+                    sim.send(f, "col_b", "ACK", 0);
+                }
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
@@ -923,10 +1061,11 @@ inline Scenario make_crashrec_variant(int idx, const GenParams& p,
 // (no-early-commit + reaches-quorum); Conservation = §Q7 cross-shard
 // receipt conservation (no-double-credit + all-credited); Reconcile = §Q7
 // F2 view reconciliation (no-phantom + complete-merge); CrashRecover = §Q7
-// crash-recovery replay (no-replay + converge-after-recovery). All draw the
-// SAME randomized fault profiles.
+// crash-recovery replay (no-replay + converge-after-recovery);
+// PartitionHeal = §Q7 partition-quorum split-brain (no-minority-commit +
+// both-commit-after-heal). All draw the SAME randomized fault profiles.
 enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation,
-                         Reconcile, CrashRecover };
+                         Reconcile, CrashRecover, PartitionHeal };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -943,6 +1082,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_reconcile_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::CrashRecover:
             return make_crashrec_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::PartitionHeal:
+            return make_partition_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -980,6 +1121,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the fabricated phantom entry is the bug
     } else if (tmpl == GenTemplate::CrashRecover) {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the recovery replay double-apply is the bug
+    } else if (tmpl == GenTemplate::PartitionHeal) {
+        bug.followers = 4; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the mis-set K-1 minority quorum is the bug
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
