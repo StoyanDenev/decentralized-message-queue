@@ -364,17 +364,47 @@ public:
     // Remove any partition (loss unaffected; clear it via set_loss(0)).
     void heal();
 
+    // Per-link CONSTANT latency (inc.10): each link is assigned a latency in
+    // [min_ms, max_ms] derived from its IMMUTABLE pseudo-port id (splitmix,
+    // NOT the link's fault rng — the drop/dup draw streams stay byte-
+    // identical whether or not latency is enabled). Constant-per-link is the
+    // honest TCP model: a frame stream on ONE connection never reorders
+    // (per-connection FIFO); REORDER happens ACROSS links with heterogeneous
+    // latencies. Applies to current and future links; (0,0) restores
+    // immediate delivery. A latencied frame's WRITE still completes
+    // immediately (bytes left the host); its DELIVERY is held by the
+    // NETWORK as a pending entry (never by a loop object — loop objects may
+    // die before pairs; the pending entry pins the Pair) and fired by the
+    // GlobalScheduler via next_delivery_ms()/deliver_next() in
+    // (arrival, seq) order — seq preserves per-link send order at equal
+    // arrival times. Requires the deterministic drive: under the THREADED
+    // backend latency is IGNORED (frames deliver immediately) — wall-clock
+    // latency is deliberately not modeled.
+    void set_latency(uint32_t min_ms, uint32_t max_ms);
+
+    // Deterministic-drive hooks for delayed deliveries (used by
+    // GlobalScheduler; no production caller). set_virtual_now_ms is the
+    // forward-only lockstep of the NETWORK clock (arrival stamps = network
+    // now + link latency); next_delivery_ms peeks the earliest pending
+    // arrival without delivering; deliver_next delivers exactly the
+    // earliest pending frame (dropped if the destination closed while the
+    // frame was in flight — a packet arriving after FIN).
+    void set_virtual_now_ms(uint64_t now_ms);
+    bool next_delivery_ms(uint64_t& out);
+    void deliver_next();
+
     // Fault-delivery WITNESS totals (inc.9), summed over every link that has
     // ever existed in this network: frames actually dropped by the loss
-    // model, blocked by a partition gate, and duplicated by the dup model.
-    // Test-facing observability only — never read on the delivery path. A
-    // fault phase asserts its fault FIRED (delta across the phase > 0):
-    // without the witness, a silently no-opped fault (a zeroed roll, an
-    // always-open gate) greens the phase vacuously, since a clean network
+    // model, blocked by a partition gate, duplicated by the dup model, and
+    // delayed by the latency model (inc.10). Test-facing observability only
+    // — never read on the delivery path. A fault phase asserts its fault
+    // FIRED (delta across the phase > 0): without the witness, a silently
+    // no-opped fault (a zeroed roll, an always-open gate, a zeroed latency
+    // assignment) greens the phase vacuously, since a clean network
     // trivially satisfies liveness and agreement. Deterministic under the
     // GlobalScheduler drive, so replay can also pin the exact totals.
     struct FaultCounts {
-        uint64_t dropped = 0, blocked = 0, duplicated = 0;
+        uint64_t dropped = 0, blocked = 0, duplicated = 0, delayed = 0;
     };
     FaultCounts fault_counts();
 
@@ -432,6 +462,31 @@ private:
     std::set<int> partition_a_;                        // empty = no partition
     uint32_t      loss_permille_   = 0;                // 0 = lossless
     uint32_t      dup_permille_    = 0;                // 0 = no duplication
+    uint32_t      latency_min_ms_  = 0;                // 0,0 = immediate
+    uint32_t      latency_max_ms_  = 0;
+    // Delayed-delivery state (inc.10). A pending frame pins its Pair via
+    // shared_ptr (Pair is complete only in the .cpp — the dtors that need
+    // it are all defined there). Ordered by (arrival_ms, seq): seq is a
+    // network-global monotonic send counter, so equal-arrival frames — in
+    // particular consecutive frames on ONE link — deliver in send order
+    // (per-connection FIFO). net_now_ms_ is the forward-only network clock
+    // the GlobalScheduler locksteps; arrival = net_now_ms_ + link latency.
+    struct PendingDelivery {
+        std::shared_ptr<VirtualConnection::Pair> pair;
+        int                  to_side = 0;
+        std::vector<uint8_t> bytes;
+    };
+    std::map<std::pair<uint64_t, uint64_t>, PendingDelivery> pending_;
+    uint64_t net_now_ms_   = 0;
+    uint64_t delivery_seq_ = 0;
+    // Called by the write path (holds the owning Pair::mu) to hand off a
+    // latencied frame. Lock order: Pair::mu -> network mu_ is the ALLOWED
+    // direction; deliver_next() therefore pops under mu_ and RELEASES it
+    // before taking Pair::mu (never mu_ -> Pair::mu while holding both).
+    friend class VirtualConnection;
+    void schedule_delivery(std::shared_ptr<VirtualConnection::Pair> pair,
+                           int to_side, const uint8_t* data, std::size_t n,
+                           uint32_t latency_ms);
     uint16_t next_auto_port_   = 30000;   // listen(0) auto-assignment
     uint16_t next_pseudo_port_ = 50000;   // remote_endpoint() pair ids
 };

@@ -49,6 +49,16 @@ public:
     explicit GlobalScheduler(std::vector<VirtualEventLoop*> loops)
         : loops_(std::move(loops)) {}
 
+    // inc.10: attach the cluster's VirtualNetwork so its LATENCIED pending
+    // deliveries participate in global event selection — the scheduler
+    // fires the earliest of {loop virtual timers} ∪ {pending arrivals},
+    // deliveries winning ties (a frame arriving at t is processed before a
+    // timer at t — the "ready work before time advances" spirit extended
+    // to arrivals). With no network attached, or zero configured latency
+    // (no pending entries ever exist), behavior is byte-identical to
+    // before. The network must outlive the scheduler drive.
+    void attach_network(VirtualNetwork* net) { net_ = net; }
+
     // The furthest global logical time (ms) advanced to so far.
     uint64_t now_ms() const { return global_now_ms_; }
     // The accumulated action trace — hash it for the replay signature.
@@ -74,21 +84,35 @@ public:
                 trace_ += ';';
             }
             if (done()) return true;
-            // (b) fire the SINGLE global-earliest virtual timer
+            // (b) fire the SINGLE global-earliest event: a loop virtual
+            // timer, or (inc.10) a pending network delivery — deliveries
+            // win ties.
             std::size_t best_i = kNone;
             uint64_t    best_d = 0, d = 0;
             for (std::size_t i = 0; i < loops_.size(); ++i)
                 if (loops_[i]->next_virtual_deadline_ms(d) &&
                     (best_i == kNone || d < best_d)) { best_d = d; best_i = i; }
-            if (best_i == kNone) return done();   // (c) quiescent
+            bool deliver = false;
+            if (net_ && net_->next_delivery_ms(d) &&
+                (best_i == kNone || d <= best_d)) { best_d = d; deliver = true; }
+            if (best_i == kNone && !deliver) return done();   // (c) quiescent
             global_now_ms_ = best_d;
             for (auto* lp : loops_) lp->set_virtual_now_ms(best_d);
-            trace_ += 'T';
-            trace_ += std::to_string(best_i);
-            trace_ += '@';
-            trace_ += std::to_string(best_d);
-            trace_ += ';';
-            loops_[best_i]->advance_to_next_timer();
+            if (net_) net_->set_virtual_now_ms(best_d);
+            if (deliver) {
+                trace_ += 'N';
+                trace_ += '@';
+                trace_ += std::to_string(best_d);
+                trace_ += ';';
+                net_->deliver_next();
+            } else {
+                trace_ += 'T';
+                trace_ += std::to_string(best_i);
+                trace_ += '@';
+                trace_ += std::to_string(best_d);
+                trace_ += ';';
+                loops_[best_i]->advance_to_next_timer();
+            }
         }
         return done();
     }
@@ -96,6 +120,7 @@ public:
 private:
     static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
     std::vector<VirtualEventLoop*> loops_;
+    VirtualNetwork* net_ = nullptr;
     uint64_t    global_now_ms_ = 0;
     std::string trace_;
 };

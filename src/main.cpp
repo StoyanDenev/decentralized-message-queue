@@ -826,11 +826,13 @@ Additional in-process tests:
                                               Asserts liveness + no-fork agreement +
                                               replay-twice-identical (per-node head/
                                               state_root + block list + action trace)
-  determ test-fa-adversarial-deterministic    inc.5/7: ADVERSARIAL schedules on the
-                                              inc.4 substrate — 10% loss, {4}|{1}
+  determ test-fa-adversarial-deterministic    inc.5/7/10: ADVERSARIAL schedules on
+                                              the inc.4 substrate — 10% loss, {4}|{1}
                                               partition, heal + S-050 valve re-probe,
                                               30% frame duplication (receiver
-                                              redelivery idempotency), ALL hard
+                                              redelivery idempotency), composed
+                                              loss+dup, 5-30ms per-link latency
+                                              (cross-link reorder), ALL hard
                                               gates (loss liveness was non-gating
                                               under wall clocks), an inc.8 per-step
                                               FA monitor at every drain boundary
@@ -29263,7 +29265,9 @@ int main(int argc, char** argv) {
                  dup_witness = false;
             bool combo_live = false, combo_agree = false,
                  combo_witness = false;
-            uint64_t fc_dropped = 0, fc_blocked = 0, fc_duplicated = 0;
+            bool lat_live = false, lat_agree = false, lat_witness = false;
+            uint64_t fc_dropped = 0, fc_blocked = 0, fc_duplicated = 0,
+                     fc_delayed = 0;
             std::vector<std::string> head_hash, state_root;
             std::string trace_hash;
         };
@@ -29365,6 +29369,11 @@ int main(int argc, char** argv) {
                 }
                 return true;
             };
+
+            // inc.10: latencied deliveries are network-held global events;
+            // with zero latency configured nothing is ever pending, so the
+            // attach is byte-neutral to every earlier phase.
+            sched.attach_network(&vnet);
 
             // inc.8: the per-step FA checker rides every done() predicate —
             // read-only, so the schedule + trace hash stay byte-identical.
@@ -29481,9 +29490,29 @@ int main(int argc, char** argv) {
             const auto fc_combo = vnet.fault_counts();
             R.combo_witness = fc_combo.dropped > fc_dup.dropped &&
                               fc_combo.duplicated > fc_dup.duplicated;
-            R.fc_dropped    = fc_combo.dropped;
-            R.fc_blocked    = fc_combo.blocked;
-            R.fc_duplicated = fc_combo.duplicated;
+
+            // ── Phase 6: LATENCY / REORDER (hard gate, inc.10) ───────────
+            // Heterogeneous per-link CONSTANT latency in [5,30] ms: a slow
+            // link's earlier send arrives AFTER a fast link's later send —
+            // cross-link arrival REORDER with per-connection FIFO preserved
+            // (the honest TCP model; per-frame jitter on one link would
+            // violate it). Deliveries are network-held and fired by the
+            // scheduler as global events interleaved with the consensus
+            // round timers.
+            vnet.set_latency(5, 30);
+            uint64_t h_lat0 = 0;
+            for (int i = 0; i < kNodes; ++i)
+                h_lat0 = std::max(h_lat0, height(i));
+            R.lat_live = sched.run_until(
+                [&] { observe_all(); return min_h(0, kNodes) >= h_lat0 + 2; });
+            R.lat_agree = agree_upto(0, kNodes, min_h(0, kNodes) - 2);
+            vnet.set_latency(0, 0);
+            const auto fc_lat = vnet.fault_counts();
+            R.lat_witness   = fc_lat.delayed > fc_combo.delayed;
+            R.fc_dropped    = fc_lat.dropped;
+            R.fc_blocked    = fc_lat.blocked;
+            R.fc_duplicated = fc_lat.duplicated;
+            R.fc_delayed    = fc_lat.delayed;
 
             // inc.8 verdicts: the monitor across the WHOLE schedule + the
             // expect-violation self-test against a live node. Coverage
@@ -29566,30 +29595,38 @@ int main(int argc, char** argv) {
               "drop and 30% dup active simultaneously (interleaved draws on "
               "the shared per-link rng), all 5 nodes byte-agreeing, both "
               "witnesses firing in-phase");
+        check(r1.lat_live && r1.lat_agree && r1.lat_witness,
+              "latency/reorder (inc.10): +2 NEW blocks finalized with "
+              "heterogeneous 5-30ms per-link constant latency (cross-link "
+              "arrival reorder, per-connection FIFO preserved), all 5 nodes "
+              "byte-agreeing, delayed-frames witness firing in-phase");
 
         RunResult r2 = run_once("r2");
         bool replay_eq = r2.loss_live == r1.loss_live &&
                          r2.heal_recovered == r1.heal_recovered &&
                          r2.dup_live == r1.dup_live &&
                          r2.combo_live == r1.combo_live &&
+                         r2.lat_live == r1.lat_live &&
                          r2.mon_clean == r1.mon_clean &&
                          r2.mon_violations == r1.mon_violations &&
                          r2.fc_dropped == r1.fc_dropped &&
                          r2.fc_blocked == r1.fc_blocked &&
                          r2.fc_duplicated == r1.fc_duplicated &&
+                         r2.fc_delayed == r1.fc_delayed &&
                          r1.head_hash == r2.head_hash &&
                          r1.state_root == r2.state_root &&
                          !r1.trace_hash.empty() &&
                          r1.trace_hash == r2.trace_hash;
         check(replay_eq,
               "replay: the ENTIRE adversarial schedule (loss + partition + heal "
-              "+ valve + dup) is byte-identical across two same-seed runs "
-              "(terminal heads, state_roots, scheduler trace hash, exact "
+              "+ valve + dup + latency) is byte-identical across two same-seed "
+              "runs (terminal heads, state_roots, scheduler trace hash, exact "
               "fault-delivery counts)");
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-adversarial-deterministic "
-                  << (fail == 0 ? "all assertions (inc.5/7/8)" : "had failures")
+                  << (fail == 0 ? "all assertions (inc.5/7/8/10)"
+                                : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

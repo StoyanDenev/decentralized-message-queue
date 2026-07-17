@@ -55,9 +55,32 @@ struct VirtualNetwork::LinkFlags {
     std::atomic<uint64_t> n_dropped{0};
     std::atomic<uint64_t> n_blocked{0};
     std::atomic<uint64_t> n_dup{0};
+    std::atomic<uint64_t> n_delayed{0};
+    // Per-link CONSTANT latency (inc.10). Derived from the link's IMMUTABLE
+    // id via splitmix — deliberately NOT a fault-rng draw, so enabling
+    // latency never perturbs the drop/dup draw streams (byte-invariance of
+    // the other fault models) and assigning it to EXISTING links from the
+    // harness thread races nothing (no rng touch outside Pair::mu).
+    std::atomic<uint32_t> latency_ms{0};
+    // Back-pointer for the delayed-delivery handoff; the network outlives
+    // every transport (documented ctor contract), and pending entries pin
+    // the Pair — never the reverse — so there is no cycle and no dangle.
+    VirtualNetwork* net = nullptr;
     int      group0 = 0;   // accept-side group  (immutable)
     int      group1 = 0;   // connect-side group (immutable)
+    uint64_t link_id = 0;  // the pseudo port; immutable latency-draw identity
     uint64_t rng    = 0;   // xorshift64 state; advanced under owning Pair::mu
+
+    // The id-derived constant latency for a [min,max] configuration.
+    static uint32_t latency_for(uint64_t id, uint32_t min_ms, uint32_t max_ms) {
+        if (max_ms == 0 || max_ms < min_ms) return 0;
+        uint64_t z = id + 0x9E3779B97F4A7C15ull;         // splitmix64
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        const uint64_t span = static_cast<uint64_t>(max_ms - min_ms) + 1;
+        return min_ms + static_cast<uint32_t>(z % span);
+    }
 
     // Advance the per-link RNG (caller holds the owning Pair::mu) and decide
     // whether THIS frame is dropped by the loss model. Never a fixed point:
@@ -481,15 +504,30 @@ void VirtualConnection::async_write(const void* buf, std::size_t n, IoCb cb) {
         return;
     }
     const uint8_t* p = static_cast<const uint8_t*>(buf);
-    peer.inbox.insert(peer.inbox.end(), p, p + n);
     // Fault model: a duplicated frame lands in the inbox TWICE back-to-back
     // (whole-frame granularity ⇒ the receiver reads the same complete Peer
     // message a second time — the S-047 redelivery class; see set_dup).
-    // Only delivered frames roll: a dropped frame was never sent twice.
-    if (P.link && P.link->roll_dup()) {
-        P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
-        peer.inbox.insert(peer.inbox.end(), p, p + n);
+    // Only delivered frames roll: a dropped frame was never sent twice. The
+    // roll happens HERE regardless of latency so the per-link draw stream
+    // is identical with and without the latency model.
+    const bool dup = P.link && P.link->roll_dup();
+    if (dup) P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t lat =
+        P.link ? P.link->latency_ms.load(std::memory_order_relaxed) : 0;
+    if (lat > 0 && P.link->net) {
+        // inc.10: the frame is held by the NETWORK until its arrival time;
+        // the write still completes NOW (bytes left the host). A dup copy
+        // shares the arrival and lands back-to-back (consecutive seq), the
+        // same shape as the immediate path.
+        P.link->n_delayed.fetch_add(1, std::memory_order_relaxed);
+        P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
+        if (dup)
+            P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
+        me.loop->post([cb = std::move(cb), n] { cb({}, n); });
+        return;
     }
+    peer.inbox.insert(peer.inbox.end(), p, p + n);
+    if (dup) peer.inbox.insert(peer.inbox.end(), p, p + n);
     // Whole-span completion first, then the peer's now-satisfiable parked
     // read — a fixed post order so single-threaded loops trace
     // deterministically.
@@ -555,14 +593,25 @@ bool VirtualConnection::write_all(const void* buf, std::size_t n) {
         return true;
     }
     const uint8_t* p = static_cast<const uint8_t*>(buf);
-    peer.inbox.insert(peer.inbox.end(), p, p + n);
-    // Duplication parity with async_write (sync consumers are off the gossip
-    // path; kept so a future sync consumer under fault injection behaves
-    // consistently).
-    if (P.link && P.link->roll_dup()) {
-        P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
-        peer.inbox.insert(peer.inbox.end(), p, p + n);
+    // Duplication + latency parity with async_write (sync consumers are off
+    // the gossip path; kept so a future sync consumer under fault injection
+    // behaves consistently). NOTE: a latencied sync frame delivers only
+    // when the deterministic drive fires it — a sync reader blocking in
+    // read_line under the threaded model would wait forever, which is why
+    // latency is a deterministic-drive-only knob.
+    const bool dup = P.link && P.link->roll_dup();
+    if (dup) P.link->n_dup.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t lat =
+        P.link ? P.link->latency_ms.load(std::memory_order_relaxed) : 0;
+    if (lat > 0 && P.link->net) {
+        P.link->n_delayed.fetch_add(1, std::memory_order_relaxed);
+        P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
+        if (dup)
+            P.link->net->schedule_delivery(pair_, 1 - side_, p, n, lat);
+        return true;
     }
+    peer.inbox.insert(peer.inbox.end(), p, p + n);
+    if (dup) peer.inbox.insert(peer.inbox.end(), p, p + n);
     deliver_locked(P, peer);
     return true;
 }
@@ -749,6 +798,11 @@ VirtualNetwork::make_pair_locked(
     lf->group1 = connect_group;
     lf->drop_permille.store(loss_permille_, std::memory_order_relaxed);
     lf->dup_permille.store(dup_permille_, std::memory_order_relaxed);
+    lf->net     = this;
+    lf->link_id = pseudo;
+    lf->latency_ms.store(
+        LinkFlags::latency_for(pseudo, latency_min_ms_, latency_max_ms_),
+        std::memory_order_relaxed);
     lf->rng = (static_cast<uint64_t>(pseudo) << 1) | 1ull;
     if (link_blocked_locked(accept_group, connect_group)) {
         lf->ab.store(false, std::memory_order_relaxed);
@@ -775,8 +829,71 @@ VirtualNetwork::FaultCounts VirtualNetwork::fault_counts() {
         fc.dropped    += lf->n_dropped.load(std::memory_order_relaxed);
         fc.blocked    += lf->n_blocked.load(std::memory_order_relaxed);
         fc.duplicated += lf->n_dup.load(std::memory_order_relaxed);
+        fc.delayed    += lf->n_delayed.load(std::memory_order_relaxed);
     }
     return fc;
+}
+
+void VirtualNetwork::set_latency(uint32_t min_ms, uint32_t max_ms) {
+    std::lock_guard<std::mutex> lk(mu_);
+    latency_min_ms_ = min_ms;
+    latency_max_ms_ = max_ms;
+    // Assign each existing link its id-derived constant. No rng touch, no
+    // Pair::mu needed — the atomics are the only cross-thread surface.
+    for (auto& lf : links_)
+        lf->latency_ms.store(
+            LinkFlags::latency_for(lf->link_id, min_ms, max_ms),
+            std::memory_order_relaxed);
+}
+
+void VirtualNetwork::schedule_delivery(
+    std::shared_ptr<VirtualConnection::Pair> pair, int to_side,
+    const uint8_t* data, std::size_t n, uint32_t latency_ms) {
+    // Caller holds the owning Pair::mu (the allowed Pair::mu -> mu_ order).
+    std::lock_guard<std::mutex> lk(mu_);
+    PendingDelivery d;
+    d.pair    = std::move(pair);
+    d.to_side = to_side;
+    d.bytes.assign(data, data + n);
+    pending_.emplace(std::make_pair(net_now_ms_ + latency_ms,
+                                    delivery_seq_++),
+                     std::move(d));
+}
+
+void VirtualNetwork::set_virtual_now_ms(uint64_t now_ms) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (now_ms > net_now_ms_) net_now_ms_ = now_ms;
+}
+
+bool VirtualNetwork::next_delivery_ms(uint64_t& out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (pending_.empty()) return false;
+    out = pending_.begin()->first.first;
+    return true;
+}
+
+void VirtualNetwork::deliver_next() {
+    // Pop under mu_, then RELEASE it before taking Pair::mu — taking both
+    // would establish mu_ -> Pair::mu against the write path's
+    // Pair::mu -> mu_ (schedule_delivery) and ABBA-deadlock the threaded
+    // model; the pop-then-release discipline keeps the order one-way.
+    PendingDelivery d;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (pending_.empty()) return;
+        auto it = pending_.begin();
+        d = std::move(it->second);
+        pending_.erase(it);
+    }
+    VirtualConnection::Pair& P = *d.pair;
+    std::lock_guard<std::mutex> lk(P.mu);
+    VirtualConnection::Pair::Side& s = P.side[d.to_side];
+    // A frame arriving after the destination closed is a packet after FIN —
+    // silently discarded, exactly like the immediate path's send-time
+    // peer.closed check, just evaluated at ARRIVAL time.
+    if (s.closed) return;
+    s.inbox.insert(s.inbox.end(), d.bytes.begin(), d.bytes.end());
+    deliver_locked(P, s);
 }
 
 void VirtualNetwork::set_dup(uint32_t permille) {
