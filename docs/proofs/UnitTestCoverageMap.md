@@ -30,7 +30,7 @@ paths:
 | # | Option | Status (in-session) |
 |---|---|---|
 | 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 152 in-process `determ test-*` subcommands; continues incrementally |
-| 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`) + **increments 1-7 shipped** (self-contained `sim/` core + `determ-dsf` + 41 baked scenarios incl. the §Q5 generator's THREE templates (broadcast + agreement + ratchet) + the inc-5 §Q5/§Q6 `--generate N --seed S [--template broadcast\|agree\|ratchet]` CLI for reproducible `gen_run_NN` variants, `tools/test_dsf_{core,inc2,inc3,inc4,inc5,inc6,inc7}.sh`); §Q1/§Q2 consensus-injection + FA4 wiring pending |
+| 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`) + **increments 1-8 shipped** (self-contained `sim/` core + `determ-dsf` + 48 baked scenarios incl. the §Q5 generator's FOUR templates (broadcast + agreement + ratchet + quorum) + the inc-5 §Q5/§Q6 `--generate N --seed S [--template broadcast\|agree\|ratchet\|quorum]` CLI for reproducible `gen_run_NN` variants, `tools/test_dsf_{core,inc2,inc3,inc4,inc5,inc6,inc7,inc8}.sh`); §Q1/§Q2 consensus-injection + FA4 wiring pending |
 | 3 | Path portability (`tools/common.sh`) | ✅ shipped |
 
 **Closure goal for Option 1.** Every FA-track theorem AND every S-* closure
@@ -525,11 +525,11 @@ randomized Byzantine actors over many traces and asserting the
 trace-level properties hold.
 
 **Resolution.** Option 2 (DSF) is spec-resolved at
-`docs/proofs/DSF-SPEC.md` **and its framework has shipped (increments 1-6:
-the self-contained `sim/` core + 41 baked scenarios incl. the §Q5 generator's
-three templates (broadcast + agreement + ratchet) + the inc-5 §Q5/§Q6 `--generate N --seed S
+`docs/proofs/DSF-SPEC.md` **and its framework has shipped (increments 1-8:
+the self-contained `sim/` core + 48 baked scenarios incl. the §Q5 generator's
+four templates (broadcast + agreement + ratchet + quorum) + the inc-5 §Q5/§Q6 `--generate N --seed S
 [--template]` reproducible-variant CLI).** It is the canonical
-extension for trace-level properties. NOTE: the increment-1-6 DSF scenarios run
+extension for trace-level properties. NOTE: the increment-1-8 DSF scenarios run
 a TOY model, not the real consensus engine. **The real-engine closure path is now
 DECIDED and STARTED (owner 2026-07-07: "keep DSF self-contained"):** rather than
 link the real engine into determ-dsf, the multi-block randomized-Byzantine
