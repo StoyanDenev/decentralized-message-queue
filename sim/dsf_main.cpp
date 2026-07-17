@@ -74,7 +74,7 @@ void print_usage() {
         "  determ-dsf --list\n"
         "  determ-dsf --scenario <name> [--seed <hex|dec>] "
         "[--trace <path|-|off>] [--max-events N] [--quiet]\n"
-        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon] --list\n"
+        "  determ-dsf --generate N [--seed <hex|dec>] [--template broadcast|agree|ratchet|quorum|conserve|recon|crashrec] --list\n"
         "                                 (register + list/run N seed-driven variants)\n"
         "\n"
         "Same --scenario + --seed => byte-identical trace. Re-run the printed\n"
@@ -104,6 +104,9 @@ int main(int argc, char** argv) {
     register_generated_scenarios(scenarios, 0x6E8B29ull, 6,   // increment-10 §Q5 6th template (F2 view reconciliation)
                                  "gen_recon", true,
                                  determ::sim::GenTemplate::Reconcile);
+    register_generated_scenarios(scenarios, 0x7F44D3ull, 6,   // increment-11 §Q5 7th template (crash/recover replay)
+                                 "gen_crashrec", true,
+                                 determ::sim::GenTemplate::CrashRecover);
 
     std::string scenario_name;
     std::string trace_path = "off";     // default: no trace file
@@ -165,6 +168,8 @@ int main(int argc, char** argv) {
           : (template_name == "recon" || template_name == "reconcile"
              || template_name == "reconciliation")
                 ? determ::sim::GenTemplate::Reconcile
+          : (template_name == "crashrec" || template_name == "crashrecover")
+                ? determ::sim::GenTemplate::CrashRecover
                 : determ::sim::GenTemplate::Broadcast;
         register_generated_scenarios(scenarios, seed,
                                      static_cast<int>(generate_count),

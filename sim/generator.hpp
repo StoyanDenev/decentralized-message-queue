@@ -765,16 +765,168 @@ inline Scenario make_reconcile_variant(int idx, const GenParams& p,
     return s;
 }
 
+// ── Increment 11: a SEVENTH generator template — CRASH/RECOVER replay ──
+//
+// The §Q7 crash-recovery family — the first generated template to exercise
+// the simulator's crash/recover seam (Node::alive; deliveries to a crashed
+// node are dropped, its kv PERSISTS). Because state persists, the HONEST
+// recovery procedure is to do NOTHING: a monotone-max follower that missed
+// messages while down is healed by the leader's re-flood, exactly like a
+// transient drop burst. The real-world bug class this template targets is
+// the NON-IDEMPOTENT RECOVERY REPLAY: a node that re-applies its pre-crash
+// journal ON TOP of already-persisted state after restart. Every follower
+// crashes and recovers on a DETERMINISTIC schedule (a function of its index,
+// consuming no PRNG — generation stays byte-stable and the crash path is
+// non-vacuous by construction), layered under the drawn drop/dup/latency/
+// jitter profile. `correct` controls the recovery procedure: true = honest
+// (persisted state stands, nothing replayed); false = the planted bug used
+// by the self-test — at crash the follower snapshots its count, at recovery
+// it ADDS the snapshot back (`count += saved`, the classic redo-log
+// double-apply), driving count above the issued total:
+// `crashrec_no_replay` MUST fire.
+inline Scenario make_crashrec_variant(int idx, const GenParams& p,
+                                      bool correct, bool self_test,
+                                      const char* name_prefix = "gen_crashrec") {
+    Scenario s;
+    char nm[48];
+    if (self_test) std::snprintf(nm, sizeof(nm), "gen_replay_selftest");
+    else           std::snprintf(nm, sizeof(nm), "%s_%02d", name_prefix, idx);
+    s.name = nm;
+    s.description = (self_test
+        ? std::string("SELF-TEST: a follower's recovery procedure re-applies "
+                      "its pre-crash journal ON TOP of persisted state "
+                      "(count += saved, a non-idempotent redo-log replay), "
+                      "driving the count above the issued total. "
+                      "crashrec_no_replay MUST fire. ")
+        : std::string("generated crash/recover replay variant — ")) +
+        gen_params_str(p);
+    s.expect_violation = self_test;
+
+    s.setup = [p](Simulator& sim) {
+        sim.add_node("leader");
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.add_node(f, [&sim, f](const Message& m) {
+                if (m.kind != "SET") return;
+                Node& self = sim.state().nodes[f];
+                const int64_t v = static_cast<int64_t>(m.payload);
+                if (v > self.kv["count"]) self.kv["count"] = v;   // monotone max
+            });
+        }
+        sim.net().set_base_latency(p.base_latency);
+        sim.net().set_jitter(p.jitter);
+        sim.net().set_drop_rate(p.drop);
+        sim.net().set_dup_rate(p.dup);
+        sim.state().scalars["issued"]     = 0;
+        sim.state().scalars["crashes"]    = 0;
+        sim.state().scalars["recoveries"] = 0;
+        const int followers = p.followers;
+
+        // SAFETY: no follower's count ever exceeds the issued total — the
+        // replay bug pushes a recovered follower's count above it.
+        sim.props().add("crashrec_no_replay", PropKind::SAFETY,
+            [](const SimState& st, std::string* d) {
+                const int64_t issued = st.scalars.count("issued")
+                                       ? st.scalars.at("issued") : 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    auto it = n.kv.find("count");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c > issued) {
+                        if (d) *d = id + " count=" + std::to_string(c) +
+                                    " > issued=" + std::to_string(issued) +
+                                    " (recovery replay)";
+                        return false;
+                    }
+                }
+                return true;
+            });
+        // LIVENESS: every follower crashed once, recovered once, AND still
+        // converged to the final issued total (the re-flood healed the gap).
+        sim.props().add("crashrec_all_converged", PropKind::LIVENESS,
+            [followers](const SimState& st, std::string* d) {
+                const int64_t issued = st.scalars.count("issued")
+                                       ? st.scalars.at("issued") : 0;
+                const int64_t cr = st.scalars.count("crashes")
+                                   ? st.scalars.at("crashes") : 0;
+                const int64_t rc = st.scalars.count("recoveries")
+                                   ? st.scalars.at("recoveries") : 0;
+                if (cr != followers || rc != followers) {
+                    if (d) *d = "crash path vacuous: crashes=" +
+                                std::to_string(cr) + " recoveries=" +
+                                std::to_string(rc) + " != followers=" +
+                                std::to_string(followers);
+                    return false;
+                }
+                int seen = 0;
+                for (const auto& [id, n] : st.nodes) {
+                    if (id == "leader") continue;
+                    ++seen;
+                    auto it = n.kv.find("count");
+                    const int64_t c = it == n.kv.end() ? 0 : it->second;
+                    if (c != issued) {
+                        if (d) *d = id + " count=" + std::to_string(c) +
+                                    " != issued=" + std::to_string(issued);
+                        return false;
+                    }
+                }
+                return seen == followers;
+            });
+    };
+
+    s.run = [p, correct](Simulator& sim) {
+        // Issue 5 increments (issued reaches 5 by 100ms).
+        for (int i = 0; i < 5; ++i)
+            sim.after(vt_ms(20 * (i + 1)),
+                      [&sim]() { sim.state().scalars["issued"] += 1; });
+        // Deterministic staggered crash/recover schedule (no PRNG): follower
+        // i is down for vt [110+30i, 230+30i) ms. Worst-case recovery is
+        // 320ms; the re-flood runs to 1000ms, so a recovered follower has
+        // >= 27 heal attempts even at drop=0.5.
+        for (int i = 0; i < p.followers; ++i) {
+            const std::string f = "f" + std::to_string(i);
+            sim.after(vt_ms(110 + 30 * i), [&sim, f, correct]() {
+                Node& n = sim.state().nodes[f];
+                if (!correct) n.kv["saved"] = n.kv["count"];  // journal snapshot
+                sim.crash(f);
+                sim.state().scalars["crashes"] += 1;
+            });
+            sim.after(vt_ms(230 + 30 * i), [&sim, f, correct]() {
+                sim.recover(f);
+                sim.state().scalars["recoveries"] += 1;
+                if (!correct) {
+                    // BUG: non-idempotent redo-log replay on restart — the
+                    // journal is re-applied ON TOP of the persisted state.
+                    Node& n = sim.state().nodes[f];
+                    n.kv["count"] += n.kv["saved"];
+                }
+            });
+        }
+        // Re-flood the current issued total 40x (every 25ms) — heals every
+        // recovered follower; harmless to an idempotent monotone-max apply.
+        for (int t = 0; t < 40; ++t)
+            sim.after(vt_ms(25 * (t + 1)), [&sim, p]() {
+                const int64_t total = sim.state().scalars["issued"];
+                for (int i = 0; i < p.followers; ++i)
+                    sim.send("leader", "f" + std::to_string(i), "SET",
+                             static_cast<uint64_t>(total));
+            });
+    };
+    s.check = [](Simulator&) {};
+    return s;
+}
+
 // The generator's template catalogue. Broadcast = §Q7 reliable-broadcast
 // (no-overcount + convergence); Agreement = §Q7 equivocation/partition
 // (no-split + decide); Ratchet = §Q7 BFT-escalation/commit-index
 // (no-regress + advance); Quorum = §Q7 quorum/threshold-commit
 // (no-early-commit + reaches-quorum); Conservation = §Q7 cross-shard
 // receipt conservation (no-double-credit + all-credited); Reconcile = §Q7
-// F2 view reconciliation (no-phantom + complete-merge). All draw the SAME
-// randomized fault profiles.
+// F2 view reconciliation (no-phantom + complete-merge); CrashRecover = §Q7
+// crash-recovery replay (no-replay + converge-after-recovery). All draw the
+// SAME randomized fault profiles.
 enum class GenTemplate { Broadcast, Agreement, Ratchet, Quorum, Conservation,
-                         Reconcile };
+                         Reconcile, CrashRecover };
 
 inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
                              bool correct, bool self_test, const char* prefix) {
@@ -789,6 +941,8 @@ inline Scenario make_variant(GenTemplate tmpl, int idx, const GenParams& p,
             return make_conservation_variant(idx, p, correct, self_test, prefix);
         case GenTemplate::Reconcile:
             return make_reconcile_variant(idx, p, correct, self_test, prefix);
+        case GenTemplate::CrashRecover:
+            return make_crashrec_variant(idx, p, correct, self_test, prefix);
         default:
             return make_broadcast_variant(idx, p, correct, self_test, prefix);
     }
@@ -824,6 +978,8 @@ inline void register_generated_scenarios(std::vector<Scenario>& out,
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // dup everything; raw counting credits the first re-delivery
     } else if (tmpl == GenTemplate::Reconcile) {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the fabricated phantom entry is the bug
+    } else if (tmpl == GenTemplate::CrashRecover) {
+        bug.followers = 2; bug.drop = 0.0; bug.dup = 0.0;   // clean delivery; the recovery replay double-apply is the bug
     } else {
         bug.followers = 2; bug.drop = 0.0; bug.dup = 1.0;   // duplicate everything
     }
