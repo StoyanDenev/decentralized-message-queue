@@ -122,13 +122,23 @@ void Peer::do_write() {
     auto self = shared_from_this();
     conn_->async_write(write_queue_.front().data(), write_queue_.front().size(),
         [self](std::error_code ec, size_t) {
-            std::lock_guard<std::mutex> lock(self->write_mutex_);
-            self->write_queue_.pop_front();
-            if (ec) {
-                if (self->on_close_) self->on_close_(self);
-                return;
+            // on_close_ is invoked with NO lock held (the read path's
+            // discipline): it runs GossipNet::handle_peer_closed, which takes
+            // peers_mutex_, while broadcast/send_to_domain hold peers_mutex_
+            // across Peer::send (which takes write_mutex_) — invoking it
+            // under write_mutex_ inverts that order and can ABBA-deadlock a
+            // failed write to a dying peer against a concurrent broadcast
+            // (adversarial-review finding; threaded paths only). on_close_
+            // is set once in start() before any I/O, so the unlocked read
+            // is safe, exactly as in read_header/read_body.
+            bool failed = false;
+            {
+                std::lock_guard<std::mutex> lock(self->write_mutex_);
+                self->write_queue_.pop_front();
+                if (ec) failed = true;
+                else if (!self->write_queue_.empty()) self->do_write();
             }
-            if (!self->write_queue_.empty()) self->do_write();
+            if (failed && self->on_close_) self->on_close_(self);
         });
 }
 
