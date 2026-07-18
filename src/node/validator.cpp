@@ -8,6 +8,7 @@
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 SHIELD / §3.22b UNSHIELD accept-rules
 #include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
+#include <determ/chain/ctx_enote.hpp>           // NC-8 §5 enote-region split/parse (shared mirror)
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/keys.hpp>
@@ -1251,12 +1252,21 @@ BlockValidator::Result BlockValidator::check_transactions(
             // pool, so no tx.to / cross-shard concern.
             const uint8_t* b = tx.payload.data();
             size_t blen = tx.payload.size();
+            // NC-8 §5 (inc.2): split off the OPTIONAL trailing per-output enote
+            // region before the frozen bundle verifiers (which demand an EXACT
+            // length). STRUCTURE ONLY — a malformed frame rejects, but ciphertext
+            // content is never inspected (consensus-inert). Absent region →
+            // bundle_len == blen → identical to a pre-NC-8 accept path. This is the
+            // authoritative mirror of the chain-apply split (chain::ctx_split_enotes).
+            size_t bundle_len = 0;
+            if (ctx_split_enotes(b, blen, &bundle_len, nullptr) != 0)
+                return {false, "CONFIDENTIAL_TRANSFER malformed DCT1 bundle or enote region"};
             size_t n_in = 0, m = 0, nbits = 0; uint64_t bundle_fee = 0;
-            if (determ_ctx_bundle_header(b, blen, &n_in, &m, &nbits, &bundle_fee) != 0)
+            if (determ_ctx_bundle_header(b, bundle_len, &n_in, &m, &nbits, &bundle_fee) != 0)
                 return {false, "CONFIDENTIAL_TRANSFER malformed DCT1 bundle header"};
             if (tx.fee != bundle_fee)
                 return {false, "CONFIDENTIAL_TRANSFER tx.fee must equal the bundle's public fee"};
-            if (determ_ctx_bundle_verify(b, blen) != 0)
+            if (determ_ctx_bundle_verify(b, bundle_len) != 0)
                 return {false, "CONFIDENTIAL_TRANSFER bundle proof invalid (range/balance)"};
             const uint8_t* Cin = b + 15;
             std::set<std::string> seen;

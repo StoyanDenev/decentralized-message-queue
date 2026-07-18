@@ -558,6 +558,10 @@ public:
     bool     shielded_note_exists(const std::string& commitment_hex) const {
         return shielded_pool_.count(commitment_hex) != 0;
     }
+    // NC-8 §5: number of `en:` delivery commitments (MODERN only; 0 on FIPS or
+    // any enote-free chain). Test/RPC surface; the trustless path is the "en:"
+    // leaf via state_proof.
+    size_t   enote_commitment_count() const { return enote_commitments_.size(); }
     // A2 audit layer reads (RPC/test surface; the trustless path is the
     // "ak:"/"al:" leaves via state_proof).
     std::optional<std::string> audit_key(const std::string& addr) const {
@@ -732,6 +736,18 @@ private:
     // (additive: zero state-root leaves). Lazy-snapshotted (most blocks don't
     // touch it).
     std::map<std::string, uint64_t>             shielded_pool_;
+
+    // NC-8 §5 (wiring inc.2, MODERN profile only): per-output encrypted-note
+    // delivery commitments. key = hex(output commitment) (a subset of the
+    // shielded_pool_ keys — one entry per CONFIDENTIAL_TRANSFER output that
+    // carried an enote); value = SHA256(commitment_bytes || enote_wire_bytes),
+    // the `en:` state leaf value that lets a light client trustlessly prove an
+    // enote's inclusion. Populated ONLY on a MODERN chain (a FIPS chain keeps
+    // the ciphertext in the tx payload, block-hash-bound, so this stays empty);
+    // an entry is erased when its note is spent, so en: ⊆ cn:. Empty on any
+    // chain with no CONFIDENTIAL_TRANSFER enotes (additive: zero state-root
+    // leaves → byte-identical). Lazy-snapshotted alongside shielded_pool_.
+    std::map<std::string, Hash>                 enote_commitments_;
 
     // A2 audit layer. audit_keys_: addr -> lowercase hex of the account's
     // standing 32-byte audit view-master pubkey (set/rotated/cleared by
@@ -937,6 +953,7 @@ private:
         std::optional<CommitteeCheckpointMap>               committee_checkpoints; // D3.3a (lazy)
         std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
         std::optional<std::map<std::string, uint64_t>>      shielded_pool;   // §3.22 (lazy)
+        std::optional<std::map<std::string, Hash>>          enote_commitments; // NC-8 §5 (lazy)
         std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)
         std::optional<std::map<std::string, uint64_t>>      audit_log_count; // A2 (lazy)
         std::map<uint64_t,

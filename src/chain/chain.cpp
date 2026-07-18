@@ -10,6 +10,7 @@
 #include <determ/crypto/merkle.hpp>
 #include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify / determ_unshield_verify
 #include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
+#include <determ/chain/ctx_enote.hpp>           // NC-8 §5 enote-region split/parse (shared mirror)
 #include <determ/util/json_validate.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -512,6 +513,18 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         leaves.push_back({k_with_prefix("cn:", key), hash_bytes(b)});
     }
 
+    // NC-8 §5 (wiring inc.2, 2b): per-output encrypted-note delivery leaves
+    // ("en:" + hex(output commitment)): value = SHA256(commitment_bytes ||
+    // enote_wire_bytes), precomputed at apply and stored directly (binds the
+    // ciphertext to the note it delivers AND, via the leaf key, to that
+    // commitment). std::map iteration is sorted → deterministic leaf order.
+    // Populated ONLY on a MODERN chain (FIPS keeps the ciphertext payload-only,
+    // block-hash-bound); empty (no leaves) on any chain without an enote-bearing
+    // CONFIDENTIAL_TRANSFER → byte-identical to a pre-NC-8 chain.
+    for (auto& [key, value] : enote_commitments_) {
+        leaves.push_back({k_with_prefix("en:", key), value});
+    }
+
     // A2 standing audit keys ("ak:" + addr): value = SHA256(pubkey_bytes).
     // Emitted only while a key is SET (ROTATE_AUDIT_KEY clear removes the
     // leaf), so an audit-free chain's state root is byte-identical.
@@ -746,6 +759,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         dapp_registry_          = std::move(*s.dapp_registry);
     if (s.shielded_pool)
         shielded_pool_          = std::move(*s.shielded_pool);   // §3.22 (lazy)
+    if (s.enote_commitments)
+        enote_commitments_      = std::move(*s.enote_commitments); // NC-8 §5 (lazy)
     if (s.audit_keys)
         audit_keys_             = std::move(*s.audit_keys);      // A2 (lazy)
     if (s.audit_log_count)
@@ -838,6 +853,10 @@ void Chain::apply_transactions(const Block& b) {
     auto __ensure_shielded_pool = [&]() {          // §3.22 (lazy)
         if (!__snapshot.shielded_pool)
             __snapshot.shielded_pool = shielded_pool_;
+    };
+    auto __ensure_enote_commitments = [&]() {      // NC-8 §5 (lazy)
+        if (!__snapshot.enote_commitments)
+            __snapshot.enote_commitments = enote_commitments_;
     };
     auto __ensure_audit_keys = [&]() {             // A2 (lazy)
         if (!__snapshot.audit_keys)
@@ -1035,6 +1054,12 @@ void Chain::apply_transactions(const Block& b) {
             // but is NOT a general underflow catch; the binding + checked debit are
             // the real guarantee, not A1.)
             shielded_pool_.erase(note);
+            // NC-8 §5 (inc.2): a spent note's `en:` delivery leaf is stale — drop
+            // it so en: ⊆ cn: stays bounded (no-op on FIPS / enote-free notes).
+            if (enote_commitments_.count(ckey)) {
+                __ensure_enote_commitments();
+                enote_commitments_.erase(ckey);
+            }
             accumulated_shielded_ -= A;
             uint64_t credit = A - tx.fee;
             auto& rcv = accounts_[tx.to].balance;
@@ -1060,10 +1085,18 @@ void Chain::apply_transactions(const Block& b) {
             // UNSHIELD). Belt-and-suspenders re-verify; skip on any failure.
             const uint8_t* b = tx.payload.data();
             size_t blen = tx.payload.size();
+            // NC-8 §5 (inc.2): split off an OPTIONAL trailing per-output enote
+            // region before the frozen bundle verifiers (which demand an EXACT
+            // length). The region is CONSENSUS-INERT — a malformed FRAME skips the
+            // tx (mirrors the validator), but ciphertext content is never inspected
+            // here. Absent region → bundle_len == blen → byte-identical to pre-NC-8.
+            size_t bundle_len = 0;
+            std::vector<CtxEnote> enotes;
+            if (ctx_split_enotes(b, blen, &bundle_len, &enotes) != 0) continue;
             size_t n_in = 0, m = 0, nbits = 0; uint64_t bundle_fee = 0;
-            if (determ_ctx_bundle_header(b, blen, &n_in, &m, &nbits, &bundle_fee) != 0) continue;
+            if (determ_ctx_bundle_header(b, bundle_len, &n_in, &m, &nbits, &bundle_fee) != 0) continue;
             if (tx.fee != bundle_fee) continue;                 // public fee must match tx.fee
-            if (determ_ctx_bundle_verify(b, blen) != 0) continue;   // range + balance
+            if (determ_ctx_bundle_verify(b, bundle_len) != 0) continue;   // range + balance
             const uint8_t* Cin  = b + 15;
             const uint8_t* Cout = b + 15 + n_in * 33;
             __ensure_shielded_pool();
@@ -1087,6 +1120,31 @@ void Chain::apply_transactions(const Block& b) {
             if (!ok) continue;   // missing/duplicate input, or output collision
             for (auto& k : in_keys)  shielded_pool_.erase(k);
             for (auto& k : out_keys) shielded_pool_[k] = height;
+            // NC-8 §5 (inc.2): profile-keyed enote commit. A spent input's stale
+            // `en:` entry is always dropped (en: ⊆ cn: stays bounded). On a MODERN
+            // chain each delivered ciphertext becomes an `en:` state leaf keyed by
+            // its output commitment (light-client-provable) with value =
+            // SHA256(commitment_bytes || enote_wire_bytes). On a FIPS chain no
+            // leaf is written — the ciphertext rides the tx payload, block-hash-
+            // bound (2a). The enote is CONSENSUS-INERT: it never touched the
+            // balance/dedup math above and never gates acceptance.
+            for (auto& k : in_keys) {
+                if (enote_commitments_.count(k)) {
+                    __ensure_enote_commitments();
+                    enote_commitments_.erase(k);
+                }
+            }
+            if (crypto_profile_ == CryptoProfile::MODERN && !enotes.empty()) {
+                __ensure_enote_commitments();
+                for (auto& e : enotes) {
+                    const std::string& okey = out_keys[e.output_index]; // idx < m (validated)
+                    crypto::SHA256Builder hb;
+                    std::vector<uint8_t> cb = from_hex(okey);
+                    hb.append(cb.data(), cb.size());
+                    hb.append(e.bytes.data(), e.bytes.size());
+                    enote_commitments_[okey] = hb.finalize();
+                }
+            }
             // Pedersen binding: Σv_in (== the consumed notes' shield values) =
             // Σv_out + fee >= fee, and every consumed note was credited into
             // accumulated_shielded_ at its S-049-checked SHIELD, so
@@ -2126,6 +2184,15 @@ json Chain::serialize_state(uint32_t header_count) const {
         for (auto& [k, h] : shielded_pool_) cn.push_back({{"c", k}, {"h", h}});
         snap["shielded_pool"] = cn;
     }
+    // NC-8 §5 (inc.2): per-output enote delivery commitments. Serialized only
+    // when non-empty (a FIPS or enote-free chain omits the key entirely → the
+    // snapshot JSON is byte-identical). v = hex of the 32-byte en: leaf value.
+    if (!enote_commitments_.empty()) {
+        json en = json::array();
+        for (auto& [k, v] : enote_commitments_)
+            en.push_back({{"c", k}, {"v", to_hex(v.data(), v.size())}});
+        snap["enote_commitments"] = en;
+    }
 
     // A2: same conditional-emission discipline — an audit-free chain's
     // snapshot JSON stays byte-identical to a pre-A2 one.
@@ -2321,6 +2388,10 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     if (snap.contains("shielded_pool") && snap["shielded_pool"].is_array())
         for (auto& e : snap["shielded_pool"])
             c.shielded_pool_[e.value("c", std::string{})] = e.value("h", uint64_t{0});
+    if (snap.contains("enote_commitments") && snap["enote_commitments"].is_array())   // NC-8 §5
+        for (auto& e : snap["enote_commitments"])
+            c.enote_commitments_[e.value("c", std::string{})] =
+                from_hex_arr<32>(e.value("v", std::string{}));
     if (snap.contains("audit_keys") && snap["audit_keys"].is_array())        // A2
         for (auto& e : snap["audit_keys"])
             c.audit_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});

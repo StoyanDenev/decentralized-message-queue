@@ -15,6 +15,7 @@
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
 #include <determ/crypto/viewkey/viewkey.h> // §3.24 A1 per-epoch view-key derivation
 #include <determ/crypto/enote/enote.h>     // NC-8 encrypted-note delivery (shielded Option A)
+#include <determ/chain/ctx_enote.hpp>      // NC-8 §5 enote-region split/parse (wiring inc.2)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
@@ -794,6 +795,10 @@ Additional in-process tests:
                                               pinned CryptoProfile: MODERN
                                               byte-neutral, FIPS diverges
                                               state_root + genesis hash
+  determ test-ctx-enote                       NC-8 wiring inc.2 — CONFIDENTIAL_
+                                              TRANSFER enote region: MODERN en:
+                                              state leaf / FIPS payload-only;
+                                              consensus-inert; shared mirror
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -42730,6 +42735,246 @@ int main(int argc, char** argv) {
         std::cout << (fail ? "  FAIL: test-unshield\n" : "  PASS: test-unshield\n");
         return fail ? 1 : 0;
     }
+    if (cmd == "test-ctx-enote") {
+        // NC-8 §5 wiring inc.2: the CONFIDENTIAL_TRANSFER encrypted-note (enote)
+        // delivery region. Pins: (structural) the shared ctx_split_enotes mirror
+        // that BOTH the validator accept-rule and chain apply consume rejects only
+        // malformed FRAMES; (apply) a MODERN chain records each enote as an `en:`
+        // state leaf (state_root diverges from a plain transfer) while a FIPS chain
+        // keeps it payload-only (state-root-invariant); a valid-but-garbage
+        // ciphertext is ACCEPTED (consensus-inert); a malformed region is a no-op;
+        // en: round-trips through the snapshot and is dropped when its note is
+        // spent (en: ⊆ cn:).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto setsc = [](uint8_t out[32], uint64_t v) {
+            std::memset(out, 0, 32); for (int i = 0; i < 8; i++) out[31 - i] = uint8_t(v >> (8 * i));
+        };
+        auto commit = [&](uint8_t out33[33], uint64_t v, uint64_t r) -> int {
+            uint8_t vs[32], rs[32]; setsc(vs, v); setsc(rs, r);
+            return determ_pedersen_commit(out33, vs, rs);
+        };
+        auto shield_payload = [&](uint64_t A, uint64_t r) -> std::vector<uint8_t> {
+            std::vector<uint8_t> C(33), E(33), x(32), k(32),
+                                 pf(DETERM_P256_BALANCE_PROOF_BYTES), out;
+            commit(C.data(), A, r);
+            determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A);
+            setsc(x.data(), r); setsc(k.data(), 0xC0FFEEu);
+            determ_p256_balance_prove(pf.data(), E.data(), x.data(), k.data());
+            out.insert(out.end(), C.begin(), C.end()); out.insert(out.end(), pf.begin(), pf.end());
+            return out;
+        };
+        const size_t n = 4;
+        auto build_bundle = [&](std::vector<uint64_t> v_in, std::vector<uint64_t> r_in,
+                                std::vector<uint64_t> v_out, std::vector<uint64_t> r_out,
+                                uint64_t fee) -> std::vector<uint8_t> {
+            size_t n_in = v_in.size(), m = v_out.size();
+            std::vector<uint8_t> Ci(n_in * 33), Co(m * 33);
+            for (size_t j = 0; j < n_in; j++) commit(&Ci[j * 33], v_in[j], r_in[j]);
+            for (size_t j = 0; j < m; j++)    commit(&Co[j * 33], v_out[j], r_out[j]);
+            uint8_t alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(alpha, 17); setsc(rho, 19); setsc(tau1, 23); setsc(tau2, 29);
+            std::vector<uint8_t> sL(m * n * 32), sR(m * n * 32);
+            for (size_t i = 0; i < m * n; i++) { setsc(&sL[i * 32], 31 + 7 * i); setsc(&sR[i * 32], 41 + 11 * i); }
+            std::vector<uint8_t> gammas(m * 32);
+            for (size_t j = 0; j < m; j++) setsc(&gammas[j * 32], r_out[j]);
+            size_t agglen = determ_agg_rangeproof_proof_len(m, n);
+            std::vector<uint8_t> agg(agglen), V(m * 33);
+            if (determ_agg_rangeproof_prove(V.data(), agg.data(), v_out.data(), gammas.data(),
+                                            alpha, rho, tau1, tau2, sL.data(), sR.data(), m, n) != 0) return {};
+            uint64_t sr_in = 0, sr_out = 0;
+            for (auto r : r_in) sr_in += r; for (auto r : r_out) sr_out += r;
+            uint8_t Exc[33], x[32], k[32], bproof[DETERM_P256_BALANCE_PROOF_BYTES];
+            setsc(x, sr_in - sr_out); setsc(k, 0x5151);
+            if (determ_p256_balance_excess(Exc, Ci.data(), n_in, Co.data(), m, fee) != 0) return {};
+            if (determ_p256_balance_prove(bproof, Exc, x, k) != 0) return {};
+            size_t blen = determ_ctx_bundle_len(n_in, m, n);
+            std::vector<uint8_t> bundle(blen);
+            if (determ_ctx_bundle_serialize(bundle.data(), blen, Ci.data(), n_in,
+                                            Co.data(), m, n, fee, agg.data(), bproof) != 0) return {};
+            return bundle;
+        };
+        // Append a per-output enote region: count(1) then {out_idx(1), len(2 BE), bytes}.
+        auto with_region = [&](std::vector<uint8_t> bundle,
+                               const std::vector<std::pair<uint8_t, std::vector<uint8_t>>>& es) {
+            bundle.push_back(uint8_t(es.size()));
+            for (auto& [idx, bytes] : es) {
+                bundle.push_back(idx);
+                bundle.push_back(uint8_t(bytes.size() >> 8));
+                bundle.push_back(uint8_t(bytes.size() & 0xFF));
+                bundle.insert(bundle.end(), bytes.begin(), bytes.end());
+            }
+            return bundle;
+        };
+        // A real determ_enote_seal ciphertext to a fixed test recipient (consensus
+        // never opens it — this proves the primitive is what rides the wire).
+        auto seal1 = [&](const std::vector<uint8_t>& pt) -> std::vector<uint8_t> {
+            uint8_t rsk[32], esk[32], rpub65[65], rpub33[33];
+            for (int i = 0; i < 32; i++) { rsk[i] = uint8_t(i + 1); esk[i] = uint8_t(0x40 + i); }
+            determ_p256_base_mul(rpub65, rsk);
+            determ_p256_point_compress(rpub33, rpub65);
+            std::vector<uint8_t> ct(pt.size() + DETERM_ENOTE_OVERHEAD); size_t ctlen = 0;
+            determ_enote_seal(rpub33, pt.data(), pt.size(), esk, ct.data(), &ctlen);
+            ct.resize(ctlen);
+            return ct;
+        };
+
+        const uint64_t vi0 = 3, ri0 = 500, vi1 = 1, ri1 = 400;
+        const uint64_t vo0 = 2, ro0 = 333, vo1 = 1, ro1 = 444, fee = 1;
+        auto make_cfg = [&](CryptoProfile prof) {
+            GenesisConfig cfg; cfg.chain_id = "ctx-enote-test"; cfg.chain_role = ChainRole::SINGLE;
+            cfg.crypto_profile = prof;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        auto shielded_chain = [&](Chain& c, CryptoProfile prof) {
+            c.append(make_genesis_block(make_cfg(prof)));
+            c.set_crypto_profile(prof);   // node-load-time setter; no Node in this test
+            Transaction s0; s0.type = TxType::SHIELD; s0.from = "alice"; s0.to = "";
+            s0.amount = vi0; s0.fee = 0; s0.nonce = 0; s0.payload = shield_payload(vi0, ri0);
+            Transaction s1; s1.type = TxType::SHIELD; s1.from = "alice"; s1.to = "";
+            s1.amount = vi1; s1.fee = 0; s1.nonce = 1; s1.payload = shield_payload(vi1, ri1);
+            Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions = {s0, s1};
+            c.append(b);
+        };
+        auto xfer_tx = [&](const std::vector<uint8_t>& payload, uint64_t nonce) {
+            Transaction t; t.type = TxType::CONFIDENTIAL_TRANSFER; t.from = "alice"; t.to = "";
+            t.amount = 0; t.fee = fee; t.nonce = nonce; t.payload = payload;
+            return t;
+        };
+        auto apply_xfer = [&](Chain& c, const std::vector<uint8_t>& payload) {
+            Block b; b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(payload, 2));
+            c.append(b);
+        };
+
+        std::vector<uint8_t> bundle = build_bundle({vi0, vi1}, {ri0, ri1}, {vo0, vo1}, {ro0, ro1}, fee);
+        std::vector<uint8_t> ct0 = seal1(std::vector<uint8_t>(40, 0xAB));  // one real enote for output 0
+        check(!bundle.empty() && ct0.size() == 40 + DETERM_ENOTE_OVERHEAD,
+              "setup: valid 2-in/2-out bundle + a real 40B-note enote (89B wire)");
+
+        // === STRUCTURAL: the shared ctx_split_enotes mirror (validator == apply) ===
+        {
+            size_t bl = 0; std::vector<CtxEnote> es;
+            auto region = with_region(bundle, {{0, ct0}});
+            check(ctx_split_enotes(region.data(), region.size(), &bl, &es) == 0
+                      && bl == bundle.size() && es.size() == 1
+                      && es[0].output_index == 0 && es[0].bytes == ct0,
+                  "split: valid 1-enote region parses (bundle_len exact, enote recovered)");
+            check(ctx_split_enotes(bundle.data(), bundle.size(), &bl, &es) == 0
+                      && bl == bundle.size() && es.empty(),
+                  "split: absent region → 0 enotes, bundle_len == payload (byte-identical case)");
+            auto zero = bundle; zero.push_back(0x00);   // count = 0
+            check(ctx_split_enotes(zero.data(), zero.size(), &bl, &es) != 0,
+                  "split: present region with count 0 is malformed");
+            auto oob = with_region(bundle, {{2, ct0}});  // m == 2 → index 2 out of range
+            check(ctx_split_enotes(oob.data(), oob.size(), &bl, &es) != 0,
+                  "split: output_index >= m rejected");
+            auto ninc = with_region(bundle, {{1, ct0}, {0, ct0}});  // not strictly increasing
+            check(ctx_split_enotes(ninc.data(), ninc.size(), &bl, &es) != 0,
+                  "split: non-increasing output indices rejected (no dup/reorder)");
+            auto shorte = with_region(bundle, {{0, std::vector<uint8_t>(10, 1)}});  // < 49
+            check(ctx_split_enotes(shorte.data(), shorte.size(), &bl, &es) != 0,
+                  "split: enote shorter than the 49B overhead rejected");
+            auto bige = with_region(bundle, {{0, std::vector<uint8_t>(513, 1)}});   // > 512
+            check(ctx_split_enotes(bige.data(), bige.size(), &bl, &es) != 0,
+                  "split: enote longer than CTX_ENOTE_MAX rejected");
+            auto dangle = with_region(bundle, {{0, ct0}}); dangle.push_back(0xFF);
+            check(ctx_split_enotes(dangle.data(), dangle.size(), &bl, &es) != 0,
+                  "split: dangling trailing byte after the region rejected");
+            // overrun: declared length runs past the payload end.
+            auto over = bundle; over.push_back(0x01); over.push_back(0x00);
+            over.push_back(0x00); over.push_back(0x64);   // out_idx 0, len 100, but no bytes
+            check(ctx_split_enotes(over.data(), over.size(), &bl, &es) != 0,
+                  "split: declared enote length overrunning the payload rejected");
+        }
+
+        // === APPLY: MODERN records an en: leaf; state_root diverges from a plain xfer ===
+        {
+            Chain plain; shielded_chain(plain, CryptoProfile::MODERN);
+            apply_xfer(plain, bundle);
+            Chain withn; shielded_chain(withn, CryptoProfile::MODERN);
+            apply_xfer(withn, with_region(bundle, {{0, ct0}}));
+            check(withn.shielded_note_count() == 2 && withn.accumulated_shielded() == vo0 + vo1,
+                  "MODERN apply: enote-bearing transfer applies (pool + supply unchanged by the enote)");
+            check(withn.enote_commitment_count() == 1,
+                  "MODERN apply: the enote is committed (1 en: entry)");
+            check(plain.enote_commitment_count() == 0,
+                  "MODERN apply: a plain transfer records NO en: entry (byte-neutral)");
+            check(withn.compute_state_root() != plain.compute_state_root(),
+                  "MODERN apply: the en: leaf diverges state_root from the plain transfer");
+        }
+
+        // === APPLY: FIPS keeps the ciphertext payload-only (state-root-invariant, 2a) ===
+        {
+            Chain plain; shielded_chain(plain, CryptoProfile::FIPS);
+            apply_xfer(plain, bundle);
+            Chain withn; shielded_chain(withn, CryptoProfile::FIPS);
+            apply_xfer(withn, with_region(bundle, {{0, ct0}}));
+            check(withn.shielded_note_count() == 2 && withn.enote_commitment_count() == 0,
+                  "FIPS apply: enote transfer applies but records NO en: entry (payload-only)");
+            check(withn.compute_state_root() == plain.compute_state_root(),
+                  "FIPS apply: state_root is invariant to the enote region (block-hash-bound only)");
+        }
+
+        // === CONSENSUS-INERT: a garbage (well-framed) ciphertext is accepted ===
+        {
+            Chain c; shielded_chain(c, CryptoProfile::MODERN);
+            std::vector<uint8_t> garbage(89, 0x00);   // valid length, NOT a real enote
+            apply_xfer(c, with_region(bundle, {{0, garbage}}));
+            check(c.enote_commitment_count() == 1 && c.accumulated_shielded() == vo0 + vo1,
+                  "inert: a valid-length garbage ciphertext is accepted (never decrypted)");
+        }
+
+        // === MALFORMED region → apply no-op (inputs NOT consumed) ===
+        {
+            Chain c; shielded_chain(c, CryptoProfile::MODERN);
+            auto bad = with_region(bundle, {{2, ct0}});   // output_index out of range
+            apply_xfer(c, bad);
+            check(c.accumulated_shielded() == vi0 + vi1 && c.enote_commitment_count() == 0,
+                  "malformed region: transfer is a no-op — inputs NOT consumed, no en: entry");
+        }
+
+        // === SNAPSHOT: en: round-trips through save/restore (MODERN) ===
+        {
+            Chain c; shielded_chain(c, CryptoProfile::MODERN);
+            apply_xfer(c, with_region(bundle, {{0, ct0}}));
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.enote_commitment_count() == 1
+                      && r.compute_state_root() == c.compute_state_root(),
+                  "snapshot: en: commitments + state_root survive save→restore");
+        }
+
+        // === ERASE-ON-SPEND: spending an enote-bearing note drops its en: entry ===
+        {
+            Chain c; shielded_chain(c, CryptoProfile::MODERN);
+            apply_xfer(c, with_region(bundle, {{0, ct0}}));   // en: keyed by commit(vo0,ro0)
+            check(c.enote_commitment_count() == 1, "erase setup: 1 en: entry after enote transfer");
+            // Spend output 0 (value vo0=2, r=ro0=333) as the sole input of a new transfer.
+            auto spend = build_bundle({vo0}, {ro0}, {vo0 - fee}, {222}, fee);
+            Block b; b.index = 3; b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"}; b.transactions.push_back(xfer_tx(spend, 3));
+            c.append(b);
+            check(c.enote_commitment_count() == 0,
+                  "erase-on-spend: the spent note's en: entry is dropped (en: ⊆ cn:)");
+        }
+
+        if (fail == 0) std::cout << "\nPASS: ctx-enote all assertions\n";
+        else           std::cout << "\nFAIL: ctx-enote " << fail << " assertion(s)\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     if (cmd == "test-confidential-transfer") {
         // §3.22c CONFIDENTIAL_TRANSFER (confidential -> confidential) CONSENSUS
         // test. Consumes NAMED input notes + produces HIDDEN-amount output notes
