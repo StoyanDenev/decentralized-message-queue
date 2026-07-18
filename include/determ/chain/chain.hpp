@@ -573,6 +573,15 @@ public:
         auto it = audit_log_count_.find(addr);
         return it == audit_log_count_.end() ? 0 : it->second;
     }
+    // NC-8 §5a note-key read (RPC/test surface; the trustless path is the
+    // "nk:" leaf via state_proof). Returns the lowercase hex note_pk, or
+    // nullopt if the account has no standing note key.
+    std::optional<std::string> note_key(const std::string& addr) const {
+        auto it = note_keys_.find(addr);
+        if (it == note_keys_.end()) return std::nullopt;
+        return it->second;
+    }
+    size_t   note_key_count() const { return note_keys_.size(); }
     // expected_total = the value the TRANSPARENT live sum must equal post-apply.
     // §3.22: value moved into the confidential pool (accumulated_shielded_) leaves
     // the transparent live sum, so it is subtracted here. Total real supply =
@@ -758,6 +767,14 @@ private:
     // state-root leaves). Lazy-snapshotted.
     std::map<std::string, std::string>          audit_keys_;
     std::map<std::string, uint64_t>             audit_log_count_;
+
+    // NC-8 §5a note-key layer. note_keys_: addr -> lowercase hex of the
+    // account's standing 33-byte SEC1-compressed P-256 recipient note_pk
+    // (set/rotated/cleared by REGISTER_NOTE_KEY). A sender reads this leaf to
+    // find whom to seal a CONFIDENTIAL_TRANSFER enote to. Empty on any
+    // note-key-free chain (additive: zero state-root leaves). Profile-agnostic
+    // (MODERN + FIPS alike). Lazy-snapshotted.
+    std::map<std::string, std::string>          note_keys_;
 
     // A9 Phase 2C: single lock-free committed view bundling accounts,
     // stakes, and registrants. Published at every successful apply
@@ -956,6 +973,7 @@ private:
         std::optional<std::map<std::string, Hash>>          enote_commitments; // NC-8 §5 (lazy)
         std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)
         std::optional<std::map<std::string, uint64_t>>      audit_log_count; // A2 (lazy)
+        std::optional<std::map<std::string, std::string>>   note_keys;       // NC-8 §5a (lazy)
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>

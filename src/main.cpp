@@ -813,6 +813,10 @@ Additional in-process tests:
   determ test-notekey-fips-c99                NC-8 wiring inc.4 — FIPS (1b)
                                               recipient note-key derivation
                                               (A2 view-master) + dual-oracle
+  determ test-register-note-key               NC-8 wiring inc.5a — REGISTER_NOTE_KEY
+                                              tx + nk: state leaf: publish/rotate/
+                                              clear note_pk; anon accounts CAN
+                                              publish; byte-neutral when unused
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -42353,6 +42357,179 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-audit-keys\n" : "  PASS: test-audit-keys\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-register-note-key") {
+        // NC-8 §5a CONSENSUS test: REGISTER_NOTE_KEY set/rotate/clear lifecycle
+        // on the nk: leaf, fee-only accounting (A1 intact), apply-level
+        // fail-closed skips for every malformed shape, state-proof
+        // observability, JSON-snapshot round-trip, and — the DECISIVE property
+        // that motivated option (a) over extending REGISTER — that an ANONYMOUS
+        // bearer account (the primary CONFIDENTIAL_TRANSFER payee) CAN publish a
+        // note key at the validator, while it still cannot REGISTER. State-root
+        // invariance for note-key-free chains is pinned by the FAST golden
+        // corpus (this test additionally asserts the leaf is ABSENT until used).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        const uint64_t kAliceBal = 1000, kFee = 1;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg;
+            cfg.chain_id = "notekey-test"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = kAliceBal;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        auto nk_tx = [&](std::vector<uint8_t> payload, uint64_t nonce) {
+            Transaction tx; tx.type = TxType::REGISTER_NOTE_KEY;
+            tx.from = "alice"; tx.to = ""; tx.amount = 0; tx.fee = kFee;
+            tx.nonce = nonce; tx.payload = std::move(payload);
+            return tx;
+        };
+        auto append_block = [&](Chain& c, std::vector<Transaction> txs) -> bool {
+            Block b; b.index = c.height(); b.prev_hash = c.head().compute_hash();
+            b.creators = {"val"};
+            b.transactions = std::move(txs);
+            try { c.append(b); } catch (const std::exception& e) {
+                std::cout << "  (append threw: " << e.what() << ")\n"; return false; }
+            return true;
+        };
+        auto hex_of = [&](const std::vector<uint8_t>& v) {
+            static const char* H = "0123456789abcdef"; std::string s;
+            for (auto b : v) { s.push_back(H[b >> 4]); s.push_back(H[b & 0xf]); }
+            return s;
+        };
+        auto leaf_key = [](const std::string& k) {
+            return std::vector<uint8_t>(k.begin(), k.end());
+        };
+
+        // A REAL inc.4-derived MODERN note_pk (33-byte SEC1) — the exact value a
+        // wallet publishes; proves §5a carries precisely what §5.4 derives.
+        std::vector<uint8_t> pk1(33), pk2(33);
+        {
+            uint8_t seed[32]; for (int i = 0; i < 32; i++) seed[i] = uint8_t(0x11 + i);
+            uint8_t sk[32], pk[33];
+            const char* cid = "notekey-test"; const char* ad = "alice";
+            int rc = determ_notekey_modern_derive(seed,
+                        reinterpret_cast<const uint8_t*>(cid), std::strlen(cid),
+                        reinterpret_cast<const uint8_t*>(ad),  std::strlen(ad), 0, sk, pk);
+            check(rc == 0, "setup: inc.4 note_pk derived");
+            pk1.assign(pk, pk + 33);
+        }
+        for (int i = 0; i < 33; i++) pk2[i] = uint8_t(0xB0 + i);  // a second (opaque) key
+
+        // === 1. Note-key-free chain: no key, no nk: leaf ===
+        Chain c;
+        c.append(make_genesis_block(make_cfg()));
+        check(!c.note_key("alice").has_value() && c.note_key_count() == 0,
+              "feature-off: genesis has no note key");
+        check(!c.state_proof(leaf_key("nk:alice")).has_value(),
+              "feature-off: no nk: leaf in the state tree");
+        const uint64_t alice0 = c.balance("alice");
+        const Hash     root0  = c.compute_state_root();
+
+        // === 2. SET: REGISTER_NOTE_KEY publishes the standing note key ===
+        check(append_block(c, {nk_tx(pk1, 0)}), "set: block applied (A1 intact)");
+        check(c.note_key("alice") == hex_of(pk1), "set: note_key == published note_pk");
+        check(c.balance("alice") == alice0 - kFee, "set: fee-only debit (no value moved)");
+        check(c.state_proof(leaf_key("nk:alice")).has_value(), "set: nk:alice leaf provable");
+        check(c.compute_state_root() != root0, "set: state root changed (observable)");
+        check(c.expected_total() == c.live_total_supply(), "set: A1 supply identity holds");
+
+        // === 3. ROTATE: a second key replaces the first ===
+        check(append_block(c, {nk_tx(pk2, 1)}), "rotate: block applied");
+        check(c.note_key("alice") == hex_of(pk2), "rotate: note_key == the NEW note_pk");
+
+        // === 4. CLEAR: empty payload revokes; the leaf disappears ===
+        check(append_block(c, {nk_tx({}, 2)}), "clear: block applied");
+        check(!c.note_key("alice").has_value(), "clear: standing note key revoked");
+        check(!c.state_proof(leaf_key("nk:alice")).has_value(), "clear: nk:alice leaf REMOVED");
+        check(c.balance("alice") == alice0 - 3 * kFee,
+              "accounting: exactly 3 fees debited across the lifecycle");
+        check(c.expected_total() == c.live_total_supply(), "accounting: A1 still holds");
+
+        // === 5. Apply-level fail-closed skips (validator authoritative;
+        //        these pin the belt-and-suspenders re-checks) ===
+        {
+            Chain c2; c2.append(make_genesis_block(make_cfg()));
+            uint64_t a0 = c2.balance("alice");
+            auto skip_case = [&](Transaction tx, const char* what) {
+                check(append_block(c2, {tx}), what);
+                check(!c2.note_key("alice").has_value() && c2.balance("alice") == a0,
+                      "  ... and the malformed tx was SKIPPED (no key/debit)");
+            };
+            { auto t = nk_tx(std::vector<uint8_t>(32, 1), 0);   // 32B (audit len) is wrong
+              skip_case(t, "skip: 32-byte payload (must be 33 or empty)"); }
+            { auto t = nk_tx(pk1, 0); t.amount = 5;
+              skip_case(t, "skip: REGISTER_NOTE_KEY with non-zero amount"); }
+            { auto t = nk_tx(pk1, 0); t.to = "0x" + std::string(64, 'b');
+              skip_case(t, "skip: REGISTER_NOTE_KEY with non-empty to"); }
+        }
+
+        // === 6. JSON-snapshot round-trip (cleared + live) ===
+        {
+            json snap = c.serialize_state(0);
+            check(!snap.contains("note_keys"),
+                  "snapshot: CLEARED note-key map omitted (conditional emission)");
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(!r.note_key("alice").has_value()
+                      && r.compute_state_root() == c.compute_state_root(),
+                  "snapshot: restore reproduces cleared key + byte-identical root");
+        }
+        {
+            Chain c3; c3.append(make_genesis_block(make_cfg()));
+            append_block(c3, {nk_tx(pk1, 0)});
+            json snap = c3.serialize_state(0);
+            check(snap.contains("note_keys"), "snapshot: live note-key map serialized");
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.note_key("alice") == hex_of(pk1)
+                      && r.compute_state_root() == c3.compute_state_root(),
+                  "snapshot: restored live key + byte-identical root");
+        }
+
+        // === 7. THE DECISIVE PROPERTY: an ANON bearer account can publish a
+        //        note key at the validator, but still cannot REGISTER. This is
+        //        the whole reason option (a) beat extending REGISTER. ===
+        {
+            crypto::NodeKey key;
+            determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+            std::string anon = make_anon_address(key.pub);
+            GenesisConfig cfg2; cfg2.chain_id = "notekey-anon"; cfg2.chain_role = ChainRole::SINGLE;
+            GenesisCreator vc; vc.domain = "val";
+            for (size_t i = 0; i < vc.ed_pub.size(); ++i) vc.ed_pub[i] = uint8_t(0x20 + i);
+            cfg2.initial_creators = {vc};
+            GenesisAllocation af; af.domain = anon; af.balance = 100;  // fund the fee
+            cfg2.initial_balances = {af};
+            Chain ca; ca.append(make_genesis_block(cfg2));
+            node::NodeRegistry reg = node::NodeRegistry::build_from_chain(ca, ca.height());
+            auto signed_from_anon = [&](TxType type, std::vector<uint8_t> payload) {
+                Transaction t; t.type = type; t.from = anon; t.to = "";
+                t.amount = 0; t.fee = kFee; t.nonce = 0; t.payload = std::move(payload);
+                auto sb = t.signing_bytes(); t.sig = crypto::sign(key, sb.data(), sb.size());
+                return t;
+            };
+            auto run_val = [&](const Transaction& t) {
+                Block vb; vb.index = 1; vb.transactions = {t};
+                node::BlockValidator v; v.set_chain_role(ChainRole::SINGLE);
+                return v.check_transactions_for_test(vb, ca, reg);
+            };
+            check(run_val(signed_from_anon(TxType::REGISTER_NOTE_KEY, pk1)).ok,
+                  "anon: a bearer account's REGISTER_NOTE_KEY PASSES the validator");
+            // Control: the SAME anon account may NOT REGISTER (validator-only tx).
+            check(!run_val(signed_from_anon(TxType::REGISTER, std::vector<uint8_t>(32, 7))).ok,
+                  "anon: the same account's REGISTER is REJECTED (validator-only)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-register-note-key\n"
+                           : "  PASS: test-register-note-key\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-block-signature-form") {

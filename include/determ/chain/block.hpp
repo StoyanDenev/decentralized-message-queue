@@ -235,6 +235,18 @@ enum class TxType : uint8_t {
     // standing ak: key — ad-hoc disclosures to a non-standing regulator are
     // legitimate (the A2 dual-mode model).
     LOG_AUDIT_ACCESS = 16,
+    // NC-8 §5.4/§5a: publish / rotate / revoke the account's standing
+    // recipient NOTE KEY — the 33-byte SEC1-compressed P-256 note_pk a sender
+    // seals a CONFIDENTIAL_TRANSFER enote to (src/crypto/notekey/). payload =
+    // the 33-byte note_pk to SET, or EMPTY to CLEAR (revoke); any other length
+    // is rejected. amount must be 0 and `to` empty (fee only). Owner-signed by
+    // the account itself — anon/bearer payees INCLUDED (they are the primary
+    // recipients that need to be discoverable). State: the "nk:" + addr leaf,
+    // emitted ONLY while a key is set, so a chain that never publishes a note
+    // key is byte-identical (additive + state-root-invariant, like ak:).
+    // Profile-agnostic: emitted identically on MODERN and FIPS (neither profile's
+    // note_pk is third-party-derivable from any other on-chain value).
+    REGISTER_NOTE_KEY = 17,
 };
 
 // A6 / §7.5.1 Block.signature_form values. Only SIG_FORM_KK_ED25519 is
@@ -246,6 +258,10 @@ inline constexpr uint8_t SIG_FORM_MLDSA_KK            = 2;   // reserved (PQ tar
 // A2 payload sizes (validator shape gates; apply re-checks defensively).
 inline constexpr size_t AUDIT_KEY_PAYLOAD_SIZE = 32;              // ROTATE set-form
 inline constexpr size_t AUDIT_LOG_PAYLOAD_SIZE = 8 + 32 + 32;     // LOG record
+// NC-8 §5a: REGISTER_NOTE_KEY set-form payload = a 33-byte SEC1-compressed
+// P-256 note_pk (== DETERM_NOTEKEY_PK_LEN in crypto/notekey/notekey.h); empty
+// payload = clear/revoke. Any other length is rejected.
+inline constexpr size_t NOTE_KEY_PAYLOAD_SIZE = 33;              // REGISTER_NOTE_KEY set-form
 // LOG_AUDIT_ACCESS epoch sentinel: the disclosure covered the FULL history
 // (view_master_sk / all epochs), not a single epoch window.
 inline constexpr uint64_t AUDIT_EPOCH_ALL = UINT64_MAX;

@@ -668,9 +668,11 @@ BlockValidator::Result BlockValidator::check_transactions(
             // accounts; everything else (register/stake/gov) needs a domain.
             if (tx.type != TxType::TRANSFER && tx.type != TxType::SHIELD
                 && tx.type != TxType::UNSHIELD && tx.type != TxType::CONFIDENTIAL_TRANSFER
-                && tx.type != TxType::ROTATE_AUDIT_KEY && tx.type != TxType::LOG_AUDIT_ACCESS)
+                && tx.type != TxType::ROTATE_AUDIT_KEY && tx.type != TxType::LOG_AUDIT_ACCESS
+                && tx.type != TxType::REGISTER_NOTE_KEY)
                 return {false, "anonymous accounts may only TRANSFER, SHIELD, UNSHIELD, "
-                               "CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY or LOG_AUDIT_ACCESS (got "
+                               "CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS or "
+                               "REGISTER_NOTE_KEY (got "
                              + std::to_string(int(tx.type)) + ")"};
             pk = parse_anon_pubkey(tx.from);
         } else {
@@ -1321,6 +1323,24 @@ BlockValidator::Result BlockValidator::check_transactions(
                 return {false, "LOG_AUDIT_ACCESS amount must be 0 (fee-only tx)"};
             if (!tx.to.empty())
                 return {false, "LOG_AUDIT_ACCESS `to` must be empty"};
+            break;
+        }
+        case TxType::REGISTER_NOTE_KEY: {
+            // NC-8 §5a: payload = 33-byte SEC1-compressed P-256 note_pk (SET) or
+            // empty (CLEAR/revoke). No value moves — amount must be 0 and `to`
+            // empty (fail-closed: reject accidental semantics rather than ignore).
+            // NOTE: this is a SHAPE gate only — the accept-rule does NOT decompress
+            // or validate the point on-curve; a garbage 33-byte payload is accepted
+            // and simply never opens any enote (consensus-inert delivery metadata,
+            // exactly like the enote ciphertext region). Apply re-checks the shape.
+            if (!tx.payload.empty()
+                && tx.payload.size() != NOTE_KEY_PAYLOAD_SIZE)
+                return {false, "REGISTER_NOTE_KEY payload must be 33 bytes (set) "
+                               "or empty (clear)"};
+            if (tx.amount != 0)
+                return {false, "REGISTER_NOTE_KEY amount must be 0 (fee-only tx)"};
+            if (!tx.to.empty())
+                return {false, "REGISTER_NOTE_KEY `to` must be empty"};
             break;
         }
         default:

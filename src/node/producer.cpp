@@ -1210,9 +1210,11 @@ Block build_body(
             // the notes authoritatively.
             break;
         case TxType::ROTATE_AUDIT_KEY:
-        case TxType::LOG_AUDIT_ACCESS: {
-            // A2 audit txs are fee-only (validator enforces amount==0/to empty);
-            // provisional accounting debits just the fee.
+        case TxType::LOG_AUDIT_ACCESS:
+        case TxType::REGISTER_NOTE_KEY: {
+            // A2 audit txs + NC-8 §5a REGISTER_NOTE_KEY are fee-only (validator
+            // enforces amount==0/to empty); provisional accounting debits just
+            // the fee.
             if (sb < tx.fee) continue;
             sb -= tx.fee;
             break;

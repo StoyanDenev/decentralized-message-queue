@@ -542,6 +542,17 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         leaves.push_back({k_with_prefix("al:", addr), hash_bytes(b)});
     }
 
+    // NC-8 §5a standing recipient note keys ("nk:" + addr): value =
+    // SHA256(note_pk_bytes). Emitted only while a key is SET (REGISTER_NOTE_KEY
+    // clear removes the leaf), so a note-key-free chain's state root is
+    // byte-identical. Profile-agnostic (MODERN + FIPS alike).
+    for (auto& [addr, pk_hex] : note_keys_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> pk = from_hex(pk_hex);
+        b.append(pk.data(), pk.size());
+        leaves.push_back({k_with_prefix("nk:", addr), hash_bytes(b)});
+    }
+
     return leaves;
 }
 
@@ -765,6 +776,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         audit_keys_             = std::move(*s.audit_keys);      // A2 (lazy)
     if (s.audit_log_count)
         audit_log_count_        = std::move(*s.audit_log_count); // A2 (lazy)
+    if (s.note_keys)
+        note_keys_              = std::move(*s.note_keys);       // NC-8 §5a (lazy)
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
@@ -866,6 +879,10 @@ void Chain::apply_transactions(const Block& b) {
         if (!__snapshot.audit_log_count)
             __snapshot.audit_log_count = audit_log_count_;
     };
+    auto __ensure_note_keys = [&]() {              // NC-8 §5a (lazy)
+        if (!__snapshot.note_keys)
+            __snapshot.note_keys = note_keys_;
+    };
     auto __ensure_committee_checkpoints = [&]() {  // D3.3b (lazy)
         if (!__snapshot.committee_checkpoints)
             __snapshot.committee_checkpoints = committee_checkpoints_;
@@ -922,6 +939,7 @@ void Chain::apply_transactions(const Block& b) {
         accumulated_shielded_= 0;   // §3.22 (genesis is always shield-free)
         audit_keys_.clear();        // A2 (genesis is always audit-free)
         audit_log_count_.clear();
+        note_keys_.clear();         // NC-8 §5a (genesis is always note-key-free)
         // Genesis-time invariant trivially holds (live == genesis_total).
         return;
     }
@@ -1186,6 +1204,26 @@ void Chain::apply_transactions(const Block& b) {
             if (!charge_fee(sender, tx.fee)) continue;
             __ensure_audit_log_count();
             audit_log_count_[tx.from]++;
+            sender.next_nonce++;
+            break;
+        }
+
+        case TxType::REGISTER_NOTE_KEY: {
+            // NC-8 §5a: set (payload = 33-byte note_pk) or clear (payload empty)
+            // the account's standing recipient note key. Fee-only; no value
+            // moves. Consensus-inert delivery metadata: the point is NOT
+            // decompressed/validated (a garbage 33-byte value simply never opens
+            // an enote), exactly like the enote ciphertext region. The validator
+            // is the authoritative shape gate; this is the belt-and-suspenders
+            // re-check.
+            if (!tx.payload.empty()
+                && tx.payload.size() != NOTE_KEY_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_note_keys();
+            if (tx.payload.empty()) note_keys_.erase(tx.from);
+            else note_keys_[tx.from] = to_hex(tx.payload.data(),
+                                              tx.payload.size());
             sender.next_nonce++;
             break;
         }
@@ -2206,6 +2244,13 @@ json Chain::serialize_state(uint32_t header_count) const {
         for (auto& [a, n] : audit_log_count_) al.push_back({{"a", a}, {"n", n}});
         snap["audit_log_counts"] = al;
     }
+    // NC-8 §5a: same conditional-emission discipline — a note-key-free chain's
+    // snapshot JSON stays byte-identical to a pre-§5a one.
+    if (!note_keys_.empty()) {
+        json nk = json::array();
+        for (auto& [a, pk] : note_keys_) nk.push_back({{"a", a}, {"pk", pk}});
+        snap["note_keys"] = nk;
+    }
 
     // S-032 cache: persist the Phase-1 abort accumulator so a
     // snapshot-bootstrapped node doesn't have to rebuild it from the log.
@@ -2398,6 +2443,9 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     if (snap.contains("audit_log_counts") && snap["audit_log_counts"].is_array())
         for (auto& e : snap["audit_log_counts"])
             c.audit_log_count_[e.value("a", std::string{})] = e.value("n", uint64_t{0});
+    if (snap.contains("note_keys") && snap["note_keys"].is_array())          // NC-8 §5a
+        for (auto& e : snap["note_keys"])
+            c.note_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});
     // genesis_total deferred until after accounts/stakes load so legacy
     // snapshots (without the field) can fall back to live sum.
 
