@@ -254,6 +254,10 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_state_proof(
             params.value("namespace", std::string{}),
             params.value("key",       std::string{}));
+    // NC-8 wiring inc.3: read-only enote scan over a height range (wallet
+    // pull-and-trial-decrypt of CONFIDENTIAL_TRANSFER delivery ciphertexts).
+    if (method == "scan_enotes")
+        return node_.rpc_scan_enotes(params);
     // D3.5e-7e / S-036: the frozen epoch-committee checkpoint content read
     // (untrusted on its own; the auditor pins it via the "cc" state_proof).
     if (method == "cc_checkpoint")

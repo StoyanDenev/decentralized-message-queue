@@ -91,7 +91,7 @@
 #     status, peers, balance, nonce, stake_info, snapshot, state_root,
 #     state_proof, dapp_info, dapp_list, dapp_messages, block, headers,
 #     chain_summary, validators, committee, account, tx, pending_params,
-#     abort_records   (src/rpc/rpc.cpp:201..270)
+#     abort_records, scan_enotes   (src/rpc/rpc.cpp:201..270)
 #
 # ── Findings / severity ──────────────────────────────────────────────────────
 #
@@ -258,7 +258,7 @@ READONLY = [
     "status", "peers", "balance", "nonce", "stake_info", "snapshot",
     "state_root", "state_proof", "dapp_info", "dapp_list", "dapp_messages",
     "block", "headers", "chain_summary", "validators", "committee",
-    "account", "tx", "pending_params", "abort_records",
+    "account", "tx", "pending_params", "abort_records", "scan_enotes",
 ]
 
 

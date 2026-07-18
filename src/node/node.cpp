@@ -6,6 +6,7 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
+#include <determ/chain/enote_scan.hpp>   // NC-8 §5 (inc.3) enote scan (read-only)
 #include <determ/crypto/pq_address.hpp>  // §3.21 PQ-native bearer address (S-028)
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -4530,6 +4531,54 @@ json Node::rpc_state_root() const {
         {"state_root", to_hex(chain_.compute_state_root())},
         {"height",     chain_.height()},
         {"head_hash",  chain_.empty() ? "" : to_hex(chain_.head_hash())},
+    };
+}
+
+// NC-8 wiring inc.3: the enote SCAN RPC. Returns the per-output encrypted-note
+// delivery ciphertexts carried on CONFIDENTIAL_TRANSFER (TxType=14) txs over a
+// height range, so a wallet can pull-and-trial-decrypt them (a verifying AEAD
+// tag = "mine"). Read-only + profile-agnostic (the ciphertext rides the tx
+// payload on both MODERN and FIPS). Params: {from_height:u64=0, to_height:u64=
+// height, limit:u64<=SCAN_ENOTES_MAX}. The range is clamped to the chain and the
+// returned set is hard-capped, so a single call can never return an unbounded
+// response; a caller pages by advancing from_height. `truncated` flags that the
+// cap was hit. tx_hash / commitment / enote are hex-encoded.
+json Node::rpc_scan_enotes(const json& params) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    constexpr size_t SCAN_ENOTES_MAX = 10000;
+    const uint64_t height = chain_.height();
+    uint64_t from = params.value("from_height", uint64_t{0});
+    uint64_t to   = params.value("to_height",   height);
+    if (to > height) to = height;
+    if (from > to)   from = to;
+    size_t limit = params.value("limit", SCAN_ENOTES_MAX);
+    if (limit == 0 || limit > SCAN_ENOTES_MAX) limit = SCAN_ENOTES_MAX;
+
+    // Collect at most limit+1 so the walk stops O(limit) into the range (bounding
+    // both the materialized set and the read-lock hold) yet we can still tell the
+    // cap was hit. limit is already clamped to [1, SCAN_ENOTES_MAX], so limit+1
+    // cannot overflow.
+    std::vector<chain::EnoteHit> hits = chain::scan_enotes(chain_, from, to, limit + 1);
+    const bool truncated = hits.size() > limit;
+    if (truncated) hits.resize(limit);
+
+    json arr = json::array();
+    for (auto& e : hits) {
+        arr.push_back({
+            {"height",       e.height},
+            {"tx_hash",      to_hex(e.tx_hash)},
+            {"output_index", e.output_index},
+            {"commitment",   e.commitment_hex},
+            {"enote",        to_hex(e.enote.data(), e.enote.size())},
+        });
+    }
+    return {
+        {"height",    height},
+        {"from",      from},
+        {"to",        to},
+        {"count",     arr.size()},
+        {"truncated", truncated},
+        {"enotes",    std::move(arr)},
     };
 }
 

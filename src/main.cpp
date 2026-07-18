@@ -16,6 +16,7 @@
 #include <determ/crypto/viewkey/viewkey.h> // §3.24 A1 per-epoch view-key derivation
 #include <determ/crypto/enote/enote.h>     // NC-8 encrypted-note delivery (shielded Option A)
 #include <determ/chain/ctx_enote.hpp>      // NC-8 §5 enote-region split/parse (wiring inc.2)
+#include <determ/chain/enote_scan.hpp>     // NC-8 §5 enote scan (wiring inc.3)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
@@ -799,6 +800,10 @@ Additional in-process tests:
                                               TRANSFER enote region: MODERN en:
                                               state leaf / FIPS payload-only;
                                               consensus-inert; shared mirror
+  determ test-scan-enotes                     NC-8 wiring inc.3 — the read-only
+                                              enote scan (scan_enotes RPC): per-
+                                              output ciphertexts over a height
+                                              range; profile-agnostic
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -42972,6 +42977,168 @@ int main(int argc, char** argv) {
 
         if (fail == 0) std::cout << "\nPASS: ctx-enote all assertions\n";
         else           std::cout << "\nFAIL: ctx-enote " << fail << " assertion(s)\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-scan-enotes") {
+        // NC-8 §5 wiring inc.3: the read-only enote SCAN (chain::scan_enotes) that
+        // backs the scan_enotes RPC. Pins: it surfaces every per-output enote
+        // carried on a CONFIDENTIAL_TRANSFER as (height, tx_hash, output_index,
+        // commitment, ciphertext); the commitment keys the enote to its output
+        // note; the height range [from,to) is half-open + clamped; a CTX with no
+        // region yields nothing; and it is profile-agnostic (returns hits on a
+        // FIPS chain too, since the ciphertext rides the tx payload on both).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto setsc = [](uint8_t out[32], uint64_t v) {
+            std::memset(out, 0, 32); for (int i = 0; i < 8; i++) out[31 - i] = uint8_t(v >> (8 * i));
+        };
+        auto commit = [&](uint8_t out33[33], uint64_t v, uint64_t r) -> int {
+            uint8_t vs[32], rs[32]; setsc(vs, v); setsc(rs, r);
+            return determ_pedersen_commit(out33, vs, rs);
+        };
+        auto shield_payload = [&](uint64_t A, uint64_t r) -> std::vector<uint8_t> {
+            std::vector<uint8_t> C(33), E(33), x(32), k(32),
+                                 pf(DETERM_P256_BALANCE_PROOF_BYTES), out;
+            commit(C.data(), A, r);
+            determ_p256_balance_excess(E.data(), C.data(), 1, nullptr, 0, A);
+            setsc(x.data(), r); setsc(k.data(), 0xC0FFEEu);
+            determ_p256_balance_prove(pf.data(), E.data(), x.data(), k.data());
+            out.insert(out.end(), C.begin(), C.end()); out.insert(out.end(), pf.begin(), pf.end());
+            return out;
+        };
+        const size_t n = 4;
+        auto build_bundle = [&](std::vector<uint64_t> v_in, std::vector<uint64_t> r_in,
+                                std::vector<uint64_t> v_out, std::vector<uint64_t> r_out,
+                                uint64_t fee) -> std::vector<uint8_t> {
+            size_t n_in = v_in.size(), m = v_out.size();
+            std::vector<uint8_t> Ci(n_in * 33), Co(m * 33);
+            for (size_t j = 0; j < n_in; j++) commit(&Ci[j * 33], v_in[j], r_in[j]);
+            for (size_t j = 0; j < m; j++)    commit(&Co[j * 33], v_out[j], r_out[j]);
+            uint8_t alpha[32], rho[32], tau1[32], tau2[32];
+            setsc(alpha, 17); setsc(rho, 19); setsc(tau1, 23); setsc(tau2, 29);
+            std::vector<uint8_t> sL(m * n * 32), sR(m * n * 32);
+            for (size_t i = 0; i < m * n; i++) { setsc(&sL[i * 32], 31 + 7 * i); setsc(&sR[i * 32], 41 + 11 * i); }
+            std::vector<uint8_t> gammas(m * 32);
+            for (size_t j = 0; j < m; j++) setsc(&gammas[j * 32], r_out[j]);
+            size_t agglen = determ_agg_rangeproof_proof_len(m, n);
+            std::vector<uint8_t> agg(agglen), V(m * 33);
+            if (determ_agg_rangeproof_prove(V.data(), agg.data(), v_out.data(), gammas.data(),
+                                            alpha, rho, tau1, tau2, sL.data(), sR.data(), m, n) != 0) return {};
+            uint64_t sr_in = 0, sr_out = 0;
+            for (auto r : r_in) sr_in += r; for (auto r : r_out) sr_out += r;
+            uint8_t Exc[33], x[32], k[32], bproof[DETERM_P256_BALANCE_PROOF_BYTES];
+            setsc(x, sr_in - sr_out); setsc(k, 0x5151);
+            if (determ_p256_balance_excess(Exc, Ci.data(), n_in, Co.data(), m, fee) != 0) return {};
+            if (determ_p256_balance_prove(bproof, Exc, x, k) != 0) return {};
+            size_t blen = determ_ctx_bundle_len(n_in, m, n);
+            std::vector<uint8_t> bundle(blen);
+            if (determ_ctx_bundle_serialize(bundle.data(), blen, Ci.data(), n_in,
+                                            Co.data(), m, n, fee, agg.data(), bproof) != 0) return {};
+            return bundle;
+        };
+        auto with_region = [&](std::vector<uint8_t> bundle,
+                               const std::vector<std::pair<uint8_t, std::vector<uint8_t>>>& es) {
+            bundle.push_back(uint8_t(es.size()));
+            for (auto& [idx, bytes] : es) {
+                bundle.push_back(idx);
+                bundle.push_back(uint8_t(bytes.size() >> 8));
+                bundle.push_back(uint8_t(bytes.size() & 0xFF));
+                bundle.insert(bundle.end(), bytes.begin(), bytes.end());
+            }
+            return bundle;
+        };
+        auto seal1 = [&](const std::vector<uint8_t>& pt) -> std::vector<uint8_t> {
+            uint8_t rsk[32], esk[32], rpub65[65], rpub33[33];
+            for (int i = 0; i < 32; i++) { rsk[i] = uint8_t(i + 1); esk[i] = uint8_t(0x40 + i); }
+            determ_p256_base_mul(rpub65, rsk);
+            determ_p256_point_compress(rpub33, rpub65);
+            std::vector<uint8_t> ct(pt.size() + DETERM_ENOTE_OVERHEAD); size_t ctlen = 0;
+            determ_enote_seal(rpub33, pt.data(), pt.size(), esk, ct.data(), &ctlen);
+            ct.resize(ctlen);
+            return ct;
+        };
+
+        const uint64_t vi0 = 3, ri0 = 500, vi1 = 1, ri1 = 400;
+        const uint64_t vo0 = 2, ro0 = 333, vo1 = 1, ro1 = 444, fee = 1;
+        auto make_cfg = [&](CryptoProfile prof) {
+            GenesisConfig cfg; cfg.chain_id = "scan-enote-test"; cfg.chain_role = ChainRole::SINGLE;
+            cfg.crypto_profile = prof;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = {val_c};
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+            cfg.initial_balances = {ab};
+            return cfg;
+        };
+        // A chain: genesis(0) + 2 SHIELDs(1) + a CONFIDENTIAL_TRANSFER(2). The CTX
+        // (2-out) optionally carries `es` enotes. Returns the two output ciphertexts.
+        auto build_chain = [&](Chain& c, CryptoProfile prof,
+                               const std::vector<std::pair<uint8_t, std::vector<uint8_t>>>& es) {
+            c.append(make_genesis_block(make_cfg(prof)));
+            c.set_crypto_profile(prof);
+            Transaction s0; s0.type = TxType::SHIELD; s0.from = "alice"; s0.to = "";
+            s0.amount = vi0; s0.fee = 0; s0.nonce = 0; s0.payload = shield_payload(vi0, ri0);
+            Transaction s1; s1.type = TxType::SHIELD; s1.from = "alice"; s1.to = "";
+            s1.amount = vi1; s1.fee = 0; s1.nonce = 1; s1.payload = shield_payload(vi1, ri1);
+            Block b1; b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"val"}; b1.transactions = {s0, s1};
+            c.append(b1);
+            std::vector<uint8_t> bundle = build_bundle({vi0, vi1}, {ri0, ri1}, {vo0, vo1}, {ro0, ro1}, fee);
+            std::vector<uint8_t> payload = es.empty() ? bundle : with_region(bundle, es);
+            Transaction t; t.type = TxType::CONFIDENTIAL_TRANSFER; t.from = "alice"; t.to = "";
+            t.amount = 0; t.fee = fee; t.nonce = 2; t.payload = payload;
+            Block b2; b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"val"}; b2.transactions.push_back(t);
+            c.append(b2);
+        };
+
+        std::vector<uint8_t> ct0 = seal1(std::vector<uint8_t>(40, 0xA1));   // enote for output 0
+        std::vector<uint8_t> ct1 = seal1(std::vector<uint8_t>(40, 0xB2));   // enote for output 1
+        uint8_t Co0[33], Co1[33]; commit(Co0, vo0, ro0); commit(Co1, vo1, ro1);
+
+        // === MODERN chain, both outputs carry an enote ===
+        {
+            Chain c; build_chain(c, CryptoProfile::MODERN, {{0, ct0}, {1, ct1}});
+            check(c.height() == 3, "setup: genesis + SHIELD block + CONFIDENTIAL_TRANSFER block");
+            auto hits = scan_enotes(c, 0, c.height());
+            check(hits.size() == 2, "scan [0,h): both per-output enotes surfaced");
+            bool h0 = hits.size() > 0 && hits[0].height == 2 && hits[0].output_index == 0
+                      && hits[0].commitment_hex == to_hex(Co0, 33) && hits[0].enote == ct0;
+            bool h1 = hits.size() > 1 && hits[1].height == 2 && hits[1].output_index == 1
+                      && hits[1].commitment_hex == to_hex(Co1, 33) && hits[1].enote == ct1;
+            check(h0, "hit[0]: height 2, output 0, commitment == commit(vo0,ro0), enote == ct0");
+            check(h1, "hit[1]: height 2, output 1, commitment == commit(vo1,ro1), enote == ct1");
+            check(hits.size() > 0 && hits[0].tx_hash != Hash{}, "hit carries the CONFIDENTIAL_TRANSFER tx hash");
+            // Half-open range: [0,2) excludes the CTX block at index 2.
+            check(scan_enotes(c, 0, 2).empty(), "range [0,2) excludes the CTX block (half-open, clamped)");
+            // Empty + past-end ranges are safe and empty.
+            check(scan_enotes(c, 3, 3).empty() && scan_enotes(c, 5, 99).empty(),
+                  "empty + past-end ranges return nothing (no OOB)");
+        }
+
+        // === A CONFIDENTIAL_TRANSFER with NO enote region yields nothing ===
+        {
+            Chain c; build_chain(c, CryptoProfile::MODERN, {});
+            check(scan_enotes(c, 0, c.height()).empty(),
+                  "a region-free CONFIDENTIAL_TRANSFER surfaces no enotes");
+        }
+
+        // === Profile-agnostic: a FIPS chain returns the same hits (payload-only) ===
+        {
+            Chain c; build_chain(c, CryptoProfile::FIPS, {{0, ct0}, {1, ct1}});
+            auto hits = scan_enotes(c, 0, c.height());
+            check(hits.size() == 2 && hits[0].enote == ct0 && hits[1].enote == ct1,
+                  "FIPS chain: scan returns the same enotes (ciphertext rides the payload on both profiles)");
+        }
+
+        if (fail == 0) std::cout << "\nPASS: scan-enotes all assertions\n";
+        else           std::cout << "\nFAIL: scan-enotes " << fail << " assertion(s)\n";
         return fail == 0 ? 0 : 1;
     }
 

@@ -305,6 +305,11 @@ public:
     // lands (follow-on commit), Block.state_root == this for every
     // honest node applying the same block sequence.
     nlohmann::json rpc_state_root()                                 const;
+    // NC-8 wiring inc.3: the enote SCAN — per-output encrypted-note delivery
+    // ciphertexts carried on CONFIDENTIAL_TRANSFER txs over a height range, for
+    // wallet pull-and-trial-decrypt. Read-only; params {from_height, to_height,
+    // limit}; result {height, from, to, count, truncated, enotes:[...]}.
+    nlohmann::json rpc_scan_enotes(const nlohmann::json& params)    const;
     // v2.2 light-client foundation: inclusion proof for a state key.
     // Returns a JSON object with the verification-input tuple, or
     // {"error": "not_found"} if the key is not committed by the
