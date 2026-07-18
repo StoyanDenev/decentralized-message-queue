@@ -17,6 +17,9 @@
 #include <determ/crypto/enote/enote.h>     // NC-8 encrypted-note delivery (shielded Option A)
 #include <determ/chain/ctx_enote.hpp>      // NC-8 §5 enote-region split/parse (wiring inc.2)
 #include <determ/chain/enote_scan.hpp>     // NC-8 §5 enote scan (wiring inc.3)
+#include <determ/crypto/notekey/notekey.h>               // NC-8 §5 note key shared (inc.4)
+#include <determ/crypto/notekey/modern/notekey_modern.h> // NC-8 §5 note key 1a (inc.4)
+#include <determ/crypto/notekey/fips/notekey_fips.h>     // NC-8 §5 note key 1b (inc.4)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
@@ -804,6 +807,12 @@ Additional in-process tests:
                                               enote scan (scan_enotes RPC): per-
                                               output ciphertexts over a height
                                               range; profile-agnostic
+  determ test-notekey-modern-c99              NC-8 wiring inc.4 — MODERN (1a)
+                                              recipient note-key derivation
+                                              (dedicated seed) + dual-oracle
+  determ test-notekey-fips-c99                NC-8 wiring inc.4 — FIPS (1b)
+                                              recipient note-key derivation
+                                              (A2 view-master) + dual-oracle
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -15311,6 +15320,133 @@ int main(int argc, char** argv) {
 
         if (fail==0) std::cout << "  PASS: view-key (A1 per-epoch derivation) unit test\n";
         return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-notekey-modern-c99" || cmd == "test-notekey-fips-c99") {
+        // NC-8 recipient note-key derivation (§3.25 / wiring inc.4). The two
+        // profiles share this test body, dispatched by `fips`; each has its own
+        // subcommand + wrapper + dual-oracle KAT (tools/vectors/notekey_*.json).
+        //   MODERN (1a): dedicated note key from an INDEPENDENT seed.
+        //   FIPS   (1b): derived from the A2 view_master_sk — an auditor with it
+        //                re-derives every note_sk (the determinism assertion IS
+        //                that re-derivation).
+        const bool  fips  = (cmd == "test-notekey-fips-c99");
+        const char* pname = fips ? "fips" : "modern";
+        std::cout << "=== NC-8 note-key derivation (" << pname << " profile) ===\n";
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for (size_t i = 0; i + 1 < s.size(); i += 2)
+                v.push_back((uint8_t)std::stoi(s.substr(i, 2), nullptr, 16)); return v; };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* h = "0123456789abcdef";
+            std::string s; for (size_t i = 0; i < n; i++){ s += h[p[i] >> 4]; s += h[p[i] & 15]; } return s; };
+        auto derive = [&](const uint8_t* ikm, const std::string& cid, const std::string& addr,
+                          uint64_t idx, uint8_t sk[32], uint8_t pk[33]) -> int {
+            if (fips) return determ_notekey_fips_derive(ikm, (const uint8_t*)cid.data(), cid.size(),
+                                                        (const uint8_t*)addr.data(), addr.size(), idx, sk, pk);
+            return determ_notekey_modern_derive(ikm, (const uint8_t*)cid.data(), cid.size(),
+                                                (const uint8_t*)addr.data(), addr.size(), idx, sk, pk); };
+
+        uint8_t ikm[32]; for (int i = 0; i < 32; i++) ikm[i] = (uint8_t)(i + 1);
+        std::string cid = "determ-mainnet", addr = "alice";
+
+        // 1. Determinism + a valid keypair, note_pk == compress(note_sk·G).
+        uint8_t sk1[32], pk1[33], sk2[32], pk2[33];
+        check(derive(ikm, cid, addr, 0, sk1, pk1) == 0, "derive: ok");
+        check(derive(ikm, cid, addr, 0, sk2, pk2) == 0 && std::memcmp(sk1, sk2, 32) == 0
+                  && std::memcmp(pk1, pk2, 33) == 0,
+              "deterministic: same inputs re-derive the identical key (auditor/recipient agree)");
+        check(pk1[0] == 0x02 || pk1[0] == 0x03, "note_pk is a compressed SEC1 point");
+        {
+            uint8_t c65[65], c33[33];
+            check(determ_p256_base_mul(c65, sk1) == 0 && determ_p256_point_compress(c33, c65) == 0
+                      && std::memcmp(c33, pk1, 33) == 0,
+                  "note_pk == compress(note_sk·G)");
+        }
+
+        // 2. Distinctness: index / addr / chain_id / IKM each change the key.
+        uint8_t s[32], p[33];
+        check(derive(ikm, cid, addr, 1, s, p) == 0 && std::memcmp(p, pk1, 33) != 0,
+              "distinct: different index -> different key");
+        check(derive(ikm, cid, "bob", 0, s, p) == 0 && std::memcmp(p, pk1, 33) != 0,
+              "distinct: different addr -> different key");
+        check(derive(ikm, "determ-test", addr, 0, s, p) == 0 && std::memcmp(p, pk1, 33) != 0,
+              "distinct: different chain_id -> different key");
+        {
+            uint8_t ikm2[32]; for (int i = 0; i < 32; i++) ikm2[i] = (uint8_t)(0x80 + i);
+            check(derive(ikm2, cid, addr, 0, s, p) == 0 && std::memcmp(p, pk1, 33) != 0,
+                  "distinct: different IKM -> different key");
+        }
+
+        // 3. Cross-profile domain separation: the OTHER profile derives a
+        //    different key from the SAME IKM + inputs (the DST is load-bearing).
+        {
+            uint8_t opk[33], osk[32];
+            int orc = fips
+                ? determ_notekey_modern_derive(ikm, (const uint8_t*)cid.data(), cid.size(),
+                                               (const uint8_t*)addr.data(), addr.size(), 0, osk, opk)
+                : determ_notekey_fips_derive(ikm, (const uint8_t*)cid.data(), cid.size(),
+                                             (const uint8_t*)addr.data(), addr.size(), 0, osk, opk);
+            check(orc == 0 && std::memcmp(opk, pk1, 33) != 0,
+                  "domain separation: the other profile derives a different key (same IKM+inputs)");
+        }
+
+        // 4. Fail-closed edges.
+        check(derive(ikm, "", addr, 0, s, p) != 0, "fail-closed: empty chain_id rejected");
+        check(derive(ikm, cid, "", 0, s, p) != 0, "fail-closed: empty addr rejected");
+        check(derive(ikm, std::string(DETERM_NOTEKEY_MAX_FIELD + 1, 'x'), addr, 0, s, p) != 0,
+              "fail-closed: over-long chain_id rejected");
+
+        // 5. Composes with the enote primitive: seal to note_pk, open with note_sk.
+        {
+            std::vector<uint8_t> note(40, 0x5A);   // value || blinding, say
+            uint8_t esk[32]; for (int i = 0; i < 32; i++) esk[i] = (uint8_t)(0x40 + i);
+            std::vector<uint8_t> ct(note.size() + DETERM_ENOTE_OVERHEAD); size_t clen = 0;
+            bool sealed = determ_enote_seal(pk1, note.data(), note.size(), esk, ct.data(), &clen) == 0;
+            std::vector<uint8_t> rec(note.size()); size_t rl = 0;
+            bool opened = sealed && determ_enote_open(sk1, ct.data(), clen, rec.data(), &rl) == 0
+                          && rl == note.size() && rec == note;
+            check(opened, "end-to-end: an enote sealed to note_pk opens with the derived note_sk");
+            uint8_t wsk[32], wpk[33];
+            derive(ikm, cid, addr, 999, wsk, wpk);   // a different note key (index 999)
+            std::vector<uint8_t> rec2(note.size()); size_t rl2 = 0;
+            check(determ_enote_open(wsk, ct.data(), clen, rec2.data(), &rl2) != 0,
+                  "a different derived note_sk does NOT open it (the scan 'not mine' filter)");
+        }
+
+        // 6. Dual-oracle KAT corpus (byte-for-byte vs the independent python oracle).
+        {
+            std::string path = std::string("tools/vectors/notekey_") + pname + ".json";
+            std::ifstream vf(path);
+            if (!vf) check(false, std::string("corpus present: ") + path);
+            else {
+                json doc; vf >> doc;
+                json& arr = doc.is_array() ? doc : doc["vectors"];
+                int n = 0;
+                for (auto& v : arr) {
+                    auto vikm = unhex(v["ikm"].get<std::string>());
+                    auto vcid = unhex(v["chain_id"].get<std::string>());
+                    auto vad  = unhex(v["addr"].get<std::string>());
+                    uint64_t vidx = v["index"].get<uint64_t>();
+                    if (vikm.size() != 32) { check(false, std::string("KAT ikm 32B: ") + pname + "[" + std::to_string(n) + "]"); n++; continue; }
+                    uint8_t dsk[32], dpk[33];
+                    int rc = fips
+                        ? determ_notekey_fips_derive(vikm.data(), vcid.data(), vcid.size(), vad.data(), vad.size(), vidx, dsk, dpk)
+                        : determ_notekey_modern_derive(vikm.data(), vcid.data(), vcid.size(), vad.data(), vad.size(), vidx, dsk, dpk);
+                    bool ok = rc == 0
+                              && hx(dsk, 32) == v["note_sk"].get<std::string>()
+                              && hx(dpk, 33) == v["note_pk"].get<std::string>();
+                    check(ok, std::string("KAT byte-equal: ") + pname + "[" + std::to_string(n) + "]");
+                    n++;
+                }
+                check(n >= 5, std::string("KAT corpus has >= 5 vectors (") + std::to_string(n) + ")");
+            }
+        }
+
+        if (fail == 0) std::cout << "\nPASS: notekey-" << pname << " all assertions\n";
+        else           std::cout << "\nFAIL: notekey-" << pname << " " << fail << " assertion(s)\n";
+        return fail == 0 ? 0 : 1;
     }
     if (cmd == "test-enote-c99") {
         // NC-8 encrypted-note delivery (shielded Option A) — the ephemeral-static

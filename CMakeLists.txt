@@ -200,6 +200,13 @@ add_library(determ-crypto-c99 STATIC
   # NC-8 encrypted-note delivery (shielded Option A): ephemeral-static ECIES
   # over P-256 (ECDH + HKDF-SHA256 + ChaCha20-Poly1305) — `determ test-enote-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/enote/enote.c"
+  # NC-8 recipient note-key derivation (wiring inc.4): profile-split note keypair
+  # from a 32-byte IKM (hash_to_scalar + base mult + compress) — the shared base
+  # plus the MODERN (1a, independent seed) and FIPS (1b, A2 view_master_sk)
+  # wrappers — `determ test-notekey-modern-c99` / `test-notekey-fips-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/notekey.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/modern/notekey_modern.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/fips/notekey_fips.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)

@@ -1458,6 +1458,25 @@ The CT-layer per-epoch view key: `vk_epoch_n = HKDF-SHA256(salt="determ-view-key
 
 ---
 
+### 3.25 NC-8 recipient note-key derivation (`determ_notekey_*`) — **SHIPPED (shielded Option A, NC-8 wiring inc.4, profile-split)**
+
+The recipient's per-address note keypair a CONFIDENTIAL_TRANSFER delivery ciphertext is sealed to (§3.23 ECIES enote): `note_sk = determ_p256_hash_to_scalar(ikm(32 B)‖len64_be(chain_id)‖chain_id‖len64_be(addr)‖addr‖index_u64_be, DST)`, `note_pk = compress(note_sk·G)`. RFC 9497 `HashToScalar` shape (`L=48`, reduce mod `n`), canonical scalar in `[1,n)` — a thin composition over the §3.9b P-256 primitives (`determ_p256_hash_to_scalar` + `determ_p256_base_mul` + `determ_p256_point_compress`), **no new cryptographic assumption**. The two profiles differ ONLY in IKM source + DST; the encoding and curve math are one shared base (`src/crypto/notekey/notekey.c`, `determ_notekey_from_ikm`):
+
+| Profile | Subfolder | DST | IKM | Auditor coupling |
+|---|---|---|---|---|
+| **MODERN (1a)** | `src/crypto/notekey/modern/` | `determ-notekey-modern-v1` | an INDEPENDENT 32-B note seed (scan/spend authority kept separate from the audit layer) | none — a dedicated key |
+| **FIPS (1b)** | `src/crypto/notekey/fips/` | `determ-notekey-fips-v1` | the A2 `view_master_sk` (§3.24) | an auditor disclosed `view_master_sk` re-derives every `note_sk` and reads all deliveries — closes the "opaque audit key opens nothing" gap |
+
+The distinct DST domain-separates the profiles: a MODERN and a FIPS key from the same IKM+inputs are independent (asserted in the gate). Headers: `include/determ/crypto/notekey/notekey.h` (shared constants + `determ_notekey_from_ikm`) + `.../modern/notekey_modern.h` + `.../fips/notekey_fips.h`.
+
+- **Python-prove-first**: the exact `hash_to_scalar` mapping was frozen BEFORE any C-side test existed — `tools/verify_notekey.py` (dependency-free: RFC 9380 `expand_message_xmd` + a from-scratch P-256 ladder, reusing `verify_pedersen.py`'s XMD) generated `tools/vectors/notekey_{modern,fips}.json` (6 vectors each: determinism, index/addr/chain_id/IKM distinctness, the max-field-length edge, the anon-address `0x…`-hex case; `note_sk` and `note_pk` pinned separately so a scalar bug is distinguishable from a point bug).
+- **Dual-oracle**: `test-notekey-modern-c99` / `test-notekey-fips-c99` (the C — determinism, `note_pk == compress(note_sk·G)`, distinctness over all four inputs, cross-profile domain separation, fail-closed edges, an end-to-end **seal→open** proof that an enote sealed to `note_pk` opens with the derived `note_sk` and a *different* derived key does NOT open it — the scan "not mine" filter — and every KAT vector byte-for-byte) + the python side (`verify_notekey.py` no-args re-verify).
+- **Fail-closed**: NULL args, empty `chain_id` (cross-network replay), empty `addr` (ownerless key), fields > `DETERM_NOTEKEY_MAX_FIELD` (256 B), an all-zero derived scalar — all return −1 with `note_sk`/`note_pk` untouched. The `msg` scratch (holds the secret IKM) and the `sk` scratch are `determ_secure_zero`'d on every path. The length-prefixed big-endian encoding is the §3.24 convention, so distinct `(chain_id, addr, index)` tuples can never alias.
+- **PERMANENCE**: the formula is permanent once accounts exist (no-migrations); any change is a `-v2` DST, never an in-place edit.
+- **Non-claims / not yet built**: this is the DERIVATION primitive only. The on-chain PUBLICATION of `note_pk` (so a third-party sender can find it) — a new tx vs a REGISTER-extension vs address-derived — and the MODERN note-seed registration mechanism are a genuine consensus sub-decision deferred to the owner (see `EncryptedNoteDeliveryDesign.md` §5.4). Library-only, additive; consensus goldens byte-identical.
+
+---
+
 ## 4. Total estimated cost
 
 > **SUPERSEDED (2026-07-07) — original-plan sections.** §4–§8 (cost, risks, downstream, decision-review, long-term) below were written for the original **secp256k1 / libsecp256k1(-zkp) / ristretto255** crypto-family plan, which was abandoned — secp256k1 was rejected 2026-07-07 (a Koblitz curve) and never built, and ristretto255 was never used (libsodium removed from the tree). The AS-BUILT crypto is the `### 3.x` subsections above (NIST P-256 §3.8c, Pedersen/Bulletproofs §3.19, OPRF §3.9b). Read the `secp256k1` / `libsecp256k1(-zkp)` / `ristretto255` cost rows, risk items, binary-size figures, and review questions below as the historical plan. See the §2 banner + `DECISION-LOG.md` 2026-07-07.
