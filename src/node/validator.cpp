@@ -1278,6 +1278,23 @@ BlockValidator::Result BlockValidator::check_transactions(
                 if (!seen.insert(k).second)
                     return {false, "CONFIDENTIAL_TRANSFER duplicate input note"};
             }
+            // Mirror the apply-side OUTPUT guard (chain.cpp ~1101-1106): every
+            // output commitment must be a FRESH note (absent from the pool) and
+            // must not collide with an input or another output (shared `seen`
+            // set). Without this the validator accepts a colliding-output bundle
+            // that apply then skips (no-op, no nonce advance) — a validator-
+            // accepts / apply-skips asymmetry (S-039 completeness). Not a fork
+            // (all nodes agree deterministically), but a submit-time hygiene gap.
+            const uint8_t* Cout = b + 15 + n_in * 33;
+            for (size_t j = 0; j < m; ++j) {
+                std::string k = to_hex(Cout + j * 33, 33);
+                if (chain.shielded_note_exists(k))
+                    return {false, "CONFIDENTIAL_TRANSFER output note collides with "
+                                   "an existing pool note"};
+                if (!seen.insert(k).second)
+                    return {false, "CONFIDENTIAL_TRANSFER output note collides with "
+                                   "an input or another output"};
+            }
             break;
         }
         case TxType::ROTATE_AUDIT_KEY: {

@@ -43152,6 +43152,74 @@ int main(int argc, char** argv) {
                   "INFLATION GUARD: duplicate-input transfer REJECTED — note not spent, no inflation");
         }
 
+        // === 5. OUTPUT-collision rejected at BOTH validator and apply ===
+        // Closes the pre-existing S-039-completeness gap surfaced by the NC-8
+        // inc.2 review: the validator now mirrors apply's output-freshness +
+        // cross-set dedup, so a bundle whose output commitment collides with an
+        // existing pool note (or an input/another output) is rejected at submit,
+        // not silently accepted-then-skipped. (Not a fork — apply already skipped
+        // it deterministically — but a validator-completeness fix.)
+        {
+            // alice as a registered creator (keypair) so the validator sig verifies
+            // (NodeRegistry::build_from_chain picks up the genesis creator's pubkey).
+            crypto::NodeKey key;
+            for (size_t i = 0; i < key.priv_seed.size(); ++i) key.priv_seed[i] = uint8_t(0x40 + i);
+            determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+            GenesisConfig cfg2; cfg2.chain_id = "ctx-collide"; cfg2.chain_role = ChainRole::SINGLE;
+            GenesisCreator ac; ac.domain = "alice"; ac.initial_stake = 2000; ac.ed_pub = key.pub;
+            cfg2.initial_creators = {ac};
+            GenesisAllocation ab2; ab2.domain = "alice"; ab2.balance = 1000;
+            cfg2.initial_balances = {ab2};
+            Chain c2; c2.append(make_genesis_block(cfg2));
+            Transaction s0; s0.type = TxType::SHIELD; s0.from = "alice"; s0.to = "";
+            s0.amount = vi0; s0.fee = 0; s0.nonce = 0; s0.payload = shield_payload(vi0, ri0);
+            Transaction s1; s1.type = TxType::SHIELD; s1.from = "alice"; s1.to = "";
+            s1.amount = vi1; s1.fee = 0; s1.nonce = 1; s1.payload = shield_payload(vi1, ri1);
+            Block bs2; bs2.index = 1; bs2.prev_hash = c2.head().compute_hash();
+            bs2.creators = {"alice"}; bs2.transactions = {s0, s1};
+            c2.append(bs2);
+            node::NodeRegistry reg = node::NodeRegistry::build_from_chain(c2, c2.height());
+            auto signed_ctx = [&](const std::vector<uint8_t>& bundle, uint64_t nonce, uint64_t f) {
+                Transaction t; t.type = TxType::CONFIDENTIAL_TRANSFER; t.from = "alice"; t.to = "";
+                t.amount = 0; t.fee = f; t.nonce = nonce; t.payload = bundle;
+                auto sb = t.signing_bytes(); t.sig = crypto::sign(key, sb.data(), sb.size());
+                return t;
+            };
+            auto run_val = [&](const Transaction& t) {
+                Block vb; vb.index = 2; vb.transactions = {t};
+                node::BlockValidator v; v.set_chain_role(ChainRole::SINGLE);
+                return v.check_transactions_for_test(vb, c2, reg);
+            };
+
+            // Control: a genuinely-fresh-output bundle PASSES the validator (proves
+            // the sig + input checks + the setup are correct — the collide reject
+            // below is specifically the new output guard, not a setup failure).
+            std::vector<uint8_t> good = build_bundle({vi0, vi1}, {ri0, ri1}, {vo0, vo1}, {ro0, ro1}, fee);
+            check(run_val(signed_ctx(good, 2, fee)).ok,
+                  "validator control: a fresh-output confidential transfer PASSES");
+
+            // Collide: output0 == commit(vi0, ri0) == an EXISTING pool note (also
+            // input0). Blindings chosen so Σr_in(900) ≥ Σr_out(800) → the balance
+            // proof is VALID (the reject must come from the output guard, not the
+            // proof). Σv_in = 4 = Σv_out (3+1) + fee 0.
+            std::vector<uint8_t> collide = build_bundle({vi0, vi1}, {ri0, ri1},
+                                                        {vi0, vi1}, {ri0, 300}, 0);
+            check(!collide.empty() && determ_ctx_bundle_verify(collide.data(), collide.size()) == 0,
+                  "setup: the output-collision bundle is CRYPTOGRAPHICALLY valid");
+            auto rr = run_val(signed_ctx(collide, 2, 0));
+            check(!rr.ok && rr.error.find("output note collides") != std::string::npos,
+                  "validator: an output colliding with a pool note is REJECTED (was silently accepted)");
+
+            // Apply the same collide bundle: a no-op (mirror) — inputs NOT consumed.
+            Transaction ct; ct.type = TxType::CONFIDENTIAL_TRANSFER; ct.from = "alice"; ct.to = "";
+            ct.amount = 0; ct.fee = 0; ct.nonce = 2; ct.payload = collide;
+            Block cb; cb.index = 2; cb.prev_hash = c2.head().compute_hash();
+            cb.creators = {"alice"}; cb.transactions.push_back(ct);
+            c2.append(cb);
+            check(c2.shielded_note_count() == 2 && c2.accumulated_shielded() == vi0 + vi1,
+                  "apply mirror: the output-collision transfer is a no-op — inputs NOT consumed");
+        }
+
         std::cout << (fail ? "  FAIL: test-confidential-transfer\n" : "  PASS: test-confidential-transfer\n");
         return fail ? 1 : 0;
     }
