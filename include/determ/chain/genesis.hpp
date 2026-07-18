@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>   // CryptoProfile (the genesis-pinned consensus profile)
 #include <string>
 #include <vector>
 
@@ -178,6 +179,16 @@ struct GenesisConfig {
     // differs on the flag computes a DIFFERENT hash — two operators cannot silently
     // diverge (one accepting a CT tx the other rejects). Immutable post-genesis.
     bool                            confidential_tx_enabled{true};
+
+    // NC-8 profile gating (EncryptedNoteDeliveryDesign.md §5): the deployment
+    // crypto profile, promoted from a params.hpp posture label to a
+    // genesis-pinned CONSENSUS field so the profile-dependent encrypted-note
+    // wiring (delivery placement + recipient-key derivation) is deterministic
+    // per chain. MODERN (default) vs FIPS. Genesis-pinned + consensus-critical:
+    // mixed into compute_genesis_hash + emitted as a `k:crypto_profile` state
+    // leaf ONLY when non-default (FIPS), so MODERN chains are byte-identical to
+    // pre-field chains. Immutable post-genesis.
+    CryptoProfile                   crypto_profile{CryptoProfile::MODERN};
 
     // A5 Phase 3: economic policy fields promoted from static constants
     // in params.hpp to genesis-pinned, governance-mutable parameters.

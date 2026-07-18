@@ -790,6 +790,10 @@ Additional in-process tests:
                                               floor — fill-to-K ascending
                                               lift order, dormancy, k=0
                                               disable, 3-mirror equivalence
+  determ test-crypto-profile                  NC-8 profile gating — genesis-
+                                              pinned CryptoProfile: MODERN
+                                              byte-neutral, FIPS diverges
+                                              state_root + genesis hash
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -25478,6 +25482,108 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": eligibility-floor "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-crypto-profile") {
+        // NC-8 profile gating: CryptoProfile promoted from a params.hpp posture
+        // label to a genesis-pinned CONSENSUS field (block.hpp / genesis.hpp /
+        // Chain::crypto_profile_). Gates: MODERN (default) is BYTE-NEUTRAL — no
+        // `k:crypto_profile` state leaf, no genesis-hash marker, no snapshot key
+        // (existing goldens unchanged); FIPS diverges the state_root + the
+        // genesis hash (two operators cannot silently disagree) and round-trips
+        // through genesis JSON + the state snapshot.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+
+        auto mk_cfg = [](CryptoProfile p) {
+            GenesisConfig cfg;
+            cfg.chain_id = "crypto-profile-test";
+            cfg.crypto_profile = p;
+            GenesisCreator a; a.domain = "alice"; a.initial_stake = 2000;
+            for (size_t i = 0; i < a.ed_pub.size(); ++i) a.ed_pub[i] = uint8_t(0x10 + i);
+            cfg.initial_creators = {a};
+            GenesisAllocation b; b.domain = "alice"; b.balance = 1000;
+            cfg.initial_balances = {b};
+            return cfg;
+        };
+        // Apply one non-boundary block so a real (non-genesis) state_root forms.
+        auto drive = [](Chain& c) {
+            Block b; b.index = c.height(); b.prev_hash = c.head_hash();
+            b.timestamp = 1700000000 + int64_t(b.index); b.creators = {"alice"};
+            c.append(std::move(b));
+        };
+
+        Chain modern; modern.append(make_genesis_block(mk_cfg(CryptoProfile::MODERN)));
+        modern.set_crypto_profile(CryptoProfile::MODERN);
+        Chain fips;   fips.append(make_genesis_block(mk_cfg(CryptoProfile::FIPS)));
+        fips.set_crypto_profile(CryptoProfile::FIPS);
+        drive(modern); drive(fips);
+
+        // === Default MODERN is byte-neutral (no leaf) ===
+        check(modern.crypto_profile() == CryptoProfile::MODERN,
+              "MODERN: chain reports MODERN");
+        {
+            // A chain built with the profile never touched must match the
+            // explicit-MODERN one bit-for-bit (default 0 = MODERN ⇒ no leaf).
+            Chain untouched; untouched.append(make_genesis_block(mk_cfg(CryptoProfile::MODERN)));
+            drive(untouched);
+            check(untouched.compute_state_root() == modern.compute_state_root(),
+                  "MODERN: state_root == a profile-untouched chain (no k: leaf)");
+        }
+
+        // === FIPS diverges the state_root + the genesis hash ===
+        check(fips.crypto_profile() == CryptoProfile::FIPS,
+              "FIPS: chain reports FIPS");
+        check(fips.compute_state_root() != modern.compute_state_root(),
+              "FIPS: state_root DIFFERS from MODERN (the k:crypto_profile leaf)");
+        check(compute_genesis_hash(mk_cfg(CryptoProfile::FIPS))
+                  != compute_genesis_hash(mk_cfg(CryptoProfile::MODERN)),
+              "FIPS: genesis hash DIFFERS from MODERN (no silent divergence)");
+        check(compute_genesis_hash(mk_cfg(CryptoProfile::MODERN))
+                  == compute_genesis_hash([]{ GenesisConfig c; c.chain_id="crypto-profile-test";
+                        GenesisCreator a; a.domain="alice"; a.initial_stake=2000;
+                        for (size_t i=0;i<a.ed_pub.size();++i) a.ed_pub[i]=uint8_t(0x10+i);
+                        c.initial_creators={a}; GenesisAllocation b; b.domain="alice"; b.balance=1000;
+                        c.initial_balances={b}; return c; }()),
+              "MODERN: genesis hash == a profile-untouched config (no marker)");
+
+        // === Genesis JSON round-trips the profile (emit only when non-default) ===
+        {
+            auto jm = mk_cfg(CryptoProfile::MODERN).to_json();
+            auto jf = mk_cfg(CryptoProfile::FIPS).to_json();
+            check(!jm.contains("crypto_profile"),
+                  "MODERN: genesis JSON omits crypto_profile (byte-neutral)");
+            check(jf.contains("crypto_profile"),
+                  "FIPS: genesis JSON carries crypto_profile");
+            check(GenesisConfig::from_json(jf).crypto_profile == CryptoProfile::FIPS,
+                  "FIPS: genesis JSON round-trips to FIPS");
+            check(GenesisConfig::from_json(jm).crypto_profile == CryptoProfile::MODERN,
+                  "MODERN: absent key parses back to MODERN");
+        }
+
+        // === Snapshot serialize/restore round-trips the profile ===
+        {
+            auto sm = modern.serialize_state();
+            auto sf = fips.serialize_state();
+            check(!sm.contains("crypto_profile"),
+                  "MODERN: snapshot omits crypto_profile (byte-neutral)");
+            check(sf.contains("crypto_profile"),
+                  "FIPS: snapshot carries crypto_profile");
+            Chain rf = Chain::restore_from_snapshot(sf);
+            check(rf.crypto_profile() == CryptoProfile::FIPS,
+                  "FIPS: restore_from_snapshot recovers FIPS + its state leaf");
+            Chain rm = Chain::restore_from_snapshot(sm);
+            check(rm.crypto_profile() == CryptoProfile::MODERN,
+                  "MODERN: restore_from_snapshot defaults to MODERN");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": crypto-profile "
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }

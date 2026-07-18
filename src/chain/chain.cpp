@@ -477,6 +477,12 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     const_leaf("merge_grace_blocks",           merge_grace_blocks_);
     const_leaf("shard_count",                  shard_count_);
     const_leaf("my_shard_id",                  my_shard_id_);
+    // NC-8 profile gating: the crypto profile as a genesis-constant leaf, emitted
+    // ONLY when non-default (FIPS), so every MODERN chain (all pre-field chains)
+    // stays byte-identical. State-root-bound ⇒ light clients trustlessly bind
+    // the profile that selects the enote wiring (EncryptedNoteDeliveryDesign §5).
+    if (crypto_profile_ != CryptoProfile::MODERN)
+        const_leaf("crypto_profile", static_cast<uint64_t>(crypto_profile_));
     // shard_salt is 32 bytes — own leaf form.
     {
         crypto::SHA256Builder b;
@@ -2063,6 +2069,10 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["subsidy_mode"]                 = subsidy_mode_;
     snap["lottery_jackpot_multiplier"]   = lottery_jackpot_multiplier_;
     snap["min_stake"]     = min_stake_;
+    // NC-8 profile gating: emit the crypto profile ONLY when non-default (FIPS),
+    // so a MODERN chain's snapshot stays byte-identical to pre-field snapshots.
+    if (crypto_profile_ != CryptoProfile::MODERN)
+        snap["crypto_profile"] = static_cast<uint64_t>(crypto_profile_);
     // A5 Phase 3: per-Chain values promoted from params.hpp constants.
     // Snapshot fields preserve pre-A5 defaults when absent.
     snap["suspension_slash"] = suspension_slash_;
@@ -2269,6 +2279,8 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.lottery_jackpot_multiplier_ =
         snap.value("lottery_jackpot_multiplier", uint32_t{0});
     c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
+    // NC-8 profile gating: absent (default 0 = MODERN) on every pre-field snapshot.
+    c.crypto_profile_ = static_cast<CryptoProfile>(snap.value("crypto_profile", uint64_t{0}));
     c.suspension_slash_ = snap.value("suspension_slash", uint64_t{10});
     c.unstake_delay_    = snap.value("unstake_delay",    uint64_t{1000});
     // R7 merge-detection thresholds (S-037-class closure). Restore from

@@ -170,6 +170,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
     // the correct subsidy when crediting creators.
     uint64_t genesis_subsidy = 0;
     uint64_t genesis_min_stake = 1000;
+    chain::CryptoProfile genesis_crypto_profile = chain::CryptoProfile::MODERN; // NC-8 profile gating
     uint64_t genesis_suspension_slash = 10;
     uint64_t genesis_unstake_delay    = 1000;
     uint32_t genesis_merge_threshold  = 100;
@@ -197,6 +198,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         cfg_.committee_region        = gcfg.committee_region;
         genesis_subsidy              = gcfg.block_subsidy;
         genesis_min_stake            = gcfg.min_stake;
+        genesis_crypto_profile       = gcfg.crypto_profile;
         genesis_suspension_slash     = gcfg.suspension_slash;
         genesis_unstake_delay        = gcfg.unstake_delay;
         genesis_merge_threshold      = gcfg.merge_threshold_blocks;
@@ -561,6 +563,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                                   genesis_my_shard, chain_epoch_blocks,
                                   cfg_.k_block_sigs);   // S-051 floor K
     chain_.set_min_stake(genesis_min_stake);
+    chain_.set_crypto_profile(genesis_crypto_profile);  // NC-8 profile gating
     chain_.set_suspension_slash(genesis_suspension_slash);
     chain_.set_unstake_delay(genesis_unstake_delay);
     chain_.set_merge_threshold_blocks(genesis_merge_threshold);
@@ -634,6 +637,7 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
             chain_.set_subsidy_mode(gcfg_opt->subsidy_mode);
             chain_.set_lottery_jackpot_multiplier(gcfg_opt->lottery_jackpot_multiplier);
             chain_.set_min_stake(genesis_min_stake);
+            chain_.set_crypto_profile(genesis_crypto_profile);  // NC-8 profile gating
             chain_.set_suspension_slash(genesis_suspension_slash);
             chain_.set_unstake_delay(genesis_unstake_delay);
             chain_.set_merge_threshold_blocks(genesis_merge_threshold);

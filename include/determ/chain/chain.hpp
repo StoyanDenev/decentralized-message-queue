@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>   // CryptoProfile (the genesis-pinned consensus profile)
 #include <determ/crypto/merkle.hpp>
 #include <map>
 #include <memory>
@@ -225,6 +226,13 @@ public:
     // than chain/params.hpp::MIN_STAKE.
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
+    // NC-8 profile gating: the genesis-pinned crypto profile (block.hpp). Set
+    // from GenesisConfig before any new block applies (the min_stake_
+    // discipline — node-set on load/genesis, snapshot-restored on bootstrap),
+    // so profile-dependent apply behavior + the conditional `k:crypto_profile`
+    // leaf are reproducible. MODERN default ⇒ no leaf ⇒ byte-identical.
+    CryptoProfile crypto_profile() const { return crypto_profile_; }
+    void          set_crypto_profile(CryptoProfile p) { crypto_profile_ = p; }
 
     // S-032: per-domain Phase-1 abort accumulator, maintained
     // incrementally in apply_transactions. NodeRegistry::build_from_chain
@@ -793,6 +801,7 @@ private:
     uint8_t                                     subsidy_mode_{0};
     uint32_t                                    lottery_jackpot_multiplier_{0};
     uint64_t                                    min_stake_{1000};
+    CryptoProfile                               crypto_profile_{CryptoProfile::MODERN}; // NC-8 profile gating
     // S-032 cache: see public abort_records() getter above.
     std::map<std::string, AbortRecord>          abort_records_;
     // A5 Phase 3: instance-state promotion of params.hpp constants.

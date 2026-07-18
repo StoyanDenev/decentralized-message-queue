@@ -100,6 +100,10 @@ json GenesisConfig::to_json() const {
     // D1: emit the CT-disable flag ONLY when set (disabled), so a CT-enabled
     // (default) chain's genesis JSON stays byte-identical to pre-flag files.
     if (!confidential_tx_enabled) out["confidential_tx_enabled"] = false;
+    // NC-8 profile gating: emit the crypto profile ONLY when non-default (FIPS),
+    // so a MODERN (default) chain's genesis JSON stays byte-identical.
+    if (crypto_profile != CryptoProfile::MODERN)
+        out["crypto_profile"] = static_cast<uint64_t>(crypto_profile);
     // D3.5e-1: emit the shard→region map ONLY when non-empty, so every
     // existing genesis file stays byte-identical. Same entry shape as the
     // node-local shard_manifest.json it replaces.
@@ -192,6 +196,8 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     // D1: CT layer enabled by default; absent key -> true (pre-flag genesis
     // files load byte-identically as CT-enabled).
     c.confidential_tx_enabled  = j.value("confidential_tx_enabled",  true);
+    c.crypto_profile           = static_cast<CryptoProfile>(
+                                     j.value("crypto_profile", uint64_t{0}));
     c.suspension_slash         = j.value("suspension_slash",         uint64_t{10});
     c.unstake_delay            = j.value("unstake_delay",            uint64_t{1000});
     c.merge_threshold_blocks   = j.value("merge_threshold_blocks",   uint32_t{100});
@@ -505,6 +511,15 @@ Block make_genesis_block(const GenesisConfig& cfg) {
     // tag suffices; domain-separated so it can never alias an adjacent mix.
     if (!cfg.confidential_tx_enabled) {
         rb.append(std::string("DTM-genesis-ct-disabled-v1"));
+    }
+    // NC-8 profile gating: the crypto profile selects the encrypted-note wiring
+    // (delivery placement + recipient-key derivation) + the state-root surface,
+    // so two operators who differ on it must NOT share a genesis hash. Mix a
+    // value-tagged marker with the same "mix only when non-default" idiom, so
+    // MODERN (default) chains keep byte-identical genesis hashes.
+    if (cfg.crypto_profile != CryptoProfile::MODERN) {
+        rb.append(std::string("DTM-genesis-crypto-profile-v1"));
+        rb.append(static_cast<uint64_t>(cfg.crypto_profile));
     }
     // D3.5e-1 (S-036 Layer 2): the shard→region map is consensus-critical on
     // a BEACON chain — it is the committed region input to shard-tip
