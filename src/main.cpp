@@ -60,6 +60,7 @@
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
 #include <determ/json/json.hpp>                // minix JSON phase 2 inc.1: determ::json (test-determ-json dual-oracle)
+#include <determ/chain/abort_canonical.hpp>   // abort-event digest canonicalization (test-abort-claims-canonical)
 #include <determ/net/rate_limiter.hpp>
 // minix: LoopTimer works over ANY EventLoop (native or virtual) — both
 // platforms' test batteries use it.
@@ -823,6 +824,11 @@ Additional in-process tests:
                                               nlohmann on the consensus/HMAC subset
                                               (sorted-key dump, strict UTF-8,
                                               parse-rejection agreement, depth cap)
+  determ test-abort-claims-canonical          abort-event digest canonicalization —
+                                              hash the six consensus-bound claim
+                                              fields (strip attacker-injected
+                                              unknown members); byte-neutral for
+                                              honest claims (digest unchanged)
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -42374,6 +42380,126 @@ int main(int argc, char** argv) {
         return fail ? 1 : 0;
     }
 
+    if (cmd == "test-abort-claims-canonical") {
+        // Abort-event digest CANONICALIZATION hardening. hash_abort_event()
+        // now hashes the canonical claims form (only the six consensus-bound
+        // fields, sorted; unknown members stripped) instead of the verbatim
+        // peer JSON, so an attacker-injected extra member in an otherwise-valid
+        // claim can no longer ride the K-of-K block digest. ONE shared helper
+        // (abort_canonical.hpp) is used by the daemon AND the light mirror.
+        // Asserts: (1) BYTE-NEUTRAL for honest claims (canonical == verbatim →
+        // every honest abort block's digest is UNCHANGED, no fork/migration);
+        // (2) the injected member is STRIPPED (same digest with/without it) —
+        // the security property; (3) the fix is LOAD-BEARING (injection DOES
+        // change the verbatim bytes, so without canonicalization the digest
+        // would differ); (4) fallbacks preserve prior behavior.
+        using namespace determ;
+        namespace dc = determ::chain;
+        using njson = nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Two honest claims, built exactly as a producer would (AbortClaimMsg::to_json).
+        auto mk_claim = [&](const std::string& claimer, uint8_t fill) {
+            node::AbortClaimMsg m;
+            m.block_index = 10; m.round = 2; m.missing_creator = "n2"; m.claimer = claimer;
+            for (auto& x : m.prev_hash) x = fill;
+            for (auto& x : m.ed_sig)    x = static_cast<uint8_t>(fill ^ 0x5a);
+            return m.to_json();
+        };
+        njson clean = njson::array();
+        clean.push_back(mk_claim("n1", 0xab));   // hex fills with letters, so the
+        clean.push_back(mk_claim("n3", 0xcd));   // hex-case channel is exercisable
+
+        // The same claims with an attacker-injected extra member — incl. the
+        // exact double from the determ::djson swap-blocker (`"z":0.1`).
+        njson inj = clean;
+        inj[0]["z"] = 0.1;
+        inj[1]["extra_note"] = "junk";
+
+        auto mk_event = [&](const njson& claims) {
+            chain::AbortEvent e;
+            e.round = 2; e.aborting_node = "n2"; e.timestamp = 123456;
+            for (auto& x : e.event_hash) x = 0x7e;
+            e.claims_json = claims;
+            return e;
+        };
+        chain::AbortEvent ev_clean = mk_event(clean);
+        chain::AbortEvent ev_inj   = mk_event(inj);
+
+        // (1) BYTE-NEUTRAL: an honest claims array canonicalizes to its own
+        //     verbatim dump → the digest of every honest abort block is unchanged.
+        check(dc::canonical_abort_claims_dump(clean) == clean.dump(),
+              "byte-neutral: honest claims canonical dump == verbatim dump (digest unchanged)");
+        Hash hc = node::hash_abort_event(ev_clean);
+        check(node::hash_abort_event(ev_clean) == hc,
+              "byte-neutral: honest abort-event digest is deterministic");
+
+        // (3) LOAD-BEARING: the injection DOES change the verbatim bytes, so
+        //     without canonicalization the two digests would differ.
+        check(clean.dump() != inj.dump(),
+              "load-bearing: injected member changes the VERBATIM claims bytes");
+
+        // (2) SECURITY: canonicalization strips the injected members, so the
+        //     digest binds only semantic content — same digest with/without them.
+        check(dc::canonical_abort_claims_dump(inj) == dc::canonical_abort_claims_dump(clean),
+              "security: canonical dump strips attacker-injected unknown members");
+        check(node::hash_abort_event(ev_inj) == hc,
+              "security: injected unknown members do NOT change the abort-event digest");
+
+        // (2b) NUMERIC-VALUE channel (adversarial-review finding): nlohmann's
+        //      get<uint64_t> TRUNCATES a float without throwing (10.9 -> 10),
+        //      exactly like json_require, so a float-encoded int field is
+        //      ACCEPTED by validation. The canonicalization re-derives ints
+        //      through the typed parse, collapsing every encoding of the same
+        //      integer → same digest (a verbatim copy would leave "10.9").
+        {
+            njson floaty = clean;
+            floaty[0]["block_index"] = 10.0;   // double; validation truncates to 10
+            floaty[1]["round"]       = 2.0;    // double; validation truncates to 2
+            check(dc::canonical_abort_claims_dump(floaty) == dc::canonical_abort_claims_dump(clean),
+                  "security: float-encoded int fields canonicalize away (numeric channel)");
+            check(node::hash_abort_event(mk_event(floaty)) == hc,
+                  "security: float-encoded block_index/round do NOT change the digest");
+            check(floaty.dump() != clean.dump(),
+                  "load-bearing: float encoding changes the VERBATIM claims bytes");
+        }
+        // (2c) HEX-CASE channel: hex is accepted case-insensitively (the sig
+        //      covers the decoded BYTES), so upper/mixed-case hex canonicalizes
+        //      to lowercase → same digest.
+        {
+            njson upper = clean;
+            auto toup = [](std::string s){
+                for (char& ch : s) if (ch >= 'a' && ch <= 'f') ch = static_cast<char>(ch - 'a' + 'A');
+                return s;
+            };
+            upper[0]["prev_hash"] = toup(clean[0]["prev_hash"].get<std::string>());
+            upper[1]["ed_sig"]    = toup(clean[1]["ed_sig"].get<std::string>());
+            check(node::hash_abort_event(mk_event(upper)) == hc,
+                  "security: upper-case hex fields canonicalize to lowercase (same digest)");
+            check(upper.dump() != clean.dump(),
+                  "load-bearing: hex case changes the VERBATIM claims bytes");
+        }
+
+        // (4) Fallbacks preserve prior behavior + never throw on the hash path.
+        njson notarr = "not-an-array";
+        check(dc::canonical_abort_claims_dump(notarr) == notarr.dump(),
+              "fallback: a non-array claims value → verbatim dump");
+        njson mal = njson::array();
+        { njson bad; bad["block_index"] = 1; mal.push_back(bad); }  // missing 5 required keys
+        check(dc::canonical_abort_claims_dump(mal) == mal.dump(),
+              "fallback: a malformed claim (missing keys) → verbatim dump (rejected upstream)");
+        njson empty = njson::array();
+        check(dc::canonical_abort_claims_dump(empty) == empty.dump(),
+              "fallback: an empty claims array → \"[]\"");
+
+        std::cout << (fail ? "  FAIL: test-abort-claims-canonical\n"
+                           : "  PASS: test-abort-claims-canonical\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-determ-json") {
         // minix JSON phase 2, increment 1 — DUAL-ORACLE byte-parity gate.
         //

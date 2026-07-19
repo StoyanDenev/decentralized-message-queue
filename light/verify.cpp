@@ -20,6 +20,7 @@
 #include <determ/util/json_validate.hpp>
 #include <determ/types.hpp>
 #include <determ/chain/block.hpp>
+#include <determ/chain/abort_canonical.hpp>  // shared canonical abort-claims dump (mirror)
 #include <set>
 #include <vector>
 #include <stdexcept>
@@ -90,7 +91,11 @@ Hash hash_abort_event(const determ::chain::AbortEvent& e) {
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    b.append(e.claims_json.dump());
+    // Mirror of producer.cpp::hash_abort_event: hash the CANONICAL claims form
+    // (only the six consensus-bound fields, sorted; strips attacker-injectable
+    // unknown members) via the ONE shared helper so the light digest cannot
+    // drift from the node's. Byte-neutral for honest claims.
+    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
     return b.finalize();
 }
 

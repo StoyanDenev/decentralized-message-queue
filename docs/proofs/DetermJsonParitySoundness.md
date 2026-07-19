@@ -161,7 +161,16 @@ in-binary test does, as the oracle).
   nlohmann). `test-determ-json` WITNESSES the current double gap (a passing
   `diverge > 0` tripwire that flips RED when parity lands) so it cannot be
   forgotten. Any integer literal exceeding `uint64` also falls back to double
-  (stricter classification), on the same footing.
+  (stricter classification), on the same footing. **UPDATE: the concrete fork
+  vector this finding named — an injected double riding the abort-event digest —
+  is now CLOSED at the source by
+  [AbortDigestCanonicalizationSoundness.md](AbortDigestCanonicalizationSoundness.md):
+  `hash_abort_event` canonicalizes the claims (stripping unknown members) before
+  hashing, so no attacker-controlled double reaches that serializer. The residual
+  double concern for the swap is the RPC-HMAC path (`method|params.dump()`),
+  where a serializer divergence fails auth CLOSED (mismatch) rather than forking
+  consensus. Double dump-parity therefore remains a swap *robustness* item, not a
+  live fork vector.**
 - **NC-2 (property, not yet a consumer).** DJP-1 is a property of the module.
   Increment 1 does not make `determ::djson` the writer at any consensus byte
   path; the swap is the owner-gated increment where a mixed-implementation

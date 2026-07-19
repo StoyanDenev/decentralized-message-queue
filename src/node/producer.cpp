@@ -6,6 +6,7 @@
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
+#include <determ/chain/abort_canonical.hpp>  // canonical abort-claims dump for the digest
 #include <algorithm>
 #include <map>
 #include <set>
@@ -376,11 +377,15 @@ Hash hash_abort_event(const chain::AbortEvent& e) {
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    // claims_json: serialize to canonical string form via nlohmann's
-    // dump(). All peers using nlohmann::json see the same dump() output
-    // for the same parsed input (nlohmann sorts object keys), so this
-    // is deterministic across observers.
-    b.append(e.claims_json.dump());
+    // claims_json: hash the CANONICAL form (rebuilt from ONLY the six
+    // consensus-bound fields, sorted keys), NOT the verbatim peer JSON. This
+    // strips attacker-injectable unknown members — which the per-claim
+    // signature does not cover and per-claim validation ignores — so the
+    // digest binds only semantic content. BYTE-NEUTRAL for honest claims
+    // (already exactly six keys, so canonical == verbatim). One shared helper
+    // (abort_canonical.hpp) is called here AND in the light-client mirror
+    // (light/verify.cpp), so the two digests cannot drift.
+    b.append(chain::canonical_abort_claims_dump(e.claims_json));
     return b.finalize();
 }
 

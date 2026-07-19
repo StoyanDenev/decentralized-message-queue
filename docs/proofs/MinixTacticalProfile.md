@@ -476,7 +476,12 @@ either a shortest-round-trip `dump_double` matching nlohmann byte for byte, or
 re-canonicalizing `claims_json` from typed `AbortClaimMsg` fields before hashing
 (which also hardens the pre-existing weakness that the abort digest binds
 attacker-injectable non-semantic bytes even today under nlohmann). The gate
-WITNESSES the current double gap so it cannot be forgotten.**
+WITNESSES the current double gap so it cannot be forgotten.** **The abort-site
+fork vector is now CLOSED (`AbortDigestCanonicalizationSoundness.md`):
+`hash_abort_event` canonicalizes the claims (strips unknown members) before
+hashing, so no attacker double reaches that serializer — the swap-blocker
+narrows to a swap *robustness* item (RPC-HMAC double divergence fails auth
+CLOSED, not a fork).**
 
 ## 6. OpenSSL track — test-oracle split (SHIPPED `217191a`)
 
