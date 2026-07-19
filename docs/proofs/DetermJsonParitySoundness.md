@@ -138,6 +138,48 @@ restoring agreement (both reject); inc.4's `both_reject("1e400", …)` pins it.
 (Underflow to a finite subnormal/0.0 is accepted by both, so the guard is on
 `isfinite`, not `errno`.)
 
+**Increment 5 lifts this agreement from a hand-written corpus to FUZZ SCALE.**
+`determ test-determ-json-fuzz` gained a second phase: valid in-scope seeds are
+corrupted by random mutation (substitute / insert / delete / duplicate /
+truncate / transpose, 1-3 per seed) and the two implementations must AGREE on
+accept-vs-reject for every resulting hostile byte string. This is the property's
+generalization — a corpus only covers what its author imagined, which is
+precisely how the overflow-to-non-finite class survived 94 hand-written cases.
+Mutations are steered OUT of the NC-4 deliberate-divergence territory so any
+disagreement is a REAL bug, not a known carve-out: `0x00` is never inserted (the
+trailing-NUL carve-out) and seeds are shallow enough that the depth cap is
+unreachable. Where both accept, dump byte-parity is additionally compared, but
+only when the parsed value holds no double (the NC-1 dtoa gap, which a mutation
+can trivially create by turning `12` into `1.2`). A NON-VACUITY gate asserts the
+mutations actually yield BOTH accepted and rejected inputs — otherwise the
+agreement would be vacuous on one side. Result: **zero disagreements and zero
+dump mismatches over 200k mutants** (52,219 both-accepted / 147,781
+both-rejected — a healthy 26%/74% split, 41,974 of the accepted ones dump-compared),
+on top of the 200k valid-value phase-1 sweep — and independently clean on the
+second toolchain (WSL2 GCC, 100k mutants: 25,822 / 74,178 / 0 disagree, 20,769
+dump-compared / 0 mismatch).
+
+*Falsify-on-mutant (executed).* Deleting the parser's raw-control-character
+rejection — so `determ::djson` accepts a bare `\t` inside a string where nlohmann
+rejects it — turns the agreement check RED (`disagree=1`, suite FAIL); restoring
+it returns to green. The gate is load-bearing, not decorative. **But note the
+honest limit it also measured: that mutant produced only ONE catch in 3000
+mutants.** A mutational fuzzer reaches a defect class only when a mutation lands
+on exactly the right byte, so its per-class detection rate at the FAST default is
+low; it COMPLEMENTS inc.4's deterministic corpus (which pins each class with
+certainty every run) rather than superseding it. The two are different
+instruments: the corpus guarantees the classes we know, the fuzzer samples the
+ones we did not think of — deep standalone runs (`--iters 200000`) are where the
+latter earns its keep.
+
+*Incidental finding (not a defect).* The first falsify target chosen — the
+parser's leading-zero rejection — proved UNOBSERVABLE at the API boundary:
+deleting it changed no accept/reject outcome, because every leading-zero input is
+still caught downstream (`"00"` parses `0` then fails on trailing content; `[01]`
+fails "expected ',' or ']'"). That check is redundant defense-in-depth, and the
+episode is the reminder that a falsify target must be observable at the surface
+the gate actually measures, or a passing mutant run proves nothing.
+
 **DJP-6 (peer-facing hardening).** The parser is (in a future increment) the
 outermost consumer of every peer-supplied byte, so it enforces a nesting DEPTH
 CAP (default 64) on both objects and arrays, strict UTF-8 validation (rejecting
@@ -248,7 +290,10 @@ GenesisAlloc / snapshot / RPC / envelope serialization. **inc.3 `determ
 test-determ-json-fuzz` (`tools/test_determ_json_fuzz.sh`, FAST via
 `determ_json_fuzz`): the deterministic differential fuzzer of NC-3 — thousands
 of random in-scope values, both build+dump and parse+dump byte-checked vs
-nlohmann, with a generator type-coverage (non-vacuity) assertion.** **inc.4
+nlohmann, with a generator type-coverage (non-vacuity) assertion; **inc.5 adds
+phase 2 — the MUTATIONAL adversarial half, asserting accept/reject AGREEMENT
+(DJP-5) over randomly corrupted inputs plus dump-parity on both-accepted
+non-double mutants, with its own accepted-AND-rejected non-vacuity gate.** **inc.4
 `determ test-determ-json-adversarial` (`tools/test_determ_json_adversarial.sh`,
 FAST via `determ_json_adversarial`): the DJP-5 adversarial accept/reject-agreement
 sweep — literal-case, NaN/Infinity, the number-malformation grammar (incl. the

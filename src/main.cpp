@@ -834,7 +834,10 @@ Additional in-process tests:
                                               DIFFERENTIAL FUZZ vs nlohmann:
                                               thousands of random in-scope values,
                                               both BUILD+dump and PARSE+dump
-                                              byte-checked (deterministic/seeded)
+                                              byte-checked (deterministic/seeded);
+                                              + inc.5 phase 2 MUTATIONAL fuzz:
+                                              corrupted inputs must agree
+                                              accept-vs-reject (DJP-5)
   determ test-determ-json-adversarial         minix JSON phase 2 inc.4 — determ::djson
                                               ADVERSARIAL accept/reject-agreement vs
                                               nlohmann (literal-case, NaN/Infinity,
@@ -43136,6 +43139,13 @@ int main(int argc, char** argv) {
         // fixed seed → identical inputs on MSVC + GCC, CI-stable + reproducible);
         // generates ONLY in-scope values (depth < the parser cap, no doubles),
         // so agreement is the expected result. `--iters N` (default 3000).
+        //
+        // PHASE 2 (inc.5) adds the ADVERSARIAL MUTATIONAL half: valid seeds are
+        // corrupted (substitute/insert/delete/duplicate/truncate/transpose) and
+        // the two impls must AGREE on accept-vs-reject (DJP-5) — the fuzz-scale
+        // counterpart of inc.4's hand-written corpus, steered clear of the NC-4
+        // deliberate carve-outs so any disagreement is a REAL bug. See the
+        // phase-2 block below for the carve-out avoidance argument.
         namespace dj = determ::djson;
         using njson = nlohmann::json;
         int fail = 0;
@@ -43242,6 +43252,102 @@ int main(int argc, char** argv) {
                   << typehits[0] << "/" << typehits[1] << "/" << typehits[2] << "/"
                   << typehits[3] << "/" << typehits[4] << "/" << typehits[5] << "/"
                   << typehits[6] << ")\n";
+
+        // ── Phase 2: ADVERSARIAL MUTATIONAL fuzz — accept/reject AGREEMENT ───
+        // Phase 1 fuzzes VALID values for dump-parity. This phase attacks the
+        // OTHER swap-safety property (DJP-5, hand-swept in inc.4): for a hostile
+        // byte string, determ::djson and nlohmann must AGREE on accept-vs-reject,
+        // or a swapped node forks (accepts what the fleet rejects) or desyncs its
+        // HMAC. inc.4's corpus is HAND-WRITTEN — a mutational fuzzer reaches the
+        // cases no author anticipates, which is precisely how the inc.4 review's
+        // overflow-to-non-finite divergence slipped past a 94-case corpus.
+        //
+        // Mutations are steered OUT of the NC-4 deliberate-divergence territory,
+        // so any disagreement found here is a REAL bug, not a known carve-out:
+        //   * 0x00 is never inserted (the trailing-NUL carve-out: nlohmann maps a
+        //     trailing NUL to end-of-input and ACCEPTS, determ deliberately
+        //     REJECTS). Seed dumps escape control bytes as \u00xx, so no raw NUL
+        //     can pre-exist either.
+        //   * seeds are depth<=4 and at most 3 single-byte mutations land, so the
+        //     nesting depth cap (64) is unreachable.
+        // Where BOTH accept, dump-parity is additionally compared — but only if
+        // the value holds no double, since the dtoa gap is the documented NC-1
+        // non-parity (a mutation can turn `12` into `1.2` or a >u64 integer).
+        {
+            std::function<bool(const njson&)> has_float = [&](const njson& j) -> bool {
+                if (j.is_number_float()) return true;
+                if (j.is_array() || j.is_object())
+                    for (auto it = j.begin(); it != j.end(); ++it)
+                        if (has_float(it.value())) return true;
+                return false;
+            };
+            // Mutation alphabet: JSON structurals + literal/number/escape bytes.
+            // Deliberately excludes 0x00 (see the carve-out note above).
+            auto mut_byte = [&]() -> char {
+                static const char pool[] = "{}[]\",:0123456789.eE+-truefalsnl \t\\/xyz";
+                return pool[next() % (sizeof(pool) - 1)];
+            };
+            uint64_t m_acc = 0, m_rej = 0, m_dis = 0, m_dump_chk = 0, m_dump_bad = 0;
+            bool m_first = false; std::string m_bad_in; bool m_bad_nlo = false;
+            std::string m_dbad_in, m_dbad_want, m_dbad_got;
+            for (uint64_t i = 0; i < iters; ++i) {
+                std::string s = gen(4).dump();          // a valid in-scope seed
+                uint64_t nmut = 1 + (next() % 3);       // 1..3 mutations
+                for (uint64_t k = 0; k < nmut && !s.empty(); ++k) {
+                    uint64_t op = next() % 6;
+                    size_t p = static_cast<size_t>(next() % s.size());
+                    switch (op) {
+                        case 0: s[p] = mut_byte(); break;                                  // substitute
+                        case 1: s.insert(s.begin() + static_cast<long>(p), mut_byte()); break;  // insert
+                        case 2: s.erase(s.begin() + static_cast<long>(p)); break;          // delete
+                        case 3: s.insert(s.begin() + static_cast<long>(p), s[p]); break;   // duplicate
+                        case 4: s.resize(p); break;                                        // truncate
+                        default: if (p + 1 < s.size()) std::swap(s[p], s[p + 1]); break;   // transpose
+                    }
+                }
+                bool n_ok = true, d_ok = true;
+                njson nv;
+                try { nv = njson::parse(s); } catch (const std::exception&) { n_ok = false; }
+                try { (void)dj::Value::parse(s); } catch (const std::exception&) { d_ok = false; }
+                if (n_ok != d_ok) {
+                    m_dis++;
+                    if (!m_first) { m_first = true; m_bad_in = s; m_bad_nlo = n_ok; }
+                } else if (n_ok) {
+                    m_acc++;
+                    if (!has_float(nv)) {
+                        std::string w = nv.dump(), g; bool ok = false;
+                        try { g = dj::Value::parse(s).dump(); ok = (g == w); }
+                        catch (const std::exception&) { ok = false; }
+                        m_dump_chk++;
+                        if (!ok && m_dump_bad == 0) { m_dbad_in = s; m_dbad_want = w; m_dbad_got = g; }
+                        if (!ok) m_dump_bad++;
+                    }
+                } else {
+                    m_rej++;
+                }
+            }
+            if (m_dis) {
+                std::cout << "    first accept/reject DISAGREEMENT: nlohmann "
+                          << (m_bad_nlo ? "accepts" : "rejects") << ", determ::djson "
+                          << (m_bad_nlo ? "rejects" : "accepts") << " on [" << m_bad_in << "]\n";
+            }
+            if (m_dump_bad) {
+                std::cout << "    first dump divergence on [" << m_dbad_in << "]\n"
+                          << "    nlohmann=[" << m_dbad_want << "] djson=[" << m_dbad_got << "]\n";
+            }
+            check(m_dis == 0,
+                  "mutfuzz: accept/reject AGREEMENT with nlohmann on every mutated hostile input (DJP-5)");
+            check(m_dump_bad == 0,
+                  "mutfuzz: dump byte-parity on every both-accepted non-double mutant");
+            // NON-VACUITY: the mutations must actually produce BOTH still-valid
+            // and now-invalid inputs. If every mutant were rejected, the
+            // accept-side agreement would be vacuous (and vice versa).
+            check(m_acc > 0 && m_rej > 0,
+                  "mutfuzz: mutations yielded BOTH accepted and rejected inputs — non-vacuous");
+            std::cout << "  (" << iters << " mutants; both-accept=" << m_acc
+                      << " both-reject=" << m_rej << " disagree=" << m_dis
+                      << "; dump-compared=" << m_dump_chk << " mismatch=" << m_dump_bad << ")\n";
+        }
 
         std::cout << (fail ? "  FAIL: test-determ-json-fuzz\n" : "  PASS: test-determ-json-fuzz\n");
         return fail ? 1 : 0;

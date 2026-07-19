@@ -12,6 +12,19 @@
 # determ::djson bug. Deterministic (splitmix64, fixed seed -> identical inputs
 # on MSVC + GCC, CI-stable + reproducible); ONLY in-scope values are generated
 # (depth < the parser cap, no doubles), so agreement is the expected result.
+#
+# PHASE 2 (inc.5) adds the ADVERSARIAL MUTATIONAL half, attacking the OTHER
+# swap-safety property (DJP-5): valid seeds are corrupted (substitute / insert /
+# delete / duplicate / truncate / transpose) and determ::djson and nlohmann must
+# AGREE on accept-vs-reject — a disagreement is a mixed-fleet fork/desync. This
+# is the fuzz-scale counterpart of inc.4's hand-written corpus (which is exactly
+# how the inc.4 review's overflow-to-non-finite divergence had slipped through).
+# Mutations are steered clear of the NC-4 deliberate carve-outs (never inserts
+# 0x00; depth stays far under the cap) so any disagreement found is a REAL bug,
+# and dump-parity is compared on both-accepted mutants only when the value holds
+# no double (the documented NC-1 dtoa gap). A non-vacuity gate asserts the
+# mutations actually yield BOTH accepted and rejected inputs.
+#
 # FAST runs the fast default (3000 iters, <1s); pass a larger `--iters N` for a
 # deeper standalone stress run.
 #

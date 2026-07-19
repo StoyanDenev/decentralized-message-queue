@@ -496,6 +496,24 @@ accept/reject fork. `include/determ/json/json.hpp` now routes every numeric
 test also witnesses the NC-4 deliberate stricter-than-nlohmann divergences (the
 depth cap and the trailing-NUL rejection) rather than asserting agreement on them.
 
+**PHASE 2 INCREMENT 5 SHIPPED (additive/test-only): the reject-agreement
+property at FUZZ SCALE.** `determ test-determ-json-fuzz` gained a second phase
+that corrupts valid in-scope seeds (substitute / insert / delete / duplicate /
+truncate / transpose, 1-3 mutations each) and asserts determ::djson and nlohmann
+AGREE on accept-vs-reject for every resulting hostile byte string — the
+generalization of inc.4's hand-written corpus, which is what a corpus
+structurally cannot give you (a corpus only covers what its author imagined,
+which is exactly how the overflow-to-non-finite class survived 94 cases).
+Mutations are steered clear of the NC-4 carve-outs (never inserts `0x00`; depth
+stays far under the cap) so any disagreement is a REAL bug; dump-parity is also
+compared on both-accepted mutants holding no double (the NC-1 dtoa gap). A
+non-vacuity gate asserts the mutations yield BOTH accepted and rejected inputs.
+Kept inside the existing subcommand/wrapper/FAST entry rather than adding a new
+one (minimalism). Zero disagreements at the FAST default and on deep standalone
+runs. This closes the determ::djson validation ladder: corpus (inc.1) → real
+surfaces (inc.2) → valid-value fuzz (inc.3) → adversarial corpus (inc.4) →
+adversarial fuzz (inc.5).
+
 **PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
 byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
 an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by
