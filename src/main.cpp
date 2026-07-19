@@ -59,6 +59,7 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
+#include <determ/json/json.hpp>                // minix JSON phase 2 inc.1: determ::json (test-determ-json dual-oracle)
 #include <determ/net/rate_limiter.hpp>
 // minix: LoopTimer works over ANY EventLoop (native or virtual) — both
 // platforms' test batteries use it.
@@ -817,6 +818,11 @@ Additional in-process tests:
                                               tx + nk: state leaf: publish/rotate/
                                               clear note_pk; anon accounts CAN
                                               publish; byte-neutral when unused
+  determ test-determ-json                     minix JSON phase 2 inc.1 — determ::json
+                                              dual-oracle byte-parity vs vendored
+                                              nlohmann on the consensus/HMAC subset
+                                              (sorted-key dump, strict UTF-8,
+                                              parse-rejection agreement, depth cap)
   determ test-net-native                      minix native-backend contracts —
                                               the platform's native backend
                                               (IOCP on Windows, the epoll
@@ -42368,6 +42374,253 @@ int main(int argc, char** argv) {
         return fail ? 1 : 0;
     }
 
+    if (cmd == "test-determ-json") {
+        // minix JSON phase 2, increment 1 — DUAL-ORACLE byte-parity gate.
+        //
+        // The load-bearing minix property (docs/proofs/MinixTacticalProfile.md
+        // §5): a from-scratch determ::json must dump() BYTE-IDENTICALLY to
+        // nlohmann on the narrow subset the daemon puts on a consensus/HMAC
+        // path — the abort-event digest (producer.cpp / light verify.cpp hash
+        // claims_json.dump()) and the RPC HMAC (method|params.dump()). nlohmann
+        // is the FROZEN reference, linked in this very binary, so parity is
+        // measured empirically (parse→dump both, byte-compare), not predicted.
+        // This increment is ADDITIVE: it introduces determ::json + proves the
+        // property; no production consumer is swapped onto it yet.
+        //
+        // Also gated: round-trip idempotence, key-sort canonicalization, the
+        // exact two byte-critical shapes, the builder path, strict-UTF-8
+        // fail-closed on dump (both impls throw), parse-rejection AGREEMENT on
+        // malformed peer input (both impls reject), and the depth-cap hardening
+        // divergence (determ rejects over-deep input nlohmann would accept).
+        namespace dj = determ::djson;
+        using njson = nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // parity(in): determ::json parse→dump == nlohmann parse→dump (byte for
+        // byte) AND determ's own dump reparses to identical bytes (idempotent).
+        auto parity = [&](const std::string& in, const char* label) {
+            std::string want;
+            try { want = njson::parse(in).dump(); }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << label
+                          << " (corpus input rejected by nlohmann: " << e.what() << ")\n";
+                fail++; return;
+            }
+            std::string got;
+            try { got = dj::Value::parse(in).dump(); }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << label << " (determ::json threw: " << e.what() << ")\n";
+                fail++; return;
+            }
+            bool eq = (got == want);
+            bool idem = false;
+            if (eq) { try { idem = (dj::Value::parse(got).dump() == got); } catch (...) { idem = false; } }
+            if (!eq) std::cout << "    want=[" << want << "]\n    got =[" << got << "]\n";
+            check(eq && idem, label);
+        };
+
+        // ── Corpus: the in-scope subset, one parity assertion each ──────────
+        // Primitives.
+        parity("null", "primitive: null");
+        parity("true", "primitive: true");
+        parity("false", "primitive: false");
+        // Unsigned integers incl. the u64 ceiling.
+        parity("0", "uint: 0");
+        parity("1", "uint: 1");
+        parity("42", "uint: 42");
+        parity("255", "uint: 255 (u8 max)");
+        parity("65535", "uint: 65535 (u16 max)");
+        parity("4294967295", "uint: 4294967295 (u32 max)");
+        parity("18446744073709551615", "uint: 18446744073709551615 (u64 max)");
+        parity("9223372036854775807", "int: 9223372036854775807 (i64 max)");
+        // Negative integers incl. the i64 floor.
+        parity("-1", "int: -1");
+        parity("-42", "int: -42");
+        parity("-9223372036854775808", "int: -9223372036854775808 (i64 min)");
+        // Strings: empty, ascii, escapes, control, \u escape, raw UTF-8.
+        parity("\"\"", "string: empty");
+        parity("\"hello\"", "string: ascii");
+        parity("\"a b c\"", "string: spaces");
+        parity("\"tab\\ttab\"", "string: \\t escape");
+        parity("\"nl\\nnl\"", "string: \\n escape");
+        parity("\"cr\\rcr\"", "string: \\r escape");
+        parity("\"q\\\"q\"", "string: \\\" escape");
+        parity("\"b\\\\s\"", "string: \\\\ escape");
+        parity("\"slash\\/slash\"", "string: \\/ escape → literal /");
+        parity("\"\\u0000\"", "string: \\u0000 control");
+        parity("\"\\u001f\"", "string: \\u001f control (lowercase hex)");
+        parity("\"\\u0041\"", "string: \\u0041 → A");
+        parity("\"\\u00e9\"", "string: \\u00e9 → UTF-8 é literal");
+        parity("\"caf\xc3\xa9\"", "string: raw UTF-8 café");
+        parity("\"\\ud83d\\ude00\"", "string: surrogate pair \\ud83d\\ude00 → 😀");
+        // Arrays.
+        parity("[]", "array: empty");
+        parity("[1]", "array: single");
+        parity("[1,2,3]", "array: ints");
+        parity("[true,null,false]", "array: mixed primitives");
+        parity("[[1],[2,[3]]]", "array: nested");
+        // Objects — including UNSORTED input that must canonicalize to sorted.
+        parity("{}", "object: empty");
+        parity("{\"a\":1}", "object: single");
+        parity("{\"b\":2,\"a\":1,\"c\":3}", "object: unsorted input → sorted dump");
+        parity("{\"z\":[1,2],\"a\":{\"y\":true,\"x\":null}}", "object: nested + sort");
+
+        // ── Explicit key-sort canonicalization (the HMAC-canonical property) ─
+        check(dj::Value::parse("{\"b\":2,\"a\":1,\"c\":3}").dump() == "{\"a\":1,\"b\":2,\"c\":3}",
+              "canonical: object keys sorted byte-lexicographically");
+
+        // ── The two byte-critical consensus shapes (§5) ─────────────────────
+        // Abort claims_json: an array of sorted-key claim objects.
+        parity("[{\"missing\":[\"val1\",\"val2\"],\"node\":\"val3\",\"round\":7},"
+               "{\"missing\":[],\"node\":\"val4\",\"round\":7}]",
+               "abort claims_json shape: byte-identical dump (consensus digest)");
+        // RPC params (sorted + unsorted inputs both canonicalize identically).
+        parity("{\"height\":42,\"key\":\"s:val3\",\"namespace\":\"stake\"}",
+               "RPC params shape (sorted): byte-identical dump (HMAC)");
+        parity("{\"namespace\":\"stake\",\"height\":42,\"key\":\"s:val3\"}",
+               "RPC params shape (unsorted) → same canonical HMAC bytes");
+
+        // ── Builder path parity (the eventual consumer path, not just parse) ─
+        {
+            dj::Value o = dj::Value::object();
+            o.set("amount", dj::Value::uint(1000));
+            o.set("from", dj::Value::str("deadbeef"));
+            o.set("nonce", dj::Value::uint(0));
+            njson no;
+            no["from"] = "deadbeef"; no["amount"] = 1000; no["nonce"] = 0;  // insertion order differs
+            check(o.dump() == no.dump(), "builder: programmatic build dumps canonical (== nlohmann)");
+            dj::Value a = dj::Value::array();
+            a.push_back(dj::Value::uint(7));
+            a.push_back(dj::Value::boolean(true));
+            a.push_back(dj::Value::null());
+            check(a.dump() == "[7,true,null]", "builder: array dump is compact");
+        }
+
+        // ── Strict UTF-8 on dump — fail closed, both implementations ─────────
+        {
+            std::string invalid("x\xff\xfe""y", 4);  // two stray high bytes
+            bool determ_threw = false;
+            try { (void)dj::Value::str(invalid).dump(); }
+            catch (const dj::dump_error&) { determ_threw = true; }
+            catch (...) { determ_threw = true; }
+            bool nlo_threw = false;
+            try { njson nv = invalid; (void)nv.dump(); }
+            catch (const std::exception&) { nlo_threw = true; }
+            check(determ_threw && nlo_threw,
+                  "strict UTF-8: invalid-UTF-8 string dump throws (fail-closed, both impls)");
+        }
+
+        // ── Parse-rejection AGREEMENT on malformed peer input ───────────────
+        // For each: assert BOTH nlohmann AND determ::json reject. (Depth is the
+        // one intentional divergence, tested separately below.)
+        auto both_reject = [&](const std::string& in, const char* label) {
+            bool nlo_threw = false, determ_threw = false;
+            try { (void)njson::parse(in); } catch (const std::exception&) { nlo_threw = true; }
+            try { (void)dj::Value::parse(in); } catch (const std::exception&) { determ_threw = true; }
+            if (!nlo_threw) { std::cout << "    (nlohmann ACCEPTED — corpus mismatch)\n"; }
+            check(nlo_threw && determ_threw, label);
+        };
+        both_reject("", "reject: empty input");
+        both_reject("   ", "reject: whitespace only");
+        both_reject("nul", "reject: truncated literal 'nul'");
+        both_reject("tru", "reject: truncated literal 'tru'");
+        both_reject("01", "reject: leading zero");
+        both_reject("-", "reject: bare minus");
+        both_reject("+1", "reject: leading plus");
+        both_reject("1.", "reject: trailing decimal point");
+        both_reject(".5", "reject: no integer part");
+        both_reject("1e", "reject: exponent no digits");
+        both_reject("1e+", "reject: exponent sign no digits");
+        both_reject("\"unterminated", "reject: unterminated string");
+        both_reject("\"bad\\xesc\"", "reject: invalid \\x escape");
+        both_reject("{\"a\":}", "reject: object value missing");
+        both_reject("{\"a\":1,}", "reject: object trailing comma");
+        both_reject("[1,]", "reject: array trailing comma");
+        both_reject("[1 2]", "reject: array missing comma");
+        both_reject("{,}", "reject: object bare comma");
+        both_reject("123abc", "reject: trailing garbage after number");
+        both_reject("{\"a\":1}x", "reject: trailing garbage after object");
+        both_reject(std::string("\"\x01\"", 3), "reject: bare control char in string");
+        both_reject("\"\\ud800\"", "reject: lone high surrogate");
+        both_reject("\"\\udc00\"", "reject: lone low surrogate");
+        both_reject(std::string("\xff\xfe", 2), "reject: invalid UTF-8 at top level");
+
+        // ── Review finding 1 (LOW): invalid UTF-8 INSIDE a string must throw
+        //    parse_error (not the serialize-time dump_error) on the parse path. ─
+        {
+            bool str_pe = false, str_other = false;
+            try { (void)dj::Value::parse(std::string("\"\xff\"", 3)); }
+            catch (const dj::parse_error&) { str_pe = true; }
+            catch (...) { str_other = true; }
+            check(str_pe && !str_other,
+                  "parse: invalid UTF-8 in a string throws parse_error (contract type)");
+            bool key_pe = false, key_other = false;
+            try { (void)dj::Value::parse(std::string("{\"\xff\":1}", 7)); }
+            catch (const dj::parse_error&) { key_pe = true; }
+            catch (...) { key_other = true; }
+            check(key_pe && !key_other,
+                  "parse: invalid UTF-8 in an object key throws parse_error");
+        }
+
+        // ── Review finding 2 (LOW): a leading UTF-8 BOM is skipped (matching
+        //    nlohmann), closing the parse-agreement gap on that input. ─────────
+        parity(std::string("\xef\xbb\xbf{}", 5), "BOM: leading UTF-8 BOM skipped (matches nlohmann)");
+        parity(std::string("\xef\xbb\xbf[1,2]", 8), "BOM: leading BOM before an array");
+
+        // ── Review finding 3 (MEDIUM): doubles ARE adversarially reachable on
+        //    the abort-event K-of-K digest — an unknown member in a wire claim
+        //    (claims_json is stored VERBATIM; the claim sig covers only typed
+        //    scalars) rides claims_json.dump() into the block digest. So double
+        //    dump-parity is a SWAP-BLOCKER, not out of scope. determ::djson does
+        //    NOT yet match nlohmann's shortest-round-trip dtoa; this WITNESSES the
+        //    gap (no silent cap) so the owner-gated swap must close it (a matching
+        //    dtoa, OR re-canonicalizing claims_json from typed fields).
+        //    NOTE TO FUTURE DEV: when dtoa parity lands, `diverge` -> 0 flips this
+        //    assertion RED — convert it to a real double parity() sweep + drop the
+        //    swap-blocker note in DetermJsonParitySoundness.md.
+        {
+            const char* dbls[] = {"0.1", "1.5", "3.14159", "1e10", "2.5e-3"};
+            int diverge = 0;
+            for (const char* d : dbls) {
+                std::string want = njson::parse(d).dump();
+                std::string got  = dj::Value::parse(d).dump();
+                if (got != want) {
+                    diverge++;
+                    std::cout << "    swap-blocker: double " << d
+                              << " determ=" << got << " nlohmann=" << want << "\n";
+                }
+            }
+            check(diverge > 0,
+                  "swap-blocker WITNESSED: double dump-parity NOT yet achieved (DJP NC-1)");
+        }
+
+        // ── Depth-cap hardening (intentional divergence from nlohmann) ──────
+        {
+            const int kOver = 200;  // > kDefaultMaxDepth (64)
+            std::string deep;
+            for (int i = 0; i < kOver; ++i) deep.push_back('[');
+            deep.push_back('1');
+            for (int i = 0; i < kOver; ++i) deep.push_back(']');
+            bool determ_rejected = false;
+            try { (void)dj::Value::parse(deep); }
+            catch (const dj::parse_error&) { determ_rejected = true; }
+            check(determ_rejected, "hardening: over-deep nesting rejected by the depth cap");
+            // And a WITHIN-cap depth still parses with byte-parity (cap doesn't false-trip).
+            const int kUnder = 30;  // < 64
+            std::string ok;
+            for (int i = 0; i < kUnder; ++i) ok.push_back('[');
+            ok.push_back('1');
+            for (int i = 0; i < kUnder; ++i) ok.push_back(']');
+            parity(ok, "hardening: within-cap deep nesting still byte-parity");
+        }
+
+        std::cout << (fail ? "  FAIL: test-determ-json\n" : "  PASS: test-determ-json\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-register-note-key") {
         // NC-8 §5a CONSENSUS test: REGISTER_NOTE_KEY set/rotate/clear lifecycle
         // on the nk: leaf, fee-only accounting (A1 intact), apply-level

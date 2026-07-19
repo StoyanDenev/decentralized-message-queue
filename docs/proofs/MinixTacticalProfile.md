@@ -37,7 +37,7 @@ libraries. Everything else is in-tree from-scratch or OS-native.
 | Dependency | Provenance | Role | Minix disposition |
 |---|---|---|---|
 | ~~asio~~ | **DELETED (§4.5e)** — was `chriskohlhoff/asio` FetchContent | (was) daemon networking | **DONE: replaced by native IOCP (Windows) + epoll reactor (POSIX) behind the net:: seam; the ratchet pins a tree-wide zero-asio-includes check** |
-| **nlohmann_json** | **VENDORED in-tree** at `third_party/nlohmann/json.hpp` (v3.11.3 single-include; SHA-256 byte-ratcheted) | JSON for config / RPC / snapshot serialization | **PHASE 1 DONE** (vendor + freeze; FetchContent deleted); phase-2 in-tree `determ::json` stays owner-gated (§5) |
+| **nlohmann_json** | **VENDORED in-tree** at `third_party/nlohmann/json.hpp` (v3.11.3 single-include; SHA-256 byte-ratcheted) | JSON for config / RPC / snapshot serialization | **PHASE 1 DONE** (vendor + freeze; FetchContent deleted); **phase-2 inc.1 DONE** (in-tree `determ::djson` module + dual-oracle byte-parity gate, additive/library-only — §5); the consumer swap onto it stays owner-gated |
 | **OpenSSL** 1.1.1w | `janbar/openssl-cmake` FetchContent — now wrapped in `option(DETERM_BUILD_CRYPTOTEST)` | **Test-oracle only** — the §Q9 dual-oracle handlers live in the separate `determ-cryptotest` binary | **SPLIT DONE (§6)** — the daemon links ZERO OpenSSL (zero openssl strings in determ.exe); a tactical build with `OFF` never even fetches OpenSSL |
 | `determ-crypto-c99` | in-tree, from scratch ([CMakeLists.txt:92](../../CMakeLists.txt)) | ALL production crypto (hash, Ed25519, AEAD, KDF, entropy) | **KEEP** — already the minix ideal (the C99 goal, done) |
 | ws2_32 / wsock32 / crypt32 / bcrypt (Win), pthread (Unix) | OS-native | Sockets, OS entropy, threads | **KEEP** — platform, vendor-audited |
@@ -437,14 +437,46 @@ vendored at `third_party/nlohmann/json.hpp` (v3.11.3), the FetchContent is
 deleted (the fetch set is down to {asio, openssl-when-cryptotest}), and the
 dependency ratchet byte-pins the vendored header by SHA-256 — the minix
 whole-source-in-repo/offline-build bar, zero consumer changes, all JSON
-contract pins (HMAC, config/genesis/hello/snapshot determinism) green. PHASE 2
-(owner-gated, ~1-2 weeks): in-tree `determ::json` behind an API-compatible
-shim — FEASIBLE given the narrow subset, but 1.5-3 KLOC of consensus-adjacent
-code gated by dual-oracle dump-equality over a corpus that MUST include
-claims_json abort arrays + HELLO + Block::to_json + RPC params + snapshots,
-the existing pin tests, AND a mixed-fleet cluster test (one node per
-implementation) exercising abort events; the parser needs a depth cap +
-strict UTF-8 (it is the outermost consumer of every peer-supplied byte).
+contract pins (HMAC, config/genesis/hello/snapshot determinism) green.
+
+**PHASE 2 INCREMENT 1 SHIPPED (additive/library-only): the in-tree module
+`determ::djson` + its dual-oracle byte-parity gate.**
+`include/determ/json/json.hpp` is a header-only, **dependency-free** JSON value
+model with a strict recursive-descent parser + a canonical compact serializer
+whose `dump()` is designed to match nlohmann's default byte for byte on the
+consensus/HMAC subset (sorted-key objects, arrays, bool, null, u64/i64 ints,
+ASCII/UTF-8 strings). The load-bearing property is established EMPIRICALLY:
+nlohmann is the frozen reference, already linked in the `determ` binary, so
+`determ test-determ-json` (`tools/test_determ_json.sh`, FAST) MEASURES parity —
+`determ::djson::parse(s).dump() == nlohmann::json::parse(s).dump()` byte for
+byte — over a corpus that includes the two byte-critical shapes (the abort
+`claims_json` array + RPC `params`), plus round-trip idempotence, key-sort
+canonicalization, strict-UTF-8 fail-closed on dump (both impls throw),
+parse-rejection AGREEMENT on malformed peer input (both impls reject), and the
+peer-facing depth-cap + strict-UTF-8 hardening §5 anticipated. Soundness record
++ non-claims: [DetermJsonParitySoundness.md](DetermJsonParitySoundness.md)
+(DJP-1..7). The namespace is `determ::djson` (not `determ::json`) because the
+tree's pervasive `using json = nlohmann::json;` + `using namespace determ;`
+would otherwise make the bare name `json` ambiguous. Increment 1 changes NO
+production serialization path (goldens byte-identical; dependency ratchet green
+— the module includes no nlohmann; only the in-binary test does, as the oracle).
+
+**PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
+byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
+an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by
+widening the dual-oracle dump-equality corpus to HELLO + `Block::to_json` + full
+snapshots + the existing pin tests, AND a mixed-fleet cluster test (one node per
+implementation) exercising abort events. Increment 1 built + proved the module
+the swap needs; the swap itself stays owner-gated. **The inc.1 adversarial
+review surfaced a hard SWAP-BLOCKER (DetermJsonParitySoundness.md NC-1): a
+double IS adversarially reachable on the abort-event digest (`claims_json` is
+stored VERBATIM from peer JSON with unknown members kept; the per-claim sig
+covers only typed scalars), so the swap must FIRST close double dump-parity —
+either a shortest-round-trip `dump_double` matching nlohmann byte for byte, or
+re-canonicalizing `claims_json` from typed `AbortClaimMsg` fields before hashing
+(which also hardens the pre-existing weakness that the abort digest binds
+attacker-injectable non-semantic bytes even today under nlohmann). The gate
+WITNESSES the current double gap so it cannot be forgotten.**
 
 ## 6. OpenSSL track — test-oracle split (SHIPPED `217191a`)
 
@@ -532,7 +564,9 @@ cross-check (how the C99 crypto is known correct).
    also caught + fixed the latent `run()`/`stop()` double-join race
    (`Node::join_loop_threads()`).
 5. **JSON track** (§5 — **phase 1 SHIPPED** `23ac341`: vendored + byte-ratcheted;
-   phase-2 determ::json owner-gated). 6. **OpenSSL split** (§6 — **SHIPPED**
+   **phase-2 inc.1 SHIPPED**: the in-tree `determ::djson` module + dual-oracle
+   byte-parity gate, additive/library-only; the consumer swap stays owner-gated).
+   6. **OpenSSL split** (§6 — **SHIPPED**
    `217191a`: the daemon links ZERO OpenSSL; determ-cryptotest is the sole
    OpenSSL consumer, skippable via DETERM_BUILD_CRYPTOTEST=OFF).
    7. **Tactical profile** — the
