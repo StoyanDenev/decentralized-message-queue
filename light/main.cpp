@@ -40,6 +40,7 @@
 //   verify-param-value       Prove current effective consensus scalar (k:)
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
 //   verify-registrant        Prove domain D is a registered validator (r:)
+//   verify-notekey           Prove an account's standing recipient note_pk (nk:)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
@@ -615,6 +616,23 @@ void print_usage() {
         "      liar; negative_footing=daemon_asserted in --json); any tamper,\n"
         "      value_hash mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false INCLUDED.\n"
+        "  verify-notekey --rpc-port <N> --genesis <file>\n"
+        "                    --domain <D> [--json] [--wait <seconds>]\n"
+        "      NC-8: trustlessly obtain account <D>'s standing recipient note_pk\n"
+        "      (the 33-byte P-256 point a sender seals a CONFIDENTIAL_TRANSFER\n"
+        "      enote to). Anchors genesis, committee-verifies the header chain,\n"
+        "      fetches the `nk:`-namespace state-proof (simple key: \"nk:\"+addr),\n"
+        "      and Merkle-verifies it against the committee-signed state_root.\n"
+        "      Load-bearing cross-check: the daemon's `account` note_key cleartext\n"
+        "      is re-hashed locally — SHA256(note_pk), the build_state_leaves\n"
+        "      `nk:` encoding — and must equal the proof's value_hash, so a lie\n"
+        "      about the note_pk is detected, not propagated. On INCLUDED the\n"
+        "      verdict reports the verified note_pk. INCLUDED → exit 0 (sound,\n"
+        "      committee-anchored); NOT-INCLUDED → exit 0 (daemon-asserted,\n"
+        "      (H-neg); the null-note_key cross-check catches a self-contradicting\n"
+        "      daemon; negative_footing=daemon_asserted in --json); tamper /\n"
+        "      value_hash mismatch / refusal → UNVERIFIABLE (exit 3), never a\n"
+        "      false INCLUDED.\n"
         "  verify-account --rpc-port <N> --genesis <file>\n"
         "                 {--pubkey <64-hex> | --address <0x...>} [--json] [--wait <seconds>]\n"
         "      Derive an anon-account's canonical address LOCALLY and prove\n"
@@ -6161,6 +6179,248 @@ int cmd_verify_registrant(int argc, char** argv) {
     }
 }
 
+// ───────────────────────────── verify-notekey ───────────────────────────
+// NC-8 §5b: trustlessly obtain an account's standing recipient note_pk (the
+// 33-byte P-256 point a sender seals a CONFIDENTIAL_TRANSFER enote to). The
+// nk: state leaf commits SHA256(note_pk); this reader binds the daemon's
+// cleartext note_pk (from the `account` RPC — UNTRUSTED) to that leaf by
+// recomputing the hash, binds the leaf key to the canonical "nk:"+addr, and
+// Merkle-verifies against a COMMITTEE-signed state_root. A pass means a sender
+// can seal to this note_pk without trusting the daemon. A simplified clone of
+// verify-registrant: the leaf value is a single-value hash, not a multi-field
+// preimage. INCLUDED → 0; NOT-INCLUDED → 0 (daemon-asserted, (H-neg));
+// UNVERIFIABLE → 3; args/transport → 1.
+int cmd_verify_notekey(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    uint64_t wait_seconds = 0;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
+        else {
+            std::cerr << "verify-notekey: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-notekey: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    std::string note_pk_hex;   // committee-verified note_pk (only on INCLUDED)
+
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-notekey: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // `nk:` is a simple ASCII-suffix namespace (2-char prefix): the daemon
+        // builds the leaf key as "nk:" + addr. Compute it locally to bind the
+        // proof's key_bytes.
+        std::vector<uint8_t> local_key;
+        local_key.reserve(3 + domain.size());
+        local_key.push_back('n'); local_key.push_back('k'); local_key.push_back(':');
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `nk:` state-proofs cannot be anchored");
+        }
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "nk"}, {"key", domain}});
+
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `nk:` leaf for '" + domain
+                        + "' — no standing note key is published at the verified "
+                          "head (state_proof not_found)";
+                // Self-contradiction cross-check: the `account` RPC's note_key
+                // must ALSO be null. Catches only a self-contradicting daemon;
+                // a consistent liar still forges the negative ((H-neg)).
+                auto acc = rpc.call("account", {{"address", domain}});
+                bool nk_null = !acc.contains("note_key")
+                             || acc["note_key"].is_null();
+                if (!nk_null) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "state_proof returned not_found for `nk:" + domain
+                            + "` but the `account` RPC returns a non-null "
+                              "note_key — inconsistent daemon (refusing to "
+                              "assert NOT-INCLUDED)";
+                }
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `nk:` state-proof: " + err
+                        + " (cannot prove the note key trustlessly)";
+            }
+        } else {
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical nk: key " + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Fetch the cleartext note_pk and recompute the leaf value_hash
+                // = SHA256(note_pk). The hash recomputation is the load-bearing
+                // cross-check: a daemon serving an honest proof for the right
+                // key cannot also lie about the note_pk without failing here.
+                auto acc = rpc.call("account", {{"address", domain}});
+                if (acc.contains("error") && !acc["error"].is_null()) {
+                    throw std::runtime_error(
+                        "state_proof served an `nk:` leaf for '" + domain
+                        + "' but the account RPC refused it: "
+                        + acc["error"].dump() + " (inconsistent daemon)");
+                }
+                if (!acc.contains("note_key") || acc["note_key"].is_null()) {
+                    throw std::runtime_error(
+                        "state_proof served an `nk:` leaf for '" + domain
+                        + "' but the account RPC returns a null note_key "
+                          "(inconsistent daemon)");
+                }
+                note_pk_hex = acc.value("note_key", std::string{});
+                std::vector<uint8_t> note_pk = from_hex(note_pk_hex);
+                if (note_pk.size() != 33) {
+                    throw std::runtime_error(
+                        "account note_key is not 33 bytes (got "
+                        + std::to_string(note_pk.size()) + ")");
+                }
+
+                // Recompute byte-for-byte matching build_state_leaves "nk:"
+                // branch: value = SHA256(note_pk_bytes).
+                determ::crypto::SHA256Builder hb;
+                hb.append(note_pk.data(), note_pk.size());
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match SHA256(note_pk) for '" + domain
+                            + "'=" + to_hex(expected_value_hash)
+                            + " — daemon is lying about the note_pk OR proving a "
+                              "different leaf";
+                } else {
+                    uint64_t proof_height = proof.value("height", uint64_t{0});
+                    std::string proof_root = proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    // Bind proof_root to the COMMITTEE-SIGNED root (the header
+                    // state_root field is NOT committee-attested), never the
+                    // bare field — mirrors verify-registrant.
+                    {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index, wait_seconds);
+                        if (attested != proof_root) {
+                            throw std::runtime_error(
+                                "verify-notekey: SECURITY — committee-attested "
+                                "state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an unattested "
+                                  "root");
+                        }
+                        vc.head_state_root = attested;
+                        vc.height = proof_height;
+                        anchor_root = attested;
+                        anchor_at   = proof_height;
+                    }
+
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",  included},
+                {"verdict",   verdict_str(verdict)},
+                {"domain",    domain},
+                {"namespace", "nk"},
+            };
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
+            if (included) out["note_pk"] = note_pk_hex;
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         nk (recipient note key)\n"
+                      << "  domain:            " << domain << "\n";
+            if (included) {
+                std::cout << "  note_pk:           " << note_pk_hex << "\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-notekey: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ─────────────────────── verify-dapp-registration ──────────────────────
 //
 // Trustless reader for the `d:` (dapp_registry) namespace — the v2.18
@@ -8743,6 +9003,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-param-value")    return cmd_verify_param_value(sub_argc, sub_argv);
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
         if (cmd == "verify-registrant")     return cmd_verify_registrant(sub_argc, sub_argv);
+        if (cmd == "verify-notekey")        return cmd_verify_notekey(sub_argc, sub_argv);
         if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);

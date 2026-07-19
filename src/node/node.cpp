@@ -3535,6 +3535,20 @@ json Node::rpc_account(const std::string& addr) const {
     j["balance"]    = balance;
     j["next_nonce"] = next_nonce;
 
+    // NC-8 §5b: the standing recipient note key (cleartext lowercase-hex
+    // note_pk), so a light client can recompute SHA256(note_pk) and match the
+    // nk: leaf it proves against the committee-signed state_root (verify-
+    // notekey). note_keys_ is NOT in the lock-free committed-view bundle, so
+    // read it under the state lock. The cleartext is UNTRUSTED — the value-
+    // hash-bind in the leaf is what makes the read trustless, so a torn/stale
+    // value merely fails the hash check on the client (a retry), never a forge.
+    std::optional<std::string> note_key_hex;
+    {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        note_key_hex = chain_.note_key(addr);
+    }
+    j["note_key"] = note_key_hex ? json(*note_key_hex) : json(nullptr);
+
     if (reg_entry) {
         json r;
         r["ed_pub"]        = to_hex(reg_entry->ed_pub);
@@ -3553,9 +3567,15 @@ json Node::rpc_account(const std::string& addr) const {
     }
 
     // Aggregate visibility: has this address ever appeared on-chain?
+    // NC-8 §5b: a published note key is on-chain state too — include it so a
+    // note-keyed account is never surfaced as null (in steady state
+    // REGISTER_NOTE_KEY's next_nonce++ already forces this; folding it in also
+    // erases the transient lock-free-view/state-lock straddle the light-client
+    // verify-notekey would otherwise fail-closed on).
     bool has_state = (balance > 0)
                   || (next_nonce > 0)
-                  || reg_entry.has_value();
+                  || reg_entry.has_value()
+                  || note_key_hex.has_value();
     if (!has_state) return nullptr;
     return j;
 }
@@ -4647,6 +4667,14 @@ json Node::rpc_state_proof(const std::string& ns,
         k.reserve(2 + composite.size());
         k.push_back('k'); k.push_back(':');
         k.insert(k.end(), composite.begin(), composite.end());
+    } else if (ns == "nk") {
+        // NC-8 §5b: "nk:" + addr (ASCII) — the standing recipient note-key
+        // leaf (value = SHA256(note_pk); build_state_leaves' "nk:" branch).
+        // A simple ASCII suffix like r:, but a 2-char prefix, so built
+        // explicitly. Lets a light client (verify-notekey) PIN a published
+        // note_pk against a committee-signed state_root before sealing to it.
+        std::string full = "nk:" + key;
+        k.assign(full.begin(), full.end());
     } else if (ns == "i" || ns == "m" || ns == "p" || ns == "cc" || ns == "t") {
         // Composite-key namespaces: `key` is the hex of the binary body.
         // D3.5e-7e adds `cc` (epoch committee checkpoint, body = epoch_be8 →
@@ -4679,7 +4707,7 @@ json Node::rpc_state_proof(const std::string& ns,
         k.push_back(':');
         k.insert(k.end(), body.begin(), body.end());
     } else {
-        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|i|m|p|cc|t"}};
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|nk|i|m|p|cc|t"}};
     }
 
     auto proof_opt = chain_.state_proof(k);
