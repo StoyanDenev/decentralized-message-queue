@@ -596,6 +596,14 @@ cross-check (how the C99 crypto is known correct).
    OpenSSL consumer, skippable via DETERM_BUILD_CRYPTOTEST=OFF).
    7. **Tactical profile** — the
    posture label + SBOM + audit-boundary doc + reproducible-build attestation.
+   **SBOM SHIPPED ([MinixSBOM.md](MinixSBOM.md), ratchet-verified by
+   `tools/test_minix_sbom.sh`):** the NTIA-minimum-elements dependency manifest
+   for every linked artifact + the TCB boundary, kept factually true against the
+   tree (nlohmann SHA-256 + license + version; OpenSSL GIT_TAG; FetchContent
+   completeness; the CRYPTOTEST gate; the crypto SPDX). Remaining in step 7: the
+   posture-label wording + reproducible-build attestation + the machine-format
+   (CycloneDX/SPDX-JSON) export — deferred with the owner-gated audit-standard
+   decision (§8).
 
 ## 8. Open owner decisions
 
