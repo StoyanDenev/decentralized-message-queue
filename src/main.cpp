@@ -824,6 +824,12 @@ Additional in-process tests:
                                               nlohmann on the consensus/HMAC subset
                                               (sorted-key dump, strict UTF-8,
                                               parse-rejection agreement, depth cap)
+  determ test-determ-json-surfaces            minix JSON phase 2 inc.2 — determ::djson
+                                              byte-exact on the daemon's REAL
+                                              serialization (Transaction/Block/
+                                              AbortEvent/snapshot/RPC): parses
+                                              nlohmann's own dump + re-emits it
+                                              byte-identically (swap-readiness)
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -42697,17 +42703,21 @@ int main(int argc, char** argv) {
         parity(std::string("\xef\xbb\xbf{}", 5), "BOM: leading UTF-8 BOM skipped (matches nlohmann)");
         parity(std::string("\xef\xbb\xbf[1,2]", 8), "BOM: leading BOM before an array");
 
-        // ── Review finding 3 (MEDIUM): doubles ARE adversarially reachable on
-        //    the abort-event K-of-K digest — an unknown member in a wire claim
-        //    (claims_json is stored VERBATIM; the claim sig covers only typed
-        //    scalars) rides claims_json.dump() into the block digest. So double
-        //    dump-parity is a SWAP-BLOCKER, not out of scope. determ::djson does
-        //    NOT yet match nlohmann's shortest-round-trip dtoa; this WITNESSES the
-        //    gap (no silent cap) so the owner-gated swap must close it (a matching
-        //    dtoa, OR re-canonicalizing claims_json from typed fields).
+        // ── determ::djson does NOT yet match nlohmann's shortest-round-trip
+        //    dtoa; this WITNESSES the gap (no silent cap). The abort-event digest
+        //    — once the concrete worry, since an unknown member in a verbatim-
+        //    stored claim could have ridden claims_json.dump() into the block
+        //    digest — is now CLOSED at the source: hash_abort_event() hashes
+        //    chain::canonical_abort_claims_dump() (abort_canonical.hpp, SHIPPED),
+        //    which rebuilds each claim from only the six typed fields, stripping
+        //    injected members + float-encoded ints (see test-abort-claims-
+        //    canonical). So the remaining double gap is a swap-COMPLETENESS item
+        //    (a matching dtoa), not a fork vector: the residual reachable path is
+        //    the RPC-HMAC re-dump, which fails auth CLOSED on a divergence, plus
+        //    node Config (off every wire/digest path). See DetermJsonParitySoundness
+        //    NC-1 + AbortDigestCanonicalizationSoundness.
         //    NOTE TO FUTURE DEV: when dtoa parity lands, `diverge` -> 0 flips this
-        //    assertion RED — convert it to a real double parity() sweep + drop the
-        //    swap-blocker note in DetermJsonParitySoundness.md.
+        //    assertion RED — convert it to a real double parity() sweep.
         {
             const char* dbls[] = {"0.1", "1.5", "3.14159", "1e10", "2.5e-3"};
             int diverge = 0;
@@ -42745,6 +42755,119 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-determ-json\n" : "  PASS: test-determ-json\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-determ-json-surfaces") {
+        // minix JSON phase 2, increment 2 — REAL-SURFACE dual-oracle.
+        //
+        // inc.1 proved determ::djson byte-parity on hand-crafted shapes. This
+        // proves it on the daemon's ACTUAL serialization: for each real object
+        // the daemon emits, take nlohmann's own dump() and assert determ::djson
+        // parses it and re-dumps to the IDENTICAL bytes. That is the byte-exact
+        // drop-in evidence the owner-gated consumer swap needs
+        // (MinixTacticalProfile §5: "widen the dual-oracle corpus to Block::
+        // to_json + snapshots"). ADDITIVE/test-only — no consumer is swapped.
+        // In-scope surfaces only (int/string/hex/array/object); node Config
+        // doubles are out of scope (DetermJsonParitySoundness NC-1).
+        using namespace determ;
+        using namespace determ::chain;
+        namespace dj = determ::djson;
+        using njson = nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        // surface(d): determ::djson parses the daemon's own nlohmann dump `d`
+        // and re-dumps to the byte-identical string (the drop-in property).
+        auto surface = [&](const std::string& d, const char* label) {
+            std::string got;
+            try { got = dj::Value::parse(d).dump(); }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << label << " (determ::djson threw: " << e.what() << ")\n";
+                fail++; return;
+            }
+            if (got != d) std::cout << "    daemon=[" << d << "]\n    determ=[" << got << "]\n";
+            check(got == d, label);
+        };
+        auto fillh = [](Hash& h, uint8_t b){ for (auto& x : h) x = b; };
+        auto fills = [](Signature& s, uint8_t b){ for (auto& x : s) x = b; };
+
+        // 1. Transaction — plain TRANSFER + a payload-carrying tx.
+        {
+            Transaction tx; tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1000; tx.fee = 3; tx.nonce = 7;
+            surface(tx.to_json().dump(), "surface: Transaction (TRANSFER)");
+            Transaction tp; tp.type = TxType::REGISTER_NOTE_KEY; tp.from = "alice"; tp.to = "";
+            tp.amount = 0; tp.fee = 1; tp.nonce = 8; tp.payload = std::vector<uint8_t>(33, 0xab);
+            surface(tp.to_json().dump(), "surface: Transaction (payload-carrying)");
+        }
+        // 2. AbortEvent with a real claim array (the consensus-digest shape).
+        {
+            node::AbortClaimMsg m; m.block_index = 10; m.round = 2; m.missing_creator = "n2";
+            m.claimer = "n1"; fillh(m.prev_hash, 0xcd); fills(m.ed_sig, 0x5b);
+            AbortEvent ae; ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = 1234567890;
+            fillh(ae.event_hash, 0x7e); ae.claims_json = njson::array({ m.to_json() });
+            surface(ae.to_json().dump(), "surface: AbortEvent (with claim)");
+        }
+        // 3. EquivocationEvent.
+        {
+            EquivocationEvent ev; ev.equivocator = "mallory"; ev.block_index = 42;
+            fillh(ev.digest_a, 0xd0); fills(ev.sig_a, 0xd1); fillh(ev.digest_b, 0xd2);
+            fills(ev.sig_b, 0xd3); ev.shard_id = 3; ev.beacon_anchor_height = 100;
+            surface(ev.to_json().dump(), "surface: EquivocationEvent");
+        }
+        // 4. GenesisAlloc.
+        {
+            GenesisAlloc g; g.domain = "alice"; g.balance = 10000; g.stake = 1000; g.region = "us-east";
+            for (size_t i = 0; i < g.ed_pub.size(); ++i) g.ed_pub[i] = uint8_t(0xe0 + i);
+            surface(g.to_json().dump(), "surface: GenesisAlloc");
+        }
+        // 5. Block — creators + tx lists + sigs + dh inputs (+ an abort event).
+        {
+            Block b; b.index = 5; fillh(b.prev_hash, 0x11); b.timestamp = 111;
+            b.creators = {"val1", "val2"};
+            Transaction tx; tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1; tx.fee = 0; tx.nonce = 0;
+            b.transactions = { tx };
+            b.creator_tx_lists = { { tx.compute_hash() }, {} };
+            Signature s1; fills(s1, 0xa1); Signature s2; fills(s2, 0xa2);
+            b.creator_ed_sigs = { s1, s2 };
+            Hash d1; fillh(d1, 0xb1); Hash d2; fillh(d2, 0xb2);
+            b.creator_dh_inputs = { d1, d2 };
+            fillh(b.tx_root, 0x22); fillh(b.delay_seed, 0x33);
+            b.creator_block_sigs = { s1, s2 };
+            surface(b.to_json().dump(), "surface: Block (creators + txs + sigs)");
+            node::AbortClaimMsg m; m.block_index = 5; m.round = 2; m.missing_creator = "val2";
+            m.claimer = "val1"; fillh(m.prev_hash, 0xcd); fills(m.ed_sig, 0x5b);
+            AbortEvent ae; ae.round = 2; ae.aborting_node = "val2"; ae.timestamp = 222;
+            fillh(ae.event_hash, 0x7e); ae.claims_json = njson::array({ m.to_json() });
+            b.abort_events = { ae };
+            surface(b.to_json().dump(), "surface: Block (abort-carrying)");
+        }
+        // 6. Chain::serialize_state snapshot (accounts + stakes + state).
+        {
+            GenesisConfig cfg; cfg.chain_id = "surf"; cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c; val_c.domain = "val";
+            for (size_t i = 0; i < val_c.ed_pub.size(); ++i) val_c.ed_pub[i] = uint8_t(0x20 + i);
+            cfg.initial_creators = { val_c };
+            GenesisAllocation ab; ab.domain = "alice"; ab.balance = 5000;
+            cfg.initial_balances = { ab };
+            Block g = make_genesis_block(cfg);
+            Chain c(g);
+            surface(c.serialize_state(16).dump(), "surface: Chain::serialize_state snapshot");
+        }
+        // 7. RPC params + gossip envelope (representative wire, nlohmann-built).
+        {
+            njson params; params["namespace"] = "stake"; params["key"] = "s:val3"; params["height"] = 42;
+            surface(params.dump(), "surface: RPC params");
+            njson env; env["type"] = "HELLO";
+            env["payload"] = { {"chain_id", "surf"}, {"height", 7}, {"version", 1} };
+            surface(env.dump(), "surface: gossip envelope (HELLO payload)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-determ-json-surfaces\n"
+                           : "  PASS: test-determ-json-surfaces\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-register-note-key") {

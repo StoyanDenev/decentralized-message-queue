@@ -461,6 +461,17 @@ would otherwise make the bare name `json` ambiguous. Increment 1 changes NO
 production serialization path (goldens byte-identical; dependency ratchet green
 — the module includes no nlohmann; only the in-binary test does, as the oracle).
 
+**PHASE 2 INCREMENT 2 SHIPPED (additive/test-only): real-surface parity.**
+`determ test-determ-json-surfaces` (`tools/test_determ_json_surfaces.sh`) proves
+determ::djson byte-reproduces the daemon's ACTUAL serialization — for each real
+object it emits (Transaction, Block incl. an abort-carrying block, AbortEvent +
+claim, EquivocationEvent, GenesisAlloc, `Chain::serialize_state` snapshot, RPC
+params, gossip envelope) it asserts `determ::djson::parse(obj.to_json().dump())
+.dump() == obj.to_json().dump()`. This is the parse+dump byte-parity on real
+shapes the swap needs (the build+dump path is covered by inc.1's builder
+assertion); node `Config` doubles stay the one out-of-scope surface
+(DetermJsonParitySoundness NC-1/NC-3). Additive — no consumer swapped.
+
 **PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
 byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
 an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by

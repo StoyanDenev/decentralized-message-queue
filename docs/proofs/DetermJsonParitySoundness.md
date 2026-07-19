@@ -175,11 +175,20 @@ in-binary test does, as the oracle).
   Increment 1 does not make `determ::djson` the writer at any consensus byte
   path; the swap is the owner-gated increment where a mixed-implementation
   abort-event cluster test is the additional gate.
-- **NC-3 (empirical, corpus-bounded).** Parity is established against nlohmann
-  as the reference over a representative corpus plus the two exact shapes — not a
-  formal proof over all inputs. The corpus is the coverage artifact; widening it
-  (HELLO, `Block::to_json`, full snapshots) is part of the swap increment’s
-  gate, per `MinixTacticalProfile.md` §5.
+- **NC-3 (empirical, corpus-bounded — now widened to the daemon's real
+  surfaces).** Parity is established against nlohmann as the reference over a
+  representative corpus plus the two exact shapes — not a formal proof over all
+  inputs. **Increment 2 (`determ test-determ-json-surfaces`) widens the coverage
+  to the daemon's ACTUAL serialization:** for each real object the daemon emits
+  — Transaction, Block (incl. an abort-carrying block), AbortEvent+claim,
+  EquivocationEvent, GenesisAlloc, `Chain::serialize_state` snapshot, RPC params,
+  gossip envelope — it asserts `determ::djson::parse(obj.to_json().dump()).dump()
+  == obj.to_json().dump()`, i.e. determ::djson round-trips the daemon's exact
+  bytes. This is the **parse+dump** byte-parity on real shapes; the **build+dump**
+  path (determ::djson's own builder producing canonical bytes) is covered by the
+  DJP-2 builder assertion in inc.1. Together they are the swap-readiness
+  evidence `MinixTacticalProfile.md` §5 asks for. Node `Config` doubles remain
+  the one uncovered surface (NC-1, off every wire/digest/HMAC path).
 - **NC-4 (deliberate stricter-than-nlohmann surface).** The depth cap and the
   `>uint64 → double` fallback are stricter than / divergent from nlohmann by
   design (hardening); DJP-5 agreement is claimed only on the in-scope grammar,
@@ -192,7 +201,11 @@ in-binary test does, as the oracle).
 key-sort canonicalization, the two byte-critical shapes, the builder path
 (programmatic construction dumps canonically), strict-UTF-8 fail-closed on dump
 (both implementations throw), the parse-rejection agreement corpus, and the
-depth-cap hardening (over-deep rejected; within-cap still byte-parity). Both
+depth-cap hardening (over-deep rejected; within-cap still byte-parity). **inc.2
+`determ test-determ-json-surfaces` (`tools/test_determ_json_surfaces.sh`, FAST
+via `determ_json_surfaces`): the real-surface parse+dump byte-parity of NC-3 over
+the daemon's actual Transaction / Block / AbortEvent / EquivocationEvent /
+GenesisAlloc / snapshot / RPC / envelope serialization.** Both
 platforms: MSVC + WSL2 GCC `ci_local`. Anchored by
 `include/determ/json/json.hpp` + the `test-determ-json` subcommand in
 `src/main.cpp`. Cross-references `MinixTacticalProfile.md` §5,

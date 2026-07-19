@@ -39,21 +39,24 @@
 // SCOPE / non-parity (documented, not silently dropped): doubles are stored
 // and dumped best-effort but are NOT YET byte-identical to nlohmann's
 // shortest-round-trip dtoa (dump_double uses %.17g, e.g. 0.1 -> "0.10000...1"
-// vs nlohmann's "0.1"). Double dump-parity is a SWAP-BLOCKER, NOT out of
-// scope: a double IS adversarially reachable on the abort-event consensus
-// digest — src/chain/block.cpp stores AbortEvent::claims_json VERBATIM from
-// peer JSON (unknown members kept), the per-claim Ed25519 signature covers
-// only typed scalars (not the JSON), and hash_abort_event() SHA-256s
-// claims_json.dump() into the K-of-K block digest, so an attacker can inject
-// `"z":0.1` into a valid claim and it rides the digest. The consumer swap
-// (owner-gated) must therefore either (a) give dump_double a shortest-round-
-// trip serializer matching nlohmann byte for byte, or (b) re-canonicalize
-// claims_json from typed AbortClaimMsg fields before hashing (stripping
-// unknown members). test-determ-json WITNESSES the current double gap so it
-// cannot be forgotten. The parser also enforces a nesting DEPTH CAP
-// (peer-facing hardening) that nlohmann does not; inputs deeper than the cap
-// are rejected by intent (the consensus subset never nests that deep). A
-// leading UTF-8 BOM is skipped (matching nlohmann, RFC 8259 §8.1).
+// vs nlohmann's "0.1"). This is a swap *robustness* item, NOT a live fork
+// vector: the abort-event digest — once the concrete worry, because
+// AbortEvent::claims_json was hashed VERBATIM (unknown members kept) while the
+// per-claim signature covers only typed scalars — is now CLOSED at the source.
+// hash_abort_event() no longer SHA-256s claims_json.dump(); it hashes
+// chain::canonical_abort_claims_dump() (include/determ/chain/abort_canonical.hpp,
+// shipped), which rebuilds each claim from ONLY the six typed fields, so an
+// injected `"z":0.1` (or a float-encoded int) is stripped and never reaches
+// any serializer. The residual double concern is the RPC-HMAC path
+// (method|params.dump()), where a serializer divergence fails auth CLOSED
+// (mismatch), not a fork; and node Config (off every wire/digest/HMAC path).
+// So double dump-parity remains a swap-completeness item (a matching dtoa),
+// tracked by the test-determ-json double witness, not a blocker. See
+// docs/proofs/{AbortDigestCanonicalizationSoundness,DetermJsonParitySoundness}.md.
+// The parser also enforces a nesting DEPTH CAP (peer-facing hardening) that
+// nlohmann does not; inputs deeper than the cap are rejected by intent (the
+// consensus subset never nests that deep). A leading UTF-8 BOM is skipped
+// (matching nlohmann, RFC 8259 §8.1).
 
 #include <cstdint>
 #include <cstdio>
