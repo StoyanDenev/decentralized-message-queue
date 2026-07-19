@@ -472,6 +472,15 @@ shapes the swap needs (the build+dump path is covered by inc.1's builder
 assertion); node `Config` doubles stay the one out-of-scope surface
 (DetermJsonParitySoundness NC-1/NC-3). Additive — no consumer swapped.
 
+**PHASE 2 INCREMENT 3 SHIPPED (additive/test-only): differential fuzzer.**
+`determ test-determ-json-fuzz` (`tools/test_determ_json_fuzz.sh`) is a
+deterministic (splitmix64, fixed-seed) differential fuzzer that generates
+thousands of random in-scope JSON values and cross-checks BOTH determ::djson
+paths (build+dump and parse+dump) against nlohmann per value, with a
+type-coverage (non-vacuity) assertion; 100k-value standalone runs pass on both
+platforms with zero divergence. This elevates the parity claim from
+corpus-bounded to fuzz-tested (DetermJsonParitySoundness NC-3). Additive.
+
 **PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
 byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
 an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by

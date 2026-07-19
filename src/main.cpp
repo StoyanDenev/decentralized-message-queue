@@ -830,6 +830,11 @@ Additional in-process tests:
                                               AbortEvent/snapshot/RPC): parses
                                               nlohmann's own dump + re-emits it
                                               byte-identically (swap-readiness)
+  determ test-determ-json-fuzz [--iters N]    minix JSON phase 2 inc.3 — determ::djson
+                                              DIFFERENTIAL FUZZ vs nlohmann:
+                                              thousands of random in-scope values,
+                                              both BUILD+dump and PARSE+dump
+                                              byte-checked (deterministic/seeded)
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -42868,6 +42873,133 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-determ-json-surfaces\n"
                            : "  PASS: test-determ-json-surfaces\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-determ-json-fuzz") {
+        // minix JSON phase 2, increment 3 — DETERMINISTIC DIFFERENTIAL FUZZER.
+        //
+        // inc.1/inc.2 proved determ::djson byte-parity on a fixed corpus + the
+        // daemon's real surfaces. This elevates DetermJsonParitySoundness NC-3
+        // from "corpus-bounded" to fuzz-tested: it generates thousands of RANDOM
+        // in-scope JSON values (bounded-depth objects/arrays, u64/i64 ints,
+        // bool/null, ASCII + UTF-8 + escape-triggering strings) and cross-checks
+        // BOTH determ::djson code paths against nlohmann per value —
+        //   (a) BUILD+dump: convert the nlohmann tree to a determ::djson Value
+        //       via its builder API, dump, assert == nlohmann's dump; and
+        //   (b) PARSE+dump: parse nlohmann's dump with determ::djson, dump,
+        //       assert == nlohmann's dump.
+        // Any divergence is a real determ::djson bug. Deterministic (splitmix64,
+        // fixed seed → identical inputs on MSVC + GCC, CI-stable + reproducible);
+        // generates ONLY in-scope values (depth < the parser cap, no doubles),
+        // so agreement is the expected result. `--iters N` (default 3000).
+        namespace dj = determ::djson;
+        using njson = nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        uint64_t iters = 3000;
+        for (int i = 1; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--iters" && i + 1 < argc) iters = std::strtoull(argv[++i], nullptr, 10);
+        }
+
+        // splitmix64 — portable, deterministic PRNG (fixed seed).
+        uint64_t st = 0x9e3779b97f4a7c15ULL;
+        auto next = [&]() -> uint64_t {
+            st += 0x9e3779b97f4a7c15ULL;
+            uint64_t z = st;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+            return z ^ (z >> 31);
+        };
+        // A random IN-SCOPE, VALID-UTF-8 string (printable ASCII, control chars
+        // that get escaped, quote/backslash, and é / 😀 multibyte UTF-8).
+        auto gen_string = [&]() -> std::string {
+            uint64_t len = next() % 12;
+            std::string s;
+            for (uint64_t i = 0; i < len; ++i) {
+                uint64_t c = next() % 100;
+                if (c < 68)      s.push_back(static_cast<char>(0x20 + (next() % 0x5f))); // printable
+                else if (c < 76) s.push_back(static_cast<char>(next() % 0x20));          // control (escaped)
+                else if (c < 80) s.push_back('"');
+                else if (c < 84) s.push_back('\\');
+                else if (c < 92) s += "\xc3\xa9";           // é (2-byte UTF-8)
+                else             s += "\xf0\x9f\x98\x80";   // 😀 (4-byte UTF-8)
+            }
+            return s;
+        };
+        // Recursive in-scope value generator (no doubles; depth-bounded well
+        // under the parser cap so no depth divergence). typehits proves the
+        // generator is non-vacuous — that every value kind is actually exercised.
+        uint64_t typehits[7] = {0, 0, 0, 0, 0, 0, 0};
+        std::function<njson(int)> gen = [&](int depth) -> njson {
+            uint64_t t = (depth <= 0) ? (next() % 5) : (next() % 7);
+            typehits[t]++;
+            switch (t) {
+                case 0: return njson(nullptr);
+                case 1: return njson((next() & 1ULL) == 0);
+                case 2: return njson(next());                              // u64
+                case 3: return njson(static_cast<int64_t>(next()));        // i64 (may be negative)
+                case 4: return njson(gen_string());
+                case 5: { njson a = njson::array(); uint64_t n = next() % 5;
+                          for (uint64_t i = 0; i < n; ++i) a.push_back(gen(depth - 1)); return a; }
+                default:{ njson o = njson::object(); uint64_t n = next() % 5;
+                          for (uint64_t i = 0; i < n; ++i) o[gen_string()] = gen(depth - 1); return o; }
+            }
+        };
+        // Convert an nlohmann tree to a determ::djson Value via its builder API
+        // (exercises the BUILD path).
+        std::function<dj::Value(const njson&)> conv = [&](const njson& j) -> dj::Value {
+            if (j.is_null())             return dj::Value::null();
+            if (j.is_boolean())          return dj::Value::boolean(j.get<bool>());
+            if (j.is_number_unsigned())  return dj::Value::uint(j.get<uint64_t>());
+            if (j.is_number_integer())   return dj::Value::integer(j.get<int64_t>());
+            if (j.is_number_float())     return dj::Value::real(j.get<double>()); // not generated
+            if (j.is_string())           return dj::Value::str(j.get<std::string>());
+            if (j.is_array()) { auto a = dj::Value::array(); for (const auto& e : j) a.push_back(conv(e)); return a; }
+            auto o = dj::Value::object();
+            for (auto it = j.begin(); it != j.end(); ++it) o.set(it.key(), conv(it.value()));
+            return o;
+        };
+
+        uint64_t build_ok = 0, parse_ok = 0, first_bad = 0; bool any_bad = false;
+        std::string bad_want, bad_got_build, bad_got_parse;
+        for (uint64_t i = 0; i < iters; ++i) {
+            njson v = gen(5);
+            std::string want = v.dump();
+            std::string gb, gp;
+            bool ok_b = false, ok_p = false;
+            try { gb = conv(v).dump(); ok_b = (gb == want); } catch (const std::exception&) { ok_b = false; }
+            try { gp = dj::Value::parse(want).dump(); ok_p = (gp == want); } catch (const std::exception&) { ok_p = false; }
+            if (ok_b) build_ok++;
+            if (ok_p) parse_ok++;
+            if ((!ok_b || !ok_p) && !any_bad) {
+                any_bad = true; first_bad = i; bad_want = want; bad_got_build = gb; bad_got_parse = gp;
+            }
+        }
+        if (any_bad) {
+            std::cout << "    first divergence at iter " << first_bad << ":\n";
+            std::cout << "    nlohmann   =[" << bad_want << "]\n";
+            std::cout << "    djson build=[" << bad_got_build << "]\n";
+            std::cout << "    djson parse=[" << bad_got_parse << "]\n";
+        }
+        check(build_ok == iters,
+              "fuzz: determ::djson BUILD+dump == nlohmann on every random in-scope value");
+        check(parse_ok == iters,
+              "fuzz: determ::djson PARSE+dump == nlohmann on every random in-scope value");
+        bool all_kinds = true;
+        for (uint64_t h : typehits) if (h == 0) all_kinds = false;
+        check(all_kinds,
+              "fuzz: generator exercised all 7 value kinds (null/bool/u64/i64/string/array/object) — non-vacuous");
+        std::cout << "  (" << iters << " random in-scope values; build_ok=" << build_ok
+                  << " parse_ok=" << parse_ok << "; typehits n/b/u/i/s/a/o="
+                  << typehits[0] << "/" << typehits[1] << "/" << typehits[2] << "/"
+                  << typehits[3] << "/" << typehits[4] << "/" << typehits[5] << "/"
+                  << typehits[6] << ")\n";
+
+        std::cout << (fail ? "  FAIL: test-determ-json-fuzz\n" : "  PASS: test-determ-json-fuzz\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-register-note-key") {

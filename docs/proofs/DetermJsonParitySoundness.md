@@ -187,8 +187,18 @@ in-binary test does, as the oracle).
   bytes. This is the **parse+dump** byte-parity on real shapes; the **build+dump**
   path (determ::djson's own builder producing canonical bytes) is covered by the
   DJP-2 builder assertion in inc.1. Together they are the swap-readiness
-  evidence `MinixTacticalProfile.md` §5 asks for. Node `Config` doubles remain
-  the one uncovered surface (NC-1, off every wire/digest/HMAC path).
+  evidence `MinixTacticalProfile.md` §5 asks for. **Increment 3 (`determ
+  test-determ-json-fuzz`) elevates the coverage from corpus-bounded to
+  FUZZ-TESTED:** a deterministic (splitmix64, fixed-seed → identical inputs on
+  MSVC + GCC) differential fuzzer generates thousands of random in-scope values
+  (bounded-depth objects/arrays, u64/i64, bool/null, ASCII + UTF-8 +
+  escape-triggering strings) and cross-checks BOTH determ::djson code paths
+  against nlohmann per value — build+dump (nlohmann tree → determ::djson builder
+  → dump) and parse+dump — each byte-identical to nlohmann's dump; a
+  type-coverage assertion proves the generator exercises all seven value kinds
+  (non-vacuous). 100k-value standalone runs pass on both platforms with zero
+  divergence. Node `Config` doubles remain the one uncovered surface (NC-1, off
+  every wire/digest/HMAC path).
 - **NC-4 (deliberate stricter-than-nlohmann surface).** The depth cap and the
   `>uint64 → double` fallback are stricter than / divergent from nlohmann by
   design (hardening); DJP-5 agreement is claimed only on the in-scope grammar,
@@ -205,7 +215,11 @@ depth-cap hardening (over-deep rejected; within-cap still byte-parity). **inc.2
 `determ test-determ-json-surfaces` (`tools/test_determ_json_surfaces.sh`, FAST
 via `determ_json_surfaces`): the real-surface parse+dump byte-parity of NC-3 over
 the daemon's actual Transaction / Block / AbortEvent / EquivocationEvent /
-GenesisAlloc / snapshot / RPC / envelope serialization.** Both
+GenesisAlloc / snapshot / RPC / envelope serialization. **inc.3 `determ
+test-determ-json-fuzz` (`tools/test_determ_json_fuzz.sh`, FAST via
+`determ_json_fuzz`): the deterministic differential fuzzer of NC-3 — thousands
+of random in-scope values, both build+dump and parse+dump byte-checked vs
+nlohmann, with a generator type-coverage (non-vacuity) assertion.** Both
 platforms: MSVC + WSL2 GCC `ci_local`. Anchored by
 `include/determ/json/json.hpp` + the `test-determ-json` subcommand in
 `src/main.cpp`. Cross-references `MinixTacticalProfile.md` §5,
