@@ -109,18 +109,34 @@ non-UTF-8 abort-path leaf key fail closed instead of silently serializing to a
 divergent byte string. The gate cross-checks that nlohmann throws on the same
 input.
 
-**DJP-5 (parse-rejection agreement).** On the in-scope grammar, `determ::djson`
-and nlohmann agree on which inputs are malformed — both reject leading zeros,
-`+` signs, bare control characters in strings, invalid escapes, lone
-surrogates, trailing bytes, and truncated tokens. Verified by an
-agreement corpus (`both_reject`). A mixed fleet must not have one implementation
-accept what another rejects on a consensus-bound input; agreement on rejection
-closes that class within scope. A leading UTF-8 BOM is the one input where the
-two once diverged (nlohmann skips it, RFC 8259 §8.1); `determ::djson` now skips
-it too, restoring agreement (corpus item). And per parse()'s contract, invalid
-UTF-8 anywhere — including inside a string or object key — surfaces as
-`parse_error` (not the serialize-time `dump_error`), asserted by type in the
-gate; both implementations still reject the input.
+**DJP-5 (parse-rejection agreement — adversarially swept in inc.4).** On the
+in-scope grammar, `determ::djson` and nlohmann agree on which inputs are
+malformed — both reject leading zeros, `+` signs, bare control characters in
+strings, invalid escapes, lone surrogates, non-leading trailing garbage, and
+truncated tokens. Verified by an agreement corpus (`both_reject`). A mixed fleet
+must not have one implementation accept what another rejects on a consensus-bound
+input; agreement on rejection closes that class within scope. A leading UTF-8 BOM
+is the one input where the two once diverged (nlohmann skips it, RFC 8259 §8.1);
+`determ::djson` now skips it too, restoring agreement (corpus item). And per
+parse()'s contract, invalid UTF-8 anywhere — including inside a string or object
+key — surfaces as `parse_error` (not the serialize-time `dump_error`), asserted
+by type in the gate; both implementations still reject the input.
+
+**Increment 4 (`determ test-determ-json-adversarial`) sweeps this agreement
+across the adversarial boundary comprehensively** — literal-case lookalikes
+(`True`/`NULL`/`None`), NaN/Infinity barewords, the full number-malformation
+grammar, `\u` surrogate edges (lone/paired/high+high), structural truncations
+(`{"a":`, `[1,`, mismatched brackets, single-quoted/unquoted keys), the u64/i64
+magnitude boundaries, and whitespace/duplicate-key canonicalization — 94+
+assertions, nlohmann the measured oracle. **The inc.4 adversarial review found and
+CLOSED one real accept/reject divergence in the fork-unsafe direction:** a number
+overflowing double to ±inf (`1e400`, or a 400-digit integer) `strtod`-ed to
+`HUGE_VAL` and `determ::djson` ACCEPTED it while nlohmann REJECTS non-finite
+floats (`out_of_range` 406). `include/determ/json/json.hpp` now routes every
+numeric `strtod` through `real_checked`, which throws on `!std::isfinite` —
+restoring agreement (both reject); inc.4's `both_reject("1e400", …)` pins it.
+(Underflow to a finite subnormal/0.0 is accepted by both, so the guard is on
+`isfinite`, not `errno`.)
 
 **DJP-6 (peer-facing hardening).** The parser is (in a future increment) the
 outermost consumer of every peer-supplied byte, so it enforces a nesting DEPTH
@@ -197,12 +213,25 @@ in-binary test does, as the oracle).
   → dump) and parse+dump — each byte-identical to nlohmann's dump; a
   type-coverage assertion proves the generator exercises all seven value kinds
   (non-vacuous). 100k-value standalone runs pass on both platforms with zero
-  divergence. Node `Config` doubles remain the one uncovered surface (NC-1, off
-  every wire/digest/HMAC path).
-- **NC-4 (deliberate stricter-than-nlohmann surface).** The depth cap and the
-  `>uint64 → double` fallback are stricter than / divergent from nlohmann by
-  design (hardening); DJP-5 agreement is claimed only on the in-scope grammar,
-  not on these deliberate divergences.
+  divergence. **Increment 4 (`determ test-determ-json-adversarial`) adds the
+  ADVERSARIAL accept/reject-agreement sweep (DJP-5): 94+ hostile/boundary inputs
+  where the risk is a parse-disagreement, not a dump-mismatch — it found + closed
+  the overflow-to-non-finite accept divergence (DJP-5) and witnesses the NC-4
+  deliberate carve-outs.** Node `Config` doubles remain the one uncovered surface
+  (NC-1, off every wire/digest/HMAC path).
+- **NC-4 (deliberate stricter-than-nlohmann surface).** Three divergences are
+  stricter than / divergent from nlohmann by design (peer-facing hardening), and
+  DJP-5 agreement is claimed only on the in-scope grammar, NOT on these: (a) the
+  nesting **depth cap** (determ rejects >64-deep input nlohmann accepts); (b) the
+  `>uint64 → double` fallback (dump-form divergence, NC-1); and (c) a **trailing
+  NUL** after a complete value — nlohmann's lexer maps `0x00` to end-of-input (a
+  string-literal convenience) and ACCEPTS `1\x00`, while `determ::djson` treats
+  `0x00` as non-whitespace trailing content and REJECTS it. All three are safe:
+  the honest consensus subset never nests 64 deep, never exceeds u64, and never
+  carries a trailing NUL, so none can false-reject an honest input, and the
+  trailing-NUL/depth cases fail CLOSED (determ stricter). inc.4 WITNESSES the
+  depth and trailing-NUL divergences explicitly (asserting determ rejects while
+  nlohmann accepts) so a future change can't silently flip them.
 
 ## 6. Gate
 
@@ -219,8 +248,14 @@ GenesisAlloc / snapshot / RPC / envelope serialization. **inc.3 `determ
 test-determ-json-fuzz` (`tools/test_determ_json_fuzz.sh`, FAST via
 `determ_json_fuzz`): the deterministic differential fuzzer of NC-3 — thousands
 of random in-scope values, both build+dump and parse+dump byte-checked vs
-nlohmann, with a generator type-coverage (non-vacuity) assertion.** Both
-platforms: MSVC + WSL2 GCC `ci_local`. Anchored by
+nlohmann, with a generator type-coverage (non-vacuity) assertion.** **inc.4
+`determ test-determ-json-adversarial` (`tools/test_determ_json_adversarial.sh`,
+FAST via `determ_json_adversarial`): the DJP-5 adversarial accept/reject-agreement
+sweep — literal-case, NaN/Infinity, the number-malformation grammar (incl. the
+overflow-to-non-finite case its review closed), `\u` surrogate edges, u64/i64
+boundaries, and whitespace/dup-key canonicalization; witnesses the NC-4 deliberate
+divergences (depth cap, trailing NUL) rather than asserting agreement on them.**
+Both platforms: MSVC + WSL2 GCC `ci_local`. Anchored by
 `include/determ/json/json.hpp` + the `test-determ-json` subcommand in
 `src/main.cpp`. Cross-references `MinixTacticalProfile.md` §5,
 `RpcAuthHmacSoundness.md` (the HMAC pre-image this canonical form feeds).

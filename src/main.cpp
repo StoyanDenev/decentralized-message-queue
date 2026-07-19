@@ -835,6 +835,12 @@ Additional in-process tests:
                                               thousands of random in-scope values,
                                               both BUILD+dump and PARSE+dump
                                               byte-checked (deterministic/seeded)
+  determ test-determ-json-adversarial         minix JSON phase 2 inc.4 — determ::djson
+                                              ADVERSARIAL accept/reject-agreement vs
+                                              nlohmann (literal-case, NaN/Infinity,
+                                              number-malformation grammar, \u
+                                              surrogate edges, u64/i64 boundaries,
+                                              whitespace/dup-key canonicalization)
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -42760,6 +42766,244 @@ int main(int argc, char** argv) {
         }
 
         std::cout << (fail ? "  FAIL: test-determ-json\n" : "  PASS: test-determ-json\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-determ-json-adversarial") {
+        // minix JSON phase 2, increment 4 — ADVERSARIAL parse-rejection +
+        // number-boundary differential.
+        //
+        // The swap-safety property (docs/proofs/MinixTacticalProfile.md §5,
+        // DetermJsonParitySoundness DJP-5): for determ::djson to replace nlohmann
+        // on the byte-critical wire/digest/HMAC path, the two impls must AGREE on
+        // accept-vs-reject for every input IN THE IN-SCOPE GRAMMAR — a divergence
+        // means a swapped node forks (accepts a claims_json the fleet rejects, or
+        // vice versa) or desyncs its HMAC. Agreement is NOT claimed on the
+        // DELIBERATE stricter-than-nlohmann carve-outs (NC-4): the nesting depth
+        // cap and the trailing-NUL rejection (determ rejects; nlohmann accepts) —
+        // peer-facing hardening on inputs the honest consensus subset never
+        // contains. Those are WITNESSED here as known divergences, not asserted
+        // as agreement.
+        // inc.1 proved dump-parity + ~24 rejection cases; this sweeps the
+        // adversarial boundary comprehensively: literal-case lookalikes,
+        // NaN/Infinity barewords, the full number-malformation grammar, structural
+        // truncations, \u surrogate edges, plus the u64/i64 magnitude boundaries
+        // (accept-agreement where the value crosses into a double — dump is out of
+        // scope there per NC-1) and whitespace/duplicate-key canonicalization
+        // parity. nlohmann is the FROZEN oracle linked in this binary, so every
+        // verdict is MEASURED, not predicted. ADDITIVE: no consumer is swapped.
+        namespace dj = determ::djson;
+        using njson = nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // BOTH impls must REJECT (throw). Self-checks the corpus: warns if
+        // nlohmann accepts (a mis-classified adversarial case).
+        auto both_reject = [&](const std::string& in, const char* label) {
+            bool nlo_threw = false, determ_threw = false;
+            try { (void)njson::parse(in); } catch (const std::exception&) { nlo_threw = true; }
+            try { (void)dj::Value::parse(in); } catch (const std::exception&) { determ_threw = true; }
+            if (!nlo_threw) std::cout << "    (nlohmann ACCEPTED — corpus mis-classified)\n";
+            if (nlo_threw && !determ_threw)
+                std::cout << "    DIVERGENCE: nlohmann rejects, determ::djson ACCEPTS [" << label << "]\n";
+            check(nlo_threw && determ_threw, label);
+        };
+        // BOTH impls must ACCEPT + dump BYTE-IDENTICALLY (+ determ idempotent).
+        // For in-scope integral / string / structural inputs.
+        auto parity = [&](const std::string& in, const char* label) {
+            std::string want;
+            try { want = njson::parse(in).dump(); }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << label << " (nlohmann rejected: " << e.what() << ")\n";
+                fail++; return;
+            }
+            std::string got;
+            try { got = dj::Value::parse(in).dump(); }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << label << " (determ::djson threw: " << e.what() << ")\n";
+                fail++; return;
+            }
+            bool eq = (got == want);
+            bool idem = false;
+            if (eq) { try { idem = (dj::Value::parse(got).dump() == got); } catch (...) { idem = false; } }
+            if (!eq) std::cout << "    want=[" << want << "]\n    got =[" << got << "]\n";
+            check(eq && idem, label);
+        };
+        // BOTH impls must ACCEPT (no throw), WITHOUT requiring dump-equality —
+        // for magnitudes that cross into a double, whose dtoa is the known
+        // out-of-scope gap (NC-1). The point is accept/classification agreement:
+        // neither forks by rejecting what the other accepts.
+        auto accept_agree = [&](const std::string& in, const char* label) {
+            bool nlo_ok = true, determ_ok = true;
+            try { (void)njson::parse(in); } catch (const std::exception&) { nlo_ok = false; }
+            try { (void)dj::Value::parse(in); } catch (const std::exception&) { determ_ok = false; }
+            if (nlo_ok != determ_ok)
+                std::cout << "    DIVERGENCE: nlohmann " << (nlo_ok ? "accepts" : "rejects")
+                          << ", determ::djson " << (determ_ok ? "accepts" : "rejects") << " [" << label << "]\n";
+            check(nlo_ok && determ_ok, label);
+        };
+
+        // ── Group 1: literal-case lookalikes + over/under-long literals ──────
+        both_reject("True", "reject: True (case)");
+        both_reject("False", "reject: False (case)");
+        both_reject("Null", "reject: Null (case)");
+        both_reject("TRUE", "reject: TRUE (case)");
+        both_reject("NULL", "reject: NULL (case)");
+        both_reject("None", "reject: None (python)");
+        both_reject("n", "reject: bare 'n'");
+        both_reject("t", "reject: bare 't'");
+        both_reject("f", "reject: bare 'f'");
+        both_reject("fals", "reject: truncated 'fals'");
+        both_reject("nulll", "reject: overlong 'nulll'");
+        both_reject("truee", "reject: overlong 'truee'");
+        both_reject("truefalse", "reject: two literals 'truefalse'");
+
+        // ── Group 2: NaN / Infinity barewords (JSON forbids; both reject) ────
+        both_reject("NaN", "reject: NaN");
+        both_reject("nan", "reject: nan");
+        both_reject("Infinity", "reject: Infinity");
+        both_reject("-Infinity", "reject: -Infinity");
+        both_reject("Inf", "reject: Inf");
+        both_reject("inf", "reject: inf");
+
+        // ── Group 3: number-malformation grammar ────────────────────────────
+        both_reject("00", "reject: 00");
+        both_reject("007", "reject: 007");
+        both_reject("-00", "reject: -00");
+        both_reject("-01", "reject: -01");
+        both_reject("1..2", "reject: double dot");
+        both_reject("1.2.3", "reject: two dots");
+        both_reject("-.5", "reject: -.5 no int part");
+        both_reject("1e1e1", "reject: two exponents");
+        both_reject("1ee2", "reject: doubled e");
+        both_reject("--1", "reject: double minus");
+        both_reject("1-", "reject: trailing minus");
+        both_reject("0x1F", "reject: hex literal");
+        both_reject("0b101", "reject: binary literal");
+        both_reject("1_000", "reject: digit separator");
+        both_reject("0.", "reject: 0. trailing dot");
+        both_reject(".", "reject: bare dot");
+        both_reject("1.2e", "reject: 1.2e no exp digits");
+        both_reject("0e", "reject: 0e no exp digits");
+        both_reject("1.e5", "reject: 1.e5 dot-no-digit");
+        // Overflow to NON-FINITE (double-max boundary). nlohmann rejects
+        // (out_of_range 406, !isfinite); determ::djson now MATCHES via
+        // real_checked (json.hpp) — a fork-unsafe accept/reject divergence the
+        // inc.4 review caught and closed. Group 6 accept_agree stops below this
+        // boundary (all finite); these cross ~1.8e308 where the impls agree to
+        // reject.
+        both_reject("1e400", "reject: 1e400 overflow to +inf");
+        both_reject("1e309", "reject: 1e309 overflow to +inf");
+        both_reject("-1e400", "reject: -1e400 overflow to -inf");
+        both_reject("1E1000", "reject: 1E1000 overflow to +inf");
+        both_reject(std::string(400, '9'), "reject: 400-digit integer overflow to +inf");
+
+        // ── Group 4: structural malformations + truncations ─────────────────
+        both_reject("[1,2,]", "reject: array trailing comma (multi)");
+        both_reject("{\"a\":1,\"b\":2,}", "reject: object trailing comma (multi)");
+        both_reject("[,1]", "reject: array leading comma");
+        both_reject("[1,,2]", "reject: array double comma");
+        both_reject("{\"a\" 1}", "reject: object missing colon");
+        both_reject("{\"a\":1 \"b\":2}", "reject: object missing comma");
+        both_reject("{\"a\"::1}", "reject: object double colon");
+        both_reject("{\"a\":1]", "reject: object closed by ]");
+        both_reject("[1,2}", "reject: array closed by }");
+        both_reject("{'a':1}", "reject: single-quoted key");
+        both_reject("{a:1}", "reject: unquoted key");
+        both_reject("[01]", "reject: leading zero inside array");
+        both_reject("}", "reject: bare }");
+        both_reject("]", "reject: bare ]");
+        both_reject(",", "reject: bare comma");
+        both_reject(":", "reject: bare colon");
+        both_reject("[", "reject: unterminated [");
+        both_reject("{", "reject: unterminated {");
+        both_reject("{\"a\"", "reject: object key no colon (EOF)");
+        both_reject("{\"a\":", "reject: object no value (EOF)");
+        both_reject("{\"a\":1", "reject: object unterminated");
+        both_reject("[1", "reject: array unterminated");
+        both_reject("[1,", "reject: array dangling comma (EOF)");
+        both_reject(std::string("\x0b" "1", 2), "reject: vertical-tab leading ws");
+        both_reject(std::string("[1,\x0c" "2]", 6), "reject: form-feed between tokens");
+
+        // ── Group 5: string escape / \u surrogate edges ─────────────────────
+        both_reject("\"\\u\"", "reject: \\u no digits");
+        both_reject("\"\\u1\"", "reject: \\u1 truncated");
+        both_reject("\"\\u12\"", "reject: \\u12 truncated");
+        both_reject("\"\\u123\"", "reject: \\u123 truncated");
+        both_reject("\"\\uGGGG\"", "reject: \\uGGGG non-hex");
+        both_reject("\"\\ud834\"", "reject: lone high surrogate \\ud834");
+        both_reject("\"\\udd1e\"", "reject: lone low surrogate \\udd1e");
+        both_reject("\"\\ud834\\u0041\"", "reject: high + non-low surrogate");
+        both_reject("\"\\ud834\\ud835\"", "reject: high + high surrogate");
+        both_reject("\"\\z\"", "reject: invalid escape \\z");
+        both_reject("\"\\ \"", "reject: invalid escape backslash-space");
+        both_reject(std::string("\"\\", 2), "reject: backslash then EOF");
+        both_reject(std::string("\"\x09\"", 3), "reject: raw tab in string");
+        both_reject(std::string("\"\x0a\"", 3), "reject: raw newline in string");
+        both_reject("\"abc", "reject: unterminated string abc");
+
+        // ── Group 6: number-magnitude boundaries ────────────────────────────
+        // In-scope integral (both stay integer types → dump-parity):
+        parity("9223372036854775808", "boundary: i64max+1 stays uint (parity)");
+        parity("-0", "boundary: -0 normalizes to 0 (parity)");
+        parity("-9223372036854775808", "boundary: i64 min (parity)");
+        parity("18446744073709551615", "boundary: u64 max (parity)");
+        // Cross into a double → accept-agreement only (dtoa is the NC-1 gap):
+        accept_agree("18446744073709551616", "boundary: u64max+1 → double (accept-agree)");
+        accept_agree("-9223372036854775809", "boundary: i64min-1 → double (accept-agree)");
+        accept_agree("100000000000000000000", "boundary: 1e20 as digits → double (accept-agree)");
+        accept_agree("99999999999999999999999999", "boundary: 26 digits → double (accept-agree)");
+
+        // ── Group 7: whitespace-insensitivity + duplicate-key canonicalization ─
+        parity("{ \"a\" : 1 , \"b\" : 2 }", "canon: interior spaces stripped");
+        parity("[ 1 , 2 , 3 ]", "canon: array spaces stripped");
+        parity("\n\t{\n\"a\"\t:\r1\n}\n", "canon: leading + interior whitespace stripped");
+        parity("{\"a\":1,\"a\":2}", "canon: duplicate key last-wins (parity)");
+        parity("{\"b\":1,\"a\":2,\"b\":3}", "canon: duplicate + sort (parity)");
+        // And prove determ's dup-key resolution matches nlohmann concretely.
+        check(dj::Value::parse("{\"a\":1,\"a\":2}").dump() == njson::parse("{\"a\":1,\"a\":2}").dump()
+                  && dj::Value::parse("{\"a\":1,\"a\":2}").dump() == "{\"a\":2}",
+              "canon: duplicate key resolves to last value == nlohmann");
+
+        // ── Known DELIBERATE divergence WITNESS: trailing NUL (NC-4) ────────
+        // nlohmann treats a trailing 0x00 as end-of-input (its lexer maps NUL to
+        // EOF — a string-literal convenience) and ACCEPTS "1\x00"; determ::djson
+        // is deliberately stricter: 0x00 is not whitespace, so it is trailing
+        // content and REJECTED. This is peer-facing hardening (the honest subset
+        // never carries a trailing NUL), on the same footing as the depth cap —
+        // NOT a bug and NOT claimed as agreement (NC-4). Assert the divergence
+        // explicitly so a future change can't silently flip it unnoticed.
+        {
+            std::string tnul("1\x00", 2);
+            bool nlo_ok = true, determ_ok = true;
+            try { (void)njson::parse(tnul); } catch (...) { nlo_ok = false; }
+            try { (void)dj::Value::parse(tnul); } catch (...) { determ_ok = false; }
+            check(nlo_ok && !determ_ok,
+                  "NC-4 divergence WITNESSED: trailing NUL — nlohmann accepts, determ::djson rejects (deliberate)");
+        }
+
+        // ── Non-vacuity: prove the lambdas DISCRIMINATE (not rubber-stamps) ──
+        // A valid input must be accepted by BOTH impls (so neither parser is a
+        // constant-throw that would make both_reject pass vacuously), AND a
+        // clearly-invalid input must be rejected by BOTH (so both_reject genuinely
+        // fires). Exercises nlohmann AND determ on each — matching the claim.
+        {
+            bool nv_valid_nlo = true, nv_valid_dj = true;
+            try { (void)njson::parse("[1,2,3]"); } catch (...) { nv_valid_nlo = false; }
+            try { (void)dj::Value::parse("[1,2,3]"); } catch (...) { nv_valid_dj = false; }
+            check(nv_valid_nlo && nv_valid_dj,
+                  "non-vacuity: a valid input is accepted by BOTH impls (not constant-throw)");
+            bool nv_bad_nlo = false, nv_bad_dj = false;
+            try { (void)njson::parse("{"); } catch (...) { nv_bad_nlo = true; }
+            try { (void)dj::Value::parse("{"); } catch (...) { nv_bad_dj = true; }
+            check(nv_bad_nlo && nv_bad_dj,
+                  "non-vacuity: a clearly-invalid input is rejected by BOTH (both_reject fires)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-determ-json-adversarial\n"
+                           : "  PASS: test-determ-json-adversarial\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-determ-json-surfaces") {

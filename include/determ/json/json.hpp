@@ -58,6 +58,7 @@
 // consensus subset never nests that deep). A leading UTF-8 BOM is skipped
 // (matching nlohmann, RFC 8259 §8.1).
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -146,7 +147,7 @@ public:
     // Strict RFC 8259 parse with a nesting depth cap. Throws parse_error on
     // any malformed input (trailing bytes, bare control chars in strings,
     // invalid escapes/UTF-8, leading zeros, '+' signs, lone surrogates,
-    // over-deep nesting, ...).
+    // over-deep nesting, numbers overflowing double to ±inf, ...).
     static Value parse(const std::string& text, size_t max_depth = kDefaultMaxDepth) {
         Parser p(text, max_depth);
         // Skip a single leading UTF-8 BOM (EF BB BF) if present, matching
@@ -487,6 +488,21 @@ private:
             return v;
         }
 
+        // strtod + reject a NON-FINITE result. A number whose magnitude
+        // overflows double (e.g. "1e400", or a 400-digit integer) strtod-s to
+        // ±HUGE_VAL WITHOUT throwing; left unchecked, determ::djson would ACCEPT
+        // it while nlohmann REJECTS it (its DOM parser fails closed with
+        // out_of_range 406 on `!std::isfinite`). That is a fork-unsafe
+        // accept/reject divergence on a valid-grammar, peer-controlled number —
+        // the exact DJP-5 class. Matching nlohmann: reject non-finite here.
+        // (Underflow returns a finite subnormal/0.0, which BOTH accept — so the
+        // guard is on isfinite only, not errno==ERANGE.)
+        Value real_checked(const std::string& tok) const {
+            double d = std::strtod(tok.c_str(), nullptr);
+            if (!std::isfinite(d)) fail("number out of range (overflow to non-finite)");
+            return Value::real(d);
+        }
+
         // Parse a JSON number. Classifies into Unsigned (non-negative int),
         // Integer (negative int), or Double (has '.'/'e'/'E' or overflows).
         Value parse_number() {
@@ -525,7 +541,7 @@ private:
             }
             std::string tok = s.substr(start, pos - start);
             if (is_double) {
-                return Value::real(std::strtod(tok.c_str(), nullptr));
+                return real_checked(tok);
             }
             // Integer token. Parse magnitude (digits after optional '-').
             const char* dp = tok.c_str() + (neg ? 1 : 0);
@@ -540,11 +556,11 @@ private:
                 // magnitude must fit in [0, 2^63] (2^63 == -INT64_MIN)
                 const uint64_t kMaxNegMag = 9223372036854775808ULL;  // 2^63
                 if (overflow || mag > kMaxNegMag)
-                    return Value::real(std::strtod(tok.c_str(), nullptr));
+                    return real_checked(tok);
                 if (mag == kMaxNegMag) return Value::integer(INT64_MIN);
                 return Value::integer(-static_cast<int64_t>(mag));
             } else {
-                if (overflow) return Value::real(std::strtod(tok.c_str(), nullptr));
+                if (overflow) return real_checked(tok);
                 return Value::uint(mag);
             }
         }

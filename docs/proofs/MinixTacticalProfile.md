@@ -481,6 +481,21 @@ type-coverage (non-vacuity) assertion; 100k-value standalone runs pass on both
 platforms with zero divergence. This elevates the parity claim from
 corpus-bounded to fuzz-tested (DetermJsonParitySoundness NC-3). Additive.
 
+**PHASE 2 INCREMENT 4 SHIPPED (additive/test-only, + one real parser fix):
+adversarial accept/reject-agreement.** `determ test-determ-json-adversarial`
+(`tools/test_determ_json_adversarial.sh`) sweeps the swap-safety property DJP-5
+across the hostile boundary — literal-case lookalikes, NaN/Infinity barewords, the
+full number-malformation grammar, `\u` surrogate edges, u64/i64 magnitude
+boundaries, and whitespace/duplicate-key canonicalization (99 assertions, nlohmann
+the measured oracle). **Its adversarial review found and CLOSED a real
+determ::djson bug in the fork-unsafe direction:** a number overflowing double to
+±inf (`1e400`, a 400-digit integer) was accepted by `determ::djson` (unchecked
+`strtod` → `HUGE_VAL`) while nlohmann rejects non-finite floats — a mixed-fleet
+accept/reject fork. `include/determ/json/json.hpp` now routes every numeric
+`strtod` through `real_checked` (rejects `!isfinite`), restoring agreement. The
+test also witnesses the NC-4 deliberate stricter-than-nlohmann divergences (the
+depth cap and the trailing-NUL rejection) rather than asserting agreement on them.
+
 **PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
 byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
 an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by
