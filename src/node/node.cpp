@@ -4675,6 +4675,16 @@ json Node::rpc_state_proof(const std::string& ns,
         // note_pk against a committee-signed state_root before sealing to it.
         std::string full = "nk:" + key;
         k.assign(full.begin(), full.end());
+    } else if (ns == "en") {
+        // NC-8 §5.6: "en:" + hex(output commitment) (ASCII) — the per-output
+        // encrypted-note delivery leaf (value = SHA256(commitment_bytes ||
+        // enote_wire_bytes); build_state_leaves' "en:" branch, MODERN only).
+        // `key` is the lowercase-hex commitment string, so the leaf key is a
+        // plain ASCII suffix (no composite-hex body). Lets a light client
+        // (verify-enote-inclusion) PROVE a scanned (commitment, ciphertext)
+        // pair is really the committed on-chain delivery before trial-decrypting.
+        std::string full = "en:" + key;
+        k.assign(full.begin(), full.end());
     } else if (ns == "i" || ns == "m" || ns == "p" || ns == "cc" || ns == "t") {
         // Composite-key namespaces: `key` is the hex of the binary body.
         // D3.5e-7e adds `cc` (epoch committee checkpoint, body = epoch_be8 →
@@ -4707,7 +4717,7 @@ json Node::rpc_state_proof(const std::string& ns,
         k.push_back(':');
         k.insert(k.end(), body.begin(), body.end());
     } else {
-        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|nk|i|m|p|cc|t"}};
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|nk|en|i|m|p|cc|t"}};
     }
 
     auto proof_opt = chain_.state_proof(k);

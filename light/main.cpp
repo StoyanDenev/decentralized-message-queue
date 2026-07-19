@@ -41,6 +41,8 @@
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
 //   verify-registrant        Prove domain D is a registered validator (r:)
 //   verify-notekey           Prove an account's standing recipient note_pk (nk:)
+//   verify-enote-inclusion   Prove a scanned (commitment, ciphertext) enote is
+//                            the committed on-chain delivery (en:, MODERN)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
@@ -633,6 +635,24 @@ void print_usage() {
         "      daemon; negative_footing=daemon_asserted in --json); tamper /\n"
         "      value_hash mismatch / refusal → UNVERIFIABLE (exit 3), never a\n"
         "      false INCLUDED.\n"
+        "  verify-enote-inclusion --rpc-port <N> --genesis <file>\n"
+        "                    --commitment <hex33> --enote <hex> [--json] [--wait <s>]\n"
+        "      NC-8: PROVE a scanned encrypted-note delivery is the genuine\n"
+        "      on-chain one before trial-decrypting it. Given a (commitment,\n"
+        "      ciphertext) pair pulled from a full node's scan_enotes RPC (an\n"
+        "      UNTRUSTED source), anchors genesis, committee-verifies the header\n"
+        "      chain, fetches the `en:`-namespace state-proof (simple key:\n"
+        "      \"en:\"+hex(commitment)), and Merkle-verifies against the\n"
+        "      committee-signed state_root. Load-bearing cross-check: the leaf\n"
+        "      value is re-hashed locally — SHA256(commitment || enote), the\n"
+        "      build_state_leaves `en:` encoding — and must equal the proof's\n"
+        "      value_hash, so a node that fabricates or tampers a ciphertext is\n"
+        "      caught. INCLUDED → exit 0 (the ciphertext is exactly the committed\n"
+        "      delivery — trial-decrypt safe); NOT-INCLUDED → exit 0 (no `en:`\n"
+        "      leaf: spent, never delivered, or a FIPS payload-only chain;\n"
+        "      daemon-asserted, (H-neg)); value_hash mismatch / tamper / refusal\n"
+        "      → UNVERIFIABLE (exit 3), never a false INCLUDED. MODERN-only (FIPS\n"
+        "      keeps enotes payload-only, so there is no leaf to prove).\n"
         "  verify-account --rpc-port <N> --genesis <file>\n"
         "                 {--pubkey <64-hex> | --address <0x...>} [--json] [--wait <seconds>]\n"
         "      Derive an anon-account's canonical address LOCALLY and prove\n"
@@ -6421,6 +6441,243 @@ int cmd_verify_notekey(int argc, char** argv) {
     }
 }
 
+// ─────────────────────── verify-enote-inclusion ──────────────────────────
+// NC-8 §5.6 (the final NC-8 increment): the light-client enote scan. A wallet
+// pulls candidate (commitment, ciphertext) pairs from a full node's scan_enotes
+// RPC (§5.3) — an UNTRUSTED source. Before spending CPU trial-decrypting them
+// (or trusting that the node did not fabricate/omit deliveries), it PROVES each
+// pair is the genuine on-chain delivery: the MODERN `en:` state leaf commits
+// value = SHA256(commitment_bytes || enote_wire_bytes), keyed by the output
+// commitment. This reader binds the CALLER-provided (commitment, enote) on BOTH
+// axes — key_bytes == "en:"+hex(commitment) AND value_hash == SHA256(commitment
+// || enote) — and Merkle-verifies against a COMMITTEE-signed state_root. A pass
+// means the ciphertext is exactly the one committed on-chain; a lying node that
+// returns a fabricated ciphertext is caught (value_hash mismatch → UNVERIFIABLE)
+// and one that invents a commitment is caught (not_found → NOT-INCLUDED).
+// Unlike verify-notekey there is NO daemon cleartext to fetch — the caller
+// supplies the pair; the leaf value-hash-bind is what makes the read trustless.
+// MODERN-only: on a FIPS chain no `en:` leaf exists (the ciphertext is
+// payload-only, block-hash-bound), so verify returns NOT-INCLUDED and the light
+// client necessarily trusts the serving node's scan there. INCLUDED → 0;
+// NOT-INCLUDED → 0 (daemon-asserted, (H-neg)); tamper/mismatch → UNVERIFIABLE
+// (exit 3); args/transport → 1.
+int cmd_verify_enote_inclusion(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, commitment_hex, enote_hex;
+    uint64_t wait_seconds = 0;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"    && i + 1 < argc) genesis_path   = argv[++i];
+        else if   (a == "--commitment" && i + 1 < argc) commitment_hex = argv[++i];
+        else if   (a == "--enote"      && i + 1 < argc) enote_hex      = argv[++i];
+        else if   (a == "--json")                       json_out       = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
+        else {
+            std::cerr << "verify-enote-inclusion: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || commitment_hex.empty()
+        || enote_hex.empty()) {
+        std::cerr << "verify-enote-inclusion: "
+                     "--rpc-port, --genesis, --commitment, --enote are required\n";
+        return 1;
+    }
+
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+
+    try {
+        // Decode + shape-check the caller-provided pair up front (from_hex
+        // throws on malformed hex → exit 1). The commitment is a 33-byte SEC1
+        // point; the enote is the |pt|+49 ECIES wire (49..512 per the inc.2
+        // frame bounds). We do NOT enforce the exact enote length here — the
+        // value-hash-bind against the committed leaf is the authority; a wrong
+        // length simply fails that bind.
+        std::vector<uint8_t> commitment = from_hex(commitment_hex);
+        std::vector<uint8_t> enote      = from_hex(enote_hex);
+        if (commitment.size() != 33) {
+            std::cerr << "verify-enote-inclusion: --commitment must be 33 bytes "
+                         "(SEC1-compressed P-256 point), got "
+                      << commitment.size() << "\n";
+            return 1;
+        }
+        // Canonicalize the commitment hex to lowercase (the daemon keys the en:
+        // leaf by to_hex(...) which is lowercase) so key_bytes binds exactly.
+        std::string commitment_lc = to_hex(commitment.data(), commitment.size());
+
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-enote-inclusion: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // `en:` is a simple ASCII-suffix namespace (2-char prefix): leaf key =
+        // "en:" + lowercase-hex(commitment). Compute locally to bind key_bytes.
+        std::vector<uint8_t> local_key;
+        {
+            std::string full = "en:" + commitment_lc;
+            local_key.assign(full.begin(), full.end());
+        }
+
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `en:` state-proofs cannot be anchored");
+        }
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "en"}, {"key", commitment_lc}});
+
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `en:` leaf for commitment "
+                        + commitment_lc + " — no committed delivery at this "
+                          "output (unspent) at the verified head: spent, never "
+                          "delivered, or a FIPS chain (payload-only) "
+                          "(state_proof not_found)";
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `en:` state-proof: " + err
+                        + " (cannot prove the enote delivery trustlessly)";
+            }
+        } else {
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical en: key " + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Recompute value_hash = SHA256(commitment || enote), byte-for-
+                // byte matching build_state_leaves' "en:" branch (apply-side
+                // chain.cpp). A mismatch means the leaf at this commitment
+                // commits a DIFFERENT ciphertext than the one provided — the
+                // node handed us a fabricated/tampered enote. Fail closed.
+                determ::crypto::SHA256Builder hb;
+                hb.append(commitment.data(), commitment.size());
+                hb.append(enote.data(), enote.size());
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match SHA256(commitment || enote)="
+                            + to_hex(expected_value_hash)
+                            + " — the on-chain delivery at this commitment is a "
+                              "DIFFERENT ciphertext than the one provided (a "
+                              "fabricated/tampered enote), OR a wrong leaf";
+                } else {
+                    uint64_t proof_height = proof.value("height", uint64_t{0});
+                    std::string proof_root = proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    // Bind proof_root to the COMMITTEE-SIGNED root (the header
+                    // state_root field is NOT committee-attested).
+                    {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index, wait_seconds);
+                        if (attested != proof_root) {
+                            throw std::runtime_error(
+                                "verify-enote-inclusion: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an unattested "
+                                  "root");
+                        }
+                        vc.head_state_root = attested;
+                        vc.height = proof_height;
+                        anchor_root = attested;
+                        anchor_at   = proof_height;
+                    }
+
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",   included},
+                {"verdict",    verdict_str(verdict)},
+                {"commitment", commitment_lc},
+                {"namespace",  "en"},
+            };
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         en (encrypted-note delivery)\n"
+                      << "  commitment:        " << commitment_lc << "\n";
+            if (included) {
+                std::cout << "  delivery:          committed on-chain (trial-decrypt safe)\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-enote-inclusion: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ─────────────────────── verify-dapp-registration ──────────────────────
 //
 // Trustless reader for the `d:` (dapp_registry) namespace — the v2.18
@@ -9004,6 +9261,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
         if (cmd == "verify-registrant")     return cmd_verify_registrant(sub_argc, sub_argv);
         if (cmd == "verify-notekey")        return cmd_verify_notekey(sub_argc, sub_argv);
+        if (cmd == "verify-enote-inclusion") return cmd_verify_enote_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
