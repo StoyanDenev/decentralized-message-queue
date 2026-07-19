@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 //
-// determ-light A2 audit-layer tx builders — see audit_tx.hpp. The signing
-// bytes match src/chain/block.cpp::Transaction::signing_bytes byte-for-byte,
-// including the trailing payload (unlike the light sign_tx path, which is
-// empty-payload only). The consensus shape gates live at
-// src/node/validator.cpp (ROTATE_AUDIT_KEY / LOG_AUDIT_ACCESS cases) +
-// include/determ/chain/block.hpp (AUDIT_KEY_PAYLOAD_SIZE / AUDIT_LOG_PAYLOAD_SIZE).
+// determ-light fee-only account-signed tx builders — see audit_tx.hpp. Hosts
+// the A2 audit-layer builders (ROTATE_AUDIT_KEY / LOG_AUDIT_ACCESS) and the NC-8
+// note-key builder (REGISTER_NOTE_KEY), which all share the identical fee-only,
+// account-Ed25519-signed shape and one signing_bytes helper. The signing bytes
+// match src/chain/block.cpp::Transaction::signing_bytes byte-for-byte, including
+// the trailing payload (unlike the light sign_tx path, which is empty-payload
+// only). The consensus shape gates live at src/node/validator.cpp
+// (ROTATE_AUDIT_KEY / LOG_AUDIT_ACCESS / REGISTER_NOTE_KEY cases) +
+// include/determ/chain/block.hpp (AUDIT_KEY_/AUDIT_LOG_/NOTE_KEY_PAYLOAD_SIZE).
 
 #include "audit_tx.hpp"
 #include <determ/crypto/keys.hpp>
@@ -20,11 +23,13 @@ using nlohmann::json;
 
 namespace {
 
-// A2 wire constants — MUST match include/determ/chain/block.hpp.
+// A2 / NC-8 wire constants — MUST match include/determ/chain/block.hpp.
 constexpr int    TX_ROTATE_AUDIT_KEY = 15;
 constexpr int    TX_LOG_AUDIT_ACCESS = 16;
+constexpr int    TX_REGISTER_NOTE_KEY = 17;
 constexpr size_t AUDIT_KEY_PAYLOAD_SIZE = 32;
 constexpr size_t AUDIT_LOG_PAYLOAD_SIZE = 8 + 32 + 32;   // epoch || auditor_pk || ctx
+constexpr size_t NOTE_KEY_PAYLOAD_SIZE  = 33;            // SEC1-compressed P-256 note_pk
 
 // Canonical signing_bytes with a trailing payload:
 //   u8(type) || from || 0x00 || to || 0x00 || u64_be(amount) || u64_be(fee)
@@ -97,6 +102,21 @@ json build_log_audit_access_tx(const LightKeyfile& kf, uint64_t epoch,
     payload.insert(payload.end(), auditor_pk.begin(),   auditor_pk.end());
     payload.insert(payload.end(), context_hash.begin(), context_hash.end());
     return sign_audit_tx(kf, TX_LOG_AUDIT_ACCESS, fee, nonce, payload, "LOG_AUDIT_ACCESS");
+}
+
+json build_register_note_key_tx(const LightKeyfile& kf,
+                                const std::optional<std::vector<uint8_t>>& note_pk,
+                                uint64_t fee, uint64_t nonce) {
+    std::vector<uint8_t> payload;
+    if (note_pk) {
+        if (note_pk->size() != NOTE_KEY_PAYLOAD_SIZE)
+            throw std::runtime_error("register-note-key: --note-pk must be 33 bytes "
+                                     "(66 hex, SEC1-compressed P-256); use --clear to revoke");
+        payload = *note_pk;
+    }
+    // REGISTER_NOTE_KEY is fee-only + account-signed, the identical shape as the
+    // audit txs, so it reuses sign_audit_tx (same canonical signing_bytes).
+    return sign_audit_tx(kf, TX_REGISTER_NOTE_KEY, fee, nonce, payload, "REGISTER_NOTE_KEY");
 }
 
 } // namespace determ::light

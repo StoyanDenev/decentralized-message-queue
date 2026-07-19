@@ -40,4 +40,15 @@ nlohmann::json build_log_audit_access_tx(const LightKeyfile& kf,
                                          uint64_t fee,
                                          uint64_t nonce);
 
+// NC-8 §5a: REGISTER_NOTE_KEY (TxType 17) — publish/rotate/revoke the account's
+// standing recipient note_pk. SET (33-byte SEC1-compressed P-256 note_pk) or
+// CLEAR (empty payload — revoke). Same fee-only, account-Ed25519-signed shape
+// as the audit txs, so any anon/bearer payee can publish its note key; shares
+// the signing_bytes helper for byte-parity. Throws if note_pk is present and
+// not exactly 33 bytes. (EncryptedNoteDeliveryDesign.md §5.5.)
+nlohmann::json build_register_note_key_tx(const LightKeyfile& kf,
+                                          const std::optional<std::vector<uint8_t>>& note_pk,
+                                          uint64_t fee,
+                                          uint64_t nonce);
+
 } // namespace determ::light

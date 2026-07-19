@@ -28,6 +28,7 @@
 //   supply-trustless         Composite: verify 5 c: counters + A1 identity
 //   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
+//   register-note-key        Build a submittable REGISTER_NOTE_KEY (nk:, NC-8)
 //   submit-tx                Submit a pre-signed tx to the daemon
 //   verify-and-submit        Composite: trustless nonce + sign + submit
 //   watch-head               Periodic trust-minimized head monitor
@@ -393,6 +394,14 @@ void print_usage() {
         "                   --context <hex32> --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE LOG_AUDIT_ACCESS (TxType 16): post an on-chain\n"
         "      disclosure record. --epoch all = full-history sentinel.\n"
+        "  register-note-key --keyfile <path> {--note-pk <hex33>|--clear}\n"
+        "                   --fee <N> --nonce <N> [--out <file>]\n"
+        "      NC-8: build a SUBMITTABLE REGISTER_NOTE_KEY (TxType 17): set or\n"
+        "      clear the account's standing recipient note_pk (the 33-byte P-256\n"
+        "      point a sender seals a CONFIDENTIAL_TRANSFER enote to). Account-\n"
+        "      Ed25519-signed, fee-only; anon/bearer payees included. Feed --out\n"
+        "      to submit-tx; verify a validator accepts it with\n"
+        "      `determ verify-audit-tx`. Then verify-notekey proves it on-chain.\n"
         "  build-shield --keyfile <path> --blind-seed <hex> --amount <N>\n"
         "               --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE SHIELD (TxType 12): move PUBLIC amount from your\n"
@@ -4003,6 +4012,57 @@ int cmd_rotate_audit_key(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "rotate-audit-key: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ─────────────────────────── register-note-key ───────────────────────────
+// NC-8 §5a client tooling: build + sign a submittable REGISTER_NOTE_KEY
+// (TxType 17) that publishes/rotates/revokes the account's standing recipient
+// note_pk (the 33-byte P-256 point a sender seals a CONFIDENTIAL_TRANSFER enote
+// to). Fee-only, account-Ed25519-signed — anon/bearer payees included. Feed the
+// output to `submit-tx`; a `determ verify-audit-tx` confirms a validator would
+// accept it. (EncryptedNoteDeliveryDesign.md §5.5.)
+int cmd_register_note_key(int argc, char** argv) {
+    std::string keyfile_path, note_pk_hex, out_path;
+    bool have_fee = false, have_nonce = false, clear = false;
+    uint64_t fee = 0, nonce = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile" && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--note-pk" && i + 1 < argc) note_pk_hex  = argv[++i];
+        else if (a == "--clear")                   clear        = true;
+        else if (a == "--fee"     && i + 1 < argc) { fee   = parse_u64("--fee",   argv[++i]); have_fee   = true; }
+        else if (a == "--nonce"   && i + 1 < argc) { nonce = parse_u64("--nonce", argv[++i]); have_nonce = true; }
+        else if (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
+        else { std::cerr << "register-note-key: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (keyfile_path.empty() || !have_fee || !have_nonce) {
+        std::cerr << "register-note-key: --keyfile, --fee, --nonce are required "
+                     "(and exactly one of --note-pk <hex33> / --clear)\n";
+        return 1;
+    }
+    if (clear == !note_pk_hex.empty()) {
+        std::cerr << "register-note-key: give EXACTLY one of --note-pk <hex33> "
+                     "(set) or --clear (revoke)\n";
+        return 1;
+    }
+    try {
+        auto kf = load_light_keyfile(keyfile_path);
+        std::optional<std::vector<uint8_t>> pk;
+        if (!clear) pk = from_hex(note_pk_hex);
+        auto tx = build_register_note_key_tx(kf, pk, fee, nonce);
+        if (out_path.empty()) std::cout << tx.dump() << "\n";
+        else {
+            write_json_file(out_path, tx);
+            std::cout << "OK: wrote REGISTER_NOTE_KEY ("
+                      << (clear ? "clear" : "set") << ", hash="
+                      << tx["hash"].get<std::string>().substr(0, 16)
+                      << "...) to " << out_path << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "register-note-key: " << e.what() << "\n";
         return 1;
     }
 }
@@ -9242,6 +9302,7 @@ int main(int argc, char** argv) {
         if (cmd == "pq-address")            return cmd_pq_address(sub_argc, sub_argv);
         if (cmd == "pq-transfer")           return cmd_pq_transfer(sub_argc, sub_argv);
         if (cmd == "rotate-audit-key")      return cmd_rotate_audit_key(sub_argc, sub_argv);
+        if (cmd == "register-note-key")     return cmd_register_note_key(sub_argc, sub_argv);
         if (cmd == "log-audit-access")      return cmd_log_audit_access(sub_argc, sub_argv);
         if (cmd == "build-shield")          return cmd_build_shield(sub_argc, sub_argv);
         if (cmd == "build-unshield")        return cmd_build_unshield(sub_argc, sub_argv);

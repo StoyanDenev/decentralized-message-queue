@@ -15058,12 +15058,13 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) { std::cerr << "verify-pq-tx: " << e.what() << "\n"; return 1; }
     }
     if (cmd == "verify-audit-tx") {
-        // A2 — context-free accept-check for an audit-layer tx (ROTATE_AUDIT_KEY
-        // / LOG_AUDIT_ACCESS) built by `determ-light rotate-audit-key` /
-        // `log-audit-access`. Mirrors the validator's anon-account path exactly
-        // (src/node/validator.cpp:603-623 + the shape gates in
-        // src/chain/chain.cpp): from must be anon-shape, amount==0, to empty,
-        // payload length matches the type, and the Ed25519 sig over
+        // A2 / NC-8 — context-free accept-check for a fee-only anon-account tx
+        // (ROTATE_AUDIT_KEY / LOG_AUDIT_ACCESS built by `determ-light
+        // rotate-audit-key` / `log-audit-access`, or REGISTER_NOTE_KEY built by
+        // `determ-light register-note-key`). Mirrors the validator's
+        // anon-account path exactly (src/node/validator.cpp anon whitelist +
+        // the per-type shape gates): from must be anon-shape, amount==0, to
+        // empty, payload length matches the type, and the Ed25519 sig over
         // signing_bytes verifies under the pubkey the address IS. Stateless
         // (no nonce/balance) — it confirms authenticity + shape, not ledger
         // acceptance. Exit 0 = VERIFIED, 3 = INVALID, 1 = usage/parse.
@@ -15079,16 +15080,21 @@ int main(int argc, char** argv) {
             auto reject = [](const std::string& why){
                 std::cout << "INVALID: " << why << "\n"; return 3; };
             if (tx.type != determ::chain::TxType::ROTATE_AUDIT_KEY
-                && tx.type != determ::chain::TxType::LOG_AUDIT_ACCESS)
-                return reject("not an audit-layer tx (type must be 15 or 16)");
+                && tx.type != determ::chain::TxType::LOG_AUDIT_ACCESS
+                && tx.type != determ::chain::TxType::REGISTER_NOTE_KEY)
+                return reject("not a fee-only anon-account tx (type must be 15, 16 or 17)");
             if (!determ::is_anon_address(tx.from))
                 return reject("from is not an anon (bearer) account");
             if (tx.amount != 0 || !tx.to.empty())
-                return reject("audit tx must be fee-only (amount==0, to empty)");
+                return reject("fee-only tx must have amount==0 and to empty");
             if (tx.type == determ::chain::TxType::ROTATE_AUDIT_KEY) {
                 if (!tx.payload.empty()
                     && tx.payload.size() != determ::chain::AUDIT_KEY_PAYLOAD_SIZE)
                     return reject("ROTATE_AUDIT_KEY payload must be empty (clear) or 32 bytes (set)");
+            } else if (tx.type == determ::chain::TxType::REGISTER_NOTE_KEY) {
+                if (!tx.payload.empty()
+                    && tx.payload.size() != determ::chain::NOTE_KEY_PAYLOAD_SIZE)
+                    return reject("REGISTER_NOTE_KEY payload must be empty (clear) or 33 bytes (set)");
             } else {
                 if (tx.payload.size() != determ::chain::AUDIT_LOG_PAYLOAD_SIZE)
                     return reject("LOG_AUDIT_ACCESS payload must be 72 bytes");
@@ -15097,8 +15103,10 @@ int main(int argc, char** argv) {
             auto sb = tx.signing_bytes();
             if (!determ::crypto::verify(pk, sb, tx.sig))
                 return reject("Ed25519 signature does not verify under the from address");
-            const char* name = (tx.type == determ::chain::TxType::ROTATE_AUDIT_KEY)
-                ? "ROTATE_AUDIT_KEY" : "LOG_AUDIT_ACCESS";
+            const char* name =
+                  (tx.type == determ::chain::TxType::ROTATE_AUDIT_KEY)  ? "ROTATE_AUDIT_KEY"
+                : (tx.type == determ::chain::TxType::REGISTER_NOTE_KEY) ? "REGISTER_NOTE_KEY"
+                                                                       : "LOG_AUDIT_ACCESS";
             std::cout << "VERIFIED: authentic " << name << " (from " << tx.from.substr(0, 18)
                       << "... nonce=" << tx.nonce << " fee=" << tx.fee << ")\n";
             return 0;
