@@ -133,7 +133,30 @@ Partition the `M−1` claimers into honest `H` and Byzantine `F'`. Each honest c
 
 **Code witness.** `src/node/validator.cpp:261–264` (exact-count `!=` reject); `src/node/validator.cpp:266–281` (distinct-claimer `std::set` + accused-exclusion + membership).
 
-**Test witness.** The exact-count and distinct-claimer invariants are pinned by `determ test-block-validator-extensive` (block-validator negative cases) and the abort-cert assembly path in `tools/test_abort_event_apply.sh`; per-signer evidence-pool bounds compose with `S013PerSignerCap.md` (S-013, 2-entry cap on the buffered evidence the certificate draws from).
+**Test witness — ⚠ NONE (corrected 2026-07-20).** An earlier revision of this line
+claimed the exact-count and distinct-claimer invariants were "pinned by `determ
+test-block-validator-extensive` (block-validator negative cases) and the abort-cert
+assembly path in `tools/test_abort_event_apply.sh`". **Both citations were false and
+have been withdrawn.** Measured:
+`determ test-block-validator-extensive` contains **zero** occurrences of the
+substring "abort" (its advertised "V1..V20 gate-by-gate" coverage stops short of
+V10), and `test_abort_event_apply.sh` exercises the **apply** path
+(`Chain::apply_transactions`), never `BlockValidator::check_abort_certs`.
+Repo-wide: of 31 `abort_events.push_back` sites in `src/main.cpp`, none has a
+`validate()` call within ±40 lines; of 68 `BlockValidator` sites, none touches
+`abort_events`.
+
+**T-C5 therefore has NO enforcing gate**, as do T-C1/T-C3/T-C4 — see
+[ProofClaimGateTraceability.md](ProofClaimGateTraceability.md) §3, where this
+cluster is the top-ranked open gap. The proof argument above stands on code
+inspection; what is missing is the mechanism that would fail if the code changed.
+The scoped remediation is an FA-capture negative test (drive the deterministic FA
+harness to produce a genuine abort-carrying block, then mutate its certificate and
+re-validate), because `check_abort_certs` is private and reaching it requires
+passing the five earlier gates including the post-abort creator re-selection.
+
+Per-signer evidence-pool bounds do genuinely compose with `S013PerSignerCap.md`
+(S-013, 2-entry cap on the buffered evidence the certificate draws from).
 
 ### T-C6 — Phase discrimination preserved through verification
 
