@@ -40,14 +40,19 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
+**Remediation status: 8 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), and the BFT-escalation
+arm T-1/T-2/PE-4 (§3c). Six HIGH remain: AL-3, SR-5, WH-2, and the three light
+client value-hash cross-check sites CR-2/RP-3/SU-2. **56 claims open overall.**
+
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
 
 | Claim | Doc | Silently deletable check |
 |---|---|---|
 | ~~**T-C1, T-C3, T-C4, T-C5**~~ **CLOSED** | AbortCertificateSoundness | the abort-certificate quorum in `validator.cpp::check_abort_certs` — **gate shipped**, see §3b |
-| PE-4 | BFTProposerElectionSoundness | `b.bft_proposer != b.creators[expected_idx]` reject |
-| T-1, T-2 | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` |
+| ~~PE-4~~ **CLOSED** | BFTProposerElectionSoundness | `b.bft_proposer != b.creators[expected_idx]` reject — **gate shipped**, see §3c |
+| ~~T-1, T-2~~ **CLOSED** | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` — **gate shipped**, see §3c |
 | AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
 | SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
@@ -113,6 +118,54 @@ gate, that mutation passed all 257 tests.
 fixture, and `"claimer not found in registry"` is **defensive-only** — a claimer
 that passed the at-event membership check is in the registry by construction, so
 the branch is unreachable through `validate()`.
+
+## 3c. Third cluster CLOSED — the BFT-escalation arm (T-1, T-2, PE-4)
+
+Closed by **10 assertions added to the existing `test-abort-cert-validation`**
+(24 total in that gate) rather than a new subcommand — minimalism, and the
+fixture is the same one: a BFT
+block is by construction an abort-ESCALATED block, so it must carry a certificate
+that clears V10 before the 9th gate ever sees it.
+
+The reachability fact that makes these testable at all: `check_creator_selection`
+(3rd) enforces only the mode↔**size** pairing — `m == ceil(2K/3)` for BFT — and
+never consults `bft_enabled_`. A BFT-mode block with an escalated committee
+therefore reaches `check_block_sigs` even with the genesis flag off, which is
+exactly the adversarial case T-1 describes. Two further prerequisites had to be
+made well-formed for any of this to be reachable: `check_delay` (8th) sits
+between the two clusters, so the builder now also computes the `delay_seed` /
+`delay_output` commit-reveal pair. (The V10 assertions are unaffected — gate 6
+fires before gate 8 either way, and all fourteen still pass.)
+
+**PE-4 is asserted without re-deriving `proposer_idx()`**, which would only
+mirror the code under test. Instead every committee member is driven as the
+claimed proposer and **exactly one must survive**. That shape is what makes the
+assertion two-sided: deleting the equality leaves *zero* rejected, inverting it
+rejects *both*. A proposer outside the committee entirely is rejected as a
+separate assertion, and the surviving proposer is then shown to fall to the
+sentinel-signature check — proving the accepted branch is the one that continues.
+A correctly-proposed, fully-signed BFT block clears the whole gate (non-vacuity).
+
+*Falsify-on-mutant (executed, three separate mutations, each reverted).*
+
+| Mutation | Assertions turned RED |
+|---|---|
+| neutralize the `!bft_enabled_` guard | T-1 only |
+| neutralize the abort-threshold arm | T-2 only |
+| neutralize `b.bft_proposer != b.creators[expected_idx]` | **both** PE-4 assertions |
+
+*Method note worth keeping:* the first attempt at the T-2 mutant produced
+malformed C++, the build failed, and the **stale binary from the previous mutant
+round ran instead** — reporting the previous mutation's signature and nearly
+manufacturing a false result. Every mutant round must confirm the build actually
+succeeded before trusting what the binary prints; this is the compiled-language
+twin of the redundant-check trap in §4.
+
+*Note on PE-4's history:* `proposer_idx()` was already unit-tested for
+determinism and in-range behaviour. The gap was never the function — it was the
+validator's **use** of it. A well-tested helper called by an unenforced
+comparison is a recurring shape in this register; the helper's own tests read as
+coverage while the security-relevant equality goes unchecked.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 

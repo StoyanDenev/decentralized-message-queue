@@ -156,10 +156,10 @@ Combining: the only knob with non-negligible effect is abort-induction, which yi
 
 **Theorem.** For any block `B` with `B.consensus_mode = BFT` accepted by an honest validator against chain prefix `C`, the validator's recomputed `expected_idx = proposer_idx(epoch_committee_seed(resolve_epoch_rand(estart, C), shard_id), B.abort_events, |B.creators|)` satisfies (i) `expected_idx < |B.creators|`, (ii) `B.bft_proposer == B.creators[expected_idx]`, and (iii) `B.creator_block_sigs[expected_idx] ≠ 0`. Equivalently: no BFT block that names the wrong proposer, an out-of-range index, or an unsigned proposer slot is ever accepted; and an MD block carrying any non-empty `bft_proposer` is rejected.
 
-**Proof.** The validator's BFT branch (`validator.cpp:408-426`) executes exactly:
+**Proof.** The validator's BFT branch (`validator.cpp:480-498`) executes exactly:
 
 ```cpp
-EpochIndex epi = epoch_blocks_ ? (b.index % epoch_blocks_) : 0;
+EpochIndex epi = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
 uint64_t   estart = epi * (epoch_blocks_ ? epoch_blocks_ : 1);
 Hash erand = resolve_epoch_rand(estart, chain);
 Hash seed  = epoch_committee_seed(erand, shard_id_);
@@ -170,7 +170,7 @@ Signature zero{};
 if (b.creator_block_sigs[expected_idx] == zero)     return {false, "BFT proposer did not sign"};
 ```
 
-The validator's seed computation is *byte-identical* to the producer's (`node.cpp:942-944` vs `validator.cpp:414-416`): same `epoch_committee_seed`, same `shard_id` (both read the chain's shard id), same `proposer_idx`. The only sourcing difference is `current_epoch_rand()` (producer, walks its in-memory chain) vs `resolve_epoch_rand(estart, chain)` (validator, walks the chain prefix it is validating against) — and under H-det these return the same `epoch_rand` because both resolve the `cumulative_rand` at the same epoch-start index of the same agreed prefix. The abort list is sourced from `b.abort_events` (the validator) which is precisely the producer's `current_aborts_` serialized into the block (the block carries its own abort history); PE-1's determinism over that shared list gives `expected_idx == p` (the producer's elected index).
+The validator's seed computation is *byte-identical* to the producer's (`node.cpp:942-944` vs `validator.cpp:484-487`): same `epoch_committee_seed`, same `shard_id` (both read the chain's shard id), same `proposer_idx`. The only sourcing difference is `current_epoch_rand()` (producer, walks its in-memory chain) vs `resolve_epoch_rand(estart, chain)` (validator, walks the chain prefix it is validating against) — and under H-det these return the same `epoch_rand` because both resolve the `cumulative_rand` at the same epoch-start index of the same agreed prefix. The abort list is sourced from `b.abort_events` (the validator) which is precisely the producer's `current_aborts_` serialized into the block (the block carries its own abort history); PE-1's determinism over that shared list gives `expected_idx == p` (the producer's elected index).
 
 Now:
 
@@ -178,7 +178,36 @@ Now:
 - (ii) holds because the honest producer set `B.bft_proposer = creators[p]` (`current_proposer_domain`, `node.cpp:947`) with the same `p`; any block where `B.bft_proposer ≠ B.creators[expected_idx]` (an adversary substituting a different proposer) is rejected by the equality check. The adversary cannot satisfy the check with a chosen proposer because `expected_idx` is fixed by inputs the adversary cannot forge under H-det (changing `b.abort_events` to move `expected_idx` onto the chosen member requires a SHA-256 preimage win, PE-3; and any change to `b.abort_events` also changes `compute_block_digest` and thus the signatures, which then fail V8).
 - (iii) holds because the producer's finalize path refuses to emit a BFT block whose proposer slot is sentinel-zero (`node.cpp:1060-1065`: it locates `proposer` in `creators` and returns without finalizing if `ordered_block_sigs[pidx] == zero_sig`), and the validator re-checks the same condition. An adversary cannot present a block where the elected proposer's slot is zero — V8 would also need ≥ Q non-zero sigs, but specifically *this* index must be non-zero, closing the "finalize without the leader's own sig" gap.
 
-Finally, the MD-mode guard (`validator.cpp:406-407`) rejects any MUTUAL_DISTRUST block with non-empty `bft_proposer`, so the proposer field is confined to BFT blocks and cannot be smuggled into MD-mode consensus where FA1's unconditional safety governs. ∎
+Finally, the MD-mode guard (`validator.cpp:477-479`) rejects any MUTUAL_DISTRUST block with non-empty `bft_proposer`, so the proposer field is confined to BFT blocks and cannot be smuggled into MD-mode consensus where FA1's unconditional safety governs. ∎
+
+**Test witness (gate).** `determ test-abort-cert-validation`
+(`tools/test_abort_cert_validation.sh`, FAST) drives a real BFT-mode block —
+escalated `⌈2K/3⌉` committee, a certificate that has already cleared V10 — through
+the production `validate()` and asserts clauses (ii) and (iii) directly:
+
+- **(ii)** every committee member is driven as the claimed `bft_proposer` and
+  **exactly one** must survive. This is deliberately *not* a re-derivation of
+  `expected_idx` — mirroring the code under test would assert nothing. The
+  two-sided shape is what carries the equality: deleting the comparison leaves
+  *zero* rejected, inverting it rejects *both*.
+- A proposer naming a domain outside `B.creators` entirely is rejected.
+- **(iii)** the surviving proposer, still carrying a sentinel-zero slot, then
+  falls to "BFT proposer did not sign" — showing the accepted branch is the one
+  that proceeds to the signature check rather than short-circuiting.
+- The MD-mode guard is asserted on a MUTUAL_DISTRUST block with `bft_proposer` set.
+- Non-vacuity: a correctly-proposed, fully-signed BFT block clears the whole gate.
+
+*Falsify-on-mutant (executed).* Neutralizing
+`b.bft_proposer != b.creators[expected_idx]` turns exactly the two
+proposer-identity assertions RED and nothing else.
+
+**Coverage note.** `proposer_idx()` itself was already unit-tested (determinism,
+in-range) before this gate existed; what had **no** enforcing gate was the
+validator's *use* of it — clause (ii). That distinction is registered as PE-4 in
+[ProofClaimGateTraceability.md](ProofClaimGateTraceability.md) §3c. Clause (i),
+the out-of-range reject, remains unasserted: `proposer_idx` returns
+`v mod |creators|`, so with `|creators| > 0` enforced upstream by
+`check_creator_selection` the branch is unreachable through `validate()`.
 
 **Corollary PE-4.1 (no honest fork in BFT mode).** Combining PE-1 (honest nodes agree on `proposer`), PE-4 (validators reject any block naming a different proposer), and the proposer-only finalize gate (`node.cpp:1039`): at any BFT height, every block an honest validator accepts names the same proposer `creators[p]`, and only that proposer finalizes. Two distinct accepted blocks at one height therefore share a proposer who signed two distinct digests — i.e. provable equivocation, slashed by FA6. There is no fork between honest nodes, and the dishonest-proposer fork is detected and economically punished. This is exactly the proposer-uniqueness half of FA5's "exactly one canonical BFT block per height." ∎
 

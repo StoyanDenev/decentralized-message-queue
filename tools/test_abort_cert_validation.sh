@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# FA-Cert V10 NEGATIVE GATE — BlockValidator::check_abort_certs.
+# NEGATIVE GATE for the two abort-path validator clusters:
+#   * BlockValidator::check_abort_certs   (V10, 6th gate) — T-C1/T-C3/T-C4/T-C5
+#   * the BFT-escalation arm of check_block_sigs (9th)    — T-1, T-2, PE-4
 #
 # check_abort_certs is the last line of defense against a FORGED ABORT
 # CERTIFICATE, whose consequence is consensus-level FALSE SUSPENSION-SLASHING of
@@ -28,6 +30,24 @@
 # T-C3 assertion RED and nothing else. Before this gate that mutation passed all
 # 257 tests.
 #
+# SECOND CLUSTER — the BFT-escalation arm of check_block_sigs (T-1, T-2, PE-4).
+# A BFT block is by construction an abort-ESCALATED block, so it must carry a
+# certificate that clears V10 first; these assertions therefore extend THIS
+# fixture rather than duplicating it. check_creator_selection enforces only the
+# mode<->SIZE pairing (m == ceil(2K/3) for BFT) and never consults bft_enabled_,
+# which is what lets a BFT block reach the 9th gate with the genesis flag off.
+#
+# PE-4 is asserted without re-deriving proposer_idx() — that would merely mirror
+# the code under test. Instead EVERY committee member is driven as the claimed
+# proposer and EXACTLY ONE must survive: deleting the equality leaves zero
+# rejected, inverting it rejects both.
+#
+# FALSIFY-ON-MUTANT (executed, three separate mutations):
+#   * neutralize the `!bft_enabled_` guard      -> only the T-1 assertion RED
+#   * neutralize the abort-threshold arm        -> only the T-2 assertion RED
+#   * neutralize the proposer-identity equality -> exactly the TWO PE-4
+#     assertions RED ("exactly ONE valid proposer" + "outsider rejected")
+#
 # Run from repo root: bash tools/test_abort_cert_validation.sh
 set -u
 cd "$(dirname "$0")/.."
@@ -36,7 +56,7 @@ source tools/common.sh
 if [ -z "${DETERM:-}" ] || [ ! -x "$DETERM" ]; then
     echo "  SKIP: determ binary not found"; exit 0; fi
 
-echo "=== FA-Cert V10 — abort-certificate verification negative gate ==="
+echo "=== FA-Cert V10 + BFT-escalation arm — abort-path negative gate ==="
 OUT=$("$DETERM" test-abort-cert-validation 2>&1); rc=$?
 echo "$OUT"
 echo ""

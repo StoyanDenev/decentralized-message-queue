@@ -850,6 +850,9 @@ Additional in-process tests:
                                               accused-self-claim, non-member and
                                               duplicate claimers, forged Ed25519
                                               sig, exact quorum count, membership)
+                                              + the BFT-escalation arm of
+                                              check_block_sigs (bft_enabled guard,
+                                              abort threshold, proposer identity)
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -31686,9 +31689,13 @@ int main(int argc, char** argv) {
         // Self-consistent block builder: re-derives creators + commitments so the
         // five pre-gates pass for ANY abort input.
         auto build_block = [&](const std::string& aborting, const Hash& evh,
-                               const nlohmann::json& claims, uint8_t round) {
+                               const nlohmann::json& claims, uint8_t round,
+                               ConsensusMode mode = ConsensusMode::MUTUAL_DISTRUST,
+                               size_t m = 0) {
+            if (m == 0) m = K;      // MSVC C2587: K cannot be a default argument
             Block b;
             b.index = 1; b.prev_hash = prev_hash;
+            b.consensus_mode = mode;
             AbortEvent ae;
             ae.round = round; ae.aborting_node = aborting;
             ae.timestamp = 0;  ae.event_hash = evh; ae.claims_json = claims;
@@ -31698,7 +31705,7 @@ int main(int argc, char** argv) {
             Hash rand = prev_rand;
             for (auto& e : b.abort_events)
                 rand = SHA256Builder{}.append(rand).append(e.event_hash).finalize();
-            for (auto i : select_m_creators(rand, avail.size(), K))
+            for (auto i : select_m_creators(rand, avail.size(), m))
                 b.creators.push_back(avail[i]);
             for (size_t i = 0; i < b.creators.size(); ++i) {
                 const NodeKey& k = key_of(b.creators[i]);
@@ -31717,6 +31724,12 @@ int main(int argc, char** argv) {
                     sign(key_of(b.creators[i]), commit.data(), commit.size()));
             }
             b.tx_root = compute_tx_root(b.creator_tx_lists);
+            // check_delay (8th) sits between the certificate gate and the
+            // block-sig gate, so the commit-reveal pair must be well-formed or
+            // the BFT-arm assertions below could never reach the 9th gate.
+            b.delay_seed   = compute_delay_seed(b.index, b.prev_hash, b.tx_root,
+                                                b.creator_dh_inputs);
+            b.delay_output = compute_block_rand(b.delay_seed, b.creator_dh_secrets);
             return b;
         };
 
@@ -31820,6 +31833,134 @@ int main(int argc, char** argv) {
             bool hit = !r.ok && r.error.find("aborting_node not in selected set") != std::string::npos;
             if (!hit) std::cout << "    got: [" << r.error << "]\n";
             check(hit, "T-C1: accusing a non-selected node is rejected (membership)");
+        }
+
+        // === BFT-ESCALATION ARM of check_block_sigs (9th of 17) =============
+        // Closes T-1 + T-2 (S025BFTEscalationSoundness) and PE-4
+        // (BFTProposerElectionSoundness) — three more HIGH rows of
+        // ProofClaimGateTraceability.md.
+        //
+        // They belong in THIS fixture rather than a new one: a BFT block is by
+        // construction an abort-ESCALATED block, so it must first carry a
+        // certificate that clears the V10 gate proved above. The only structural
+        // difference is committee size — check_creator_selection (3rd) enforces
+        // the mode<->SIZE pairing (m == ceil(2K/3) for BFT) but does NOT consult
+        // bft_enabled_, which is exactly why a BFT block still reaches gate 9
+        // with the genesis flag off, and is what makes T-1 testable at all.
+        //
+        // On PE-4: proposer_idx() is already unit-tested for determinism and
+        // range, but the validator's USE of it -- the equality
+        // `b.bft_proposer != b.creators[expected_idx]` -- had no gate. Rather
+        // than re-derive the expected index (which would only mirror the code
+        // under test), the assertion drives EVERY committee member as the
+        // claimed proposer and requires EXACTLY ONE to survive. Deleting the
+        // equality leaves zero rejected; inverting it rejects both.
+        {
+            const size_t k_bft = bft_committee_size(K);      // ceil(2*3/3) = 2
+            auto mk_bft = [&]() {
+                Block b = build_block(aborting, evh,
+                                      mk_claims(claimers, aborting, 1), 1,
+                                      ConsensusMode::BFT, k_bft);
+                b.creator_block_sigs.assign(b.creators.size(), Signature{});
+                return b;
+            };
+            // Every distinct check_block_sigs reject marker.
+            auto sig_err = [](const std::string& e) {
+                static const char* pats[] = {
+                    "creator_block_sigs size", "k_block_sigs not configured",
+                    "bft_enabled=false at genesis", "insufficient aborts",
+                    "bft_proposer set in MUTUAL_DISTRUST", "proposer index out of range",
+                    "wrong BFT proposer", "BFT proposer did not sign",
+                    // "creator not found" is emitted by three gates, so it cannot
+                    // DISCRIMINATE — but sig_err is used only in an ABSENCE
+                    // assertion, where over-matching is conservative and a
+                    // missing marker would let a real gate-9 reject read as
+                    // "clears". It is the pubkey-resolution arm (validator.cpp:515)
+                    // and belongs here for that reason.
+                    "creator not found",
+                    "block sig invalid", "block signatures "
+                };
+                for (auto* p : pats) if (e.find(p) != std::string::npos) return true;
+                return false;
+            };
+            auto err_of = [&](const Block& b) {
+                auto r = bv.validate(b, c, reg);
+                return r.ok ? std::string() : r.error;
+            };
+            auto has = [](const std::string& e, const char* p) {
+                return e.find(p) != std::string::npos;
+            };
+
+            Block probe = mk_bft();
+            check(k_bft == 2 && probe.creators.size() == k_bft
+                  && !abort_cert_err(err_of(probe)),
+                  "fixture: BFT block carries an escalated ceil(2K/3) committee "
+                  "and still clears the certificate gate");
+
+            // --- T-1: the bft_enabled_ genesis guard -------------------------
+            bv.set_bft_enabled(false);
+            const std::string e_off = err_of(mk_bft());
+            bv.set_bft_enabled(true);
+            const std::string e_on  = err_of(mk_bft());
+            if (!has(e_off, "bft_enabled=false at genesis"))
+                std::cout << "    got: [" << e_off << "]\n";
+            check(has(e_off, "bft_enabled=false at genesis"),
+                  "T-1: a BFT block is rejected when bft_enabled=false at genesis");
+            check(!has(e_on, "bft_enabled=false at genesis"),
+                  "T-1 non-vacuity: the SAME block clears that reject when enabled");
+
+            // --- T-2: the escalation-threshold arm ---------------------------
+            // The block carries exactly one abort event, so a threshold of 3
+            // must reject and the default of 1 must not.
+            bv.set_bft_escalation_threshold(3);
+            const std::string e_lo = err_of(mk_bft());
+            bv.set_bft_escalation_threshold(1);
+            const std::string e_hi = err_of(mk_bft());
+            if (!has(e_lo, "insufficient aborts (1 < 3)"))
+                std::cout << "    got: [" << e_lo << "]\n";
+            check(has(e_lo, "insufficient aborts (1 < 3)"),
+                  "T-2: BFT escalation below the abort threshold is rejected");
+            check(!has(e_hi, "insufficient aborts"),
+                  "T-2 boundary: aborts == threshold (1 >= 1) clears the arm");
+
+            // --- PE-4: the proposer-identity equality ------------------------
+            size_t rejected = 0, survived = 0, good_idx = 0;
+            std::string e_good;
+            for (size_t i = 0; i < probe.creators.size(); ++i) {
+                Block b = mk_bft(); b.bft_proposer = b.creators[i];
+                const std::string e = err_of(b);
+                if (has(e, "wrong BFT proposer")) ++rejected;
+                else { ++survived; good_idx = i; e_good = e; }
+            }
+            check(rejected == 1 && survived == 1,
+                  "PE-4: exactly ONE committee member is the valid BFT proposer");
+            check(has(e_good, "BFT proposer did not sign"),
+                  "PE-4: the accepted proposer then falls to the sentinel-sig check");
+
+            Block outsider_prop = mk_bft();
+            outsider_prop.bft_proposer = "not-a-committee-member";
+            check(has(err_of(outsider_prop), "wrong BFT proposer"),
+                  "PE-4: a proposer outside the committee is rejected");
+
+            // --- the MUTUAL_DISTRUST mirror of the same field ----------------
+            Block md = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            md.creator_block_sigs.assign(md.creators.size(), Signature{});
+            md.bft_proposer = md.creators[0];
+            check(has(err_of(md), "bft_proposer set in MUTUAL_DISTRUST block"),
+                  "S025: bft_proposer set in a MUTUAL_DISTRUST block is rejected");
+
+            // --- non-vacuity: a correct, fully-signed BFT block clears gate 9 -
+            Block ok = mk_bft();
+            ok.bft_proposer = ok.creators[good_idx];
+            const Hash dg = compute_block_digest(ok);   // binds bft_proposer
+            for (size_t i = 0; i < ok.creators.size(); ++i)
+                ok.creator_block_sigs[i] =
+                    sign(key_of(ok.creators[i]), dg.data(), dg.size());
+            const std::string e_ok = err_of(ok);
+            if (sig_err(e_ok)) std::cout << "    got: [" << e_ok << "]\n";
+            check(!sig_err(e_ok),
+                  "BASELINE: a correctly-proposed, fully-signed BFT block clears "
+                  "check_block_sigs");
         }
 
         std::cout << (fail ? "  FAIL: test-abort-cert-validation\n"

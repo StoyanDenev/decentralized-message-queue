@@ -384,6 +384,41 @@ The producer-validator-mirror invariant (L-1 through L-4 admissibility lemmas + 
 
 The PARAM_CHANGE pipeline for `bft_escalation_threshold` mutation is covered by `tools/test_param_change_threshold.sh` (the A5 governance integration test) — the staged-activation ensures producer and validator agree on the post-activation value at the same height.
 
+### 7.4 `tools/test_abort_cert_validation.sh` (unit, NEGATIVE — gates 1 and 2)
+
+The coverage above is all *positive*: it exercises escalation happening
+correctly. That is the wrong direction for T-1 and T-2, whose adversarial content
+is a **rejection** — and a soundness regression here *widens* acceptance, which
+positive and liveness gates are structurally blind to. The
+[ProofClaimGateTraceability.md](ProofClaimGateTraceability.md) audit recorded T-1
+and T-2 as HIGH claims with no enforcing gate on that basis.
+
+Closed by `determ test-abort-cert-validation` (FAST), which builds a BFT-mode
+block on a real 4-node genesis and drives it through the production `validate()`:
+
+| Assertion | Enforces |
+|---|---|
+| BFT block rejected when `bft_enabled_ = false` | **T-1** (gate 1) |
+| the SAME block clears that reject when enabled | T-1 non-vacuity |
+| BFT block with `1` abort rejected at threshold `3` | **T-2** (gate 2) |
+| `aborts == threshold` (1 ≥ 1) clears the arm | T-2 boundary |
+
+The block reaches the 9th gate at all because `check_creator_selection` (3rd)
+enforces only the mode↔**size** pairing `m == ⌈2K/3⌉` and never consults
+`bft_enabled_` — precisely the adversarial case T-1 describes, where a proposer
+asserts BFT mode on a chain whose genesis forbids it.
+
+*Falsify-on-mutant (executed, separately, each reverted).* Neutralizing the
+`!bft_enabled_` guard turns **only** the T-1 assertion RED; neutralizing the
+`total_aborts < bft_escalation_threshold_` arm turns **only** the T-2 assertion
+RED.
+
+Note these assertions gate the **validator** arm of each conjunct
+(`check_block_sigs`). The producer-side short-circuits at `node.cpp:775-776`
+remain covered only by the positive integration path in §7.1 — an honest residual,
+though the validator arm is the security-relevant one (it is what an adversarial
+proposer must defeat).
+
 ---
 
 ## 8. References
