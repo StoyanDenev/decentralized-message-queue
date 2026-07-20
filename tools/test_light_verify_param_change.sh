@@ -20,16 +20,46 @@
 # A `p:` leaf only exists while a PARAM_CHANGE is STAGED but not yet
 # activated — which requires a GOVERNED chain (governance_mode + param
 # keyholders + a threshold of signatures) and a future effective_height.
-# Standing that flow up deterministically in a short test is fragile, so
-# this test follows the receipt/merge SKIP-clean philosophy: it stands up
-# a single node, probes the `pending_params` RPC for any staged change,
-# and asserts a real INCLUDED if one exists. The fail-closed / negative
-# assertions need only a live daemon with a non-empty state_root and
-# always run.
+# This test used to probe for such a change opportunistically and SKIP the
+# INCLUDED headline when none existed — which, on an ungoverned genesis,
+# was ALWAYS. It now STAGES one itself: genesis carries a 1-of-1 keyholder
+# (the node's own key) and step 6 submits a change at effective_height
+# +1e6, far enough out that activation cannot consume the leaf mid-run.
 #
-# Assertions (all run; the INCLUDED headline only when a change is staged):
-#   1. (headline, conditional) A genuinely-staged param change → INCLUDED,
-#      exit 0, with a committee-anchored state_root. SKIP if none staged.
+# CR-2 (docs/proofs/ProofClaimGateTraceability.md §3d) — the value-hash
+# CLEARTEXT cross-check. Both --name and --value-hex are CALLER-asserted
+# and are ABSENT from the leaf key ('p:' || u64_be(eff) || u32_be(idx)),
+# so a wrong value clears the key_bytes gate and lands exactly on the
+# value_hash comparison. That is why this site needs no tampering proxy:
+# the operator's own argv is the untrusted cleartext. (RP-3 and SU-2, the
+# sibling claims, take their cleartext off the wire and do need one.)
+#
+# The staged INCLUDED control is load-bearing, not decoration: without a
+# real leaf the not_found branch fires ~30 lines BEFORE the comparison and
+# every tamper leg would pass while proving nothing.
+#
+# FALSIFY-ON-MUTANT (executed, each reverted):
+#   * light/main.cpp:5467 `if (proof_value_hash != expected_value_hash)`
+#     -> `if (false)`: BOTH tamper legs flip to INCLUDED/exit 0 — i.e. the
+#     client accepts attacker-chosen cleartext as verified — while the
+#     control and all other assertions stay green. 9 pass -> 7 pass/2 fail.
+#   * light/main.cpp:5397 delete `mb.append(name);`: the CONTROL flips red
+#     (8 pass/1 fail) and the tamper legs stay green. Note the asymmetry —
+#     dropping a preimage field makes the client OVER-reject, so it is the
+#     control that catches it. The control pins accept-narrowing and the
+#     tamper legs pin accept-widening; together they constrain the check
+#     from both directions.
+#
+# Assertions:
+#   1. (headline, CONTROL) The staged param change → INCLUDED, exit 0,
+#      with a committee-anchored state_root. Now deterministic: step 6
+#      stages the change this assertion reads back.
+#   1a. CR-2: a wrong --value-hex (one nibble flipped, length preserved so
+#      from_hex cannot throw first) → exit 3 EXACTLY + UNVERIFIABLE + a
+#      hash-mismatch detail, and NOT a key_bytes detail (the anti-vacuity
+#      guard proving the key gate did not fire instead).
+#   1b. CR-2: a wrong --name, value honest → same three assertions. Covers
+#      the second preimage field independently of 1a.
 #   2. A random (never-staged) slot → NOT-INCLUDED (a sound verified
 #      negative: daemon returns not_found), exit 0, NEVER a false INCLUDED.
 #   3. Wrong --genesis → fail-closed, non-zero exit (genesis-hash mismatch
@@ -95,6 +125,13 @@ echo "=== 1. Init data dir + node key ==="
 $DETERM init --data-dir $T/node --profile regional_test 2>&1 | tail -1
 $DETERM genesis-tool peer-info node_n --data-dir $T/node --stake 1000 > $T/node_p.json
 
+# CR-2 gate prerequisite: a p: leaf only exists on a GOVERNED chain, so make
+# the single founder a 1-of-1 param keyholder (legal per src/chain/genesis.cpp
+# — governed needs >= 1 keyholder and threshold <= keyholder count). Reusing
+# the node's own key as the keyholder avoids a separate keystore.
+PK1=$($PY -c "import json; print(json.load(open('$T/node/node_key.json'))['pubkey'])")
+PRIV1=$($PY -c "import json; print(json.load(open('$T/node/node_key.json'))['priv_seed'])")
+
 echo
 echo "=== 2. Build genesis (single-creator chain, M=K=1) ==="
 cat > $T/node_gen.json <<EOF
@@ -107,6 +144,9 @@ cat > $T/node_gen.json <<EOF
   "initial_creators": [
 $(cat $T/node_p.json | tr -d '\n')
   ],
+  "governance_mode": 1,
+  "param_threshold": 1,
+  "param_keyholders": ["$PK1"],
   "initial_balances": []
 }
 EOF
@@ -188,6 +228,34 @@ fi
 echo "  pre-flight OK: daemon runs our genesis"
 
 echo
+echo "=== 6. Stage a PARAM_CHANGE far in the future (creates the p: leaf) ==="
+# The leaf must PERSIST for the whole run, so effective_height is ~1e6 blocks
+# out: activation consumes the pending entry and deletes the leaf, which would
+# race the assertions below. Staging it here is what converts ASSERTION 1 from
+# a permanent SKIP into a real INCLUDED control — and without that control the
+# CR-2 tamper legs would be VACUOUS, because the not_found branch fires ~30
+# lines before the value-hash comparison they target.
+STAGE_EFF=$((NODE_H + 1000000))
+$DETERM submit-param-change \
+  --priv "$PRIV1" \
+  --from node_n \
+  --name MIN_STAKE \
+  --value-hex d007000000000000 \
+  --effective-height "$STAGE_EFF" \
+  --fee 0 \
+  --keyholder-sig "0:$PRIV1" \
+  --rpc-port 8901 2>&1 | tail -3
+PP_N=0
+for _ in $(seq 1 90); do
+  PP_N=$($DETERM pending-params --json --rpc-port 8901 2>/dev/null | $PY -c "import sys,json
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)")
+  [ "$PP_N" != "0" ] && break
+  sleep 0.3
+done
+echo "  pending entries: $PP_N (effective_height=$STAGE_EFF)"
+
+echo
 echo "=== ASSERTION 1: a staged param change → INCLUDED (conditional) ==="
 # pending_param_changes is surfaced by the determ CLI's `pending-params`
 # command (governance visibility). Each entry carries (effective_height,
@@ -238,6 +306,65 @@ else
     assert "true" "staged param change → INCLUDED, exit 0 (real p: state-proof Merkle-verified)"
   else
     assert "false" "staged param change → INCLUDED/exit0 (got rc=$RC)"
+  fi
+
+  # --- CR-2: the value-hash CLEARTEXT cross-check -------------------------
+  # docs/proofs/ProofClaimGateTraceability.md registered CR-2 as a HIGH claim
+  # with no enforcing gate. The property: the light client must reject a
+  # cleartext that does not hash to the value_hash its Merkle proof binds.
+  #
+  # Both --name and --value-hex are CALLER-asserted and are absent from the
+  # leaf key ('p:' || u64_be(effective_height) || u32_be(idx)), so a wrong
+  # value clears the key_bytes gate and lands exactly on the comparison — no
+  # tampering proxy is needed for this site. The INCLUDED control immediately
+  # above ran on the SAME (eff, idx), which is what proves these legs are not
+  # silently exercising the not_found path.
+  #
+  # exit == 3 is asserted EXACTLY, not merely "non-zero": a malformed
+  # --value-hex throws out of from_hex and exits 1, and only 3 is UNVERIFIABLE.
+  tamper_leg() {   # $1=label  $2=name  $3=value_hex
+    set +e
+    local o rc
+    o=$($DETERM_LIGHT verify-param-change --rpc-port 8901 --genesis $T/node_gen.json \
+          --effective-height $P_EFF --idx $P_IDX --name "$2" --value-hex "$3" 2>&1)
+    rc=$?
+    set -e
+    echo "$o" | head -2
+    if [ "$rc" = "3" ] \
+       && echo "$o" | head -1 | grep -qE "^UNVERIFIABLE" \
+       && echo "$o" | grep -q "does not match the recomputed hash of" \
+       && ! echo "$o" | grep -q "key_bytes"; then
+      assert "true" "$1"
+    else
+      assert "false" "$1 (got rc=$rc, wanted 3 + UNVERIFIABLE + hash-mismatch detail)"
+    fi
+  }
+
+  if [ -n "$P_VAL" ]; then
+    # TAMPER A — one nibble of the VALUE flipped, length preserved so from_hex
+    # cannot throw first.
+    T_VAL=$($PY -c "
+v = '$P_VAL'
+print(('e' if v[0] != 'e' else 'd') + v[1:])")
+    if [ "$T_VAL" = "$P_VAL" ] || [ ${#T_VAL} -ne ${#P_VAL} ]; then
+      assert "false" "tamper A: constructed value differs from the honest one"
+    else
+      echo "  tamper A: value_hex $P_VAL -> $T_VAL"
+      tamper_leg "CR-2: a wrong --value-hex is rejected (cleartext != committed value_hash)" \
+                 "$P_NAME" "$T_VAL"
+    fi
+
+    # TAMPER B — the NAME mutated, value honest. Covers the second preimage
+    # field independently: a mutation dropping only `mb.append(name)` would
+    # leave tamper A red but this leg green.
+    T_NAME=$($PY -c "
+n = '$P_NAME'
+print(n[:-1] + ('F' if n[-1] != 'F' else 'G'))")
+    echo "  tamper B: name $P_NAME -> $T_NAME"
+    tamper_leg "CR-2: a wrong --name is rejected (name is bound into the preimage)" \
+               "$T_NAME" "$P_VAL"
+  else
+    echo "  SKIP(tamper): staged change carries an empty value"
   fi
 fi
 

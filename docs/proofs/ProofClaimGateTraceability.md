@@ -40,10 +40,11 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
-**Remediation status: 8 of the 14 HIGH claims are now closed** — GW-2 (§3a),
-the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), and the BFT-escalation
-arm T-1/T-2/PE-4 (§3c). Six HIGH remain: AL-3, SR-5, WH-2, and the three light
-client value-hash cross-check sites CR-2/RP-3/SU-2. **56 claims open overall.**
+**Remediation status: 9 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), the BFT-escalation arm
+T-1/T-2/PE-4 (§3c), and CR-2 (§3d). Five HIGH remain: AL-3, SR-5, WH-2, and the
+two light-client sites whose cleartext arrives over the wire, RP-3 and SU-2.
+**55 claims open overall.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -56,7 +57,7 @@ green:
 | AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
 | SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
-| CR-2, RP-3, SU-2 | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** (three separate call sites) |
+| ~~CR-2~~ **CLOSED** / RP-3, SU-2 | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 **gate shipped**, see §3d; RP-3/SU-2 still open (they need a tampering proxy) |
 | WH-2 | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) |
 
 ## 3. The top gap, independently re-verified
@@ -166,6 +167,64 @@ determinism and in-range behaviour. The gap was never the function — it was th
 validator's **use** of it. A well-tested helper called by an unenforced
 comparison is a recurring shape in this register; the helper's own tests read as
 coverage while the security-relevant equality goes unchecked.
+
+## 3d. CR-2 CLOSED — the light client's value-hash cleartext cross-check
+
+Registered as one three-site cluster (CR-2 / RP-3 / SU-2), the scouting for this
+gate found the three sites are **not one testability class**, and saying so is
+the useful result:
+
+| Claim | Where the cleartext comes from | What it takes to gate |
+|---|---|---|
+| **CR-2** | the operator's own **argv** (`--name` / `--value-hex`, `--partner-id` / `--refugee-region`) | nothing — a wrong flag against an honest daemon |
+| RP-3 | a second `account` RPC reply | a tampering proxy |
+| SU-2 | the `value_hex` field of the same `state_proof` reply | a tampering proxy |
+
+The threat model differs accordingly. For RP-3/SU-2 the adversary is a lying
+daemon. For CR-2 the "adversary" is an operator asserting a `(name, value)` the
+chain never committed — the check is what stops `verify-param-change` from
+rubber-stamping an assertion the proof does not actually support. Both are real;
+only the latter needs no interposition, because **neither `name` nor `value`
+participates in the leaf key** (`'p:' || u64_be(effective_height) || u32_be(idx)`),
+so a wrong value clears the `key_bytes` gate and lands exactly on the comparison.
+
+Closed by **4 assertions added to `tools/test_light_verify_param_change.sh`** —
+no new file, no new binary, no new dependency.
+
+**The prerequisite was the harder half.** That test's INCLUDED headline had been
+SKIPping *unconditionally*: a `p:` leaf only exists on a GOVERNED chain, and the
+fixture's genesis was ungoverned, so the branch could never be taken. The gate
+therefore also stages its own subject — genesis now carries a 1-of-1 param
+keyholder (the node's own key) and the test submits one change at
+`effective_height + 1e6`, far enough out that activation cannot consume the leaf
+mid-run. That converts a permanently-skipped assertion into a real control, and
+**the control is what makes the tamper legs non-vacuous**: without a leaf, the
+`not_found` branch fires ~30 lines before the comparison and every tamper leg
+would pass while testing nothing.
+
+`exit == 3` is asserted **exactly**, never "non-zero" — a malformed `--value-hex`
+throws out of `from_hex` and exits 1, so a non-zero assertion would pass on the
+mutant. Each leg additionally asserts the detail is *not* a `key_bytes` message,
+pinning that the key gate did not fire in the comparison's place.
+
+*Falsify-on-mutant (executed, each reverted).*
+
+| Mutation | Effect |
+|---|---|
+| `light/main.cpp:5467` `if (proof_value_hash != expected_value_hash)` → `if (false)` | **both** tamper legs flip to INCLUDED/exit 0 — the client certifies attacker-chosen cleartext as verified — control unaffected (9 pass → 7 pass / 2 fail) |
+| `light/main.cpp:5397` delete `mb.append(name);` | the **control** flips red (8 pass / 1 fail); tamper legs stay green |
+
+That asymmetry is worth keeping. Dropping a field from the preimage makes the
+client **over**-reject, so it is the control that catches it, while deleting the
+comparison makes it **under**-reject, which only the tamper legs catch. The
+control pins accept-narrowing and the tamper legs pin accept-widening; neither
+direction is gated by the other. This is the constructive answer to §2's warning
+about asking which direction a gate constrains.
+
+*Open residual.* RP-3 and SU-2 remain ungated. Their cleartext arrives on the
+wire and no honest daemon can be coaxed into serving a mismatch (`node.cpp` emits
+`value_hex` only when it already hashes correctly), so they need a tampering
+proxy — tracked as the next increment, not as a claim this section closes.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
