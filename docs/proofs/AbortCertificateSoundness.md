@@ -133,30 +133,50 @@ Partition the `M−1` claimers into honest `H` and Byzantine `F'`. Each honest c
 
 **Code witness.** `src/node/validator.cpp:261–264` (exact-count `!=` reject); `src/node/validator.cpp:266–281` (distinct-claimer `std::set` + accused-exclusion + membership).
 
-**Test witness — ⚠ NONE (corrected 2026-07-20).** An earlier revision of this line
-claimed the exact-count and distinct-claimer invariants were "pinned by `determ
-test-block-validator-extensive` (block-validator negative cases) and the abort-cert
-assembly path in `tools/test_abort_event_apply.sh`". **Both citations were false and
-have been withdrawn.** Measured:
-`determ test-block-validator-extensive` contains **zero** occurrences of the
-substring "abort" (its advertised "V1..V20 gate-by-gate" coverage stops short of
-V10), and `test_abort_event_apply.sh` exercises the **apply** path
-(`Chain::apply_transactions`), never `BlockValidator::check_abort_certs`.
-Repo-wide: of 31 `abort_events.push_back` sites in `src/main.cpp`, none has a
-`validate()` call within ±40 lines; of 68 `BlockValidator` sites, none touches
-`abort_events`.
+**Test witness — `determ test-abort-cert-validation`
+(`tools/test_abort_cert_validation.sh`, FAST via `abort_cert_validation`).**
 
-**T-C5 therefore has NO enforcing gate**, as do T-C1/T-C3/T-C4 — see
-[ProofClaimGateTraceability.md](ProofClaimGateTraceability.md) §3, where this
-cluster is the top-ranked open gap. The proof argument above stands on code
-inspection; what is missing is the mechanism that would fail if the code changed.
-The scoped remediation is an FA-capture negative test (drive the deterministic FA
-harness to produce a genuine abort-carrying block, then mutate its certificate and
-re-validate), because `check_abort_certs` is private and reaching it requires
-passing the five earlier gates including the post-abort creator re-selection.
+*History, kept deliberately.* An earlier revision claimed these invariants were
+"pinned by `determ test-block-validator-extensive` … and the abort-cert assembly
+path in `tools/test_abort_event_apply.sh`". **Both citations were false** —
+measured, not asserted: `test-block-validator-extensive` contains **zero**
+occurrences of the substring "abort" (its advertised "V1..V20 gate-by-gate"
+coverage stopped short of V10) and `test_abort_event_apply.sh` exercises the
+**apply** path, never `check_abort_certs`. The
+[traceability audit](ProofClaimGateTraceability.md) ranked the resulting
+T-C1/T-C3/T-C4/T-C5 cluster as its top HIGH. The false citations were withdrawn,
+and the gate below now closes the gap for real.
 
-Per-signer evidence-pool bounds do genuinely compose with `S013PerSignerCap.md`
-(S-013, 2-entry cap on the buffered evidence the certificate draws from).
+The gate builds a 4-node genesis with REAL Ed25519 keypairs, mirrors the
+validator's at-event committee derivation, and drives a self-consistent
+abort-carrying block through the full `BlockValidator::validate()` path. A
+well-formed certificate CLEARS V10 (baseline); twelve mutants each assert their
+SPECIFIC V10 reject: the four claim field-bindings (T-C4), accused-self-claim and
+duplicate-claimer and under/over-sized quorum and non-array claims (T-C5),
+non-member claimer and accusing a non-selected node (T-C1), and a forged Ed25519
+claim signature (T-C3).
+
+The builder RE-DERIVES `b.creators` and every per-creator commitment from the
+abort inputs on each call. This is load-bearing rather than cosmetic:
+`check_creator_selection` runs BEFORE V10 and itself reads `b.abort_events` (it
+excludes `aborting_node` and folds `event_hash` into the selection rand), so a
+naive build-once-then-mutate test would trip THAT gate and never reach V10 —
+exactly the kind of vacuous coverage this proof corpus is trying to avoid.
+
+**Falsify-on-mutant (executed).** Turning the per-claim signature reject at
+`validator.cpp:353-354` into a `continue` — the precise silent mutation the audit
+named, which widens acceptance and is therefore invisible to every liveness,
+replay, golden-vector and determinism gate — flips **exactly one** assertion RED
+(T-C3) and nothing else. Before this gate that mutation passed all 257 tests.
+
+Per-signer evidence-pool bounds compose with `S013PerSignerCap.md` (S-013,
+2-entry cap on the buffered evidence the certificate draws from).
+
+**Still uncovered (honest scope):** `"insufficient eligible nodes at
+abort_event[i]"` needs a larger BFT-escalation fixture, and `"claimer not found in
+registry"` is defensive-only — a claimer that passed the at-event membership check
+is in the registry by construction, so the branch is unreachable through
+`validate()`.
 
 ### T-C6 — Phase discrimination preserved through verification
 

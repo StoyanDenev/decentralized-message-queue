@@ -45,7 +45,7 @@ green:
 
 | Claim | Doc | Silently deletable check |
 |---|---|---|
-| **T-C1, T-C3, T-C4, T-C5** | AbortCertificateSoundness | the abort-certificate quorum in `validator.cpp::check_abort_certs` — per-claim Ed25519 verify, exact `max(2,K-1)` count, `aborting_node ∈ selected set`, and the round/block_index field binding |
+| ~~**T-C1, T-C3, T-C4, T-C5**~~ **CLOSED** | AbortCertificateSoundness | the abort-certificate quorum in `validator.cpp::check_abort_certs` — **gate shipped**, see §3b |
 | PE-4 | BFTProposerElectionSoundness | `b.bft_proposer != b.creators[expected_idx]` reject |
 | T-1, T-2 | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` |
 | AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
@@ -78,13 +78,41 @@ re-verified by hand rather than taken on the agents' word:
   structurally invisible to liveness, byte-identity replay, and golden-vector
   gates alike — honest inputs never exercise the weakened branch.
 
-**Why no gate ships in this increment.** `check_abort_certs` is `private`, so a
-negative test must drive it through `validate()` — which means constructing a
-block that passes ~10 earlier gates with a correctly reconstructed at-event
-committee and real Ed25519 claim signatures. That is intricate, and a
-half-correct version that passed vacuously would be *worse than none* — the exact
-failure mode this audit exists to detect. It is scoped as the next increment
-rather than rushed.
+## 3b. Top gap CLOSED — the abort-certificate cluster (T-C1/T-C3/T-C4/T-C5)
+
+Closed by `determ test-abort-cert-validation`
+(`tools/test_abort_cert_validation.sh`, FAST via `abort_cert_validation`).
+
+`check_abort_certs` is `private`, so the gate drives it through the public
+`validate()`: a 4-node genesis with REAL Ed25519 keypairs, the at-event committee
+derived exactly as the validator derives it, and a self-consistent abort-carrying
+block. A well-formed certificate CLEARS V10 (baseline); twelve mutants each assert
+their SPECIFIC V10 reject — the four claim field-bindings (T-C4), accused-self-claim
+/ duplicate-claimer / under- and over-sized quorum / non-array claims (T-C5),
+non-member claimer and accusing a non-selected node (T-C1), and a forged Ed25519
+claim signature (T-C3).
+
+**The design constraint that made this non-trivial**, recorded because it is the
+reusable lesson: `check_creator_selection` runs BEFORE V10 and *itself* reads
+`b.abort_events` (it excludes `aborting_node` and folds `event_hash` into the
+selection rand). A naive build-once-then-mutate test would therefore trip THAT
+gate and never reach V10 — passing vacuously while appearing to test the
+certificate. The builder instead RE-DERIVES `b.creators` and every per-creator
+commitment from the abort inputs on each call, keeping each mutant self-consistent
+up to the certificate itself. The baseline asserts only that NO abort-cert message
+appears; later gates legitimately reject the hand-built block, and that is correct
+— the property under test is *which gate fires*, not whether the block is valid.
+
+*Falsify-on-mutant (executed).* Turning the per-claim signature reject
+(`validator.cpp:353-354`) into a `continue` — the exact silent mutation the audit
+named — flips **exactly one** assertion RED (T-C3) and nothing else. Before this
+gate, that mutation passed all 257 tests.
+
+*Honest residual.* Two of the fourteen reject strings remain uncovered:
+`"insufficient eligible nodes at abort_event[i]"` needs a larger BFT-escalation
+fixture, and `"claimer not found in registry"` is **defensive-only** — a claimer
+that passed the at-event membership check is in the registry by construction, so
+the branch is unreachable through `validate()`.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 

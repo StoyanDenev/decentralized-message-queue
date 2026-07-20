@@ -844,6 +844,12 @@ Additional in-process tests:
                                               number-malformation grammar, \u
                                               surrogate edges, u64/i64 boundaries,
                                               whitespace/dup-key canonicalization)
+)" << R"(  determ test-abort-cert-validation           FA-Cert V10 NEGATIVE gate — a forged
+                                              abort certificate must be REJECTED by
+                                              check_abort_certs (field bindings,
+                                              accused-self-claim, non-member and
+                                              duplicate claimers, forged Ed25519
+                                              sig, exact quorum count, membership)
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -31597,6 +31603,229 @@ int main(int argc, char** argv) {
     // replay under the new value. Names that don't have chain-instance
     // storage are forwarded to the optional param_changed_hook_ (Node's
     // way to mirror validator-side fields like bft_escalation_threshold).
+    if (cmd == "test-abort-cert-validation") {
+        // FA-Cert V10 NEGATIVE GATE — closes the top gap in
+        // docs/proofs/ProofClaimGateTraceability.md (T-C1/T-C3/T-C4/T-C5).
+        //
+        // BlockValidator::check_abort_certs is the last line of defense against a
+        // FORGED ABORT CERTIFICATE, whose consequence is consensus-level FALSE
+        // SUSPENSION-SLASHING of an honest validator. Before this test it had NO
+        // negative coverage at all: of 31 `abort_events.push_back` sites in this
+        // file, none had a validate() call within +/-40 lines; of 68
+        // BlockValidator sites, none touched abort_events. The two witnesses the
+        // docs named contain the substring "abort" once (a comment) and never.
+        //
+        // WHY THE EARLIER GATES MATTER. check_abort_certs is 6th of 17 in
+        // validate(); a block must first pass check_prev_hash,
+        // check_creators_registered, check_creator_selection,
+        // check_creator_tx_commitments and check_creator_dh_secrets. Critically,
+        // check_creator_selection ITSELF reads b.abort_events (it excludes
+        // aborting_node and folds event_hash into the selection rand), so a naive
+        // "build once, then mutate" test would trip THAT gate instead and never
+        // reach V10. Hence build_block() below RE-DERIVES b.creators and every
+        // per-creator commitment from the abort inputs on each call, keeping each
+        // mutant self-consistent up to the cert itself.
+        //
+        // The baseline asserts only that NO abort-cert message appears — later
+        // gates (block sigs, digests, timestamp) legitimately reject this
+        // hand-built block, and that is fine: the property under test is which
+        // gate fires, not whether the block is fully valid.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        const size_t N = 4, K = 3;   // K=2 makes the quorum unsatisfiable by design
+        std::vector<std::string> doms = {"n0", "n1", "n2", "n3"};
+        std::vector<NodeKey> keys(N);
+        GenesisConfig cfg;
+        cfg.chain_id = "abort-cert-validation-test";
+        for (size_t i = 0; i < N; ++i) {
+            for (size_t j = 0; j < 32; ++j)
+                keys[i].priv_seed[j] = uint8_t(0x40 + i * 32 + j);
+            determ_ed25519_pubkey_from_seed(keys[i].priv_seed.data(), keys[i].pub.data());
+            GenesisCreator gc; gc.domain = doms[i]; gc.ed_pub = keys[i].pub;
+            gc.initial_stake = 1000; cfg.initial_creators.push_back(gc);
+            GenesisAllocation ga; ga.domain = doms[i]; ga.balance = 1000;
+            cfg.initial_balances.push_back(ga);
+        }
+        Chain c; c.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+        BlockValidator bv;
+        bv.set_k_block_sigs(uint32_t(K));
+        bv.set_epoch_blocks(1000);          // epoch_index 0 => epoch_start 0
+
+        auto key_of = [&](const std::string& d) -> const NodeKey& {
+            for (size_t i = 0; i < N; ++i) if (doms[i] == d) return keys[i];
+            return keys[0];
+        };
+
+        // Mirror the validator's at-event committee derivation (scaffolding: we
+        // are testing the cert checks, not selection).
+        const Hash prev_hash  = c.head().compute_hash();
+        const Hash epoch_rand = c.head().cumulative_rand;
+        const Hash prev_rand  = epoch_committee_seed(epoch_rand, 0);
+        auto pool = select_committee_pool(c, reg, 0, "");
+        std::vector<std::string> pool_doms;
+        for (auto& n : pool) pool_doms.push_back(n.domain);
+        std::vector<std::string> at_event;
+        for (auto i : select_m_creators(prev_rand, pool_doms.size(), K))
+            at_event.push_back(pool_doms[i]);
+        std::string outsider;   // pool member the at-event draw did NOT pick
+        for (auto& d : pool_doms)
+            if (std::find(at_event.begin(), at_event.end(), d) == at_event.end())
+                outsider = d;
+        check(pool_doms.size() == N && at_event.size() == K && !outsider.empty(),
+              "fixture: 4-node pool, 3-member at-event committee, 1 outsider");
+
+        // Self-consistent block builder: re-derives creators + commitments so the
+        // five pre-gates pass for ANY abort input.
+        auto build_block = [&](const std::string& aborting, const Hash& evh,
+                               const nlohmann::json& claims, uint8_t round) {
+            Block b;
+            b.index = 1; b.prev_hash = prev_hash;
+            AbortEvent ae;
+            ae.round = round; ae.aborting_node = aborting;
+            ae.timestamp = 0;  ae.event_hash = evh; ae.claims_json = claims;
+            b.abort_events.push_back(ae);
+            std::vector<std::string> avail;
+            for (auto& d : pool_doms) if (d != aborting) avail.push_back(d);
+            Hash rand = prev_rand;
+            for (auto& e : b.abort_events)
+                rand = SHA256Builder{}.append(rand).append(e.event_hash).finalize();
+            for (auto i : select_m_creators(rand, avail.size(), K))
+                b.creators.push_back(avail[i]);
+            for (size_t i = 0; i < b.creators.size(); ++i) {
+                const NodeKey& k = key_of(b.creators[i]);
+                Hash secret{};
+                for (size_t j = 0; j < 32; ++j) secret[j] = uint8_t(0xC0 + i * 8 + j);
+                b.creator_dh_secrets.push_back(secret);
+                b.creator_dh_inputs.push_back(SHA256Builder{}
+                    .append(secret).append(k.pub.data(), k.pub.size()).finalize());
+                b.creator_tx_lists.push_back({});
+            }
+            for (size_t i = 0; i < b.creators.size(); ++i) {
+                Hash commit = make_contrib_commitment(b.index, b.prev_hash,
+                                                      b.creator_tx_lists[i],
+                                                      b.creator_dh_inputs[i]);
+                b.creator_ed_sigs.push_back(
+                    sign(key_of(b.creators[i]), commit.data(), commit.size()));
+            }
+            b.tx_root = compute_tx_root(b.creator_tx_lists);
+            return b;
+        };
+
+        auto mk_claims = [&](const std::vector<std::string>& claimers,
+                             const std::string& missing, uint8_t round) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (auto& cl : claimers)
+                arr.push_back(make_abort_claim(key_of(cl), cl, 1, round,
+                                               prev_hash, missing).to_json());
+            return arr;
+        };
+
+        // Every distinct check_abort_certs reject marker.
+        auto abort_cert_err = [](const std::string& e) {
+            static const char* pats[] = {
+                "abort_events present at genesis", "insufficient eligible nodes at abort_event",
+                "aborting_node not in selected set", "claims missing",
+                "claim count !=", "claim block_index mismatch", "claim round mismatch",
+                "claim prev_hash mismatch", "claim missing_creator mismatch",
+                "claimer == missing", "claimer not in at-event set",
+                "duplicate claimer in cert", "claimer not found in registry",
+                "claim sig invalid from"
+            };
+            for (auto* p : pats) if (e.find(p) != std::string::npos) return true;
+            return false;
+        };
+
+        const std::string aborting = at_event[0];
+        const std::vector<std::string> claimers = {at_event[1], at_event[2]};
+        Hash evh{}; for (size_t j = 0; j < 32; ++j) evh[j] = uint8_t(0x77);
+
+        // --- BASELINE: a well-formed certificate must clear V10 -------------
+        {
+            Block b = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            auto r = bv.validate(b, c, reg);
+            if (abort_cert_err(r.error))
+                std::cout << "    baseline unexpectedly hit V10: " << r.error << "\n";
+            check(!abort_cert_err(r.error),
+                  "BASELINE: valid abort certificate clears check_abort_certs");
+        }
+
+        // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
+        // Values only, never JSON shape: AbortClaimMsg::from_json uses
+        // json_require and THROWS on a missing/mistyped field, which would
+        // escape validate() as an exception rather than a Result.
+        auto mutant = [&](const std::function<void(nlohmann::json&)>& edit,
+                          const char* want, const char* label) {
+            nlohmann::json cl = mk_claims(claimers, aborting, 1);
+            edit(cl);
+            Block b = build_block(aborting, evh, cl, 1);
+            auto r = bv.validate(b, c, reg);
+            bool hit = !r.ok && r.error.find(want) != std::string::npos;
+            if (!hit) std::cout << "    got: [" << r.error << "]\n";
+            check(hit, label);
+        };
+
+        mutant([](nlohmann::json& j){ j[0]["block_index"] = 99; },
+               "claim block_index mismatch",
+               "T-C4: claim block_index != block.index -> reject");
+        mutant([](nlohmann::json& j){ j[0]["round"] = 2; },
+               "claim round mismatch",
+               "T-C4: claim round != event round -> reject (phase smuggle)");
+        mutant([](nlohmann::json& j){
+                   j[0]["prev_hash"] = std::string(64, 'a'); },
+               "claim prev_hash mismatch",
+               "T-C4: claim prev_hash != chain head -> reject");
+        mutant([&](nlohmann::json& j){ j[0]["missing_creator"] = outsider; },
+               "claim missing_creator mismatch",
+               "T-C4: claim missing_creator != event aborting_node -> reject");
+        mutant([&](nlohmann::json& j){ j[0]["claimer"] = aborting; },
+               "claimer == missing",
+               "T-C5: the accused cannot claim toward its own slash");
+        mutant([&](nlohmann::json& j){ j[0]["claimer"] = outsider; },
+               "claimer not in at-event set",
+               "T-C1: a non-member of the at-event committee cannot claim");
+        mutant([](nlohmann::json& j){ j[1]["claimer"] = j[0]["claimer"]; },
+               "duplicate claimer in cert",
+               "T-C5: duplicate claimer cannot pad the quorum");
+        mutant([](nlohmann::json& j){
+                   std::string s = j[0]["ed_sig"];
+                   s[0] = (s[0] == '0' ? '1' : '0');
+                   j[0]["ed_sig"] = s; },
+               "claim sig invalid from",
+               "T-C3: a claim with a forged/corrupt Ed25519 signature is rejected");
+        mutant([](nlohmann::json& j){ j.erase(1); },
+               "claim count !=",
+               "T-C5: under-sized certificate (1 of 2) rejected (exact-count)");
+        mutant([](nlohmann::json& j){ j.push_back(j[0]); },
+               "claim count !=",
+               "T-C5: over-sized certificate (3 of 2) rejected (exact-count)");
+        mutant([](nlohmann::json& j){ j = nlohmann::json::object(); },
+               "claims missing",
+               "T-C5: non-array claims_json rejected");
+
+        // aborting_node itself must be an at-event member. This one cannot be a
+        // claims-only mutation: check_creator_selection reads aborting_node, so
+        // the whole block is rebuilt around the outsider and stays self-consistent.
+        {
+            Block b = build_block(outsider, evh, mk_claims(claimers, outsider, 1), 1);
+            auto r = bv.validate(b, c, reg);
+            bool hit = !r.ok && r.error.find("aborting_node not in selected set") != std::string::npos;
+            if (!hit) std::cout << "    got: [" << r.error << "]\n";
+            check(hit, "T-C1: accusing a non-selected node is rejected (membership)");
+        }
+
+        std::cout << (fail ? "  FAIL: test-abort-cert-validation\n"
+                           : "  PASS: test-abort-cert-validation\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-param-change-apply") {
         using namespace determ;
         using namespace determ::chain;
