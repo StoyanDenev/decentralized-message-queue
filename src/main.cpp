@@ -31780,6 +31780,56 @@ int main(int argc, char** argv) {
                   "determinism: same staging → same state_root");
         }
 
+        // === GW-2: the exact-WIDTH decode guard =============================
+        // activate_pending_params' parse_u64 opens with
+        //     if (value.size() != 8) return false;
+        // in front of a FIXED 8-iteration loop `v |= value[i] << (8*i)`. That
+        // guard is load-bearing twice over: a SHORT value would read PAST THE
+        // END of the vector, and an over-long value would silently decode its
+        // first 8 bytes as if the operator had authorized exactly that number.
+        // The staged bytes come from a PARAM_CHANGE payload, so this is the only
+        // thing between a malformed governance value and a silently mis-applied
+        // consensus parameter.
+        //
+        // ProofClaimGateTraceability.md recorded GW-2 as a HIGH with NO enforcing
+        // gate: relaxing `!= 8` to `< 8` (or deleting the line) passed every
+        // existing test. These assertions close it — each malformed width must
+        // leave the parameter UNCHANGED (fail-soft), and the exact-8 case must
+        // still apply (non-vacuity, or a reject-everything parser would pass).
+        {
+            auto width_case = [&](const std::vector<uint8_t>& v, const char* label) {
+                Chain c; c.append(make_genesis_block(cfg));
+                const uint64_t before = c.min_stake();
+                c.stage_param_change(2, "MIN_STAKE", v);
+                advance_to(c, 2);
+                check(c.min_stake() == before, label);
+            };
+            width_case({},                        "GW-2: 0-byte MIN_STAKE value rejected (unchanged)");
+            width_case({0x01},                    "GW-2: 1-byte MIN_STAKE value rejected");
+            width_case({0x01, 0x02, 0x03, 0x04},  "GW-2: 4-byte (short) MIN_STAKE value rejected");
+            width_case({1, 2, 3, 4, 5, 6, 7},     "GW-2: 7-byte (one short) MIN_STAKE value rejected");
+            {
+                std::vector<uint8_t> nine = le8(4242); nine.push_back(0xff);
+                width_case(nine,                  "GW-2: 9-byte (over-long) MIN_STAKE value rejected");
+            }
+            {   // NON-VACUITY: the exact-8 width must still apply.
+                Chain c; c.append(make_genesis_block(cfg));
+                c.stage_param_change(2, "MIN_STAKE", le8(4242));
+                advance_to(c, 2);
+                check(c.min_stake() == 4242,
+                      "GW-2 non-vacuity: exact-8-byte MIN_STAKE DOES apply");
+            }
+            {   // The same guard fronts the other two numeric parameters.
+                Chain c; c.append(make_genesis_block(cfg));
+                const uint64_t s0 = c.suspension_slash(), u0 = c.unstake_delay();
+                c.stage_param_change(2, "SUSPENSION_SLASH", {0xaa, 0xbb});
+                c.stage_param_change(2, "UNSTAKE_DELAY",    {0xcc});
+                advance_to(c, 2);
+                check(c.suspension_slash() == s0 && c.unstake_delay() == u0,
+                      "GW-2: short SUSPENSION_SLASH / UNSTAKE_DELAY rejected too");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": param-change-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

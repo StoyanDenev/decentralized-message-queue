@@ -50,7 +50,7 @@ green:
 | T-1, T-2 | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` |
 | AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
 | SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
-| GW-2 | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard |
+| ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
 | CR-2, RP-3, SU-2 | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** (three separate call sites) |
 | WH-2 | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) |
 
@@ -85,6 +85,30 @@ committee and real Ed25519 claim signatures. That is intricate, and a
 half-correct version that passed vacuously would be *worse than none* — the exact
 failure mode this audit exists to detect. It is scoped as the next increment
 rather than rushed.
+
+## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
+
+`Chain::activate_pending_params`' `parse_u64` opens with
+`if (value.size() != 8) return false;` in front of a **fixed 8-iteration loop**
+`v |= value[i] << (8*i)`. The guard is load-bearing twice over: a SHORT value
+would read **past the end** of the vector, and an over-long value would silently
+decode its first 8 bytes as if the operator had authorized exactly that number.
+The staged bytes originate in a `PARAM_CHANGE` payload, so this is the only thing
+between a malformed governance value and a silently mis-applied consensus
+parameter.
+
+Closed by **7 assertions added to the existing `test-param-change-apply`** —
+extended rather than given a new subcommand/wrapper/FAST entry (minimalism).
+Each malformed width (0, 1, 4, 7, 9 bytes) must leave the parameter UNCHANGED;
+the exact-8 case must still apply (non-vacuity); and the same guard is checked on
+`SUSPENSION_SLASH` / `UNSTAKE_DELAY`.
+
+*Falsify-on-mutant (executed).* Applying the audit's named mutation —
+`value.size() != 8` → `< 8` — flips **exactly one** assertion RED: the 9-byte
+over-long case. The four short-value cases still pass (they remain `< 8`, still
+rejected) and non-vacuity holds. That is the precise, expected signature: the
+over-long assertion is the one carrying the `!=`-versus-`<` semantics, and the
+counter-delta (not merely the PASS line) confirms the gate is load-bearing.
 
 ## 4. How to use this register
 
