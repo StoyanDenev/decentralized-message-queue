@@ -35524,6 +35524,79 @@ int main(int argc, char** argv) {
                   "A1: invariant holds after S-007 rollback");
         }
 
+        // === SB-3 (SubsidyAccountingSoundness corollary 3): the REWARD-path
+        //     checked_add_u64 guards (chain.cpp:1749 join / :1761 per-creator /
+        //     :1769 dust) fail-close on a near-UINT64_MAX CREATOR credit ===
+        //
+        // The TRANSFER/receipt legs above stress the DEBIT/CREDIT tx path; the
+        // subsidy hot path credits COMMITTEE CREATORS, which no existing test
+        // drives near the u64 ceiling (all subsidy/fee tests use small
+        // balances). A raw `bal += per_creator` at :1761 would silently mint by
+        // wrapping — invisible to every golden/replay/supply gate because they
+        // never near a creator to the ceiling. This gates the per-creator site
+        // (the register SB-3 falsify target); :1749 and :1769 are the identical
+        // checked_add_u64 idiom.
+
+        // 7. Per-creator subsidy credit overflowing the sole creator throws
+        //    S-007 with the 'per-creator' diagnostic (not a wrap-mint).
+        {
+            Chain c;
+            c.append(build_genesis_overflow(UINT64_MAX - 5, 200)); // alice = sole creator
+            c.set_block_subsidy(100);                              // FLAT subsidy
+            check(c.balance("alice") == UINT64_MAX - 5,
+                  "SB-3 setup: alice (sole creator) at UINT64_MAX - 5");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};        // no txs: total_fees=0, subsidy=100 → per_creator=100
+
+            bool threw = false; std::string what;
+            try { c.append(b); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("S-007") != std::string::npos
+                  && what.find("per-creator") != std::string::npos,
+                  "SB-3 per-creator subsidy overflow: throws S-007 'per-creator' diagnostic");
+        }
+
+        // 8. On that S-007 throw, Phase-1 rollback leaves the creator balance
+        //    and state_root byte-identical — no partial mint survives (the
+        //    corollary-3 claim: the A1 identity holds on the throwing branch).
+        {
+            Chain c;
+            c.append(build_genesis_overflow(UINT64_MAX - 5, 200));
+            c.set_block_subsidy(100);
+            Hash     root_before  = c.compute_state_root();
+            uint64_t alice_before = c.balance("alice");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            try { c.append(b); } catch (const std::exception&) {}
+            check(c.balance("alice") == alice_before,
+                  "SB-3 rollback: creator balance unchanged after subsidy S-007 (no partial mint)");
+            check(c.compute_state_root() == root_before,
+                  "SB-3 rollback: state_root byte-identical after subsidy S-007 throw");
+        }
+
+        // 9. Boundary control (pins the strict-greater check, catches an
+        //    over-reject `>=` mutation): a subsidy bringing the creator to
+        //    EXACTLY UINT64_MAX is credited, not rejected.
+        {
+            Chain c;
+            c.append(build_genesis_overflow(UINT64_MAX - 100, 200));
+            c.set_block_subsidy(100);      // alice: UINT64_MAX-100 + 100 = UINT64_MAX exactly
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            bool threw = false;
+            try { c.append(b); } catch (const std::exception&) { threw = true; }
+            check(!threw,
+                  "SB-3 boundary: subsidy to exactly UINT64_MAX is credited (no spurious overflow)");
+            check(c.balance("alice") == UINT64_MAX,
+                  "SB-3 boundary: creator balance == UINT64_MAX after subsidy");
+        }
+
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": overflow-paths ", stdout);

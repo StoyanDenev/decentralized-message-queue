@@ -48,9 +48,10 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
 executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
 tiers the original run recorded only as counts — 34 confirmed unenforced
-MED/LOW gaps (4 more were re-examined and found already-gated) — and **SP-2
-(§3i)**, the stake-info cleartext cross-check, is now the first MED closed:
-**33 MED/LOW open; zero HIGH.**
+MED/LOW gaps (4 more were re-examined and found already-gated) — and two MEDs
+are now closed: **SP-2 (§3i)**, the stake-info cleartext cross-check, and
+**SB-3 (§3j)**, the reward-path overflow guard (the first MED gated in FAST on
+both platforms). **32 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -440,6 +441,39 @@ PART A + control stay green (the mutant is invisible on honest input). The two
 tamper legs prove **whole-leaf binding** — a lie about EITHER scalar is caught.
 Backward-compatible: RP-3 8/0, SU-2 4/0, WH-2 5/0 unchanged.
 
+## 3j. SB-3 CLOSED — the reward-path overflow guard (a FAST consensus gate)
+
+`SubsidyAccountingSoundness.md` SB-3 corollary 3 (*no silent wrap*): every credit
+on the block-reward path is guarded by `checked_add_u64` — the fees+subsidy join
+(`chain.cpp:1749`), each per-creator credit (`:1761`), the dust remainder
+(`:1769`) — so on overflow the apply throws an `S-007` diagnostic and the A9
+envelope rolls back byte-identical, and no partial mint survives. The consequence
+of a regression is direct **supply inflation at the reward hot path**: a raw
+`bal += per_creator` silently wraps a committee creator whose balance is near
+`UINT64_MAX`, minting `~2^64` from nothing. No existing test drove a *creator*
+(as opposed to a tx recipient) near the ceiling — every subsidy/fee test uses
+small balances — so the guard had no negative test.
+
+Closed by **extending `determ test-overflow-paths`** (`tools/test_overflow_paths.sh`,
+FAST both platforms — no new subcommand; the existing overflow suite already had
+the near-`UINT64_MAX` fixture machinery). Six assertions on the sole-creator
+`build_genesis_overflow` helper + `set_block_subsidy(100)`: the per-creator credit
+overflows and throws `S-007 "per-creator"`; the A9 rollback leaves the creator
+balance and `state_root` byte-identical (no partial mint); and a **boundary
+control** — a subsidy bringing the creator to *exactly* `UINT64_MAX` is credited,
+not rejected — pinning the strict-greater semantics (an over-reject `>=` mutant
+would flip the control).
+
+*Falsify-on-mutant (executed, reverted via `git checkout`; determ rebuilt).*
+Replacing the guard at `:1761` with `bal += per_creator` (the register's named
+mutation) makes the near-max creator wrap silently with no throw and no rollback:
+the overflow assertion and both rollback assertions flip RED (6/6 → 3/6) while the
+setup and boundary control stay green (the mutant is invisible at the exact-max
+boundary — a raw add reaches `UINT64_MAX` without wrapping). The `:1749` and
+`:1769` guards are the identical `checked_add_u64` idiom; the per-creator site is
+the falsifiable representative. **This is the first MED gated in FAST on both
+platforms** (SP-2 is cluster-bound/Windows-standalone).
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -499,9 +533,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 is now closed (§3i)** — the first MED gated — leaving 33.
+gate-cost. **SP-2 (§3i) and SB-3 (§3j) are now closed** — leaving 32.
 
-### 6.1 Confirmed unenforced MED/LOW claims (33 open + SP-2 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (32 open + SP-2, SB-3 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -510,7 +544,7 @@ gate-cost. **SP-2 is now closed (§3i)** — the first MED gated — leaving 33.
 | 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | open | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | open | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
-| 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | open | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
+| 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
 | 7 | AL-5 | AuditLayerSoundness | MED | trivial | open | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
 | 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | open | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
