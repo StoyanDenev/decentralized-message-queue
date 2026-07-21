@@ -1,9 +1,13 @@
-# DSSO threshold-OPRF soundness — Bundle-A gates G1 + G2 + G3
+# DSSO threshold-OPRF soundness — Bundle-A gates G1 + G2 + G3 (+ the G4 assertion layer)
 
-**Status: SHIPPED (the math gate + the credential envelope).** Backs the first
-three of the six green gates in
-[`v2.25-DSSO-DAPP-SPEC.md`](v2.25-DSSO-DAPP-SPEC.md) §9. The gate is
-`determ test-dsso-threshold-oprf` (`tools/test_dsso_threshold_oprf.sh`, FAST).
+**Status: SHIPPED (the math gate + the credential envelope + the RP assertion
+token).** Backs the first three of the six §9 green gates of
+[`v2.25-DSSO-DAPP-SPEC.md`](v2.25-DSSO-DAPP-SPEC.md), plus the assertion (RP-token)
+layer of G4 (§6 below). Two gates:
+- `determ test-dsso-threshold-oprf` (`tools/test_dsso_threshold_oprf.sh`, FAST) —
+  G1/G2/G3 (the OPRF math + credential envelope).
+- `determ test-dsso-assertion` (`tools/test_dsso_assertion.sh`, FAST) — the §5
+  dual-hash RP token, security claim **C6** (§6 below).
 
 ## 1. What this proves, and what it does not
 
@@ -14,8 +18,8 @@ the password to `B = r·H2C(pw)`, broadcasts it, and Lagrange-combines **any t**
 of the responses `Z_i = k_i·B` back to `Z = k·B`. No server below `t` learns the
 password; no fixed order; no server-to-server communication.
 
-This document backs the two gates that pin the **cryptographic math** of that
-login before any ceremony code is written:
+This document backs the gates that pin the **cryptographic math** of that login
+before any ceremony code is written (G1–G3), plus the RP assertion token (§6):
 
 - **G1 — t-of-n identity.** For every t-subset `S`, the Lagrange combination
   `Σ_{i∈S} λ_i·Z_i` equals the direct single-key evaluation `k·B`, and hence the
@@ -34,13 +38,15 @@ login before any ceremony code is written:
   — HKDF and both AEADs are already shipped + KAT-gated (`test-*-c99`), and the
   `y` it feeds to HKDF is produced by the same combine G1 proves identical.
 
-Out of scope here (later Bundle-A increments): the register→login→**dual-hash
-assertion**→RP-accept end-to-end (G4), and the constant-time / zeroization review
-of the secret scalar paths (G5/G6). In particular G3 gates the envelope's
-*crypto round-trip and password-binding*, **not** the OPAQUE aPAKE handshake
-(spec §4/§5) — that is the ceremony, a later increment, and the production
-HKDF-info / AEAD-nonce wire parameters are pinned there (mirroring how spec §5
-pins the H1/H2 assertion wire format "at implementation").
+The §5 **dual-hash assertion token** (the RP-facing half of G4) is gated in §6.
+What remains out of scope: the **OPAQUE aPAKE handshake** that co-generates the
+`sso_key` the assertion consumes (the design-sensitive AKE — owner-gated), the
+full register→login→assertion→RP wiring as one live flow (G4 end-to-end), and the
+constant-time / zeroization review of the secret scalar paths (G5/G6). G3 gates
+the envelope's *crypto round-trip and password-binding*, not the AKE; the
+production HKDF-info / AEAD-nonce / H1-H2 wire parameters are pinned at the
+ceremony increment (mirroring how spec §5 pins the assertion wire format "at
+implementation").
 
 ## 2. Zero new primitive
 
@@ -133,3 +139,70 @@ MSVC + WSL2 GCC. Cross-references
 [v2.25-DSSO-DAPP-SPEC.md](v2.25-DSSO-DAPP-SPEC.md) (§4 login, §9 gates, C1/C3/C4)
 and [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.8c/§3.9b (the shipped P-256 + OPRF
 stack this composes).
+
+## 6. G4 (assertion layer) — the RP dual-hash token, claim C6
+
+`determ test-dsso-assertion` (`tools/test_dsso_assertion.sh`, FAST; 7 assertions).
+
+Spec §5 issues the relying-party token by the paper's **dual-hash
+challenge-response** over co-generated keys — no signature, no FROST, no block
+co-sign:
+
+```
+challenge = canonical length-prefixed (iss, sub, aud, iat, exp, nonce)
+H1' = HMAC-SHA256(sso_key,    challenge)   # sso_key: the login-session key (given)
+H2  = HMAC-SHA256(tenant_key, H1')         # tenant_key: the RP's registration key
+RP accepts iff HMAC-SHA256(tenant_key, H1') == H2.
+```
+
+`H = HMAC-SHA256` (the shipped, KAT-gated keyed hash — **zero new primitive**;
+`H(key, msg)` maps to HMAC, which avoids the length-extension pitfall of a bare
+`SHA256(key‖msg)`). The seven properties gate security claim **C6** ("keyed-hash
+challenge-response, PRF security of `H`, over PAKE-authenticated keys"):
+
+1. **correctness** — an honest token is accepted (verifier-side).
+2. **audience binding** — a token minted under RP-B's `tenant_key` is rejected
+   under RP-A's, and vice versa (both directions): an SSO token is RP-scoped by
+   the `tenant_key` layer, which `rp_accept` checks (verifier-side).
+3. **session binding** — a token whose `H1'` came from a different `sso_key`
+   does not verify (to accept a chosen `H1'` you need `HMAC(tenant_key, H1')`,
+   i.e. `tenant_key`) (verifier-side).
+4. **nonce commitment** *(generation-side)* — a fresh nonce yields a **distinct**
+   token, and each `H2` is bound to its own `H1'` (neither cross-verifies).
+5. **claim commitment** *(generation-side)* — mutating any of
+   `iss/sub/aud/iat/exp` yields a **distinct** token, so no single token is valid
+   for two claims (the IdP cannot be made to mint one token authenticating two
+   claims).
+6. **layer separation** — the bare inner `H1'` presented as the token is
+   rejected: the `tenant_key` layer is mandatory, so an attacker who learns `H1'`
+   but not `tenant_key` cannot forge `H2` (verifier-side).
+7. **forgery** — an arbitrary 32-byte `H2` is rejected (verifier-side).
+
+**What this proves, precisely.** The token is a sound keyed **commitment**:
+unforgeable without the keys (1, 6, 7 + the HMAC-keying falsify below), and a
+collision-resistant binding of `(sso_key, tenant_key, iss, sub, aud, iat, exp,
+nonce)` (2–5). `sso_key` is a **given** handshake output — the OPAQUE AKE that
+co-generates it is the owner-gated remainder of G4.
+
+**Residual — verifier-side freshness is NOT gated (an adversarial-verification
+finding, 2026-07-21).** The §5 accept rule is **stateless** (`HMAC(tenant_key,
+H1') == H2`) and the RP cannot recompute `H1'` (it holds no `sso_key`). So the
+token **in isolation** does not reject a *verbatim replay* of a captured
+`(H1', H2)`, nor a claim *substituted at presentation* — properties 4/5 are
+**generation-side** (the honest producer emits distinct tokens for distinct
+inputs), not verifier-enforced. Verifier-side replay/expiry rejection needs RP
+session state — an RP-issued **single-use nonce** plus an `exp`-vs-clock check —
+which is a **ceremony/topology** property, part of the owner-gated G4 end-to-end
+flow, not the token. This is flagged for a possible spec §5 clarification (the
+accept rule as written omits the RP's freshness obligation). The gate prints this
+scope explicitly and does not claim verifier replay-rejection.
+
+*Falsify-on-mutant (executed, reverted via file backup).* This gate adds **zero
+new production surface** (HMAC-SHA256 is shipped + KAT-gated), so the falsify
+targets the shipped keyed hash: neutralizing the key in `determ_hmac_sha256`
+(`src/crypto/sha2/hmac.c`, the short-key copy) flips **exactly** the two
+key-dependent assertions — audience binding and session binding — while the
+message-dependent ones (correctness, replay, claim binding, layer separation,
+forgery) stay green. That directional signature is the point: the two properties
+whose security *is* "the key matters" are the two that break when the key stops
+mattering.
