@@ -121,6 +121,22 @@ or the FAST golden corpus.
   serialize → restore reproduces count + cleared key + a byte-identical
   recomputed state root (assertions 31-35).
 
+  **Gate (executed).** The crash/rollback half — previously proven-in-code but
+  *not separately fault-injected* — is now enforced by `determ test-audit-keys`
+  (`tools/test_audit_keys.sh`, FAST both platforms — register claim **AL-5**,
+  `ProofClaimGateTraceability.md` §3k). The gate applies a single block whose
+  txs are `[ROTATE_AUDIT_KEY(pk1), LOG_AUDIT_ACCESS, TRANSFER]` where the
+  TRANSFER credits a near-`UINT64_MAX` recipient and throws `S-007` mid-apply —
+  *after* the ROTATE and LOG have already mutated `audit_keys_` /
+  `audit_log_count_`. It asserts the append throws and that both maps roll back
+  (`audit_key == nullopt`, `audit_log_count == 0`) with a `state_root`
+  byte-identical to pre-apply. *Falsify-on-mutant:* deleting the two restore
+  branches at `chain.cpp:775-778` (the register's named mutation) makes the
+  mid-block ROTATE and LOG survive the throw — all three rollback assertions flip
+  RED (5/5 → 2/5) while the setup and the throw-detection stay green. The two
+  per-map assertions independently pin each branch (`:775` audit_keys, `:777`
+  audit_log_count).
+
 ## 3. Non-claims — READ BEFORE TREATING THIS AS AN AUDIT GUARANTEE
 
 - **NC-1 — The published pubkey is OPAQUE 32 bytes.** Neither validator nor
@@ -157,7 +173,7 @@ or the FAST golden corpus.
 | **AL-2** additive byte-invariance | chain.cpp:430-445 (conditional leaves), 1838-1847 / 1976-1981 (conditional snapshot), 774-775 (genesis clear) | FAST golden state-root corpus green with A2 compiled in; assertions 1-2, 7, 31, 34 | proven-in-code + golden-corpus witness |
 | **AL-3** fail-closed shapes + unknown-type default | validator.cpp:1162-1195; chain.cpp:946-948, 963-964 (apply re-checks) | assertions 21-30 (five malformed shapes: no key/count/debit) + **`test-al3-unknown-tx-type`** (the `default:` unknown-type fail-close, driven via `check_transactions_for_test`; falsify at validator.cpp:1352 — see ProofClaimGateTraceability §3f) | **gated + falsified** |
 | **AL-4** last-writer-wins / leaf removal / monotone count | chain.cpp:951-953 (overwrite/erase), 967 (sole increment) | assertions 3-18 (set/rotate/clear/log lifecycle), 19-20 (fee-only + A1) | proven-in-code |
-| **AL-5** rollback atomicity + snapshot round-trip | chain.cpp:691, 720-727, 655-658, 1689-1701 | assertions 31-35 (round-trip, byte-identical root); A9 rollback machinery shared with the shielded pool | proven-in-code (rollback path inherited, not separately fault-injected) |
+| **AL-5** rollback atomicity + snapshot round-trip | chain.cpp:691, 720-727, 655-658, 1689-1701 | assertions 31-35 (round-trip, byte-identical root); **crash/rollback now fault-injected** (test-audit-keys AL-5 legs — mid-block ROTATE+LOG then an S-007-throwing TRANSFER, both maps roll back; falsify at chain.cpp:775-778) | gated (register §3k) |
 
 Cross-references: [ShieldedPoolSoundness.md](ShieldedPoolSoundness.md) (the
 §3.22 family whose conditional-emission and dual-ingress discipline A2

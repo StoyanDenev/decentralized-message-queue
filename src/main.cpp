@@ -43650,6 +43650,38 @@ int main(int argc, char** argv) {
                   "snapshot: restored live key + byte-identical root");
         }
 
+        // === 8. AL-5 (crash/rollback atomicity): a THROWING apply restores BOTH
+        //        audit maps byte-identically — no half-applied ROTATE/LOG can
+        //        survive a mid-block throw (else a failed block leaves the ak:/al:
+        //        leaves half-mutated and forks the state_root). The restore lives
+        //        at chain.cpp restore_state_snapshot (audit_keys_ / audit_log_count_);
+        //        every earlier section exercised only the SUCCESS path. ===
+        {
+            // genesis: alice funded + bob near UINT64_MAX, so a TRANSFER credit
+            // overflows and throws S-007 mid-block — AFTER a ROTATE + LOG have
+            // already mutated audit_keys_ / audit_log_count_ in this same apply.
+            GenesisConfig cfg = make_cfg();
+            GenesisAllocation bb; bb.domain = "bob"; bb.balance = UINT64_MAX - 5;
+            cfg.initial_balances.push_back(bb);
+            Chain c4; c4.append(make_genesis_block(cfg));
+            check(!c4.audit_key("alice").has_value() && c4.audit_log_count("alice") == 0,
+                  "AL-5 setup: no audit key / zero count pre-apply");
+            const Hash root_pre = c4.compute_state_root();
+
+            Transaction xfer; xfer.type = TxType::TRANSFER;
+            xfer.from = "alice"; xfer.to = "bob"; xfer.amount = 100; xfer.fee = kFee;
+            xfer.nonce = 2;   // after ROTATE(nonce 0) + LOG(nonce 1)
+            const bool applied = append_block(c4, {rotate_tx(pk1, 0), log_tx(7, 1), xfer});
+            check(!applied,
+                  "AL-5: a block whose 3rd tx S-007-overflows is REJECTED (append threw)");
+            check(!c4.audit_key("alice").has_value(),
+                  "AL-5: audit_keys_ rolled back — the mid-block ROTATE did NOT survive the throw");
+            check(c4.audit_log_count("alice") == 0,
+                  "AL-5: audit_log_count_ rolled back — the mid-block LOG did NOT survive the throw");
+            check(c4.compute_state_root() == root_pre,
+                  "AL-5: state_root byte-identical to pre-apply (atomic rollback of both audit maps)");
+        }
+
         std::cout << (fail ? "  FAIL: test-audit-keys\n" : "  PASS: test-audit-keys\n");
         return fail ? 1 : 0;
     }

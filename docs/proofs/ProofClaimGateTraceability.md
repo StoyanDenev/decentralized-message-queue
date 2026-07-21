@@ -48,10 +48,11 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
 executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
 tiers the original run recorded only as counts — 34 confirmed unenforced
-MED/LOW gaps (4 more were re-examined and found already-gated) — and two MEDs
-are now closed: **SP-2 (§3i)**, the stake-info cleartext cross-check, and
-**SB-3 (§3j)**, the reward-path overflow guard (the first MED gated in FAST on
-both platforms). **32 MED/LOW open; zero HIGH.**
+MED/LOW gaps (4 more were re-examined and found already-gated) — and three MEDs
+are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
+(§3j)** the reward-path overflow guard, and **AL-5 (§3k)** audit-map crash/
+rollback atomicity (SB-3 and AL-5 both gated in FAST on both platforms).
+**31 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -474,6 +475,36 @@ boundary — a raw add reaches `UINT64_MAX` without wrapping). The `:1749` and
 the falsifiable representative. **This is the first MED gated in FAST on both
 platforms** (SP-2 is cluster-bound/Windows-standalone).
 
+## 3k. AL-5 CLOSED — audit-map crash/rollback atomicity (a FAST consensus gate)
+
+`AuditLayerSoundness.md` AL-5 (crash/rollback atomicity): a throwing
+`apply_transactions` restores BOTH audit maps (`audit_keys_`,
+`audit_log_count_`) byte-identically, so a failed block leaves the `ak:`/`al:`
+leaves exactly as before — no half-applied `ROTATE_AUDIT_KEY` / `LOG_AUDIT_ACCESS`
+survives to fork the `state_root`. The doc's own coverage table flagged this row
+as *proven-in-code, **not separately fault-injected*** — every earlier
+`test-audit-keys` assertion exercised only the SUCCESS path. The regression is a
+consensus fork: with the restore branches gone, a node that fails a block mid-apply
+keeps the partial audit mutation while a node that never started it does not.
+
+Closed by **extending `determ test-audit-keys`** (`tools/test_audit_keys.sh`,
+FAST both platforms — no new subcommand; reused its `rotate_tx`/`log_tx`/
+`append_block` helpers + the SB-3 near-`UINT64_MAX` overflow idiom). One block,
+three txs — `[ROTATE_AUDIT_KEY(pk1), LOG_AUDIT_ACCESS, TRANSFER]` — where the
+TRANSFER credits a genesis `bob` at `UINT64_MAX − 5` and throws `S-007` mid-apply,
+*after* the ROTATE and LOG have already mutated both maps. Five assertions: the
+append throws; `audit_key == nullopt` and `audit_log_count == 0` (both rolled
+back); and `state_root` byte-identical to pre-apply. The two per-map assertions
+independently pin each restore branch.
+
+*Falsify-on-mutant (executed, reverted via `git checkout`; determ rebuilt).*
+Neutering both restore branches at `chain.cpp:775-778` (the register's named
+mutation) makes the mid-block ROTATE and LOG survive the throw: all three rollback
+assertions flip RED (5/5 → 2/5) while the setup and the throw-detection stay green.
+The lazy-snapshot capture (`__ensure_audit_keys` / `__ensure_audit_log_count`
+before the first mutation) is what makes the pre-block map recoverable; this gate
+is the executed witness that the capture *and* the restore are both load-bearing.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -533,9 +564,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i) and SB-3 (§3j) are now closed** — leaving 32.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k) are now closed** — leaving 31.
 
-### 6.1 Confirmed unenforced MED/LOW claims (32 open + SP-2, SB-3 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (31 open + SP-2, SB-3, AL-5 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -545,7 +576,7 @@ gate-cost. **SP-2 (§3i) and SB-3 (§3j) are now closed** — leaving 32.
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | open | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
-| 7 | AL-5 | AuditLayerSoundness | MED | trivial | open | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
+| 7 | AL-5 | AuditLayerSoundness | MED | trivial | **CLOSED §3k** | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
 | 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | open | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
 | 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | open | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
