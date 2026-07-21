@@ -40,13 +40,13 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
-**Remediation status: 13 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+**Remediation status: ALL 14 HIGH claims are now closed** — GW-2 (§3a),
 the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), the BFT-escalation arm
 T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
-**RP-3 and SU-2 (§3e)**, **AL-3 (§3f)** — the unknown-tx-type fail-close — and
-**SR-5 (§3g)** — the cross-shard receipt misroute reject. **One HIGH remains:
-WH-2** (the light-client `--wait` no-re-fetch/no-race neutrality, which needs a
-moving-daemon executed mutant). **51 claims open overall.**
+**RP-3 and SU-2 (§3e)**, **AL-3 (§3f)** — the unknown-tx-type fail-close —
+**SR-5 (§3g)** — the cross-shard receipt misroute reject — and **WH-2 (§3h)** —
+the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
+executed mutant. **50 claims open overall (39 MEDIUM, 11 LOW); zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -60,7 +60,7 @@ green:
 | ~~SR-5~~ **CLOSED** | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject — **gate shipped**, see §3g |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
 | ~~CR-2 / RP-3 / SU-2~~ **CLOSED** | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 via argv (§3d); RP-3/SU-2 via a tampering proxy against a lying daemon (§3e) |
-| WH-2 | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) |
+| ~~WH-2~~ **CLOSED** | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) — **gate shipped**, see §3h |
 
 ## 3. The top gap, independently re-verified
 
@@ -352,6 +352,48 @@ The one delta from AL-3: SR-5 required **adding** a test seam (AL-3 reused an
 existing one), kept a pure byte-neutral const forwarder. Same accept-widening
 asymmetry: the control pins that a correct route is accepted, the negative legs
 pin that an incorrect route is rejected.
+
+## 3h. WH-2 CLOSED — the light-client `--wait` no-re-fetch neutrality (the last HIGH)
+
+`WaitHoldAndWaitSoundness.md` §4.2 (WH-2): `read_account_trustless` captures the
+`state_proof` for the anchor **exactly once**, before the `--wait` loop is
+entered; the loop (inside `committee_bound_state_root`) re-polls ONLY the
+successor `headers`, never the proof. So a daemon that advances its state DURING
+the wait cannot swap the bound root — the proof was frozen before the loop. This
+is a **soundness-neutrality** property: invisible on a static chain (a re-fetch
+mutant only diverges when the proof CHANGES between fetches), which is why the
+register demanded an **executed mutant**, not inspection.
+
+Closed by **`tools/test_light_wh2_norefetch.sh`** with a MOVING DAEMON. The
+reusable `tools/rpc_tamper_proxy.py` gained two modes: `--serve-first N` (pass
+the first N `state_proof` replies verbatim, then flip `state_root`) and
+`--withhold-successor K` (return an empty `headers` array for the successor poll
+— `from>0, count==1` — K times, forcing the client's `--wait` loop to iterate);
+it also logs every forwarded request. Against this daemon the CLEAN client is
+**immune**, and the gate reads it straight off the proxy log — five assertions:
+a pass-through control verifies; the moving-daemon run (a) stays `verified`/exit
+0 despite the armed flip, (b) issues **exactly one** `state_proof` request
+(fetch-once), (c) iterated the `--wait` loop (successor withheld ≥2× ⇒ it
+re-polled only `headers`), and (d) fired **zero** tampers (no 2nd `state_proof`
+to flip).
+
+*Executed-mutant falsify (run out-of-band, reverted via file backup; determ-light
+rebuilt).*
+
+| Mutation | Effect |
+|---|---|
+| `light/trustless_read.cpp` — insert a caller-side `state_proof` re-fetch after the wait, before the held `if (attested != proof_root)` compare (overwriting `proof_root`) | the re-fetch is `state_proof` call #2 ⇒ the moving daemon flips it ⇒ `proof_root != attested` ⇒ the client throws `SECURITY … does NOT match proof.state_root` and exits 1. 4 of the 5 clean assertions flip (only the proxy-side loop-iterated stays) |
+
+A sharper result fell out: the re-fetch mutant fails **even through a
+pass-through (honest) proxy**, because the re-fetch binds an *advanced*
+`state_root` (the chain moved during `--wait`) that no longer matches the
+committee-bound anchor. So the fetch-once structure is load-bearing against an
+ordinary moving chain, not only a malicious daemon — exactly the race WH-2 says
+it avoids. (This gate is cluster-bound, standalone; the tamper proxy's extensions
+are backward-compatible — RP-3 8/0, SU-2 4/0 unchanged.)
+
+**With WH-2 closed, all 14 HIGH gate-gaps from the 2026-07-19 traceability audit
+are gated + falsified.**
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 

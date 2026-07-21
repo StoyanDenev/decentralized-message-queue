@@ -82,6 +82,8 @@ class Proxy:
                     k, v = pair.split("=", 1)
                     self.want[k.strip()] = v.strip()
         self.tampered = 0
+        self.match_count = 0       # matching target requests seen (for serve-first)
+        self.withheld_count = 0    # successor-header polls emptied (WH-2)
         self.lock = threading.Lock()
         self.logfh = open(args.log, "w") if args.log else None
 
@@ -91,9 +93,44 @@ class Proxy:
         if self.want and not params_match(req.get("params") or {}, self.want):
             return False
         with self.lock:
-            if self.tampered and not self.args.all:
+            self.match_count += 1
+            n = self.match_count
+        # serve the first --serve-first matches verbatim (the "moving daemon":
+        # honest P0 first, then flip); default 0 => tamper from the first match.
+        if n <= self.args.serve_first:
+            return False
+        if n == self.args.serve_first + 1:
+            return True                        # tamper the first eligible match
+        return self.args.all                   # subsequent matches: only with --all
+
+    def should_withhold(self, req):
+        # WH-2: empty the SUCCESSOR-header poll (from>0, count==1) for the first
+        # --withhold-successor replies, forcing the client's --wait loop to
+        # iterate. Leaves from==0 (genesis / head-height) and multi-header page
+        # walks (count>1) untouched.
+        if self.args.withhold_successor <= 0 or req.get("method") != "headers":
+            return False
+        p = req.get("params") or {}
+        try:
+            if int(p.get("from", 0)) <= 0 or int(p.get("count", 0)) != 1:
                 return False
+        except (TypeError, ValueError):
+            return False
+        with self.lock:
+            if self.withheld_count >= self.args.withhold_successor:
+                return False
+            self.withheld_count += 1
         return True
+
+    def withhold(self, reply):
+        result = reply.get("result")
+        if isinstance(result, dict) and isinstance(result.get("headers"), list):
+            result["headers"] = []
+            if "count" in result:
+                result["count"] = 0
+            log(self.logfh, "WITHHOLD headers successor poll")
+            return True
+        return False
 
     def tamper(self, reply):
         result = reply.get("result")
@@ -138,24 +175,36 @@ class Proxy:
                 req_line = cf.readline()
                 if not req_line:
                     break
-                do_tamper = False
+                req = None
                 try:
-                    do_tamper = self.should_tamper(
-                        json.loads(req_line.decode("utf-8")))
+                    req = json.loads(req_line.decode("utf-8"))
                 except Exception:
                     pass
+                if req is not None:
+                    p = req.get("params") or {}
+                    log(self.logfh, "REQ %s from=%s count=%s"
+                        % (req.get("method"), p.get("from"), p.get("count")))
+                do_tamper = do_withhold = False
+                if req is not None:
+                    try: do_tamper = self.should_tamper(req)
+                    except Exception: pass
+                    try: do_withhold = self.should_withhold(req)
+                    except Exception: pass
                 uf.write(req_line)                  # forward request verbatim
                 reply_line = uf.readline()          # one reply per request
                 if not reply_line:
                     break
-                if do_tamper:
+                if do_tamper or do_withhold:
                     try:
                         reply = json.loads(reply_line.decode("utf-8"))
-                        if self.tamper(reply):
+                        changed = False
+                        if do_tamper and self.tamper(reply):     changed = True
+                        if do_withhold and self.withhold(reply): changed = True
+                        if changed:
                             reply_line = (json.dumps(reply) + "\n").encode("utf-8")
                     except Exception as e:
-                        log(self.logfh, "tamper parse error: %s" % e)
-                cf.write(reply_line)                # return (maybe tampered) reply
+                        log(self.logfh, "rewrite parse error: %s" % e)
+                cf.write(reply_line)                # return (maybe rewritten) reply
         finally:
             for s in (client, up):
                 try: s.close()
@@ -184,6 +233,13 @@ def main():
     ap.add_argument("--mode", choices=["flip-hex", "bump", "set"], default="flip-hex")
     ap.add_argument("--set", default="")
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--serve-first", dest="serve_first", type=int, default=0,
+                    help="serve the first N matching --method replies verbatim, "
+                         "then tamper (the moving-daemon: honest P0 then flip)")
+    ap.add_argument("--withhold-successor", dest="withhold_successor", type=int,
+                    default=0, help="empty the successor-header poll "
+                    "(headers from>0 count==1) for the first K replies, forcing "
+                    "a --wait client's loop to iterate (WH-2)")
     ap.add_argument("--log", default="")
     args = ap.parse_args()
     if args.method and not args.field:
