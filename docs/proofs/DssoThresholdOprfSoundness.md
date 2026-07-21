@@ -348,8 +348,35 @@ succeeds. *Self-load-bearing:* had the byzantine response been admitted, the com
 would yield a wrong `Zc` → wrong `y` → the envelope unseal FAILS → no login. So the
 DLEQ filter is what makes the fault-tolerant login sound, end-to-end.
 
-**Remaining (owner-gated).** inc.3 folds the §6 assertion + the four Option-A
-freshness legs onto this login for the single register→login→assert→accept gate;
-G5 (CT review) + G6 (zeroization) audit the production ceremony's secret handling
-once a production threshold-combine module exists. Cross-ref `v2.25-DSSO-DAPP-SPEC.md`
-§3-5/§9, `DssoAssertionFreshness.md`, `CRYPTO-C99-SPEC.md` §3.26.
+**E2E-5..E2E-9 (inc.3) — the RP assertion + Option-A freshness, bound to the login's
+`sso_key`.** The same `test-dsso-login-e2e` gate now closes the whole flow:
+register → login → AKE → **RP dual-hash assertion accepted**. The §6 token is
+`H1' = HMAC(sso_key, challenge)`, `H2 = HMAC(tenant_key, H1')`. The session binding
+(the paper's mutual-distrust property) is realized faithfully: the IdP independently
+computes `H2' = HMAC(tenant_key, HMAC(sso_key_real, challenge))` from the login's
+co-generated key and hands it to the RP; the RP accepts iff `HMAC(tenant_key,
+H1'_client) == H2'` **and** the four §5 Option-A freshness conditions hold (audience
+match; `now − skew ≤ iat`; `exp > now`; `exp − iat ≤ T_max`; single-use nonce cache).
+
+- **E2E-5 (accept):** the honest token minted under the login's real `sso_key`, fresh
+  + in-window + audience-matched + unseen-nonce, is accepted.
+- **E2E-6 (replay):** the same `(challenge, token)` presented a second time is rejected
+  by the single-use nonce cache.
+- **E2E-7 (freshness):** an expired (`exp ≤ now`), a stale (`iat < now − skew`), and an
+  over-long-lifetime (`exp − iat > T_max`) claim are each rejected.
+- **E2E-8 (audience):** a token whose `challenge.aud ≠` the RP's audience is rejected.
+- **E2E-9 (session binding — the load-bearing composition claim):** an attacker WITHOUT
+  the login's `sso_key` produces a different `H1'`, so `HMAC(tenant, H1'_atk) ≠ H2'` →
+  rejected. This is what ties the RP acceptance to the AKE the login co-generated.
+  *Executed falsify:* skipping the RP's `H2 == H2'` check flips EXACTLY E2E-9 RED (the
+  attacker is accepted) while E2E-5 stays green — the clean directional split proves the
+  gate rests on the session binding, not on the freshness/audience legs.
+
+So `test-dsso-login-e2e` (18 assertions) is now the COMPLETE G4 end-to-end gate. The
+freshness legs discharge the `DssoAssertionFreshness.md` / §6 verifier-side residual
+that the standalone `test-dsso-assertion` (a stateless token check) could not: here the
+RP is stateful (nonce cache + clock window), so replay/expiry are genuinely rejected.
+**Remaining (owner-gated): only G5 (CT review) + G6 (zeroization)** audit the production
+ceremony's secret handling once a production threshold-combine module exists — the
+functional G4 flow is fully gated. Cross-ref `v2.25-DSSO-DAPP-SPEC.md` §3-6/§9,
+`DssoAssertionFreshness.md`, `CRYPTO-C99-SPEC.md` §3.26.

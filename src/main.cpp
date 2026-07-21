@@ -558,19 +558,26 @@ In-process tests (deterministic, no network):
                                               byte-equal to verify_opaque3dh.py;
                                               P-256 mult + HKDF + HMAC, zero new
                                               primitive
-  determ test-dsso-login-e2e                  DSSO G4 end-to-end (§3-5/§9 G4
-                                              inc.2): register -> t-of-n login ->
-                                              OPAQUE-3DH AKE composition — a fresh
+  determ test-dsso-login-e2e                  DSSO G4 end-to-end (§3-6/§9 G4
+                                              inc.2+inc.3): the COMPLETE flow —
+                                              register -> t-of-n login -> OPAQUE-3DH
+                                              AKE -> RP dual-hash assertion. A fresh
                                               P-256 DSSO credential sealed in the
                                               envelope, recovered via the threshold
                                               OPRF, feeding the AKE; honest login
                                               agrees + authenticates, wrong pw
                                               aborts before the AKE, a MITM swap of
                                               cred_response breaks the transcript
-                                              MAC, and a 1-crash+1-byzantine login
-                                              still succeeds; composes the shipped
-                                              OPRF/AEAD/HKDF/opaque3dh, zero new
-                                              primitive
+                                              MAC, a 1-crash+1-byzantine login still
+                                              succeeds; then the §5-6 RP token bound
+                                              to the login's sso_key is accepted,
+                                              with Option-A freshness (audience +
+                                              iat/exp window + single-use nonce) and
+                                              session binding enforced (replay /
+                                              expired / stale / wrong-audience /
+                                              wrong-session all rejected); composes
+                                              the shipped OPRF/AEAD/HKDF/opaque3dh/
+                                              HMAC, zero new primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -14360,10 +14367,12 @@ int main(int argc, char** argv) {
                     && std::memcmp(sk_c_rec, sk_c, 32) == 0;
             return o; };
 
+        uint8_t login_sso[32]; bool have_login_sso = false;   // captured from the honest login for the RP-assertion legs
         // ── E2E-1: honest t-of-n login end-to-end ──
         {
             int sub[3] = {0, 1, 2};
             LoginOut o = do_login(sub, 3);
+            if (o.rc == 0) { std::memcpy(login_sso, o.sso, 32); have_login_sso = true; }
             check(o.rc == 0, "E2E-1 setup: honest t-of-n login runs to AKE completion");
             check(o.authed != 0,
                   "E2E-1 honest login: both parties derive the SAME sso_key and the transcript MACs "
@@ -14436,6 +14445,104 @@ int main(int argc, char** argv) {
             check(o.rc == 0 && o.authed != 0,
                   "E2E-4 fault-tolerant login: combining the DLEQ survivors recovers the credential and the "
                   "OPAQUE-3DH AKE co-generates a mutually-authenticated sso_key (n=5, t=3, 1 crash + 1 byzantine)");
+        }
+
+        // ── E2E-5..E2E-9 (inc.3): the §5-6 dual-hash RP assertion + the four §5
+        //    Option-A freshness legs, BOUND to the login's co-generated sso_key.
+        //    This makes the gate the COMPLETE G4 flow: register -> t-of-n login ->
+        //    OPAQUE-3DH AKE -> RP assertion accepted, with the RP's normative
+        //    freshness enforcement (audience + iat/exp window + single-use nonce).
+        //    Session binding (the paper's mutual-distrust property): the IdP
+        //    independently computes H2' = HMAC(tenant, HMAC(sso_key, challenge))
+        //    from the REAL session key and hands it to the RP; the RP accepts iff
+        //    HMAC(tenant, H1'_client) == H2'. An attacker without the login's
+        //    sso_key produces a different H1' -> a different H2 -> rejected.
+        if (have_login_sso) {
+            struct Claim { std::string iss, sub, aud; uint64_t iat, exp; uint8_t nonce[32]; };
+            auto encode = [](const Claim& c) {
+                std::vector<uint8_t> b;
+                auto put_str = [&](const std::string& s) {
+                    for (int i = 7; i >= 0; --i) b.push_back((uint8_t)((uint64_t)s.size() >> (8 * i)));
+                    b.insert(b.end(), s.begin(), s.end()); };
+                auto put_u64 = [&](uint64_t v) { for (int i = 7; i >= 0; --i) b.push_back((uint8_t)(v >> (8 * i))); };
+                put_str(c.iss); put_str(c.sub); put_str(c.aud);
+                put_u64(c.iat); put_u64(c.exp);
+                b.insert(b.end(), c.nonce, c.nonce + 32);
+                return b; };
+            // H1' = HMAC(sso_key, challenge); H2 = HMAC(tenant_key, H1').
+            auto h1 = [&](const uint8_t sso[32], const Claim& cl, uint8_t H1p[32]) {
+                std::vector<uint8_t> ch = encode(cl); determ_hmac_sha256(sso, 32, ch.data(), ch.size(), H1p); };
+            uint8_t tenant[32]; for (int i = 0; i < 32; ++i) tenant[i] = (uint8_t)(0x80 ^ i);
+            // The IdP's reference H2' for a claim, computed from the REAL login sso_key.
+            auto idp_h2 = [&](const Claim& cl, uint8_t H2ref[32]) {
+                uint8_t H1ref[32]; h1(login_sso, cl, H1ref); determ_hmac_sha256(tenant, 32, H1ref, 32, H2ref); };
+            // Option-A freshness (spec §5): audience match + iat/exp window + single-use nonce.
+            const uint64_t NOW = 1500, SKEW = 300, TMAX = 3600;
+            const std::string RP_AUD = "rp.example";
+            std::set<std::string> nonce_cache;
+            // The RP receives H1' (client) + H2' (IdP); accepts iff HMAC(tenant, H1')==H2' AND fresh.
+            auto rp_verify = [&](const uint8_t H1p_client[32], const uint8_t H2ref_idp[32], const Claim& cl) -> bool {
+                uint8_t H2[32]; determ_hmac_sha256(tenant, 32, H1p_client, 32, H2);
+                if (std::memcmp(H2, H2ref_idp, 32) != 0) return false;        // token / session invalid
+                if (cl.aud != RP_AUD) return false;                            // audience binding
+                if (!(NOW - SKEW <= cl.iat)) return false;                     // not stale
+                if (!(cl.exp > NOW)) return false;                             // not expired
+                if (cl.exp - cl.iat > TMAX) return false;                      // bounded lifetime
+                std::string nk((const char*)cl.nonce, 32);
+                if (nonce_cache.count(nk)) return false;                       // single-use replay reject
+                nonce_cache.insert(nk);
+                return true; };
+
+            Claim base; base.iss = "determ-idp"; base.sub = "alice@rp"; base.aud = RP_AUD;
+            base.iat = 1400; base.exp = 1600;                                  // in-window: 1200<=1400, 1600>1500, 200<=3600
+            for (int i = 0; i < 32; ++i) base.nonce[i] = (uint8_t)(0x5a ^ i);
+
+            // E2E-5: the honest RP assertion, bound to the login's sso_key, accepted.
+            {
+                uint8_t H1p[32], H2ref[32]; h1(login_sso, base, H1p); idp_h2(base, H2ref);
+                check(rp_verify(H1p, H2ref, base),
+                      "E2E-5 assertion accepted: the RP token minted under the login's co-generated sso_key "
+                      "(fresh, in-window, audience-matched, unseen nonce) is accepted by the RP");
+            }
+            // E2E-6: replay — the same token a second time is rejected (nonce cache).
+            {
+                uint8_t H1p[32], H2ref[32]; h1(login_sso, base, H1p); idp_h2(base, H2ref);
+                check(!rp_verify(H1p, H2ref, base),
+                      "E2E-6 replay: the same token presented a second time is rejected (single-use nonce cache)");
+            }
+            // E2E-7: expired / stale-iat / over-long-lifetime claims each rejected.
+            {
+                Claim expd = base; expd.exp = 1450;                            // exp <= now
+                Claim stal = base; stal.iat = 1100;                            // iat < now-skew (1200)
+                Claim lng  = base; lng.iat = 1400; lng.exp = 1400 + TMAX + 100; // exp-iat > T_max
+                for (int i = 0; i < 32; ++i) { expd.nonce[i] = (uint8_t)(0x11 ^ i);
+                    stal.nonce[i] = (uint8_t)(0x22 ^ i); lng.nonce[i] = (uint8_t)(0x33 ^ i); }
+                uint8_t a1[32], a2[32], b1[32], b2[32], c1[32], c2[32];
+                h1(login_sso, expd, a1); idp_h2(expd, a2);
+                h1(login_sso, stal, b1); idp_h2(stal, b2);
+                h1(login_sso, lng,  c1); idp_h2(lng,  c2);
+                check(!rp_verify(a1, a2, expd) && !rp_verify(b1, b2, stal) && !rp_verify(c1, c2, lng),
+                      "E2E-7 freshness: an expired (exp<=now), a stale (iat<now-skew), and an over-long "
+                      "(exp-iat>T_max) claim are each rejected");
+            }
+            // E2E-8: audience binding — a token for a different audience is rejected.
+            {
+                Claim evil = base; evil.aud = "evil.example";
+                for (int i = 0; i < 32; ++i) evil.nonce[i] = (uint8_t)(0x44 ^ i);
+                uint8_t H1p[32], H2ref[32]; h1(login_sso, evil, H1p); idp_h2(evil, H2ref);
+                check(!rp_verify(H1p, H2ref, evil),
+                      "E2E-8 audience binding: a token whose challenge.aud != the RP's audience is rejected");
+            }
+            // E2E-9: session binding — an attacker WITHOUT the login's sso_key produces a
+            //        different H1', so HMAC(tenant, H1'_atk) != the IdP's H2' -> rejected.
+            {
+                uint8_t wrong_sso[32]; for (int i = 0; i < 32; ++i) wrong_sso[i] = (uint8_t)(login_sso[i] ^ 0x01);
+                Claim fresh = base; for (int i = 0; i < 32; ++i) fresh.nonce[i] = (uint8_t)(0x66 ^ i);
+                uint8_t H1p_atk[32], H2ref[32]; h1(wrong_sso, fresh, H1p_atk); idp_h2(fresh, H2ref);
+                check(!rp_verify(H1p_atk, H2ref, fresh),
+                      "E2E-9 session binding: an assertion minted WITHOUT the login's co-generated sso_key "
+                      "(a party that did not complete the AKE) is rejected — the RP token is bound to the session");
+            }
         }
 
         if (fail == 0) std::cout << "\nPASS: dsso-login-e2e all assertions\n";
