@@ -46,7 +46,11 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 **RP-3 and SU-2 (§3e)**, **AL-3 (§3f)** — the unknown-tx-type fail-close —
 **SR-5 (§3g)** — the cross-shard receipt misroute reject — and **WH-2 (§3h)** —
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
-executed mutant. **50 claims open overall (39 MEDIUM, 11 LOW); zero HIGH.**
+executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
+tiers the original run recorded only as counts — 34 confirmed unenforced
+MED/LOW gaps (4 more were re-examined and found already-gated) — and **SP-2
+(§3i)**, the stake-info cleartext cross-check, is now the first MED closed:
+**33 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -395,6 +399,47 @@ are backward-compatible — RP-3 8/0, SU-2 4/0 unchanged.)
 **With WH-2 closed, all 14 HIGH gate-gaps from the 2026-07-19 traceability audit
 are gated + falsified.**
 
+## 3i. First MED CLOSED — SP-2, the stake-info cleartext cross-check vs a lying daemon
+
+`StakeProofSoundness.md` §4.2 (SP-2 cleartext cross-check): `read_stake_trustless`
+recomputes `SHA256(u64_be(locked) ‖ u64_be(unlock_height))` from the daemon's
+separately-served `stake_info` reply and rejects any mismatch against the
+committee-proven `value_hash` (`light/main.cpp:2395`). It is the `s:`-namespace
+sibling of the a:/r:/c: cross-checks gated by CR-2 / RP-3 / SU-2 — the **last of
+the light-client value-hash cleartext cross-checks**, and the original F-6 site.
+No stake-info tamper test existed and the proxy was never interposed on
+`stake_info` (every stake test is an honest-daemon parity check), so the
+accept-widening direction — a lying daemon serving an honest `s:` proof but a
+FALSE `stake_info` cleartext — was unguarded. Consequence: `stake-trustless`
+reports attacker-chosen (locked, unlock_height) as committee-verified, feeding
+min_stake / unlock-maturity decisions off forged numbers.
+
+Closed by **`tools/test_light_stake_tamper.sh`** (cluster-bound, standalone),
+reusing `tools/rpc_tamper_proxy.py` — which gained a **JSON-coercing `set` mode**
+so an integer field can be tampered (a bare word still falls back to a string, so
+RP-3/SU-2 are unaffected). Eight assertions: a PART A offline proxy self-test
+(pass-through relays `locked` as an int; `set` yields integer `12345`, not the
+string `"12345"`) so the gate is non-vacuous even where the live cluster SKIPs; a
+pass-through **control** (`verified=true`/exit 0 — the compare is reached and
+honest-passes); and two **tamper legs** — `bump locked` and `set unlock_height` —
+each asserting exit **1** with the SPECIFIC `TAMPERED — daemon's stake_info reply`
+detail and NOT a SECURITY/key-bind message.
+
+**The detail differential (the SU-2 lesson):** `cmd_stake_trustless` maps EVERY
+throw to exit 1 (`light/main.cpp:2469`) — the key-bind reject (:2312), the
+committee-attest SECURITY reject (:2361), an RPC failure — so "exit non-zero", or
+even "exit 1", is not discriminating. The legs key on the value-hash-specific
+`TAMPERED`/`stake_info` detail, pinning that :2395 fired and not an earlier gate.
+
+*Falsify-on-mutant (executed, reverted; determ-light rebuilt).* Neutering the
+compare at `:2395` **alone** (`→ if (false)`, leaving the `:2664`
+verify-unstake-eligibility sibling intact) flips both tamper legs to a **false
+`verified=true`/exit 0**: the client certifies the daemon's forged `locked=1001`
+/ `unlock_height=12345` as committee-verified — the exact SP-2 break. 8/0 → 4/4;
+PART A + control stay green (the mutant is invisible on honest input). The two
+tamper legs prove **whole-leaf binding** — a lie about EITHER scalar is caught.
+Backward-compatible: RP-3 8/0, SU-2 4/0, WH-2 5/0 unchanged.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -442,3 +487,69 @@ own — the honest scoping the register itself argues for. It is anchored by the
 workflow. Cross-references [MinixSBOM.md](MinixSBOM.md) §4 (the ratchet-verified
 manifest pattern) and [DetermJsonParitySoundness.md](DetermJsonParitySoundness.md)
 §5 (falsify-on-mutant discipline).
+
+## 6. The reconstructed MED/LOW register (open items)
+
+The original audit (§2) carried only the 14 HIGH into this document and
+recorded the lower tiers as bare counts. A **2026-07-21 reconstruction**
+re-ran the traceability workflow over the same 93 security-property docs
+(16 finders -> per-claim adversarial verifier whose default verdict was
+REFUTED; 54 agents, ~8.2M tokens) to **enumerate** them — the actionable
+list this register previously lacked. It confirmed **34** unenforced gaps
+(each with a concrete surviving mutation) and, usefully, found **4**
+claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
+by the verifier's value_rank (1 = must-gate), then severity, then
+gate-cost. **SP-2 is now closed (§3i)** — the first MED gated — leaving 33.
+
+### 6.1 Confirmed unenforced MED/LOW claims (33 open + SP-2 CLOSED)
+
+| # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
+|---|---|---|---|---|---|---|
+| 1 | SP-2 | StakeProofSoundness | MED | trivial | **CLOSED §3i** | SURVIVING MUTATION: light/main.cpp:2395 `if (computed_value_hash != proof_value_hash)` -> `if (false)` (or a -Wunused-safe `if (computed_value_hash != |
+| 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | open | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
+| 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | open | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
+| 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | open | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
+| 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
+| 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | open | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
+| 7 | AL-5 | AuditLayerSoundness | MED | trivial | open | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
+| 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
+| 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | open | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
+| 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | open | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
+| 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | open | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
+| 12 | DR-2 | DAppRegistryReadSoundness | MED | moderate | open | SURVIVING MUTATION: light/main.cpp:6944 `if (proof_value_hash != expected_value_hash){ verdict=UNVERIFIABLE; ... }` -> `if (false){ ... }` survives EV |
+| 13 | MPC-3 | MultiPeerCrossCheckSoundness | MED | moderate | open | Surviving mutation: in light/main.cpp cmd_cross_check (lines 2103-2131) replace the by_height intra-group comparison with a loop that compares every p |
+| 14 | SS-5 | StreamingSubscriptionSoundness | MED | moderate | open | SURVIVING MUTANT: in src/rpc/rpc.cpp handle_session (~line 171-204), hoist the `req.value("method","")=="dapp_subscribe"` takeover branch ABOVE the `v |
+| 15 | CP-2 | ConstantProofSoundness | MED | moderate | open | Surviving mutant: light/main.cpp:2898 `bool confirmed = (proof_value_hash == expected_value_hash);` -> `bool confirmed = true;` (verify-constant repor |
+| 16 | CP-1 | ConstantProofSoundness | MED | moderate | open | SURVIVING MUTATION: in light/main.cpp cmd_verify_constant, change line 2851 `if (proof_key_hex != local_key_hex) {` to `if (false) {` (compile-clean v |
+| 17 | LSP-6 | LightStatePersistenceSoundness | MED | moderate | open | Surviving mutation: in anchored_head (light/trustless_read.cpp:509) change verify_chain_from_anchor(rpc, committee_seed, st.head_height, st.head_block |
+| 18 | VCW-4 | VerifyChainWalkSoundness | MED | moderate | open | Surviving mutation: in light/trustless_read.cpp change the walked-count gate (lines 342-348) `if (headers_seen != head_height - start_from)` to `if (f |
+| 19 | RI-2 | ReceiptInclusionProofSoundness | MED | moderate | open | Surviving mutant: in light/main.cpp cmd_verify_receipt_inclusion, change `if (proof_key_hex != local_key_hex)` (~line 4796) to `if (false)`. RI-2's ke |
+| 20 | AB-2 | AbortRecordProofSoundness | MED | hard | open | Surviving mutation: light/main.cpp:2664 `if (computed_value_hash != proof_value_hash)` -> `if (false)` neutralizes the TAMPERED value-hash bind of the |
+| 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | open | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
+| 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | open | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
+| 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | open | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
+| 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
+| 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
+| 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | open | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
+| 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | open | Surviving mutation: in light/main.cpp cmd_verify_equivocation, after the V11 else-if chain finalizes `verdict` (after line 7593, before `proven` is co |
+| 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | open | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
+| 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | open | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a tok |
+| 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
+| 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | open | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
+| 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | open | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
+| 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | open | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (the `auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.s |
+| 34 | SP-CK-2 | StateProofCompositeKeySoundness | LOW | moderate | open | Surviving mutation: src/node/node.cpp:4709 `if (body.size() != want)` -> `if (false)`. A wrong-width composite body (e.g. 39/41-byte `i:` body) then f |
+
+### 6.2 Re-examined and found GATED (4 — recorded so they are not re-audited)
+
+| Claim | Doc | Enforcing gate the reconstruction located |
+|---|---|---|
+| T-5 | JsonValidationSoundness | test-consensus-msgs (src/main.cpp:13103; wrapper tools/test_consensus_msgs.sh; FAST both platforms). The tx_hashes defense-in-depth object at src/main |
+| T-2 | BlockchainStateIntegrity | test-eligibility-floor (src/main.cpp ~26377-26426; wrapper tools/test_eligibility_floor.sh; FAST both platforms). Its "lost-K reload (K defaulted 0) i |
+| SP-5 | ShieldedPoolSoundness | Catching gate: `determ test-ctx-enote` (wrapper tools/test_ctx_enote.sh; FAST regex token `ctx_enote` in run_all.sh:108, so gated on BOTH platforms vi |
+| DC-1 | DAppRegistryCommitmentSoundness | Catching gate: `test-dapp-registry-trustless-read` (wrapper tools/test_dapp_registry_trustless_read.sh; wired in run_all.sh FAST pattern, both platfor |
+
+**Method note.** Like the original, this is a register of *absent gates*, not
+of bugs — every listed property is believed to hold today. The remediation
+pattern is §4's: add the negative assertion, then falsify-on-mutant. Rows
+are refreshed by re-running the workflow (§5).

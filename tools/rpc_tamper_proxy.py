@@ -36,7 +36,8 @@
 #   flip-hex  flip the last nibble of a hex string (same length, valid hex,
 #             guaranteed different value)
 #   bump      add 1 to an integer field (guaranteed different value)
-#   set       replace with --set VALUE (string) verbatim
+#   set       replace with --set VALUE (JSON-coerced: a numeric literal becomes
+#             an int/float, a bare word stays a string)
 # Only the FIRST matching reply is tampered unless --all is given.
 import argparse, json, socket, sys, threading
 
@@ -144,7 +145,14 @@ class Proxy:
             return False
         old = parent[key]
         if self.args.mode == "set":
-            new = self.args.set
+            # Coerce a JSON-parseable literal (e.g. an integer) to its native
+            # type so integer fields stay integers on the wire; a bare word like
+            # TAMPERED_REGION is not valid JSON so it falls back to a raw string.
+            # (Backward-compatible: existing --set uses are non-numeric words.)
+            try:
+                new = json.loads(self.args.set)
+            except (ValueError, TypeError):
+                new = self.args.set
         elif self.args.mode == "bump":
             try:
                 new = int(old) + 1
