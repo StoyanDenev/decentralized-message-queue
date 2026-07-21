@@ -292,9 +292,64 @@ Two independent implementations (a from-scratch python P-256 ladder + hashlib HK
 vs the determ::c99 C stack) landing on the identical bytes is the soundness witness
 for the encoding — the same discipline as §3.25 notekey and the Pedersen/OPRF KATs.
 
-**Out of scope (later increments).** inc.2 composes the OPRF-recovered credential
-into `cred_request`/`cred_response` (registration/envelope binding); inc.3 is the
-G4 end-to-end gate (register → t-of-n login with one crash + one byzantine →
-dual-hash assertion → RP accept + the four §5 Option-A freshness legs). G5/G6 (CT
-review + zeroization audit of the secret scalar paths) remain owner-gated. Cross-ref
-`CRYPTO-C99-SPEC.md` §3.26, `v2.25-DSSO-DAPP-SPEC.md` §4/§9, `DssoAssertionFreshness.md`.
+**Out of scope of §7 (later increments).** inc.2 (this doc §8) composes the
+OPRF-recovered credential into `cred_request`/`cred_response`; inc.3 stitches the
+three halves into the single end-to-end gate + the four §5 Option-A freshness legs.
+G5/G6 (CT review + zeroization audit of the secret scalar paths) remain owner-gated.
+Cross-ref `CRYPTO-C99-SPEC.md` §3.26, `v2.25-DSSO-DAPP-SPEC.md` §4/§9, `DssoAssertionFreshness.md`.
+
+## 8. G4 (end-to-end) — the register → t-of-n login → OPAQUE-3DH AKE composition
+
+Sections §1-§6 gate the login math (G1/G2), the envelope (G3), the fault-tolerant
+login (G4-login), and the RP token (G4-assertion); §7 gates the AKE core in
+isolation. This section closes the last gap: the pieces **compose** into the full
+login and the security properties hold end-to-end. Gate `test-dsso-login-e2e`
+(`tools/test_dsso_login_e2e.sh`, FAST, both platforms). **Zero new primitive** —
+every operation is one of the already-byte-frozen pieces (OPRF/AEAD/HKDF/P-256/
+opaque3dh); this is a *composition/property* gate, not a new byte-KAT.
+
+**Credential model (owner decision 2026-07-21).** The client's long-term OPAQUE
+credential is a **fresh P-256 keypair** `(sk_c, pk_c)` — the DSSO identity is
+SEPARATE from the on-chain Ed25519 identity (no linkage), and single-curve P-256 is
+what the OPAQUE-3DH `stat×eph` / `eph×stat` terms require. Spec §3's "Ed25519
+keypair" predated the RFC-9807-standard AKE choice and is clarified to P-256 (spec
+§2/§3, folded this increment; DECISION-LOG 2026-07-21). Registration mints
+`(sk_c, pk_c)`, seals `sk_c` under `HKDF(y_reg)` into the envelope, and the server
+stores `pk_c` + its own static `(sk_s, pk_s)`. Login runs the threshold OPRF → `y` →
+unseals `sk_c` → runs the AKE with `cred_request = the OPRF blind` and
+`cred_response = the combined OPRF evaluation ‖ the envelope`.
+
+**E2E-1 (honest login).** A correct-password t-of-n login recovers `y = y_reg`,
+unseals `sk_c`, and the AKE yields `client.session_key == server.session_key` with
+both transcript MACs authenticating AND the recovered `sk_c` equal to the sealed
+one. *Gate:* the "both parties derive the SAME sso_key … credential recovered"
+assertion (which ANDs MAC agreement, key agreement, and `sk_c_rec == sk_c`).
+
+**E2E-2 (password binding gates the whole login).** A wrong password yields a
+different OPRF output `y' ≠ y_reg`, so the envelope AEAD tag fails and `sk_c` is
+never recovered — the login **aborts before the AKE runs at all**. *Gate:* the
+wrong-password unseal-fails assertion. This is the property that makes the login a
+password-authenticated flow rather than an unauthenticated key exchange.
+
+**E2E-3 (credential-transcript binding — the load-bearing composition claim).** The
+`cred_request`/`cred_response` are not merely computed alongside the AKE; they are
+**bound into the AKE transcript** (§7's preamble streams both). So a MITM who swaps
+`cred_response` between the server and the client makes the client's transcript
+differ from the server's, and the client rejects the server MAC (`server_mac_ok =
+0`). *Gate (executed falsify):* deleting the `cred_response` update from the §7
+`hash_preamble` flips EXACTLY this assertion RED (the swap stops mattering) while
+E2E-1 stays green (both sides omit it identically) — the clean directional split
+proves E2E-3 rests on the binding, not on the AKE running.
+
+**E2E-4 (fault tolerance, end-to-end).** With `n=5, t=3`, one server crashed and one
+byzantine (bad DLEQ), the client's survivor-selection pipeline (§5, G4-login) admits
+exactly the honest `t=3`, and combining them recovers `y` → unseals `sk_c` → the AKE
+succeeds. *Self-load-bearing:* had the byzantine response been admitted, the combine
+would yield a wrong `Zc` → wrong `y` → the envelope unseal FAILS → no login. So the
+DLEQ filter is what makes the fault-tolerant login sound, end-to-end.
+
+**Remaining (owner-gated).** inc.3 folds the §6 assertion + the four Option-A
+freshness legs onto this login for the single register→login→assert→accept gate;
+G5 (CT review) + G6 (zeroization) audit the production ceremony's secret handling
+once a production threshold-combine module exists. Cross-ref `v2.25-DSSO-DAPP-SPEC.md`
+§3-5/§9, `DssoAssertionFreshness.md`, `CRYPTO-C99-SPEC.md` §3.26.

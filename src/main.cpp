@@ -558,6 +558,19 @@ In-process tests (deterministic, no network):
                                               byte-equal to verify_opaque3dh.py;
                                               P-256 mult + HKDF + HMAC, zero new
                                               primitive
+  determ test-dsso-login-e2e                  DSSO G4 end-to-end (§3-5/§9 G4
+                                              inc.2): register -> t-of-n login ->
+                                              OPAQUE-3DH AKE composition — a fresh
+                                              P-256 DSSO credential sealed in the
+                                              envelope, recovered via the threshold
+                                              OPRF, feeding the AKE; honest login
+                                              agrees + authenticates, wrong pw
+                                              aborts before the AKE, a MITM swap of
+                                              cred_response breaks the transcript
+                                              MAC, and a 1-crash+1-byzantine login
+                                              still succeeds; composes the shipped
+                                              OPRF/AEAD/HKDF/opaque3dh, zero new
+                                              primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -14190,6 +14203,243 @@ int main(int argc, char** argv) {
                         "P-256/AEAD/HKDF stack)"
                       : "had assertion failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-dsso-login-e2e") {
+        // DSSO G4 END-TO-END inc.2 (v2.25-DSSO-DAPP-SPEC §3-5 / §9 G4): the
+        // register -> t-of-n login -> OPAQUE-3DH AKE composition. Wires the
+        // SHIPPED pieces — the threshold OPRF (G1/G2, test-dsso-threshold-oprf),
+        // the credential envelope (G3), and the OPAQUE-3DH AKE core (§3.26,
+        // test-dsso-opaque3dh) — into the full login and proves the composition
+        // holds. The client's long-term credential is a FRESH P-256 keypair
+        // (owner decision 2026-07-21: the DSSO identity is SEPARATE from the chain
+        // Ed25519 identity), sealed in the envelope; login recovers it via the
+        // OPRF and runs the AKE with cred_request = the OPRF blind and
+        // cred_response = the combined OPRF evaluation || the envelope. ZERO new
+        // primitive — every op is already byte-frozen (OPRF/AEAD/HKDF/P-256/
+        // opaque3dh); this gates that they COMPOSE and the properties hold e2e.
+        //
+        //   E2E-1 honest login: correct pw -> both parties derive the SAME sso_key
+        //         AND the transcript MACs mutually authenticate.
+        //   E2E-2 password binding: a wrong pw -> the envelope AEAD tag fails ->
+        //         login ABORTS before the AKE (no sk_c, no sso_key).
+        //   E2E-3 credential-transcript binding: a MITM swapping cred_response
+        //         between server and client breaks the transcript MAC (the OPRF/
+        //         envelope layer is BOUND into the AKE, not merely adjacent).
+        //   E2E-4 fault tolerance: n=5,t=3, one crash + one byzantine -> the DLEQ
+        //         filter admits the honest t -> the login + AKE still succeed.
+        std::cout << "=== DSSO G4 end-to-end (register -> t-of-n login -> OPAQUE-3DH AKE) ===\n";
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto scmul = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_mul_mod_n(r, a, b) == 0; };
+        auto scadd = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_add_mod_n(r, a, b) == 0; };
+        auto scsub = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_sub_mod_n(r, a, b) == 0; };
+        auto scinv = [](uint8_t r[32], const uint8_t a[32]) {
+            return determ_p256_scalar_inv_mod_n(r, a) == 0; };
+        auto sc_u32 = [](uint8_t s[32], uint32_t v) {
+            std::memset(s, 0, 32);
+            s[28] = (uint8_t)(v >> 24); s[29] = (uint8_t)(v >> 16);
+            s[30] = (uint8_t)(v >> 8);  s[31] = (uint8_t)v; };
+
+        // Shamir f(x)=k+c1 x+c2 x^2 (degree t-1), f(0)=k the OPRF key.
+        uint8_t coeff[3][32]; std::memset(coeff, 0, sizeof coeff);
+        coeff[0][31] = 0x2a; coeff[0][30] = 0x13;
+        coeff[1][31] = 0x55; coeff[1][29] = 0x07;
+        coeff[2][31] = 0x11; coeff[2][28] = 0x03;
+        auto poly_eval = [&](uint8_t out[32], int t, const uint8_t x[32]) -> bool {
+            uint8_t acc[32]; std::memcpy(acc, coeff[t - 1], 32);
+            for (int j = t - 2; j >= 0; --j) {
+                uint8_t tmp[32];
+                if (!scmul(tmp, acc, x)) return false;
+                if (!scadd(acc, tmp, coeff[j])) return false; }
+            std::memcpy(out, acc, 32); return true; };
+        auto lagrange0 = [&](uint8_t out[32], const uint8_t xs[][32], int m, int mi) -> bool {
+            uint8_t acc[32]; std::memset(acc, 0, 32); acc[31] = 1;
+            for (int j = 0; j < m; ++j) {
+                if (j == mi) continue;
+                uint8_t diff[32], inv[32], term[32], tmp[32];
+                if (!scsub(diff, xs[j], xs[mi])) return false;
+                if (!scinv(inv, diff)) return false;
+                if (!scmul(term, xs[j], inv)) return false;
+                if (!scmul(tmp, acc, term)) return false;
+                std::memcpy(acc, tmp, 32); }
+            std::memcpy(out, acc, 32); return true; };
+        auto combine = [&](uint8_t out33[33], const uint8_t Z33[][33],
+                           const uint8_t xsAll[][32], const int* sub, int m) -> bool {
+            uint8_t xs[8][32];
+            for (int a = 0; a < m; ++a) std::memcpy(xs[a], xsAll[sub[a]], 32);
+            uint8_t acc65[65]; bool have = false;
+            for (int a = 0; a < m; ++a) {
+                uint8_t lam[32], Zi65[65], term65[65];
+                if (!lagrange0(lam, xs, m, a)) return false;
+                if (determ_p256_point_decompress(Zi65, Z33[sub[a]]) != 0) return false;
+                if (determ_p256_point_mul(term65, lam, Zi65) != 0) return false;
+                if (!have) { std::memcpy(acc65, term65, 65); have = true; }
+                else { uint8_t s65[65];
+                    if (determ_p256_point_add(s65, acc65, term65) != 0) return false;
+                    std::memcpy(acc65, s65, 65); } }
+            if (!have) return false;
+            return determ_p256_point_compress(out33, acc65) == 0; };
+
+        // ── OPRF setup: the user's blinded password + the reference output ──
+        const uint8_t* pw = (const uint8_t*)"sso-password"; const size_t pwlen = 12;
+        uint8_t blind[32]; std::memset(blind, 0, 32); blind[31] = 0x0e; blind[30] = 0x37; blind[15] = 0x41;
+        uint8_t B33[33];
+        check(determ_p256_oprf_blind(B33, pw, pwlen, blind, 0x01) == 0, "OPRF blind(pw)");
+        uint8_t Zref33[33], yref[32];
+        check(determ_p256_oprf_evaluate(Zref33, coeff[0], B33) == 0
+                  && determ_p256_oprf_finalize(yref, pw, pwlen, blind, Zref33) == 0,
+              "reference OPRF output y_reg = Finalize(pw, k*B)");
+
+        // ── registration: mint the FRESH P-256 DSSO credential + server key ──
+        const char INFO[] = "determ-dsso-envelope-v1"; const size_t INFOLEN = sizeof(INFO) - 1;
+        auto env_key = [&](uint8_t K[32], const uint8_t y[32]) {
+            return determ_hkdf_sha256(nullptr, 0, y, 32, (const uint8_t*)INFO, INFOLEN, K, 32) == 0; };
+        uint8_t sk_c[32]; std::memset(sk_c, 0, 32); sk_c[31] = 0x11; sk_c[3] = 0x77;   // fresh DSSO cred secret (< n)
+        uint8_t pk_c[65];
+        check(determ_p256_base_mul(pk_c, sk_c) == 0, "registration: pk_c = sk_c*G (fresh P-256 DSSO credential)");
+        uint8_t sk_s[32]; std::memset(sk_s, 0, 32); sk_s[31] = 0x22; sk_s[5] = 0x33;   // server static (< n)
+        uint8_t pk_s[65];
+        check(determ_p256_base_mul(pk_s, sk_s) == 0, "registration: pk_s = sk_s*G (server static)");
+        uint8_t Kseal[32];
+        check(env_key(Kseal, yref), "registration: envelope key = HKDF(y_reg)");
+        uint8_t env_ct[32], env_tag[16], env_nonce[24];
+        std::memset(env_nonce, 0, 24); env_nonce[0] = 0x5e;
+        check(determ_xchacha20_poly1305_encrypt(Kseal, env_nonce, nullptr, 0, sk_c, 32, env_ct, env_tag) == 0,
+              "registration: envelope = AEAD_{HKDF(y_reg)}(sk_c) sealed");
+
+        // ── the n server OPRF responses (built once) ──
+        const int t = 3, n = 5;
+        uint8_t xs[8][32], ki[8][32], Zi33[8][33], PKi33[8][33], proof[8][64];
+        for (int i = 0; i < n; ++i) {
+            sc_u32(xs[i], (uint32_t)(i + 1)); poly_eval(ki[i], t, xs[i]);
+            determ_p256_oprf_evaluate(Zi33[i], ki[i], B33);
+            uint8_t pk65[65]; determ_p256_base_mul(pk65, ki[i]); determ_p256_point_compress(PKi33[i], pk65);
+            uint8_t r[32]; std::memset(r, 0, 32); r[31] = (uint8_t)(0x41 + i); r[19] = (uint8_t)(i + 3);
+            determ_p256_voprf_prove(proof[i], ki[i], PKi33[i], B33, Zi33[i], r, 0x01);
+        }
+
+        // Build a login transcript from a chosen survivor subset (correct pw) and
+        // run it through to the AKE. Returns rc (0 ok / -2 unseal-fail / -1 error),
+        // the client session key, and `authed` = MACs agree + keys agree + the
+        // recovered credential equals the sealed one.
+        struct LoginOut { int rc; uint8_t sso[32]; int authed; };
+        auto do_login = [&](const int* sub, int m) -> LoginOut {
+            LoginOut o; o.rc = -1; o.authed = 0; std::memset(o.sso, 0, 32);
+            uint8_t Zc33[33]; if (!combine(Zc33, Zi33, xs, sub, m)) return o;
+            uint8_t y[32]; if (determ_p256_oprf_finalize(y, pw, pwlen, blind, Zc33) != 0) return o;
+            uint8_t Klogin[32]; if (!env_key(Klogin, y)) return o;
+            uint8_t sk_c_rec[32];
+            if (determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, nullptr, 0, env_ct, 32, env_tag, sk_c_rec) != 0) {
+                o.rc = -2; return o; }               // wrong pw -> abort before AKE
+            uint8_t cred_resp[81];                    // cred_response = OPRF eval || envelope(ct||tag)
+            std::memcpy(cred_resp, Zc33, 33); std::memcpy(cred_resp + 33, env_ct, 32); std::memcpy(cred_resp + 65, env_tag, 16);
+            const std::string ctx = "determ-dsso-login", cid = "alice@rp", sid = "determ-idp";
+            determ_opaque3dh_transcript tr{};
+            tr.context = (const uint8_t*)ctx.data(); tr.context_len = ctx.size();
+            tr.client_identity = (const uint8_t*)cid.data(); tr.client_identity_len = cid.size();
+            tr.server_identity = (const uint8_t*)sid.data(); tr.server_identity_len = sid.size();
+            tr.cred_request = B33; tr.cred_request_len = 33;
+            tr.cred_response = cred_resp; tr.cred_response_len = sizeof cred_resp;
+            uint8_t cnon[32], snon[32]; std::memset(cnon, 0x51, 32); std::memset(snon, 0x62, 32);
+            tr.client_nonce = cnon; tr.server_nonce = snon;
+            uint8_t esk_c[32], esk_s[32]; std::memset(esk_c, 0x33, 32); std::memset(esk_s, 0x44, 32);
+            uint8_t epk_c[65]; if (determ_p256_base_mul(epk_c, esk_c) != 0) return o;
+            uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
+            if (determ_opaque3dh_server(&tr, sk_s, pk_c, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac) != 0) return o;
+            uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 0;
+            if (determ_opaque3dh_client(&tr, sk_c_rec, pk_s, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok) != 0) return o;
+            o.rc = 0; std::memcpy(o.sso, c_sk, 32);
+            o.authed = smac_ok && std::memcmp(c_sk, s_sk, 32) == 0
+                    && std::memcmp(c_cmac, s_ecmac, 32) == 0
+                    && std::memcmp(sk_c_rec, sk_c, 32) == 0;
+            return o; };
+
+        // ── E2E-1: honest t-of-n login end-to-end ──
+        {
+            int sub[3] = {0, 1, 2};
+            LoginOut o = do_login(sub, 3);
+            check(o.rc == 0, "E2E-1 setup: honest t-of-n login runs to AKE completion");
+            check(o.authed != 0,
+                  "E2E-1 honest login: both parties derive the SAME sso_key and the transcript MACs "
+                  "mutually authenticate (register -> t-of-n login -> OPAQUE-3DH AKE, credential recovered)");
+            uint8_t zero[32] = {0};
+            check(std::memcmp(o.sso, zero, 32) != 0, "E2E-1: sso_key is non-zero");
+        }
+
+        // ── E2E-3: a MITM swapping cred_response breaks the transcript MAC ──
+        {
+            int sub[3] = {0, 1, 2}; uint8_t Zc33[33]; combine(Zc33, Zi33, xs, sub, 3);
+            uint8_t y[32]; determ_p256_oprf_finalize(y, pw, pwlen, blind, Zc33);
+            uint8_t Klogin[32]; env_key(Klogin, y);
+            uint8_t sk_c_rec[32];
+            determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, nullptr, 0, env_ct, 32, env_tag, sk_c_rec);
+            uint8_t cred_resp[81];
+            std::memcpy(cred_resp, Zc33, 33); std::memcpy(cred_resp + 33, env_ct, 32); std::memcpy(cred_resp + 65, env_tag, 16);
+            const std::string ctx = "determ-dsso-login", cid = "alice@rp", sid = "determ-idp";
+            determ_opaque3dh_transcript trh{};
+            trh.context = (const uint8_t*)ctx.data(); trh.context_len = ctx.size();
+            trh.client_identity = (const uint8_t*)cid.data(); trh.client_identity_len = cid.size();
+            trh.server_identity = (const uint8_t*)sid.data(); trh.server_identity_len = sid.size();
+            trh.cred_request = B33; trh.cred_request_len = 33;
+            trh.cred_response = cred_resp; trh.cred_response_len = 81;
+            uint8_t cnon[32], snon[32]; std::memset(cnon, 0x51, 32); std::memset(snon, 0x62, 32);
+            trh.client_nonce = cnon; trh.server_nonce = snon;
+            uint8_t esk_c[32], esk_s[32]; std::memset(esk_c, 0x33, 32); std::memset(esk_s, 0x44, 32);
+            uint8_t epk_c[65]; determ_p256_base_mul(epk_c, esk_c);
+            uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
+            determ_opaque3dh_server(&trh, sk_s, pk_c, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac);
+            uint8_t cred_swapped[81]; std::memcpy(cred_swapped, cred_resp, 81); cred_swapped[40] ^= 0x40;
+            determ_opaque3dh_transcript trc = trh; trc.cred_response = cred_swapped;
+            uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 1;
+            determ_opaque3dh_client(&trc, sk_c_rec, pk_s, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok);
+            check(smac_ok == 0,
+                  "E2E-3 credential-transcript binding: a MITM swapping cred_response between server and "
+                  "client breaks the transcript MAC (the OPRF/envelope layer is bound into the AKE)");
+        }
+
+        // ── E2E-2: a wrong password fails the envelope AEAD tag (abort) ──
+        {
+            const uint8_t* pw2 = (const uint8_t*)"WRONG-password"; const size_t pw2len = 14;
+            uint8_t bw[32]; std::memset(bw, 0, 32); bw[31] = 0x0e; bw[7] = 0x22;
+            uint8_t Bw[33], Zw[33], yw[32];
+            bool okw = determ_p256_oprf_blind(Bw, pw2, pw2len, bw, 0x01) == 0
+                    && determ_p256_oprf_evaluate(Zw, coeff[0], Bw) == 0
+                    && determ_p256_oprf_finalize(yw, pw2, pw2len, bw, Zw) == 0;
+            uint8_t Kw[32]; env_key(Kw, yw);
+            uint8_t junk[32];
+            bool unseal_fail = determ_xchacha20_poly1305_decrypt(Kw, env_nonce, nullptr, 0, env_ct, 32, env_tag, junk) != 0;
+            check(okw && std::memcmp(yw, yref, 32) != 0 && unseal_fail,
+                  "E2E-2 password binding: a wrong password's OPRF output fails the envelope AEAD tag -> "
+                  "the login aborts before the AKE (no sk_c recovered)");
+        }
+
+        // ── E2E-4: fault-tolerant login (1 crash + 1 byzantine) end-to-end ──
+        {
+            const int CRASHED = 4, BYZANT = 3;
+            Zi33[BYZANT][12] ^= 0x20;                 // byzantine tampers its response (DLEQ now fails)
+            int surv[8], ns = 0;
+            for (int i = 0; i < n; ++i) {
+                if (i == CRASHED) continue;           // crashed: silent
+                if (determ_p256_voprf_verify(PKi33[i], B33, Zi33[i], proof[i], 0x01) != 0) continue;  // byzantine: discarded
+                surv[ns++] = i;
+            }
+            check(ns == t && surv[0] == 0 && surv[1] == 1 && surv[2] == 2,
+                  "E2E-4 setup: the DLEQ filter admits exactly the t=3 honest servers "
+                  "under 1 crash (S4) + 1 byzantine (S3)");
+            LoginOut o = do_login(surv, t);
+            check(o.rc == 0 && o.authed != 0,
+                  "E2E-4 fault-tolerant login: combining the DLEQ survivors recovers the credential and the "
+                  "OPAQUE-3DH AKE co-generates a mutually-authenticated sso_key (n=5, t=3, 1 crash + 1 byzantine)");
+        }
+
+        if (fail == 0) std::cout << "\nPASS: dsso-login-e2e all assertions\n";
+        else           std::cout << "\nFAIL: dsso-login-e2e " << fail << " assertion(s)\n";
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "test-dsso-assertion") {
