@@ -48,12 +48,13 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
 executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
 tiers the original run recorded only as counts — 34 confirmed unenforced
-MED/LOW gaps (4 more were re-examined and found already-gated) — and five MEDs
+MED/LOW gaps (4 more were re-examined and found already-gated) — and six MEDs
 are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
 (§3j)** the reward-path overflow guard, **AL-5 (§3k)** audit-map crash/rollback
-atomicity, **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close, and
-**T-3 (§3m)** the commit-reveal delay-derivation check (SB-3, AL-5, STMC-5, T-3
-all gated in FAST on both platforms). **29 MED/LOW open; zero HIGH.**
+atomicity, **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close, **T-3
+(§3m)** the commit-reveal delay-derivation check, and **PCL-1 (§3n)** the
+governance-whitelist source-coherence guard (SB-3/AL-5/STMC-5/T-3 gated in FAST
+both platforms; PCL-1 an offline ci_local guard). **28 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -564,6 +565,34 @@ leg stay green. Each compare is therefore independently gated. (This round used 
 parallel design workflow to pre-verify the fixture's reachability and the
 delay_seed fall-through before implementation.)
 
+## 3n. PCL-1 CLOSED — the governance-whitelist source-coherence guard (offline)
+
+`ParamChangeLintSoundness.md` PCL-1: the wallet's `kWhitelist` and
+`kNumericScalars` are byte-for-byte the validator's whitelist
+(`src/node/validator.cpp`) and the chain's `parse_u64` scalar dispatch
+(`src/chain/chain.cpp`). **The load-bearing fact:** `determ-wallet` links no chain
+library (TCB separation), so these are HAND-MAINTAINED mirrors in a *different
+binary* — adding a name to one copy without the others (the register's mutation)
+is invisible to every runtime test, and makes the wallet lint silently reject a
+now-valid governance param or accept one the chain cannot apply. Only source
+parity can catch it.
+
+Closed by **a new offline guard `tools/test_param_change_whitelist_coherence.sh`**
+(pure awk/grep, no node/build) wired into the ci_local offline doc-guard loop
+(`tools/ci_local.sh`), so it gates on both platforms via CI and is auto-discovered
+by a full `run_all.sh`; like the other doc guards it is intentionally NOT in the
+FAST regex. It extracts all three `kWhitelist` literals + the wallet
+`kNumericScalars` + the chain dispatch names and asserts: all three whitelists
+set-identical; `kNumericScalars` == the chain dispatch; every scalar on the
+whitelist. It pins `EXPECTED_WL_BLOCKS = 3` so a renamed/deleted copy (which would
+make a parity check *vacuously* pass) turns it RED — the anti-vacuity control.
+
+*Falsify (executed, reverted via `git checkout`; no build — a source guard).*
+Adding `"NEW_SCALAR"` to the validator `kWhitelist` alone makes the guard FAIL
+(`drift: kWhitelist sets differ`, validator 10 vs wallet 9); the coherent tree
+passes 4/4. This is the first register gap closed as a pure source-coherence guard
+(the CB-2/ADC-3 class), not a runtime negative test.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -623,9 +652,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m) are now closed** — leaving 29.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n) are now closed** — leaving 28.
 
-### 6.1 Confirmed unenforced MED/LOW claims (29 open + SP-2, SB-3, AL-5, STMC-5, T-3 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (28 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -638,7 +667,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m) ar
 | 7 | AL-5 | AuditLayerSoundness | MED | trivial | **CLOSED §3k** | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
 | 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | **CLOSED §3m** | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
-| 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | open | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
+| 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | **CLOSED §3n** | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
 | 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | **CLOSED §3l** | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
 | 12 | DR-2 | DAppRegistryReadSoundness | MED | moderate | open | SURVIVING MUTATION: light/main.cpp:6944 `if (proof_value_hash != expected_value_hash){ verdict=UNVERIFIABLE; ... }` -> `if (false){ ... }` survives EV |
 | 13 | MPC-3 | MultiPeerCrossCheckSoundness | MED | moderate | open | Surviving mutation: in light/main.cpp cmd_cross_check (lines 2103-2131) replace the by_height intra-group comparison with a loop that compares every p |

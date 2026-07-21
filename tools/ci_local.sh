@@ -256,7 +256,7 @@ FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; 
 echo "=== ci_local: offline doc-coherence guards ==="
 GUARDS_OK=1
 for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
-         test_proofs_index_complete; do
+         test_proofs_index_complete test_param_change_whitelist_coherence; do
   if [ -f "tools/$g.sh" ]; then
     if bash "tools/$g.sh" >/dev/null 2>&1; then
       echo "  PASS: $g"

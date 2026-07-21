@@ -11,6 +11,23 @@ The exit code is monitor-friendly: `0` for EFFECTIVE / HOOK_ONLY (the change wil
 
 **The load-bearing design fact (TCB separation).** `determ-wallet` deliberately does **not** link `libdeterm_chain`. The two on-chain rules this lint predicts — the validator's `kWhitelist` admission set and the activation path's `parse_u64` 8-byte-width decode — are therefore **reimplemented inline** in `wallet/main.cpp` as a 9-element `std::set<std::string>` plus a 3-element numeric-scalar `std::set` plus a `value_hex.size() / 2 == 8` width test, rather than called from the chain library. **PCL-1** proves the reimplemented whitelist and scalar/hook partition are **byte-for-byte** the validator's `kWhitelist` and the activation dispatch; **PCL-2** proves the reimplemented width rule is **byte-for-byte** the `parse_u64` `value.size() != 8` guard. This is the same wallet-TCB posture as the `block-verify` sibling (`OfflineBlockVerifySoundness.md` BV-1): the lint trades a chain-library link for a lean trusted base, and pays the cost as a stated boundary, not a hidden assumption.
 
+**Gate (executed).** PCL-1's byte-for-byte equivalence is now enforced by
+`tools/test_param_change_whitelist_coherence.sh` (register claim **PCL-1**,
+`ProofClaimGateTraceability.md` §3n) — an **offline source-parity guard** in the
+ci_local doc-guard set (gated on both platforms via `.github/workflows/ci.yml`).
+Because the wallet links no chain library, the mirrors live in *different
+binaries* with no shared runtime object, so drift is invisible to every runtime
+test; the guard is the only mechanism that can catch it. It extracts the quoted
+names of all three `kWhitelist` literals (validator ×1 + wallet ×2), the wallet's
+`kNumericScalars`, and the chain's `parse_u64` scalar dispatch, and asserts:
+(1) all three whitelists are set-identical; (2) `kNumericScalars` == the chain
+dispatch set; (3) every numeric scalar is on the whitelist. It pins
+`EXPECTED_WL_BLOCKS = 3` so a renamed/deleted copy (which would make a parity
+check vacuously pass) turns it RED. *Falsify:* adding `"NEW_SCALAR"` to the
+validator `kWhitelist` alone (the register's named mutation) makes the guard FAIL
+with a whitelist-drift diagnostic; a matching edit to all three copies keeps it
+green.
+
 **What the verify-proof for the companion command rests on, vs. what THIS lint rests on.** The sibling `param-change-verify` reimplements the validator's *Ed25519 multisig gate* and its soundness reduces to **A1** (Ed25519 EUF-CMA) — that proof is referenced here for the verify half of the governance toolchain, but `param-change-lint` is a *different* check: it predicts the **activation effect**, not signature validity, and assumes nothing about the signatures (a lint is run *before* the multisig is even assembled, or against a build that has not yet collected signatures). The lint's soundness therefore reduces not to A1 but to the **determinism of the whitelist set-membership test and the `parse_u64` width decode** (themselves grounded in A2 SHA-256 determinism for the on-chain state-root binding of the resulting parameter, via `GovernanceWhitelistSoundness.md` GW-3, but not for the lint's verdict, which is a pure byte-length comparison). This document states that reduction precisely.
 
 **Canonical assumption labels.** Per `Preliminaries.md §2.0`: **A1** = Ed25519 EUF-CMA (`Preliminaries.md §2.2`), **A2** = SHA-256 collision resistance (`Preliminaries.md §2.1`). The lint *verdict* itself is purely deterministic (set membership + integer width comparison) and uses **neither** A1 nor A2 — it is a decidable predicate over the input bytes. A1 and A2 enter only at the *boundaries*: A1 governs whether the transaction the lint describes will eventually be *accepted* by the multisig gate (the `param-change-verify` companion, not this lint), and A2 governs whether the activated scalar is *bound into the state root* (the `GovernanceWhitelistSoundness.md` GW-3 / `ParamChangeDeterminism.md` convergence the lint's EFFECTIVE verdict presupposes for cross-node agreement). This document cites both honestly and disclaims that the lint verdict carries a cryptographic error term.
