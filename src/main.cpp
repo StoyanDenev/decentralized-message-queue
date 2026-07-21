@@ -526,17 +526,20 @@ In-process tests (deterministic, no network):
                                               (P-256, SHA-256) protocol —
                                               blind/evaluate/finalize + DLEQ
                                               reject paths (vectors via §3.13)
-  determ test-dsso-threshold-oprf             DSSO Bundle-A G1/G2/G3 (v2.25-DSSO
-                                              §4/§9): t-of-n UNORDERED threshold
-                                              OPRF — Lagrange over every t-subset
-                                              == direct k·B (G1), per-response
-                                              DLEQ reject + load-bearing (G2),
-                                              < t cannot reconstruct; + the
+  determ test-dsso-threshold-oprf             DSSO Bundle-A G1/G2/G3/G4-login
+                                              (v2.25-DSSO §4/§9): t-of-n UNORDERED
+                                              threshold OPRF — Lagrange over every
+                                              t-subset == direct k·B (G1), per-
+                                              response DLEQ reject + load-bearing
+                                              (G2), < t cannot reconstruct; + the
                                               credential envelope AEAD_{HKDF(y)}
                                               unseals with the t-of-n-recovered y,
                                               wrong password rejects, both profiles
-                                              (G3); shipped P-256/AEAD/HKDF, zero
-                                              new primitive
+                                              (G3); + fault-tolerant login under
+                                              1 crash + 1 byzantine, n=5 t=3, the
+                                              DLEQ filter load-bearing (G4-login);
+                                              shipped P-256/AEAD/HKDF, zero new
+                                              primitive
   determ test-dsso-assertion                  DSSO Bundle-A G4 assertion layer
                                               (v2.25-DSSO §5, claim C6): the RP
                                               dual-hash token H2=HMAC(tenant_key,
@@ -13885,11 +13888,79 @@ int main(int argc, char** argv) {
             run_profile("FIPS AES-256-GCM", true);
         }
 
+        // === G4 login: fault-tolerant t-of-n under 1 crash + 1 byzantine =====
+        // Spec §4 step 4 + §9 G4 (login half): the client collects responses
+        // from the AVAILABLE servers, discards any whose DLEQ proof fails, and
+        // Lagrange-combines the survivors. G1 proves subsets reconstruct and G2
+        // proves a bad response is detected; this composes them into the exact
+        // scenario the spec names — n=5, t=3, ONE server crashed (no response)
+        // AND ONE byzantine (bad DLEQ) in the SAME login — and drives the
+        // survivor-SELECTION pipeline (the client does not know a priori which
+        // servers are honest), not an a-priori subset. The OPAQUE AKE that
+        // co-generates sso_key and the RP assertion token are the owner-gated
+        // remainder of G4 (the token is gated separately by test-dsso-assertion);
+        // this gates the login's fault tolerance. ZERO new production surface.
+        {
+            const int t = 3, n = 5;
+            const int CRASHED = 4;         // server 4 sends no response
+            const int BYZANT  = 3;         // server 3 responds with a bad DLEQ
+            uint8_t xs[8][32], ki[8][32], Zi33[8][33], PKi33[8][33], proof[8][64];
+            bool responded[8];
+            for (int i = 0; i < n; ++i) {
+                sc_u32(xs[i], (uint32_t)(i + 1));
+                poly_eval(ki[i], t, xs[i]);
+                determ_p256_oprf_evaluate(Zi33[i], ki[i], B33);
+                uint8_t pk65[65]; determ_p256_base_mul(pk65, ki[i]);
+                determ_p256_point_compress(PKi33[i], pk65);
+                uint8_t r[32]; std::memset(r, 0, 32);
+                r[31] = (uint8_t)(0x41 + i); r[19] = (uint8_t)(i + 3);  // proof rand
+                determ_p256_voprf_prove(proof[i], ki[i], PKi33[i], B33, Zi33[i], r, 0x01);
+                responded[i] = (i != CRASHED);        // the crashed server is silent
+            }
+            // the byzantine server tampers its response (proof no longer matches).
+            Zi33[BYZANT][12] ^= 0x20;
+
+            // client pipeline: verify each RESPONDING server, keep the survivors.
+            int surv[8], ns = 0;
+            for (int i = 0; i < n; ++i) {
+                if (!responded[i]) continue;                              // crash: absent
+                if (determ_p256_voprf_verify(PKi33[i], B33, Zi33[i], proof[i], 0x01) != 0)
+                    continue;                                             // byzantine: discarded
+                surv[ns++] = i;
+            }
+            check(ns == t && surv[0] == 0 && surv[1] == 1 && surv[2] == 2,
+                  "G4 login: under 1 crash (S4) + 1 byzantine (S3) the DLEQ filter "
+                  "admits exactly the t=3 honest responses {S0,S1,S2}");
+
+            // combine the survivors -> the login yields the reference OPRF output.
+            uint8_t Zc33[33], y[32];
+            bool recovered = ns >= t
+                          && combine(Zc33, Zi33, xs, surv, t)
+                          && std::memcmp(Zc33, Zref33, 33) == 0
+                          && determ_p256_oprf_finalize(y, input, ilen, blind, Zc33) == 0
+                          && std::memcmp(y, yref, 32) == 0;
+            check(recovered,
+                  "G4 login: combining the t surviving responses recovers the "
+                  "reference OPRF output y (login succeeds despite 1 crash + 1 "
+                  "byzantine, n=5, t=3)");
+
+            // load-bearing: had the client NOT filtered and combined {S0,S1,byz S3},
+            // recovery fails -> the DLEQ filter is what makes the login sound.
+            int bad_sub[3] = {0, 1, BYZANT};
+            uint8_t Zbad33[33];
+            bool poisoned = !combine(Zbad33, Zi33, xs, bad_sub, 3)
+                         || std::memcmp(Zbad33, Zref33, 33) != 0;
+            check(poisoned,
+                  "G4 login: admitting the byzantine response (skipping the DLEQ "
+                  "filter) breaks recovery — the filter is load-bearing");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": test-dsso-threshold-oprf "
                   << (fail == 0
                       ? "(G1 t-of-n identity + G2 DLEQ soundness + G3 credential "
-                        "envelope over the shipped P-256/AEAD/HKDF stack)"
+                        "envelope + G4 fault-tolerant login over the shipped "
+                        "P-256/AEAD/HKDF stack)"
                       : "had assertion failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

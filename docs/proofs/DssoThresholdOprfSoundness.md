@@ -83,7 +83,7 @@ means here.)
 
 ## 3. The gate
 
-`test-dsso-threshold-oprf` (15 assertions):
+`test-dsso-threshold-oprf` (18 assertions):
 
 1. **Scalar-op self-validation, oracle-free.** `(a+b)·G == a·G ⊕ b·G` and
    `(a−b)·G ⊕ b·G == a·G` tie the two exposed additive ops to the group via the
@@ -104,6 +104,21 @@ means here.)
    and FIPS AES-256-GCM); and a **wrong password's** `y` fails the envelope AEAD
    tag so the credential stays sealed. A wrong password is first shown to yield a
    different OPRF output.
+6. **G4 login (fault-tolerant), the login half of §9 G4.** The exact scenario the
+   spec names — `n=5`, `t=3`, **one server crashed** (sends no response) **and
+   one byzantine** (returns a bad DLEQ) in the **same** login. The client runs
+   the §4-step-4 pipeline over the *available* responses (it does not know a
+   priori which are honest): verify each DLEQ, discard the failures, Lagrange-
+   combine the survivors. Three assertions: the filter admits **exactly** the
+   `t=3` honest responses `{S0,S1,S2}` (the crashed one absent, the byzantine one
+   rejected); combining those survivors recovers the reference OPRF output `y`
+   (the login succeeds despite the two faults); and — load-bearing — combining
+   the byzantine response instead (skipping the filter) breaks recovery, so the
+   DLEQ filter is what makes the fault-tolerant login sound, not any 3 responses.
+   This composes G1 (subsets reconstruct) and G2 (a bad response is detected)
+   into the survivor-**selection** pipeline neither exercises alone. Out of scope
+   here (owner-gated remainder of G4): the OPAQUE AKE that co-generates
+   `sso_key`, and the RP assertion token (gated separately in §6).
 
 The reference `k·B` is computed by the single-key `oprf_evaluate(k, B)` — an
 independent path from the shares (`poly_eval`) and the combine (Lagrange), so G1
@@ -127,6 +142,15 @@ propagates to a wrong HKDF key so the G3 envelope no longer unseals — proving 
 is genuinely composed on the threshold math, not a standalone envelope
 round-trip. (The G3 **wrong-password rejects** stay green under this mutation:
 they don't depend on the shares, so they isolate the password-binding property.)
+
+The G4-login block carries its own test-logic falsify (the byzantine server is
+the only new fault surface): **neutralizing the byzantine tamper** (S3 now sends
+an honest response) flips exactly the filter-exactness assertion (survivors
+become `{S0,S1,S2,S3}`, count `≠ t`) and the load-bearing negative (combining
+`{S0,S1,S3}` now *does* reconstruct) RED, while the middle assertion — combine
+the first `t` survivors — stays green (they truncate to the honest prefix). That
+clean directional split proves the gate rests on the byzantine actually being
+detected, not on any three responses combining.
 
 *Process note:* because these definitions are uncommitted while iterating, the
 mutant loop must restore from a file backup, not `git checkout`, which would

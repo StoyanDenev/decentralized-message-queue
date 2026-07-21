@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DSSO Bundle-A gates G1 + G2 (v2.25-DSSO-DAPP-SPEC §4 login, §9 green gates).
+# DSSO Bundle-A gates G1 + G2 + G3 + G4-login (v2.25-DSSO-DAPP-SPEC §4, §9).
 #
 # The "Sign-In With Determ" login is a t-of-n, UNORDERED threshold OPRF: the
 # user Shamir-deals the OPRF key k over the P-256 scalar field Z_n, each server
@@ -21,6 +21,12 @@
 #       composition), a WRONG password's y fails the AEAD tag, both profiles
 #       (MODERN XChaCha20-Poly1305 / FIPS AES-256-GCM). NOT the OPAQUE aPAKE
 #       handshake — that is the ceremony (§4/§5), a later Bundle-A increment.
+#   G4  fault-tolerant login (the §9 G4 login half): n=5, t=3, ONE server crashed
+#       AND ONE byzantine in the same login; the client runs the §4-step-4
+#       pipeline (verify each DLEQ, discard failures, Lagrange-combine the
+#       survivors), admits EXACTLY the t honest responses, and recovers y
+#       (load-bearing: admitting the byzantine response breaks recovery). The
+#       OPAQUE AKE + RP assertion token are the owner-gated remainder of G4.
 #   +   threshold realness: < t shares cannot reconstruct (spec C1/C3).
 #   +   scalar-op self-validation: (a±b)·G ties the two exposed additive ops to
 #       the group with NO external oracle.
@@ -43,7 +49,7 @@ source tools/common.sh
 if [ -z "${DETERM:-}" ] || [ ! -x "$DETERM" ]; then
     echo "  SKIP: determ binary not found"; exit 0; fi
 
-echo "=== DSSO threshold-OPRF — Bundle-A gates G1 (t-of-n identity) + G2 (DLEQ) ==="
+echo "=== DSSO threshold-OPRF — Bundle-A G1 (identity) + G2 (DLEQ) + G3 (envelope) + G4 (login) ==="
 OUT=$("$DETERM" test-dsso-threshold-oprf 2>&1); rc=$?
 echo "$OUT"
 echo ""
