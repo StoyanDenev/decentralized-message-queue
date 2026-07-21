@@ -40,11 +40,11 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
-**Remediation status: 9 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+**Remediation status: 11 of the 14 HIGH claims are now closed** — GW-2 (§3a),
 the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), the BFT-escalation arm
-T-1/T-2/PE-4 (§3c), and CR-2 (§3d). Five HIGH remain: AL-3, SR-5, WH-2, and the
-two light-client sites whose cleartext arrives over the wire, RP-3 and SU-2.
-**55 claims open overall.**
+T-1/T-2/PE-4 (§3c), CR-2 (§3d), and the two wire-sourced light-client sites
+**RP-3 and SU-2 (§3e)** — closed by a transparent RPC tampering proxy. Three
+HIGH remain: AL-3, SR-5, WH-2. **53 claims open overall.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -57,7 +57,7 @@ green:
 | AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
 | SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
-| ~~CR-2~~ **CLOSED** / RP-3, SU-2 | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 **gate shipped**, see §3d; RP-3/SU-2 still open (they need a tampering proxy) |
+| ~~CR-2 / RP-3 / SU-2~~ **CLOSED** | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 via argv (§3d); RP-3/SU-2 via a tampering proxy against a lying daemon (§3e) |
 | WH-2 | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) |
 
 ## 3. The top gap, independently re-verified
@@ -221,10 +221,57 @@ control pins accept-narrowing and the tamper legs pin accept-widening; neither
 direction is gated by the other. This is the constructive answer to §2's warning
 about asking which direction a gate constrains.
 
-*Open residual.* RP-3 and SU-2 remain ungated. Their cleartext arrives on the
-wire and no honest daemon can be coaxed into serving a mismatch (`node.cpp` emits
-`value_hex` only when it already hashes correctly), so they need a tampering
-proxy — tracked as the next increment, not as a claim this section closes.
+## 3e. RP-3 and SU-2 CLOSED — the wire-sourced cross-checks vs a lying daemon
+
+CR-2's argv attack cannot reach RP-3/SU-2: their cleartext arrives **on the
+wire**, and no honest daemon serves a mismatch (`node.cpp` emits the registry
+fields / `value_hex` only when they already hash to the committed `value_hash`).
+The adversary here is a **lying daemon**, so the lie is injected by a transparent
+man-in-the-middle: **`tools/rpc_tamper_proxy.py`** (stdlib-only, ~180 lines) sits
+between `determ-light` (`--rpc-port` → proxy) and the honest node, relays every
+newline-delimited JSON request/reply verbatim, and rewrites exactly ONE named
+field of one reply. Nothing signs the RPC response (the optional HMAC auth covers
+only the request), so the rewrite is invisible at the transport layer **by
+design** — the client must catch it cryptographically.
+
+| Claim | Gate | Tampered field | Result |
+|---|---|---|---|
+| **RP-3** | `tools/test_light_registrant_tamper.sh` (8 assert) | `account` reply `result.registry.registered_at` (then `.region`) | `verify-registrant` → `UNVERIFIABLE`, exit **3**, "does not match the recomputed hash of the account registry" |
+| **SU-2** | `tools/test_light_supply_tamper.sh` (4 assert) | `state_proof` reply `result.value_hex` for `genesis_total` | `supply-trustless` → `UNVERIFIABLE`, exit **3**, "TAMPERED — daemon's atomic value_hex for counter 'genesis_total'" |
+
+**Non-vacuity — the CR-2 lesson applied to a wire adversary.** Each gate runs the
+SAME client through a **pass-through** instance of the SAME proxy first:
+- RP-3's control reaches **INCLUDED / exit 0** — proving the proxy is transparent
+  AND the value-hash compare (`light/main.cpp:6112`) is reached and passes on
+  honest input. The tamper legs then flip it, asserting exit is **exactly 3**
+  (an `ed_pub`-decode or inconsistent-daemon throw exits 1, so "non-zero" would
+  pass on the wrong gate) and the detail is the account-registry mismatch, not a
+  key-bind message. A second field (`region`) proves the `value_hash` binds the
+  WHOLE registrant record, not one field.
+- SU-2 targets `genesis_total` (`kCounters[0]`), whose compare at
+  `light/main.cpp:8007` executes BEFORE the stale-height / committee-root / merkle
+  steps. On a fast single-host cluster the honest verdict can itself be
+  `UNVERIFIABLE` — **not a defect**: the chain advances between the per-counter
+  `state_proof` calls, so a later counter anchors to a newer `state_root` and the
+  client correctly fail-closes on a cross-snapshot read. Because the outer exit-3
+  is therefore not discriminating there, the gate's non-vacuous core is a
+  **detail differential**: the honest path never emits the genesis_total value_hex
+  marker (proving `:8007` passes honestly), the tampered path always does.
+
+*Falsify-on-mutant (executed, each reverted; determ-light rebuilt).*
+
+| Mutation | Effect |
+|---|---|
+| `light/main.cpp:6112` `if (proof_value_hash != expected_value_hash)` → `if (false)` | RP-3 tamper legs flip: the client certifies the attacker's registry as **INCLUDED / exit 0** (it even prints the fabricated `region: TAMPERED_REGION` as verified); the pass-through control is unaffected (8 pass → 4 pass / 4 fail) |
+| `light/main.cpp:8007` same neutralization | SU-2's genesis_total value_hex detail marker vanishes (the compare no longer fires); the discriminating detail assertion flips (4 pass → 3 pass / 1 fail). The bare exit-3 stays green on this host because the cross-snapshot read race independently yields exit 3 — which is exactly why the gate keys on the detail marker, not the exit code |
+
+Same asymmetry as §3d: the pass-through control pins accept-narrowing (a broken
+proxy or an over-rejecting client makes the honest leg go red), the tamper legs
+pin accept-widening (a deleted comparison makes the client certify a lie). The
+proxy is reusable for any future wire-sourced cross-check (`--method`, dotted
+`--field`, `flip-hex`/`bump`/`set`). These are cluster-bound (need a bindable
+local node), so — like the other `*-trustless` tests — they run standalone, not
+in `ci_local`/FAST; both self-skip (exit 0) if the node cannot bootstrap.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
