@@ -217,9 +217,12 @@ token **in isolation** does not reject a *verbatim replay* of a captured
 inputs), not verifier-enforced. Verifier-side replay/expiry rejection needs RP
 session state — an RP-issued **single-use nonce** plus an `exp`-vs-clock check —
 which is a **ceremony/topology** property, part of the owner-gated G4 end-to-end
-flow, not the token. This is flagged for a possible spec §5 clarification (the
-accept rule as written omits the RP's freshness obligation). The gate prints this
-scope explicitly and does not claim verifier replay-rejection.
+flow, not the token. The gate prints this scope explicitly and does not claim
+verifier replay-rejection. **RESOLVED** (owner ratified **Option A**,
+`DssoAssertionFreshness.md`): spec §5 now carries a normative RP-freshness bullet
+(audience + `iat`/`exp` clock + single-use `nonce` cache — the OIDC/JWT/SIWE
+replay+expiry discipline), and G4-end-to-end gates the four legs (replay rejected
+on second use; expired / future / first-use).
 
 *Falsify-on-mutant (executed, reverted via file backup).* This gate adds **zero
 new production surface** (HMAC-SHA256 is shipped + KAT-gated), so the falsify

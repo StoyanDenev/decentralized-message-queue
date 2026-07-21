@@ -1,11 +1,12 @@
 # DSSO §5 Assertion Freshness — resolving the verifier-side replay/expiry gap
 
-**Status: DECISION ARTIFACT (owner ratification pending).** This document
-resolves the open §5 freshness question the G4-assertion gate surfaced
-(`DssoThresholdOprfSoundness.md` §6). It is **not** an edit to the authoritative
-`v2.25-DSSO-DAPP-SPEC.md`; it states the gap precisely, lays out the resolution
-options, and **recommends one** for the owner to fold into §5. Once ratified, it
-fixes exactly what the owner-gated **G4 end-to-end** flow must enforce and gate.
+**Status: RATIFIED — Option A (owner, 2026-07-21).** This document resolved the
+open §5 freshness question the G4-assertion gate surfaced
+(`DssoThresholdOprfSoundness.md` §6); the owner ratified **Option A**, and the
+normative clause is now folded into `v2.25-DSSO-DAPP-SPEC.md` §5 (the RP
+freshness bullet). It fixes exactly what the owner-gated **G4 end-to-end** flow
+must enforce and gate. The options + rationale below are retained as the
+decision record.
 
 Owner decision this resolves (answered **Q1 = A**, "resolve the freshness gap
 first, then build G4-e2e"): *is the RP-side freshness obligation in-scope of the
@@ -129,10 +130,10 @@ declares out of scope (its printed SCOPE NOTE). They join the login half
 
 ## 6. Scope
 
-This is a **decision artifact**. The owner ratifies the chosen rule and folds
-the normative clause into `v2.25-DSSO-DAPP-SPEC.md` §5 (the authoritative,
-design-locked spec — untouched here). G4-end-to-end then builds against the
-ratified §5, per the FROST-deviation discipline (build only the committed spec;
-defer protocol design to the owner). Cross-refs:
+**Resolved.** The owner ratified **Option A**; the normative clause is now in
+`v2.25-DSSO-DAPP-SPEC.md` §5 (the RP-freshness bullet after the `H2 == H2'`
+accept rule). G4-end-to-end builds against that ratified §5, per the
+FROST-deviation discipline (build only the committed spec). This document is
+retained as the decision record (options + rationale). Cross-refs:
 [`DssoThresholdOprfSoundness.md`](DssoThresholdOprfSoundness.md) §6 (the residual
 this resolves), [`v2.25-DSSO-DAPP-SPEC.md`](v2.25-DSSO-DAPP-SPEC.md) §5.
