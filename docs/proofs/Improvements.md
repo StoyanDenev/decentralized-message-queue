@@ -767,7 +767,7 @@ Items that V2-DESIGN.md originally framed as chain-level substrate but were recl
 
 **Original V2-DESIGN.md framing.** Chain-level substrate; T-OPAQUE on K committee members; FROST-Ed25519 threshold-signed assertions verified against on-chain committee pubkey set.
 
-**Reclassified as.** Chain-aware DApp registered via v2.18 DAPP_REGISTER. K DApp instances run BY committee members; T-OPAQUE-style authentication (t-of-n P-256 T-OPRF + credential envelope, no AKE) coordinated via DAPP_CALL; assertions block-anchored — the chain's K-of-K block signature attests inclusion, and assertion truth is anchored to the user's credential signature (**DLT-B**, `v2.25-DSSO-DAPP-SPEC.md`, DECISION-LOG.md 2026-07-15; FROST was removed from the chain path per DECISION-LOG.md 2026-06-07).
+**Reclassified as.** Chain-aware DApp registered via v2.18 DAPP_REGISTER. K DApp instances run BY committee members as the paper's mutual-distrust IdP (academia.edu/80188125); **threshold-OPAQUE** authentication (OPAQUE for SRP + a t-of-n, unordered threshold OPRF) with the paper's hash-challenge-response RP token (`v2.25-DSSO-DAPP-SPEC.md`) — no threshold signature, no FROST (removed from the chain path per DECISION-LOG.md 2026-06-07).
 
 **Reclassification rationale.** ~80% of substrate's security properties recoverable at the DApp level; ~8-12 weeks of v1.0 critical-path work eliminated; DSSO iterates post-mainnet without no-migrations constraints; federation by design (multiple DSSO providers can coexist). See `DECISION-LOG.md` 2026-05-24 entry "DSSO architecture (v2.25): DApp, not substrate".
 
@@ -776,9 +776,9 @@ Items that V2-DESIGN.md originally framed as chain-level substrate but were recl
 **Dependencies (DApp-side):**
 - v2.18 DAPP_REGISTER (✅ shipped)
 - v2.19 DAPP_CALL (✅ shipped)
-- P-256 RFC 9497 OPRF/VOPRF stack (✅ shipped; `CRYPTO-C99-SPEC.md` §3.9b) — the DLT-B T-OPRF substrate
+- P-256 RFC 9497 OPRF/VOPRF stack (✅ shipped; `CRYPTO-C99-SPEC.md` §3.9b) — the threshold-OPAQUE T-OPRF substrate
 - v2.26 on-chain key rotation (in Theme 9 review-track; v1.0 critical path)
-- Chain K-of-K block signature as the assertion **inclusion** attestation (DLT-B; assertion truth = user credential signature per `v2.25-DSSO-DAPP-SPEC.md` §5; FROST removed from the chain path per DECISION-LOG.md 2026-06-07). The K-of-K block-sig path is already shipped.
+- The paper's hash-challenge-response token over the PAKE-co-generated keys — no committee signature, no FROST (`v2.25-DSSO-DAPP-SPEC.md` §5). The DAPP_REGISTER/DAPP_CALL transport is already shipped.
 - Committee-instance DApp-hosting infrastructure (new DApp pattern not previously deployed)
 
 **Related.** Memory `dlt-dsso-as-dapp`; **`v2.25-DSSO-DAPP-SPEC.md` (authoritative mechanism doc, 2026-07-15)**; V2-DESIGN.md §v2.25 (original substrate design — preserved for historical reference but supplanted); `DECISION-LOG.md` 2026-05-24 + 2026-07-15 entries.

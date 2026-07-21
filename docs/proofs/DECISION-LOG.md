@@ -1420,3 +1420,31 @@ Three owner decisions made during a live review of the just-shipped input-unlink
 **Files updated.** NEW `v2.25-DSSO-DAPP-SPEC.md`; `V1.1-PLAN.md` (§0 property row + Bundle A reworked to DLT-B, mechanism text replaced by spec pointer); `Improvements.md` §8.1; `V2-DESIGN.md` (v2.25 status row, Theme 9 banner, v2.10-cascade bullet, Phase C row); `CRYPTO-C99-SPEC.md` (profile matrix row, §3.9b consumer note, §3.7 parenthetical); `SECURITY.md` (two status lines); `WHITEPAPER-v1.x.md`; `Beaconless-v2-SPEC.md` (two banner lines); `IMPLEMENTATION-SEQUENCING.md` (banner clause); `DAPP_SDK_GUIDANCE.md` (maintained rows only — ARCHIVE body untouched); `README.md` (locked-property #2 + DSSO section); `PRE-LAUNCH-DECISIONS.md` §E1 (mechanism paragraph, dated revision note); `include/determ/chain/params.hpp` (MODERN-profile comment); `FROST_DEVIATION_NOTICE.md` §10 amendment (append-only). Historical records (2026-06-07 / 2026-07-07 entries, quarantined substrate sections, plan.md ristretto-era text) intentionally NOT rewritten.
 
 **Authority:** Stoyan Denev (owner decision relayed in-session 2026-07-15; recorded by Claude Fable at his direction — same recording pattern as the 2026-06-07 and 2026-07-07 entries).
+
+---
+
+## 2026-07-20 — DSSO settled: the paper's mutual-distrust IdP realized as threshold-OPAQUE; "DLT-A/-B" retired
+
+### Owner correction — the block-anchored assertion re-engineering is withdrawn; the design is the paper's, improved with OPAQUE + t-of-n
+
+**Question.** The 2026-07-15 entry recorded DSSO as "DLT-B": a t-of-n P-256 T-OPRF plus a *block-anchored DAPP_CALL assertion* whose truth reduced to a user credential signature verified via light-client block-sig + Merkle inclusion. On owner review that assertion mechanism was flagged as AI drift — a Determ-specific re-engineering, not the design of *Identity provider in an environment of mutual distrust* (academia.edu/80188125), which the owner had chosen to keep. What ships?
+
+**Decision (owner, 2026-07-20).** Keep the paper's design, improved only by the owner's two stated changes:
+
+1. **OPAQUE in place of the paper's SRP** — modern UC-secure aPAKE (OPRF blinding + precomputation-resistant envelope).
+2. **t-of-n, unordered in place of the paper's sequential all-node chain** — the OPRF is thresholdized (Shamir, user-dealt); the user broadcasts the blinded password and recombines any t responses in any order.
+
+The relying-party token is the **paper's dual-hash challenge-response** over the handshake-co-generated keys (`H2 = H(tenant_key, H1')`, RP compares) — **not** a signature, therefore **not** block-anchored and **not** FROST-co-signed. The paper co-signs nothing, so there was never a threshold-signature step: FROST is not merely dropped, it is structurally absent.
+
+**Withdrawn.** The 2026-06-07 "DLT-A" and 2026-07-15 "DLT-B" assertion designs (block-anchored DAPP_CALL + committee/user signatures). The "DLT-A/-B" labels are retired across the corpus.
+
+**Carried over (correct).** The t-of-n verifiable OPRF on the shipped P-256 RFC 9497 stack (§3.9b) — the only shipped stack with the required group operations — user-dealt Shamir shares + per-response DLEQ. An implementation substrate for the paper's threshold PAKE, not a change to the design.
+
+**FROST.** Reaffirmed: removed (2026-06-07), deleted (2026-07-09), and now explicit as **not required by this design at all**. The stale "composes with v2.10 FROST" clause (KR-5) in `v2.26-ROTATION-SPEC.md` is marked N/A (no DKG ceremony exists).
+
+**Provenance discipline (`FROST_DEVIATION_NOTICE.md` §4).** Corrects an AI-introduced drift (the block-anchored assertion) that had propagated into the spec + ~13 docs before owner review caught it — the same failure mode the FROST NOTICE records. NOTICE §11 appended.
+
+**Files updated.** `v2.25-DSSO-DAPP-SPEC.md` (rewritten to the paper); `v2.26-ROTATION-SPEC.md` (KR-5 -> N/A); README (locked-property 2, §527, §686), V1.1-PLAN, Improvements §8.1, CRYPTO-C99-SPEC, SECURITY, WHITEPAPER, Beaconless-v2-SPEC, IMPLEMENTATION-SEQUENCING, DAPP_SDK_GUIDANCE, PRE-LAUNCH §E1, params.hpp — "DLT-B" retired, block-anchoring replaced by the paper's hash challenge-response. Historical entries (2026-06-07, 2026-07-15) left intact.
+
+**Authority:** Stoyan Denev (owner decision relayed in-session 2026-07-20; recorded by Claude Fable at his direction).
+

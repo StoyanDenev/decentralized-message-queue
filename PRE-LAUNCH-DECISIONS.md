@@ -212,7 +212,7 @@ Several items below already have a spec-recommended answer — for those the rea
 
 ### E1. DSSO (Bundle A) — the shared identity substrate
 
-**[Mechanism revised 2026-07-15: DLT-A → DLT-B — `DECISION-LOG.md` 2026-07-15; spec `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`.]** DLT-B composition: t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack (joint password evaluation, per-share DLEQ-verified; user-dealt Shamir shares, no DKG) + block-anchored DAPP_CALL assertion (the chain's K-of-K block signature attests *inclusion*; assertion truth is anchored to the user's credential signature). Uses only already-shipped primitives — Ed25519, P-256 §3.9b, DAPP_CALL, light-client verifier — **zero new crypto**. Ships as a Theme-7 DApp, so it can iterate post-mainnet free of the no-migrations constraint, and multiple DSSO providers can federate. **~4–6 weeks.** Every DApp below authenticates through it.
+**[Mechanism settled 2026-07-20: the paper's mutual-distrust IdP, realized as threshold-OPAQUE — `DECISION-LOG.md` 2026-07-20; spec `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`.]** OPAQUE in place of the paper's SRP + a t-of-n, unordered threshold OPRF (any t of n servers, any order; no server below t learns the password) in place of the paper's sequential all-node chain; the RP token is the paper's hash challenge-response, so there is no threshold signature and no FROST. Uses only already-shipped primitives — Ed25519, P-256 §3.9b OPRF, SHA-256/HKDF, DAPP_REGISTER/DAPP_CALL — **zero new crypto**. Ships as a Theme-7 DApp, iterating post-mainnet free of the no-migrations constraint; multiple providers can federate. **~4-6 weeks.** Every DApp below authenticates through it.
 
 ### E2. Tier-1 DApps — DSSO + chain primitives (no zk-VM)
 
