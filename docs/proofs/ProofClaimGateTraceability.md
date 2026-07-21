@@ -40,11 +40,11 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
-**Remediation status: 11 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+**Remediation status: 12 of the 14 HIGH claims are now closed** — GW-2 (§3a),
 the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), the BFT-escalation arm
-T-1/T-2/PE-4 (§3c), CR-2 (§3d), and the two wire-sourced light-client sites
-**RP-3 and SU-2 (§3e)** — closed by a transparent RPC tampering proxy. Three
-HIGH remain: AL-3, SR-5, WH-2. **53 claims open overall.**
+T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
+**RP-3 and SU-2 (§3e)**, and **AL-3 (§3f)** — the unknown-tx-type fail-close.
+Two HIGH remain: SR-5, WH-2. **52 claims open overall.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -54,7 +54,7 @@ green:
 | ~~**T-C1, T-C3, T-C4, T-C5**~~ **CLOSED** | AbortCertificateSoundness | the abort-certificate quorum in `validator.cpp::check_abort_certs` — **gate shipped**, see §3b |
 | ~~PE-4~~ **CLOSED** | BFTProposerElectionSoundness | `b.bft_proposer != b.creators[expected_idx]` reject — **gate shipped**, see §3c |
 | ~~T-1, T-2~~ **CLOSED** | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` — **gate shipped**, see §3c |
-| AL-3 | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` |
+| ~~AL-3~~ **CLOSED** | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` — **gate shipped**, see §3f |
 | SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
 | ~~CR-2 / RP-3 / SU-2~~ **CLOSED** | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 via argv (§3d); RP-3/SU-2 via a tampering proxy against a lying daemon (§3e) |
@@ -272,6 +272,46 @@ proxy is reusable for any future wire-sourced cross-check (`--method`, dotted
 `--field`, `flip-hex`/`bump`/`set`). These are cluster-bound (need a bindable
 local node), so — like the other `*-trustless` tests — they run standalone, not
 in `ci_local`/FAST; both self-skip (exit 0) if the node cannot bootstrap.
+
+## 3f. AL-3 CLOSED — the unknown-tx-type fail-close in check_transactions
+
+`TxType` is an `enum class : uint8_t` with values 0..17, but
+`Transaction::from_json` casts any int **straight into the enum with no range
+check** (`src/chain/block.cpp`), so an out-of-range discriminator like `99`
+decodes cleanly off the wire and reaches the type `switch` inside
+`check_transactions` (gate 11 of `BlockValidator::validate`). The `default:`
+case is the only thing between an unrecognized type and a silently
+accepted-then-skipped transaction — and, as its own comment records, before this
+reject existed an unknown type **passed validation and no-op'd at apply**,
+diverging the validator's nonce simulation from apply (the W-1/S-039 hazard).
+
+Closed by **`determ test-al3-unknown-tx-type`** (`tools/test_al3_unknown_tx_type.sh`,
+FAST — in-process, no cluster). It drives `check_transactions` in isolation via
+the public `check_transactions_for_test` seam (`validator.hpp`) — that check
+reads only `b.transactions`, so no committee / block-sig / `tx_root` machinery is
+assembled. A tx from a genesis creator ("alice", real Ed25519 key) clears every
+pre-switch guard (registered non-zero sender, `amount`/`fee` small so no S-049
+overflow, non-anon so a valid signature is required, correct nonce) and differs
+between legs ONLY in the type byte:
+
+- **Positive control** — a KNOWN type (`TRANSFER`) reaches the switch and does
+  NOT yield the unknown-type message, proving the reject below is TYPE-triggered,
+  not a generic pre-switch failure of the fixture.
+- **AL-3 legs** — type `99` and type `255` are each rejected, and the reject's
+  **specific** `"unknown tx type"` message proves the switch was actually reached
+  (only `default:` emits it), i.e. the value decoded past `from_json` and every
+  pre-switch guard passed.
+
+*Falsify-on-mutant (executed, reverted via file backup; determ rebuilt).*
+
+| Mutation | Effect |
+|---|---|
+| `src/node/validator.cpp:1352` `default:` `return {false, "unknown tx type …"}` → `break;` | the unknown-type tx drops through the switch and the function returns `{true,""}` (accept); all three AL-3 legs flip RED while the positive control stays GREEN (4 pass → 1 pass / 3 fail) |
+
+The asymmetry is the usual one: the control pins that the fixture reaches and
+passes the switch on a known type (accept-narrowing), the negative legs pin that
+an unknown type is fail-closed (accept-widening). This gate runs in FAST on both
+platforms (it needs no bindable node), unlike the §3e cluster gates.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 

@@ -874,6 +874,11 @@ Additional in-process tests:
                                               + the BFT-escalation arm of
                                               check_block_sigs (bft_enabled guard,
                                               abort threshold, proposer identity)
+  determ test-al3-unknown-tx-type             AL-3 NEGATIVE gate — an out-of-range
+                                              TxType (99/255) decodes past from_json
+                                              and is fail-closed at check_transactions'
+                                              default: (control: a known type is not);
+                                              via the check_transactions_for_test seam
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -12118,6 +12123,96 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
 
+    if (cmd == "test-al3-unknown-tx-type") {
+        // AL-3 (AuditLayerSoundness): check_transactions' `default:` case
+        // fail-closes on an unknown / out-of-range TxType discriminator
+        // (src/node/validator.cpp — "unknown tx type ... (fail-closed)"). The
+        // TxType enum is 0..17, but Transaction::from_json casts any int STRAIGHT
+        // into the uint8_t-backed enum with NO range check (src/chain/block.cpp),
+        // so a value like 99 decodes cleanly off the wire and reaches the switch —
+        // this reject is the only thing between an unrecognized discriminator and
+        // a silently accepted-then-skipped transaction (the W-1/S-039 posture).
+        // Driven through the public `check_transactions_for_test` seam: the check
+        // reads only b.transactions, so no committee / block-sig / tx_root
+        // machinery is needed. Both-legs design (positive control + negative leg):
+        // a KNOWN type reaches the switch and does NOT hit `default:`; the
+        // out-of-range types do — the reject's SPECIFIC message proves the switch
+        // was reached, not a generic pre-switch failure.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // "alice" is a genesis creator, so NodeRegistry::build_from_chain registers
+        // her ed_pub and the tx signature verifies; she also holds a balance.
+        crypto::NodeKey key;
+        for (size_t i = 0; i < key.priv_seed.size(); ++i)
+            key.priv_seed[i] = uint8_t(0x40 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        GenesisConfig cfg;
+        cfg.chain_id = "al3-unknown-tx-type";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = key.pub;
+        c0.initial_stake = 1000; cfg.initial_creators = { c0 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 1000;
+        cfg.initial_balances.push_back(ga);
+        Chain chain; chain.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        BlockValidator v;
+
+        // Build a tx from alice that clears EVERY pre-switch guard in
+        // check_transactions (registered non-zero sender, amount/fee small so no
+        // S-049 overflow, non-anon so a real Ed25519 sig is required + valid,
+        // correct nonce) — differing ONLY in the type discriminator, so the
+        // switch outcome isolates the type dispatch.
+        auto run_type = [&](TxType t) -> BlockValidator::Result {
+            Transaction tx;
+            tx.type = t; tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1; tx.fee = 0; tx.nonce = 0;   // fresh account => next_nonce 0
+            auto sb = tx.signing_bytes();              // signing_bytes covers the type byte
+            tx.sig = crypto::sign(key, sb.data(), sb.size());
+            Block b; b.index = 1; b.transactions = { tx };
+            return v.check_transactions_for_test(b, chain, reg);
+        };
+
+        // POSITIVE CONTROL — a KNOWN type (TRANSFER = 0) reaches the switch and is
+        // NOT rejected by `default:`. Because the pre-switch guards are identical
+        // to the AL-3 legs, this proves the unknown-type reject below is
+        // TYPE-triggered, not a generic failure of the fixture.
+        {
+            auto r = run_type(TxType::TRANSFER);
+            check(r.error.find("unknown tx type") == std::string::npos,
+                  "CONTROL: a KNOWN type (TRANSFER) never yields the unknown-type reject");
+        }
+
+        // AL-3 negative leg — an out-of-range discriminator (99) is fail-closed at
+        // `default:`. The SPECIFIC "unknown tx type" message proves the switch was
+        // reached (only `default:` emits it), i.e. the type decoded past from_json
+        // and every pre-switch guard passed.
+        {
+            auto r = run_type(static_cast<TxType>(99));
+            check(!r.ok,
+                  "AL-3: an unknown tx-type (99) is REJECTED by check_transactions");
+            check(r.error.find("unknown tx type") != std::string::npos,
+                  "AL-3: the reject is the `default:` unknown-tx-type fail-close");
+        }
+
+        // A second out-of-range value (255) — the whole out-of-enum range is
+        // fail-closed, not one magic constant.
+        {
+            auto r = run_type(static_cast<TxType>(255));
+            check(!r.ok && r.error.find("unknown tx type") != std::string::npos,
+                  "AL-3: a second out-of-range type (255) is also fail-closed");
+        }
+
+        std::cout << (fail ? "  FAIL: test-al3-unknown-tx-type\n"
+                           : "  PASS: test-al3-unknown-tx-type\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-s036-merge-witness") {
         // D3.7 / S-036 falsifier: the D3.6 MERGE_BEGIN historical-witness admission
         // gate. On a BEACON, a MERGE_BEGIN is accepted ONLY when the committed `t:`
