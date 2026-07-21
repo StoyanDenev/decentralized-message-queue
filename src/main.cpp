@@ -12448,6 +12448,21 @@ int main(int argc, char** argv) {
             auto r2 = run(recs, T, 20, ChainRole::BEACON, 0);
             check(r1.ok && r2.ok, "A2: genuine-accept is deterministic (twice identical)");
         }
+        {   // STMC-5 (ShardTipMergeClosureSoundness): window-terminus u64-overflow
+            //   fail-close. evidence_window_start is ATTACKER-CONTROLLED; setting it
+            //   to UINT64_MAX makes `evidence_window_start + merge_threshold_blocks`
+            //   WRAP, which without the guard (validator.cpp:922) yields a silently
+            //   EMPTY [start, start+T) window — the loop bound is < start, so zero
+            //   heights are checked and a merge that proves NOTHING is admitted. The
+            //   guard must reject first. Same records as scenario A (ACCEPTED at
+            //   window 0), so ONLY window_start differs — the overflow guard is the
+            //   sole cause of the flip (A is the built-in positive control).
+            std::vector<ShardTipRecord> recs;
+            for (uint64_t h = 0; h < T; ++h) recs.push_back(mkrec(0, h, 3));
+            auto r = run(recs, T, 20, ChainRole::BEACON, UINT64_MAX);
+            check(!r.ok && r.error.find("overflows u64") != std::string::npos,
+                  "STMC-5: window terminus overflow (window_start=UINT64_MAX) REJECTED");
+        }
 
         std::cout << (fail == 0 ? "PASS" : "FAIL")
                   << ": s036-merge-witness "

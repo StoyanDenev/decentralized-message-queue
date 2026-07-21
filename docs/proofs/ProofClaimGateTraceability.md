@@ -48,11 +48,11 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
 executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
 tiers the original run recorded only as counts — 34 confirmed unenforced
-MED/LOW gaps (4 more were re-examined and found already-gated) — and three MEDs
+MED/LOW gaps (4 more were re-examined and found already-gated) — and four MEDs
 are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
-(§3j)** the reward-path overflow guard, and **AL-5 (§3k)** audit-map crash/
-rollback atomicity (SB-3 and AL-5 both gated in FAST on both platforms).
-**31 MED/LOW open; zero HIGH.**
+(§3j)** the reward-path overflow guard, **AL-5 (§3k)** audit-map crash/rollback
+atomicity, and **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close (SB-3,
+AL-5, STMC-5 all gated in FAST on both platforms). **30 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -505,6 +505,32 @@ The lazy-snapshot capture (`__ensure_audit_keys` / `__ensure_audit_log_count`
 before the first mutation) is what makes the pre-block map recoverable; this gate
 is the executed witness that the capture *and* the restore are both load-bearing.
 
+## 3l. STMC-5 CLOSED — the merge-window u64-overflow fail-close (a FAST consensus gate)
+
+`ShardTipMergeClosureSoundness.md` STMC-5: a `MERGE_BEGIN` admission is
+uniform-fail-closed on a `u64`-overflowing window terminus — the guard at
+`validator.cpp:922-925` rejects an `evidence_window_start` where
+`evidence_window_start + merge_threshold_blocks` wraps. `evidence_window_start`
+is **attacker-controlled** (it rides the `MergeEvent` payload). Without the guard,
+setting it to `UINT64_MAX` wraps the terminus so the witness loop
+`for (h = start; h < start + T; ++h)` runs **zero** iterations — a silently EMPTY
+window — and a merge admission that proves *nothing* (no committed sub-2K distress)
+slips through. The consequence is an unjustified shard merge on a BEACON.
+
+Closed by **extending `determ test-s036-merge-witness`** (`tools/test_s036_merge_witness.sh`,
+FAST both platforms — no new subcommand; the subcommand's `run(...)` helper already
+takes `window_start`). One scenario reusing scenario A's genuine sub-2K records
+(ACCEPTED at `window_start = 0`, the built-in positive control) with only
+`window_start` flipped to `UINT64_MAX`, asserting `!r.ok` **and** the reject detail
+contains `"overflows u64"` — so the overflow guard is the sole cause of the flip,
+not an incidental later gate.
+
+*Falsify-on-mutant (executed, reverted via `git checkout`; determ rebuilt).*
+Neutering the guard condition at `validator.cpp:923` (`&& false`) makes the
+wrapped-empty window slip through: the STMC-5 assertion flips RED (the merge is no
+longer rejected with `"overflows u64"`) while scenario A — the positive control at
+`window_start = 0` — and every other scenario stay green.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -564,9 +590,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k) are now closed** — leaving 31.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l) are now closed** — leaving 30.
 
-### 6.1 Confirmed unenforced MED/LOW claims (31 open + SP-2, SB-3, AL-5 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (30 open + SP-2, SB-3, AL-5, STMC-5 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -580,7 +606,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k) are now closed** — leaving 
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
 | 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | open | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
 | 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | open | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
-| 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | open | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
+| 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | **CLOSED §3l** | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
 | 12 | DR-2 | DAppRegistryReadSoundness | MED | moderate | open | SURVIVING MUTATION: light/main.cpp:6944 `if (proof_value_hash != expected_value_hash){ verdict=UNVERIFIABLE; ... }` -> `if (false){ ... }` survives EV |
 | 13 | MPC-3 | MultiPeerCrossCheckSoundness | MED | moderate | open | Surviving mutation: in light/main.cpp cmd_cross_check (lines 2103-2131) replace the by_height intra-group comparison with a loop that compares every p |
 | 14 | SS-5 | StreamingSubscriptionSoundness | MED | moderate | open | SURVIVING MUTANT: in src/rpc/rpc.cpp handle_session (~line 171-204), hoist the `req.value("method","")=="dapp_subscribe"` takeover branch ABOVE the `v |

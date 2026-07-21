@@ -368,12 +368,25 @@ invokes the seam and FAST is unchanged by its presence.
 
 **Excluded failure.** A test-only accessor silently altering the validated path,
 or an unexercised (untested) fail-close branch shipping as dead code. The seam is a
-pure forwarder and the eight scenarios drive every arm of the BEGIN witness loop.
+pure forwarder and the nine scenarios drive every arm of the BEGIN witness loop
+*plus* the pre-loop `u64`-overflow guard (the STMC-5 leg, register §3l).
 
 **Witness.** The `test-s036-merge-witness` subcommand itself (STMC-5), constructing
 a genesis `BEACON+EXTENDED` validator (`k=2 ⇒ 2K=4`), injecting `t:` records via the
 public `add_shard_tip_record`, and driving one signed MERGE_BEGIN through
 `check_transactions_for_test` per scenario.
+
+**Gate (executed) — the overflow leg (register STMC-5, `ProofClaimGateTraceability.md`
+§3l).** `evidence_window_start` is attacker-controlled; setting it to `UINT64_MAX`
+makes `evidence_window_start + merge_threshold_blocks` **wrap**, which without the
+guard (`validator.cpp:922-925`) yields a silently EMPTY `[start, start+T)` window —
+the loop bound is `< start`, so zero heights are checked and a merge that proves
+nothing is admitted. The STMC-5 scenario reuses scenario A's genuine sub-2K records
+(ACCEPTED at window 0, the built-in positive control) and flips ONLY `window_start`
+to `UINT64_MAX`, asserting the reject carries the `"overflows u64"` diagnostic —
+so the overflow guard is the sole cause. *Falsify-on-mutant:* neutering the guard
+condition at `validator.cpp:923` makes the wrapped-empty window slip through — the
+STMC-5 assertion flips RED while scenario A stays green.
 
 ---
 
