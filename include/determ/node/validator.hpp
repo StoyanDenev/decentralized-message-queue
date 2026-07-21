@@ -104,6 +104,17 @@ public:
         return check_cross_shard_receipts(b, chain);
     }
 
+    // T-3 test seam (ConsensusPhaseStructureSoundness, derivation determinism):
+    // run the commit-reveal derivation check in isolation — same const-forwarder
+    // pattern as the three seams above. check_delay reads ONLY b (no chain, no
+    // registry), so this isolates the gate from the other 16 validate() checks
+    // and lets the falsifier tamper b.delay_seed / b.delay_output and assert the
+    // SPECIFIC reject without assembling a fully-signed committee block (whose
+    // later block-sig/digest gates would otherwise mask a clean positive control).
+    Result check_delay_for_test(const chain::Block& b) const {
+        return check_delay(b);
+    }
+
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
     // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
     // accepted (unchanged). false = all three rejected at this (authoritative,

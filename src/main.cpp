@@ -32739,6 +32739,75 @@ int main(int argc, char** argv) {
                   "check_block_sigs");
         }
 
+        // === T-3 (derivation determinism): check_delay commit-reveal =========
+        // Closes FA-Phase T-3 of ConsensusPhaseStructureSoundness. check_delay
+        // (8th of 17 validate() gates) re-derives BOTH delay_seed (from
+        // index/prev_hash/tx_root/creator_dh_inputs) and delay_output
+        // (= compute_block_rand(delay_seed, creator_dh_secrets)) and rejects a
+        // block whose STORED values are not canonical. Before this, no test-*
+        // drove check_delay: mutating validator.cpp:446 (delay_output compare)
+        // or :433 (delay_seed compare) to `if (false)` passed the whole suite.
+        //
+        // Driven through the check_delay_for_test seam, NOT validate():
+        // check_delay reads only b, so the seam isolates the gate AND makes the
+        // positive control observable (the honest hand-built block does not
+        // survive the later block-sig/digest gates, so its clean PASS is
+        // reachable only via the seam). Substring-specific asserts discriminate
+        // the two legs — see the delay_seed note below.
+        {
+            // Honest, self-consistent commit-reveal block: build_block sets
+            //   delay_seed   = compute_delay_seed(index,prev,tx_root,dh_inputs)
+            //   delay_output = compute_block_rand(delay_seed, dh_secrets)
+            // and pushes one dh_secret per creator (satisfies check_delay's
+            // creator_dh_secrets.size()==creators.size() guard).
+            Block base = build_block(aborting, evh,
+                                     mk_claims(claimers, aborting, 1), 1);
+
+            // POSITIVE CONTROL: the canonical delay pair clears check_delay.
+            {
+                auto r = bv.check_delay_for_test(base);
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "T-3 control: a canonical delay_seed/delay_output block "
+                      "clears check_delay");
+            }
+
+            // NEG LEG 1: tamper delay_output only -> "delay_output mismatch".
+            // Falsifies validator.cpp:446 `if (expected_output != b.delay_output)`
+            // -> `if (false)`: that mutant returns {true,""} here, dropping the
+            // substring and turning this leg RED.
+            {
+                Block b = base;
+                b.delay_output[0] ^= 0x01;
+                auto r = bv.check_delay_for_test(b);
+                bool hit = !r.ok &&
+                    r.error.find("delay_output mismatch") != std::string::npos;
+                if (!hit) std::cout << "    got: [" << r.error << "]\n";
+                check(hit,
+                      "T-3: a non-canonical delay_output is rejected "
+                      "(commit-reveal)");
+            }
+
+            // NEG LEG 2: tamper delay_seed only -> "delay_seed mismatch".
+            // Falsifies validator.cpp:433 `if (expected_seed != b.delay_seed)`
+            // -> `if (false)`: under that mutant the tampered seed is NOT caught
+            // at :433; it flows to :445 where expected_output is recomputed from
+            // the TAMPERED seed and differs from the honest b.delay_output, so
+            // the reject becomes "delay_output mismatch" — NOT "delay_seed
+            // mismatch". The substring-specific assert therefore goes RED,
+            // which is exactly the falsification signal.
+            {
+                Block b = base;
+                b.delay_seed[0] ^= 0x01;
+                auto r = bv.check_delay_for_test(b);
+                bool hit = !r.ok &&
+                    r.error.find("delay_seed mismatch") != std::string::npos;
+                if (!hit) std::cout << "    got: [" << r.error << "]\n";
+                check(hit,
+                      "T-3: a non-canonical delay_seed is rejected");
+            }
+        }
+
         std::cout << (fail ? "  FAIL: test-abort-cert-validation\n"
                            : "  PASS: test-abort-cert-validation\n");
         return fail ? 1 : 0;

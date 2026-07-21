@@ -48,11 +48,12 @@ T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
 the light-client `--wait` no-re-fetch/no-race neutrality, by a moving-daemon
 executed mutant. A **2026-07-21 reconstruction (§6)** re-enumerated the lower
 tiers the original run recorded only as counts — 34 confirmed unenforced
-MED/LOW gaps (4 more were re-examined and found already-gated) — and four MEDs
+MED/LOW gaps (4 more were re-examined and found already-gated) — and five MEDs
 are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
 (§3j)** the reward-path overflow guard, **AL-5 (§3k)** audit-map crash/rollback
-atomicity, and **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close (SB-3,
-AL-5, STMC-5 all gated in FAST on both platforms). **30 MED/LOW open; zero HIGH.**
+atomicity, **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close, and
+**T-3 (§3m)** the commit-reveal delay-derivation check (SB-3, AL-5, STMC-5, T-3
+all gated in FAST on both platforms). **29 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -531,6 +532,38 @@ wrapped-empty window slip through: the STMC-5 assertion flips RED (the merge is 
 longer rejected with `"overflows u64"`) while scenario A — the positive control at
 `window_start = 0` — and every other scenario stay green.
 
+## 3m. T-3 CLOSED — the commit-reveal delay derivation check (a FAST consensus gate)
+
+`ConsensusPhaseStructureSoundness.md` T-3 (derivation determinism): `check_delay`
+(the 8th of `validate()`'s gates) re-derives BOTH `delay_seed`
+(= `SHA256(index‖prev_hash‖tx_root‖ordered dh_inputs)`) and `delay_output`
+(= `SHA256(delay_seed‖ordered secrets)`) and rejects a block whose stored values
+are not the canonical functions of the authenticated Phase-1/Phase-2 inputs. No
+`test-*` drove `check_delay`: mutating either compare (`validator.cpp:446`
+`delay_output` / `:433` `delay_seed`) to `if (false)` passed the whole suite — a
+producer could then ship a non-canonical `delay_output` (the block randomness `R`)
+and honest nodes would accept it.
+
+Closed by **extending `determ test-abort-cert-validation`** (`tools/test_abort_cert_validation.sh`,
+FAST both platforms — no new subcommand; its real-key fixture already builds a
+block with a canonical commit-reveal pair). Added one public const seam
+`BlockValidator::check_delay_for_test(const Block&)` (the fourth `*_for_test`
+forwarder, byte-neutral to production). Three assertions: a positive control (the
+honest pair clears `check_delay` — observable *only* via the seam, since the
+hand-built block would fail the later block-sig/digest gates of full `validate()`,
+the recurring "key the control on the gate, not the pipeline" lesson) and two
+negative legs (a one-byte-tampered `delay_output` → `"delay_output mismatch"`; a
+tampered `delay_seed` → `"delay_seed mismatch"`).
+
+*Falsify-on-mutant (executed, BOTH compares independently, each reverted).*
+`:446 → if(false)` flips ONLY the delay_output leg RED (control + seed leg green);
+`:433 → if(false)` flips ONLY the delay_seed leg RED — the tampered seed falls
+through to `:446`, which emits `"delay_output mismatch"` (not the seed-specific
+string), so the substring-keyed leg goes red while the control and delay_output
+leg stay green. Each compare is therefore independently gated. (This round used a
+parallel design workflow to pre-verify the fixture's reachability and the
+delay_seed fall-through before implementation.)
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -590,9 +623,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l) are now closed** — leaving 30.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m) are now closed** — leaving 29.
 
-### 6.1 Confirmed unenforced MED/LOW claims (30 open + SP-2, SB-3, AL-5, STMC-5 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (29 open + SP-2, SB-3, AL-5, STMC-5, T-3 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -604,7 +637,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l) are now closed
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
 | 7 | AL-5 | AuditLayerSoundness | MED | trivial | **CLOSED §3k** | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
-| 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | open | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
+| 9 | T-3 | ConsensusPhaseStructureSoundness | MED | trivial | **CLOSED §3m** | Surviving mutation: validator.cpp:446 `if (expected_output != b.delay_output) return {false,"delay_output mismatch (commit-reveal)"}` -> `if (false) . |
 | 10 | PCL-1 | ParamChangeLintSoundness | MED | trivial | open | Surviving mutation: add "NEW_SCALAR" to the validator's kWhitelist literal at src/node/validator.cpp:784-789 (a trivially-compilable one-line std::set |
 | 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | **CLOSED §3l** | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
 | 12 | DR-2 | DAppRegistryReadSoundness | MED | moderate | open | SURVIVING MUTATION: light/main.cpp:6944 `if (proof_value_hash != expected_value_hash){ verdict=UNVERIFIABLE; ... }` -> `if (false){ ... }` survives EV |
