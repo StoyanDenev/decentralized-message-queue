@@ -154,6 +154,8 @@ Because (a) already bars any cross-chain replay structurally, (b) is a defense-i
 
 By SR-1 the producer's `ρ_{S,salt}(r.to)` and every receiver's `ρ_{S,salt}(r.to)` are the *same* value. This is exactly the producer-receiver routing-agreement premise that FA7's exactly-one-receipt theorem (`CrossShardReceipts.md` §61, the `r.dst_shard == shard_id_for_address(tx.to, …)` clause) and FA8's receipt-verification argument (`RegionalSharding.md` §3.4) take as given. SR-5 discharges it. ∎
 
+**Executed gate.** SR-5's misroute reject is gated by `determ test-sr5-misroute-receipt` (`tools/test_sr5_misroute_receipt.sh`, FAST, both platforms): a receipt with `dst_shard ≠ ρ(to)` (and a second leg claiming the producer's own shard) is rejected by `check_cross_shard_receipts` with a `"dst_shard mismatch"` — driven via the `check_cross_shard_receipts_for_test` seam — while a correctly-routed control is accepted; the falsify (deleting the reject) lets the misrouted receipt through (`A_misroute` succeeds). See `ProofClaimGateTraceability.md` §3g.
+
 **Corollary SR-5.1.** A routing-grind adversary choosing `a` to land on a target shard `j` exercises only the public function `ρ` on its *own* addresses; by SR-2 the result is a single in-range shard, by SR-5 every node agrees on it, and by SR-1 the choice is fixed once `a` is fixed. The adversary cannot (i) make a single transfer route to two shards (SR-2 single-valuedness), (ii) misroute another party's `to` address (SR-1 — routing depends only on `a`, not on who submits the tx), or (iii) cause a receiver to admit a receipt for an address it does not own (SR-5). The only "gain" is choosing the home shard of the adversary's own funds — a load-placement choice bounded in aggregate effect by SR-3. ∎
 
 ---

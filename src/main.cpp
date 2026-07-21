@@ -879,6 +879,12 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-sr5-misroute-receipt            SR-5 NEGATIVE gate — a cross-shard
+                                              receipt with dst_shard != ρ(to) is
+                                              REJECTED by check_cross_shard_receipts
+                                              (receiver recomputes ρ; control: a
+                                              correctly-routed receipt is accepted);
+                                              via check_cross_shard_receipts_for_test
   determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
@@ -12211,6 +12217,106 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-al3-unknown-tx-type\n"
                            : "  PASS: test-al3-unknown-tx-type\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-sr5-misroute-receipt") {
+        // SR-5 (ShardRoutingSoundness, Theorem SR-5 — misroute detection): a block
+        // claiming a cross-shard receipt whose dst_shard != ρ_{S,salt}(to) is
+        // rejected by check_cross_shard_receipts (validator.cpp) — the receiver
+        // recomputes ρ from (to, shard_count, salt) rather than trusting the
+        // producer's claimed dst_shard. Without this, an A_misroute adversary could
+        // redirect another party's funds to a shard of its choosing. Driven through
+        // the public check_cross_shard_receipts_for_test seam (2-arg, no registry:
+        // the check reads only b + chain). Both-legs: a correctly-routed receipt is
+        // ACCEPTED; a misrouted one is REJECTED at the dst_shard gate.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Multi-shard chain (shard_count=4, my_shard_id=0, all-zero salt).
+        GenesisConfig cfg;
+        cfg.chain_id = "sr5-misroute";
+        GenesisCreator alice_c; alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0; cfg.initial_creators = { alice_c };
+        GenesisAllocation ab; ab.domain = "alice"; ab.balance = 1000;
+        cfg.initial_balances = { ab };
+        Chain c; c.append(make_genesis_block(cfg));
+        Hash salt{};                                 // all-zero salt
+        c.set_shard_routing(4, salt, ShardId{0});    // shard_count=4, my_shard_id=0
+
+        // Pick a `to` that routes to a shard != 0 (so the tx is cross-shard), and
+        // compute the CORRECT destination via the SAME ρ the validator recomputes.
+        std::string remote;
+        for (int i = 0; i < 256 && remote.empty(); ++i) {
+            char buf[8]; std::snprintf(buf, sizeof(buf), "addr%02x", i);
+            std::string a = buf;
+            if (crypto::shard_id_for_address(a, 4, salt) != ShardId{0}) remote = a;
+        }
+        check(!remote.empty(), "setup: found a cross-shard `to` address (routes to shard != 0)");
+        ShardId correct_dst = crypto::shard_id_for_address(remote, 4, salt);
+
+        Transaction tx;
+        tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = remote;
+        tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+        tx.hash = tx.compute_hash();
+
+        // One receipt maker: everything matches the tx + passes the src_shard /
+        // size / src_block_index / field-match guards; only dst_shard varies, so
+        // the switch outcome isolates the dst_shard recompute gate.
+        auto make_receipt = [&](ShardId dst) {
+            CrossShardReceipt r;
+            r.src_shard = 0;                 // == my_shard_id → passes the src_shard gate
+            r.dst_shard = dst;               // the field under test
+            r.src_block_index = 1;           // == b.index
+            r.tx_hash = tx.hash; r.from = tx.from; r.to = tx.to;
+            r.amount = tx.amount; r.fee = tx.fee; r.nonce = tx.nonce;
+            return r;
+        };
+        BlockValidator v;
+
+        // POSITIVE CONTROL — dst == ρ(to) is ACCEPTED (proves the fixture reaches
+        // and passes the whole receipt check on a correctly-routed receipt).
+        {
+            Block b; b.index = 1; b.transactions = { tx };
+            b.cross_shard_receipts = { make_receipt(correct_dst) };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(r.ok,
+                  "CONTROL: a correctly-routed receipt (dst == ρ(to)) is ACCEPTED");
+        }
+
+        // SR-5 NEGATIVE — a misrouted dst is REJECTED at the dst_shard gate. The
+        // SPECIFIC "dst_shard mismatch" message proves the recompute gate fired,
+        // not the earlier src_shard / size guards (identical between the legs).
+        {
+            ShardId wrong_dst = (correct_dst + 1u) % 4u;  // any value != correct_dst
+            Block b; b.index = 1; b.transactions = { tx };
+            b.cross_shard_receipts = { make_receipt(wrong_dst) };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(!r.ok,
+                  "SR-5: a misrouted receipt (dst != ρ(to)) is REJECTED");
+            check(r.error.find("dst_shard mismatch") != std::string::npos,
+                  "SR-5: the reject is the dst_shard-recompute mismatch gate");
+        }
+
+        // A second wrong value (my own shard, 0) — the receiver never trusts a
+        // claimed dst, whatever it is.
+        {
+            Block b; b.index = 1; b.transactions = { tx };
+            b.cross_shard_receipts = { make_receipt(ShardId{0}) };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(!r.ok && r.error.find("dst_shard mismatch") != std::string::npos,
+                  "SR-5: claiming dst = my own shard (0) is also REJECTED");
+        }
+
+        std::cout << (fail ? "  FAIL: test-sr5-misroute-receipt\n"
+                           : "  PASS: test-sr5-misroute-receipt\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-s036-merge-witness") {

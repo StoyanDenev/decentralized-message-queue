@@ -95,6 +95,15 @@ public:
         return check_shardtip_witnesses(b, chain, registry);
     }
 
+    // SR-5 test seam: run the cross-shard-receipt misroute check in isolation
+    // (same const-forwarder pattern) so the falsifier can drive a receipt whose
+    // dst_shard != ρ(to) without assembling a fully-signed committee block. Note
+    // the 2-arg signature (no NodeRegistry) — the check reads only b + chain.
+    Result check_cross_shard_receipts_for_test(const chain::Block& b,
+                                               const chain::Chain& chain) const {
+        return check_cross_shard_receipts(b, chain);
+    }
+
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
     // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
     // accepted (unchanged). false = all three rejected at this (authoritative,

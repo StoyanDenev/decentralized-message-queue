@@ -40,11 +40,13 @@ ratchet checks is prose, and a check that cannot fail certifies nothing.*
 large and mostly well-gated; these are the residue that survived an
 assume-it-is-enforced verifier.
 
-**Remediation status: 12 of the 14 HIGH claims are now closed** — GW-2 (§3a),
+**Remediation status: 13 of the 14 HIGH claims are now closed** — GW-2 (§3a),
 the abort-certificate cluster T-C1/T-C3/T-C4/T-C5 (§3b), the BFT-escalation arm
 T-1/T-2/PE-4 (§3c), CR-2 (§3d), the two wire-sourced light-client sites
-**RP-3 and SU-2 (§3e)**, and **AL-3 (§3f)** — the unknown-tx-type fail-close.
-Two HIGH remain: SR-5, WH-2. **52 claims open overall.**
+**RP-3 and SU-2 (§3e)**, **AL-3 (§3f)** — the unknown-tx-type fail-close — and
+**SR-5 (§3g)** — the cross-shard receipt misroute reject. **One HIGH remains:
+WH-2** (the light-client `--wait` no-re-fetch/no-race neutrality, which needs a
+moving-daemon executed mutant). **51 claims open overall.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -55,7 +57,7 @@ green:
 | ~~PE-4~~ **CLOSED** | BFTProposerElectionSoundness | `b.bft_proposer != b.creators[expected_idx]` reject — **gate shipped**, see §3c |
 | ~~T-1, T-2~~ **CLOSED** | S025BFTEscalationSoundness | the `bft_enabled_` genesis guard and the escalation-threshold arm in `check_block_sigs` — **gate shipped**, see §3c |
 | ~~AL-3~~ **CLOSED** | AuditLayerSoundness | the `default:` unknown-tx-type reject in `check_transactions` — **gate shipped**, see §3f |
-| SR-5 | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject |
+| ~~SR-5~~ **CLOSED** | ShardRoutingSoundness | the receipt `dst_shard` mismatch reject — **gate shipped**, see §3g |
 | ~~GW-2~~ **CLOSED** | GovernanceWhitelistSoundness | the exact-width `value.size() != 8` decode guard — **gate shipped**, see §3a |
 | ~~CR-2 / RP-3 / SU-2~~ **CLOSED** | CompositeStateRead / RegistrantProof / SupplyProof | the light client's **value-hash cleartext cross-check** — CR-2 via argv (§3d); RP-3/SU-2 via a tampering proxy against a lying daemon (§3e) |
 | WH-2 | WaitHoldAndWaitSoundness | (verified by an *executed* mutant build, not inspection) |
@@ -312,6 +314,44 @@ The asymmetry is the usual one: the control pins that the fixture reaches and
 passes the switch on a known type (accept-narrowing), the negative legs pin that
 an unknown type is fail-closed (accept-widening). This gate runs in FAST on both
 platforms (it needs no bindable node), unlike the §3e cluster gates.
+
+## 3g. SR-5 CLOSED — the cross-shard receipt misroute reject
+
+`ShardRoutingSoundness.md` Theorem SR-5 (misroute detection): a block claiming a
+cross-shard receipt whose `dst_shard ≠ ρ_{S,salt}(to)` must be rejected — the
+receiver **recomputes** the destination shard from `(to, shard_count, salt)`
+rather than trusting the producer's claimed `dst_shard`. This is the
+`A_misroute` defense (threat table §4.5): without it a block producer could
+redirect another party's funds to a shard of its choosing. The enforcing check
+is `BlockValidator::check_cross_shard_receipts` (gate 12,
+`src/node/validator.cpp`), whose `dst_shard` comparison had no negative test.
+
+Closed by **`determ test-sr5-misroute-receipt`**
+(`tools/test_sr5_misroute_receipt.sh`, FAST — in-process, both platforms). Like
+AL-3 it drives the check in isolation via a new public const-forwarder seam
+`check_cross_shard_receipts_for_test` (`validator.hpp`, 2-arg — the check reads
+only `b + chain`, no `NodeRegistry`). A shard-count-4 chain, a cross-shard
+`TRANSFER` whose `to` routes off shard 0, and one receipt matching the tx in
+every field; the legs differ ONLY in `dst_shard`:
+
+- **Positive control** — `dst == ρ(to)` is ACCEPTED, proving the fixture reaches
+  and passes the whole receipt check (size + `src_shard` + `src_block_index` +
+  field-match) on a correctly-routed receipt.
+- **SR-5 legs** — `dst = correct+1` and `dst = 0` (my own shard) are each
+  REJECTED with the **specific** `"dst_shard mismatch"` message, which proves the
+  `dst_shard`-recompute gate fired and not the earlier `src_shard`/size guards
+  (identical between the legs).
+
+*Falsify-on-mutant (executed, reverted via file backup; determ rebuilt).*
+
+| Mutation | Effect |
+|---|---|
+| `src/node/validator.cpp` — delete the `if (r.dst_shard != ρ(tx.to,…)) return {false, "…dst_shard mismatch"}` reject | the misrouted receipt passes through to acceptance (`A_misroute` succeeds); all three SR-5 legs flip RED while the correctly-routed control stays GREEN |
+
+The one delta from AL-3: SR-5 required **adding** a test seam (AL-3 reused an
+existing one), kept a pure byte-neutral const forwarder. Same accept-widening
+asymmetry: the control pins that a correct route is accepted, the negative legs
+pin that an incorrect route is rejected.
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
