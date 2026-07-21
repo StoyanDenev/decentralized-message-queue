@@ -526,13 +526,17 @@ In-process tests (deterministic, no network):
                                               (P-256, SHA-256) protocol —
                                               blind/evaluate/finalize + DLEQ
                                               reject paths (vectors via §3.13)
-  determ test-dsso-threshold-oprf             DSSO Bundle-A G1/G2 (v2.25-DSSO
+  determ test-dsso-threshold-oprf             DSSO Bundle-A G1/G2/G3 (v2.25-DSSO
                                               §4/§9): t-of-n UNORDERED threshold
                                               OPRF — Lagrange over every t-subset
                                               == direct k·B (G1), per-response
                                               DLEQ reject + load-bearing (G2),
-                                              < t cannot reconstruct; over the
-                                              shipped P-256 stack, zero new primitive
+                                              < t cannot reconstruct; + the
+                                              credential envelope AEAD_{HKDF(y)}
+                                              unseals with the t-of-n-recovered y,
+                                              wrong password rejects, both profiles
+                                              (G3); shipped P-256/AEAD/HKDF, zero
+                                              new primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -13786,10 +13790,99 @@ int main(int argc, char** argv) {
                   "(the DLEQ check is load-bearing, not decorative)");
         }
 
+        // === G3: the credential envelope, composed with the t-of-n login =====
+        // Spec §3 registration step 3 + §9 G3: envelope = AEAD_{HKDF(y)}(cred).
+        // The AEAD key is derived from the OPRF output y, so the credential
+        // unseals with the y recovered from ANY t-of-n login (this is the whole
+        // point of the threshold OPRF — the composition with G1), and a WRONG
+        // password's y fails the AEAD tag. ZERO new production surface: HKDF and
+        // both AEADs are already shipped + KAT-gated (test-*-c99); the OPRF
+        // output y comes from the same combine G1 proves identical per subset.
+        // Round-trip / password-binding gate — NOT the OPAQUE aPAKE handshake
+        // (that is the ceremony, spec §4/§5, a later Bundle-A increment); the
+        // production HKDF-info / nonce wire params are pinned at that increment.
+        {
+            const char   INFO[]  = "determ-dsso-envelope-v1";
+            const size_t INFOLEN = sizeof(INFO) - 1;
+            uint8_t cred[32];
+            for (int i = 0; i < 32; ++i) cred[i] = (uint8_t)(0xa0 ^ i);  // the secret to protect
+            auto env_key = [&](uint8_t K[32], const uint8_t y[32]) {
+                return determ_hkdf_sha256(nullptr, 0, y, 32,
+                                          (const uint8_t*)INFO, INFOLEN, K, 32) == 0;
+            };
+
+            // A WRONG password's OPRF output (same key k, different input) —
+            // must NOT open the envelope.
+            uint8_t y_wrong[32];
+            {
+                const uint8_t* pw2 = (const uint8_t*)"WRONG-password";
+                uint8_t bw[32]; std::memset(bw, 0, 32); bw[31] = 0x0e; bw[7] = 0x22;
+                uint8_t Bw[33], Zw[33];
+                bool ok = determ_p256_oprf_blind(Bw, pw2, 14, bw, 0x01) == 0
+                       && determ_p256_oprf_evaluate(Zw, coeff[0], Bw) == 0
+                       && determ_p256_oprf_finalize(y_wrong, pw2, 14, bw, Zw) == 0;
+                check(ok && std::memcmp(y_wrong, yref, 32) != 0,
+                      "G3 setup: a wrong password yields a DIFFERENT OPRF output");
+            }
+
+            // A real t-of-n login recovers y (via the threshold combine) — feed
+            // THOSE bytes to HKDF, so G3 genuinely exercises the G1 composition.
+            uint8_t y_login[32];
+            {
+                const int t = 3, n = 5;
+                uint8_t xs[8][32], ki[8][32], Zi33[8][33];
+                for (int i = 0; i < n; ++i) {
+                    sc_u32(xs[i], (uint32_t)(i + 1));
+                    poly_eval(ki[i], t, xs[i]);
+                    determ_p256_oprf_evaluate(Zi33[i], ki[i], B33);
+                }
+                int sub[3] = {1, 3, 4};                 // an arbitrary t-subset
+                uint8_t Zc33[33];
+                bool ok = combine(Zc33, Zi33, xs, sub, 3)
+                       && determ_p256_oprf_finalize(y_login, input, ilen, blind, Zc33) == 0;
+                check(ok && std::memcmp(y_login, yref, 32) == 0,
+                      "G3 setup: a t-of-n login recovers the reference OPRF output y");
+            }
+
+            auto run_profile = [&](const char* name, bool fips) {
+                uint8_t Kseal[32], Klogin[32], Kwrong[32];
+                env_key(Kseal, yref);      // registration seals under y
+                env_key(Klogin, y_login);  // login unseals under the recovered y
+                env_key(Kwrong, y_wrong);  // attacker's wrong-password key
+                uint8_t nonce[24]; std::memset(nonce, 0, 24); nonce[0] = 0x5e;
+                uint8_t ct[32], tag[16], rec[32], rec2[32];
+                bool sealed = false, opened = false, wrong_rejected = false;
+                if (!fips) {               // MODERN: XChaCha20-Poly1305 (24-byte nonce)
+                    sealed = determ_xchacha20_poly1305_encrypt(
+                                 Kseal, nonce, nullptr, 0, cred, 32, ct, tag) == 0;
+                    opened = determ_xchacha20_poly1305_decrypt(
+                                 Klogin, nonce, nullptr, 0, ct, 32, tag, rec) == 0;
+                    wrong_rejected = determ_xchacha20_poly1305_decrypt(
+                                 Kwrong, nonce, nullptr, 0, ct, 32, tag, rec2) != 0;
+                } else {                   // FIPS: AES-256-GCM (12-byte IV prefix of nonce)
+                    determ_aes256_gcm_encrypt(Kseal, nonce, nullptr, 0, cred, 32, ct, tag);
+                    sealed = true;
+                    opened = determ_aes256_gcm_decrypt(
+                                 Klogin, nonce, nullptr, 0, ct, 32, tag, rec) == 0;
+                    wrong_rejected = determ_aes256_gcm_decrypt(
+                                 Kwrong, nonce, nullptr, 0, ct, 32, tag, rec2) != 0;
+                }
+                check(sealed && opened && std::memcmp(rec, cred, 32) == 0,
+                      std::string("G3 (") + name + "): credential sealed under y "
+                      "unseals with the t-of-n-recovered y");
+                check(wrong_rejected,
+                      std::string("G3 (") + name + "): a wrong password's OPRF "
+                      "output fails the envelope AEAD tag (credential stays sealed)");
+            };
+            run_profile("MODERN XChaCha20-Poly1305", false);
+            run_profile("FIPS AES-256-GCM", true);
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": test-dsso-threshold-oprf "
                   << (fail == 0
-                      ? "(G1 t-of-n identity + G2 DLEQ soundness over the shipped P-256 stack)"
+                      ? "(G1 t-of-n identity + G2 DLEQ soundness + G3 credential "
+                        "envelope over the shipped P-256/AEAD/HKDF stack)"
                       : "had assertion failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

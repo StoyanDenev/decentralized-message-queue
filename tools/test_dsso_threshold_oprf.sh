@@ -16,14 +16,23 @@
 #       single-key OPRF output (enumerated exhaustively for 3-of-5 and 2-of-3).
 #   G2  per-response DLEQ: a tampered Z_i fails its VOPRF proof AND, if admitted,
 #       corrupts the combine — the check is load-bearing (spec C4).
+#   G3  the credential envelope (spec §3 reg step 3): envelope = AEAD_{HKDF(y)}
+#       (cred) unseals with the y recovered from ANY t-of-n login (the G1
+#       composition), a WRONG password's y fails the AEAD tag, both profiles
+#       (MODERN XChaCha20-Poly1305 / FIPS AES-256-GCM). NOT the OPAQUE aPAKE
+#       handshake — that is the ceremony (§4/§5), a later Bundle-A increment.
 #   +   threshold realness: < t shares cannot reconstruct (spec C1/C3).
 #   +   scalar-op self-validation: (a±b)·G ties the two exposed additive ops to
 #       the group with NO external oracle.
 #
+# G3 adds ZERO new production surface: HKDF + both AEADs are already shipped +
+# KAT-gated; the OPRF output y comes from the same combine G1 proves identical.
+#
 # FALSIFY-ON-MUTANT (executed, each reverted): swapping the body of
 # determ_p256_scalar_add_mod_n to sc_sub (or sub->add) turns the scalar-op
-# self-check AND both G1 assertions RED — the exposed ops are load-bearing for
-# the whole threshold identity.
+# self-check, both G1 assertions, AND the G3 login-recover + both unseal
+# assertions RED — proving G3 is genuinely composed on the threshold math, not
+# a standalone envelope round-trip.
 #
 # Full mechanism: docs/proofs/DssoThresholdOprfSoundness.md.
 # Run from repo root: bash tools/test_dsso_threshold_oprf.sh
