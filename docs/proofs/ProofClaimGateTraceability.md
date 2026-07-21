@@ -52,9 +52,11 @@ MED/LOW gaps (4 more were re-examined and found already-gated) — and six MEDs
 are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
 (§3j)** the reward-path overflow guard, **AL-5 (§3k)** audit-map crash/rollback
 atomicity, **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close, **T-3
-(§3m)** the commit-reveal delay-derivation check, and **PCL-1 (§3n)** the
-governance-whitelist source-coherence guard (SB-3/AL-5/STMC-5/T-3 gated in FAST
-both platforms; PCL-1 an offline ci_local guard). **28 MED/LOW open; zero HIGH.**
+(§3m)** the commit-reveal delay-derivation check, **PCL-1 (§3n)** the
+governance-whitelist source-coherence guard, and **ADC-3 (§3o)** the F2 sub-hasher
+source-parity guard (+ its 2 same-class siblings hash_equivocation_event /
+hash_cross_shard_receipt) (SB-3/AL-5/STMC-5/T-3/ADC-3 gated in FAST both platforms;
+PCL-1 an offline ci_local guard). **27 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -593,6 +595,45 @@ Adding `"NEW_SCALAR"` to the validator `kWhitelist` alone makes the guard FAIL
 passes 4/4. This is the first register gap closed as a pure source-coherence guard
 (the CB-2/ADC-3 class), not a runtime negative test.
 
+## 3o. ADC-3 CLOSED — the F2 sub-hasher source-parity guard (+ 2 siblings)
+
+`AbortDigestCanonicalizationSoundness.md` ADC-3: `hash_abort_event` is
+re-implemented in TWO binaries that deliberately do NOT share a code path —
+`src/node/producer.cpp` (ground truth; feeds the `akeys` view root the block
+digest binds) and `light/verify.cpp` (the mirror that recomputes that root to
+verify each committee member's Ed25519 sig). **The load-bearing fact:** the block
+digest binds the abort view root, so a field reorder / add / drop / recast in
+EITHER `hash_abort_event` copy silently drifts the committee-signed digest for
+cross-shard / reconciled blocks — yet no runtime test catches it (the only runtime
+cross-check, `test_light_verify_block_sigs.sh`, exercises block 1, a non-F2 block,
+so the F2 collections are never populated and the sub-hasher never runs on both
+sides with the same input). The existing `test_block_digest_xbinary_parity.sh`
+guard reduces the whole abort view root to ONE token (`ABORT_ROOT`) and so never
+saw the sub-hasher's internal field order — exactly the surviving-mutant the
+register named (swap `hash_abort_event` lines 90/91 in light, or drop the
+`timestamp` append).
+
+Closed by **extending `tools/test_block_digest_xbinary_parity.sh`** (the same
+static cross-binary guard, already FAST both platforms) with an
+`extract_subhasher_appends` extractor + a `check_subhasher` assertion: it isolates
+each F2 sub-hasher body by its `^Hash <fn>(` anchor, reduces every `b.append(ARG)`
+to `ARG` with the `determ::` / `chain::` / `std::` namespace qualifiers stripped
+(the ONLY spelling difference between the two copies), and asserts the producer and
+light append sequences are EQUAL, non-empty (anti-vacuity), and carry the expected
+`DTM-F2-*` domain tag. The same mechanism trivially covers the two SIBLING F2
+sub-hashers of the identical gap class, so all three are closed in one pass:
+**`hash_abort_event` (ADC-3, `DTM-F2-ABORT-v1`) + `hash_equivocation_event`
+(`DTM-F2-EQ-v1`) + `hash_cross_shard_receipt` (`DTM-F2-RCPT-v1`)**. A `SELFTEST=1`
+leg proves the extractor flags a reordered field AND that the `chain::` vs
+`determ::chain::` spelling normalizes equal (no false positive). No new file, no
+new test (count unchanged), zero compiled change.
+
+*Falsify (executed, reverted via `git checkout` — a source guard, no build).*
+Swapping `b.append(e.round)` / `b.append(e.aborting_node)` in
+`light/verify.cpp::hash_abort_event` makes the guard FAIL (`sub-hasher
+hash_abort_event: producer != light`); the coherent tree passes. Verified on both
+git-bash (MSVC side) and WSL Ubuntu (Linux gate) — main + selftest identical.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -652,15 +693,15 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n) are now closed** — leaving 28.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o) are now closed** — leaving 27.
 
-### 6.1 Confirmed unenforced MED/LOW claims (28 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (27 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
 | 1 | SP-2 | StakeProofSoundness | MED | trivial | **CLOSED §3i** | SURVIVING MUTATION: light/main.cpp:2395 `if (computed_value_hash != proof_value_hash)` -> `if (false)` (or a -Wunused-safe `if (computed_value_hash != |
 | 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | open | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
-| 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | open | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
+| 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | open | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |

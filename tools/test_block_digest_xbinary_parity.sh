@@ -242,6 +242,75 @@ extract_triggers() {
   ' "$file"
 }
 
+# ── extract_subhasher_appends <file> <fnname> ───────────────────────────────────
+# Prints the ordered, NORMALIZED b.append(...) argument sequence for ONE F2
+# sub-hasher body — hash_abort_event (register ADC-3) / hash_equivocation_event /
+# hash_cross_shard_receipt. These three feed the akeys/ekeys/ikeys view roots the
+# block digest (checked above) binds, and each is RE-IMPLEMENTED in BOTH
+# producer.cpp (ground truth) AND light/verify.cpp (the mirror that recomputes
+# those roots to verify committee sigs). The block-digest guard above reduces each
+# whole view root to ONE token (ABORT_ROOT/EQ_ROOT/INBOUND_ROOT) and therefore
+# does NOT see a sub-hasher's internal field order — so a field reorder / add /
+# drop / recast in EITHER copy silently drifts the committee-signed view root for
+# cross-shard / reconciled blocks, with NO runtime red (the block-1 runtime
+# cross-check never populates the F2 collections). This closes that gap by
+# pinning the two copies of each sub-hasher EQUAL, append-for-append.
+#
+# Each `b.append(ARG)` is reduced to ARG with (a) // comments stripped, (b) all
+# whitespace removed, (c) the determ:: / chain:: / std:: namespace qualifiers
+# stripped — the ONLY spelling difference between the two copies (producer
+# `chain::canonical_...` vs light `determ::chain::canonical_...`). The domain-tag
+# string append survives normalization intact, so a copy that changed its tag is
+# caught. Anchoring on the fn NAME at column 0 keeps it drift-robust and skips the
+# indented call sites; the arg-type spelling lives in the signature, not an
+# append, so it never enters the token stream. Removing the leading `.append(` and
+# the trailing `);` leaves ARG's own balanced parens (static_cast<...>(...),
+# canonical_...(...), sig.data(), sig.size()) intact.
+extract_subhasher_appends() {
+  local file="$1" fn="$2"
+  awk -v fn="$fn" '
+    BEGIN { inreg = 0 }
+    !inreg && $0 ~ ("^Hash +" fn "\\(") { inreg = 1; next }
+    inreg {
+      line = $0
+      sub(/\/\/.*/, "", line)                 # strip // comments
+      gsub(/[ \t]+/, "", line)                # remove ALL whitespace
+      if (line ~ /\.append\(/) {
+        arg = line
+        sub(/^.*\.append\(/, "", arg)         # drop through the (single) .append(
+        sub(/\);.*$/, "", arg)                # drop the trailing );  -> ARG remains
+        gsub(/determ::/, "", arg)             # normalize namespaces (order matters:
+        gsub(/chain::/,  "", arg)             #   determ::chain:: -> chain:: -> "")
+        gsub(/std::/,    "", arg)
+        print arg
+      }
+      if (line ~ /\.finalize\(\)/) exit       # end of this sub-hasher body
+    }
+  ' "$file" | tr "\n" " " | sed -E "s/ +/ /g; s/^ //; s/ $//"
+}
+
+# ── check_subhasher <fnname> <domain-tag> ───────────────────────────────────────
+# Assert the producer + light copies of one F2 sub-hasher have the IDENTICAL
+# normalized append sequence, that sequence is NON-EMPTY (anti-vacuity: a missed
+# anchor yields "" and ""=="" would false-pass), and it contains the expected
+# domain tag (binds WHICH sub-hasher + catches a changed tag).
+check_subhasher() {
+  local fn="$1" tag="$2" pseq lseq
+  pseq=$(extract_subhasher_appends "$PROD_FILE" "$fn")
+  lseq=$(extract_subhasher_appends "$LIGHT_FILE" "$fn")
+  if [ -z "$pseq" ]; then bad "sub-hasher $fn: producer body not found / no appends (anchor drift)"; return; fi
+  if [ -z "$lseq" ]; then bad "sub-hasher $fn: light body not found / no appends (anchor drift)"; return; fi
+  case " $pseq " in *"$tag"*) : ;; *) bad "sub-hasher $fn: producer missing domain tag [$tag]" ;; esac
+  case " $lseq " in *"$tag"*) : ;; *) bad "sub-hasher $fn: light missing domain tag [$tag]" ;; esac
+  if [ "$pseq" = "$lseq" ]; then
+    ok "sub-hasher $fn: producer == light append sequence [$pseq]"
+  else
+    bad "sub-hasher $fn: producer != light (F2 sub-hasher drift — the committee-signed view root would diverge)"
+    echo "       producer: [$pseq]" >&2
+    echo "       light:    [$lseq]" >&2
+  fi
+}
+
 # ── SELFTEST mode (SELFTEST=1) ──────────────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
   echo "=== SELFTEST: cross-binary block-digest extractor + full-parity cross-site liveness ==="
@@ -579,6 +648,67 @@ EOF
   fi
   st_crosssite "producer-dropped-delay-seed" "$P_DROP" "$LIGHT_SEQ"
 
+  # ── F2 sub-hasher extractor liveness (ADC-3) ──────────────────────────────────
+  # (a) a reordered abort body yields a DIFFERENT normalized sequence than the
+  #     canonical (so a producer!=light field-swap drift surfaces RED); (b) the
+  #     producer (chain::) and light (determ::chain::) spelling of the SAME body
+  #     normalize EQUAL (so ns-qualifier alone is NOT flagged — no false positive).
+  ST_SUB_CANON=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
+Hash hash_abort_event(const chain::AbortEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(e.round);
+    b.append(e.aborting_node);
+    b.append(static_cast<uint64_t>(e.timestamp));
+    b.append(e.event_hash);
+    b.append(chain::canonical_abort_claims_dump(e.claims_json));
+    return b.finalize();
+}
+EOF
+)
+  ST_SUB_DRIFT=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
+Hash hash_abort_event(const determ::chain::AbortEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(e.aborting_node);
+    b.append(e.round);
+    b.append(static_cast<uint64_t>(e.timestamp));
+    b.append(e.event_hash);
+    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
+    return b.finalize();
+}
+EOF
+)
+  ST_SUB_LIGHT=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
+Hash hash_abort_event(const determ::chain::AbortEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(e.round);
+    b.append(e.aborting_node);
+    b.append(static_cast<uint64_t>(e.timestamp));
+    b.append(e.event_hash);
+    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
+    return b.finalize();
+}
+EOF
+)
+  if [ -n "$ST_SUB_CANON" ] && [ "$ST_SUB_CANON" != "$ST_SUB_DRIFT" ]; then
+    echo "  ok:  sub-hasher extractor flags a reordered abort field (canon != drift)"
+  else
+    echo "  bad: sub-hasher extractor did NOT flag a reordered abort field!" >&2
+    echo "       canon: [$ST_SUB_CANON]" >&2
+    echo "       drift: [$ST_SUB_DRIFT]" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+  if [ -n "$ST_SUB_CANON" ] && [ "$ST_SUB_CANON" = "$ST_SUB_LIGHT" ]; then
+    echo "  ok:  sub-hasher ns-normalization: chain:: == determ::chain:: spelling (no false positive)"
+  else
+    echo "  bad: sub-hasher ns-normalization failed (chain:: vs determ::chain:: diverged)!" >&2
+    echo "       producer-spelling: [$ST_SUB_CANON]" >&2
+    echo "       light-spelling:    [$ST_SUB_LIGHT]" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
     echo "  PASS: test_block_digest_xbinary_parity SELFTEST (extractor + full-parity rule flag all drift classes: tail-swap, missing-F2-root in producer OR light, dropped-core)"
@@ -670,9 +800,21 @@ if [ -f "$LIGHT_FILE" ]; then
   fi
 fi
 
+# ── F2 sub-hasher source-parity (ADC-3 + siblings) ──────────────────────────────
+# The three F2 sub-hashers feed the akeys/ekeys/ikeys view roots the block digest
+# (checked above) binds. They are re-implemented in BOTH producer.cpp and
+# light/verify.cpp, and the block-digest guard reduces each view root to ONE token
+# (ABORT_ROOT/EQ_ROOT/INBOUND_ROOT) — it does NOT see a sub-hasher's internal field
+# order. Pin the two copies of each sub-hasher EQUAL, append-for-append, so a
+# reorder/add/drop/recast in either copy (which would drift the committee-signed
+# view root for cross-shard/reconciled blocks with no runtime red) is RED here.
+check_subhasher hash_abort_event         DTM-F2-ABORT-v1    # register ADC-3
+check_subhasher hash_equivocation_event  DTM-F2-EQ-v1       # same class (F2 equivocation view)
+check_subhasher hash_cross_shard_receipt DTM-F2-RCPT-v1     # same class (F2 inbound-receipt view)
+
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_block_digest_xbinary_parity (producer.cpp + light/verify.cpp are byte-parity equal; identical field set + order incl. all 3 F2 view roots; merged-block tail triggers identical)"
+  echo "  PASS: test_block_digest_xbinary_parity (producer.cpp + light/verify.cpp are byte-parity equal; identical field set + order incl. all 3 F2 view roots; merged-block tail triggers identical; + the 3 F2 sub-hashers hash_abort/equivocation/cross_shard_receipt are append-for-append equal across both copies)"
   exit 0
 else
   echo "  FAIL: test_block_digest_xbinary_parity ($VIOLATIONS parity violation(s) — a block-digest copy has drifted)"
