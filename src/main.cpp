@@ -526,6 +526,13 @@ In-process tests (deterministic, no network):
                                               (P-256, SHA-256) protocol —
                                               blind/evaluate/finalize + DLEQ
                                               reject paths (vectors via §3.13)
+  determ test-dsso-threshold-oprf             DSSO Bundle-A G1/G2 (v2.25-DSSO
+                                              §4/§9): t-of-n UNORDERED threshold
+                                              OPRF — Lagrange over every t-subset
+                                              == direct k·B (G1), per-response
+                                              DLEQ reject + load-bearing (G2),
+                                              < t cannot reconstruct; over the
+                                              shipped P-256 stack, zero new primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -13548,6 +13555,241 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": p256-oprf-c99 " << (fail == 0
                       ? "protocol self-consistency + DLEQ reject paths held (RFC 9497; byte gate via §3.13)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-dsso-threshold-oprf") {
+        // DSSO Bundle-A gates G1 + G2 (v2.25-DSSO-DAPP-SPEC §4 login +
+        // §9 green gates). The "Sign-In With Determ" login is a t-of-n,
+        // UNORDERED threshold OPRF: the user Shamir-deals the OPRF key k over
+        // the P-256 scalar field Z_n, each server holds a share k_i, returns
+        // Z_i = k_i·B, and the client Lagrange-combines ANY t of them at x=0 to
+        // recover Z = k·B. No new primitive: Shamir + Lagrange-in-the-exponent
+        // (TOPPSS, JKKX 2017) over the shipped P-256 group/scalar ops. This
+        // gate proves the math over the shipped stack before any ceremony code.
+        //
+        //   G1 (t-of-n identity): Lagrange over EVERY t-subset == direct k·B ==
+        //       the single-key OPRF output. Enumerated exhaustively, not sampled.
+        //   G2 (per-response DLEQ): a tampered Z_i fails its VOPRF proof AND, if
+        //       admitted, corrupts the combine — so the check is load-bearing.
+        //   + threshold realness: < t shares cannot reconstruct.
+        //   + scalar-op self-validation: the two newly-exposed additive ops
+        //       (scalar_add/sub_mod_n) tied to the group via (a±b)·G, oracle-free.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto scmul = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_mul_mod_n(r, a, b) == 0; };
+        auto scadd = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_add_mod_n(r, a, b) == 0; };
+        auto scsub = [](uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
+            return determ_p256_scalar_sub_mod_n(r, a, b) == 0; };
+        auto scinv = [](uint8_t r[32], const uint8_t a[32]) {
+            return determ_p256_scalar_inv_mod_n(r, a) == 0; };
+        auto sc_u32 = [](uint8_t s[32], uint32_t v) {
+            std::memset(s, 0, 32);
+            s[28] = (uint8_t)(v >> 24); s[29] = (uint8_t)(v >> 16);
+            s[30] = (uint8_t)(v >> 8);  s[31] = (uint8_t)v; };
+
+        const uint8_t* input = (const uint8_t*)"sso-password";
+        const size_t   ilen  = 12;
+        uint8_t blind[32]; std::memset(blind, 0, 32);
+        blind[31] = 0x0e; blind[30] = 0x37; blind[15] = 0x41;   // nonzero, < n
+
+        // Shamir polynomial f(x) = k + c1 x + c2 x^2 (degree t-1); f(0)=k the
+        // OPRF key. Coeffs small & nonzero (trivially < n).
+        uint8_t coeff[3][32];
+        std::memset(coeff, 0, sizeof coeff);
+        coeff[0][31] = 0x2a; coeff[0][30] = 0x13;   // k
+        coeff[1][31] = 0x55; coeff[1][29] = 0x07;   // c1
+        coeff[2][31] = 0x11; coeff[2][28] = 0x03;   // c2
+
+        auto poly_eval = [&](uint8_t out[32], int t, const uint8_t x[32]) -> bool {
+            uint8_t acc[32]; std::memcpy(acc, coeff[t - 1], 32);
+            for (int j = t - 2; j >= 0; --j) {
+                uint8_t tmp[32];
+                if (!scmul(tmp, acc, x)) return false;      // acc*x
+                if (!scadd(acc, tmp, coeff[j])) return false; // + c_j
+            }
+            std::memcpy(out, acc, 32); return true;
+        };
+        // Lagrange basis at x=0 for member `mi` of the x-coord set xs[0..m-1]:
+        //   lambda = prod_{j!=mi} xs[j] / (xs[j] - xs[mi])  mod n.
+        auto lagrange0 = [&](uint8_t out[32], const uint8_t xs[][32], int m, int mi) -> bool {
+            uint8_t acc[32]; std::memset(acc, 0, 32); acc[31] = 1;   // 1
+            for (int j = 0; j < m; ++j) {
+                if (j == mi) continue;
+                uint8_t diff[32], inv[32], term[32], tmp[32];
+                if (!scsub(diff, xs[j], xs[mi])) return false;
+                if (!scinv(inv, diff)) return false;
+                if (!scmul(term, xs[j], inv)) return false;
+                if (!scmul(tmp, acc, term)) return false;
+                std::memcpy(acc, tmp, 32);
+            }
+            std::memcpy(out, acc, 32); return true;
+        };
+        // Combine compressed responses Z33[member]·lambda over a subset. Returns
+        // false if any op fails (e.g. degenerate identity in a wrong subset).
+        auto combine = [&](uint8_t out33[33], const uint8_t Z33[][33],
+                           const uint8_t xsAll[][32], const int* sub, int m) -> bool {
+            uint8_t xs[8][32];
+            for (int a = 0; a < m; ++a) std::memcpy(xs[a], xsAll[sub[a]], 32);
+            uint8_t acc65[65]; bool have = false;
+            for (int a = 0; a < m; ++a) {
+                uint8_t lam[32], Zi65[65], term65[65];
+                if (!lagrange0(lam, xs, m, a)) return false;
+                if (determ_p256_point_decompress(Zi65, Z33[sub[a]]) != 0) return false;
+                if (determ_p256_point_mul(term65, lam, Zi65) != 0) return false;
+                if (!have) { std::memcpy(acc65, term65, 65); have = true; }
+                else {
+                    uint8_t s65[65];
+                    if (determ_p256_point_add(s65, acc65, term65) != 0) return false;
+                    std::memcpy(acc65, s65, 65);
+                }
+            }
+            if (!have) return false;
+            return determ_p256_point_compress(out33, acc65) == 0;
+        };
+
+        // ── scalar-op self-validation (oracle-free: tie add/sub to the group) ─
+        {
+            uint8_t a[32], b[32], s[32], d[32];
+            sc_u32(a, 0x9abcdef1); sc_u32(b, 0x24681357);
+            uint8_t aG[65], bG[65], sG[65], dG[65], lhs[65], zero[32];
+            std::memset(zero, 0, 32);
+            bool ok = scadd(s, a, b) && scsub(d, a, b)
+                   && determ_p256_base_mul(aG, a) == 0
+                   && determ_p256_base_mul(bG, b) == 0
+                   && determ_p256_base_mul(sG, s) == 0
+                   && determ_p256_base_mul(dG, d) == 0
+                   && determ_p256_point_add(lhs, aG, bG) == 0
+                   && std::memcmp(lhs, sG, 65) == 0;           // (a+b)G == aG+bG
+            uint8_t back[65];
+            ok = ok && determ_p256_point_add(back, dG, bG) == 0
+                    && std::memcmp(back, aG, 65) == 0;         // (a-b)G + bG == aG
+            uint8_t r1[32], r2[32];
+            ok = ok && scadd(r1, a, zero) && std::memcmp(r1, a, 32) == 0  // a+0==a
+                    && scsub(r2, a, a) && std::memcmp(r2, zero, 32) == 0  // a-a==0
+                    && scadd(r1, a, b) && scadd(r2, b, a)
+                    && std::memcmp(r1, r2, 32) == 0;           // commutativity
+            check(ok, "scalar add/sub mod n: (a+b)G==aG+bG, (a-b)G+bG==aG, "
+                      "a+0==a, a-a==0, a+b==b+a (group-tied, no oracle)");
+            // an operand >= n (0xFF..FF is > n) must be rejected by the ops:
+            uint8_t big[32], junk[32]; std::memset(big, 0xff, 32);
+            check(determ_p256_scalar_add_mod_n(junk, big, a) == -1
+                  && determ_p256_scalar_sub_mod_n(junk, big, a) == -1,
+                  "scalar add/sub reject an operand >= n (public-validity gate)");
+        }
+
+        // ── direct single-key reference ─────────────────────────────────────
+        uint8_t B33[33], Zref33[33], yref[32];
+        {
+            bool ok = determ_p256_oprf_blind(B33, input, ilen, blind, 0x01) == 0
+                   && determ_p256_oprf_evaluate(Zref33, coeff[0], B33) == 0   // k·B
+                   && determ_p256_oprf_finalize(yref, input, ilen, blind, Zref33) == 0;
+            check(ok, "reference: single-key OPRF eval k·B + finalize (the target output)");
+        }
+
+        // ── deal shares + publish PK_i; run one (t,n) config end to end ──────
+        // Returns the number of t-subsets that reconstructed exactly, or -1.
+        auto run_config = [&](int t, int n) -> int {
+            uint8_t xs[8][32], ki[8][32], Zi33[8][33], PKi33[8][33];
+            for (int i = 0; i < n; ++i) {
+                sc_u32(xs[i], (uint32_t)(i + 1));               // server x-coord = i+1
+                if (!poly_eval(ki[i], t, xs[i])) return -1;     // k_i = f(i+1)
+                uint8_t pk65[65];
+                if (determ_p256_oprf_evaluate(Zi33[i], ki[i], B33) != 0) return -1; // Z_i
+                if (determ_p256_base_mul(pk65, ki[i]) != 0) return -1;
+                if (determ_p256_point_compress(PKi33[i], pk65) != 0) return -1;     // PK_i
+            }
+            int good = 0;
+            for (int mask = 0; mask < (1 << n); ++mask) {
+                int sub[8], m = 0;
+                for (int i = 0; i < n; ++i) if (mask & (1 << i)) sub[m++] = i;
+                if (m != t) continue;               // portable popcount==t
+                uint8_t Zc33[33], yc[32];
+                if (!combine(Zc33, Zi33, xs, sub, m)) continue;
+                if (std::memcmp(Zc33, Zref33, 33) != 0) continue;
+                if (determ_p256_oprf_finalize(yc, input, ilen, blind, Zc33) != 0) continue;
+                if (std::memcmp(yc, yref, 32) != 0) continue;
+                ++good;
+            }
+            return good;
+        };
+
+        // G1: exhaustive t-subset identity for two configs.
+        check(run_config(3, 5) == 10,
+              "G1: all C(5,3)=10 subsets of a 3-of-5 sharing reconstruct k·B "
+              "and the identical OPRF output");
+        check(run_config(2, 3) == 3,
+              "G1: all C(3,2)=3 subsets of a 2-of-3 sharing reconstruct k·B");
+
+        // threshold realness: < t shares cannot reconstruct (C1/C3).
+        {
+            const int t = 3, n = 5;
+            uint8_t xs[8][32], ki[8][32], Zi33[8][33];
+            for (int i = 0; i < n; ++i) {
+                sc_u32(xs[i], (uint32_t)(i + 1));
+                poly_eval(ki[i], t, xs[i]);
+                determ_p256_oprf_evaluate(Zi33[i], ki[i], B33);
+            }
+            int sub2[2] = {0, 1};
+            uint8_t Zc33[33];
+            bool reconstructed = combine(Zc33, Zi33, xs, sub2, 2)
+                              && std::memcmp(Zc33, Zref33, 33) == 0;
+            check(!reconstructed,
+                  "threshold real: a (t-1)=2-share subset does NOT reconstruct k·B");
+        }
+
+        // G2: per-response DLEQ; tamper detection AND load-bearing.
+        {
+            const int t = 3, n = 5;
+            uint8_t xs[8][32], ki[8][32], Zi33[8][33], PKi33[8][33], proof[8][64];
+            bool all_prove = true, all_verify = true;
+            for (int i = 0; i < n; ++i) {
+                sc_u32(xs[i], (uint32_t)(i + 1));
+                poly_eval(ki[i], t, xs[i]);
+                determ_p256_oprf_evaluate(Zi33[i], ki[i], B33);
+                uint8_t pk65[65]; determ_p256_base_mul(pk65, ki[i]);
+                determ_p256_point_compress(PKi33[i], pk65);
+                uint8_t r[32]; std::memset(r, 0, 32);
+                r[31] = (uint8_t)(0x13 + i); r[20] = (uint8_t)(i + 1);   // proof randomness
+                if (determ_p256_voprf_prove(proof[i], ki[i], PKi33[i], B33, Zi33[i], r, 0x01) != 0)
+                    all_prove = false;
+                if (determ_p256_voprf_verify(PKi33[i], B33, Zi33[i], proof[i], 0x01) != 0)
+                    all_verify = false;
+            }
+            check(all_prove && all_verify,
+                  "G2: every honest server's response carries a valid DLEQ proof vs its PK_i");
+
+            // Byzantine server 2 flips a byte of Z_2.
+            uint8_t Zbad33[33]; std::memcpy(Zbad33, Zi33[2], 33); Zbad33[10] ^= 0x08;
+            bool dleq_rejects =
+                determ_p256_voprf_verify(PKi33[2], B33, Zbad33, proof[2], 0x01) == -1;
+            check(dleq_rejects,
+                  "G2: a tampered response Z_i fails its DLEQ proof (client discards it)");
+
+            // Load-bearing: if the tampered response were admitted (no DLEQ),
+            // the combine is corrupted -> != k·B. So the check is what protects.
+            uint8_t Zmix33[8][33];
+            for (int i = 0; i < n; ++i) std::memcpy(Zmix33[i], Zi33[i], 33);
+            std::memcpy(Zmix33[2], Zbad33, 33);
+            int sub[3] = {0, 1, 2};
+            uint8_t Zc33[33];
+            bool corrupted = !combine(Zc33, Zmix33, xs, sub, 3)
+                          || std::memcmp(Zc33, Zref33, 33) != 0;
+            check(corrupted,
+                  "G2: admitting the tampered response corrupts the combine "
+                  "(the DLEQ check is load-bearing, not decorative)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": test-dsso-threshold-oprf "
+                  << (fail == 0
+                      ? "(G1 t-of-n identity + G2 DLEQ soundness over the shipped P-256 stack)"
                       : "had assertion failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

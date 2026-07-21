@@ -81,6 +81,15 @@ int determ_p256_scalar_mul_mod_n(uint8_t r[32], const uint8_t a[32],
  * Constant-time in `a` (the exponent n-2 is a public constant). */
 int determ_p256_scalar_inv_mod_n(uint8_t r[32], const uint8_t a[32]);
 
+/* r = a +/- b mod n (inputs big-endian, both < n; -1 otherwise). The additive
+ * group ops the DSSO threshold-OPRF combine needs: Shamir polynomial eval
+ * (Horner: mul then ADD) and the Lagrange denominator (x_j - x_i, SUB) at x=0
+ * over Z_n. See docs/proofs/DssoThresholdOprfSoundness.md. */
+int determ_p256_scalar_add_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]);
+int determ_p256_scalar_sub_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]);
+
 /* expand_message_xmd with SHA-256 (RFC 9380 §5.3.1). -1 on the RFC's
  * length/DST bounds (outlen > 8160 i.e. ell > 255, or > 65535; dstlen >
  * 255; zero outlen). Exposed for the appendix-K.1 vector gate. */

@@ -502,6 +502,43 @@ int determ_p256_scalar_inv_mod_n(uint8_t r[32], const uint8_t a[32]) {
     return 0;
 }
 
+/* sc_sub_raw is defined later (SSWU field-helper section); forward-declare it
+ * so the exposed additive ops below can be grouped with the other scalar
+ * publics rather than moved past its definition. */
+static void sc_sub_raw(fe r, const fe a, const fe b);
+
+/* r = a + b mod n. Exposes the raw (non-Montgomery) sc_add over the group
+ * order n — the additive-group op the DSSO threshold-OPRF Lagrange combine
+ * needs (v2.25-DSSO-DAPP-SPEC §4/§9 G1: Shamir deal + Lagrange-at-0 over Z_n).
+ * be_to_fe yields the raw integer limbs sc_add_raw operates on (mul_mod_n only
+ * uses Montgomery because multiplication does; addition does not). Inputs
+ * big-endian, both < n; -1 otherwise. Public-validity outcome. */
+int determ_p256_scalar_add_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]) {
+    fe af, bf, rf;
+    sc_init();
+    if (!be_lt(a, N_BE) || !be_lt(b, N_BE)) return -1;
+    be_to_fe(af, a);
+    be_to_fe(bf, b);
+    sc_add_raw(rf, af, bf);
+    fe_to_be(r, rf);
+    return 0;
+}
+
+/* r = a - b mod n (companion to add; the Lagrange denominator x_j - x_i).
+ * Same raw-fe path. Inputs big-endian, both < n; -1 otherwise. */
+int determ_p256_scalar_sub_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]) {
+    fe af, bf, rf;
+    sc_init();
+    if (!be_lt(a, N_BE) || !be_lt(b, N_BE)) return -1;
+    be_to_fe(af, a);
+    be_to_fe(bf, b);
+    sc_sub_raw(rf, af, bf);
+    fe_to_be(r, rf);
+    return 0;
+}
+
 /* ── field helpers for SSWU (public fixed exponents, derived at runtime) ── */
 
 /* big-endian helpers over 32-byte exponents */
