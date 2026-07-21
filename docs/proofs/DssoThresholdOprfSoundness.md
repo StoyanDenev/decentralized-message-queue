@@ -1,4 +1,4 @@
-# DSSO threshold-OPRF soundness — Bundle-A gates G1 + G2 + G3 (+ the G4 assertion layer)
+# DSSO threshold-OPRF soundness — Bundle-A gates G1 + G2 + G3 (+ the G4 assertion layer + the G4 OPAQUE-3DH AKE core)
 
 **Status: SHIPPED (the math gate + the credential envelope + the RP assertion
 token).** Backs the first three of the six §9 green gates of
@@ -233,3 +233,68 @@ message-dependent ones (correctness, replay, claim binding, layer separation,
 forgery) stay green. That directional signature is the point: the two properties
 whose security *is* "the key matters" are the two that break when the key stops
 mattering.
+
+## 7. G4 (AKE core) — the OPAQUE-3DH session-key co-generation
+
+The G4 assertion layer (§6) verifies the RP token *given* a shared `sso_key`. This
+section closes the other half of the "given": the AKE that co-generates `sso_key`
+between the client and the IdP. Spec §4 step 5 says *"the OPAQUE handshake
+co-generates a shared session key"*; the owner selected **OPAQUE-3DH (RFC 9807
+§6.4)** as that handshake (DECISION-LOG 2026-07-21). The module is
+`src/crypto/dsso/opaque3dh.c` (`determ_opaque3dh_server` / `_client`); the gate is
+`test-dsso-opaque3dh` (`tools/test_dsso_opaque3dh.sh`, FAST, both platforms).
+
+**Scope.** This proves the AKE core — the 3DH + key schedule + transcript-MAC
+mutual auth — in isolation. The `credential_request` / `credential_response` are
+opaque transcript blobs here; the OPRF/envelope that fills them (G1/G2/G3, §3-5) is
+composed in at the login layer in inc.2. So the claim is exactly: *both parties
+derive the SAME `session_key` from the three DH values + the whole transcript, and
+the two MACs bind that transcript so any tamper is detected.*
+
+**Zero new primitive / zero new hardness assumption.** The construction is three
+P-256 scalar mults (the 3DH: client-eph×server-eph, client-eph×server-static,
+client-static×server-eph), an RFC-9807 / TLS-1.3 HKDF-Expand-Label schedule over
+HKDF-SHA256, and HMAC-SHA256 — all shipped (`determ_p256_point_mul`/`_base_mul`/
+`_point_compress` §3.8c, `determ_hmac_sha256` + streaming `determ_sha256` §3.1). No
+new C surface beyond the composition module itself. Security rests on the standard
+OPAQUE-3DH argument (RFC 9807; Gap-DH / ROM) — this doc does not re-derive it; it
+gates the byte-level realization.
+
+**AKE-1 (mutual agreement).** For an honest run, `client.session_key ==
+server.session_key`. Both sides compute the same unordered triple of shared points
+(the DH symmetry `a·(b·G) = b·(a·G)`) and hash the same transcript, so the key
+schedule is a pure function of shared inputs. *Gate:* the "both parties derive the
+SAME session_key" assertion.
+
+**AKE-2 (mutual authentication).** `server_mac = HMAC(Km2, SHA256(preamble))` is
+verifiable only by a party that derived `Km2`, which requires the server's private
+DH contributions; `client_mac = HMAC(Km3, SHA256(preamble‖server_mac))` symmetric.
+The honest client accepts the server MAC and the server's `expected_client_mac`
+equals the client's produced MAC. *Gates:* "client verifies the server MAC" +
+"expected client MAC == client MAC".
+
+**AKE-3 (transcript binding).** Every output is keyed on `SHA256(preamble)`, and
+the preamble streams every wire field (context, both identities, both nonces, both
+ephemerals, both credential blobs). A single changed field ⇒ a different key and a
+server MAC the honest client rejects. *Gate (executed):* flipping `server_nonce`
+yields a DIFFERENT `session_key` AND the honest client, fed that wrong-transcript
+server MAC over the honest transcript, sets `server_mac_ok = 0`.
+
+**AKE-4 (fail-closed).** NULL transcript / NULL nonce / over-length field / identity
+ephemeral ⇒ `-1`, outputs untouched. *Gates:* the two NULL-edge assertions.
+
+**Dual-oracle byte-freeze.** The whole schedule was frozen python-first in
+`tools/verify_opaque3dh.py` before any C existed, and the C reproduces the KAT
+byte-for-byte: `session_key = 6d58d64b27a10b95d8fc79a1dce81f5e79ba05aa0089bf515a9be1d8191ede08`,
+`server_mac = 9f85241fe292952202a4520f4aea3eb300f7371cf4daa0600ffd097416ed2bb5`,
+`client_mac = df2fef7f903d40ad45bc564623671863c20c704ca441aa277600a09cb38b6cca`.
+Two independent implementations (a from-scratch python P-256 ladder + hashlib HKDF,
+vs the determ::c99 C stack) landing on the identical bytes is the soundness witness
+for the encoding — the same discipline as §3.25 notekey and the Pedersen/OPRF KATs.
+
+**Out of scope (later increments).** inc.2 composes the OPRF-recovered credential
+into `cred_request`/`cred_response` (registration/envelope binding); inc.3 is the
+G4 end-to-end gate (register → t-of-n login with one crash + one byzantine →
+dual-hash assertion → RP accept + the four §5 Option-A freshness legs). G5/G6 (CT
+review + zeroization audit of the secret scalar paths) remain owner-gated. Cross-ref
+`CRYPTO-C99-SPEC.md` §3.26, `v2.25-DSSO-DAPP-SPEC.md` §4/§9, `DssoAssertionFreshness.md`.

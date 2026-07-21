@@ -207,6 +207,11 @@ add_library(determ-crypto-c99 STATIC
   "${CMAKE_SOURCE_DIR}/src/crypto/notekey/notekey.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/notekey/modern/notekey_modern.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/notekey/fips/notekey_fips.c"
+
+  # §3.26 DSSO G4 OPAQUE-3DH AKE core (RFC 9807 §6.4) — the login session-key
+  # co-generation + transcript-MAC mutual auth, a pure composition of P-256
+  # scalar mult + HKDF-SHA256 + SHA-256 (`determ test-dsso-opaque3dh`).
+  "${CMAKE_SOURCE_DIR}/src/crypto/dsso/opaque3dh.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)

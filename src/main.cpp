@@ -42,6 +42,7 @@
 #include <determ/crypto/mldsa/keygen.h>        // §3.18: ML-DSA keygen (increment 7, ACVP-pinned)
 #include <determ/crypto/mldsa/sign.h>          // §3.18: ML-DSA sign/verify (increment 8, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
+#include <determ/crypto/dsso/opaque3dh.h>     // §3.26: DSSO G4 OPAQUE-3DH AKE core (RFC 9807)
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
@@ -547,6 +548,16 @@ In-process tests (deterministic, no network):
                                               audience/session/claim binding,
                                               replay + layer separation + forgery
                                               reject; HMAC-SHA256, zero new primitive
+  determ test-dsso-opaque3dh                  DSSO G4 OPAQUE-3DH AKE core
+                                              (§3.26 / RFC 9807 §6.4): the login
+                                              session-key co-generation — both
+                                              parties derive the SAME sso_key from
+                                              the three P-256 DH + the transcript;
+                                              transcript-MAC mutual auth; tamper +
+                                              fail-closed reject; dual-oracle KAT
+                                              byte-equal to verify_opaque3dh.py;
+                                              P-256 mult + HKDF + HMAC, zero new
+                                              primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -16149,6 +16160,94 @@ int main(int argc, char** argv) {
 
         if (fail==0) std::cout << "  PASS: view-key (A1 per-epoch derivation) unit test\n";
         return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-dsso-opaque3dh") {
+        // DSSO G4 OPAQUE-3DH AKE core (§3.26 / RFC 9807 §6.4) — the login session-
+        // key co-generation + transcript-MAC mutual auth in src/crypto/dsso/opaque3dh.c.
+        // Proves: both parties derive the SAME session_key from the 3DH + the whole
+        // transcript, the two MACs bind that transcript (any tamper flips them), and
+        // the KAT matches tools/verify_opaque3dh.py byte-for-byte (the dual-oracle).
+        // NO new primitive — three P-256 scalar mults + HKDF-SHA256 + HMAC-SHA256.
+        std::cout << "=== DSSO G4 OPAQUE-3DH AKE (RFC 9807 3DH) ===\n";
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* h = "0123456789abcdef";
+            std::string s; for (size_t i = 0; i < n; i++){ s += h[p[i] >> 4]; s += h[p[i] & 15]; } return s; };
+        auto fill = [](uint8_t* d, uint8_t b){ for (int i = 0; i < 32; i++) d[i] = b; };
+
+        // Fixed fixtures — byte-identical to verify_opaque3dh.py selftest().
+        const std::string ctx  = "determ-dsso-test", cid = "alice@rp", sid = "determ-idp";
+        const std::string creq = "CRED-REQ-blob",    cresp = "CRED-RESP-blob";
+        uint8_t sk_c[32], sk_s[32], esk_c[32], esk_s[32], cnon[32], snon[32];
+        fill(sk_c, 0x11); fill(sk_s, 0x22); fill(esk_c, 0x33); fill(esk_s, 0x44);
+        fill(cnon, 0x55); fill(snon, 0x66);
+
+        uint8_t pk_c[65], pk_s[65], epk_c[65];
+        check(determ_p256_base_mul(pk_c,  sk_c)  == 0, "pk_c  = sk_c·G");
+        check(determ_p256_base_mul(pk_s,  sk_s)  == 0, "pk_s  = sk_s·G");
+        check(determ_p256_base_mul(epk_c, esk_c) == 0, "epk_c = esk_c·G (client ke1)");
+
+        determ_opaque3dh_transcript t{};
+        t.context = (const uint8_t*)ctx.data();  t.context_len = ctx.size();
+        t.client_identity = (const uint8_t*)cid.data(); t.client_identity_len = cid.size();
+        t.server_identity = (const uint8_t*)sid.data(); t.server_identity_len = sid.size();
+        t.cred_request  = (const uint8_t*)creq.data();  t.cred_request_len  = creq.size();
+        t.cred_response = (const uint8_t*)cresp.data(); t.cred_response_len = cresp.size();
+        t.client_nonce = cnon; t.server_nonce = snon;
+
+        uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
+        check(determ_opaque3dh_server(&t, sk_s, pk_c, esk_s, epk_c,
+                                      epk_s, s_sk, s_smac, s_ecmac) == 0, "server_finalize ok");
+
+        uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 0;
+        check(determ_opaque3dh_client(&t, sk_c, pk_s, esk_c, epk_s, s_smac,
+                                      c_epk_c, c_sk, c_cmac, &smac_ok) == 0, "client_finalize ok");
+
+        // Mutual agreement + authentication.
+        check(smac_ok == 1, "client verifies the server MAC (server authenticated)");
+        check(std::memcmp(c_sk, s_sk, 32) == 0, "both parties derive the SAME session_key");
+        check(std::memcmp(c_cmac, s_ecmac, 32) == 0,
+              "server's expected client MAC == client's client MAC (client authenticated)");
+        check(std::memcmp(c_epk_c, epk_c, 65) == 0, "client re-derives the epk_c that fed ke1");
+        { uint8_t z[32] = {0}; check(std::memcmp(c_sk, z, 32) != 0, "session_key is non-zero"); }
+
+        // Dual-oracle KAT — byte-for-byte vs tools/verify_opaque3dh.py.
+        check(hx(c_sk, 32)   == "6d58d64b27a10b95d8fc79a1dce81f5e79ba05aa0089bf515a9be1d8191ede08",
+              "KAT session_key byte-equal to the python oracle");
+        check(hx(s_smac, 32) == "9f85241fe292952202a4520f4aea3eb300f7371cf4daa0600ffd097416ed2bb5",
+              "KAT server_mac byte-equal to the python oracle");
+        check(hx(c_cmac, 32) == "df2fef7f903d40ad45bc564623671863c20c704ca441aa277600a09cb38b6cca",
+              "KAT client_mac byte-equal to the python oracle");
+
+        // Tamper: a different server_nonce yields a different session_key + a MAC the
+        // honest client rejects (the whole transcript is bound into every output).
+        {
+            uint8_t snon2[32]; fill(snon2, 0x99);
+            determ_opaque3dh_transcript t2 = t; t2.server_nonce = snon2;
+            uint8_t e2[65], sk2[32], smac2[32], ecmac2[32];
+            determ_opaque3dh_server(&t2, sk_s, pk_c, esk_s, epk_c, e2, sk2, smac2, ecmac2);
+            check(std::memcmp(sk2, s_sk, 32) != 0,
+                  "a changed server_nonce yields a DIFFERENT session_key (transcript-bound)");
+            uint8_t ce[65], csk[32], cmc[32]; int ok2 = 1;
+            determ_opaque3dh_client(&t, sk_c, pk_s, esk_c, epk_s, smac2, ce, csk, cmc, &ok2);
+            check(ok2 == 0, "client REJECTS a server MAC computed over a different transcript");
+        }
+
+        // Fail-closed edges.
+        {
+            uint8_t e[65], sk[32], sm[32], ec[32];
+            check(determ_opaque3dh_server(nullptr, sk_s, pk_c, esk_s, epk_c, e, sk, sm, ec) != 0,
+                  "fail-closed: NULL transcript rejected");
+            determ_opaque3dh_transcript tb = t; tb.client_nonce = nullptr;
+            check(determ_opaque3dh_server(&tb, sk_s, pk_c, esk_s, epk_c, e, sk, sm, ec) != 0,
+                  "fail-closed: NULL client_nonce rejected");
+        }
+
+        if (fail == 0) std::cout << "\nPASS: dsso-opaque3dh all assertions\n";
+        else           std::cout << "\nFAIL: dsso-opaque3dh " << fail << " assertion(s)\n";
+        return fail == 0 ? 0 : 1;
     }
     if (cmd == "test-notekey-modern-c99" || cmd == "test-notekey-fips-c99") {
         // NC-8 recipient note-key derivation (§3.25 / wiring inc.4). The two
