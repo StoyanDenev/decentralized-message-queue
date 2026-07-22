@@ -53,10 +53,11 @@ are now closed: **SP-2 (§3i)** the stake-info cleartext cross-check, **SB-3
 (§3j)** the reward-path overflow guard, **AL-5 (§3k)** audit-map crash/rollback
 atomicity, **STMC-5 (§3l)** the merge-window `u64`-overflow fail-close, **T-3
 (§3m)** the commit-reveal delay-derivation check, **PCL-1 (§3n)** the
-governance-whitelist source-coherence guard, and **ADC-3 (§3o)** the F2 sub-hasher
+governance-whitelist source-coherence guard, **ADC-3 (§3o)** the F2 sub-hasher
 source-parity guard (+ its 2 same-class siblings hash_equivocation_event /
-hash_cross_shard_receipt) (SB-3/AL-5/STMC-5/T-3/ADC-3 gated in FAST both platforms;
-PCL-1 an offline ci_local guard). **27 MED/LOW open; zero HIGH.**
+hash_cross_shard_receipt), and **T-1 (§3p)** the RPC HMAC canonical-pre-image
+source-parity guard (SB-3/AL-5/STMC-5/T-3/ADC-3 gated in FAST both platforms;
+PCL-1 + T-1 offline ci_local guards). **26 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -634,6 +635,48 @@ Swapping `b.append(e.round)` / `b.append(e.aborting_node)` in
 hash_abort_event: producer != light`); the coherent tree passes. Verified on both
 git-bash (MSVC side) and WSL Ubuntu (Linux gate) — main + selftest identical.
 
+## 3p. T-1 CLOSED — the RPC HMAC canonical-pre-image source-parity guard (offline)
+
+`RpcAuthHmacSoundness.md` T-1: the RPC auth tag is `HMAC-SHA-256(secret,
+canonical_for_hmac(method, params))`, and `canonical_for_hmac` binds the METHOD
+into the pre-image — `return method + "|" + params.dump();` (`src/rpc/rpc.cpp`).
+Binding the method is what prevents CROSS-METHOD REPLAY: a captured auth tag for a
+read like `balance` must not authenticate a `stop` / `submit` call. The register's
+surviving mutation drops the prefix (`return params.dump();`), after which a valid
+tag for ANY method authenticates EVERY method.
+
+**The load-bearing fact:** nothing gated the method-binding at the PRODUCTION
+source. `determ test-rpc-auth-hmac` (17 assertions, incl. #14 "wrong method →
+different tag") tests a **local lambda copy** of `canonical_for_hmac`, not the
+production function — the production one lives in an **anonymous namespace** in
+`rpc.cpp` (internal linkage, uncallable from the test), so the two are hand-mirrored
+in different translation units. The live-cluster test (`tools/test_rpc_hmac_auth.sh`)
+drives the SAME production canonical on both client and server, so a dropped method
+prefix still round-trips (correct / wrong / missing tag all still behave) — the
+method-binding property is invisible to it. So a production drop survives EVERY
+existing gate.
+
+Closed by **a new offline guard `tools/test_rpc_hmac_canonical_parity.sh`** (pure
+awk over `rpc.cpp` + `main.cpp`, no build/node) wired into the `ci_local.sh` offline
+doc-guard loop, so it gates on both platforms via CI (like PCL-1). It extracts the
+production `canonical_for_hmac` return expression + the test lambda's, and asserts
+(a) production **binds `method`** (the security property — anti-cross-method-replay)
+and (b) production **==** the lambda spec. The lambda is the SELF-TESTED spec
+(assertion #14 turns RED if the lambda ever drops the method), so pinning
+production == lambda transitively gates production's method-binding. Same class as
+PCL-1 (governance whitelist) + ADC-3 (F2 sub-hashers): two hand-mirrored copies in
+different binaries/TUs, pinned equal at the source. A `SELFTEST=1` leg drives a
+dropped-prefix snippet through the extractor to prove the drift is flagged.
+
+*Falsify (executed, reverted via `git checkout` — a source guard, no build).*
+Applying the register's exact mutation (`rpc.cpp` → `return params.dump();`) makes
+the guard FAIL (2 violations: "does NOT bind the method — CROSS-METHOD REPLAY" +
+"DIFFERS from the self-tested lambda spec"); the coherent tree passes. Verified on
+both git-bash (MSVC side) and WSL Ubuntu (Linux gate) — main + selftest identical.
+**T-3-s001 (handle_session auth-before-dispatch) remains DEFERRED** — it touches the
+live auth control flow, not a pure helper, so it needs a careful review rather than
+an additive source guard.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -693,16 +736,16 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o) are now closed** — leaving 27.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p) are now closed** — leaving 26.
 
-### 6.1 Confirmed unenforced MED/LOW claims (27 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (26 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
 | 1 | SP-2 | StakeProofSoundness | MED | trivial | **CLOSED §3i** | SURVIVING MUTATION: light/main.cpp:2395 `if (computed_value_hash != proof_value_hash)` -> `if (false)` (or a -Wunused-safe `if (computed_value_hash != |
 | 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | open | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
 | 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
-| 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | open | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
+| 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | **CLOSED §3p** | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
 | 7 | AL-5 | AuditLayerSoundness | MED | trivial | **CLOSED §3k** | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
