@@ -29,6 +29,11 @@
 #   5. digest_a == digest_b (replay, not equivocation) → NOT-EQUIVOCATION 3.
 #   6. sig_a == sig_b (single signature) → NOT-EQUIVOCATION exit 3.
 #   7. Tampered sig_b (one flipped nibble) → NOT-EQUIVOCATION exit 3.
+#  7b. (register T-OE4) sig_a INVALID + sig_b VALID → NOT-EQUIVOCATION exit 3
+#      — pins the V11 clause-3 (`!sig_a_ok`) reject. No other leg builds this
+#      profile (assertion 4 invalidates BOTH sigs; assertion 7 keeps sig_a
+#      valid), so a deletion of clause 3 would report a forged sig_a as
+#      EQUIVOCATION-PROVEN with no red test. Carries its own PROVEN control.
 #   8. --committee with an unknown equivocator domain → usage error exit 1.
 #   9. Malformed event (bad-length digest hex) → usage error exit 1.
 #  10. Missing --in → usage error exit 1.
@@ -176,6 +181,34 @@ if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "sig_b does not verify"; then
   assert "true" "tampered sig_b → NOT-EQUIVOCATION exit 3"
 else
   echo "$OUT"; assert "false" "tampered sig_b → exit 3 (rc=$RC)"
+fi
+
+echo
+echo "=== 7b. Clause-3 asymmetry (T-OE4): sig_a INVALID, sig_b VALID → exit 3 ==="
+# The V11 else-if chain has FOUR clauses (digests-distinct, sigs-distinct,
+# sig_a verifies, sig_b verifies). Assertion 4 (wrong key) invalidates BOTH
+# sigs so it reaches clause 3; assertion 7 keeps sig_a VALID so it reaches
+# clause 4. Neither builds the sig_a-bad / sig_b-good profile, so deleting
+# clause 3 (`else if (!sig_a_ok)`) would let a forged sig_a fall through to
+# EQUIVOCATION-PROVEN with no red test. This leg pins clause 3.
+# Adjacent positive control: the genuine event still reaches V11 and emits
+# PROVEN, so a fixture/path regression fails HERE, not silently in the leg.
+run_verify --in "$TMP/equiv.json" --pubkey "$PUBKEY"
+if [ "$RC" = "0" ] && echo "$OUT" | head -1 | grep -q "EQUIVOCATION-PROVEN"; then
+  assert "true" "control: genuine double-sign reaches V11 → PROVEN exit 0"
+else
+  echo "$OUT"; assert "false" "control: genuine double-sign → PROVEN exit 0 (rc=$RC)"
+fi
+# Negative leg: flip sig_a's last nibble (a→b), keep sig_b valid. Still 128-hex
+# and distinct from sig_b, so digests_distinct + sigs_distinct pass and clause 3
+# is the first true clause.
+SIG_A_BAD="${SIG_A%?}b"
+write_event "$TMP/tampered_a.json" "$DIGEST_A" "$SIG_A_BAD" "$DIGEST_B" "$SIG_B"
+run_verify --in "$TMP/tampered_a.json" --pubkey "$PUBKEY"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "sig_a does not verify"; then
+  assert "true" "tampered sig_a (sig_b valid) → NOT-EQUIVOCATION exit 3"
+else
+  echo "$OUT"; assert "false" "tampered sig_a → NOT-EQUIVOCATION exit 3 (rc=$RC)"
 fi
 
 echo

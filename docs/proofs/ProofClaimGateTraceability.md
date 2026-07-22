@@ -739,6 +739,43 @@ stay green. Compiled change — MSVC FAST + WSL2 GCC ci_local both green (run
 SEQUENTIALLY); test count unchanged. *(Design pre-verified in the register-gate-triage
 Workflow, run wf_b2e68071.)*
 
+## 3s. T-OE4 CLOSED — offline equivocation clause-3 asymmetry (FAST unit)
+
+`cmd_verify_equivocation` (`light/main.cpp`, the offline `determ-light
+verify-equivocation` FA6 verifier) re-runs the daemon's V11 double-sign gate as a
+FOUR-clause else-if chain: (1) digests distinct, (2) sigs distinct, (3) sig_a
+verifies, (4) sig_b verifies — else the verdict stays **EQUIVOCATION-PROVEN**
+(exit 0, a cryptographically-justified slash). Clause 3 (`else if (!sig_a_ok)`,
+lines 7587-7589) has NO enforcing negative leg: deleting it lets an event with
+**sig_a INVALID but sig_b VALID** (dd=T, sd=T, sig_a_ok=F, sig_b_ok=T) skip clause
+4 (its `!sig_b_ok` is false) and fall through to PROVEN — a forged sig_a reported
+as a proven double-sign, i.e. a false-slashing justification, with no red test.
+
+**The false coverage** (why the existing wrapper's four NOT-EQUIVOCATION legs miss
+it): assertion 4 (wrong `--pubkey`) invalidates BOTH sigs, so with clause 3 gone it
+still reaches clause 4 → green; assertions 5/6 short-circuit on clauses 1/2;
+assertion 7 tampers sig_b only, keeping sig_a valid → clause 4 → green. **No leg
+builds the sig_a-bad / sig_b-good profile.** And the whole wrapper was outside the
+FAST regex — it ran only in a full local suite, never in either platform gate.
+
+Closed by **an additive leg (7b) in the existing `test_light_verify_equivocation.sh`**
+(no new wrapper, no production edit) + **wiring `light_verify_equivocation` into the
+run_all.sh FAST ONLY_PATTERN** so it now gates on BOTH platforms alongside its
+`light_verify_ct`/`_notekey`/`_enote_inclusion` siblings. The leg tampers sig_a only
+(`SIG_A_BAD="${SIG_A%?}b"`, sig_b left valid) → asserts exit 3 + reason
+`"sig_a does not verify"`, and carries its own adjacent PROVEN control (the genuine
+double-sign still reaches V11) so it can't pass vacuously if the fixture stops
+reaching the gate. Pure offline, baked RFC-8032 Ed25519 vector — no daemon, no
+runtime crypto backend.
+
+*Falsify (executed, reverted via `git checkout`).* delete clause 3 (light/main.cpp
+7587-7589) → determ-light rebuilt → the 7b negative leg flips RED (tampered_a now
+yields PROVEN exit 0, rc=0≠3) as the SOLE failure (13 pass / 1 fail); the adjacent
+control + assertions 4/7 stay green. No compiled `determ` change (the leg drives
+`determ-light`), so MSVC FAST is 265/0 (was 264 — the newly-wired test) and WSL2 GCC
+ci_local 265/0 + 6 doc guards. *(Design adversarially verified SOUND in the FAST_UNIT
+batch-design Workflow, run wf_f1a08faf-653.)*
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -798,9 +835,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r) are now closed** — leaving 24.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s) are now closed** — leaving 23.
 
-### 6.1 Confirmed unenforced MED/LOW claims (24 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (23 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -830,7 +867,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
 | 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
 | 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | open | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
-| 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | open | Surviving mutation: in light/main.cpp cmd_verify_equivocation, after the V11 else-if chain finalizes `verdict` (after line 7593, before `proven` is co |
+| 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | **CLOSED §3s** | Surviving mutation: delete V11 clause 3 (`else if (!sig_a_ok)`, light/main.cpp 7587-7589) — an event with sig_a INVALID + sig_b VALID skips clause 4 and reaches EQUIVOCATION-PROVEN. |
 | 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | open | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
 | 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | open | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a tok |
 | 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
@@ -861,10 +898,26 @@ reachability each time. Three classes:
 
 - **FAST_UNIT** — the mutated code is reachable from a `determ test-*` (or
   `determ-light`) subcommand seam, so an additive in-process negative leg closes it
-  on **both** platforms with no live node. Cheapest. Remaining: **#27 T-OE4**
-  (verify-equivocation forensic-field leg), **#29 RL-2** (gossip HELLO-exempt —
-  needs a new `handle_message_for_test` seam first), **#34 SP-CK-2** (composite-key
-  width). *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r.)*
+  on **both** platforms with no live node. Cheapest. Remaining: **#29 RL-2** +
+  **#34 SP-CK-2** (both adversarially verified SOUND in Workflow wf_f1a08faf-653):
+  - **#29 RL-2** (S-014 gossip HELLO-exempt token consume, `gossip.cpp:157`; mutant
+    `if (msg.type != HELLO)` → `if (true)`). **No new seam needed** — the register's
+    assumed `handle_message_for_test` is UNNECESSARY: the existing VirtualTransport
+    wire path (used by `test-node-reorg-s048`) already drives `handle_message`
+    in-process, with `on_status_request` (dispatch counter) + `peer_addresses()`
+    (proves a HELLO was dispatched) as public observability. New subcommand
+    `test-rl2-hello-exempt`. TRAPS: keep sender domain empty (connect() auto-HELLOs);
+    rate ~0.001/s (avoid a refill between drain and the HELLO); the bucket-empty
+    control is load-bearing (non-vacuity).
+  - **#34 SP-CK-2** (composite-key body-width guard `node.cpp:4709`
+    `if (body.size()!=want)`; mutant `if(false)`). Needs ONE additive **byte-neutral**
+    production seam — extract a pure free fn `decode_composite_state_body(ns,hex) ->
+    {hex_ok, ok, body, want}` (DECL node.hpp / DEFN node.cpp, verbatim from
+    node.cpp 4695-4718); `rpc_state_proof` calls it and rebuilds its TWO existing
+    error-json shapes VERBATIM (verify byte-identity with `test_state_proof.sh`
+    before/after). EXTEND the existing `test-state-proof-composite-key` subcommand
+    (already in FAST regex) to assert on the struct — no new wrapper, no regex edit.
+  *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r; #27 T-OE4 — CLOSED §3s.)*
 - **OFFLINE_SOURCE** — the property is a source-parity / presence invariant closeable
   by a build-free awk/source guard wired into ci_local's offline loop (the PCL-1 /
   ADC-3 / T-1 pattern). Surprising width — the triage found these OFFLINE-gateable:
@@ -878,5 +931,6 @@ reachability each time. Three classes:
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
 
-Recommended order: exhaust FAST_UNIT (3), then OFFLINE_SOURCE (9, all offline both
-platforms), then the CLUSTER tranche (12) in one or two live-node rounds.
+Recommended order: exhaust FAST_UNIT (2 left — RL-2, SP-CK-2; T-OE4 CLOSED §3s),
+then OFFLINE_SOURCE (9, all offline both platforms), then the CLUSTER tranche (12)
+in one or two live-node rounds.
