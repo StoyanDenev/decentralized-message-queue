@@ -776,6 +776,47 @@ control + assertions 4/7 stay green. No compiled `determ` change (the leg drives
 ci_local 265/0 + 6 doc guards. *(Design adversarially verified SOUND in the FAST_UNIT
 batch-design Workflow, run wf_f1a08faf-653.)*
 
+## 3t. SP-CK-2 CLOSED — composite-key exact-width guard (FAST unit, shared free fn)
+
+`Node::rpc_state_proof` (`src/node/node.cpp`) exposes the composite-key namespaces
+(i:/m:/p:/cc:/t:): the `key` argument is the HEX of a binary body that is decoded and
+**exact-width-checked** before it builds the leaf key `ns:body`. The width guard
+(originally `if (body.size() != want)` at node.cpp:4709) is load-bearing — a
+wrong-width body (e.g. a 39- or 41-byte `i:` body when `want`=40) would silently
+build a DIFFERENT leaf key and alias/forge a state-proof target. The register mutant
+neutralizes the check (`if(false)`) with no red test.
+
+**The reachability gap** (why no prior assertion drove it): the existing
+`test-state-proof-composite-key` builds BINARY keys and calls `Chain::state_proof`
+directly, entirely bypassing the hex-decode + width layer that only
+`Node::rpc_state_proof` performs — and driving a real `Node` in-process needs a full
+on-disk bootstrap (config/key/genesis/chain-load), far too heavy and not FAST-clean.
+
+Closed by **extracting the decode+width logic into a byte-neutral free fn**
+`determ::node::decode_composite_state_body(ns, hex) -> {hex_ok, ok, body, want}`
+(DECL in node.hpp, DEFN in node.cpp) that `rpc_state_proof` now calls — rebuilding
+its TWO error-json shapes VERBATIM (invalid-hex + wrong-length), so RPC output is
+byte-identical (all state_proof unit/namespace/value-hash tests unchanged; the
+mutant now lives on the real production path). Four legs added to the existing
+`test-state-proof-composite-key` (FAST both platforms; no new wrapper, no regex
+edit): a correct-width control (40B accepted), a 39-byte short + a 41-byte long
+reject (both valid EVEN-length hex so `hex_ok` stays true — isolating the WIDTH
+verdict), and a non-hex leg pinning the distinct `hex_ok=false` path.
+
+*Falsify (executed).* `d.ok = (d.body.size() == d.want)` → `d.ok = true`
+(equivalently the register's `if(false)`): determ rebuilt → ONLY the 39-byte + 41-byte
+reject legs flip RED; the correct-width control + the non-hex leg stay green — clean
+two-sided. Compiled change — MSVC FAST + WSL2 GCC ci_local both green (run
+SEQUENTIALLY); test count unchanged (legs added to an existing subcommand).
+*(Design adversarially verified SOUND in Workflow wf_f1a08faf-653; also fixed the stale
+node.hpp "i/m/p … not yet exposed by RPC" comment.)*
+
+**PROCESS TRAP HIT (recorded):** the falsify-revert used `git checkout -- node.cpp`
+but node.cpp was UNCOMMITTED this round — so the checkout wiped BOTH the mutant AND
+the legitimate free-fn definition, leaving node.hpp's decl + main.cpp's call as an
+unresolved external (LNK2019). When the file under falsify is UNCOMMITTED, revert the
+mutant with a TARGETED edit (restore just the mutated line), never `git checkout`.
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -835,9 +876,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s) are now closed** — leaving 23.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t) are now closed** — leaving 22.
 
-### 6.1 Confirmed unenforced MED/LOW claims (23 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (22 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -874,7 +915,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | open | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
 | 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | open | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
 | 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | open | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (the `auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.s |
-| 34 | SP-CK-2 | StateProofCompositeKeySoundness | LOW | moderate | open | Surviving mutation: src/node/node.cpp:4709 `if (body.size() != want)` -> `if (false)`. A wrong-width composite body (e.g. 39/41-byte `i:` body) then f |
+| 34 | SP-CK-2 | StateProofCompositeKeySoundness | LOW | moderate | **CLOSED §3t** | Surviving mutation: src/node/node.cpp:4709 `if (body.size() != want)` -> `if (false)` (now `decode_composite_state_body`'s `d.ok = true`). A wrong-width composite body (39/41-byte `i:`) aliases a different leaf. |
 
 ### 6.2 Re-examined and found GATED (4 — recorded so they are not re-audited)
 
@@ -898,8 +939,8 @@ reachability each time. Three classes:
 
 - **FAST_UNIT** — the mutated code is reachable from a `determ test-*` (or
   `determ-light`) subcommand seam, so an additive in-process negative leg closes it
-  on **both** platforms with no live node. Cheapest. Remaining: **#29 RL-2** +
-  **#34 SP-CK-2** (both adversarially verified SOUND in Workflow wf_f1a08faf-653):
+  on **both** platforms with no live node. Cheapest. Remaining: **#29 RL-2**
+  (adversarially verified SOUND in Workflow wf_f1a08faf-653; #34 SP-CK-2 CLOSED §3t):
   - **#29 RL-2** (S-014 gossip HELLO-exempt token consume, `gossip.cpp:157`; mutant
     `if (msg.type != HELLO)` → `if (true)`). **No new seam needed** — the register's
     assumed `handle_message_for_test` is UNNECESSARY: the existing VirtualTransport
@@ -931,6 +972,6 @@ reachability each time. Three classes:
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
 
-Recommended order: exhaust FAST_UNIT (2 left — RL-2, SP-CK-2; T-OE4 CLOSED §3s),
+Recommended order: exhaust FAST_UNIT (1 left — RL-2; T-OE4 §3s + SP-CK-2 §3t CLOSED),
 then OFFLINE_SOURCE (9, all offline both platforms), then the CLUSTER tranche (12)
 in one or two live-node rounds.

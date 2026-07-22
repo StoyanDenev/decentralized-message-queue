@@ -174,6 +174,22 @@ enum class ConsensusPhase : uint8_t { IDLE, CONTRIB, BLOCK_SIG };
 
 enum class SyncState : uint8_t { SYNCING, IN_SYNC };
 
+// SP-CK-2 (register): the composite-key (i:/m:/p:/cc:/t:) hex-body decode +
+// EXACT-width guard, extracted from Node::rpc_state_proof so the width check is
+// reachable in-process (test-state-proof-composite-key) without a live node.
+// The guard is load-bearing: a wrong-width body would silently ALIAS a different
+// state leaf. `want` is the per-namespace byte width from build_state_leaves; the
+// caller dispatches on `ns` being one of i/m/p/cc/t. hex_ok=false on non-hex
+// input; ok=false on a width mismatch (body.size() != want).
+struct CompositeKeyDecode {
+    bool                 hex_ok{false};  // `hex` parsed as bytes
+    bool                 ok{false};      // hex_ok AND body.size() == want
+    std::vector<uint8_t> body{};         // decoded bytes (meaningful iff hex_ok)
+    std::size_t          want{0};        // required byte width for this ns
+};
+CompositeKeyDecode decode_composite_state_body(const std::string& ns,
+                                               const std::string& hex);
+
 class Node {
 public:
     // §Q1 clock injection: the wall clock is an injected dependency. Defaults
@@ -320,8 +336,9 @@ public:
     // Namespace argument: "a" (accounts), "s" (stakes), "r" (registrants),
     //   "b" (abort_records), "k" (constants), "c" (counters). For
     //   "a"/"s"/"r"/"b" the key argument is the domain string; for
-    //   "k"/"c" it's the constant/counter name. Other namespaces
-    //   (i/m/p) need composite keys and are not yet exposed by RPC.
+    //   "k"/"c" it's the constant/counter name. The composite namespaces
+    //   (i/m/p/cc/t) ARE exposed: `key` is the hex of the binary body, decoded
+    //   + exact-width-checked via decode_composite_state_body (SP-CK-2).
     nlohmann::json rpc_state_proof(const std::string& ns,
                                        const std::string& key)      const;
     // D3.5e-7e / S-036: the cc:[epoch] committee-checkpoint CONTENT read — the

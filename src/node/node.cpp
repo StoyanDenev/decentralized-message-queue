@@ -4624,6 +4624,30 @@ json Node::rpc_scan_enotes(const json& params) const {
 // height — if the header's state_root matches, the proof is honest.
 // Returning {"error": "not_found"} if the key is absent from the
 // current state. (Non-membership proofs require an SMT migration.)
+// SP-CK-2 (register): shared composite-key body decode + exact-width guard.
+// Extracted from rpc_state_proof so the width check is reachable in-process by
+// test-state-proof-composite-key. `want` per build_state_leaves; `ns` is one of
+// i/m/p/cc/t (the caller dispatches). Fail-closed: hex_ok=false on non-hex,
+// ok=false on any width mismatch — a wrong-width body must NOT be accepted, else
+// it aliases a different leaf.
+CompositeKeyDecode decode_composite_state_body(const std::string& ns,
+                                               const std::string& hex) {
+    CompositeKeyDecode d;
+    d.want = (ns == "i")  ? (8 + 32)   // src_be8 + tx_hash[32]
+           : (ns == "m")  ? 4          // shard_be4
+           : (ns == "p")  ? (8 + 4)    // eff_be8 + idx_be4
+           : (ns == "cc") ? 8          // epoch_be8
+                          : (4 + 8);   // t: shard_be4 + height_be8
+    try {
+        d.body   = from_hex(hex);
+        d.hex_ok = true;
+    } catch (const std::exception&) {
+        return d;                      // hex_ok=false, ok=false
+    }
+    d.ok = (d.body.size() == d.want);
+    return d;
+}
+
 json Node::rpc_state_proof(const std::string& ns,
                               const std::string& key) const {
     std::shared_lock<std::shared_mutex> lk(state_mutex_);
@@ -4692,30 +4716,26 @@ json Node::rpc_state_proof(const std::string& ns,
         // shard_be4 + height_be8 → leaf "t:"+shard_be4+height_be8) so the
         // verify-shardtip-records auditor can PIN the frozen committee + a
         // folded record against a committee-signed state_root.
-        std::vector<uint8_t> body;
-        try {
-            body = from_hex(key);
-        } catch (const std::exception&) {
+        // SP-CK-2: hex-decode + EXACT-width guard via the shared free fn so the
+        // width check is gated in-process (test-state-proof-composite-key). The
+        // two error shapes below are the byte-identical originals; a wrong-width
+        // body must be rejected here — otherwise it silently aliases a different
+        // leaf (lengths per build_state_leaves).
+        auto dec = decode_composite_state_body(ns, key);
+        if (!dec.hex_ok) {
             return {{"error", "invalid hex key for composite namespace"},
                     {"namespace", ns}, {"key", key}};
         }
-        // Enforce the exact body width so a malformed query can't silently
-        // alias a different leaf (lengths per build_state_leaves).
-        const size_t want = (ns == "i")  ? (8 + 32)   // src_be8 + tx_hash[32]
-                          : (ns == "m")  ? 4           // shard_be4
-                          : (ns == "p")  ? (8 + 4)     // eff_be8 + idx_be4
-                          : (ns == "cc") ? 8           // epoch_be8
-                                         : (4 + 8);    // t: shard_be4 + height_be8
-        if (body.size() != want) {
+        if (!dec.ok) {
             return {{"error", "composite key wrong length"},
                     {"namespace",      ns},
-                    {"expected_bytes", want},
-                    {"got_bytes",      body.size()}};
+                    {"expected_bytes", dec.want},
+                    {"got_bytes",      dec.body.size()}};
         }
-        k.reserve(ns.size() + 1 + body.size());
+        k.reserve(ns.size() + 1 + dec.body.size());
         k.insert(k.end(), ns.begin(), ns.end());   // "cc" is a 2-char prefix
         k.push_back(':');
-        k.insert(k.end(), body.begin(), body.end());
+        k.insert(k.end(), dec.body.begin(), dec.body.end());
     } else {
         return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|nk|en|i|m|p|cc|t"}};
     }

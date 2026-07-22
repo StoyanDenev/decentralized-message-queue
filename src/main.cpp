@@ -57244,6 +57244,49 @@ int main(int argc, char** argv) {
                   "determinism: 2 proofs for p:-composite key byte-identical");
         }
 
+        // === SP-CK-2 (register): composite-key EXACT-width guard ===
+
+        // 12. The composite-key hex body is decoded + width-checked by the
+        //     SHARED free fn decode_composite_state_body that rpc_state_proof
+        //     itself calls (node.cpp) — a wrong-width body MUST be rejected
+        //     (ok=false), else it silently aliases a DIFFERENT state leaf.
+        //     No prior assertion drives this guard: 1-11 build BINARY keys and
+        //     call state_proof directly, bypassing the hex-decode+width layer.
+        {
+            using determ::node::decode_composite_state_body;
+            // Correct-width i: body = u64_be(src=1) + tx_hash[32] = 40 bytes.
+            std::vector<uint8_t> ibody;
+            push_u64_be(ibody, 1);
+            ibody.insert(ibody.end(), recv_tx_hash.begin(), recv_tx_hash.end());
+            std::string ok_hex = to_hex(ibody.data(), ibody.size());  // 80 hex
+
+            auto d_ok = decode_composite_state_body("i", ok_hex);
+            check(d_ok.hex_ok && d_ok.ok && d_ok.want == 40
+                      && d_ok.body.size() == 40,
+                  "sp-ck-2 control: correct-width i: body (40B) accepted");
+
+            // 39-byte body (drop last byte): valid EVEN-length hex, wrong width.
+            std::vector<uint8_t> shortb(ibody.begin(), ibody.end() - 1);
+            auto d_short = decode_composite_state_body(
+                "i", to_hex(shortb.data(), shortb.size()));
+            check(d_short.hex_ok && !d_short.ok && d_short.want == 40
+                      && d_short.body.size() == 39,
+                  "sp-ck-2: 39-byte i: body REJECTED (short-width)");
+
+            // 41-byte body (append a byte): wrong width the other direction.
+            std::vector<uint8_t> longb(ibody); longb.push_back(0xAB);
+            auto d_long = decode_composite_state_body(
+                "i", to_hex(longb.data(), longb.size()));
+            check(d_long.hex_ok && !d_long.ok && d_long.body.size() == 41,
+                  "sp-ck-2: 41-byte i: body REJECTED (long-width)");
+
+            // Non-hex input is a DISTINCT failure (hex_ok=false), so the width
+            // legs above can't be confused with a decode error.
+            auto d_bad = decode_composite_state_body("i", "zz");
+            check(!d_bad.hex_ok && !d_bad.ok,
+                  "sp-ck-2: non-hex i: body -> hex_ok=false (not a width verdict)");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof-composite-key "
                   << (fail == 0 ? "all assertions" : "had failures")
