@@ -862,6 +862,36 @@ SOUND in Workflow wf_f1a08faf-653.)*
 from an in-process `determ test-*` seam is closed. The remaining 21 open rows are 9
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy).
 
+## 3v. T-1kd CLOSED — S-014 rate-limiter keys on BARE IP (FAST unit; RECLASSIFIED)
+
+`GossipNet::handle_message` (`gossip.cpp:160-162`) strips `":<port>"` from
+`peer->address()` so the S-014 token bucket keys on the **bare IP** — else each
+connection (a distinct ephemeral port) gets its OWN bucket and the per-IP rate limit
+is trivially defeated by opening N connections. The register mutant deletes the strip
+(`auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.substr(0,colon);`), and no
+existing gate observed it (`test-rate-limiter` exercises `RateLimiter` in isolation;
+the live cluster test measures aggregate throughput).
+
+**RECLASSIFIED OFFLINE_SOURCE → FAST_UNIT.** The gate-class triage (§6.3) had this as
+OFFLINE_SOURCE (a grep-presence guard on the strip), but the just-shipped §3u RL-2
+harness made a stronger **behavioral** gate cheap: the two adversarial-verify
+workflows (wf_f1a08faf-653 for the class, wf_6a81aa3a-4d7 for this design) both
+confirmed FAST_UNIT is correct and beats a grep guard. Closed by a 5th leg in the
+existing `determ test-rl2-hello-exempt` (no new file): after S drains the bucket, a
+SECOND sender S2 shares IP 127.0.0.1 — VirtualTransport hands each connection a
+distinct pseudo-port (`virtual_transport.hpp` `next_pseudo_port_`), and its
+`remote_endpoint()` header comment even documents that "virtual peers therefore share
+the 127.0.0.1 rate-limit bucket." So under the strip S2's `STATUS_REQUEST` is dropped
+(shared DRAINED bucket); a `R.peer_count()==2` control pins that S2 actually attached.
+
+*Falsify (executed, reverted via `git checkout` — gossip.cpp was committed, only the
+strip deleted).* delete the port strip → S2 keys on `127.0.0.1:<its pseudo-port>`, a
+NEW key with a full burst=1 bucket → its `STATUS_REQUEST` is DISPATCHED → the T-1kd
+leg flips RED as the SOLE failure; setup + all 4 RL-2 legs (which key on S's own
+port-stripped/port-kept IP either way) stay green. Compiled change — MSVC FAST + WSL2
+GCC ci_local both green (run SEQUENTIALLY); test count unchanged (leg added to the
+existing subcommand). *(Design adversarially verified SOUND in Workflow wf_6a81aa3a-4d7.)*
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -921,9 +951,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u) are now closed** — leaving 21. **The FAST_UNIT tranche is EXHAUSTED; all 21 remaining are OFFLINE_SOURCE (9) or CLUSTER (12).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v) are now closed** — leaving 20. **The FAST_UNIT tranche is EXHAUSTED; all 20 remaining are OFFLINE_SOURCE (8) or CLUSTER (12).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (21 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (20 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -959,7 +989,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
 | 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | open | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
 | 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | open | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
-| 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | open | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (the `auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.s |
+| 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | **CLOSED §3v** | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (`auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.substr(0,colon);`) so each connection keys on ip:port, defeating per-IP limiting. RECLASSIFIED to FAST_UNIT (2nd-sender leg in test-rl2-hello-exempt). |
 | 34 | SP-CK-2 | StateProofCompositeKeySoundness | LOW | moderate | **CLOSED §3t** | Surviving mutation: src/node/node.cpp:4709 `if (body.size() != want)` -> `if (false)` (now `decode_composite_state_body`'s `d.ok = true`). A wrong-width composite body (39/41-byte `i:`) aliases a different leaf. |
 
 ### 6.2 Re-examined and found GATED (4 — recorded so they are not re-audited)
@@ -1005,11 +1035,34 @@ reachability each time. Three classes:
     before/after). EXTEND the existing `test-state-proof-composite-key` subcommand
     (already in FAST regex) to assert on the struct — no new wrapper, no regex edit.
   *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r; #27 T-OE4 — CLOSED §3s.)*
-- **OFFLINE_SOURCE** — the property is a source-parity / presence invariant closeable
-  by a build-free awk/source guard wired into ci_local's offline loop (the PCL-1 /
-  ADC-3 / T-1 pattern). Surprising width — the triage found these OFFLINE-gateable:
-  **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6, #31 WA-2,
-  #32 CB-4, #33 T-1kd**. This is the next-cheapest tranche and larger than assumed.
+- **OFFLINE_SOURCE (8 left)** — a source-parity / presence invariant closeable by a
+  build-free awk/source guard wired into ci_local's offline loop (the PCL-1 / ADC-3 /
+  T-1 pattern). **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6,
+  #31 WA-2, #32 CB-4.** *(#33 T-1kd was here but RECLASSIFIED to FAST_UNIT and CLOSED
+  §3v — a behavioral 2nd-sender leg beat the grep guard.)* **Designs adversarially
+  verified in Workflow wf_6a81aa3a-4d7 (each pins a POSITIVE anchor count so a
+  rename/delete flips RED, never a bare substring grep):**
+  - **#2 SR-1** (SOUND): EXTEND `test_light_state_root_binding_guard.sh` — add I3d
+    (`if (succ_prev != recomputed_hex)` pinned to a single-term parenthesized form,
+    EXPECTED_BIND_IF=1, so `&& false` breaks it) + I3e (`Hash recomputed = b.compute_hash();`
+    EXPECTED_RECOMPUTE=1, so re-sourcing from a daemon field breaks it) + SELFTEST R5/R6.
+  - **#32 CB-4** (SOUND): NEW `tools/test_keygen_failclosed_guard.sh` (+ ci_local wire) —
+    assert `keys.cpp generate_node_key` fatal-throws on `determ_rng_bytes(...) != 0`, no
+    `(void)`-cast of the RNG return.
+  - **#17 LSP-6** (SOUND): EXTEND `test_light_resume_monotonicity_guard.sh` I7 — the
+    `verify_chain_from_anchor` initial-prev-anchor binding.
+  - **#31 WA-2** (SOUND): NEW `tools/test_wallet_accounting_credit_gate_source.sh` — the
+    `credits +=` receiver-gate must stay `to_hit && t == 0` (single-shard TRANSFER only).
+  - **#23 RP-5** (SOUND): NEW `tools/test_registrant_lifecycle_classifier_coherence.sh` —
+    the deactivation clause `inactive_from != 0 && inactive_from <= anchored_height`.
+  - **#28 DR-6** (SOUND): the dapp-registry active/inactive boundary `< inactive_from`.
+  - **#26 PRW-1** (NEEDS_FIX, minor): EXTEND `test_light_resume_monotonicity_guard.sh`
+    I7 — the `proof_height < vc.height` stale-read guard; mechanics sound, small anchor fix.
+  - **#16 CP-1** (NEEDS_FIX): EXTEND `test_light_keybind_surface.sh` invariant-4 pinning
+    `proof_key_hex != local_key_hex` count — the design's named CI-wiring claim was FALSE;
+    re-verify the guard actually runs in ci_local before shipping.
+  Full designs: scratchpad/offline_designs.txt (session-local; re-extract from the
+  wf_6a81aa3a-4d7 journal if needed).
 - **CLUSTER** — light-client verdict logic (light/main.cpp) needing a live node +
   the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local. **#5 OSB-5,
   #8 T-3, #12 DR-2, #13 MPC-3, #14 SS-5, #15 CP-2, #18 VCW-4, #19 RI-2, #20 AB-2,

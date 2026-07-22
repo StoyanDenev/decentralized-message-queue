@@ -944,14 +944,16 @@ Additional in-process tests:
                                               both rendezvous orders, refused
                                               connect, write-after-close, and
                                               the two-loop multi-node shape
-  determ test-rl2-hello-exempt                S-014 gossip HELLO-exemption
-                                              (register RL-2): drives the real
-                                              GossipNet::handle_message over the
-                                              VirtualTransport wire — a HELLO on
-                                              an EMPTY per-IP token bucket is
-                                              still dispatched (never consumes a
-                                              token) while a 2nd STATUS_REQUEST
-                                              is dropped
+  determ test-rl2-hello-exempt                S-014 gossip rate-limiter invariants
+                                              (register RL-2 + T-1kd): drives the
+                                              real GossipNet::handle_message over
+                                              the VirtualTransport wire — a HELLO
+                                              on an EMPTY per-IP bucket is still
+                                              dispatched (never consumes a token),
+                                              a 2nd STATUS_REQUEST is dropped, and
+                                              a 2nd same-IP peer (distinct pseudo-
+                                              port) SHARES the bucket (limiter keys
+                                              on bare IP, not ip:port)
   determ test-scheduler-timers                DeterministicSchedulerDesign.md
                                               §2b inc.2: the loop-local VIRTUAL-
                                               TIME timer source — deterministic,
@@ -29334,6 +29336,30 @@ int main(int argc, char** argv) {
         check(hello_dispatched,
               "HELLO-EXEMPT (register RL-2): a HELLO on the EMPTY bucket is still "
               "dispatched (peer domain 'late' set) — HELLO never consumes a token");
+
+        // 4. T-1kd (register RateLimiterKeyDerivationSoundness): the S-014
+        //    limiter strips ":<port>" so it keys on BARE IP. A SECOND sender
+        //    shares IP 127.0.0.1 — VirtualTransport hands each connection a
+        //    distinct pseudo-port (virtual_transport.hpp: next_pseudo_port_),
+        //    so after the strip it shares S's already-DRAINED bucket and its
+        //    STATUS_REQUEST is dropped. Delete the strip (gossip.cpp
+        //    handle_message) and the 2nd sender keys on 127.0.0.1:<pseudo-port>,
+        //    gets its OWN full bucket, and is dispatched — defeating per-IP
+        //    limiting with one extra connection.
+        VirtualTransport st2(loop, vnet);
+        GossipNet S2(st2);
+        S2.set_log_quiet(true);
+        S2.connect("127.0.0.1", port);
+        { int g = 0; while (R.peer_count() < 2 && g++ < 200000) {
+            if (loop.run_ready(64) == 0 && !loop.advance_to_next_timer()) break; } }
+        check(R.peer_count() == 2,
+              "setup: a 2nd sender (same IP 127.0.0.1, distinct pseudo-port) attached");
+        const size_t before_t1kd = statusReqs;   // exempt HELLO above left it at 1
+        S2.broadcast(make_status_request()); drain();
+        check(statusReqs == before_t1kd,
+              "PORT-STRIP (register T-1kd): a 2nd same-IP peer shares the DRAINED "
+              "bucket → its STATUS_REQUEST is dropped (limiter keys on bare IP, "
+              "not ip:port)");
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": rl2-hello-exempt "

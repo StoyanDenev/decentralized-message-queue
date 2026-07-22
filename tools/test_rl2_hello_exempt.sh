@@ -17,6 +17,13 @@
 # exemption leg would pass even under the mutant. Pure std, no OS sockets —
 # identical on every platform, in-process, <1s — FAST=1 eligible.
 #
+# Also gates register T-1kd (RateLimiterKeyDerivationSoundness): a 2nd sender
+# shares IP 127.0.0.1 (VirtualTransport hands each connection a distinct
+# pseudo-port), so after the ":<port>" strip it shares the drained bucket and
+# its STATUS_REQUEST is dropped. Deleting the strip (gossip.cpp handle_message)
+# lets the 2nd sender key on 127.0.0.1:<port> and get its own bucket — that leg
+# flips RED, defeating per-IP limiting with one extra connection.
+#
 # Run from repo root: bash tools/test_rl2_hello_exempt.sh
 set -u
 cd "$(dirname "$0")/.."
