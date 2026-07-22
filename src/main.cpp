@@ -22298,6 +22298,43 @@ int main(int argc, char** argv) {
                   "binary tx: UINT64_MAX nonce round-trips");
         }
 
+        // Negative: a TRANSACTION envelope whose tx-frame body is shorter than
+        // decode_tx_frame's 128+1+2 minimum is rejected 'tx frame too short'
+        // (binary_codec.cpp). Register BinaryCodecRoundTripSoundness T-3: deleting
+        // that bounds check let a short/truncated frame off the P2P wire read past
+        // its buffer / decode a garbage tx, with NO red test. Reached through the
+        // PUBLIC decode_binary path (decode_tx_frame is file-local). We keep a real
+        // message's valid 4-byte envelope header and truncate the body to
+        // (min-1) = 130 bytes — short enough to trip the guard, but ≥ the 128-byte
+        // fixed-slot region so the decode stays IN BOUNDS if the guard were removed
+        // (the mutant then simply fails to throw 'too short' → this leg goes RED).
+        {
+            const size_t body_min = 128 + 1 + 2;   // decode_tx_frame minimum
+            Transaction tx;
+            tx.type = TxType::TRANSFER; tx.from = "a"; tx.to = "b";
+            tx.amount = 1; tx.fee = 0; tx.nonce = 0; tx.hash = tx.compute_hash();
+            Message m{MsgType::TRANSACTION, tx.to_json()};
+            auto full = encode_binary(m);
+            // Positive control: the full frame decodes (so the negative leg can't
+            // pass vacuously if encode_binary ever changed shape).
+            bool ok_full = false;
+            try { ok_full = (decode_binary(full.data(), full.size()).type == MsgType::TRANSACTION); }
+            catch (...) { ok_full = false; }
+            check(ok_full, "binary tx: full TRANSACTION frame decodes (short-frame positive control)");
+            // Negative: body one byte below the minimum → 'tx frame too short'.
+            bool threw_short = false;
+            if (full.size() >= 4 + body_min) {
+                std::vector<uint8_t> shortbuf(full.begin(), full.begin() + 4 + (body_min - 1));
+                try { (void)decode_binary(shortbuf.data(), shortbuf.size()); }
+                catch (const std::exception& e) {
+                    threw_short = std::string(e.what()).find("tx frame too short") != std::string::npos;
+                }
+            }
+            check(threw_short,
+                  "binary tx: a TRANSACTION frame with body < 128+1+2 is rejected 'tx frame too short' "
+                  "(decode_tx_frame bounds check; register BinaryCodecRoundTripSoundness T-3)");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-binary-codec " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

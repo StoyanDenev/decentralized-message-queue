@@ -57,7 +57,8 @@ governance-whitelist source-coherence guard, **ADC-3 (§3o)** the F2 sub-hasher
 source-parity guard (+ its 2 same-class siblings hash_equivocation_event /
 hash_cross_shard_receipt), and **T-1 (§3p)** the RPC HMAC canonical-pre-image
 source-parity guard (SB-3/AL-5/STMC-5/T-3/ADC-3 gated in FAST both platforms;
-PCL-1 + T-1 offline ci_local guards). **26 MED/LOW open; zero HIGH.**
+PCL-1 + T-1 offline ci_local guards), and **BinaryCodec-T-3 (§3q)** the short tx-frame
+reject (an additive FAST negative leg in test-tx-binary-codec). **25 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -677,6 +678,33 @@ both git-bash (MSVC side) and WSL Ubuntu (Linux gate) — main + selftest identi
 live auth control flow, not a pure helper, so it needs a careful review rather than
 an additive source guard.
 
+## 3q. BinaryCodecRoundTripSoundness T-3 CLOSED — the short tx-frame reject (FAST unit)
+
+`decode_tx_frame` (`src/net/binary_codec.cpp`) rejects a TRANSACTION frame whose body
+is below the `128 + 1 + 2` minimum: `if (len < 128 + 1 + 2) throw "tx frame too
+short"`. That guard sits in front of the fixed-slot reads (sender/amount/recipient/
+payload at offsets 0..127, then the type + payload_len header). The register's
+surviving mutant deletes it, after which a short/truncated frame off the P2P wire
+reads past its buffer and/or decodes a garbage transaction — with NO red test (the
+existing `test-tx-binary-codec` only round-trips WELL-FORMED frames).
+
+Closed by **an additive negative leg in the existing `test-tx-binary-codec`** (FAST,
+both platforms). `decode_tx_frame` is file-local, so the leg reaches it through the
+PUBLIC `decode_binary` path: encode a real TRANSACTION message, keep its valid 4-byte
+binary-envelope header, and truncate the body to `min - 1 = 130` bytes. `decode_binary`
+extracts the body and calls `decode_tx_frame(body, 130)` → `130 < 131` → throws "tx
+frame too short". A positive control (the full frame decodes) keeps the leg from
+passing vacuously if `encode_binary` ever changes shape. 130 is chosen deliberately —
+one below the threshold so the guard fires, yet ≥ the 128-byte fixed region so the
+decode stays in bounds if the guard were removed (the mutant then just fails to throw
+→ the leg goes RED, no reliance on out-of-bounds behavior on the shipped path).
+
+*Falsify (executed, reverted via `git checkout`).* `binary_codec.cpp` `if (len < 128 +
+1 + 2)` → `if (false)` makes the negative leg FAIL ('tx frame too short' no longer
+thrown) while the positive control stays green; the coherent tree passes both.
+Compiled change — MSVC FAST + WSL2 GCC ci_local both green; test count unchanged (leg
+added to an existing subcommand).
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -736,9 +764,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p) are now closed** — leaving 26.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q) are now closed** — leaving 25.
 
-### 6.1 Confirmed unenforced MED/LOW claims (26 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (25 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -762,7 +790,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 18 | VCW-4 | VerifyChainWalkSoundness | MED | moderate | open | Surviving mutation: in light/trustless_read.cpp change the walked-count gate (lines 342-348) `if (headers_seen != head_height - start_from)` to `if (f |
 | 19 | RI-2 | ReceiptInclusionProofSoundness | MED | moderate | open | Surviving mutant: in light/main.cpp cmd_verify_receipt_inclusion, change `if (proof_key_hex != local_key_hex)` (~line 4796) to `if (false)`. RI-2's ke |
 | 20 | AB-2 | AbortRecordProofSoundness | MED | hard | open | Surviving mutation: light/main.cpp:2664 `if (computed_value_hash != proof_value_hash)` -> `if (false)` neutralizes the TAMPERED value-hash bind of the |
-| 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | open | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
+| 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | **CLOSED §3q** | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
 | 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | open | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
 | 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | open | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
 | 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
