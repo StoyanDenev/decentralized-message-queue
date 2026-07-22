@@ -18730,6 +18730,45 @@ int main(int argc, char** argv) {
                   "make_contrib_commitment: all-zero views == v1 short-circuit");
         }
 
+        // 18b. (register MakeContribCommitmentBackwardCompat T-1) The v1 (zero-
+        //      view) commit must be BYTE-IDENTICAL to the INDEPENDENT pre-F2
+        //      4-append pre-image — i.e. it must NOT carry the DTM-F2-v1 tag.
+        //      Assertions 18 + 19 only compare F2-path hashes to EACH OTHER
+        //      (18 = two zero-view calls; 19 = two non-zero-root calls differing
+        //      by the root value), so both stay green if the v1 short-circuit is
+        //      removed (`any_view` forced true). This pins the actual v1 bytes
+        //      against an external reference (Lemma L-1), which is what the
+        //      backward-compat proof rests on: pre-F2 peers hash the 4-append
+        //      form, so the zero-view commit must reproduce it exactly.
+        {
+            std::vector<Hash> tx = {patterned_hash(0x01), patterned_hash(0x02)};
+            Hash prev = patterned_hash(0xAA);
+            Hash dh   = patterned_hash(0x03);
+            // Independent v1 pre-image: SHA256( u64(index) || prev || inner_root
+            // || dh ), inner_root = SHA256( concat sorted_tx_hashes ). No F2 tag,
+            // no timestamp — the exact pre-F2 shape (producer.cpp:256-264).
+            determ::crypto::SHA256Builder inner;
+            for (auto& h : tx) inner.append(h);
+            Hash inner_root = inner.finalize();
+            determ::crypto::SHA256Builder b;
+            b.append((uint64_t)100);
+            b.append(prev);
+            b.append(inner_root);
+            b.append(dh);
+            Hash v1_ref = b.finalize();
+            Hash v1_zero_view = make_contrib_commitment(100, prev, tx, dh, Hash{}, Hash{}, Hash{});
+            check(v1_zero_view == v1_ref,
+                  "make_contrib_commitment: zero-view commit == independent v1 pre-image "
+                  "(no DTM-F2-v1 tag; register MakeContribCommitmentBackwardCompat T-1)");
+            // Positive control: an F2 (non-zero eq_root) commit does NOT equal the
+            // v1 reference (the tag + roots are bound). Stays green under honest
+            // AND mutated code, so the negative leg above cannot pass vacuously.
+            Hash f2 = make_contrib_commitment(100, prev, tx, dh, patterned_hash(0xEE), Hash{}, Hash{});
+            check(f2 != v1_ref,
+                  "make_contrib_commitment: F2 (non-zero view) commit != independent v1 pre-image "
+                  "(positive control)");
+        }
+
         // 19. ANY non-zero view root produces a DIFFERENT hash.
         {
             std::vector<Hash> tx = {patterned_hash(0x01)};

@@ -58,7 +58,8 @@ source-parity guard (+ its 2 same-class siblings hash_equivocation_event /
 hash_cross_shard_receipt), and **T-1 (§3p)** the RPC HMAC canonical-pre-image
 source-parity guard (SB-3/AL-5/STMC-5/T-3/ADC-3 gated in FAST both platforms;
 PCL-1 + T-1 offline ci_local guards), and **BinaryCodec-T-3 (§3q)** the short tx-frame
-reject (an additive FAST negative leg in test-tx-binary-codec). **25 MED/LOW open; zero HIGH.**
+reject (an additive FAST negative leg in test-tx-binary-codec), and **MakeContribCommit-T-1
+(§3r)** the v1 pre-image reference leg in test-view-root. **24 MED/LOW open; zero HIGH.**
 
 The HIGH set — each with a verifier-supplied mutation that leaves every gate
 green:
@@ -705,6 +706,39 @@ thrown) while the positive control stays green; the coherent tree passes both.
 Compiled change — MSVC FAST + WSL2 GCC ci_local both green; test count unchanged (leg
 added to an existing subcommand).
 
+## 3r. MakeContribCommitmentBackwardCompat T-1 CLOSED — v1 pre-image reference (FAST unit)
+
+`make_contrib_commitment` (`src/node/producer.cpp:248`) has a **v1 backward-compat
+short-circuit**: when all three F2 view roots are zero it falls through to the
+pre-F2 commit shape — 4 appends `SHA256( u64(index) ‖ prev ‖ inner_root ‖ dh )`,
+`inner_root = SHA256(concat sorted_tx_hashes)`, with NO `DTM-F2-v1` domain tag — so
+a pre-F2 peer's ContribMsg signature verifies against the same bytes. The register's
+surviving mutant forces `bool any_view = true` (producer.cpp:277-279), which makes
+the zero-view commit take the F2 path (prepend the `DTM-F2-v1` tag + the 3 zero
+roots), silently breaking the byte-identity with pre-F2 peers — with NO red test.
+
+**The false coverage** (why the existing `test-view-root` assertions miss it): assn
+18 compares two *zero-view* calls (both mutate identically → still equal → green),
+and assn 19 compares two *non-zero-root* calls that differ by the root VALUE, not by
+the tag's presence (also green under `any_view=true`). Neither pins the v1 BYTES
+against an external reference.
+
+Closed by **an additive leg (18b) in the existing `determ test-view-root`** (FAST,
+both platforms via `tools/test_view_root.sh`; `make_contrib_commitment` is a public
+free fn, called in-process — no live node). The leg independently rebuilds the v1
+4-append pre-image with a fresh `SHA256Builder` and asserts the zero-view commit
+equals it, plus a positive control that an F2 (non-zero eq_root) commit does NOT
+equal the v1 reference (so the leg can't pass vacuously). This supplies exactly the
+pre-F2 reference (Lemma L-1) the backward-compat proof rests on.
+
+*Falsify (executed, reverted via `git checkout`).* producer.cpp:277-279
+`bool any_view = !is_zero_hash(...) || …` → `bool any_view = true;` flips ONLY the
+18b negative leg RED (the zero-view commit gains the `DTM-F2-v1` tag → ≠ the
+independent v1 pre-image); the positive control + all prior view-root assertions
+stay green. Compiled change — MSVC FAST + WSL2 GCC ci_local both green (run
+SEQUENTIALLY); test count unchanged. *(Design pre-verified in the register-gate-triage
+Workflow, run wf_b2e68071.)*
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -764,9 +798,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q) are now closed** — leaving 25.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r) are now closed** — leaving 24.
 
-### 6.1 Confirmed unenforced MED/LOW claims (25 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (24 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -791,7 +825,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 19 | RI-2 | ReceiptInclusionProofSoundness | MED | moderate | open | Surviving mutant: in light/main.cpp cmd_verify_receipt_inclusion, change `if (proof_key_hex != local_key_hex)` (~line 4796) to `if (false)`. RI-2's ke |
 | 20 | AB-2 | AbortRecordProofSoundness | MED | hard | open | Surviving mutation: light/main.cpp:2664 `if (computed_value_hash != proof_value_hash)` -> `if (false)` neutralizes the TAMPERED value-hash bind of the |
 | 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | **CLOSED §3q** | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
-| 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | open | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
+| 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | **CLOSED §3r** | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
 | 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | open | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
 | 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
 | 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
@@ -818,3 +852,31 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 of bugs — every listed property is believed to hold today. The remediation
 pattern is §4's: add the negative assertion, then falsify-on-mutant. Rows
 are refreshed by re-running the workflow (§5).
+
+### 6.3 Gate-class triage of the open backlog (Workflow wf_b2e68071)
+
+A read-only reachability sweep (25 agents, one per open row) classified how each
+remaining gap is *closeable*, so future rounds pick by cost rather than re-deriving
+reachability each time. Three classes:
+
+- **FAST_UNIT** — the mutated code is reachable from a `determ test-*` (or
+  `determ-light`) subcommand seam, so an additive in-process negative leg closes it
+  on **both** platforms with no live node. Cheapest. Remaining: **#27 T-OE4**
+  (verify-equivocation forensic-field leg), **#29 RL-2** (gossip HELLO-exempt —
+  needs a new `handle_message_for_test` seam first), **#34 SP-CK-2** (composite-key
+  width). *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r.)*
+- **OFFLINE_SOURCE** — the property is a source-parity / presence invariant closeable
+  by a build-free awk/source guard wired into ci_local's offline loop (the PCL-1 /
+  ADC-3 / T-1 pattern). Surprising width — the triage found these OFFLINE-gateable:
+  **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6, #31 WA-2,
+  #32 CB-4, #33 T-1kd**. This is the next-cheapest tranche and larger than assumed.
+- **CLUSTER** — light-client verdict logic (light/main.cpp) needing a live node +
+  the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local. **#5 OSB-5,
+  #8 T-3, #12 DR-2, #13 MPC-3, #14 SS-5, #15 CP-2, #18 VCW-4, #19 RI-2, #20 AB-2,
+  #24 SU-3, #25 LSP-7, #30 TI-3**. Highest cost; batch these in a cluster round.
+
+**#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
+control flow, not an additive guard; needs careful review, not a fixture.
+
+Recommended order: exhaust FAST_UNIT (3), then OFFLINE_SOURCE (9, all offline both
+platforms), then the CLUSTER tranche (12) in one or two live-node rounds.
