@@ -944,6 +944,14 @@ Additional in-process tests:
                                               both rendezvous orders, refused
                                               connect, write-after-close, and
                                               the two-loop multi-node shape
+  determ test-rl2-hello-exempt                S-014 gossip HELLO-exemption
+                                              (register RL-2): drives the real
+                                              GossipNet::handle_message over the
+                                              VirtualTransport wire — a HELLO on
+                                              an EMPTY per-IP token bucket is
+                                              still dispatched (never consumes a
+                                              token) while a 2nd STATUS_REQUEST
+                                              is dropped
   determ test-scheduler-timers                DeterministicSchedulerDesign.md
                                               §2b inc.2: the loop-local VIRTUAL-
                                               TIME timer source — deterministic,
@@ -29255,6 +29263,83 @@ int main(int argc, char** argv) {
     // mechanism here, since in-memory writes never block), and the
     // MULTI-NODE shape the FA4 harness uses (two loops, two transports,
     // one shared VirtualNetwork). Pure std, identical on every platform.
+    // RL-2 (register S014RateLimiterSoundness): the S-014 gossip token bucket
+    // EXEMPTS HELLO (gossip.cpp:157 `if (msg.type != MsgType::HELLO)`) so a
+    // freshly-attached peer can always finish the handshake even when its IP's
+    // bucket is empty. The mutant `if (true)` makes HELLO also consume a token,
+    // breaking that invariant — and NO existing gate observes it (test-rate-
+    // limiter exercises RateLimiter in isolation; the live cluster test measures
+    // only aggregate throughput, unmoved by one extra token per connection). We
+    // drive the REAL GossipNet::handle_message over the in-process VirtualTransport
+    // wire (no OS socket, deterministic run_ready pump) — no production seam.
+    if (cmd == "test-rl2-hello-exempt") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        VirtualNetwork  vnet;
+        VirtualEventLoop loop;
+        loop.enable_virtual_time();
+        auto drain = [&] { int g = 0; while (loop.run_ready(64) > 0 && g++ < 200000) {} };
+
+        VirtualTransport rt(loop, vnet);   // receiver transport
+        VirtualTransport st(loop, vnet);   // sender transport
+        const uint16_t port = 34129;
+
+        // Receiver: burst=1 bucket, near-zero refill so a sub-second test hands
+        // out ~0 tokens after the first (RateLimiter refills off steady_clock,
+        // NOT the injected VirtualClock — same wall-clock assumption the existing
+        // test-rate-limiter burst-exhaustion assertions rely on).
+        GossipNet R(rt);
+        R.set_log_quiet(true);
+        R.set_rate_limit(0.001, 1.0);
+        size_t statusReqs = 0;
+        R.on_status_request = [&](std::shared_ptr<Peer>) { statusReqs++; };
+        R.listen(port);
+
+        // Sender: DO NOT set_hello — an empty our_domain_ means connect() sends
+        // NO auto-HELLO (gossip.cpp:66), so the ONLY HELLO the receiver sees is
+        // the manual one below (otherwise a connect-time HELLO would pre-set the
+        // peer domain and green the exemption leg even under the mutant).
+        GossipNet S(st);
+        S.set_log_quiet(true);
+        S.connect("127.0.0.1", port);
+        { int g = 0; while (R.peer_count() < 1 && g++ < 200000) {
+            if (loop.run_ready(64) == 0 && !loop.advance_to_next_timer()) break; } }
+        check(R.peer_count() == 1,
+              "setup: sender attached to receiver over VirtualTransport (peer formed)");
+
+        // 1. First STATUS_REQUEST (non-HELLO): consumes the one token, dispatched.
+        S.broadcast(make_status_request()); drain();
+        check(statusReqs == 1,
+              "positive control: 1st STATUS_REQUEST (non-HELLO) dispatched over the "
+              "wire — handle_message rate gate reached, token consumed");
+
+        // 2. Second STATUS_REQUEST: the burst=1 bucket is now drained → dropped.
+        //    This proves the bucket is EMPTY for the exemption leg (non-vacuity).
+        S.broadcast(make_status_request()); drain();
+        check(statusReqs == 1,
+              "non-vacuity control: 2nd STATUS_REQUEST dropped at the drained "
+              "bucket — the IP bucket is provably EMPTY");
+
+        // 3. A HELLO on the EMPTY bucket must STILL be dispatched (peer domain set
+        //    to 'late') — proving HELLO never consumes a token (the S-014 exempt).
+        S.broadcast(make_hello("late", 1)); drain();
+        bool hello_dispatched = false;
+        for (auto& a : R.peer_addresses())
+            if (a.find("(late)") != std::string::npos) hello_dispatched = true;
+        check(hello_dispatched,
+              "HELLO-EXEMPT (register RL-2): a HELLO on the EMPTY bucket is still "
+              "dispatched (peer domain 'late' set) — HELLO never consumes a token");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": rl2-hello-exempt "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-net-virtual") {
         using namespace determ::net;
         int fail = 0;

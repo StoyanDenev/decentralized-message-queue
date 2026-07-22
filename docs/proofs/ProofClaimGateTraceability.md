@@ -817,6 +817,51 @@ the legitimate free-fn definition, leaving node.hpp's decl + main.cpp's call as 
 unresolved external (LNK2019). When the file under falsify is UNCOMMITTED, revert the
 mutant with a TARGETED edit (restore just the mutated line), never `git checkout`.
 
+## 3u. RL-2 CLOSED — S-014 gossip HELLO-exemption (FAST unit; LAST FAST_UNIT gap)
+
+`GossipNet::handle_message` (`src/net/gossip.cpp:157`) gates every **non-HELLO**
+message through the S-014 per-peer-IP token bucket and EXEMPTS HELLO, so a
+freshly-attached peer can always finish the handshake even when its IP bucket is
+empty (`if (msg.type != MsgType::HELLO) { … if (!rate_limiter_.consume(ip)) return; }`).
+The register mutant `if (true)` makes HELLO also consume a token — a peer whose
+bucket is drained (e.g. by an attacker sharing its NAT IP) can no longer complete
+the handshake, a liveness/censorship break — with no red test.
+
+**Why no existing gate observes it:** `test-rate-limiter` / `-bucket` exercise
+`net::RateLimiter` in ISOLATION (never construct GossipNet, never call
+handle_message); the live `test_gossip_rate_limit.sh` cluster (excluded from FAST)
+measures only aggregate consensus throughput, which one extra token-per-connection
+doesn't move; `test-node-reorg-s048` drives GossipNet over VirtualTransport but never
+sets a rate limit nor drains a bucket. The mutant is invisible to all three.
+
+Closed by a **new FAST subcommand `determ test-rl2-hello-exempt`** that drives the
+REAL `GossipNet::handle_message` over the in-process **VirtualTransport wire** (no OS
+socket, deterministic `run_ready` pump) — **no production seam** (the register's
+assumed `handle_message_for_test` proved unnecessary). Receiver R: burst=1 bucket,
+near-zero refill; sender S: **no `set_hello`** so `connect()` emits no auto-HELLO (an
+auto-HELLO would pre-set the peer domain and green the leg even under the mutant).
+Three legs + setup: (1) 1st `STATUS_REQUEST` consumes the one token → dispatched
+(`on_status_request` counter); (2) 2nd `STATUS_REQUEST` dropped at the drained bucket
+— proving it is **provably EMPTY** (the load-bearing non-vacuity control); (3) a
+`make_hello("late")` on the EMPTY bucket is STILL dispatched (R's `peer_addresses()`
+gains `"(late)"`) — the exemption. Observability is all public: `on_status_request`
+(non-HELLO dispatch) + `peer_addresses()` (HELLO set the domain).
+
+*Falsify (executed, reverted via `git checkout` — gossip.cpp was committed, only the
+mutant added).* `:157` `if (msg.type != MsgType::HELLO)` → `if (true)`: the HELLO now
+enters the consume block, finds the empty bucket, `return`s — never sets the domain →
+leg 3 flips RED as the SOLE failure; setup + both STATUS_REQUEST controls stay green
+(if the bucket had held a spare token the mutant HELLO would consume it and still
+dispatch, so leg 2 being green is what makes leg 3 discriminating). Compiled change —
+MSVC FAST + WSL2 GCC ci_local both green (run SEQUENTIALLY); +1 test. Wall-clock note:
+`RateLimiter` refills off `steady_clock` (NOT the injected VirtualClock), neutralized
+by rate=0.001/s (a sub-second test refills ≪1 token). *(Design adversarially verified
+SOUND in Workflow wf_f1a08faf-653.)*
+
+**MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
+from an in-process `determ test-*` seam is closed. The remaining 21 open rows are 9
+OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy).
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -876,9 +921,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t) are now closed** — leaving 22.
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u) are now closed** — leaving 21. **The FAST_UNIT tranche is EXHAUSTED; all 21 remaining are OFFLINE_SOURCE (9) or CLUSTER (12).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (22 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (21 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -910,7 +955,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | open | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
 | 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | **CLOSED §3s** | Surviving mutation: delete V11 clause 3 (`else if (!sig_a_ok)`, light/main.cpp 7587-7589) — an event with sig_a INVALID + sig_b VALID skips clause 4 and reaches EQUIVOCATION-PROVEN. |
 | 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | open | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
-| 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | open | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a tok |
+| 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | **CLOSED §3u** | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a token (breaks the handshake-always-completes exemption). |
 | 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
 | 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | open | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
 | 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | open | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
@@ -939,18 +984,19 @@ reachability each time. Three classes:
 
 - **FAST_UNIT** — the mutated code is reachable from a `determ test-*` (or
   `determ-light`) subcommand seam, so an additive in-process negative leg closes it
-  on **both** platforms with no live node. Cheapest. Remaining: **#29 RL-2**
-  (adversarially verified SOUND in Workflow wf_f1a08faf-653; #34 SP-CK-2 CLOSED §3t):
-  - **#29 RL-2** (S-014 gossip HELLO-exempt token consume, `gossip.cpp:157`; mutant
-    `if (msg.type != HELLO)` → `if (true)`). **No new seam needed** — the register's
-    assumed `handle_message_for_test` is UNNECESSARY: the existing VirtualTransport
-    wire path (used by `test-node-reorg-s048`) already drives `handle_message`
-    in-process, with `on_status_request` (dispatch counter) + `peer_addresses()`
-    (proves a HELLO was dispatched) as public observability. New subcommand
-    `test-rl2-hello-exempt`. TRAPS: keep sender domain empty (connect() auto-HELLOs);
-    rate ~0.001/s (avoid a refill between drain and the HELLO); the bucket-empty
-    control is load-bearing (non-vacuity).
-  - **#34 SP-CK-2** (composite-key body-width guard `node.cpp:4709`
+  on **both** platforms with no live node. Cheapest. **TRANCHE EXHAUSTED** — all
+  FAST_UNIT gaps are closed: #22 MakeContribCommit-T-1 §3r, #27 T-OE4 §3s, #34
+  SP-CK-2 §3t, #29 RL-2 §3u. Kept here for the pattern record:
+  - **#29 RL-2** (CLOSED §3u — S-014 gossip HELLO-exempt token consume,
+    `gossip.cpp:157`; mutant `if (msg.type != HELLO)` → `if (true)`). **No new seam
+    needed** — the register's assumed `handle_message_for_test` was UNNECESSARY: the
+    existing VirtualTransport wire path (used by `test-node-reorg-s048`) already drives
+    `handle_message` in-process, with `on_status_request` (dispatch counter) +
+    `peer_addresses()` (proves a HELLO was dispatched) as public observability. New
+    subcommand `test-rl2-hello-exempt`. TRAPS confirmed real: keep sender domain empty
+    (connect() auto-HELLOs); rate ~0.001/s (avoid a refill between drain and the HELLO);
+    the bucket-empty control is load-bearing (non-vacuity).
+  - **#34 SP-CK-2** (CLOSED §3t — composite-key body-width guard `node.cpp:4709`
     `if (body.size()!=want)`; mutant `if(false)`). Needs ONE additive **byte-neutral**
     production seam — extract a pure free fn `decode_composite_state_body(ns,hex) ->
     {hex_ok, ok, body, want}` (DECL node.hpp / DEFN node.cpp, verbatim from
@@ -972,6 +1018,6 @@ reachability each time. Three classes:
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
 
-Recommended order: exhaust FAST_UNIT (1 left — RL-2; T-OE4 §3s + SP-CK-2 §3t CLOSED),
-then OFFLINE_SOURCE (9, all offline both platforms), then the CLUSTER tranche (12)
-in one or two live-node rounds.
+Recommended order: **FAST_UNIT tranche is EXHAUSTED (all 4 closed §3r/§3s/§3t/§3u)** —
+next is OFFLINE_SOURCE (9, all offline both platforms via ci_local source guards), then
+the CLUSTER tranche (12) in one or two live-node rounds.
