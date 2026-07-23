@@ -115,6 +115,19 @@ public:
         return check_delay(b);
     }
 
+    // EQV test seam (ConsensusValidatorGateAudit, EQV-sig-verify-forged-slash):
+    // run the equivocation-evidence check in isolation — same const-forwarder
+    // pattern as the seams above. Lets the falsifier drive an event with a
+    // forged sig_a and assert the SPECIFIC reject without assembling a
+    // fully-signed (F2-reconciled) committee block whose block-sig/digest gates
+    // would otherwise mask a corrupted-sig event. Arg order matches the private
+    // method: (b, registry, chain).
+    Result check_equivocation_events_for_test(const chain::Block& b,
+                                              const NodeRegistry& registry,
+                                              const chain::Chain& chain) const {
+        return check_equivocation_events(b, registry, chain);
+    }
+
     // D1: the CONFIDENTIAL-TX (shielded-pool) master switch, mirrored from
     // GenesisConfig. Default true = SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER
     // accepted (unchanged). false = all three rejected at this (authoritative,

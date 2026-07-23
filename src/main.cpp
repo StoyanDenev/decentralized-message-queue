@@ -33295,6 +33295,54 @@ int main(int argc, char** argv) {
                   "TXROOT-union-bind: a header tx_root that mismatches the committed lists is rejected at :226");
         }
 
+        // --- EQV-sig-verify-forged-slash (validator.cpp:394) ----------------
+        // check_equivocation_events slashes an equivocator only on GENUINE
+        // evidence of a double-sign: for each event BOTH sig_a (over digest_a)
+        // and sig_b (over digest_b) must verify against the equivocator's
+        // committee key. Removing the :394 sig_a arm lets a producer FORGE a
+        // slash of an HONEST validator — submit an event whose sig_a was never
+        // signed by the equivocator. Driven in ISOLATION via the
+        // check_equivocation_events_for_test const-forwarder seam (arg order
+        // b, registry, chain): the private gate is digest-bound only on an
+        // F2-reconciled signed block, so the seam avoids the block-sig masking
+        // and makes :394 the SOLE gate this fixture exercises. Genuinely
+        // un-pinned: every pre-existing "sig_a does not verify" assertion checks
+        // a local re-impl / a separate binary / the apply path (Chain::append,
+        // which never runs check_equivocation_events), never this validator gate.
+        {
+            // GENUINE double-sign by registered committee creator n0: two
+            // distinct digests, each signed by n0 -> clears :382 (digests
+            // differ), :385 (sigs differ), :390 (n0 registered), :394 + :397.
+            Hash dA{}, dB{};
+            for (size_t j = 0; j < 32; ++j) { dA[j] = uint8_t(0xA0 + j); dB[j] = uint8_t(0xB0 + j); }
+            EquivocationEvent ev;
+            ev.equivocator = "n0"; ev.block_index = 1;
+            ev.digest_a = dA; ev.sig_a = sign(key_of("n0"), dA.data(), dA.size());
+            ev.digest_b = dB; ev.sig_b = sign(key_of("n0"), dB.data(), dB.size());
+
+            // POSITIVE CONTROL — genuine evidence is ACCEPTED (proves the
+            // equivocator resolves present-head and both sigs verify, so the
+            // negative RED below is caused by the byte flip, not the fixture).
+            {
+                Block b2; b2.index = 1; b2.equivocation_events = { ev };
+                auto r2 = bv.check_equivocation_events_for_test(b2, reg, c);
+                check(r2.ok,
+                      "EQV control: a genuine double-sign by a registered creator is ACCEPTED");
+            }
+
+            // FORGE: corrupt ONLY sig_a. forged.sig_a stays != forged.sig_b
+            // (clears :385) and sig_b stays genuine (clears :397), so :394 is
+            // the UNIQUE failing arm. Under the mutant (:394 short-circuited)
+            // the loop completes and returns {true} -> the forged slash is
+            // ACCEPTED -> the specific-string assertion flips RED.
+            EquivocationEvent forged = ev;
+            forged.sig_a[0] ^= 0xFF;
+            Block b; b.index = 1; b.equivocation_events = { forged };
+            auto r = bv.check_equivocation_events_for_test(b, reg, c);
+            check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
+                  "EQV-sig-verify-forged-slash: an event with a forged sig_a is REJECTED at :394 (no forged slash)");
+        }
+
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
         // Values only, never JSON shape: AbortClaimMsg::from_json uses
         // json_require and THROWS on a missing/mistyped field, which would

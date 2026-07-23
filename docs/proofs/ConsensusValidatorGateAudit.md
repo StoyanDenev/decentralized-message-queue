@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (5 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union
+## 2. CLOSED (6 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -233,14 +233,60 @@ this round), rebuilt → GREEN. Structural twin of DHS-commit-reveal-bind (§2d)
 first-gate-then-delay-binder ordering — so closed by direct source-verification rather than a fresh
 analysis workflow.
 
-## 3. The enumerated residual (14 open — a ranked FAST-gateable backlog)
+### 2f. EQV-sig-verify-forged-slash (equivocation evidence must be a genuine double-sign)
+
+**#5 EQV-sig-verify-forged-slash** — `src/node/validator.cpp:394`, inside `check_equivocation_events`
+(gate at `validate()` `:49`). An `EquivocationEvent` is *evidence* used to SLASH a validator; the gate
+requires BOTH signatures to genuinely verify against the equivocator's committee key over two distinct
+digests:
+
+```cpp
+if (!verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+    return {false, "equivocation_event[i] sig_a does not verify against equivocator's key"};
+```
+
+**Consequence if silently removed:** a producer can FORGE a slash of an **honest** validator — submit
+an `EquivocationEvent` whose `sig_a` was never actually signed by the named equivocator — and the
+honest validator is punished for a double-sign it never committed. This is a *griefing / stake-theft*
+primitive against any committee member.
+
+**Genuinely un-pinned — a subtle trap-1 cleared.** Three suites *mention* the sig-verify reject but
+none pins `:394`: `test-equivocation-evidence` asserts against a **local re-implemented** `verify_evidence`
+lambda (not the validator); `test_light_verify_equivocation.sh` / `test_wallet_verify_equivocation.sh`
+drive **separate binaries** with a different reject string; and the apply-path tests
+(`test-equivocation-apply/-multi`) inject default sigs through `Chain::append`, which never runs
+`check_equivocation_events`. `test_equivocation_slashing.sh` signs GENUINE sigs (the accept path,
+through the `on_equivocation_evidence` RPC gate). No test populated `b.equivocation_events` on a real
+`check_equivocation_events` call, so the mutant survives green.
+
+**Gate — a new isolation seam (the sole production change of this round).** `check_equivocation_events`
+is private and (unlike tx_root/dh) the block-sig digest binds `sig_a` on an F2-reconciled block, so an
+Option-A "tamper after signing" fixture would be **masked** by `check_block_sigs` (`:51`) on an F2 block
+— both original and mutant reject there, never reaching `:394`. So a byte-neutral const-forwarder seam
+`check_equivocation_events_for_test(b, registry, chain)` was added to `validator.hpp` (the 5th instance
+of the established `*_for_test` pattern), isolating `:394`. Fixture (hosted in
+`test-abort-cert-validation`, reusing its n0..n3 genesis + `key_of`): build a GENUINE double-sign by
+registered creator n0 (distinct digests `dA`/`dB`, `sig_a=sign(key_of("n0"),dA)`, `sig_b=sign(…,dB)`) —
+clears `:382` (digests differ) `:385` (sigs differ) `:390` (n0 registered) `:394`/`:397` (both verify);
+then `forged=ev; forged.sig_a[0] ^= 0xFF` so `:394` is the SOLE failing arm; assert the reject contains
+`"sig_a does not verify against equivocator's key"`. The un-mutated event is the positive control
+(asserts `r.ok` — proving the equivocator resolves present-head and the ACCEPT arm is non-vacuous).
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`).* `:394 → if (false && !verify(…))` makes the
+forged event flow to `:397` (genuine `sig_b` verifies), the loop completes, and the gate returns
+`{true,""}` — the **forged slash is ACCEPTED**. So `r.error` no longer contains the specific substring
+→ the negative assertion flips RED (a clean 1-assertion counter-delta) while the positive control stays
+GREEN. Reverted via `git checkout src/node/validator.cpp` (the seam lives in `validator.hpp` and is
+kept). Design nailed by a parallel read-only analysis workflow (`wf_edd60f84-21c`) — including the
+Option-A-masking and arg-order (`b, registry, chain`) traps — before any code changed.
+
+## 3. The enumerated residual (13 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 5 | EQV-sig-verify-forged-slash | validator.cpp:394 | equivocation sig-arm: slash only on a genuine double-sign — forge a slash of an honest validator | delete/short-circuit the `sig_a` reject arm | 1 | moderate |
 | 6 | VAL-param-multisig-threshold | validator.cpp:827 | A5 governance multisig threshold — pass a PARAM_CHANGE with too few keyholder sigs | `if (good_sigs < param_threshold_)` → `if (false)` | 1 | trivial |
 | 7 | VAL-param-distinct-keyholder | validator.cpp:820 | distinct keyholder indices — one keyholder counted N times toward threshold | drop the `seen_idx.insert(idx)` distinctness reject | 1 | trivial |
 | 8 | VAL-batch-inner-sig | validator.cpp:1201 | COMPOSABLE_BATCH inner-tx sender authenticity — forge inner transfers | `if (!verify(ipk,..,it.sig))` → `if (false && ...)` | 1 | trivial |
