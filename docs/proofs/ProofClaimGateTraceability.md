@@ -1092,6 +1092,38 @@ invariant-7 1→0 RED. Pure-offline, guard already in ci_local's loop (§3z); WS
 ci_local green. **7 remaining are genuinely live-node CLUSTER** (T-3, SS-5 auth control-
 flow; MPC-3 multi-peer; VCW-4/TI-3 count-gates; SU-3 height-gated supply; LSP-7 resume).
 
+## 3af. MPC-3 investigated — the banked live-fork design is IMPRACTICAL as a fixture (documented negative result)
+
+Attempting the banked MPC-3 DIVERGENCE gate (the design in §3ae / Workflow wf_d9008c84-0ad)
+surfaced a real infrastructural obstacle that INVALIDATES it as a live fixture. The design's
+reachability premise was partly right, partly fatally wrong:
+- **CONFIRMED:** two same-identity M=1/K=1 partitioned `determ` instances DO build divergent
+  chains (per-round `dh_input` is fresh OS randomness + `proposer_time` is wall-clock, so
+  `block_hash`, `timestamp`, `delay_seed`/`delay_output` all differ at every h≥1 — verified by
+  diffing A/B `chain.json`). `state_root` at equal height MATCHES (no txs → same balances).
+- **FATAL for the fixture:** (1) `verify_chain_to_head` walks `[0, head)`, so at a LOW equal
+  height the compared head is still the SHARED GENESIS PREFIX → AGREE, not DIVERGENCE (the fork
+  only shows once the walk includes block ≥1, i.e. head height ≥2). (2) the block timers
+  (`tx_commit_ms`/`block_sig_ms`) do NOT throttle EMPTY-block production — a peerless M=1 node
+  mints back-to-back at max speed (~10+ blocks/s), so nodes CANNOT be frozen or plateaued at a
+  common height; two independent instances DRIFT continuously and are almost never at an equal
+  height, making the DIVERGENCE leg a pure race. (3) the chains grow tall within seconds, so
+  cross-check (which re-walks every header per peer) becomes slow and the whole test runs >120s
+  — unsuitable for the suite.
+
+Net: DIVERGENCE-at-a-common-height is not reliably samplable from two free-running nodes. A
+sound live gate would need chain-file surgery — truncate two divergent chains to an identical
+height H≥2 and recompute `head_hash`, then serve them frozen — which is too error-prone for a
+shell fixture. The two register-named mutants (neutralize `if(false)` at :2122; over-compare —
+flatten the by_height grouping 2115-2131) therefore stand UN-gated behaviorally. The
+lag-benignity leg (different-height peers → INCONCLUSIVE) + the AGREE positive control ARE
+reliably reachable, but they only cover the over-compare mutant; the load-bearing NEUTRALIZE
+mutant needs the equal-height fork the free-running fixture cannot reliably produce.
+
+**MPC-3 is RE-CLASSIFIED alongside T-3-s001 as a behavioral residual that needs a purpose-built
+freeze-two-forks harness (or owner review) — NOT the banked free-running-nodes fixture. No test
+was committed for this attempt** (a fixture that always SKIPs its load-bearing leg is not a gate).
+
 ## 3ae. LSP-7 CLOSED — behavioral (live-node) resume head-monotonicity gate, falsify-on-mutant via a rebuilt binary
 
 The SECOND live-node CLUSTER residual closed BEHAVIORALLY (continuing the owner-directed live
@@ -1132,11 +1164,10 @@ clean this round), rebuilt, re-ran → 3/0 green.
 
 Windows-standalone: auto-globbed into the FULL `run_all.sh`, EXCLUDED from FAST=1 (needs live
 daemons), NOT in ci_local → zero compiled/gate delta for the commit. **2 remaining CLUSTER: T-3
-(handle_session, owner-DEFERRED), MPC-3 (multi-peer cross-check LOOP — the panel banked a full
-ship-ready design: two SAME-identity M=1/K=1 PARTITIONED daemons each mint a divergent-but-
-committee-valid chain = the A_byz_committee equivocation the detector targets; deferred this round
-only because its DIVERGENCE leg needs an equal-height sample whereas LSP-7's gate fires on height
-alone).**
+(handle_session, owner-DEFERRED), MPC-3 (multi-peer cross-check LOOP — the banked free-running-
+nodes design was ATTEMPTED and found IMPRACTICAL as a fixture, §3af: nodes mint unthrottled so
+cannot be frozen/plateaued at a common height, making the equal-height DIVERGENCE sample a pure
+race; re-classified as needing a freeze-two-forks harness or owner review).**
 
 ## 3ad. SS-5 CLOSED — behavioral (live-node) auth-ordering gate, falsify-on-mutant via a REBUILT binary
 
@@ -1273,7 +1304,7 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac), SS-5 (§3ad), LSP-7 (§3ae) are now closed** — leaving 2. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); and the two live-node CLUSTER rows SS-5 (§3ad, single-node auth-ordering) + LSP-7 (§3ae, resume head-monotonicity G1) are now closed BEHAVIORALLY, each mutant-falsified via a rebuilt binary. The 2 remaining are live-node CLUSTER: T-3 (rpc.cpp handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check loop — a ship-ready design is banked in §3ae/§6.3).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac), SS-5 (§3ad), LSP-7 (§3ae) are now closed** — leaving 2. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); and the two live-node CLUSTER rows SS-5 (§3ad, single-node auth-ordering) + LSP-7 (§3ae, resume head-monotonicity G1) are now closed BEHAVIORALLY, each mutant-falsified via a rebuilt binary. The 2 remaining are live-node CLUSTER: T-3 (rpc.cpp handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check loop — the banked free-running-nodes design was attempted and found IMPRACTICAL as a fixture, §3af; needs a freeze-two-forks harness or owner review).**
 
 ### 6.1 Confirmed unenforced MED/LOW claims (2 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3, SS-5, LSP-7 CLOSED)
 
@@ -1415,10 +1446,11 @@ reachability each time. Three classes:
   body checks to the tx_root recompute by the adversarial verifier. #12 DR-2, #15 CP-2, #19 RI-2,
   #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all were CLUSTER-classified but were
   comparison/value-hash binds closed by the completeness invariants.)* **#8 T-3-s001 stays
-  DEFERRED** (owner-flagged handle_session auth review). MPC-3 is the last non-deferred residual;
-  a ship-ready design (two same-identity M=1/K=1 partitioned daemons = A_byz_committee
-  equivocation) is banked in §3ae — deferred this round only because its DIVERGENCE leg needs an
-  equal-height sample whereas LSP-7's gate fired on height alone.
+  DEFERRED** (owner-flagged handle_session auth review). MPC-3 was the last non-deferred residual;
+  its banked free-running-nodes design was ATTEMPTED and found IMPRACTICAL as a fixture (§3af —
+  unthrottled minting prevents freezing two forks at a common height; the equal-height DIVERGENCE
+  sample is a pure race, and the tall chains push the run >120s). Both remaining rows now need a
+  purpose-built harness (MPC-3: freeze-two-forks; T-3: handle_session review), not an additive fixture.
 
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
