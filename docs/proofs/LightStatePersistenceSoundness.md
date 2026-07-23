@@ -185,11 +185,21 @@ removed; `SELFTEST=1` proves each detector live).
   offline gap is re-derived by the resume's forward suffix verify, not cached.
 - **Live resume path is cluster-bound** — the offline `--resume` *arg contract*
   (accepted; fallback when no/absent/corrupt anchor) is deterministically tested
-  on every host; the live suffix-verify + fallback verdicts AND the live LSP-7
-  legs (a daemon restored below the anchor → hard error; the ==-height
-  cross-check verdicts) need a block-minting cluster (WSL2/CI), like every
-  other determ-light composite. The LSP-7 source shape is held offline by
-  `tools/test_light_resume_monotonicity_guard.sh` meanwhile.
+  on every host; the live suffix-verify + fallback verdicts need a block-minting
+  daemon, like every other determ-light composite. The LSP-7 source shape is held
+  offline by `tools/test_light_resume_monotonicity_guard.sh`. **The live LSP-7 G1
+  leg now ALSO has a BEHAVIORAL gate:** `tools/test_light_resume_regression_live.sh`
+  (Windows-standalone) writes a committee-verified cache at height `H` via
+  `verify-chain --persist`, then runs `verify-chain --resume` against a
+  genuinely-below-anchor daemon (a fresh data-dir seeded with the node's key + the
+  same genesis → a short committee-VALID chain from 0, the "restored from an old
+  snapshot" case) and asserts a hard exit-1 throw carrying "is BELOW … anchor",
+  with the ahead-daemon resume (exit-0 `RESUMED`) as the non-vacuity control. It
+  catches what the source guard cannot — a *functional* fail-open that keeps the
+  throw token but regresses the height comparison — falsified on a rebuilt
+  `determ-light` where the faithful pre-LSP-7 fall-back-to-full-verify-accept mutant
+  flips the G1 leg to a silent accept (3/0 → 2/1). Recorded in
+  `ProofClaimGateTraceability.md` §3ae (register row #25).
 - **LSP-7 floors at the cache, not at "now"** — the monotonicity floor is the
   LAST PERSISTED verified height. A daemon stale by less than one cache-write
   interval still passes; cross-invocation freshness beyond the floor remains
