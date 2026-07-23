@@ -51,7 +51,12 @@
 #   * invariant-5 (PRW-1 / StateProofRaceWindowSoundness): pin the stale-read race
 #     guard count `proof_height < vc.height` — every reader rejects a proof below
 #     the verified head (delete ONE -> RED).
-# Both are completeness anchors: bump EXPECTED_* when a trustless reader is added.
+#   * invariant-6 (DR-2/CP-2/AB-2): pin the value-hash cleartext cross-check counts
+#     (proof_value_hash !=/== expected_value_hash, computed_value_hash != proof_value_hash)
+#     — every reader cross-checks the daemon's cleartext against the committed
+#     value_hash (neuter ONE -> RED). The BEHAVIORAL tamper tests prove the rejection
+#     MECHANISM; this pins per-reader completeness.
+# All are completeness anchors: bump EXPECTED_* when a trustless reader is added.
 #
 # A "key-bind" is detected structurally: within the function body, a comparison
 # of the proof's key_bytes against a locally-built key — the canonical shape is
@@ -241,6 +246,33 @@ else
   bad "invariant-5 (PRW-1): found $staleread_guard 'proof_height < vc.height' guard(s), EXPECTED $EXPECTED_STALEREAD_GUARD — a stale-read race guard was deleted, or a reader added without bumping the count"
 fi
 
+# Invariant 6 (DR-2 / CP-2 / AB-2 — value-hash cleartext cross-check completeness):
+# every trustless reader that derives a verdict from a state_proof cross-checks the
+# daemon's cleartext against the committee-committed value_hash byte-for-byte, so a
+# LYING DAEMON that serves a tampered value is caught cryptographically (the tampered
+# cleartext no longer hashes to the committed value_hash). The BEHAVIORAL tamper tests
+# (test_light_{supply,stake,registrant}_tamper.sh, via tools/rpc_tamper_proxy.py) prove
+# the rejection MECHANISM end-to-end; this invariant pins per-reader COMPLETENESS so no
+# reader silently ships without its value-hash bind — the F-6 argument (invariant-4)
+# extended from key-binds to value-hash binds. Three comparison shapes, each a POSITIVE
+# count so an `if(false)` / `-> true` neuter of ONE drops it -> RED:
+#   * proof_value_hash != expected_value_hash  (DR-2 #12; register mutant -> if(false))
+#   * computed_value_hash != proof_value_hash  (AB-2 #20; register mutant -> if(false))
+#   * proof_value_hash == expected_value_hash  (CP-2 #15; register mutant -> `= true`)
+# (Bump the EXPECTED_* when a value-hash-binding reader is added.) RI-2 #19's key-bind
+# at light/main.cpp:4796 is already covered by invariant-4's count.
+EXPECTED_VH_NE=9    # proof_value_hash != expected_value_hash
+EXPECTED_CVH_NE=3   # computed_value_hash != proof_value_hash
+EXPECTED_VH_EQ=1    # proof_value_hash == expected_value_hash
+vh_ne=$(grep -hoE 'proof_value_hash != expected_value_hash' $FILES 2>/dev/null | wc -l | tr -d ' ')
+cvh_ne=$(grep -hoE 'computed_value_hash != proof_value_hash' $FILES 2>/dev/null | wc -l | tr -d ' ')
+vh_eq=$(grep -hoE 'proof_value_hash == expected_value_hash' $FILES 2>/dev/null | wc -l | tr -d ' ')
+if [ "$vh_ne" = "$EXPECTED_VH_NE" ] && [ "$cvh_ne" = "$EXPECTED_CVH_NE" ] && [ "$vh_eq" = "$EXPECTED_VH_EQ" ]; then
+  ok "invariant-6 (DR-2/CP-2/AB-2): value-hash cross-check counts intact ($vh_ne '!=', $cvh_ne computed'!=', $vh_eq '==')"
+else
+  bad "invariant-6 (DR-2/CP-2/AB-2): value-hash cross-check count drift — '!=' $vh_ne (exp $EXPECTED_VH_NE), computed'!=' $cvh_ne (exp $EXPECTED_CVH_NE), '==' $vh_eq (exp $EXPECTED_VH_EQ) — a verdict's value-hash bind was neutered (if(false)/->true), removed, or a reader added without bumping the count"
+fi
+
 # ── SELFTEST: prove the guard is live ───────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
   echo
@@ -290,9 +322,22 @@ if [ "${SELFTEST:-}" = "1" ]; then
     ST_FAIL=$((ST_FAIL + 1))
   fi
 
+  # (6) DR-2/CP-2/AB-2: neuter ONE value-hash cross-check (if(false)) in a scratch
+  #     copy -> the invariant-6 count for that shape must drop below EXPECTED.
+  s6="$tmp/main6.cpp"
+  sed '0,/if (proof_value_hash != expected_value_hash)/s//if (false)/' light/main.cpp > "$s6"
+  full6=$(grep -hoE 'proof_value_hash != expected_value_hash' light/main.cpp | wc -l | tr -d ' ')
+  cut6=$(grep -hoE 'proof_value_hash != expected_value_hash' "$s6" | wc -l | tr -d ' ')
+  if [ "$cut6" -lt "$full6" ]; then
+    echo "  ok:  invariant-6 detector live (neuter one value-hash cross-check -> $full6 -> $cut6)"
+  else
+    echo "  bad: SELFTEST(6) failed to drop the value-hash cross-check count ($full6 -> $cut6)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
   echo
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered comparison + deleted stale-read guard)"
+    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered key/value-hash comparison + deleted stale-read guard)"
   else
     echo "  FAIL: test_light_keybind_surface SELFTEST"
     exit 1
@@ -301,7 +346,7 @@ fi
 
 echo
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind comparison count (CP-1) + stale-read guard count (PRW-1) pinned)"
+  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind (CP-1) + stale-read (PRW-1) + value-hash cross-check (DR-2/CP-2/AB-2) counts pinned)"
   exit 0
 else
   echo "  FAIL: test_light_keybind_surface ($VIOLATIONS F-6 key-bind surface violation(s))"
