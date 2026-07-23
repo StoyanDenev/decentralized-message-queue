@@ -43,6 +43,16 @@
 # AND the un-bound set equals the quarantine set exactly (no surprise omissions,
 # no stale quarantine entries).
 #
+# Invariants 1-3 classify a consumer as "bound" on the key_bytes EXTRACTION, so a
+# mutant that neuters only the COMPARISON (`if (proof_key_hex != local_key_hex)` ->
+# `if (false)`) slips past them. Two POSITIVE-count invariants close that:
+#   * invariant-4 (CP-1 / ConstantProofSoundness): pin the load-bearing key-bind
+#     comparison count `proof_key_hex != local_key_hex` (neuter/remove ONE -> RED).
+#   * invariant-5 (PRW-1 / StateProofRaceWindowSoundness): pin the stale-read race
+#     guard count `proof_height < vc.height` — every reader rejects a proof below
+#     the verified head (delete ONE -> RED).
+# Both are completeness anchors: bump EXPECTED_* when a trustless reader is added.
+#
 # A "key-bind" is detected structurally: within the function body, a comparison
 # of the proof's key_bytes against a locally-built key — the canonical shape is
 #   std::string proof_key_hex = proof.value("key_bytes", ...);   // or proof["key_bytes"]
@@ -199,6 +209,38 @@ else
   bad "count identity broken: $total_q − $total_bound = $actual_unbound ≠ $expected_unbound quarantined"
 fi
 
+# Invariant 4 (CP-1 / ConstantProofSoundness): the key-bind must be a LOAD-BEARING
+# comparison, not merely a key_bytes EXTRACTION. Invariants 1-3 classify a consumer
+# as "bound" when it EXTRACTS proof.key_bytes (`b=1` on the extraction), so a mutant
+# that neuters only the comparison —
+#     if (proof_key_hex != local_key_hex)  ->  if (false)
+# — leaves the extraction in place and slips past 1-3 (the CP-1 surviving mutation
+# at light/main.cpp cmd_verify_constant). Pin a POSITIVE count of the canonical
+# comparison so neutering/removing/renaming ONE drops it 14 -> 13 -> RED. (Bump
+# EXPECTED_KEYBIND_CMP when a trustless reader using the proof_key_hex idiom is
+# added — the count is a completeness anchor, exactly the register's prescription.)
+EXPECTED_KEYBIND_CMP=14
+keybind_cmp=$(grep -hoE 'proof_key_hex != local_key_hex' $FILES 2>/dev/null | wc -l | tr -d ' ')
+if [ "$keybind_cmp" = "$EXPECTED_KEYBIND_CMP" ]; then
+  ok "invariant-4 (CP-1): $keybind_cmp load-bearing 'proof_key_hex != local_key_hex' key-bind comparison(s) (EXPECTED $EXPECTED_KEYBIND_CMP)"
+else
+  bad "invariant-4 (CP-1): found $keybind_cmp 'proof_key_hex != local_key_hex' comparison(s), EXPECTED $EXPECTED_KEYBIND_CMP — a key-bind was NEUTERED (e.g. -> if(false)), removed, or a reader added without bumping the count"
+fi
+
+# Invariant 5 (PRW-1 / StateProofRaceWindowSoundness): every trustless reader must
+# reject a proof anchored BELOW the verified-chain head (a stale-state race window)
+# with `if (proof_height < vc.height) throw ...`. The register's surviving mutation
+# deletes one such guard so a daemon can serve a stale (pre-head) proof. Pin a
+# POSITIVE count so deleting ONE guard drops it 14 -> 13 -> RED. (Bump
+# EXPECTED_STALEREAD_GUARD when a trustless reader is added.)
+EXPECTED_STALEREAD_GUARD=14
+staleread_guard=$(grep -hoE 'proof_height < vc\.height' $FILES 2>/dev/null | wc -l | tr -d ' ')
+if [ "$staleread_guard" = "$EXPECTED_STALEREAD_GUARD" ]; then
+  ok "invariant-5 (PRW-1): $staleread_guard 'proof_height < vc.height' stale-read race guard(s) (EXPECTED $EXPECTED_STALEREAD_GUARD)"
+else
+  bad "invariant-5 (PRW-1): found $staleread_guard 'proof_height < vc.height' guard(s), EXPECTED $EXPECTED_STALEREAD_GUARD — a stale-read race guard was deleted, or a reader added without bumping the count"
+fi
+
 # ── SELFTEST: prove the guard is live ───────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
   echo
@@ -221,9 +263,36 @@ if [ "${SELFTEST:-}" = "1" ]; then
     echo "  bad: SELFTEST could not neutralize the key-bind (scan still sees bind=$inj)" >&2
     ST_FAIL=$((ST_FAIL + 1))
   fi
+
+  # (4) CP-1: neuter ONE key-bind comparison (`if (... != ...)` -> `if (false)`)
+  #     in a scratch copy -> the invariant-4 count must drop below EXPECTED.
+  s4="$tmp/main4.cpp"
+  sed '0,/if (proof_key_hex != local_key_hex)/s//if (false)/' light/main.cpp > "$s4"
+  full4=$(grep -hoE 'proof_key_hex != local_key_hex' light/main.cpp | wc -l | tr -d ' ')
+  cut4=$(grep -hoE 'proof_key_hex != local_key_hex' "$s4" | wc -l | tr -d ' ')
+  if [ "$cut4" -lt "$full4" ]; then
+    echo "  ok:  invariant-4 detector live (neuter one comparison -> $full4 -> $cut4)"
+  else
+    echo "  bad: SELFTEST(4) failed to drop the key-bind comparison count ($full4 -> $cut4)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
+  # (5) PRW-1: delete ONE stale-read guard token in a scratch copy -> the
+  #     invariant-5 count must drop below EXPECTED.
+  s5="$tmp/main5.cpp"
+  sed '0,/proof_height < vc\.height/s//proof_height < 0 \/* NEUTERED *\//' light/main.cpp > "$s5"
+  full5=$(grep -hoE 'proof_height < vc\.height' light/main.cpp | wc -l | tr -d ' ')
+  cut5=$(grep -hoE 'proof_height < vc\.height' "$s5" | wc -l | tr -d ' ')
+  if [ "$cut5" -lt "$full5" ]; then
+    echo "  ok:  invariant-5 detector live (delete one stale-read guard -> $full5 -> $cut5)"
+  else
+    echo "  bad: SELFTEST(5) failed to drop the stale-read guard count ($full5 -> $cut5)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
   echo
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind)"
+    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered comparison + deleted stale-read guard)"
   else
     echo "  FAIL: test_light_keybind_surface SELFTEST"
     exit 1
@@ -232,7 +301,7 @@ fi
 
 echo
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact)"
+  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind comparison count (CP-1) + stale-read guard count (PRW-1) pinned)"
   exit 0
 else
   echo "  FAIL: test_light_keybind_surface ($VIOLATIONS F-6 key-bind surface violation(s))"
