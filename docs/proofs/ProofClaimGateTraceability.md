@@ -861,9 +861,10 @@ SOUND in Workflow wf_f1a08faf-653.)*
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
 from an in-process `determ test-*` seam is closed. The remaining open rows are all
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
-§6.1 carries the live count (3 open — all genuinely live-node CLUSTER, NOT source-countable
-— after §3ad closed SS-5 BEHAVIORALLY (live-node auth-ordering gate, mutant-falsified via a
-rebuilt binary), §3ac closed VCW-4 + TI-3 + SU-3 (count-gate invariants 8/9/10, adversarially
+§6.1 carries the live count (2 open — all genuinely live-node CLUSTER, NOT source-countable
+— after §3ae closed LSP-7 BEHAVIORALLY (live-node resume head-monotonicity G1 gate, mutant-
+falsified via a rebuilt determ-light), §3ad closed SS-5 BEHAVIORALLY (live-node auth-ordering
+gate), §3ac closed VCW-4 + TI-3 + SU-3 (count-gate invariants 8/9/10, adversarially
 verified), §3ab closed OSB-5, and §3aa
 reclassified + closed 4 comparison-shaped rows (DR-2/CP-2/AB-2 via a value-hash-bind
 completeness invariant, RI-2 already covered by CP-1's invariant-4); §3z closed CP-1 +
@@ -1091,6 +1092,52 @@ invariant-7 1→0 RED. Pure-offline, guard already in ci_local's loop (§3z); WS
 ci_local green. **7 remaining are genuinely live-node CLUSTER** (T-3, SS-5 auth control-
 flow; MPC-3 multi-peer; VCW-4/TI-3 count-gates; SU-3 height-gated supply; LSP-7 resume).
 
+## 3ae. LSP-7 CLOSED — behavioral (live-node) resume head-monotonicity gate, falsify-on-mutant via a rebuilt binary
+
+The SECOND live-node CLUSTER residual closed BEHAVIORALLY (continuing the owner-directed live
+round, 2026-07-23). `tools/test_light_resume_regression_live.sh` — the behavioral complement to
+the STATIC source guard `test_light_resume_monotonicity_guard.sh` (which only asserts the throw
+TOKEN is present in source; a functional fail-open that keeps the token but regresses the height
+comparison is invisible to grep, caught here by a live exit-code differential) — pins the G1
+resume head-monotonicity gate in `anchored_head` (light/trustless_read.cpp:443).
+
+- **#25 LSP-7 (LightStatePersistenceSoundness)** — G1: `if (daemon_head < st.head_height) throw
+  "...is BELOW the previously committee-verified anchor..."`. The cached anchor is written by
+  `verify-chain --persist` ONLY after a full genesis-to-head verify (LSP-1); a fork-free chain
+  never regresses, so a daemon below the anchor is serving stale/rollback state and MUST be
+  refused. The discriminator is a pure HEIGHT comparison — no fork, no sampling race:
+    * G1-NEGATIVE leg — a committee-verified cache at height H (53), then `verify-chain --resume`
+      against a below-anchor daemon (a FRESH data-dir seeded with node1's `node_key.json` + the
+      SAME genesis → rebuilds a short, committee-VALID chain from 0, the doc's "restored from an
+      old snapshot"; head 1) → HONEST throws exit 1 with "is BELOW ... anchor".
+    * POSITIVE CONTROL — `--resume` against a legitimately-AHEAD daemon (>H) → exit 0 "RESUMED"
+      (proves the gate is not always-reject); stays green under both binaries.
+
+Design + falsify plan were adversarially produced + judged in Workflow wf_d9008c84-0ad (a
+2-design + judge panel; the judge picked LSP-7 over MPC-3 for reliability — LSP-7's discriminating
+state is deterministic, while MPC-3's DIVERGENCE leg risks a spurious RED when a peer is
+transiently unverifiable). The panel CORRECTED a critical design flaw: a BARE DELETE of the G1
+throw does NOT discriminate (control falls to the `>anchor` resume branch :509, whose own head
+fetch re-throws the G3 error at :526) — so the honest side asserts BOTH exit==1 AND the
+G1-specific "is BELOW ... anchor" token, and the FAITHFUL mutant is the fall-back-to-full-verify-
+and-accept (the pre-LSP-7 fail-open), not a delete.
+
+*Falsify-on-mutant (executed via a REBUILT determ-light — determ.exe untouched, so the live nodes
+keep working).* Replaced the G1 throw (trustless_read.cpp:443-454) with the pre-LSP-7 fall-back-
+to-full-verify-accept, rebuilt determ-light, re-ran → the G1-negative leg flipped to exit 0
+"daemon not ahead of cached anchor — full verify" (silent accept of the height-1-vs-anchor-53
+regression), 3/0 → 2/1 RED; the positive control stayed GREEN (the discriminator is the
+G1-negative leg specifically). Reverted via `git checkout light/trustless_read.cpp` (committed
+clean this round), rebuilt, re-ran → 3/0 green.
+
+Windows-standalone: auto-globbed into the FULL `run_all.sh`, EXCLUDED from FAST=1 (needs live
+daemons), NOT in ci_local → zero compiled/gate delta for the commit. **2 remaining CLUSTER: T-3
+(handle_session, owner-DEFERRED), MPC-3 (multi-peer cross-check LOOP — the panel banked a full
+ship-ready design: two SAME-identity M=1/K=1 PARTITIONED daemons each mint a divergent-but-
+committee-valid chain = the A_byz_committee equivocation the detector targets; deferred this round
+only because its DIVERGENCE leg needs an equal-height sample whereas LSP-7's gate fires on height
+alone).**
+
 ## 3ad. SS-5 CLOSED — behavioral (live-node) auth-ordering gate, falsify-on-mutant via a REBUILT binary
 
 The FIRST live-node CLUSTER residual closed BEHAVIORALLY (owner-directed live round,
@@ -1226,9 +1273,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac), SS-5 (§3ad) are now closed** — leaving 3. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); and SS-5 — the first genuinely live-node CLUSTER row — is now closed BEHAVIORALLY (§3ad, a single-node auth-ordering test, mutant-falsified via a rebuilt binary). The 3 remaining are live-node CLUSTER: T-3 (rpc.cpp handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check loop), LSP-7 (resume persistence).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac), SS-5 (§3ad), LSP-7 (§3ae) are now closed** — leaving 2. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); and the two live-node CLUSTER rows SS-5 (§3ad, single-node auth-ordering) + LSP-7 (§3ae, resume head-monotonicity G1) are now closed BEHAVIORALLY, each mutant-falsified via a rebuilt binary. The 2 remaining are live-node CLUSTER: T-3 (rpc.cpp handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check loop — a ship-ready design is banked in §3ae/§6.3).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (3 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3, SS-5 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (2 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3, SS-5, LSP-7 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -1256,7 +1303,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | **CLOSED §3r** | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
 | 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
 | 24 | SU-3 | SupplyProofSoundness | LOW | moderate | **CLOSED §3ac** | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
-| 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
+| 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | **CLOSED §3ae** | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
 | 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | **CLOSED §3z** | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
 | 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | **CLOSED §3s** | Surviving mutation: delete V11 clause 3 (`else if (!sig_a_ok)`, light/main.cpp 7587-7589) — an event with sig_a INVALID + sig_b VALID skips clause 4 and reaches EQUIVOCATION-PROVEN. |
 | 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
@@ -1351,23 +1398,27 @@ reachability each time. Three classes:
     round before shipping, exactly as the NEEDS_FIX warned. Falsified, ci_local green.
   Full designs: scratchpad/offline_designs.txt (session-local; re-extract from the
   wf_6a81aa3a-4d7 journal if needed).
-- **CLUSTER (3 left — the genuinely behavioral residual)** — light-client verdict logic
+- **CLUSTER (2 left — the genuinely behavioral residual)** — light-client verdict logic
   needing a live node + the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local.
-  **#8 T-3, #13 MPC-3, #25 LSP-7** — auth branch-ordering control-flow (T-3 in rpc.cpp
-  handle_session), multi-peer cross-check loop (MPC-3), resume persistence (LSP-7). These
-  are NOT single-comparison count-gates (a source-count completeness invariant cannot catch
-  a branch-hoist / loop-rewrite / ordering mutation), so they need a live-node behavioral
-  test or careful review. *(#14 SS-5 CLOSED §3ad — the FIRST genuinely live-node CLUSTER row
-  closed BEHAVIORALLY: `test_rpc_dapp_subscribe_auth.sh` pins the dapp_subscribe-behind-auth
-  ordering on a single auth-enabled node, mutant-falsified via a rebuilt determ.exe (3/0 →
-  2/1 under the hoist). This proves the live-round approach: the 3-node cluster hangs on WSL2
-  /mnt/c but single/multi-node daemons come up fine natively on Windows Git Bash. #18 VCW-4,
-  #24 SU-3, #30 TI-3 CLOSED §3ac via count-gate invariants 8/9/10 — TI-3's anchor was
-  corrected from the non-load-bearing body checks to the tx_root recompute by the adversarial
-  verifier. #12 DR-2, #15 CP-2, #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all
-  were CLUSTER-classified but were comparison/value-hash binds closed by the completeness
-  invariants.)* **#8 T-3-s001 stays DEFERRED.** A live-node cluster round for the true
-  behavioral residual (MPC-3 multi-peer + LSP-7 resume are the next candidates).
+  **#8 T-3, #13 MPC-3** — auth branch-ordering control-flow (T-3 in rpc.cpp handle_session),
+  multi-peer cross-check loop (MPC-3). These are NOT single-comparison count-gates (a
+  source-count completeness invariant cannot catch a branch-hoist / loop-rewrite / ordering
+  mutation), so they need a live-node behavioral test or careful review. *(#14 SS-5 CLOSED §3ad
+  + #25 LSP-7 CLOSED §3ae — the two live-node CLUSTER rows closed BEHAVIORALLY:
+  `test_rpc_dapp_subscribe_auth.sh` pins dapp_subscribe-behind-auth on a single auth-enabled
+  node (3/0 → 2/1 under the hoist), and `test_light_resume_regression_live.sh` pins the G1
+  resume head-monotonicity gate (cache@H vs a below-anchor daemon → exit 1 'is BELOW'; 3/0 →
+  2/1 under the pre-LSP-7 fall-back-accept mutant), each mutant-falsified via a rebuilt binary.
+  These prove the live-round approach: the 3-node cluster hangs on WSL2 /mnt/c but single/multi-
+  node daemons come up fine natively on Windows Git Bash. #18 VCW-4, #24 SU-3, #30 TI-3 CLOSED
+  §3ac via count-gate invariants 8/9/10 — TI-3's anchor was corrected from the non-load-bearing
+  body checks to the tx_root recompute by the adversarial verifier. #12 DR-2, #15 CP-2, #19 RI-2,
+  #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all were CLUSTER-classified but were
+  comparison/value-hash binds closed by the completeness invariants.)* **#8 T-3-s001 stays
+  DEFERRED** (owner-flagged handle_session auth review). MPC-3 is the last non-deferred residual;
+  a ship-ready design (two same-identity M=1/K=1 partitioned daemons = A_byz_committee
+  equivocation) is banked in §3ae — deferred this round only because its DIVERGENCE leg needs an
+  equal-height sample whereas LSP-7's gate fired on height alone.
 
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
