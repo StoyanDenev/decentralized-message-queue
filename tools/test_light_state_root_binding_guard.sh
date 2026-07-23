@@ -33,6 +33,11 @@
 #       pieces: the FULL-block fetch (`rpc.call("block"`), the successor-prev_hash
 #       binding check (`succ_prev != recomputed_hex`), and a fail-closed SECURITY
 #       throw. Stripping any of these would silently un-bind state_root.
+#       I3d (SR-1): the binding compare is a SINGLE-TERM unconditional if — an
+#       `&& false` short-circuit slips past I3b's bare substring grep, so a
+#       POSITIVE single-term count pins it. I3e (SR-1): the block_hash is
+#       recomputed LOCALLY via b.compute_hash(), never re-sourced from a
+#       daemon-returned field.
 #
 # LIVENESS (SELFTEST=1): re-runs the three checks against scratch COPIES of the real
 # files with a regression injected into each, and asserts the guard flags every one.
@@ -107,6 +112,29 @@ check_invariants() {
     else
       bad "I3c helper lost its SECURITY fail-closed throw"
     fi
+
+    # I3d (SR-1): the binding IF must be the SINGLE-TERM parenthesized check
+    # `if (succ_prev != recomputed_hex)`. The bare grep -q in I3b still matches
+    # `... && false)`, so pin the CLOSED single-term form with a POSITIVE count:
+    # an inserted `&& false` short-circuit (or any extra conjunct) drops it 1 -> 0.
+    local i3d
+    i3d=$(grep -hoE 'if[[:space:]]*\([[:space:]]*succ_prev[[:space:]]*!=[[:space:]]*recomputed_hex[[:space:]]*\)' "$helper" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$i3d" = "1" ]; then
+      ok "I3d binding IF is the single-term '(succ_prev != recomputed_hex)' check (EXPECTED_BIND_IF=1)"
+    else
+      bad "I3d EXPECTED_BIND_IF=1 but found $i3d — succ_prev binding IF broken (e.g. '&& false' short-circuit), renamed, or duplicated"
+    fi
+
+    # I3e (SR-1): `recomputed` MUST be recomputed LOCALLY via b.compute_hash(),
+    # never sourced from a daemon-returned field. Pin the local recompute with a
+    # POSITIVE count so re-sourcing it from full[...] drops it 1 -> 0.
+    local i3e
+    i3e=$(grep -hoE 'recomputed[[:space:]]*=[[:space:]]*b\.compute_hash\(\)' "$helper" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$i3e" = "1" ]; then
+      ok "I3e anchor block_hash recomputed LOCALLY via b.compute_hash() (EXPECTED_RECOMPUTE=1)"
+    else
+      bad "I3e EXPECTED_RECOMPUTE=1 but found $i3e — 'recomputed' no longer bound to a LOCAL b.compute_hash() (daemon-field trust?)"
+    fi
   fi
 }
 
@@ -163,9 +191,20 @@ if [ "${SELFTEST:-}" = "1" ]; then
   sed 's/rpc\.call("block"/rpc.call("headers_stripped"/' "$clean/trustless_read.cpp" > "$r4/trustless_read.cpp"
   st_expect_red "R4 helper lost the FULL-block fetch" "$r4"
 
+  # R5 (SR-1): short-circuit the binding IF with '&& false' — I3b's bare grep
+  # still matches, but I3d (single-term count) must flag it.
+  r5="$tmproot/r5"; mkdir -p "$r5"; cp "$clean"/* "$r5"/
+  sed 's/if (succ_prev != recomputed_hex)/if (succ_prev != recomputed_hex \&\& false)/' "$clean/trustless_read.cpp" > "$r5/trustless_read.cpp"
+  st_expect_red "R5 binding IF short-circuited with '&& false' (I3b-blind, I3d must catch)" "$r5"
+
+  # R6 (SR-1): source `recomputed` from a daemon field instead of local compute_hash().
+  r6="$tmproot/r6"; mkdir -p "$r6"; cp "$clean"/* "$r6"/
+  sed 's/recomputed = b.compute_hash()/recomputed = from_hex(full.value("block_hash", std::string{}))/' "$clean/trustless_read.cpp" > "$r6/trustless_read.cpp"
+  st_expect_red "R6 recomputed sourced from daemon field, not compute_hash() (I3e must catch)" "$r6"
+
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_state_root_binding_guard SELFTEST (flags all 4 regression classes)"
+    echo "  PASS: test_light_state_root_binding_guard SELFTEST (flags all 6 regression classes)"
     exit 0
   else
     echo "  FAIL: test_light_state_root_binding_guard SELFTEST ($ST_FAIL self-test failure(s))"
@@ -178,7 +217,7 @@ check_invariants light
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_state_root_binding_guard (S-042 binding intact: no field-trust anchor; all readers route through committee_bound_state_root; helper binding pieces present)"
+  echo "  PASS: test_light_state_root_binding_guard (S-042 binding intact: no field-trust anchor; all readers route through committee_bound_state_root; helper binding pieces present; binding IF is single-term (I3d) and recompute is local (I3e))"
   exit 0
 else
   echo "  FAIL: test_light_state_root_binding_guard ($VIOLATIONS S-042 regression(s) — a trustless reader may again trust an unsigned state_root field)"

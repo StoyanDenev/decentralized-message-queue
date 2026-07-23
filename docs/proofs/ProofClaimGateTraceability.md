@@ -861,7 +861,8 @@ SOUND in Workflow wf_f1a08faf-653.)*
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
 from an in-process `determ test-*` seam is closed. The remaining open rows are all
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
-§6.1 carries the live count (18 open after §3w/§3x closed CB-4 + WA-2).
+§6.1 carries the live count (14 open after §3y closed SR-1 + LSP-6 + RP-5 + DR-6, on
+top of §3w/§3x's CB-4 + WA-2).
 
 ## 3v. T-1kd CLOSED — S-014 rate-limiter keys on BARE IP (FAST unit; RECLASSIFIED)
 
@@ -944,6 +945,51 @@ failure, the non-vacuity anchor stays green. Pure OFFLINE source guard (zero com
 change) → MSVC FAST trivially unaffected; WSL2 GCC ci_local is the gate (green).
 *(Design adversarially verified SOUND in Workflow wf_6a81aa3a-4d7.)*
 
+## 3y. OFFLINE_SOURCE batch 2 — SR-1 + LSP-6 + RP-5 + DR-6 CLOSED (4 light-client source guards)
+
+Four light-client (`light/`) source guards closed in one batch. Designs were
+re-verified against CURRENT source and adversarially checked (each on anchor-
+uniqueness, non-vacuity, and falsify-reach) in Workflow wf_a639e7da-b94 — all four
+returned SOUND. Each falsify was executed against the real (committed) source and
+reverted via `git checkout`; all four RED under their own mutant, GREEN post-revert;
+one WSL2 GCC `ci_local` run is the gate (pure-offline, zero compiled change → MSVC
+FAST trivially unaffected).
+
+- **#2 SR-1 (StateRootAnchorSoundness)** — EXTEND `test_light_state_root_binding_guard.sh`.
+  The pre-existing I3b used a bare `grep -q 'succ_prev != recomputed_hex'`, which
+  STILL matches the register mutant `if (succ_prev != recomputed_hex && false)` — the
+  exact vacuity the register warns of. Added **I3d** (`EXPECTED_BIND_IF=1`: the binding
+  IF is the SINGLE-TERM `(succ_prev != recomputed_hex)`, so `&& false` drops the count
+  1→0) + **I3e** (`EXPECTED_RECOMPUTE=1`: `recomputed = b.compute_hash()` is a LOCAL
+  recompute, so re-sourcing from a daemon field drops it 1→0) + SELFTEST R5/R6.
+  *Falsify:* `&& false` at `trustless_read.cpp:637` → I3d RED (I3b stays green — proving
+  why I3d was needed), I3e green.
+- **#17 LSP-6 (LightStatePersistenceSoundness)** — EXTEND `test_light_resume_monotonicity_guard.sh`.
+  New **I7** (`EXPECTED_ANCHOR_BIND=2`): both `verify_chain_from_anchor(...)` call sites
+  in `anchored_head` must bind BOTH `st.head_height` AND `st.head_block_hash` (the cached
+  anchor as the resume's first verified link). An EXACT count of 2 — a bare `grep -q`
+  stays green when only ONE site's binding is stripped (the other still holds
+  `st.head_block_hash`). *Falsify:* drop `st.head_block_hash` from the :509 resume call →
+  count 2→1 → I7 RED (I6 call-token count stays 2).
+- **#23 RP-5 (RegistrantProofSoundness)** — NEW `test_registrant_lifecycle_classifier_coherence.sh`.
+  Pins the deactivation classifier (`light/main.cpp:6193`, a two-physical-line statement):
+  `EXPECTED_DEACT_ASSIGNS=1` (paren-independent anchor, stays green under `-> false`) +
+  the accumulated RHS == `(inactive_from!=0&&inactive_from<=anchored_height)`.
+  *Falsify:* `-> false` → content RED, anchor green; drop-conjunct → content RED.
+- **#28 DR-6 (DAppRegistryReadSoundness)** — NEW `test_dapp_registry_active_boundary_coherence.sh`.
+  Pins the dapp active boundary (`light/main.cpp:7021`): exactly 1 site, RHS ==
+  `(anchored_height<inactive_from)`, operator STRICT `<`. *Falsify:* `<` → `<=` → expr
+  + op RED, non-vacuity green; `-> true` → anchor count 1→0 RED.
+
+**CI-wiring fix (CP-1-class trap, closed here for the two EXTEND guards).** The
+register warned (CP-1) that a design's "the guard runs in ci_local" claim can be FALSE.
+Both `test_light_state_root_binding_guard.sh` and `test_light_resume_monotonicity_guard.sh`
+were in fact NOT run by `ci_local` at all (absent from the FAST `ONLY_PATTERN` and from
+the offline doc-guard loop) — so their invariants were ungated on the local gate. This
+round wires all four guards into `ci_local`'s offline doc-guard loop, closing that
+pre-existing gap alongside the new invariants. *(Designs adversarially verified SOUND in
+Workflow wf_a639e7da-b94.)*
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -1003,14 +1049,14 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x) are now closed** — leaving 18. **The FAST_UNIT tranche is EXHAUSTED; all 18 remaining are OFFLINE_SOURCE (6) or CLUSTER (12).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y) are now closed** — leaving 14. **The FAST_UNIT tranche is EXHAUSTED; all 14 remaining are OFFLINE_SOURCE (2) or CLUSTER (12).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (18 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (14 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
 | 1 | SP-2 | StakeProofSoundness | MED | trivial | **CLOSED §3i** | SURVIVING MUTATION: light/main.cpp:2395 `if (computed_value_hash != proof_value_hash)` -> `if (false)` (or a -Wunused-safe `if (computed_value_hash != |
-| 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | open | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
+| 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
 | 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | **CLOSED §3p** | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
@@ -1025,18 +1071,18 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 14 | SS-5 | StreamingSubscriptionSoundness | MED | moderate | open | SURVIVING MUTANT: in src/rpc/rpc.cpp handle_session (~line 171-204), hoist the `req.value("method","")=="dapp_subscribe"` takeover branch ABOVE the `v |
 | 15 | CP-2 | ConstantProofSoundness | MED | moderate | open | Surviving mutant: light/main.cpp:2898 `bool confirmed = (proof_value_hash == expected_value_hash);` -> `bool confirmed = true;` (verify-constant repor |
 | 16 | CP-1 | ConstantProofSoundness | MED | moderate | open | SURVIVING MUTATION: in light/main.cpp cmd_verify_constant, change line 2851 `if (proof_key_hex != local_key_hex) {` to `if (false) {` (compile-clean v |
-| 17 | LSP-6 | LightStatePersistenceSoundness | MED | moderate | open | Surviving mutation: in anchored_head (light/trustless_read.cpp:509) change verify_chain_from_anchor(rpc, committee_seed, st.head_height, st.head_block |
+| 17 | LSP-6 | LightStatePersistenceSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: in anchored_head (light/trustless_read.cpp:509) change verify_chain_from_anchor(rpc, committee_seed, st.head_height, st.head_block |
 | 18 | VCW-4 | VerifyChainWalkSoundness | MED | moderate | open | Surviving mutation: in light/trustless_read.cpp change the walked-count gate (lines 342-348) `if (headers_seen != head_height - start_from)` to `if (f |
 | 19 | RI-2 | ReceiptInclusionProofSoundness | MED | moderate | open | Surviving mutant: in light/main.cpp cmd_verify_receipt_inclusion, change `if (proof_key_hex != local_key_hex)` (~line 4796) to `if (false)`. RI-2's ke |
 | 20 | AB-2 | AbortRecordProofSoundness | MED | hard | open | Surviving mutation: light/main.cpp:2664 `if (computed_value_hash != proof_value_hash)` -> `if (false)` neutralizes the TAMPERED value-hash bind of the |
 | 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | **CLOSED §3q** | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
 | 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | **CLOSED §3r** | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
-| 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | open | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
+| 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
 | 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
 | 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
 | 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | open | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
 | 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | **CLOSED §3s** | Surviving mutation: delete V11 clause 3 (`else if (!sig_a_ok)`, light/main.cpp 7587-7589) — an event with sig_a INVALID + sig_b VALID skips clause 4 and reaches EQUIVOCATION-PROVEN. |
-| 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | open | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
+| 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
 | 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | **CLOSED §3u** | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a token (breaks the handshake-always-completes exemption). |
 | 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
 | 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | **CLOSED §3x** | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
@@ -1087,29 +1133,36 @@ reachability each time. Three classes:
     before/after). EXTEND the existing `test-state-proof-composite-key` subcommand
     (already in FAST regex) to assert on the struct — no new wrapper, no regex edit.
   *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r; #27 T-OE4 — CLOSED §3s.)*
-- **OFFLINE_SOURCE (6 left)** — a source-parity / presence invariant closeable by a
+- **OFFLINE_SOURCE (2 left)** — a source-parity / presence invariant closeable by a
   build-free awk/source guard wired into ci_local's offline loop (the PCL-1 / ADC-3 /
-  T-1 pattern). **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6.**
-  *(#31 WA-2 CLOSED §3x, #32 CB-4 CLOSED §3w — both shipped this round. #33 T-1kd was
-  here but RECLASSIFIED to FAST_UNIT and CLOSED §3v — a behavioral 2nd-sender leg beat
-  the grep guard.)* **Designs adversarially
+  T-1 pattern). **#16 CP-1, #26 PRW-1 (both NEEDS_FIX — see below).**
+  *(#2 SR-1, #17 LSP-6, #23 RP-5, #28 DR-6 CLOSED §3y this round; #31 WA-2 CLOSED §3x,
+  #32 CB-4 CLOSED §3w. #33 T-1kd was here but RECLASSIFIED to FAST_UNIT and CLOSED §3v —
+  a behavioral 2nd-sender leg beat the grep guard.)* **Designs adversarially
   verified in Workflow wf_6a81aa3a-4d7 (each pins a POSITIVE anchor count so a
   rename/delete flips RED, never a bare substring grep):**
-  - **#2 SR-1** (SOUND): EXTEND `test_light_state_root_binding_guard.sh` — add I3d
+  - **#2 SR-1** (CLOSED §3y): EXTEND `test_light_state_root_binding_guard.sh` — added I3d
     (`if (succ_prev != recomputed_hex)` pinned to a single-term parenthesized form,
     EXPECTED_BIND_IF=1, so `&& false` breaks it) + I3e (`Hash recomputed = b.compute_hash();`
     EXPECTED_RECOMPUTE=1, so re-sourcing from a daemon field breaks it) + SELFTEST R5/R6.
+    Falsified (`&& false` → I3d RED, I3b stays green — the vacuity that motivated I3d),
+    ci_local green. Also wired into ci_local (was previously unrun there).
   - **#32 CB-4** (CLOSED §3w): NEW `tools/test_keygen_failclosed_guard.sh` (+ ci_local wire) —
     asserts `keys.cpp generate_node_key` fatal-throws on `determ_rng_bytes(...) != 0`, no
     `(void)`-cast of the RNG return. Falsified (void-cast → 3/4 RED), ci_local green.
-  - **#17 LSP-6** (SOUND): EXTEND `test_light_resume_monotonicity_guard.sh` I7 — the
-    `verify_chain_from_anchor` initial-prev-anchor binding.
+  - **#17 LSP-6** (CLOSED §3y): EXTEND `test_light_resume_monotonicity_guard.sh` I7 — the
+    `verify_chain_from_anchor` initial-prev-anchor binding, EXACT count of 2 call sites
+    binding st.head_height + st.head_block_hash. Falsified (drop the :509 resume site's
+    block_hash → count 2→1 RED), ci_local green. Also wired into ci_local (was unrun).
   - **#31 WA-2** (CLOSED §3x): NEW `tools/test_wallet_accounting_credit_gate_source.sh` — the
     `credits +=` receiver-gate must stay `to_hit && t == 0` (single-shard TRANSFER only).
     Falsified (widen to `t==0||t==10` → condition RED), ci_local green.
-  - **#23 RP-5** (SOUND): NEW `tools/test_registrant_lifecycle_classifier_coherence.sh` —
-    the deactivation clause `inactive_from != 0 && inactive_from <= anchored_height`.
-  - **#28 DR-6** (SOUND): the dapp-registry active/inactive boundary `< inactive_from`.
+  - **#23 RP-5** (CLOSED §3y): NEW `tools/test_registrant_lifecycle_classifier_coherence.sh` —
+    the deactivation clause == `(inactive_from!=0&&inactive_from<=anchored_height)` (multi-line
+    accumulate). Falsified (`-> false` / drop-conjunct → content RED), ci_local green.
+  - **#28 DR-6** (CLOSED §3y): NEW `tools/test_dapp_registry_active_boundary_coherence.sh` —
+    the dapp active boundary `(anchored_height<inactive_from)`, STRICT `<`. Falsified
+    (`<` → `<=` → expr+op RED; `-> true` → anchor 1→0 RED), ci_local green.
   - **#26 PRW-1** (NEEDS_FIX, minor): EXTEND `test_light_resume_monotonicity_guard.sh`
     I7 — the `proof_height < vc.height` stale-read guard; mechanics sound, small anchor fix.
   - **#16 CP-1** (NEEDS_FIX): EXTEND `test_light_keybind_surface.sh` invariant-4 pinning
@@ -1125,7 +1178,9 @@ reachability each time. Three classes:
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
 
-Recommended order: **FAST_UNIT tranche is EXHAUSTED** — the OFFLINE_SOURCE tranche is
-now in progress (CB-4 §3w + WA-2 §3x closed this round; **6 left**: SR-1, CP-1, LSP-6,
-RP-5, PRW-1, DR-6 — all offline both platforms via ci_local source guards), then the
-CLUSTER tranche (12) in one or two live-node rounds.
+Recommended order: **FAST_UNIT tranche is EXHAUSTED; the OFFLINE_SOURCE tranche is nearly
+done** — CB-4 §3w + WA-2 §3x + SR-1/LSP-6/RP-5/DR-6 §3y closed. **2 left, both NEEDS_FIX
+first**: #16 CP-1 (the design's named CI-wiring claim was FALSE — re-verify it runs in
+ci_local, exactly the trap the §3y batch hit for the two light guards) and #26 PRW-1
+(minor anchor fix on the `proof_height < vc.height` stale-read guard). Then the CLUSTER
+tranche (12) in one or two live-node rounds.

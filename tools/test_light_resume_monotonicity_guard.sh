@@ -34,6 +34,13 @@
 #   I5: the pre-LSP-7 silent-fallback marker ("daemon not ahead of cached
 #       anchor") is GONE — its reappearance means someone reopened the
 #       fail-open path.
+#   I6: BOTH suffix-walk call sites are present (the > resume path and the
+#       ==-race anchor binding) — exactly 2 verify_chain_from_anchor calls.
+#   I7: (LSP-6) both verify_chain_from_anchor call sites in anchored_head pass
+#       the cached anchor's height+block_hash (st.head_height, st.head_block_hash)
+#       as the start link — the resume chains onto the exact cached anchor
+#       (initial-prev-anchor binding). An EXACT count of 2, since a bare grep
+#       stays green when only one site's binding is stripped.
 #
 # SELFTEST=1: strips each gate from a scratch copy and asserts detection.
 #
@@ -47,6 +54,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 SRC="light/trustless_read.cpp"
+EXPECTED_ANCHOR_BIND=2   # both suffix-walk sites carry the cached-anchor start link
 
 VIOLATIONS=0
 ok()  { echo "  ok:  $1"; }
@@ -68,6 +76,31 @@ extract_anchored_head() {
     in_fn { print }
     in_fn && /^\}/ { exit }
   ' "$1" | tr -d '\r'
+}
+
+# count_anchor_bind_calls <file> — N verify_chain_from_anchor(...) call sites in
+# anchored_head whose argument list binds BOTH st.head_height (start_from) AND
+# st.head_block_hash (initial_prev_anchor) — the cached anchor as the resume's
+# first verified link (LSP-6). Scoped to the anchored_head body so the DEFINITION
+# (line 377) is excluded; the args carry no inner parens so index(rest,')') is
+# the true call boundary. A bare grep -q would stay green when only one of the
+# two sites is neutered (the other still holds st.head_block_hash) — only the
+# exact count observes the 2->1 drop.
+count_anchor_bind_calls() {
+  extract_anchored_head "$1" | awk '
+    { buf = buf " " $0 }
+    END {
+      n = 0
+      while (match(buf, /verify_chain_from_anchor\(/)) {
+        rest = substr(buf, RSTART + RLENGTH)
+        close_at = index(rest, ")")
+        if (close_at == 0) break
+        args = substr(rest, 1, close_at - 1)
+        if (args ~ /st\.head_height/ && args ~ /st\.head_block_hash/) n++
+        buf = substr(rest, close_at + 1)
+      }
+      print n
+    }'
 }
 
 check_gates() {  # check_gates <file> <label-prefix>
@@ -131,6 +164,18 @@ check_gates() {  # check_gates <file> <label-prefix>
     fails=$((fails + 1))
   fi
 
+  # I7 — LSP-6 initial-prev-anchor binding (EXACT count, not grep -q: dropping
+  # the cached-anchor block_hash on ONE site leaves the other's intact, so only
+  # the exact count of 2 observes the loss).
+  local bind_calls
+  bind_calls=$(count_anchor_bind_calls "$f")
+  if [ "$bind_calls" -eq "$EXPECTED_ANCHOR_BIND" ]; then
+    ok "${pfx}I7: $bind_calls verify_chain_from_anchor call(s) bind the cached anchor (st.head_height + st.head_block_hash) as the start link"
+  else
+    bad "${pfx}I7: expected $EXPECTED_ANCHOR_BIND anchor-binding verify_chain_from_anchor call(s), found $bind_calls (resume no longer chains onto the cached anchor)"
+    fails=$((fails + 1))
+  fi
+
   return "$fails"
 }
 
@@ -169,6 +214,18 @@ if [ "${SELFTEST:-}" = "1" ]; then
     echo "  ok:  fail-open marker re-introduction detected (I5 detector live)"
   else
     echo "  bad: SELFTEST(c) could not see the re-introduced marker" >&2; ST_FAIL=$((ST_FAIL + 1))
+  fi
+
+  # (d) drop the cached anchor block_hash from the resume (>) call site — the
+  #     LSP-6 binding the register's :509 mutation targets. The resume call
+  #     carries both fields on ONE line; the ==-race binding splits them across
+  #     lines, so this sed hits only the resume site and the count drops 2 -> 1.
+  sed 's/st\.head_height, st\.head_block_hash);/st.head_height, "");/' \
+      "$SRC" > "$tmp/d.cpp"
+  if [ "$(count_anchor_bind_calls "$tmp/d.cpp")" -lt "$EXPECTED_ANCHOR_BIND" ]; then
+    echo "  ok:  resume anchor-bind strip detected (I7 detector live)"
+  else
+    echo "  bad: SELFTEST(d) failed to drop the resume anchor binding" >&2; ST_FAIL=$((ST_FAIL + 1))
   fi
 
   echo
