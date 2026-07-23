@@ -861,8 +861,9 @@ SOUND in Workflow wf_f1a08faf-653.)*
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
 from an in-process `determ test-*` seam is closed. The remaining open rows are all
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
-§6.1 carries the live count (4 open — all genuinely live-node CLUSTER, NOT source-countable
-— after §3ac closed VCW-4 + TI-3 + SU-3 (count-gate invariants 8/9/10, adversarially
+§6.1 carries the live count (3 open — all genuinely live-node CLUSTER, NOT source-countable
+— after §3ad closed SS-5 BEHAVIORALLY (live-node auth-ordering gate, mutant-falsified via a
+rebuilt binary), §3ac closed VCW-4 + TI-3 + SU-3 (count-gate invariants 8/9/10, adversarially
 verified), §3ab closed OSB-5, and §3aa
 reclassified + closed 4 comparison-shaped rows (DR-2/CP-2/AB-2 via a value-hash-bind
 completeness invariant, RI-2 already covered by CP-1's invariant-4); §3z closed CP-1 +
@@ -1090,6 +1091,45 @@ invariant-7 1→0 RED. Pure-offline, guard already in ci_local's loop (§3z); WS
 ci_local green. **7 remaining are genuinely live-node CLUSTER** (T-3, SS-5 auth control-
 flow; MPC-3 multi-peer; VCW-4/TI-3 count-gates; SU-3 height-gated supply; LSP-7 resume).
 
+## 3ad. SS-5 CLOSED — behavioral (live-node) auth-ordering gate, falsify-on-mutant via a REBUILT binary
+
+The FIRST live-node CLUSTER residual closed BEHAVIORALLY (owner-directed live round,
+2026-07-23). `tools/test_rpc_dapp_subscribe_auth.sh` — a single-node (M=K=1),
+auth-ENABLED daemon with the `determ` CLI as the wire client — pins the SS-5 ordering
+property in `src/rpc/rpc.cpp::handle_session`: `verify_auth` (line 171) fires BEFORE
+the `dapp_subscribe` socket-takeover branch (line 175), so an unauthenticated subscribe
+is refused at the auth gate and never reaches the handler.
+
+- **#14 SS-5 (StreamingSubscriptionSoundness)** — the discriminator is the SAME
+  unknown-domain `dapp_subscribe` request with auth toggled:
+    * UNauthenticated → `auth_required: missing 'auth' field` (auth precedes the domain
+      inspection — the correct ordering).
+    * AUTHENTICATED   → `invalid_arg: unknown DApp domain` (reaches the handler —
+      the positive control proving the gate is live, not a reject-everything tautology).
+  A control leg re-proves the gate is enabled (unauth `status` → auth error), so the
+  SS-5 legs rest on a confirmed-ON gate. NO cluster, NO dapp registration needed.
+
+*Falsify-on-mutant (executed via a REBUILT binary — the gold standard for a behavioral
+gate).* The register's named SS-5 mutation (hoist the `dapp_subscribe` branch above the
+auth check) was applied minimally to `rpc.cpp:172` (`!auth_err.empty()` →
+`!auth_err.empty() && req.value("method","") != "dapp_subscribe"`, so an unauthenticated
+subscribe skips the auth-error branch and falls through to the handler), `determ.exe`
+rebuilt, and the test RE-RUN: the unauth leg flipped to `invalid_arg: unknown DApp` — the
+handler ran WITHOUT auth — turning the gate RED (3/0 → 2/1). The `status` control leg
+stayed GREEN under the mutant, which is exactly WHY the status-only `test_rpc_hmac_auth.sh`
+cannot catch SS-5 (status is the final dispatch branch, auth-gated even under the hoist).
+Mutant reverted via `git checkout src/rpc/rpc.cpp` (committed clean this round), rebuilt,
+re-run → 3/0 green.
+
+Windows-standalone (needs a live daemon): auto-globbed into the FULL `run_all.sh` run
+(`for t in tools/test_*.sh`), correctly EXCLUDED from FAST=1 (its ONLY_PATTERN allowlist
+omits it). NOT in ci_local — the WSL2 `/mnt/c` cluster infeasibility stands, but the
+single-node daemon comes up fine natively on Windows (the WSL hang was `/mnt/c`-specific,
+confirmed this round: a 3-node cluster reached height 12 under Git Bash). **3 remaining
+CLUSTER: T-3 (handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that
+keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check
+LOOP), LSP-7 (resume persistence).**
+
 ## 3ac. VCW-4 + TI-3 + SU-3 CLOSED — 3 count-gate completeness invariants (adversarially verified)
 
 The 3 count-gate-shaped CLUSTER rows closed by invariants 8/9/10 in
@@ -1186,9 +1226,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac) are now closed** — leaving 4. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); the 4 remaining are genuinely live-node CLUSTER, NOT source-countable — T-3 + SS-5 (rpc.cpp handle_session auth branch-ordering), MPC-3 (multi-peer loop), LSP-7 (resume persistence).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac), SS-5 (§3ad) are now closed** — leaving 3. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); and SS-5 — the first genuinely live-node CLUSTER row — is now closed BEHAVIORALLY (§3ad, a single-node auth-ordering test, mutant-falsified via a rebuilt binary). The 3 remaining are live-node CLUSTER: T-3 (rpc.cpp handle_session, owner-DEFERRED — a subtle auth-before-dispatch mutant that keeps dapp_subscribe auth-gated, needs review not a fixture), MPC-3 (multi-peer cross-check loop), LSP-7 (resume persistence).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (4 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (3 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3, SS-5 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -1205,7 +1245,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 11 | STMC-5 | ShardTipMergeClosureSoundness | MED | trivial | **CLOSED §3l** | Surviving mutation: delete/neutralize the overflow guard at src/node/validator.cpp:922-926 (`if (ev->evidence_window_start + threshold < ev->evidence_ |
 | 12 | DR-2 | DAppRegistryReadSoundness | MED | moderate | **CLOSED §3aa** | SURVIVING MUTATION: light/main.cpp:6944 `if (proof_value_hash != expected_value_hash){ verdict=UNVERIFIABLE; ... }` -> `if (false){ ... }` survives EV |
 | 13 | MPC-3 | MultiPeerCrossCheckSoundness | MED | moderate | open | Surviving mutation: in light/main.cpp cmd_cross_check (lines 2103-2131) replace the by_height intra-group comparison with a loop that compares every p |
-| 14 | SS-5 | StreamingSubscriptionSoundness | MED | moderate | open | SURVIVING MUTANT: in src/rpc/rpc.cpp handle_session (~line 171-204), hoist the `req.value("method","")=="dapp_subscribe"` takeover branch ABOVE the `v |
+| 14 | SS-5 | StreamingSubscriptionSoundness | MED | moderate | **CLOSED §3ad** | SURVIVING MUTANT: in src/rpc/rpc.cpp handle_session (~line 171-204), hoist the `req.value("method","")=="dapp_subscribe"` takeover branch ABOVE the `v |
 | 15 | CP-2 | ConstantProofSoundness | MED | moderate | **CLOSED §3aa** | Surviving mutant: light/main.cpp:2898 `bool confirmed = (proof_value_hash == expected_value_hash);` -> `bool confirmed = true;` (verify-constant repor |
 | 16 | CP-1 | ConstantProofSoundness | MED | moderate | **CLOSED §3z** | SURVIVING MUTATION: in light/main.cpp cmd_verify_constant, change line 2851 `if (proof_key_hex != local_key_hex) {` to `if (false) {` (compile-clean v |
 | 17 | LSP-6 | LightStatePersistenceSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: in anchored_head (light/trustless_read.cpp:509) change verify_chain_from_anchor(rpc, committee_seed, st.head_height, st.head_block |
@@ -1311,19 +1351,23 @@ reachability each time. Three classes:
     round before shipping, exactly as the NEEDS_FIX warned. Falsified, ci_local green.
   Full designs: scratchpad/offline_designs.txt (session-local; re-extract from the
   wf_6a81aa3a-4d7 journal if needed).
-- **CLUSTER (4 left — the genuinely behavioral residual)** — light-client verdict logic
+- **CLUSTER (3 left — the genuinely behavioral residual)** — light-client verdict logic
   needing a live node + the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local.
-  **#8 T-3, #13 MPC-3, #14 SS-5, #25 LSP-7** — auth branch-ordering control-flow
-  (T-3/SS-5 in rpc.cpp handle_session), multi-peer cross-check loop (MPC-3), resume
-  persistence (LSP-7). These are NOT single-comparison count-gates (a source-count
-  completeness invariant cannot catch a branch-hoist / loop-rewrite / ordering mutation),
-  so they need a live-node behavioral test or careful review. *(#18 VCW-4, #24 SU-3,
-  #30 TI-3 CLOSED §3ac via count-gate invariants 8/9/10 — TI-3's anchor was corrected
-  from the non-load-bearing body checks to the tx_root recompute by the adversarial
-  verifier. #12 DR-2, #15 CP-2, #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab —
-  all were CLUSTER-classified but were comparison/value-hash binds closed by the
-  completeness invariants.)* **#8 T-3-s001 stays DEFERRED.** Highest cost; a live-node
-  cluster round for the true behavioral residual.
+  **#8 T-3, #13 MPC-3, #25 LSP-7** — auth branch-ordering control-flow (T-3 in rpc.cpp
+  handle_session), multi-peer cross-check loop (MPC-3), resume persistence (LSP-7). These
+  are NOT single-comparison count-gates (a source-count completeness invariant cannot catch
+  a branch-hoist / loop-rewrite / ordering mutation), so they need a live-node behavioral
+  test or careful review. *(#14 SS-5 CLOSED §3ad — the FIRST genuinely live-node CLUSTER row
+  closed BEHAVIORALLY: `test_rpc_dapp_subscribe_auth.sh` pins the dapp_subscribe-behind-auth
+  ordering on a single auth-enabled node, mutant-falsified via a rebuilt determ.exe (3/0 →
+  2/1 under the hoist). This proves the live-round approach: the 3-node cluster hangs on WSL2
+  /mnt/c but single/multi-node daemons come up fine natively on Windows Git Bash. #18 VCW-4,
+  #24 SU-3, #30 TI-3 CLOSED §3ac via count-gate invariants 8/9/10 — TI-3's anchor was
+  corrected from the non-load-bearing body checks to the tx_root recompute by the adversarial
+  verifier. #12 DR-2, #15 CP-2, #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all
+  were CLUSTER-classified but were comparison/value-hash binds closed by the completeness
+  invariants.)* **#8 T-3-s001 stays DEFERRED.** A live-node cluster round for the true
+  behavioral residual (MPC-3 multi-peer + LSP-7 resume are the next candidates).
 
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
