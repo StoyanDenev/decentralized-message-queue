@@ -33429,6 +33429,68 @@ int main(int argc, char** argv) {
             }
         }
 
+        // --- VAL-batch-inner-sig (validator.cpp:1201) -----------------------
+        // A COMPOSABLE_BATCH's inner TRANSFERs each move funds from their OWN
+        // inner.from account, so each must be independently signed by that
+        // sender. :1201 verifies inner.sig against the inner sender's key.
+        // Removing it lets a batch carry FORGED inner transfers (spend from any
+        // account) even though the OUTER batch tx is validly signed by its own
+        // sender. TRAP: the inner sig lives INSIDE outer.payload and the outer
+        // tx.sig covers the payload (:685), so the inner sig must be corrupted
+        // FIRST, then the outer RE-SIGNED over the mutated payload — else the
+        // :685 outer-sender gate rejects before :1201 is reached. Driven via
+        // check_transactions_for_test (the case lives in check_transactions);
+        // :1201 is the LAST inner check before break, so under the mutant the
+        // forged-inner batch is cleanly ACCEPTED (no downstream masking).
+        // Genuinely un-pinned: test-composable-batch drives UNSIGNED inner txs
+        // through Chain::append (apply path), which never runs check_transactions.
+        {
+            auto pack = [](const std::vector<Transaction>& inner) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (auto& t : inner) arr.push_back(t.to_json());
+                std::string s = arr.dump();
+                return std::vector<uint8_t>(s.begin(), s.end());
+            };
+            // one inner TRANSFER n1->n2, fee 0, signed by n1 (clears the
+            // type / fee / payload-size / registry gates ahead of :1201).
+            auto mk_inner = [&](bool forge) {
+                Transaction it;
+                it.type = TxType::TRANSFER; it.from = "n1"; it.to = "n2";
+                it.amount = 1; it.fee = 0; it.nonce = 0;
+                auto sb = it.signing_bytes();
+                it.sig = sign(key_of("n1"), sb.data(), sb.size());
+                if (forge) it.sig[0] ^= 0xFF;   // corrupt the INNER sig
+                it.hash = it.compute_hash();
+                return it;
+            };
+            // COMPOSABLE_BATCH outer from registered n0, signed AFTER packing so
+            // the outer sig covers the (possibly forged) inner payload.
+            auto run_batch = [&](bool forge_inner) {
+                Transaction outer;
+                outer.type = TxType::COMPOSABLE_BATCH; outer.from = "n0"; outer.to = "";
+                outer.amount = 0; outer.fee = 0; outer.nonce = 0;
+                outer.payload = pack({ mk_inner(forge_inner) });
+                auto sb = outer.signing_bytes();
+                outer.sig = sign(key_of("n0"), sb.data(), sb.size());  // clears :685
+                Block b; b.index = 1; b.transactions = { outer };
+                return bv.check_transactions_for_test(b, c, reg);
+            };
+
+            // POSITIVE CONTROL — a batch whose inner TRANSFER is validly signed
+            // is ACCEPTED (proves the fixture reaches :1201 honestly).
+            {
+                auto r = run_batch(/*forge_inner=*/false);
+                check(r.ok,
+                      "VAL-batch control: a COMPOSABLE_BATCH with a validly-signed inner TRANSFER is ACCEPTED");
+            }
+            // FORGE the inner sig (outer re-signed over the mutated payload).
+            {
+                auto r = run_batch(/*forge_inner=*/true);
+                check(!r.ok && r.error.find("COMPOSABLE_BATCH inner[0] signature invalid") != std::string::npos,
+                      "VAL-batch-inner-sig: a forged inner-tx signature is REJECTED at :1201 (no forged inner transfers)");
+            }
+        }
+
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
         // Values only, never JSON shape: AbortClaimMsg::from_json uses
         // json_require and THROWS on a missing/mistyped field, which would

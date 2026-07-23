@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (8 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2)
+## 2. CLOSED (9 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -328,14 +328,57 @@ control stay GREEN — proving `:820` alone is load-bearing and the leg targets 
 PARAM_CHANGE decode is authoritative and the encoding was cross-checked against the `submit-param-change`
 builder) — no analysis workflow needed.
 
-## 3. The enumerated residual (11 open — a ranked FAST-gateable backlog)
+### 2h. VAL-batch-inner-sig (COMPOSABLE_BATCH inner-transaction authenticity)
+
+**#8 VAL-batch-inner-sig** — `src/node/validator.cpp:1201`, inside the `TxType::COMPOSABLE_BATCH` case
+of `check_transactions`. A v2.4 atomic batch carries a JSON array of inner TRANSFERs; each inner tx
+moves funds from its OWN `inner.from` account, so each must be independently signed by that sender:
+
+```cpp
+auto sb = it.signing_bytes();
+if (!verify(ipk, sb.data(), sb.size(), it.sig))
+    return {false, "COMPOSABLE_BATCH inner[" + std::to_string(ii) + "] signature invalid from " + it.from};
+```
+
+**Consequence if silently removed:** a batch can carry FORGED inner transfers — the outer batch tx is
+validly signed by *its* sender (who pays the fee), but the inner TRANSFERs would move funds out of
+arbitrary victim accounts with no valid authorization. Batch-scoped fund theft.
+
+**Genuinely un-pinned.** `test-composable-batch` exercises the *apply-path* semantics (all-or-nothing
+rollback, balance/nonce effects) by driving **unsigned** inner txs through `Chain::append` — which
+never runs `check_transactions`, so `:1201` is never reached. No test drove a signed/forged inner tx
+through the validator; the reject string is asserted nowhere. (Same apply-path-vs-validator shape as the
+EQV finding.)
+
+**Gate (in-process, both platforms).** Hosted in `test-abort-cert-validation` (reuses n0..n3 + `key_of`),
+with inline JSON packaging (`arr.push_back(it.to_json()); arr.dump()` — the same format
+`Transaction::from_json` parses). A `run_batch(forge)` helper: build one inner TRANSFER n1→n2 (fee 0,
+signed by n1 — clears the type / fee / payload-size / registry gates ahead of `:1201`), optionally flip
+one byte of the inner `sig`, pack it into `outer.payload`, then sign the OUTER `COMPOSABLE_BATCH` tx
+(from n0) over that payload; drive `check_transactions_for_test`. Legs: **positive control** — validly
+signed inner → ACCEPTED; **forge** — inner `sig[0] ^= 0xFF` → assert
+`"COMPOSABLE_BATCH inner[0] signature invalid"`.
+
+**The load-bearing subtlety (the outer-sig masking trap).** The inner sig lives INSIDE `outer.payload`,
+and the outer `tx.sig` covers the payload (verified at `:685`). So the inner sig must be corrupted FIRST
+and the outer RE-SIGNED over the mutated payload — otherwise the `:685` outer-sender gate rejects
+`"tx signature invalid"` before `:1201` is reached (testing the wrong gate). `to_json`/`from_json`
+roundtrip `sig` (`j["sig"] = to_hex(sig)` ↔ `from_hex_arr<64>`), so the corrupted inner sig survives the
+pack→parse. `:1201` is the LAST inner check before `break`, so under the mutant the forged-inner batch
+is cleanly ACCEPTED (no downstream masking).
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`).* `:1201 → if (false && !verify(…))` accepts
+the forged-inner batch → the specific-string assertion flips RED (clean 1-assertion counter-delta) while
+the positive control stays GREEN. Reverted via `git checkout`. Direct-verify (the batch decode is
+authoritative and the packing matched the `pack_batch` helper) — no analysis workflow needed.
+
+## 3. The enumerated residual (10 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 8 | VAL-batch-inner-sig | validator.cpp:1201 | COMPOSABLE_BATCH inner-tx sender authenticity — forge inner transfers | `if (!verify(ipk,..,it.sig))` → `if (false && ...)` | 1 | trivial |
 | 9 | VAL-csr-field-match | validator.cpp:1412 | cross-shard receipt payload bound to its source TRANSFER — inflate a receipt amount | drop the amount clause from the disjunction | 1 | trivial |
 | 10 | VAL-csr-size | validator.cpp:1396 | receipt COUNT bound to # cross-shard transfers — append unbacked receipts | `!=` → `>` (loop skips the extras) | 1 | trivial |
 | 11 | VAL-inbound-f2-intersection | validator.cpp:1493 | F2 inbound-receipt authenticity (per-creator view intersection) — credit an unbacked inbound | delete the intersection enforcement | 1 | trivial |
