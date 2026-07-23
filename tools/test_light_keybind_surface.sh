@@ -59,7 +59,17 @@
 #   * invariant-7 (OSB-5): the same value-hash bind for the OFFLINE state-bundle
 #     verifier (verify_state_bundle.cpp `computed_vh != proof_vh`) — a reader that
 #     contacts no daemon; same crypto mechanism, separate count (abbreviated names).
+#   * invariant-8 (VCW-4): the header-walk truncation gate
+#     `headers_seen != head_height - start_from` (sole catcher of a short final page).
+#   * invariant-9 (TI-3): the tx_root recompute-match gate `recomputed_root != b.tx_root`
+#     (the LOAD-BEARING inclusion gate per proof §4.3 — NOT the body cross-checks, which
+#     read an already committee-signed set).
+#   * invariant-10 (SU-3): the height-gated supply total-mismatch VIOLATED leg
+#     `have_claimed_total && claimed_total != expected_total` (pins text-presence; the
+#     leg is R51-height-gated so conditionally load-bearing).
 # All are completeness anchors: bump EXPECTED_* when a trustless reader is added.
+# Invariants 8-10 adversarially verified SOUND in Workflow wf_52594f94-a57 (which
+# corrected TI-3 away from the non-load-bearing :217/:231 body checks to :185).
 #
 # A "key-bind" is detected structurally: within the function body, a comparison
 # of the proof's key_bytes against a locally-built key — the canonical shape is
@@ -294,6 +304,56 @@ else
   bad "invariant-7 (OSB-5): found $bundle_vh 'computed_vh != proof_vh' in $BUNDLE_FILE, EXPECTED $EXPECTED_BUNDLE_VH — the offline bundle cleartext bind was neutered (-> if(false)), removed, or a namespace reader added without bumping the count"
 fi
 
+# Invariant 8 (VCW-4 / VerifyChainWalkSoundness): the header-walk verified EXACTLY the
+# full [start_from, head_height) span — `if (headers_seen != head_height - start_from)`
+# on the UNCONDITIONAL post-loop verdict path (light/trustless_read.cpp). It is the sole
+# catcher of a TRUNCATED FINAL PAGE (a short last page passes contiguity + per-block sigs,
+# but leaves trailing headers unverified while the client still reports head_height as the
+# tip). The register mutant `-> if(false)` reports the unverified tip. Pin the full
+# comparison (NOT the bare `head_height - start_from` substring, which also appears in the
+# adjacent error string — count 2). POSITIVE count: drop -> RED. (Adversarially verified
+# SOUND, Workflow wf_52594f94-a57: unconditional path, so no runtime-skip caveat.)
+EXPECTED_WALKED_COUNT_GATE=1
+walked_gate=$(grep -hoE 'headers_seen != head_height - start_from' $FILES 2>/dev/null | wc -l | tr -d ' ')
+if [ "$walked_gate" = "$EXPECTED_WALKED_COUNT_GATE" ]; then
+  ok "invariant-8 (VCW-4): $walked_gate walked-count completeness gate 'headers_seen != head_height - start_from' (EXPECTED $EXPECTED_WALKED_COUNT_GATE)"
+else
+  bad "invariant-8 (VCW-4): found $walked_gate 'headers_seen != head_height - start_from' gate(s), EXPECTED $EXPECTED_WALKED_COUNT_GATE — the header-walk truncation gate was neutered (-> if(false)), removed, or the walk refactored without bumping the count"
+fi
+
+# Invariant 9 (TI-3 / TxInclusionProofSoundness): the LOAD-BEARING gate is the tx_root
+# recompute-and-match `if (recomputed_root != b.tx_root)` (light/verify_tx_inclusion.cpp:185,
+# proof doc §4.3 r_A==r*), NOT the step-5 body cross-checks at :217/:231 (those validate the
+# body against an ALREADY committee-signed `committed` set and cannot forge a false verdict —
+# adversarially confirmed, Workflow wf_52594f94-a57). The register mutant `-> if(false)`
+# on :185 would accept a forged tx_root. Separate file (not in $FILES). POSITIVE count -> RED.
+TXINCL_FILE=light/verify_tx_inclusion.cpp
+EXPECTED_TXROOT_MATCH=1
+txroot_match=$(grep -hoE 'recomputed_root != b\.tx_root' "$TXINCL_FILE" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$txroot_match" = "$EXPECTED_TXROOT_MATCH" ]; then
+  ok "invariant-9 (TI-3): $txroot_match tx_root recompute-match gate 'recomputed_root != b.tx_root' (EXPECTED $EXPECTED_TXROOT_MATCH)"
+else
+  bad "invariant-9 (TI-3): found $txroot_match 'recomputed_root != b.tx_root' in $TXINCL_FILE, EXPECTED $EXPECTED_TXROOT_MATCH — the tx_root recompute-match gate was neutered (-> if(false)) or removed"
+fi
+
+# Invariant 10 (SU-3 / SupplyProofSoundness): the daemon's claimed total_supply must equal
+# the A1 closed-form recomputed from the 5 committee-committed counters —
+# `else if (have_claimed_total && claimed_total != expected_total)` (light/main.cpp) reports
+# VIOLATED on mismatch. The register mutant `-> else if(false)` reports CONSERVED for a wrong
+# total. POSITIVE count -> RED. LIMITATION (adversarially noted, Workflow wf_52594f94-a57):
+# this leg is R51-HEIGHT-GATED (have_claimed_total is forced false at main.cpp:~8132 when the
+# fresh chain_summary height != anchored height), so the compare is CONDITIONALLY load-bearing
+# — this pins its TEXT-PRESENCE (the canonical `else if(false)` neuter), not runtime firing,
+# the same contract as invariants 4/6/7. The register explicitly lists SU-3 as closeable by
+# this pattern.
+EXPECTED_SU3_TOTAL_CMP=1
+su3_total_cmp=$(grep -hoE 'have_claimed_total && claimed_total != expected_total' $FILES 2>/dev/null | wc -l | tr -d ' ')
+if [ "$su3_total_cmp" = "$EXPECTED_SU3_TOTAL_CMP" ]; then
+  ok "invariant-10 (SU-3): $su3_total_cmp height-gated total-mismatch VIOLATED-leg compare 'have_claimed_total && claimed_total != expected_total' (EXPECTED $EXPECTED_SU3_TOTAL_CMP)"
+else
+  bad "invariant-10 (SU-3): found $su3_total_cmp 'have_claimed_total && claimed_total != expected_total' compare(s), EXPECTED $EXPECTED_SU3_TOTAL_CMP — the SU-3 total cross-check leg was neutered (-> else if(false)), removed, or a supply reader added without bumping the count"
+fi
+
 # ── SELFTEST: prove the guard is live ───────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
   echo
@@ -369,9 +429,45 @@ if [ "${SELFTEST:-}" = "1" ]; then
     ST_FAIL=$((ST_FAIL + 1))
   fi
 
+  # (8) VCW-4: neuter the header-walk truncation gate (if(false)) -> count drops.
+  s8="$tmp/tr8.cpp"
+  sed '0,/if (headers_seen != head_height - start_from)/s//if (false)/' light/trustless_read.cpp > "$s8"
+  full8=$(grep -hoE 'headers_seen != head_height - start_from' light/trustless_read.cpp | wc -l | tr -d ' ')
+  cut8=$(grep -hoE 'headers_seen != head_height - start_from' "$s8" | wc -l | tr -d ' ')
+  if [ "$cut8" -lt "$full8" ]; then
+    echo "  ok:  invariant-8 detector live (neuter the walked-count gate -> $full8 -> $cut8)"
+  else
+    echo "  bad: SELFTEST(8) failed to drop the walked-count gate ($full8 -> $cut8)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
+  # (9) TI-3: neuter the tx_root recompute-match gate (if(false)) -> count drops.
+  s9="$tmp/txincl9.cpp"
+  sed '0,/if (recomputed_root != b.tx_root)/s//if (false)/' light/verify_tx_inclusion.cpp > "$s9"
+  full9=$(grep -hoE 'recomputed_root != b\.tx_root' light/verify_tx_inclusion.cpp | wc -l | tr -d ' ')
+  cut9=$(grep -hoE 'recomputed_root != b\.tx_root' "$s9" | wc -l | tr -d ' ')
+  if [ "$cut9" -lt "$full9" ]; then
+    echo "  ok:  invariant-9 detector live (neuter the tx_root recompute-match gate -> $full9 -> $cut9)"
+  else
+    echo "  bad: SELFTEST(9) failed to drop the tx_root recompute-match gate ($full9 -> $cut9)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
+  # (10) SU-3: neuter the total-mismatch VIOLATED leg (else if(false)) -> count drops.
+  s10="$tmp/main10.cpp"
+  sed '0,/else if (have_claimed_total && claimed_total != expected_total)/s//else if (false)/' light/main.cpp > "$s10"
+  full10=$(grep -hoE 'have_claimed_total && claimed_total != expected_total' light/main.cpp | wc -l | tr -d ' ')
+  cut10=$(grep -hoE 'have_claimed_total && claimed_total != expected_total' "$s10" | wc -l | tr -d ' ')
+  if [ "$cut10" -lt "$full10" ]; then
+    echo "  ok:  invariant-10 detector live (neuter the SU-3 total-mismatch leg -> $full10 -> $cut10)"
+  else
+    echo "  bad: SELFTEST(10) failed to drop the SU-3 total-mismatch leg ($full10 -> $cut10)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
   echo
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered key/value-hash comparison + deleted stale-read guard + offline bundle bind)"
+    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered key/value-hash comparison + deleted stale-read guard + offline bundle bind + walk/tx_root/supply-total gates)"
   else
     echo "  FAIL: test_light_keybind_surface SELFTEST"
     exit 1
@@ -380,7 +476,7 @@ fi
 
 echo
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind (CP-1) + stale-read (PRW-1) + value-hash (DR-2/CP-2/AB-2) + offline-bundle (OSB-5) cross-check counts pinned)"
+  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind (CP-1) + stale-read (PRW-1) + value-hash (DR-2/CP-2/AB-2) + offline-bundle (OSB-5) + walk (VCW-4) + tx_root (TI-3) + supply-total (SU-3) gate counts pinned)"
   exit 0
 else
   echo "  FAIL: test_light_keybind_surface ($VIOLATIONS F-6 key-bind surface violation(s))"

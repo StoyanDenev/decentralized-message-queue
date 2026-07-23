@@ -861,8 +861,9 @@ SOUND in Workflow wf_f1a08faf-653.)*
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
 from an in-process `determ test-*` seam is closed. The remaining open rows are all
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
-§6.1 carries the live count (7 open — all genuinely live-node CLUSTER — after §3ab closed
-OSB-5 (offline bundle value-hash, invariant-7) and §3aa
+§6.1 carries the live count (4 open — all genuinely live-node CLUSTER, NOT source-countable
+— after §3ac closed VCW-4 + TI-3 + SU-3 (count-gate invariants 8/9/10, adversarially
+verified), §3ab closed OSB-5, and §3aa
 reclassified + closed 4 comparison-shaped rows (DR-2/CP-2/AB-2 via a value-hash-bind
 completeness invariant, RI-2 already covered by CP-1's invariant-4); §3z closed CP-1 +
 PRW-1; on top of §3y's SR-1/LSP-6/RP-5/DR-6 and §3w/§3x's CB-4/WA-2).
@@ -1089,6 +1090,43 @@ invariant-7 1→0 RED. Pure-offline, guard already in ci_local's loop (§3z); WS
 ci_local green. **7 remaining are genuinely live-node CLUSTER** (T-3, SS-5 auth control-
 flow; MPC-3 multi-peer; VCW-4/TI-3 count-gates; SU-3 height-gated supply; LSP-7 resume).
 
+## 3ac. VCW-4 + TI-3 + SU-3 CLOSED — 3 count-gate completeness invariants (adversarially verified)
+
+The 3 count-gate-shaped CLUSTER rows closed by invariants 8/9/10 in
+`test_light_keybind_surface.sh`, each a positive count of the load-bearing verdict
+comparison (`-> if(false)` mutant drops it 1→0 → RED). Designs were adversarially
+verified against current source in Workflow wf_52594f94-a57 BEFORE shipping — which
+caught a real design error (see TI-3).
+
+- **#18 VCW-4 (VerifyChainWalkSoundness)** — **invariant-8**: the header-walk truncation
+  gate `headers_seen != head_height - start_from` (`trustless_read.cpp:342`), the sole
+  catcher of a short FINAL page (a truncated last page passes contiguity + per-block
+  sigs but leaves trailing headers unverified). On the UNCONDITIONAL post-loop verdict
+  path — no runtime-skip caveat. Anchor is the FULL comparison (the bare
+  `head_height - start_from` substring also appears in the adjacent error string, count 2).
+- **#30 TI-3 (TxInclusionProofSoundness)** — **invariant-9**: the tx_root recompute-and-
+  match gate `recomputed_root != b.tx_root` (`verify_tx_inclusion.cpp:185`, proof §4.3
+  r_A==r*). **The verifier CORRECTED the naive design:** the register's cited sites
+  (`committed.find(h)==end()` :217, `body_hashes.size()!=committed.size()` :231) are NOT
+  load-bearing — they validate the body against an ALREADY committee-signed `committed`
+  set and cannot forge a false INCLUDED/NOT-INCLUDED (the verdict at :253 reads
+  `committed`, never the body). Pinning :217/:231 would have gated the wrong site; :185
+  (the tx_root recompute) is the operative gate.
+- **#24 SU-3 (SupplyProofSoundness)** — **invariant-10**: the A1 total-mismatch VIOLATED
+  leg `have_claimed_total && claimed_total != expected_total` (`main.cpp:8157`).
+  LIMITATION (recorded in the guard comment): this leg is R51-HEIGHT-GATED
+  (`have_claimed_total` forced false at ~8132 when the fresh chain_summary height differs
+  from the anchored height), so the compare is CONDITIONALLY load-bearing — the invariant
+  pins its TEXT-PRESENCE (the canonical `else if(false)` neuter), not runtime firing, the
+  same contract as invariants 4/6/7.
+
+*Falsify (executed, reverted via `git checkout` — the 3 source files held ONLY the 3
+mutants, diff-verified).* the three mutants flip invariant-8/9/10 RED (each 1→0). Pure-
+offline, guard already in ci_local's loop (§3z); WSL2 GCC ci_local green. **4 remaining
+are genuinely live-node CLUSTER, NOT source-countable: T-3 + SS-5 (rpc.cpp handle_session
+auth BRANCH-ORDERING control-flow), MPC-3 (multi-peer cross-check LOOP), LSP-7 (resume
+persistence).**
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -1148,9 +1186,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab) are now closed** — leaving 7. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 5 comparison/value-hash-shaped CLUSTER rows (§3aa + §3ab); the 7 remaining are genuinely live-node CLUSTER (T-3/SS-5 auth control-flow, MPC-3 multi-peer, VCW-4/TI-3 count-gates, SU-3 height-gated supply, LSP-7 resume).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab), VCW-4 + TI-3 + SU-3 (§3ac) are now closed** — leaving 4. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 8 comparison/value-hash/count-gate-shaped CLUSTER rows (§3aa + §3ab + §3ac); the 4 remaining are genuinely live-node CLUSTER, NOT source-countable — T-3 + SS-5 (rpc.cpp handle_session auth branch-ordering), MPC-3 (multi-peer loop), LSP-7 (resume persistence).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (7 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (4 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5, VCW-4, TI-3, SU-3 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -1171,19 +1209,19 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 15 | CP-2 | ConstantProofSoundness | MED | moderate | **CLOSED §3aa** | Surviving mutant: light/main.cpp:2898 `bool confirmed = (proof_value_hash == expected_value_hash);` -> `bool confirmed = true;` (verify-constant repor |
 | 16 | CP-1 | ConstantProofSoundness | MED | moderate | **CLOSED §3z** | SURVIVING MUTATION: in light/main.cpp cmd_verify_constant, change line 2851 `if (proof_key_hex != local_key_hex) {` to `if (false) {` (compile-clean v |
 | 17 | LSP-6 | LightStatePersistenceSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: in anchored_head (light/trustless_read.cpp:509) change verify_chain_from_anchor(rpc, committee_seed, st.head_height, st.head_block |
-| 18 | VCW-4 | VerifyChainWalkSoundness | MED | moderate | open | Surviving mutation: in light/trustless_read.cpp change the walked-count gate (lines 342-348) `if (headers_seen != head_height - start_from)` to `if (f |
+| 18 | VCW-4 | VerifyChainWalkSoundness | MED | moderate | **CLOSED §3ac** | Surviving mutation: in light/trustless_read.cpp change the walked-count gate (lines 342-348) `if (headers_seen != head_height - start_from)` to `if (f |
 | 19 | RI-2 | ReceiptInclusionProofSoundness | MED | moderate | **CLOSED §3aa** | Surviving mutant: in light/main.cpp cmd_verify_receipt_inclusion, change `if (proof_key_hex != local_key_hex)` (~line 4796) to `if (false)`. RI-2's ke |
 | 20 | AB-2 | AbortRecordProofSoundness | MED | hard | **CLOSED §3aa** | Surviving mutation: light/main.cpp:2664 `if (computed_value_hash != proof_value_hash)` -> `if (false)` neutralizes the TAMPERED value-hash bind of the |
 | 21 | T-3 | BinaryCodecRoundTripSoundness | LOW | trivial | **CLOSED §3q** | Surviving mutant: delete `if (len < 128 + 1 + 2) throw std::runtime_error("binary_codec: tx frame too short");` at src/net/binary_codec.cpp:256-257. E |
 | 22 | T-1 | MakeContribCommitmentBackwardCompat | LOW | trivial | **CLOSED §3r** | Surviving mutation: `bool any_view = true;` at src/node/producer.cpp:277-279 (equivalently, make the local is_zero_hash lambda return false). make_con |
 | 23 | RP-5 | RegistrantProofSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTATION: light/main.cpp:6193 `bool deactivated = (inactive_from != 0 && inactive_from <= anchored_height)` -> `bool deactivated = false;` ( |
-| 24 | SU-3 | SupplyProofSoundness | LOW | moderate | open | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
+| 24 | SU-3 | SupplyProofSoundness | LOW | moderate | **CLOSED §3ac** | Surviving mutation: in light/main.cpp cmd_supply_trustless, neutralize the total-mismatch VIOLATED leg at ~8157 `else if (have_claimed_total && claime |
 | 25 | LSP-7 | LightStatePersistenceSoundness | MED | hard | open | No behavioral gate exists; the only LSP-7 gate (test_light_resume_monotonicity_guard.sh) is a static awk/grep over light/trustless_read.cpp asserting  |
 | 26 | PRW-1 | StateProofRaceWindowSoundness | LOW | trivial | **CLOSED §3z** | Surviving mutation: delete the `if (proof_height < vc.height) { throw ... "is BEFORE verified-chain head ... serving stale state" }` block at light/tr |
 | 27 | T-OE4 | OfflineEquivocationEvidenceSoundness | LOW | trivial | **CLOSED §3s** | Surviving mutation: delete V11 clause 3 (`else if (!sig_a_ok)`, light/main.cpp 7587-7589) — an event with sig_a INVALID + sig_b VALID skips clause 4 and reaches EQUIVOCATION-PROVEN. |
 | 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | **CLOSED §3y** | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
 | 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | **CLOSED §3u** | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a token (breaks the handshake-always-completes exemption). |
-| 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
+| 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | **CLOSED §3ac** | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
 | 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | **CLOSED §3x** | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
 | 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | **CLOSED §3w** | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
 | 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | **CLOSED §3v** | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (`auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.substr(0,colon);`) so each connection keys on ip:port, defeating per-IP limiting. RECLASSIFIED to FAST_UNIT (2nd-sender leg in test-rl2-hello-exempt). |
@@ -1273,19 +1311,19 @@ reachability each time. Three classes:
     round before shipping, exactly as the NEEDS_FIX warned. Falsified, ci_local green.
   Full designs: scratchpad/offline_designs.txt (session-local; re-extract from the
   wf_6a81aa3a-4d7 journal if needed).
-- **CLUSTER (7 left)** — light-client verdict logic needing a live node +
-  the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local. **#8 T-3,
-  #13 MPC-3, #14 SS-5, #18 VCW-4, #24 SU-3, #25 LSP-7, #30 TI-3** — auth control-flow
-  (T-3/SS-5), multi-peer cross-check (MPC-3), count-gates in other files (VCW-4
-  verify_chain_walk `headers_seen != head_height-start_from`, TI-3 verify_tx_inclusion
-  `committed.find(h)==end()`), the height-gated supply total-mismatch (SU-3
-  `claimed_total != expected_total`), and resume persistence (LSP-7). VCW-4/TI-3/SU-3
-  are single-comparison count-gates (closeable by the completeness-invariant pattern in
-  a future round if a live behavioral test stays infeasible); T-3/SS-5 are branch-ordering
-  control-flow (NOT source-countable) and MPC-3 is a loop rewrite. *(#12 DR-2, #15 CP-2,
-  #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all were CLUSTER-classified but
-  are value-hash/key comparison binds closed by the completeness invariants.)* Highest
-  cost; batch the true behavioral ones in a live-node cluster round.
+- **CLUSTER (4 left — the genuinely behavioral residual)** — light-client verdict logic
+  needing a live node + the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local.
+  **#8 T-3, #13 MPC-3, #14 SS-5, #25 LSP-7** — auth branch-ordering control-flow
+  (T-3/SS-5 in rpc.cpp handle_session), multi-peer cross-check loop (MPC-3), resume
+  persistence (LSP-7). These are NOT single-comparison count-gates (a source-count
+  completeness invariant cannot catch a branch-hoist / loop-rewrite / ordering mutation),
+  so they need a live-node behavioral test or careful review. *(#18 VCW-4, #24 SU-3,
+  #30 TI-3 CLOSED §3ac via count-gate invariants 8/9/10 — TI-3's anchor was corrected
+  from the non-load-bearing body checks to the tx_root recompute by the adversarial
+  verifier. #12 DR-2, #15 CP-2, #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab —
+  all were CLUSTER-classified but were comparison/value-hash binds closed by the
+  completeness invariants.)* **#8 T-3-s001 stays DEFERRED.** Highest cost; a live-node
+  cluster round for the true behavioral residual.
 
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
