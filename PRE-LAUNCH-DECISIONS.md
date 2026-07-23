@@ -265,7 +265,7 @@ Then the single beta soak (D4) on top.
 - **v1.1 application scope** (feature-complete target ~3.5–5 months): DSSO (~4–6 wk) + D.1/D.2/D.3/D.5/D.9, plus the primitives they force in — **v2.26 ROTATE_KEY** (D.2, D.3), **v2.15 multi-sig** (D.2), **v2.22 PFS/PRIV-6 OTPK** (D.3), all 0% today.
 - **v1.2 (deferred):** Bundle B zk-VM (~3–6 mo) + D.4/D.6/D.7/D.8. Clean boundary — everything past v1.1 gates on the zk-VM substrate; it is off the v1.1 critical path and iterates under DApp-layer freedom (only the zk-VM anchor/settlement primitive touches consensus, reviewed then).
 
-### E7. Re-sequenced v1.1 execution (core + application layer)
+### E7. Re-sequenced v1.1 execution (core + application layer) **ACTIVE FRONT (2026-07-23, owner directive):** start **v2.26 ROTATE_KEY** (Phase 2) and **D.5 government random-selection** (Phase 4, DSSO + shipped commit-reveal) **now**, in parallel, ahead of finishing the traceability-register burn-down. All four gating decisions cleared (`DECISION-LOG.md` 2026-07-23); DSSO built end-to-end 07-22. Next after D.5: v2.15 Option-A multi-sig + D.1/D.9, then the DSSO packaging tail (G5/G6, RP SDK, reference DApp).
 
 Beta is one clean soak at full feature-complete (D4), so the whole v1.1 scope below precedes beta start.
 

@@ -1471,3 +1471,19 @@ The relying-party token is the **paper's dual-hash challenge-response** over the
 
 **Authority:** Stoyan Denev (owner decisions via the in-session AskUserQuestion menu, 2026-07-23; recorded by Claude Fable at his direction).
 
+
+---
+
+## 2026-07-23 — Active work directive: start v2.26 + D.5 now
+
+**Directive (owner).** With all four launch decisions cleared (entry above) and DSSO built end-to-end (07-22), point threads at implementation **now** rather than finishing the traceability-register burn-down first. Active front, in parallel:
+
+- **v2.26 ROTATE_KEY** — build per `v2.26-ROTATION-SPEC.md` (AUTHORIZED, KR-10 in scope). Gates D.2/D.3 + DSSO production recovery.
+- **D.5 government random-selection DApp** — the lightest Tier-1 DApp (DSSO identity + shipped commit-reveal randomness + v2.24 audit hooks); the founding `MOTIVATION.md` use case; fastest end-to-end validation of the DSSO+DApp path.
+
+**Then:** v2.15 Option-A multi-sig + D.1 (flagship, CT+audit) + D.9 (Merritt voting); DSSO packaging tail (G5/G6, RP SDK, reference RP DApp); Z_p* deletion under the standard gate. The traceability register (~20 open, MED/LOW) continues as background, not the front.
+
+**Not changed:** the production floor — D4 soak at feature-complete + Critical/High discovery-curve flattening + (given no-migrations) external audit — is unaffected by this directive; it gates *launch*, not *feature work*.
+
+**Authority:** Stoyan Denev (in-session directive, 2026-07-23; recorded by Claude Fable at his direction).
+
