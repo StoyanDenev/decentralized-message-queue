@@ -1,0 +1,10 @@
+PLACEHOLDER — replace this file with the verbatim canonical text of the
+GNU Affero General Public License v3.0.
+
+Obtain it from: https://www.gnu.org/licenses/agpl-3.0.txt
+
+It is intentionally NOT reproduced here: legal license text must be byte-exact,
+and hand-copying risks a defective license. Paste the canonical text over this
+file before relying on the AGPL split.
+
+SPDX-License-Identifier: AGPL-3.0-or-later

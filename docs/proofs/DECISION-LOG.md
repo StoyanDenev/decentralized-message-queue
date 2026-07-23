@@ -1487,3 +1487,32 @@ The relying-party token is the **paper's dual-hash challenge-response** over the
 
 **Authority:** Stoyan Denev (in-session directive, 2026-07-23; recorded by Claude Fable at his direction).
 
+
+---
+
+## 2026-07-23 — DApps/SDK = Apache-2.0; converge to zero vendored dependencies (JSON format -> canonical binary)
+
+### D1 — All DApps + SDK + DSSO client are Apache-2.0
+
+Extends the split-license decision (`LICENSING.md`): every DApp (D.1-D.9), the DApp/RP SDK, and the DSSO client libraries — wherever they land (`dapps/`, `sdk/`, client libs) — are **Apache-2.0**, not AGPL. The DApp layer is the adoption surface; permissive licensing removes copyleft friction for third-party/commercial DApp builders, consistent with the "everything else is a DApp" philosophy and the Apache-for-clients half of the split. AGPL copyleft stays confined to the daemon/consensus-execution core. `tools/apply_spdx_headers.sh` `is_apache()` extended to `dapps/` + `sdk/`.
+
+### D2 — Zero vendored third-party dependencies; replace the JSON *format* with the canonical binary codec
+
+**Directive (owner).** Drive the tree to **zero vendored third-party runtime dependencies**, and eliminate **JSON as a serialization format** everywhere it is used (storage, snapshots, RPC, gossip envelopes, keyfiles, config, light-client proofs, test vectors), replacing it with a **canonical length-prefixed binary encoding**.
+
+**Current state — the goal is ~80% reached.** Asio **already deleted** (native sockets/IOCP, minix §7); OpenSSL + libsodium are **test-oracle-only** (daemon/wallet/light link zero of either, §3.15); nlohmann/json is a vendored single header already being replaced by the in-house `determ::json` (djson). JSON itself is the last dependency to retire.
+
+**Key safety property — the authenticated form is already binary.** `signing_bytes()` / `compute_block_digest` / `build_state_leaves` / `src/net/binary_codec.cpp` are binary; JSON is only the *storage + transport-envelope + RPC + tooling container*, never the signed/hashed bytes. So the migration is **byte-neutral for all authenticated data** (signed-field goldens unchanged) and is **not state-level no-migrations-locked** (state_root is over binary leaves, independent of the JSON container). The one pre-genesis-sensitive surface is any JSON in the **p2p wire envelope** and anything feeding the byte-deterministic goldens — do those before v1.1 freeze; purely-local JSON (config, CLI, keyfiles, vectors) can change anytime.
+
+**Mechanism.** Promote the existing **canonical binary codec** (`src/net/binary_codec.cpp`, proven by `BinaryCodecRoundTripSoundness.md`) to the **single** serialization for storage/RPC/config/keyfiles/messages. Delete `third_party/nlohmann/json.hpp` **and** `determ::json`/djson (no JSON parser remains). Regenerate the ~7,388 `.json` fixtures as binary vectors.
+
+**Benefits.** (1) Zero-dep = smallest supply-chain/audit surface — directly strengthens NIS 2 Art. 21(2)(d) and the KISS small-green-surface directive. (2) Length-prefixed binary is **inherently cross-platform-deterministic** — it eliminates the whole class of JSON byte-determinism hazards (float formatting, key ordering, whitespace, escaping) the djson byte-exact gates exist to fight. (3) Trivial to port to C99/MINIX (no parser). (4) Smaller + faster.
+
+**Trade-offs (accepted, with mitigations).** (a) **Loss of human-readability** for config/RPC/CLI is the real cost — mitigated by a `determ inspect` binary<->text debug tool, and optionally a thin *non-authenticated, local* text form for config/CLI only. (b) **Large refactor surface** (every JSON touchpoint + fixture regeneration). (c) **Sunk cost**: `determ::json`/djson is obsoleted, though its differential-fuzz + byte-determinism harness carries over to the binary codec's gates.
+
+**Resolved (owner, 2026-07-23).** (i) The **authoritative form is always binary** (length-prefixed, canonical codec) on every surface. (ii) A **`determ inspect` binary<->text debug view ships** — read-only, non-authoritative. (iii) Storage, p2p wire, keyfiles, and test vectors are **binary-only**; operator-facing **config, CLI output, and RPC responses keep an optional human-readable text rendering derived from the binary** (binary stays authoritative — text is a view, never a parse target for authenticated data). This confines text to a non-authoritative operator-convenience layer and removes it from every dependency-bearing and determinism-bearing path.
+
+**Sequencing.** Fits the minix / NH1 track: wire-envelope + goldens-adjacent parts pre-v1.1-freeze, the rest as an additive/local sweep. Blocks nothing already authorized; parallel to the feature front.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-23; recorded by Claude Fable at his direction).
+

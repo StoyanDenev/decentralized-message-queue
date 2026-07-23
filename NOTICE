@@ -1,3 +1,6 @@
+Determ is multi-licensed (see LICENSING.md): the daemon/consensus core is AGPL-3.0-or-later;
+the reusable libraries and client tools are Apache-2.0. This NOTICE covers the Apache-2.0 components.
+
 Determ
 Copyright 2026 Determ Contributors
 
