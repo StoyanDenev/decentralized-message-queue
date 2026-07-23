@@ -12256,6 +12256,42 @@ int main(int argc, char** argv) {
                   "AL-3: a second out-of-range type (255) is also fail-closed");
         }
 
+        // VAL-tx-sender-sig (validator.cpp:685): a TRANSFER whose per-tx Ed25519
+        // signature is corrupted is REJECTED by check_transactions with the
+        // sender-authenticity reject. This is the accept-widening gate whose
+        // removal enables universal fund theft (spend from any account without
+        // its key) — invisible to every happy-path/golden test. tx.sig is NOT
+        // folded into Transaction::signing_bytes / compute_hash / tx_root / the
+        // block digest (block.cpp:18-30), so a post-sign byte flip trips NO
+        // earlier commitment gate; and check_transactions_for_test forwards ONLY
+        // to check_transactions, so the tx_root / block-sig gates are not even
+        // reached. :685 is therefore the SOLE gate this fixture exercises.
+        // Falsify-on-mutant: :685 `if (!verify(..))` -> `if (false && !verify(..))`
+        // accepts the forged tx (nonce 0 matches, no balance check in
+        // check_transactions) and flips the two negative asserts below RED.
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1; tx.fee = 0; tx.nonce = 0;
+            auto sb = tx.signing_bytes();
+            tx.sig = crypto::sign(key, sb.data(), sb.size());   // valid sig first ...
+            // POSITIVE CONTROL — the honest-signed tx clears the sender-sig gate,
+            // isolating the RED below to the deliberate byte flip (not the fixture).
+            {
+                Block hb; hb.index = 1; hb.transactions = { tx };
+                auto rc = v.check_transactions_for_test(hb, chain, reg);
+                check(rc.error.find("tx signature invalid") == std::string::npos,
+                      "CONTROL: an honest-signed TRANSFER clears the sender-sig gate (:685)");
+            }
+            tx.sig[0] ^= 0xFF;                                  // ... then FORGE one byte
+            Block b; b.index = 1; b.transactions = { tx };
+            auto r = v.check_transactions_for_test(b, chain, reg);
+            check(!r.ok,
+                  "VAL-tx-sender-sig: a TRANSFER with a corrupted sender sig is REJECTED (:685)");
+            check(r.error.find("tx signature invalid") != std::string::npos,
+                  "VAL-tx-sender-sig: the reject is the per-tx sender-sig gate, not a downstream check");
+        }
+
         std::cout << (fail ? "  FAIL: test-al3-unknown-tx-type\n"
                            : "  PASS: test-al3-unknown-tx-type\n");
         return fail ? 1 : 0;

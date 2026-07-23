@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (2 of 19) — the two `check_block_sigs` gates
+## 2. CLOSED (3 of 19) — the two `check_block_sigs` gates + the per-tx sender-sig gate
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -92,14 +92,58 @@ specific-string assertion, not `!r.ok`), while BSIG-516 stays GREEN (independent
 = exactly one assertion; reverted, rebuilt → GREEN. With both closed, `check_block_sigs`'s two
 load-bearing gates (per-signature validity + quorum count) are now fully pinned.
 
-## 3. The enumerated residual (17 open — a ranked FAST-gateable backlog)
+### 2c. VAL-tx-sender-sig (per-transaction SENDER Ed25519 authenticity)
+
+**#1 VAL-tx-sender-sig** — `src/node/validator.cpp:685`, inside `check_transactions` (gate 11 of
+`validate()`), in the per-tx loop's non-PQ (Ed25519) branch, after the sender pubkey `pk` is resolved
+(registry lookup / `parse_anon_pubkey` / REGISTER payload):
+
+```cpp
+auto sb = tx.signing_bytes();
+if (!verify(pk, sb.data(), sb.size(), tx.sig))
+    return {false, "tx signature invalid from: " + tx.from};
+```
+
+**Consequence if silently removed:** every transaction is admitted **without authenticating its
+sender** — anyone can forge a TRANSFER `from` any account (its balance is spent to an attacker-chosen
+`to`) with an arbitrary signature. This is the single highest-value accept-widening in the register:
+**universal fund theft.** It is invisible to every honest-direction gate — goldens, state-root, and
+byte-identity all exercise *validly-signed* txs, so none notices that the reject-branch is gone; and
+`crypto::verify` being KAT-tested proves the primitive, never the validator's *use* of it (trap-2).
+
+**Gate (in-process, both platforms).** Extended `test-al3-unknown-tx-type`, whose genesis already
+registers creator "alice" with `ed_pub = key.pub` and whose `run_type` lambda builds a signed
+non-anon TRANSFER that clears every pre-`:685` guard (ZEROTH / confidential / S-049 overflow / PQ /
+registry-present) and drives it through the `check_transactions_for_test` seam (a const forwarder to
+`check_transactions` only). New leg: sign a valid alice→bob TRANSFER, then flip one byte of `tx.sig`
+(`tx.sig[0] ^= 0xFF`) and assert the reject contains `"tx signature invalid"`; an honest-signed copy
+of the same tx is the non-vacuity positive control.
+
+**The load-bearing subtlety (two traps avoided):** (a) `tx.sig` is **NOT** folded into
+`Transaction::signing_bytes()` / `compute_hash()` / `tx_root` / the block digest (`block.cpp:18-30`),
+so a post-sign byte flip is invariant under every commitment — no tx_root or block-hash gate can
+reject it first; and doubly so here, since the seam runs *only* `check_transactions` (never
+`check_creator_tx_commitments` or `check_block_sigs`), making `:685` the UNIQUE gate the fixture
+exercises. (b) The assertion pins the **specific** `"tx signature invalid"` substring, not `!r.ok`.
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`).* Mutating `:685` to
+`if (false && !verify(...))` accepts the forged tx (the nonce check at `:690` passes — expected 0,
+got 0 — and `check_transactions` runs no balance check), so `r.ok` becomes true and `r.error` is
+empty: **both** VAL-tx-sender-sig assertions flip RED (a clean 2-assertion counter-delta) while all
+four AL-3 asserts **and** the honest-sig positive control stay GREEN — proving the fixture reaches the
+gate honestly and the RED is caused solely by the byte flip, not the fixture. Reverted via
+`git checkout src/node/validator.cpp` (committed clean this round), rebuilt → GREEN. Robustness: even
+if some hypothetical downstream gate rejected the forged tx with a *different* string, the specific
+`"tx signature invalid"` substring would still be absent → still RED, so no downstream gate can
+vacuously mask the removal.
+
+## 3. The enumerated residual (16 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 1 | VAL-tx-sender-sig | validator.cpp:685 | per-tx SENDER Ed25519 authenticity — universal fund theft / tx forgery | `if (!verify(pk,sb,..,tx.sig))` → `if (false && ...)` | 1 | trivial |
 | 3 | DHS-commit-reveal-bind | validator.cpp:423 | S-009 commit-reveal: revealed dh_secret must preimage the Phase-1 committed dh_input — bias the block RNG | `if (expected != creator_dh_inputs[i])` → `if (false)` | 1 | trivial |
 | 4 | TXROOT-union-bind | validator.cpp:226 | tx_root == union(creator_tx_lists) — smuggle txs not in the committed root | `if (expected_root != b.tx_root)` → `if (false)` | 1 | trivial |
 | 5 | EQV-sig-verify-forged-slash | validator.cpp:394 | equivocation sig-arm: slash only on a genuine double-sign — forge a slash of an honest validator | delete/short-circuit the `sig_a` reject arm | 1 | moderate |
