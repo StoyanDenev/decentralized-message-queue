@@ -33226,6 +33226,43 @@ int main(int argc, char** argv) {
                   "BASELINE: valid abort certificate clears check_abort_certs");
         }
 
+        // --- DHS-commit-reveal-bind (validator.cpp:423) ---------------------
+        // S-009 commit-reveal: each revealed creator_dh_secrets[i] must hash
+        // (with creator i's pubkey) to the Phase-1-committed creator_dh_inputs[i]
+        // (expected = SHA256(secret||pubkey)). Removing :423 lets a participant
+        // substitute a DIFFERENT secret post-Phase-1 and GRIND the block
+        // randomness (delay_output = compute_block_rand(delay_seed, secrets)) to
+        // bias committee/leader selection. check_creator_dh_secrets (validate()
+        // gate at :47) runs BEFORE check_delay (:50) and check_block_sigs (:51);
+        // a one-secret byte flip leaves the earlier gates (which read
+        // creators / creator_dh_inputs / prev_hash / ed_sigs, never the reveals)
+        // untouched, so :47 is the FIRST gate that can reject and it emits the
+        // unique index-qualified string. The specific-string assertion is
+        // load-bearing: under the mutant the block is NOT accepted — it is
+        // caught DOWNSTREAM by the delay_output binder (:446 "delay_output
+        // mismatch (commit-reveal)", since delay_output is a function of the
+        // secrets) — so a vacuous !r.ok would stay GREEN (masked); asserting the
+        // index-qualified "creator_dh_secret[0] does not match commit" (which
+        // also avoids the ":...does not match committed root" substring at
+        // :1488/1542/1604) is what flips it RED.
+        {
+            // POSITIVE CONTROL — a consistent commit-reveal pair is NOT rejected
+            // by :423 (the clean block clears the dh gate, per BASELINE above).
+            Block b_ok = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            auto r_ok = bv.validate(b_ok, c, reg);
+            check(r_ok.error.find("creator_dh_secret[0] does not match commit") == std::string::npos,
+                  "DHS control: a consistent commit-reveal pair is NOT rejected by :423");
+
+            // FORGE: substitute creator 0's REVEAL (flip one byte) while leaving
+            // creator_dh_inputs / creator_ed_sigs / delay_seed untouched, so :47
+            // is the unique gate the mutation trips.
+            Block b = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            b.creator_dh_secrets[0][0] ^= 0x01;
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok && r.error.find("creator_dh_secret[0] does not match commit") != std::string::npos,
+                  "DHS-commit-reveal-bind: a post-Phase-1 secret substitution is rejected at :423");
+        }
+
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
         // Values only, never JSON shape: AbortClaimMsg::from_json uses
         // json_require and THROWS on a missing/mistyped field, which would

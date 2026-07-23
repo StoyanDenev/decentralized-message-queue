@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (3 of 19) — the two `check_block_sigs` gates + the per-tx sender-sig gate
+## 2. CLOSED (4 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal binding
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -137,14 +137,63 @@ if some hypothetical downstream gate rejected the forged tx with a *different* s
 `"tx signature invalid"` substring would still be absent → still RED, so no downstream gate can
 vacuously mask the removal.
 
-## 3. The enumerated residual (16 open — a ranked FAST-gateable backlog)
+### 2d. DHS-commit-reveal-bind (S-009 commit-reveal binding)
+
+**#3 DHS-commit-reveal-bind** — `src/node/validator.cpp:423`, inside `check_creator_dh_secrets`
+(gate 7 of `validate()`, at `:47`). Each revealed `creator_dh_secrets[i]` must hash (with committee
+member i's pubkey) to the Phase-1-committed `creator_dh_inputs[i]`:
+
+```cpp
+Hash expected = SHA256Builder{}.append(b.creator_dh_secrets[i])
+                               .append(pk->data(), pk->size()).finalize();
+if (expected != b.creator_dh_inputs[i])
+    return {false, "creator_dh_secret[" + std::to_string(i) + "] does not match commit"};
+```
+
+**Consequence if silently removed:** `creator_dh_inputs[i]` is the Phase-1 commit **signed** in
+`creator_ed_sigs[i]`; the revealed secret feeds the block randomness beacon
+(`delay_output = compute_block_rand(delay_seed, creator_dh_secrets)`). Without this bind a committee
+member can substitute a **different** secret post-Phase-1 — grinding the block RNG over many candidate
+secrets to bias committee/leader selection (the S-009 selective-abort / randomness-grinding attack).
+The Phase-1 signature covers the *commit* (`make_contrib_commitment(..,creator_dh_inputs[i])`), never
+the reveal, so only this recompute-and-compare pins the reveal to the commit.
+
+**Gate (in-process, both platforms).** Extended `test-abort-cert-validation`, reusing its `build_block`
+lambda (which already assembles a fully self-consistent committee block:
+`creator_dh_inputs[i] = SHA256(secret‖pub)`, `creator_ed_sigs` over the commitments, `delay_seed` from
+the inputs, `delay_output` from the secrets) plus the genesis / registry / `bv` scaffolding. New leg:
+`Block b = build_block(...); b.creator_dh_secrets[0][0] ^= 0x01;` (flip ONE byte of creator 0's reveal,
+leaving `creator_dh_inputs` / `creator_ed_sigs` / `delay_seed` untouched) → drive `bv.validate(b, c, reg)`
+and assert the reject contains the index-qualified `"creator_dh_secret[0] does not match commit"`. An
+un-mutated `build_block` copy is the positive control (asserts that string is absent — corroborated by
+the pre-existing BASELINE which proves the clean block clears past this gate into `check_abort_certs`).
+
+**The load-bearing subtlety (the specific-string discipline is essential here).** `check_creator_dh_secrets`
+(`:47`) runs BEFORE `check_delay` (`:50`) and `check_block_sigs` (`:51`), and the earlier gates
+(`prev_hash` / `registered` / `selection` / `tx_commitments`) read `creators` / `creator_dh_inputs`,
+never the reveals — so with the gate present `:47` is the FIRST gate that can reject, emitting the unique
+string. But under the mutant (`:423 → if (false && expected != …)`) the secret-substituted block is
+**NOT accepted** — it flows to `check_delay`, whose `delay_output` check (`:446`) recomputes
+`compute_block_rand(delay_seed, mutated_secrets) != stored delay_output` and rejects
+`"delay_output mismatch (commit-reveal)"` (delay_output is a function of the secrets). So a vacuous
+`!r.ok` assertion would stay GREEN (masked by the downstream binder); asserting the **index-qualified**
+`"creator_dh_secret[0] does not match commit"` is what flips it RED — and the index qualifier also
+avoids the substring collision with `"… does not match committed root"` (`:1488/1542/1604`).
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`).* The mutation flips ONLY the forged-secret
+assertion RED (a clean 1-assertion counter-delta) while the positive control and the BASELINE stay
+GREEN — proving the fixture reaches the gate honestly and the RED is caused solely by the secret
+substitution. Reverted via `git checkout src/node/validator.cpp` (committed clean this round), rebuilt
+→ GREEN. Design nailed by a parallel read-only analysis workflow (`wf_ff6477a8-a7d`) before any code
+changed; every load-bearing claim re-verified against source.
+
+## 3. The enumerated residual (15 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 3 | DHS-commit-reveal-bind | validator.cpp:423 | S-009 commit-reveal: revealed dh_secret must preimage the Phase-1 committed dh_input — bias the block RNG | `if (expected != creator_dh_inputs[i])` → `if (false)` | 1 | trivial |
 | 4 | TXROOT-union-bind | validator.cpp:226 | tx_root == union(creator_tx_lists) — smuggle txs not in the committed root | `if (expected_root != b.tx_root)` → `if (false)` | 1 | trivial |
 | 5 | EQV-sig-verify-forged-slash | validator.cpp:394 | equivocation sig-arm: slash only on a genuine double-sign — forge a slash of an honest validator | delete/short-circuit the `sig_a` reject arm | 1 | moderate |
 | 6 | VAL-param-multisig-threshold | validator.cpp:827 | A5 governance multisig threshold — pass a PARAM_CHANGE with too few keyholder sigs | `if (good_sigs < param_threshold_)` → `if (false)` | 1 | trivial |
