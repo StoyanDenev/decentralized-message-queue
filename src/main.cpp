@@ -33405,6 +33405,26 @@ int main(int argc, char** argv) {
             check(has(e516, "block sig invalid"),
                   "BSIG-516: a non-zero but INVALID block signature is rejected "
                   "(per-signature authenticity, not merely quorum count)");
+
+            // --- BSIG-521 (block-signature QUORUM floor, the sibling gate at
+            //     validator.cpp:521). A block finalizes only with >= required
+            //     valid signatures (MUTUAL_DISTRUST: K-of-K; BFT: ceil(2K/3)).
+            //     Zero ALL non-proposer slots so signed_count drops to 1 (just
+            //     the proposer, which the :496 proposer-sig check still needs) —
+            //     for any BFT block (required >= 2) that is < required, so :521
+            //     rejects "block signatures N < required". test-required-block-sigs
+            //     pins only the pure required_block_sigs() helper, never the
+            //     validator's USE of it — removing :521 lets a block finalize
+            //     with a single signer (quorum bypass / unilateral finalization).
+            Block forged521 = ok;                        // clears gate 9 as-is
+            for (size_t i = 0; i < forged521.creator_block_sigs.size(); ++i)
+                if (i != good_idx) forged521.creator_block_sigs[i] = Signature{};
+            const std::string e521 = err_of(forged521);
+            if (!has(e521, "block signatures"))
+                std::cout << "    got: [" << e521 << "]\n";
+            check(has(e521, "block signatures"),
+                  "BSIG-521: a block with fewer than the required valid signatures "
+                  "is rejected (quorum floor, not merely per-sig validity)");
         }
 
         // === T-3 (derivation determinism): check_delay commit-reveal =========

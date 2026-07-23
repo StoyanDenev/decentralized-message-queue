@@ -25,7 +25,9 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED — BSIG-516 (per-signature block-signature authenticity)
+## 2. CLOSED (2 of 19) — the two `check_block_sigs` gates
+
+### 2a. BSIG-516 (per-signature block-signature authenticity)
 
 **#3 BSIG-persig-verify-516** — `src/node/validator.cpp:516`, inside `check_block_sigs` (gate 9 of
 `validate()`). Each COUNTED (non-sentinel) `creator_block_sig` must be a VALID Ed25519 signature over
@@ -68,7 +70,29 @@ error and fails. Counter-delta: exactly one assertion flips (PASS→FAIL, `got: 
 incorrect]`); the baseline and every other assertion stay GREEN. Reverted via
 `git checkout src/node/validator.cpp` (committed clean this round), rebuilt → GREEN.
 
-## 3. The enumerated residual (18 open — a ranked FAST-gateable backlog)
+### 2b. BSIG-521 (block-signature quorum floor — the sibling gate)
+
+**BSIG-quorum-count-521** — `validator.cpp:521`, the quorum gate immediately after the `:516`
+per-signature loop in the same function: `if (signed_count < required) return {false, "block
+signatures N < required M"}`. `required = required_block_sigs(mode, |creators|)` — full K-of-K in
+MUTUAL_DISTRUST, `⌈2K/3⌉` in BFT. **Consequence if silently removed:** a block finalizes with fewer
+valid signatures than the mode demands — one committee member (or any Phase-1 participant holding the
+others' `creator_ed_sigs`) fills the rest with sentinel-zeros and *unilaterally* finalizes the block.
+Same trap-2 shape as BSIG-516: `test-required-block-sigs` pins only the pure `required_block_sigs()`
+helper, never the validator's *use* of it (the exact "well-tested helper called by an unenforced
+comparison" pattern).
+
+**Gate + falsify.** Same seam and `ok` block: zero **all non-proposer** slots so `signed_count`
+drops to 1 (just the proposer, which the `:496` proposer-sig check still requires) — for any BFT
+block (`required ≥ 2`) that is `< required`, so `:521` rejects; assert `"block signatures"`.
+Robust to committee size (`signed_count == 1 < required` regardless of |creators|). Falsify via a
+rebuilt `determ.exe`: `:521` → `if (false && signed_count < required)` flips **only** the BSIG-521
+assertion RED (`got: [cumulative_rand incorrect]` — the same downstream gate, again requiring the
+specific-string assertion, not `!r.ok`), while BSIG-516 stays GREEN (independent gates); counter-delta
+= exactly one assertion; reverted, rebuilt → GREEN. With both closed, `check_block_sigs`'s two
+load-bearing gates (per-signature validity + quorum count) are now fully pinned.
+
+## 3. The enumerated residual (17 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
@@ -76,7 +100,6 @@ in-process. Closed one per directive, cheapest-value-first, exactly like the sis
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
 | 1 | VAL-tx-sender-sig | validator.cpp:685 | per-tx SENDER Ed25519 authenticity — universal fund theft / tx forgery | `if (!verify(pk,sb,..,tx.sig))` → `if (false && ...)` | 1 | trivial |
-| 2 | BSIG-quorum-count-521 | validator.cpp:521 | block-sig QUORUM floor (K-of-K / ⌈2K/3⌉) — finalize with too few sigs | `if (signed_count < required)` → `if (false)` | 1 | trivial |
 | 3 | DHS-commit-reveal-bind | validator.cpp:423 | S-009 commit-reveal: revealed dh_secret must preimage the Phase-1 committed dh_input — bias the block RNG | `if (expected != creator_dh_inputs[i])` → `if (false)` | 1 | trivial |
 | 4 | TXROOT-union-bind | validator.cpp:226 | tx_root == union(creator_tx_lists) — smuggle txs not in the committed root | `if (expected_root != b.tx_root)` → `if (false)` | 1 | trivial |
 | 5 | EQV-sig-verify-forged-slash | validator.cpp:394 | equivocation sig-arm: slash only on a genuine double-sign — forge a slash of an honest validator | delete/short-circuit the `sig_a` reject arm | 1 | moderate |
