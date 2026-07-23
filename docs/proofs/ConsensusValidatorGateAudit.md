@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (12 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3)
+## 2. CLOSED (14 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3) + F2-inbound-receipt-binding (×2)
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -413,19 +413,57 @@ the positive control stay GREEN in all three passes. Reverted via `git checkout`
 Direct-verify (the receipt-binding logic is authoritative; the register named each mutation) — no analysis
 workflow needed.
 
-## 3. The enumerated residual (7 open — a ranked FAST-gateable backlog)
+### 2j. VAL-inbound-f2 cluster — the F2 inbound-receipt admission binding gates (two gates)
+
+**#11 VAL-inbound-f2-intersection (`validator.cpp:1493`) + #16 VAL-inbound-f2-rootauth (`:1486`)** inside
+`check_inbound_receipts` — a DISTINCT function from the outbound `check_cross_shard_receipts` of §2i. When
+F2 is active (`b.index >= chain.f2_active_from_height()`) and a block admits inbound cross-shard receipts,
+the admitted set must be the deterministic committee-wide intersection of the K creators' Phase-1-committed
+inbound views, and each carried per-creator view list must authenticate against its committed root:
+
+- **:1493 intersection** — `if (!iset.count(hash_cross_shard_receipt(inbound_receipts[i]))) return "… not in
+  committee-view intersection"`. Removing it credits an inbound receipt **no committee member witnessed** —
+  an admitted inbound receipt CREDITS funds on this (destination) shard, so this is mint-from-nothing.
+- **:1486 rootauth** — `if (compute_view_root(creator_view_inbound_lists[i]) != root) return "… does not
+  match committed root"`. Removing it lets a producer **substitute a spoofed view list post-commit** to
+  fabricate the intersection (the roots are bound into each creator's Phase-1 commit in
+  `check_creator_*`), which then lets an unwitnessed receipt into the admitted set.
+
+**Genuinely un-pinned.** No test builds `creator_view_inbound_lists` at all (the sole grep hit is a comment
+that deliberately *avoids* the `":…does not match committed root"` substring); the F2 helper tests exercise
+`compute_view_root` / `reconcile_intersection` in isolation but never drive `check_inbound_receipts`.
+
+**Seam.** `check_inbound_receipts` is a *private* method, so a byte-neutral public const-forwarder
+`check_inbound_receipts_for_test(b, chain)` (2-arg, no registry — the check reads only `b` + `chain`) was
+added to `validator.hpp` (the 6th `*_for_test` instance, same pattern as `check_cross_shard_receipts_for_test`).
+The seam bypasses `validate()`, so no block-sig/digest gate can mask a forged view list.
+
+**Gate (in-process, both platforms).** A dedicated F2-inbound section appended to `test-sr5-misroute-receipt`
+reuses its multi-shard `c` (`my_shard_id = 0`) and `v`, with `c.set_f2_active_from_height(0)`. A `make_inbound(seed)`
+helper builds a shape-valid inbound receipt (`dst_shard = 0`, `src_shard = 1`, distinct `tx_hash` per seed).
+The **positive control** — one receipt, both view lists `[H(r)]`, roots `compute_view_root([H(r)])` — is
+ACCEPTED. The two forges are ORTHOGONAL: **:1493** carries *authenticated* lists (roots match) holding only a
+DECOY hash, so the admitted receipt is absent from the intersection → `"not in committee-view intersection"`;
+**:1486** SPOOFS the lists to include `H(r)` but carries the genuinely-committed roots (over a different list),
+so the list fails root-auth → `"does not match committed root"` (and `H(r)` *is* in the spoofed intersection,
+so `:1493` cannot mask it).
+
+*Falsify-on-mutant (two INDEPENDENT rebuilt-`determ.exe` passes).* `:1493 → if (false && !iset.count(…))`
+flips ONLY the intersection assert RED (control + rootauth GREEN); `:1486 → if (false && compute_view_root(…)
+!= root)` flips ONLY the rootauth assert RED (control + intersection GREEN). `git checkout` between passes.
+Direct-verify — the admission logic is authoritative; the register named each mutation — no analysis workflow.
+
+## 3. The enumerated residual (5 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 11 | VAL-inbound-f2-intersection | validator.cpp:1493 | F2 inbound-receipt authenticity (per-creator view intersection) — credit an unbacked inbound | delete the intersection enforcement | 1 | trivial |
 | 12 | STAKE-balance-underspend | chain.cpp:1327 | STAKE value-conservation — stake more weight than the sender holds | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
 | 13 | SR-declared-state-root-unbound | chain.cpp:1953 | S-033: declared state_root must equal the recomputed post-state | neuter the `computed != b.state_root` reject | 1 | trivial |
 | 14 | DAPPCALL-balance-underspend | chain.cpp:1680 | DAPP_CALL value-conservation — spend more than held | delete `if (sender.balance < cost) continue;` | 1 | trivial |
 | 15 | SHIELD-balance-underspend | chain.cpp:1026 | SHIELD value-conservation — mint a note worth more than the transparent debit | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
-| 16 | VAL-inbound-f2-rootauth | validator.cpp:1486 | per-creator inbound view list bound to its Phase-1-committed root | neuter `compute_view_root(...) != root` | 2 | moderate |
 | 18 | VAL-timestamp-30s-window | validator.cpp:1772 | ±30s bound is the sole gate on a LEGACY block's (non-digest-bound) timestamp | `||` → `&&` (contradiction, reject dead) | 3 | moderate |
 
 ## 4. How to use this register

@@ -104,6 +104,20 @@ public:
         return check_cross_shard_receipts(b, chain);
     }
 
+    // VAL-inbound-f2 test seam (ConsensusValidatorGateAudit, VAL-inbound-f2-*):
+    // run the F2 inbound-receipt admission check in isolation — same 2-arg
+    // const-forwarder pattern as check_cross_shard_receipts_for_test (the check
+    // reads only b + chain). Lets the falsifier drive an F2-active multi-shard
+    // block with forged creator_view_inbound_lists / an unwitnessed inbound
+    // receipt and assert the SPECIFIC reject (":1486 does not match committed
+    // root" / ":1493 not in committee-view intersection") without assembling a
+    // fully-signed committee block whose block-sig/digest gates would otherwise
+    // mask a corrupted view list.
+    Result check_inbound_receipts_for_test(const chain::Block& b,
+                                           const chain::Chain& chain) const {
+        return check_inbound_receipts(b, chain);
+    }
+
     // T-3 test seam (ConsensusPhaseStructureSoundness, derivation determinism):
     // run the commit-reveal derivation check in isolation — same const-forwarder
     // pattern as the three seams above. check_delay reads ONLY b (no chain, no

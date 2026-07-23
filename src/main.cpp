@@ -12439,6 +12439,93 @@ int main(int argc, char** argv) {
                   "VAL-csr-field-match: a receipt whose amount != the source tx is REJECTED at :1412 (no amount inflation)");
         }
 
+        // --- VAL-inbound-f2 cluster: the F2 inbound-receipt admission binding
+        //     gates in check_inbound_receipts (validator.cpp:1486 rootauth,
+        //     :1493 committee-view intersection). Distinct FUNCTION from the
+        //     cross_shard_receipts (outbound) checks above, so driven through a
+        //     separate 2-arg seam check_inbound_receipts_for_test(b, c). The same
+        //     multi-shard chain `c` serves (my_shard_id=0), with F2 active from
+        //     height 0 so a non-empty inbound_receipts enters the F2 rule. An
+        //     admitted inbound receipt CREDITS funds on this (destination) shard,
+        //     so both gates are value_rank-1: removing :1493 credits a receipt no
+        //     committee member witnessed (mint from nothing); removing :1486 lets
+        //     a producer SUBSTITUTE a spoofed view list post-commit to fabricate
+        //     the intersection. The two forges are ORTHOGONAL (unwitnessed receipt
+        //     vs. root-mismatched list), so each isolates its own gate; the seam
+        //     bypasses validate(), so no block-sig/digest gate can mask either.
+        c.set_f2_active_from_height(0);            // F2 active from genesis height
+        auto make_inbound = [&](uint8_t seed) {
+            CrossShardReceipt r;
+            r.src_shard = 1;                 // != my_shard_id(0) → passes the src_shard gate
+            r.dst_shard = 0;                 // == my_shard_id → passes the dst_shard gate
+            r.src_block_index = 1;
+            r.from = "remote"; r.to = "alice";
+            r.amount = 100; r.fee = 1; r.nonce = 0;
+            for (size_t i = 0; i < r.tx_hash.size(); ++i) r.tx_hash[i] = uint8_t(seed + i);
+            return r;                        // distinct seed → distinct tx_hash → distinct receipt hash
+        };
+
+        // POSITIVE CONTROL — a receipt witnessed by ALL K committee views, each
+        // list authenticated by a matching root, lies in the intersection → the
+        // whole F2 admission check PASSES (proves the fixture reaches both gates).
+        {
+            CrossShardReceipt r = make_inbound(0xA0);
+            Hash hr = hash_cross_shard_receipt(r);
+            Block b; b.index = 5;                         // >= f2_active_from_height (0)
+            b.creators = { "n0", "n1" };                  // K=2 committee members
+            b.inbound_receipts = { r };
+            b.creator_view_inbound_lists = { { hr }, { hr } };
+            b.creator_view_inbound_roots = { compute_view_root({ hr }),
+                                             compute_view_root({ hr }) };
+            auto res = v.check_inbound_receipts_for_test(b, c);
+            check(res.ok,
+                  "CONTROL: an inbound receipt witnessed by all K committee views (matching roots) is ACCEPTED");
+        }
+
+        // VAL-inbound-f2-intersection (:1493) — the admitted receipt is NOT in the
+        // (correctly-authenticated) committee-view intersection. The views hold
+        // only a DECOY receipt and their roots MATCH those lists, so :1486 passes;
+        // the admitted receipt r is absent from the intersection → :1493 rejects.
+        // Faithful mutation: delete the intersection-membership enforcement.
+        {
+            CrossShardReceipt r     = make_inbound(0xA0);   // the receipt a producer tries to credit
+            CrossShardReceipt decoy = make_inbound(0xB0);   // what the committee actually witnessed
+            Hash hd = hash_cross_shard_receipt(decoy);
+            Block b; b.index = 5;
+            b.creators = { "n0", "n1" };
+            b.inbound_receipts = { r };                     // credit r ...
+            b.creator_view_inbound_lists = { { hd }, { hd } };  // ... but the views hold only the decoy
+            b.creator_view_inbound_roots = { compute_view_root({ hd }),
+                                             compute_view_root({ hd }) };  // roots MATCH lists → :1486 passes
+            auto res = v.check_inbound_receipts_for_test(b, c);
+            check(!res.ok && res.error.find("not in committee-view intersection") != std::string::npos,
+                  "VAL-inbound-f2-intersection: an inbound receipt absent from the committee-view intersection is REJECTED at :1493");
+        }
+
+        // VAL-inbound-f2-rootauth (:1486) — the carried view list is SPOOFED to
+        // include the receipt (so it would land in the intersection), but the
+        // Phase-1-committed roots are over a DIFFERENT (honest) list, so the list
+        // fails root authentication first. Faithful mutation: neuter the
+        // compute_view_root(list[i]) != root check. Under the mutant the spoofed
+        // list is trusted → r lands in the intersection → :1493 passes → ACCEPTED,
+        // so this leg isolates :1486 (r IS in the carried intersection, proving
+        // :1493 cannot mask it).
+        {
+            CrossShardReceipt r     = make_inbound(0xA0);   // spoofed into the carried lists
+            CrossShardReceipt honest= make_inbound(0xC0);   // what the roots were actually committed over
+            Hash hr = hash_cross_shard_receipt(r);
+            Hash ho = hash_cross_shard_receipt(honest);
+            Block b; b.index = 5;
+            b.creators = { "n0", "n1" };
+            b.inbound_receipts = { r };
+            b.creator_view_inbound_lists = { { hr }, { hr } };   // spoofed to include r
+            b.creator_view_inbound_roots = { compute_view_root({ ho }),
+                                             compute_view_root({ ho }) };  // committed over `honest`, NOT r
+            auto res = v.check_inbound_receipts_for_test(b, c);
+            check(!res.ok && res.error.find("does not match committed root") != std::string::npos,
+                  "VAL-inbound-f2-rootauth: a carried view list not matching its Phase-1-committed root is REJECTED at :1486");
+        }
+
         std::cout << (fail ? "  FAIL: test-sr5-misroute-receipt\n"
                            : "  PASS: test-sr5-misroute-receipt\n");
         return fail ? 1 : 0;
