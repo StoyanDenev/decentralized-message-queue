@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (14 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3) + F2-inbound-receipt-binding (×2)
+## 2. CLOSED (17 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3) + F2-inbound-receipt-binding (×2) + apply-path value-conservation (×3)
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -453,17 +453,53 @@ flips ONLY the intersection assert RED (control + rootauth GREEN); `:1486 → if
 != root)` flips ONLY the rootauth assert RED (control + intersection GREEN). `git checkout` between passes.
 Direct-verify — the admission logic is authoritative; the register named each mutation — no analysis workflow.
 
-## 3. The enumerated residual (5 open — a ranked FAST-gateable backlog)
+### 2k. Apply-path value-conservation cluster — the balance-underspend gates (three gates)
+
+**#12 STAKE-balance-underspend (`chain.cpp:1327`) + #14 DAPP_CALL-balance-underspend (`:1680`) + #15
+SHIELD-balance-underspend (`:1026`)** in `apply_transactions` (the `Chain::append` apply path, a DIFFERENT
+surface from every §2a-§2j gate, which live in the `validate()` path). Each per-tx case guards
+`if (sender.balance < cost) continue;` immediately below its S-049 `amount+fee` overflow guard; removing it
+lets `sender.balance -= cost` UNDERFLOW to ~2^64 while the mint still lands — locked consensus weight
+(`stakes_[from].locked += amount`), a recipient credit (`accounts_[to].balance += amount`), or a phantom
+confidential note (`accumulated_shielded_ += A`). This is the highest-impact class after fund theft: an
+overspend that mints value the sender never held.
+
+**★ WHY VALIDATOR TESTS MISS IT.** The apply path never re-runs the validator's balance check (the exact
+apply-path-vs-validator gap behind the EQV + batch findings). And the A1 unitary-supply invariant asserted
+at end-of-block is **mod-2^64 blind** ([[determ-a1-supply-invariant-mod2^64-blind]]): the −cost underflow and
+the +mint are exact-2^64 complements, so `live_total_supply() == expected_total()` still holds and apply does
+NOT throw — the sender is simply left holding the wrapped balance. So the falsifier is a value-conservation
+observable, not a reject string: **"sender balance UNCHANGED after an overspend"** (throw-robust — a future
+A1 tightening would surface as a throw, which must also read as not-conserved).
+
+**Genuinely un-pinned.** No test drove an overspend STAKE/DAPP_CALL/SHIELD through `Chain::append` and
+asserted the skip; the only pre-switch guard is the sequential-nonce check at `:970`.
+
+**Gate (in-process, both platforms).** Three scenarios appended to `test-value-overflow-mint` (the sibling
+that already pins the S-049 overflow guard one line above each target), reusing its `fresh_chain(bal)` /
+`base_block(c)` / `balance()`/`stake()`/`next_nonce()` scaffolding. STAKE: an 8-byte-LE overspend (amount
+1000 > balance 100) is skipped → stake 0, balance 100. DAPP_CALL: register an active DApp (an affordable
+call FIRST proves the debit/credit path is live), then an overspend call → recipient uncredited, sender
+unchanged. SHIELD: the balance guard sits ABOVE the payload-size / `determ_shield_verify` / dup-commitment
+guards, so the forged tx must carry a GENUINELY VALID 98-byte note (`commit(A,r)` + P-256 balance PoK, the
+`make_shield` recipe) for A = 1000 > balance 100 — a valid payload is REQUIRED or a downstream guard masks
+the mutant.
+
+*Falsify-on-mutant (three INDEPENDENT rebuilt-`determ.exe` passes).* Each `if (sender.balance < cost)
+continue;` → `if (false && …) continue;` flips ONLY its own scenario RED; the affordable DApp control and
+the other two conservation scenarios stay GREEN — proving each gate is separately load-bearing and that the
+SHIELD payload genuinely reaches the debit past `determ_shield_verify` (a masked/invalid payload would leave
+`:1026` un-falsifiable). Reverted via `git checkout` between passes. Host + per-type fixtures + masking
+nailed by a 6-agent read-only analysis workflow (`wf_f76c5eb0-1b9`) before touching code.
+
+## 3. The enumerated residual (2 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 12 | STAKE-balance-underspend | chain.cpp:1327 | STAKE value-conservation — stake more weight than the sender holds | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
 | 13 | SR-declared-state-root-unbound | chain.cpp:1953 | S-033: declared state_root must equal the recomputed post-state | neuter the `computed != b.state_root` reject | 1 | trivial |
-| 14 | DAPPCALL-balance-underspend | chain.cpp:1680 | DAPP_CALL value-conservation — spend more than held | delete `if (sender.balance < cost) continue;` | 1 | trivial |
-| 15 | SHIELD-balance-underspend | chain.cpp:1026 | SHIELD value-conservation — mint a note worth more than the transparent debit | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
 | 18 | VAL-timestamp-30s-window | validator.cpp:1772 | ±30s bound is the sole gate on a LEGACY block's (non-digest-bound) timestamp | `||` → `&&` (contradiction, reject dead) | 3 | moderate |
 
 ## 4. How to use this register

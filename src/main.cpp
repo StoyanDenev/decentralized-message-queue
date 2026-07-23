@@ -56482,6 +56482,154 @@ int main(int argc, char** argv) {
                   "past 2^64 is rejected (checked total_fees throws)");
         }
 
+        // === Scenarios 6-8: apply-path value-conservation (UNDERSPEND) ===
+        //
+        // ConsensusValidatorGateAudit VAL-*-balance-underspend: the S-049
+        // overflow guards above each pin `amount+fee` NOT WRAPPING; the
+        // SIBLING guard `if (sender.balance < cost) continue;` one line below
+        // each pins `cost <= balance`. Removing it lets `sender.balance -= cost`
+        // UNDERFLOW to ~2^64 while the mint (locked stake / recipient credit /
+        // confidential note) still lands — the exact-2^64 compensation is
+        // INVISIBLE to the A1 unitary-supply check (which is mod-2^64 blind, see
+        // determ-a1-supply-invariant-mod2^64-blind), so apply does NOT throw and
+        // the sender's balance is left holding the wrapped value. The universal
+        // falsifier is therefore "sender balance UNCHANGED after an overspend".
+        // These drive Chain::append directly (the apply path never runs the
+        // validator's balance check — accept-widening invisible to validator
+        // tests). Each conserved-check is throw-robust (a future A1 tightening
+        // would surface as a throw, which must also read as "not conserved").
+
+        // (6) STAKE overspend -> chain.cpp:1327. amount in an 8-byte LE payload;
+        // amount+fee (1000) does not wrap (clears the :1326 S-049 guard) but
+        // exceeds the balance (100). Removing :1327 mints locked consensus weight.
+        {
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            uint64_t amt = 1000;                       // > balance 100, no overflow
+            std::vector<uint8_t> pl(8);
+            for (int i = 0; i < 8; ++i) pl[i] = uint8_t((amt >> (8 * i)) & 0xFF);
+            Transaction tx;
+            tx.type = TxType::STAKE; tx.from = "alice"; tx.to = "";
+            tx.amount = 0; tx.fee = 0;
+            tx.nonce = chain.next_nonce("alice");      // 0, clears the nonce gate
+            tx.payload = pl;                           // size 8, clears :1318
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            bool conserved = false;
+            try {
+                chain.append(tb);
+                conserved = chain.balance("alice") == 100
+                         && chain.stake("alice") == 0
+                         && chain.next_nonce("alice") == 0;
+            } catch (...) { conserved = false; }
+            check(conserved,
+                  "(6) STAKE overspend (chain.cpp:1327): amount+fee > balance is "
+                  "skipped — no locked-stake mint, sender balance unchanged");
+        }
+
+        // (7) DAPP_CALL overspend -> chain.cpp:1680. Needs a registered ACTIVE
+        // DApp first; then an affordable call proves the path is live (reaches
+        // the debit/credit), and the overspend on the same chain is the gate.
+        {
+            Chain chain = fresh_chain(100);
+            // Block 1: self-register dapp.example (op=0 create, 38-byte all-zero
+            // payload: op + 32B pubkey + url_len0 + topic_count0 + retention0 +
+            // metalen0(2B) — active_from = height 1). fee 0 so no creator needed.
+            {
+                Block b1 = base_block(chain);
+                std::vector<uint8_t> reg(38, 0);
+                Transaction r;
+                r.type = TxType::DAPP_REGISTER; r.from = "dapp.example"; r.to = "";
+                r.amount = 0; r.fee = 0;
+                r.nonce = chain.next_nonce("dapp.example");
+                r.payload = reg; r.hash = r.compute_hash();
+                b1.transactions.push_back(r);
+                chain.append(b1);
+            }
+            // Block 2: AFFORDABLE call (40 <= 100) applies — liveness control
+            // proving the DApp is registered and the debit/credit path is reached.
+            {
+                Block b2 = base_block(chain);
+                Transaction t;
+                t.type = TxType::DAPP_CALL; t.from = "alice"; t.to = "dapp.example";
+                t.amount = 40; t.fee = 0;
+                t.nonce = chain.next_nonce("alice");
+                t.payload = {0x00, 0x00, 0x00, 0x00, 0x00};  // topic_len0 + ct_len0
+                t.hash = t.compute_hash();
+                b2.transactions.push_back(t);
+                chain.append(b2);
+            }
+            check(chain.balance("alice") == 60 && chain.balance("dapp.example") == 40,
+                  "(7a) DAPP_CALL affordable: applies (alice 100->60, dapp +40) — "
+                  "path is live, DApp registered");
+            // Block 3: OVERSPEND call (1000 > remaining 60) -> the :1680 gate.
+            {
+                Block b3 = base_block(chain);
+                Transaction t;
+                t.type = TxType::DAPP_CALL; t.from = "alice"; t.to = "dapp.example";
+                t.amount = 1000; t.fee = 0;
+                t.nonce = chain.next_nonce("alice");
+                t.payload = {0x00, 0x00, 0x00, 0x00, 0x00};
+                t.hash = t.compute_hash();
+                b3.transactions.push_back(t);
+                bool conserved = false;
+                try {
+                    chain.append(b3);
+                    conserved = chain.balance("alice") == 60
+                             && chain.balance("dapp.example") == 40;
+                } catch (...) { conserved = false; }
+                check(conserved,
+                      "(7b) DAPP_CALL overspend (chain.cpp:1680): amount+fee > "
+                      "balance is skipped — no recipient mint, sender unchanged");
+            }
+        }
+
+        // (8) SHIELD overspend -> chain.cpp:1026. The masking subtlety: :1026
+        // sits ABOVE the payload-size (:1027), determ_shield_verify (:1028) and
+        // duplicate-commitment (:1031) guards, so the forged tx must carry a
+        // GENUINELY VALID 98-byte payload — otherwise a later guard skips it even
+        // under the :1026 mutant. Build a real note C = commit(A, r) + a P-256
+        // balance PoK (the make_shield recipe), for the public amount A = 1000 >
+        // balance 100. The mutant-flip is the reach-proof: only a valid payload
+        // reaches the debit past :1028, so a flip proves :1026 was the operative
+        // guard.
+        {
+            auto setsc = [](uint8_t out[32], uint64_t v) {
+                std::memset(out, 0, 32);
+                for (int i = 0; i < 8; ++i) out[31 - i] = uint8_t(v >> (8 * i));
+            };
+            auto shield_payload = [&](uint64_t A, uint64_t r) {
+                uint8_t C[33], E[33], vs[32], rs[32], x[32], k[32];
+                uint8_t pf[DETERM_P256_BALANCE_PROOF_BYTES];
+                setsc(vs, A); setsc(rs, r);
+                determ_pedersen_commit(C, vs, rs);              // C = A*G + r*H
+                determ_p256_balance_excess(E, C, 1, nullptr, 0, A);  // E = r*H
+                setsc(x, r); setsc(k, 0xC0FFEEu);
+                determ_p256_balance_prove(pf, E, x, k);         // PoK E = x*H
+                std::vector<uint8_t> out(C, C + 33);
+                out.insert(out.end(), pf, pf + DETERM_P256_BALANCE_PROOF_BYTES);
+                return out;                                     // 33 + 65 == 98
+            };
+            Chain chain = fresh_chain(100);
+            Block tb = base_block(chain);
+            Transaction tx;
+            tx.type = TxType::SHIELD; tx.from = "alice"; tx.to = "";
+            tx.amount = 1000; tx.fee = 0;                       // A+fee=1000 > 100
+            tx.nonce = chain.next_nonce("alice");
+            tx.payload = shield_payload(1000, 0x1234u);         // valid note for A=1000
+            tx.hash = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            bool conserved = false;
+            try {
+                chain.append(tb);
+                conserved = chain.balance("alice") == 100
+                         && chain.next_nonce("alice") == 0;
+            } catch (...) { conserved = false; }
+            check(conserved,
+                  "(8) SHIELD overspend (chain.cpp:1026): A+fee > balance is "
+                  "skipped — no phantom confidential note, sender unchanged");
+        }
+
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": value-overflow-mint ", stdout);
