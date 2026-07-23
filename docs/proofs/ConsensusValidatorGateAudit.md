@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (6 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash
+## 2. CLOSED (8 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2)
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -280,15 +280,61 @@ GREEN. Reverted via `git checkout src/node/validator.cpp` (the seam lives in `va
 kept). Design nailed by a parallel read-only analysis workflow (`wf_edd60f84-21c`) — including the
 Option-A-masking and arg-order (`b, registry, chain`) traps — before any code changed.
 
-## 3. The enumerated residual (13 open — a ranked FAST-gateable backlog)
+### 2g. VAL-param-multisig — the A5 governance PARAM_CHANGE multisig (two gates)
+
+**#6 VAL-param-multisig-threshold (`validator.cpp:827`) + #7 VAL-param-distinct-keyholder (`:820`)** —
+both inside the `TxType::PARAM_CHANGE` case of `check_transactions`. A governance parameter change is
+authorized by `param_threshold_` **distinct** keyholder signatures over the canonical
+`(name ‖ value ‖ effective_height)` tuple:
+
+```cpp
+if (!seen_idx.insert(idx).second)                       // :820 distinct-keyholder
+    return {false, "PARAM_CHANGE duplicate keyholder_index"};
+if (verify(param_keyholders_[idx], sig_msg…, msig)) good_sigs++;
+…
+if (good_sigs < param_threshold_)                        // :827 threshold
+    return {false, "PARAM_CHANGE signature threshold not met …"};
+```
+
+**Consequence if silently removed:** dropping `:820` lets one keyholder's signature be **replayed**
+`param_threshold_` times (same `keyholder_index`), reaching the threshold with a **single key**;
+dropping `:827` accepts a PARAM_CHANGE with **fewer than the required** (even zero) valid signatures.
+Either is a single-key governance takeover — an attacker who compromises one keyholder (or none) can
+push through any whitelisted parameter change (MIN_STAKE, SUSPENSION_SLASH, the keyholder set itself…).
+
+**Genuinely un-pinned.** The only prior governance tests are a setter smoke-test (`v.set_governance_mode`
+/ `set_param_keyholders` / `set_param_threshold` called for no-throw, no tx driven) and
+`test-governance-param-determinism` (FA-Apply-8, a determinism check). No test drove a PARAM_CHANGE with
+a duplicate index or a below-threshold sig set through the validator; the two reject strings are
+asserted nowhere.
+
+**Gate (in-process, both platforms).** Both gates share ONE fixture, hosted in
+`test-abort-cert-validation` (reusing its n0..n3 genesis + `key_of`): a fresh `BlockValidator pv` with
+`set_governance_mode(1)`, `set_param_keyholders({n0,n1,n2 pubkeys})`, `set_param_threshold(2)`. A
+`run_pc(sigs)` helper builds a PARAM_CHANGE tx from registered sender **n0** (payload
+`nlen‖name‖vlen_LE‖value‖eff_LE ‖ sigc ‖ {idx_LE16,sig}…`, name `"MIN_STAKE"` on the whitelist, each
+keyholder signs the `sig_msg` prefix, the tx itself signed by n0 to clear the `:685` sender gate) and
+drives it through the `check_transactions_for_test` seam. Three legs: **positive control** — 2 distinct
+valid sigs `{(0,s0),(1,s1)}` → ACCEPTED; **:820** — `{(0,s0),(0,s0)}` (replay idx 0) → assert
+`"duplicate keyholder_index"`; **:827** — `{(0,s0)}` (one sig `< 2`) → assert
+`"signature threshold not met"`. Both arms are the LAST checks of the case, so under either mutant the
+tx is cleanly ACCEPTED (no downstream masking).
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`, each gate INDEPENDENTLY).* `:820 → if (false &&
+!seen_idx.insert(idx).second)` flips ONLY the distinct-keyholder assert RED (the threshold assert +
+control stay GREEN — proving `:820` alone is load-bearing and the leg targets its own gate); separately
+`:827 → if (false && good_sigs < param_threshold_)` flips ONLY the threshold assert RED. Reverted via
+`git checkout src/node/validator.cpp` between passes. Both closed by direct source-verification (the
+PARAM_CHANGE decode is authoritative and the encoding was cross-checked against the `submit-param-change`
+builder) — no analysis workflow needed.
+
+## 3. The enumerated residual (11 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 6 | VAL-param-multisig-threshold | validator.cpp:827 | A5 governance multisig threshold — pass a PARAM_CHANGE with too few keyholder sigs | `if (good_sigs < param_threshold_)` → `if (false)` | 1 | trivial |
-| 7 | VAL-param-distinct-keyholder | validator.cpp:820 | distinct keyholder indices — one keyholder counted N times toward threshold | drop the `seen_idx.insert(idx)` distinctness reject | 1 | trivial |
 | 8 | VAL-batch-inner-sig | validator.cpp:1201 | COMPOSABLE_BATCH inner-tx sender authenticity — forge inner transfers | `if (!verify(ipk,..,it.sig))` → `if (false && ...)` | 1 | trivial |
 | 9 | VAL-csr-field-match | validator.cpp:1412 | cross-shard receipt payload bound to its source TRANSFER — inflate a receipt amount | drop the amount clause from the disjunction | 1 | trivial |
 | 10 | VAL-csr-size | validator.cpp:1396 | receipt COUNT bound to # cross-shard transfers — append unbacked receipts | `!=` → `>` (loop skips the extras) | 1 | trivial |

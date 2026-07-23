@@ -33343,6 +33343,92 @@ int main(int argc, char** argv) {
                   "EQV-sig-verify-forged-slash: an event with a forged sig_a is REJECTED at :394 (no forged slash)");
         }
 
+        // --- VAL-param-multisig (validator.cpp:820 distinct-keyholder + :827
+        //     threshold) — the A5 governance PARAM_CHANGE multisig ------------
+        // A governance PARAM_CHANGE is authorized by param_threshold_ DISTINCT
+        // keyholder signatures over the canonical (name||value||eff) tuple.
+        // :820 rejects a DUPLICATE keyholder_index (else one keyholder's sig,
+        // replayed N times, reaches the threshold with a SINGLE key); :827
+        // rejects when fewer than param_threshold_ good sigs are present (else
+        // 0/too-few sigs authorize a param change). Removing either = single-key
+        // governance takeover. The PARAM_CHANGE case lives in check_transactions,
+        // so it is driven through the check_transactions_for_test seam; both arms
+        // are the LAST checks of the case, so under either mutant the tx is
+        // cleanly ACCEPTED (no downstream masking) and the specific reject string
+        // is absent -> the negative assertion flips RED. Genuinely un-pinned: no
+        // test drove a PARAM_CHANGE dup/below-threshold through the validator.
+        {
+            BlockValidator pv;                       // isolated governance config
+            pv.set_governance_mode(1);               // 0 rejects PARAM_CHANGE outright
+            pv.set_param_keyholders({ key_of("n0").pub, key_of("n1").pub, key_of("n2").pub });
+            pv.set_param_threshold(2);
+
+            const std::string pname = "MIN_STAKE";   // on the governance whitelist
+            const std::vector<uint8_t> pval(8, 0x11);
+            const uint64_t peff = 5000;
+
+            // canonical signed message: nlen || name || vlen(LE16) || value || eff(LE64)
+            auto pc_sig_msg = [&]() {
+                std::vector<uint8_t> m;
+                m.push_back(uint8_t(pname.size()));
+                m.insert(m.end(), pname.begin(), pname.end());
+                m.push_back(uint8_t(pval.size() & 0xff));
+                m.push_back(uint8_t((pval.size() >> 8) & 0xff));
+                m.insert(m.end(), pval.begin(), pval.end());
+                for (int i = 0; i < 8; ++i) m.push_back(uint8_t((peff >> (8 * i)) & 0xff));
+                return m;
+            };
+            const std::vector<uint8_t> msg = pc_sig_msg();
+            const Signature s0 = sign(key_of("n0"), msg.data(), msg.size());
+            const Signature s1 = sign(key_of("n1"), msg.data(), msg.size());
+
+            // full PARAM_CHANGE payload = sig_msg || [sig_count] || each (idx_LE16, sig)
+            auto build_payload = [&](const std::vector<std::pair<uint16_t, Signature>>& sigs) {
+                std::vector<uint8_t> pl = pc_sig_msg();
+                pl.push_back(uint8_t(sigs.size()));
+                for (auto& kv : sigs) {
+                    pl.push_back(uint8_t(kv.first & 0xff));
+                    pl.push_back(uint8_t((kv.first >> 8) & 0xff));
+                    pl.insert(pl.end(), kv.second.begin(), kv.second.end());
+                }
+                return pl;
+            };
+            // signed PARAM_CHANGE tx from registered sender n0 carrying the sig list
+            auto run_pc = [&](const std::vector<std::pair<uint16_t, Signature>>& sigs) {
+                Transaction tx;
+                tx.type = TxType::PARAM_CHANGE; tx.from = "n0"; tx.to = "n0";
+                tx.amount = 0; tx.fee = 0; tx.nonce = 0;
+                tx.payload = build_payload(sigs);
+                auto sb = tx.signing_bytes();
+                tx.sig = sign(key_of("n0"), sb.data(), sb.size());  // clears the :685 sender gate
+                Block b; b.index = 1; b.transactions = { tx };
+                return pv.check_transactions_for_test(b, c, reg);
+            };
+
+            // POSITIVE CONTROL — 2 DISTINCT valid keyholder sigs meet threshold 2.
+            {
+                auto r = run_pc({ {0, s0}, {1, s1} });
+                check(r.ok,
+                      "VAL-param control: PARAM_CHANGE with 2 distinct valid keyholder sigs is ACCEPTED");
+            }
+
+            // VAL-param-distinct-keyholder (:820) — replaying ONE keyholder's sig
+            // (idx 0 twice) must be REJECTED, not counted twice toward threshold.
+            {
+                auto r = run_pc({ {0, s0}, {0, s0} });
+                check(!r.ok && r.error.find("duplicate keyholder_index") != std::string::npos,
+                      "VAL-param-distinct-keyholder: a duplicate keyholder_index is REJECTED at :820 (no single-key replay)");
+            }
+
+            // VAL-param-multisig-threshold (:827) — one valid sig (< threshold 2)
+            // must be REJECTED.
+            {
+                auto r = run_pc({ {0, s0} });
+                check(!r.ok && r.error.find("signature threshold not met") != std::string::npos,
+                      "VAL-param-multisig-threshold: fewer than param_threshold good sigs is REJECTED at :827");
+            }
+        }
+
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
         // Values only, never JSON shape: AbortClaimMsg::from_json uses
         // json_require and THROWS on a missing/mistyped field, which would
