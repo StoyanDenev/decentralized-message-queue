@@ -25675,6 +25675,57 @@ int main(int argc, char** argv) {
                   "A1 invariant after STAKE");
         }
 
+        // === S-033 declared-state-root verification gate (chain.cpp:1953) ===
+        // ConsensusValidatorGateAudit SR-declared-state-root-unbound: a block that
+        // carries a NON-ZERO state_root must match the recomputed post-apply state,
+        // else Chain::append throws "state_root mismatch ... (S-033)". Removing that
+        // reject lets a producer declare a FALSE post-state under an honest digest —
+        // a validate-vs-apply divergence that light clients / fast-sync peers trust.
+        // (A zero state_root skips the check: pre-S-033 backward compatibility.)
+        {
+            // The deterministic post-apply state_root for an empty block at height 1,
+            // obtained by a dry-run on an identical chain (apply is deterministic, so
+            // the same block on the same genesis yields the same post-state).
+            Hash good_root;
+            {
+                Chain probe; probe.append(make_genesis_block(cfg));
+                Block pb; pb.index = 1; pb.prev_hash = probe.head().compute_hash();
+                pb.creators = {"alice"};              // state_root left zero → check skipped
+                probe.append(pb);
+                good_root = probe.compute_state_root();
+            }
+            // CONTROL — a block declaring the CORRECT post-apply state_root applies
+            // (proves the fixture reaches and passes the S-033 gate on a match).
+            {
+                Chain c; c.append(make_genesis_block(cfg));
+                Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"}; b.state_root = good_root;
+                bool threw = false;
+                try { c.append(b); } catch (...) { threw = true; }
+                check(!threw && c.height() == 2,
+                      "state_root matching the recomputed post-state is ACCEPTED");
+            }
+            // NEGATIVE — a block declaring a WRONG non-zero state_root is REJECTED at
+            // the S-033 gate. The SPECIFIC "state_root mismatch" proves this gate
+            // fired (not some other apply throw).
+            {
+                Chain c; c.append(make_genesis_block(cfg));
+                Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                Hash wrong{}; for (auto& x : wrong) x = 0xFF;   // non-zero, != good_root
+                b.state_root = wrong;
+                bool state_root_reject = false;
+                try { c.append(b); }
+                catch (const std::exception& e) {
+                    state_root_reject =
+                        std::string(e.what()).find("state_root mismatch") != std::string::npos;
+                }
+                check(state_root_reject,
+                      "state_root NOT matching the recomputed post-state is REJECTED "
+                      "(S-033, chain.cpp:1953)");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-apply-block " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
@@ -43079,6 +43130,49 @@ int main(int argc, char** argv) {
                   && determ::node::compute_block_digest(c1.head()) == determ::node::compute_block_digest(c2.head())
                   && c1.compute_state_root() == c2.compute_state_root(),
                   "determinism: identical timestamp → identical hashes across all surfaces");
+        }
+
+        // === VAL-timestamp-30s-window (validator.cpp:1772) ===
+        // ConsensusValidatorGateAudit: check_timestamp's +-30s wall-clock bound is
+        // the SOLE gate on a LEGACY block's (empty creator_proposer_times) timestamp
+        // — the digest-bound median path above only applies to feature blocks.
+        // Removing the bound (|| -> &&, a dead contradiction) accepts an arbitrarily
+        // skewed timestamp. A VirtualClock pins "now"; the 1-arg
+        // check_timestamp_for_test seam runs the check in isolation (empty
+        // creator_proposer_times skips the median branch, so the +-30s bound is
+        // exactly what's exercised).
+        {
+            const int64_t kNow = 1000000;
+            determ::time::VirtualClock vc(kNow);
+            node::BlockValidator v;
+            v.set_clock(vc);
+            // CONTROL — a timestamp equal to "now" is ACCEPTED (reaches + passes the gate).
+            {
+                Block b; b.timestamp = uint64_t(kNow);
+                check(v.check_timestamp_for_test(b).ok,
+                      "timestamp within +-30s of the clock is ACCEPTED");
+            }
+            // Boundary — exactly +30s is still in-window (inclusive bound).
+            {
+                Block b; b.timestamp = uint64_t(kNow + 30);
+                check(v.check_timestamp_for_test(b).ok,
+                      "timestamp at the +30s boundary is ACCEPTED");
+            }
+            // NEGATIVE (future) — a timestamp far ahead is REJECTED, SPECIFIC message.
+            {
+                Block b; b.timestamp = uint64_t(kNow + 1000);
+                auto r = v.check_timestamp_for_test(b);
+                check(!r.ok && r.error.find("timestamp out of +-30s window") != std::string::npos,
+                      "timestamp far in the future is REJECTED (VAL-timestamp, validator.cpp:1772)");
+            }
+            // NEGATIVE (past) — a timestamp far behind is also REJECTED (both arms of
+            // the +- bound are load-bearing; the || -> && mutant kills both).
+            {
+                Block b; b.timestamp = uint64_t(kNow - 1000);
+                auto r = v.check_timestamp_for_test(b);
+                check(!r.ok && r.error.find("timestamp out of +-30s window") != std::string::npos,
+                      "timestamp far in the past is REJECTED (VAL-timestamp)");
+            }
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

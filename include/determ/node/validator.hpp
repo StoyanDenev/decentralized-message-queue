@@ -129,6 +129,17 @@ public:
         return check_delay(b);
     }
 
+    // VAL-timestamp test seam (ConsensusValidatorGateAudit, VAL-timestamp-30s-window):
+    // run the wall-clock timestamp check in isolation — same 1-arg const-forwarder
+    // as check_delay_for_test. check_timestamp reads ONLY b + clock_ (injected via
+    // set_clock), so a VirtualClock pins "now" and lets the falsifier drive a block
+    // whose timestamp is far outside the +-30s window and assert the SPECIFIC reject
+    // without assembling a fully-signed committee block (whose block-sig/digest gates
+    // would otherwise mask a clean positive control).
+    Result check_timestamp_for_test(const chain::Block& b) const {
+        return check_timestamp(b);
+    }
+
     // EQV test seam (ConsensusValidatorGateAudit, EQV-sig-verify-forged-slash):
     // run the equivocation-evidence check in isolation — same const-forwarder
     // pattern as the seams above. Lets the falsifier drive an event with a

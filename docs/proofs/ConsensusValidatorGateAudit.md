@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (17 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3) + F2-inbound-receipt-binding (×2) + apply-path value-conservation (×3)
+## 2. CLOSED (19 of 19 — REGISTER COMPLETE) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3) + F2-inbound-receipt-binding (×2) + apply-path value-conservation (×3) + declared-state-root + legacy-timestamp-window
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -492,15 +492,37 @@ SHIELD payload genuinely reaches the debit past `determ_shield_verify` (a masked
 `:1026` un-falsifiable). Reverted via `git checkout` between passes. Host + per-type fixtures + masking
 nailed by a 6-agent read-only analysis workflow (`wf_f76c5eb0-1b9`) before touching code.
 
-## 3. The enumerated residual (2 open — a ranked FAST-gateable backlog)
+### 2l. The final two — declared-state-root + legacy-timestamp-window (the register closers)
 
-Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
-in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
+Two independent single-check gates on two different surfaces, closed together as the terminal round.
 
-| # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
-|---|---|---|---|---|---|---|
-| 13 | SR-declared-state-root-unbound | chain.cpp:1953 | S-033: declared state_root must equal the recomputed post-state | neuter the `computed != b.state_root` reject | 1 | trivial |
-| 18 | VAL-timestamp-30s-window | validator.cpp:1772 | ±30s bound is the sole gate on a LEGACY block's (non-digest-bound) timestamp | `||` → `&&` (contradiction, reject dead) | 3 | moderate |
+**#13 SR-declared-state-root-unbound (`chain.cpp:1953`)** in `Chain::append` (apply): a block carrying a
+NON-ZERO `state_root` must equal `compute_state_root()` after apply, else append throws `"state_root
+mismatch … (S-033)"`. Removing the reject lets a producer publish a FALSE post-state under an honest digest —
+a validate-vs-apply divergence that light clients / fast-sync peers would trust. **Gate = two scenarios in
+`test-chain-apply-block`** (reuses its genesis `cfg` + `Chain::append`, no seam — `compute_state_root()` is
+public): a block declaring the CORRECT post-state (obtained by a deterministic dry-run on an identical
+chain) is ACCEPTED; a block declaring an all-`0xFF` (non-zero, wrong) root is REJECTED with the SPECIFIC
+`"state_root mismatch"` (throw-robust `catch`). Mutant `if (false && computed != b.state_root)` accepts the
+false root → only the negative leg flips; the timestamp gate is untouched.
+
+**#18 VAL-timestamp-30s-window (`validator.cpp:1772`)** in `check_timestamp`: the ±30s wall-clock bound
+`if (diff > 30 || diff < -30) return reject` is the SOLE gate on a LEGACY block's (empty
+`creator_proposer_times`) timestamp — the digest-bound median path only covers feature blocks. **Gate = a
+section in `test-block-timestamp`** driving a new 1-arg `check_timestamp_for_test` seam under an injected
+`VirtualClock` (via public `set_clock`): a timestamp at "now" and at the +30s boundary is ACCEPTED; a
+timestamp ±1000s away is REJECTED with `"timestamp out of +-30s window"`. The register's `||` → `&&` mutation
+makes the reject a dead contradiction → BOTH the future- and past-skew legs flip (both arms load-bearing),
+controls + the state-root gate green. Direct-verify — both mutations are named by the register and both
+checks are single-branch, so no analysis workflow. **This round closes the register: 19 / 19.**
+
+## 3. The enumerated residual (0 open — REGISTER COMPLETE)
+
+**The backlog is empty.** All 19 confirmed accept-widening reject-paths that `wf_eb293ab6-600` surfaced are
+now closed as falsify-on-mutant negative tests (§2a-§2l), each verified on BOTH platforms (MSVC FAST + WSL2
+GCC ci_local) with a clean per-gate counter-delta. Every gate was closed one cluster per directive,
+cheapest-value-first. Any future accept-widening branch discovered in `validate()` / `apply_block` /
+`apply_tx` opens a NEW row here and is closed by the same falsify-on-mutant method.
 
 ## 4. How to use this register
 
