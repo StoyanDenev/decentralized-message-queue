@@ -8,7 +8,7 @@
 
 **Companion documents:**
 - `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs are over NIST P-256 — secp256k1 was rejected 2026-07-07 and never built)
-- `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard threshold accumulator uses FROST-Ed25519)
+- `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard randomness uses MPDH commit-reveal aggregation, not FROST — switched 2026-06-07, `DECISION-LOG.md`)
 - `DSF-SPEC.md` — Phase 0 deterministic-simulation framework (parallel work track)
 
 ---

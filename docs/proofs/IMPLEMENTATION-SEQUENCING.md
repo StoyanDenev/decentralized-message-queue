@@ -104,7 +104,7 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 | **Bundle effort** | ~2-3 weeks | Confirm against spec total |
 
 **Depends on:** Foundation
-**Blocks:** Bundle 5 (Beaconless v2 Q6 uses FROST threshold sigs for cross-shard randomness)
+**Blocks:** Bundle 5 (Beaconless v2 Q6 uses MPDH commit-reveal for cross-shard randomness — switched from FROST 2026-06-07)
 **Can parallelize with:** Bundle 2 (F2), Bundle 3 (v2.22) — different curve families and code paths
 
 ### Bundle 2: F2
@@ -164,7 +164,7 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 | BL-3: Committee-rotation log + manifest-tunable snapshot interval | 1-2 weeks | |
 | BL-4: Cross-shard receipts with Merkle proofs + u32 nonce | 2-3 weeks | |
 | BL-5: Decentralized merge-detection + manifest-tunable merritt_k | 1-2 weeks | |
-| BL-6: Cross-shard randomness aggregation + manifest-tunable cutoff | 1-2 weeks | uses FROST from Bundle 1 |
+| BL-6: Cross-shard randomness aggregation + manifest-tunable cutoff | 1-2 weeks | MPDH commit-reveal (no FROST; switched 2026-06-07) |
 | BL-7: DSF prerequisite | (Bundle 4) | already landed before Bundle 5 starts |
 | BL-8: Phase D sequencing | (this doc) | meta-decision |
 | Q2.1: Manifest validity (hard + soft tiers) | 1 week | inside BL-2 work |

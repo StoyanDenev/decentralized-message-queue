@@ -1448,3 +1448,26 @@ The relying-party token is the **paper's dual-hash challenge-response** over the
 
 **Authority:** Stoyan Denev (owner decision relayed in-session 2026-07-20; recorded by Claude Fable at his direction).
 
+
+---
+
+## 2026-07-23 — Four launch decisions cleared: v2.15=Option A, v2.26 authorized, Z_p* delete, DApp go (D.5 first)
+
+### The unblock — owner answers the standing menu; app-layer threads freed
+
+**Context.** After the DSSO realignment settled (2026-07-20), the thread pool completed DSSO Bundle A end-to-end (G1-G4, 07-21) then drained the 07-20 traceability register. Scope-advance stalled because four questions stood unanswered. All four resolved this session.
+
+**Decisions (owner, 2026-07-23).**
+
+1. **v2.15 multi-sig = Option A** (COMPOSABLE_BATCH pattern + wallet policy layer; ~zero new consensus code). Gates D.2. Per `PHASE2-PRIMITIVES-KICKOFF.md §2`, Option B (on-chain M-of-N account policy) is **reserved as a §7.5 discriminator slot** in the B4 pre-genesis reserved-bit audit, so on-chain enforcement can ship additively later without a wire break.
+
+2. **v2.26 ROTATE_KEY authorized for implementation, with KR-10 unification.** One rotation mechanism covers account key + DApp service_pubkey + audit key. Gates D.2, D.3, and DSSO production recovery. Zero dependencies beyond shipped Ed25519 (the stale FROST/KR-5 clause was marked N/A 2026-07-20).
+
+3. **Z_p* big-prime ff-stack (§3.20) — DELETE.** `ffgroup`/`ffipa`/`ffrangeproof`/`ffbalance`/`ff_confidential_tx` (~5 files + tests) consumer-less since the 2026-07-07 D3 reuse-P-256 decision. Removed under the standard deletion gate (build + FAST both platforms + dependency ratchet + goldens byte-identical); git history preserves the code. Resolves the PENDING-owner-confirmation item from the 2026-07-07 entry.
+
+4. **DApp go-signal: start D.5 first.** D.1/D.5/D.9 were already launch-authorized (`PRE-LAUNCH-DECISIONS.md §E1-E7`, 2026-07-09) and dependencies are now met (DSSO built end-to-end; commit-reveal randomness + light-client shipped). D.5 (government random-selection, the founding `MOTIVATION.md` use case) is lightest — DSSO identity + shipped commit-reveal randomness + v2.24 audit hooks — and the fastest end-to-end validation of the DSSO+DApp path. D.1 (flagship, CT+audit stack) and D.9 (Merritt voting) follow. A go, not a new design decision.
+
+**Cascade.** `PHASE2-PRIMITIVES-KICKOFF.md` §2 STUB -> Option A selected; `v2.26-ROTATION-SPEC.md` status -> authorized-for-implementation; V1.1-PLAN D.1/D.5/D.9 dependency rows corrected ("v2.10 FROST randomness" credited a removed primitive — actual source is the v1.x commit-reveal / MPDH beacon per `FROST_DEVIATION_NOTICE.md`); Z_p* §3.20 files scheduled for deletion.
+
+**Authority:** Stoyan Denev (owner decisions via the in-session AskUserQuestion menu, 2026-07-23; recorded by Claude Fable at his direction).
+

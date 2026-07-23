@@ -38,7 +38,7 @@ they can validate the DSSO+DApp path first while Phase 2 runs.
 
 ---
 
-## 2. v2.15 multi-sig — STUB (design proposal, owner review required)
+## 2. v2.15 multi-sig — RESOLVED: Option A (owner, 2026-07-23 — `DECISION-LOG.md`); Option B reserved as a §7.5 slot for the B4 audit
 
 **Gates:** D.2 B2B settlement (M-of-N vendor-invoice authorization). Only Tier-1 consumer.
 
