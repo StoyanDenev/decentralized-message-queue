@@ -12392,6 +12392,53 @@ int main(int argc, char** argv) {
                   "SR-5: claiming dst = my own shard (0) is also REJECTED");
         }
 
+        // --- VAL-csr cluster: the remaining cross-shard-receipt binding gates
+        //     (validator.cpp:1396 size, :1410 src_block_index, :1412 field-match).
+        // The SR-5 fixture builds a valid cross-shard block whose single receipt
+        // matches `tx` in every field; these legs forge ONE binding each and drive
+        // the same check_cross_shard_receipts_for_test seam. The forges are
+        // ORTHOGONAL (receipt COUNT / src_block_index / amount), so each is the
+        // UNIQUE gate that can reject its forge -> each falsifies independently.
+        // Genuinely un-pinned: no test asserted these three rejects.
+
+        // VAL-csr-size (:1396) — appending an UNBACKED extra receipt (2 receipts
+        // for 1 cross-shard tx) must be REJECTED, else a producer smuggles a
+        // destination-shard credit for a transfer that never happened. Faithful
+        // mutation: `!=` -> `>` (the loop only checks index 0, so the extra rides
+        // through and the block is accepted).
+        {
+            Block b; b.index = 1; b.transactions = { tx };
+            b.cross_shard_receipts = { make_receipt(correct_dst), make_receipt(correct_dst) };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(!r.ok && r.error.find("cross_shard_receipts size") != std::string::npos,
+                  "VAL-csr-size: an extra unbacked receipt (count != cross-shard tx count) is REJECTED at :1396");
+        }
+
+        // VAL-csr-src-block-index (:1410) — a receipt claiming a wrong source
+        // block height must be REJECTED (provenance binding). Mutation: delete
+        // the `r.src_block_index != b.index` reject.
+        {
+            Block b; b.index = 1; b.transactions = { tx };
+            auto r0 = make_receipt(correct_dst); r0.src_block_index = 999;  // != b.index (1)
+            b.cross_shard_receipts = { r0 };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(!r.ok && r.error.find("src_block_index mismatch") != std::string::npos,
+                  "VAL-csr-src-block-index: a receipt whose src_block_index != carrying block is REJECTED at :1410");
+        }
+
+        // VAL-csr-field-match (:1412) — a receipt whose AMOUNT diverges from its
+        // source TRANSFER must be REJECTED, else a producer INFLATES a cross-shard
+        // receipt amount (destination shard over-credits). Faithful mutation: drop
+        // the `r.amount != tx.amount` clause from the field disjunction.
+        {
+            Block b; b.index = 1; b.transactions = { tx };
+            auto r0 = make_receipt(correct_dst); r0.amount = tx.amount + 1;  // inflate
+            b.cross_shard_receipts = { r0 };
+            auto r = v.check_cross_shard_receipts_for_test(b, c);
+            check(!r.ok && r.error.find("field mismatch with tx") != std::string::npos,
+                  "VAL-csr-field-match: a receipt whose amount != the source tx is REJECTED at :1412 (no amount inflation)");
+        }
+
         std::cout << (fail ? "  FAIL: test-sr5-misroute-receipt\n"
                            : "  PASS: test-sr5-misroute-receipt\n");
         return fail ? 1 : 0;

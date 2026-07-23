@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (9 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig
+## 2. CLOSED (12 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union + equivocation-slash + governance-multisig (×2) + batch-inner-sig + cross-shard-receipt-binding (×3)
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -372,22 +372,60 @@ the forged-inner batch → the specific-string assertion flips RED (clean 1-asse
 the positive control stays GREEN. Reverted via `git checkout`. Direct-verify (the batch decode is
 authoritative and the packing matched the `pack_batch` helper) — no analysis workflow needed.
 
-## 3. The enumerated residual (10 open — a ranked FAST-gateable backlog)
+### 2i. VAL-csr cluster — the cross-shard-receipt binding gates (three gates)
+
+**#10 VAL-csr-size (`validator.cpp:1396`) + #17 VAL-csr-src-block-index (`:1410`) + #9 VAL-csr-field-match
+(`:1412`)** — all in `check_cross_shard_receipts`, which rederives the block's cross-shard TRANSFER
+subset and binds each `cross_shard_receipts[i]` one-for-one to its source tx:
+
+```cpp
+if (cross.size() != b.cross_shard_receipts.size()) return {…,"cross_shard_receipts size …"};   // :1396
+…
+if (r.src_block_index != b.index)                   return {…,"src_block_index mismatch"};       // :1410
+if (r.tx_hash != tx.hash || … || r.amount != tx.amount || …) return {…,"field mismatch with tx"};// :1412
+```
+
+**Consequence if silently removed:** `:1396` — a producer appends an **unbacked** receipt (count >
+cross-tx count; the loop only iterates the tx count, so the extra rides through), crediting a
+destination shard for a transfer that never happened; `:1410` — a receipt misrepresents its source
+block height (provenance); `:1412` — a receipt's **amount** (or from/to/fee/nonce/tx_hash) diverges from
+its source tx — i.e. **inflate a cross-shard receipt amount** so the destination shard over-credits.
+Cross-shard supply-conservation break.
+
+**Genuinely un-pinned.** `test-sr5-misroute-receipt` builds a *fully valid* cross-shard fixture but only
+forges `dst_shard` (Theorem SR-5 misroute); its own comment notes the receipt "passes the src_shard /
+size / src_block_index / field-match guards" without ever forging them. None of the three reject strings
+is asserted anywhere.
+
+**Gate (in-process, both platforms).** Three forge legs added to `test-sr5-misroute-receipt`, reusing its
+`tx` / `make_receipt` / `c` / `v` and the `check_cross_shard_receipts_for_test` seam. The forges are
+ORTHOGONAL — **size** (two receipts for one cross-tx → `"cross_shard_receipts size"`), **src_block_index**
+(`r.src_block_index = 999` → `"src_block_index mismatch"`), **amount** (`r.amount = tx.amount + 1` →
+`"field mismatch with tx"`) — so each is the UNIQUE gate that can reject its forge (the size forge is
+caught only by `:1396` because the loop body examines only the valid index-0 receipt; the others match
+every field except the one forged).
+
+*Falsify-on-mutant (three INDEPENDENT rebuilt-`determ.exe` passes, one per gate — proving each is
+separately load-bearing and each leg targets its own gate).* `:1396` `!=` → `>` (the register's faithful
+"loop skips the extras" mutation) flips ONLY the size assert RED; `:1410 → if (false && …)` flips ONLY
+src_block_index; `:1412` drop the `r.amount != tx.amount` clause flips ONLY field-match. The SR-5 legs and
+the positive control stay GREEN in all three passes. Reverted via `git checkout` between passes.
+Direct-verify (the receipt-binding logic is authoritative; the register named each mutation) — no analysis
+workflow needed.
+
+## 3. The enumerated residual (7 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 9 | VAL-csr-field-match | validator.cpp:1412 | cross-shard receipt payload bound to its source TRANSFER — inflate a receipt amount | drop the amount clause from the disjunction | 1 | trivial |
-| 10 | VAL-csr-size | validator.cpp:1396 | receipt COUNT bound to # cross-shard transfers — append unbacked receipts | `!=` → `>` (loop skips the extras) | 1 | trivial |
 | 11 | VAL-inbound-f2-intersection | validator.cpp:1493 | F2 inbound-receipt authenticity (per-creator view intersection) — credit an unbacked inbound | delete the intersection enforcement | 1 | trivial |
 | 12 | STAKE-balance-underspend | chain.cpp:1327 | STAKE value-conservation — stake more weight than the sender holds | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
 | 13 | SR-declared-state-root-unbound | chain.cpp:1953 | S-033: declared state_root must equal the recomputed post-state | neuter the `computed != b.state_root` reject | 1 | trivial |
 | 14 | DAPPCALL-balance-underspend | chain.cpp:1680 | DAPP_CALL value-conservation — spend more than held | delete `if (sender.balance < cost) continue;` | 1 | trivial |
 | 15 | SHIELD-balance-underspend | chain.cpp:1026 | SHIELD value-conservation — mint a note worth more than the transparent debit | `if (sender.balance < cost) continue;` → `if (false) continue;` | 1 | trivial |
 | 16 | VAL-inbound-f2-rootauth | validator.cpp:1486 | per-creator inbound view list bound to its Phase-1-committed root | neuter `compute_view_root(...) != root` | 2 | moderate |
-| 17 | VAL-csr-src-block-index | validator.cpp:1410 | receipt src_block_index bound to the carrying block — misrepresent provenance | delete the `r.src_block_index != b.index` reject | 3 | trivial |
 | 18 | VAL-timestamp-30s-window | validator.cpp:1772 | ±30s bound is the sole gate on a LEGACY block's (non-digest-bound) timestamp | `||` → `&&` (contradiction, reject dead) | 3 | moderate |
 
 ## 4. How to use this register
