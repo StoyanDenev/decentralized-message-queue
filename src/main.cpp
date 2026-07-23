@@ -33380,6 +33380,31 @@ int main(int argc, char** argv) {
             check(!sig_err(e_ok),
                   "BASELINE: a correctly-proposed, fully-signed BFT block clears "
                   "check_block_sigs");
+
+            // --- BSIG-516 (per-signature authenticity, NOT merely quorum count).
+            //     Each COUNTED (non-sentinel) creator_block_sig must be a VALID
+            //     Ed25519 sig over the block digest (validator.cpp:516). Corrupt
+            //     ONE non-proposer slot to a NON-ZERO but INVALID sig: the :512
+            //     sentinel does NOT skip it (non-zero), its creator pubkey resolves,
+            //     so it MUST reach verify() at :516 and reject "block sig invalid".
+            //     A ZEROED slot would instead be skipped and trip :521 (the
+            //     DIFFERENT quorum gate, "block signatures N < required") -- hence
+            //     the bit-flip, not a zero. Only the sig bytes change (not a
+            //     digest-bound field), so the proposer sig still verifies and :516
+            //     is the UNIQUE gate that can reject `forged516`. Closes the trap-2
+            //     blind spot: test-required-block-sigs pins the pure
+            //     required_block_sigs() helper, but nothing pinned the validator's
+            //     per-signature verify -- whose removal counts garbage sigs toward
+            //     the quorum, finalizing a forged block with zero real consent.
+            Block forged516 = ok;                        // clears gate 9 as-is
+            size_t np516 = (good_idx == 0) ? 1 : 0;      // a NON-proposer slot
+            forged516.creator_block_sigs[np516][0] ^= 0x01;   // non-zero AND invalid
+            const std::string e516 = err_of(forged516);
+            if (!has(e516, "block sig invalid"))
+                std::cout << "    got: [" << e516 << "]\n";
+            check(has(e516, "block sig invalid"),
+                  "BSIG-516: a non-zero but INVALID block signature is rejected "
+                  "(per-signature authenticity, not merely quorum count)");
         }
 
         // === T-3 (derivation determinism): check_delay commit-reveal =========
