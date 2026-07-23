@@ -25,7 +25,7 @@ candidates** — each with the exact test-passing surviving mutation. Ranked by 
 forged-block/cert/tx or fund-loss), then gate-cost. Sixteen of the nineteen are value_rank 1, and
 all nineteen are FAST-gateable in-process (no live node) — the cheapest, both-platform class.
 
-## 2. CLOSED (4 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal binding
+## 2. CLOSED (5 of 19) — `check_block_sigs` (×2) + per-tx sender-sig + commit-reveal + tx_root-union
 
 ### 2a. BSIG-516 (per-signature block-signature authenticity)
 
@@ -187,14 +187,59 @@ substitution. Reverted via `git checkout src/node/validator.cpp` (committed clea
 → GREEN. Design nailed by a parallel read-only analysis workflow (`wf_ff6477a8-a7d`) before any code
 changed; every load-bearing claim re-verified against source.
 
-## 3. The enumerated residual (15 open — a ranked FAST-gateable backlog)
+### 2e. TXROOT-union-bind (block tx_root bound to the committee tx-lists)
+
+**#4 TXROOT-union-bind** — `src/node/validator.cpp:226`, inside `check_creator_tx_commitments` (gate 4
+of `validate()`). The block-header `tx_root` must equal the union of the committee's tx-hash lists:
+
+```cpp
+Hash expected_root = compute_tx_root(b.creator_tx_lists);
+if (expected_root != b.tx_root)
+    return {false, "tx_root mismatch with union(creator_tx_lists)"};
+```
+
+**Consequence if silently removed:** a producer can publish a `tx_root` in the header that does NOT
+match the actual `creator_tx_lists` — smuggling transactions into (or misrepresenting) the block's
+committed transaction set that downstream `tx_root`-trusting consumers (light clients, inclusion
+proofs) would treat as canonical.
+
+**A pre-existing test *mentions* this gate but does NOT pin it — the trap-1 case, caught and
+documented.** `test-block-validator-extensive`'s "V4 alt" leg (`~main.cpp:50917`) builds a block with a
+**garbage `creator_ed_sigs[0]`** and asserts the *disjunction* `"creator commit" OR "tx_root"`. The
+zero signature trips the EARLIER creator-commit-sig gate (`:217`, `"creator commit sig invalid"`) so
+the `|| "tx_root"` arm is **vacuous** — control flow never reaches `:226`. Verified directly: under the
+`:226` mutant that V4-alt assertion stays GREEN. So `:226` was genuinely un-pinned; the disjunction was
+false comfort.
+
+**Gate (in-process, both platforms).** Extended `test-abort-cert-validation`, reusing its `build_block`
+lambda whose block has **valid** commit sigs (so the `:217` loop passes) and `tx_root =
+compute_tx_root(creator_tx_lists)`. New leg: `Block b = build_block(...); b.tx_root[0] ^= 0x01;` →
+drive `bv.validate(b, c, reg)` and assert `"tx_root mismatch with union(creator_tx_lists)"`; an
+un-mutated copy is the positive control. Because the commit-sig loop passes, the flipped header
+`tx_root` is the UNIQUE thing `:226` can reject.
+
+**The load-bearing subtlety (same shape as DHS).** `check_creator_tx_commitments` (`:46`) runs BEFORE
+`check_delay` (`:50`) and `check_block_sigs` (`:51`), and the `:210-217` commit-sig loop reads only the
+per-creator tx list (never `b.tx_root`), so with the gate present `:226` rejects first. Under the mutant
+the bogus-`tx_root` block is NOT accepted — it is caught DOWNSTREAM by `check_delay`'s `delay_seed`
+binder (`compute_delay_seed` folds `tx_root` → `"delay_seed mismatch"`), so a vacuous `!r.ok` would stay
+GREEN; asserting the specific `"tx_root mismatch with union(creator_tx_lists)"` string is what flips it
+RED.
+
+*Falsify-on-mutant (executed via a rebuilt `determ.exe`).* `:226 → if (false && expected_root != …)`
+flips ONLY the forged assertion RED (a clean 1-assertion counter-delta) while the positive control, the
+BASELINE, and the pre-existing V4-alt leg all stay GREEN. Reverted via `git checkout` (committed clean
+this round), rebuilt → GREEN. Structural twin of DHS-commit-reveal-bind (§2d) — same host, same
+first-gate-then-delay-binder ordering — so closed by direct source-verification rather than a fresh
+analysis workflow.
+
+## 3. The enumerated residual (14 open — a ranked FAST-gateable backlog)
 
 Every row is a confirmed accept-widening with a named test-passing mutation; all are FAST-gateable
 in-process. Closed one per directive, cheapest-value-first, exactly like the sister register.
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | val | cost |
 |---|---|---|---|---|---|---|
-| 4 | TXROOT-union-bind | validator.cpp:226 | tx_root == union(creator_tx_lists) — smuggle txs not in the committed root | `if (expected_root != b.tx_root)` → `if (false)` | 1 | trivial |
 | 5 | EQV-sig-verify-forged-slash | validator.cpp:394 | equivocation sig-arm: slash only on a genuine double-sign — forge a slash of an honest validator | delete/short-circuit the `sig_a` reject arm | 1 | moderate |
 | 6 | VAL-param-multisig-threshold | validator.cpp:827 | A5 governance multisig threshold — pass a PARAM_CHANGE with too few keyholder sigs | `if (good_sigs < param_threshold_)` → `if (false)` | 1 | trivial |
 | 7 | VAL-param-distinct-keyholder | validator.cpp:820 | distinct keyholder indices — one keyholder counted N times toward threshold | drop the `seen_idx.insert(idx)` distinctness reject | 1 | trivial |

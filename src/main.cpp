@@ -33263,6 +33263,38 @@ int main(int argc, char** argv) {
                   "DHS-commit-reveal-bind: a post-Phase-1 secret substitution is rejected at :423");
         }
 
+        // --- TXROOT-union-bind (validator.cpp:226) --------------------------
+        // check_creator_tx_commitments binds the block-header tx_root to the
+        // union of the committee's tx-hash lists: expected =
+        // compute_tx_root(creator_tx_lists); reject if != b.tx_root. Removing
+        // :226 lets a producer publish a tx_root that does NOT match
+        // creator_tx_lists — smuggling txs not in the committed root. The
+        // pre-existing V4-alt leg (~main.cpp:50917) only reaches the EARLIER
+        // creator-commit-sig gate (:217) via a garbage sig, so its `|| "tx_root"`
+        // arm is vacuous — :226 was un-pinned. Here `build_block` produces VALID
+        // commit sigs, so the commit-sig loop passes and the flipped header
+        // tx_root is the UNIQUE thing :226 can reject. Specific-string discipline
+        // is load-bearing: check_creator_tx_commitments runs BEFORE check_delay
+        // (:50) / check_block_sigs (:51), and the commit-sig loop (:210-217) does
+        // not read b.tx_root, so with the gate present :226 rejects first — but
+        // under the mutant the block is still caught DOWNSTREAM by check_delay's
+        // delay_seed binder (compute_delay_seed folds tx_root → "delay_seed
+        // mismatch"), so a vacuous !r.ok would stay GREEN.
+        {
+            // POSITIVE CONTROL — the honest block's tx_root matches its lists.
+            Block b_ok = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            auto r_ok = bv.validate(b_ok, c, reg);
+            check(r_ok.error.find("tx_root mismatch with union") == std::string::npos,
+                  "TXROOT control: an honest tx_root matches union(creator_tx_lists) at :226");
+
+            // FORGE: mutate the header tx_root so it no longer matches the lists.
+            Block b = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            b.tx_root[0] ^= 0x01;
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok && r.error.find("tx_root mismatch with union(creator_tx_lists)") != std::string::npos,
+                  "TXROOT-union-bind: a header tx_root that mismatches the committed lists is rejected at :226");
+        }
+
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
         // Values only, never JSON shape: AbortClaimMsg::from_json uses
         // json_require and THROWS on a missing/mistyped field, which would
