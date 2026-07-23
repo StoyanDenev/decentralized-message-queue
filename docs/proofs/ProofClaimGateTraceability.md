@@ -859,8 +859,9 @@ by rate=0.001/s (a sub-second test refills ≪1 token). *(Design adversarially v
 SOUND in Workflow wf_f1a08faf-653.)*
 
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
-from an in-process `determ test-*` seam is closed. The remaining 21 open rows are 9
-OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy).
+from an in-process `determ test-*` seam is closed. The remaining open rows are all
+OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
+§6.1 carries the live count (18 open after §3w/§3x closed CB-4 + WA-2).
 
 ## 3v. T-1kd CLOSED — S-014 rate-limiter keys on BARE IP (FAST unit; RECLASSIFIED)
 
@@ -891,6 +892,57 @@ leg flips RED as the SOLE failure; setup + all 4 RL-2 legs (which key on S's own
 port-stripped/port-kept IP either way) stay green. Compiled change — MSVC FAST + WSL2
 GCC ci_local both green (run SEQUENTIALLY); test count unchanged (leg added to the
 existing subcommand). *(Design adversarially verified SOUND in Workflow wf_6a81aa3a-4d7.)*
+
+## 3w. CB-4 CLOSED — node-keygen entropy check fails CLOSED (OFFLINE source guard)
+
+`generate_node_key` (`src/crypto/keys.cpp:36-37`) draws a 32-byte seed from the OS
+CSPRNG and derives the Ed25519 node identity from it. The security property is
+FAIL-CLOSED entropy: `determ_rng_bytes` returns non-zero on a short/failed read, and
+the `if (... != 0) throw` is the only thing between an entropy failure and an
+all-zero (or partially-initialised) private seed being published as a validator key.
+The register mutant keeps the draw but drops the fatal check —
+`(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed OS CSPRNG draw
+becomes a silently-forgeable node identity. No unit test can portably force the OS
+CSPRNG to fail, so every happy-path keygen test still passes under the mutant (the
+fail-closed-branch class — SB-3 §3j, AL-5 §3k).
+
+Closed by NEW `tools/test_keygen_failclosed_guard.sh`, a build-free read-only awk
+over `generate_node_key()`'s body wired into ci_local's offline doc-guard loop. It
+pins four properties: exactly ONE `determ_rng_bytes` draw (non-vacuity anchor), the
+draw sits inside an `if (... != 0)` guard, it is NOT a `(void)`-cast (return not
+discarded), and a `throw` follows to abort identity creation. `SELFTEST=1` drives a
+coherent and a `(void)`-cast snippet through the SAME extractor to prove it live.
+
+*Falsify (executed, reverted via `git checkout` — keys.cpp was committed, only the
+check mutated).* `(void)determ_rng_bytes(...)` → 3 of 4 assertions flip RED
+(fail-closed, void-cast, throw), the non-vacuity anchor stays green — the precise
+signature. Pure OFFLINE source guard (zero compiled change) → MSVC FAST trivially
+unaffected; WSL2 GCC ci_local is the gate (green). *(Design adversarially verified
+SOUND in Workflow wf_6a81aa3a-4d7.)*
+
+## 3x. WA-2 CLOSED — wallet receiver-credit gate is exact (OFFLINE source guard)
+
+The wallet tx tally credits a receiver's running balance in exactly one place
+(`wallet/main.cpp:18681`): `if (to_hit && t == 0) { tit->second.credits += amt; }`.
+The gate is a CORRECTNESS invariant — only a same-shard TRANSFER (tx type 0) to the
+tracked account may add to `credits`; DAPP_CALL (10) moves and cross-shard receiver
+credits the wallet cannot confirm must fold into `non_tx_delta` instead. The register
+mutant widens the gate to `if (to_hit && (t == 0 || t == 10))`, double-counting
+DApp-call amounts that already folded into `non_tx_delta` and breaking the
+"provably-exact tally" property. Every existing wallet test uses plain TRANSFERs, so
+the widened gate passes them all.
+
+Closed by NEW `tools/test_wallet_accounting_credit_gate_source.sh`, a build-free
+read-only awk wired into ci_local's offline loop. It pins TWO properties: exactly ONE
+`credits +=` site (non-vacuity — a second credit path or a rename flips the count)
+and the governing condition EXACTLY `to_hit&&t==0` (whitespace-normalised).
+`SELFTEST=1` drives a coherent and a widened-gate snippet through the SAME extractor.
+
+*Falsify (executed, reverted via `git checkout` — wallet/main.cpp was committed).*
+widen to `(t == 0 || t == 10)` → the condition assertion flips RED as the SOLE
+failure, the non-vacuity anchor stays green. Pure OFFLINE source guard (zero compiled
+change) → MSVC FAST trivially unaffected; WSL2 GCC ci_local is the gate (green).
+*(Design adversarially verified SOUND in Workflow wf_6a81aa3a-4d7.)*
 
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
@@ -951,9 +1003,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v) are now closed** — leaving 20. **The FAST_UNIT tranche is EXHAUSTED; all 20 remaining are OFFLINE_SOURCE (8) or CLUSTER (12).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x) are now closed** — leaving 18. **The FAST_UNIT tranche is EXHAUSTED; all 18 remaining are OFFLINE_SOURCE (6) or CLUSTER (12).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (20 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (18 open + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -987,8 +1039,8 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 28 | DR-6 | DAppRegistryReadSoundness | LOW | moderate | open | SURVIVING MUTANT: light/main.cpp:7021 `active = (anchored_height < inactive_from)` -> `active = true;` (equivalently `<` -> `<=`). It survives EVERY e |
 | 29 | RL-2 | S014RateLimiterSoundness | LOW | moderate | **CLOSED §3u** | Surviving mutation: src/net/gossip.cpp:157 `if (msg.type != MsgType::HELLO) { ...consume(ip)... }` -> `if (true) { ... }` so HELLO also consumes a token (breaks the handshake-always-completes exemption). |
 | 30 | TI-3 | TxInclusionProofSoundness | LOW | moderate | open | SURVIVING MUTATION: in light/verify_tx_inclusion.cpp step 5, change `if (committed.find(h) == committed.end())` (line ~217) and/or `if (body_hashes.si |
-| 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | open | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
-| 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | open | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
+| 31 | WA-2 | WalletDomainAccountingSoundness | LOW | moderate | **CLOSED §3x** | Surviving mutant: in wallet/main.cpp cmd_account_accounting (line ~18681) widen the receiver gate to `if (to_hit && (t == 0 \|\| t == 10)) { tit->seco |
+| 32 | CB-4 | CryptoBackendMigrationSoundness | LOW | moderate | **CLOSED §3w** | Surviving mutant (keys.cpp:36-37): drop the fatal check but keep the draw — `(void)determ_rng_bytes(key.priv_seed.data(), 32);` — so a failed/partial  |
 | 33 | T-1 | RateLimiterKeyDerivationSoundness | LOW | moderate | **CLOSED §3v** | Surviving mutation: delete the port strip in src/net/gossip.cpp GossipNet::handle_message (`auto colon = ip.rfind(':'); if (colon!=npos) ip = ip.substr(0,colon);`) so each connection keys on ip:port, defeating per-IP limiting. RECLASSIFIED to FAST_UNIT (2nd-sender leg in test-rl2-hello-exempt). |
 | 34 | SP-CK-2 | StateProofCompositeKeySoundness | LOW | moderate | **CLOSED §3t** | Surviving mutation: src/node/node.cpp:4709 `if (body.size() != want)` -> `if (false)` (now `decode_composite_state_body`'s `d.ok = true`). A wrong-width composite body (39/41-byte `i:`) aliases a different leaf. |
 
@@ -1035,24 +1087,26 @@ reachability each time. Three classes:
     before/after). EXTEND the existing `test-state-proof-composite-key` subcommand
     (already in FAST regex) to assert on the struct — no new wrapper, no regex edit.
   *(#22 MakeContribCommit-T-1 was in this class — CLOSED §3r; #27 T-OE4 — CLOSED §3s.)*
-- **OFFLINE_SOURCE (8 left)** — a source-parity / presence invariant closeable by a
+- **OFFLINE_SOURCE (6 left)** — a source-parity / presence invariant closeable by a
   build-free awk/source guard wired into ci_local's offline loop (the PCL-1 / ADC-3 /
-  T-1 pattern). **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6,
-  #31 WA-2, #32 CB-4.** *(#33 T-1kd was here but RECLASSIFIED to FAST_UNIT and CLOSED
-  §3v — a behavioral 2nd-sender leg beat the grep guard.)* **Designs adversarially
+  T-1 pattern). **#2 SR-1, #16 CP-1, #17 LSP-6, #23 RP-5, #26 PRW-1, #28 DR-6.**
+  *(#31 WA-2 CLOSED §3x, #32 CB-4 CLOSED §3w — both shipped this round. #33 T-1kd was
+  here but RECLASSIFIED to FAST_UNIT and CLOSED §3v — a behavioral 2nd-sender leg beat
+  the grep guard.)* **Designs adversarially
   verified in Workflow wf_6a81aa3a-4d7 (each pins a POSITIVE anchor count so a
   rename/delete flips RED, never a bare substring grep):**
   - **#2 SR-1** (SOUND): EXTEND `test_light_state_root_binding_guard.sh` — add I3d
     (`if (succ_prev != recomputed_hex)` pinned to a single-term parenthesized form,
     EXPECTED_BIND_IF=1, so `&& false` breaks it) + I3e (`Hash recomputed = b.compute_hash();`
     EXPECTED_RECOMPUTE=1, so re-sourcing from a daemon field breaks it) + SELFTEST R5/R6.
-  - **#32 CB-4** (SOUND): NEW `tools/test_keygen_failclosed_guard.sh` (+ ci_local wire) —
-    assert `keys.cpp generate_node_key` fatal-throws on `determ_rng_bytes(...) != 0`, no
-    `(void)`-cast of the RNG return.
+  - **#32 CB-4** (CLOSED §3w): NEW `tools/test_keygen_failclosed_guard.sh` (+ ci_local wire) —
+    asserts `keys.cpp generate_node_key` fatal-throws on `determ_rng_bytes(...) != 0`, no
+    `(void)`-cast of the RNG return. Falsified (void-cast → 3/4 RED), ci_local green.
   - **#17 LSP-6** (SOUND): EXTEND `test_light_resume_monotonicity_guard.sh` I7 — the
     `verify_chain_from_anchor` initial-prev-anchor binding.
-  - **#31 WA-2** (SOUND): NEW `tools/test_wallet_accounting_credit_gate_source.sh` — the
+  - **#31 WA-2** (CLOSED §3x): NEW `tools/test_wallet_accounting_credit_gate_source.sh` — the
     `credits +=` receiver-gate must stay `to_hit && t == 0` (single-shard TRANSFER only).
+    Falsified (widen to `t==0||t==10` → condition RED), ci_local green.
   - **#23 RP-5** (SOUND): NEW `tools/test_registrant_lifecycle_classifier_coherence.sh` —
     the deactivation clause `inactive_from != 0 && inactive_from <= anchored_height`.
   - **#28 DR-6** (SOUND): the dapp-registry active/inactive boundary `< inactive_from`.
@@ -1071,6 +1125,7 @@ reachability each time. Three classes:
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
 
-Recommended order: **FAST_UNIT tranche is EXHAUSTED (all 4 closed §3r/§3s/§3t/§3u)** —
-next is OFFLINE_SOURCE (9, all offline both platforms via ci_local source guards), then
-the CLUSTER tranche (12) in one or two live-node rounds.
+Recommended order: **FAST_UNIT tranche is EXHAUSTED** — the OFFLINE_SOURCE tranche is
+now in progress (CB-4 §3w + WA-2 §3x closed this round; **6 left**: SR-1, CP-1, LSP-6,
+RP-5, PRW-1, DR-6 — all offline both platforms via ci_local source guards), then the
+CLUSTER tranche (12) in one or two live-node rounds.
