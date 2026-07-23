@@ -56,6 +56,9 @@
 #     — every reader cross-checks the daemon's cleartext against the committed
 #     value_hash (neuter ONE -> RED). The BEHAVIORAL tamper tests prove the rejection
 #     MECHANISM; this pins per-reader completeness.
+#   * invariant-7 (OSB-5): the same value-hash bind for the OFFLINE state-bundle
+#     verifier (verify_state_bundle.cpp `computed_vh != proof_vh`) — a reader that
+#     contacts no daemon; same crypto mechanism, separate count (abbreviated names).
 # All are completeness anchors: bump EXPECTED_* when a trustless reader is added.
 #
 # A "key-bind" is detected structurally: within the function body, a comparison
@@ -273,6 +276,24 @@ else
   bad "invariant-6 (DR-2/CP-2/AB-2): value-hash cross-check count drift — '!=' $vh_ne (exp $EXPECTED_VH_NE), computed'!=' $cvh_ne (exp $EXPECTED_CVH_NE), '==' $vh_eq (exp $EXPECTED_VH_EQ) — a verdict's value-hash bind was neutered (if(false)/->true), removed, or a reader added without bumping the count"
 fi
 
+# Invariant 7 (OSB-5 / OfflineStateBundleSoundness): the OFFLINE state-bundle verifier
+# (light/verify_state_bundle.cpp) is the value-hash-bind sibling of invariant-6 for a
+# reader that contacts NO daemon — it cross-checks the bundle's account_cleartext
+# against the committee-committed value_hash (SHA256(cleartext) == proof value_hash) so
+# a tampered-cleartext bundle is refused. Same crypto MECHANISM as the value_hex tamper
+# leg proven by test_light_supply_tamper.sh; this pins the bundle reader's completeness.
+# The comparison uses the abbreviated var names `computed_vh != proof_vh`, so it is a
+# separate count from invariant-6's $FILES scan. POSITIVE count: `-> if(false)`/remove
+# drops it -> RED. (Bump when a bundle namespace value-hash reader is added.)
+BUNDLE_FILE=light/verify_state_bundle.cpp
+EXPECTED_BUNDLE_VH=1
+bundle_vh=$(grep -hoE 'computed_vh != proof_vh' "$BUNDLE_FILE" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$bundle_vh" = "$EXPECTED_BUNDLE_VH" ]; then
+  ok "invariant-7 (OSB-5): $bundle_vh offline state-bundle value-hash cross-check 'computed_vh != proof_vh' (EXPECTED $EXPECTED_BUNDLE_VH)"
+else
+  bad "invariant-7 (OSB-5): found $bundle_vh 'computed_vh != proof_vh' in $BUNDLE_FILE, EXPECTED $EXPECTED_BUNDLE_VH — the offline bundle cleartext bind was neutered (-> if(false)), removed, or a namespace reader added without bumping the count"
+fi
+
 # ── SELFTEST: prove the guard is live ───────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
   echo
@@ -335,9 +356,22 @@ if [ "${SELFTEST:-}" = "1" ]; then
     ST_FAIL=$((ST_FAIL + 1))
   fi
 
+  # (7) OSB-5: neuter the offline state-bundle value-hash cross-check (if(false))
+  #     in a scratch copy -> the invariant-7 count must drop below EXPECTED.
+  s7="$tmp/bundle7.cpp"
+  sed '0,/if (computed_vh != proof_vh)/s//if (false)/' light/verify_state_bundle.cpp > "$s7"
+  full7=$(grep -hoE 'computed_vh != proof_vh' light/verify_state_bundle.cpp | wc -l | tr -d ' ')
+  cut7=$(grep -hoE 'computed_vh != proof_vh' "$s7" | wc -l | tr -d ' ')
+  if [ "$cut7" -lt "$full7" ]; then
+    echo "  ok:  invariant-7 detector live (neuter the offline bundle value-hash bind -> $full7 -> $cut7)"
+  else
+    echo "  bad: SELFTEST(7) failed to drop the offline bundle value-hash count ($full7 -> $cut7)" >&2
+    ST_FAIL=$((ST_FAIL + 1))
+  fi
+
   echo
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered key/value-hash comparison + deleted stale-read guard)"
+    echo "  PASS: test_light_keybind_surface SELFTEST (detects a stripped key-bind + neutered key/value-hash comparison + deleted stale-read guard + offline bundle bind)"
   else
     echo "  FAIL: test_light_keybind_surface SELFTEST"
     exit 1
@@ -346,7 +380,7 @@ fi
 
 echo
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind (CP-1) + stale-read (PRW-1) + value-hash cross-check (DR-2/CP-2/AB-2) counts pinned)"
+  echo "  PASS: test_light_keybind_surface (every state_proof consumer key-binds; quarantine exact; key-bind (CP-1) + stale-read (PRW-1) + value-hash (DR-2/CP-2/AB-2) + offline-bundle (OSB-5) cross-check counts pinned)"
   exit 0
 else
   echo "  FAIL: test_light_keybind_surface ($VIOLATIONS F-6 key-bind surface violation(s))"

@@ -861,7 +861,8 @@ SOUND in Workflow wf_f1a08faf-653.)*
 **MILESTONE: the FAST_UNIT tranche is now EXHAUSTED** — every register gap reachable
 from an in-process `determ test-*` seam is closed. The remaining open rows are all
 OFFLINE_SOURCE (build-free source guards) + 12 CLUSTER (live-node + rpc_tamper_proxy);
-§6.1 carries the live count (8 open — all genuinely live-node CLUSTER — after §3aa
+§6.1 carries the live count (7 open — all genuinely live-node CLUSTER — after §3ab closed
+OSB-5 (offline bundle value-hash, invariant-7) and §3aa
 reclassified + closed 4 comparison-shaped rows (DR-2/CP-2/AB-2 via a value-hash-bind
 completeness invariant, RI-2 already covered by CP-1's invariant-4); §3z closed CP-1 +
 PRW-1; on top of §3y's SR-1/LSP-6/RP-5/DR-6 and §3w/§3x's CB-4/WA-2).
@@ -1062,6 +1063,32 @@ Pure-offline, zero compiled change; the guard is already in ci_local's offline l
 VCW-4, SU-3, LSP-7, TI-3 — auth control-flow, multi-peer, count-gates in other files,
 offline bundle).
 
+## 3ab. OSB-5 CLOSED — offline state-bundle value-hash completeness (invariant-7)
+
+OSB-5 was classified CLUSTER, but the OFFLINE state-bundle verifier
+(`light/verify_state_bundle.cpp`, subcommand `verify-state-bundle --in <bundle>
+--genesis <file>`) contacts NO daemon — its OSB-5 leg is a value-hash cleartext
+cross-check `if (computed_vh != proof_vh)` (line 470) recomputing the account_cleartext
+hash and requiring it equal the committee-committed value_hash. That is the same value-
+hash-bind shape §3aa closed; the abbreviated var names (`computed_vh`/`proof_vh`) make it
+a separate count. Closed by **invariant-7** in `test_light_keybind_surface.sh`
+(EXPECTED_BUNDLE_VH=1): a `-> if(false)` neuter drops 1→0 → RED. Same crypto MECHANISM
+(a tampered cleartext fails SHA256==value_hash) proven behaviorally by
+`test_light_supply_tamper.sh`; this pins the offline bundle reader's completeness.
+
+*Why not the behavioral bundle-tamper leg?* `test_light_state_bundle.sh` already tampers
+the bundle's `anchor_block.state_root` / `successor_header.prev_hash` (committee binding)
+as cluster legs, but never `account_cleartext` (the OSB-5 leg). Adding that leg is sound,
+but the account_cleartext leg sits BEHIND the committee-binding gate, so it needs a REAL
+committee-signed bundle (a live-node export); the 3-node cluster does not come up
+reliably on WSL2 /mnt/c (it hung past 300s), so a cluster leg cannot be verified here.
+The completeness invariant is the deterministic both-platform closure; the behavioral
+account_cleartext leg remains available as a CI/WSL2 cluster leg for a future live round.
+*Falsify (executed, reverted via `git checkout`).* the `if(false)` mutant flips
+invariant-7 1→0 RED. Pure-offline, guard already in ci_local's loop (§3z); WSL2 GCC
+ci_local green. **7 remaining are genuinely live-node CLUSTER** (T-3, SS-5 auth control-
+flow; MPC-3 multi-peer; VCW-4/TI-3 count-gates; SU-3 height-gated supply; LSP-7 resume).
+
 ## 3a. First gap CLOSED — GW-2 (the exact-width decode guard)
 
 `Chain::activate_pending_params`' `parse_u64` opens with
@@ -1121,9 +1148,9 @@ list this register previously lacked. It confirmed **34** unenforced gaps
 (each with a concrete surviving mutation) and, usefully, found **4**
 claims the first pass had flagged that ARE in fact gated (§6.2). Ranked
 by the verifier's value_rank (1 = must-gate), then severity, then
-gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa) are now closed** — leaving 8. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 4 comparison-shaped CLUSTER rows (§3aa); the 8 remaining are genuinely live-node CLUSTER (auth control-flow, multi-peer, count-gates in other files, offline bundle).**
+gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), PCL-1 (§3n), ADC-3 (§3o), T-1 (§3p), BinaryCodec-T-3 (§3q), MakeContribCommit-T-1 (§3r), T-OE4 (§3s), SP-CK-2 (§3t), RL-2 (§3u), T-1kd (§3v), CB-4 (§3w), WA-2 (§3x), SR-1 + LSP-6 + RP-5 + DR-6 (§3y), CP-1 + PRW-1 (§3z), DR-2 + CP-2 + AB-2 + RI-2 (§3aa), OSB-5 (§3ab) are now closed** — leaving 7. **The FAST_UNIT AND OFFLINE_SOURCE tranches are BOTH EXHAUSTED, plus the 5 comparison/value-hash-shaped CLUSTER rows (§3aa + §3ab); the 7 remaining are genuinely live-node CLUSTER (T-3/SS-5 auth control-flow, MPC-3 multi-peer, VCW-4/TI-3 count-gates, SU-3 height-gated supply, LSP-7 resume).**
 
-### 6.1 Confirmed unenforced MED/LOW claims (8 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2 CLOSED)
+### 6.1 Confirmed unenforced MED/LOW claims (7 open — all live-node CLUSTER + SP-2, SB-3, AL-5, STMC-5, T-3, PCL-1, ADC-3, T-1, BinaryCodec-T-3, MakeContribCommit-T-1, T-OE4, SP-CK-2, RL-2, T-1kd, CB-4, WA-2, SR-1, LSP-6, RP-5, DR-6, CP-1, PRW-1, DR-2, CP-2, AB-2, RI-2, OSB-5 CLOSED)
 
 | # | Claim | Doc | Sev | Gate-cost | Status | Silently-deletable check (verifier's surviving mutation) |
 |---|---|---|---|---|---|---|
@@ -1131,7 +1158,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 | 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
 | 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | **CLOSED §3p** | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
-| 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | open | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
+| 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | **CLOSED §3ab** | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |
 | 7 | AL-5 | AuditLayerSoundness | MED | trivial | **CLOSED §3k** | Surviving mutation: delete both audit-map restore branches at src/chain/chain.cpp:775-778 (`if (s.audit_keys) audit_keys_ = std::move(*s.audit_keys);` |
 | 8 | T-3 | S001RpcAuthSoundness | MED | trivial | open | Surviving mutant in src/rpc/rpc.cpp::handle_session: keep the `dapp_subscribe` else-if branch exactly as-is (so it stays auth-gated and test_dapp_subs |
@@ -1246,15 +1273,19 @@ reachability each time. Three classes:
     round before shipping, exactly as the NEEDS_FIX warned. Falsified, ci_local green.
   Full designs: scratchpad/offline_designs.txt (session-local; re-extract from the
   wf_6a81aa3a-4d7 journal if needed).
-- **CLUSTER (8 left)** — light-client verdict logic (light/main.cpp) needing a live node +
-  the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local. **#5 OSB-5,
-  #8 T-3, #13 MPC-3, #14 SS-5, #18 VCW-4, #24 SU-3, #25 LSP-7, #30 TI-3** — auth
-  control-flow (T-3/SS-5), multi-peer cross-check (MPC-3), count-gates in other files
-  (VCW-4 verify_chain_walk, TI-3 verify_tx_inclusion), offline bundle (OSB-5), the
-  height-gated supply total-mismatch (SU-3), and resume persistence (LSP-7). *(#12 DR-2,
-  #15 CP-2, #19 RI-2, #20 AB-2 were CLUSTER-classified but are single-comparison verdict
-  binds — CLOSED §3aa via the value-hash-bind / key-bind completeness invariants, the
-  CP-1 pattern.)* Highest cost; batch these in a cluster round.
+- **CLUSTER (7 left)** — light-client verdict logic needing a live node +
+  the `rpc_tamper_proxy.py` MITM; Windows-standalone, not in ci_local. **#8 T-3,
+  #13 MPC-3, #14 SS-5, #18 VCW-4, #24 SU-3, #25 LSP-7, #30 TI-3** — auth control-flow
+  (T-3/SS-5), multi-peer cross-check (MPC-3), count-gates in other files (VCW-4
+  verify_chain_walk `headers_seen != head_height-start_from`, TI-3 verify_tx_inclusion
+  `committed.find(h)==end()`), the height-gated supply total-mismatch (SU-3
+  `claimed_total != expected_total`), and resume persistence (LSP-7). VCW-4/TI-3/SU-3
+  are single-comparison count-gates (closeable by the completeness-invariant pattern in
+  a future round if a live behavioral test stays infeasible); T-3/SS-5 are branch-ordering
+  control-flow (NOT source-countable) and MPC-3 is a loop rewrite. *(#12 DR-2, #15 CP-2,
+  #19 RI-2, #20 AB-2 CLOSED §3aa; #5 OSB-5 CLOSED §3ab — all were CLUSTER-classified but
+  are value-hash/key comparison binds closed by the completeness invariants.)* Highest
+  cost; batch the true behavioral ones in a live-node cluster round.
 
 **#8 T-3-s001 (handle_session auth-before-dispatch) stays DEFERRED** — LIVE auth
 control flow, not an additive guard; needs careful review, not a fixture.
