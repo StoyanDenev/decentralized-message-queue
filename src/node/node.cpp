@@ -7,6 +7,7 @@
 #include <determ/chain/params.hpp>
 #include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
 #include <determ/chain/enote_scan.hpp>   // NC-8 §5 (inc.3) enote scan (read-only)
+#include <determ/chain/chain_summary.hpp> // RpcIngressGateAudit §3 #6 chain_summary page cap
 #include <determ/crypto/pq_address.hpp>  // §3.21 PQ-native bearer address (S-028)
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -3669,7 +3670,12 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
     json arr = json::array();
     uint64_t total = chain_.height();
     if (total > 0) {
-        uint64_t start = (total > last_n) ? total - last_n : 0;
+        // RpcIngressGateAudit §3 #6: clamp last_n to the 256-page anti-DoS cap
+        // (chain::kChainSummaryPageMax) its sibling history handlers already
+        // enforce (on_get_chain / rpc_headers). An unbounded last_n >= total
+        // otherwise forces start = 0 → a full-chain compute_hash() rewalk under
+        // this read lock — a per-request-work DoS the token bucket cannot bound.
+        uint64_t start = chain::chain_summary_start(total, last_n);
         for (uint64_t i = start; i < total; ++i) {
             const auto& b = chain_.at(i);
             json e;

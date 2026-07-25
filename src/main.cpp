@@ -17,6 +17,7 @@
 #include <determ/crypto/enote/enote.h>     // NC-8 encrypted-note delivery (shielded Option A)
 #include <determ/chain/ctx_enote.hpp>      // NC-8 §5 enote-region split/parse (wiring inc.2)
 #include <determ/chain/enote_scan.hpp>     // NC-8 §5 enote scan (wiring inc.3)
+#include <determ/chain/chain_summary.hpp>  // RpcIngressGateAudit §3 #6 chain_summary page cap
 #include <determ/crypto/notekey/notekey.h>               // NC-8 §5 note key shared (inc.4)
 #include <determ/crypto/notekey/modern/notekey_modern.h> // NC-8 §5 note key 1a (inc.4)
 #include <determ/crypto/notekey/fips/notekey_fips.h>     // NC-8 §5 note key 1b (inc.4)
@@ -446,6 +447,11 @@ In-process tests (deterministic, no network):
                                               ingress paths (rpc_submit_tx throws,
                                               on_tx gossip silent-drops); in-proc
                                               Node harness, falsify each path
+  determ test-chain-summary-cap               RpcIngress #6 — the chain_summary
+                                              256-page anti-DoS cap (matching
+                                              on_get_chain / rpc_headers); an
+                                              unbounded last_n no longer rewalks
+                                              the whole chain under the read lock
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -43198,6 +43204,84 @@ int main(int argc, char** argv) {
     //
     // Previously only exercised via end-to-end shell tests through the
     // Node fixture. This direct unit test catches drift faster.
+    if (cmd == "test-chain-summary-cap") {
+        // RpcIngressGateAudit §3 #6 (ING-chain-summary-last_n-uncapped): the
+        // chain_summary RPC surfaces the trailing `last_n` blocks. Its sibling
+        // history handlers all clamp to a 256-page anti-DoS cap (on_get_chain
+        // node.cpp:3119 "if (count > 256) count = 256"; rpc_headers
+        // HEADERS_PAGE_MAX); chain_summary was the LONE reader that walked an
+        // unbounded client-supplied last_n, so last_n >= height forced start=0 --
+        // a full-chain compute_hash() rewalk under the state read lock (a
+        // per-request-WORK DoS the rate-limiter's token bucket, which meters
+        // requests not work, cannot bound). The clamp now lives in the shared
+        // chain::chain_summary_start helper that Node::rpc_chain_summary calls for
+        // its walk bound. This pins the bound directly on a real >256-block chain.
+        // Falsify-on-mutant: neuter the clamp in chain_summary.hpp
+        // (`if (false && last_n > kChainSummaryPageMax) ...`) -> every huge/
+        // over-cap assert flips from a 256-block window back to the whole chain.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a real bare chain TALLER than the cap: genesis + 300 empty blocks
+        // (empty-tx blocks append cleanly -- apply_transactions is a no-op with no
+        // creators/txs -- so this is cheap and needs no funded accounts).
+        Block g;
+        g.index = 0;
+        g.timestamp = 1;
+        g.cumulative_rand = Hash{};
+        Chain c(g);
+        for (int i = 0; i < 300; ++i) {
+            Block b;
+            b.index           = c.height();
+            b.prev_hash       = c.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            c.append(b);
+        }
+        const uint64_t H = c.height();
+        check(H == 301, "chain built to height 301 (genesis + 300 empty blocks)");
+
+        // walk_len(last_n) == the number of blocks rpc_chain_summary would
+        // materialize: total - chain_summary_start(total, last_n). We do the REAL
+        // block walk (c.at over the window) so the assert proves the bound governs
+        // a live block read under the lock, not merely an arithmetic identity.
+        auto walk_len = [&](uint32_t last_n) -> uint64_t {
+            uint64_t start = chain_summary_start(H, last_n);
+            uint64_t n = 0;
+            for (uint64_t i = start; i < H; ++i) { (void)c.at(i); ++n; }
+            return n;
+        };
+
+        // Contract preserved at/below the cap: a last_n <= 256 is honored exactly.
+        check(walk_len(10)  == 10,  "last_n=10 -> 10 blocks (small last_n honored exactly)");
+        check(walk_len(256) == 256, "last_n=256 -> 256 blocks (exactly at the cap)");
+
+        // THE LOAD-BEARING asserts: the clamp bites ABOVE the cap. The mutant (no
+        // clamp) returns the whole 301-block chain for every one of these.
+        check(walk_len(257)        == 256, "last_n=257 -> clamped to 256 (one over the cap)");
+        check(walk_len(1000)       == 256, "last_n=1000 -> clamped to 256");
+        check(walk_len(UINT32_MAX) == 256, "last_n=UINT32_MAX -> clamped to 256 (no full-chain rewalk)");
+
+        // The window START for the huge case is exactly height-256, never 0 --
+        // i.e. the walk is bounded, not restarted from genesis.
+        check(chain_summary_start(H, UINT32_MAX) == H - kChainSummaryPageMax,
+              "start(UINT32_MAX) == height-256 (walk bounded, not restarted at 0)");
+
+        // Short chains (height <= cap) are unaffected -- the whole chain is already
+        // within budget, so start stays 0 for any last_n.
+        check(chain_summary_start(100, UINT32_MAX) == 0, "height 100 < cap -> start 0 (whole short chain, in budget)");
+        check(chain_summary_start(0,   UINT32_MAX) == 0, "empty chain -> start 0");
+
+        std::cout << (fail ? "  FAIL: test-chain-summary-cap\n"
+                           : "  PASS: test-chain-summary-cap\n");
+        return fail ? 1 : 0;
+    }
+
     if (cmd == "test-rpc-tx-sig-admit") {
         // RpcIngressGateAudit §3 MEM-tx-sig-admit: a tx must carry a VALID sender
         // signature before mempool admission. verify_tx_signature_locked runs in
