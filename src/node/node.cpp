@@ -2364,63 +2364,35 @@ void Node::apply_block_locked(const chain::Block& b) {
         // same height — equivocation. Extract proof: digest_a/sig_a from
         // the stored block, digest_b/sig_b from the incoming block, both
         // by the same proposer key. Push to evidence pool, gossip.
+        // rev.8 equivocation detection + evidence assembly. The pure,
+        // SIZE-GUARDED assembly is factored into node::detect_equivocation
+        // (BlockIngress EQV-assemble-OOB): this duplicate/old-height branch
+        // runs BEFORE any validate() call, so a peer's block with a
+        // creator_block_sigs shorter than the proposer's creators-position
+        // would otherwise drive an out-of-bounds read when the assembler
+        // extracted the second signature. The pool dedup + gossip + log
+        // (Node-side effects) stay here.
         if (!b.bft_proposer.empty()) {
-            const auto& stored = chain_.at(b.index);
-            Hash stored_hash   = stored.compute_hash();
-            Hash incoming_hash = b.compute_hash();
-            if (stored_hash != incoming_hash
-                && stored.bft_proposer == b.bft_proposer
-                && !stored.bft_proposer.empty()) {
-
-                auto sit = std::find(stored.creators.begin(),
-                                       stored.creators.end(),
-                                       stored.bft_proposer);
-                auto bit = std::find(b.creators.begin(),
-                                       b.creators.end(),
-                                       b.bft_proposer);
-                if (sit != stored.creators.end() && bit != b.creators.end()) {
-                    size_t sidx = sit - stored.creators.begin();
-                    size_t bidx = bit - b.creators.begin();
-                    Hash digest_a = compute_block_digest(stored);
-                    Hash digest_b = compute_block_digest(b);
-                    Signature sig_a = stored.creator_block_sigs[sidx];
-                    Signature sig_b = b.creator_block_sigs[bidx];
-                    if (digest_a != digest_b && sig_a != sig_b) {
-                        chain::EquivocationEvent ev;
-                        ev.equivocator = stored.bft_proposer;
-                        ev.block_index = b.index;
-                        ev.digest_a    = digest_a;
-                        ev.sig_a       = sig_a;
-                        ev.digest_b    = digest_b;
-                        ev.sig_b       = sig_b;
-                        // rev.9 B2c.4: cross-chain provenance. SHARD-role
-                        // detections record their shard_id + the latest
-                        // verified beacon header's height as the anchor.
-                        // SINGLE / BEACON detections leave them at default
-                        // (0, 0), distinguishing the source chain in the
-                        // forensic trail.
-                        if (cfg_.chain_role == ChainRole::SHARD) {
-                            ev.shard_id = cfg_.shard_id;
-                            ev.beacon_anchor_height = beacon_headers_.empty()
-                                ? 0 : beacon_headers_.back().index;
-                        }
-
-                        // Add to pool if not already present.
-                        bool dup = false;
-                        for (auto& e : pending_equivocation_evidence_) {
-                            if (e.equivocator == ev.equivocator
-                                && e.block_index == ev.block_index) {
-                                dup = true; break;
-                            }
-                        }
-                        if (!dup) {
-                            pending_equivocation_evidence_.push_back(ev);
-                            gossip_.broadcast(net::make_equivocation_evidence(ev));
-                            std::cerr << "[node] EQUIVOCATION evidence built at h="
-                                      << b.index << " equivocator=" << ev.equivocator
-                                      << " (gossiped; will be baked into next block)\n";
-                        }
+            if (auto ev_opt = detect_equivocation(
+                    chain_.at(b.index), b,
+                    cfg_.chain_role == ChainRole::SHARD,
+                    cfg_.shard_id,
+                    beacon_headers_.empty() ? 0 : beacon_headers_.back().index)) {
+                const chain::EquivocationEvent& ev = *ev_opt;
+                // Add to pool if not already present.
+                bool dup = false;
+                for (auto& e : pending_equivocation_evidence_) {
+                    if (e.equivocator == ev.equivocator
+                        && e.block_index == ev.block_index) {
+                        dup = true; break;
                     }
+                }
+                if (!dup) {
+                    pending_equivocation_evidence_.push_back(ev);
+                    gossip_.broadcast(net::make_equivocation_evidence(ev));
+                    std::cerr << "[node] EQUIVOCATION evidence built at h="
+                              << b.index << " equivocator=" << ev.equivocator
+                              << " (gossiped; will be baked into next block)\n";
                 }
             }
         }

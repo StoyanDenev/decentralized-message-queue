@@ -6,6 +6,7 @@
 #include <determ/crypto/keys.hpp>
 #include <determ/types.hpp>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -257,6 +258,32 @@ std::vector<Hash> reconcile_intersection(
 // observing the same struct should produce the same Hash.
 
 Hash hash_equivocation_event(const chain::EquivocationEvent& e);
+
+// BlockIngress EQV-assemble-OOB (SnapshotRestore/RpcIngress sister register):
+// the pure, SIZE-GUARDED equivocation-evidence assembler. Given the block we
+// already stored at some height and an incoming block a peer gossiped at the
+// SAME (already-committed) height, decide whether the two constitute a
+// provable BFT double-sign by one proposer and, if so, assemble the
+// EquivocationEvent; otherwise return nullopt.
+//
+// This is factored out of Node::apply_block_locked's duplicate/old-height
+// branch because that branch runs BEFORE any validate() call (validate only
+// runs on the b.index>=height accept path) and Block::from_json does NOT
+// enforce creator_block_sigs.size()==creators.size(). Indexing
+// creator_block_sigs by a creators-position without a bounds check — as the
+// inline code did — lets a peer's size-short block trigger an out-of-bounds
+// read. Every sibling that indexes creator_block_sigs by a creators-index
+// already guards the size first (validator.cpp, maybe_reorg, beacon-header,
+// shardtip_verify); this forensic path now does too. `is_shard`/`shard_id`/
+// `beacon_anchor_height` fill the SHARD-role forensic provenance (ignored for
+// non-SHARD roles), matching the original inline behavior exactly.
+std::optional<chain::EquivocationEvent> detect_equivocation(
+    const chain::Block& stored,
+    const chain::Block& incoming,
+    bool is_shard,
+    uint32_t shard_id,
+    uint64_t beacon_anchor_height);
+
 Hash hash_abort_event(const chain::AbortEvent& e);
 Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r);
 // D3.5d: full-content hash of a shard-tip record = SHA256(rec.encode()). The

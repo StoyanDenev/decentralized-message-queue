@@ -9,6 +9,7 @@
 #include <determ/chain/abort_canonical.hpp>  // canonical abort-claims dump for the digest
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 
@@ -368,6 +369,70 @@ Hash hash_equivocation_event(const chain::EquivocationEvent& e) {
     b.append(static_cast<uint64_t>(e.shard_id));
     b.append(e.beacon_anchor_height);
     return b.finalize();
+}
+
+// BlockIngress EQV-assemble-OOB: pure, size-guarded equivocation-evidence
+// assembler factored VERBATIM out of Node::apply_block_locked's duplicate/
+// old-height branch (same predicate order + same field assignment), with the
+// ONE addition of a creator_block_sigs bounds check before indexing by a
+// creators-position. See the header comment for why the guard is load-bearing:
+// the incoming block is UNVALIDATED on that branch and from_json does not pin
+// creator_block_sigs.size()==creators.size(). Returns nullopt (drop as a
+// malformed/non-equivocating duplicate) unless the two blocks prove a genuine
+// BFT double-sign by one proposer.
+std::optional<chain::EquivocationEvent> detect_equivocation(
+    const chain::Block& stored,
+    const chain::Block& b,
+    bool is_shard,
+    uint32_t shard_id,
+    uint64_t beacon_anchor_height) {
+    // Both blocks must be BFT-mode (carry a proposer) and name the SAME
+    // proposer, and be genuinely different blocks at this height.
+    if (b.bft_proposer.empty() || stored.bft_proposer.empty()) return std::nullopt;
+    if (stored.bft_proposer != b.bft_proposer)                 return std::nullopt;
+    if (stored.compute_hash() == b.compute_hash())             return std::nullopt;
+
+    auto sit = std::find(stored.creators.begin(), stored.creators.end(),
+                         stored.bft_proposer);
+    auto bit = std::find(b.creators.begin(), b.creators.end(), b.bft_proposer);
+    if (sit == stored.creators.end() || bit == b.creators.end()) return std::nullopt;
+
+    size_t sidx = static_cast<size_t>(sit - stored.creators.begin());
+    size_t bidx = static_cast<size_t>(bit - b.creators.begin());
+
+    // ── The guard this refactor exists to add ──────────────────────────────
+    // sidx/bidx index creator_block_sigs. A well-formed block has
+    // creator_block_sigs.size()==creators.size() (the validator pins this on
+    // the accept path), but this branch never validated `b`, and from_json
+    // does not enforce it — so a peer can gossip a block whose
+    // creator_block_sigs is SHORTER than the proposer's creators-position.
+    // Without this check, b.creator_block_sigs[bidx] is an out-of-bounds read.
+    if (sidx >= stored.creator_block_sigs.size()
+        || bidx >= b.creator_block_sigs.size()) return std::nullopt;
+
+    Hash digest_a = compute_block_digest(stored);
+    Hash digest_b = compute_block_digest(b);
+    Signature sig_a = stored.creator_block_sigs[sidx];
+    Signature sig_b = b.creator_block_sigs[bidx];
+    // A genuine double-sign needs two DIFFERENT digests carrying two DIFFERENT
+    // signatures by the same proposer key.
+    if (digest_a == digest_b || sig_a == sig_b) return std::nullopt;
+
+    chain::EquivocationEvent ev;
+    ev.equivocator = stored.bft_proposer;
+    ev.block_index = b.index;
+    ev.digest_a    = digest_a;
+    ev.sig_a       = sig_a;
+    ev.digest_b    = digest_b;
+    ev.sig_b       = sig_b;
+    // rev.9 B2c.4 cross-chain provenance: SHARD-role detections record the
+    // shard + latest verified beacon-anchor height; SINGLE/BEACON leave the
+    // defaults (0,0), matching the original inline behavior.
+    if (is_shard) {
+        ev.shard_id             = shard_id;
+        ev.beacon_anchor_height = beacon_anchor_height;
+    }
+    return ev;
 }
 
 Hash hash_abort_event(const chain::AbortEvent& e) {

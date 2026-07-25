@@ -1106,6 +1106,13 @@ Additional in-process tests:
                                               (real Ed25519), wrong-key
                                               non-attribution, wire round-
                                               trip, event-hash binding
+  determ test-equivocation-detect-oob         BlockIngress EQV-assemble-OOB —
+                                              node::detect_equivocation bounds-
+                                              guards creator_block_sigs on the
+                                              UNVALIDATED duplicate-block path;
+                                              size-short gossip block → nullopt
+                                              (no OOB read), genuine double-
+                                              sign still assembles evidence
   determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
                                               stake-lifecycle complement;
                                               fee refund on failure; A1
@@ -59519,6 +59526,139 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-evidence "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // BlockIngress EQV-assemble-OOB (fifth code-surface falsify-on-mutant
+    // register, sister to ConsensusValidator / RpcIngress / SnapshotRestore).
+    // Node::apply_block_locked's duplicate/old-height branch runs BEFORE any
+    // validate() call and Block::from_json does NOT enforce
+    // creator_block_sigs.size()==creators.size(); the inline equivocation-
+    // detection code indexed creator_block_sigs[bidx] by the proposer's
+    // creators-position with no bounds check, so a peer gossiping a BFT block
+    // at an already-committed height with a size-short creator_block_sigs
+    // triggered an out-of-bounds read (remote crash / DoS). The assembly is now
+    // node::detect_equivocation, size-guarded like every sibling that indexes
+    // creator_block_sigs by a creators-position (validator.cpp:453, maybe_reorg,
+    // beacon-header, shardtip_verify). This gate drives the helper directly:
+    // a genuine double-sign still assembles evidence (positive control); a
+    // size-short block returns nullopt with no OOB; guard-independent negatives
+    // stay green. Falsify-on-mutant (`if (false && (sidx>=... || bidx>=...))`)
+    // flips ONLY the size-short asserts — either the assembler forges an event
+    // from OOB-read bytes (has_value flips) or ASan reports the heap over-read
+    // (Linux ci_local) — while the positive control + negatives stay green.
+    if (cmd == "test-equivocation-detect-oob") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto psig = [](uint8_t seed){
+            Signature s{}; for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(seed + i);
+            return s;
+        };
+        auto phash = [](uint8_t seed){
+            Hash h{}; for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(seed + i);
+            return h;
+        };
+        // Build a same-height block with a chosen tx_root (→ a distinct
+        // compute_block_digest), proposer, creators list, and
+        // creator_block_sigs. detect_equivocation does NOT verify sigs
+        // cryptographically (that is the validator's job); it checks the
+        // two-block contradiction + bounds only, so patterned bytes suffice.
+        auto mkblk = [&](uint8_t tx_seed, const std::string& proposer,
+                         std::vector<std::string> creators,
+                         std::vector<Signature> sigs){
+            Block b;
+            b.index    = 5;
+            b.prev_hash = phash(0x70);
+            b.tx_root  = phash(tx_seed);
+            b.bft_proposer = proposer;
+            b.creators = std::move(creators);
+            b.creator_block_sigs = std::move(sigs);
+            return b;
+        };
+
+        // The block we already stored at height 5: a well-formed BFT block by
+        // alice (creators has exactly her one signature slot).
+        Block stored = mkblk(0x01, "alice", {"alice"}, {psig(0x11)});
+
+        // === Positive control: a genuine same-height double-sign ===
+        {
+            Block incoming = mkblk(0x02, "alice", {"alice"}, {psig(0x22)});
+            auto ev = node::detect_equivocation(stored, incoming, false, 0, 0);
+            check(ev.has_value(), "genuine double-sign → evidence assembled");
+            check(ev && ev->equivocator == "alice" && ev->block_index == 5,
+                  "genuine: equivocator + height bound correctly");
+            check(ev && ev->digest_a != ev->digest_b && !(ev->sig_a == ev->sig_b),
+                  "genuine: two distinct digests + two distinct sigs captured");
+        }
+
+        // === THE GUARD: size-short creator_block_sigs must NOT be indexed ===
+        // proposer at creators[0] but ZERO sigs → bidx=0 is out of range.
+        {
+            Block malformed = mkblk(0x02, "alice", {"alice"}, {} /* empty sigs */);
+            auto ev = node::detect_equivocation(stored, malformed, false, 0, 0);
+            check(!ev.has_value(),
+                  "malformed (empty creator_block_sigs, proposer@0) → nullopt, no OOB read");
+        }
+        // proposer at creators[1] but only ONE sig → bidx=1 is out of range.
+        {
+            Block malformed = mkblk(0x02, "alice", {"bob","alice"}, {psig(0x33)});
+            auto ev = node::detect_equivocation(stored, malformed, false, 0, 0);
+            check(!ev.has_value(),
+                  "malformed (proposer@1, only 1 sig) → nullopt, no OOB read");
+        }
+        // Symmetric guard on the STORED side: stored proposer index beyond its
+        // own (hand-corrupted) sig vector also returns nullopt, no OOB.
+        {
+            Block stored_bad = mkblk(0x01, "alice", {"zoe","alice"}, {psig(0x11)});
+            Block incoming   = mkblk(0x02, "alice", {"alice"}, {psig(0x22)});
+            auto ev = node::detect_equivocation(stored_bad, incoming, false, 0, 0);
+            check(!ev.has_value(),
+                  "malformed stored (proposer@1, only 1 sig) → nullopt, no OOB read");
+        }
+
+        // === Guard-independent negative controls (stay GREEN under mutant) ===
+        {
+            Block incoming = mkblk(0x02, "", {"alice"}, {psig(0x22)});
+            check(!node::detect_equivocation(stored, incoming, false, 0, 0).has_value(),
+                  "empty bft_proposer → nullopt (non-BFT)");
+        }
+        {
+            Block incoming = mkblk(0x02, "bob", {"bob"}, {psig(0x22)});
+            check(!node::detect_equivocation(stored, incoming, false, 0, 0).has_value(),
+                  "different proposer → nullopt");
+        }
+        {
+            Block incoming = stored;  // byte-identical → same hash
+            check(!node::detect_equivocation(stored, incoming, false, 0, 0).has_value(),
+                  "identical block (same hash) → nullopt (plain duplicate)");
+        }
+        {
+            // same tx_root as stored → same digest; only the sig differs.
+            Block incoming = mkblk(0x01, "alice", {"alice"}, {psig(0x22)});
+            check(!node::detect_equivocation(stored, incoming, false, 0, 0).has_value(),
+                  "same digest, different sig → nullopt (no distinct-digest contradiction)");
+        }
+        {
+            Block incoming = mkblk(0x02, "alice", {"bob"}, {psig(0x22)});
+            check(!node::detect_equivocation(stored, incoming, false, 0, 0).has_value(),
+                  "proposer absent from creators → nullopt");
+        }
+        // SHARD-role provenance threaded through on a genuine detection.
+        {
+            Block incoming = mkblk(0x02, "alice", {"alice"}, {psig(0x22)});
+            auto ev = node::detect_equivocation(stored, incoming, true, 7, 99);
+            check(ev && ev->shard_id == 7 && ev->beacon_anchor_height == 99,
+                  "SHARD role: shard_id + beacon_anchor_height threaded into evidence");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": equivocation-detect-oob "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
