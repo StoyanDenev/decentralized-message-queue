@@ -664,7 +664,15 @@ public:
     // The returned chain is self-consistent at the snapshot's
     // block_index. Wiring it into Node::start (as the bootstrap path
     // when chain.json is absent) is a follow-on commit.
-    static Chain restore_from_snapshot(const nlohmann::json& snapshot);
+    // require_supply_invariant (SnapshotRestoreGateAudit A1-revalidate): when true,
+    // reject a snapshot whose loaded state violates the A1 unitary-balance identity
+    // (expected_total() != live_total_supply()) — a NODE-ADOPTION policy (node.cpp
+    // passes true) so a corrupt/tampered operator snapshot fails cleanly at LOAD
+    // instead of wedging the node on the first post-restore apply. Default false
+    // keeps the deserializer GENERAL for tools + round-trip tests, which legitimately
+    // serialize synthetic (non-A1-consistent) fixtures.
+    static Chain restore_from_snapshot(const nlohmann::json& snapshot,
+                                       bool require_supply_invariant = false);
     // block_subsidy must be passed at load time so replay credits creators
     // correctly. Caller (Node) loads it from GenesisConfig before this call.
     // rev.9 B3: shard routing params must also be passed so apply-side

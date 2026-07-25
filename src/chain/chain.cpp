@@ -2387,7 +2387,7 @@ json Chain::serialize_state(uint32_t header_count) const {
     return snap;
 }
 
-Chain Chain::restore_from_snapshot(const json& snap) {
+Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invariant) {
     if (!snap.is_object())
         throw std::runtime_error("snapshot is not a JSON object");
     int v = snap.value("version", 0);
@@ -2642,10 +2642,13 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // apply-side check at line ~900 — without it, the fast-bootstrap
     // path trusts the snapshot source unconditionally, and a hostile
     // operator could ship a snapshot whose accounts/stakes diverge from
-    // what the chain ever committed to. With this check, any tamper
-    // produces a hash mismatch caught locally; the committee-signed
-    // block_hash (which covers state_root) means the snapshot supplier
-    // cannot manufacture a self-consistent forgery.
+    // what the chain ever committed to. This is a SELF-CONSISTENCY check
+    // under the weak-subjectivity bootstrap model (the operator opts into a
+    // snapshot source by setting snapshot_path): it catches accidental
+    // corruption and naive tampering, but a supplier the operator trusts can
+    // still recompute a self-consistent state_root — restore does NOT verify
+    // the head block's committee signature (that guard lives on the live
+    // apply / fork-choice path, not here). See SnapshotRestoreGateAudit.md.
     //
     // Pre-S-033 chains carry zero state_root in their headers (the
     // producer wrote nothing); we skip verification on those for
@@ -2668,6 +2671,36 @@ Chain Chain::restore_from_snapshot(const json& snap) {
                     computed[0], computed[1], computed[2], computed[3]);
                 throw std::runtime_error(buf);
             }
+        }
+    }
+
+    // SnapshotRestoreGateAudit A1-revalidate (OPT-IN node-adoption policy):
+    // re-assert the unitary-balance identity that apply_transactions enforces on
+    // EVERY block (chain.cpp ~1866: expected_total() == live_total_supply()), once,
+    // over the fully-loaded snapshot state. The head_hash/state_root self-checks
+    // above bind each leaf VALUE but NOT the accounting IDENTITY among them, so a
+    // genesis_total (2628) or accumulated_* counter that is internally
+    // self-consistent yet supply-INCONSISTENT loads clean here and then throws
+    // "unitary-balance invariant violated" on the FIRST post-restore apply —
+    // permanently wedging the node at the restored height. Node adoption
+    // (node.cpp) passes require_supply_invariant=true so a corrupt/tampered
+    // operator snapshot is rejected cleanly at LOAD instead of bricking the node.
+    // Gated on the flag (default false) so the deserializer stays GENERAL for
+    // tools + round-trip tests, which legitimately serialize synthetic
+    // (non-A1-consistent) fixtures. Same identity the apply path runs; no
+    // accept-rule / trust-model change; inert for honest snapshots and for the
+    // fieldless branch above, which back-solves genesis_total into equality.
+    if (require_supply_invariant) {
+        uint64_t expected = c.expected_total();
+        uint64_t live     = c.live_total_supply();
+        if (expected != live) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                "snapshot supply-invariant inconsistent (A1): expected_total=%llu "
+                "!= live_total_supply=%llu — counters/balances do not satisfy the "
+                "unitary-balance identity; snapshot is inconsistent or tampered",
+                (unsigned long long)expected, (unsigned long long)live);
+            throw std::runtime_error(buf);
         }
     }
 

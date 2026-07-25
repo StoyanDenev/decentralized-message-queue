@@ -457,6 +457,11 @@ In-process tests (deterministic, no network):
                                               (on_snapshot_request + rpc_snapshot);
                                               an unbounded header_count no longer
                                               to_json()'s the whole chain per req
+  determ test-snapshot-a1-revalidate          SnapshotRestore — restore_from_snapshot
+                                              re-asserts the A1 unitary-balance
+                                              identity at LOAD; a supply-inconsistent
+                                              snapshot is rejected cleanly instead of
+                                              wedging the node on the first apply
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -43399,6 +43404,96 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-snapshot-header-cap\n"
                            : "  PASS: test-snapshot-header-cap\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-snapshot-a1-revalidate") {
+        // SnapshotRestoreGateAudit A1-revalidate (discovery wf_49023d9a finding #4 —
+        // the sole CONFIRMED autonomous-safe gap of that register). Chain::
+        // restore_from_snapshot (chain.cpp:2390) reconstructs accounts_/stakes_ +
+        // the A1 supply counters DIRECTLY and never re-asserts the unitary-balance
+        // identity apply_transactions enforces on every block (expected_total() ==
+        // live_total_supply()). The head_hash/state_root self-checks bind each leaf
+        // VALUE but not the accounting IDENTITY among them, so a snapshot with a
+        // supply-inconsistent (yet otherwise self-consistent) genesis_total loads
+        // clean and then throws "unitary-balance invariant violated" on the FIRST
+        // post-restore apply -> a permanent wedge. The new restore-side guard
+        // rejects it at LOAD. Falsify-on-mutant: delete the guard -> the tampered
+        // snapshot loads clean (the REJECT asserts flip; the positive controls do not).
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // A real chain (genesis + 3 empty blocks); the honest snapshot satisfies
+        // A1 by construction (apply maintains it every block).
+        Block g;
+        g.index = 0;
+        g.timestamp = 1;
+        g.cumulative_rand = Hash{};
+        Chain c(g);
+        for (int i = 0; i < 3; ++i) {
+            Block b;
+            b.index           = c.height();
+            b.prev_hash       = c.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            c.append(b);
+        }
+        json snap = c.serialize_state(16);
+
+        // require_supply_invariant is OPT-IN: the node's snapshot-adopt path passes
+        // true; the general deserializer (tools + round-trip tests) defaults false.
+        auto restores_ok = [&](const json& s, bool require) -> bool {
+            try { (void)Chain::restore_from_snapshot(s, require); return true; }
+            catch (...) { return false; }
+        };
+
+        // Positive control 1: the honest snapshot restores WITHOUT throwing, even
+        // with the A1 gate demanded.
+        check(restores_ok(snap, true), "honest snapshot restores cleanly under require_supply_invariant (A1 holds)");
+
+        // Isolate the A1 guard by bypassing the two self-consistency gates the
+        // same way legitimate pre-S-033 / headerless snapshots do: zero the head's
+        // state_root (skips the S-033 check, chain.cpp:2657) and drop the top-level
+        // head_hash (skips the head-hash check, chain.cpp:2617). A real restore path.
+        json bypass = snap;
+        bypass.erase("head_hash");
+        if (bypass.contains("headers") && !bypass["headers"].empty())
+            bypass["headers"].back()["state_root"] = std::string(64, '0');
+
+        // Positive control 2: self-checks bypassed but A1 still CONSISTENT -> the
+        // guard must NOT false-positive.
+        check(restores_ok(bypass, true),
+              "self-checks-bypassed but A1-consistent snapshot still restores under require (guard no false-positive)");
+
+        // Tamper genesis_total by +1 so expected_total == live + 1. With both
+        // self-checks bypassed, the A1 guard is the ONLY thing that can catch it.
+        json tampered = bypass;
+        uint64_t g0 = snap.value("genesis_total", uint64_t{0});
+        tampered["genesis_total"] = g0 + 1;
+
+        // OPT-IN control: with require_supply_invariant=false (the default), the
+        // general deserializer still accepts the A1-inconsistent snapshot — tools
+        // and round-trip tests legitimately serialize synthetic fixtures.
+        check(restores_ok(tampered, false),
+              "opt-in: default restore accepts an A1-inconsistent snapshot (general primitive unchanged)");
+
+        // NEGATIVE (the gate): with require_supply_invariant=true, it is REJECTED.
+        bool threw = false;
+        std::string msg;
+        try { (void)Chain::restore_from_snapshot(tampered, /*require_supply_invariant=*/true); }
+        catch (const std::exception& e) { threw = true; msg = e.what(); }
+        check(threw,
+              "require_supply_invariant: A1-inconsistent snapshot (genesis_total tampered +1) is REJECTED at restore");
+        check(threw && msg.find("supply-invariant") != std::string::npos,
+              "the rejection cites the A1 supply-invariant");
+
+        std::cout << (fail ? "  FAIL: test-snapshot-a1-revalidate\n"
+                           : "  PASS: test-snapshot-a1-revalidate\n");
         return fail ? 1 : 0;
     }
 

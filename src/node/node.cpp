@@ -593,7 +593,12 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
             try {
                 std::ifstream sf(cfg_.snapshot_path);
                 nlohmann::json sj = nlohmann::json::parse(sf);
-                chain_ = chain::Chain::restore_from_snapshot(sj);
+                // SnapshotRestoreGateAudit A1-revalidate: this is the node's
+                // operator-opt-in snapshot adoption — require the A1 unitary-balance
+                // identity so a corrupt/tampered snapshot fails cleanly HERE rather
+                // than wedging the node on its first post-restore block apply.
+                chain_ = chain::Chain::restore_from_snapshot(
+                    sj, /*require_supply_invariant=*/true);
                 // restore_from_snapshot reads constants from the
                 // snapshot itself; they should match what genesis
                 // would set, but we do not require gcfg_opt here.
