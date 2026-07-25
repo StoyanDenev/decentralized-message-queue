@@ -2279,6 +2279,14 @@ void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
         if (r.src_shard != src_shard)     continue;     // sanity
         auto key = std::make_pair(r.src_shard, r.tx_hash);
         if (pending_inbound_receipts_.count(key)) continue;     // already buffered
+        // MEM-inbound-receipt-pool cap: this pool is UNAUTHENTICATED transit data
+        // (B3.4 defers source-side verification) and junk receipts are never
+        // pruned, so bound it (drop-newest) to defeat a distinct-tx_hash flood.
+        // Break: once at cap no new key can be added; a later dup is already
+        // present, so stopping here is correct. See the decl comment on
+        // MAX_PENDING_INBOUND_RECEIPTS.
+        if (pending_inbound_receipts_.size() >= MAX_PENDING_INBOUND_RECEIPTS)
+            break;
         pending_inbound_receipts_[key] = r;
         // S-016 Option 2: record first-seen height so build_body's
         // snapshot construction can skip receipts that haven't soaked

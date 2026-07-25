@@ -439,6 +439,24 @@ public:
     static constexpr size_t   SUBSCRIBER_MAX_PER_NODE       = 256;
     static constexpr uint64_t SUBSCRIBE_BACKLOG_MAX_BLOCKS  = 10000;
     static constexpr uint64_t HEARTBEAT_INTERVAL_BLOCKS     = 50;
+    // BlockIngress MEM-inbound-receipt-pool cap (node-local DoS knob): the
+    // pending_inbound_receipts_ pool is fed by UNAUTHENTICATED gossiped
+    // CROSS_SHARD_RECEIPT_BUNDLE frames (source-side K-of-K verification deferred
+    // to the B3.4 milestone) and pruned ONLY when a block this node applies
+    // credits a receipt — so a junk receipt (random tx_hash matching no real
+    // cross-shard TRANSFER) is never baked into a valid block and thus never
+    // erased. Without a ceiling a peer flooding distinct tx_hashes grows the pool
+    // (and its parallel first-seen map) without bound = remote memory-exhaustion
+    // DoS. Cap (drop-newest) at the same order as the S-008 mempool. This is an
+    // OOM guard, not a tight bound, and it is intentionally lossy: because junk
+    // receipts are never credited (never baked → never erased), a one-time burst
+    // of MAX distinct tx_hashes leaves the pool permanently full and blocks
+    // further inbound-receipt admission on this node until restart — a
+    // BOUNDED-memory functional degradation, strictly preferable to the pre-fix
+    // unbounded-memory OOM crash. The complete, non-lossy fix (only authenticated
+    // receipts ever enter the pool) is the B3.4 source-side K-of-K
+    // authentication — a consensus/protocol change, owner-gated.
+    static constexpr size_t   MAX_PENDING_INBOUND_RECEIPTS = 10000;
     static constexpr uint64_t HEARTBEAT_MAX_BLOCKS          = 10000;
     static constexpr int      SUBSCRIBER_IDLE_HEARTBEAT_SECS = 30;
 
@@ -464,6 +482,15 @@ public:
     // rpc_submit_tx throw. Byte-neutral non-const const-forwarder (on_tx mutates
     // tx_store_); same seam pattern as the validator *_for_test seams.
     void on_tx_for_test(const chain::Transaction& tx) { on_tx(tx); }
+    // MEM-inbound-receipt-pool cap test seam (BlockIngress): drive the SHARD-side
+    // cross-shard receipt-bundle ingress in isolation so the falsifier can flood
+    // distinct tx_hashes and assert pending_inbound_receipts_ caps at
+    // MAX_PENDING_INBOUND_RECEIPTS. Byte-neutral forwarder; the `relay` Message is
+    // used only by the BEACON relay branch (unused for SHARD), so pass a default.
+    void on_cross_shard_receipt_bundle_for_test(ShardId src_shard,
+                                                const chain::Block& src_block) {
+        on_cross_shard_receipt_bundle(src_shard, src_block, net::Message{});
+    }
     // rev.9 B5: external submission of equivocation evidence. Forensics
     // tools and governance scripts can submit EquivocationEvent JSON
     // assembled off-chain (e.g., from log scraping that observed two

@@ -1,6 +1,7 @@
 # Block-Ingress Gate-Gap Audit
 
-**Status:** open (2026-07-25, updated 2026-07-26); **2 autonomous gates CLOSED.** FIFTH code-surface
+**Status:** open (2026-07-25, updated 2026-07-26); **3 autonomous gates CLOSED** (the discovery
+sweep's autonomous-safe findings are exhausted). FIFTH code-surface
 register in the falsify-on-mutant series, after [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
 [RpcIngressGateAudit](RpcIngressGateAudit.md), and [SnapshotRestoreGateAudit](SnapshotRestoreGateAudit.md).
@@ -120,20 +121,47 @@ asserts flip RED while the over-broadness guard + discriminator + empty-pool sta
 directional split, both platforms. **Regression:** `test-fa-equivocation-trace` (live-engine
 detection + slashing + pooling) stays green — the honest path is unchanged.
 
-## 4. Follow-up
+## 4. CLOSED — inbound-receipt-pool cap (`test-inbound-receipt-cap`)
 
-**Confirmed autonomous-safe, NEXT (rank-2):** `MEM-inbound-receipt-pool-unbounded` —
-`Node::on_cross_shard_receipt_bundle` (node.cpp:2280) admits every receipt of a gossiped, *unsigned*
-`CROSS_SHARD_RECEIPT_BUNDLE` into `pending_inbound_receipts_` keyed on `(src_shard, tx_hash)` with no
-size cap; a peer floods distinct random `tx_hash`es → unbounded map growth (junk receipts that match
-no real cross-shard TRANSFER are never baked into a valid block, so the credit-erase never prunes
-them). Reachable on a SHARD-role multi-shard deployment, no stake/auth. Fix = a hard OOM-guard cap
-before the insert. **Dual-use caveat:** a bare cap under a sustained flood can starve *legitimate*
-inbound receipts (a cross-shard-credit liveness degradation) — strictly better than the OOM crash,
-but the principled complete fix is **source-side K-of-K authentication of receipts (the already-
-planned B3.4 milestone: receipts are documented "untrusted transit data", verification deferred),
-which makes the cap non-lossy — that part is a consensus/protocol change and is owner-gated.**
+`Node::on_cross_shard_receipt_bundle` (node.cpp:2277, SHARD-role branch) admitted every receipt of a
+gossiped, **unsigned** `CROSS_SHARD_RECEIPT_BUNDLE` into `pending_inbound_receipts_` (keyed on
+`(src_shard, tx_hash)`, with a parallel `pending_inbound_first_seen_`) with **no size cap**. Source-side
+K-of-K verification is deferred to the B3.4 milestone, so this is documented "untrusted transit data";
+but the pool is pruned **only** when a block this node applies actually credits a receipt
+(node.cpp:2467) — so a junk receipt (a random `tx_hash` matching no real cross-shard TRANSFER) is
+never baked into a valid block and never erased. A peer flooding distinct `tx_hash`es grows the pool
+(and its parallel map) without bound = **remote memory-exhaustion DoS**. Reachable on a SHARD-role
+multi-shard deployment, no stake/auth. This is the receipts sibling of the RpcIngress 256-page cap
+family: the read/responder handlers are capped, this **write-side pool** was not.
 
-Remaining sub-surfaces are clean (workflow `wf_1061bad6-1fc`): the reorg path, `on_block_sig`
-buffering (S-013 bounded), and `from_json`/binary decode returned no confirmed gaps. Any
-consensus/accept-rule finding is owner-gated, as in the RpcIngress register.
+**Fix (pure robustness, no accept-rule / consensus / state_root / wire change).** A public node-local
+`MAX_PENDING_INBOUND_RECEIPTS = 10000` (same order as the S-008 mempool `MEMPOOL_MAX_TXS`) + a
+`if (pending_inbound_receipts_.size() >= MAX_PENDING_INBOUND_RECEIPTS) break;` before the insert
+(drop-newest). The cap sits after the dedup `continue` and before **both** map inserts, so the two
+maps stay in lockstep and no orphan `first_seen` entry can form. The pool is node-local transit state
+consumed by the producer and credited only after block validation, so bounding it changes no
+consensus outcome. **★ Honest caveat (documented, not silent):** drop-newest is intentionally lossy —
+because junk is never credited/erased, a *one-time* burst of MAX distinct `tx_hash`es leaves the pool
+**permanently full**, blocking further inbound-receipt admission on this node until restart. That is a
+**bounded-memory functional degradation**, strictly preferable to the pre-fix unbounded-memory OOM
+crash. The complete, non-lossy fix (only authenticated receipts ever enter the pool) is the **B3.4
+source-side K-of-K authentication — a consensus/protocol change, owner-gated**; an eviction policy
+(FIFO-by-`first_seen`) is a possible future autonomous refinement that would recover after a one-time
+burst, but adds churn and is moot once B3.4 lands.
+
+**Gate** = `test-inbound-receipt-cap` (in-process SHARD-role Node harness; observable is
+`rpc_status()["pending_inbound_receipts"]`): CONTROL — a 5-receipt bundle is admitted in full (pool
+== 5, proves the SHARD ingest path is reached + admits); FLOOD — CAP+100 distinct `tx_hash`es cap the
+pool at exactly `MAX_PENDING_INBOUND_RECEIPTS`; a second disjoint flood keeps it AT the cap (idempotent
+ceiling). **Falsify-on-mutant** (`if (false && …) break`): the FLOOD asserts flip (pool grows to
+10105 / 20205) while setup + CONTROL stay green — clean directional split, both platforms. A 3-lens
+adversarial review (`wf_1cf9021d-82d`) returned **0 blocking defects** and confirmed the sole insert
+site is capped (no bypass), the honest non-flood path is unbroken, and the gate is non-vacuous.
+
+## 5. Follow-up
+
+The discovery sweep (`wf_1061bad6-1fc`) is exhausted for autonomous-safe gaps: both confirmed findings
+(§3, §4) are closed; the reorg path, `on_block_sig` buffering (S-013 bounded), and
+`from_json`/binary decode returned no confirmed gaps. The remaining owner-gated item on this surface
+is **B3.4 source-side receipt authentication** (the complete fix for §4), plus the two rank-1 consensus
+vulns already escalated from the RpcIngress register. Any consensus/accept-rule finding is owner-gated.

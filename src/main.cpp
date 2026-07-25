@@ -1120,6 +1120,12 @@ Additional in-process tests:
                                               double-sign can't replay into an
                                               unbounded pool; distinct
                                               equivocators still each pooled
+  determ test-inbound-receipt-cap             BlockIngress inbound-receipt cap —
+                                              pending_inbound_receipts_ bounded
+                                              at MAX_PENDING_INBOUND_RECEIPTS
+                                              against an unsigned gossiped-
+                                              bundle tx_hash flood (SHARD-role
+                                              in-process harness; drop-newest)
   determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
                                               stake-lifecycle complement;
                                               fee refund on failure; A1
@@ -43628,6 +43634,107 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-rpc-tx-sig-admit\n"
                            : "  PASS: test-rpc-tx-sig-admit\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-inbound-receipt-cap") {
+        // BlockIngress MEM-inbound-receipt-pool-unbounded (fifth register, gate 3;
+        // confirmed autonomous-safe by discovery workflow wf_1061bad6-1fc).
+        // Node::on_cross_shard_receipt_bundle (node.cpp:2277) admits every receipt
+        // of an UNAUTHENTICATED gossiped CROSS_SHARD_RECEIPT_BUNDLE into
+        // pending_inbound_receipts_ (keyed on (src_shard,tx_hash)) with NO cap;
+        // source-side K-of-K verification is deferred to B3.4, and a junk receipt
+        // (random tx_hash matching no real cross-shard TRANSFER) is never baked
+        // into a valid block, so the credit-erase never prunes it. A peer floods
+        // distinct random tx_hashes -> unbounded pool = remote memory-exhaustion
+        // DoS. The fix caps the pool at MAX_PENDING_INBOUND_RECEIPTS (drop-newest).
+        // In-process SHARD-role node harness (mirrors test-rpc-tx-sig-admit);
+        // rpc_status()["pending_inbound_receipts"] is the observable. Falsify-on-
+        // mutant: remove the cap -> the flood grows the pool past the cap, flipping
+        // the FLOOD assert while the CONTROL (under-cap) assert stays green.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        crypto::NodeKey key;
+        for (int i = 0; i < 32; ++i) key.priv_seed[i] = uint8_t(0x70 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        fs::path dir = fs::temp_directory_path() / "determ-inbound-cap";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+        chain::GenesisConfig g;
+        g.chain_id = "inbound-cap"; g.m_creators = 1; g.k_block_sigs = 1;
+        g.epoch_blocks = 1;
+        g.chain_role = ChainRole::SHARD; g.shard_id = 0; g.initial_shard_count = 2;
+        chain::GenesisCreator gc;
+        gc.domain = "node0"; gc.ed_pub = key.pub; gc.initial_stake = 1000;
+        g.initial_creators.push_back(gc);
+        chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+        g.initial_balances.push_back(ab);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+        cfg.listen_port = 7681; cfg.key_path = (dir / "node0.key").string();
+        cfg.chain_path = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+        cfg.chain_role = ChainRole::SHARD; cfg.shard_id = 0;
+        cfg.initial_shard_count = 2; cfg.log_quiet = true;
+        fs::create_directories(cfg.data_dir);
+        crypto::save_node_key(key, cfg.key_path);
+        VirtualNetwork vnet;
+        auto loop = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        node::Node node(cfg, determ::time::RealClock::instance(),
+                        loop.get(), transport.get());
+
+        const size_t CAP = node::Node::MAX_PENDING_INBOUND_RECEIPTS;
+        auto pending = [&]() {
+            return node.rpc_status()["pending_inbound_receipts"].get<size_t>();
+        };
+        // A src_block whose cross_shard_receipts carry `n` receipts addressed to
+        // our shard (dst=0) from shard 1, tx_hash varied by (base+i). Only
+        // src_shard/dst_shard/tx_hash gate admission (the rest is B3.4's job).
+        auto make_bundle = [&](uint64_t base, size_t n) {
+            chain::Block b;
+            b.cross_shard_receipts.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                chain::CrossShardReceipt r;
+                r.src_shard = 1; r.dst_shard = 0;
+                uint64_t v = base + i;
+                for (int k = 0; k < 8; ++k) r.tx_hash[k] = uint8_t(v >> (8 * k));
+                b.cross_shard_receipts.push_back(r);
+            }
+            return b;
+        };
+
+        check(pending() == 0, "setup: SHARD node, pending_inbound_receipts == 0");
+
+        // CONTROL: a small honest bundle is admitted in full (under the cap) —
+        // proves the harness reaches + passes the admission path.
+        node.on_cross_shard_receipt_bundle_for_test(1, make_bundle(0, 5));
+        check(pending() == 5,
+              "CONTROL: a 5-receipt bundle is admitted in full (pool == 5, under cap)");
+
+        // FLOOD: a peer sends CAP+overflow distinct tx_hashes; the pool must cap.
+        node.on_cross_shard_receipt_bundle_for_test(1, make_bundle(1000, CAP + 100));
+        check(pending() == CAP,
+              "FLOOD: CAP+100 distinct receipts -> pool caps at MAX_PENDING_INBOUND_RECEIPTS");
+
+        // A SECOND flood does not grow the pool past the cap (idempotent ceiling).
+        node.on_cross_shard_receipt_bundle_for_test(1, make_bundle(9'000'000, CAP + 100));
+        check(pending() == CAP,
+              "second flood keeps the pool AT the cap (no further growth)");
+
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-inbound-receipt-cap\n"
+                           : "  PASS: test-inbound-receipt-cap\n");
         return fail ? 1 : 0;
     }
 
