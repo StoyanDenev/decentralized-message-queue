@@ -29,10 +29,11 @@ itself. The gaps are on the unauthenticated **gossip** surface or are missing pe
 MOSTLY well-guarded but NOT clean: **7 confirmed accept-widening gaps** in two classes —
 **(A) two rank-1 remote-unauthenticated consensus-integrity holes** on the peer-gossip paths where a
 self-declared-role or zero-consent message is trusted, and **(B) five rank-2 resource / liveness / integrity
-gaps** (one pure-test, four missing-bound) — **3 CLOSED** (#3 MEM-tx-sig-admit §3a, #6
-ING-chain-summary-last_n-uncapped §3b, #7 RPC-readline-unbounded §3c) = the **entire autonomous
-DoS-hardening track**; the 2 remaining (#4/#5) touch the accept path and are OWNER-GATED. Each is invisible to
-the current suite (no test drives the adversarial input), so each is a clean falsify-on-mutant candidate.
+gaps** (one pure-test, four missing-bound) — **4 CLOSED** (#3 MEM-tx-sig-admit §3a, #6
+ING-chain-summary-last_n-uncapped §3b, #7 RPC-readline-unbounded §3c, plus the follow-up-promoted #8
+SNAP-header-count-uncapped §3d) = the **entire autonomous DoS-hardening track**; the 2 remaining ranked rows
+(#4/#5) touch the accept path and are OWNER-GATED. Each is invisible to the current suite (no test drives the
+adversarial input), so each is a clean falsify-on-mutant candidate.
 
 ---
 
@@ -97,12 +98,13 @@ new byte-neutral `on_beacon_header_for_test` seam + a `test-beacon-header-commit
 
 ## 3. The FAST-gateable backlog (rank-2 — a ranked, mostly test-or-small-hardening set)
 
-Closed one per directive, cheapest-value-first. **The autonomous track is now COMPLETE — all three pure
-read-only DoS-hardening rows are CLOSED:** #3 (MEM-tx-sig-admit) §3a, #6 (ING-chain-summary-last_n-uncapped)
-§3b, #7 (RPC-readline-unbounded) §3c. The **only remaining rank-2 rows, #4 and #5, touch the gossip/sync
-accept path** → they are OWNER-GATED (a production accept-rule change is not shipped autonomously) and are
-**presented to the owner**, alongside the two rank-1 consensus vulns (§2). **No autonomous rank-2 work
-remains; NEXT (owner) = #4.**
+Closed one per directive, cheapest-value-first. **The autonomous read-only DoS-hardening track is CLOSED:**
+the three ranked rows #3 (MEM-tx-sig-admit) §3a, #6 (ING-chain-summary-last_n-uncapped) §3b, #7
+(RPC-readline-unbounded) §3c, **plus the follow-up-promoted row #8 (SNAP-header-count-uncapped) §3d** — the
+snapshot-request analog of #6, found during #7's close and clamped the same way. The **only remaining rank-2
+rows, #4 and #5, touch the gossip/sync accept path** → they are OWNER-GATED (a production accept-rule change
+is not shipped autonomously) and are **presented to the owner**, alongside the two rank-1 consensus vulns
+(§2). **No autonomous rank-2 work remains; NEXT (owner) = #4.**
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | class | val |
 |---|---|---|---|---|---|---|
@@ -111,6 +113,7 @@ remains; NEXT (owner) = #4.**
 | 5 | STATUS-height-unbounded-sync-stall | node.cpp:3204 (on_status_response) | a peer-reported height is stored verbatim with no plausibility bound; one `UINT64_MAX` STATUS_RESPONSE pins the victim in SYNCING forever (block production halts; `peer_heights_` never pruned) → remote hit-and-run liveness DoS | add + delete `if (height > chain_.height()+MAX_SYNC_LEAD) return;` (or same-genesis median) | clamp + test | 2 |
 | 6 | ING-chain-summary-last_n-uncapped | node.cpp:3667-3672 (rpc_chain_summary) | the sole pagination handler missing the 256-page cap its siblings enforce (rpc_headers/on_get_chain); `last_n>=height` re-hashes + copies the ENTIRE chain under one state_mutex_ read lock (per-request-work DoS the token bucket doesn't bound) | neuter the clamp in `chain_summary.hpp` (`if (false && last_n > kChainSummaryPageMax)`) → over-cap asserts flip | ✅ **CLOSED** (test-chain-summary-cap) | 2 |
 | 7 | RPC-readline-unbounded | iocp_transport.cpp:329 + reactor_transport.cpp:241 (read_line `carry_.append`) | a single RPC line has no size ceiling; a client streaming bytes with no `\n` grows `carry_` unbounded BEFORE rate-limit/auth (both per-completed-line) → pre-auth OOM. Gossip ingress IS bounded (kMaxFrameBytes=16MB); the RPC read path is the asymmetric outlier | `if (false && carry_.size() > kMaxRpcLineBytes)` in each transport → the 64 MiB-flood assert flips (read_line consumes all, returns true) | ✅ **CLOSED** (test-net-native 6e, both transports) | 2 |
+| 8 | SNAP-header-count-uncapped | chain.cpp:2367 (serialize_state) ← on_snapshot_request (gossip) + rpc_snapshot (RPC) | the snapshot "headers" array walked an unbounded client `header_count`; `header_count>=height` forced start=0 → `to_json()` over the ENTIRE chain per request (the snapshot analog of #6; serialize_state backs ONLY the two external snapshot paths — `Chain::save` persists via its own path — so this is pure DoS, no persistence impact) | neuter the clamp (`if (false && header_count > kSnapshotHeaderMax)`) → over-cap asserts flip to the whole chain | ✅ **CLOSED** (test-snapshot-header-cap) | 2 |
 
 ---
 
@@ -178,6 +181,29 @@ hangs). **Falsified INDEPENDENTLY per transport**: `if (false && carry_.size() >
 the 6e flood assert while the small-line `read_line` asserts stay GREEN — on MSVC (iocp) and on WSL GCC
 (reactor).
 
+### 3d. CLOSED — SNAP-header-count-uncapped (`test-snapshot-header-cap`)
+
+The snapshot analog of #6, found while closing #7 (the "follow-up surfaces" list flagged
+`on_snapshot_request(header_count)` against a crafted peer value). `Chain::serialize_state(header_count)`
+(chain.cpp:2367) builds the snapshot's trailing `"headers"` array from a **client-supplied** `header_count`,
+via the exact unbounded pattern #6 had: `start = (total > header_count) ? total - header_count : 0`. It is
+reachable from **both** external snapshot paths — `on_snapshot_request` (gossip, node.cpp:2300) and
+`rpc_snapshot` (RPC, node.cpp:4533, default 16) — so a `header_count >= height` forces `start = 0` →
+`to_json()` over the ENTIRE chain per request (a per-request-work DoS, heavier than #6 since the whole state
+also serializes). **Not dual-use**: `serialize_state` backs ONLY those two external paths — full-chain disk
+persistence uses `Chain::save`'s own block loop (chain.cpp:2687), not `serialize_state` — so capping the
+header window has no persistence impact.
+
+**Fix**: clamp `header_count` to a file-local `kSnapshotHeaderMax = 256` at the top of the headers loop (the
+same 256-page cap `on_get_chain` / `rpc_headers` / `chain_summary` enforce). Read-only, no state/gossip/
+consensus touch; byte-neutral for every existing snapshot golden (all serialize with `header_count ≤ 16`), so
+only an abusive `> 256` is bounded — the requester default is 16, ~16× below the cap, so no legitimate
+snapshot truncates. Gate = `test-snapshot-header-cap`: builds a real 301-block bare Chain and asserts
+`serialize_state(hc)["headers"].size()` — `16→16`, `256→256` (boundary), `257/1000/UINT32_MAX→256` (clamped),
+and a short 11-block chain returns all 11 regardless. **Falsify-on-mutant**: neutering the clamp
+(`if (false && header_count > kSnapshotHeaderMax) …`) flips EXACTLY the three over-cap asserts while the
+default/boundary/short-chain asserts stay GREEN — a targeted counter-delta, both platforms.
+
 ## 4. Completeness / follow-up
 
 Deduped 9→7 (RPC-readline == C1; GOSSIP-tx-hash == C2). A follow-up audit should still deep-read surfaces the
@@ -187,8 +213,9 @@ apply-block equivocation-assembly; the consensus-chatter handlers (`on_contrib`,
 here); the acknowledged **B2c.2-minimal** secondary beacon weakness (`node.cpp:1971`: non-empty creators
 verified against the shard's OWN registry, so one registered node can self-sign a sole-creator header —
 worth its own gate); `on_cross_shard_receipt_bundle` relay amplification + unverified-`src_block` buffering
-(confirm the deferral to the sister VAL-csr / VAL-inbound-f2 gates holds); `on_snapshot_request(header_count)`
-against a crafted peer value; whether `on_snapshot_response`/`on_headers_response` are truly never wired on
+(confirm the deferral to the sister VAL-csr / VAL-inbound-f2 gates holds); ~~`on_snapshot_request(header_count)`
+against a crafted peer value~~ — **CLOSED as row #8 §3d** (SNAP-header-count-uncapped); whether
+`on_snapshot_response`/`on_headers_response` are truly never wired on
 the full node; and the lower-confidence `verify_auth` empty-expected-MAC observation (rpc.cpp:123-128 — the
 internal-failure trigger is not attacker-forceable so it is unregistered, but it contradicts the
 `fails CLOSED` comment and merits a defense-in-depth assertion).

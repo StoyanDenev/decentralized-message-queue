@@ -2363,8 +2363,19 @@ json Chain::serialize_state(uint32_t header_count) const {
     // Tail headers for chain continuity. Restorer keeps them so they
     // can verify incoming block's prev_hash chains correctly. Default
     // is 16 — enough for typical sync overlap.
+    // RpcIngressGateAudit §3 SNAP-header-count-uncapped: clamp header_count to
+    // the 256-page anti-DoS cap the sibling handlers already enforce
+    // (on_get_chain, rpc_headers, chain_summary). serialize_state backs ONLY the
+    // two EXTERNAL snapshot-request paths (on_snapshot_request gossip +
+    // rpc_snapshot RPC) — full-chain disk persistence uses Chain::save's own path
+    // — so an unbounded client header_count >= height would otherwise serialize
+    // the ENTIRE chain (to_json per block) under one snapshot request: a
+    // per-request-work DoS. The default request is 16 (~16x below the cap), so
+    // this never truncates a legitimate snapshot; only an abusive count is bounded.
+    constexpr uint32_t kSnapshotHeaderMax = 256;
     json hdrs = json::array();
     if (!blocks_.empty() && header_count > 0) {
+        if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
         size_t total = blocks_.size();
         size_t start = (total > header_count) ? total - header_count : 0;
         for (size_t i = start; i < total; ++i) {

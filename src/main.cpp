@@ -452,6 +452,11 @@ In-process tests (deterministic, no network):
                                               on_get_chain / rpc_headers); an
                                               unbounded last_n no longer rewalks
                                               the whole chain under the read lock
+  determ test-snapshot-header-cap             RpcIngress — serialize_state's
+                                              snapshot "headers" 256-page cap
+                                              (on_snapshot_request + rpc_snapshot);
+                                              an unbounded header_count no longer
+                                              to_json()'s the whole chain per req
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -43320,6 +43325,80 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-chain-summary-cap\n"
                            : "  PASS: test-chain-summary-cap\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-snapshot-header-cap") {
+        // RpcIngressGateAudit §3 SNAP-header-count-uncapped: Chain::serialize_state
+        // (chain.cpp:2367) builds the snapshot's trailing "headers" array from a
+        // client-supplied header_count. It backs BOTH external snapshot ingress
+        // paths -- on_snapshot_request (gossip, node.cpp:2300) + rpc_snapshot (RPC,
+        // node.cpp:4533) -- but was UNBOUNDED: header_count >= height forced
+        // start=0 -> to_json() over the ENTIRE chain per request (a per-request-
+        // work DoS the sibling handlers on_get_chain / rpc_headers / chain_summary
+        // all cap at 256). serialize_state is NOT used for full-chain disk
+        // persistence (Chain::save has its own path), so the clamp caps
+        // header_count to kSnapshotHeaderMax=256 with no persistence impact.
+        // Falsify-on-mutant: neuter the clamp (`if (false && header_count > ...)`)
+        // -> every over-cap assert flips from a 256-header window to the whole chain.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Real bare chain TALLER than the cap: genesis + 300 empty blocks.
+        Block g;
+        g.index = 0;
+        g.timestamp = 1;
+        g.cumulative_rand = Hash{};
+        Chain c(g);
+        for (int i = 0; i < 300; ++i) {
+            Block b;
+            b.index           = c.height();
+            b.prev_hash       = c.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            c.append(b);
+        }
+        check(c.height() == 301, "chain built to height 301 (genesis + 300 empty blocks)");
+
+        // n_headers(hc) == the number of block headers serialize_state materializes
+        // for header_count=hc -- the REAL serialize path, so the assert pins the
+        // production DoS bound, not an arithmetic identity.
+        auto n_headers = [&](uint32_t hc) -> size_t {
+            return c.serialize_state(hc)["headers"].size();
+        };
+
+        // Default + at/below the cap: honored exactly.
+        check(n_headers(16)  == 16,  "header_count=16 -> 16 headers (default, honored exactly)");
+        check(n_headers(256) == 256, "header_count=256 -> 256 headers (exactly at the cap)");
+
+        // THE LOAD-BEARING asserts: the clamp bites ABOVE the cap. The mutant
+        // (no clamp) serializes the whole 301-block chain for each of these.
+        check(n_headers(257)        == 256, "header_count=257 -> clamped to 256 (one over the cap)");
+        check(n_headers(1000)       == 256, "header_count=1000 -> clamped to 256");
+        check(n_headers(UINT32_MAX) == 256, "header_count=UINT32_MAX -> clamped to 256 (no full-chain to_json rewalk)");
+
+        // A short chain (height <= cap) is unaffected -- the whole chain is already
+        // within budget, so an over-cap request still returns every header. This
+        // assert stays GREEN on the mutant (a boundary control, not a discriminator).
+        Chain s(g);
+        for (int i = 0; i < 10; ++i) {
+            Block b;
+            b.index           = s.height();
+            b.prev_hash       = s.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            s.append(b);
+        }
+        check(s.serialize_state(UINT32_MAX)["headers"].size() == 11,
+              "short chain (height 11 < cap) -> all 11 headers regardless of header_count");
+
+        std::cout << (fail ? "  FAIL: test-snapshot-header-cap\n"
+                           : "  PASS: test-snapshot-header-cap\n");
         return fail ? 1 : 0;
     }
 
