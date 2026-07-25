@@ -1,20 +1,27 @@
 # Block-Ingress Gate-Gap Audit
 
-**Status:** open (2026-07-25); 1 autonomous gate CLOSED. FIFTH code-surface register in the
-falsify-on-mutant series, after [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
+**Status:** open (2026-07-25, updated 2026-07-26); **2 autonomous gates CLOSED.** FIFTH code-surface
+register in the falsify-on-mutant series, after [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
 [RpcIngressGateAudit](RpcIngressGateAudit.md), and [SnapshotRestoreGateAudit](SnapshotRestoreGateAudit.md).
 
 ## 0. Surface & method
 
-The **untrusted-block ingress path** — how a gossiped `chain::Block` becomes chain state or
-forensic evidence: `Node::on_block` → `Node::apply_block_locked` (node.cpp:2353), its
+The **untrusted-block ingress path** — how a gossiped `chain::Block` (and its side-paths) becomes
+chain state or forensic evidence: `Node::on_block` → `Node::apply_block_locked` (node.cpp:2353), its
 duplicate/old-height branch (`b.index < chain_.height()`), the equivocation-detection + reorg
-sub-paths, and the `Block::from_json` / binary decode that feeds them. This is the sibling of the
-tx-ingress (RpcIngress MEM-tx-sig-admit), the RPC-ingress, and the snapshot-restore surfaces.
+sub-paths, the gossip-fed pools (`pending_equivocation_evidence_`, `pending_inbound_receipts_`), and
+the `Block::from_json` / binary decode that feeds them. This is the sibling of the tx-ingress
+(RpcIngress MEM-tx-sig-admit), the RPC-ingress, and the snapshot-restore surfaces.
 
-Unlike the prior four registers, the first gate here was found by **direct inspection**, not a
-discovery workflow — a full finder → adversarial-verify sweep of this surface is a future step.
+**Method.** The first gate (§2) was found by **direct inspection**. The rest of the surface was then
+swept by a discovery workflow `wf_1061bad6-1fc` — 5 finders (pre-validation `apply_block_locked`,
+`on_block_sig` buffering, `Block::from_json`/binary-decode bounds, the reorg path, F2 pools + gossip
+work-amplification) → adversarial REFUTE-by-default verifiers that independently re-classified each
+finding as autonomous-safe (pure robustness) vs owner-gated. Result: **2 confirmed autonomous-safe
+(both closed — §2, §3), 1 refuted, 0 owner-gated**; the pre-validation, block-sig-buffering, and
+decode-bounds sub-surfaces returned clean (covered by the 19/19 accept path, the §2 fix, and the
+existing decode caps).
 
 ## 1. Verdict so far
 
@@ -76,10 +83,57 @@ the positive control + negatives stay green. Both platforms.
 exercises real equivocation detection + slashing) stays green on both platforms — the extraction did
 not change honest detection behavior.
 
-## 3. Follow-up (not yet this register)
+## 3. CLOSED — equiv-evidence dedup identity (`test-equivocation-dedup-identity`)
 
-A full finder → adversarial-verify discovery sweep of the block-ingress surface (the reorg path,
-`on_block_sig` buffering/flooding, the F2 reconciliation admission on gossiped blocks, decode-side
-bounds) is the natural next step; the accept path itself is already closed by
-ConsensusValidatorGateAudit. Any consensus/accept-rule finding is owner-gated, as in the RpcIngress
-register.
+`pending_equivocation_evidence_` deduped inserts on `(equivocator, block_index)` at three sites
+(`on_equivocation_evidence` gossip handler node.cpp:1922, the self-built detect path in
+`apply_block_locked`, the `on_contrib` S-006 detect), and `rpc_submit_equivocation` inspected the
+pool with the same key for its response. But **`EquivocationEvent.block_index` is bound by neither of
+the two signatures** — only the two raw 32-byte digests are signed — so a single *valid* double-sign
+`(digest_a, sig_a, digest_b, sig_b)` re-passes both `crypto::verify` calls when re-gossiped/
+re-submitted with `block_index = 0, 1, 2, … 2⁶⁴-1`, each counting as a fresh `(equivocator,
+block_index)` entry → **unbounded pool growth from ONE proof** (a node-local memory-exhaustion DoS).
+This is DISTINCT from the owner-gated `EQV-height-unbound-forged-slash` consensus vuln
+(RpcIngressGateAudit): here the impact is the *pool dedup key*, and the fix is a pool-dedup change,
+not an accept-rule change. Tellingly, the credited-evidence prune (node.cpp:2454) already treats the
+**equivocator alone** as the identity (`remove_if` by equivocator) — the insert dedup was simply
+inconsistent with it.
+
+**Fix (pure robustness, no accept-rule / consensus / wire change).** ONE shared identity predicate
+`node::same_equivocation_identity(a, b) → a.equivocator == b.equivocator` (+ a
+`pending_equivocation_contains` helper) in producer.hpp, used at **every** dedup / inspect / prune
+site so they cannot drift. Dedup on the equivocator alone bounds the pool to |distinct equivocators|
+(≤ |registrants|, since each insert requires a signature-verified proof against a *registered* key)
+and defeats the replay amplification. Behavior-preserving on honest input: an equivocator is fully
+slashed (full-stake forfeit + deregister) on the FIRST valid proof regardless of height, so a second
+distinct-height proof for the same equivocator is redundant — exactly why the prune already erases by
+equivocator. `rpc_submit_equivocation` now reports `accepted=true` idempotently for an already-pooled
+equivocator (it *will* be slashed), `false` only for an invalid submission.
+
+**Gate** = `test-equivocation-dedup-identity` (drives the shared predicate directly, no Node needed):
+a replay with a different / far `block_index` is deduped (amplification defeated), a same-equivocator
+different-proof-bytes submission is deduped, but a **different equivocator is NOT deduped** (distinct
+equivocators each keep a pool entry → slashing coverage preserved); the predicate ignores
+`block_index` and distinguishes equivocators; empty pool contains nothing. **Falsify-on-mutant**
+(restore `&& a.block_index == b.block_index` to the identity): the four replay/ignore-block_index
+asserts flip RED while the over-broadness guard + discriminator + empty-pool stay green — clean
+directional split, both platforms. **Regression:** `test-fa-equivocation-trace` (live-engine
+detection + slashing + pooling) stays green — the honest path is unchanged.
+
+## 4. Follow-up
+
+**Confirmed autonomous-safe, NEXT (rank-2):** `MEM-inbound-receipt-pool-unbounded` —
+`Node::on_cross_shard_receipt_bundle` (node.cpp:2280) admits every receipt of a gossiped, *unsigned*
+`CROSS_SHARD_RECEIPT_BUNDLE` into `pending_inbound_receipts_` keyed on `(src_shard, tx_hash)` with no
+size cap; a peer floods distinct random `tx_hash`es → unbounded map growth (junk receipts that match
+no real cross-shard TRANSFER are never baked into a valid block, so the credit-erase never prunes
+them). Reachable on a SHARD-role multi-shard deployment, no stake/auth. Fix = a hard OOM-guard cap
+before the insert. **Dual-use caveat:** a bare cap under a sustained flood can starve *legitimate*
+inbound receipts (a cross-shard-credit liveness degradation) — strictly better than the OOM crash,
+but the principled complete fix is **source-side K-of-K authentication of receipts (the already-
+planned B3.4 milestone: receipts are documented "untrusted transit data", verification deferred),
+which makes the cap non-lossy — that part is a consensus/protocol change and is owner-gated.**
+
+Remaining sub-surfaces are clean (workflow `wf_1061bad6-1fc`): the reorg path, `on_block_sig`
+buffering (S-013 bounded), and `from_json`/binary decode returned no confirmed gaps. Any
+consensus/accept-rule finding is owner-gated, as in the RpcIngress register.

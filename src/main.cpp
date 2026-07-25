@@ -1113,6 +1113,13 @@ Additional in-process tests:
                                               size-short gossip block → nullopt
                                               (no OOB read), genuine double-
                                               sign still assembles evidence
+  determ test-equivocation-dedup-identity     BlockIngress equiv-evidence dedup
+                                              — pending_equivocation_evidence_
+                                              keys on the equivocator ALONE not
+                                              the unsigned block_index, so one
+                                              double-sign can't replay into an
+                                              unbounded pool; distinct
+                                              equivocators still each pooled
   determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
                                               stake-lifecycle complement;
                                               fee refund on failure; A1
@@ -59659,6 +59666,82 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-detect-oob "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // BlockIngress MEM-equiv-evidence-blockindex-amplification (register gate 2).
+    // pending_equivocation_evidence_ dedups on the equivocator ALONE, not on the
+    // attacker-chosen, UNSIGNED block_index. Keying dedup on block_index let one
+    // valid double-sign be re-gossiped/re-submitted with block_index = 0,1,2,…
+    // (each pair re-passes the two sig checks — only the raw digests are signed)
+    // into unbounded pool entries: a node-local memory-exhaustion DoS. The fix
+    // is one shared identity predicate node::same_equivocation_identity used at
+    // every dedup/inspect/prune site (on_equivocation_evidence, the self-built
+    // detect path, the on_contrib S-006 detect, rpc_submit_equivocation's
+    // response inspection, and the credited-evidence prune). This gate drives the
+    // shared predicate directly. Falsify-on-mutant: restore block_index to the
+    // identity (return a.equivocator==b.equivocator && a.block_index==b.block_index)
+    // — the "replay is deduped" asserts flip while "a different equivocator is NOT
+    // deduped" stays green. (The live-engine test-fa-equivocation-trace is the
+    // wiring/regression gate that the honest detection+slashing path still works.)
+    if (cmd == "test-equivocation-dedup-identity") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        // A patterned EquivocationEvent for `who` at height `bidx`; the digest/sig
+        // bytes vary with `seed` (the identity ignores them, but varying them
+        // proves dedup keys on the equivocator, not the proof content).
+        auto mkev = [](const std::string& who, uint64_t bidx, uint8_t seed){
+            EquivocationEvent ev;
+            ev.equivocator = who;
+            ev.block_index = bidx;
+            for (size_t i = 0; i < ev.digest_a.size(); ++i) ev.digest_a[i] = uint8_t(seed + i);
+            for (size_t i = 0; i < ev.digest_b.size(); ++i) ev.digest_b[i] = uint8_t(seed + 0x40 + i);
+            for (size_t i = 0; i < ev.sig_a.size(); ++i)    ev.sig_a[i]    = uint8_t(seed + 0x10 + i);
+            for (size_t i = 0; i < ev.sig_b.size(); ++i)    ev.sig_b[i]    = uint8_t(seed + 0x80 + i);
+            return ev;
+        };
+
+        // Pool holds ONE record for alice at block_index 1.
+        std::vector<EquivocationEvent> pool;
+        pool.push_back(mkev("alice", 1, 0x01));
+
+        // Baseline: the exact same record is a dup.
+        check(node::pending_equivocation_contains(pool, mkev("alice", 1, 0x01)),
+              "exact same (equivocator, block_index) is deduped");
+        // THE FIX: the same proof replayed with a DIFFERENT block_index (the
+        // attacker varies the unsigned field) is STILL deduped -> one entry per
+        // equivocator, amplification defeated.
+        check(node::pending_equivocation_contains(pool, mkev("alice", 2, 0x01)),
+              "replay with a different block_index is deduped (amplification defeated)");
+        check(node::pending_equivocation_contains(pool, mkev("alice", 999999, 0x01)),
+              "replay with a far block_index is deduped");
+        // Same equivocator, entirely different proof bytes -> still deduped (an
+        // equivocator is fully slashed on the first proof).
+        check(node::pending_equivocation_contains(pool, mkev("alice", 2, 0x55)),
+              "same equivocator, different proof bytes -> still deduped");
+        // NOT over-broad: a DIFFERENT equivocator is NOT deduped, so distinct
+        // equivocators each still get their own pool entry (slashing coverage).
+        check(!node::pending_equivocation_contains(pool, mkev("bob", 1, 0x01)),
+              "a different equivocator is NOT deduped (distinct equivocators pooled)");
+        // The identity predicate directly ignores block_index and keys on the
+        // equivocator.
+        check(node::same_equivocation_identity(mkev("alice", 1, 0x01), mkev("alice", 7, 0x22)),
+              "same_equivocation_identity ignores block_index");
+        check(!node::same_equivocation_identity(mkev("alice", 1, 0x01), mkev("bob", 1, 0x01)),
+              "same_equivocation_identity distinguishes equivocators");
+        // Empty pool contains nothing.
+        check(!node::pending_equivocation_contains(std::vector<EquivocationEvent>{},
+                                                   mkev("alice", 1, 0x01)),
+              "empty pool contains nothing");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": equivocation-dedup-identity "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

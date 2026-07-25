@@ -1919,10 +1919,12 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     if (!crypto::verify(*ek, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
         return;
 
-    for (auto& e : pending_equivocation_evidence_) {
-        if (e.equivocator == ev.equivocator && e.block_index == ev.block_index)
-            return; // dup
-    }
+    // MEM-equiv-evidence-blockindex-amplification: dedup on the equivocator
+    // alone (NOT the attacker-chosen, unsigned block_index) so one valid
+    // double-sign cannot be replayed with varying block_index into unbounded
+    // pool entries. See node::same_equivocation_identity.
+    if (pending_equivocation_contains(pending_equivocation_evidence_, ev))
+        return; // dup — this equivocator is already pooled (will be slashed)
     pending_equivocation_evidence_.push_back(ev);
     std::cout << "[node] adopted gossiped equivocation evidence: equivocator="
               << ev.equivocator << " at h=" << ev.block_index << "\n";
@@ -2379,15 +2381,9 @@ void Node::apply_block_locked(const chain::Block& b) {
                     cfg_.shard_id,
                     beacon_headers_.empty() ? 0 : beacon_headers_.back().index)) {
                 const chain::EquivocationEvent& ev = *ev_opt;
-                // Add to pool if not already present.
-                bool dup = false;
-                for (auto& e : pending_equivocation_evidence_) {
-                    if (e.equivocator == ev.equivocator
-                        && e.block_index == ev.block_index) {
-                        dup = true; break;
-                    }
-                }
-                if (!dup) {
+                // Add to pool if this equivocator is not already pooled
+                // (equivocator-only identity — MEM-equiv-evidence-blockindex).
+                if (!pending_equivocation_contains(pending_equivocation_evidence_, ev)) {
                     pending_equivocation_evidence_.push_back(ev);
                     gossip_.broadcast(net::make_equivocation_evidence(ev));
                     std::cerr << "[node] EQUIVOCATION evidence built at h="
@@ -2456,7 +2452,8 @@ void Node::post_append_bookkeeping_locked(const chain::Block& b) {
             std::remove_if(pending_equivocation_evidence_.begin(),
                             pending_equivocation_evidence_.end(),
                 [&](const chain::EquivocationEvent& e) {
-                    return e.equivocator == ev.equivocator;
+                    // Same equivocator-only identity the dedup uses.
+                    return same_equivocation_identity(e, ev);
                 }),
             pending_equivocation_evidence_.end());
     }
@@ -2945,14 +2942,7 @@ void Node::on_contrib(const ContribMsg& msg) {
             ev.beacon_anchor_height = beacon_headers_.empty()
                 ? 0 : beacon_headers_.back().index;
 
-            bool dup = false;
-            for (auto& e : pending_equivocation_evidence_) {
-                if (e.equivocator == ev.equivocator
-                    && e.block_index == ev.block_index) {
-                    dup = true; break;
-                }
-            }
-            if (!dup) {
+            if (!pending_equivocation_contains(pending_equivocation_evidence_, ev)) {
                 pending_equivocation_evidence_.push_back(ev);
                 gossip_.broadcast(net::make_equivocation_evidence(ev));
                 std::cerr << "[node] S-006 ContribMsg equivocation detected: "
@@ -4486,13 +4476,12 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
     // The handler grabs state_mutex_ itself.
     on_equivocation_evidence(ev);
 
-    // Re-grab to inspect post-handler state for the response.
+    // Re-grab to inspect post-handler state for the response. Idempotent on the
+    // equivocator (same identity the handler dedups on): a valid submission for
+    // an already-pooled equivocator reports accepted=true (it WILL be slashed),
+    // an invalid one leaves the equivocator absent → accepted=false.
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
-    bool present = false;
-    for (auto& e : pending_equivocation_evidence_) {
-        if (e.equivocator == ev.equivocator
-            && e.block_index == ev.block_index) { present = true; break; }
-    }
+    bool present = pending_equivocation_contains(pending_equivocation_evidence_, ev);
     if (present) {
         // Gossip so peers can also slash. The handler doesn't broadcast
         // (it processes inbound), so we do it here on the submission path.

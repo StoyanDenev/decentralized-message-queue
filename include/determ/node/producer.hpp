@@ -284,6 +284,31 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
     uint32_t shard_id,
     uint64_t beacon_anchor_height);
 
+// BlockIngress MEM-equiv-evidence-blockindex-amplification: the pool-identity
+// used to dedup pending equivocation evidence. An equivocator is fully slashed
+// (full-stake forfeit + deregister, chain.cpp apply) on the FIRST valid proof
+// REGARDLESS of block_index, and the credited-evidence prune erases by
+// equivocator alone — so pending_equivocation_evidence_ holds at most one
+// meaningful record per equivocator. block_index is an attacker-chosen field
+// bound by NEITHER of the two signatures, so keying dedup on it let ONE valid
+// double-sign replay with block_index = 0,1,2,… into unbounded pool entries
+// (a node-local memory-exhaustion DoS, distinct from the owner-gated
+// EQV-height-unbound consensus vuln). Deduping on the equivocator alone bounds
+// the pool to |distinct equivocators| and defeats the replay amplification.
+// ONE shared identity used at every dedup / inspect / prune site so they cannot
+// drift.
+inline bool same_equivocation_identity(const chain::EquivocationEvent& a,
+                                       const chain::EquivocationEvent& b) {
+    return a.equivocator == b.equivocator;
+}
+inline bool pending_equivocation_contains(
+        const std::vector<chain::EquivocationEvent>& pool,
+        const chain::EquivocationEvent& ev) {
+    for (const auto& e : pool)
+        if (same_equivocation_identity(e, ev)) return true;
+    return false;
+}
+
 Hash hash_abort_event(const chain::AbortEvent& e);
 Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r);
 // D3.5d: full-content hash of a shard-tip record = SHA256(rec.encode()). The
