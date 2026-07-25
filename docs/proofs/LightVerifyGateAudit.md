@@ -1,6 +1,6 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **1 autonomous gate CLOSED, 9 confirmed autonomous-safe in backlog, 0
+**Status:** open (2026-07-26); **2 autonomous gates CLOSED, 8 confirmed autonomous-safe in backlog, 0
 owner-gated.** SIXTH code-surface register in the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -51,6 +51,33 @@ mutant** (`if (false && b.creators.empty())`): the mutant prints `OK … verifie
 state_root: <forged>` (exit 0) — literally accepting a forged state_root with zero signatures — while
 CTRL stays FAIL; a clean directional split on both platforms.
 
+## 1b. CLOSED — anchor-index label not bound (`test-light-verify-state-bundle-anchor-index`, LSB-ANCHOR-INDEX)
+
+`verify-state-bundle` (light/verify_state_bundle.cpp) verifies a **proof-carrying artifact offline**: a
+`(namespace, key)` state proof plus the `anchor_block`/`successor_header` pair whose crypto binding
+(`successor.prev_hash == compute_hash(anchor)`) is committee-authenticated. The envelope also carries an
+`anchor_index` field that the tool read (line 283) and **echoed into the VERIFIED report + JSON**
+(`anchor_index: N`) but never bound to anything. The anchor block's own `index` is the first field of the
+committee-signed block digest — so it is authenticated — but nothing tied the **displayed** `anchor_index`
+label to it. A valid bundle for a real anchor at height `B'` could therefore be **re-labelled**
+`anchor_index = B` and the tool would print `VERIFIED … anchor_index: B` for state actually anchored at
+`B'`, deceiving the offline verifier about the height. (Same "label not bound to the committee-anchored
+value" class as the backlog's LTX-HEIGHT-NOT-BOUND, but file-based and cleanly gateable offline.)
+
+**Fix (client-side soundness, no node/consensus/wire change):** a structural gate placed next to the
+existing key-binding gate (before the crypto/genesis gates) requiring the envelope `anchor_index` to equal
+`anchor_block.index`. Because the anchor block's index is committee-authenticated by the crypto chain, the
+label is then transitively bound. When `anchor_block.index` is absent the check no-ops (the crypto binding
+still governs), so no honest bundle regresses.
+
+**Gate** = `test_light_verify_state_bundle_anchor_index.sh` — FAST, fully-offline (hand-built JSON
+fixtures; the structural check needs no real crypto, mirroring the key-binding leg): NEG `anchor_index(5)
+!= anchor_block.index(1)` → UNVERIFIABLE exit 3 with the exact `anchor_index label … != anchor_block.index`
+diagnostic, rejected **before** the genesis-load gate; CTRL a matching `anchor_index(1)==index(1)` passes
+the gate and falls through to a later gate (non-vacuity). **Falsify-on-mutant** (`if (false && anchor_index
+!= anchor_block_index)`): the NEG bundle falls through to the genesis-load gate (exit 1, no anchor_index
+diagnostic), flipping the NEG assert — a clean directional split on both platforms.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
@@ -61,7 +88,6 @@ CTRL stays FAIL; a clean directional split on both platforms.
 | LV-2 | 2 | trustless_read.cpp | unconditional MD→BFT quorum fallback accepts reduced-quorum (`ceil(2K/3)`) blocks with no BFT-eligibility gate. Fix: gate the `bft=true` retry on `consensus_mode==BFT && genesis.bft_enabled`. |
 | WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
 | LRPC-1 | 2 | rpc_client.cpp | `RpcClient::read_line` grows its buffer unbounded → a MITM daemon OOM-crashes the reader. Fix: a light-local 16 MiB `kLightRpcMaxLineBytes` cap (the client-side sibling of the RpcIngress readline cap). |
-| LSB-ANCHOR-INDEX-NOT-BOUND | 3 | verify_state_bundle.cpp | displays `bundle['anchor_index']` without binding it to the committee-anchored `anchor.index` — a real (key,value) proof can be relabeled to a false height. |
 | AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: route idx==0 through `committee_bound_state_root` or derive the genesis `state_root` locally. |
 
 ## 3. REFUTED

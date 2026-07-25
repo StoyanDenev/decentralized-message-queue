@@ -165,6 +165,10 @@ else
     assert "true" "matching key_bytes passes the key-binding gate (falls through to a later gate)"
 fi
 
+# NOTE: the anchor_index-binding structural gate (LSB-ANCHOR-INDEX) has its own
+# standalone FAST test, tools/test_light_verify_state_bundle_anchor_index.sh
+# (offline hand-built fixtures, like leg 2b), so it is not duplicated here.
+
 # ── CLUSTER-DEPENDENT LEGS (positive round-trip + negative binding) ─────────
 echo
 echo "=== 3. Attempt a 3-node cluster for the export->verify round-trip ==="

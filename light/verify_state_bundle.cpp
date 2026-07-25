@@ -351,6 +351,34 @@ int verify_state_bundle(const VerifyStateBundleOptions& opts) {
             }
         }
 
+        // ── 1b. ANCHOR-INDEX BINDING (structural, pre-crypto — mirrors the
+        //        key-binding gate above). LightVerify LSB-ANCHOR-INDEX: the
+        //        `anchor_index` field is a DISPLAY LABEL the untrusted bundle
+        //        supplies (echoed in the VERIFIED report + JSON). The crypto
+        //        binding below (successor.prev_hash == compute_hash(anchor), whose
+        //        digest includes anchor_block.index) committee-authenticates the
+        //        anchor block, but NOTHING tied the displayed anchor_index to it —
+        //        so a valid bundle for a real anchor at height B' could be
+        //        RELABELLED anchor_index=B and the tool would print
+        //        "VERIFIED … anchor_index: B" for state actually anchored at B'.
+        //        Bind the label to the anchor block's own index field (which the
+        //        crypto below then authenticates). Structural + offline: no
+        //        genesis/RPC needed. Deferred to step 4's from_json when the
+        //        anchor_block is absent/indexless.
+        if (bundle.contains("anchor_block") && bundle["anchor_block"].is_object()
+            && bundle["anchor_block"].contains("index")) {
+            uint64_t anchor_block_index =
+                bundle["anchor_block"].value("index", uint64_t{0});
+            if (anchor_index != anchor_block_index) {
+                emit_unverifiable(opts.json_out,
+                    "SECURITY: envelope anchor_index label "
+                    + std::to_string(anchor_index) + " != anchor_block.index "
+                    + std::to_string(anchor_block_index)
+                    + " — bundle relabelled to a false anchor height");
+                return 3;
+            }
+        }
+
         // ── 2. CHAIN-IDENTITY PIN (the SOLE trust anchor). ──────────────────
         // compute_genesis_hash(--genesis) must equal bundle.genesis_hash. This
         // is the one leg that uses compute_genesis_hash (known Windows edge),
