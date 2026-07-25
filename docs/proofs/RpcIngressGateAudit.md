@@ -29,9 +29,10 @@ itself. The gaps are on the unauthenticated **gossip** surface or are missing pe
 MOSTLY well-guarded but NOT clean: **7 confirmed accept-widening gaps** in two classes —
 **(A) two rank-1 remote-unauthenticated consensus-integrity holes** on the peer-gossip paths where a
 self-declared-role or zero-consent message is trusted, and **(B) five rank-2 resource / liveness / integrity
-gaps** (one pure-test, four missing-bound) — **2 CLOSED** (#3 MEM-tx-sig-admit §3a, #6
-ING-chain-summary-last_n-uncapped §3b), 3 open. Each is invisible to the current suite (no test drives the
-adversarial input), so each is a clean falsify-on-mutant candidate.
+gaps** (one pure-test, four missing-bound) — **3 CLOSED** (#3 MEM-tx-sig-admit §3a, #6
+ING-chain-summary-last_n-uncapped §3b, #7 RPC-readline-unbounded §3c) = the **entire autonomous
+DoS-hardening track**; the 2 remaining (#4/#5) touch the accept path and are OWNER-GATED. Each is invisible to
+the current suite (no test drives the adversarial input), so each is a clean falsify-on-mutant candidate.
 
 ---
 
@@ -96,12 +97,12 @@ new byte-neutral `on_beacon_header_for_test` seam + a `test-beacon-header-commit
 
 ## 3. The FAST-gateable backlog (rank-2 — a ranked, mostly test-or-small-hardening set)
 
-Closed one per directive, cheapest-value-first. **#3 (MEM-tx-sig-admit) is CLOSED — see §3a**; **#6
-(ING-chain-summary-last_n-uncapped) is CLOSED — see §3b.** #4/#5 touch the gossip/sync **accept path** →
-they are OWNER-GATED (a production accept-rule change is not shipped autonomously; present to the owner), so
-the autonomous cadence takes the two pure read-only DoS-hardening rows (#6, then #7) first. Remaining open:
-#4/#5 (owner-gated accept-path bound) and #7 (RPC-readline pre-auth OOM ceiling, two transports + a
-socket-level fixture — the costliest). **NEXT (autonomous) = #7; NEXT (owner) = #4.**
+Closed one per directive, cheapest-value-first. **The autonomous track is now COMPLETE — all three pure
+read-only DoS-hardening rows are CLOSED:** #3 (MEM-tx-sig-admit) §3a, #6 (ING-chain-summary-last_n-uncapped)
+§3b, #7 (RPC-readline-unbounded) §3c. The **only remaining rank-2 rows, #4 and #5, touch the gossip/sync
+accept path** → they are OWNER-GATED (a production accept-rule change is not shipped autonomously) and are
+**presented to the owner**, alongside the two rank-1 consensus vulns (§2). **No autonomous rank-2 work
+remains; NEXT (owner) = #4.**
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | class | val |
 |---|---|---|---|---|---|---|
@@ -109,7 +110,7 @@ socket-level fixture — the costliest). **NEXT (autonomous) = #7; NEXT (owner) 
 | 4 | GOSSIP-on_tx-tx-hash-not-rechecked | node.cpp:2843 (on_tx) vs the present-but-unpinned :4438 (rpc_submit_tx) | on_tx never recomputes `tx.hash==compute_hash()`, so a validly-signed tx can enter `tx_store_` under a forged key (light-client inclusion-proof false-negatives; on sharded, a cross-shard-receipt front-run → targeted fund-lock) | neuter the :4438 recompute; add `if (tx.hash != tx.compute_hash()) return;` to on_tx | 1-line fix + test | 2 (borderline 2/3) |
 | 5 | STATUS-height-unbounded-sync-stall | node.cpp:3204 (on_status_response) | a peer-reported height is stored verbatim with no plausibility bound; one `UINT64_MAX` STATUS_RESPONSE pins the victim in SYNCING forever (block production halts; `peer_heights_` never pruned) → remote hit-and-run liveness DoS | add + delete `if (height > chain_.height()+MAX_SYNC_LEAD) return;` (or same-genesis median) | clamp + test | 2 |
 | 6 | ING-chain-summary-last_n-uncapped | node.cpp:3667-3672 (rpc_chain_summary) | the sole pagination handler missing the 256-page cap its siblings enforce (rpc_headers/on_get_chain); `last_n>=height` re-hashes + copies the ENTIRE chain under one state_mutex_ read lock (per-request-work DoS the token bucket doesn't bound) | neuter the clamp in `chain_summary.hpp` (`if (false && last_n > kChainSummaryPageMax)`) → over-cap asserts flip | ✅ **CLOSED** (test-chain-summary-cap) | 2 |
-| 7 | RPC-readline-unbounded | iocp_transport.cpp:329 + reactor_transport.cpp:241 (read_line `carry_.append`) | a single RPC line has no size ceiling; a client streaming bytes with no `\n` grows `carry_` unbounded BEFORE rate-limit/auth (both per-completed-line) → pre-auth OOM. Gossip ingress IS bounded (kMaxFrameBytes=16MB); the RPC read path is the asymmetric outlier | insert then delete `if (carry_.size() > (64u<<20)) return false;` after each append | ceiling (both transports) + test | 2 |
+| 7 | RPC-readline-unbounded | iocp_transport.cpp:329 + reactor_transport.cpp:241 (read_line `carry_.append`) | a single RPC line has no size ceiling; a client streaming bytes with no `\n` grows `carry_` unbounded BEFORE rate-limit/auth (both per-completed-line) → pre-auth OOM. Gossip ingress IS bounded (kMaxFrameBytes=16MB); the RPC read path is the asymmetric outlier | `if (false && carry_.size() > kMaxRpcLineBytes)` in each transport → the 64 MiB-flood assert flips (read_line consumes all, returns true) | ✅ **CLOSED** (test-net-native 6e, both transports) | 2 |
 
 ---
 
@@ -151,6 +152,31 @@ empty blocks) and does the REAL block walk (`c.at` over `[start, height)`), asse
 `start(UINT32_MAX)==height−256` (bounded, not restarted at 0). **Falsify-on-mutant**: neutering the clamp
 (`if (false && last_n > kChainSummaryPageMax) …`) flips EXACTLY the four over-cap asserts RED while the
 boundary/small/short/empty asserts stay GREEN — a targeted counter-delta, both platforms.
+
+### 3c. CLOSED — RPC-readline-unbounded (`test-net-native` case 6e, both transports)
+
+`Connection::read_line` accumulates socket bytes into `carry_` until it sees a `'\n'`, then returns that
+line. Both native backends — `IocpConnection::read_line` (iocp_transport.cpp:329) and
+`ReactorConnection::read_line` (reactor_transport.cpp:241) — appended to `carry_` with **no size ceiling**, so
+a client that streams bytes with no newline grows `carry_` without bound BEFORE the request ever reaches
+rate-limit or auth (both per-completed-line) — a pre-auth OOM. The gossip framing path is already bounded
+(`messages.hpp` `kMaxFrameBytes = 16 MiB`, S-022); the RPC line path was its asymmetric, unbounded
+counterpart.
+
+**Fix (minimal, one shared constant).** A single `kMaxRpcLineBytes = 16 MiB` in `transport.hpp` (symmetric
+with the gossip `kMaxFrameBytes`; a legitimate JSON-RPC line tops out near 2 MiB given the tiny tx-payload
+caps, so 16 MiB is ~8× headroom). Both `read_line` loops add `if (carry_.size() > kMaxRpcLineBytes) return
+false;` immediately after the append — dropping the session (fail-closed, exactly as an EOF/recv error already
+does). Pure transport-layer DoS hardening below the RPC dispatch/auth layer: no consensus / accept-rule /
+wire-format impact (autonomous-safe). Gate = a new case **6e** appended to the existing `test-net-native`
+socket fixture (no new subcommand/wrapper — reuses the real loopback `Connection` pair, so **each platform's
+FAST run exercises its own native transport**: IOCP on MSVC, epoll/reactor on WSL GCC). A writer floods 64 MiB
+of newline-less bytes then a single `'\n'`; with the ceiling `read_line` drops the session after ~16 MiB
+(bytes delivered `< 64 MiB`), without it `read_line` consumes the whole flood and returns the line at 64 MiB —
+the delivered-bytes gap is the falsify signal (and the trailing `'\n'` ensures the mutant returns rather than
+hangs). **Falsified INDEPENDENTLY per transport**: `if (false && carry_.size() > kMaxRpcLineBytes)` flips only
+the 6e flood assert while the small-line `read_line` asserts stay GREEN — on MSVC (iocp) and on WSL GCC
+(reactor).
 
 ## 4. Completeness / follow-up
 

@@ -29476,6 +29476,47 @@ int main(int argc, char** argv) {
                 cli2->close();
             }
 
+            // 6e. RpcIngressGateAudit §3 #7 (RPC-readline-unbounded): read_line
+            //     enforces the kMaxRpcLineBytes ceiling so a client streaming
+            //     bytes with NO '\n' cannot grow carry_ without bound before the
+            //     request reaches rate-limit/auth (pre-auth OOM). A writer floods
+            //     64 MiB of newline-less bytes (>> the 16 MiB ceiling) then writes
+            //     a single '\n'. WITH the ceiling the reader's read_line drops the
+            //     session (false) after ~16 MiB, long before the flood target;
+            //     WITHOUT it, read_line accumulates the WHOLE flood and returns
+            //     true only when the trailing '\n' lands at 64 MiB. The bytes
+            //     DELIVERED when read_line returns is the falsify signal:
+            //     < floodTarget iff the ceiling dropped the session early.
+            //     (Neutering the ceiling makes read_line consume all 64 MiB and
+            //     return true, flipping this assert.)
+            auto [srv3, cli3] = pair_up();
+            check(srv3 && cli3, "third loopback pair for the read_line ceiling");
+            if (srv3 && cli3) {
+                srv3->set_send_timeout(std::chrono::milliseconds(30000));
+                std::atomic<uint64_t> delivered{0};
+                std::atomic<bool>     reader_done{false};
+                const uint64_t floodTarget = 64ull * 1024 * 1024;   // 64 MiB, no '\n'
+                auto flood = std::async(std::launch::async, [&] {
+                    std::vector<char> chunk(256 * 1024, 'x');       // no '\n'
+                    while (!reader_done.load() && delivered.load() < floodTarget) {
+                        if (!srv3->write_all(chunk.data(), chunk.size()))
+                            return;                                 // reader dropped us
+                        delivered.fetch_add(chunk.size());
+                    }
+                    srv3->write_all("\n", 1);   // only a no-ceiling reader ever sees this
+                });
+                std::string overflow_line;
+                bool     dropped = !cli3->read_line(overflow_line);
+                uint64_t at_drop = delivered.load();
+                reader_done.store(true);
+                check(dropped && at_drop < floodTarget,
+                      "RpcIngress #7: read_line drops a newline-less flood at the "
+                      "kMaxRpcLineBytes ceiling, before the 64 MiB target (bounds carry_)");
+                cli3->close();
+                srv3->close();
+                flood.wait();
+            }
+
             loop.stop();
             w1.join();
             w2.join();

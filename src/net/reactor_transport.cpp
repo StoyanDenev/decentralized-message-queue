@@ -239,6 +239,12 @@ bool ReactorConnection::read_line(std::string& out_line) {
         ssize_t r = ::recv(fd_, buf, sizeof buf, 0);
         if (r > 0) {
             carry_.append(buf, static_cast<std::size_t>(r));
+            // RpcIngressGateAudit §3 #7: bound the pre-auth line. A client
+            // streaming bytes with no '\n' would otherwise grow carry_ without
+            // limit before the request reaches rate-limit/auth — pre-auth OOM.
+            // Drop the session once it crosses the ceiling (the gossip framing
+            // path is already S-022 bounded).
+            if (carry_.size() > kMaxRpcLineBytes) return false;
             continue;
         }
         if (r == 0) return false;   // EOF — session ends

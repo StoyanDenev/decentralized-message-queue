@@ -327,6 +327,11 @@ bool IocpConnection::read_line(std::string& out_line) {
         int  rc = ::recv(static_cast<SOCKET>(sock_), buf, sizeof buf, 0);
         if (rc <= 0) return false;   // EOF or error — session ends
         carry_.append(buf, static_cast<std::size_t>(rc));
+        // RpcIngressGateAudit §3 #7: bound the pre-auth line. A client streaming
+        // bytes with no '\n' would otherwise grow carry_ without limit before the
+        // request reaches rate-limit/auth — pre-auth OOM. Drop the session once it
+        // crosses the ceiling (the gossip framing path is already S-022 bounded).
+        if (carry_.size() > kMaxRpcLineBytes) return false;
     }
 }
 

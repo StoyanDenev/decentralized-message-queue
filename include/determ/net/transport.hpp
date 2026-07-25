@@ -23,6 +23,17 @@
 
 namespace determ::net {
 
+// RpcIngressGateAudit §3 #7 (RPC-readline-unbounded): the per-line size ceiling
+// for Connection::read_line. The RPC read path accumulates bytes into `carry_`
+// until it sees a '\n'; without a ceiling a client that streams bytes with no
+// newline grows `carry_` without bound BEFORE the request ever reaches rate-limit
+// or auth (both per-completed-line) — a pre-auth OOM. The gossip framing path is
+// already bounded (messages.hpp kMaxFrameBytes = 16 MiB, S-022); this restores
+// the same ceiling on the RPC line path, its asymmetric counterpart. A legitimate
+// JSON-RPC line tops out near 2 MiB (tiny tx-payload caps: TRANSFER_PAYLOAD_MAX =
+// 128, REGISTER_PAYLOAD_MAX_SIZE = 65), so 16 MiB is ~8x headroom.
+inline constexpr std::size_t kMaxRpcLineBytes = 16 * 1024 * 1024;
+
 // One established TCP connection.
 //
 // COMPLETION CONTRACTS (every backend must uphold; Peer's single-outstanding-
