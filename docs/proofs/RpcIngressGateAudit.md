@@ -95,21 +95,39 @@ new byte-neutral `on_beacon_header_for_test` seam + a `test-beacon-header-commit
 
 ## 3. The FAST-gateable backlog (rank-2 — a ranked, mostly test-or-small-hardening set)
 
-Closed one per directive, cheapest-value-first. **#3 is a PURE TEST gap** (the guard already runs in
-production — zero consensus-code change, the direct analog of the closed `VAL-tx-sender-sig:685`) and is the
-recommended first closure. #4–#7 add a missing bound (a one-line clamp/recompute/ceiling matching an existing
-sibling pattern) + its falsify-on-mutant test; #4/#5 touch the gossip/sync accept path (present to the owner),
-#6/#7 are pure DoS hardening.
+Closed one per directive, cheapest-value-first. **#3 (MEM-tx-sig-admit) is CLOSED — see §3a** (a pure test
+gap: the guard already ran in production, zero consensus-code change, the direct analog of the closed
+`VAL-tx-sender-sig:685`; this round also established the reusable in-process Node-ingress harness). Remaining
+open: #4–#7 add a missing bound (a one-line clamp/recompute/ceiling matching an existing sibling pattern) +
+its falsify-on-mutant test; #4/#5 touch the gossip/sync accept path (present to the owner), #6/#7 are pure
+DoS hardening. **NEXT = #4.**
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | class | val |
 |---|---|---|---|---|---|---|
-| 3 | MEM-tx-sig-admit | node.cpp:2819 (on_tx) + :4453 (rpc_submit_tx) → verify_tx_signature_locked | a tx must carry a valid sender sig before mempool admission — else forged-sender txs poison every node's mempool (production stall / cap exhaustion) | `if (false && !verify_tx_signature_locked(tx))` at :2819 + delete the :4453 throw | **PURE TEST** (guard exists) | 2 |
+| 3 | MEM-tx-sig-admit | node.cpp:2819 (on_tx) + :4453 (rpc_submit_tx) → verify_tx_signature_locked | a tx must carry a valid sender sig before mempool admission — else forged-sender txs poison every node's mempool (production stall / cap exhaustion) | `if (false && !verify_tx_signature_locked(tx))` at :2819 + delete the :4453 throw | ✅ **CLOSED** (test-rpc-tx-sig-admit) | 2 |
 | 4 | GOSSIP-on_tx-tx-hash-not-rechecked | node.cpp:2843 (on_tx) vs the present-but-unpinned :4438 (rpc_submit_tx) | on_tx never recomputes `tx.hash==compute_hash()`, so a validly-signed tx can enter `tx_store_` under a forged key (light-client inclusion-proof false-negatives; on sharded, a cross-shard-receipt front-run → targeted fund-lock) | neuter the :4438 recompute; add `if (tx.hash != tx.compute_hash()) return;` to on_tx | 1-line fix + test | 2 (borderline 2/3) |
 | 5 | STATUS-height-unbounded-sync-stall | node.cpp:3204 (on_status_response) | a peer-reported height is stored verbatim with no plausibility bound; one `UINT64_MAX` STATUS_RESPONSE pins the victim in SYNCING forever (block production halts; `peer_heights_` never pruned) → remote hit-and-run liveness DoS | add + delete `if (height > chain_.height()+MAX_SYNC_LEAD) return;` (or same-genesis median) | clamp + test | 2 |
 | 6 | ING-chain-summary-last_n-uncapped | node.cpp:3667-3672 (rpc_chain_summary) | the sole pagination handler missing the 256-page cap its siblings enforce (rpc_headers/on_get_chain); `last_n>=height` re-hashes + copies the ENTIRE chain under one state_mutex_ read lock (per-request-work DoS the token bucket doesn't bound) | insert then delete `if (last_n > 256) last_n = 256;` at :3668 | 256-clamp + test | 2 |
 | 7 | RPC-readline-unbounded | iocp_transport.cpp:329 + reactor_transport.cpp:241 (read_line `carry_.append`) | a single RPC line has no size ceiling; a client streaming bytes with no `\n` grows `carry_` unbounded BEFORE rate-limit/auth (both per-completed-line) → pre-auth OOM. Gossip ingress IS bounded (kMaxFrameBytes=16MB); the RPC read path is the asymmetric outlier | insert then delete `if (carry_.size() > (64u<<20)) return false;` after each append | ceiling (both transports) + test | 2 |
 
 ---
+
+### 3a. CLOSED — MEM-tx-sig-admit (`test-rpc-tx-sig-admit`)
+
+The mempool signature-admission gate is now pinned on **both** ingress call sites. `verify_tx_signature_locked`
+runs in production on `on_tx` (gossip, silent drop) and `rpc_submit_tx` (RPC, hard throw); the negative
+behavior was previously untested. Gate = a new `test-rpc-tx-sig-admit` subcommand that builds an in-process
+M=K=1 Node ("node0", genesis-registered + funded) over a `VirtualTransport` — a fresh node per leg so the
+`mempool_size` observable is independent (replace-by-fee / nonce dedup would otherwise cross-contaminate).
+A validly-signed TRANSFER is ADMITTED (queued, `mempool==1`); the same tx with one `tx.sig` byte flipped
+(after `compute_hash`, which excludes the sig, so it survives the hash-recompute and reaches the sig gate) is
+REJECTED — `rpc_submit_tx` throws `"submitted tx signature verification failed"`, and `on_tx` (driven via a
+new byte-neutral `on_tx_for_test` seam) SILENTLY drops it (`mempool` unchanged). **Each call site was
+falsified INDEPENDENTLY**: `if (false && !verify_tx_signature_locked(tx))` at `on_tx:2819` flips only the
+gossip leg RED; the same neutering of the `rpc_submit_tx:4453` throw flips only the RPC leg; the control and
+the other path stay GREEN in each pass. Zero consensus-code change (the guard already ran in production) —
+this round establishes the reusable in-process Node-ingress harness for the remaining rank-2 rows. **NEXT =
+#4 GOSSIP-on_tx-tx-hash-not-rechecked.**
 
 ## 4. Completeness / follow-up
 

@@ -456,6 +456,14 @@ public:
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
     // Used for anonymous-account TRANSFERs that aren't authored by this node.
     nlohmann::json rpc_submit_tx(const nlohmann::json& tx_json);
+
+    // MEM-tx-sig-admit test seam (RpcIngressGateAudit §3): drive the GOSSIP
+    // mempool-ingress path (on_tx) in isolation so the falsifier can submit a
+    // forged-sender tx and assert the SILENT drop (tx_store_ unchanged) that the
+    // unauthenticated gossip path performs — the peer-facing analog of the
+    // rpc_submit_tx throw. Byte-neutral non-const const-forwarder (on_tx mutates
+    // tx_store_); same seam pattern as the validator *_for_test seams.
+    void on_tx_for_test(const chain::Transaction& tx) { on_tx(tx); }
     // rev.9 B5: external submission of equivocation evidence. Forensics
     // tools and governance scripts can submit EquivocationEvent JSON
     // assembled off-chain (e.g., from log scraping that observed two

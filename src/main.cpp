@@ -441,6 +441,11 @@ In-process tests (deterministic, no network):
                                               bypass, first-touch full, burst
                                               exhaustion, per-key independence,
                                               refill timing, burst-cap invariant
+  determ test-rpc-tx-sig-admit                RpcIngress MEM-tx-sig-admit — the
+                                              mempool sig-admission gate on both
+                                              ingress paths (rpc_submit_tx throws,
+                                              on_tx gossip silent-drops); in-proc
+                                              Node harness, falsify each path
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -43193,6 +43198,126 @@ int main(int argc, char** argv) {
     //
     // Previously only exercised via end-to-end shell tests through the
     // Node fixture. This direct unit test catches drift faster.
+    if (cmd == "test-rpc-tx-sig-admit") {
+        // RpcIngressGateAudit §3 MEM-tx-sig-admit: a tx must carry a VALID sender
+        // signature before mempool admission. verify_tx_signature_locked runs in
+        // production on BOTH ingress paths -- rpc_submit_tx (node.cpp:4453, hard
+        // throw to the RPC caller) and on_tx (gossip, node.cpp:2819, SILENT drop
+        // for the faceless peer) -- but NO negative test pinned either. This is the
+        // ingress analog of the closed VAL-tx-sender-sig:685 (block-validator path),
+        // on a different code path: removing it lets any peer / RPC client inject
+        // forged-sender txs into shared mempool (production stall + cap exhaustion).
+        // In-process Node harness (mirrors test-scheduler-external): a single
+        // M=K=1 node "node0" whose ed_pub is genesis-registered + funded, so
+        // verify_tx_signature_locked can resolve node0's pubkey. Each leg runs on a
+        // FRESH node so the mempool-size observable is independent (replace-by-fee /
+        // nonce dedup would otherwise cross-contaminate under the mutants).
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        crypto::NodeKey key;
+        for (int i = 0; i < 32; ++i) key.priv_seed[i] = uint8_t(0x50 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        // Build + tear down a fresh in-process node per leg; fn(node) runs the leg.
+        int node_seq = 0;
+        auto with_fresh_node = [&](const std::function<void(node::Node&)>& fn) {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-mem-sig-" + std::to_string(node_seq++));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+            chain::GenesisConfig g;
+            g.chain_id = "mem-sig"; g.m_creators = 1; g.k_block_sigs = 1;
+            g.epoch_blocks = 1;
+            chain::GenesisCreator gc;
+            gc.domain = "node0"; gc.ed_pub = key.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+            cfg.listen_port = 7671; cfg.key_path = (dir / "node0.key").string();
+            cfg.chain_path = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+            cfg.log_quiet = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(key, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node node(cfg, determ::time::RealClock::instance(),
+                            loop.get(), transport.get());
+            fn(node);
+            fs::remove_all(dir, fec);
+        };
+
+        // A validly-signed TRANSFER node0 -> bob (sig covers signing_bytes, which
+        // EXCLUDES sig/hash; compute_hash also excludes sig -- so a post-sign byte
+        // flip survives the tx-hash recompute and reaches the signature gate).
+        auto signed_tx = [&](uint64_t nonce) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::TRANSFER; tx.from = "node0"; tx.to = "bob";
+            tx.amount = 10; tx.fee = 0; tx.nonce = nonce;
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        auto mempool = [](node::Node& n) {
+            return n.rpc_status()["mempool_size"].get<size_t>();
+        };
+
+        // CONTROL -- a validly-signed tx IS admitted (proves the harness reaches +
+        // passes the sig gate; without it the negatives could be vacuous).
+        with_fresh_node([&](node::Node& n) {
+            check(n.rpc_status()["height"].get<uint64_t>() == 1 && mempool(n) == 0,
+                  "setup: genesis applied (height 1), mempool empty");
+            auto r = n.rpc_submit_tx(signed_tx(0).to_json());
+            check(r.value("status", std::string{}) == "queued" && mempool(n) == 1,
+                  "CONTROL: a validly-signed tx is ADMITTED (queued, mempool == 1)");
+        });
+
+        // NEGATIVE (RPC path, node.cpp:4453) -- a forged-sender tx is REJECTED with
+        // a hard throw and never enters the mempool.
+        with_fresh_node([&](node::Node& n) {
+            chain::Transaction tx = signed_tx(0);
+            tx.sig[0] ^= 0xFF;                          // forge AFTER hash
+            bool sig_reject = false;
+            try { n.rpc_submit_tx(tx.to_json()); }
+            catch (const std::exception& e) {
+                sig_reject = std::string(e.what())
+                                 .find("signature verification failed") != std::string::npos;
+            }
+            check(sig_reject && mempool(n) == 0,
+                  "RPC ingress: a forged-sender tx is REJECTED at verify_tx_signature_locked "
+                  "(node.cpp:4453) -- throws, not admitted");
+        });
+
+        // NEGATIVE (gossip path, node.cpp:2819) -- a forged-sender tx is SILENTLY
+        // dropped by on_tx (no throw for the faceless peer); mempool unchanged.
+        with_fresh_node([&](node::Node& n) {
+            chain::Transaction tx = signed_tx(0);
+            tx.sig[0] ^= 0xFF;
+            n.on_tx_for_test(tx);                       // gossip admission, silent
+            check(mempool(n) == 0,
+                  "gossip ingress: a forged-sender tx is SILENTLY DROPPED by on_tx "
+                  "(node.cpp:2819) -- mempool unchanged");
+        });
+
+        std::cout << (fail ? "  FAIL: test-rpc-tx-sig-admit\n"
+                           : "  PASS: test-rpc-tx-sig-admit\n");
+        return fail ? 1 : 0;
+    }
+
     if (cmd == "test-node-registry") {
         using namespace determ;
         using namespace determ::chain;
