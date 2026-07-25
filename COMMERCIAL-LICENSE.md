@@ -11,7 +11,7 @@ end users.
 ## What is sold
 
 1. **DApp production grants (the royalty)** — production deployment/operation of any reference
-   DApp (`dapps/`, D.1–D.9) **by or for a commercial entity, or by or for a government /
+   DApp (`dapps/`, D.1–D.10) **by or for a commercial entity, or by or for a government /
    public-sector body**. Free without a grant: development, evaluation, testing, CI, and
    noncommercial production by natural persons and noncommercial organizations (BUSL
    Additional Use Grant). Pricing axes for counsel + owner to fix: per deployment / per node /

@@ -5,7 +5,7 @@
 > 1. **Everything except `dapps/**`** — daemon / consensus core, C99 crypto library, light
 >    client, wallet, SDK, DSSO client libs, tools, docs — **Apache-2.0. Free for everyone,
 >    for any use, forever.**
-> 2. **All reference DApps (`dapps/**`, D.1–D.9) — BUSL-1.1** (source-available): free for
+> 2. **All reference DApps (`dapps/**`, D.1–D.10) — BUSL-1.1** (source-available): free for
 >    development / evaluation / test / CI, **and free for noncommercial production** (natural
 >    persons and noncommercial organizations). **Production use by or for a commercial entity
 >    or a government / public-sector body requires a paid grant** — this is the royalty. Each
@@ -58,7 +58,7 @@ outside `dapps/**`** — each DApp is a leaf: it links the Apache SDK/clients, n
 | `determ-light`, `determ-wallet` | `light/**`, `wallet/**` | Apache-2.0 |
 | SDK + DSSO client libs | `sdk/**` | Apache-2.0 |
 | sim / tools / tests / docs | `sim/`, `tools/`, `test*/`, `docs/` | Apache-2.0 |
-| **All reference DApps (D.1–D.9)** | `dapps/**` | **BUSL-1.1** |
+| **All reference DApps (D.1–D.10)** | `dapps/**` | **BUSL-1.1** |
 | Vendored deps | `third_party/**` | unchanged upstream |
 
 ## BUSL-1.1 parameters (fixed per DApp release)

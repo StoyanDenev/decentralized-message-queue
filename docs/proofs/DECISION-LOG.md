@@ -1553,3 +1553,32 @@ Extends the split-license decision (`LICENSING.md`): every DApp (D.1-D.9), the D
 **Files.** `LICENSING.md`, `LICENSE`, `NOTICE`, `COMMERCIAL-LICENSE.md`, `dapps/LICENSE`, `dapps/README.md`, `LICENSES/BUSL-1.1.txt` (parameters), `LICENSES/AGPL-3.0.txt` (tombstoned — unused; owner may `git rm`), `README.md` §License, `tools/apply_spdx_headers.sh` (all-Apache stamping restored).
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-25; recorded by Claude Fable at his direction).
+
+## 2026-07-25 — D.10 confidential property register added to the DApp catalog (ten reference DApps)
+
+**Problem.** In mid-July 2026 Romania's national land registry (ANCPI) was breached via
+compromised credentials and its databases were **wiped** after a failed extortion attempt —
+property transactions froze nationwide and the stolen data was offered for sale. A centralized
+register is one credential away from national paralysis and one insider away from unlogged
+browsing. The catalog had no DApp answering this: registry integrity + ownership
+confidentiality + audited access.
+
+**Decision (owner, 2026-07-25).** Catalog **D.10 — confidential government property register**:
+commitments + per-parcel AEAD on-chain; `K_p` user-dealt Shamir t-of-n across the K-of-K node
+set; reads require threshold cooperation with a **`LOG_AUDIT_ACCESS` record before any share is
+released** (no silent browsing, by construction); transfers are owner+notary+cadastre
+`COMPOSABLE_BATCH`; owners self-read free and prove ownership by commitment opening; judicial
+inverse lookup is a separate court-order-gated class; GDPR via crypto-shredding. Spec sketch:
+`docs/proofs/D10-PROPERTY-REGISTER-SPEC.md`. Tier-1 only — no zk dependency.
+
+**Deployment economics (exemplifies licensing v3.1).** Any government runs the Apache-2.0 core
+free of charge on its own mutually-distrusting institutions' nodes; D.10 production deployment
+by a public-sector body is a BUSL-1.1 grant — the royalty event. The state buys the protection
+of its citizens' register, not the infrastructure.
+
+**Sequencing unchanged:** D.5 remains the first DApp (active-front directive 2026-07-23). D.10
+is catalogued, not scheduled. Catalog counts of "nine DApps" in older docs are superseded by
+this entry (ten) until the next convergence sweep. License-map files updated: `dapps/LICENSE`,
+`dapps/README.md`, `LICENSING.md`, `LICENSE`, `COMMERCIAL-LICENSE.md`.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-25; recorded by Claude Fable at his direction).

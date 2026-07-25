@@ -1,7 +1,7 @@
 DApp licensing (owner decision 2026-07-25, licensing v3.1 — see /LICENSING.md and
 docs/proofs/DECISION-LOG.md; PENDING-COUNSEL):
 
-  ALL reference DApps are Business Source License 1.1 (/LICENSES/BUSL-1.1.txt):
+  ALL reference DApps (D.1-D.10) are Business Source License 1.1 (/LICENSES/BUSL-1.1.txt):
     d1-liberty-bell/          SPDX-License-Identifier: BUSL-1.1
     d2-b2b-settlement/        SPDX-License-Identifier: BUSL-1.1
     d3-journalism/            SPDX-License-Identifier: BUSL-1.1
@@ -11,6 +11,7 @@ docs/proofs/DECISION-LOG.md; PENDING-COUNSEL):
     d7-verifiable-inference/  SPDX-License-Identifier: BUSL-1.1
     d8-anon-credentials/      SPDX-License-Identifier: BUSL-1.1
     d9-merritt-voting/        SPDX-License-Identifier: BUSL-1.1
+    d10-property-register/    SPDX-License-Identifier: BUSL-1.1
 
   Additional Use Grant (recorded intent; counsel drafts the operative text):
     - free: development, evaluation, testing, CI

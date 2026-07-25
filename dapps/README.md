@@ -1,6 +1,6 @@
 # Determ DApps
 
-The reference DApp catalog. **All nine DApps are BUSL-1.1** (owner decision 2026-07-25,
+The reference DApp catalog. **All ten DApps are BUSL-1.1** (owner decision 2026-07-25,
 licensing v3.1 — `../LICENSING.md`, `../docs/proofs/DECISION-LOG.md`): source-available; free
 for development/test/CI **and for noncommercial production** (individuals and noncommercial
 organizations); **production use by a commercial entity or a public-sector body requires a paid
@@ -16,6 +16,7 @@ Tier-1 (DSSO + shipped primitives):
 - `d9-merritt-voting/` — Byzantine-fault-tolerant elections (Merritt 1984) + DSSO + confidential ballots.
 - `d2-b2b-settlement/` — confidential vendor-invoice settlement (v2.15 multi-sig Option A + ROTATE_KEY).
 - `d3-journalism/` — source-protection payments (PFS/OTPK + ROTATE_KEY).
+- `d10-property-register/` — confidential government property register: threshold-read ownership + mandatory pre-read audit log (motivated by the July 2026 ANCPI registry wipe; `../docs/proofs/D10-PROPERTY-REGISTER-SPEC.md`).
 
 Tier-2 (v1.2, zk-VM): `d4-ai-agent/`, `d6-private-rollup/`, `d7-verifiable-inference/`, `d8-anon-credentials/`.
 
