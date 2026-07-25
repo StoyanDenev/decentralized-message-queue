@@ -413,6 +413,23 @@ VerifyResult verify_block_sigs(const nlohmann::json& header_in,
         return r;
     }
 
+    // LightVerify LVS-1: a committee-signed header MUST name at least one
+    // creator. An empty creator set makes the quorum threshold vacuous —
+    // `required` (below) becomes 0 in both MD and BFT modes, the membership +
+    // signature loops run zero iterations (valid=0), and `valid(0) < required(0)`
+    // is false, so a header with creators:[]/creator_block_sigs:[] would return
+    // ok=true with ZERO signatures verified. Since a MITM RPC server supplies
+    // the header, that is a keys-free forgery of the committee-signed state_root
+    // anchor (the sole crypto gate in committee_bound_state_root). Every
+    // legitimate committee-signed block carries K>=1 creators, and genesis
+    // (index 0) is routed around this function by both sinks, so this rejects no
+    // honest header.
+    if (b.creators.empty()) {
+        r.detail = "FAIL: header names no creators (empty committee) — a "
+                   "committee-signed block always carries at least one creator";
+        return r;
+    }
+
     for (auto& d : b.creators) {
         if (pubkey_of.find(d) == pubkey_of.end()) {
             r.detail = "FAIL: creator '" + d
