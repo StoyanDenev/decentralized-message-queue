@@ -1,6 +1,6 @@
 # Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
-**Version v1.1 (mainnet launch target)** · [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+**Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
 > **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
@@ -1017,24 +1017,12 @@ The protocol is intentionally minimal: two consensus message types per block, on
 
 ## License
 
-Determ is licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
+Determ is **multi-licensed** — [LICENSING.md](LICENSING.md) is the authoritative map (PENDING-COUNSEL, DECISION-LOG 2026-07-25, licensing v3.1):
 
-```
-Copyright 2026 Determ Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-implied. See the License for the specific language governing
-permissions and limitations under the License.
-```
+- **Core — free for all.** Everything except `dapps/` (daemon, consensus, crypto library, light client, wallet, SDK, DSSO client libs, tools, docs) is **Apache-2.0** ([LICENSE](LICENSE)): run, modify, embed, resell — no obligations beyond attribution.
+- **Reference DApps (`dapps/`, D.1-D.9) — BUSL-1.1**: source-available; free for development/test/CI **and for noncommercial production** (individuals, noncommercial organizations); **production use by a commercial entity or a public-sector body requires a paid grant** ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)); each release converts to Apache-2.0 after 4 years.
+- **End users pay nothing**: the Licensor operates reference DApp instances on the network free of charge; using a hosted instance is not a licensed activity.
 
 Third-party components (OpenSSL, Asio, nlohmann/json, libsodium) are bundled or referenced under their respective licenses. See [NOTICE](NOTICE) for the full attribution list.
 
-Source files carry an SPDX identifier (`// SPDX-License-Identifier: Apache-2.0`) so toolchain-level license scanners can verify provenance automatically.
+Source files carry a per-component SPDX identifier (rule in [LICENSING.md](LICENSING.md)) so toolchain-level license scanners can verify provenance automatically.

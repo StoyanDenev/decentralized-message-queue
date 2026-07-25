@@ -1,84 +1,107 @@
-# Determ — licensing (split: AGPL-3.0 core / Apache-2.0 libraries & clients)
+# Determ — licensing (Apache-2.0 core, free for all / BUSL-1.1 DApps)
 
-> **Authoritative license map.** Determ is **multi-licensed**. The daemon / consensus-execution
-> core is **AGPL-3.0-or-later**; the reusable C99 crypto library, the light client, the wallet, and
-> the future SDK / DSSO client libraries are **Apache-2.0**.
+> **Authoritative license map.** Determ is **multi-licensed**, two tiers:
 >
-> **This is not legal advice.** Relicensing and contributor consent are decisions for the copyright
-> holder and counsel. Prepared 2026-07-23; the repo was previously all-Apache-2.0.
+> 1. **Everything except `dapps/**`** — daemon / consensus core, C99 crypto library, light
+>    client, wallet, SDK, DSSO client libs, tools, docs — **Apache-2.0. Free for everyone,
+>    for any use, forever.**
+> 2. **All reference DApps (`dapps/**`, D.1–D.9) — BUSL-1.1** (source-available): free for
+>    development / evaluation / test / CI, **and free for noncommercial production** (natural
+>    persons and noncommercial organizations). **Production use by or for a commercial entity
+>    or a government / public-sector body requires a paid grant** — this is the royalty. Each
+>    release converts to Apache-2.0 on its Change Date (4 years after publication).
+>
+> **The Licensor operates reference instances of the DApps on the network free of charge for
+> end users.** Using a hosted instance requires no code license — the license governs
+> deploying/operating the code, not consuming a service.
+>
+> **This is not legal advice.** Grant drafting (the commercial / public-sector / noncommercial
+> definitions) is **PENDING-COUNSEL** (`docs/proofs/DECISION-LOG.md` 2026-07-25, licensing
+> v3.1, which supersedes v3's dual core and per-DApp split).
 
-## Why split
+## Why this structure
 
-The consensus/node code is where **capture** would hurt — AGPL's network clause (§13) stops anyone
-running an *improved, closed* fork of the Determ daemon as a service without offering source, which
-matches the project's mutual-distrust / public-interest posture. The **libraries and clients** are
-where **adoption** happens — permissive Apache-2.0 (with its explicit patent grant) lets governments,
-regulated operators, wallet vendors, and DApp builders reuse the crypto, verification, and identity
-code in closed products with zero copyleft friction. Split licensing gets both: an un-capturable core
-and a frictionless ecosystem.
+Problem: royalties from commercial and public-sector operators, without taxing the ecosystem,
+the end users, or the founding public-interest mission. The core through the 2026-07-21 push is
+already irrevocably published under Apache-2.0 (public GitHub remote, many clones), and an L1's
+real moat is the running network — the K-of-K operator set, audits, certification, trademark —
+not source secrecy. So:
 
-## The rule (unambiguous, mechanically checkable)
+- **Apache core, free for all** — zero procurement friction for the government-first market,
+  zero integration friction for wallets/clients/DApp builders, credibly un-capturable by
+  openness rather than by copyleft. Sole copyright preserves the option to tighten *future*
+  releases if a capture threat materializes (a ratchet that only tightens forward).
+- **All DApps BUSL-1.1** — the deployables are where paying entities show up. Source stays
+  fully visible (the provable-security posture needs source availability, not OSI approval).
+  The noncommercial production grant keeps the public-interest cases free (journalists,
+  communities, individuals self-hosting); ministries and companies deploying their own pay.
+- **Non-license lanes** (no code-license impact): trademark / "Determ Certified" certification,
+  and a compliance-evidence + security-update subscription (audit reports, FIPS/NIS2 evidence
+  packages, patch SLA).
 
-> A source file is **Apache-2.0** if it is compiled into any client/library target
-> (`determ-crypto-c99`, `determ-light`, `determ-wallet`, the SDK, all DApps (D.1-D.9), and DSSO client libs). A file compiled
-> **only** into the `determ` daemon is **AGPL-3.0-or-later**.
+## The rules (mechanically checkable)
 
-This direction is forced by license compatibility: **Apache-2.0 code may be incorporated into an
-(A)GPLv3 work, but not the reverse** (FSF-confirmed, one-way). So the AGPL daemon may freely link the
-Apache libraries, but **no Apache binary may contain AGPL code** — hence any file a client compiles
-must be Apache.
+1. A file under `dapps/<name>/` => **BUSL-1.1** (all nine DApps; the owner may re-grant a DApp
+   before its first public release).
+2. A file under `third_party/**` => its upstream license (do **not** relicense).
+3. Every other file in the repository => **Apache-2.0**.
 
-## Component map (from `CMakeLists.txt`)
+Leaf rule: Apache-2.0 code may be used inside the BUSL DApps; **BUSL code never enters anything
+outside `dapps/**`** — each DApp is a leaf: it links the Apache SDK/clients, nothing links it.
 
-| Target | Paths | License |
+## Component map
+
+| Component | Paths | License |
 |---|---|---|
-| `determ-crypto-c99` (static lib) | `src/crypto/**` (all `.c` and `.cpp`) | **Apache-2.0** |
-| `determ-light` (light client) | `light/**` + reused `src/chain/block.cpp`, `src/chain/genesis.cpp`, `src/crypto/*.cpp` | **Apache-2.0** |
-| `determ-wallet` | `wallet/**` | **Apache-2.0** |
-| DApps + SDK + DSSO client | `dapps/**`, `sdk/**`, DSSO client libs (wherever they land) | **Apache-2.0** (owner decision 2026-07-23) |
-| `determ` (daemon) | `src/node/**`, `src/net/**`, `src/rpc/**`, `src/main.cpp`, and `src/chain/**` *except* the two shared files below | **AGPL-3.0-or-later** |
-| `third_party/**` | vendored deps (e.g. nlohmann/json) | **unchanged** — their own upstream licenses (do **not** relicense) |
-| `sim/`, `tools/`, `test*/`, `docs/` | dev / test / docs | AGPL-3.0-or-later by default, unless a file is compiled into a client target |
+| `determ` daemon + chain | `src/**` (all), `include/**` | Apache-2.0 |
+| `determ-crypto-c99` | `src/crypto/**` | Apache-2.0 |
+| `determ-light`, `determ-wallet` | `light/**`, `wallet/**` | Apache-2.0 |
+| SDK + DSSO client libs | `sdk/**` | Apache-2.0 |
+| sim / tools / tests / docs | `sim/`, `tools/`, `test*/`, `docs/` | Apache-2.0 |
+| **All reference DApps (D.1–D.9)** | `dapps/**` | **BUSL-1.1** |
+| Vendored deps | `third_party/**` | unchanged upstream |
 
-### Boundary files — Apache-2.0 even though they live under `src/chain/`
+## BUSL-1.1 parameters (fixed per DApp release)
 
-The Apache light client compiles these directly, so they **must** be Apache-2.0; they carry an
-explicit `SPDX-License-Identifier: Apache-2.0` header:
-
-- `src/chain/block.cpp` + `include/determ/chain/block.hpp` — block wire format / codec
-- `src/chain/genesis.cpp` (+ its header) — genesis construction
-
-Keeping the consensus **data structures + genesis** permissive is intentional and desirable: it lets
-third parties build interoperable clients and verifiers. The AGPL teeth are over the **node
-execution** — consensus apply/validate, networking, RPC — which is what a competitor would fork.
+| Field | Value |
+|---|---|
+| Licensor | owner legal name / entity — **counsel to fix** |
+| Licensed Work | the specific DApp release (name + version) |
+| Additional Use Grant | development, evaluation, testing, CI; **and production use by natural persons and noncommercial organizations for noncommercial purposes**. Production use by or for a commercial entity, or by or for a government / public-sector body, requires a commercial license from the Licensor. *(Recorded intent — exact definitions are counsel work; PolyForm-Noncommercial-style definitions are the reference precedent.)* |
+| Change Date | 4 years after that release's first publication |
+| Change License | Apache License 2.0 |
 
 ## Files in this repo
 
-- `/LICENSE` — short multi-license pointer (this split).
-- `/LICENSES/AGPL-3.0.txt`, `/LICENSES/Apache-2.0.txt` — the canonical full texts.
-- `/NOTICE` — Apache-2.0 NOTICE for the Apache components.
-- `src/crypto/LICENSE`, `light/LICENSE`, `wallet/LICENSE` — Apache-2.0 per-component markers.
-- `tools/apply_spdx_headers.sh` — stamps every source file with its `SPDX-License-Identifier` per the rule (idempotent; review before running).
+- `/LICENSE` — multi-license pointer. `/NOTICE` — Apache NOTICE for the Apache components.
+- `/LICENSES/Apache-2.0.txt` — canonical text. `/LICENSES/BUSL-1.1.txt` — **deliberate
+  placeholder**: paste verbatim from <https://mariadb.com/bsl11/>; legal text must be verbatim.
+  `/LICENSES/AGPL-3.0.txt` — tombstoned (unused since v3.1; safe to delete).
+- `/COMMERCIAL-LICENSE.md` — draft-for-counsel structure of the paid lanes (not an offer).
+- `src/crypto/LICENSE`, `light/LICENSE`, `wallet/LICENSE`, `sdk/LICENSE` — Apache markers;
+  `dapps/LICENSE` — the DApp tier (all BUSL-1.1).
+- `tools/apply_spdx_headers.sh` — SPDX stamper per the rules above (idempotent; review first).
 
-## Owner action items (before the split is legally effective)
+## Owner action items (before the structure is legally effective)
 
-1. **Paste the canonical AGPL-3.0 text** into `/LICENSES/AGPL-3.0.txt` from
-   <https://www.gnu.org/licenses/agpl-3.0.txt>. It is deliberately **not** reproduced here — legal
-   text must be verbatim, and hand-copying risks a defective license.
-2. **Confirm copyright ownership** for the relicense. The daemon files move Apache-2.0 → AGPL-3.0;
-   that is only yours to do if you hold, or have consent for, all copyright in those files. A
-   solo/owner-held project can relicense freely; any externally-Apache-contributed *daemon* code
-   stays Apache unless its author agrees.
-3. **Confirm the boundary.** The consensus wire-format/genesis substrate is Apache because the light
-   client currently compiles it. If you wanted those AGPL, the light client must stop compiling them
-   directly (refactor into a small Apache "protocol" library it links). Recommended: leave as Apache.
-4. **Review and run** `tools/apply_spdx_headers.sh`, then commit.
+1. **Counsel:** BUSL grant drafting (commercial / public-sector / noncommercial definitions),
+   a CLA for any external `dapps/**` contribution (sole copyright in the DApps is what "owning
+   them" means), trademark filing for "Determ" / "Determ Certified", sanctions/end-use
+   screening clauses for commercial grants, and the Bulgarian Electronic Governance Act /
+   EU-procurement check **before D.5 is priced**.
+2. **Paste the canonical BUSL-1.1 text** into its placeholder file.
+3. **Forward-only:** everything pushed through 2026-07-21 remains Apache-2.0 for its holders;
+   this map applies from the next release.
+4. **Review + run** `tools/apply_spdx_headers.sh`; stamp DApp code `BUSL-1.1` when it lands.
 
 ## Downstream effect (plain English)
 
-- Anyone may reuse the **Apache** libraries — crypto, light client, wallet, SDK/DSSO — in closed or
-  commercial products, with the Apache patent grant, no source-sharing obligation.
-- Anyone who runs a **modified daemon** as a network-accessible service must offer that daemon's
-  source to its users (AGPL §13). Running the *unmodified* daemon triggers no such obligation.
-- The combined daemon binary is effectively AGPL (the strongest license in the combination governs
-  the whole executable), with the Apache components remaining independently reusable in source form.
+- **Everyone, for the entire core:** free, Apache-2.0, explicit patent grant — run, modify,
+  embed, resell, no obligations beyond attribution.
+- **End users of the DApps:** free — they use the Licensor's hosted instances, which is not a
+  licensed activity at all.
+- **Individuals / noncommercial organizations self-hosting a DApp:** free, even in production.
+- **Companies and public-sector bodies deploying a DApp:** buy the production grant (the
+  royalty) — or wait out that release's 4-year Change Date, after which it is Apache-2.0.
+- **Everyone:** all source stays published and inspectable — the provable-security story loses
+  nothing.

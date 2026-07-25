@@ -1,10 +1,6 @@
-PLACEHOLDER — replace this file with the verbatim canonical text of the
-GNU Affero General Public License v3.0.
+TOMBSTONE — unused since licensing v3.1 (2026-07-25).
 
-Obtain it from: https://www.gnu.org/licenses/agpl-3.0.txt
-
-It is intentionally NOT reproduced here: legal license text must be byte-exact,
-and hand-copying risks a defective license. Paste the canonical text over this
-file before relying on the AGPL split.
-
-SPDX-License-Identifier: AGPL-3.0-or-later
+The dual AGPL/commercial core tier of licensing v3 was withdrawn the same week it
+was drafted and never shipped in any release; the core is Apache-2.0 (see
+/LICENSING.md and docs/proofs/DECISION-LOG.md 2026-07-25). This file is safe to
+delete (`git rm LICENSES/AGPL-3.0.txt`).

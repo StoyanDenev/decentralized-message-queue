@@ -1,9 +1,12 @@
-# Determ DApps (Apache-2.0)
+# Determ DApps
 
-The reference DApp catalog. **All code here is Apache-2.0** (owner decision 2026-07-23 —
-`../LICENSING.md`, `../docs/proofs/DECISION-LOG.md`), so third-party and commercial DApp builders
-reuse it without copyleft friction. DApps consume only shipped chain primitives + DSSO; they are
-**not** part of the AGPL consensus core.
+The reference DApp catalog. **All nine DApps are BUSL-1.1** (owner decision 2026-07-25,
+licensing v3.1 — `../LICENSING.md`, `../docs/proofs/DECISION-LOG.md`): source-available; free
+for development/test/CI **and for noncommercial production** (individuals and noncommercial
+organizations); **production use by a commercial entity or a public-sector body requires a paid
+grant**; each release converts to Apache-2.0 after 4 years. The Licensor runs reference
+instances free of charge for end users. DApps consume only shipped chain primitives + DSSO;
+they are **not** part of the Apache-2.0 core (which is free for everyone).
 
 ## Catalog (V1.1-PLAN Bundle D / PRE-LAUNCH §E2)
 

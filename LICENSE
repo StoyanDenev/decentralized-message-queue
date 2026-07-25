@@ -1,19 +1,24 @@
-Determ is multi-licensed. See LICENSING.md for the authoritative per-component map.
+Determ is multi-licensed. See LICENSING.md for the authoritative per-component map
+(PENDING-COUNSEL — DECISION-LOG 2026-07-25, licensing v3.1).
 
-  - The Determ daemon / consensus-execution core (the `determ` binary: src/node,
-    src/net, src/rpc, src/main.cpp, and src/chain except the shared wire-format
-    files) is licensed under the GNU Affero General Public License v3.0 or later
-    (AGPL-3.0-or-later).  Full text: LICENSES/AGPL-3.0.txt
+  1. Everything except dapps/ and third_party/ — the daemon / consensus-execution
+     core, the C99 crypto library (src/crypto), the light client (light/), the
+     wallet (wallet/), the SDK and DSSO client libraries (sdk/), tools, tests and
+     docs: Apache License 2.0 (LICENSES/Apache-2.0.txt). Free for everyone, for
+     any use.
 
-  - The reusable C99 crypto library (determ-crypto-c99, src/crypto), the light
-    client (determ-light, light/), the wallet (determ-wallet, wallet/), the
-    shared consensus wire-format/genesis files, and the future SDK / DSSO client
-    libraries are licensed under the Apache License 2.0 (Apache-2.0).
-    Full text: LICENSES/Apache-2.0.txt
+  2. All reference DApps (dapps/, D.1-D.9): Business Source License 1.1
+     (LICENSES/BUSL-1.1.txt) — free for development, evaluation, testing and CI,
+     and free for noncommercial production use by natural persons and
+     noncommercial organizations; production use by or for a commercial entity or
+     a government / public-sector body requires a paid grant
+     (COMMERCIAL-LICENSE.md). Each release converts to Apache-2.0 four years
+     after its publication. The Licensor operates reference instances free of
+     charge for end users.
 
-  - Vendored third-party code under third_party/ retains its own upstream license.
+  3. Vendored third-party code under third_party/ retains its own upstream license.
 
 Per-file SPDX-License-Identifier headers are authoritative for any individual
-file; the rule that assigns them is in LICENSING.md. This project was previously
-licensed in whole under Apache-2.0; the AGPL portion is a relicensing of the
-daemon-only sources by the copyright holder.
+file; the rule that assigns them is in LICENSING.md. Everything published through
+2026-07-21 remains Apache-2.0 for its recipients; the BUSL tier applies to DApp
+releases from v3.1 onward (forward-only, by the copyright holder).

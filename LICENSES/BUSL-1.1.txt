@@ -1,0 +1,21 @@
+PLACEHOLDER — canonical Business Source License 1.1 text not yet vendored.
+
+Paste the verbatim BUSL-1.1 template from:
+  https://mariadb.com/bsl11/            (canonical)
+  https://spdx.org/licenses/BUSL-1.1    (SPDX record)
+
+It is deliberately not reproduced here: license text must be verbatim, and a
+hand-copied license risks being legally defective.
+
+Determ per-release parameters (see LICENSING.md, "BUSL-1.1 parameters"):
+  Licensor:             owner legal name / entity — counsel to fix
+  Licensed Work:        the specific DApp release (name + version)
+  Additional Use Grant: development, evaluation, testing, CI; and production use
+                        by natural persons and noncommercial organizations for
+                        noncommercial purposes. Production use by or for a
+                        commercial entity, or by or for a government /
+                        public-sector body, requires a commercial license from
+                        the Licensor. (Recorded intent — counsel drafts the
+                        operative definitions.)
+  Change Date:          4 years after that release's first publication
+  Change License:       Apache License 2.0

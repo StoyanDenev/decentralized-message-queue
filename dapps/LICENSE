@@ -1,4 +1,28 @@
-This component is licensed under the Apache License, Version 2.0.
-Full text: LICENSES/Apache-2.0.txt (repo root).
-SPDX-License-Identifier: Apache-2.0
-See /LICENSING.md for the project-wide split (AGPL-3.0 core / Apache-2.0 libs, clients, DApps & SDK).
+DApp licensing (owner decision 2026-07-25, licensing v3.1 — see /LICENSING.md and
+docs/proofs/DECISION-LOG.md; PENDING-COUNSEL):
+
+  ALL reference DApps are Business Source License 1.1 (/LICENSES/BUSL-1.1.txt):
+    d1-liberty-bell/          SPDX-License-Identifier: BUSL-1.1
+    d2-b2b-settlement/        SPDX-License-Identifier: BUSL-1.1
+    d3-journalism/            SPDX-License-Identifier: BUSL-1.1
+    d4-ai-agent/              SPDX-License-Identifier: BUSL-1.1
+    d5-random-selection/      SPDX-License-Identifier: BUSL-1.1
+    d6-private-rollup/        SPDX-License-Identifier: BUSL-1.1
+    d7-verifiable-inference/  SPDX-License-Identifier: BUSL-1.1
+    d8-anon-credentials/      SPDX-License-Identifier: BUSL-1.1
+    d9-merritt-voting/        SPDX-License-Identifier: BUSL-1.1
+
+  Additional Use Grant (recorded intent; counsel drafts the operative text):
+    - free: development, evaluation, testing, CI
+    - free: production use by natural persons and noncommercial organizations
+      for noncommercial purposes
+    - paid: production use by or for a commercial entity, or by or for a
+      government / public-sector body  ->  COMMERCIAL-LICENSE.md
+    Change Date: 4 years per release. Change License: Apache-2.0.
+
+  The Licensor operates reference instances on the network free of charge for
+  end users; using a hosted instance requires no code license.
+
+The owner may re-grant any DApp before its first public release. External
+contributions to dapps/ require a CLA (sole Licensor copyright is what makes
+the BUSL grants possible).
