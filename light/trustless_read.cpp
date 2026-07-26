@@ -110,7 +110,12 @@ VerifiedChain verify_chain_walk(
     uint64_t start_from,
     const std::string& initial_prev_anchor,
     uint64_t head_height,
-    bool track_registry = false) {
+    bool track_registry = false,
+    // LV-1/LV-2 (inc.2b): genesis k_block_sigs + bft_enabled, forwarded to every
+    // per-block verify_block_sigs so the chain walk enforces the node's
+    // committee-size mode-eligibility on each walked header. 0 = not enforced.
+    size_t expected_k = 0,
+    bool bft_enabled = true) {
 
     VerifiedChain vc;
 
@@ -215,12 +220,12 @@ VerifiedChain verify_chain_walk(
             // property explicit and independent of that gate (defense in depth).
             if (idx == 0 && from == 0) continue;
             json cj = committee_at(idx);   // static unless --track-registry
-            auto vbs = verify_block_sigs(h, cj, /*bft=*/false);
+            auto vbs = verify_block_sigs(h, cj, /*bft=*/false, expected_k, bft_enabled);
             if (!vbs.ok) {
                 // BFT mode fallback: a BFT-escalated block has at most
                 // K - ceil(2K/3) sentinel-zero slots. Retry once with
                 // bft_mode=true and accept if it passes.
-                vbs = verify_block_sigs(h, cj, /*bft=*/true);
+                vbs = verify_block_sigs(h, cj, /*bft=*/true, expected_k, bft_enabled);
             }
             if (!vbs.ok) {
                 // F-7 FULL-BLOCK FALLBACK. A cross-shard / reconciled (F2)
@@ -253,10 +258,10 @@ VerifiedChain verify_chain_walk(
                                 determ::chain::Block::from_json(full);
                             if (to_hex(fb.compute_hash()) == chained_hash) {
                                 auto fvbs = verify_block_sigs(
-                                    full, cj, /*bft=*/false);
+                                    full, cj, /*bft=*/false, expected_k, bft_enabled);
                                 if (!fvbs.ok)
                                     fvbs = verify_block_sigs(
-                                        full, cj, /*bft=*/true);
+                                        full, cj, /*bft=*/true, expected_k, bft_enabled);
                                 if (fvbs.ok) { vbs = fvbs; recovered = true; }
                             }
                         } catch (const std::exception&) {
@@ -361,7 +366,9 @@ VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
-    bool track_registry) {
+    bool track_registry,
+    size_t expected_k,
+    bool bft_enabled) {
 
     uint64_t head_height = fetch_head_height(rpc);
     if (head_height == 0) {
@@ -371,14 +378,16 @@ VerifiedChain verify_chain_to_head(
     }
     return verify_chain_walk(rpc, committee_seed, genesis_hash_hex,
                              /*start_from=*/0, /*initial_prev_anchor=*/"",
-                             head_height, track_registry);
+                             head_height, track_registry, expected_k, bft_enabled);
 }
 
 ResumeResult verify_chain_from_anchor(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     uint64_t anchor_height,
-    const std::string& anchor_block_hash) {
+    const std::string& anchor_block_hash,
+    size_t expected_k,
+    bool bft_enabled) {
 
     ResumeResult rr;
     uint64_t head_height = fetch_head_height(rpc);
@@ -397,7 +406,8 @@ ResumeResult verify_chain_from_anchor(
     rr.vc = verify_chain_walk(rpc, committee_seed, /*genesis_hash_hex=*/"",
                               /*start_from=*/anchor_height,
                               /*initial_prev_anchor=*/anchor_block_hash,
-                              head_height);
+                              head_height, /*track_registry=*/false,
+                              expected_k, bft_enabled);
     rr.resumed = true;
     return rr;
 }
@@ -457,7 +467,10 @@ AnchoredHead anchored_head(
                         // full verify, then require the verified tip to BE the
                         // cached anchor block (same chain, no same-height fork).
                         out.vc = verify_chain_to_head(rpc, committee_seed,
-                                                      out.genesis_hash_hex);
+                                                      out.genesis_hash_hex,
+                                                      /*track_registry=*/false,
+                                                      genesis.k_block_sigs,
+                                                      genesis.bft_enabled);
                         if (out.vc.height == st.head_height) {
                             if (out.vc.head_block_hash != st.head_block_hash) {
                                 throw std::runtime_error(
@@ -487,7 +500,8 @@ AnchoredHead anchored_head(
                         // exactly when a block lands mid-check.
                         auto bind = verify_chain_from_anchor(
                             rpc, committee_seed, st.head_height,
-                            st.head_block_hash);
+                            st.head_block_hash,
+                            genesis.k_block_sigs, genesis.bft_enabled);
                         if (!bind.resumed) {
                             throw std::runtime_error(
                                 "--resume: SECURITY/STALE — daemon head"
@@ -507,7 +521,8 @@ AnchoredHead anchored_head(
                     // a hard error, never a silent from-genesis re-verify that
                     // would mask the fork.
                     auto rr = verify_chain_from_anchor(
-                        rpc, committee_seed, st.head_height, st.head_block_hash);
+                        rpc, committee_seed, st.head_height, st.head_block_hash,
+                        genesis.k_block_sigs, genesis.bft_enabled);
                     if (rr.resumed) {
                         out.vc = rr.vc;
                         out.resumed = true;
@@ -540,7 +555,9 @@ AnchoredHead anchored_head(
     }
 
     // Full from-genesis verify (the default, and every fallback path above).
-    out.vc = verify_chain_to_head(rpc, committee_seed, out.genesis_hash_hex);
+    out.vc = verify_chain_to_head(rpc, committee_seed, out.genesis_hash_hex,
+                                  /*track_registry=*/false,
+                                  genesis.k_block_sigs, genesis.bft_enabled);
     return out;
 }
 

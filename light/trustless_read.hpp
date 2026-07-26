@@ -107,7 +107,12 @@ VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
-    bool track_registry = false);
+    bool track_registry = false,
+    // LV-1/LV-2 (inc.2b): genesis k_block_sigs + bft_enabled forwarded to the
+    // per-block verify_block_sigs so the chain walk enforces committee-size
+    // mode-eligibility on every header. Default 0 = not enforced (legacy).
+    size_t expected_k = 0,
+    bool bft_enabled = true);
 
 // LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
 // a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),
@@ -135,7 +140,9 @@ ResumeResult verify_chain_from_anchor(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     uint64_t anchor_height,
-    const std::string& anchor_block_hash);
+    const std::string& anchor_block_hash,
+    size_t expected_k = 0,
+    bool bft_enabled = true);
 
 // The committee-verified head a read/verify composite anchors against, obtained
 // either by a full from-genesis verify or — when `resume` is set and a valid,

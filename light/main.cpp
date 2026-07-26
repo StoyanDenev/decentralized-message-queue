@@ -1751,7 +1751,8 @@ int cmd_verify_chain(int argc, char** argv) {
             std::string gh = anchor_genesis(rpc, genesis);
             VerifiedChain vc =
                 verify_chain_to_head(rpc, committee_seed, gh,
-                                     /*track_registry=*/true);
+                                     /*track_registry=*/true,
+                                     genesis.k_block_sigs, genesis.bft_enabled);
             std::cout << "OK\n"
                       << "  genesis pin:        matches (" << gh << ")\n"
                       << "  height:             " << vc.height << "\n"
@@ -2105,7 +2106,7 @@ int cmd_cross_check(int argc, char** argv) {
             }
             try {
                 std::string gh = anchor_genesis(rpc, genesis);
-                auto vc = verify_chain_to_head(rpc, committee_seed, gh);
+                auto vc = verify_chain_to_head(rpc, committee_seed, gh, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
                 peers.push_back({label, vc.height, vc.head_block_hash, vc.head_state_root});
             } catch (const std::exception& e) {
                 std::cerr << "cross-check: peer " << label << " UNVERIFIABLE (fail-closed): "
@@ -4752,7 +4753,7 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the
         // head's state_root (the anchor for the Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -5071,7 +5072,7 @@ int cmd_verify_merge_state(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the
         // head's state_root (the anchor for the Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -5409,7 +5410,7 @@ int cmd_verify_param_change(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the
         // head's state_root (the anchor for the Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -5739,7 +5740,7 @@ int cmd_verify_param_value(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the head's
         // state_root (the anchor for the `k:` Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -5999,7 +6000,7 @@ int cmd_verify_registrant(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the
         // head's state_root (the anchor for the Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -6321,7 +6322,7 @@ int cmd_verify_notekey(int argc, char** argv) {
         local_key.push_back('n'); local_key.push_back('k'); local_key.push_back(':');
         local_key.insert(local_key.end(), domain.begin(), domain.end());
 
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -6590,7 +6591,7 @@ int cmd_verify_enote_inclusion(int argc, char** argv) {
             local_key.assign(full.begin(), full.end());
         }
 
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -6837,7 +6838,7 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the
         // head's state_root (the anchor for the Merkle inclusion).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -7245,7 +7246,7 @@ int cmd_verify_account(int argc, char** argv) {
 
         // Committee-verify the header chain end-to-end, capturing the head's
         // state_root (the anchor for the `a:` Merkle proof / its absence).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "
@@ -9149,7 +9150,7 @@ int cmd_audit(int argc, char** argv) {
             RpcClient rpc(port);
             if (!rpc.open()) throw std::runtime_error(rpc.last_error());
             std::string gh = anchor_genesis(rpc, genesis);
-            auto vc = verify_chain_to_head(rpc, committee_seed, gh);
+            auto vc = verify_chain_to_head(rpc, committee_seed, gh, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
             head_state_root = vc.head_state_root;
             detail = "height " + std::to_string(vc.height) + ", "
                    + std::to_string(vc.headers_verified) + " headers, "

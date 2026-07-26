@@ -1,9 +1,9 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **3 autonomous gates CLOSED — including LV-1/LV-2 committee-size
-mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring, live-regressed; inc.2b
-header-walk wiring tracked), 5 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface
-register in the falsify-on-mutant series, after
+**Status:** open (2026-07-26); **3 autonomous gates CLOSED — LV-1/LV-2 committee-size mode-eligibility now
+COMPLETE (inc.1 mechanism + falsify; inc.2 state-root anchor wiring; inc.2b chain-walk wiring — both
+live-regressed), 5 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
+the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
 [RpcIngressGateAudit](RpcIngressGateAudit.md), [SnapshotRestoreGateAudit](SnapshotRestoreGateAudit.md),
@@ -136,10 +136,19 @@ a live-cluster NON-REGRESSION check — 7 core live light tests pass with the en
 (`balance-trustless`, `stake-trustless`, `supply-trustless`, `state-bundle`, `verify-account`,
 `committee-at-height`, `verify-state-root` — covering `read_account_trustless`, the direct handlers, the
 export path, and BOTH cascade helpers). Regression-safety is the same proof: a node-accepted successor
-satisfies `md_ok||bft_ok`, so no honest read regresses. **Residual (inc.2b, tracked):** the header-only
-`verify_chain_walk` (the from-genesis / resume chain-sig walk) still passes `expected_k=0`; wiring it via
-`verify_chain_to_head`/`verify_chain_from_anchor` extends the enforcement to every walked block header
-(defense-in-depth beyond the state-root anchor, which already covers the user-facing reads).
+satisfies `md_ok||bft_ok`, so no honest read regresses.
+
+**Increment 2b (LANDED) — chain-walk wiring:** threaded `expected_k`/`bft_enabled` into the header-only
+`verify_chain_walk` (defaulted params after `track_registry`, forwarded to all four per-block
+`verify_block_sigs` calls incl. the F2 full-block fallback) via `verify_chain_to_head` +
+`verify_chain_from_anchor` (both `.hpp`/`.cpp` + the resume path), and all their callers — the 11 direct
+`verify-*`/read handlers (regex) + the 1 `--track-registry` caller + the 4 internal `anchored_head`
+callers (which carry `genesis`). So the from-genesis / resume chain walk now enforces the committee-size
+mode-eligibility on EVERY walked block header. This closes LV-1/LV-2 for the walk-only commands
+(`verify-chain`, etc.) that don't subsequently anchor a state read, and hardens the whole chain-trust for
+the reads. Same live-cluster non-regression validation (the walk is exercised by every trustless read +
+the resume path); regression-safety is the same proof. LV-1/LV-2 is now enforced on BOTH the state-root
+anchor (inc.2) and the full chain walk (inc.2b) — the gate is complete.
 
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
