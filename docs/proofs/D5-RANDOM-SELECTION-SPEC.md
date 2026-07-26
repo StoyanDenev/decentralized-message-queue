@@ -292,10 +292,22 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    `selftest-verify-selection` extended with the collect→core pipeline: a COLLECT round-trip CTRL +
    the **3a** roster-completeness NEG (a result over an un-removed roster → the applied remove
    excludes the victim → UNVERIFIABLE), falsify-on-mutant (dropping the fold's remove-application
-   flips only the 3a NEG). So **3 of the 4 SPEC §11 mutants (3a/3b/3c) are gated**; **remaining:**
-   the thin live CLI `verify-selection` (compose `verify_chain_to_head` + `collect_d5_streams` +
-   `verify_rand` + the core; wired with the orchestrator at inc.6) and the private-roster
-   `roster_root` binding (3d, only when the opt-in private mode ships).
+   flips only the 3a NEG). So **3 of the 4 SPEC §11 mutants (3a/3b/3c) are gated**. **inc.5c
+   SHIPPED** — the thin live CLI `verify-selection` (`determ-light verify-selection --domain
+   --case-id [--member]`): the composite `verify_selection_at` (`light/verify_selection.cpp`) anchors
+   genesis, committee-authenticates the FULL block chain AND collects every tx-bearing body via a new
+   opt-in `out_txbearing_full_blocks` collector on the shared `verify_chain_to_head` walk (each body
+   pinned to the committee-chained `block_hash` — the F-7/`--track-registry` pin, byte-neutral to
+   existing callers by default), then runs `collect_d5_streams` → first-open-wins canonical case-open
+   → `filter_roster_to_cutoff` (roster frozen to the case-open's `roster_cutoff_height`) → the S-042
+   `verify_rand_from_blocks` seed authentication → `verify_selection_core`. The new pure
+   `filter_roster_to_cutoff` carries its own FAST offline gate in `selftest-verify-selection` (a
+   POST-cutoff member counted in the published result is refused once the roster is frozen →
+   UNVERIFIABLE; the mutant that drops the filter folds it in → false SELECTED — flips only that NEG,
+   both platforms). Both-platform green (WSL2/GCC ci_local 284/1-known-red; collector byte-neutral —
+   no trustless-read regression). **Remaining:** the `dapps/d5-random-selection` orchestrator wires
+   the live composite end-to-end on a 3-of-5 fixture (inc.6), and the private-roster `roster_root`
+   binding (3d) ships only with the opt-in private mode.
 6. `dapps/d5-random-selection` orchestrator + reference RP end-to-end on a 3-of-5 fixture (the
    reference RP integration that later defines `sdk/rp`).
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs

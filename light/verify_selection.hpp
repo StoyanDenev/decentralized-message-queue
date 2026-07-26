@@ -21,9 +21,13 @@
 // any mismatch -> UNVERIFIABLE.
 
 #pragma once
+#include "rpc_client.hpp"
 #include <determ/dapp/d5codec.h>
+#include <determ/chain/genesis.hpp>
+#include <determ/types.hpp>
 #include <nlohmann/json.hpp>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -89,5 +93,40 @@ SelectionResult verify_selection_core(
     const std::vector<D5CaseOpenAt>& case_opens,
     const D5ResultAt& result,
     const std::vector<uint8_t>& queried_member);
+
+// Materialize the roster as of a `cutoff` block height: keep ONLY the ops that
+// landed at height <= cutoff, in input order. The canonical case-open declares
+// `roster_cutoff_height` (bound into the d5_draw ctx), so a member added AFTER
+// the cutoff is NOT eligible for that draw — folding the un-filtered stream
+// would admit a post-cutoff member and re-derive over the wrong roster. Pure;
+// the live composite calls it before verify_selection_core. (SPEC §4/§11.)
+std::vector<D5RosterOp> filter_roster_to_cutoff(
+    const std::vector<D5RosterOp>& ops, uint64_t cutoff);
+
+// Live composite (the thin CLI spine, SPEC §12 inc.5 tail). Given an UNTRUSTED
+// daemon `rpc`, the genesis-seeded committee, the D.5 `domain`, a `case_id`, and
+// an optional `queried_member`, it:
+//   1. anchors genesis (anchor_genesis — the operator's own pin);
+//   2. committee-authenticates the FULL block chain to the head AND collects
+//      every tx-bearing full body (verify_chain_to_head's out-param =
+//      completeness, SPEC §11 3a) — a doctored/truncated stream fails closed;
+//   3. decodes the roster / case-open / result streams (collect_d5_streams);
+//   4. picks the canonical (first-open-wins) case-open, filters the roster to
+//      its roster_cutoff_height, and authenticates the beacon seed
+//      cumulative_rand[draw_height] via the S-042 successor binding
+//      (verify_rand_from_blocks); any unauthenticated input -> UNVERIFIABLE;
+//   5. runs verify_selection_core (re-derives d5_draw, compares to the published
+//      result, decides the queried member) — NEVER a false SELECTED.
+// Throws std::runtime_error only on genesis-pin / transport failures; a
+// verification shortfall is returned as verdict UNVERIFIABLE with a detail.
+SelectionResult verify_selection_at(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    const std::vector<uint8_t>& queried_member,
+    size_t expected_k = 0,
+    bool bft_enabled = true);
 
 } // namespace determ::light

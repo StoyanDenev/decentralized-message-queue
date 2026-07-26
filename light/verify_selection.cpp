@@ -6,7 +6,11 @@
 // first-open-wins + ordering verifier defences. No new crypto.
 
 #include "verify_selection.hpp"
+#include "trustless_read.hpp"   // anchor_genesis, verify_chain_to_head
+#include "verify_rand.hpp"      // verify_rand_from_blocks (S-042 seed binding)
+#include "verify.hpp"           // to_hex / from_hex_arr
 #include <determ/dapp/d5draw.h>
+#include <determ/types.hpp>
 #include <cstring>
 #include <set>
 
@@ -101,6 +105,19 @@ int collect_d5_streams(
     return 0;
 }
 
+std::vector<D5RosterOp> filter_roster_to_cutoff(
+    const std::vector<D5RosterOp>& ops, uint64_t cutoff) {
+    // Keep only the ops that landed at height <= cutoff, in input order. A
+    // member added AFTER the canonical case-open's roster_cutoff_height is not
+    // eligible for that draw; folding the un-filtered stream would admit it and
+    // re-derive over the wrong roster (a false SELECTED for a post-cutoff id).
+    std::vector<D5RosterOp> out;
+    out.reserve(ops.size());
+    for (const auto& op : ops)
+        if (op.height <= cutoff) out.push_back(op);
+    return out;
+}
+
 SelectionResult verify_selection_core(
     const std::vector<uint8_t>& domain,
     const std::vector<uint8_t>& case_id,
@@ -178,6 +195,95 @@ SelectionResult verify_selection_core(
     for (size_t k = 0; k < oc; k++) if (ids[outi[k]] == queried_member) { sel = true; break; }
     res.verdict = sel ? SelectionVerdict::SELECTED : SelectionVerdict::NOT_SELECTED;
     return res;
+}
+
+SelectionResult verify_selection_at(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    const std::vector<uint8_t>& queried_member,
+    size_t expected_k,
+    bool bft_enabled) {
+
+    SelectionResult res;  // default verdict UNVERIFIABLE
+
+    // ── 1. Anchor genesis (the operator's own pin; throws on mismatch). ──
+    std::string genesis_hash = anchor_genesis(rpc, genesis);
+
+    // ── 2. Committee-authenticate the FULL chain to the head, collecting every
+    //       tx-bearing full body. The collector's block_hash pin makes the set
+    //       COMPLETE + authentic (SPEC §11 3a) — a truncatable dapp hint cannot
+    //       hide a DAPP_CALL. ──
+    std::vector<nlohmann::json> full_blocks;
+    verify_chain_to_head(rpc, committee_seed, genesis_hash,
+                         /*track_registry=*/false, expected_k, bft_enabled,
+                         &full_blocks);
+
+    // ── 3. Decode the roster / case-open / result streams for this case. ──
+    std::vector<D5RosterOp>   roster;
+    std::vector<D5CaseOpenAt> case_opens;
+    std::vector<D5ResultAt>   results;
+    collect_d5_streams(full_blocks, domain, case_id, roster, case_opens, results);
+
+    if (case_opens.empty()) {
+        res.detail = "no case-open for case_id on the authenticated chain";
+        return res;
+    }
+    res.multiple_case_opens = (case_opens.size() > 1);
+
+    // ── 4. Canonical (first-open-wins) case-open = the smallest block height. ──
+    size_t first = 0;
+    for (size_t i = 1; i < case_opens.size(); i++)
+        if (case_opens[i].height < case_opens[first].height) first = i;
+    const D5CaseOpenAt& co = case_opens[first];
+
+    // ── 5. Authenticate the beacon seed cumulative_rand[draw_height] via the
+    //       S-042 successor binding (verify_rand_from_blocks). Any shortfall =
+    //       UNVERIFIABLE, never a guessed seed. ──
+    nlohmann::json bh  = rpc.call("block", {{"index", co.draw_height}});
+    nlohmann::json bh1 = rpc.call("block", {{"index", co.draw_height + 1}});
+    if (bh.is_null() || bh1.is_null()) {
+        res.detail = "draw_height " + std::to_string(co.draw_height)
+                   + " has no committee-signed successor yet — seed unauthenticated";
+        return res;
+    }
+    RandResult rr = verify_rand_from_blocks(bh, bh1, committee_seed,
+                                            co.draw_height, expected_k, bft_enabled);
+    if (rr.verdict != RandVerdict::VERIFIED) {
+        res.detail = "beacon seed at draw_height " + std::to_string(co.draw_height)
+                   + " UNVERIFIABLE: " + rr.detail;
+        return res;
+    }
+    Hash seed = from_hex_arr<32>(rr.cumulative_rand_hex);
+
+    // ── 6. Materialize the eligible roster as of the canonical cutoff. ──
+    std::vector<D5RosterOp> elig_ops =
+        filter_roster_to_cutoff(roster, co.roster_cutoff_height);
+
+    // ── 7. Pick the published result referencing the canonical draw_height
+    //       (min height wins, mirroring first-open-wins). ──
+    const D5ResultAt* chosen = nullptr;
+    for (const auto& r : results) {
+        if (r.draw_height != co.draw_height) continue;
+        if (!chosen || r.height < chosen->height) chosen = &r;
+    }
+    if (!chosen) {
+        res.detail = "no published result references the canonical draw_height "
+                   + std::to_string(co.draw_height);
+        return res;
+    }
+
+    // ── 8. Pure core: re-derive d5_draw over (seed, eligible roster) under the
+    //       canonical case-open, compare to the published result, decide the
+    //       queried member. NEVER a false SELECTED. ──
+    std::vector<uint8_t> domain_bytes(domain.begin(), domain.end());
+    SelectionResult core = verify_selection_core(
+        domain_bytes, case_id, seed.data(), elig_ops, case_opens, *chosen,
+        queried_member);
+    core.multiple_case_opens = res.multiple_case_opens || core.multiple_case_opens;
+    return core;
 }
 
 } // namespace determ::light

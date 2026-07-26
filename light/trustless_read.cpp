@@ -115,7 +115,10 @@ VerifiedChain verify_chain_walk(
     // per-block verify_block_sigs so the chain walk enforces the node's
     // committee-size mode-eligibility on each walked header. 0 = not enforced.
     size_t expected_k = 0,
-    bool bft_enabled = true) {
+    bool bft_enabled = true,
+    // D.5 collector: when non-null, push the pinned full body of every
+    // tx-bearing block (see verify_chain_to_head's header doc). nullptr = no-op.
+    std::vector<nlohmann::json>* out_full_blocks = nullptr) {
 
     VerifiedChain vc;
 
@@ -333,6 +336,41 @@ VerifiedChain verify_chain_walk(
                     }
                 }
             }
+            // D.5 collector: after this block's committee sigs verified, pull
+            // its FULL body if it carries transactions (the D.5 messages live in
+            // tx bodies, which the stripped header stream omits). Pin the body:
+            // its recomputed block_hash MUST equal the block_hash the header walk
+            // committee-chained (a doctored body changes the hash → throw). A
+            // zero-tx_root block provably has no tx (tx_root is bound into the
+            // committee digest), so skipping it cannot hide a message — this is
+            // the SPEC §11 3a completeness source. Independent of the F-7 /
+            // --track-registry fetches above (a rare redundant fetch when both
+            // fire is correct, just wasteful); keeps this path's soundness local.
+            if (out_full_blocks && !(idx == 0 && from == 0)) {
+                std::string troot = h.value("tx_root", std::string{});
+                bool has_txs = !troot.empty()
+                               && troot.find_first_not_of('0') != std::string::npos;
+                if (has_txs) {
+                    std::string chained = h.value("block_hash", std::string{});
+                    json full = rpc.call("block", {{"index", idx}});
+                    if (chained.empty() || !full.is_object()
+                        || (full.contains("error") && !full["error"].is_null())) {
+                        throw std::runtime_error(
+                            "verify-chain (D.5 collect): cannot fetch full block "
+                            + std::to_string(idx) + " (daemon refused)");
+                    }
+                    determ::chain::Block fb =
+                        determ::chain::Block::from_json(full);
+                    if (to_hex(fb.compute_hash()) != chained) {
+                        throw std::runtime_error(
+                            "verify-chain (D.5 collect): full block "
+                            + std::to_string(idx)
+                            + " does not hash to the chained block_hash "
+                              "(daemon served a doctored body)");
+                    }
+                    out_full_blocks->push_back(std::move(full));
+                }
+            }
             if (!vbs.state_root_hex.empty()) {
                 last_state_root = vbs.state_root_hex;
             }
@@ -368,7 +406,8 @@ VerifiedChain verify_chain_to_head(
     const std::string& genesis_hash_hex,
     bool track_registry,
     size_t expected_k,
-    bool bft_enabled) {
+    bool bft_enabled,
+    std::vector<nlohmann::json>* out_txbearing_full_blocks) {
 
     uint64_t head_height = fetch_head_height(rpc);
     if (head_height == 0) {
@@ -378,7 +417,8 @@ VerifiedChain verify_chain_to_head(
     }
     return verify_chain_walk(rpc, committee_seed, genesis_hash_hex,
                              /*start_from=*/0, /*initial_prev_anchor=*/"",
-                             head_height, track_registry, expected_k, bft_enabled);
+                             head_height, track_registry, expected_k, bft_enabled,
+                             out_txbearing_full_blocks);
 }
 
 ResumeResult verify_chain_from_anchor(

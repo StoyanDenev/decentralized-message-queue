@@ -45,6 +45,8 @@
 //   verify-enote-inclusion   Prove a scanned (commitment, ciphertext) enote is
 //                            the committed on-chain delivery (en:, MODERN)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
+//   verify-rand              D.5: authenticate cumulative_rand[H] (S-042 beacon)
+//   verify-selection         D.5: re-derive + refute a government random selection
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
@@ -693,6 +695,32 @@ void print_usage() {
         "      NOT-CREATED → exit 0 (a definite answer); any tamper,\n"
         "      key/leaf mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false EXISTS.\n"
+        "\n"
+        "Government random-selection — D.5 citizen verifier (--genesis required):\n"
+        "  verify-rand --rpc-port <N> --genesis <file> --height <H> [--json]\n"
+        "      Authenticate cumulative_rand[H] — the K-of-K commit-reveal MPDH\n"
+        "      beacon D.5 draws its seed from. Fetches block H + its successor\n"
+        "      H+1, anchors genesis, and binds the seed via S-042: block_hash[H]\n"
+        "      (which commits cumulative_rand[H]) must equal block[H+1].prev_hash,\n"
+        "      and H+1's committee sigs must verify. committee-authenticated:YES\n"
+        "      (exit 0) or UNVERIFIABLE (exit 1) — never a false YES on a swapped\n"
+        "      beacon whose successor sig was not rebound.\n"
+        "  verify-selection --rpc-port <N> --genesis <file> --domain <D>\n"
+        "                   --case-id <hex> [--member <hex>] [--json]\n"
+        "      The D.5 citizen check: re-derive a published government random\n"
+        "      selection for <case-id> under DApp <domain> and refute any result\n"
+        "      that disagrees. Committee-authenticates the FULL block chain and\n"
+        "      collects the D.5 roster / case-open / result streams from EVERY\n"
+        "      block body (a truncatable dapp hint cannot hide a message — SPEC\n"
+        "      §11 3a), picks the first-open-wins canonical case-open, freezes the\n"
+        "      roster to its roster_cutoff_height, authenticates the beacon seed\n"
+        "      (verify-rand's S-042 binding), then re-runs the lowest-hash draw\n"
+        "      (d5_draw) and compares to the published result. With --member\n"
+        "      reports whether that id was fairly SELECTED / NOT_SELECTED; without\n"
+        "      it reports that the result verifies. NEVER a false SELECTED: any\n"
+        "      mismatch, unauthenticated seed, or missing input → UNVERIFIABLE\n"
+        "      (exit 1). >1 case-open for one case_id is surfaced as permanent\n"
+        "      public EVIDENCE.\n"
         "\n"
         "Equivocation forensics (offline, no daemon):\n"
         "  verify-equivocation --in <event.json>\n"
@@ -9509,10 +9537,115 @@ int cmd_selftest_verify_selection(int argc, char** argv) {
         }
     }
 
+    // ── CUTOFF-FREEZE (SPEC §4): the eligible roster is materialized AS OF the
+    //    canonical case-open's roster_cutoff_height — a member ADDED AFTER the
+    //    cutoff is NOT eligible for that draw (filter_roster_to_cutoff). This NEG
+    //    plants a post-cutoff add + a fraudulent result that counts it; once the
+    //    correct filter freezes the roster to the pre-cutoff set the count no
+    //    longer supports the published draw -> UNVERIFIABLE, so the post-cutoff
+    //    member is refused. The mutant (filter_roster_to_cutoff returns the ops
+    //    unfiltered) folds the post-cutoff member in and ACCEPTS -> false
+    //    SELECTED, exactly the never-false-SELECTED violation. ──
+    {
+        std::vector<std::vector<uint8_t>> pre(members.begin(), members.begin() + 11);
+        std::vector<uint8_t> bonus = { 'D','5','-','B','O','N','U','S' };
+        std::vector<std::vector<uint8_t>> all12 = pre; all12.push_back(bonus);
+
+        D5RosterOp add_pre;  add_pre.op  = D5_ROSTER_ADD;  add_pre.height  = 5;  add_pre.ids  = pre;
+        D5RosterOp add_post; add_post.op = D5_ROSTER_ADD;  add_post.height = 50; add_post.ids = { bonus };
+        std::vector<D5RosterOp> ops = { add_pre, add_post };
+
+        // Canonical case-open: cutoff=10 (BEFORE the post-cutoff add@50); N=12 so
+        // the fraudulent 12-member result "selects all" of the padded roster.
+        D5CaseOpenAt co; co.height = 12; co.roster_cutoff_height = 10; co.draw_height = 100;
+        co.n_primary = 12; co.m_alternate = 0; co.draw_algo_version = D5_DRAW_ALGO_LOWEST_HASH;
+
+        // Fraudulent published result = the draw over the FULL padded 12
+        // (want=12==count so `bonus` is in the published set).
+        std::vector<const uint8_t*> idp; std::vector<size_t> idl;
+        for (auto& id : all12) { idp.push_back(id.data()); idl.push_back(id.size()); }
+        std::vector<size_t> outi(12); size_t oc = 0;
+        d5_draw(seed, domain.data(), domain.size(), case_id.data(), case_id.size(),
+                100, 10, D5_DRAW_ALGO_LOWEST_HASH, idp.data(), idl.data(), 12, 12, 0,
+                outi.data(), &oc);
+        std::vector<std::vector<uint8_t>> sel12;
+        for (size_t k = 0; k < oc; k++) sel12.push_back(all12[outi[k]]);
+        D5ResultAt result; result.height = 110; result.draw_height = 100; result.selected_ids = sel12;
+
+        // CORRECT: filter to the cutoff -> the post-cutoff add@50 drops -> 11
+        // eligible -> d5_draw(n_primary=12, count=11) fails the count boundary ->
+        // UNVERIFIABLE (the post-cutoff `bonus` is refused).
+        auto elig = filter_roster_to_cutoff(ops, co.roster_cutoff_height);
+        auto r = verify_selection_core(domain, case_id, seed, elig, {co}, result, bonus);
+        check(r.verdict == SelectionVerdict::UNVERIFIABLE,
+              "NEG (roster cutoff-freeze): a result counting a POST-cutoff member is refused once the roster is frozen to roster_cutoff_height");
+    }
+
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
     if (fail == 0) { std::cout << "  PASS: selftest-verify-selection\n"; return 0; }
     std::cout << "  FAIL: selftest-verify-selection\n";
     return 1;
+}
+
+// verify-selection — LIVE: the D.5 citizen verifier. Against an UNTRUSTED daemon,
+// authenticate a published government random-selection for `--case-id` under the
+// D.5 `--domain`: committee-authenticate the full block chain, collect the D.5
+// roster / case-open / result streams from the block bodies (completeness =
+// SPEC §11 3a), authenticate the beacon seed (S-042), re-derive d5_draw, and
+// report whether an optional `--member` was fairly SELECTED — NEVER a false
+// SELECTED. See light/verify_selection.hpp. Exit 0 on a decided verdict
+// (SELECTED / NOT_SELECTED), 1 on UNVERIFIABLE.
+int cmd_verify_selection(int argc, char** argv) {
+    uint16_t port = 0; bool have_port = false;
+    std::string genesis_path, domain, case_id_hex, member_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) { port = parse_u16("--rpc-port", argv[++i]); have_port = true; }
+        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--domain"   && i + 1 < argc) domain = argv[++i];
+        else if (a == "--case-id"  && i + 1 < argc) case_id_hex = argv[++i];
+        else if (a == "--member"   && i + 1 < argc) member_hex = argv[++i];
+        else if (a == "--json") json_out = true;
+        else { std::cerr << "verify-selection: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty() || case_id_hex.empty()) {
+        std::cerr << "verify-selection: --rpc-port, --genesis, --domain, --case-id are required\n";
+        return 1;
+    }
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        std::vector<uint8_t> case_id = from_hex(case_id_hex);
+        std::vector<uint8_t> member;
+        if (!member_hex.empty()) member = from_hex(member_hex);
+        RpcClient rpc(port);
+        if (!rpc.open()) { std::cerr << "verify-selection: " << rpc.last_error() << "\n"; return 1; }
+        auto r = verify_selection_at(rpc, committee_seed, genesis, domain, case_id, member,
+                                     genesis.k_block_sigs, genesis.bft_enabled);
+        const char* verdict =
+            r.verdict == SelectionVerdict::SELECTED     ? "SELECTED" :
+            r.verdict == SelectionVerdict::NOT_SELECTED ? "NOT_SELECTED" : "UNVERIFIABLE";
+        if (json_out) {
+            json out = {
+                {"domain",              domain},
+                {"verdict",             verdict},
+                {"multiple_case_opens", r.multiple_case_opens},
+                {"eligible_count",      r.eligible_count},
+            };
+            if (!r.detail.empty()) out["detail"] = r.detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << "verify-selection " << domain << ": " << verdict << "\n";
+            if (r.multiple_case_opens)
+                std::cout << "  WARNING: multiple case-opens for case_id — permanent public EVIDENCE\n";
+            if (!r.detail.empty()) std::cout << "  " << r.detail << "\n";
+        }
+        return (r.verdict == SelectionVerdict::UNVERIFIABLE) ? 1 : 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-selection: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // verify-rand — LIVE: authenticate cumulative_rand[H] (the MPDH beacon the D.5
@@ -9881,6 +10014,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-watch-label")  return cmd_selftest_watch_label(sub_argc, sub_argv);
         if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
         if (cmd == "verify-rand")           return cmd_verify_rand(sub_argc, sub_argv);
+        if (cmd == "verify-selection")      return cmd_verify_selection(sub_argc, sub_argv);
         if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
         if (cmd == "selftest-verify-selection") return cmd_selftest_verify_selection(sub_argc, sub_argv);
     } catch (const std::exception& e) {

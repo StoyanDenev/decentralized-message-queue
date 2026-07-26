@@ -103,6 +103,17 @@ struct VerifiedChain {
 // acceptance still requires a valid Ed25519 sig under the registered
 // pubkey). Default false = the pre-R52 genesis-frozen behavior, byte-for-
 // byte (existing callers unaffected).
+// D.5 collector (out_txbearing_full_blocks): when non-null, the walk also
+// COLLECTS the committee-authenticated FULL body of every tx-bearing block
+// (idx > 0, non-zero tx_root) into the vector, ascending by height. Each body
+// is re-fetched via the `block` RPC and PINNED — its recomputed block_hash must
+// equal the block_hash the header walk already committee-chained, so a doctored
+// body fails closed (the same F-7 / --track-registry pin). This is the
+// COMPLETENESS source for the D.5 verify-selection composite (SPEC §11 3a): a
+// truncatable `dapp_messages` RPC hint cannot hide a DAPP_CALL because the
+// collector reads EVERY block body, and a zero-tx_root block provably carries no
+// tx (tx_root is bound into the committee digest — verify.cpp:143). Default
+// nullptr = no collection, byte-identical to existing callers.
 VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
@@ -112,7 +123,8 @@ VerifiedChain verify_chain_to_head(
     // per-block verify_block_sigs so the chain walk enforces committee-size
     // mode-eligibility on every header. Default 0 = not enforced (legacy).
     size_t expected_k = 0,
-    bool bft_enabled = true);
+    bool bft_enabled = true,
+    std::vector<nlohmann::json>* out_txbearing_full_blocks = nullptr);
 
 // LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
 // a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),
