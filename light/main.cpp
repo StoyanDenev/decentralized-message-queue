@@ -77,6 +77,7 @@
 #include "account_history.hpp"
 #include "verify_tx_inclusion.hpp"
 #include "verify_state_root.hpp"
+#include "verify_rand.hpp"
 #include "verify_ct.hpp"
 #include "persist.hpp"
 
@@ -9328,6 +9329,137 @@ int cmd_selftest_readline_cap(int argc, char** argv) {
     return 1;
 }
 
+// verify-rand — LIVE: authenticate cumulative_rand[H] (the MPDH beacon the D.5
+// government random-selection DApp draws from) via the S-042 successor binding.
+// Fetches block H + H+1 from the daemon, anchors genesis, and never reports a
+// false committee-authenticated:YES. See light/verify_rand.hpp.
+int cmd_verify_rand(int argc, char** argv) {
+    uint16_t port = 0; bool have_port = false;
+    std::string genesis_path;
+    uint64_t height = 0; bool have_height = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) { port = parse_u16("--rpc-port", argv[++i]); have_port = true; }
+        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--height"   && i + 1 < argc) { height = parse_u64("--height", argv[++i]); have_height = true; }
+        else if (a == "--json") json_out = true;
+        else { std::cerr << "verify-rand: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (!have_port || genesis_path.empty() || !have_height) {
+        std::cerr << "verify-rand: --rpc-port, --genesis, --height are required\n";
+        return 1;
+    }
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) { std::cerr << "verify-rand: " << rpc.last_error() << "\n"; return 1; }
+        anchor_genesis(rpc, genesis);   // pin chain identity (fail-closed)
+        auto r = verify_rand_at(rpc, committee_seed, genesis, height,
+                                genesis.k_block_sigs, genesis.bft_enabled);
+        bool ok = (r.verdict == RandVerdict::VERIFIED);
+        if (json_out) {
+            json out = {
+                {"height",                 r.height},
+                {"cumulative_rand",        r.cumulative_rand_hex},
+                {"block_hash",             r.block_hash_hex},
+                {"committee_size",         r.committee_size},
+                {"sigs_verified",          r.sigs_verified},
+                {"committee_authenticated", ok},
+            };
+            if (!r.detail.empty()) out["detail"] = r.detail;
+            std::cout << out.dump() << "\n";
+        } else if (ok) {
+            std::cout << "cumulative_rand@" << r.height << " = " << r.cumulative_rand_hex << "\n"
+                      << "committee-authenticated: YES (" << r.sigs_verified << " sigs)\n";
+        } else {
+            std::cout << "cumulative_rand@" << r.height << "\n"
+                      << "committee-authenticated: UNVERIFIABLE\n  " << r.detail << "\n";
+        }
+        return ok ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-rand: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// selftest-verify-rand — offline, NO daemon: drive verify_rand_from_blocks with
+// a synthetic (block[H], block[H+1]) pair to prove the S-042 successor-binding
+// gate. Mirrors selftest-tx-inclusion-height: the binding gate is checked
+// BEFORE the committee-sig anchor so it is falsifiable with an empty committee.
+// NEG proves a swapped-beacon successor (prev_hash != recomputed block_hash[H])
+// is refused at the binding gate; CTRL proves a correct binding passes it and
+// reaches the committee-sig anchor (non-vacuity). Removing the binding check
+// (the SPEC §11 mutant) makes NEG fall through to the committee-sig detail ->
+// the NEG assertion flips RED.
+int cmd_selftest_verify_rand(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+    auto mk_block = [](uint64_t index, const std::string& prev_hash, const std::string& cumrand) {
+        return nlohmann::json{
+            {"index", index},
+            {"prev_hash", prev_hash},
+            {"timestamp", 0},
+            {"transactions", nlohmann::json::array()},
+            {"creators", nlohmann::json::array()},
+            {"cumulative_rand", cumrand},
+            {"abort_events", nlohmann::json::array()}
+        };
+    };
+    std::map<std::string, PubKey> empty_seed;
+    const uint64_t H = 100;
+    const std::string zero(64, '0');
+    const std::string cr_H = std::string(63, '0') + "1";   // cumulative_rand[H]
+
+    auto header_h = mk_block(H, zero, cr_H);
+    // Recompute block_hash[H] exactly as the core does (SHA256 over signing_bytes,
+    // which include cumulative_rand[H]).
+    std::string bh_hash = to_hex(
+        determ::chain::Block::from_json(pad_stripped_header(header_h)).compute_hash());
+
+    // CTRL: successor prev_hash == recomputed block_hash[H] -> passes the S-042
+    // binding gate -> reaches the committee-sig anchor (empty seed -> fails).
+    {
+        auto header_h1 = mk_block(H + 1, bh_hash, zero);
+        auto r = verify_rand_from_blocks(header_h, header_h1, empty_seed, H);
+        bool notrip = (r.verdict == RandVerdict::UNVERIFIABLE)
+                    && (r.detail.find("successor prev_hash binding failed") == std::string::npos)
+                    && (r.detail.find("committee-sig verification failed") != std::string::npos);
+        check(notrip, "CTRL: a correct successor prev_hash passes the S-042 binding gate and reaches the committee-sig anchor (non-vacuity)");
+    }
+
+    // NEG (falsify target): successor prev_hash != recomputed block_hash[H]
+    // (models a daemon that swapped cumulative_rand[H]) -> UNVERIFIABLE at the
+    // S-042 binding gate, BEFORE the committee-sig anchor.
+    {
+        auto header_h1 = mk_block(H + 1, zero, zero);   // wrong prev_hash
+        auto r = verify_rand_from_blocks(header_h, header_h1, empty_seed, H);
+        bool hit = (r.verdict == RandVerdict::UNVERIFIABLE)
+                 && r.detail.find("successor prev_hash binding failed") != std::string::npos;
+        check(hit, "NEG: a successor whose prev_hash != recomputed block_hash[H] (swapped beacon) is refused at the S-042 binding gate");
+    }
+
+    // NEG index: block[H].index != requested height -> the index-binding gate.
+    {
+        auto bad_h = mk_block(H + 5, zero, cr_H);
+        auto header_h1 = mk_block(H + 1, bh_hash, zero);
+        auto r = verify_rand_from_blocks(bad_h, header_h1, empty_seed, H);
+        bool hit = (r.verdict == RandVerdict::UNVERIFIABLE)
+                 && r.detail.find("block index binding failed") != std::string::npos;
+        check(hit, "NEG: a block[H] whose own index != the requested height is refused at the index-binding gate");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-verify-rand\n"; return 0; }
+    std::cout << "  FAIL: selftest-verify-rand\n";
+    return 1;
+}
+
 // selftest-tx-inclusion-height — offline, NO daemon: drive the testable core
 // verify_tx_inclusion_from_block with a synthetic block to prove the LTX
 // index-binding gate. verify-tx-inclusion asks the `block` RPC for index==height
@@ -9562,6 +9694,8 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-tx-inclusion-height") return cmd_selftest_tx_inclusion_height(sub_argc, sub_argv);
         if (cmd == "selftest-watch-label")  return cmd_selftest_watch_label(sub_argc, sub_argv);
         if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
+        if (cmd == "verify-rand")           return cmd_verify_rand(sub_argc, sub_argv);
+        if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

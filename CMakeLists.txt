@@ -356,6 +356,7 @@ add_executable(determ-light
   light/account_history.cpp
   light/verify_tx_inclusion.cpp
   light/verify_state_root.cpp
+  light/verify_rand.cpp      # D.5 inc.4: cumulative_rand[H] beacon authentication
   light/verify_ct.cpp        # A3: client-side CT range/balance verification
   light/persist.cpp
   # Reused from src/ (explicit list — no glob):
