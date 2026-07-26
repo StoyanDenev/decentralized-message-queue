@@ -1,9 +1,9 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **2 autonomous gates CLOSED + the LV-1/LV-2 committee-size
-mode-eligibility MECHANISM landed (increment 1; anchor-caller wiring = increment 2), 5 confirmed
-autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in the falsify-on-mutant series,
-after
+**Status:** open (2026-07-26); **3 autonomous gates CLOSED — including LV-1/LV-2 committee-size
+mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring, live-regressed; inc.2b
+header-walk wiring tracked), 5 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface
+register in the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
 [RpcIngressGateAudit](RpcIngressGateAudit.md), [SnapshotRestoreGateAudit](SnapshotRestoreGateAudit.md),
@@ -121,14 +121,25 @@ mode-eligibility gate → NEG-LV1/LV2a/LV2b fall through, their diagnostics disa
 flip, all else unchanged; (ii) `sig_bft = bft_mode` neutralizes the sig-count refinement → only NEG-LV1b
 flips. Clean directional splits on both platforms.
 
-**Increment 2 (tracked) — anchor-caller wiring:** the anchor callers still pass `expected_k=0` (legacy
-behaviour, zero regression risk this round), so the USER-FACING balance/inclusion/history reads gain the
-enforcement only once increment 2 threads `genesis.k_block_sigs` + `genesis.bft_enabled` into
-`committee_bound_state_root`, `verify_chain_walk`, `verify_state_bundle`, `verify_tx_inclusion`,
-`verify_archive`, `watch`, `export`, and `account_history` (~30 call sites across the light command
-surface — a wide but mechanical change), validated by the LIVE light cluster tests (the honest-block path
-is not covered by FAST). Split this way per the minimalism / zero-merge-cost directive: increment 1 lands
-the careful consensus-mirror with a falsify proof; increment 2 is mechanical threading + a live gate.
+**Increment 2 (LANDED) — state-root anchor wiring:** threaded `genesis.k_block_sigs` +
+`genesis.bft_enabled` into the **state-root anchor** `committee_bound_state_root` (new defaulted
+`expected_k`/`bft_enabled` params inserted before the out-pointer, so untouched callers are byte-neutral)
+and its **18 call sites** — the 14 `verify-*` / `stake-trustless` / `supply-trustless` command handlers +
+`read_account_trustless` (balance) + `run_export_state_bundle` (state-bundle), all of which carry a
+genesis directly, plus two one-level cascades whose helper took only a committee (`verify_header_state_root_at`
+in account_history, `verify_state_root_at` in verify_state_root — each gained defaulted params threaded from
+its genesis-bearing caller). Now every state-root-anchored read (balance / supply / stake / state-bundle /
+account / inclusion / history) enforces the node's committee-size mode-eligibility on the anchor's
+committee-signed successor. **Validation:** the enforcement path has no FAST-offline falsify (every call
+does a live `rpc.call`); the falsify already happened at the `verify_block_sigs` level (inc.1), so inc.2 is
+a live-cluster NON-REGRESSION check — 7 core live light tests pass with the enforcement active
+(`balance-trustless`, `stake-trustless`, `supply-trustless`, `state-bundle`, `verify-account`,
+`committee-at-height`, `verify-state-root` — covering `read_account_trustless`, the direct handlers, the
+export path, and BOTH cascade helpers). Regression-safety is the same proof: a node-accepted successor
+satisfies `md_ok||bft_ok`, so no honest read regresses. **Residual (inc.2b, tracked):** the header-only
+`verify_chain_walk` (the from-genesis / resume chain-sig walk) still passes `expected_k=0`; wiring it via
+`verify_chain_to_head`/`verify_chain_from_anchor` extends the enforcement to every walked block header
+(defense-in-depth beyond the state-root anchor, which already covers the user-facing reads).
 
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 

@@ -118,6 +118,11 @@ StateRootResult verify_state_root_at(
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
     uint64_t    height,
-    uint64_t    max_wait_seconds = 0);
+    uint64_t    max_wait_seconds = 0,
+    // LV-1/LV-2 (inc.2): the genesis k_block_sigs + bft_enabled, forwarded to
+    // committee_bound_state_root so the successor's committee-size mode-
+    // eligibility is enforced. Default 0 = not enforced (legacy behaviour).
+    size_t      expected_k = 0,
+    bool        bft_enabled = true);
 
 } // namespace determ::light

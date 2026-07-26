@@ -261,10 +261,20 @@ build_genesis_committee(const determ::chain::GenesisConfig& cfg);
 // anchor. Callers that pin a full block body to the anchor (e.g. verify-ct-block
 // re-verifying the block's confidential txs) MUST pin against THIS value, not the
 // reported field, or the pin is circular. Untouched on the throw paths.
+// `expected_k` / `bft_enabled` (LV-1/LV-2, inc.2): the genesis `k_block_sigs` and
+// `bft_enabled` flag. When `expected_k > 0` they are forwarded to the successor's
+// `verify_block_sigs`, which then enforces the node's committee-size
+// mode-eligibility (MD names exactly k creators; BFT `ceil(2k/3)`; BFT only when
+// `bft_enabled`) — closing the 1-of-K / BFT-downgrade forgery on this anchor.
+// Default 0 = not enforced (byte-identical legacy behaviour for callers that do
+// not carry a genesis). Inserted BEFORE `out_committee_block_hash` so the sole
+// out-pointer caller is the only positional site that shifts.
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const nlohmann::json& committee_json,
                                        uint64_t anchor_index,
                                        uint64_t max_wait_seconds = 0,
+                                       size_t expected_k = 0,
+                                       bool bft_enabled = true,
                                        std::string* out_committee_block_hash = nullptr);
 
 } // namespace determ::light

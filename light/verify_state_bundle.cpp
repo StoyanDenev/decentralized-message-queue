@@ -144,7 +144,9 @@ int run_export_state_bundle(const ExportStateBundleOptions& opts) {
         //    A bundle is written only if the committee-bound root for
         //    anchor_index equals the proof's claimed root.
         std::string attested =
-            committee_bound_state_root(rpc, committee_json, anchor_index);
+            committee_bound_state_root(rpc, committee_json, anchor_index,
+                                       /*max_wait_seconds=*/0,
+                                       genesis.k_block_sigs, genesis.bft_enabled);
         if (attested != proof_root) {
             std::cerr << "export-state-bundle: SECURITY — committee-bound "
                          "state_root at index " << anchor_index << " = "

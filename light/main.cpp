@@ -2374,8 +2374,7 @@ StakeView read_stake_trustless(
             committee_json = json{{"members", arr}};
         }
         uint64_t anchor_index = proof_height - 1;
-        std::string attested = determ::light::committee_bound_state_root(
-            rpc, committee_json, anchor_index, max_wait_seconds);
+        std::string attested = determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, max_wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (attested != proof_root) {
             throw std::runtime_error("stake-trustless: SECURITY — committee-attested "
                 "state_root at index " + std::to_string(anchor_index) + " = " + attested
@@ -2637,8 +2636,7 @@ int cmd_verify_abort_record(int argc, char** argv) {
             committee_json = json{{"members", arr}};
         }
         uint64_t anchor_index = proof_height - 1;
-        std::string attested = determ::light::committee_bound_state_root(
-            rpc, committee_json, anchor_index, wait_seconds);
+        std::string attested = determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (attested != proof_root) {
             throw std::runtime_error("SECURITY — committee-attested state_root at "
                 "index " + std::to_string(anchor_index) + " = " + attested
@@ -2899,8 +2897,7 @@ int cmd_verify_constant(int argc, char** argv) {
             committee_json = json{{"members", arr}};
         }
         uint64_t anchor_index = proof_height - 1;
-        std::string attested = determ::light::committee_bound_state_root(
-            rpc, committee_json, anchor_index, wait_seconds);
+        std::string attested = determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (attested != proof_root) {
             throw std::runtime_error("SECURITY — committee-attested state_root at "
                 "index " + std::to_string(anchor_index) + " = " + attested
@@ -3275,8 +3272,7 @@ int cmd_verify_state_root(int argc, char** argv) {
         }
         std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
 
-        auto r = verify_state_root_at(rpc, committee_seed,
-                                      genesis_hash_hex, height, wait_seconds);
+        auto r = verify_state_root_at(rpc, committee_seed, genesis_hash_hex, height, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
 
         if (json_out) {
             json out = {
@@ -3383,8 +3379,7 @@ int cmd_verify_ct_block(int argc, char** argv) {
         std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
 
         // (1) ANCHOR — genesis-chain walk + committee attestation (S-042).
-        auto sr = verify_state_root_at(rpc, committee_seed,
-                                       genesis_hash_hex, height, wait_seconds);
+        auto sr = verify_state_root_at(rpc, committee_seed, genesis_hash_hex, height, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (!sr.ok) {
             if (json_out) {
                 json out = {{"height", height}, {"committee_verified", false},
@@ -3625,8 +3620,7 @@ int cmd_verify_shardtip_records(int argc, char** argv) {
         std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
 
         // (1) ANCHOR — committee-attested block_hash(H).
-        auto sr = verify_state_root_at(rpc, committee_seed,
-                                       genesis_hash_hex, height, wait_seconds);
+        auto sr = verify_state_root_at(rpc, committee_seed, genesis_hash_hex, height, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (!sr.ok) return fail(3, "ANCHOR failed: " + sr.detail);
 
         // (2) BODY-PIN — the full block recomputes to the committee-anchored hash.
@@ -3778,8 +3772,7 @@ int cmd_verify_shardtip_records(int argc, char** argv) {
                 uint64_t    proof_height = proof.value("height", uint64_t{0});
                 if (proof_height == 0)
                     return fail(3, "record[" + std::to_string(i) + "]: cc: proof has no height");
-                std::string attested = determ::light::committee_bound_state_root(
-                    rpc, committee_json, proof_height - 1, wait_seconds);
+                std::string attested = determ::light::committee_bound_state_root(rpc, committee_json, proof_height - 1, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                 if (attested != proof_root)
                     return fail(3, "record[" + std::to_string(i) + "]: cc: proof.state_root is NOT "
                                    "the committee-attested root at index "
@@ -4861,9 +4854,7 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-receipt-inclusion: SECURITY — "
@@ -5186,9 +5177,7 @@ int cmd_verify_merge_state(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-merge-state: SECURITY — "
@@ -5528,9 +5517,7 @@ int cmd_verify_param_change(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-param-change: SECURITY — "
@@ -5838,9 +5825,7 @@ int cmd_verify_param_value(int argc, char** argv) {
                     }
                     uint64_t anchor_index = proof_height - 1;
                     std::string attested =
-                        determ::light::committee_bound_state_root(
-                            rpc, committee_json, anchor_index,
-                            wait_seconds);
+                        determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                     if (attested != proof_root) {
                         throw std::runtime_error(
                             "verify-param-value: SECURITY — committee-attested "
@@ -6171,9 +6156,7 @@ int cmd_verify_registrant(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-registrant: SECURITY — "
@@ -6451,8 +6434,7 @@ int cmd_verify_notekey(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index, wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-notekey: SECURITY — committee-attested "
@@ -6689,8 +6671,7 @@ int cmd_verify_enote_inclusion(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index, wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-enote-inclusion: SECURITY — "
@@ -7003,9 +6984,7 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-dapp-registration: SECURITY — "
@@ -7386,9 +7365,7 @@ int cmd_verify_account(int argc, char** argv) {
                         }
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
-                            determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index,
-                                wait_seconds);
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-account: SECURITY — committee-attested "
@@ -8078,9 +8055,7 @@ int cmd_supply_trustless(int argc, char** argv) {
                     }
                     uint64_t anchor_index = proof_height - 1;
                     std::string attested =
-                        determ::light::committee_bound_state_root(
-                            rpc, committee_json, anchor_index,
-                            wait_seconds);
+                        determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
                     if (attested != proof_root) {
                         throw std::runtime_error(
                             "supply-trustless: SECURITY — committee-attested "
@@ -8356,8 +8331,7 @@ int cmd_committee_at_height(int argc, char** argv) {
         // when H == head: the S-042 successor binding needs block H+1, so a
         // query at the exact head fails closed until the chain advances. For
         // any H < head the successor already exists and no wait is needed.
-        auto sr = verify_state_root_at(rpc, committee_seed,
-                                       genesis_hash_hex, height, wait_seconds);
+        auto sr = verify_state_root_at(rpc, committee_seed, genesis_hash_hex, height, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
         if (!sr.ok) {
             std::cerr << "committee-at-height: " << sr.detail << "\n";
             return 1;

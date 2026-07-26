@@ -110,7 +110,9 @@ struct HistoryRow {
 std::string verify_header_state_root_at(RpcClient& rpc,
                                         const json& committee_json,
                                         uint64_t idx,
-                                        uint64_t max_wait_seconds = 0) {
+                                        uint64_t max_wait_seconds = 0,
+                                        size_t expected_k = 0,
+                                        bool bft_enabled = true) {
     if (idx == 0) {
         auto page = rpc.call("headers", {{"from", idx}, {"count", 1}});
         if (!page.contains("headers") || !page["headers"].is_array()
@@ -124,7 +126,7 @@ std::string verify_header_state_root_at(RpcClient& rpc,
         return page["headers"][0].value("state_root", std::string{});
     }
     return committee_bound_state_root(rpc, committee_json, idx,
-                                      max_wait_seconds);
+                                      max_wait_seconds, expected_k, bft_enabled);
 }
 
 // Incrementally verifies the prev_hash chain from the pinned genesis,
@@ -286,7 +288,9 @@ int run_account_history(const AccountHistoryOptions& opts) {
             // Committee-verify the header at h -> its state_root.
             row.state_root_hex =
                 verify_header_state_root_at(rpc, committee_json, h,
-                                            opts.wait_seconds);
+                                            opts.wait_seconds,
+                                            genesis.k_block_sigs,
+                                            genesis.bft_enabled);
 
             // Balance/nonce: the daemon serves a Merkle state-proof only
             // at the head (no height param on state_proof/account RPCs).

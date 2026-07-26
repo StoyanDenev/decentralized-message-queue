@@ -548,6 +548,8 @@ std::string committee_bound_state_root(RpcClient& rpc,
                                        const json& committee_json,
                                        uint64_t anchor_index,
                                        uint64_t max_wait_seconds,
+                                       size_t expected_k,
+                                       bool bft_enabled,
                                        std::string* out_committee_block_hash) {
     // 1. Fetch the FULL block at anchor_index (NOT the stripped header).
     //    The full body carries the heavy fields signing_bytes needs, so
@@ -618,9 +620,14 @@ std::string committee_bound_state_root(RpcClient& rpc,
             "daemon returned wrong index for successor header");
     }
 
-    // 4. Verify the successor's committee sigs (MD first, BFT fallback).
-    auto vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/false);
-    if (!vbs.ok) vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/true);
+    // 4. Verify the successor's committee sigs (MD first, BFT fallback). LV-1/LV-2
+    //    (inc.2): forward the genesis k_block_sigs + bft_enabled so verify_block_sigs
+    //    enforces the node's committee-size mode-eligibility on this anchor's
+    //    committee-signed successor (expected_k==0 → not enforced, legacy behaviour).
+    auto vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/false,
+                                 expected_k, bft_enabled);
+    if (!vbs.ok) vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/true,
+                                         expected_k, bft_enabled);
     if (!vbs.ok) {
         throw std::runtime_error(
             "successor header " + std::to_string(succ)
@@ -760,8 +767,7 @@ AccountView read_account_trustless(
 
     uint64_t anchor_index = proof_height - 1;
     std::string attested =
-        committee_bound_state_root(rpc, committee_json, anchor_index,
-                                   max_wait_seconds);
+        committee_bound_state_root(rpc, committee_json, anchor_index, max_wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
     if (attested != proof_root) {
         throw std::runtime_error(
             "trustless-read: SECURITY — committee-attested state_root at "

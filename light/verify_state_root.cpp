@@ -104,7 +104,9 @@ StateRootResult verify_state_root_at(
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
     uint64_t    height,
-    uint64_t    max_wait_seconds) {
+    uint64_t    max_wait_seconds,
+    size_t      expected_k,
+    bool        bft_enabled) {
 
     StateRootResult res;
     res.height = height;
@@ -198,7 +200,8 @@ StateRootResult verify_state_root_at(
             // sound anchor for a caller pinning a full body (verify-ct-block).
             std::string attested =
                 committee_bound_state_root(rpc, committee_json, height,
-                                           max_wait_seconds, &res.block_hash_hex);
+                                           max_wait_seconds, expected_k,
+                                           bft_enabled, &res.block_hash_hex);
             res.state_root_hex = attested;
             res.state_root_present = !attested.empty();
             res.committee_verified = true;
