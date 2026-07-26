@@ -22,6 +22,7 @@
 
 #pragma once
 #include <determ/dapp/d5codec.h>
+#include <nlohmann/json.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -32,8 +33,9 @@ enum class SelectionVerdict { SELECTED, NOT_SELECTED, UNVERIFIABLE };
 
 // A decoded roster message (op + ids), in canonical block order.
 struct D5RosterOp {
-    uint8_t op{0};                               // D5_ROSTER_ADD / D5_ROSTER_REMOVE
-    std::vector<std::vector<uint8_t>> ids;
+    uint8_t  op{0};                              // D5_ROSTER_ADD / D5_ROSTER_REMOVE
+    uint64_t height{0};                          // block height it landed at (for cutoff filtering)
+    std::vector<std::vector<uint8_t>> ids;       // OWNED copies (not pointers into the block JSON)
 };
 // A decoded case-open, tagged with the block height it landed at (h_o).
 struct D5CaseOpenAt {
@@ -57,6 +59,25 @@ struct SelectionResult {
     size_t eligible_count{0};
     std::string detail;
 };
+
+// Collect the D.5 roster / case-open / result streams from a set of ALREADY-
+// COMMITTEE-VERIFIED full blocks (SPEC §11 3a). The caller obtains `blocks` from
+// the committee-authenticated full-block walk (verify_chain_to_head — that
+// AUTHENTICATION is its job); the COMPLETENESS here comes from iterating EVERY
+// DAPP_CALL tx in EVERY block, so a truncatable `dapp_messages` RPC hint cannot
+// hide a message. Filters DAPP_CALL (type==10) txs where `tx.to == domain`,
+// parses the `[topic][ciphertext]` envelope, and decodes the ciphertext via the
+// d5codec into the typed streams (owned copies). Roster ops are domain-wide
+// (tagged with height so the caller can fold up to roster_cutoff_height);
+// case-opens / results are kept only when their payload's case_id matches.
+// Returns 0 (always; malformed/foreign txs are skipped, not fatal).
+int collect_d5_streams(
+    const std::vector<nlohmann::json>& blocks,    // committee-verified full blocks, ascending height
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    std::vector<D5RosterOp>&   out_roster,
+    std::vector<D5CaseOpenAt>& out_case_opens,
+    std::vector<D5ResultAt>&   out_results);
 
 // Pure verification core. `queried_member` empty = report "result verified"
 // (verdict SELECTED with no membership question). NEVER a false SELECTED.

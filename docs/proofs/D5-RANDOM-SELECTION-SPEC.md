@@ -285,10 +285,17 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    and the `d5_draw` re-derivation vs the published result (never a false SELECTED). Offline
    `selftest-verify-selection` + `tools/test_light_verify_selection.sh`, both platforms +
    falsify-on-mutant for **3b** (max-height pick flips only the first-open-wins NEG) and **3c**
-   (`h_o ≤ H` flips only the ordering NEG). **inc.5b remaining:** the live committee-authenticated
-   full-block-walk that MATERIALIZES the roster/case-open streams (roster-completeness 3a — a live
-   source property) + the private-roster `roster_root` binding (3d, only when the opt-in private
-   mode ships).
+   (`h_o ≤ H` flips only the ordering NEG). **inc.5b SHIPPED** — the `collect_d5_streams` collector
+   (`light/verify_selection.cpp`): iterates EVERY `DAPP_CALL` tx in EVERY committee-verified full
+   block, parses the `[topic][ciphertext]` envelope, and decodes via the d5codec into the typed
+   streams (completeness is inherent — a truncatable `dapp_messages` hint cannot hide a message).
+   `selftest-verify-selection` extended with the collect→core pipeline: a COLLECT round-trip CTRL +
+   the **3a** roster-completeness NEG (a result over an un-removed roster → the applied remove
+   excludes the victim → UNVERIFIABLE), falsify-on-mutant (dropping the fold's remove-application
+   flips only the 3a NEG). So **3 of the 4 SPEC §11 mutants (3a/3b/3c) are gated**; **remaining:**
+   the thin live CLI `verify-selection` (compose `verify_chain_to_head` + `collect_d5_streams` +
+   `verify_rand` + the core; wired with the orchestrator at inc.6) and the private-roster
+   `roster_root` binding (3d, only when the opt-in private mode ships).
 6. `dapps/d5-random-selection` orchestrator + reference RP end-to-end on a 3-of-5 fixture (the
    reference RP integration that later defines `sdk/rp`).
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs

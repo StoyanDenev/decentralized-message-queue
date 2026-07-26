@@ -9422,6 +9422,93 @@ int cmd_selftest_verify_selection(int argc, char** argv) {
         check(hit, "NEG (ordering): a case-open at h_o == draw_height (post-hoc) is refused at the ordering gate");
     }
 
+    // ── COLLECTOR path (SPEC §11 3a): drive collect_d5_streams over synthetic
+    //    committee-verified full blocks carrying DAPP_CALL txs, so the DAPP_CALL
+    //    envelope parse + d5codec decode + domain/case_id filter are exercised
+    //    end-to-end, then feed the DECODED streams to the core. ──
+    {
+        std::string domain_str(domain.begin(), domain.end());
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        // Wrap a d5codec payload in the DAPP_CALL envelope + a block-body tx json.
+        auto mk_tx = [&](const std::string& topic, const std::vector<uint8_t>& ct){
+            std::vector<uint8_t> pl; pl.push_back((uint8_t)topic.size());
+            pl.insert(pl.end(), topic.begin(), topic.end());
+            uint32_t cl=(uint32_t)ct.size();
+            pl.push_back((uint8_t)(cl&0xff)); pl.push_back((uint8_t)((cl>>8)&0xff));
+            pl.push_back((uint8_t)((cl>>16)&0xff)); pl.push_back((uint8_t)((cl>>24)&0xff));
+            pl.insert(pl.end(), ct.begin(), ct.end());
+            return nlohmann::json{{"type",10},{"to",domain_str},{"payload",hx(pl.data(),pl.size())}};
+        };
+        auto enc_roster = [&](uint8_t op, const std::vector<std::vector<uint8_t>>& ids){
+            std::vector<const uint8_t*> idp; std::vector<uint16_t> idl;
+            for(auto&id:ids){idp.push_back(id.data());idl.push_back((uint16_t)id.size());}
+            std::vector<uint8_t> out(64+ids.size()*40); size_t ol=0;
+            d5_roster_encode(op, idp.data(), idl.data(), (uint16_t)ids.size(), out.data(), out.size(), &ol);
+            out.resize(ol); return out;
+        };
+        auto enc_case_open = [&](uint64_t cutoff, uint64_t H, uint32_t N, uint32_t M){
+            d5_case_open co; co.case_id=case_id.data(); co.case_id_len=(uint16_t)case_id.size();
+            co.roster_cutoff_height=cutoff; co.draw_height=H; co.n_primary=N; co.m_alternate=M;
+            co.draw_algo_version=D5_DRAW_ALGO_LOWEST_HASH;
+            std::vector<uint8_t> out(128); size_t ol=0;
+            d5_case_open_encode(&co, out.data(), out.size(), &ol); out.resize(ol); return out;
+        };
+        auto enc_result = [&](uint64_t H, uint64_t cutoff, const std::vector<std::vector<uint8_t>>& sel){
+            d5_result_hdr r; r.case_id=case_id.data(); r.case_id_len=(uint16_t)case_id.size();
+            r.draw_height=H; r.roster_cutoff_height=cutoff; for(int i=0;i<32;i++) r.seed[i]=seed[i];
+            r.draw_algo_version=D5_DRAW_ALGO_LOWEST_HASH; r.n_primary=(uint32_t)sel.size(); r.m_alternate=0;
+            std::vector<const uint8_t*> sp; std::vector<uint16_t> sl;
+            for(auto&s:sel){sp.push_back(s.data());sl.push_back((uint16_t)s.size());}
+            std::vector<uint8_t> out(128+sel.size()*40); size_t ol=0;
+            d5_result_encode(&r, sp.data(), sl.data(), (uint32_t)sel.size(), out.data(), out.size(), &ol);
+            out.resize(ol); return out;
+        };
+
+        auto sel_all = draw(100, 80, 5, 0);   // canonical draw over ALL 12 members
+
+        // CTRL-collect: honest blocks (add 12, case-open, result over all 12).
+        {
+            std::vector<nlohmann::json> blocks = {
+                {{"index",80},{"transactions",{ mk_tx("roster", enc_roster(D5_ROSTER_ADD, members)) }}},
+                {{"index",88},{"transactions",{ mk_tx("case-open", enc_case_open(80,100,5,0)) }}},
+                {{"index",110},{"transactions",{ mk_tx("result", enc_result(100,80,sel_all)) }}},
+            };
+            std::vector<D5RosterOp> rop; std::vector<D5CaseOpenAt> cops; std::vector<D5ResultAt> ress;
+            collect_d5_streams(blocks, domain_str, case_id, rop, cops, ress);
+            bool decoded = (rop.size()==1 && rop[0].ids.size()==12 && cops.size()==1 && ress.size()==1);
+            check(decoded, "COLLECT: DAPP_CALL envelope + d5codec decode materializes the roster/case-open/result streams");
+            if (decoded) {
+                auto r = verify_selection_core(domain, case_id, seed, rop, cops, ress[0], sel_all[0]);
+                check(r.verdict == SelectionVerdict::SELECTED,
+                      "COLLECT CTRL: an honest published result verifies SELECTED through the full collect->core pipeline");
+            } else check(false, "COLLECT CTRL: (skipped — decode failed)");
+        }
+
+        // NEG 3a (roster completeness): the daemon publishes a result over the
+        // roster INCLUDING a member it also REMOVED (sel_all's victim), i.e. it
+        // ignored its own remove. The COMPLETE walk sees the remove -> the folded
+        // roster excludes the victim -> the re-derivation (over 11) mismatches the
+        // 12-member published result -> UNVERIFIABLE. The mutant that drops the
+        // remove-application (models materializing from a truncatable hint that
+        // omitted the remove) folds all 12 -> matches -> false SELECTED.
+        {
+            std::vector<uint8_t> victim = sel_all[0];
+            std::vector<nlohmann::json> blocks = {
+                {{"index",80},{"transactions",{ mk_tx("roster", enc_roster(D5_ROSTER_ADD, members)) }}},
+                {{"index",85},{"transactions",{ mk_tx("roster", enc_roster(D5_ROSTER_REMOVE, {victim})) }}},
+                {{"index",88},{"transactions",{ mk_tx("case-open", enc_case_open(80,100,5,0)) }}},
+                {{"index",110},{"transactions",{ mk_tx("result", enc_result(100,80,sel_all)) }}},  // fraudulent (over 12)
+            };
+            std::vector<D5RosterOp> rop; std::vector<D5CaseOpenAt> cops; std::vector<D5ResultAt> ress;
+            collect_d5_streams(blocks, domain_str, case_id, rop, cops, ress);
+            auto r = verify_selection_core(domain, case_id, seed, rop, cops, ress.empty()?D5ResultAt{}:ress[0], victim);
+            bool hit = (rop.size()==2) && (r.verdict == SelectionVerdict::UNVERIFIABLE)
+                     && r.detail.find("re-derivation mismatch") != std::string::npos;
+            check(hit, "NEG (roster completeness 3a): a result over an un-removed roster is refused because the applied remove excludes the victim");
+        }
+    }
+
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
     if (fail == 0) { std::cout << "  PASS: selftest-verify-selection\n"; return 0; }
     std::cout << "  FAIL: selftest-verify-selection\n";

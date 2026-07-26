@@ -7,9 +7,99 @@
 
 #include "verify_selection.hpp"
 #include <determ/dapp/d5draw.h>
+#include <cstring>
 #include <set>
 
 namespace determ::light {
+
+// TxType::DAPP_CALL (include/determ/chain/block.hpp:180). Hardcoded to avoid
+// pulling the consensus block header into the light-verifier module.
+static constexpr int D5_DAPP_CALL_TX_TYPE = 10;
+
+static std::vector<uint8_t> d5_unhex(const std::string& s) {
+    std::vector<uint8_t> v;
+    v.reserve(s.size() / 2);
+    for (size_t i = 0; i + 1 < s.size(); i += 2)
+        v.push_back((uint8_t)std::stoi(s.substr(i, 2), nullptr, 16));
+    return v;
+}
+
+int collect_d5_streams(
+    const std::vector<nlohmann::json>& blocks,
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    std::vector<D5RosterOp>&   out_roster,
+    std::vector<D5CaseOpenAt>& out_case_opens,
+    std::vector<D5ResultAt>&   out_results) {
+
+    out_roster.clear(); out_case_opens.clear(); out_results.clear();
+
+    for (const auto& blk : blocks) {
+        uint64_t height = blk.value("index", (uint64_t)0);
+        if (!blk.contains("transactions") || !blk["transactions"].is_array()) continue;
+        for (const auto& tx : blk["transactions"]) {
+            if (tx.value("type", -1) != D5_DAPP_CALL_TX_TYPE) continue;
+            if (tx.value("to", std::string()) != domain) continue;
+
+            // Parse the DAPP_CALL envelope (block.hpp:150-157):
+            //   [topic_len u8][topic][ciphertext_len u32 LE][ciphertext]
+            std::vector<uint8_t> payload = d5_unhex(tx.value("payload", std::string()));
+            size_t off = 0;
+            if (payload.size() < 1) continue;
+            uint8_t tlen = payload[off++];
+            if (off + (size_t)tlen + 4 > payload.size()) continue;
+            std::string topic((const char*)&payload[off], tlen); off += tlen;
+            uint32_t clen = (uint32_t)payload[off]
+                          | ((uint32_t)payload[off + 1] << 8)
+                          | ((uint32_t)payload[off + 2] << 16)
+                          | ((uint32_t)payload[off + 3] << 24);
+            off += 4;
+            if (off + (size_t)clen != payload.size()) continue;   // strict: cipher_len == remaining
+            const uint8_t* ct = clen ? &payload[off] : (const uint8_t*)"";
+            size_t ctlen = clen;
+
+            if (topic == "roster") {
+                uint8_t op = 0;
+                std::vector<const uint8_t*> ids(D5_MAX_ROSTER);
+                std::vector<uint16_t> idl(D5_MAX_ROSTER);
+                uint16_t cnt = 0;
+                if (d5_roster_decode(ct, ctlen, &op, ids.data(), idl.data(),
+                                     (uint16_t)D5_MAX_ROSTER, &cnt) != 0) continue;
+                D5RosterOp rop; rop.op = op; rop.height = height;
+                for (uint16_t i = 0; i < cnt; i++)
+                    rop.ids.push_back(std::vector<uint8_t>(ids[i], ids[i] + idl[i]));
+                out_roster.push_back(std::move(rop));
+            } else if (topic == "case-open") {
+                d5_case_open co;
+                if (d5_case_open_decode(ct, ctlen, &co) != 0) continue;
+                if (co.case_id_len != case_id.size()
+                    || memcmp(co.case_id, case_id.data(), case_id.size()) != 0) continue;
+                D5CaseOpenAt coa;
+                coa.height               = height;
+                coa.roster_cutoff_height = co.roster_cutoff_height;
+                coa.draw_height          = co.draw_height;
+                coa.n_primary            = co.n_primary;
+                coa.m_alternate          = co.m_alternate;
+                coa.draw_algo_version    = co.draw_algo_version;
+                out_case_opens.push_back(coa);
+            } else if (topic == "result") {
+                d5_result_hdr r;
+                std::vector<const uint8_t*> sid(D5_MAX_ROSTER);
+                std::vector<uint16_t> sl(D5_MAX_ROSTER);
+                uint32_t sc = 0;
+                if (d5_result_decode(ct, ctlen, &r, sid.data(), sl.data(),
+                                     (uint32_t)D5_MAX_ROSTER, &sc) != 0) continue;
+                if (r.case_id_len != case_id.size()
+                    || memcmp(r.case_id, case_id.data(), case_id.size()) != 0) continue;
+                D5ResultAt ra; ra.height = height; ra.draw_height = r.draw_height;
+                for (uint32_t i = 0; i < sc; i++)
+                    ra.selected_ids.push_back(std::vector<uint8_t>(sid[i], sid[i] + sl[i]));
+                out_results.push_back(std::move(ra));
+            }
+        }
+    }
+    return 0;
+}
 
 SelectionResult verify_selection_core(
     const std::vector<uint8_t>& domain,
