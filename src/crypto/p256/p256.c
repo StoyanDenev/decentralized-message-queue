@@ -476,6 +476,10 @@ int determ_p256_scalar_mul_mod_n(uint8_t r[32], const uint8_t a[32],
     sc_mont_mul(rm, am, bm);
     sc_mont_mul(t, rm, one);
     fe_to_be(r, t);
+    /* G6-1: scrub the secret product (threshold-OPRF λ·share / Bulletproofs
+     * witness), matching the sibling scalar_inv_mod_n. */
+    determ_secure_zero(am, sizeof am); determ_secure_zero(bm, sizeof bm);
+    determ_secure_zero(rm, sizeof rm); determ_secure_zero(t, sizeof t);
     return 0;
 }
 
@@ -522,6 +526,9 @@ int determ_p256_scalar_add_mod_n(uint8_t r[32], const uint8_t a[32],
     be_to_fe(bf, b);
     sc_add_raw(rf, af, bf);
     fe_to_be(r, rf);
+    /* G6-2: scrub the secret Lagrange partial-sum / reconstructed secret. */
+    determ_secure_zero(af, sizeof af); determ_secure_zero(bf, sizeof bf);
+    determ_secure_zero(rf, sizeof rf);
     return 0;
 }
 
@@ -536,6 +543,10 @@ int determ_p256_scalar_sub_mod_n(uint8_t r[32], const uint8_t a[32],
     be_to_fe(bf, b);
     sc_sub_raw(rf, af, bf);
     fe_to_be(r, rf);
+    /* G6-3: operands are the public Lagrange denominator x_j-x_i (clean today);
+     * scrub for uniform discipline so a future secret reuse stays covered. */
+    determ_secure_zero(af, sizeof af); determ_secure_zero(bf, sizeof bf);
+    determ_secure_zero(rf, sizeof rf);
     return 0;
 }
 
@@ -756,6 +767,13 @@ static void sswu_map(fe x_out, fe y_out, const fe u) {
         memcpy(y_out, y1, sizeof(fe));
         fe_cmov(y_out, y2, sgn_mask);
     }
+    /* G6-7: scrub the SSWU intermediates derived from u (x_out/y_out already
+     * written above). */
+    determ_secure_zero(tv1, sizeof tv1); determ_secure_zero(tv2, sizeof tv2);
+    determ_secure_zero(x1, sizeof x1);   determ_secure_zero(gx1, sizeof gx1);
+    determ_secure_zero(x2, sizeof x2);   determ_secure_zero(gx2, sizeof gx2);
+    determ_secure_zero(y1, sizeof y1);   determ_secure_zero(y2, sizeof y2);
+    determ_secure_zero(u2, sizeof u2);   determ_secure_zero(t, sizeof t);
 }
 
 /* 48 big-endian bytes -> scalar mod n (the order-field analogue of
@@ -858,6 +876,10 @@ int determ_p256_hash_to_curve(uint8_t out[65],
     determ_secure_zero(uniform, sizeof uniform);
     determ_secure_zero(&q0, sizeof q0); determ_secure_zero(&q1, sizeof q1);
     determ_secure_zero(&r, sizeof r);
+    /* G6-7: scrub the SSWU field inputs derived from the (possibly secret)
+     * OPRF message. */
+    determ_secure_zero(u0p, sizeof u0p); determ_secure_zero(u1p, sizeof u1p);
+    determ_secure_zero(u0, sizeof u0);   determ_secure_zero(u1, sizeof u1);
     return rc;
 }
 
@@ -1037,7 +1059,6 @@ int determ_p256_oprf_finalize(uint8_t out[32],
     if (oprf_load33(&p, eval33) != 0) goto cleanup;
     pt_scalar_mul(&r, inv, &p);
     if (oprf_store33(n33, &r) != 0) goto cleanup;
-    determ_secure_zero(&r, sizeof r);
     if (total <= sizeof stackbuf) buf = stackbuf;
     else { heap = (uint8_t*)malloc(total); if (!heap) goto cleanup; buf = heap; }
     buf[off++] = (uint8_t)(inputlen >> 8);
@@ -1054,6 +1075,9 @@ cleanup:
     determ_secure_zero(inv, sizeof inv);
     determ_secure_zero(n33, sizeof n33);
     determ_secure_zero(&p, sizeof p);
+    /* G6-6: r = inv·p held the unblinded point; the store-fail goto skipped the
+     * inline scrub, so scrub here so every exit path clears it. */
+    determ_secure_zero(&r, sizeof r);
     return rc;
 }
 

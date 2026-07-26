@@ -184,7 +184,9 @@ int determ_opaque3dh_server(const determ_opaque3dh_transcript *t,
 
     uint8_t km2[32], km3[32];
     if (key_schedule(ikm, pre_hash, session_key, km2, km3) != 0) {
-        determ_secure_zero(ikm, sizeof ikm); return -1;
+        determ_secure_zero(ikm, sizeof ikm);
+        determ_secure_zero(km2, sizeof km2); determ_secure_zero(km3, sizeof km3);  /* G6-5 */
+        return -1;
     }
     determ_secure_zero(ikm, sizeof ikm);
 
@@ -235,7 +237,9 @@ int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
 
     uint8_t km2[32], km3[32];
     if (key_schedule(ikm, pre_hash, session_key, km2, km3) != 0) {
-        determ_secure_zero(ikm, sizeof ikm); return -1;
+        determ_secure_zero(ikm, sizeof ikm);
+        determ_secure_zero(km2, sizeof km2); determ_secure_zero(km3, sizeof km3);  /* G6-5 */
+        return -1;
     }
     determ_secure_zero(ikm, sizeof ikm);
 
@@ -247,6 +251,7 @@ int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
     uint8_t pre_smac_hash[32];
     if (hash_preamble(t, epk_c, epk_s, server_mac, NH, pre_smac_hash) != 0) {
         determ_secure_zero(km2, sizeof km2); determ_secure_zero(km3, sizeof km3);
+        determ_secure_zero(expect_smac, sizeof expect_smac);  /* G6-4 */
         return -1;
     }
     determ_hmac_sha256(km3, NH, pre_smac_hash, NH, client_mac);
@@ -254,5 +259,6 @@ int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
     memcpy(epk_c_out, epk_c, 65);
     determ_secure_zero(km2, sizeof km2);
     determ_secure_zero(km3, sizeof km3);
+    determ_secure_zero(expect_smac, sizeof expect_smac);  /* G6-4: hygiene (public MAC tag) */
     return 0;
 }
