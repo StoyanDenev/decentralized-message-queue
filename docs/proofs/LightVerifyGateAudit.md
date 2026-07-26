@@ -1,9 +1,10 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **5 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
+**Status:** open (2026-07-26); **6 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
 LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring;
-inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label binding, and LRPC-1
-read_line DoS cap; 3 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
+inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label binding, LRPC-1
+read_line DoS cap, and LTX-HEIGHT-NOT-BOUND tx-inclusion index binding; 2 confirmed autonomous-safe in
+backlog, 0 owner-gated.** SIXTH code-surface register in
 the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -208,11 +209,41 @@ aborted at the 16 MiB cap with bounded memory. **Falsify-on-mutant** (`if (false
 **only** the NEG assert flips (the stream is no longer aborted → it EOFs to `nullopt` with no cap
 diagnostic), both CTRLs stay green — a clean directional split on both platforms.
 
+## 1f. CLOSED — tx-inclusion height not bound (`selftest-tx-inclusion-height`, LTX-HEIGHT-NOT-BOUND)
+
+`verify_tx_inclusion` (light/verify_tx_inclusion.cpp) asks the `block` RPC for `index==height`, verifies the
+returned block's committee sigs over its digest (which binds the block's OWN `index`), recomputes `tx_root`,
+cross-checks the body, and answers membership — but it **never asserted the returned block's `index` equals
+the requested `height`**, and it reports the verdict at the requested height (`res.height`). Critically it
+anchors on the **static genesis committee** (`build_genesis_committee`), so a real committee-signed block from
+ANY height passes the sig check. A hostile/MITM daemon therefore returns a real committee-signed block from a
+DIFFERENT height `B'` that contains the queried tx: every check (committee sigs, `tx_root`, body bijection)
+passes, and the tool prints `INCLUDED … height: <requested>` while the tx is actually at `B'` — a relabel that
+deceives the caller about WHICH height the tx was included at. (Same "displayed label not bound to committee-
+anchored content" class as §1b LSB-ANCHOR-INDEX and §1d EXP-1.)
+
+**Fix (client-side soundness, no node/consensus/wire change):** a structural gate placed right after the block
+parse (BEFORE the committee-sig anchor) requiring `b.index == height`. `b.index` is the first field of the
+committee-signed block digest (verified in step 2 for `B>0`, bound by `compute_genesis_hash` for `B==0`), so
+requiring the match binds the reported height to committee-authenticated content. An honest daemon returns the
+block AT the requested index (`b.index == height`), so no honest query regresses. To make the gate FAST-offline
+falsifiable, the RPC fetch was split out of a pure core `verify_tx_inclusion_from_block(blk_json, …)` with the
+block JSON **injected**; `verify_tx_inclusion` is now a thin wrapper that fetches block `height` (handling the
+out-of-range / RPC-error cases) then delegates to the core.
+
+**Gate** = `test_light_verify_tx_inclusion_height.sh` — FAST, fully-offline (the determ-light
+`selftest-tx-inclusion-height` subcommand drives the core with a hand-built block, no daemon): NEG a block whose
+own `index(500) != height(100)` → UNVERIFIABLE at the index-binding gate with the exact `block index binding
+failed … index=500 … requested height=100` diagnostic, BEFORE the committee-sig anchor; CTRL a matching
+`index(100)==height(100)` passes the gate and reaches the committee-sig anchor (fails on the empty committee) —
+a positive non-vacuity check robust against a parse-failure vacuous pass. **Falsify-on-mutant** (`if (false &&
+b.index != height)`): ONLY the NEG assert flips (the mismatched block reaches the sig anchor, no index
+diagnostic); CTRL stays green — a clean directional split on both platforms.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
 |---|---|---|---|
-| LTX-HEIGHT-NOT-BOUND | 2 | verify_tx_inclusion.cpp | never binds the returned block's `index` to the requested `height` — a real committee-signed block at a DIFFERENT height forges an "included at height B" proof. Fix: `if (b.index != height) UNVERIFIABLE`. |
 | WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
 | AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: route idx==0 through `committee_bound_state_root` or derive the genesis `state_root` locally. |
 

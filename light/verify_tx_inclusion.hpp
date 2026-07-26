@@ -110,4 +110,20 @@ TxInclusionResult verify_tx_inclusion(
     uint64_t    height,
     const std::string& tx_hash_hex);
 
+// Testable core of verify_tx_inclusion: takes an ALREADY-FETCHED block JSON
+// (blk_json) instead of an RpcClient, so the index-binding + anchor + tx_root
+// + body checks are unit-testable OFFLINE with a synthetic block (no daemon).
+// verify_tx_inclusion is a thin wrapper that fetches block `height` via the
+// `block` RPC (handling transport / out-of-range anomalies) then delegates
+// here. This is where the LTX index-binding gate lives: it requires the
+// returned block's own `index` to equal the requested `height`, so a hostile
+// daemon cannot relabel a real committee-signed block from a DIFFERENT height
+// as an inclusion proof at the queried height.
+TxInclusionResult verify_tx_inclusion_from_block(
+    const nlohmann::json& blk_json,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    uint64_t    height,
+    const std::string& tx_hash_hex);
+
 } // namespace determ::light

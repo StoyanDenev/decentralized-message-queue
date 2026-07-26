@@ -9328,6 +9328,74 @@ int cmd_selftest_readline_cap(int argc, char** argv) {
     return 1;
 }
 
+// selftest-tx-inclusion-height — offline, NO daemon: drive the testable core
+// verify_tx_inclusion_from_block with a synthetic block to prove the LTX
+// index-binding gate. verify-tx-inclusion asks the `block` RPC for index==height
+// but anchors on the STATIC genesis committee, so a hostile daemon can return a
+// real committee-signed block from a DIFFERENT height that contains the queried
+// tx; without the gate every check passes and the verdict is reported at the
+// REQUESTED height — a relabel. NEG proves a mismatched index is refused BEFORE
+// the committee-sig anchor; CTRL proves a matching index passes the gate.
+int cmd_selftest_tx_inclusion_height(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // Minimal parseable block: Block::from_json requires index / prev_hash
+    // (64 hex) / timestamp; everything else is optional. Empty creators means
+    // the committee-sig anchor (reached only when the index gate PASSES) rejects
+    // with a non-index diagnostic — exactly the CTRL non-vacuity signal.
+    auto mk_block = [](uint64_t index) {
+        return nlohmann::json{
+            {"index", index},
+            {"prev_hash", std::string(64, '0')},
+            {"timestamp", 0},
+            {"transactions", nlohmann::json::array()},
+            {"creators", nlohmann::json::array()},
+            {"cumulative_rand", std::string(64, '0')},
+            {"abort_events", nlohmann::json::array()}
+        };
+    };
+    std::map<std::string, PubKey> empty_seed;
+    determ::chain::GenesisConfig genesis{};
+    const std::string dummy_hash(64, '0');
+
+    // NEG: block's own index (500) != requested height (100) -> UNVERIFIABLE at
+    // the index-binding gate, BEFORE the committee-sig anchor.
+    {
+        auto r = verify_tx_inclusion_from_block(
+            mk_block(500), empty_seed, genesis, /*height=*/100, dummy_hash);
+        bool hit = (r.verdict == InclusionVerdict::UNVERIFIABLE)
+                   && r.detail.find("block index binding failed") != std::string::npos
+                   && r.detail.find("index=500") != std::string::npos
+                   && r.detail.find("requested height=100") != std::string::npos;
+        check(hit, "NEG: a block whose own index != the requested height is refused at the index-binding gate");
+    }
+
+    // CTRL: block's own index (100) == requested height (100) -> passes the
+    // index gate and falls through to the committee-sig anchor (which fails on
+    // the empty committee). Proves the gate is live, not a tautology.
+    {
+        auto r = verify_tx_inclusion_from_block(
+            mk_block(100), empty_seed, genesis, /*height=*/100, dummy_hash);
+        // Positively assert control reached the committee-sig anchor (step 2)
+        // — proves the index gate PASSED and did not short-circuit, and is
+        // robust against a vacuous pass on a parse failure (which would carry
+        // a "malformed block body" detail instead).
+        bool notrip = (r.detail.find("block index binding failed") == std::string::npos)
+                      && (r.detail.find("committee-sig verification failed") != std::string::npos);
+        check(notrip, "CTRL: a matching block index passes the index gate and reaches the committee-sig anchor (non-vacuity)");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-tx-inclusion-height\n"; return 0; }
+    std::cout << "  FAIL: selftest-tx-inclusion-height\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -9406,6 +9474,7 @@ int main(int argc, char** argv) {
         if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
         if (cmd == "rpc-auth")              return cmd_rpc_auth(sub_argc, sub_argv);
         if (cmd == "selftest-readline-cap") return cmd_selftest_readline_cap(sub_argc, sub_argv);
+        if (cmd == "selftest-tx-inclusion-height") return cmd_selftest_tx_inclusion_height(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

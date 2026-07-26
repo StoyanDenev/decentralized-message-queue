@@ -53,8 +53,8 @@ static json build_committee_json(
     return json{{"members", arr}};
 }
 
-TxInclusionResult verify_tx_inclusion(
-    RpcClient&  rpc,
+TxInclusionResult verify_tx_inclusion_from_block(
+    const nlohmann::json& blk_json,
     const std::map<std::string, PubKey>& committee_seed,
     const determ::chain::GenesisConfig& genesis,
     uint64_t    height,
@@ -87,24 +87,8 @@ TxInclusionResult verify_tx_inclusion(
     }
     res.tx_hash_hex = target_hex;
 
-    // ── 1. Fetch block B (full body) via the `block` RPC ────────────────
-    // rpc_block returns null for index >= height (out of range). A null
-    // reply is a hard error (the height doesn't exist on the chain), not
-    // a NOT_INCLUDED — the caller asked about a block that isn't there.
-    json blk_json = rpc.call("block", {{"index", height}});
-    if (blk_json.is_null()) {
-        throw std::runtime_error(
-            "block " + std::to_string(height)
-            + " is out of range (>= daemon's chain height) — cannot prove "
-              "inclusion against a block that doesn't exist");
-    }
-    if (blk_json.contains("error") && !blk_json["error"].is_null()) {
-        throw std::runtime_error(
-            "block RPC error for height " + std::to_string(height)
-            + ": " + blk_json["error"].dump());
-    }
-
-    // Parse the block. A malformed block body is UNVERIFIABLE.
+    // ── 1. Parse the block (already fetched by the caller) ──────────────
+    // A malformed block body is UNVERIFIABLE.
     determ::chain::Block b;
     try {
         b = determ::chain::Block::from_json(blk_json);
@@ -119,6 +103,33 @@ TxInclusionResult verify_tx_inclusion(
     // tool. (The `block` RPC's to_json() doesn't even emit block_hash;
     // recomputing also defends against a daemon that injects a bogus one.)
     res.block_hash_hex  = to_hex(b.compute_hash());
+
+    // ── 1b. LTX: bind the returned block's OWN index to the REQUESTED
+    //       height. The `block` RPC was asked for index==height, but a
+    //       hostile/MITM daemon can return a DIFFERENT block — e.g. a real
+    //       committee-signed block from height B' that happens to contain the
+    //       queried tx. verify-tx-inclusion anchors on the STATIC genesis
+    //       committee (build_genesis_committee), so a real block from ANY
+    //       height passes the committee-sig check below; every check would
+    //       succeed for that block and the verdict would be reported at the
+    //       REQUESTED height (res.height, set above) — NOT B' — a relabel that
+    //       deceives the caller about WHICH height the tx was included at.
+    //       b.index is the first field of the committee-signed block digest
+    //       (verified in step 2 for B>0, and bound by compute_genesis_hash for
+    //       B==0), so requiring b.index == height binds the reported height to
+    //       committee-authenticated content. An honest daemon returns the block
+    //       AT the requested index (b.index == height), so no honest query
+    //       regresses. Same "displayed label not bound to committee-anchored
+    //       content" class as LSB-ANCHOR-INDEX / EXP-1. ────────────────────
+    if (b.index != height) {
+        res.verdict = InclusionVerdict::UNVERIFIABLE;
+        res.detail  = "block index binding failed: the daemon returned a "
+                      "block whose own index=" + std::to_string(b.index)
+                    + " != the requested height=" + std::to_string(height)
+                    + " — refusing to report inclusion at a height the block "
+                      "does not claim (possible relabel by a hostile daemon)";
+        return res;
+    }
 
     // ── 2. Anchor the block ─────────────────────────────────────────────
     if (height == 0) {
@@ -254,6 +265,35 @@ TxInclusionResult verify_tx_inclusion(
                   ? InclusionVerdict::INCLUDED
                   : InclusionVerdict::NOT_INCLUDED;
     return res;
+}
+
+// Thin RPC wrapper: fetch block `height` (full body) via the `block` RPC,
+// handle transport / RPC-reply anomalies, then delegate to the testable core
+// (verify_tx_inclusion_from_block, which holds the index-binding + anchor +
+// body verification).
+TxInclusionResult verify_tx_inclusion(
+    RpcClient&  rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    uint64_t    height,
+    const std::string& tx_hash_hex) {
+    // rpc_block returns null for index >= height (out of range). A null reply
+    // is a hard error (the height doesn't exist on the chain), not a
+    // NOT_INCLUDED — the caller asked about a block that isn't there.
+    json blk_json = rpc.call("block", {{"index", height}});
+    if (blk_json.is_null()) {
+        throw std::runtime_error(
+            "block " + std::to_string(height)
+            + " is out of range (>= daemon's chain height) — cannot prove "
+              "inclusion against a block that doesn't exist");
+    }
+    if (blk_json.contains("error") && !blk_json["error"].is_null()) {
+        throw std::runtime_error(
+            "block RPC error for height " + std::to_string(height)
+            + ": " + blk_json["error"].dump());
+    }
+    return verify_tx_inclusion_from_block(blk_json, committee_seed, genesis,
+                                          height, tx_hash_hex);
 }
 
 } // namespace determ::light
