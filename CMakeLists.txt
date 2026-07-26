@@ -212,6 +212,9 @@ add_library(determ-crypto-c99 STATIC
   # co-generation + transcript-MAC mutual auth, a pure composition of P-256
   # scalar mult + HKDF-SHA256 + SHA-256 (`determ test-dsso-opaque3dh`).
   "${CMAKE_SOURCE_DIR}/src/crypto/dsso/opaque3dh.c"
+  # D.5 government random-selection — lowest-hash sortition (the pure, Apache-2.0
+  # citizen-verifier draw core; D5-RANDOM-SELECTION-SPEC §4) — `determ test-d5-draw`.
+  "${CMAKE_SOURCE_DIR}/src/dapp/d5draw.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)

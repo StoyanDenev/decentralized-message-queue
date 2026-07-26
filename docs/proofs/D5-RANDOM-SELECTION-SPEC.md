@@ -2,7 +2,7 @@
 
 # D.5 — Government random-selection reference DApp
 
-**Status:** DESIGN — owner chose "design-first" (2026-07-26). Design synthesized + adversarially verified (workflow `wf_4d036bff-772`: 3 framings → adversarial grounding/doctrine verification → synthesis). **No code until §13 is ratified** (the parameters are pre-genesis-free to change now, frozen once a deployment goes live — no migrations).
+**Status:** **RATIFIED 2026-07-26 — the owner accepted all 8 §13 recommendations as-is; build proceeding per §12** (increment 2 `d5_draw` first). Design synthesized + adversarially verified (workflow `wf_4d036bff-772`: 3 framings → adversarial grounding/doctrine verification → synthesis). The frozen-once-live parameters (D1 lowest-hash draw + `draw_algo_version`, D3 Δ ≥ one committee-epoch) are fixed for any deployment; they are pre-genesis-free to amend only until a deployment goes live — no migrations.
 **License:** BUSL-1.1 orchestrator (`dapps/d5-random-selection/**`) + **Apache-2.0 citizen verifier** (the `verify-rand` / `verify-selection` / `d5_draw` surface lives in `determ-light` so any citizen verifies freely). See §13 D8.
 
 ## 0. Motivation
@@ -275,7 +275,7 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
 
 1. **This spec** + owner ratification of §13 **before any code** (params pre-genesis-free now,
    frozen once live).
-2. `d5_draw` pure module + `test-d5-draw` (cheapest offline class; everything composes it).
+2. `d5_draw` pure module + `test-d5-draw` — **SHIPPED** (`src/dapp/d5draw.c` + `include/determ/dapp/d5draw.h`; dual-oracle `tools/verify_d5_draw.py` / `tools/vectors/d5_draw.json`, 5 vectors; wrapper `tools/test_d5_draw.sh`). Gated both platforms (MSVC + WSL2/GCC; KAT cross-toolchain byte-identical) + falsify-on-mutant: the ctx-drop mutant flips all 5 KAT byte-matches + both ctx-binding asserts RED while order-independence stays green (clean directional split).
 3. Payload codecs (`roster` / `case-open` / `result`), D2 canonical binary, KAT-pinned round-trip.
 4. `determ-light verify-rand <H>` + `test-light-verify-rand` (closes the named beacon-read gap).
 5. `determ-light verify-selection` + `test-light-verify-selection` (all four mutants) — the
@@ -287,10 +287,11 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
 8. Ship gate: G5/G6 already green (2026-07-26). Then, as a **separate later front item**, extract
    `sdk/rp` (Apache-2.0) FROM the working D.5 RP-accept logic.
 
-## 13. OPEN decisions for owner ratification (before code)
+## 13. Decisions (RATIFIED 2026-07-26)
 
-Each carries a recommendation; ratify one per row (or amend). Parameters marked *frozen-once-live*
-are un-migratable after a deployment goes live.
+**The owner accepted all 8 recommendations below as-is (2026-07-26); each recommendation is the
+ratified choice.** Parameters marked *frozen-once-live* are un-migratable after a deployment goes
+live (D1 draw algo + `draw_algo_version`, D3 Δ).
 
 - **D1 — Draw construction** (frozen-once-live via `draw_algo_version`). Options: (a) **lowest-hash
   sortition** (§4); (b) seeded Fisher-Yates over the canonically-sorted roster. **Recommend (a)** —

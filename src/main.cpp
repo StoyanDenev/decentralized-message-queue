@@ -44,6 +44,7 @@
 #include <determ/crypto/mldsa/sign.h>          // §3.18: ML-DSA sign/verify (increment 8, ACVP-pinned)
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/dsso/opaque3dh.h>     // §3.26: DSSO G4 OPAQUE-3DH AKE core (RFC 9807)
+#include <determ/dapp/d5draw.h>               // D.5 lowest-hash sortition (test-d5-draw)
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
@@ -638,6 +639,11 @@ In-process tests (deterministic, no network):
                                               derivation: 14 frozen vectors
                                               byte-equal (info + vk halves) +
                                               fail-closed edges + determinism
+  determ test-d5-draw [file]                  D.5 lowest-hash sortition (govt
+                                              random-selection): 5 frozen vectors
+                                              byte-equal vs the python oracle +
+                                              order-independence + ctx binding +
+                                              fail-closed edges
   determ test-enote-c99 [file]                NC-8 encrypted-note delivery
                                               (shielded Option A): ECIES over
                                               P-256 — roundtrip/tamper/wrong-key
@@ -16737,6 +16743,109 @@ int main(int argc, char** argv) {
         }
 
         if (fail==0) std::cout << "  PASS: view-key (A1 per-epoch derivation) unit test\n";
+        return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-d5-draw") {
+        // D.5 lowest-hash sortition (D5-RANDOM-SELECTION-SPEC §4, ratified D1) —
+        // src/dapp/d5draw.c. Dual-oracle: every vector in tools/vectors/d5_draw.json
+        // (frozen by the dependency-free python oracle tools/verify_d5_draw.py) is
+        // recomputed through the shipped d5_draw() and the selected ids must
+        // byte-match. Plus order-independence, ctx/height binding (the SPEC §11
+        // ctx-drop mutant flips these), and the fail-closed edges.
+        std::cout << "=== D.5 lowest-hash sortition (test-d5-draw) ===\n";
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        // Run d5_draw over a roster, returning the selected ids as hex (in order).
+        auto run = [&](const std::vector<uint8_t>& seed, const std::string& domain,
+                       const std::string& case_id, uint64_t H, uint64_t cutoff, uint8_t algo,
+                       const std::vector<std::vector<uint8_t>>& ids, size_t N, size_t M,
+                       std::vector<std::string>& out_sel)->int{
+            std::vector<const uint8_t*> idp; std::vector<size_t> idl;
+            for (auto& id : ids){ idp.push_back(id.data()); idl.push_back(id.size()); }
+            std::vector<size_t> outi(N+M); size_t oc=0;
+            int rc = d5_draw(seed.data(), (const uint8_t*)domain.data(), domain.size(),
+                             (const uint8_t*)case_id.data(), case_id.size(), H, cutoff, algo,
+                             idp.data(), idl.data(), ids.size(), N, M, outi.data(), &oc);
+            out_sel.clear();
+            if (rc==0) for (size_t k=0;k<oc;k++) out_sel.push_back(hx(ids[outi[k]].data(), ids[outi[k]].size()));
+            return rc;
+        };
+
+        std::string path = (argc>2)? argv[2] : "tools/vectors/d5_draw.json";
+        std::ifstream f(path);
+        if (!f) check(false, std::string("corpus present: ")+path);
+        else {
+            json doc; f >> doc; int n=0;
+            for (auto& v : doc["vectors"]) {
+                std::string name = v.value("name","?");
+                auto seed = unhex(v["seed_hex"].get<std::string>());
+                std::string domain = v["domain"].get<std::string>();
+                std::string case_id = v["case_id"].get<std::string>();
+                uint64_t H = std::stoull(v["draw_height"].get<std::string>());
+                uint64_t cutoff = std::stoull(v["roster_cutoff_height"].get<std::string>());
+                uint8_t algo = (uint8_t)v["draw_algo_version"].get<int>();
+                size_t N = v["n_primary"].get<size_t>();
+                size_t M = v["m_alternate"].get<size_t>();
+                std::vector<std::vector<uint8_t>> ids;
+                for (auto& s : v["ids_hex"]) ids.push_back(unhex(s.get<std::string>()));
+                std::vector<std::string> exp;
+                for (auto& s : v["expected_selected_ids_hex"]) exp.push_back(s.get<std::string>());
+
+                std::vector<std::string> sel;
+                int rc = run(seed, domain, case_id, H, cutoff, algo, ids, N, M, sel);
+                check(rc==0 && sel==exp, std::string("vector selected-ids byte-equal: ")+name);
+
+                // order-independence: reverse the roster -> identical selected SET.
+                std::vector<std::vector<uint8_t>> rids(ids.rbegin(), ids.rend());
+                std::vector<std::string> sel2;
+                run(seed, domain, case_id, H, cutoff, algo, rids, N, M, sel2);
+                std::vector<std::string> sa=sel, sb=sel2;
+                std::sort(sa.begin(),sa.end()); std::sort(sb.begin(),sb.end());
+                check(sa==sb, std::string("order-independent selected SET: ")+name);
+                n++;
+            }
+            check(n==5, "corpus complete (5 vectors)");
+        }
+
+        // ctx/height binding (load-bearing — the SPEC §11 ctx-drop mutant flips
+        // these): mutating case_id or draw_height must change the selection.
+        {
+            std::vector<uint8_t> seed(32); for(int i=0;i<32;i++) seed[i]=(uint8_t)i;
+            std::vector<std::vector<uint8_t>> ids;
+            for (int i=0;i<64;i++){ std::string s="D5-MEMBER-"+std::to_string(i);
+                ids.push_back(std::vector<uint8_t>(s.begin(), s.end())); }
+            std::vector<std::string> s0,s1,s2;
+            run(seed,"dom","CASE-1",1000,900,1,ids,5,0,s0);
+            run(seed,"dom","CASE-2",1000,900,1,ids,5,0,s1);   // different case_id
+            run(seed,"dom","CASE-1",1001,900,1,ids,5,0,s2);   // different height
+            check(!s0.empty(), "draw produced a nonempty selection");
+            check(s0!=s1, "case_id bound into the draw (ctx)");
+            check(s0!=s2, "draw_height bound into the draw (ctx)");
+        }
+
+        // fail-closed edges: -1 on bad args.
+        {
+            std::vector<uint8_t> seed(32,7);
+            const uint8_t* dom=(const uint8_t*)"dom"; const uint8_t* cid=(const uint8_t*)"C";
+            std::vector<uint8_t> a(4,1),b(4,2); const uint8_t* idp[2]={a.data(),b.data()}; size_t idl[2]={4,4};
+            size_t oi[4]; size_t oc=0;
+            check(d5_draw(seed.data(),dom,3,cid,1,1000,900,1,idp,idl,0,1,0,oi,&oc)==-1, "count==0 rejected");
+            check(d5_draw(seed.data(),dom,3,cid,1,1000,900,1,idp,idl,2,3,0,oi,&oc)==-1, "N>count rejected");
+            check(d5_draw(seed.data(),dom,3,cid,1,1000,900,1,idp,idl,2,1,2,oi,&oc)==-1, "N+M>count rejected");
+            check(d5_draw(seed.data(),dom,3,cid,1,1000,900,2,idp,idl,2,1,0,oi,&oc)==-1, "unknown algo rejected");
+            check(d5_draw(seed.data(),dom,3,cid,1,1000,900,1,idp,idl,2,0,0,oi,&oc)==-1, "N+M==0 rejected");
+            check(d5_draw(seed.data(),nullptr,0,cid,1,1000,900,1,idp,idl,2,1,0,oi,&oc)==-1, "empty domain rejected");
+            check(d5_draw(nullptr,dom,3,cid,1,1000,900,1,idp,idl,2,1,0,oi,&oc)==-1, "NULL seed rejected");
+        }
+
+        if (fail==0) std::cout << "  PASS: d5-draw (lowest-hash sortition) unit test\n";
         return fail==0 ? 0 : 1;
     }
     if (cmd == "test-dsso-opaque3dh") {
