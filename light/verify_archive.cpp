@@ -131,6 +131,44 @@ int run_verify_archive(const VerifyArchiveOptions& opts) {
         }
         std::string archive_ghash = archive["genesis_hash"].get<std::string>();
 
+        // ── 1b. EXP-1: bind the DISPLAYED range labels to the archive CONTENT,
+        //       BEFORE the genesis/crypto gates. The summary (step 5) prints
+        //       `range: [from, from+count)` from the envelope's self-declared
+        //       `from`/`count` fields, but nothing tied them to the headers
+        //       actually present — a forged archive could carry a real
+        //       committee-signed slice (e.g. indices [500,510]) yet claim
+        //       `from=0, count=1000`, deceiving the auditor about WHICH range was
+        //       verified. Bind them to the ground truth: `from == headers[0].index`
+        //       (the same first_index the anchor decision below uses) and
+        //       `count == #records`. Same "displayed label not bound to the
+        //       committee-anchored content" class as LSB-ANCHOR-INDEX; purely
+        //       structural, no crypto. export-headers always writes both fields
+        //       with from==first_index and count==size, so no honest archive
+        //       regresses; the `contains` guards keep a legacy field-less archive
+        //       working (the crypto binding below still governs it). ────────────
+        if (archive.contains("from") && records[0].is_object()
+            && records[0].contains("header_json")
+            && records[0]["header_json"].is_object()) {
+            uint64_t first_idx =
+                records[0]["header_json"].value("index", uint64_t{0});
+            uint64_t declared_from = archive.value("from", uint64_t{0});
+            if (declared_from != first_idx) {
+                std::cerr << "verify-archive: SECURITY — declared from="
+                          << declared_from << " != headers[0].index=" << first_idx
+                          << " — the archive's range label does not match its "
+                             "content; refusing a mislabelled range\n";
+                return 1;
+            }
+        }
+        if (archive.contains("count")
+            && archive.value("count", uint64_t{0}) != records.size()) {
+            std::cerr << "verify-archive: SECURITY — declared count="
+                      << archive.value("count", uint64_t{0})
+                      << " != actual header count=" << records.size()
+                      << " — the archive's range label overstates its content\n";
+            return 1;
+        }
+
         // ── 2. Genesis anchor: compute_genesis_hash(--genesis) must
         //       equal archive.genesis_hash. No daemon — the archive's
         //       stored hash stands in for block 0. ─────────────────────

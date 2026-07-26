@@ -1,8 +1,9 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **3 autonomous gates CLOSED — LV-1/LV-2 committee-size mode-eligibility now
-COMPLETE (inc.1 mechanism + falsify; inc.2 state-root anchor wiring; inc.2b chain-walk wiring — both
-live-regressed), 5 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
+**Status:** open (2026-07-26); **4 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
+LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring;
+inc.2b chain-walk wiring — both live-regressed), and EXP-1 archive range-label binding; 4 confirmed
+autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
 the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -150,11 +151,42 @@ the reads. Same live-cluster non-regression validation (the walk is exercised by
 the resume path); regression-safety is the same proof. LV-1/LV-2 is now enforced on BOTH the state-root
 anchor (inc.2) and the full chain walk (inc.2b) — the gate is complete.
 
+## 1d. CLOSED — archive range-label not bound (`test-light-verify-archive-range-bind`, EXP-1)
+
+`verify-archive` (light/verify_archive.cpp) verifies an **export-headers archive offline**: a `genesis_hash`
++ a `headers[]` array whose prev_hash chain and per-header committee sigs (step 4) it re-checks. The archive
+also carries self-declared `from` / `count` fields, and the summary (step 5) prints
+`range: [from, from+count)` from them — but **nothing bound those DISPLAYED labels to the headers actually
+present**. So a MITM/archive-forger could serve a genuinely committee-signed slice — say the real headers for
+indices `[500..510]` — yet stamp `from=0, count=1000`, and verify-archive would print `range: [0, 1000)` for
+content that actually covers `[500, 511)`, deceiving the auditor about WHICH range was verified. (Same
+"displayed label not bound to committee-anchored content" class as §1b LSB-ANCHOR-INDEX; the backlog listed
+this as EXP-1 with `file: export.cpp`, but the fix belongs in the VERIFIER — fixing only the honest producer
+does nothing against a MITM who controls the archive bytes.) This also subsumes the backlog's `index==0 when
+from>0` sub-case: if `from>0` but `headers[0].index==0`, the `from != headers[0].index` gate fires.
+
+**Fix (client-side soundness, no node/consensus/wire change):** a structural gate placed BEFORE the
+genesis/crypto gates (right after the records-nonempty check) requiring the declared `from` to equal
+`headers[0].index` and the declared `count` to equal the number of records. Because each non-genesis
+header's `index` is committee-authenticated by the step-4 sig check (the block digest's first field), the
+displayed labels are transitively bound to committee-authenticated content. `export-headers` always writes
+`from == first_index` and `count == size`, so no honest archive regresses; the `contains` guards keep a
+legacy field-less archive working (the crypto binding below still governs it).
+
+**Gate** = `test_light_verify_archive_range_bind.sh` — FAST, fully-offline (hand-built JSON fixtures; the
+structural check needs no real crypto and fires before the genesis-load step, so a nonexistent `--genesis`
+suffices): NEG-from `from(0) != headers[0].index(5)` → reject (exit 1) with the exact `declared from=0 !=
+headers[0].index=5` diagnostic; NEG-count `count(99) != #records(1)` → reject with the exact `declared
+count=99 != actual header count=1` diagnostic; CTRL `from(5)==index(5), count(1)==#records(1)` passes the
+range gate and falls through to a later gate (genesis-load on the nonexistent `--genesis`) — non-vacuity.
+**Falsify-on-mutant** (`if (false && …)` on BOTH range checks): NEG-from + NEG-count fall through to the
+genesis-load gate (no `declared` diagnostic), flipping both NEG asserts while CTRL is unchanged — a clean
+directional split on both platforms.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
 |---|---|---|---|
-| EXP-1 | 1 | export.cpp | `export-headers --from > 0` anchors the first page to NOTHING (no genesis in a `from>0` range), letting a MITM inject a fabricated/wrong-range archive marked `verified_committee_sigs=true`. Fix mirrors `verify_chain_walk`: require `headers[0].index == from`, reject any `index==0` when `from>0`. |
 | LTX-HEIGHT-NOT-BOUND | 2 | verify_tx_inclusion.cpp | never binds the returned block's `index` to the requested `height` — a real committee-signed block at a DIFFERENT height forges an "included at height B" proof. Fix: `if (b.index != height) UNVERIFIABLE`. |
 | WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
 | LRPC-1 | 2 | rpc_client.cpp | `RpcClient::read_line` grows its buffer unbounded → a MITM daemon OOM-crashes the reader. Fix: a light-local 16 MiB `kLightRpcMaxLineBytes` cap (the client-side sibling of the RpcIngress readline cap). |
