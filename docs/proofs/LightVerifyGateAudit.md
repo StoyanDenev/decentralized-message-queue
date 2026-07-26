@@ -1,10 +1,11 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **7 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
-LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring;
-inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label binding, LRPC-1
-read_line DoS cap, LTX-HEIGHT-NOT-BOUND tx-inclusion index binding, and WATCH-1 tip-state_root relabel;
-1 confirmed autonomous-safe in backlog (AH-1), 0 owner-gated.** SIXTH code-surface register in
+**Status:** COMPLETE (2026-07-26); **8 of 8 autonomous gates CLOSED, 0 backlog, 0 owner-gated — LVS-1
+empty-committee, LSB anchor-index, LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify;
+inc.2 state-root anchor wiring; inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label
+binding, LRPC-1 read_line DoS cap, LTX-HEIGHT-NOT-BOUND tx-inclusion index binding, WATCH-1 tip-state_root
+relabel, and AH-1 genesis-row state_root not echoed. All FAST-offline falsify-on-mutant, both platforms.**
+SIXTH code-surface register in
 the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -268,11 +269,38 @@ tick still renders `sigs_valid=yes` + height + `head_hash(as-served)` (non-vacui
 (revert to a bare `state_root=` label): the two label asserts flip while the non-vacuity assert stays green — a
 clean directional split on both platforms.
 
-## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
+## 1h. CLOSED — account-history genesis row echoes the daemon's forgeable state_root (`selftest-genesis-row`, AH-1)
 
-| id | rank | file | gap |
-|---|---|---|---|
-| AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: for idx==0 derive the genesis `state_root` LOCALLY from `make_genesis_block(genesis).state_root` (empty/zero by construction → row shows "(none)") instead of echoing the served field. Informational-only (balance/nonce come from the Merkle-verified head_view), hence rank-3. FAST-offline: the genesis state_root is a pure fn of GenesisConfig. |
+`account-history`'s per-height helper `verify_header_state_root_at` (light/account_history.cpp) routes
+`idx >= 1` through `committee_bound_state_root` (transitively binding the row's state_root), but its
+`idx == 0` branch returned `page["headers"][0].value("state_root", …)` — the daemon's self-declared
+genesis `state_root` FIELD. Genesis carries **no committee-attested state_root**: `make_genesis_block`
+(src/chain/genesis.cpp) sets `tx_root = {}` and never touches `state_root`, so the genuine value is the
+all-zero `Hash{}`; genesis also has zero `creator_block_sigs`, and `anchor_genesis` binds only block-0's
+`block_hash` (string-compared, never recomputed over the served header). So a hostile/MITM daemon could
+put an **arbitrary forged root** on the `h=0` row. Rank-3 / low severity: balance + next_nonce come from
+the Merkle-verified head_view, not this field, so only the informational state_root column of the genesis
+row was deceived. (The in-code comment claiming genesis "carries the post-genesis-apply commitment when
+S-033 is active" is factually wrong — no genesis `state_root` is ever set.)
+
+**Fix (client-side, no wire/consensus change):** route the genesis-row value through a pure
+`genesis_row_state_root(served)` that returns the GENUINE (empty) genesis root — rendered "(none)" —
+DELIBERATELY IGNORING the served field. No GenesisConfig threading is needed: the genuine genesis
+state_root is the constant empty `Hash{}` (per minimalism, "a feature that changes zero behavior is not
+built"). The `served` parameter exists only to make the "ignore the forgeable field" contract explicit
+and offline-testable.
+
+**Gate** = `test_light_account_history_genesis_root.sh` — FAST, fully-offline (the determ-light
+`selftest-genesis-row` subcommand drives `genesis_row_state_root`): two forged served values are NOT
+echoed (NEG ×2); an empty served value stays empty (CTRL, unaffected by the mutant). **Falsify-on-mutant**
+(`return served_state_root` — the AH-1 bug): the two NEG asserts flip while CTRL stays green — a clean
+directional split on both platforms.
+
+## 2. Backlog — EMPTY (register COMPLETE)
+
+Every finding this register enumerated as a future gate is now CLOSED, across the **8 gate-sections
+§1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1). No remaining backlog; 0 owner-gated.
+Any future light-verifier gap opens a new row here.
 
 ## 3. REFUTED
 

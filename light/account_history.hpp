@@ -97,4 +97,16 @@ struct AccountHistoryOptions {
 //   }
 int run_account_history(const AccountHistoryOptions& opts);
 
+// AH-1: the state_root reported for the GENESIS row (height 0). The genesis
+// block carries NO committee-attested state_root — make_genesis_block never sets
+// it, so `g.state_root` is the all-zero Hash{} by construction — and the daemon's
+// served `state_root` FIELD at index 0 is unbound (genesis has zero
+// creator_block_sigs; anchor_genesis binds only block-0's block_hash). So a
+// hostile daemon could echo an arbitrary forged root on the h=0 row. This returns
+// the GENUINE (empty) genesis state_root, DELIBERATELY IGNORING the served value;
+// `served_state_root` is accepted only to make the "ignore the forgeable field"
+// contract explicit and offline-testable. Exposed for the `selftest-genesis-row`
+// self-test. Empty result → the row renders "(none)".
+std::string genesis_row_state_root(const std::string& served_state_root);
+
 } // namespace determ::light

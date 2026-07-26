@@ -121,9 +121,15 @@ std::string verify_header_state_root_at(RpcClient& rpc,
                 "account-history: daemon returned no header at index "
                 + std::to_string(idx));
         }
-        // Genesis is pinned by the genesis-hash anchor (anchor_genesis);
-        // it has no committee-signed successor in a 1-block chain.
-        return page["headers"][0].value("state_root", std::string{});
+        // Genesis is pinned by the genesis-hash anchor (anchor_genesis); it has
+        // no committee-signed successor in a 1-block chain. AH-1: the served
+        // `state_root` FIELD here is NOT committee-attested (genesis carries zero
+        // creator_block_sigs, and make_genesis_block never sets a state_root — the
+        // genuine genesis root is the all-zero Hash{}), so echoing it would let a
+        // hostile daemon put an arbitrary forged root on the h=0 row. Return the
+        // genuine (empty) genesis state_root instead, ignoring the served field.
+        return genesis_row_state_root(
+            page["headers"][0].value("state_root", std::string{}));
     }
     return committee_bound_state_root(rpc, committee_json, idx,
                                       max_wait_seconds, expected_k, bft_enabled);
@@ -203,6 +209,17 @@ private:
 };
 
 } // namespace
+
+// AH-1 (declared in account_history.hpp): the genesis row's state_root. Genesis
+// carries NO committee-attested state_root — make_genesis_block never sets it, so
+// the genuine value is the all-zero Hash{} (rendered "(none)") — and the served
+// field is unbound/forgeable, so it is DELIBERATELY IGNORED. Returning the served
+// value instead is exactly the AH-1 gap; the `served_state_root` parameter exists
+// only to make that ignore explicit and offline-falsifiable.
+std::string genesis_row_state_root(const std::string& served_state_root) {
+    (void)served_state_root;   // unbound daemon field — never echoed
+    return std::string{};
+}
 
 int run_account_history(const AccountHistoryOptions& opts) {
     try {

@@ -9445,6 +9445,42 @@ int cmd_selftest_watch_label(int argc, char** argv) {
     return 1;
 }
 
+// selftest-genesis-row — offline, NO daemon: drive genesis_row_state_root to
+// prove the AH-1 fix. account-history's genesis (h=0) row echoed the daemon's
+// served `state_root` FIELD, but genesis carries NO committee-attested state_root
+// (make_genesis_block never sets it → the genuine value is the all-zero Hash{})
+// and the served field is unbound (genesis has zero creator_block_sigs), so a
+// hostile daemon could put an arbitrary forged root on the h=0 row. The fix
+// returns the genuine (empty) root, IGNORING the served field. NEG: a forged
+// served value is NOT echoed. CTRL: an empty served value stays empty (the
+// unaffected genuine path). Falsify (return the served value): the NEG asserts
+// flip; the CTRL stays green.
+int cmd_selftest_genesis_row(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // NEG: a forged served genesis state_root must NOT be echoed onto the row.
+    check(genesis_row_state_root(std::string(64, 'e')).empty(),
+          "NEG: a forged served genesis state_root is NOT echoed (returns the genuine empty root)");
+    // NEG-2: a different, realistic-looking forged 64-hex is likewise ignored.
+    check(genesis_row_state_root(
+              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").empty(),
+          "NEG-2: any forged served genesis state_root is ignored, not echoed");
+    // CTRL: an already-empty served value returns empty (the genuine genesis
+    // root); this path is unaffected by the falsify mutant (non-vacuity).
+    check(genesis_row_state_root(std::string{}).empty(),
+          "CTRL: an empty served value returns the genuine empty genesis root");
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-genesis-row\n"; return 0; }
+    std::cout << "  FAIL: selftest-genesis-row\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -9525,6 +9561,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-readline-cap") return cmd_selftest_readline_cap(sub_argc, sub_argv);
         if (cmd == "selftest-tx-inclusion-height") return cmd_selftest_tx_inclusion_height(sub_argc, sub_argv);
         if (cmd == "selftest-watch-label")  return cmd_selftest_watch_label(sub_argc, sub_argv);
+        if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
