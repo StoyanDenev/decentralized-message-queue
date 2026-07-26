@@ -126,7 +126,11 @@ void print_usage() {
         "  verify-headers --in <file> [--genesis-hash <hex>] [--prev-hash <hex>]\n"
         "      Verify the prev_hash chain in a `headers` RPC reply.\n"
         "  verify-block-sigs --header <file> --committee <file> [--bft]\n"
+        "                    [--k-block-sigs <n>] [--no-bft-enabled]\n"
         "      Verify K-of-K committee Ed25519 sigs (or ceil(2K/3) BFT).\n"
+        "      --k-block-sigs enforces the node's committee-size mode-eligibility\n"
+        "      (MD names exactly k creators; BFT ceil(2k/3)); --no-bft-enabled\n"
+        "      refuses any BFT block (a mutual-distrust-only chain). LV-1/LV-2.\n"
         "  block-verify --block <file> --committee <file> [--bft] [--json]\n"
         "      Self-contained OFFLINE single-block verifier: STRUCTURE +\n"
         "      TX-ROOT (recompute compute_tx_root == stored) + SIGS (committee\n"
@@ -889,11 +893,22 @@ int cmd_verify_headers(int argc, char** argv) {
 int cmd_verify_block_sigs(int argc, char** argv) {
     std::string header_path, committee_path;
     bool bft = false;
+    // LV-1/LV-2 mode-eligibility inputs. --k-block-sigs supplies the genesis
+    // k_block_sigs so verify_block_sigs can enforce the node's committee-size
+    // gate (MD names exactly K creators; BFT exactly ceil(2K/3)); default 0
+    // keeps this primitive's legacy behaviour (membership + quorum-count only).
+    // --no-bft-enabled models a genesis with bft_enabled=false (a
+    // mutual-distrust-only chain) — any BFT block is then refused.
+    size_t k_block_sigs = 0;
+    bool bft_enabled = true;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--header"    && i + 1 < argc) header_path    = argv[++i];
-        else if (a == "--committee" && i + 1 < argc) committee_path = argv[++i];
-        else if (a == "--bft")                       bft = true;
+        if      (a == "--header"       && i + 1 < argc) header_path    = argv[++i];
+        else if (a == "--committee"    && i + 1 < argc) committee_path = argv[++i];
+        else if (a == "--bft")                          bft = true;
+        else if (a == "--k-block-sigs" && i + 1 < argc)
+            k_block_sigs = static_cast<size_t>(std::stoul(argv[++i]));
+        else if (a == "--no-bft-enabled")               bft_enabled = false;
         else {
             std::cerr << "verify-block-sigs: unknown arg '" << a << "'\n";
             return 1;
@@ -906,12 +921,16 @@ int cmd_verify_block_sigs(int argc, char** argv) {
     try {
         json header_json = read_json_file(header_path);
         json committee_json = read_json_file(committee_path);
-        auto r = verify_block_sigs(header_json, committee_json, bft);
+        auto r = verify_block_sigs(header_json, committee_json, bft,
+                                   k_block_sigs, bft_enabled);
         if (!r.ok) { std::cerr << r.detail << "\n"; return 1; }
         std::cout << "OK\n"
                   << "  mode:      " << (bft ? "BFT" : "MD") << "\n"
-                  << "  verified:  " << r.count << " sig(s)\n"
-                  << "  digest:    " << r.digest_hex << "\n";
+                  << "  verified:  " << r.count << " sig(s)\n";
+        if (k_block_sigs > 0)
+            std::cout << "  k_block_sigs: " << k_block_sigs
+                      << " (mode-eligibility enforced)\n";
+        std::cout << "  digest:    " << r.digest_hex << "\n";
         if (!r.state_root_hex.empty())
             std::cout << "  state_root: " << r.state_root_hex << "\n";
         return 0;

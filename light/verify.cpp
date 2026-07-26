@@ -20,6 +20,7 @@
 #include <determ/util/json_validate.hpp>
 #include <determ/types.hpp>
 #include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>          // bft_committee_size (mirror the node's k_bft)
 #include <determ/chain/abort_canonical.hpp>  // shared canonical abort-claims dump (mirror)
 #include <set>
 #include <vector>
@@ -382,7 +383,9 @@ VerifyResult verify_headers(const nlohmann::json& headers_json,
 
 VerifyResult verify_block_sigs(const nlohmann::json& header_in,
                                 const nlohmann::json& committee_json,
-                                bool bft_mode) {
+                                bool bft_mode,
+                                size_t expected_k,
+                                bool bft_enabled) {
     VerifyResult r;
 
     // Accept either an rpc_headers envelope or a single header object.
@@ -445,6 +448,69 @@ VerifyResult verify_block_sigs(const nlohmann::json& header_in,
         return r;
     }
 
+    // LightVerify LV-1 / LV-2 — committee-size mode-eligibility gate, a
+    // byte-for-byte mirror of the NODE's check_block_sigs
+    // (src/node/validator.cpp: md_ok/bft_ok at :120-133 + the bft_enabled gate
+    // at :467-469). The membership loop above only proves every listed creator
+    // is IN the committee; NOTHING bound the COUNT to the chain's required
+    // signing-committee size. Because genesis permits 1 <= k_block_sigs <=
+    // m_creators, the committee POOL in committee_json may be LARGER than
+    // k_block_sigs, so the old `required = creators.size()` let a MITM serve:
+    //   * (LV-1) an MD block naming a SINGLE creator (creators=[one member] with
+    //     that member's real sig) → required=1 → a 1-of-K quorum downgrade; and
+    //   * (LV-2) a BFT/ceil(2K/3) reduced-quorum block on a chain whose genesis
+    //     has bft_enabled=false (a mutual-distrust-only chain that never
+    //     escalates), via the unconditional BFT fallback.
+    // The node rejects BOTH (its m==k_full / m==k_bft eligibility + bft_enabled
+    // gate), so ANY block on the real chain satisfies this check — it rejects no
+    // honest block. Keyed on the committee-signed b.consensus_mode (bound in
+    // light_compute_block_digest), independent of the caller's bft_mode retry.
+    // Enforced only when the caller supplies the genesis k_block_sigs
+    // (expected_k>0); the low-level `verify-block-sigs` primitive leaves it 0
+    // (behaviour byte-identical to before) unless --k-block-sigs is given.
+    if (expected_k > 0) {
+        using determ::chain::ConsensusMode;
+        size_t k_bft = determ::chain::bft_committee_size(expected_k);
+        if (b.consensus_mode == ConsensusMode::MUTUAL_DISTRUST) {
+            if (b.creators.size() != expected_k) {
+                r.detail = "FAIL: MD block names " + std::to_string(b.creators.size())
+                         + " creators but genesis k_block_sigs=" + std::to_string(expected_k)
+                         + " — a K-of-K mutual-distrust block signs with EXACTLY "
+                           "k_block_sigs creators; refusing a quorum downgrade";
+                return r;
+            }
+        } else if (b.consensus_mode == ConsensusMode::BFT) {
+            if (!bft_enabled) {
+                r.detail = "FAIL: BFT-mode block but genesis bft_enabled=false — "
+                           "a mutual-distrust-only chain never escalates to a "
+                           "reduced-quorum committee; refusing";
+                return r;
+            }
+            if (b.creators.size() != k_bft) {
+                r.detail = "FAIL: BFT block names " + std::to_string(b.creators.size())
+                         + " creators but the escalated committee size is "
+                           "ceil(2*k_block_sigs/3)=" + std::to_string(k_bft)
+                         + " — refusing a mismatched-quorum block";
+                return r;
+            }
+        } else {
+            r.detail = "FAIL: block has unknown consensus_mode "
+                     + std::to_string(static_cast<int>(b.consensus_mode));
+            return r;
+        }
+    }
+
+    // When the mode-eligibility gate is active (expected_k>0), the sentinel
+    // tolerance + quorum floor below MUST also follow the committee-signed
+    // b.consensus_mode — NOT the caller's bft_mode flag — so a mis-asserted
+    // --bft cannot loosen an MD block's K-of-K quorum to ceil(2K/3) (the node
+    // derives BOTH the eligibility gate and required_block_sigs from
+    // b.consensus_mode). With expected_k==0 (the low-level primitive) the
+    // caller's bft_mode still governs — byte-identical legacy behaviour.
+    bool sig_bft = (expected_k > 0)
+        ? (b.consensus_mode == determ::chain::ConsensusMode::BFT)
+        : bft_mode;
+
     Hash digest = light_compute_block_digest(b);
 
     Signature zero_sig{};
@@ -452,7 +518,7 @@ VerifyResult verify_block_sigs(const nlohmann::json& header_in,
     for (size_t i = 0; i < b.creators.size(); ++i) {
         const auto& sig = b.creator_block_sigs[i];
         if (sig == zero_sig) {
-            if (!bft_mode) {
+            if (!sig_bft) {
                 r.detail = "FAIL: creator[" + std::to_string(i) + "] '"
                          + b.creators[i]
                          + "' has sentinel-zero signature in MD mode";
@@ -471,7 +537,7 @@ VerifyResult verify_block_sigs(const nlohmann::json& header_in,
         }
     }
 
-    size_t required = bft_mode
+    size_t required = sig_bft
         ? (2 * b.creators.size() + 2) / 3
         : b.creators.size();
 

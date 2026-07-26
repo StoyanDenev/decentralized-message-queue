@@ -61,6 +61,24 @@ VerifyResult verify_headers(const nlohmann::json& headers_json,
 //                  member is `{domain: "...", ed_pub: "<64-hex>"}`.
 //   bft_mode: when true, threshold = ceil(2K/3) with sentinel-zero
 //             allowed; when false, full K-of-K required.
+//   expected_k: the genesis `k_block_sigs` (the per-block signing-committee
+//               size the chain requires). When > 0, mirror the NODE's
+//               committee-size mode-eligibility gate (validator.cpp
+//               check_block_sigs): an MD block must name EXACTLY `expected_k`
+//               creators, a BFT block exactly `bft_committee_size(expected_k)`.
+//               This is the LV-1/LV-2 fix: the committee POOL passed in
+//               committee_json may be LARGER than k_block_sigs (genesis allows
+//               1 <= k_block_sigs <= m_creators), so the quorum floor must be
+//               the genesis k_block_sigs, NOT the attacker-controlled
+//               `creators.size()` — else a MITM serves an MD block signed by a
+//               single member (creators=[that one]) and the old
+//               `required = creators.size()` = 1 accepts a 1-of-K downgrade.
+//               When 0 (the default), the mode-eligibility gate is NOT enforced
+//               — for the low-level `verify-block-sigs` primitive / callers that
+//               do not carry a genesis (behaviour byte-identical to before).
+//   bft_enabled: the genesis `bft_enabled` flag; consulted only when
+//               expected_k > 0. When false, ANY BFT-mode block is refused (a
+//               mutual-distrust-only chain never escalates), closing LV-2.
 //
 // On success: result.count = number of valid sigs, result.digest_hex =
 // compute_block_digest(header) hex, result.state_root_hex = header's
@@ -68,7 +86,9 @@ VerifyResult verify_headers(const nlohmann::json& headers_json,
 // state-proof verifications).
 VerifyResult verify_block_sigs(const nlohmann::json& header_json,
                                const nlohmann::json& committee_json,
-                               bool bft_mode);
+                               bool bft_mode,
+                               size_t expected_k = 0,
+                               bool bft_enabled = true);
 
 // Verify a state-proof JSON (the daemon's `rpc_state_proof` reply
 // shape) using a supplied trusted state_root.

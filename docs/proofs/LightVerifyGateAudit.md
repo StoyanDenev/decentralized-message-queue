@@ -1,7 +1,9 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **2 autonomous gates CLOSED, 8 confirmed autonomous-safe in backlog, 0
-owner-gated.** SIXTH code-surface register in the falsify-on-mutant series, after
+**Status:** open (2026-07-26); **2 autonomous gates CLOSED + the LV-1/LV-2 committee-size
+mode-eligibility MECHANISM landed (increment 1; anchor-caller wiring = increment 2), 5 confirmed
+autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in the falsify-on-mutant series,
+after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
 [RpcIngressGateAudit](RpcIngressGateAudit.md), [SnapshotRestoreGateAudit](SnapshotRestoreGateAudit.md),
@@ -78,14 +80,62 @@ the gate and falls through to a later gate (non-vacuity). **Falsify-on-mutant** 
 != anchor_block_index)`): the NEG bundle falls through to the genesis-load gate (exit 1, no anchor_index
 diagnostic), flipping the NEG assert — a clean directional split on both platforms.
 
+## 1c. MECHANISM LANDED (increment 1) — committee-size mode-eligibility gate (`test-light-verify-committee-size`, LV-1 + LV-2)
+
+`verify_block_sigs` (light/verify.cpp) set its MD quorum floor to the block's **own** attacker-controlled
+`creators.size()`: `required = creators.size()`. The membership loop only proves each listed creator is IN
+the committee; the **count** was never bound to the chain's required signing-committee size. Because
+genesis permits `1 <= k_block_sigs <= m_creators`, the committee POOL the light client passes in may be
+LARGER than `k_block_sigs`, so a MITM/malicious RPC daemon could serve:
+- **(LV-1)** an MD block naming a SINGLE committee member (`creators=[one]` with that member's real
+  signature) → `required=1` → a **1-of-K quorum downgrade** the node itself rejects (its `m==k_full`
+  eligibility at validator.cpp:127); and
+- **(LV-2)** a reduced-quorum `ceil(2K/3)` BFT block on a chain whose genesis has `bft_enabled=false` (a
+  mutual-distrust-only chain that never escalates), via the unconditional MD→BFT fallback.
+
+`verify_block_sigs` is the sole committee-sig gate under the state-root / inclusion / history anchors, so
+either downgrade lets a MITM forge a committee-attested read the user trusts.
+
+**Fix (client-side; a byte-for-byte mirror of the NODE's `check_block_sigs`, no consensus/wire change):**
+when the caller supplies the genesis `k_block_sigs` (a new `expected_k` param, default 0 = not enforced),
+`verify_block_sigs` enforces the node's mode-eligibility on the committee-signed `b.consensus_mode`
+(mirrors validator.cpp:120-133 + the `bft_enabled` gate at :467-469):
+`MD → creators.size()==k_block_sigs`; `BFT → bft_enabled AND creators.size()==bft_committee_size(k)`.
+When enforced, the sig-count floor + sentinel-zero tolerance below **also** follow the committee-signed
+`b.consensus_mode` (not the caller's `--bft` flag), so a mis-asserted `--bft` on an MD block cannot loosen
+its K-of-K quorum to `ceil(2K/3)` (closes the sig-count consistency gap the adversarial review flagged;
+NEG-LV1b covers it). **Regression-safety is a proof, not a hope:** any block the node accepted satisfies
+the node's `md_ok||bft_ok`, which is exactly this check — so it rejects **no** honest block. A 3-lens
+adversarial review (`wf_03db0c50`) returned SHIP on all lenses, 0 blocking/major.
+
+**Increment 1 (this round) landed the mechanism + proved it:** the gate is in `verify_block_sigs`
+(guarded by `expected_k>0`) and enforced by the offline `verify-block-sigs` CLI primitive via
+`--k-block-sigs N` / `--no-bft-enabled`. **Gate** = `test_light_verify_committee_size.sh` — FAST,
+fully-offline (hand-built headers, placeholder sigs; the mode-eligibility gate fires BEFORE the sig loop):
+NEG-LV1 (MD 1-of-3) → `genesis k_block_sigs=3`; NEG-LV2a (BFT + `--no-bft-enabled`) → `bft_enabled=false`;
+NEG-LV2b (BFT wrong size) → `escalated committee size`; NEG-LV1b (MD block + a sentinel slot under
+`--bft`) → `sentinel-zero signature in MD mode` (the sig semantics follow `b.consensus_mode`, not `--bft`);
+CTRL (MD 3-of-3) passes the gate and reaches the sig check (`does NOT verify`) — non-vacuity.
+**Falsify-on-mutant** — two independent mutants: (i) `if (false && expected_k>0)` neutralizes the
+mode-eligibility gate → NEG-LV1/LV2a/LV2b fall through, their diagnostics disappear, those three asserts
+flip, all else unchanged; (ii) `sig_bft = bft_mode` neutralizes the sig-count refinement → only NEG-LV1b
+flips. Clean directional splits on both platforms.
+
+**Increment 2 (tracked) — anchor-caller wiring:** the anchor callers still pass `expected_k=0` (legacy
+behaviour, zero regression risk this round), so the USER-FACING balance/inclusion/history reads gain the
+enforcement only once increment 2 threads `genesis.k_block_sigs` + `genesis.bft_enabled` into
+`committee_bound_state_root`, `verify_chain_walk`, `verify_state_bundle`, `verify_tx_inclusion`,
+`verify_archive`, `watch`, `export`, and `account_history` (~30 call sites across the light command
+surface — a wide but mechanical change), validated by the LIVE light cluster tests (the honest-block path
+is not covered by FAST). Split this way per the minimalism / zero-merge-cost directive: increment 1 lands
+the careful consensus-mirror with a falsify proof; increment 2 is mechanical threading + a live gate.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
 |---|---|---|---|
-| LV-1 | 1 | verify.cpp | `verify_block_sigs` threshold keyed to `creators.size()`, not genesis `k_block_sigs` — the fuller `creators.size()==expected_K` binding (defense-in-depth beyond §1's empty-set fix; §1 closed the only keys-free forgery). Threads genesis K through the chain-trust callers. |
 | EXP-1 | 1 | export.cpp | `export-headers --from > 0` anchors the first page to NOTHING (no genesis in a `from>0` range), letting a MITM inject a fabricated/wrong-range archive marked `verified_committee_sigs=true`. Fix mirrors `verify_chain_walk`: require `headers[0].index == from`, reject any `index==0` when `from>0`. |
 | LTX-HEIGHT-NOT-BOUND | 2 | verify_tx_inclusion.cpp | never binds the returned block's `index` to the requested `height` — a real committee-signed block at a DIFFERENT height forges an "included at height B" proof. Fix: `if (b.index != height) UNVERIFIABLE`. |
-| LV-2 | 2 | trustless_read.cpp | unconditional MD→BFT quorum fallback accepts reduced-quorum (`ceil(2K/3)`) blocks with no BFT-eligibility gate. Fix: gate the `bft=true` retry on `consensus_mode==BFT && genesis.bft_enabled`. |
 | WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
 | LRPC-1 | 2 | rpc_client.cpp | `RpcClient::read_line` grows its buffer unbounded → a MITM daemon OOM-crashes the reader. Fix: a light-local 16 MiB `kLightRpcMaxLineBytes` cap (the client-side sibling of the RpcIngress readline cap). |
 | AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: route idx==0 through `committee_bound_state_root` or derive the genesis `state_root` locally. |
