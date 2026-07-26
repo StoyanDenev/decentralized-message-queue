@@ -21,8 +21,19 @@
 // sigs independently.
 //
 // Output per tick (single line, machine-parseable):
-//   TICK <i>: height=<H> head_hash=<short> state_root=<short> \
+//   TICK <i>: height=<H> head_hash(as-served)=<short> \
+//             tip_state_root(UNVERIFIED)=<short> \
 //             committee_size=<K> sigs_valid=<yes|no>
+//
+// WATCH-1 soundness: the committee signature authenticates the block DIGEST
+// (light_compute_block_digest — index / prev_hash / tx_root / creators /
+// creator_tx_lists / F2 roots), which does NOT cover the block's state_root,
+// and the tip has NO committee-signed successor to anchor it. So the tip's own
+// state_root is reported UNVERIFIED (never as a verified value) and head_hash
+// is labeled as-served (the daemon's self-declared id, not recomputed);
+// sigs_valid reflects ONLY the digest quorum. A verified state_root for a
+// non-tip height is available via the `verify-state-root` command (which runs
+// the committee-signed-successor anchor).
 //
 // If sigs_valid=no at any tick: print a WARN line + continue polling
 // (don't exit — the operator wants visibility, not silence).
@@ -53,5 +64,17 @@ struct WatchOptions {
 // continues — the operator wants visibility into chain liveness, not
 // silent exits.
 int run_watch_head(const WatchOptions& opts);
+
+// Pure formatter for one watch-head observation line (exposed for the offline
+// `selftest-watch-label` self-test; the socket fetch stays in do_one_tick).
+// The tip's own state_root is NOT covered by the committee digest and the tip
+// has no committee-signed successor, so it is rendered under a
+// `tip_state_root(UNVERIFIED)` label — never as a verified value; sigs_ok
+// reflects ONLY the digest quorum. head_hash is rendered as-served (the
+// daemon's self-declared id). Returns the line WITHOUT a trailing newline.
+std::string format_watch_tick(uint64_t tick_index, uint64_t head_height,
+                              const std::string& head_hash,
+                              const std::string& tip_state_root,
+                              size_t committee_size, bool sigs_ok);
 
 } // namespace determ::light

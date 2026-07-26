@@ -1,10 +1,10 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **6 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
+**Status:** open (2026-07-26); **7 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
 LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring;
 inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label binding, LRPC-1
-read_line DoS cap, and LTX-HEIGHT-NOT-BOUND tx-inclusion index binding; 2 confirmed autonomous-safe in
-backlog, 0 owner-gated.** SIXTH code-surface register in
+read_line DoS cap, LTX-HEIGHT-NOT-BOUND tx-inclusion index binding, and WATCH-1 tip-state_root relabel;
+1 confirmed autonomous-safe in backlog (AH-1), 0 owner-gated.** SIXTH code-surface register in
 the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -240,12 +240,39 @@ a positive non-vacuity check robust against a parse-failure vacuous pass. **Fals
 b.index != height)`): ONLY the NEG assert flips (the mismatched block reaches the sig anchor, no index
 diagnostic); CTRL stays green — a clean directional split on both platforms.
 
+## 1g. CLOSED — watch-head tip state_root presented as verified (`selftest-watch-label`, WATCH-1)
+
+`watch-head` (light/watch.cpp) polls only the chain TIP and printed its `state_root` — read from the daemon's
+self-declared header field — next to `sigs_valid=yes`. But the committee signature authenticates the block
+DIGEST (`light_compute_block_digest`: index / prev_hash / tx_root / creators / creator_tx_lists / F2 roots),
+which **excludes** `state_root`, and the tip has **no committee-signed successor** to anchor it (a block's
+state_root is only committee-authenticated once a later block commits to it via `prev_hash == compute_hash`).
+So a hostile/MITM daemon can swap the tip's `state_root` field to a forged value — the digest is unchanged, so
+the K committee sigs still verify — and the operator trusts a root the committee never signed. head_hash is
+likewise the daemon's self-declared id (not recomputed). Same "displayed value not bound to committee-anchored
+content" class as §1b/§1d/§1f, on the live head-monitor surface.
+
+**Fix (client-side, no wire/consensus change):** the per-tick line renders the tip's own `state_root` under a
+`tip_state_root(UNVERIFIED)` label — never as a verified value — and head_hash `as-served`; `sigs_valid`
+continues to mean only "the digest carries a valid committee quorum" (which is true and useful — a daemon that
+loses quorum is still immediately visible). A committee-VERIFIED state_root for a non-tip height stays available
+via the `verify-state-root` command (which runs the committee-signed-successor anchor). Per the minimalism
+doctrine this closes the deception with the smallest change (relabel the unverifiable field); it does not add a
+speculative in-loop head-1 anchor. The line-formatting decision was factored into a pure `format_watch_tick(...)`
+(the socket fetch stays in `do_one_tick`) so the relabel is falsifiable OFFLINE with no daemon.
+
+**Gate** = `test_light_watch_head_label.sh` — FAST, fully-offline (the determ-light `selftest-watch-label`
+subcommand drives `format_watch_tick` with a forged tip state_root): the tip state_root is rendered under the
+`tip_state_root(UNVERIFIED)` label; the forged value appears ONLY under that label (never as verified); a valid
+tick still renders `sigs_valid=yes` + height + `head_hash(as-served)` (non-vacuity). **Falsify-on-mutant**
+(revert to a bare `state_root=` label): the two label asserts flip while the non-vacuity assert stays green — a
+clean directional split on both platforms.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
 |---|---|---|---|
-| WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
-| AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: route idx==0 through `committee_bound_state_root` or derive the genesis `state_root` locally. |
+| AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: for idx==0 derive the genesis `state_root` LOCALLY from `make_genesis_block(genesis).state_root` (empty/zero by construction → row shows "(none)") instead of echoing the served field. Informational-only (balance/nonce come from the Merkle-verified head_view), hence rank-3. FAST-offline: the genesis state_root is a pure fn of GenesisConfig. |
 
 ## 3. REFUTED
 

@@ -9396,6 +9396,55 @@ int cmd_selftest_tx_inclusion_height(int argc, char** argv) {
     return 1;
 }
 
+// selftest-watch-label — offline, NO daemon: drive the pure format_watch_tick
+// formatter to prove the WATCH-1 relabel. watch-head fetches only the tip and
+// printed its state_root next to sigs_valid=yes, but the committee digest
+// EXCLUDES state_root and the tip has no committee-signed successor — so a
+// hostile daemon can swap the tip's state_root field (digest unchanged → the K
+// sigs still verify) and the operator trusts a root the committee never signed.
+// The fix renders the tip state_root under a `tip_state_root(UNVERIFIED)` label.
+// CTRL proves the honest label is emitted + the digest-quorum verdict still
+// renders (non-vacuity); falsify (revert to a bare `state_root=` label) flips
+// the label asserts while the non-vacuity assert stays green.
+int cmd_selftest_watch_label(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // A forged tip state_root a hostile daemon could inject (the committee
+    // digest does NOT cover state_root, so a swapped value still passes
+    // sigs_valid=yes). head_hash is likewise the daemon's self-declared id.
+    const std::string forged_root(64, 'e');   // "eeee…" — a value never signed
+    const std::string served_hash(64, 'a');
+    const std::string forged_short = forged_root.substr(0, 16);
+    std::string line = format_watch_tick(/*tick=*/1, /*head_height=*/5,
+                                         served_hash, forged_root,
+                                         /*committee_size=*/3, /*sigs_ok=*/true);
+
+    // FIX: the tip's state_root is rendered UNVERIFIED (never as a verified
+    // value). This is the security-relevant assertion — the falsify target.
+    check(line.find("tip_state_root(UNVERIFIED)=") != std::string::npos,
+          "the tip state_root is rendered under the UNVERIFIED label (not a verified value)");
+    // The forged root only ever appears immediately after that UNVERIFIED
+    // label — i.e. it is never surfaced as a verified/anchored value.
+    check(line.find("tip_state_root(UNVERIFIED)=" + forged_short) != std::string::npos,
+          "the forged tip state_root appears ONLY under the UNVERIFIED label");
+    // Non-vacuity: a valid tick still renders the digest-quorum verdict + the
+    // height + the as-served head_hash label (unaffected by the label mutant).
+    check(line.find("sigs_valid=yes") != std::string::npos
+          && line.find("height=5") != std::string::npos
+          && line.find("head_hash(as-served)=") != std::string::npos,
+          "a valid tick still renders sigs_valid=yes + height + as-served head_hash (non-vacuity)");
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-watch-label\n"; return 0; }
+    std::cout << "  FAIL: selftest-watch-label\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -9475,6 +9524,7 @@ int main(int argc, char** argv) {
         if (cmd == "rpc-auth")              return cmd_rpc_auth(sub_argc, sub_argv);
         if (cmd == "selftest-readline-cap") return cmd_selftest_readline_cap(sub_argc, sub_argv);
         if (cmd == "selftest-tx-inclusion-height") return cmd_selftest_tx_inclusion_height(sub_argc, sub_argv);
+        if (cmd == "selftest-watch-label")  return cmd_selftest_watch_label(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

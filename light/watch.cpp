@@ -161,13 +161,12 @@ TickResult do_one_tick(RpcClient& rpc,
             sigs_ok = vbs.ok;
         }
 
-        // 4. Emit the structured line.
-        std::cout << "TICK " << tick_index
-                  << ": height=" << head_height
-                  << " head_hash=" << short_hash(head_hash)
-                  << " state_root=" << short_hash(state_root)
-                  << " committee_size=" << committee_size
-                  << " sigs_valid=" << (sigs_ok ? "yes" : "no")
+        // 4. Emit the structured line. WATCH-1: the tip's own state_root is
+        //    NOT covered by the committee digest and has no signed successor,
+        //    so format_watch_tick renders it UNVERIFIED (never as a verified
+        //    value); sigs_valid reflects only the digest quorum.
+        std::cout << format_watch_tick(tick_index, head_height, head_hash,
+                                       state_root, committee_size, sigs_ok)
                   << "\n";
 
         if (!sigs_ok) {
@@ -191,6 +190,24 @@ TickResult do_one_tick(RpcClient& rpc,
 }
 
 } // namespace
+
+// Pure formatter (declared in watch.hpp). WATCH-1: the committee signature
+// authenticates the block DIGEST (light_compute_block_digest), which does NOT
+// cover state_root, and the tip has no committee-signed successor — so the
+// tip's own state_root is rendered under a `tip_state_root(UNVERIFIED)` label,
+// never as a verified value; `sigs_ok` reflects only the digest quorum. The
+// head_hash is rendered as-served (the daemon's self-declared id).
+std::string format_watch_tick(uint64_t tick_index, uint64_t head_height,
+                              const std::string& head_hash,
+                              const std::string& tip_state_root,
+                              size_t committee_size, bool sigs_ok) {
+    return "TICK " + std::to_string(tick_index)
+         + ": height=" + std::to_string(head_height)
+         + " head_hash(as-served)=" + short_hash(head_hash)
+         + " tip_state_root(UNVERIFIED)=" + short_hash(tip_state_root)
+         + " committee_size=" + std::to_string(committee_size)
+         + " sigs_valid=" + (sigs_ok ? "yes" : "no");
+}
 
 int run_watch_head(const WatchOptions& opts) {
     // 1. Load genesis + build committee seed.
