@@ -5,7 +5,9 @@
 **Subject:** the DSSO (Sign-In With Determ, v2.25) crypto that touches SECRET scalars — the OPAQUE-3DH AKE
 core (`src/crypto/dsso/opaque3dh.c`) and the P-256 secret-scalar primitives it and the DSSO threshold-OPRF
 compose (`src/crypto/p256/p256.c`). This is the **G5 ship-gate** for D.5: a read-only constant-time review;
-it makes **no code change** (the G6 zeroization follow-ups are enumerated in §5 but deferred — owner-scoped).
+G5 itself made **no code change**. The G6 zeroization follow-ups it enumerated (§5) have since shipped —
+byte-neutral, commit `cab12b2` (owner "full pass", 2026-07-26) — so the DSSO CT/zeroization ship-gate is
+now closed on both halves.
 
 **Method.** A 4-lens adversarial audit (workflow `wf_01d27b02`, read-only): (1) the OPAQUE-3DH composition;
 (2) the P-256 scalar operations; (3) the P-256 field + point operations underneath the secret scalars; (4) a
@@ -26,8 +28,9 @@ validity/reject outcomes, fixed public exponents, the 1-bit auth result — may 
 
 **The DSSO secret-scalar paths are CONSTANT-TIME on secrets. Zero timing / branch / secret-index violations.**
 All four lenses returned CLEAN on the CT question; the only findings are **secret-lifetime (zeroization)
-gaps**, which are *not* timing leaks and form the **G6 worklist** (§5). The G5 constant-time ship-gate is
-therefore **MET**; G6 (a small, byte-neutral zeroization pass) is the remaining hardening.
+gaps**, which are *not* timing leaks and formed the **G6 worklist** (§5). The G5 constant-time ship-gate is
+therefore **MET**; G6 (the byte-neutral zeroization pass) has since **shipped in `cab12b2`**, so both halves
+of the DSSO CT/zeroization ship-gate are closed.
 
 The whole surface reduces to a handful of load-bearing CT facts, each verified:
 
@@ -127,8 +130,14 @@ observation for each. Direct-read spot-checks: `p256.c:264-276` (ladder), `p256.
 ## 5. G6 worklist — secret-lifetime (zeroization) gaps, NOT CT violations
 
 None of these affect timing; each is a secret buffer left on the stack, exploitable only via a *secondary*
-memory-disclosure. They are the byte-neutral G6 hardening pass (owner-scoped; **not applied in G5**). Listed
-most-actionable first.
+memory-disclosure. Listed most-actionable first.
+
+**STATUS: G6 APPLIED — all seven items shipped in commit `cab12b2` (owner "full pass", 2026-07-26).** Every
+fix is a `determ_secure_zero` insertion on a path *after* the outputs are written (or an error/unreachable
+path), so the change is byte-neutral: the dual-oracle KATs stay byte-identical on both platforms
+(MSVC FAST + WSL2/GCC `ci_local`; `test-p256-oprf-c99` / `test-p256-{balance,confidential-tx}-c99` /
+`test-p256-ctx-bundle` / `test-dsso-{opaque3dh,threshold-oprf,login-e2e}` all PASS). With G5 (this review) +
+G6 (`cab12b2`) both closed, the DSSO CT/zeroization ship-gate for the D.5 packaging tail is MET.
 
 | id | location | secret residue | sev | fix (byte-neutral) |
 |---|---|---|---|---|
