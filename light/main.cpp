@@ -78,6 +78,7 @@
 #include "verify_tx_inclusion.hpp"
 #include "verify_state_root.hpp"
 #include "verify_rand.hpp"
+#include "verify_selection.hpp"
 #include "verify_ct.hpp"
 #include "persist.hpp"
 
@@ -9329,6 +9330,104 @@ int cmd_selftest_readline_cap(int argc, char** argv) {
     return 1;
 }
 
+// selftest-verify-selection — offline, NO daemon: drive the pure
+// verify_selection_core with synthetic DECODED streams to prove the two
+// verifier-side defences (D5-RANDOM-SELECTION-SPEC §11 3b/3c). The COMPLETENESS
+// of the streams (3a) is the committee-authenticated full-block walk's job (a
+// live property, exercised end-to-end later); this gate covers the
+// composition-heart: first-open-wins + ordering + the d5_draw re-derivation vs
+// the published result.
+int cmd_selftest_verify_selection(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    std::vector<uint8_t> domain  = { 'd','5','.','c','o','u','r','t' };
+    std::vector<uint8_t> case_id = { 'C','A','S','E','-','1' };
+    uint8_t seed[32]; for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(i * 7 + 1);
+
+    std::vector<std::vector<uint8_t>> members;
+    for (int i = 0; i < 12; i++) { std::string s = "D5-MEMBER-" + std::to_string(i);
+        members.push_back(std::vector<uint8_t>(s.begin(), s.end())); }
+    D5RosterOp add; add.op = D5_ROSTER_ADD; add.ids = members;
+    std::vector<D5RosterOp> roster = { add };
+
+    // Compute the canonical d5_draw selection over `members` so the test's
+    // "correct result" matches what the core re-derives.
+    auto draw = [&](uint64_t H, uint64_t cutoff, uint32_t N, uint32_t M) {
+        std::set<std::vector<uint8_t>> elig(members.begin(), members.end());
+        std::vector<std::vector<uint8_t>> ids(elig.begin(), elig.end());
+        std::vector<const uint8_t*> idp; std::vector<size_t> idl;
+        for (auto& id : ids) { idp.push_back(id.data()); idl.push_back(id.size()); }
+        std::vector<size_t> outi(N + M ? N + M : 1); size_t oc = 0;
+        d5_draw(seed, domain.data(), domain.size(), case_id.data(), case_id.size(),
+                H, cutoff, D5_DRAW_ALGO_LOWEST_HASH, idp.data(), idl.data(), ids.size(),
+                N, M, outi.data(), &oc);
+        std::vector<std::vector<uint8_t>> sel;
+        for (size_t k = 0; k < oc; k++) sel.push_back(ids[outi[k]]);
+        return sel;
+    };
+
+    // CTRL: single case-open (h_o=90 < H=100 < h_s=110) + correct result.
+    {
+        D5CaseOpenAt co; co.height = 90; co.roster_cutoff_height = 80; co.draw_height = 100;
+        co.n_primary = 3; co.m_alternate = 2; co.draw_algo_version = D5_DRAW_ALGO_LOWEST_HASH;
+        auto sel = draw(100, 80, 3, 2);
+        D5ResultAt result; result.height = 110; result.draw_height = 100; result.selected_ids = sel;
+
+        auto r1 = verify_selection_core(domain, case_id, seed, roster, {co}, result, sel[0]);
+        check(r1.verdict == SelectionVerdict::SELECTED,
+              "CTRL: a selected member verifies SELECTED against the canonical draw");
+        std::vector<uint8_t> notsel;
+        for (auto& m : members) { bool in = false; for (auto& s : sel) if (s == m) { in = true; break; }
+            if (!in) { notsel = m; break; } }
+        auto r2 = verify_selection_core(domain, case_id, seed, roster, {co}, result, notsel);
+        check(r2.verdict == SelectionVerdict::NOT_SELECTED,
+              "CTRL: a non-selected eligible member verifies NOT_SELECTED");
+    }
+
+    // NEG 3b (first-open-wins): two case-opens for case_id (h1=90 N=3, h2=95 N=5);
+    // the result matches the LATER (favorable, N=5) draw. The core picks the
+    // FIRST (N=3) -> re-derives 3 -> != result(5) -> UNVERIFIABLE. The mutant
+    // (pick max-height) would match -> wrongly accept.
+    {
+        D5CaseOpenAt co1; co1.height = 90; co1.roster_cutoff_height = 80; co1.draw_height = 100;
+        co1.n_primary = 3; co1.m_alternate = 0; co1.draw_algo_version = D5_DRAW_ALGO_LOWEST_HASH;
+        // co2 differs by roster_cutoff_height -> different d5_draw ctx -> a
+        // DIFFERENT selection of the same size (a rank mismatch, not a count one).
+        D5CaseOpenAt co2 = co1; co2.height = 95; co2.roster_cutoff_height = 85;   // favorable, later
+        auto sel_favorable = draw(100, 85, 3, 0);                     // matches co2 (cutoff=85)
+        D5ResultAt result; result.height = 110; result.draw_height = 100; result.selected_ids = sel_favorable;
+        auto r = verify_selection_core(domain, case_id, seed, roster, {co1, co2}, result, sel_favorable[0]);
+        bool hit = (r.verdict == SelectionVerdict::UNVERIFIABLE)
+                 && r.multiple_case_opens
+                 && r.detail.find("re-derivation mismatch") != std::string::npos;
+        check(hit, "NEG (first-open-wins): a favorable LATER case-open's result is refused — the canonical FIRST re-derivation mismatches");
+    }
+
+    // NEG 3c (ordering): a post-hoc case-open (h_o=100 == draw_height, NOT
+    // strictly before) whose result matches. The core rejects at the ordering
+    // gate. The mutant relaxing h_o < H to h_o <= H would accept.
+    {
+        D5CaseOpenAt co; co.height = 100; co.roster_cutoff_height = 80; co.draw_height = 100;  // h_o == H
+        co.n_primary = 3; co.m_alternate = 0; co.draw_algo_version = D5_DRAW_ALGO_LOWEST_HASH;
+        auto sel = draw(100, 80, 3, 0);
+        D5ResultAt result; result.height = 110; result.draw_height = 100; result.selected_ids = sel;
+        auto r = verify_selection_core(domain, case_id, seed, roster, {co}, result, sel[0]);
+        bool hit = (r.verdict == SelectionVerdict::UNVERIFIABLE)
+                 && r.detail.find("not before draw_height") != std::string::npos;
+        check(hit, "NEG (ordering): a case-open at h_o == draw_height (post-hoc) is refused at the ordering gate");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-verify-selection\n"; return 0; }
+    std::cout << "  FAIL: selftest-verify-selection\n";
+    return 1;
+}
+
 // verify-rand — LIVE: authenticate cumulative_rand[H] (the MPDH beacon the D.5
 // government random-selection DApp draws from) via the S-042 successor binding.
 // Fetches block H + H+1 from the daemon, anchors genesis, and never reports a
@@ -9696,6 +9795,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
         if (cmd == "verify-rand")           return cmd_verify_rand(sub_argc, sub_argv);
         if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
+        if (cmd == "selftest-verify-selection") return cmd_selftest_verify_selection(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

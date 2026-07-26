@@ -279,7 +279,16 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
 3. Payload codecs (`roster` / `case-open` / `result`), D2 canonical binary, KAT-pinned round-trip — **SHIPPED** (`src/dapp/d5codec.c` + `include/determ/dapp/d5codec.h`; big-endian, length-prefixed, strict — decode rejects truncated / over-cap / trailing bytes; zero-copy decode). Dual-oracle `tools/verify_d5_codec.py` / `tools/vectors/d5_codec.json` (4 vectors), `determ test-d5-codec` + `tools/test_d5_codec.sh` (decode→fields + re-encode→byte-equal + fail-closed edges). Both platforms + falsify-on-mutant (a case-open field-order swap flips the encode-byte-equal KAT RED).
 4. `determ-light verify-rand <H>` + `test-light-verify-rand` (closes the named beacon-read gap) — **SHIPPED** (`light/verify_rand.cpp` + `.hpp`; pure core `verify_rand_from_blocks` + live `verify_rand_at` + CLI `verify-rand`). Composes `verify_block_sigs` (with the LV-1/LV-2 committee-size floor) + the `Block::compute_hash` recompute; the S-042 successor binding (`block[H+1].prev_hash == recompute block_hash[H]`) authenticates `cumulative_rand[H]`, never a false YES. Offline `selftest-verify-rand` (empty-committee fixture, binding gate before the sig anchor) + `tools/test_light_verify_rand.sh`; both platforms + falsify-on-mutant (dropping the S-042 binding check flips only the swapped-beacon NEG RED). No new crypto.
 5. `determ-light verify-selection` + `test-light-verify-selection` (all four mutants) — the
-   security spine; green before the orchestrator ships.
+   security spine; green before the orchestrator ships. **inc.5a SHIPPED** — the pure
+   `verify_selection_core` (`light/verify_selection.cpp` + `.hpp`): first-open-wins (canonical
+   case-open = smallest height; >1 = EVIDENCE), `h_o < draw_height < h_s` ordering, roster fold,
+   and the `d5_draw` re-derivation vs the published result (never a false SELECTED). Offline
+   `selftest-verify-selection` + `tools/test_light_verify_selection.sh`, both platforms +
+   falsify-on-mutant for **3b** (max-height pick flips only the first-open-wins NEG) and **3c**
+   (`h_o ≤ H` flips only the ordering NEG). **inc.5b remaining:** the live committee-authenticated
+   full-block-walk that MATERIALIZES the roster/case-open streams (roster-completeness 3a — a live
+   source property) + the private-roster `roster_root` binding (3d, only when the opt-in private
+   mode ships).
 6. `dapps/d5-random-selection` orchestrator + reference RP end-to-end on a 3-of-5 fixture (the
    reference RP integration that later defines `sdk/rp`).
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs
