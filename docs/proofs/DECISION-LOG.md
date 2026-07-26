@@ -1582,3 +1582,21 @@ this entry (ten) until the next convergence sweep. License-map files updated: `d
 `dapps/README.md`, `LICENSING.md`, `LICENSE`, `COMMERCIAL-LICENSE.md`.
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-25; recorded by Claude Fable at his direction).
+
+## 2026-07-26 — Active work directive: DSSO packaging tail folded into D.5 (Option C); D.5 is the reference RP
+
+**Problem.** The DSSO threshold-OPAQUE protocol is SHIPPED and gated to `main` (G1+G2 `dec7498`, G3 `ad6bee9`, G4 login `40c078d`, G4 assertion `028e19b`, OPAQUE-3DH AKE + end-to-end `cc5373d`/`3848513`/`c1e8735`, `test-dsso-login-e2e` 18 assertions, 07-21/07-22). What remains is the **packaging tail** (spec §9 / DECISION-LOG line 1484): G5 constant-time review, G6 zeroization, the RP SDK, and a reference RP DApp — all owner-gated, so the thread pool has not self-started them and has defaulted to assurance registers (validator, rpc-ingress, light-client LVS). The tail is not blocked by any technical dependency; it is blocked only by the absence of an explicit owner directive.
+
+**Decision (owner, 2026-07-26) — Option C. This is the active front; it supersedes assurance-register work as the pool's priority until the tail is closed.**
+
+1. **Security floor first — G5 + G6.** Constant-time review of every secret-scalar path (`k`, `k_i`, coefficients, blind `r`, OPRF output `y`, derived keys) and zeroization of the same. This is the one part of shipped crypto that is unsafe to leave undone. **G5+G6 gate the point at which D.5 *ships*, not the point at which D.5 work *starts*** — build proceeds in parallel; neither the reference DApp nor the SDK may be published/tagged for production before G5+G6 are green.
+2. **D.5 is the reference RP DApp.** D.5 (government random-selection, the already-designated first DApp) is itself a relying party. Build it as *the* worked RP integration rather than a throwaway demo — it exercises the full register → t-of-n login → OPAQUE-3DH AKE → dual-hash assertion → RP-accepts flow against real chain primitives.
+3. **The RP SDK is extracted from the D.5 build, not designed in the abstract.** Let D.5's real integration needs define the SDK surface (client login, assertion verification with the §5 Option-A freshness discipline, key handling); factor the reusable client library out of the working consumer. No speculative SDK API ahead of a real caller.
+
+**Ordering.** G5/G6 review can run concurrently with D.5 scaffolding; D.5 drives SDK extraction; G5+G6 are a merge/ship gate for the D.5 + SDK release. Target: a demonstrable end-to-end DSSO login into a real government DApp, with the identity crypto certified constant-time and zeroized.
+
+**Consistency.** No new primitive (spec §2 — all shipped). BUSL-1.1 applies to D.5 as a revenue DApp (licensing v3.1); the RP SDK is Apache-2.0 integration surface (`sdk/**`). FROST remains out (not required). No-migrations untouched — DSSO is DApp-layer + already-shipped substrate primitives, no consensus change.
+
+**Still open (NOT folded in here — separate owner decision):** the two rank-1 consensus-integrity findings (EQV-INGRESS forged-slash `validator.cpp:378`; empty-committee beacon `node.cpp:1973`, RpcIngressGateAudit §2). They are pre-genesis, in the no-migrations consensus path, and independent of the DSSO tail. They still await an owner directive on the fix; this entry does not authorize them.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-26; recorded by Claude Fable at his direction).
