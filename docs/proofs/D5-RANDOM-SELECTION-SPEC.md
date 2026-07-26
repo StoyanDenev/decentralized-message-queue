@@ -276,7 +276,7 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
 1. **This spec** + owner ratification of §13 **before any code** (params pre-genesis-free now,
    frozen once live).
 2. `d5_draw` pure module + `test-d5-draw` — **SHIPPED** (`src/dapp/d5draw.c` + `include/determ/dapp/d5draw.h`; dual-oracle `tools/verify_d5_draw.py` / `tools/vectors/d5_draw.json`, 5 vectors; wrapper `tools/test_d5_draw.sh`). Gated both platforms (MSVC + WSL2/GCC; KAT cross-toolchain byte-identical) + falsify-on-mutant: the ctx-drop mutant flips all 5 KAT byte-matches + both ctx-binding asserts RED while order-independence stays green (clean directional split).
-3. Payload codecs (`roster` / `case-open` / `result`), D2 canonical binary, KAT-pinned round-trip.
+3. Payload codecs (`roster` / `case-open` / `result`), D2 canonical binary, KAT-pinned round-trip — **SHIPPED** (`src/dapp/d5codec.c` + `include/determ/dapp/d5codec.h`; big-endian, length-prefixed, strict — decode rejects truncated / over-cap / trailing bytes; zero-copy decode). Dual-oracle `tools/verify_d5_codec.py` / `tools/vectors/d5_codec.json` (4 vectors), `determ test-d5-codec` + `tools/test_d5_codec.sh` (decode→fields + re-encode→byte-equal + fail-closed edges). Both platforms + falsify-on-mutant (a case-open field-order swap flips the encode-byte-equal KAT RED).
 4. `determ-light verify-rand <H>` + `test-light-verify-rand` (closes the named beacon-read gap).
 5. `determ-light verify-selection` + `test-light-verify-selection` (all four mutants) — the
    security spine; green before the orchestrator ships.

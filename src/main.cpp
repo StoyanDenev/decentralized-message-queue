@@ -45,6 +45,7 @@
 #include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/dsso/opaque3dh.h>     // §3.26: DSSO G4 OPAQUE-3DH AKE core (RFC 9807)
 #include <determ/dapp/d5draw.h>               // D.5 lowest-hash sortition (test-d5-draw)
+#include <determ/dapp/d5codec.h>              // D.5 canonical-binary payload codecs (test-d5-codec)
 #include <determ/crypto/pedersen/pedersen.h>  // §3.19: Pedersen commitment over P-256
 #include <determ/crypto/pedersen/ipa.h>       // §3.19 inc.4: Bulletproofs inner-product argument
 #include <determ/crypto/pedersen/rangeproof.h> // §3.19 inc.5: Bulletproofs range proof
@@ -643,6 +644,11 @@ In-process tests (deterministic, no network):
                                               random-selection): 5 frozen vectors
                                               byte-equal vs the python oracle +
                                               order-independence + ctx binding +
+                                              fail-closed edges
+  determ test-d5-codec [file]                 D.5 canonical-binary payload codecs
+                                              (roster/case-open/result): 4 frozen
+                                              vectors decode+re-encode byte-equal
+                                              vs the python oracle + strict
                                               fail-closed edges
   determ test-enote-c99 [file]                NC-8 encrypted-note delivery
                                               (shielded Option A): ECIES over
@@ -16846,6 +16852,117 @@ int main(int argc, char** argv) {
         }
 
         if (fail==0) std::cout << "  PASS: d5-draw (lowest-hash sortition) unit test\n";
+        return fail==0 ? 0 : 1;
+    }
+    if (cmd == "test-d5-codec") {
+        // D.5 canonical-binary payload codecs (D5-RANDOM-SELECTION-SPEC §3/§7) —
+        // src/dapp/d5codec.c. Dual-oracle: every vector in tools/vectors/d5_codec.json
+        // (frozen by tools/verify_d5_codec.py) is DECODED to its fields AND
+        // re-ENCODED to the identical bytes (the KAT freeze; the field-order/
+        // endianness mutant flips it), plus strict fail-closed edges (truncated /
+        // trailing / wrong fmt / wrong type).
+        std::cout << "=== D.5 payload codecs (test-d5-codec) ===\n";
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m){
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; } };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        std::string path = (argc>2)? argv[2] : "tools/vectors/d5_codec.json";
+        std::ifstream f(path);
+        if (!f) check(false, std::string("corpus present: ")+path);
+        else {
+            json doc; f >> doc; int n=0;
+            for (auto& v : doc["vectors"]) {
+                std::string name = v.value("name","?");
+                std::string type = v["type"].get<std::string>();
+                auto enc = unhex(v["encoded_hex"].get<std::string>());
+                std::vector<uint8_t> buf(enc.size()+16); size_t olen=0;
+
+                if (type=="roster") {
+                    uint8_t op = (uint8_t)v["op"].get<int>();
+                    std::vector<std::vector<uint8_t>> ids;
+                    for (auto& s: v["ids_hex"]) ids.push_back(unhex(s.get<std::string>()));
+                    std::vector<const uint8_t*> idp; std::vector<uint16_t> idl;
+                    for (auto& id: ids){ idp.push_back(id.data()); idl.push_back((uint16_t)id.size()); }
+                    int rc = d5_roster_encode(op, idp.data(), idl.data(), (uint16_t)ids.size(), buf.data(), buf.size(), &olen);
+                    check(rc==0 && hx(buf.data(),olen)==v["encoded_hex"].get<std::string>(),
+                          std::string("roster encode byte-equal: ")+name);
+                    uint8_t op2=0; std::vector<const uint8_t*> ids2(4096); std::vector<uint16_t> idl2(4096); uint16_t cnt2=0;
+                    int rc2 = d5_roster_decode(enc.data(), enc.size(), &op2, ids2.data(), idl2.data(), 4096, &cnt2);
+                    bool okf = (rc2==0 && op2==op && cnt2==ids.size());
+                    for (uint16_t i=0; okf && i<cnt2; i++) okf = (idl2[i]==ids[i].size() && memcmp(ids2[i], ids[i].data(), idl2[i])==0);
+                    check(okf, std::string("roster decode fields: ")+name);
+                } else if (type=="case_open") {
+                    std::string cid = v["case_id"].get<std::string>();
+                    d5_case_open co; co.case_id=(const uint8_t*)cid.data(); co.case_id_len=(uint16_t)cid.size();
+                    co.roster_cutoff_height=std::stoull(v["roster_cutoff_height"].get<std::string>());
+                    co.draw_height=std::stoull(v["draw_height"].get<std::string>());
+                    co.n_primary=(uint32_t)v["n_primary"].get<unsigned>();
+                    co.m_alternate=(uint32_t)v["m_alternate"].get<unsigned>();
+                    co.draw_algo_version=(uint8_t)v["draw_algo_version"].get<int>();
+                    int rc = d5_case_open_encode(&co, buf.data(), buf.size(), &olen);
+                    check(rc==0 && hx(buf.data(),olen)==v["encoded_hex"].get<std::string>(),
+                          std::string("case-open encode byte-equal: ")+name);
+                    d5_case_open co2;
+                    int rc2 = d5_case_open_decode(enc.data(), enc.size(), &co2);
+                    check(rc2==0 && co2.case_id_len==cid.size() && memcmp(co2.case_id,cid.data(),cid.size())==0
+                          && co2.roster_cutoff_height==co.roster_cutoff_height && co2.draw_height==co.draw_height
+                          && co2.n_primary==co.n_primary && co2.m_alternate==co.m_alternate
+                          && co2.draw_algo_version==co.draw_algo_version,
+                          std::string("case-open decode fields: ")+name);
+                } else if (type=="result") {
+                    std::string cid = v["case_id"].get<std::string>();
+                    auto seed = unhex(v["seed_hex"].get<std::string>());
+                    d5_result_hdr r; r.case_id=(const uint8_t*)cid.data(); r.case_id_len=(uint16_t)cid.size();
+                    r.draw_height=std::stoull(v["draw_height"].get<std::string>());
+                    r.roster_cutoff_height=std::stoull(v["roster_cutoff_height"].get<std::string>());
+                    memcpy(r.seed, seed.data(), 32);
+                    r.draw_algo_version=(uint8_t)v["draw_algo_version"].get<int>();
+                    r.n_primary=(uint32_t)v["n_primary"].get<unsigned>();
+                    r.m_alternate=(uint32_t)v["m_alternate"].get<unsigned>();
+                    std::vector<std::vector<uint8_t>> sel;
+                    for (auto& s: v["sel_ids_hex"]) sel.push_back(unhex(s.get<std::string>()));
+                    std::vector<const uint8_t*> sp; std::vector<uint16_t> sl;
+                    for (auto& s: sel){ sp.push_back(s.data()); sl.push_back((uint16_t)s.size()); }
+                    int rc = d5_result_encode(&r, sp.data(), sl.data(), (uint32_t)sel.size(), buf.data(), buf.size(), &olen);
+                    check(rc==0 && hx(buf.data(),olen)==v["encoded_hex"].get<std::string>(),
+                          std::string("result encode byte-equal: ")+name);
+                    d5_result_hdr r2; std::vector<const uint8_t*> sid2(4096); std::vector<uint16_t> sl2(4096); uint32_t sc2=0;
+                    int rc2 = d5_result_decode(enc.data(), enc.size(), &r2, sid2.data(), sl2.data(), 4096, &sc2);
+                    bool okf = (rc2==0 && r2.case_id_len==cid.size() && memcmp(r2.case_id,cid.data(),cid.size())==0
+                          && r2.draw_height==r.draw_height && r2.roster_cutoff_height==r.roster_cutoff_height
+                          && memcmp(r2.seed,r.seed,32)==0 && r2.draw_algo_version==r.draw_algo_version
+                          && r2.n_primary==r.n_primary && r2.m_alternate==r.m_alternate && sc2==sel.size());
+                    for (uint32_t i=0; okf && i<sc2; i++) okf = (sl2[i]==sel[i].size() && memcmp(sid2[i],sel[i].data(),sl2[i])==0);
+                    check(okf, std::string("result decode fields: ")+name);
+                }
+                n++;
+            }
+            check(n==4, "corpus complete (4 vectors)");
+        }
+
+        // Strict fail-closed edges on a valid case-open buffer.
+        {
+            uint8_t cid[]="C"; d5_case_open co; co.case_id=cid; co.case_id_len=1;
+            co.roster_cutoff_height=1; co.draw_height=2; co.n_primary=1; co.m_alternate=0; co.draw_algo_version=1;
+            uint8_t b[64]; size_t bl=0;
+            int rc = d5_case_open_encode(&co, b, sizeof b, &bl);
+            d5_case_open tmp;
+            check(rc==0, "fail-closed setup encode ok");
+            check(d5_case_open_decode(b, bl-1, &tmp)==-1, "truncated rejected");
+            std::vector<uint8_t> trail(b, b+bl); trail.push_back(0);
+            check(d5_case_open_decode(trail.data(), trail.size(), &tmp)==-1, "trailing byte rejected (strict)");
+            std::vector<uint8_t> badfmt(b, b+bl); badfmt[0]=9;
+            check(d5_case_open_decode(badfmt.data(), badfmt.size(), &tmp)==-1, "wrong fmt version rejected");
+            std::vector<uint8_t> badtype(b, b+bl); badtype[1]=D5_MSG_RESULT;
+            check(d5_case_open_decode(badtype.data(), badtype.size(), &tmp)==-1, "wrong msg_type rejected");
+        }
+
+        if (fail==0) std::cout << "  PASS: d5-codec (canonical-binary payloads) unit test\n";
         return fail==0 ? 0 : 1;
     }
     if (cmd == "test-dsso-opaque3dh") {

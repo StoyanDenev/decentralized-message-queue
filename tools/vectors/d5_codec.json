@@ -1,0 +1,55 @@
+{
+  "format": "d5-canonical-binary-v1",
+  "vectors": [
+    {
+      "name": "roster-add-3",
+      "type": "roster",
+      "op": 0,
+      "ids_hex": [
+        "0f7bc839442e64129b290e39651139df50b255bf965e0cb5abdf74ce539a2eb8",
+        "2d9186f5656e92a3b7a6ac0f18a9efd31ef0b00334530b5a00bcce0476751455",
+        "42e317d5402fb65e5bd86095dcb0a6b7be9d268dc3e0b7f610e6c96bf1ee3615"
+      ],
+      "encoded_hex": "010100000300200f7bc839442e64129b290e39651139df50b255bf965e0cb5abdf74ce539a2eb800202d9186f5656e92a3b7a6ac0f18a9efd31ef0b00334530b5a00bcce0476751455002042e317d5402fb65e5bd86095dcb0a6b7be9d268dc3e0b7f610e6c96bf1ee3615"
+    },
+    {
+      "name": "roster-remove-strid",
+      "type": "roster",
+      "op": 1,
+      "ids_hex": [
+        "6a756467652d3037"
+      ],
+      "encoded_hex": "010101000100086a756467652d3037"
+    },
+    {
+      "name": "case-open-basic",
+      "type": "case_open",
+      "case_id": "CASE-2026-000123",
+      "roster_cutoff_height": "99000",
+      "draw_height": "100000",
+      "n_primary": 3,
+      "m_alternate": 2,
+      "draw_algo_version": 1,
+      "encoded_hex": "01020010434153452d323032362d30303031323300000000000182b800000000000186a0000000030000000201"
+    },
+    {
+      "name": "result-3primary-2alt",
+      "type": "result",
+      "case_id": "CASE-2026-000123",
+      "draw_height": "100000",
+      "roster_cutoff_height": "99000",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "draw_algo_version": 1,
+      "n_primary": 3,
+      "m_alternate": 2,
+      "sel_ids_hex": [
+        "4859799566396b7a8a127f3481df97c1ba0ea1f5e1bb907af9602e4984bb6eba",
+        "42e317d5402fb65e5bd86095dcb0a6b7be9d268dc3e0b7f610e6c96bf1ee3615",
+        "7c0742a5079afe76f92a13f814a6318f628267ce4edf3a68128caf22800d6622",
+        "46c2eeb6a4d31bc9a9a8ccd0f1adf989aeeb3621d4e91915cb208c51b3ea0a96",
+        "d6283ba4aae7d23e866a742decb4f35b75581d734ccdc11e73a99cdfa5fba74f"
+      ],
+      "encoded_hex": "01030010434153452d323032362d30303031323300000000000186a000000000000182b8000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f01000000030000000200204859799566396b7a8a127f3481df97c1ba0ea1f5e1bb907af9602e4984bb6eba002042e317d5402fb65e5bd86095dcb0a6b7be9d268dc3e0b7f610e6c96bf1ee361500207c0742a5079afe76f92a13f814a6318f628267ce4edf3a68128caf22800d6622002046c2eeb6a4d31bc9a9a8ccd0f1adf989aeeb3621d4e91915cb208c51b3ea0a960020d6283ba4aae7d23e866a742decb4f35b75581d734ccdc11e73a99cdfa5fba74f"
+    }
+  ]
+}

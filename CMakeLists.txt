@@ -215,6 +215,9 @@ add_library(determ-crypto-c99 STATIC
   # D.5 government random-selection — lowest-hash sortition (the pure, Apache-2.0
   # citizen-verifier draw core; D5-RANDOM-SELECTION-SPEC §4) — `determ test-d5-draw`.
   "${CMAKE_SOURCE_DIR}/src/dapp/d5draw.c"
+  # D.5 canonical-binary payload codecs (roster/case-open/result; D2 no-JSON) —
+  # `determ test-d5-codec`.
+  "${CMAKE_SOURCE_DIR}/src/dapp/d5codec.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)
