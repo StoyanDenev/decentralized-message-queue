@@ -24,6 +24,8 @@
 #pragma once
 #include <nlohmann/json.hpp>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 
 #ifdef _WIN32
@@ -49,6 +51,25 @@ constexpr sock_t kInvalidSock = INVALID_SOCKET;
 using sock_t = int;
 constexpr sock_t kInvalidSock = -1;
 #endif
+
+// Max bytes RpcClient::read_line will accumulate for a SINGLE response line
+// before treating the peer as hostile. The light client talks to an untrusted
+// / MITM daemon (LightVerifyGateAudit surface); without a bound, a malicious
+// daemon can stream an endless newline-less body to exhaust the reader's
+// memory (LRPC-1). Mirrors the node's ingress `net::kMaxRpcLineBytes`; every
+// legitimate daemon response (state proof / header / committee list / paged
+// history) is far under 16 MiB.
+constexpr size_t kLightRpcMaxLineBytes = 16u * 1024u * 1024u;   // 16 MiB
+
+// Testable core of RpcClient::read_line, with the byte source INJECTED so the
+// cap is unit-testable with NO socket. Pulls bytes via `fill` (which appends
+// >=0 bytes to `inbuf` and returns false on EOF/transport error) until a '\n'
+// is seen — returns the line (newline stripped; any remainder left in `inbuf`)
+// — or throws std::runtime_error once `inbuf` exceeds kLightRpcMaxLineBytes
+// without a newline. Returns std::nullopt if `fill` reports EOF/error first.
+// The socket read_line is a thin wrapper whose `fill` does one recv().
+std::optional<std::string> read_line_capped(
+    std::string& inbuf, const std::function<bool(std::string&)>& fill);
 
 class RpcClient {
 public:

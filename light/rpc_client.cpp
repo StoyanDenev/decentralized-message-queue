@@ -69,8 +69,32 @@ bool send_line(sock_t s, const std::string& payload) {
 
 // Read bytes until we see '\n'; return the line content (without
 // the newline). Buffers any leftover bytes after the newline in
-// `inbuf` for subsequent reads.
+// `inbuf` for subsequent reads. The newline-scan + hostile-peer cap live in
+// the shared read_line_capped core; here `fill` is one recv() into a 4 KiB
+// stack buffer — behaviour is byte-identical to the pre-cap loop for every
+// response under the 16 MiB cap.
 std::optional<std::string> read_line(sock_t s, std::string& inbuf) {
+    return read_line_capped(inbuf, [s](std::string& buf) -> bool {
+        char tmp[4096];
+#ifdef _WIN32
+        int n = ::recv(s, tmp, sizeof(tmp), 0);
+#else
+        ssize_t n = ::recv(s, tmp, sizeof(tmp), 0);
+#endif
+        if (n <= 0) return false;
+        buf.append(tmp, static_cast<size_t>(n));
+        return true;
+    });
+}
+
+} // namespace
+
+// Testable core (declared in rpc_client.hpp): the newline scan + the LRPC-1
+// hostile-peer cap, with the byte source injected. Kept out of the anonymous
+// namespace so the determ-light `selftest-readline-cap` subcommand can drive
+// it with a synthetic `fill` and NO socket.
+std::optional<std::string> read_line_capped(
+    std::string& inbuf, const std::function<bool(std::string&)>& fill) {
     while (true) {
         auto nl = inbuf.find('\n');
         if (nl != std::string::npos) {
@@ -78,18 +102,19 @@ std::optional<std::string> read_line(sock_t s, std::string& inbuf) {
             inbuf.erase(0, nl + 1);
             return line;
         }
-        char tmp[4096];
-#ifdef _WIN32
-        int n = ::recv(s, tmp, sizeof(tmp), 0);
-#else
-        ssize_t n = ::recv(s, tmp, sizeof(tmp), 0);
-#endif
-        if (n <= 0) return std::nullopt;
-        inbuf.append(tmp, static_cast<size_t>(n));
+        // No newline yet. If the buffer has grown past the cap the peer is
+        // either broken or hostile (a MITM flooding the reader); abort rather
+        // than keep growing toward OOM. Checked BEFORE the next fill so the
+        // buffer overshoots by at most one fill chunk.
+        if (inbuf.size() > kLightRpcMaxLineBytes) {
+            throw std::runtime_error(
+                "RPC response line exceeds " +
+                std::to_string(kLightRpcMaxLineBytes) +
+                "-byte cap without a newline (hostile/MITM daemon?); aborting");
+        }
+        if (!fill(inbuf)) return std::nullopt;
     }
 }
-
-} // namespace
 
 RpcClient::RpcClient(uint16_t port)
     : host_("127.0.0.1"), port_(port), sock_(kInvalidSock) {

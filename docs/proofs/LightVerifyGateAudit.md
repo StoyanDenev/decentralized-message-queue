@@ -1,9 +1,9 @@
 # Light-Client Verifier Gate-Gap Audit
 
-**Status:** open (2026-07-26); **4 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
+**Status:** open (2026-07-26); **5 autonomous gates CLOSED — LVS-1 empty-committee, LSB anchor-index,
 LV-1/LV-2 committee-size mode-eligibility (inc.1 mechanism + falsify; inc.2 state-root anchor wiring;
-inc.2b chain-walk wiring — both live-regressed), and EXP-1 archive range-label binding; 4 confirmed
-autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
+inc.2b chain-walk wiring — both live-regressed), EXP-1 archive range-label binding, and LRPC-1
+read_line DoS cap; 3 confirmed autonomous-safe in backlog, 0 owner-gated.** SIXTH code-surface register in
 the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
 [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19),
@@ -183,13 +183,37 @@ range gate and falls through to a later gate (genesis-load on the nonexistent `-
 genesis-load gate (no `declared` diagnostic), flipping both NEG asserts while CTRL is unchanged — a clean
 directional split on both platforms.
 
+## 1e. CLOSED — read_line unbounded → MITM OOM (`selftest-readline-cap`, LRPC-1)
+
+`RpcClient::read_line` (light/rpc_client.cpp) accumulated `recv()` bytes into `inbuf` until it saw a `'\n'`
+— with **no upper bound**. The light client talks to an untrusted / MITM daemon (this surface's whole
+premise); a malicious daemon that streams an endless newline-less body grows `inbuf` without limit until the
+client **OOM-crashes** — a trivial remote DoS. This is the client-side sibling of the node-side ingress
+readline cap already shipped in `RpcIngressGateAudit.md` (`net::kMaxRpcLineBytes`).
+
+**Fix (client-side, no wire/consensus change):** a light-local `kLightRpcMaxLineBytes = 16 MiB` cap. The
+newline-scan + cap were factored into a pure `read_line_capped(inbuf, fill)` core with the byte source
+**injected** (`fill` appends bytes and returns false on EOF/error), so the cap is **FAST-offline
+falsifiable with no socket**; the socket `read_line` is now a thin wrapper whose `fill` does one `recv()`.
+When `inbuf` exceeds the cap without a newline the core throws a `runtime_error` (which the command handler
+already surfaces as a clean error) instead of growing toward OOM. Behaviour is byte-identical for every
+response under 16 MiB, and every legitimate daemon response (state proof / header / committee list / paged
+history) is far under it, so nothing regresses.
+
+**Gate** = `test_light_rpc_readline_cap.sh` — FAST, fully-offline (the determ-light `selftest-readline-cap`
+subcommand drives `read_line_capped` with a synthetic `fill`, no daemon): CTRL-1 a normal newline-terminated
+line is returned + remainder buffered; CTRL-2 an under-cap newline-less stream that EOFs returns `nullopt`
+(the cap does **not** false-trip on a legitimate short response); NEG an endless newline-less stream is
+aborted at the 16 MiB cap with bounded memory. **Falsify-on-mutant** (`if (false && inbuf.size() > cap)`):
+**only** the NEG assert flips (the stream is no longer aborted → it EOFs to `nullopt` with no cap
+diagnostic), both CTRLs stay green — a clean directional split on both platforms.
+
 ## 2. Backlog — confirmed autonomous-safe (ordered; each is a future gate)
 
 | id | rank | file | gap |
 |---|---|---|---|
 | LTX-HEIGHT-NOT-BOUND | 2 | verify_tx_inclusion.cpp | never binds the returned block's `index` to the requested `height` — a real committee-signed block at a DIFFERENT height forges an "included at height B" proof. Fix: `if (b.index != height) UNVERIFIABLE`. |
 | WATCH-1 | 2 | watch.cpp | `watch-head` prints `state_root`/`head_hash` with `sigs_valid=yes` although the committee sig covers neither (the head has no signed successor). Fix: report a committee-bound `state_root` for `head-1`, label the head's own as unverified. |
-| LRPC-1 | 2 | rpc_client.cpp | `RpcClient::read_line` grows its buffer unbounded → a MITM daemon OOM-crashes the reader. Fix: a light-local 16 MiB `kLightRpcMaxLineBytes` cap (the client-side sibling of the RpcIngress readline cap). |
 | AH-1 | 3 | account_history.cpp | the genesis row (h=0) reports the served `state_root` FIELD, which `anchor_genesis` never binds (block 0 hash is only string-compared, never recomputed). Fix: route idx==0 through `committee_bound_state_root` or derive the genesis `state_root` locally. |
 
 ## 3. REFUTED

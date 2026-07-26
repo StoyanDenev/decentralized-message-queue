@@ -9246,6 +9246,88 @@ int cmd_audit(int argc, char** argv) {
     return overall ? 0 : 1;
 }
 
+// selftest-readline-cap — offline, NO daemon: drive read_line_capped (the
+// testable core of RpcClient::read_line) with a synthetic byte source to prove
+// the LRPC-1 hostile-peer cap. A MITM/malicious daemon can stream an endless
+// newline-less body; without the cap, read_line grows its buffer toward OOM.
+// CTRL cases prove the cap does NOT disturb normal reads; the NEG case proves
+// an endless stream is aborted at the 16 MiB cap with bounded memory.
+int cmd_selftest_readline_cap(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // CTRL-1: a normal newline-terminated line arrives before the cap ->
+    // returned intact, remainder buffered (identical to the pre-cap behaviour).
+    {
+        std::string inbuf;
+        bool fed = false;
+        auto fill = [&](std::string& b) -> bool {
+            if (fed) return false;
+            fed = true;
+            b.append("hello\nworld");
+            return true;
+        };
+        bool threw = false;
+        std::optional<std::string> line;
+        try { line = read_line_capped(inbuf, fill); }
+        catch (const std::exception&) { threw = true; }
+        check(!threw && line.has_value() && *line == "hello" && inbuf == "world",
+              "CTRL: a normal newline-terminated line is returned, remainder buffered");
+    }
+
+    // CTRL-2: an under-cap newline-less stream that hits EOF returns nullopt
+    // (NOT a throw) — proves the cap does not false-trip on a legitimate short
+    // response that the peer simply closes.
+    {
+        std::string inbuf;
+        int calls = 0;
+        auto fill = [&](std::string& b) -> bool {
+            if (calls++ >= 4) return false;                 // ~4 MiB then EOF (< 16 MiB)
+            b.append(std::string(1024 * 1024, 'x'));
+            return true;
+        };
+        bool threw = false;
+        std::optional<std::string> line;
+        try { line = read_line_capped(inbuf, fill); }
+        catch (const std::exception&) { threw = true; }
+        check(!threw && !line.has_value(),
+              "CTRL: an under-cap newline-less stream that EOFs returns nullopt (no false cap trip)");
+    }
+
+    // NEG: a newline-less flood (2 MiB/fill up to 20 MiB — a bounded stand-in
+    // for an endless MITM stream) must be ABORTED at the cap with the cap
+    // diagnostic, and the buffer must not have grown far past the cap. Without
+    // the cap it would read all 20 MiB, EOF, and return nullopt (no throw) —
+    // which is exactly what the falsify-on-mutant flips.
+    {
+        std::string inbuf;
+        int calls = 0;
+        auto fill = [&](std::string& b) -> bool {
+            if (calls++ >= 10) return false;                // 20 MiB then EOF
+            b.append(std::string(2 * 1024 * 1024, 'x'));    // never a newline
+            return true;
+        };
+        bool threw = false;
+        std::string msg;
+        try { (void)read_line_capped(inbuf, fill); }
+        catch (const std::exception& e) { threw = true; msg = e.what(); }
+        bool hit = threw
+                   && msg.find("cap") != std::string::npos
+                   && inbuf.size() <= kLightRpcMaxLineBytes + 2 * 1024 * 1024;
+        check(hit,
+              "NEG: an endless newline-less stream is aborted at the 16 MiB cap (bounded memory)");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-readline-cap\n"; return 0; }
+    std::cout << "  FAIL: selftest-readline-cap\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -9323,6 +9405,7 @@ int main(int argc, char** argv) {
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
         if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
         if (cmd == "rpc-auth")              return cmd_rpc_auth(sub_argc, sub_argv);
+        if (cmd == "selftest-readline-cap") return cmd_selftest_readline_cap(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
