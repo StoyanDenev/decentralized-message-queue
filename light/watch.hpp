@@ -77,4 +77,14 @@ std::string format_watch_tick(uint64_t tick_index, uint64_t head_height,
                               const std::string& tip_state_root,
                               size_t committee_size, bool sigs_ok);
 
+// WATCH-2 head-slot bind (pure; exposed for the offline self-test). A tick may
+// report sigs_valid=yes for `head_height` ONLY if the committee-verified header is
+// actually AT the claimed head slot (index == head_height - 1). Otherwise a hostile
+// daemon inflates head_height then serves a GENUINE committee-signed EARLIER block:
+// verify_block_sigs passes (the digest binds THAT block's own index, e.g. 5), and
+// without this bind the tick prints the daemon's fictitious head_height as
+// sigs_valid=yes — a relabel forgery of the head height. Returns true iff
+// head_height >= 1 && served_header_index == head_height - 1.
+bool watch_head_slot_bound(uint64_t head_height, uint64_t served_header_index);
+
 } // namespace determ::light

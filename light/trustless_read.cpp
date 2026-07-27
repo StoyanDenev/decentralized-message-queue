@@ -622,13 +622,29 @@ AnchoredHead anchored_head(
     return out;
 }
 
+AuthenticatedCommittee authenticated_committee(const determ::chain::Block& full,
+                                               const std::string& attested_block_hash) {
+    std::string recomputed = to_hex(full.compute_hash());
+    if (recomputed != attested_block_hash) {
+        throw std::runtime_error(
+            "committee body binding failed: recomputed block_hash " + recomputed
+            + " != committee-attested " + attested_block_hash
+            + " (daemon served a forged block body — e.g. a swapped creators[])");
+    }
+    AuthenticatedCommittee ac;
+    ac.creators   = full.creators;
+    ac.block_sigs = full.creator_block_sigs;
+    return ac;
+}
+
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const json& committee_json,
                                        uint64_t anchor_index,
                                        uint64_t max_wait_seconds,
                                        size_t expected_k,
                                        bool bft_enabled,
-                                       std::string* out_committee_block_hash) {
+                                       std::string* out_committee_block_hash,
+                                       size_t* out_committee_size) {
     // 1. Fetch the FULL block at anchor_index (NOT the stripped header).
     //    The full body carries the heavy fields signing_bytes needs, so
     //    block_hash = compute_hash() is recomputable locally — the
@@ -733,6 +749,9 @@ std::string committee_bound_state_root(RpcClient& rpc,
     //    one the successor's committee sig commits) to callers that pin a full
     //    body to it; then report the anchor's state_root (empty if zero).
     if (out_committee_block_hash) *out_committee_block_hash = recomputed_hex;
+    // Authenticated committee size: |creators| of the recompute-bound full body
+    // `b` (NOT a stripped header field the daemon can inflate freely).
+    if (out_committee_size) *out_committee_size = b.creators.size();
     Hash zero{};
     return (b.state_root != zero) ? to_hex(b.state_root) : std::string{};
 }

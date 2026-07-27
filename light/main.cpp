@@ -8380,36 +8380,26 @@ int cmd_committee_at_height(int argc, char** argv) {
             return 1;
         }
 
-        // Re-fetch the now-committee-attested header[H] and parse it. The
-        // sigs verified above were computed over light_compute_block_digest,
-        // which binds creators[] AND creator_block_sigs[] — so the creator
-        // set + per-slot sig status read here is itself committee-attested.
-        auto page = rpc.call("headers", {{"from", height}, {"count", 1}});
-        if (!page.contains("headers") || !page["headers"].is_array()
-            || page["headers"].empty()) {
+        // Read creators[] from the COMMITTEE-BOUND FULL block, RECOMPUTE-bound to
+        // the attested block_hash. verify_state_root_at (H>=1) verifies committee
+        // sigs on the SUCCESSOR H+1, never on H's own header, so H's creators are
+        // bound ONLY via committee_bound_state_root's full-block recompute (which
+        // sr.block_hash_hex is). Re-fetching the STRIPPED header and string-comparing
+        // its (free, daemon-controlled) block_hash field is NOT a bind — a daemon
+        // that serves the real full block (to pass the anchor) can serve a stripped
+        // header with block_hash copied but a FORGED creators[] -> false IN_COMMITTEE.
+        // authenticated_committee recomputes compute_hash over the FULL body and
+        // requires it == sr.block_hash_hex; a forged creators[] changes the hash.
+        json full = rpc.call("block", {{"index", height}});
+        if (!full.is_object()
+            || (full.contains("error") && !full["error"].is_null())) {
             throw std::runtime_error(
-                "daemon returned no header at index "
-                + std::to_string(height));
+                "committee-at-height: daemon refused full block "
+                + std::to_string(height)
+                + " (needed to authenticate creators[])");
         }
-        json header_json = page["headers"][0];
-
-        // Bind the re-fetched header to the anchor: its block_hash must be
-        // the one verify_state_root_at just attested. A daemon that serves a
-        // different (forged) header on the second fetch is caught here.
-        std::string refetched_hash =
-            header_json.value("block_hash", std::string{});
-        if (refetched_hash != sr.block_hash_hex) {
-            throw std::runtime_error(
-                "re-fetched header[" + std::to_string(height)
-                + "].block_hash=" + refetched_hash
-                + " does not match the committee-attested block_hash="
-                + sr.block_hash_hex
-                + " (daemon served a different header on re-fetch)");
-        }
-
-        determ::chain::Block b =
-            determ::chain::Block::from_json(
-                pad_stripped_header(std::move(header_json)));
+        determ::chain::Block b = determ::chain::Block::from_json(full);
+        authenticated_committee(b, sr.block_hash_hex);  // throws on a forged body
 
         // creator_block_sigs is parallel to creators (verify_block_sigs
         // already enforced this size equality during the anchor above, but
@@ -9370,6 +9360,63 @@ int cmd_selftest_readline_cap(int argc, char** argv) {
     return 1;
 }
 
+// selftest-committee-auth — offline, NO daemon: pin the two committee-metadata
+// binding helpers the LVS adversarial audit (wf_517af620) hardened —
+// authenticated_committee (committee-at-height / verify-state-root committee_size)
+// and watch_head_slot_bound (watch-head head-slot relabel). Each mutant that drops
+// the bind flips exactly one assertion.
+int cmd_selftest_committee_auth(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // ── authenticated_committee: creators[] must be read only from a body whose
+    //    recomputed compute_hash == the committee-attested block_hash. A daemon that
+    //    serves a stripped header with a copied block_hash but a FORGED creators[]
+    //    must be REFUSED (else committee-at-height emits a false IN_COMMITTEE and
+    //    verify-state-root a forged committee_size). ──
+    {
+        determ::chain::Block g;
+        g.index    = 5;
+        g.creators = { "validator-a", "validator-b", "validator-c" };
+        std::string attested = to_hex(g.compute_hash());
+
+        bool ctrl = false;
+        try {
+            auto ac = authenticated_committee(g, attested);
+            ctrl = (ac.creators == g.creators);
+        } catch (...) { ctrl = false; }
+        check(ctrl, "authenticated_committee: a body matching the attested block_hash yields its creators");
+
+        // A forged creators[] changes compute_hash → must throw against the genuine
+        // attested hash. The mutant dropping the hash-equality check returns the
+        // forged committee → false IN_COMMITTEE.
+        determ::chain::Block f = g;
+        f.creators = { "attacker-validator" };
+        bool threw = false;
+        try { authenticated_committee(f, attested); }
+        catch (const std::exception&) { threw = true; }
+        check(threw, "authenticated_committee (fix): a forged creators[] with a copied block_hash is REFUSED — the mutant dropping the recompute-bind would accept a forged committee");
+    }
+
+    // ── watch_head_slot_bound: report sigs_valid=yes for head_height only if the
+    //    committee-verified header sits at slot head_height-1. ──
+    check(watch_head_slot_bound(1000000, 999999),
+          "watch_head_slot_bound: a header at the true head slot binds");
+    check(!watch_head_slot_bound(1000000, 5),
+          "watch_head_slot_bound (fix): a genuine EARLIER signed block relabeled as head_height is refused — the mutant dropping the slot bind prints a fictitious head_height as sigs_valid=yes");
+    check(!watch_head_slot_bound(0, 0),
+          "watch_head_slot_bound: head_height 0 (no head slot) binds to nothing");
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-committee-auth\n"; return 0; }
+    std::cout << "  FAIL: selftest-committee-auth\n";
+    return 1;
+}
+
 // selftest-verify-selection — offline, NO daemon: drive the pure
 // verify_selection_core with synthetic DECODED streams to prove the two
 // verifier-side defences (D5-RANDOM-SELECTION-SPEC §11 3b/3c). The COMPLETENESS
@@ -10166,6 +10213,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-selection-offline") return cmd_verify_selection_offline(sub_argc, sub_argv);
         if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
         if (cmd == "selftest-verify-selection") return cmd_selftest_verify_selection(sub_argc, sub_argv);
+        if (cmd == "selftest-committee-auth") return cmd_selftest_committee_auth(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

@@ -33,6 +33,7 @@
 #pragma once
 #include "rpc_client.hpp"
 #include "verify.hpp"
+#include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/types.hpp>
 #include <map>
@@ -306,12 +307,40 @@ build_genesis_committee(const determ::chain::GenesisConfig& cfg);
 // Default 0 = not enforced (byte-identical legacy behaviour for callers that do
 // not carry a genesis). Inserted BEFORE `out_committee_block_hash` so the sole
 // out-pointer caller is the only positional site that shifts.
+// `out_committee_size` (optional): set to |creators| of the COMMITTEE-BOUND full
+// block (the body whose recomputed block_hash the successor's committee sig commits)
+// — the ONLY authenticated committee size for anchor_index. Callers must use this,
+// never |creators| off a stripped header (which the daemon can inflate/deflate
+// freely, since the stripped header's block_hash is trusted, not recomputed here).
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const nlohmann::json& committee_json,
                                        uint64_t anchor_index,
                                        uint64_t max_wait_seconds = 0,
                                        size_t expected_k = 0,
                                        bool bft_enabled = true,
-                                       std::string* out_committee_block_hash = nullptr);
+                                       std::string* out_committee_block_hash = nullptr,
+                                       size_t* out_committee_size = nullptr);
+
+// The committee membership of a block, authenticated by binding the served FULL
+// body to a committee-attested block_hash. `creators` + `block_sigs` are both inputs
+// to Block::compute_hash (src/chain/block.cpp:323 / :488), so a body whose
+// recomputed block_hash equals the attested value carries a committee-committed
+// creator set AND per-slot signed/abstained status.
+struct AuthenticatedCommittee {
+    std::vector<std::string> creators;
+    std::vector<Signature>   block_sigs;   // parallel to creators (may be shorter)
+};
+
+// Recompute-bind a served FULL block to the committee-attested block_hash BEFORE
+// trusting its committee metadata, then return the authenticated committee. Requires
+// to_hex(full.compute_hash()) == attested_block_hash (the hash committee_bound_state_root
+// bound via the committee-signed successor); THROWS otherwise — a daemon that forged
+// creators[] changes compute_hash. This is the F-7-safe committee source: reading
+// creators/committee_size off a stripped header (bound only by a string-compared,
+// never-recomputed block_hash field) is a false-YES vector. Pure; the falsify-on-mutant
+// seam for committee-at-height / verify-state-root (the mutant dropping the hash-equality
+// check trusts a forged committee).
+AuthenticatedCommittee authenticated_committee(const determ::chain::Block& full,
+                                               const std::string& attested_block_hash);
 
 } // namespace determ::light

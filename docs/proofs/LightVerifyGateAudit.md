@@ -296,11 +296,51 @@ echoed (NEG ×2); an empty served value stays empty (CTRL, unaffected by the mut
 (`return served_state_root` — the AH-1 bug): the two NEG asserts flip while CTRL stays green — a clean
 directional split on both platforms.
 
-## 2. Backlog — EMPTY (register COMPLETE)
+## 1i. LVS-2 — committee-metadata read off a weakly-bound stripped header (2026-07-27)
+
+A second adversarial pass (`wf_517af620`, 8 lenses, once the CURRENT-FRONT pause lifted) re-audited the
+shipped surface against "never a false YES" and found **3 CLIENT-side false-YES gaps, all the same class
+as the D.5 F-7 finding** — a consumer reads committee metadata off a STRIPPED header the daemon controls
+but the walk never recomputes. (0 consensus-side; lenses committee_bound_state_root / inclusion-proofs /
+composite-reads / dapp-registration / anchor-walk verified SOUND.)
+
+- **CM-1 (HIGH) `committee`-at-height forged creators[]** (`light/main.cpp` cmd_committee_at_height). The
+  verb bound its re-fetched header only by a STRING-compare of the daemon-controlled `block_hash` field
+  (never recomputed), then read `b.creators` off it. But `verify_state_root_at` (H≥1) verifies committee
+  sigs on the SUCCESSOR H+1, never on H's own header — so creators[H] are authenticated ONLY via
+  `committee_bound_state_root`'s full-block recompute, which the verb DISCARDED. A daemon serving the real
+  full block (to pass the anchor) + a stripped header with `block_hash` copied but a FORGED `creators[]`
+  → a false IN_COMMITTEE verdict. **Fix:** new pure `authenticated_committee(full, attested_block_hash)`
+  (`light/trustless_read.{hpp,cpp}`) recomputes `compute_hash` and requires it == the successor-bound
+  `block_hash`, THROWS otherwise — the verb re-fetches the FULL block and reads creators from it.
+  `Block::compute_hash` binds `creators` (block.cpp:323) AND `creator_block_sigs` (block.cpp:488), so the
+  recompute-bound body authenticates membership AND per-slot signed/abstained status.
+- **CM-2 (MED) verify-state-root forged committee_size** (`light/verify_state_root.cpp`). `committee_size`
+  was `|creators|` of the stripped header — daemon-forgeable. **Fix:** new `committee_bound_state_root`
+  out-param `out_committee_size`, set from the bound full block's `creators.size()`.
+- **CM-3 (MED) watch-head head_height relabel** (`light/watch.cpp` do_one_tick). The tick printed a
+  daemon-asserted `head_height` as `sigs_valid=yes` without checking the committee-verified header's own
+  `index == head_height-1` — a daemon inflates `head_height` then serves a GENUINE signed EARLIER block
+  (digest binds THAT block's index) → a fictitious head as `sigs_valid=yes` (the LTX relabel class).
+  **Fix:** new pure `watch_head_slot_bound(head_height, served_index)`.
+
+**Gate** = `test_light_committee_auth.sh` — FAST, offline (the `selftest-committee-auth` subcommand):
+`authenticated_committee` yields a genuine body's creators (CTRL) but REFUSES a forged creators[] with a
+copied block_hash (NEG); `watch_head_slot_bound` binds the true head slot (CTRL) but refuses a relabeled
+earlier block (NEG). **Falsify-on-mutant, independently, both platforms:** dropping the
+`compute_hash==attested` check flips only the CM-1 NEG; dropping the `index==head-1` term flips only the
+CM-3 NEG.
+
+**Recurring lesson (3rd sighting of this class):** the stripped-header laundering CLASS recurs at EVERY
+consumer that reads a daemon-controlled header field the walk doesn't recompute — after finding one, audit
+ALL consumers, not just the trigger. "Built + gated" ≠ "adversarially sound".
+
+## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2)
 
 Every finding this register enumerated as a future gate is now CLOSED, across the **8 gate-sections
-§1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1). No remaining backlog; 0 owner-gated.
-Any future light-verifier gap opens a new row here.
+§1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1) **plus the LVS-2 committee-metadata
+trio §1i** (CM-1/CM-2/CM-3). No remaining backlog; 0 owner-gated. Any future light-verifier gap opens a
+new row here.
 
 ## 3. REFUTED
 

@@ -158,7 +158,21 @@ TickResult do_one_tick(RpcClient& rpc,
             if (h.contains("creators") && h["creators"].is_array()) {
                 committee_size = h["creators"].size();
             }
-            sigs_ok = vbs.ok;
+            // WATCH-2: bind the daemon-asserted head_height to the committee-
+            // verified header's OWN index. A daemon that inflates head_height then
+            // serves a GENUINE committee-signed EARLIER block passes verify_block_sigs
+            // (the digest binds that block's own index), but it occupies a different
+            // slot; without this bind we would print the fictitious head_height as
+            // sigs_valid=yes (a relabel forgery of the head height).
+            uint64_t served_index = h.value("index", ~uint64_t{0});
+            bool slot_ok = watch_head_slot_bound(head_height, served_index);
+            sigs_ok = vbs.ok && slot_ok;
+            if (vbs.ok && !slot_ok) {
+                std::cout << "  WARN: daemon claims head_height=" << head_height
+                          << " but the committee-signed header it served is at index "
+                          << served_index
+                          << " (relabel forgery — reporting sigs_valid=no)\n";
+            }
         }
 
         // 4. Emit the structured line. WATCH-1: the tip's own state_root is
@@ -197,6 +211,13 @@ TickResult do_one_tick(RpcClient& rpc,
 // tip's own state_root is rendered under a `tip_state_root(UNVERIFIED)` label,
 // never as a verified value; `sigs_ok` reflects only the digest quorum. The
 // head_hash is rendered as-served (the daemon's self-declared id).
+bool watch_head_slot_bound(uint64_t head_height, uint64_t served_header_index) {
+    // The head slot index is head_height - 1 (head_height counts blocks). A tick
+    // may report sigs_valid=yes only if the committee-verified header sits at that
+    // exact slot; otherwise the daemon relabeled an earlier signed block as the head.
+    return head_height >= 1 && served_header_index == head_height - 1;
+}
+
 std::string format_watch_tick(uint64_t tick_index, uint64_t head_height,
                               const std::string& head_hash,
                               const std::string& tip_state_root,

@@ -201,7 +201,8 @@ StateRootResult verify_state_root_at(
             std::string attested =
                 committee_bound_state_root(rpc, committee_json, height,
                                            max_wait_seconds, expected_k,
-                                           bft_enabled, &res.block_hash_hex);
+                                           bft_enabled, &res.block_hash_hex,
+                                           &res.committee_size);
             res.state_root_hex = attested;
             res.state_root_present = !attested.empty();
             res.committee_verified = true;
@@ -213,12 +214,11 @@ StateRootResult verify_state_root_at(
             res.detail = e.what();
             return res;
         }
-        // committee_size = |creators| of header[H]. The header chained to
-        // the pinned genesis (walk_chain_to) and its state_root is now
-        // committee-bound via the successor; read creators[] for reporting.
-        if (h.contains("creators") && h["creators"].is_array()) {
-            res.committee_size = h["creators"].size();
-        }
+        // committee_size is set from the COMMITTEE-BOUND full block (the
+        // out-param above), NOT |creators| of the stripped header `h`. The
+        // stripped header's block_hash is trusted (not recomputed here), so its
+        // creators[] is daemon-forgeable — reading committee_size off it let a
+        // hostile daemon report an inflated/deflated committee size as attested.
     }
 
     res.ok = true;
