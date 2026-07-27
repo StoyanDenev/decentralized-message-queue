@@ -2,7 +2,7 @@
 
 # D.5 — Government random-selection reference DApp
 
-**Status:** **RATIFIED 2026-07-26 — the owner accepted all 8 §13 recommendations as-is; build proceeding per §12** (increment 2 `d5_draw` first). Design synthesized + adversarially verified (workflow `wf_4d036bff-772`: 3 framings → adversarial grounding/doctrine verification → synthesis). The frozen-once-live parameters (D1 lowest-hash draw + `draw_algo_version`, D3 Δ ≥ one committee-epoch) are fixed for any deployment; they are pre-genesis-free to amend only until a deployment goes live — no migrations.
+**Status:** **RATIFIED 2026-07-26 (owner accepted all 8 §13 recommendations as-is) — BUILT END-TO-END per §12.** Shipped: `d5_draw` + the 3 canonical-binary codecs + the `verify-rand` / `verify-selection` / `verify-selection-offline` Apache citizen verifiers (inc.2–5c) + the `d5rp` BUSL reference producer with an independent Python dual-oracle (inc.6a) + the deterministic cross-binary RP→citizen end-to-end (inc.6b) + the Apache `sdk/rp/python/determ_rp/d5` verification SDK (item 8). Each increment gated both platforms (MSVC + WSL2/GCC) with a falsify-on-mutant. Design synthesized + adversarially verified (workflow `wf_4d036bff-772`: 3 framings → adversarial grounding/doctrine verification → synthesis). The frozen-once-live parameters (D1 lowest-hash draw + `draw_algo_version`, D3 Δ ≥ one committee-epoch) are fixed for any deployment; they are pre-genesis-free to amend only until a deployment goes live — no migrations.
 **License:** BUSL-1.1 orchestrator (`dapps/d5-random-selection/**`) + **Apache-2.0 citizen verifier** (the `verify-rand` / `verify-selection` / `d5_draw` surface lives in `determ-light` so any citizen verifies freely). See §13 D8.
 
 ## 0. Motivation
