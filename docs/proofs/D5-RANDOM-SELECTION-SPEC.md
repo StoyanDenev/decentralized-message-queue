@@ -1,4 +1,4 @@
-> **TIER: NEAR-TERM — D.5 is a post-v1.0 reference DApp (Bundle D, §5.1 chain-primitive DApps). NOT part of the 1.0-authoritative set.** Active-front build target (CLAUDE.md CURRENT FRONT item 2, after the DSSO CT/zeroization ship-gate G5+G6 closed 2026-07-26). Every primitive it uses is SHIPPED. This is the ratifiable BUILD spec (mirrors `D10-PROPERTY-REGISTER-SPEC.md`); §13 lists the OPEN decisions the owner must ratify before any code.
+> **TIER: NEAR-TERM — D.5 is a post-v1.0 reference DApp (Bundle D, §5.1 chain-primitive DApps). NOT part of the 1.0-authoritative set.** Active-front build target (CLAUDE.md CURRENT FRONT item 2, after the DSSO CT/zeroization ship-gate G5+G6 closed 2026-07-26). Every primitive it uses is SHIPPED. This is the ratifiable BUILD spec (mirrors `D10-PROPERTY-REGISTER-SPEC.md`); §13 lists the OPEN decisions the owner must ratify before any code. Roadmap index: docs/ROADMAP.md
 
 # D.5 — Government random-selection reference DApp
 

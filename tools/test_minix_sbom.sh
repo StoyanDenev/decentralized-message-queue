@@ -132,14 +132,21 @@ else
     bad "expected exactly 1 bare 'crypto' OpenSSL link token (cryptotest only); found $CRYPTO_LINKS — a shipped binary may now link OpenSSL"
 fi
 
-# ── 6. Apache-2.0 provenance: the repo LICENSE/NOTICE + the per-file SPDX ─────
-#      marker on the C++ wrapper set the SBOM claims (NOT a first-match grep —
-#      the from-scratch C99 .c core is covered by the repo LICENSE, and the SBOM
-#      no longer claims 'every source file').
-if [ -f LICENSE ] && grep -q "Apache License" LICENSE && grep -q "Version 2.0" LICENSE; then
-    ok "repo LICENSE is Apache-2.0 (the SBOM's determ-crypto-c99 license fact)"
+# ── 6. Apache-2.0 provenance: the crypto TCB (src/crypto, determ-crypto-c99) is ─
+#      Apache-2.0. Since licensing v3.1 (DECISION-LOG 2026-07-25) the repo is
+#      MULTI-licensed: the root LICENSE is a per-tier MAP (Apache-2.0 core + BUSL-1.1
+#      dapps, per LICENSING.md) and the canonical Apache-2.0 TEXT lives in
+#      LICENSES/Apache-2.0.txt. Verify BOTH — the root map declares the Apache core
+#      tier AND the referenced text file is the real Apache 2.0 — so the check stays
+#      non-vacuous: a missing/corrupted Apache text, or a root LICENSE that stopped
+#      declaring the core tier, turns this RED. (The from-scratch C99 .c core + the
+#      C++ wrapper set live under this Apache core tier; per-file SPDX is 6b below.)
+APACHE_TXT="LICENSES/Apache-2.0.txt"
+if [ -f LICENSE ] && grep -q "Apache License 2.0" LICENSE && grep -q "LICENSES/Apache-2.0.txt" LICENSE \
+   && [ -f "$APACHE_TXT" ] && grep -q "Apache License" "$APACHE_TXT" && grep -q "Version 2.0" "$APACHE_TXT"; then
+    ok "repo core/crypto tier is Apache-2.0 (root LICENSE map -> $APACHE_TXT, canonical text present)"
 else
-    bad "repo LICENSE missing or not Apache-2.0 — the SBOM's Apache-2.0 license claim is unverified"
+    bad "Apache-2.0 provenance drift: the root LICENSE must declare the Apache-2.0 core tier AND $APACHE_TXT must carry the canonical Apache 2.0 text — the SBOM's determ-crypto-c99 license fact is unverified"
 fi
 if [ -f NOTICE ]; then
     ok "repo NOTICE (Apache-2.0 attribution) present"
