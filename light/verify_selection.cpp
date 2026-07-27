@@ -141,11 +141,23 @@ SelectionResult verify_selection_core(
         if (case_opens[i].height < case_opens[first].height) first = i;
     const D5CaseOpenAt& co = case_opens[first];
 
-    // ── ordering: h_o < draw_height < h_s (anti-grinding + no post-hoc). ──
+    // ── ordering: h_r <= h_o < draw_height < h_s (anti-grinding + no post-hoc). ──
     if (!(co.height < co.draw_height)) {
         res.detail = "case-open height (" + std::to_string(co.height)
                    + ") not before draw_height (" + std::to_string(co.draw_height)
                    + ") — post-hoc roster"; return res; }
+    // roster cutoff must NOT be after the case-open (SPEC §9 ordering h_r <= h_o).
+    // The roster is frozen no later than the case-open, so no id can be added on
+    // knowledge of cumulative_rand[H]. A case-open declaring a cutoff AFTER its own
+    // block height lets a compromised authority observe the beacon at H, then ADD a
+    // winning member before the (late) cutoff h_r — filter_roster_to_cutoff would
+    // admit it and the core would re-derive a rigged-but-matching draw (false
+    // SELECTED). This is the R2 anti-grinding leg; without it the freeze is toothless.
+    if (!(co.roster_cutoff_height <= co.height)) {
+        res.detail = "roster_cutoff_height (" + std::to_string(co.roster_cutoff_height)
+                   + ") is after case-open height (" + std::to_string(co.height)
+                   + ") — SPEC h_r<=h_o anti-grinding ordering violated (post-commit roster)";
+        return res; }
     if (!(result.height > co.draw_height)) {
         res.detail = "result height (" + std::to_string(result.height)
                    + ") not after draw_height (" + std::to_string(co.draw_height) + ")"; return res; }

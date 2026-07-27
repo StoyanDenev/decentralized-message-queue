@@ -216,8 +216,12 @@ operator-supplied committee file):
 3. `verify-selection` → re-authenticates the seed; **enumerates** the complete `roster` +
    `case-open` streams for `case_id` up to H over the committee-authenticated full-block walk;
    asserts exactly one canonical first `case-open` at `h_o < H` (any N>1 surfaced as tamper
-   evidence); re-runs `d5_draw` over the materialized roster + authenticated seed; asserts equality
-   with the published result; enforces `h_o < H < h_s` → `SELECTED / NOT-SELECTED / UNVERIFIABLE`.
+   evidence); freezes the roster to `roster_cutoff_height` (`filter_roster_to_cutoff`); re-runs
+   `d5_draw` over the materialized roster + authenticated seed; asserts equality with the published
+   result; enforces the **full** SPEC ordering `h_r ≤ h_o < H < h_s` → the `h_r ≤ h_o` leg is
+   load-bearing: it freezes the roster no later than the case-open so no id can be added on
+   knowledge of `cumulative_rand[H]` (dropping it re-admits post-seed roster stuffing — a false
+   SELECTED). `SELECTED / NOT-SELECTED / UNVERIFIABLE`.
 4. `verify-tx-inclusion` on the `LOG_AUDIT_ACCESS` tx + `context_hash` equality → the disclosure is
    on-chain and binds this exact selection.
 
@@ -267,7 +271,21 @@ standalone green (the LVS light-verify discipline).
   `case-open`s for one `case_id` before H; the mutant skipping first-open-wins accepts the
   favorable second draw → gate flips. **(3c ordering)** relax `h_o < H` to accept `h_o ≥ H` →
   post-hoc-roster case wrongly VALID → RED. **(3d roster binding)** alter one eligible id while
-  keeping `roster_root`; the mutant skipping the root check flips VALID → RED.
+  keeping `roster_root`; the mutant skipping the root check flips VALID → RED (private-roster mode,
+  deferred). **(3e anti-grinding `h_r ≤ h_o`)** — an authority sets `roster_cutoff_height` AFTER
+  its own case-open height, then (post-`cumulative_rand[H]`) ADDs a winning member before the late
+  cutoff and publishes a matching result; the mutant dropping the `h_r ≤ h_o` check folds the
+  post-seed add and emits a false SELECTED → flips only that NEG. **(3f F-7 `tx_root` laundering)**
+  — a daemon serves a `tx_root=0` stripped header for a real roster-REMOVE block, forcing the F-7
+  full-block fallback to recover it while the D.5 collector, trusting the unauthenticated header
+  `tx_root`, skips it (hiding the REMOVE → false SELECTED); the mutant dropping `recovered_via_f7`
+  from `must_consult_full_body` re-opens the skip → flips only that NEG.
+
+**Adversarial-audit provenance:** 3e and 3f were surfaced by the `wf_6148bd7f` 8-lens adversarial
+audit of the shipped verifier (2026-07-27) — each confirmed a real false-SELECTED gap that the
+original 3a–3d gate family missed, then closed with the falsify-on-mutant NEG above. 3e also
+converged the code with this doc: §9 already declared `h_r ≤ h_o` "enforced by the verifier", but
+the shipped check enforced only `h_o < H < h_s` until this pass.
 
 D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture.
 
@@ -363,6 +381,26 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    increments, per `sdk/README`): the DSSO-token + light-client block-sig/tx-inclusion proof
    verifiers, the JS + Go bindings, and `sdk/dapp` codec bindings — the DSSO pieces defer to the
    owner (DSSO design authority).
+9. **Adversarial-audit hardening (2026-07-27) — SHIPPED.** An 8-lens adversarial audit
+   (`wf_6148bd7f`) of the shipped verifier surface + `sdk/rp` confirmed **3 real false-SELECTED
+   gaps** the build increments missed; each closed with a falsify-on-mutant NEG, both platforms:
+   **(A) anti-grinding `h_r ≤ h_o`** — `verify_selection_core` enforced only `h_o < H < h_s`, not
+   the §9 `h_r ≤ h_o` leg, so a `roster_cutoff_height` set AFTER the case-open re-admitted post-seed
+   roster stuffing → false SELECTED. Fix: the `h_r ≤ h_o` check (`light/verify_selection.cpp`) + the
+   §11 3e NEG; the reference e2e fixture was corrected to a SPEC-valid placement (it had encoded
+   `h_r > h_o`, "passing" only because the check was absent). **(C) F-7 `tx_root` laundering** — the
+   completeness collector keyed has-txs on the STRIPPED header `tx_root`, which is UNauthenticated
+   when a block was recovered via the F-7 full-block fallback; a daemon serving `tx_root=0` hid a
+   roster-REMOVE → false SELECTED. Fix: the pure `must_consult_full_body`
+   (`light/trustless_read.{cpp,hpp}`, applied at the collector AND the `--track-registry` replay) +
+   the §11 3f NEG. **(B) SDK↔C parity** — `sdk/rp/python/determ_rp/d5.py` checked a single triple
+   without the fold/cutoff/first-open/committee-auth context and omitted the C codec's fail-closed
+   bounds, so a lone REMOVE / oversized / empty id verified in the SDK but was UNVERIFIABLE in
+   `determ-light`. Fix: mirror the codec bounds (`D5_MAX_ROSTER` / `D5_MAX_FIELD`), require a single
+   `ROSTER_ADD` + dedup, and CORRECT the docstring — the SDK is a draw-consistency check over a
+   caller-canonicalized, caller-authenticated triple, NOT a standalone trustless verifier (a citizen
+   facing an untrusted daemon uses `determ-light verify-selection`); NEGs added to the
+   `verify_d5rp.py` dogfood selftest.
 
 ## 13. Decisions (RATIFIED 2026-07-26)
 

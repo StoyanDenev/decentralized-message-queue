@@ -82,6 +82,16 @@ std::string anchor_genesis(RpcClient& rpc,
     return expected_hex;
 }
 
+// See trustless_read.hpp. External linkage (declared there) so the selftest in
+// main.cpp can pin it: dropping `|| recovered_via_f7` reintroduces the F-7
+// tx_root-laundering skip.
+bool must_consult_full_body(const std::string& header_tx_root_hex,
+                            bool recovered_via_f7) {
+    bool header_says_txs = !header_tx_root_hex.empty()
+        && header_tx_root_hex.find_first_not_of('0') != std::string::npos;
+    return header_says_txs || recovered_via_f7;
+}
+
 namespace {
 
 // Ask the daemon for its current tip height (the `headers` reply carries the
@@ -222,6 +232,12 @@ VerifiedChain verify_chain_walk(
             // but gating on `from` here makes the suffix walk's never-skip
             // property explicit and independent of that gate (defense in depth).
             if (idx == 0 && from == 0) continue;
+            // Set iff this block's committee sigs verified ONLY via the F-7
+            // full-block fallback (below) — meaning the STRIPPED header's tx_root
+            // was NOT the value the committee signed (the full body's digest was),
+            // so the collector / registry replay must not trust it to decide
+            // has-txs (must_consult_full_body).
+            bool recovered_via_f7 = false;
             json cj = committee_at(idx);   // static unless --track-registry
             auto vbs = verify_block_sigs(h, cj, /*bft=*/false, expected_k, bft_enabled);
             if (!vbs.ok) {
@@ -265,7 +281,7 @@ VerifiedChain verify_chain_walk(
                                 if (!fvbs.ok)
                                     fvbs = verify_block_sigs(
                                         full, cj, /*bft=*/true, expected_k, bft_enabled);
-                                if (fvbs.ok) { vbs = fvbs; recovered = true; }
+                                if (fvbs.ok) { vbs = fvbs; recovered = true; recovered_via_f7 = true; }
                             }
                         } catch (const std::exception&) {
                             // malformed full block — fall through to the throw
@@ -292,10 +308,11 @@ VerifiedChain verify_chain_walk(
             // tx_root) is re-fetched FULL and pinned to the already-chained
             // block_hash — a doctored body changes the hash, fail-closed.
             if (track_registry && !(idx == 0 && from == 0)) {
-                std::string troot = h.value("tx_root", std::string{});
-                bool has_txs = !troot.empty()
-                               && troot.find_first_not_of('0') != std::string::npos;
-                if (has_txs) {
+                // A block recovered via F-7 had its header tx_root UNauthenticated,
+                // so a daemon could zero it to hide a REGISTER/DEREGISTER; consult
+                // the full body in that case too (must_consult_full_body).
+                if (must_consult_full_body(h.value("tx_root", std::string{}),
+                                           recovered_via_f7)) {
                     std::string chained = h.value("block_hash", std::string{});
                     json full = rpc.call("block", {{"index", idx}});
                     if (chained.empty() || !full.is_object()
@@ -336,40 +353,44 @@ VerifiedChain verify_chain_walk(
                     }
                 }
             }
-            // D.5 collector: after this block's committee sigs verified, pull
-            // its FULL body if it carries transactions (the D.5 messages live in
-            // tx bodies, which the stripped header stream omits). Pin the body:
-            // its recomputed block_hash MUST equal the block_hash the header walk
+            // D.5 collector: after this block's committee sigs verified, pull its
+            // FULL body if it may carry transactions (the D.5 messages live in tx
+            // bodies, which the stripped header stream omits). Pin the body: its
+            // recomputed block_hash MUST equal the block_hash the header walk
             // committee-chained (a doctored body changes the hash → throw). A
-            // zero-tx_root block provably has no tx (tx_root is bound into the
-            // committee digest), so skipping it cannot hide a message — this is
-            // the SPEC §11 3a completeness source. Independent of the F-7 /
-            // --track-registry fetches above (a rare redundant fetch when both
-            // fire is correct, just wasteful); keeps this path's soundness local.
-            if (out_full_blocks && !(idx == 0 && from == 0)) {
-                std::string troot = h.value("tx_root", std::string{});
-                bool has_txs = !troot.empty()
-                               && troot.find_first_not_of('0') != std::string::npos;
-                if (has_txs) {
-                    std::string chained = h.value("block_hash", std::string{});
-                    json full = rpc.call("block", {{"index", idx}});
-                    if (chained.empty() || !full.is_object()
-                        || (full.contains("error") && !full["error"].is_null())) {
-                        throw std::runtime_error(
-                            "verify-chain (D.5 collect): cannot fetch full block "
-                            + std::to_string(idx) + " (daemon refused)");
-                    }
-                    determ::chain::Block fb =
-                        determ::chain::Block::from_json(full);
-                    if (to_hex(fb.compute_hash()) != chained) {
-                        throw std::runtime_error(
-                            "verify-chain (D.5 collect): full block "
-                            + std::to_string(idx)
-                            + " does not hash to the chained block_hash "
-                              "(daemon served a doctored body)");
-                    }
-                    out_full_blocks->push_back(std::move(full));
+            // zero-tx_root block provably has no tx ONLY when its sigs verified on
+            // the NORMAL header-digest path (which binds tx_root — verify.cpp:143);
+            // a block recovered via F-7 had its header tx_root UNauthenticated, so a
+            // daemon could serve tx_root=0 to hide a DAPP_CALL (e.g. a roster REMOVE
+            // → false SELECTED). must_consult_full_body forces the fetch in that
+            // case and the (committee-pinned) full body decides. This is the SPEC
+            // §11 3a completeness source. Independent of the F-7 / --track-registry
+            // fetches above (a rare redundant fetch when both fire is just wasteful).
+            if (out_full_blocks && !(idx == 0 && from == 0)
+                && must_consult_full_body(h.value("tx_root", std::string{}),
+                                          recovered_via_f7)) {
+                std::string chained = h.value("block_hash", std::string{});
+                json full = rpc.call("block", {{"index", idx}});
+                if (chained.empty() || !full.is_object()
+                    || (full.contains("error") && !full["error"].is_null())) {
+                    throw std::runtime_error(
+                        "verify-chain (D.5 collect): cannot fetch full block "
+                        + std::to_string(idx) + " (daemon refused)");
                 }
+                determ::chain::Block fb =
+                    determ::chain::Block::from_json(full);
+                if (to_hex(fb.compute_hash()) != chained) {
+                    throw std::runtime_error(
+                        "verify-chain (D.5 collect): full block "
+                        + std::to_string(idx)
+                        + " does not hash to the chained block_hash "
+                          "(daemon served a doctored body)");
+                }
+                // Collect only if the (now committee-authenticated) body actually
+                // bears transactions — an honest F-7 zero-tx block that we fetched
+                // out of caution carries no DAPP_CALL and need not be pushed.
+                if (!fb.transactions.empty())
+                    out_full_blocks->push_back(std::move(full));
             }
             if (!vbs.state_root_hex.empty()) {
                 last_state_root = vbs.state_root_hex;

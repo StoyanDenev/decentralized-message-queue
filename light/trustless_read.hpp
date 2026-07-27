@@ -111,9 +111,14 @@ struct VerifiedChain {
 // body fails closed (the same F-7 / --track-registry pin). This is the
 // COMPLETENESS source for the D.5 verify-selection composite (SPEC §11 3a): a
 // truncatable `dapp_messages` RPC hint cannot hide a DAPP_CALL because the
-// collector reads EVERY block body, and a zero-tx_root block provably carries no
-// tx (tx_root is bound into the committee digest — verify.cpp:143). Default
-// nullptr = no collection, byte-identical to existing callers.
+// collector reads EVERY block body. A zero-tx_root block provably carries no tx
+// ONLY when its committee sigs verified on the NORMAL stripped-header digest path
+// (that digest binds tx_root — verify.cpp:143); a block recovered via the F-7
+// full-block fallback had its HEADER tx_root UNauthenticated (the full body's
+// digest verified, not the header's), so a daemon could serve tx_root=0 to hide a
+// DAPP_CALL. The collector therefore consults the full body whenever the header
+// tx_root is non-zero OR the block was F-7-recovered (must_consult_full_body).
+// Default nullptr = no collection, byte-identical to existing callers.
 VerifiedChain verify_chain_to_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
@@ -125,6 +130,19 @@ VerifiedChain verify_chain_to_head(
     size_t expected_k = 0,
     bool bft_enabled = true,
     std::vector<nlohmann::json>* out_txbearing_full_blocks = nullptr);
+
+// Whether the D.5 collector (and --track-registry replay) MUST fetch a walked
+// block's full body. The stripped header's tx_root is committee-authenticated only
+// when the block's sigs verified on the normal light-digest path (that digest binds
+// tx_root — verify.cpp:143). A block recovered via the F-7 full-block fallback had
+// its header tx_root UNauthenticated, so a daemon could zero it to make a naive
+// `tx_root != 0` test skip a real tx-bearing block (hiding e.g. a roster REMOVE →
+// false SELECTED). Returns true when the header claims txs OR the block was
+// F-7-recovered — in the latter case the (trusted) full body decides. Pure; exposed
+// for the falsify-on-mutant unit gate (selftest-verify-selection). Dropping the
+// `recovered_via_f7` term is the primary mutant.
+bool must_consult_full_body(const std::string& header_tx_root_hex,
+                            bool recovered_via_f7);
 
 // LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
 // a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),

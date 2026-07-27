@@ -9593,6 +9593,71 @@ int cmd_selftest_verify_selection(int argc, char** argv) {
               "NEG (roster cutoff-freeze): a result counting a POST-cutoff member is refused once the roster is frozen to roster_cutoff_height");
     }
 
+    // ── ANTI-GRINDING (SPEC §9 h_r <= h_o): the canonical case-open's
+    //    roster_cutoff_height must NOT be AFTER its own block height. Otherwise a
+    //    compromised authority opens the case at h_o, waits for cumulative_rand[H]
+    //    to be revealed at H, then ADDs a member it computes will WIN the draw at a
+    //    height <= the (late) cutoff h_r, and publishes a matching result. This NEG
+    //    plants exactly that: h_r=250 > h_o=100, a post-seed add@220, and a
+    //    fraudulent result selecting the ground member. The correct core rejects at
+    //    the cutoff-ordering gate (h_r<=h_o) BEFORE materializing. The mutant that
+    //    drops the h_r<=h_o check folds the post-seed add (220 <= cutoff 250) and
+    //    re-derives a draw that matches the rigged result -> false SELECTED. ──
+    {
+        std::vector<uint8_t> ground = { 'D','5','-','G','R','O','U','N','D' };
+        std::vector<std::vector<uint8_t>> padded = members; padded.push_back(ground);
+
+        D5RosterOp add_pre;  add_pre.op  = D5_ROSTER_ADD;  add_pre.height  = 5;   add_pre.ids  = members;
+        D5RosterOp add_post; add_post.op = D5_ROSTER_ADD;  add_post.height = 220; add_post.ids = { ground }; // AFTER H=200
+        std::vector<D5RosterOp> ops = { add_pre, add_post };
+
+        // h_r=250 > h_o=100 (violates h_r<=h_o); the OTHER legs pass: h_o=100 < H=200 < h_s=260.
+        D5CaseOpenAt co; co.height = 100; co.roster_cutoff_height = 250; co.draw_height = 200;
+        co.n_primary = 13; co.m_alternate = 0; co.draw_algo_version = D5_DRAW_ALGO_LOWEST_HASH;
+
+        // Rigged published result = the draw over the FULL padded 13 (incl the post-seed ground).
+        std::set<std::vector<uint8_t>> es(padded.begin(), padded.end());
+        std::vector<std::vector<uint8_t>> eids(es.begin(), es.end());
+        std::vector<const uint8_t*> idp; std::vector<size_t> idl;
+        for (auto& id : eids) { idp.push_back(id.data()); idl.push_back(id.size()); }
+        std::vector<size_t> outi(13); size_t oc = 0;
+        d5_draw(seed, domain.data(), domain.size(), case_id.data(), case_id.size(),
+                200, 250, D5_DRAW_ALGO_LOWEST_HASH, idp.data(), idl.data(), eids.size(), 13, 0,
+                outi.data(), &oc);
+        std::vector<std::vector<uint8_t>> sel13;
+        for (size_t k = 0; k < oc; k++) sel13.push_back(eids[outi[k]]);
+        D5ResultAt result; result.height = 260; result.draw_height = 200; result.selected_ids = sel13;
+
+        // Model the real pipeline: filter to cutoff (250 keeps the post-seed add@220), then core.
+        auto elig = filter_roster_to_cutoff(ops, co.roster_cutoff_height);
+        auto r = verify_selection_core(domain, case_id, seed, elig, {co}, result, ground);
+        bool hit = (r.verdict == SelectionVerdict::UNVERIFIABLE)
+                 && r.detail.find("roster_cutoff_height") != std::string::npos
+                 && r.detail.find("anti-grinding") != std::string::npos;
+        check(hit, "NEG (anti-grinding h_r<=h_o): a case-open whose roster cutoff is AFTER its block height (post-seed roster stuffing) is refused at the cutoff-ordering gate");
+    }
+
+    // ── F-7 tx_root laundering (SPEC §11 3a completeness, F-7 interaction): the
+    //    D.5 collector decides whether to fetch a block's full body via
+    //    must_consult_full_body(header_tx_root, recovered_via_f7). The stripped
+    //    header's tx_root is committee-authenticated only when the block's sigs
+    //    verified on the NORMAL header-digest path; a block recovered via the F-7
+    //    full-block fallback had its header tx_root UNauthenticated, so a daemon
+    //    could serve tx_root=0 to make a naive `tx_root != 0` test skip a real
+    //    tx-bearing block (hiding a roster REMOVE → false SELECTED). The predicate
+    //    must fetch whenever the header claims txs OR the block was F-7-recovered.
+    //    The mutant that drops the recovered_via_f7 term makes the F-7 case skip. ──
+    {
+        std::string zero_root(64, '0');
+        std::string txr = std::string(61, '0') + "abc";   // any non-all-zero tx_root
+        check(!must_consult_full_body(zero_root, false),
+              "F-7 collect: a NORMAL-path zero-tx_root block is skipped (optimization preserved)");
+        check(must_consult_full_body(txr, false),
+              "F-7 collect: a NORMAL-path tx-bearing block is fetched");
+        check(must_consult_full_body(zero_root, true),
+              "F-7 collect (fix): an F-7-recovered block is fetched even with a zero header tx_root — the mutant dropping recovered_via_f7 would skip it, laundering a hidden DAPP_CALL into a false SELECTED");
+    }
+
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
     if (fail == 0) { std::cout << "  PASS: selftest-verify-selection\n"; return 0; }
     std::cout << "  FAIL: selftest-verify-selection\n";

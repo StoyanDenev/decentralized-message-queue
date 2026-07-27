@@ -50,7 +50,8 @@ DOMAIN=$(echo "$EMIT" | sed -n 's/.*domain=\([^ ]*\).*/\1/p')
   || { ck 0 "d5rp emit produced the three streams"; echo "  $pass pass / $fail fail"; echo "  FAIL: test_d5_selection_e2e"; exit 1; }
 
 # The demo scenario's public parameters (d5rp_main.c): CASE-1, seed = i*7+1,
-# cutoff=80, draw_height=100. Place roster <= cutoff, h_o < 100 < h_s.
+# cutoff=80, draw_height=100. Placement must satisfy the SPEC §9 ordering
+# h_r <= h_o < H < h_s: roster <= cutoff(80), 80 <= case-open h_o < 100 < h_s.
 SEED=$("$PY" -c "print(bytes((i*7+1)&255 for i in range(32)).hex())")
 CASEID=$("$PY" -c "print('CASE-1'.encode().hex())")
 NONMEMBER=$("$PY" -c "print('D5-MEMBER-99'.encode().hex())")
@@ -60,7 +61,7 @@ build_blocks() {  # $1=result_payload -> writes $2
 import json, sys
 roster, caseopen, result, domain, out = sys.argv[1:6]
 def blk(h, p): return {"index": h, "transactions": [{"type": 10, "to": domain, "payload": p}]}
-blocks = [blk(5, roster), blk(12, caseopen), blk(110, result)]
+blocks = [blk(5, roster), blk(85, caseopen), blk(110, result)]  # h_r=80 <= h_o=85 < H=100 < h_s=110
 with open(out, "w") as f: json.dump(blocks, f)
 PYEOF
 }
