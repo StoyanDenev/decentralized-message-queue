@@ -47,6 +47,7 @@
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-rand              D.5: authenticate cumulative_rand[H] (S-042 beacon)
 //   verify-selection         D.5: re-derive + refute a government random selection
+//   verify-selection-offline D.5: verify-selection over a blocks file (no daemon)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
@@ -721,6 +722,17 @@ void print_usage() {
         "      mismatch, unauthenticated seed, or missing input → UNVERIFIABLE\n"
         "      (exit 1). >1 case-open for one case_id is surfaced as permanent\n"
         "      public EVIDENCE.\n"
+        "  verify-selection-offline --blocks <file|-> --domain <D>\n"
+        "                   --case-id <hex> --seed-hex <hex> [--member <hex>] [--json]\n"
+        "      OFFLINE (no daemon) counterpart of verify-selection: decide the\n"
+        "      selection from a JSON ARRAY of ALREADY-committee-authenticated full\n"
+        "      blocks (obtained + verified out of band, e.g. verify-chain) plus the\n"
+        "      ALREADY-authenticated beacon seed (confirmed via verify-rand). Runs\n"
+        "      the same collect + first-open-wins + roster cutoff-freeze + d5_draw\n"
+        "      re-derivation (verify_selection_from_blocks) → SELECTED /\n"
+        "      NOT_SELECTED / UNVERIFIABLE, never a false SELECTED. Used by the D.5\n"
+        "      reference-RP end-to-end (SPEC §12 inc.6b). The CALLER owns the block\n"
+        "      committee-authentication + the seed's S-042 binding.\n"
         "\n"
         "Equivocation forensics (offline, no daemon):\n"
         "  verify-equivocation --in <event.json>\n"
@@ -9648,6 +9660,77 @@ int cmd_verify_selection(int argc, char** argv) {
     }
 }
 
+// verify-selection-offline — OFFLINE (no daemon): the D.5 citizen decides a
+// selection from a JSON array of ALREADY-committee-authenticated full blocks
+// (obtained + verified out of band, e.g. `verify-chain`) plus the ALREADY-
+// authenticated beacon seed (confirmed via `verify-rand`). Runs the SAME
+// collect_d5_streams + first-open-wins + roster cutoff-freeze + d5_draw
+// re-derivation as the live `verify-selection` (verify_selection_from_blocks) —
+// NEVER a false SELECTED. This is the deterministic counterpart used by the
+// reference-RP end-to-end (SPEC §12 inc.6b): d5rp produces the streams, they are
+// placed in blocks, and this verifies the published result. The caller is
+// responsible for the block committee-authentication + the seed's S-042 binding.
+int cmd_verify_selection_offline(int argc, char** argv) {
+    std::string blocks_path, domain, case_id_hex, seed_hex, member_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--blocks"   && i + 1 < argc) blocks_path = argv[++i];
+        else if (a == "--domain"   && i + 1 < argc) domain = argv[++i];
+        else if (a == "--case-id"  && i + 1 < argc) case_id_hex = argv[++i];
+        else if (a == "--seed-hex" && i + 1 < argc) seed_hex = argv[++i];
+        else if (a == "--member"   && i + 1 < argc) member_hex = argv[++i];
+        else if (a == "--json") json_out = true;
+        else { std::cerr << "verify-selection-offline: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (blocks_path.empty() || domain.empty() || case_id_hex.empty() || seed_hex.empty()) {
+        std::cerr << "verify-selection-offline: --blocks, --domain, --case-id, --seed-hex are required\n";
+        return 1;
+    }
+    try {
+        std::vector<uint8_t> case_id = from_hex(case_id_hex);
+        Hash seed = from_hex_arr<32>(seed_hex);   // throws on bad hex / wrong length
+        std::vector<uint8_t> member;
+        if (!member_hex.empty()) member = from_hex(member_hex);
+
+        json doc;
+        if (blocks_path == "-") { doc = json::parse(std::cin); }
+        else {
+            std::ifstream f(blocks_path);
+            if (!f) { std::cerr << "verify-selection-offline: cannot open --blocks " << blocks_path << "\n"; return 1; }
+            doc = json::parse(f);
+        }
+        if (!doc.is_array()) {
+            std::cerr << "verify-selection-offline: --blocks must be a JSON array of block objects\n";
+            return 1;
+        }
+        std::vector<json> blocks(doc.begin(), doc.end());
+
+        auto r = verify_selection_from_blocks(blocks, domain, case_id, seed.data(), member);
+        const char* verdict =
+            r.verdict == SelectionVerdict::SELECTED     ? "SELECTED" :
+            r.verdict == SelectionVerdict::NOT_SELECTED ? "NOT_SELECTED" : "UNVERIFIABLE";
+        if (json_out) {
+            json out = {
+                {"domain", domain}, {"verdict", verdict},
+                {"multiple_case_opens", r.multiple_case_opens},
+                {"eligible_count", r.eligible_count},
+            };
+            if (!r.detail.empty()) out["detail"] = r.detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << "verify-selection-offline " << domain << ": " << verdict << "\n";
+            if (r.multiple_case_opens)
+                std::cout << "  WARNING: multiple case-opens for case_id — permanent public EVIDENCE\n";
+            if (!r.detail.empty()) std::cout << "  " << r.detail << "\n";
+        }
+        return (r.verdict == SelectionVerdict::UNVERIFIABLE) ? 1 : 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-selection-offline: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // verify-rand — LIVE: authenticate cumulative_rand[H] (the MPDH beacon the D.5
 // government random-selection DApp draws from) via the S-042 successor binding.
 // Fetches block H + H+1 from the daemon, anchors genesis, and never reports a
@@ -10015,6 +10098,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
         if (cmd == "verify-rand")           return cmd_verify_rand(sub_argc, sub_argv);
         if (cmd == "verify-selection")      return cmd_verify_selection(sub_argc, sub_argv);
+        if (cmd == "verify-selection-offline") return cmd_verify_selection_offline(sub_argc, sub_argv);
         if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
         if (cmd == "selftest-verify-selection") return cmd_selftest_verify_selection(sub_argc, sub_argv);
     } catch (const std::exception& e) {

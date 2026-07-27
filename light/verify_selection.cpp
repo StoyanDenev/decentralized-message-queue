@@ -221,25 +221,22 @@ SelectionResult verify_selection_at(
                          /*track_registry=*/false, expected_k, bft_enabled,
                          &full_blocks);
 
-    // ── 3. Decode the roster / case-open / result streams for this case. ──
+    // ── 3. Collect the streams once to find the canonical case-open's
+    //       draw_height — the height the beacon seed must be authenticated at. ──
     std::vector<D5RosterOp>   roster;
     std::vector<D5CaseOpenAt> case_opens;
     std::vector<D5ResultAt>   results;
     collect_d5_streams(full_blocks, domain, case_id, roster, case_opens, results);
-
     if (case_opens.empty()) {
         res.detail = "no case-open for case_id on the authenticated chain";
         return res;
     }
-    res.multiple_case_opens = (case_opens.size() > 1);
-
-    // ── 4. Canonical (first-open-wins) case-open = the smallest block height. ──
     size_t first = 0;
     for (size_t i = 1; i < case_opens.size(); i++)
         if (case_opens[i].height < case_opens[first].height) first = i;
     const D5CaseOpenAt& co = case_opens[first];
 
-    // ── 5. Authenticate the beacon seed cumulative_rand[draw_height] via the
+    // ── 4. Authenticate the beacon seed cumulative_rand[draw_height] via the
     //       S-042 successor binding (verify_rand_from_blocks). Any shortfall =
     //       UNVERIFIABLE, never a guessed seed. ──
     nlohmann::json bh  = rpc.call("block", {{"index", co.draw_height}});
@@ -258,12 +255,44 @@ SelectionResult verify_selection_at(
     }
     Hash seed = from_hex_arr<32>(rr.cumulative_rand_hex);
 
-    // ── 6. Materialize the eligible roster as of the canonical cutoff. ──
+    // ── 5. With the committee-authenticated blocks + authenticated seed in hand,
+    //       the rest is the daemon-free pipeline (collect → canonical → filter →
+    //       pick → core), shared with the offline citizen path. ──
+    return verify_selection_from_blocks(full_blocks, domain, case_id, seed.data(),
+                                        queried_member);
+}
+
+SelectionResult verify_selection_from_blocks(
+    const std::vector<nlohmann::json>& blocks,
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    const uint8_t seed32[32],
+    const std::vector<uint8_t>& queried_member) {
+
+    SelectionResult res;   // default verdict UNVERIFIABLE
+
+    std::vector<D5RosterOp>   roster;
+    std::vector<D5CaseOpenAt> case_opens;
+    std::vector<D5ResultAt>   results;
+    collect_d5_streams(blocks, domain, case_id, roster, case_opens, results);
+
+    if (case_opens.empty()) {
+        res.detail = "no case-open for case_id in the supplied blocks";
+        return res;
+    }
+    res.multiple_case_opens = (case_opens.size() > 1);
+
+    // first-open-wins: the canonical case-open is the one at the SMALLEST height.
+    size_t first = 0;
+    for (size_t i = 1; i < case_opens.size(); i++)
+        if (case_opens[i].height < case_opens[first].height) first = i;
+    const D5CaseOpenAt& co = case_opens[first];
+
+    // Materialize the eligible roster as of the canonical cutoff.
     std::vector<D5RosterOp> elig_ops =
         filter_roster_to_cutoff(roster, co.roster_cutoff_height);
 
-    // ── 7. Pick the published result referencing the canonical draw_height
-    //       (min height wins, mirroring first-open-wins). ──
+    // Pick the published result at the canonical draw_height (min height wins).
     const D5ResultAt* chosen = nullptr;
     for (const auto& r : results) {
         if (r.draw_height != co.draw_height) continue;
@@ -275,12 +304,11 @@ SelectionResult verify_selection_at(
         return res;
     }
 
-    // ── 8. Pure core: re-derive d5_draw over (seed, eligible roster) under the
-    //       canonical case-open, compare to the published result, decide the
-    //       queried member. NEVER a false SELECTED. ──
+    // Pure core: re-derive d5_draw over (seed, eligible roster) under the
+    // canonical case-open, compare to the published result, decide the member.
     std::vector<uint8_t> domain_bytes(domain.begin(), domain.end());
     SelectionResult core = verify_selection_core(
-        domain_bytes, case_id, seed.data(), elig_ops, case_opens, *chosen,
+        domain_bytes, case_id, seed32, elig_ops, case_opens, *chosen,
         queried_member);
     core.multiple_case_opens = res.multiple_case_opens || core.multiple_case_opens;
     return core;

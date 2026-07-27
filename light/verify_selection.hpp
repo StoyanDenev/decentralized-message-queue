@@ -103,6 +103,23 @@ SelectionResult verify_selection_core(
 std::vector<D5RosterOp> filter_roster_to_cutoff(
     const std::vector<D5RosterOp>& ops, uint64_t cutoff);
 
+// Offline citizen core (SPEC §12 inc.6b). Given a set of ALREADY-committee-
+// authenticated full `blocks` (the caller obtained them via the committee-
+// authenticated full-block walk, e.g. verify-chain) and the ALREADY-authenticated
+// beacon seed (the caller confirmed cumulative_rand[draw_height] via verify-rand),
+// decide the selection with NO daemon: collect the roster/case-open/result
+// streams, pick the first-open-wins canonical case-open, freeze the roster to its
+// roster_cutoff_height, pick the result at that draw_height, and run
+// verify_selection_core. NEVER a false SELECTED. This is the pure post-walk
+// pipeline `verify_selection_at` delegates to once it has the blocks + seed; the
+// offline `verify-selection-offline` CLI calls it directly over a blocks file.
+SelectionResult verify_selection_from_blocks(
+    const std::vector<nlohmann::json>& blocks,
+    const std::string& domain,
+    const std::vector<uint8_t>& case_id,
+    const uint8_t seed32[32],
+    const std::vector<uint8_t>& queried_member);
+
 // Live composite (the thin CLI spine, SPEC §12 inc.5 tail). Given an UNTRUSTED
 // daemon `rpc`, the genesis-seeded committee, the D.5 `domain`, a `case_id`, and
 // an optional `queried_member`, it:

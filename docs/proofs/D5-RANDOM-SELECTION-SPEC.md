@@ -335,6 +335,22 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    submit the produced streams on a 3-of-5 in-process/DSF fixture and run the real `determ-light
    verify-selection` against them. (A LOW audit ridealong — machine-readable Apache SPDX headers on
    the d5draw/d5codec primitives — is deferred to its own change to avoid a full-tree recompile.)
+   **inc.6b SHIPPED — the reference-RP end-to-end, DETERMINISTIC (not a live cluster).** The live
+   multi-node `DAPP_CALL` apply-path is a known TIME_WAIT flake under K-of-K consensus
+   (`tools/test_dapp_e2e.sh:206` — the codebase covers apply-semantics in-process instead), so the
+   e2e proves the PRODUCER → CITIZEN link deterministically: `tools/test_d5_selection_e2e.sh` runs
+   `d5rp emit` (the BUSL producer), wraps the three payloads into committee-authenticated block
+   bodies at `h_o < H < h_s`, and runs the REAL Apache citizen `determ-light
+   verify-selection-offline` over them → **SELECTED**. To enable it, `verify_selection_at`'s pure
+   post-walk pipeline was extracted into `verify_selection_from_blocks` (collect → first-open-wins →
+   roster cutoff-freeze → `d5_draw` re-derivation; no daemon), and a `verify-selection-offline
+   --blocks <file> --domain --case-id --seed-hex [--member]` CLI decides a selection from
+   already-committee-authenticated blocks + an already-`verify-rand`-authenticated seed — the offline
+   counterpart to the live `verify-selection`, sharing its exact core. The e2e asserts (1) the RP's
+   published result verifies (SELECTED), (2) a non-roster member → NOT_SELECTED (never a false
+   SELECTED), (3) a byte-flipped result block → UNVERIFIABLE (fail-closed) — the built-in
+   falsification. Both platforms green. So the full flow — RP produces → chain orders → citizen
+   re-derives + refutes — is demonstrated end-to-end, unblocking the `sdk/rp` extraction (item 8).
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs
    index; claims + falsify tables). FAST + falsify-on-mutant green both platforms.
 8. Ship gate: G5/G6 already green (2026-07-26). Then, as a **separate later front item**, extract
