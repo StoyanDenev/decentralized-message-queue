@@ -34,12 +34,33 @@ if [ -z "$D5RP" ] || [ ! -x "$D5RP" ]; then
   exit 0
 fi
 
+# ── 1. the C self-contained round-trip gate ──
 OUT=$("$D5RP" selftest 2>&1); RC=$?
-
-if [ "$RC" -eq 0 ] && echo "$OUT" | grep -q "PASS: selftest-d5rp"; then
-  echo "  PASS: test_d5rp"
-  exit 0
+if [ "$RC" -ne 0 ] || ! echo "$OUT" | grep -q "PASS: selftest-d5rp"; then
+  echo "  FAIL: test_d5rp (C selftest)"
+  echo "$OUT" | grep -E "FAIL|pass / " | head -10
+  exit 1
 fi
-echo "  FAIL: test_d5rp"
-echo "$OUT" | grep -E "FAIL|pass / " | head -10
-exit 1
+
+# ── 2. INDEPENDENT dual-oracle (python-prove-first): parse the DAPP_CALL envelope
+#       + d5codec + re-derive the lowest-hash draw with a separate implementation
+#       (tools/verify_d5rp.py, shares no code with the C producer / its selftest),
+#       asserting the RP's published `result` == the independent canonical draw. ──
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python
+if ! "$PY" tools/verify_d5rp.py --selftest >/dev/null 2>&1; then
+  echo "  FAIL: test_d5rp (python oracle selftest failed)"; exit 1
+fi
+if ! "$D5RP" emit | "$PY" tools/verify_d5rp.py --check - >/dev/null 2>&1; then
+  echo "  FAIL: test_d5rp (independent oracle rejected the RP's emit output)"; exit 1
+fi
+
+# ── 3. no-drift: the committed vector must equal the current emit bytes. ──
+TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+"$D5RP" emit | "$PY" tools/verify_d5rp.py --gen - --out "$TMP" >/dev/null 2>&1
+if ! diff -q "$TMP" tools/vectors/d5rp.json >/dev/null 2>&1; then
+  echo "  FAIL: test_d5rp (committed tools/vectors/d5rp.json drifted from d5rp emit)"; exit 1
+fi
+
+echo "  PASS: test_d5rp"
+exit 0

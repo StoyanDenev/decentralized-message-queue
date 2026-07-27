@@ -320,7 +320,15 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    seed** (NOT the result's seed field — mirroring `verify_selection_core`, which never trusts the
    RP's seed claim) → assert it EQUALS the published `result`; a tamper NEG confirms the round-trip
    catches a byte-flipped selected id. Falsify-on-mutant: a producer that publishes a non-canonical
-   result flips ONLY the "published == canonical" assertion RED. Adversarially audited (workflow
+   result flips ONLY the "published == canonical" assertion RED. **Independent dual-oracle**
+   (python-prove-first, DECISION-LOG D2): `tools/verify_d5rp.py` re-parses the DAPP_CALL envelope
+   (the u32 **little-endian** `ct_len`, DISTINCT from the big-endian d5codec internals — the exact
+   silent-divergence a citizen `collect_d5_streams` would reject) + decodes the payloads + re-derives
+   the draw via the frozen `verify_d5_draw` oracle, sharing NO code with the C producer or its
+   selftest, and confirms the RP's published `result` == the independent canonical draw. The wrapper
+   `tools/test_d5rp.sh` runs the C selftest + `d5rp emit | verify_d5rp.py --check -` + a no-drift
+   check against the frozen `tools/vectors/d5rp.json`; the oracle's own selftest bakes in a
+   corrupted-result NEG and a big-endian-`ct_len` NEG (proving it is non-vacuous). Adversarially audited (workflow
    `wf_7187e858`, 3 lenses, 0 HIGH): fixes applied — deleted the unused `d5_rp_envelope` (dead
    surface), the seed-fidelity re-derivation, dropped two redundant CTRL asserts, and bounded the
    selftest stack (`RP_DECODE_CAP`, Minix-portable). **Remaining (inc.6b):** the live end-to-end —
