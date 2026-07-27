@@ -96,7 +96,8 @@ def selftest():
     # Build a minimal emit-shaped input from the codec encoders (independent of
     # the C), verify it round-trips through the SDK, and confirm a corrupted
     # result + a big-endian ct_len are REJECTED.
-    from verify_d5_codec import enc_roster, enc_case_open, enc_result, ROSTER_ADD
+    from verify_d5_codec import (enc_roster, enc_case_open, enc_result,
+                                 ROSTER_ADD, ROSTER_REMOVE)
 
     def env(topic, ct):
         tb = topic.encode()
@@ -142,6 +143,34 @@ def selftest():
             raise AssertionError("SDK accepted a big-endian ct_len")
     except D5Error:
         pass
+
+    # NEG (SDK hardening — Finding B, SDK↔C parity): a lone ROSTER_REMOVE envelope
+    # must be REFUSED. The single-triple SDK cannot fold ADD/REMOVE; treating a
+    # REMOVE list as the eligible set was a false SELECTED vs determ-light (which
+    # folds the full stream). The op-ADD guard forces the caller to determ-light.
+    remove_roster = env("roster", enc_roster(ROSTER_REMOVE, ids))
+    try:
+        verify_result(domain, remove_roster, caseo, result, seed)
+    except D5Error:
+        pass
+    else:
+        raise AssertionError("SDK accepted a lone ROSTER_REMOVE as the eligible set")
+
+    # NEG (SDK hardening — Finding B, codec bounds): the canonical C codec rejects
+    # a zero-length and an oversized (> D5_MAX_FIELD) member id (d5codec.c:88-91);
+    # the SDK decoder must match, else an oversized/empty-id roster verifies in the
+    # SDK but is UNVERIFIABLE in determ-light.
+    def bad_roster(id_len):
+        return (bytes([1, 1, ROSTER_ADD]) + (1).to_bytes(2, "big")
+                + id_len.to_bytes(2, "big") + (b"x" * min(id_len, 8)))
+    for badlen, label in [(0, "zero-length"), (5000, "oversized")]:
+        try:
+            decode_roster(bad_roster(badlen))
+        except D5Error:
+            pass
+        else:
+            raise AssertionError("SDK codec accepted a %s member id" % label)
+
     print("verify_d5rp selftest: PASS")
 
 

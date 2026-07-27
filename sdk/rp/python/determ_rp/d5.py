@@ -1,21 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Determ Contributors
-"""D.5 government random-selection — relying-party / citizen VERIFICATION SDK.
+"""D.5 government random-selection — relying-party / citizen draw-CONSISTENCY SDK.
 
 The Apache-2.0 client-side surface of D.5 (SPEC docs/proofs/D5-RANDOM-SELECTION-SPEC.md):
-given the three canonical-binary `DAPP_CALL` streams a court authority published
-(`roster` / `case-open` / `result`) and the committee-authenticated beacon seed,
-INDEPENDENTLY re-derive the lowest-hash draw and refute any published result that
-disagrees — NEVER a false SELECTED. This is the reusable extraction of the
-verification logic the reference build ships in `tools/verify_d5rp.py`; a relying
-party or any citizen can `import determ_rp.d5` and check a draw with no daemon and
-no C toolchain. Dependency-free (stdlib `hashlib` only).
+given ONE already-canonicalized triple — a single `ROSTER_ADD` envelope, its
+`case-open`, and the published `result` — plus the committee-authenticated beacon
+seed, INDEPENDENTLY re-derive the lowest-hash draw and refute a published result
+that disagrees. It is the reusable extraction of the draw check the reference build
+ships in `tools/verify_d5rp.py`; `import determ_rp.d5` and check a draw with no
+daemon and no C toolchain. Dependency-free (stdlib `hashlib` only).
 
-The BUSL-1.1 *producer* side (building the streams + running a deployment) lives
-in `dapps/d5-random-selection/` and is NOT part of this Apache SDK. The caller is
-responsible for authenticating the blocks the streams came from (light-client
-committee-sig proofs) and the seed (the S-042 successor binding) — those verifiers
-are the other planned `sdk/rp` components.
+SCOPE / TRUST BOUNDARY (read before relying on a verdict — provable security, B3,
+nothing aspirational). `verify_result` proves ONE thing: the published selection
+equals `d5_draw(authenticated_seed, this ADD-roster, this case-open)`, with the
+canonical-binary codec's fail-closed bounds. It does NOT, and structurally CANNOT
+(it sees no chain, no block heights, and no committee signatures), establish the
+rest of the SPEC's soundness chain. The CALLER is responsible for:
+  * committee-authenticating the blocks the streams came from (light-client
+    committee-sig proofs) and the seed (the S-042 successor binding);
+  * the SPEC §9 height ordering `h_r <= h_o < H < h_s`;
+  * folding the FULL roster ADD/REMOVE stream and freezing it to
+    `roster_cutoff_height` (this SDK rejects a non-ADD op rather than silently
+    treat a lone REMOVE as the eligible set);
+  * first-open-wins across multiple `case-open`s;
+  * stream COMPLETENESS (that no on-chain roster/case-open/result was hidden).
+A citizen facing an UNTRUSTED daemon must therefore use `determ-light
+verify-selection`, which performs ALL of the above; this SDK alone is a draw-
+consistency check over a caller-canonicalized, caller-authenticated triple, NOT a
+standalone trustless verifier. The BUSL-1.1 *producer* side lives in
+`dapps/d5-random-selection/` and is NOT part of this Apache SDK.
 
 Wire layouts (SPEC §3/§7):
     DAPP_CALL envelope   [u8 topic_len][topic][u32 LE ct_len][ct]   (ct_len is LITTLE-endian)
@@ -29,6 +42,12 @@ import hashlib
 
 ALGO_LOWEST_HASH = 1
 _MSG_ROSTER, _MSG_CASE_OPEN, _MSG_RESULT = 1, 2, 3
+ROSTER_ADD, ROSTER_REMOVE = 0, 1
+# Fail-closed codec bounds — MUST match src/dapp/d5codec.c / include/determ/dapp/d5draw.h
+# (D5_MAX_ROSTER / D5_MAX_FIELD). A decoder that omits them accepts oversized or
+# empty-id rosters the canonical C codec rejects, diverging from determ-light.
+D5_MAX_ROSTER = 16384   # max members per draw / selection
+D5_MAX_FIELD  = 4096    # max length-prefixed field (domain / case_id / member-id)
 
 
 class D5Error(Exception):
@@ -76,7 +95,15 @@ class _Cur:
     def u16(self): return int.from_bytes(self.take(2), "big")
     def u32(self): return int.from_bytes(self.take(4), "big")
     def u64(self): return int.from_bytes(self.take(8), "big")
-    def lp(self):  return self.take(self.u16())
+
+    def lp(self):
+        # Length-prefixed field with the canonical C codec's fail-closed bound:
+        # every field (case_id / member-id / selected-id) is in [1, D5_MAX_FIELD].
+        n = self.u16()
+        if n == 0 or n > D5_MAX_FIELD:
+            raise D5Error("length-prefixed field out of bounds [1, %d]: %d"
+                          % (D5_MAX_FIELD, n))
+        return self.take(n)
 
     def end(self):
         if self.o != len(self.b):
@@ -105,7 +132,12 @@ def decode_roster(ct):
     if c.u8() != 1:            raise D5Error("roster: bad fmt")
     if c.u8() != _MSG_ROSTER:  raise D5Error("roster: bad msg_type")
     op = c.u8()
-    ids = [c.lp() for _ in range(c.u16())]
+    if op not in (ROSTER_ADD, ROSTER_REMOVE):
+        raise D5Error("roster: bad op %d" % op)
+    count = c.u16()
+    if count == 0 or count > D5_MAX_ROSTER:
+        raise D5Error("roster count out of bounds [1, %d]: %d" % (D5_MAX_ROSTER, count))
+    ids = [c.lp() for _ in range(count)]
     c.end()
     return op, ids
 
@@ -128,7 +160,14 @@ def decode_result(ct):
     cid = c.lp()
     H = c.u64(); cutoff = c.u64(); seed = c.take(32); algo = c.u8()
     n = c.u32(); m = c.u32()
-    sel = [c.lp() for _ in range(n + m)]
+    # Overflow-safe count bound, mirroring d5codec.c d5_result_decode.
+    if n > D5_MAX_ROSTER or m > D5_MAX_ROSTER - n:
+        raise D5Error("result n/m out of bounds")
+    total = n + m
+    if total == 0 or total > D5_MAX_ROSTER:
+        raise D5Error("result selection count out of bounds [1, %d]: %d"
+                      % (D5_MAX_ROSTER, total))
+    sel = [c.lp() for _ in range(total)]
     c.end()
     return dict(case_id=cid, draw_height=H, roster_cutoff_height=cutoff, seed=seed,
                 draw_algo_version=algo, n_primary=n, m_alternate=m, selected=sel)
@@ -168,6 +207,19 @@ def verify_result(domain, roster_env, case_open_env, result_env, seed):
         raise D5Error("unexpected envelope topics: %r" % ((tr, tc, ts),))
 
     op, roster_ids = decode_roster(roster_ct)
+    if op != ROSTER_ADD:
+        raise D5Error("verify_result handles a single ROSTER_ADD envelope; a lone "
+                      "REMOVE (or a multi-op roster) requires folding the full "
+                      "stream to the cutoff — use determ-light verify-selection")
+    # Dedup like the std::set the full C verifier materializes (a duplicated id
+    # must not occupy two selection ranks). A published result built over a
+    # duplicated roster then fails the count/rank compare below (fail-closed).
+    seen = set(); uniq = []
+    for mid in roster_ids:
+        b = bytes(mid)
+        if b not in seen:
+            seen.add(b); uniq.append(mid)
+    roster_ids = uniq
     co = decode_case_open(case_ct)
     rs = decode_result(res_ct)
 
