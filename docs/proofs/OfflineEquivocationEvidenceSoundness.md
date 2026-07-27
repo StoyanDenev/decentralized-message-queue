@@ -8,6 +8,16 @@ The proof exists because the adjudication trust posture is structural, not crypt
 
 ---
 
+## 0. ⚠ Soundness correction (2026-07-28) — T-OE1 does NOT hold for the shipped mode-(a) verifier
+
+An adversarial proof-claim traceability audit (`wf_6c5a9e49`, independently verified) found that **T-OE1 (§4.2) as stated is FALSE for the shipped verifier**, and the §3.4 "same-target binding" and §7 F-2 reassurances that support it are incorrect. This section is authoritative; the affected claims below carry a pointer back here and must be read subject to it.
+
+**The flaw.** The shipped `cmd_verify_equivocation` (`light/main.cpp:7607-7632`) implements ONLY hash-trusting mode (a): it gates ACCEPT on exactly `{digest_a ≠ digest_b, σ_a ≠ σ_b, Verify(pk,digest_a,σ_a), Verify(pk,digest_b,σ_b)}`. It does **not** bind the two digests to a common `(block_index, generation)` — it cannot, since the digests are opaque 32-byte hashes and the `EquivocationEvent`'s single `block_index` is parsed metadata bound to neither. The `--class`/raw-field recompute of "mode (b)" (§3.2/§3.4/§6.4) is **unshipped** (no such flag or code path exists).
+
+**The attack (no forgery, probability 1).** Committee block-signatures are Ed25519 over the block digest and live in the `creator_block_sigs` of every finalized block, so they are public. An accuser harvests two *genuine* signatures produced by an honest member `M` over two **different-height** block digests `D_{h5}`, `D_{h9}` and assembles `{equivocator: M, digest_a: D_{h5}, sig_a: σ_M(D_{h5}), digest_b: D_{h9}, sig_b: σ_M(D_{h9})}`. The verifier: digests distinct ✓, sigs distinct ✓, both verify under `M`'s key ✓ → **ACCEPT**. `M` signing distinct blocks at distinct heights is its normal job, not equivocation. The T-OE1 proof step "at least one of `h_a,h_b` is a hash `d` did not sign" is unsound: it presumes both hashes share one `(height, generation)`, which the code never checks, so *both* can be genuine and the reduction to an existential forgery collapses.
+
+**Root cause & owner-gate boundary.** This is the **offline mirror** of the on-chain `EQV-height-unbound-forged-slash` (`validator.cpp` `check_equivocation_events`, ~:372-402), a rank-1 consensus vulnerability that is **already escalated and OWNER-GATED** (see `RpcIngressGateAudit.md` §2 / the third gate-gap register). The offline verifier faithfully mirrors the *same* height-unbound V11 predicate — so **T-OE3 (completeness relative to V11) still holds**; it is T-OE1 (soundness) that fails, because *both* sites share the height-unbound flaw. The offline verifier is therefore not an independent on-chain attack surface; correcting it means (i) shipping mode (b) — raw `(block_index, generation)`-carrying evidence recomputed and same-target-gated before ACCEPT — **and** (ii) the owner-gated consensus change binding the digests to one target. Until then the shipped predicate is **height-unbound**: an offline ACCEPT proves only "two distinct digests both signed by `M`", not "`M` equivocated at one target." Do not treat T-OE1's `≤ 2⁻¹²⁸` bound as established for the shipped surface.
+
 ## 1. Scope
 
 The offline verifier is a **per-invocation, pure** surface: each invocation
@@ -105,7 +115,7 @@ Apply the V11 non-triviality gates:
 
 - **Digest distinctness:** `h_a ≠ h_b`. Equal digests are not equivocation (the signer signed one thing, possibly replayed). REJECT on equality (`identical digests — not equivocation`). This is the V11 `digest_a != digest_b` clause.
 - **Signature distinctness:** `σ_a ≠ σ_b`. Under RFC 8032, distinct messages yield distinct deterministic signatures; equal signatures over claimed-distinct digests is a malformed pair. REJECT on equality (`identical signatures`). This is the V11 `sig_a != sig_b` clause.
-- **Same-target binding:** the two hashes pertain to the same `block_index` (and, in mode (b) Phase-1, the same `(prev_hash, aborts_gen)` generation). In hash-trusting mode (a) this is implicit — a single `EquivocationEvent` carries one `block_index` for both halves (`block.hpp:258`). In recompute mode (b) the verifier checks that both raw messages declare the same `(block_index)` [and `(prev_hash, aborts_gen)` for Phase-1] before recomputing, REJECT-ing a cross-target pair (`messages target different (height,generation) — legitimate distinct signing, not equivocation`). This is the gate that prevents a genuine cross-round signature pair from being mis-adjudicated as equivocation (the Subcase b.2 / T-2 concern of FA6 / S-006, handled offline).
+- **Same-target binding:** ⚠ **See §0 — this bullet is INCORRECT for the shipped verifier.** The claim that same-target is "implicit in mode (a)" because "a single `EquivocationEvent` carries one `block_index` for both halves" is false: that `block_index` is parsed metadata bound to *neither* opaque digest, so the shipped mode (a) accepts a genuine cross-height pair. The recompute mode (b) that *would* gate `(block_index)` [and `(prev_hash, aborts_gen)`] before ACCEPT is **unshipped**. Consequently the shipped predicate is height-unbound (the offline mirror of the owner-gated on-chain `EQV-height-unbound`); it does **not** prevent a genuine cross-round signature pair from being mis-adjudicated as equivocation. Original (aspirational) text retained for the mode-(b) design: *the two hashes pertain to the same `block_index` (and, in mode (b) Phase-1, the same `(prev_hash, aborts_gen)` generation); in recompute mode (b) the verifier checks that both raw messages declare the same `(block_index)` before recomputing, REJECT-ing a cross-target pair.*
 
 On passing all four steps the verifier emits **ACCEPT** with a verdict record: `{equivocator, block_index, class, digest_a, digest_b, would_slash: true}`.
 
@@ -171,7 +181,9 @@ This is the offline analogue of `LightClientThreatModel.md` L-6 (fail-closed exi
 
 ### 4.2 Theorem T-OE1 (soundness — no false ACCEPT against an honest signer)
 
-**Statement.** Under (A1) Ed25519 EUF-CMA, and conditional on the supplied `pk` being `d`'s genuine registered key (i.e., `¬A_keymap`), if `d` is honest (H1 — `d` signs at most one message per `(block_index, generation)` tuple), then the verifier emits ACCEPT on `A_accuser`'s evidence with probability `≤ 2⁻¹²⁸` per fabrication attempt.
+> ⚠ **This theorem does NOT hold for the shipped mode-(a) verifier — see §0.** The proof below presumes both evidence hashes share one `(block_index, generation)`; the shipped code never binds that, so an honest signer can be framed with a genuine cross-height pair (probability 1, no forgery). The statement/proof are retained as the *target* property that shipping mode (b) + the owner-gated on-chain height-bind would restore.
+
+**Statement (target, not yet established for the shipped surface).** Under (A1) Ed25519 EUF-CMA, and conditional on the supplied `pk` being `d`'s genuine registered key (i.e., `¬A_keymap`), if `d` is honest (H1 — `d` signs at most one message per `(block_index, generation)` tuple), then the verifier emits ACCEPT on `A_accuser`'s evidence with probability `≤ 2⁻¹²⁸` per fabrication attempt.
 
 **Adversary game.**
 
@@ -277,9 +289,9 @@ As in T-OE3's caveat, recompute mode (b)'s completeness depends on the local `ma
 
 **Surface.** In mode (a), the verifier trusts that `digest_a`/`digest_b` are over genuine protocol messages (it checks sigs over the hashes, not what the hashes are *over*).
 
-**Soundness impact.** None for the slash-prediction claim — the chain also stores only the hashes and slashes on the two-sig proof over them (`block.hpp:256-262`). If a signer genuinely signed two distinct 32-byte values at the same target, that *is* equivocation by the protocol's definition, regardless of what the values pre-image to. The "what the hash is over" question is a mode-(b) forensic enrichment, not a soundness gap.
+**Soundness impact.** ⚠ **The original "None" here is WRONG — see §0.** The reassurance "if a signer genuinely signed two distinct 32-byte values *at the same target*, that *is* equivocation" is exactly the false step: mode (a) never establishes "at the same target". Because the two digests are unbound to any common `(block_index, generation)`, a genuine cross-height pair (two legitimate distinct-height block-sigs by an honest member) passes all four gates → a false ACCEPT against an honest signer. Mode (a) faithfully mirrors the chain's V11 predicate, but that predicate is itself height-unbound (the owner-gated `EQV-height-unbound`), so the shared soundness gap is real, not a mere "forensic enrichment". T-OE3 (completeness vs V11) is unaffected; T-OE1 (soundness) fails.
 
-**Mitigation.** None needed; mode (a) faithfully mirrors the chain. Mode (b) is available when pre-image inspection is desired.
+**Mitigation.** The offline fix is the unshipped mode (b): require raw `(block_index, generation)`-carrying evidence, recompute both digests, and REJECT a cross-target pair before ACCEPT. This must land together with the owner-gated on-chain height-bind (`validator.cpp check_equivocation_events`) so the offline verdict continues to mirror the chain. Until both ship, treat an ACCEPT as "two distinct digests both signed by `d`", not "`d` equivocated at one target".
 
 ### F-3 Cross-invocation correlation is operator's responsibility
 
@@ -325,11 +337,11 @@ These are *suggested* surfaces for the Lane-C verifier owner; this proof's corre
 ## 9. Status
 
 - **Spec.** Complete (this document).
-- **Implementation.** The offline verifier subcommand is a Lane-C `determ-light` surface (owned separately); this document is the soundness proof that surface must satisfy. The verifier reuses existing primitives (`EquivocationEvent::from_json`, `parse_committee`, `crypto::verify`, the digest-recompute copies) — no new cryptographic primitive.
+- **Implementation.** The offline verifier subcommand is **shipped** (`determ-light verify-equivocation`, `light/main.cpp:7552-7680`) and gated by a 12-assertion FAST test (`tools/test_light_verify_equivocation.sh`) — the earlier "Lane-C, owned separately, should it land" framing was stale. Only hash-trusting mode (a) is implemented; the `--class`/raw-field recompute of mode (b) (§3.2/§3.4/§6.4) is **not shipped**. The verifier reuses existing primitives (`EquivocationEvent::from_json`, `parse_committee`, `crypto::verify`) — no new cryptographic primitive.
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA) for T-OE1; A2 (SHA-256 collision resistance) transitively for the digest-distinctness ⇒ message-distinctness step and for mode-(b) recompute determinism; H1 (honest-signer single-message) for the soundness reduction. A3/A4 are not invoked.
 - **Adversary model.** `A_accuser` (fabricating evidence author). Explicitly out of scope: `A_crypto`, `A_keymap`, `A_local`, `A_net` (no transport at all — pure offline).
 - **Composes with.** FA6 (same predicate, offline site), S-006 (digest-agnostic two-class coverage), FA-Apply-10 (slash prediction), LightClientThreatModel (pure-verifier fail-closed posture). Introduces no new chain-level invariant.
-- **Theorems.** T-OE0 (total adjudicability), T-OE1 (soundness — no false ACCEPT against honest, `≤ 2⁻¹²⁸`/attempt), T-OE2 (non-triviality — replays/self-pairs/cross-target REJECT), T-OE3 (completeness relative to V11 — faithful slash predictor), T-OE4 (forensic-field independence). All closed against the cited surfaces.
+- **Theorems.** T-OE0 (total adjudicability), T-OE1 (soundness — no false ACCEPT against honest, `≤ 2⁻¹²⁸`/attempt), T-OE2 (non-triviality — replays/self-pairs/cross-target REJECT), T-OE3 (completeness relative to V11 — faithful slash predictor), T-OE4 (forensic-field independence). **T-OE1 and the T-OE2 "cross-target REJECT" clause do NOT hold for the shipped mode-(a) verifier — see §0** (the shipped predicate is height-unbound, the offline mirror of the owner-gated on-chain `EQV-height-unbound`; they would be restored by shipping mode (b) + the owner-gated on-chain height-bind). T-OE0, T-OE3, T-OE4 hold against the shipped surface.
 - **Concrete-security bound.** `Pr[false ACCEPT against honest d] ≤ 2⁻¹²⁸` per attempt; `≤ Q · 2⁻¹²⁸` over `Q` attempts — identical to FA6 T-6, as the verifier evaluates the same predicate. Under Grover (PQ), the bound degrades to `≤ Q · 2⁻⁶⁴` for Ed25519, still negligible for any operational `Q`; PQ-signature migration is the long-term path (`Preliminaries.md` §2.2 note).
 
 ---
