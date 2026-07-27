@@ -8812,11 +8812,22 @@ int cmd_committee_signature_verify(int argc, char** argv) {
         });
     }
 
-    // BFT-style quorum: pass when valid_count >= ceil(2 * present_count / 3).
-    // If no sigs are present at all, present_count == 0 ⇒ required == 0,
-    // but we explicitly fail in that case (no real verification happened).
-    size_t required = (2 * present_count + 2) / 3;   // ceil(2P/3)
-    bool pass = (present_count > 0) && (valid_count >= required);
+    // BFT-style quorum: pass when valid_count >= ceil(2 * K / 3), where K is the
+    // OPERATOR-SUPPLIED committee size (pubkey_of.size()) — NOT present_count.
+    // SECURITY: the denominator MUST be the authoritative committee size, not the
+    // number of signatures the (untrusted) block happens to carry. A block-carried
+    // present_count is fully attacker-controllable: padding K-1 slots with the
+    // sentinel-zero (abstention) drives present_count to 1, so ceil(2*1/3)=1 and a
+    // single valid signature would meet "quorum" — a 1-of-K downgrade the daemon
+    // (required_block_sigs over committee_size) always rejects. Anchoring to
+    // pubkey_of.size() also defeats the sibling attack of shrinking creators[].
+    // (This stays the lean ceil(2/3) check the tool documents; it does NOT try to
+    // reproduce the daemon's per-mode MD=K-of-K vs BFT split — the operator supplies
+    // the round's committee, so supplying the full K for a BFT round is fail-SAFE:
+    // it can only demand MORE sigs, never fewer.)
+    size_t committee_k = pubkey_of.size();
+    size_t required = (2 * committee_k + 2) / 3;   // ceil(2K/3) over the committee
+    bool pass = (committee_k > 0) && (valid_count >= required);
 
     if (json_out) {
         nlohmann::json r;
@@ -8852,6 +8863,72 @@ int cmd_committee_signature_verify(int argc, char** argv) {
         }
     }
     return pass ? 0 : 2;
+}
+
+// ── selftest-committee-quorum ── falsify gate for the committee-size quorum bind.
+// The quorum denominator MUST be the operator-supplied committee size, never the
+// number of signatures the untrusted block carries. Mints real Ed25519 sigs for a
+// 3-member committee, then drives cmd_committee_signature_verify end-to-end:
+//   CTRL 3-of-3 and 2-of-3(+1 abstention) PASS (ceil(2*3/3)=2 met);
+//   NEG  1 valid + 2 sentinel-zero padding must FAIL — present_count=1, so the
+//        MUTANT (present_count denominator) would compute required=ceil(2/3)=1 and
+//        PASS the 1-of-K downgrade the daemon always rejects.
+int cmd_selftest_committee_quorum(int, char**) {
+    int pass = 0, fail = 0;
+    auto check = [&](bool c, const char* m) {
+        if (c) { std::cout << "  ok:   " << m << "\n"; pass++; }
+        else   { std::cout << "  FAIL: " << m << "\n"; fail++; }
+    };
+    std::cout << "=== selftest-committee-quorum: quorum denominator = committee size, "
+                 "not block-carried present_count ===\n";
+    if (!init_libsodium()) { std::cout << "  FAIL: crypto init\n"; return 1; }
+
+    const char* names[3] = {"m1", "m2", "m3"};
+    std::array<std::array<uint8_t, 32>, 3> pk{};
+    std::array<std::string, 3> sig_hex{};
+    std::array<uint8_t, 32> digest{};
+    for (int b = 0; b < 32; ++b) digest[b] = static_cast<uint8_t>(0x11 * (b % 15 + 1));
+    for (int i = 0; i < 3; ++i) {
+        std::array<uint8_t, 32> seed{}; seed.fill(static_cast<uint8_t>(0xA0 + i));
+        std::array<uint8_t, 64> sk{};
+        crypto_sign_seed_keypair(pk[i].data(), sk.data(), seed.data());
+        std::array<uint8_t, 64> sig{}; unsigned long long sl = 0;
+        crypto_sign_detached(sig.data(), &sl, digest.data(), digest.size(), sk.data());
+        sig_hex[i] = to_hex(sig);
+    }
+    const std::string digest_hex = to_hex(digest);
+    const std::string zero_sig(128, '0');
+
+    nlohmann::json comm = nlohmann::json::array();
+    for (int i = 0; i < 3; ++i)
+        comm.push_back({{"domain", names[i]}, {"ed_pub", to_hex(pk[i])}});
+    const std::string comm_path = "selftest_csq_committee.json";
+    { std::ofstream f(comm_path); f << comm.dump(); }
+
+    auto run = [&](const std::array<std::string, 3>& sigs) -> int {
+        nlohmann::json blk;
+        blk["creators"] = {names[0], names[1], names[2]};
+        blk["creator_block_sigs"] = {sigs[0], sigs[1], sigs[2]};
+        const std::string blk_path = "selftest_csq_block.json";
+        { std::ofstream f(blk_path); f << blk.dump(); }
+        const char* argv[] = {"--block", blk_path.c_str(), "--committee",
+                              comm_path.c_str(), "--block-digest", digest_hex.c_str()};
+        int rc = cmd_committee_signature_verify(6, const_cast<char**>(argv));
+        std::remove(blk_path.c_str());
+        return rc;
+    };
+
+    check(run({sig_hex[0], sig_hex[1], sig_hex[2]}) == 0,
+          "3-of-3 valid committee sigs -> PASS (rc 0)");
+    check(run({sig_hex[0], sig_hex[1], zero_sig}) == 0,
+          "2-of-3 (1 abstention) -> PASS (ceil(2K/3)=2 met over K=3)");
+    check(run({sig_hex[0], zero_sig, zero_sig}) == 2,
+          "1-of-3 sentinel-padded downgrade -> FAIL (rc 2): attacker cannot set the quorum denominator");
+
+    std::remove(comm_path.c_str());
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-committee-quorum\n"; return 0; }
+    std::cout << "  FAIL: selftest-committee-quorum\n"; return 1;
 }
 
 // ── bft-quorum ───────────────────────────────────────────────────────────────
@@ -25500,6 +25577,7 @@ int main(int argc, char** argv) {
     if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
+    if (cmd == "selftest-committee-quorum") return cmd_selftest_committee_quorum(argc - 2, argv + 2);
     if (cmd == "verify-equivocation") return cmd_verify_equivocation(argc - 2, argv + 2);
     if (cmd == "bft-quorum")      return cmd_bft_quorum     (argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
