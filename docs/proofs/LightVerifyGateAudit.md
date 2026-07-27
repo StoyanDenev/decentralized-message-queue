@@ -363,12 +363,50 @@ VERIFIED (CT-P1; falsify: reverting `ctx_split_enotes` false-FAILs it) + the pur
 `selftest-ct-collision` (CT-P2; falsify: dropping the OUTPUT half misses the output==input / output==output
 NEGs). Both platforms.
 
-## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2 + CT/enote parity)
+## 1k. CLOSED — verify-state-bundle offline committee-size gate dropped (`test-light-verify-state-bundle-committee-size`, LSB-COMMITTEE-SIZE, 2026-07-27)
+
+A 6-lens adversarial audit (`wf_e73b18ec`) of the 11 remaining unaudited verifier subcommands
+(param-change/value, unstake-eligibility, account, merge-state, shardtip-records, dapp-registration,
+registrant, abort-record, equivocation, state-bundle) found **5 of 6 lenses SOUND** and **one HIGH
+CLIENT-fixable false-VERIFIED gap** (survived 2/2 diverse refutation votes): the OFFLINE
+`verify-state-bundle` verified the bundle's committee-signed SUCCESSOR header with the 3-arg
+`verify_block_sigs(successor, committee, /*bft=*/false)`, so `expected_k` defaulted to 0. With
+`expected_k==0` the LV-1/LV-2 committee-size mode-eligibility gate (verify.cpp: "refusing a quorum
+downgrade") is SKIPPED and the accepted quorum floor becomes `creators.size()` instead of the genesis
+`k_block_sigs`. Under K-of-K mutual distrust ONE colluding genesis committee member M suffices: M serves a
+bundle whose successor is a **1-of-K MUTUAL_DISTRUST** block (`creators=[M]`, one real M-signature). Every
+other bundle leg (key-bind, anchor-index-bind, genesis-pin, `prev_hash == compute_hash(anchor)` binding,
+`state_root == proof_root`, merkle, value_hash) is a structural self-consistency check M satisfies by
+construction, so the offline verifier would emit **VERIFIED** for arbitrary (namespace,key,balance)/
+state_root the full committee never attested. (Via the unconditional `bft=true` retry it also admits a
+reduced-quorum BFT block on a `bft_enabled=false` chain.) The node's `check_creator_selection`
+(validator.cpp) rejects the same successor (`m=1 != k_full=K`). This is the SAME class as the shipped
+LV-1/LV-2 chain-walk fix, on a **4th consumer** that had been missed — the online sibling
+`committee_bound_state_root` and even this file's OWN export side already forward the params.
+
+- **Fix (client-side only; no node/consensus change):** forward `genesis.k_block_sigs` +
+  `genesis.bft_enabled` to both `verify_block_sigs` calls (`genesis` is already loaded above), mirroring
+  `trustless_read.cpp::committee_bound_state_root` and `build_state_bundle`.
+- **Gate** = `test_light_verify_state_bundle_committee_size.sh` (FAST + offline): a real genesis built with
+  `determ genesis-tool build` (no cluster) so the chain-identity pin passes, then a hand-built bundle whose
+  successor is a **1-of-3 MD downgrade** → UNVERIFIABLE with the "quorum downgrade" diagnostic (the mode-
+  eligibility gate is a structural `creators.size()` check reached BEFORE any signature verification, so no
+  real sigs are needed to trip it); a **3-of-3 MD** control passes the gate and falls through to the later
+  signature gate (live, not a tautology). Falsify-on-mutant: reverting to the 3-arg calls (`expected_k=0`)
+  makes the 1-of-3 NEG fall through to the signature gate instead → its diagnostic no longer says "quorum
+  downgrade" → the NEG assert flips. Both platforms.
+
+The other 5 lenses (governance / stake-eligibility / cross-shard-merge / registration / abort-equivocation)
+returned **0 surviving findings** after refutation — those verifiers bind their consumed fields to the
+committee-authenticated walk / `committee_bound_state_root` correctly.
+
+## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2 + CT/enote parity + LSB-committee-size)
 
 Every finding this register enumerated as a future gate is now CLOSED, across the **8 gate-sections
 §1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1), the **LVS-2 committee-metadata
-trio §1i** (CM-1/CM-2/CM-3), and the **CT/enote parity pair §1j** (CT-P1/CT-P2; the CT/enote *soundness*
-surface itself audited clean — 0 false-VERIFIED). No remaining backlog; 0 owner-gated. Any future
+trio §1i** (CM-1/CM-2/CM-3), the **CT/enote parity pair §1j** (CT-P1/CT-P2; the CT/enote *soundness*
+surface itself audited clean — 0 false-VERIFIED), and **§1k LSB-COMMITTEE-SIZE** (the 4th consumer of the
+LV-1/LV-2 class; the other 10 unaudited verifiers audited clean). No remaining backlog; 0 owner-gated. Any future
 light-verifier gap opens a new row here.
 
 ## 3. REFUTED

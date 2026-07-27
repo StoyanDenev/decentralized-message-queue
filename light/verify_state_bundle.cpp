@@ -416,11 +416,25 @@ int verify_state_bundle(const VerifyStateBundleOptions& opts) {
         std::string recomputed_hex = to_hex(recomputed);
 
         // ── 5. Verify the SUCCESSOR header's committee sigs (MD, BFT fallback).
+        //       LV-1/LV-2: forward the genesis k_block_sigs + bft_enabled so
+        //       verify_block_sigs enforces the node's committee-size mode-
+        //       eligibility on the committee-signed successor. WITHOUT them
+        //       expected_k defaults to 0 (verify.hpp) -> the mode-eligibility
+        //       gate is skipped and required=creators.size(), so ONE colluding
+        //       genesis committee member could forge a 1-of-K MUTUAL_DISTRUST
+        //       successor (or, via the bft=true retry, a reduced-quorum BFT
+        //       block on a bft_enabled=false chain) and this OFFLINE verifier
+        //       would emit VERIFIED for state the full K-of-K committee never
+        //       attested. Mirrors committee_bound_state_root (trustless_read.cpp)
+        //       and this file's export side (build_state_bundle) — genesis is
+        //       already loaded above.
         auto vbs = verify_block_sigs(successor_header, committee_json,
-                                     /*bft=*/false);
+                                     /*bft=*/false,
+                                     genesis.k_block_sigs, genesis.bft_enabled);
         if (!vbs.ok) {
             vbs = verify_block_sigs(successor_header, committee_json,
-                                    /*bft=*/true);
+                                    /*bft=*/true,
+                                    genesis.k_block_sigs, genesis.bft_enabled);
         }
         if (!vbs.ok) {
             emit_unverifiable(opts.json_out,
