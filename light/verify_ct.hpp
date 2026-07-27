@@ -12,9 +12,13 @@
 //                               nonce, amount) — the context-bind is what makes
 //                               a captured proof non-redirectable, so the light
 //                               client MUST rebuild the context itself.
-//   CONFIDENTIAL_TRANSFER(14) — DCT1 header + tx.fee == bundle fee + full
-//                               range/balance verify + intra-bundle duplicate-
-//                               input rejection (a dup would claim 2x value).
+//   CONFIDENTIAL_TRANSFER(14) — split off the OPTIONAL trailing NC-8 enote
+//                               region (ctx_split_enotes) → DCT1 header over the
+//                               bundle prefix + tx.fee == bundle fee + full
+//                               range/balance verify + intra-bundle collision
+//                               rejection (a note listed twice — two inputs, or an
+//                               output == an input or another output — claims/burns
+//                               value the balance proof still "balances").
 //
 // SCOPE (honest limits): this is CRYPTOGRAPHIC validity only. Note-SET checks
 // (input notes unspent, output notes fresh — double-spend rejection) need the
@@ -55,5 +59,16 @@ CtTxVerdict verify_ct_tx_json(const json& tx_json, size_t index = 0);
 
 // Walk block_json["transactions"] (absent/empty array => zero CT txs, ok()).
 CtVerifyResult verify_ct_transactions(const json& block_json);
+
+// Structural intra-bundle note collision (STATELESS; mirrors the node validator).
+// Returns true iff any of the n_in input + m output 33-byte commitments collides:
+// two equal inputs, or an output equal to an input or another output. Input
+// commitments start at bundle+15, outputs at bundle+15+n_in*33. A collision lets a
+// bundle claim/burn value the DCT1 balance proof still "balances", so it must be
+// rejected. The pool-existence half (output note already on-chain) is STATE, out of
+// a stateless verifier's scope. CALLER must have validated the bundle layout first
+// (determ_ctx_bundle_verify) so the reads are in-bounds. Pure; the falsify-on-mutant
+// seam (dropping the OUTPUT half re-opens the light-accepts / node-rejects widening).
+bool ct_bundle_has_intra_collision(const uint8_t* bundle, size_t n_in, size_t m);
 
 }  // namespace determ::light

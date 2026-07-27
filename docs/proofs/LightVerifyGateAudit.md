@@ -335,12 +335,41 @@ CM-3 NEG.
 consumer that reads a daemon-controlled header field the walk doesn't recompute — after finding one, audit
 ALL consumers, not just the trigger. "Built + gated" ≠ "adversarially sound".
 
-## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2)
+## 1j. CT/ENOTE — light↔node accept-rule parity (2026-07-27)
+
+A 5-lens adversarial audit (`wf_8f47bd9e`) of the confidential-tx / enote client verifiers found
+**0 false-VERIFIED / false-INCLUDED gaps** — 4 lenses SOUND, and `verify-ct-block` (ANCHOR → BODY-PIN
+`compute_hash == committee-anchored block_hash` → client-side proof re-verify) + `verify-enote-inclusion`
+(the full F-6 bind: KEY = locally-computed `en:` leaf key, VALUE = `SHA256(commitment‖enote)` == the
+committed leaf, ROOT = `committee_bound_state_root`, + merkle path + stale-height check) held up. It did
+surface **2 LOW light-vs-node accept-rule PARITY drifts** (neither forges value, so `verify_ct.cpp`'s
+"MUST stay byte-identical to the validator's" contract was violated in a fail-closed-ish way):
+
+- **CT-P1 (correctness / false-FAILED)** — `verify_ct.cpp` passed the FULL `tx.payload.size()` to the
+  frozen bundle verifiers, but the node splits off the OPTIONAL trailing NC-8 per-output enote region
+  first (`ctx_split_enotes`, validator.cpp:1263). So a legit **enote-bearing** CONFIDENTIAL_TRANSFER the
+  node ACCEPTS was reported FAILED by the light client (a light client would flag a valid committee-
+  attested CT block as INVALID). **Fix:** call `determ::chain::ctx_split_enotes` → `bundle_len`, run the
+  header/verify + commitment offsets over `bundle_len`.
+- **CT-P2 (accept-widening)** — light checked only intra-bundle INPUT duplicates; the node also rejects
+  OUTPUT collisions (output == an input or another output; validator.cpp:1290). A degenerate colliding-
+  output bundle the node rejects was reported VERIFIED by light (no value forged — the balance proof
+  still binds sum(in)=sum(out)+fee, apply no-ops the collision — a submit-time hygiene / S-039
+  completeness parity gap). **Fix:** new pure `ct_bundle_has_intra_collision(bundle, n_in, m)` (shared
+  `seen` over inputs + outputs; the pool-existence half stays out of a stateless verifier's scope).
+
+**Gate** = `test_light_verify_ct.sh` extended: a valid bundle + a structurally-valid NC-8 enote region →
+VERIFIED (CT-P1; falsify: reverting `ctx_split_enotes` false-FAILs it) + the pure offline
+`selftest-ct-collision` (CT-P2; falsify: dropping the OUTPUT half misses the output==input / output==output
+NEGs). Both platforms.
+
+## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2 + CT/enote parity)
 
 Every finding this register enumerated as a future gate is now CLOSED, across the **8 gate-sections
-§1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1) **plus the LVS-2 committee-metadata
-trio §1i** (CM-1/CM-2/CM-3). No remaining backlog; 0 owner-gated. Any future light-verifier gap opens a
-new row here.
+§1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1), the **LVS-2 committee-metadata
+trio §1i** (CM-1/CM-2/CM-3), and the **CT/enote parity pair §1j** (CT-P1/CT-P2; the CT/enote *soundness*
+surface itself audited clean — 0 false-VERIFIED). No remaining backlog; 0 owner-gated. Any future
+light-verifier gap opens a new row here.
 
 ## 3. REFUTED
 

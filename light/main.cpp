@@ -9360,6 +9360,49 @@ int cmd_selftest_readline_cap(int argc, char** argv) {
     return 1;
 }
 
+// selftest-ct-collision — offline, NO daemon: pin ct_bundle_has_intra_collision,
+// the structural intra-bundle note-collision check the CT/enote audit (wf_8f47bd9e)
+// added to restore validator parity (light was checking only INPUT dups; the node
+// also rejects OUTPUT collisions). Decoupled from the range/balance proof (the
+// helper reads only the 33-byte commitment bytes), so it is a pure FAST gate.
+int cmd_selftest_ct_collision(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+    // Build a DCT1-shaped buffer: 15-byte header + n_in*33 input + m*33 output
+    // commitments. Each commitment's 33 bytes are filled with a small distinct id
+    // (equal ids => identical commitment => collision).
+    auto build = [](size_t n_in, size_t m, std::vector<int> in_ids,
+                    std::vector<int> out_ids) {
+        std::vector<uint8_t> b(15 + (n_in + m) * 33, 0);
+        auto setC = [&](size_t off, int id) {
+            for (size_t k = 0; k < 33; ++k) b[off + k] = (uint8_t)id;
+        };
+        for (size_t i = 0; i < n_in; ++i) setC(15 + i * 33, in_ids[i]);
+        for (size_t j = 0; j < m; ++j)   setC(15 + n_in * 33 + j * 33, out_ids[j]);
+        return b;
+    };
+    { auto b = build(2, 2, {1, 2}, {3, 4});
+      check(!ct_bundle_has_intra_collision(b.data(), 2, 2),
+            "ct-collision CTRL: distinct in/out commitments -> no collision"); }
+    { auto b = build(2, 1, {5, 5}, {6});
+      check(ct_bundle_has_intra_collision(b.data(), 2, 1),
+            "ct-collision: duplicate INPUT note -> collision"); }
+    { auto b = build(2, 1, {7, 8}, {7});
+      check(ct_bundle_has_intra_collision(b.data(), 2, 1),
+            "ct-collision (fix): an OUTPUT equal to an INPUT -> collision — the mutant dropping the output half misses it (light-accepts / node-rejects)"); }
+    { auto b = build(1, 2, {9}, {10, 10});
+      check(ct_bundle_has_intra_collision(b.data(), 1, 2),
+            "ct-collision (fix): an OUTPUT equal to another OUTPUT -> collision — the mutant dropping the output half misses it"); }
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-ct-collision\n"; return 0; }
+    std::cout << "  FAIL: selftest-ct-collision\n";
+    return 1;
+}
+
 // selftest-committee-auth — offline, NO daemon: pin the two committee-metadata
 // binding helpers the LVS adversarial audit (wf_517af620) hardened —
 // authenticated_committee (committee-at-height / verify-state-root committee_size)
@@ -10214,6 +10257,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-verify-rand")  return cmd_selftest_verify_rand(sub_argc, sub_argv);
         if (cmd == "selftest-verify-selection") return cmd_selftest_verify_selection(sub_argc, sub_argv);
         if (cmd == "selftest-committee-auth") return cmd_selftest_committee_auth(sub_argc, sub_argv);
+        if (cmd == "selftest-ct-collision") return cmd_selftest_ct_collision(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

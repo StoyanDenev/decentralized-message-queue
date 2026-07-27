@@ -10,6 +10,7 @@
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/shielded.hpp>
+#include <determ/chain/ctx_enote.hpp>   // ctx_split_enotes (NC-8 region split)
 #include <determ/crypto/pedersen/ctxbundle.h>
 
 #include <set>
@@ -81,9 +82,21 @@ CtTxVerdict verify_ct_tx_json(const json& tx_json, size_t index) {
     }
     case TxType::CONFIDENTIAL_TRANSFER: {
         v.is_ct = true;
+        // NC-8 §5: split off the OPTIONAL trailing per-output enote region BEFORE
+        // the frozen bundle verifiers (which demand an EXACT length). Mirrors the
+        // node validator + chain apply (determ::chain::ctx_split_enotes): STRUCTURE
+        // only, ciphertext never inspected. Absent region -> bundle_len ==
+        // payload.size() (byte-identical to pre-NC-8). WITHOUT this, an enote-bearing
+        // CONFIDENTIAL_TRANSFER the node ACCEPTS is falsely reported FAILED.
+        size_t bundle_len = 0;
+        if (determ::chain::ctx_split_enotes(tx.payload.data(), tx.payload.size(),
+                                            &bundle_len, nullptr) != 0) {
+            v.detail = "CONFIDENTIAL_TRANSFER malformed DCT1 bundle or enote region";
+            return v;
+        }
         size_t n_in = 0, m = 0, nbits = 0;
         uint64_t bundle_fee = 0;
-        if (determ_ctx_bundle_header(tx.payload.data(), tx.payload.size(),
+        if (determ_ctx_bundle_header(tx.payload.data(), bundle_len,
                                      &n_in, &m, &nbits, &bundle_fee) != 0) {
             v.detail = "CONFIDENTIAL_TRANSFER malformed DCT1 bundle header";
             return v;
@@ -94,33 +107,18 @@ CtTxVerdict verify_ct_tx_json(const json& tx_json, size_t index) {
                      + std::to_string(bundle_fee) + ")";
             return v;
         }
-        if (determ_ctx_bundle_verify(tx.payload.data(),
-                                     tx.payload.size()) != 0) {
+        if (determ_ctx_bundle_verify(tx.payload.data(), bundle_len) != 0) {
             v.detail = "CONFIDENTIAL_TRANSFER bundle proof INVALID (range/balance)";
             return v;
         }
-        // Intra-bundle duplicate input: listing the same note twice would let
-        // the bundle claim 2x its value — structurally checkable without pool
-        // state, so the light client checks it too (mirrors the validator).
-        {
-            const uint8_t* Cin = tx.payload.data() + 15;
-            std::set<std::string> seen;
-            static const char* H = "0123456789abcdef";
-            for (size_t i = 0; i < n_in; ++i) {
-                std::string k;
-                k.reserve(66);
-                for (size_t b = 0; b < 33; ++b) {
-                    uint8_t byte = Cin[i * 33 + b];
-                    k.push_back(H[byte >> 4]);
-                    k.push_back(H[byte & 0xf]);
-                }
-                if (!seen.insert(k).second) {
-                    v.ok = false;
-                    v.detail = "CONFIDENTIAL_TRANSFER duplicate input note "
-                               "(inflation attempt)";
-                    return v;
-                }
-            }
+        // Intra-bundle structural collision (input or output note listed twice)
+        // would let the bundle claim/burn value the balance proof still "balances".
+        // Mirrors the validator's shared-`seen` input+output check (the pool-
+        // existence half is state, out of a stateless verifier's scope).
+        if (ct_bundle_has_intra_collision(tx.payload.data(), n_in, m)) {
+            v.detail = "CONFIDENTIAL_TRANSFER note collision (a note listed twice as "
+                       "inputs, or an output equal to an input or another output)";
+            return v;
         }
         v.ok = true;
         v.detail = "DCT1 range+balance verified (" + std::to_string(n_in)
@@ -153,6 +151,26 @@ CtVerifyResult verify_ct_transactions(const json& block_json) {
         else      r.failures.push_back(std::move(v));
     }
     return r;
+}
+
+bool ct_bundle_has_intra_collision(const uint8_t* bundle, size_t n_in, size_t m) {
+    const uint8_t* Cin  = bundle + 15;
+    const uint8_t* Cout = bundle + 15 + n_in * 33;
+    static const char* H = "0123456789abcdef";
+    auto keyhex = [&](const uint8_t* C) {
+        std::string k; k.reserve(66);
+        for (size_t b = 0; b < 33; ++b) {
+            k.push_back(H[C[b] >> 4]);
+            k.push_back(H[C[b] & 0xf]);
+        }
+        return k;
+    };
+    std::set<std::string> seen;   // shared across inputs + outputs (mirrors validator)
+    for (size_t i = 0; i < n_in; ++i)
+        if (!seen.insert(keyhex(Cin + i * 33)).second) return true;   // duplicate input
+    for (size_t j = 0; j < m; ++j)
+        if (!seen.insert(keyhex(Cout + j * 33)).second) return true;  // output == input/output
+    return false;
 }
 
 }  // namespace determ::light

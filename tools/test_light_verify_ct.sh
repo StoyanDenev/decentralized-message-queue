@@ -92,6 +92,13 @@ write("ctx_ok.json", tx(14, "alice", "", 0, bundle_fee, 2, bundle_hex))
 write("ctx_bad_fee.json", tx(14, "alice", "", 0, bundle_fee + 1, 2, bundle_hex))
 badb = bytearray(bytes.fromhex(bundle_hex)); badb[-1] ^= 1
 write("ctx_tampered.json", tx(14, "alice", "", 0, bundle_fee, 2, bytes(badb).hex()))
+# NC-8 §5: a valid DCT1 bundle + a structurally-valid trailing per-output enote
+# region (count=1, out_idx=0, elen=49=CTX_ENOTE_MIN of zero bytes). The node splits
+# this off (ctx_split_enotes) before the frozen bundle verifier; the light client
+# MUST too, else it false-FAILs a valid, committee-attested enote-bearing CT block.
+_bb = bytes.fromhex(bundle_hex)
+_region = bytes([1, 0]) + (49).to_bytes(2, "big") + bytes(49)   # 1 enote, output 0, 49B
+write("ctx_enote_ok.json", tx(14, "alice", "", 0, bundle_fee, 2, (_bb + _region).hex()))
 
 # Non-CT tx (plain TRANSFER).
 write("transfer.json", tx(0, "alice", "bob", 5, 1, 0, ""))
@@ -139,6 +146,8 @@ check "UNSHIELD unbound proof REJECTED"            3 $DETERM_LIGHT verify-ct-tx 
 check "DCT1 frozen-corpus bundle VERIFIED"         0 $DETERM_LIGHT verify-ct-tx --file "$TMP/ctx_ok.json"
 check "DCT1 fee mismatch REJECTED"                 3 $DETERM_LIGHT verify-ct-tx --file "$TMP/ctx_bad_fee.json"
 check "DCT1 tampered bundle REJECTED"              3 $DETERM_LIGHT verify-ct-tx --file "$TMP/ctx_tampered.json"
+check "DCT1 + valid NC-8 enote region VERIFIED (validator parity; falsify: reverting ctx_split_enotes false-FAILs this)" \
+                                                   0 $DETERM_LIGHT verify-ct-tx --file "$TMP/ctx_enote_ok.json"
 check "non-CT tx is INVALID (never reads as verified)" \
                                                    3 $DETERM_LIGHT verify-ct-tx --file "$TMP/transfer.json"
 check "missing --file is a usage error"            1 $DETERM_LIGHT verify-ct-tx
@@ -161,6 +170,14 @@ if [ "$V" = "PASS" ] && echo "$DETAIL" | grep -q "none present"; then
   echo "  PASS: block-verify CT-PROOFS vacuous-PASS carries the explicit 0-count"; PASS=$((PASS+1))
 else
   echo "  FAIL: block-verify CT-PROOFS vacuity (verdict '$V', detail '$DETAIL')"; FAIL=$((FAIL+1))
+fi
+
+# Structural intra-bundle note-collision parity (input + output; wf_8f47bd9e) — a
+# pure C selftest of ct_bundle_has_intra_collision, decoupled from the proof crypto.
+if $DETERM_LIGHT selftest-ct-collision 2>&1 | grep -q "PASS: selftest-ct-collision"; then
+  echo "  PASS: ct-bundle intra-collision (input+output) parity selftest"; PASS=$((PASS+1))
+else
+  echo "  FAIL: ct-bundle intra-collision (input+output) parity selftest"; FAIL=$((FAIL+1))
 fi
 
 echo ""
