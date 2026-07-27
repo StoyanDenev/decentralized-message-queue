@@ -437,3 +437,21 @@ if(DETERM_BUILD_CRYPTOTEST)
     target_link_libraries(determ-cryptotest PRIVATE pthread)
   endif()
 endif()
+
+# ── d5rp: the D.5 reference-RP producer (dapps/d5-random-selection, BUSL-1.1) ──
+# The orchestrator side of D.5 (the founding MOTIVATION.md use case; dapps
+# catalog first DApp). Produces the three canonical-binary DAPP_CALL streams
+# (roster / case-open / result) using ONLY the shipped Apache-2.0 primitives
+# determ-crypto-c99 (d5codec + d5draw); it has no consensus authority and the
+# chain never parses its payloads. Its `selftest` round-trips producer output
+# through the codec + an independent lowest-hash re-derivation — the exact
+# contract the Apache-2.0 citizen verifier (`determ-light verify-selection`)
+# enforces adversarially. This target is the substrate from which the Apache-2.0
+# RP SDK (sdk/rp) is later extracted. Pure C99, no OpenSSL, no threads.
+add_executable(d5rp
+  dapps/d5-random-selection/d5rp.c
+  dapps/d5-random-selection/d5rp_main.c
+)
+target_compile_features(d5rp PRIVATE c_std_99)
+target_include_directories(d5rp PRIVATE include)
+target_link_libraries(d5rp PRIVATE determ-crypto-c99)

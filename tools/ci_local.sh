@@ -222,9 +222,9 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "=== ci_local: configure ==="
   cmake -B "$BUILD_DIR" -S . -DCMAKE_BUILD_TYPE=Release || {
     echo "FAIL: ci-local configure failed"; exit 1; }
-  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-cryptotest + determ-dsf ==="
+  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-cryptotest + determ-dsf + d5rp ==="
   cmake --build "$BUILD_DIR" --config Release -j "$JOBS" \
-        --target determ determ-wallet determ-light determ-cryptotest determ-dsf || {
+        --target determ determ-wallet determ-light determ-cryptotest determ-dsf d5rp || {
     echo "FAIL: ci-local build failed"; exit 1; }
 fi
 
@@ -248,7 +248,10 @@ export DETERM_BIN DETERM_WALLET_BIN DETERM_LIGHT_BIN DETERM_CRYPTOTEST_BIN
 # DSF test uses the NATIVE build, not a Windows determ-dsf.exe picked up via WSL
 # interop (which writes traces the Linux shell can't read — an empty-trace RED).
 if DETERM_DSF_BIN=$(find_bin determ-dsf); then export DETERM_DSF_BIN; fi
-echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} ==="
+# d5rp is the D.5 reference-RP producer (dapps/, BUSL). Export the NATIVE build so
+# its FAST selftest wrapper doesn't pick a Windows d5rp.exe via WSL interop.
+if DETERM_D5RP_BIN=$(find_bin d5rp); then export DETERM_D5RP_BIN; fi
+echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} | ${DETERM_D5RP_BIN:-<d5rp: not built>} ==="
 
 echo "=== ci_local: FAST=1 suite ==="
 FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; exit 1; }

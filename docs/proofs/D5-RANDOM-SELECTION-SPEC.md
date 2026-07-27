@@ -309,7 +309,24 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    the live composite end-to-end on a 3-of-5 fixture (inc.6), and the private-roster `roster_root`
    binding (3d) ships only with the opt-in private mode.
 6. `dapps/d5-random-selection` orchestrator + reference RP end-to-end on a 3-of-5 fixture (the
-   reference RP integration that later defines `sdk/rp`).
+   reference RP integration that later defines `sdk/rp`). **inc.6a SHIPPED** — the reference-RP
+   **producer** (`dapps/d5-random-selection/d5rp.{h,c}` + the `d5rp` CLI, **BUSL-1.1**): builds the
+   three canonical-binary `DAPP_CALL` streams (`roster` / `case-open` / `result`) and computes the
+   canonical draw using ONLY the shipped Apache-2.0 primitives (d5codec + d5draw); no consensus
+   authority, the chain never parses the payloads. New CMake target `d5rp` (links only
+   `determ-crypto-c99`), wrapper `tools/test_d5rp.sh`, FAST regex + ci_local `d5rp` target/export.
+   Gate `d5rp selftest` (both platforms, 7/7): produce → strip envelope → d5codec decode →
+   INDEPENDENTLY re-derive the lowest-hash draw over the decoded roster + the **authenticated beacon
+   seed** (NOT the result's seed field — mirroring `verify_selection_core`, which never trusts the
+   RP's seed claim) → assert it EQUALS the published `result`; a tamper NEG confirms the round-trip
+   catches a byte-flipped selected id. Falsify-on-mutant: a producer that publishes a non-canonical
+   result flips ONLY the "published == canonical" assertion RED. Adversarially audited (workflow
+   `wf_7187e858`, 3 lenses, 0 HIGH): fixes applied — deleted the unused `d5_rp_envelope` (dead
+   surface), the seed-fidelity re-derivation, dropped two redundant CTRL asserts, and bounded the
+   selftest stack (`RP_DECODE_CAP`, Minix-portable). **Remaining (inc.6b):** the live end-to-end —
+   submit the produced streams on a 3-of-5 in-process/DSF fixture and run the real `determ-light
+   verify-selection` against them. (A LOW audit ridealong — machine-readable Apache SPDX headers on
+   the d5draw/d5codec primitives — is deferred to its own change to avoid a full-tree recompile.)
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs
    index; claims + falsify tables). FAST + falsify-on-mutant green both platforms.
 8. Ship gate: G5/G6 already green (2026-07-26). Then, as a **separate later front item**, extract
