@@ -353,8 +353,16 @@ D.5 end-to-end wiring is exercised separately on a 3-of-5 in-process/DSF fixture
    re-derives + refutes — is demonstrated end-to-end, unblocking the `sdk/rp` extraction (item 8).
 7. Docs threading + register (CLI-REFERENCE rows; V2-DAPP-DESIGN / dapps catalog cross-ref; proofs
    index; claims + falsify tables). FAST + falsify-on-mutant green both platforms.
-8. Ship gate: G5/G6 already green (2026-07-26). Then, as a **separate later front item**, extract
-   `sdk/rp` (Apache-2.0) FROM the working D.5 RP-accept logic.
+8. Ship gate: G5/G6 already green (2026-07-26). Extract `sdk/rp` (Apache-2.0) FROM the working D.5
+   build. **STARTED — `sdk/rp/python/determ_rp/d5.py` SHIPPED**: the Apache-2.0, dependency-free
+   citizen/relying-party VERIFICATION module (DAPP_CALL envelope + d5codec decode + lowest-hash
+   `d5_draw` re-derivation → verify a published selection, never a false SELECTED), extracted from
+   the reference `tools/verify_d5rp.py` — which now DOGFOODS it (a real in-repo caller, so this is
+   not speculative surface), gated + falsified via `tools/test_d5rp.sh`. Matches the `sdk/README`
+   `rp/` scope (verification, Python binding first). **Remaining sdk components** (their own
+   increments, per `sdk/README`): the DSSO-token + light-client block-sig/tx-inclusion proof
+   verifiers, the JS + Go bindings, and `sdk/dapp` codec bindings — the DSSO pieces defer to the
+   owner (DSSO design authority).
 
 ## 13. Decisions (RATIFIED 2026-07-26)
 
