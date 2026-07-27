@@ -540,6 +540,52 @@ carry a `# Read-only RPC; safe against any running daemon` header (e.g.
 header across the whole family so the read-only property is self-documenting at
 the point of use. *(Recommendation only.)*
 
+**F-4 (finding + gate — the unreachable fail-closed contract).** Read-only-ness
+(OT-1) says a script never *mutates*; it says nothing about what a script
+*reports* when it never reached the chain at all. For a **security-assurance**
+script — one whose output an operator reads as "audited, nothing wrong" — the
+dangerous failure mode is not a mutation but a **silent false-clear**: exiting
+`0` with no anomaly when the daemon was simply unreachable, so a scheduled audit
+records a clean pass over a chain it never saw. The family avoids this via one of
+two conventions, and **F-4 is that every security-assurance script must satisfy
+exactly one of them** when the daemon is unreachable:
+
+- **Convention A (fail-closed RPC error):** exit **non-zero**. The unreachable
+  probe fails, the script emits an `RPC error … is daemon running?` /
+  `cannot reach daemon` line and exits `1` (e.g. `operator_supply_check.sh:51-55`,
+  `operator_chain_health.sh:54-57`). The scheduled audit visibly errors; it can
+  never be mistaken for a clean pass.
+- **Convention B (documented clean SKIP):** exit **`0`**, but **only together
+  with an explicit skip/unreachable marker** (`INFO: … daemon unreachable … SKIP`
+  or a `{"skipped":true,"reason":"daemon_unreachable"}` envelope — e.g.
+  `operator_reorg_resilience.sh:214-223`,
+  `operator_committee_capture_margin.sh`). The exit-`0` is an *honest* "N/A, no
+  data", chosen so a scheduled audit "never pages on a node that is simply down".
+
+What no script may do is exit `0` **with no marker** after failing to reach the
+chain. This is now enforced by a falsify-on-mutant gate,
+**`tools/test_operator_unreachable_contract.sh`** (FAST + offline): it runs a
+curated crown-jewels set of security-assurance tools against a **known-dead RPC
+port** and asserts each tool's convention — Convention-A tools must exit
+non-zero; Convention-B tools must exit `0` **and** carry a skip marker. Mutating a
+Convention-A tool's unreachable guard to `exit 0`, or stripping a Convention-B
+tool's marker, flips the gate RED (both directions demonstrated). Scope is a
+curated 16-tool set (not all 156 `operator_*.sh`, which would be brittle);
+each was verified by direct probe to reach its convention via the *unreachable
+path specifically* — not an incidental arg-parse / missing-file / missing-`jq`
+early exit — and to do so identically regardless of `jq` presence, so the
+contract holds on every platform. Five tools are **deliberately excluded** and
+the exclusion is documented in the gate header rather than left silent:
+`operator_fork_watch.sh` (a two-node `--node-a/--node-b` tool, no single
+`--rpc-port` reachability model), `operator_anchor_audit.sh` (audits a *local*
+`determ-light` cache; a fresh box hits the "no cache" local path, not the RPC
+path), and the three `jq`-dependent scanners
+(`operator_chain_invariants_audit.sh`, `operator_inbound_reconciliation_audit.sh`,
+`operator_receipt_proof_audit.sh`) whose exit on a `jq`-less runner is the `jq`
+guard, not the unreachable path, so their unreachable behavior is not
+platform-robustly assertable here. (Those three *do* fail-closed when `jq` is
+present and the daemon is down; the gate simply cannot portably prove it.)
+
 ---
 
 ## §7. Cross-references
@@ -577,4 +623,8 @@ script invokes any state-mutating RPC method or mutating CLI subcommand;
 Theorem OT-1 (read-only family) and Theorem OT-2 (no side-effects beyond local
 files) both hold. No F-1 mutating-method finding was raised. Two recommendations
 recorded: F-2 (CI lint to preserve the property) and F-3 (standardize the
-read-only header). Both are advisory; this survey changes no code.
+read-only header); both advisory. **F-4 (unreachable fail-closed contract)** is
+now enforced by a falsify-on-mutant gate,
+`tools/test_operator_unreachable_contract.sh` (FAST; 16 curated
+security-assurance tools; both falsification directions demonstrated), which is
+the one code artifact this survey's follow-up adds beyond the survey itself.
