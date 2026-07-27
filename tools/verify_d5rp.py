@@ -57,10 +57,18 @@ def parse_emit(text):
 
 
 def verify_emit(text):
-    """INDEPENDENTLY verify a `d5rp emit` output via the SDK. Raises on divergence."""
+    """INDEPENDENTLY verify a `d5rp emit` output via the SDK. Raises on divergence.
+
+    This is a PRODUCER self-consistency audit (does the RP's published result
+    match a draw over the RP's own declared seed + roster?), so it knowingly uses
+    the seed the RP committed in the result payload — passed EXPLICITLY, since the
+    SDK has no seedless verify. A real citizen instead passes the S-042-
+    authenticated beacon seed, not this claimed one."""
     domain, streams = parse_emit(text)
+    _, res_ct = strip_dapp_call(streams["result"])
+    claimed_seed = decode_result(res_ct)["seed"]
     info = verify_result(domain, streams["roster"], streams["case-open"],
-                         streams["result"])   # seed=None → the published seed
+                         streams["result"], claimed_seed)
     return dict(domain=domain, roster_size=info["roster_size"],
                 selected=len(info["selected"]),
                 case_id=info["case_id"].decode("latin-1"))
@@ -104,14 +112,22 @@ def selftest():
     caseo  = env("case-open", enc_case_open(case_id, 80, 100, 3, 2, ALGO_LOWEST_HASH))
     result = env("result", enc_result(case_id, 100, 80, seed, ALGO_LOWEST_HASH, 3, 2, sel))
 
-    info = verify_result(domain, roster, caseo, result)
+    info = verify_result(domain, roster, caseo, result, seed)
     assert info["ok"] and len(info["selected"]) == 5 and info["roster_size"] == 12, info
+
+    # NEG: the SDK has no seedless verify — a missing/short seed is refused.
+    try:
+        verify_result(domain, roster, caseo, result, None)
+    except D5Error:
+        pass
+    else:
+        raise AssertionError("SDK accepted a seedless verify")
 
     # NEG: swap two published selected ids -> independent re-derivation mismatch.
     bad = sel[:]; bad[0], bad[1] = bad[1], bad[0]
     bad_result = env("result", enc_result(case_id, 100, 80, seed, ALGO_LOWEST_HASH, 3, 2, bad))
     try:
-        verify_result(domain, roster, caseo, bad_result)
+        verify_result(domain, roster, caseo, bad_result, seed)
     except D5Error:
         pass
     else:

@@ -134,15 +134,21 @@ def decode_result(ct):
                 draw_algo_version=algo, n_primary=n, m_alternate=m, selected=sel)
 
 
-def verify_result(domain, roster_env, case_open_env, result_env, seed=None):
+def verify_result(domain, roster_env, case_open_env, result_env, seed):
     """Verify a published D.5 selection from its three DAPP_CALL envelopes.
 
     `domain` is bytes-or-str (the D.5 DApp domain, part of the draw ctx).
-    `seed` (optional) is the 32-byte committee-authenticated beacon seed the
-    caller confirmed via the S-042 binding; when None, the seed committed in the
-    result payload is used (self-consistency check only — a real citizen MUST
-    pass the independently-authenticated seed, since the result's seed field is
-    an untrusted claim).
+    `seed` is REQUIRED: the 32-byte committee-authenticated beacon seed
+    (`cumulative_rand[draw_height]`) the caller confirmed OUT OF BAND via the
+    S-042 successor binding (e.g. `determ-light verify-rand`). The result
+    payload ALSO carries a `seed` field, but it is an UNTRUSTED claim by the RP
+    and is deliberately IGNORED here — a rigged authority controls that field,
+    so a self-consistency check against it is not a verification. There is no
+    seedless "verify" path by design: making the authenticated seed mandatory
+    prevents mistaking self-consistency for a real refutation (provable
+    security, doctrine B3 — nothing aspirational). Use `decode_result(...)['seed']`
+    if you explicitly want the RP's *claimed* seed (e.g. to audit a producer's
+    internal consistency), and pass it in knowingly.
 
     Returns a dict {ok, selected, roster_op, roster_size, case_id, draw_height}.
     Raises D5Error on any wire divergence or if the published result does NOT
@@ -150,6 +156,10 @@ def verify_result(domain, roster_env, case_open_env, result_env, seed=None):
     """
     if isinstance(domain, str):
         domain = domain.encode()
+    if seed is None or len(seed) != 32:
+        raise D5Error("seed must be the 32-byte authenticated beacon seed "
+                      "(no seedless verify — the result's own seed field is an "
+                      "untrusted RP claim)")
 
     tr, roster_ct = strip_dapp_call(roster_env)
     tc, case_ct   = strip_dapp_call(case_open_env)
@@ -172,11 +182,7 @@ def verify_result(domain, roster_env, case_open_env, result_env, seed=None):
     if len(rs["selected"]) != co["n_primary"] + co["m_alternate"]:
         raise D5Error("published selection count != N+M")
 
-    use_seed = seed if seed is not None else rs["seed"]
-    if len(use_seed) != 32:
-        raise D5Error("seed must be 32 bytes")
-
-    canonical = d5_draw(use_seed, domain, co["case_id"], co["draw_height"],
+    canonical = d5_draw(seed, domain, co["case_id"], co["draw_height"],
                         co["roster_cutoff_height"], co["draw_algo_version"],
                         roster_ids, co["n_primary"], co["m_alternate"])
     if canonical != rs["selected"]:
