@@ -34290,6 +34290,57 @@ int main(int argc, char** argv) {
             }
         }
 
+        // T-3 cumulative_rand leg (gate #10, check_cumulative_rand). This is the
+        // BEACON-CHAIN value R_h = SHA256(prev_cumulative_rand || delay_output)
+        // that feeds committee selection (resolve_epoch_rand -> committee seed),
+        // the block lottery (first8(cumulative_rand) % M), and derive_delay
+        // activation. The proof T-3 asserts the validator re-derives-and-rejects
+        // a non-canonical value for ALL THREE derived values, but before this
+        // leg the falsify-on-mutant gate above drove ONLY delay_seed/delay_output
+        // via check_delay_for_test — nothing drove check_cumulative_rand: gate
+        // #10 sits after check_block_sigs #9, so the hand-built block dies before
+        // reaching it, and mutating validator.cpp's cumulative_rand compare to
+        // `if(false)` (accept any beacon value -> a producer could grind
+        // committee/leader/lottery outcomes) passed the whole suite green. Driven
+        // through the check_cumulative_rand_for_test seam, using the genesis head
+        // c.head() as the prev_cumulative_rand source.
+        {
+            Block cr_base = build_block(aborting, evh,
+                                        mk_claims(claimers, aborting, 1), 1);
+            // Canonicalize cumulative_rand against the genesis-head prev value so
+            // the positive control is observable through the seam (mirrors the
+            // exact SHA256(prev_rand || delay_output) the validator recomputes).
+            const Hash cr_prev = c.head().cumulative_rand;
+            cr_base.cumulative_rand = SHA256Builder{}
+                .append(cr_prev)
+                .append(cr_base.delay_output)
+                .finalize();
+
+            // POSITIVE CONTROL: the canonical cumulative_rand clears the gate.
+            {
+                auto r = bv.check_cumulative_rand_for_test(cr_base, c);
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "T-3 control: a canonical cumulative_rand block clears "
+                      "check_cumulative_rand");
+            }
+
+            // NEG LEG: tamper cumulative_rand -> "cumulative_rand incorrect".
+            // Falsifies check_cumulative_rand's `if (expected != b.cumulative_rand)`
+            // -> `if (false)`: that mutant returns {true,""} here, dropping the
+            // substring and turning this leg RED.
+            {
+                Block b = cr_base;
+                b.cumulative_rand[0] ^= 0x01;
+                auto r = bv.check_cumulative_rand_for_test(b, c);
+                bool hit = !r.ok &&
+                    r.error.find("cumulative_rand incorrect") != std::string::npos;
+                if (!hit) std::cout << "    got: [" << r.error << "]\n";
+                check(hit,
+                      "T-3: a non-canonical cumulative_rand is rejected");
+            }
+        }
+
         std::cout << (fail ? "  FAIL: test-abort-cert-validation\n"
                            : "  PASS: test-abort-cert-validation\n");
         return fail ? 1 : 0;

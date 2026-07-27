@@ -129,6 +129,20 @@ public:
         return check_delay(b);
     }
 
+    // T-3 cumulative_rand test seam (ConsensusPhaseStructureSoundness, T-3):
+    // run the beacon-chaining check in isolation — same const-forwarder pattern.
+    // check_cumulative_rand re-derives R_h = SHA256(prev_cumulative_rand ||
+    // delay_output) and rejects a non-canonical stored value; it reads b + the
+    // chain head's prev_cumulative_rand, so this 2-arg seam isolates gate #10
+    // (which sits AFTER check_block_sigs #9 and is therefore unreachable by a
+    // hand-built commit-reveal block) and lets the falsifier tamper
+    // b.cumulative_rand and assert the SPECIFIC reject. Falsifies
+    // validator.cpp check_cumulative_rand's compare -> `if(false)`.
+    Result check_cumulative_rand_for_test(const chain::Block& b,
+                                          const chain::Chain& chain) const {
+        return check_cumulative_rand(b, chain);
+    }
+
     // VAL-timestamp test seam (ConsensusValidatorGateAudit, VAL-timestamp-30s-window):
     // run the wall-clock timestamp check in isolation — same 1-arg const-forwarder
     // as check_delay_for_test. check_timestamp reads ONLY b + clock_ (injected via
