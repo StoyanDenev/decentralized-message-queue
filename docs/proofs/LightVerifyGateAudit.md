@@ -400,7 +400,33 @@ The other 5 lenses (governance / stake-eligibility / cross-shard-merge / registr
 returned **0 surviving findings** after refutation — those verifiers bind their consumed fields to the
 committee-authenticated walk / `committee_bound_state_root` correctly.
 
-## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2 + CT/enote parity + LSB-committee-size)
+## 1l. CLOSED — pq-verify-tx accepted a PQ_TRANSFER whose key does not hash to `from` (`test-light-pq-addr-bind`, PQ-ADDR-BIND, 2026-07-27)
+
+A direct read of the ONE verifier subcommand no register had swept — `pq-verify-tx` (the offline verifier
+of a post-quantum / ML-DSA-authenticated tx) — found a HIGH CLIENT-fixable false-authenticity gap.
+`cmd_pq_verify_tx` verified **only** that the DPQ1 envelope's ML-DSA signature verifies over the tx
+signing_bytes. But a DPQ1 envelope is **self-certifying** — it carries its own ML-DSA pubkey — so "the
+signature verifies" only proves the CARRIED key signed, NOT that the key is the one committed to by the
+account `from` (an A5 Option-A hash address = `make_pq_anon_address(form, pubkey)`). So an attacker who
+signs a victim-`from` message with ITS OWN key was reported **VERIFIED** offline, even though the node's
+shipped accept-rule `determ::chain::verify_pq_transaction` REJECTS it (recomputes
+`make_pq_anon_address(form, envelope_pubkey) == from` at `src/chain/pq_tx_auth.cpp:38`). The verifier's
+"VERIFIED … binds this tx's signing_bytes" was true-but-misleading: it never proved the tx was authorized
+by the account it names. The stale `pq_sign_tx.hpp` header ("the consensus accept-rule … is a separate,
+owner-gated step") predated inc.4, which shipped `verify_pq_transaction` — the light verifier never caught
+up to the shipped node rule (the same "light under-checks vs node" class as §1j CT-P2 and §1k).
+
+- **Fix (client-side only; no node/consensus change):** route a PQ_TRANSFER (type 11) through the SHARED
+  `verify_pq_transaction` (the exact node rule — ML-DSA signature AND the address binding AND non-hybrid
+  AND normalized-address legs). The generic (non-PQ-native) DPQ1 envelope check is unchanged. Extracted a
+  testable `pq_verify_tx_core(json)`; added `src/chain/pq_tx_auth.cpp` to the determ-light target.
+- **Gate** = `test_light_pq_addr_bind.sh` driving the pure in-process `selftest-pq-addr-bind`: it builds a
+  concrete forgery (attacker key B signs a victim-`from`(==H(A)) message), asserts the raw envelope check
+  STILL accepts it (the gap), the legit tx (A signs) → VERIFIED, and the forged tx → **INVALID** (the
+  address binding catches it). Falsify-on-mutant: neutering the PQ_TRANSFER routing makes the forged case
+  fall through to the envelope-only check → VERIFIED → the "→ INVALID" assertion flips. Both platforms.
+
+## 2. Backlog — EMPTY (register COMPLETE, incl. LVS-2 + CT/enote parity + LSB-committee-size + PQ-addr-bind)
 
 Every finding this register enumerated as a future gate is now CLOSED, across the **8 gate-sections
 §1a–§1h** (LVS-1, LSB, LV-1/LV-2, EXP-1, LRPC-1, LTX, WATCH-1, AH-1), the **LVS-2 committee-metadata

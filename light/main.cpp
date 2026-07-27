@@ -10217,6 +10217,7 @@ int main(int argc, char** argv) {
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
         if (cmd == "pq-sign-tx")            return cmd_pq_sign_tx(sub_argc, sub_argv);
         if (cmd == "pq-verify-tx")          return cmd_pq_verify_tx(sub_argc, sub_argv);
+        if (cmd == "selftest-pq-addr-bind") return cmd_selftest_pq_addr_bind(sub_argc, sub_argv);
         if (cmd == "pq-address")            return cmd_pq_address(sub_argc, sub_argv);
         if (cmd == "pq-transfer")           return cmd_pq_transfer(sub_argc, sub_argv);
         if (cmd == "rotate-audit-key")      return cmd_rotate_audit_key(sub_argc, sub_argv);

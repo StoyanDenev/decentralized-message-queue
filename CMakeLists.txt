@@ -369,6 +369,8 @@ add_executable(determ-light
                                  # standalone — deps are sha256 + <algorithm> only)
   src/crypto/pqauth.cpp          # §3.21 DPQ1 PQ tx-auth envelope (determ::pqauth)
   src/crypto/pq_address.cpp      # §3.21 PQ-native bearer address (pq-address / pq-transfer)
+  src/chain/pq_tx_auth.cpp       # §3.21 PQ_TRANSFER accept-rule (verify_pq_transaction — the
+                                 # address-binding the offline pq-verify-tx enforces)
   src/chain/block.cpp
   src/chain/genesis.cpp
 )
