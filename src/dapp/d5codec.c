@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Determ Contributors */
 /* D.5 canonical-binary payload codecs — see include/determ/dapp/d5codec.h for
  * the frozen §3/§7 wire layouts and the strict fail-closed contract. Big-endian,
  * length-prefixed, no JSON (DECISION-LOG D2). Byte-gated against

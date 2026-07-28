@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Determ Contributors */
 /* D.5 lowest-hash sortition — see include/determ/dapp/d5draw.h for the frozen
  * SPEC §4 construction and the fail-closed contract. Byte-gated against
  * tools/verify_d5_draw.py / tools/vectors/d5_draw.json by `determ test-d5-draw`.

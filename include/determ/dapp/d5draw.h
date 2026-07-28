@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Determ Contributors */
 /* D.5 government random-selection — lowest-hash sortition (the sole gated
  * primitive of the D.5 reference DApp). See docs/proofs/D5-RANDOM-SELECTION-SPEC.md
  * §4 (draw construction ratified D1, 2026-07-26). Pure, deterministic,

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Determ Contributors */
 /* D.5 government random-selection — canonical-binary payload codecs for the
  * three DAPP_CALL topics (roster / case-open / result). See
  * docs/proofs/D5-RANDOM-SELECTION-SPEC.md §3/§7. Canonical BINARY only
