@@ -141,6 +141,23 @@ public:
         return check_inbound_receipts(b, chain);
     }
 
+    // EqAbort test seam (EqAbortViewDigestExtension.md): run the F2 eq/abort
+    // view-reconciliation check in isolation — same 2-arg const-forwarder pattern
+    // as check_inbound_receipts_for_test (the check reads only b + chain, using
+    // chain ONLY for f2_active_from_height()). check_eqabort_reconciliation
+    // authenticates each per-creator eq/abort view list against its committed root
+    // (:1602) and enforces the block's eq/abort event set is a SUBSET of the
+    // reconcile_union over those lists (:1608). It sits in validate() AFTER
+    // check_block_sigs, so a hand-built (unsigned) F2 block dies before reaching
+    // it; the seam lets the falsifier drive a root-mismatched view list or an
+    // out-of-union event and assert the SPECIFIC reject without assembling a
+    // fully-signed committee block. Falsifies check_eqabort_reconciliation's whole
+    // body -> `return {true,""}` (accept ANY eq/abort set).
+    Result check_eqabort_reconciliation_for_test(const chain::Block& b,
+                                                 const chain::Chain& chain) const {
+        return check_eqabort_reconciliation(b, chain);
+    }
+
     // T-3 test seam (ConsensusPhaseStructureSoundness, derivation determinism):
     // run the commit-reveal derivation check in isolation — same const-forwarder
     // pattern as the three seams above. check_delay reads ONLY b (no chain, no

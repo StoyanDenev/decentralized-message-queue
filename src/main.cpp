@@ -33403,6 +33403,86 @@ int main(int argc, char** argv) {
                   "A1 invariant: expected == live after full UNSTAKE flow");
         }
 
+        // === S-017 T-2: VALIDATOR-side UNSTAKE unlock gate (validator.cpp:728-736,
+        //     "UNSTAKE before unlock_height"). Test 1 above exercises only the APPLY
+        //     layer (c.append -> silent refuse + fee refund); the VALIDATOR reject
+        //     string was asserted in NO test (it appears only in comments), so the
+        //     mutant `validator.cpp:730 if (b.index < unlock) -> if(false)` (or
+        //     deleting the whole `if (tx.type == UNSTAKE)` block) survived green
+        //     because the apply-refund still ran. check_transactions is a validate()
+        //     gate that sits before a signed block's later sig/digest gates, so a
+        //     hand-built block would die there first; driven here in isolation
+        //     through the check_transactions_for_test seam. A REAL keypair is
+        //     required because check_transactions verifies the tx signature
+        //     (validator.cpp:684), so this leg builds its own creator rather than
+        //     reusing alice's placeholder (non-derived) pubkey. NOTE: the T-1
+        //     producer gate (producer.cpp:1254) is the same-shape check against the
+        //     same stake_unlock_height getter and is covered by inspection here.
+        {
+            using namespace determ::node;
+            using namespace determ::crypto;
+
+            NodeKey key;
+            for (size_t i = 0; i < key.priv_seed.size(); ++i)
+                key.priv_seed[i] = uint8_t(0x71 + i);
+            determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+            GenesisConfig vcfg;
+            vcfg.chain_id = "unstake-validator-gate";
+            GenesisCreator gc; gc.domain = "node1"; gc.ed_pub = key.pub;
+            // >= chain.min_stake() (default 1000) so NodeRegistry::build_from_chain
+            // keeps node1 eligible -> registry.find("node1") resolves its pubkey and
+            // check_transactions' signature gate is reached (else the tx is rejected
+            // upstream with "tx sender not in registry").
+            gc.initial_stake = 2000;
+            vcfg.initial_creators = { gc };
+            GenesisAllocation ga; ga.domain = "node1"; ga.balance = 1000;
+            vcfg.initial_balances = { ga };
+            Chain vc; vc.append(make_genesis_block(vcfg));
+            // node1's genesis stake is locked: stakes_["node1"].unlock_height ==
+            // UINT64_MAX (chain.cpp genesis), so any UNSTAKE at b.index < UINT64_MAX
+            // is too early.
+            NodeRegistry vreg = NodeRegistry::build_from_chain(vc, vc.height());
+            BlockValidator vbv;
+
+            // A signed, otherwise-well-formed UNSTAKE (valid sig + nonce + 8-byte
+            // payload) so that WITHOUT the unlock gate the tx would be ACCEPTED —
+            // which is exactly what makes deleting the gate flip the leg RED.
+            Transaction tx;
+            tx.type   = TxType::UNSTAKE;
+            tx.from   = "node1";
+            tx.fee    = 1;
+            tx.nonce  = 0;
+            tx.payload = encode_amount(100);
+            auto sb = tx.signing_bytes();
+            tx.sig  = sign(key, sb.data(), sb.size());
+
+            // NEG — the UNSTAKE at height 1 << unlock_height is REJECTED with the
+            // specific diagnostic. Falsifies validator.cpp:730 -> if(false) (and the
+            // deletion of the `if (tx.type == UNSTAKE)` block): the otherwise-valid
+            // tx would then clear check_transactions -> !r.ok becomes false -> RED.
+            {
+                Block b; b.index = 1; b.transactions = { tx };
+                auto r = vbv.check_transactions_for_test(b, vc, vreg);
+                if (r.ok) std::cout << "    got: [ACCEPTED]\n";
+                check(!r.ok && r.error.find("UNSTAKE before unlock_height") != std::string::npos,
+                      "S-017 T-2: a too-early UNSTAKE is REJECTED by the validator (validator.cpp:730)");
+            }
+            // POSITIVE CONTROL isolating the comparison — the SAME signed UNSTAKE at
+            // b.index == unlock_height (UINT64_MAX) is NOT too early (b.index < unlock
+            // is false), so it clears check_transactions. This proves the reject
+            // above is the unlock comparison at :730 and not an unrelated
+            // sig/nonce/payload gate (each check_transactions call re-derives the
+            // expected nonce from the unchanged chain, so reusing `tx` is safe).
+            {
+                Block b; b.index = UINT64_MAX; b.transactions = { tx };
+                auto r = vbv.check_transactions_for_test(b, vc, vreg);
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "S-017 T-2 control: the same UNSTAKE at b.index == unlock_height clears :730");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": unstake-deregister-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
@@ -34397,6 +34477,87 @@ int main(int argc, char** argv) {
                 if (!hit) std::cout << "    got: [" << r.error << "]\n";
                 check(hit,
                       "T-3: a non-canonical cumulative_rand is rejected");
+            }
+        }
+
+        // EqAbortViewDigestExtension: check_eqabort_reconciliation (validator.cpp:1554,
+        // a validate() gate). The F2 eq/abort dimension of the SAME view-reconciliation
+        // family as check_inbound_receipts (VAL-inbound-f2, driven in
+        // test-sr5-misroute-receipt): each per-creator eq/abort view list is
+        // authenticated against its committed root (:1602), and the block's eq/abort
+        // event set must be a SUBSET of the reconcile_union over those lists (:1608).
+        // Before this leg check_eqabort_reconciliation had NO _for_test seam and NO
+        // test drove it — test_f2_eqabort_reconciliation.sh is happy-path (its
+        // load-bearing assert is "no node logs 'invalid block: F2:'"), which the
+        // accept-anything mutant `check_eqabort_reconciliation -> return {true,""}`
+        // keeps green. The gate sits after check_block_sigs in validate(), so a
+        // hand-built block dies first; driven here through the new
+        // check_eqabort_reconciliation_for_test seam over a fresh F2-active chain.
+        // SUBSET, not exact-cardinality (the event hashes fold observer-dependent
+        // forensic fields, so the union may hold witnesses no single assembler
+        // materializes — see the function comment + the proof §4.1 correction).
+        {
+            // f2_active_from_height() is the ONLY thing check_eqabort_reconciliation
+            // reads from the chain, so a bare F2-active chain suffices.
+            Chain ec; ec.set_f2_active_from_height(0);
+            BlockValidator ev;
+
+            // A well-formed EquivocationEvent so its hash_equivocation_event key is
+            // a real committed-event key; a fixed decoy hash stands in for "some
+            // OTHER committed view content".
+            EquivocationEvent evt;
+            evt.equivocator = "n0";
+            evt.block_index = 1;
+            for (size_t i = 0; i < evt.digest_a.size(); ++i) evt.digest_a[i] = uint8_t(0x30 + i);
+            for (size_t i = 0; i < evt.digest_b.size(); ++i) evt.digest_b[i] = uint8_t(0x50 + i);
+            const Hash ek = hash_equivocation_event(evt);
+            Hash decoy{};
+            for (size_t i = 0; i < decoy.size(); ++i) decoy[i] = uint8_t(0x99);
+
+            // POSITIVE CONTROL — the event key lies in the root-authenticated
+            // committee-view union, so the SUBSET check passes -> ACCEPTED (proves
+            // the fixture reaches both gates).
+            {
+                Block b; b.index = 5;                        // >= f2_active_from_height (0)
+                b.creators = { "n0" };                       // K=1: one committed view
+                b.equivocation_events = { evt };
+                b.creator_view_eq_lists = { { ek } };        // the view holds the event ...
+                b.creator_view_eq_roots = { compute_view_root({ ek }) };  // ... root matches
+                auto r = ev.check_eqabort_reconciliation_for_test(b, ec);
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "CONTROL: an eq event inside the root-authenticated committee-view union is ACCEPTED");
+            }
+
+            // SUBSET reject (:1608) — the committed view holds ONLY a decoy (its root
+            // MATCHES that list, so :1602 passes), so the event key is absent from the
+            // union. Faithful mutation: the accept-anything body `return {true,""}`
+            // drops this reject.
+            {
+                Block b; b.index = 5;
+                b.creators = { "n0" };
+                b.equivocation_events = { evt };                     // event to admit ...
+                b.creator_view_eq_lists = { { decoy } };            // ... but the view holds only a decoy
+                b.creator_view_eq_roots = { compute_view_root({ decoy }) };  // root MATCHES list -> :1602 passes
+                auto r = ev.check_eqabort_reconciliation_for_test(b, ec);
+                check(!r.ok && r.error.find("not in committee-view union") != std::string::npos,
+                      "EqAbort-subset: an eq event absent from the committee-view union is REJECTED at :1608");
+            }
+
+            // ROOT-AUTH reject (:1602) — the carried view list is SPOOFED to include
+            // the event (so it WOULD land in the union), but the committed (non-zero)
+            // root is over a DIFFERENT list, so the list fails root authentication
+            // first. r IS in the carried intersection, so :1608 cannot mask this —
+            // it isolates :1602.
+            {
+                Block b; b.index = 5;
+                b.creators = { "n0" };
+                b.equivocation_events = { evt };
+                b.creator_view_eq_lists = { { ek } };               // spoofed to include the event
+                b.creator_view_eq_roots = { compute_view_root({ decoy }) };  // committed over `decoy`, NOT ek
+                auto r = ev.check_eqabort_reconciliation_for_test(b, ec);
+                check(!r.ok && r.error.find("does not match committed root") != std::string::npos,
+                      "EqAbort-rootauth: a carried eq view list not matching its committed root is REJECTED at :1602");
             }
         }
 
@@ -43590,6 +43751,77 @@ int main(int argc, char** argv) {
                 auto r = v.check_timestamp_for_test(b);
                 check(!r.ok && r.error.find("timestamp out of +-30s window") != std::string::npos,
                       "timestamp far in the past is REJECTED (VAL-timestamp)");
+            }
+        }
+
+        // === S-030-D2 timestamp reconciliation arm (validator.cpp:1762/1764/1766) ===
+        // Safety.md §5.3: on a PRODUCTION reconciled block (non-empty
+        // creator_proposer_times) the canonical timestamp MUST equal the
+        // deterministic LOWER-median of the K Phase-1-committed proposer times —
+        // the exact value compute_block_digest binds. The +-30s block above drives
+        // ONLY legacy blocks (empty creator_proposer_times), so the three FEATURE-
+        // block reject arms — size-mismatch (:1762), zero-entry (:1764), and
+        // timestamp != median (:1766) — were driven by NO test (all three reject
+        // substrings appeared in zero tests). check_timestamp runs inside validate()
+        // after check_block_sigs, so a hand-built feature block dies before reaching
+        // it, and the mutant `validator.cpp:1766 if (b.timestamp !=
+        // reconcile_median_time(...)) -> if(false)` (accept ANY timestamp on a
+        // reconciled block — a producer could grind the digest-bound timestamp)
+        // passed the whole suite green. Driven through the SAME 1-arg
+        // check_timestamp_for_test seam, with the VirtualClock pinned to the median
+        // so the positive control also clears the +-30s wall-clock bound below it.
+        {
+            // reconcile_median_time({30,10,20}) == 20 (lower-median order statistic,
+            // pinned by test-timestamp-reconciliation). Pin the clock there so the
+            // control's timestamp is inside the +-30s window too.
+            const std::vector<uint64_t> times = {30, 10, 20};
+            const uint64_t med = node::reconcile_median_time(times);   // == 20
+            const int64_t  clock_now = int64_t(med);   // named var: avoid the vexing parse
+            determ::time::VirtualClock vc(clock_now);
+            node::BlockValidator v;
+            v.set_clock(vc);
+            auto mk = [&](uint64_t ts, std::vector<uint64_t> t,
+                          std::vector<std::string> creators) -> Block {
+                Block b;
+                b.timestamp = ts;
+                b.creator_proposer_times = std::move(t);
+                b.creators = std::move(creators);
+                return b;
+            };
+            // CONTROL — timestamp == lower-median (and within +-30s) is ACCEPTED
+            // (proves the fixture reaches + clears the median arm).
+            {
+                Block b = mk(med, times, {"a", "b", "c"});
+                auto r = v.check_timestamp_for_test(b);
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "S-030-D2 control: timestamp == lower-median clears check_timestamp");
+            }
+            // NEG (median, :1766) — timestamp != median. med+1 stays inside the
+            // +-30s window, so the median arm is the SOLE possible rejecter: under
+            // the mutant `:1766 -> if(false)` the block falls through to the +-30s
+            // bound, passes it, and returns {true,""} -> this leg flips RED.
+            {
+                Block b = mk(med + 1, times, {"a", "b", "c"});
+                auto r = v.check_timestamp_for_test(b);
+                check(!r.ok && r.error.find("timestamp != median") != std::string::npos,
+                      "S-030-D2: timestamp != lower-median is REJECTED (validator.cpp:1766)");
+            }
+            // NEG (size, :1762) — 3 proposer times but 2 creators. The size check
+            // is first, so it fires before the median/zero arms.
+            {
+                Block b = mk(med, times, {"a", "b"});
+                auto r = v.check_timestamp_for_test(b);
+                check(!r.ok && r.error.find("creator_proposer_times size != creators size") != std::string::npos,
+                      "S-030-D2: proposer-times/creators size mismatch is REJECTED (validator.cpp:1762)");
+            }
+            // NEG (zero-entry, :1764) — a zero committed proposer time. Size matches
+            // (3 == 3), so the zero-entry guard is what rejects.
+            {
+                Block b = mk(med, {30, 0, 20}, {"a", "b", "c"});
+                auto r = v.check_timestamp_for_test(b);
+                check(!r.ok && r.error.find("creator_proposer_times has a zero entry") != std::string::npos,
+                      "S-030-D2: a zero proposer-time entry is REJECTED (validator.cpp:1764)");
             }
         }
 
