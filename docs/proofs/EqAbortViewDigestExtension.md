@@ -493,9 +493,16 @@ genesis). Mirrors the inbound reconciliation test and the existing
 3. **Silent-node tolerance.** Drop node-3; assert the union of node-1+node-2 views is
    still bound and the block finalizes (one honest observer suffices — censorship
    resistance).
-4. **Digest-removal attack.** Post-sign, strip an event from a block instance and
-   re-gossip; assert validator `check_eqabort_reconciliation` rejects (cardinality
-   mismatch) AND the digest no longer matches the K-of-K signatures.
+4. **Digest-removal / injection attack.** Post-sign, strip an event from — or inject
+   a non-committee event into — a block instance and re-gossip. The two directions
+   are caught by two different guards: an **injected** event is rejected by
+   `check_eqabort_reconciliation` via the **SUBSET rule** — the event is not in the
+   committee-view `reconcile_union` (`validator.cpp:1608`); this is a subset-membership
+   check, **not** a cardinality/exact-count check (per the Implementation-note §1
+   correction above). A pure **strip** leaves the remaining set still a *subset* of the
+   union, so the subset check does not fire on it — it is caught instead by the digest
+   binding: any post-sign edit (strip or inject) changes `compute_block_digest`, so the
+   stored K-of-K signatures no longer verify. Assert both guards accordingly.
 5. **State-root consistency.** Assert all three nodes compute identical post-apply
    `state_root` (S-033) for the canonical block.
 
@@ -548,6 +555,22 @@ now also witnessed **at the unit level** — fast, deterministic, no cluster —
 These unit assertions cover the digest-binding precondition; the cluster test (§4.1)
 remains the end-to-end witness that signature gathering and `check_eqabort_reconciliation`
 rejection compose correctly on top of it.
+
+**Reject-arm falsify-on-mutant coverage (round-3 gate-gap closure).** The §4.1 cluster
+test is happy-path: its load-bearing assertion is that no node logs `invalid block:
+F2:`, which the accept-anything mutant `check_eqabort_reconciliation → return {true,""}`
+keeps green — so it did not *falsify* the reject arms, and the function sits inside
+`validate()` after `check_block_sigs`, unreachable by any hand-built (unsigned) fixture.
+That gate-gap (round-3 proof-claim audit `wf_97a30e14`, the same class as the
+`check_cumulative_rand` gap closed in `1b53344`) is now closed by an in-process
+falsifier: the new `check_eqabort_reconciliation_for_test` const-forwarder seam
+(`include/determ/node/validator.hpp`, mirroring `check_inbound_receipts_for_test`)
+drives a fresh F2-active chain in `determ test-abort-cert-validation`
+(`tools/test_abort_cert_validation.sh`) with a positive control plus two negative legs —
+the **subset** reject (`validator.cpp:1608`, an eq event absent from the committee-view
+union) and the **root-auth** reject (`validator.cpp:1602`, a carried view list not
+matching its committed root). Neutering either gate flips its leg RED; the
+accept-anything body mutant is falsified by both.
 - Bump the shell-test count across the doc surfaces and add the test name to
   UNIT-TESTS / SECURITY / CLI-REFERENCE per the standard threading rule.
 
