@@ -8,6 +8,12 @@ The proof is mechanical: the apply branch is 13 lines, the per-block `block_slas
 
 ---
 
+## 0. ⚠ Soundness correction (2026-07-28) — registry deactivation is NOT permanent; re-REGISTER re-activates
+
+A round-3 adversarial proof-claim audit (`wf_97a30e14`, independently verified) found that the "re-activation closed / the offender must register a fresh domain" claim (T-E2, §3 asymmetry table, §5, §7) is **false**. The REGISTER apply branch (`src/chain/chain.cpp:1231-1296`) has **no `registrants_.contains(d)` skip**: it computes `first_time_register` only to gate the Negative-Entry-Fee pool drain (`:1282`), then **unconditionally** builds a fresh `RegistryEntry` with `inactive_from = UINT64_MAX` + fresh `active_from` and does `registrants_[tx.from] = e` (`:1260-1264`), overwriting the equivocation-deactivated entry (the inline comment `:1249-1253` confirms re-registration is a supported overwrite path for key-rotation/region-update). The validator REGISTER case (`validator.cpp:709-710`) is a bare `break`.
+
+**Consequence.** A slashed equivocator submits REGISTER for the **same** domain → `inactive_from` resets to `UINT64_MAX` → eligible again after `derive_registration_delay`. In **DOMAIN_INCLUSION mode** (`min_stake_ == 0`, which §3/T-E4 treat as supported and where registry deactivation is the *entire* penalty) this re-activates at **zero lasting cost** — a repeatable Byzantine equivocation with no permanent removal, defeating the FA6 deterrent this proof exists to back. (In STAKE_INCLUSION mode the T-E1 stake burn still stands, but the "permanent removal / fresh domain required" claim is still false and the same domain identity is reused.) The §3 asymmetry (DEREGISTER re-activation "Open" vs equivocation "Closed") is impossible — both are indistinguishable `registrants_` entries hitting the same overwriting REGISTER path. **Status: OWNER-ESCALATED** (a slash-lockout / cooldown policy that distinguishes slash-deactivation from voluntary DEREGISTER is a consensus/state-format decision → owner-gated). The T-E1 stake-forfeiture and T-E3 ghost-record results are unaffected; it is the registry-permanence claim that fails.
+
 ## 1. Setup
 
 ### 1.1 The `EquivocationEvent` struct

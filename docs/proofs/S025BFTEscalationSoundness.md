@@ -10,6 +10,12 @@ The proof exists because the FA1 K-of-K safety proof (`Safety.md`) and the FA5 B
 
 ---
 
+## 0. ⚠ Soundness correction (2026-07-28) — the "gate 3" the proof relies on is NOT validator-enforced
+
+A round-3 adversarial proof-claim audit (`wf_97a30e14`, independently verified) found that this proof's central claim — that escalation to BFT mode is rejected when K-of-K is still feasible (`|avail_domains| < k_target`, "gate 3") — is **enforced only on the PRODUCER (`node.cpp:1031`), with no validator mirror**. `check_creator_selection` (`validator.cpp:126-145`) enforces only the mode↔size pairing (`bft_ok = mode==BFT && m==k_bft`, `avail ≥ m`); `check_block_sigs` (`:467-473`) only gates 1+2 (`bft_enabled_`, `total_aborts ≥ threshold`); nothing rejects a BFT block whose eligible pool (minus aborters) is `≥ k_full`.
+
+**Consequence.** T-5 (sufficiency), the A_premature (A1) disposition, and L-5 as stated are **false about validator behavior**: an adversarial proposer at a healthy-pool height (`|avail| ≥ K`) carrying `≥ bft_escalation_threshold` genuinely-certified abort events bound to this height can emit a `k_bft`-committee BFT block that the validator accepts, finalizing under `Q = ⌈2·k_bft/3⌉` instead of full K — a finalization-quorum downgrade (FA1→FA5) exactly as gate 3 is claimed to forbid. **Status: OWNER-ESCALATED** (adding a validator gate-3 mirror is a consensus accept-rule change → owner-gated). Do not rely on T-5's "no premature escalation" claim against a Byzantine proposer until the validator gate lands. The abort-cert intrinsic-validity gates (check_abort_certs) still hold; it is the pool-margin necessity that is unenforced.
+
 ## 1. Introduction
 
 ### 1.1 The K-of-K mode and its liveness vulnerability

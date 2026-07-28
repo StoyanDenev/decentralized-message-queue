@@ -6,6 +6,14 @@ This document proves Determ's structural censorship-resistance claim: a transact
 
 ---
 
+## 0. ⚠ Soundness correction (2026-07-28) — T-2's conclusion does NOT hold: the tx body is not committee-signed
+
+A round-3 adversarial proof-claim audit (`wf_97a30e14`, confirmed by direct read) found that **§3 Step 4 case (b) describes a rejection mechanism that does not exist**, so the censorship-resistance conclusion (T-2: a committed tx `t` cannot be omitted from block `B` at height `h`) is **false for shipped code**.
+
+**The gap.** `compute_block_digest` (`src/node/producer.cpp:757-900`) — the value the K-of-K Phase-2 signatures verify against (`validator.cpp:500-517`) — binds `b.tx_root` and the committed **hash lists** `b.creator_tx_lists`, but **never `b.transactions`** (the tx body) and never `b.state_root`. `tx_root` is re-derived in `check_creator_tx_commitments` from `compute_tx_root(b.creator_tx_lists)` (`validator.cpp:225-227`), never from the body; no validator gate requires `b.transactions` to COVER `union(creator_tx_lists)`; `check_transactions` only validates the txs that ARE present. So a Byzantine assembler or any relayer can strip a committed `t` from `b.transactions` post-signature: `validate()` passes on every honest node and apply consumes the censored body — `t` is censored at `h`. Worse, because the digest binds neither the body nor `state_root`, two blocks with identical committee signatures but different bodies both validate → honest nodes fed different bodies diverge in applied state (a body-level fork). §3 Step 4 case (b)'s claim that "the tx_root recomputed from the assembled body diverges from B.tx_root, and V15 + V7 reject the block" is the false step — `tx_root` is never recomputed from the body.
+
+**Status: OWNER-ESCALATED, not autonomously fixed** (the fix changes the consensus accept-rule / block digest → owner-gated per CLAUDE.md; do not rely on T-2 until it lands). The remedy is a validator gate binding `b.transactions` to `union(creator_tx_lists)`, or binding a body/state_root Merkle root into `compute_block_digest`. (Note: `compute_block_digest` already closed this exact "digest doesn't cover the field → strip-after-sign" class for inbound_receipts / eq / abort / partner_subset / timestamp / signature_form / eligible_count / shard_tip_records — the tx body is the one remaining un-authenticated field.) The T-1 K-conjunction (a member cannot be forced to sign a block excluding its own committed tx) is unaffected; it is the post-signature body-strip that T-2 fails to prevent.
+
 ## 1. Theorem statement
 
 **Theorem T-2 (Censorship resistance).** Let `B` be the unique valid block at height `h` against chain prefix `B₀, …, B_{h-1}` (existence and uniqueness guaranteed by FA1). Let `t` be a transaction such that:
