@@ -40,10 +40,15 @@
 //     height at which they were Merkle-proven (`balance_proven_at_height`).
 // A row's `balance_merkle_verified` flag is true ONLY when the daemon
 // served a state-proof whose height equals that row's height — which,
-// against a head-only daemon, is the head row. The framework is written
-// height-generically, so if the RPC ever grows a `height` parameter the
-// per-height Merkle verification engages automatically with no code
-// change here.
+// against a head-only daemon, is the head row. Every OTHER row carries
+// the head-proven balance/nonce under an explicit `head@H` provenance
+// label (JSON `balance_source`), so a reader can never mistake it for
+// D's balance at that row's own height (they differ whenever D's balance
+// changed between h and the head — even against an HONEST daemon). If the
+// RPC ever grows a `height` parameter, extending the per-sample loop to
+// fetch a per-height state-proof would let `balance_merkle_verified`
+// engage at every row (the verification primitives are already
+// height-generic).
 //
 // Trust model: --genesis pins chain identity (fail-closed if the
 // daemon's block 0 doesn't hash to compute_genesis_hash). Each row's
@@ -76,12 +81,16 @@ struct AccountHistoryOptions {
 // failure (genesis-anchor mismatch, fetch failure, out-of-range height,
 // committee-sig verification failure). Diagnostics go to stderr.
 //
-// Text output (default): a header line + one row per sampled height:
-//   height   balance      next_nonce   state_root        verified
-//   5        500          0            a1b2c3d4e5f6a7b8  committee
-//   10       480          1            d4c3b2a1f6e5d8c7  committee
+// Text output (default): a header line + one row per sampled height.
+// Because the state_proof RPC is head-only, EVERY row carries the same
+// head-proven balance/next_nonce; the balance_src column marks the
+// provenance — head@H (the head value, NOT the value at that row's own
+// height) vs merkle@H (Merkle-proven at the head row's own height H):
+//   height   balance      next_nonce   state_root        balance_src
+//   5        420          4            a1b2c3d4e5f6a7b8  head@31
+//   10       420          4            d4c3b2a1f6e5d8c7  head@31
 //   ...
-//   30       420          4            9f8e7d6c5b4a3210  merkle(head)
+//   30       420          4            9f8e7d6c5b4a3210  merkle@31
 //
 // JSON output (--json): a structured object:
 //   {
@@ -91,7 +100,8 @@ struct AccountHistoryOptions {
 //     "history": [
 //       { "height": <h>, "balance": <b>, "next_nonce": <n>,
 //         "state_root": "<64-hex>", "balance_merkle_verified": <bool>,
-//         "balance_proven_at_height": <h_proof> },
+//         "balance_proven_at_height": <h_proof>,
+//         "balance_source": "head@<H>" | "merkle@<H>" },
 //       ...
 //     ]
 //   }
@@ -108,5 +118,15 @@ int run_account_history(const AccountHistoryOptions& opts);
 // contract explicit and offline-testable. Exposed for the `selftest-genesis-row`
 // self-test. Empty result → the row renders "(none)".
 std::string genesis_row_state_root(const std::string& served_state_root);
+
+// AH-1b: the provenance label for a row's balance/next_nonce. The daemon's
+// state_proof/account RPCs are HEAD-ONLY, so balance/nonce are Merkle-proven
+// only at the head; a non-head row carries the HEAD's value. Returns
+//   "merkle@<H>"  when merkle_verified  (proven at this row's own height H), or
+//   "head@<H>"    otherwise             (the head value proven at height H — NOT
+//                                        proven at this row's height; a reader
+//                                        must NOT read it as balance-at-this-height).
+// Exposed for the offline `selftest-account-history-label` falsify gate.
+std::string balance_source_label(bool merkle_verified, uint64_t proven_at_height);
 
 } // namespace determ::light
