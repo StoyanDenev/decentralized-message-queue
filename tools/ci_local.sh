@@ -259,7 +259,8 @@ FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; 
 echo "=== ci_local: offline doc-coherence guards ==="
 GUARDS_OK=1
 for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
-         test_proofs_index_complete test_param_change_whitelist_coherence \
+         test_proofs_index_complete test_proofs_no_deleted_crypto_backend \
+         test_param_change_whitelist_coherence \
          test_rpc_hmac_canonical_parity test_keygen_failclosed_guard \
          test_wallet_accounting_credit_gate_source \
          test_dapp_registry_active_boundary_coherence \
