@@ -464,6 +464,12 @@ In-process tests (deterministic, no network):
                                               identity at LOAD; a supply-inconsistent
                                               snapshot is rejected cleanly instead of
                                               wedging the node on the first apply
+  determ test-snapshot-genesis-backsolve      SnapshotRestore — the fieldless-snapshot
+                                              genesis_total back-solve is the exact
+                                              6-term inverse of expected_total(),
+                                              incl. §3.22 accumulated_shielded_ (a
+                                              fieldless+shielded snapshot restores
+                                              A1-consistent, not fail-closed rejected)
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -44105,6 +44111,130 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-snapshot-a1-revalidate\n"
                            : "  PASS: test-snapshot-a1-revalidate\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-snapshot-genesis-backsolve") {
+        // SnapshotRestoreGateAudit (round-10 apply-path invariant audit, wf_a941ce55
+        // finding — fail-closed latent-correctness gap). The legacy fieldless-snapshot
+        // back-solve (chain.cpp:2628-2637) reconstructs genesis_total_ when a snapshot
+        // OMITS the field, and must be the EXACT inverse of the 6-term expected_total()
+        // (chain.hpp:590 = genesis + subsidy + inbound - slashed - outbound - shielded).
+        // Before the fix it omitted the §3.22 negative term accumulated_shielded_ (which
+        // is restored at :2443, BEFORE the back-solve), so a fieldless snapshot carrying
+        // accumulated_shielded_>0 back-solved genesis_total_ under by exactly that amount
+        // => expected_total() == live - shielded != live => the A1 re-check FAILS CLOSED
+        // (require_supply_invariant at :2693, else the first post-restore apply at :1868)
+        // and REJECTS a VALID snapshot — a latent liveness landmine if the format ever
+        // makes the fieldless branch reachable with shielded>0. NOT a live bug today
+        // (serialize writes genesis_total UNCONDITIONALLY at :2212, so a fieldless
+        // snapshot predates §3.22 => shielded==0), so this gate hand-builds the
+        // otherwise-unreachable fieldless+shielded snapshot directly.
+        //
+        // Falsify-on-mutant: delete the `+ c.accumulated_shielded_` term from the
+        // back-solve => genesis_total_ is under-computed by X, so genesis_total()==base
+        // (not base+X), expected_total()!=live, and the require=true restore THROWS —
+        // three asserts flip RED. The shield-FREE fieldless control (X==0) stays green
+        // under both fix and mutant (the term is +0), proving byte-neutrality on every
+        // honest snapshot.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // A real chain (genesis + 3 empty blocks) => an honest, A1-consistent,
+        // shield-free snapshot carrying genesis_total.
+        Block g;
+        g.index = 0;
+        g.timestamp = 1;
+        g.cumulative_rand = Hash{};
+        Chain c(g);
+        for (int i = 0; i < 3; ++i) {
+            Block b;
+            b.index           = c.height();
+            b.prev_hash       = c.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            c.append(b);
+        }
+        json snap = c.serialize_state(16);
+        const uint64_t base_genesis = snap.value("genesis_total", uint64_t{0});
+
+        // Isolate the back-solve by bypassing the two self-consistency gates the
+        // way a legitimate pre-S-033 / headerless snapshot does — zero the head
+        // state_root (skips the S-033 check at :2657) and drop head_hash (skips the
+        // head-hash check at :2617). Required here because accumulated_shielded_ is a
+        // STATE-ROOT leaf (chain.cpp:502-503, `c:accumulated_shielded` when non-zero):
+        // injecting it into a chain with no matching shielded state would otherwise
+        // trip the state_root gate for an unrelated reason and mask this one.
+        json bypass = snap;
+        bypass.erase("head_hash");
+        if (bypass.contains("headers") && !bypass["headers"].empty())
+            bypass["headers"].back()["state_root"] = std::string(64, '0');
+
+        // (1) Shield-FREE fieldless control: omit genesis_total, leave shielded==0.
+        // Back-solve must reproduce the honest genesis exactly, and A1 must hold under
+        // require=true. Green under BOTH fix and mutant (the new term is +0) — this is
+        // the "changes NOTHING on honest snapshots" assertion.
+        {
+            json fieldless = bypass;
+            fieldless.erase("genesis_total");
+            bool threw = false;
+            try {
+                Chain r = Chain::restore_from_snapshot(fieldless, /*require=*/true);
+                check(r.genesis_total() == base_genesis,
+                      "shield-free fieldless: back-solved genesis_total == honest genesis");
+                check(r.expected_total() == r.live_total_supply(),
+                      "shield-free fieldless: A1 self-consistency holds (expected==live)");
+            } catch (...) { threw = true; }
+            check(!threw,
+                  "shield-free fieldless: restores cleanly under require_supply_invariant");
+        }
+
+        // (2) The gap: a FIELDLESS snapshot that OMITS genesis_total but SETS
+        // accumulated_shielded > 0 (the format-reachable-in-future case). A distinctive
+        // X makes the under-computation unambiguous.
+        const uint64_t X = 777;
+        json fs = bypass;
+        fs.erase("genesis_total");
+        fs["accumulated_shielded"] = X;
+
+        // require=false (the general deserializer) accepts it regardless of the gate;
+        // read back the back-solved state and assert the 6-term inverse held.
+        {
+            Chain r = Chain::restore_from_snapshot(fs, /*require=*/false);
+            check(r.accumulated_shielded() == X,
+                  "fieldless+shielded: accumulated_shielded restored as-set");
+            // FIX: genesis = live + slashed + outbound + shielded - subsidy - inbound
+            //    = base_genesis + X (shield-free honest chain had slashed==outbound==0).
+            // MUTANT (no +shielded): genesis == base_genesis => this flips RED.
+            check(r.genesis_total() == base_genesis + X,
+                  "fieldless+shielded: back-solve includes accumulated_shielded (genesis == base + X)");
+            // The A1 identity the back-solve exists to satisfy. MUTANT: expected ==
+            // live - X != live => flips RED.
+            check(r.expected_total() == r.live_total_supply(),
+                  "fieldless+shielded: A1 self-consistency holds (expected==live)");
+        }
+
+        // require=true (node-adoption policy): the VALID fieldless+shielded snapshot
+        // must restore CLEANLY, not be fail-closed rejected. MUTANT: the under-computed
+        // genesis makes expected!=live => restore THROWS => this flips RED.
+        {
+            bool threw = false;
+            std::string msg;
+            try { (void)Chain::restore_from_snapshot(fs, /*require=*/true); }
+            catch (const std::exception& e) { threw = true; msg = e.what(); }
+            check(!threw,
+                  "fieldless+shielded: VALID snapshot restores under require (NOT fail-closed rejected)");
+            if (threw)
+                std::cout << "    (rejection message: " << msg << ")\n";
+        }
+
+        std::cout << (fail ? "  FAIL: test-snapshot-genesis-backsolve\n"
+                           : "  PASS: test-snapshot-genesis-backsolve\n");
         return fail ? 1 : 0;
     }
 

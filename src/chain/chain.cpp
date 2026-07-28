@@ -2630,7 +2630,20 @@ Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invaria
     } else {
         uint64_t live = c.live_total_supply();
         uint64_t deltas_pos = c.accumulated_subsidy_ + c.accumulated_inbound_;
-        uint64_t deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_;
+        // §3.22: accumulated_shielded_ is a NEGATIVE term of the 6-term
+        // expected_total() (value moved into the confidential pool leaves the
+        // transparent live sum), so it belongs with slashed+outbound here. The
+        // back-solve must be the EXACT inverse of expected_total(); otherwise the
+        // restored genesis_total_ is under-computed by exactly accumulated_shielded_
+        // and the A1 re-check (require_supply_invariant at :2693, or the first
+        // post-restore apply at :1868) fails CLOSED on a VALID snapshot. It is
+        // restored at :2443 above, so it is already populated here. Byte-neutral on
+        // every honest fieldless snapshot: serialize writes genesis_total
+        // UNCONDITIONALLY (:2212), so the fieldless branch implies a pre-§3.22
+        // snapshot => accumulated_shielded_==0 => +0. This term only matters if the
+        // snapshot format ever makes the fieldless branch reachable with shielded>0.
+        uint64_t deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_
+                            + c.accumulated_shielded_;
         // Solve: genesis = live + deltas_neg - deltas_pos. Wraparound is
         // impossible on a well-formed snapshot since live - deltas_pos +
         // deltas_neg should yield a valid uint64 by construction.

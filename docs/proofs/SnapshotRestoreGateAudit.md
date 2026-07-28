@@ -1,6 +1,6 @@
 # Snapshot-Restore / Deserialize Gate-Gap Audit
 
-**Status:** discovery complete (2026-07-25); 1 autonomous gate CLOSED, surface otherwise SOUND under its documented trust model. FOURTH code-surface register in the falsify-on-mutant series, after
+**Status:** discovery complete (2026-07-25); **2** autonomous gates CLOSED (§2 A1-revalidate; §2b fieldless back-solve 6-term inverse — the latter from the round-10 apply-path invariant audit `wf_a941ce55`, 2026-07-28), surface otherwise SOUND under its documented trust model. FOURTH code-surface register in the falsify-on-mutant series, after
 [ProofClaimGateTraceability](ProofClaimGateTraceability.md), [ConsensusValidatorGateAudit](ConsensusValidatorGateAudit.md) (19/19), and [RpcIngressGateAudit](RpcIngressGateAudit.md).
 
 ## 0. Surface & method
@@ -68,6 +68,54 @@ and the tampered snapshot restores cleanly under the **default `false`** (the op
 general primitive is unchanged for tools/round-trips). **Falsify-on-mutant**: `if (false && expected
 != live)` flips EXACTLY the two REJECT asserts while the three positive/opt-in controls stay GREEN —
 targeted counter-delta, both platforms.
+
+## 2b. CLOSED — fieldless back-solve is the 6-term inverse of `expected_total()` (`test-snapshot-genesis-backsolve`)
+
+Found by the round-10 apply-path invariant audit (`wf_a941ce55`, HIGH-confidence). A **fail-closed,
+honest-unreachable, latent** correctness gap in the *fieldless* branch §2 relies on. When a snapshot
+OMITS `genesis_total`, `restore_from_snapshot` back-solves it (chain.cpp:2628-2637) so the loaded
+state satisfies A1 by construction — the §2 fix explicitly leans on this ("inert … for the fieldless
+branch, which back-solves `genesis_total` into equality"). But §3.22 made `expected_total()` a
+**six**-term sum (chain.hpp:590-597): `genesis + subsidy + inbound − slashed − outbound −
+accumulated_shielded_`. The back-solve computed `genesis = live + (slashed + outbound) − (subsidy +
+inbound)` — **omitting `+ accumulated_shielded_`**. `accumulated_shielded_` is restored at
+chain.cpp:2443, *before* the back-solve, so on a fieldless snapshot carrying `accumulated_shielded_ >
+0` the reconstructed `genesis_total_` was under-computed by exactly that amount, leaving
+`expected_total() == live − accumulated_shielded_ ≠ live`.
+
+**Fails closed, honest-unreachable — hence latent, not a live bug.** The mismatch is caught: the §2
+`require_supply_invariant=true` re-check (chain.cpp:2693) throws at load, else the first post-restore
+apply trips the A1 assertion (chain.cpp:1868). And it is unreachable via honest snapshots:
+`serialize_state` writes `genesis_total` **unconditionally** (chain.cpp:2212) while
+`accumulated_shielded` is emitted only when non-zero (chain.cpp:2219) — so any snapshot old enough to
+omit `genesis_total` predates §3.22 ⇒ `accumulated_shielded_ == 0` ⇒ the back-solve was already
+correct. The landmine: if the snapshot format ever makes the fieldless branch reachable with
+`shielded > 0`, restore would silently under-compute `genesis_total_` and then **fail-closed REJECT a
+valid snapshot** — a liveness bug.
+
+**Fix (unconditionally correct, byte-neutral on every honest path).** Fold `+ c.accumulated_shielded_`
+into `deltas_neg` (chain.cpp:2637) so the back-solve is the **exact inverse** of the 6-term
+`expected_total()`: `genesis = live + slashed + outbound + accumulated_shielded_ − subsidy − inbound`.
+On every honest fieldless snapshot `accumulated_shielded_ == 0`, so the term is `+0` and every
+existing snapshot/supply test stays byte-identically green. Threaded into
+[SupplyInvariantComposition](SupplyInvariantComposition.md) SI-2 and
+[SnapshotDeterminismComposition](SnapshotDeterminismComposition.md) SD-5 (the code fix + gate;
+the broader 5→6-term exhaustiveness reconciliation across the supply proofs is the §3.22 shielded-pool
+doc pass).
+
+**Gate** = `test-snapshot-genesis-backsolve` (bare Chain): serialize an honest shield-free chain,
+bypass the two self-consistency gates (zero head `state_root`, drop `head_hash`) the way a legitimate
+pre-S-033 / headerless snapshot does — required because `accumulated_shielded_` is a *state-root leaf*
+(chain.cpp:502-503) so injecting it into a chain with no matching shielded state would otherwise trip
+the state_root gate for an unrelated reason — then hand-build the otherwise-unreachable
+fieldless+shielded snapshot (omit `genesis_total`, set `accumulated_shielded = X`). Asserts the
+back-solved `genesis_total_ == base + X`, `expected_total() == live_total_supply()`, and that the
+VALID snapshot restores cleanly under `require_supply_invariant=true` (NOT fail-closed rejected).
+**Controls**: a shield-free fieldless snapshot (X == 0) back-solves to the honest genesis and restores
+clean. **Falsify-on-mutant**: deleting `+ c.accumulated_shielded_` flips the three fieldless+shielded
+asserts RED (restore rejects the valid snapshot citing `expected_total = live − X`) while the
+shield-free control stays GREEN — proving byte-neutrality on honest snapshots. Verified both build
+mutant→RED / fix→GREEN on MSVC.
 
 ## 3. REFUTED — the surface is sound under its trust model
 
