@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Ad-hoc audit output; retained for rationale, NOT coherence-maintained and NOT an authoritative convergence point (CLAUDE.md convergence rule; DECISION-LOG 2026-07-28). Roadmap index: docs/ROADMAP.md
+
 # Security Audit — Crypto Primitives & Canonical Encoding Proof Cluster
 
 Scope: 19 documents in `docs/proofs/` (CRYPTO-C99-SPEC, C99CryptoStackAudit, P256CryptoStackAudit, CryptoBackendMigrationSoundness, MLDSAConformance, OprfConformanceMap, PQSignatureEnvelopeSoundness, PqHashAddressSoundness, BlockSignatureFormSoundness, BatchSigningSoundness, CanonicalSigningBytesParity, CrossBinaryCanonicalFormat, BinaryCodecRoundTripSoundness, BlockDigestCrossBinaryParity, ConstantTimeInventory, TimingProbeDesign, TimingProbeCTPQCoverage, FROST_DEVIATION_NOTICE, S009DelayHashRemoval). Every document was read in full. Verification method: full document reading + independent code reading of cited source sites + reproduction of one document's grep audit. **No test suites were executed**; where a document claims a test result it is reported as the document's claim, not as re-verified.

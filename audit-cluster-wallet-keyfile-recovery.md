@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Ad-hoc audit output; retained for rationale, NOT coherence-maintained and NOT an authoritative convergence point (CLAUDE.md convergence rule; DECISION-LOG 2026-07-28). Roadmap index: docs/ROADMAP.md
+
 ## Cluster: 钱包/密钥文件/恢复 (Wallet / Keyfile / Recovery)
 
 审计范围:docs/proofs/ 下 12 篇文档。所有代码对照均在当前脏树(src/main.cpp、src/rpc/rpc.cpp、src/node/node.cpp、include/determ/node/node.hpp 已修改)上本轮重新核实。

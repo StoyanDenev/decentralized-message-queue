@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Ad-hoc audit output; retained for rationale, NOT coherence-maintained and NOT an authoritative convergence point (CLAUDE.md convergence rule; DECISION-LOG 2026-07-28). Roadmap index: docs/ROADMAP.md
+
 # Network / RPC / DoS Proof-Cluster Audit (subagent report)
 
 Auditor: skeptical protocol-security proof auditor (subagent). Scope: 23 proof docs under `docs/proofs/`.

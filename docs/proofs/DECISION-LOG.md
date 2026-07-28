@@ -1624,3 +1624,42 @@ this entry (ten) until the next convergence sweep. License-map files updated: `d
 **Caveat.** Engineering maturity of Spartan/Brakedown-class implementations moves fast and post-dates the current knowledge horizon; confirm current reference implementations + proof-size/prover-time numbers for the actual D.6/D.4 circuit sizes before building. Each Tier-2 circuit must be pinned before choosing the linear-verify Bulletproofs path vs the succinct sum-check path.
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-27; recorded by Claude Fable at his direction).
+
+## 2026-07-28 — DApp substrate open questions (V2-DAPP-DESIGN §12, Q1–Q8) resolved: five ratified as-shipped, three decided
+
+**Problem.** §12 carried eight open substrate questions with recommendations but no owner ratification. All are consensus accept-rules or wire-format → genesis-frozen under no-migrations, so they must be settled pre-genesis. Reconciliation against the shipped DAPP_REGISTER/DAPP_CALL code (`include/determ/chain/block.hpp` + `src/chain/chain.cpp`) found most already implemented — the design record simply never closed them (a coherence gap now fixed).
+
+**Decision (owner, 2026-07-28).**
+
+*Ratified as-shipped (code already matches; recorded as the decision):*
+- **Q1 namespace** — shared, `d:`-prefix domain-separated (the `d:` registry state-root leaf).
+- **Q5 reply-routing** — both paths: `endpoint_url` (≤255 B) for off-chain + on-chain DAPP_CALL-back.
+- **Q6 proof-of-processing** — convention (a DApp posts its own reply tx); no protocol ACK type (minimalism).
+- **Q7 deprecation** — `inactive_from` + `DAPP_GRACE_BLOCKS = 100`; calls to deactivated DApps rejected after grace.
+- **Q8 bandwidth** — no priority lane; size bounded by the payload cap + `MAX_DAPP_METADATA = 4096`. Monitor; revisit only on a real problem.
+
+*Decided — require pre-genesis code work, AUTHORIZED FOR IMPLEMENTATION:*
+- **Q2 — DAPP_CALL payload cap → governance-mutable.** Currently `MAX_DAPP_CALL_PAYLOAD = 16384` (16 KB) as a `constexpr` (genesis-pinned). Move it to a PARAM_CHANGE-governed parameter, default 16 KB. Rationale: Tier-2 verifiable-computation proofs (sum-check/Bulletproofs, per the 2026-07-27 zk-VM decision) ride in this payload and their size is not measurable until circuits exist; a governed cap avoids a genesis trap (no-migrations) while keeping the initial surface small (minimalism).
+- **Q3 — topic routing → ENFORCE.** Validator rejects a DAPP_CALL whose `topic` is not in the target DApp's registered set (topics already stored, ≤32 × ≤64 B). Confirm/add the call-time accept-rule and gate it falsify-on-mutant (B3). Adding a topic is a cheap re-DAPP_REGISTER.
+- **Q4 — anonymous calls → ALLOW by default, per-DApp opt-out.** Add an `accept_anon` flag to the DAPP_REGISTER wire format (default: accept); relax the current registered-`tx.from` requirement so bearer/anon senders are admitted unless a DApp sets `accept_anon = false`. Serves the privacy / mutual-distrust mission (D.3, anon polling/oracles) while letting audit DApps (D.5, D.10) require identity. MUST land pre-genesis (wire-format change).
+
+**Consistency.** No-migrations (Q2 governed not frozen; Q4 wire change done pre-genesis; all three settled before launch); minimalism (five ratified untouched, no speculative surface, Q2 default stays 16 KB); provable security (Q3 is a clean gateable accept-rule; Q2/Q4 additive + testable); canonical binary (all wire changes stay in the binary codec, no JSON); mutual distrust (Q4 enables privacy-preserving DApps). No effect on shipped Tier-1 DApps. Amends V2-DAPP-DESIGN §12 (resolution banner added; the per-question prose retained as rationale — DECISION-LOG is authoritative).
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-28; recorded by Claude Fable at his direction).
+
+## 2026-07-28 — Authorized: execute the D2 JSON→binary migration (wire + storage + keyfiles) as the front after the D.5 tail
+
+**Problem.** D2 (2026-07-23) decided binary-everywhere on storage / wire / keyfiles / vectors and deletion of the JSON parsers, but the migration is **unexecuted**: `third_party/nlohmann/json.hpp` (~900 KB heavy C++ dep) is still vendored, a second parser (`include/determ/json/json.hpp`) coexists, and JSON remains in the exact paths D2 mandated binary-only — the p2p wire envelope (`src/net/gossip.cpp`, `src/net/messages.cpp`) and storage/genesis (`src/chain/block.cpp`, `chain.cpp`, `genesis.cpp`). This is the largest standing doctrine-vs-code gap: it breaks canonical-binary, zero-heavy-deps, minimalism (two JSON impls), and C99/Minix portability at once, and the wire-envelope portion is genesis-frozen under no-migrations.
+
+**Decision (owner, 2026-07-28).** Execute the D2 migration. Not a new decision — D2 already resolved the direction; this entry **schedules and scopes execution** as the **next front after the D.5 packaging tail (Option C) completes**. Priority order:
+1. **Wire envelope (genesis-deadline):** remove JSON from `src/net/gossip.cpp`, `src/net/messages.cpp`, and any JSON path in `src/net/binary_codec.cpp`; the p2p envelope is binary-only. **Pre-genesis.**
+2. **Storage / genesis:** `src/chain/block.cpp`, `chain.cpp`, `genesis.cpp` — storage container binary-only. (Authenticated bytes are already binary; this removes only the JSON *container*.)
+3. **Keyfiles:** `wallet/` keyfile paths binary-only.
+4. **Delete both parsers:** `third_party/nlohmann/json.hpp` and `include/determ/json/json.hpp`; regenerate the JSON test vectors as binary.
+5. **Permitted to remain (D2 exception):** optional human-readable text for RPC responses, CLI output, and local config — non-authoritative views derived from the binary.
+
+Each step gated falsify-on-mutant against the byte-golden vectors (B3); byte-neutral for authenticated data (signed/hashed bytes are already binary). No consensus-rule change — a container/serialization migration only.
+
+**Consistency.** Canonical-binary (removes JSON from the mandated paths); zero-heavy-deps (deletes the nlohmann dependency); minimalism (two JSON impls → zero); C99/Minix (removes the C++-template blocker for the reference build); no-migrations (wire + storage container settled pre-genesis). Sequenced after D.5 so it does not preempt the active front.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-28; recorded by Claude Fable at his direction).

@@ -2249,6 +2249,8 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 
 ## 12. Open design questions
 
+> **RESOLVED 2026-07-28 (owner; `docs/proofs/DECISION-LOG.md`).** Q1/Q5/Q6/Q7/Q8 ratified as-shipped. Q2 → payload cap becomes PARAM_CHANGE-governed (default 16 KB). Q3 → topic routing ENFORCED (validator rejects an unregistered topic). Q4 → anonymous calls ALLOWED by default with a per-DApp `accept_anon` opt-out (wire-format change, pre-genesis). The per-question prose below is retained as rationale; the DECISION-LOG entry is authoritative.
+
 ### Q1: Should DApp domains share namespace with user domains?
 
 **Option A:** Yes — DApp `dapp.example` and user `alice.example` are the same namespace. Pro: simple, reuses REGISTER. Con: namespace squatting confusion.
