@@ -186,9 +186,10 @@ live_total_supply  ==  genesis_total
                        + accumulated_inbound
                        − accumulated_slashed
                        − accumulated_outbound
+                       − accumulated_shielded
 ```
 
-where `live_total_supply = Σ_{a ∈ accounts_} accounts_[a].balance + Σ_{d ∈ stakes_} stakes_[d].locked`. The `accumulated_subsidy_` counter tracks **exactly the total minted across all blocks** — every unit minted into existence by the subsidy pipeline contributes to this counter, and every unit credited to a creator's balance is matched 1:1 by the counter's advancement.
+where `live_total_supply = Σ_{a ∈ accounts_} accounts_[a].balance + Σ_{d ∈ stakes_} stakes_[d].locked`. The sixth term `− accumulated_shielded` (§3.22, `chain.hpp:898`) subtracts value moved into the confidential pool by SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER; the subsidy pipeline never touches it, and it is zero on shield-free chains (its `c:accumulated_shielded` leaf is emitted only when non-zero, `chain.cpp:502–503`), so the identity degenerates to the classic five-term form here. The `accumulated_subsidy_` counter tracks **exactly the total minted across all blocks** — every unit minted into existence by the subsidy pipeline contributes to this counter, and every unit credited to a creator's balance is matched 1:1 by the counter's advancement.
 
 *Proof sketch.* This is the FA11 T-12 invariant (per `EconomicSoundness.md` §3 by induction on block height). The present proof's contribution is to verify that the subsidy pipeline preserves the inductive step. By T-S1, every successful per-block subsidy event satisfies the joint update:
 
@@ -200,7 +201,7 @@ where `live_total_supply = Σ_{a ∈ accounts_} accounts_[a].balance + Σ_{d ∈
 
 The fee component is intra-supply (FA-Apply-6 T-F4 — the per-tx fee debit cancels with the creator credit). The subsidy component is the only **mint** — it advances `live_total_supply` by `+subsidy_this_block` on the LHS and advances `accumulated_subsidy_` by `+subsidy_this_block` on the RHS, preserving the equality. By T-S2, the empty-creators case is a structural no-op (both sides advance by zero, equality preserved). By T-S5, the E4-capped case still respects the equality (the cap binds `subsidy_this_block` but the LHS/RHS advancement remains 1:1). By T-S6, the NEF channel is supply-neutral (LHS unchanged across NEF, RHS unchanged because no counter is touched). By T-S4, the LOTTERY miss outcome contributes zero to both sides explicitly. The composition with `block_inbound`, `block_outbound`, and `block_slashed` is handled by `CrossShardReceipts.md` (FA7) and `EquivocationSlashing.md` (FA6); subsidy's role is the lone mint channel. The apply-tail assertion at `chain.cpp:1399` confirms the closure block-by-block; any divergence throws and rolls back. ∎
 
-**Code witness.** `src/chain/chain.cpp:1390–1392` (the gated A1 mint); `src/chain/chain.cpp:1397–1419` (the A1 closure assertion); `include/determ/chain/chain.hpp:611–615` (the five A1 counters); `src/chain/chain.cpp:543–548` (`Chain::live_total_supply()` and `expected_total()` helpers).
+**Code witness.** `src/chain/chain.cpp:1390–1392` (the gated A1 mint); `src/chain/chain.cpp:1397–1419` (the A1 closure assertion); `include/determ/chain/chain.hpp:889–898` (the six A1 counters, incl. `accumulated_shielded_`); `src/chain/chain.cpp:699–704` (`Chain::live_total_supply()`) + `include/determ/chain/chain.hpp:590–597` (`expected_total()`).
 
 **Test witness.** `tools/test_supply_lifecycle.sh` (the canonical A1 lifecycle integration test) walks the chain through TRANSFER / STAKE / UNSTAKE / REGISTER (with NEF) / DEREGISTER / equivocation slash / suspension slash / FLAT subsidy / LOTTERY subsidy / FINITE_POOL exhaustion / cross-shard inbound + outbound, asserting the A1 closing equality after every block. `tools/test_supply_invariant.sh` exercises the A1 assertion directly with synthetic per-counter deltas. `tools/operator_supply_check.sh` is the operator-facing offline audit tool that re-runs the A1 check from snapshot data.
 
@@ -252,7 +253,7 @@ The Negative Entry Fee mechanism exists to **bootstrap value for new entrants wi
 
 1. **Bootstrap incentive.** A new chain has zero validators registered at genesis (or a small bootstrap set). New operators considering joining face a "cold start" cost: pay the REGISTER fee, pay the STAKE deposit, lose value to network latency and operational overhead before earning any subsidy. Without an entry-side incentive, the network has no signal to early adopters that participation is rewarded. NEF gives them a one-time payout sourced from a pre-funded pool, dampening the cold-start cost.
 
-2. **No new supply.** The naive way to fund this would be a per-REGISTER mint — but that would couple bootstrap funding to inflation, making the chain's supply schedule unpredictable. NEF avoids this by drawing from a **genesis-funded pool** seeded by `zeroth_pool_initial`. The pool's initial balance is part of `genesis_total_` (FA11 T-13), so the chain's total supply at any height is exactly `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound`. NEF events are intra-supply transfers; they do not advance any A1 counter.
+2. **No new supply.** The naive way to fund this would be a per-REGISTER mint — but that would couple bootstrap funding to inflation, making the chain's supply schedule unpredictable. NEF avoids this by drawing from a **genesis-funded pool** seeded by `zeroth_pool_initial`. The pool's initial balance is part of `genesis_total_` (FA11 T-13), so the chain's total supply at any height is exactly `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound − accumulated_shielded`. NEF events are intra-supply transfers; they do not advance any A1 counter, and neither NEF nor subsidy touches `accumulated_shielded` (§3.22) — it stays zero here, so the sixth term drops out, though the closed form carries it to match the shipped six-term `expected_total()` (`chain.hpp:590–597`).
 
 3. **Geometric drain.** The pool halves per first-time REGISTER. After 64 first-time REGISTERs, the pool is `Z / 2^64` ≈ 0 (integer underflow to 0 when `Z < 2^64`). This is **not a perpetual inflation source** — the pool exhausts asymptotically. Operators registering early get more; operators registering after the pool exhausts get nothing. The drain rate matches the network's growth: early adopters get the highest incentive because they are the highest risk, late adopters get the lowest because the network is already established and the cold-start cost is lower.
 
@@ -263,10 +264,10 @@ The chain's economic invariant after both mechanisms have fired across N first-t
 ```
 genesis_total = Σ initial_balances + zeroth_pool_initial + Σ initial_stakes  (constant)
 post_state = genesis_total + accumulated_subsidy + accumulated_inbound
-              − accumulated_slashed − accumulated_outbound
+              − accumulated_slashed − accumulated_outbound − accumulated_shielded
 ```
 
-NEF events do not appear explicitly because they are intra-supply transfers; only their initial pool funding is captured in `genesis_total`. Per-block subsidy events appear via `accumulated_subsidy`. Both mechanisms are A1-consistent.
+NEF events do not appear explicitly because they are intra-supply transfers; only their initial pool funding is captured in `genesis_total`. Per-block subsidy events appear via `accumulated_subsidy`. Both mechanisms are A1-consistent. Shield operations likewise do not fire in this subsidy/NEF setting, so `accumulated_shielded` stays zero; the closed form carries the `− accumulated_shielded` term regardless, because a chain that later shields must satisfy the same six-term identity (`expected_total()`, `chain.hpp:590–597`).
 
 ---
 
@@ -319,7 +320,7 @@ The theorems above target the subsidy pipeline + NEF channel in isolation. They 
 | `include/determ/chain/chain.hpp:571` | `block_subsidy_` field declaration. |
 | `include/determ/chain/chain.hpp:577` | `subsidy_pool_initial_` field declaration (E4 cap). |
 | `include/determ/chain/chain.hpp:583–584` | `subsidy_mode_` + `lottery_jackpot_multiplier_` fields (E3). |
-| `include/determ/chain/chain.hpp:611–615` | The five A1 counters (`genesis_total_`, `accumulated_subsidy_`, `accumulated_slashed_`, `accumulated_inbound_`, `accumulated_outbound_`). |
+| `include/determ/chain/chain.hpp:889–898` | The six A1 counters (`genesis_total_`, `accumulated_subsidy_`, `accumulated_slashed_`, `accumulated_inbound_`, `accumulated_outbound_`, `accumulated_shielded_`). |
 | `include/determ/chain/genesis.hpp:105` | `GenesisConfig.block_subsidy`. |
 | `include/determ/chain/genesis.hpp:114` | `GenesisConfig.subsidy_pool_initial`. |
 | `include/determ/chain/genesis.hpp:125–126` | `GenesisConfig.subsidy_mode`, `lottery_jackpot_multiplier`. |
@@ -351,6 +352,6 @@ All eight theorems (T-S1 through T-S8) are closed in the current codebase:
 - **T-S7** (A1 invariance) closed via the apply-tail closure at `chain.cpp:1397–1419` + the joint mint-with-distribution gate; regression `test_supply_lifecycle.sh` + `test_supply_invariant.sh`.
 - **T-S8** (subsidy determinism) closed via the determinism of every intermediate computation (no system-time, no `rand()`, no thread-scheduling-dependent iteration) + the state-root binding of `accumulated_subsidy_` via the `k:c:` namespace; regression `test_supply_lifecycle.sh` + `test_lottery_subsidy.sh` (both perform replay-determinism assertions).
 
-No theorem is open or partial. The combination of T-S2's empty-creators gate + T-S5's E4 cap + T-S6's NEF first-time-only constraint forms the **three structural safety properties** of the subsidy substrate: a block with no creators cannot mint (genesis-safety), the cap binds the total ever minted (finite-supply chains), and NEF drains the pool deterministically without ever overdrawing. Combined with FA11 T-12's chain-wide invariant, the chain's total supply at any height is exactly computable from the genesis parameters plus the five A1 counters — and that number is exact, not approximate, even under arbitrary block sequences combining all four mechanisms (FLAT, LOTTERY, FINITE_POOL, NEF).
+No theorem is open or partial. The combination of T-S2's empty-creators gate + T-S5's E4 cap + T-S6's NEF first-time-only constraint forms the **three structural safety properties** of the subsidy substrate: a block with no creators cannot mint (genesis-safety), the cap binds the total ever minted (finite-supply chains), and NEF drains the pool deterministically without ever overdrawing. Combined with FA11 T-12's chain-wide invariant, the chain's total supply at any height is exactly computable from the genesis parameters plus the six A1 counters — and that number is exact, not approximate, even under arbitrary block sequences combining all four mechanisms (FLAT, LOTTERY, FINITE_POOL, NEF).
 
 The proof's foundation rests on a small set of code primitives: the `subsidy_this_block` derivation, the `total_distributed = total_fees + subsidy_this_block` aggregation, the joint `total_distributed > 0 && !b.creators.empty()` gate on both distribution and mint, the `checked_add_u64` S-007 overflow guard on every credit, and the `first_time_register` check that bounds NEF to a one-shot per Determ identity. The breadth of consequences — eight theorems covering four economic mechanisms (E1 / E3 / E4 / FLAT-default) under one A1 invariant — is testimony to how few primitives the chain needs to express the full subsidy contract without coupling it to inflation, slashing, or cross-shard composition.

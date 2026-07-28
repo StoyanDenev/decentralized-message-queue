@@ -161,11 +161,12 @@ There are NO other apply-path writes to `accounts_[d].balance`. Genesis (line 68
    + state_{n+1}.accumulated_inbound_
    − state_{n+1}.accumulated_slashed_
    − state_{n+1}.accumulated_outbound_
+   − state_{n+1}.accumulated_shielded_
 ```
 
 The left-hand side is computed by `Chain::live_total_supply()` (`chain.cpp:548`). The right-hand side is `Chain::expected_total()`. The equality is asserted at `chain.cpp:1397–1419`; a mismatch throws a "unitary-balance invariant violated" diagnostic with the per-counter breakdown, which is caught by the outer try/catch and rolls the apply back via `restore_state_snapshot`.
 
-This invariant is the chain-level companion of the per-account view. The full proof is in `EconomicSoundness.md` T-12 (and T-13 for the NEF supply-neutrality subclaim, and T-14 for the E3 / E4 expected-value preservation under lottery + finite pool). The relevance to AccountState is structural: every channel listed in I-5 contributes to exactly one of the five right-hand-side terms, and the equality at apply-tail confirms the per-account deltas closed correctly.
+This invariant is the chain-level companion of the per-account view. The full proof is in `EconomicSoundness.md` T-12 (and T-13 for the NEF supply-neutrality subclaim, and T-14 for the E3 / E4 expected-value preservation under lottery + finite pool). The relevance to AccountState is structural: every channel listed in I-5 contributes to exactly one of the first five right-hand-side terms, the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER branches feed the sixth (`− accumulated_shielded_`) term (zero on shield-free chains), and the equality at apply-tail confirms the per-account deltas closed correctly.
 
 **Test surface.** `tools/test_supply_lifecycle.sh` walks the chain through TRANSFER, STAKE, UNSTAKE, REGISTER (with and without NEF), DEREGISTER, equivocation slash, suspension slash, lottery subsidy, finite-pool exhaustion, and cross-shard inbound/outbound, asserting the A1 closing equality after each block. `tools/test_supply_invariant.sh` exercises the assertion directly with synthetic per-counter deltas. `tools/operator_supply_check.sh` is the operator-facing tool that re-runs the A1 check from snapshot data — useful for offline audit of a downloaded chain.
 
@@ -197,7 +198,7 @@ The invariants in §2 are stated as predicates over `state_n`. The corresponding
 
 **Theorem T-A6 (A1 contribution).** The per-account state at `state_n` sums (across all `accounts_` keys plus all `stakes_` keys) to `expected_total(state_n)`.
 
-*Proof.* See `EconomicSoundness.md` T-12, which establishes the chain-level invariant by induction on block height. The per-account I-5 decomposition is the inductive step's enumeration of balance deltas; the per-stake decomposition is the I-3 channel enumeration. The five running counters absorb the corresponding deltas (`accumulated_subsidy_` accepts the per-block subsidy debit from the implicit mint; `accumulated_inbound_` / `accumulated_outbound_` accept the cross-shard credits / debits; `accumulated_slashed_` accepts the suspension + equivocation slash; `genesis_total_` is the index-0 anchor). Apply-tail assertion at `chain.cpp:1399` would throw if the per-account deltas failed to close. ∎
+*Proof.* See `EconomicSoundness.md` T-12, which establishes the chain-level invariant by induction on block height. The per-account I-5 decomposition is the inductive step's enumeration of balance deltas; the per-stake decomposition is the I-3 channel enumeration. The six running counters absorb the corresponding deltas (`accumulated_subsidy_` accepts the per-block subsidy debit from the implicit mint; `accumulated_inbound_` / `accumulated_outbound_` accept the cross-shard credits / debits; `accumulated_slashed_` accepts the suspension + equivocation slash; `accumulated_shielded_` accepts the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER confidential-pool moves — zero on shield-free chains; `genesis_total_` is the index-0 anchor). Apply-tail assertion at `chain.cpp:1399` would throw if the per-account deltas failed to close. ∎
 
 ---
 

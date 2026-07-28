@@ -72,12 +72,13 @@ accumulated_outbound_ += block_outbound;
 
 The per-block `block_outbound` is reset to zero at the start of each apply (line 723), accumulates one `tx.amount` per cross-shard TRANSFER (line 765), and folds into the chain-wide `accumulated_outbound_` at apply-tail (line 1394). The per-block scope is what makes the A9 atomic-apply rollback work: a throw inside the loop reverts `accumulated_outbound_` to its pre-block value because the chain-wide counter is only mutated at the tail, after every per-event accumulation has succeeded.
 
-`accumulated_outbound_` is one of the five A1 counters (`include/determ/chain/chain.hpp:609–611`). The A1 expected-total formula at `chain.hpp:443`:
+`accumulated_outbound_` is one of the six A1 counters (`include/determ/chain/chain.hpp:889–898`). The A1 expected-total formula at `chain.hpp:590–597`:
 
 ```cpp
 uint64_t expected_total() const {
     return genesis_total_ + accumulated_subsidy_ + accumulated_inbound_
-           - accumulated_slashed_ - accumulated_outbound_;
+           - accumulated_slashed_ - accumulated_outbound_
+           - accumulated_shielded_;
 }
 ```
 
@@ -151,7 +152,7 @@ The sum is over `tx.amount` (not `tx.amount + tx.fee`): the fee stays on the sou
 
 **Proof sketch.** The per-block accumulator `block_outbound` is declared at `chain.cpp:723` and initialized to zero. The only mutation site is `chain.cpp:765` (`block_outbound += tx.amount`), which is inside the TRANSFER case's cross-shard else-arm at lines 762–766. All other tx-type cases (REGISTER, STAKE, etc.) do not touch `block_outbound`. The cost gate at line 744 (`if (sender.balance < cost) continue;`) short-circuits before the cross-shard arm is reached, so a tx with insufficient balance contributes nothing. The block-tail fold at `chain.cpp:1394` (`accumulated_outbound_ += block_outbound`) then advances the chain-wide counter by exactly the per-block sum. The arithmetic is u64 unchecked at the block-tail (block_outbound is bounded by Σ tx.amount which is itself bounded by Σ sender.balance ≤ live_total_supply ≤ u64-max, so overflow at this stage is impossible without first overflowing the supply ceiling — a property the genesis allocation enforces). ∎
 
-**Code witness.** `src/chain/chain.cpp:723` (per-block declaration); `src/chain/chain.cpp:765` (per-event accumulation); `src/chain/chain.cpp:1394` (block-tail fold into chain-wide counter); `include/determ/chain/chain.hpp:441` (`accumulated_outbound()` getter); `include/determ/chain/chain.hpp:609–611` (the five A1 counters comment).
+**Code witness.** `src/chain/chain.cpp:723` (per-block declaration); `src/chain/chain.cpp:765` (per-event accumulation); `src/chain/chain.cpp:1394` (block-tail fold into chain-wide counter); `include/determ/chain/chain.hpp:441` (`accumulated_outbound()` getter); `include/determ/chain/chain.hpp:889–898` (the six A1 counters comment).
 
 **Test witness.** `tools/test_cross_shard_outbound_apply.sh` "A1: accumulated_outbound = amount (fee stays)" assertion (`src/main.cpp:17083`) — after a TRANSFER with `amount=75, fee=1`, `accumulated_outbound() == 75` (the fee does not contribute to the counter). `tools/test_cross_shard_atomicity.sh` cross-checks the chain-pair conservation `src.accumulated_outbound == dst.accumulated_inbound`. `tools/test_supply_lifecycle.sh` exercises `accumulated_outbound_` across a mixed-tx lifecycle.
 
@@ -188,7 +189,7 @@ Summing across `n` cross-shard TRANSFERs: `Δlive = − Σ (a_i + f_i) + Σ f_i 
 
 This is the per-shard A1 invariance specialized to the outbound channel. It composes with FA-Apply-9 T-R5 (destination-side A1 invariance) to give the chain-pair conservation T-7.1 of FA7. ∎
 
-**Code witness.** `src/chain/chain.cpp:545` (sender debit by `amount + fee`); `src/chain/chain.cpp:765` (`block_outbound += tx.amount`, fee not included); `src/chain/chain.cpp:1394` (block-tail fold); `src/chain/chain.cpp:1397–1419` (A1 closure assertion); `include/determ/chain/chain.hpp:443` (`expected_total()` formula including `−accumulated_outbound_` term).
+**Code witness.** `src/chain/chain.cpp:545` (sender debit by `amount + fee`); `src/chain/chain.cpp:765` (`block_outbound += tx.amount`, fee not included); `src/chain/chain.cpp:1394` (block-tail fold); `src/chain/chain.cpp:1397–1419` (A1 closure assertion); `include/determ/chain/chain.hpp:590–597` (`expected_total()` formula including `−accumulated_outbound_` and `−accumulated_shielded_` terms).
 
 **Test witness.** `tools/test_cross_shard_outbound_apply.sh` "A1: live supply decreases by amount (fee returns via creator)" assertion (`src/main.cpp:17111`) — the live supply drops by exactly `amount`, not `amount + fee`. The follow-up "A1 invariant: expected == live after outbound" assertion at line 17113 closes the invariant. `tools/test_supply_lifecycle.sh` exercises the A1 closure across a mixed-tx lifecycle including cross-shard outbound. `tools/test_cross_shard_atomicity.sh` cross-checks the chain-pair: `src.live - src.live_pre == −amount` AND `dst.live - dst.live_pre == +amount` (T-R5 of FA-Apply-9 covers the destination side).
 
@@ -284,8 +285,8 @@ The theorems above target the source-side apply branch in isolation. They do not
 | `tools/test_state_root_namespaces.sh` | `c:` namespace state-root contribution (cross-checks T-O8 state-root binding). |
 | `include/determ/chain/chain.hpp:198–202` | `is_cross_shard` predicate. |
 | `include/determ/chain/chain.hpp:441` | `accumulated_outbound()` getter. |
-| `include/determ/chain/chain.hpp:443` | `expected_total()` formula including `−accumulated_outbound_`. |
-| `include/determ/chain/chain.hpp:609–611` | The five A1 counters comment. |
+| `include/determ/chain/chain.hpp:590–597` | `expected_total()` formula including `−accumulated_outbound_` and `−accumulated_shielded_`. |
+| `include/determ/chain/chain.hpp:889–898` | The six A1 counters comment. |
 | `src/chain/chain.cpp:198–202` | `is_cross_shard` definition. |
 | `src/chain/chain.cpp:408` | `c:accumulated_outbound` state-root leaf. |
 | `src/chain/chain.cpp:723` | Per-block `block_outbound` declaration. |
@@ -309,7 +310,7 @@ All eight theorems (T-O1 through T-O8) are closed in the current codebase:
 - **T-O3** (NO local credit on cross-shard branch) closed structurally by the absence of any `accounts_[tx.to]` access in the cross-shard arm at `chain.cpp:762–766`; regression `test_cross_shard_outbound_apply.sh` "dst address NOT credited locally" assertion.
 - **T-O4** (`accumulated_outbound_` advance by exactly `tx.amount`) closed via the per-event `block_outbound += tx.amount` at `chain.cpp:765` + the block-tail fold at `chain.cpp:1394`; regression `test_cross_shard_outbound_apply.sh` "A1: accumulated_outbound = amount (fee stays)" assertion.
 - **T-O5** (receipt emission as apply-side post-condition) closed via the producer-side emission at `producer.cpp:449–465` + V12 binding at `validator.cpp:1081–1110`; regression `test_cross_shard_atomicity.sh` chain-pair surface + `test_cross_shard_transfer.sh` end-to-end.
-- **T-O6** (A1 invariance on source shard, live supply decreases by exactly `amount`) closed via the fee-returns-via-creator decomposition + the `expected_total()` formula at `chain.hpp:443` + A1 closure at `chain.cpp:1397–1419`; regression `test_cross_shard_outbound_apply.sh` "A1: live supply decreases by amount" + "expected == live after outbound" assertions.
+- **T-O6** (A1 invariance on source shard, live supply decreases by exactly `amount`) closed via the fee-returns-via-creator decomposition + the `expected_total()` formula at `chain.hpp:590–597` + A1 closure at `chain.cpp:1397–1419`; regression `test_cross_shard_outbound_apply.sh` "A1: live supply decreases by amount" + "expected == live after outbound" assertions.
 - **T-O7** (single-shard short-circuit, `shard_count_ <= 1` ⇒ no outbound) closed via the line-199 short-circuit in `is_cross_shard`; regression `test_cross_shard_outbound_apply.sh` "shard_count=1: is_cross_shard always false" + "single-shard fallback: local credit happens" + "single-shard fallback: accumulated_outbound unchanged" assertions.
 - **T-O8** (apply-determinism with cross-shard outbound) closed via the pure-function nature of `is_cross_shard` + `shard_id_for_address` (no I/O, no clock, no randomness) + the `c:` namespace state-root binding at `chain.cpp:408` enforcing byte-level equivalence at the wire layer; regression `test_cross_shard_outbound_apply.sh` "determinism: same outbound TRANSFER → same state_root" assertion + `test_cross_shard_multi_receipt.sh` mixed-direction determinism.
 
