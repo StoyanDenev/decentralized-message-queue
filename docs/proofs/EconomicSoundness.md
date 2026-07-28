@@ -1,6 +1,6 @@
 # FA11 — Economic soundness (A1 unitary balance + E1/E3/E4)
 
-This document proves that Determ's economic primitives — A1 (unitary supply invariant), E1 (Negative Entry Fee from Zeroth pool), E3 (lottery subsidy mode), E4 (finite subsidy fund) — collectively preserve a closed-form supply ledger across every block apply. The bound is sharp: total live value across all accounts and stakes exactly matches `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound` after every block.
+This document proves that Determ's economic primitives — A1 (unitary supply invariant), E1 (Negative Entry Fee from Zeroth pool), E3 (lottery subsidy mode), E4 (finite subsidy fund) — collectively preserve a closed-form supply ledger across every block apply. The bound is sharp: total live value across all accounts and stakes exactly matches `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound − accumulated_shielded` after every block. The sixth term, `accumulated_shielded` (§3.22), is the value moved from the transparent live sum into the confidential pool by SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER; it is `0` on any shield-free chain, which recovers the classical five-term identity.
 
 Three properties matter:
 
@@ -24,6 +24,9 @@ uint64_t accumulated_subsidy_;    // monotone increase
 uint64_t accumulated_slashed_;    // monotone increase
 uint64_t accumulated_inbound_;    // monotone increase (cross-shard credits in)
 uint64_t accumulated_outbound_;   // monotone increase (cross-shard debits out)
+uint64_t accumulated_shielded_;   // §3.22: value moved into the confidential pool
+                                  // (SHIELD +A / UNSHIELD −A / CONFIDENTIAL_TRANSFER −fee);
+                                  // NOT monotone; 0 on shield-free chains (chain.hpp:898)
 ```
 
 ### Invariant
@@ -33,10 +36,10 @@ After every block apply:
 ```
 Σ accounts[a].balance + Σ stakes[v].locked
     == genesis_total + accumulated_subsidy + accumulated_inbound
-       − accumulated_slashed − accumulated_outbound
+       − accumulated_slashed − accumulated_outbound − accumulated_shielded
 ```
 
-Enforced via direct C++ assertion at `apply_transactions` tail; mismatch throws with a "unitary-balance invariant violated" diagnostic.
+Enforced via direct C++ assertion at `apply_transactions` tail (`chain.cpp:1866-1888`); mismatch throws with a "unitary-balance invariant violated" diagnostic. `accumulated_shielded` (§3.22) subtracts the value currently held as opaque commitments in the confidential pool: that value left the transparent live sum but was not burned, so real total supply is `live_total_supply() + accumulated_shielded_` (chain.hpp:585-589). The term is `0` on shield-free chains; the diagnostic's per-field breakdown itemizes the five transparent operands (the shielded term is folded into `expected`, not printed separately).
 
 ### E1 NEF flow
 
@@ -82,10 +85,10 @@ live_total_supply() == expected_total()
 ```
 
 where:
-- `live_total_supply()` = `Σ accounts[a].balance + Σ stakes[v].locked` (O(N) walk over both maps).
-- `expected_total()` = `genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ − accumulated_slashed_ − accumulated_outbound_`.
+- `live_total_supply()` = `Σ accounts[a].balance + Σ stakes[v].locked` (O(N) walk over both maps; `chain.cpp:699-704`).
+- `expected_total()` = `genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ − accumulated_slashed_ − accumulated_outbound_ − accumulated_shielded_` (`chain.hpp:590-597`).
 
-Holds unconditionally — no cryptographic assumption required; the property is structural.
+The sixth term `accumulated_shielded_` (§3.22, `chain.hpp:898`) is subtractive because value moved into the confidential pool leaves the transparent live sum: SHIELD moves `A` from a sender balance into the pool (`accumulated_shielded_ += A`, `chain.cpp:1037`), UNSHIELD releases it back (`accumulated_shielded_ −= A`, `chain.cpp:1081`), and CONFIDENTIAL_TRANSFER moves the public fee out of the pool (`accumulated_shielded_ −= fee`, `chain.cpp:1172`). Unlike the four monotone accumulators, `accumulated_shielded_` both rises and falls. It is conditional/zero: identically `0` on any chain that never ran a shield op, in which case T-12 collapses to the classical five-term identity. Holds unconditionally — no cryptographic assumption required; the property is structural.
 
 **Theorem T-13 (E1 supply neutrality).** Every NEF distribution event preserves T-12 trivially: the pre-event sum and post-event sum across `Σ accounts[a].balance` are equal (balance moves from `ZEROTH_ADDRESS` to the registrant; `accumulated_subsidy_` and other counters are unchanged).
 
@@ -112,9 +115,10 @@ for a in initial_state:
         stakes[a.domain].locked = a.stake;   gtotal += a.stake;
 genesis_total_       = gtotal;
 accumulated_subsidy_ = 0;  ...  accumulated_outbound_ = 0;
+accumulated_shielded_= 0;   // §3.22 — genesis is always shield-free (chain.cpp:939)
 ```
 
-Live sum at index-0 exit equals `gtotal = genesis_total_`, with all counters zero. ⇒ `live = expected`. ✓
+Live sum at index-0 exit equals `gtotal = genesis_total_`, with all counters zero (the §3.22 `accumulated_shielded_` included, `chain.cpp:939`). ⇒ `live = expected`. ✓
 
 **Inductive step.** Suppose `live == expected` before applying block `h`. The apply path's per-block delta tracking:
 
@@ -125,21 +129,22 @@ Live sum at index-0 exit equals `gtotal = genesis_total_`, with all counters zer
 - UNSTAKE (eligible): locked → balance (sum preserving). Fee deducted: −fee.
 - DEREGISTER: −fee.
 - PARAM_CHANGE, MERGE_EVENT: −fee.
+- SHIELD (§3.22, `chain.cpp:1037`): sender pays `cost = amount + fee` (fee → creators like any transparent fee); the `amount = A` leaves the live sum into the confidential pool, `accumulated_shielded_ += A`. Net change in `Σ balances`, fee aside: −A.
+- UNSHIELD (§3.22b, `chain.cpp:1081`): the spent note releases its public `A` from the pool back to the transparent side — `accounts[tx.to].balance += A − fee` and `fee → creators` — with `accumulated_shielded_ −= A`. The whole `A` re-enters the live sum (split recipient/creators); there is no separate live-fee debit (the fee is carved from `A`). Net change in `Σ balances`: +A.
+- CONFIDENTIAL_TRANSFER (§3.22c, `chain.cpp:1172`): pool → pool, hidden amounts stay in the pool; only the public `fee` leaves the pool to creators, `accumulated_shielded_ −= fee`. Net change in `Σ balances`: +fee.
 
-Fee aggregation: `total_fees` summed across all txs is credited to creators alongside subsidy. Net effect on `Σ balances + Σ locked`:
-
-```
-Δ live = −(Σ fees) − (block_outbound) + (block_inbound) + total_distributed − block_slashed
-```
-
-where `total_distributed = total_fees + subsidy_this_block`. Substituting:
+Fee aggregation: `total_fees` summed across all txs is credited to creators alongside subsidy. Write `block_shielded_delta` for the net change to `accumulated_shielded_` this block (`= Σ SHIELD.amount − Σ UNSHIELD.amount − Σ CONFIDENTIAL_TRANSFER.fee`). Net effect on `Σ balances + Σ locked`:
 
 ```
-Δ live = −(Σ fees) + total_fees + subsidy_this_block − block_outbound + block_inbound − block_slashed
-       = +subsidy_this_block + block_inbound − block_outbound − block_slashed
+Δ live = −(Σ live-sender fees) − (block_outbound) + (block_inbound) + total_distributed
+         − block_slashed − block_shielded_delta
 ```
 
-(The `−(Σ fees) + total_fees = 0` cancellation is exact: every fee deducted from a sender is added to `total_fees`.)
+where `total_distributed = total_fees + subsidy_this_block`. The `−(Σ live-sender fees) + total_fees = 0` cancellation is exact for fees debited from a live sender (TRANSFER/REGISTER/UNSTAKE/DEREGISTER/PARAM_CHANGE/SHIELD). UNSHIELD's and CONFIDENTIAL_TRANSFER's fees are carved from the pool, not from a live sender, so they are already accounted inside `−block_shielded_delta` (which released them from the pool) and enter `total_fees` on the credit side — the per-op net effects listed above (UNSHIELD `+A`, CONFIDENTIAL_TRANSFER `+fee`) already fold in that split. Substituting:
+
+```
+Δ live = +subsidy_this_block + block_inbound − block_outbound − block_slashed − block_shielded_delta
+```
 
 Counter updates at apply tail:
 
@@ -148,9 +153,12 @@ accumulated_subsidy_  += subsidy_this_block  (when distributed > 0 and creators 
 accumulated_inbound_  += block_inbound
 accumulated_outbound_ += block_outbound
 accumulated_slashed_  += block_slashed
+accumulated_shielded_ += block_shielded_delta   (net of SHIELD +A / UNSHIELD −A / CONFIDENTIAL_TRANSFER −fee, in-line per §3.22)
 ```
 
-⇒ `Δ expected = +subsidy_this_block + block_inbound − block_outbound − block_slashed = Δ live`.
+⇒ `Δ expected = +subsidy_this_block + block_inbound − block_outbound − block_slashed − block_shielded_delta = Δ live`.
+
+For each shield op the change to the live sum is exactly the negation of the change to `accumulated_shielded_` (SHIELD: live −A, shielded +A; UNSHIELD: live +A, shielded −A; CONFIDENTIAL_TRANSFER: live +fee, shielded −fee), so the `−accumulated_shielded_` term keeps `expected_total()` tracking `live_total_supply()`. On a shield-free chain `block_shielded_delta ≡ 0` and this reduces to the five-term step. The three ops are single-shard-only (UNSHIELD rejects a cross-shard `tx.to`, `chain.cpp:1059`), so `accumulated_shielded_` never crosses a shard boundary.
 
 The post-apply assertion `live == expected` is `pre-live + Δ live == pre-expected + Δ expected = (pre-expected) + Δ live` by IH. ⇒ live == expected. ✓ ∎
 
@@ -230,21 +238,24 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 
 | Component | Source |
 |---|---|
-| A1 counters declaration | `include/determ/chain/chain.hpp` (`genesis_total_` ... `accumulated_outbound_`) |
-| Genesis-time `genesis_total_` initialization | `src/chain/chain.cpp::apply_transactions` `b.index == 0` branch |
+| A1 counters declaration | `include/determ/chain/chain.hpp:890-898` (`genesis_total_` ... `accumulated_outbound_`, `accumulated_shielded_`) |
+| `expected_total()` (six-term RHS) | `include/determ/chain/chain.hpp:590-597` |
+| `live_total_supply()` | `src/chain/chain.cpp:699-704` |
+| Genesis-time `genesis_total_` initialization | `src/chain/chain.cpp::apply_transactions` `b.index == 0` branch (`chain.cpp:905-944`; all six counters zeroed incl. `accumulated_shielded_` at `:939`) |
 | Per-block delta tracking | `src/chain/chain.cpp::apply_transactions` (per-tx delta accumulation) |
-| Apply-tail assertion | `src/chain/chain.cpp::apply_transactions` (A1 invariant assertion at tail) |
+| Apply-tail assertion | `src/chain/chain.cpp:1866-1888` (A1 invariant assertion at tail) |
+| §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER `accumulated_shielded_` mutation | `src/chain/chain.cpp:1037` (`+= A`) / `:1081` (`−= A`) / `:1172` (`−= fee`); single-shard reject at `:1059` |
 | E1 NEF distribution | REGISTER branch in `apply_transactions` |
 | Zeroth address validator guard | `src/node/validator.cpp::check_transactions` (rejects `from == ZEROTH_ADDRESS`) |
 | E3 lottery branch | subsidy distribution in `apply_transactions` |
 | E4 cap enforcement | same; `min(base_subsidy, remaining)` |
-| Snapshot serialization of all counters | `src/chain/chain.cpp::serialize_state` |
+| Snapshot serialization of all counters | `src/chain/chain.cpp::serialize_state` (`accumulated_shielded` conditional at `chain.cpp:2219`) |
 
 A reviewer can confirm soundness by:
 
 1. Running any of the regression tests in `tools/test_*.sh` — the apply-tail assertion throws loudly on any A1 mismatch, so every passing test is a per-block invariant verification across whatever block sequence that test produces.
 2. Grepping for `+=` / `-=` on `accumulated_*` and `genesis_total_`: every mutation site should be inside `apply_transactions` and paired with the corresponding state mutation.
-3. Confirming the snapshot path round-trips all five counters; restore_from_snapshot's `value()` defaults are conservative (zero, equivalent to a fresh chain) so old snapshots load with degraded-but-consistent state.
+3. Confirming the snapshot path round-trips all six counters (the §3.22 `accumulated_shielded_` is serialized conditionally — only when non-zero — at `chain.cpp:2219`, and the legacy `genesis_total` back-solve inverts all six terms at `chain.cpp:2645-2650`); restore_from_snapshot's `value()` defaults are conservative (zero, equivalent to a fresh chain) so old snapshots load with degraded-but-consistent state.
 
 ---
 
@@ -252,6 +263,6 @@ A reviewer can confirm soundness by:
 
 T-12 establishes Determ's closed-form supply invariant unconditionally — no cryptographic assumption is required; the apply path's mechanical counter updates make it structurally true. T-13 + T-14 establish that all three economic primitives (E1 NEF, E3 lottery, E4 finite pool) preserve the invariant.
 
-The proof is mechanical because the design is mechanical: every state mutation is paired with the corresponding counter delta, and the post-apply assertion catches any divergence before the block commits. Combined with FA1's safety guarantee (no forks finalize), this means an operator can compute the chain's total supply *as of any height* from genesis parameters + the chain's counter values — and that number is exact, not approximate, even under cross-shard transit and slashing.
+The proof is mechanical because the design is mechanical: every state mutation is paired with the corresponding counter delta, and the post-apply assertion catches any divergence before the block commits. Combined with FA1's safety guarantee (no forks finalize), this means an operator can compute the chain's total supply *as of any height* from genesis parameters + the chain's counter values — and that number is exact, not approximate, even under cross-shard transit, slashing, and confidential-pool shielding (real total supply = `live_total_supply() + accumulated_shielded_`, the transparent live sum plus the value held as opaque commitments in the §3.22 pool).
 
 This completes the FA-track coverage of all v1.x mechanisms: consensus + sharding + slashing + governance + economics.

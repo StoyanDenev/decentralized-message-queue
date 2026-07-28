@@ -7,7 +7,7 @@ This document formalizes the **K-shard aggregate supply-conservation theorem**: 
     =  Σ_shards genesis_total
 ```
 
-i.e. value that has left a source shard but not yet been credited on its destination shard ("in flight") is counted, value burned by forfeiture is counted, and nothing is created or destroyed by the cross-shard machinery. This is the multi-shard composition of the **per-shard A1 unitary-supply invariant** (`AccountStateInvariants.md`, FA-Apply-1) — the property `live_total_supply + accumulated_slashed = expected_total` that the apply path asserts after every block (`chain.cpp:1397–1419`).
+i.e. value that has left a source shard but not yet been credited on its destination shard ("in flight") is counted, value burned by forfeiture is counted, and nothing is created or destroyed by the cross-shard machinery. This is the multi-shard composition of the **per-shard A1 unitary-supply invariant** (`AccountStateInvariants.md`, FA-Apply-1) — the property `live_total_supply == expected_total` that the apply path asserts after every block (`chain.cpp:1866–1888`).
 
 **A-number namespace.** This proof concerns the apply-layer **accounting** identity historically labelled "the A1 unitary-supply invariant" in the `FA-Apply-*` series. Per `Preliminaries.md` §2.0, that label is an *accounting* invariant — `live_total_supply + accumulated_slashed = expected_total` — and is **unrelated** to the cryptographic assumption A1 (Ed25519 EUF-CMA). Throughout this document, "A1" written bare means the accounting identity. The cryptographic assumptions used are A2 (SHA-256 collision resistance, `Preliminaries.md` §2.1), which underpins the receipt-key uniqueness this proof relies on for dedup, and — only indirectly via FA7 — the surrounding consensus assumptions. The selective-abort family (FA-track) is unrelated and not cited here; FA3 is *not* a SHA-256 assumption (FA3 = SelectiveAbort).
 
@@ -31,13 +31,13 @@ This proof states and proves the **K-shard aggregate supply identity** — that 
 
 ### 1.1 What this proof adds over the per-shard proofs
 
-The per-shard A1 invariant (FA-Apply-1 I-6, asserted at `chain.cpp:1397–1419`) is a statement about **one** `Chain` object: after every block,
+The per-shard A1 invariant (FA-Apply-1 I-6, asserted at `chain.cpp:1866–1888`) is a statement about **one** `Chain` object: after every block,
 
 ```
 live_total_supply()  =  expected_total()
 ```
 
-where (per `chain.hpp:443–449` and `chain.cpp:548–553`)
+where (per `chain.hpp:590–597` and `chain.cpp:699–704`)
 
 ```
 live_total_supply  =  Σ accounts_[d].balance  +  Σ stakes_[d].locked
@@ -46,7 +46,10 @@ expected_total     =  genesis_total
                     +  accumulated_inbound
                     -  accumulated_slashed
                     -  accumulated_outbound
+                    -  accumulated_shielded      (§3.22; 0 on shield-free chains)
 ```
+
+The sixth term `accumulated_shielded` (`chain.hpp:898`) is subtractive — value moved into the confidential pool leaves the transparent live sum — and is single-shard-local (see §2.2, §5 limitation 7): SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER never cross a shard boundary, so it introduces no cross-shard channel.
 
 A cross-shard `TRANSFER` debits the sender on the source shard `S` and emits a receipt; the destination shard `D` credits the recipient when it applies the inbound receipt. On `S`, the per-shard A1 stays balanced because the debit is matched by `accumulated_outbound_ += amount` (the `-accumulated_outbound` term). On `D`, the per-shard A1 stays balanced because the credit is matched by `accumulated_inbound_ += amount` (the `+accumulated_inbound` term). **Each shard's A1 holds in isolation** — but neither shard's invariant, on its own, says anything about whether the value that left `S` is *the same* value that arrived at `D`, nor that the K-shard total is conserved across the whole transfer.
 
@@ -72,17 +75,18 @@ The complete set of supply-bearing chain-state fields — the fields that contri
 
 | # | Field | Type | Role | Code anchor |
 |---|-------|------|------|-------------|
-| 1 | `accounts_[d].balance` | `uint64_t` per account | summed into `live_total_supply` | `chain.cpp:550` |
-| 2 | `stakes_[d].locked` | `uint64_t` per stake entry | summed into `live_total_supply` | `chain.cpp:551` |
-| 3 | `genesis_total_` | `uint64_t` | baseline (Σ initial balances + Σ initial stakes at block 0) | `chain.cpp:687–711`, `chain.hpp:444` |
-| 4 | `accumulated_subsidy_` | `uint64_t` | block-subsidy minted to creators (E1/E3/E4); `+` term | `chain.cpp:1391`, `chain.hpp:445` |
-| 5 | `accumulated_inbound_` | `uint64_t` | cross-shard receipt value credited *into* this shard; `+` term | `chain.cpp:1393`, `chain.hpp:446` |
-| 6 | `accumulated_slashed_` | `uint64_t` | suspension + equivocation forfeiture; `−` term | `chain.cpp:1395`, `chain.hpp:447` |
-| 7 | `accumulated_outbound_` | `uint64_t` | cross-shard `TRANSFER` value that *left* this shard; `−` term | `chain.cpp:1394`, `chain.hpp:448` |
+| 1 | `accounts_[d].balance` | `uint64_t` per account | summed into `live_total_supply` | `chain.cpp:701` |
+| 2 | `stakes_[d].locked` | `uint64_t` per stake entry | summed into `live_total_supply` | `chain.cpp:702` |
+| 3 | `genesis_total_` | `uint64_t` | baseline (Σ initial balances + Σ initial stakes at block 0) | `chain.cpp:910–934`, `chain.hpp:889` |
+| 4 | `accumulated_subsidy_` | `uint64_t` | block-subsidy minted to creators (E1/E3/E4); `+` term | `chain.cpp:1860`, `chain.hpp:890` |
+| 5 | `accumulated_inbound_` | `uint64_t` | cross-shard receipt value credited *into* this shard; `+` term | `chain.cpp:1862`, `chain.hpp:892` |
+| 6 | `accumulated_slashed_` | `uint64_t` | suspension + equivocation forfeiture; `−` term | `chain.cpp:1864`, `chain.hpp:891` |
+| 7 | `accumulated_outbound_` | `uint64_t` | cross-shard `TRANSFER` value that *left* this shard; `−` term | `chain.cpp:1863`, `chain.hpp:893` |
+| 8 | `accumulated_shielded_` | `uint64_t` | §3.22 value moved into the confidential pool (SHIELD `+A` / UNSHIELD `−A` / CONFIDENTIAL_TRANSFER `−fee`); `−` term; **single-shard-local** (§5 lim. 7) | `chain.cpp:1037`/`1081`/`1172`, `chain.hpp:898` |
 
-This list is **complete**. The genesis bootstrap (`chain.cpp:711–715`) initializes fields 3–7 (`genesis_total_` from the Σ at lines 687–709; the four accumulators to `0`). The apply tail (`chain.cpp:1391–1395`) is the *only* site that mutates fields 4–7 per block, folding the per-block running counters `block_inbound / block_outbound / block_slashed` (declared `chain.cpp:723–725`) and `subsidy_this_block` into them. `live_total_supply()` (`chain.cpp:548–553`) sums *only* fields 1 and 2 — there is no other balance-bearing container (no pseudo-account pool, no separate fee escrow: fees flow through `accounts_` via the creator-distribution at `chain.cpp:1286–1305`; see XS-3). The post-apply assertion `actual == expected` (`chain.cpp:1397–1399`) ties (1+2) to (3+4+5−6−7) on every block.
+This list is **complete**. The genesis bootstrap (`chain.cpp:905–944`) initializes fields 3–8 (`genesis_total_` from the Σ over `b.initial_state`; the five accumulators to `0`, `accumulated_shielded_` zeroed at `chain.cpp:939`). The apply tail (`chain.cpp:1859–1864`) folds the per-block running counters `block_inbound / block_outbound / block_slashed` and `subsidy_this_block` into fields 4–7; field 8 (`accumulated_shielded_`) is instead mutated **in-line** inside the SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER apply arms (`chain.cpp:1037`/`1081`/`1172`), not at the tail, but is equally a per-block delta on the `expected_total()` RHS. `live_total_supply()` (`chain.cpp:699–704`) sums *only* fields 1 and 2 — there is no other balance-bearing container (no pseudo-account pool, no separate fee escrow: fees flow through `accounts_` via the creator-distribution; see XS-3). The confidential-pool value tracked by field 8 is **not** in `live_total_supply()` — that is exactly why it is a subtractive term of `expected_total()`. The post-apply assertion `actual == expected` (`chain.cpp:1866–1888`) ties (1+2) to (3+4+5−6−7−8) on every block.
 
-There is **no `nef_pool` field on the conservation path in v1.x**: the NEF subsidy stream is a sub-channel of `accumulated_subsidy_` for accounting purposes (FA-Apply-14 NefPoolDrain shows the geometric drain converts pool → registrant balance under the same A1 identity); it does not introduce a supply-bearing field outside the seven above. (`genesis_total()` at `chain.cpp:682–686` explicitly notes that any future pool's initial balance would be added into `genesis_total_` at block 0, leaving the invariant formula unchanged.)
+There is **no `nef_pool` field on the conservation path in v1.x**: the NEF subsidy stream is a sub-channel of `accumulated_subsidy_` for accounting purposes (FA-Apply-14 NefPoolDrain shows the geometric drain converts pool → registrant balance under the same A1 identity); it does not introduce a supply-bearing field outside the eight above. (`genesis_total()` at `chain.cpp:682–686` explicitly notes that any future pool's initial balance would be added into `genesis_total_` at block 0, leaving the invariant formula unchanged.)
 
 ### 2.3 The in-flight quantity
 
@@ -104,24 +108,26 @@ Define the **K-shard aggregate supply** in two equivalent forms.
 TotalSupply  =  Σ_s ( Σ balances(C_s) + Σ staked(C_s) )         (live, fields 1+2)
              +  ( Σ_s accumulated_outbound(C_s) − Σ_s accumulated_inbound(C_s) )   (net in-flight)
              +  Σ_s accumulated_slashed(C_s)                     (burned)
+             +  Σ_s accumulated_shielded(C_s)                    (§3.22 sequestered in the confidential pool)
              −  Σ_s accumulated_subsidy(C_s)                     (newly minted, already in live)
 ```
 
-**Form B (the test's accumulator, fully general).** Rearranging Form A and substituting the per-shard A1 identity `live(C_s) = expected_total(C_s)` term by term gives the quantity D1's `aggregate_conserved()` lambda computes (`main.cpp:26933–26943`):
+**Form B (the test's accumulator, fully general).** Rearranging Form A and substituting the per-shard A1 identity `live(C_s) = expected_total(C_s)` term by term gives the aggregate quantity (a `+ accumulated_shielded` extension of D1's `aggregate_conserved()` lambda, `main.cpp:26933–26943`, which runs shield-free — see below):
 
 ```
 aggregate  =  Σ_s [ live_total_supply(C_s)
                   + accumulated_outbound(C_s)
                   + accumulated_slashed(C_s)
+                  + accumulated_shielded(C_s)
                   − accumulated_inbound(C_s)
                   − accumulated_subsidy(C_s) ]
 ```
 
 **Claim (proved below as XS-5):** `aggregate = Σ_s genesis_total(C_s)` for every reachable multi-shard state.
 
-**Why the two `−` terms.** `accumulated_inbound` and `accumulated_subsidy` are subtracted because their value is *already counted inside `live_total_supply`*: an inbound credit raised an `accounts_[to].balance` on the destination (so it is in fields 1+2), and a subsidy mint raised a creator's `accounts_[creator].balance` (likewise). To compare the live sum against the *genesis* baseline (which predates both), we net them back out. Symmetrically, `accumulated_outbound` is *added* because that value was debited out of live balances on the source but has not yet (or has only partially) re-appeared as inbound elsewhere — it must be re-counted to recover the conserved total. `accumulated_slashed` is added because forfeited value was removed from live `stakes_[d].locked` but is not destroyed from the *conservation* viewpoint — it is sequestered, and re-adding it recovers the genesis baseline.
+**Why the two `−` terms.** `accumulated_inbound` and `accumulated_subsidy` are subtracted because their value is *already counted inside `live_total_supply`*: an inbound credit raised an `accounts_[to].balance` on the destination (so it is in fields 1+2), and a subsidy mint raised a creator's `accounts_[creator].balance` (likewise). To compare the live sum against the *genesis* baseline (which predates both), we net them back out. Symmetrically, `accumulated_outbound` is *added* because that value was debited out of live balances on the source but has not yet (or has only partially) re-appeared as inbound elsewhere — it must be re-counted to recover the conserved total. `accumulated_slashed` is added because forfeited value was removed from live `stakes_[d].locked` but is not destroyed from the *conservation* viewpoint — it is sequestered, and re-adding it recovers the genesis baseline. **`accumulated_shielded` (§3.22) is added for the identical reason**: SHIELD moves value out of a live `accounts_[d].balance` into the confidential pool as opaque commitments — removed from `live_total_supply` but not destroyed (real supply = `live + accumulated_shielded`, `chain.hpp:585–589`), so re-adding it recovers the genesis baseline. Because the shield ops are single-shard-only (§5 lim. 7), each shard's `accumulated_shielded` is a purely intra-shard accumulator — it introduces no cross-shard channel, so the sum `Σ_s accumulated_shielded` is well-defined and needs no in-flight netting (unlike outbound/inbound).
 
-The task's simplified identity `Σ(balances + staked + outbound_in_flight) + Σ slashed = Σ genesis_total` is exactly **Form A specialized to `Σ accumulated_subsidy = 0` and with `outbound_in_flight = Σ outbound − Σ inbound`** — the regime D1's test runs in (no block subsidy configured; one outbound, one matching inbound). Form B is the general statement that holds even with subsidy minting and partial flows; the rest of this proof proves Form B, from which Form A and the task's simplified identity follow by substitution.
+The task's simplified identity `Σ(balances + staked + outbound_in_flight) + Σ slashed = Σ genesis_total` is exactly **Form A specialized to `Σ accumulated_subsidy = 0` and `Σ accumulated_shielded = 0` and with `outbound_in_flight = Σ outbound − Σ inbound`** — the regime D1's test runs in (no block subsidy configured, no shield op run; one outbound, one matching inbound). Form B is the general statement that holds even with subsidy minting, confidential shielding, and partial flows; the rest of this proof proves Form B, from which Form A and the task's simplified identity follow by substitution. D1's `aggregate_conserved()` lambda omits the `+ accumulated_shielded` term precisely because it runs shield-free (`Σ accumulated_shielded = 0`), so it computes Form B's value verbatim in its regime — the same way it omits nothing for subsidy because it also runs subsidy-free (see §4).
 
 ### 2.5 Per-transaction-type A1 closure (why each shard's invariant holds)
 
@@ -136,11 +142,14 @@ XS-1 consumes the per-shard A1 invariant as a hypothesis. That hypothesis is FA-
 | UNSTAKE (post-unlock) | `0` (locked → balance, both in `live`) | none | `0` | `chain.cpp` UNSTAKE arm |
 | Suspension slash (Phase-1 abort) | `−d` (locked `−d`) | `accumulated_slashed += d` | `0` (`−slashed` rises by `d`) | `chain.cpp:1313–1328` |
 | Equivocation slash | `−L` (locked `−L`, full forfeit) | `accumulated_slashed += L` | `0` | `chain.cpp:1344–1356` |
-| Subsidy mint | `+s` (creators `+s`) | `accumulated_subsidy += s` | `0` (`+subsidy` rises by `s`) | `chain.cpp:1390–1392` |
-| Fee redistribution | `0` (sender `−f` already counted, creator `+f`) | none | `0` | `chain.cpp:1286–1305` |
+| Subsidy mint | `+s` (creators `+s`) | `accumulated_subsidy += s` | `0` (`+subsidy` rises by `s`) | `chain.cpp:1859–1861` |
+| Fee redistribution | `0` (sender `−f` already counted, creator `+f`) | none | `0` | `chain.cpp` creator-distribution arm |
+| SHIELD (§3.22, single-shard) | `−A` (sender `−(A+f)`, fee `→` creators `+f`) | `accumulated_shielded += A` | `0` (`−shielded` drops by `A`) | `chain.cpp:1037` |
+| UNSHIELD (§3.22b, single-shard) | `+A` (recipient `+(A−f)`, fee `→` creators `+f`) | `accumulated_shielded −= A` | `0` (`−shielded` rises by `A`) | `chain.cpp:1081` |
+| CONFIDENTIAL_TRANSFER (§3.22c, single-shard) | `+f` (public fee `→` creators; hidden outputs stay in pool) | `accumulated_shielded −= f` | `0` (`−shielded` rises by `f`) | `chain.cpp:1172` |
 | REGISTER / DEREGISTER / DAPP_REGISTER / PARAM_CHANGE | `0` (or `−f` fee, redistributed) | none | `0` | `chain.cpp` respective arms |
 
-Every row is net-zero on `expected − live`, which is why the post-apply assertion `actual == expected` (`chain.cpp:1397–1399`) holds. The only two rows that touch the *cross-shard* accumulators are the cross-shard TRANSFER source (`+out`) and the inbound receipt (`+in`) — the two rows XS-1's case analysis exercises. The slash rows feed `accumulated_slashed` (the `Σ slashed` term of the aggregate); the subsidy row feeds `accumulated_subsidy` (the `−subsidy` netting term). This table is the apply-layer foundation on which the K-shard sum of XS-5 rests.
+Every row is net-zero on `expected − live`, which is why the post-apply assertion `actual == expected` (`chain.cpp:1866–1888`) holds. The only two rows that touch the *cross-shard* accumulators are the cross-shard TRANSFER source (`+out`) and the inbound receipt (`+in`) — the two rows XS-1's case analysis exercises. The slash rows feed `accumulated_slashed` (the `Σ slashed` term of the aggregate); the subsidy row feeds `accumulated_subsidy` (the `−subsidy` netting term); the three §3.22 shield rows feed `accumulated_shielded` (the `+shielded` term). The shield rows never touch a *cross-shard* accumulator — they are single-shard-local (UNSHIELD rejects a cross-shard `tx.to`, `chain.cpp:1059`), so `accumulated_shielded` stays a purely intra-shard summand of the aggregate. This table is the apply-layer foundation on which the K-shard sum of XS-5 rests.
 
 ---
 
@@ -160,24 +169,26 @@ Throughout, write `G := Σ_s genesis_total(C_s)` for the (fixed) aggregate genes
 
 **Statement.** Every apply step on any shard `C_s ∈ 𝕊` leaves the aggregate `A` unchanged: if a single block apply on one shard transitions `A` from `A⁻` to `A⁺`, then `A⁺ = A⁻`.
 
-**Proof.** Fix one shard `C_s` and one block `b` it applies. By the per-shard A1 invariant (FA-Apply-1 I-6, enforced at `chain.cpp:1397–1399`), *after* the apply, `live_total_supply(C_s) = expected_total(C_s)`. Substituting `expected_total = genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound` (`chain.hpp:443–449`) into shard `C_s`'s contribution to Form B:
+**Proof.** Fix one shard `C_s` and one block `b` it applies. By the per-shard A1 invariant (FA-Apply-1 I-6, enforced at `chain.cpp:1866–1888`), *after* the apply, `live_total_supply(C_s) = expected_total(C_s)`. Substituting `expected_total = genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound − accumulated_shielded` (`chain.hpp:590–597`) into shard `C_s`'s contribution to Form B:
 
 ```
 contrib(C_s) =  live(C_s)
               + accumulated_outbound(C_s)
               + accumulated_slashed(C_s)
+              + accumulated_shielded(C_s)
               − accumulated_inbound(C_s)
               − accumulated_subsidy(C_s)
 
             =  [ genesis_total(C_s) + accumulated_subsidy(C_s) + accumulated_inbound(C_s)
-                 − accumulated_slashed(C_s) − accumulated_outbound(C_s) ]    (← live = expected_total)
-              + accumulated_outbound(C_s) + accumulated_slashed(C_s)
+                 − accumulated_slashed(C_s) − accumulated_outbound(C_s)
+                 − accumulated_shielded(C_s) ]    (← live = expected_total, chain.hpp:590–597)
+              + accumulated_outbound(C_s) + accumulated_slashed(C_s) + accumulated_shielded(C_s)
               − accumulated_inbound(C_s) − accumulated_subsidy(C_s)
 
             =  genesis_total(C_s).
 ```
 
-Every accumulator term cancels its mirror, leaving `contrib(C_s) = genesis_total(C_s)`, which is **constant across all blocks** (`genesis_total_` is written once at block 0, `chain.cpp:711`, and never mutated again on the apply path; the only other writer is the snapshot back-solve of XS-4, which by construction reproduces the same value). The other `K−1` shards' contributions are untouched by `C_s`'s apply. Hence `A⁺ = Σ_s genesis_total(C_s) = A⁻`. ∎
+Every accumulator term cancels its mirror — including the §3.22 `accumulated_shielded` pair (the `−accumulated_shielded` inside `expected_total` against the `+accumulated_shielded` Form-B term) — leaving `contrib(C_s) = genesis_total(C_s)`, which is **constant across all blocks** (`genesis_total_` is written once at block 0, `chain.cpp:934`, and never mutated again on the apply path; the only other writer is the snapshot back-solve of XS-4, which by construction reproduces the same value). The other `K−1` shards' contributions are untouched by `C_s`'s apply. Hence `A⁺ = Σ_s genesis_total(C_s) = A⁻`. ∎
 
 **Mechanism, case by case.** XS-1 above is the algebraic short proof. For concreteness, here is the case analysis on the actual debit/emit/credit code that *makes* the per-shard A1 hold (these are the FA-Apply-13 and FA-Apply-9 results that XS-1 invokes):
 
@@ -222,7 +233,7 @@ Therefore the fee never enters `accumulated_outbound_`, never crosses a shard bo
 
 **Statement.** `serialize_state` → `restore_from_snapshot` preserves every supply-bearing field and the dedup set, so `TotalSupply` (and each shard's `expected_total`, `live_total_supply`, and contribution to Form B) is identical post-restore.
 
-**Proof.** `serialize_state` (`chain.cpp:1614–1618`) persists fields 3–7 verbatim:
+**Proof.** `serialize_state` (`chain.cpp:2212–2219`) persists fields 3–8 verbatim:
 
 ```
 snap["genesis_total"]        = genesis_total_;
@@ -230,26 +241,29 @@ snap["accumulated_subsidy"]  = accumulated_subsidy_;
 snap["accumulated_slashed"]  = accumulated_slashed_;
 snap["accumulated_inbound"]  = accumulated_inbound_;
 snap["accumulated_outbound"] = accumulated_outbound_;
+if (accumulated_shielded_ != 0)                        // §3.22: conditional (chain.cpp:2219)
+    snap["accumulated_shielded"] = accumulated_shielded_;
 ```
 
-and the `applied_inbound_receipts` dedup set (`chain.cpp:1586–1592`, each entry serialized as `src_shard` + `tx_hash`), as well as `accounts_` and `stakes_` (fields 1, 2) — which carry the balances and locked stake. `restore_from_snapshot` reads them all back: the four delta counters at `chain.cpp:1732–1735` (subsidy/slashed/inbound/outbound) and `genesis_total_` at `chain.cpp:1867–1868` (with a back-solve fallback — see below); the dedup set at `chain.cpp:1778–1783` (`c.applied_inbound_receipts_.insert({src, txhash})`); and accounts/stakes via the standard state load. This is FA-Apply-2 T-S3 (cross-namespace coverage — fields 1–7 live in the `a:`/`s:`/`c:` namespaces of `compute_state_root`, see `chain.cpp:404–408`) composed with FA-Apply-12 T-R4 (dedup-set restore).
+and the `applied_inbound_receipts` dedup set (`chain.cpp:1586–1592`, each entry serialized as `src_shard` + `tx_hash`), as well as `accounts_` and `stakes_` (fields 1, 2) — which carry the balances and locked stake. `restore_from_snapshot` reads them all back: the delta counters (subsidy/slashed/inbound/outbound and the §3.22 `accumulated_shielded_`, the latter restored at `chain.cpp:2443`) and `genesis_total_` at `chain.cpp:2628–2629` (with a back-solve fallback — see below); the dedup set (`c.applied_inbound_receipts_.insert({src, txhash})`); and accounts/stakes via the standard state load. This is FA-Apply-2 T-S3 (cross-namespace coverage — fields 1–8 live in the `a:`/`s:`/`c:` namespaces of `compute_state_root`, see `chain.cpp:495–503`) composed with FA-Apply-12 T-R4 (dedup-set restore). `accumulated_shielded` is serialized only when non-zero (`chain.cpp:2219`) so a shield-free snapshot is byte-identical to a pre-§3.22 one; it defaults to `0` on restore, matching a shield-free chain.
 
-**The back-solve preserves the identity even for legacy snapshots.** If `genesis_total` is absent from the snapshot (legacy form), `restore_from_snapshot` back-solves it (`chain.cpp:1869–1877`):
+**The back-solve preserves the identity even for legacy snapshots.** If `genesis_total` is absent from the snapshot (legacy form), `restore_from_snapshot` back-solves it (`chain.cpp:2630–2650`):
 
 ```
 live       = c.live_total_supply();
 deltas_pos = c.accumulated_subsidy_ + c.accumulated_inbound_;
-deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_;
+deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_
+           + c.accumulated_shielded_;                 // §3.22 negative term (chain.cpp:2645–2646)
 c.genesis_total_ = live + deltas_neg − deltas_pos;
 ```
 
-This is exactly `genesis_total = live − (subsidy + inbound) + (slashed + outbound)`, the rearrangement of the per-shard A1 identity — so the restored chain satisfies `live_total_supply == expected_total` *by construction*, and the restored `genesis_total_` equals the original (because the original also satisfied the same identity). Either way, all seven supply-bearing fields are reproduced, so each shard's contribution to Form B (which equals `genesis_total(C_s)` by XS-1) is identical post-restore, and the aggregate `A` is unchanged.
+This is exactly `genesis_total = live − (subsidy + inbound) + (slashed + outbound + shielded)`, the rearrangement of the six-term per-shard A1 identity — so the restored chain satisfies `live_total_supply == expected_total` *by construction*, and the restored `genesis_total_` equals the original (because the original also satisfied the same identity). The `+ accumulated_shielded_` term is load-bearing: omitting it would under-compute `genesis_total_` by exactly `accumulated_shielded_` and fail-closed-reject a *valid* fieldless+shielded snapshot (this is the SnapshotRestoreGateAudit §2b fix, gate `test-snapshot-genesis-backsolve`; it is latent because `serialize_state` writes `genesis_total` unconditionally at `:2212`, so any snapshot old enough to omit it predates §3.22 ⇒ `accumulated_shielded_ == 0`). Either way, all eight supply-bearing fields are reproduced, so each shard's contribution to Form B (which equals `genesis_total(C_s)` by XS-1) is identical post-restore, and the aggregate `A` is unchanged.
 
-Moreover, S-033 binds it: the snapshot head's `state_root` covers the `c:` namespace (the five counters, `chain.cpp:404–408`), so a tampered counter would fail the post-restore `compute_state_root()` check (`chain.cpp:1879+`). D1 pins this as the snapshot round-trip: `restored.compute_state_root() == dst.compute_state_root()`, `restored.live_total_supply() == dst.live_total_supply()`, `restored.expected_total() == dst.expected_total()`, and `restored.accumulated_inbound() == dst.accumulated_inbound()` (`main.cpp:27053–27066`), plus a full replay-from-genesis producing byte-identical state_roots on both source and destination (`main.cpp:27068–27109`). ∎
+Moreover, S-033 binds it: the snapshot head's `state_root` covers the `c:` namespace (the counters, `chain.cpp:495–503`; the `c:accumulated_shielded` leaf conditional at `:502–503`), so a tampered counter would fail the post-restore `compute_state_root()` check. D1 pins this as the snapshot round-trip: `restored.compute_state_root() == dst.compute_state_root()`, `restored.live_total_supply() == dst.live_total_supply()`, `restored.expected_total() == dst.expected_total()`, and `restored.accumulated_inbound() == dst.accumulated_inbound()` (`main.cpp:27053–27066`), plus a full replay-from-genesis producing byte-identical state_roots on both source and destination (`main.cpp:27068–27109`). ∎
 
 ### XS-5 — Aggregate identity (the conservation theorem)
 
-**Statement.** For any reachable multi-shard state `t`, `A(t) = G = Σ_s genesis_total(C_s)`. Equivalently (Form A / task framing, specialized to `Σ accumulated_subsidy = 0`):
+**Statement.** For any reachable multi-shard state `t`, `A(t) = G = Σ_s genesis_total(C_s)`. Equivalently (Form A / task framing, specialized to `Σ accumulated_subsidy = 0` and `Σ accumulated_shielded = 0`):
 
 ```
 Σ_s ( Σ balances + Σ staked + outbound_in_flight )  +  Σ_s accumulated_slashed  =  Σ_s genesis_total.
@@ -257,11 +271,11 @@ Moreover, S-033 binds it: the snapshot head's `state_root` covers the `c:` names
 
 **Proof.** By induction over the sequence of apply steps that produced state `t` (each step is one block applied on one shard; the multi-shard state evolves by interleaving these, and the order does not matter because distinct shards' states are disjoint and each step touches one shard).
 
-- **Base case (genesis).** Immediately after every shard has applied its block 0, each shard has `accumulated_subsidy_ = accumulated_inbound_ = accumulated_slashed_ = accumulated_outbound_ = 0` (`chain.cpp:712–715`) and `live_total_supply(C_s) = genesis_total(C_s)` (`chain.cpp:716` comment: "Genesis-time invariant trivially holds (live == genesis_total)"; established because `genesis_total_` is computed as exactly `Σ initial balance + Σ initial stake`, `chain.cpp:687–709`). Hence each contribution to Form B is `genesis_total(C_s) + 0 + 0 − 0 − 0 = genesis_total(C_s)`, and `A(genesis) = Σ_s genesis_total(C_s) = G`. D1 pins this: per-shard `expected_total == live_total_supply` for every shard, and `aggregate_conserved() == aggregate_genesis()` at genesis (`main.cpp:26952–26960`).
+- **Base case (genesis).** Immediately after every shard has applied its block 0, each shard has `accumulated_subsidy_ = accumulated_inbound_ = accumulated_slashed_ = accumulated_outbound_ = accumulated_shielded_ = 0` (`chain.cpp:935–939`) and `live_total_supply(C_s) = genesis_total(C_s)` (`chain.cpp:943` comment: "Genesis-time invariant trivially holds (live == genesis_total)"; established because `genesis_total_` is computed as exactly `Σ initial balance + Σ initial stake`, `chain.cpp:910–934`). Hence each contribution to Form B is `genesis_total(C_s) + 0 + 0 + 0 − 0 − 0 = genesis_total(C_s)`, and `A(genesis) = Σ_s genesis_total(C_s) = G`. D1 pins this: per-shard `expected_total == live_total_supply` for every shard, and `aggregate_conserved() == aggregate_genesis()` at genesis (`main.cpp:26952–26960`).
 
-- **Inductive step.** Assume `A = G` after some prefix of apply steps. The next step applies one block on one shard `C_s`. By XS-1 (whose hypothesis — the per-shard A1 — holds because the apply path *asserted* it at `chain.cpp:1397–1399` for this very block, throwing otherwise), the step leaves `A` unchanged: `A⁺ = A⁻ = G`. XS-2 guarantees this remains true even if the step re-applies a duplicate receipt (no-op). XS-3 guarantees the fee redistribution inside the step is intra-shard and does not perturb the aggregate. XS-4 guarantees that a snapshot-restore "step" (replacing a shard's chain object with one restored from its serialized state) also leaves `A` unchanged.
+- **Inductive step.** Assume `A = G` after some prefix of apply steps. The next step applies one block on one shard `C_s`. By XS-1 (whose hypothesis — the per-shard A1 — holds because the apply path *asserted* it at `chain.cpp:1866–1888` for this very block, throwing otherwise), the step leaves `A` unchanged: `A⁺ = A⁻ = G`. XS-2 guarantees this remains true even if the step re-applies a duplicate receipt (no-op). XS-3 guarantees the fee redistribution inside the step is intra-shard and does not perturb the aggregate. XS-4 guarantees that a snapshot-restore "step" (replacing a shard's chain object with one restored from its serialized state) also leaves `A` unchanged.
 
-By induction, `A(t) = G` for every reachable `t`. The Form A / task-simplified statement follows by substituting `Σ accumulated_subsidy = 0` and `outbound_in_flight := Σ accumulated_outbound − Σ accumulated_inbound` into §2.4's equivalence. ∎
+By induction, `A(t) = G` for every reachable `t`. The Form A / task-simplified statement follows by substituting `Σ accumulated_subsidy = 0`, `Σ accumulated_shielded = 0`, and `outbound_in_flight := Σ accumulated_outbound − Σ accumulated_inbound` into §2.4's equivalence. ∎
 
 **Corollary (closed cycle ⇒ live sum unchanged).** When every emitted receipt has been credited (no coin in flight: `Σ accumulated_outbound = Σ accumulated_inbound`) and no subsidy was minted and nothing was slashed, Form A collapses to `Σ_s live_total_supply(C_s) = G` — the live balances-plus-stake across the whole set equal the genesis baseline. D1 pins exactly this after the cycle closes: `Σ live_total_supply across shards == kGenesisAggregate` (`main.cpp:27042–27050`).
 
@@ -301,7 +315,9 @@ D1's `aggregate_conserved()` lambda (`main.cpp:26933–26943`) is **Form B of §
 
 5. **Subsidy/slashing are conserved, not absent.** The theorem holds *with* subsidy minting and slashing active (Form B carries both terms). D1's test runs with `subsidy = 0` and no slashing to isolate the cross-shard flow, so it pins Form A; FA-Apply-7 (subsidy) and FA-Apply-10/11 (slashing) pin the per-shard A1 invariance of those channels, which XS-1 consumes to extend the conservation theorem to the general case.
 
-6. **R4 under-quorum merge does not move supply.** The R4 `MERGE_EVENT` apply branch (`chain.cpp:929–945`) mutates only `merge_state_` — a `shard_id → refugee_region` metadata map in the `m:` namespace (`chain.cpp:242`, `349–358`) — and consumes fee + nonce. It does **not** transfer `accounts_` or `stakes_` between shards: a merge changes *which committee produces blocks* for an under-quorum region, not *where value is held*. Accordingly `merge_state_` is not a supply-bearing field (it is absent from §2.2's list of seven), and MERGE_BEGIN/MERGE_END leave every shard's `live_total_supply` and accumulators untouched — the per-shard A1 row for MERGE is the "fee redistributed, otherwise net-zero" case of §2.5. The conservation identity is therefore invariant across merge events; FA9 (`UnderQuorumMerge.md`) covers the consensus-safety side, and this proof's XS-5 holds verbatim across BEGIN/END because those steps fall under the §2.5 net-zero rows.
+6. **R4 under-quorum merge does not move supply.** The R4 `MERGE_EVENT` apply branch (`chain.cpp:929–945`) mutates only `merge_state_` — a `shard_id → refugee_region` metadata map in the `m:` namespace (`chain.cpp:242`, `349–358`) — and consumes fee + nonce. It does **not** transfer `accounts_` or `stakes_` between shards: a merge changes *which committee produces blocks* for an under-quorum region, not *where value is held*. Accordingly `merge_state_` is not a supply-bearing field (it is absent from §2.2's list of eight), and MERGE_BEGIN/MERGE_END leave every shard's `live_total_supply` and accumulators untouched — the per-shard A1 row for MERGE is the "fee redistributed, otherwise net-zero" case of §2.5. The conservation identity is therefore invariant across merge events; FA9 (`UnderQuorumMerge.md`) covers the consensus-safety side, and this proof's XS-5 holds verbatim across BEGIN/END because those steps fall under the §2.5 net-zero rows.
+
+7. **§3.22 confidential pool is single-shard-only, so it needs no cross-shard channel.** SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER move value between a shard's transparent live sum and its own confidential pool, tracked by the eighth supply-bearing field `accumulated_shielded_` (§2.2). This value left `live_total_supply` but was not burned; the aggregate re-counts it via the `+ accumulated_shielded` term added to Form A/B (§2.4), so the identity `aggregate = Σ genesis_total` stays exact on a shard that has run shield ops (without the term the aggregate would evaluate to `Σ genesis − Σ shielded`). Critically, the three ops are **single-shard-only**: UNSHIELD rejects a cross-shard `tx.to` (`is_cross_shard(tx.to) ⇒ continue`, `chain.cpp:1053–1059`) — a cross-shard confidential withdraw would land spendable value on the destination with no `accumulated_outbound_` booking and no receipt, silently breaking this very identity — and SHIELD/CONFIDENTIAL_TRANSFER are pool-local (no transparent `tx.to` credit). So no shielded value ever crosses a shard boundary: each `accumulated_shielded_(C_s)` is a purely intra-shard summand, never in flight, and `Σ_s accumulated_shielded` needs no outbound/inbound-style netting. This is the reconciliation `SupplyInvariantComposition.md` §5 lim. 7 defers to FA-Apply-17. (A future cross-shard confidential withdraw — receipt + `block_outbound` booking — is a separate, owner-gated design that would extend the in-flight machinery to shielded value; until then the single-shard restriction is what keeps Form B a closed identity with a plain `+ accumulated_shielded` term.)
 
 ---
 
@@ -309,20 +325,21 @@ D1's `aggregate_conserved()` lambda (`main.cpp:26933–26943`) is **Form B of §
 
 | Surface | Location | Relevance |
 |---|---|---|
-| Per-shard A1 assertion | `src/chain/chain.cpp:1397–1419` | the `actual == expected` post-apply check that XS-1 consumes |
-| `live_total_supply()` | `src/chain/chain.cpp:548–553` | fields 1+2 (balances + locked stake) |
-| `expected_total()` | `include/determ/chain/chain.hpp:443–449` | the `genesis + subsidy + inbound − slashed − outbound` formula |
-| Genesis bootstrap | `src/chain/chain.cpp:680–717` | `genesis_total_` Σ + zeroing the four accumulators (XS-5 base case) |
+| Per-shard A1 assertion | `src/chain/chain.cpp:1866–1888` | the `actual == expected` post-apply check that XS-1 consumes |
+| `live_total_supply()` | `src/chain/chain.cpp:699–704` | fields 1+2 (balances + locked stake) |
+| `expected_total()` | `include/determ/chain/chain.hpp:590–597` | the six-term `genesis + subsidy + inbound − slashed − outbound − shielded` formula |
+| Genesis bootstrap | `src/chain/chain.cpp:905–944` | `genesis_total_` Σ + zeroing the five accumulators incl. `accumulated_shielded_` at `:939` (XS-5 base case) |
 | Cross-shard TRANSFER (source) | `src/chain/chain.cpp:742–769` | debit + `block_outbound += amount`; fee stays local (XS-1, XS-3) |
 | Inbound receipt apply (destination) | `src/chain/chain.cpp:1363–1381` | dedup guard + credit + `block_inbound += amount` (XS-1, XS-2) |
-| Accumulator fold (apply tail) | `src/chain/chain.cpp:1391–1395` | the only per-block mutation of fields 4–7 |
+| Accumulator fold (apply tail) | `src/chain/chain.cpp:1859–1864` | the only per-block mutation of fields 4–7 (`accumulated_shielded_` field 8 is mutated in-line in the shield arms, not here) |
+| §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER (`accumulated_shielded_`) | `src/chain/chain.cpp:1037` / `1081` / `1172`; single-shard reject `:1059` | field 8 mutation; the `+ accumulated_shielded` Form-B term (§2.4, §5 lim. 7) |
 | Fee → creator distribution | `src/chain/chain.cpp:1279–1305` | fee is intra-shard recirculation (XS-3) |
 | `is_cross_shard` | `src/chain/chain.cpp:198–202` | the routing predicate that defines a cross-shard transfer |
-| `serialize_state` (counters) | `src/chain/chain.cpp:1614–1618` | persist fields 3–7 (XS-4) |
+| `serialize_state` (counters) | `src/chain/chain.cpp:2212–2216`; `accumulated_shielded` conditional `:2219` | persist fields 3–8 (XS-4) |
 | `serialize_state` (dedup set) | `src/chain/chain.cpp:1586–1592` | persist `applied_inbound_receipts_` (XS-4) |
-| `restore_from_snapshot` (counters + back-solve) | `src/chain/chain.cpp:1732–1735`, `1867–1877` | reload fields 4–7; back-solve `genesis_total` for legacy (XS-4) |
+| `restore_from_snapshot` (counters + back-solve) | `src/chain/chain.cpp:2628–2650` | reload fields 4–8; legacy `genesis_total` back-solve inverts all six `expected_total` terms incl. `+ accumulated_shielded_` at `:2645–2646` (XS-4) |
 | `restore_from_snapshot` (dedup set) | `src/chain/chain.cpp:1778–1783` | reload `applied_inbound_receipts_` (XS-4) |
-| `c:` namespace in state_root | `src/chain/chain.cpp:404–408` | S-033 binds the five counters (XS-4 tamper-detection) |
+| `c:` namespace in state_root | `src/chain/chain.cpp:495–503` | S-033 binds the counters; `c:accumulated_shielded` leaf is conditional (emitted only when non-zero, `:502–503`) so a shield-free chain stays byte-identical (XS-4 tamper-detection) |
 | R4 MERGE_EVENT apply | `src/chain/chain.cpp:929–945`, `m:` namespace `:242`/`:349–358` | metadata-only; does not move supply (§5 limitation 6) |
 | `Block::cross_shard_receipts` / `inbound_receipts` | `include/determ/chain/block.hpp:428`, `:437` | source-emitted vs destination-applied receipt lists (§2.3) |
 | **FA7** | `docs/proofs/CrossShardReceipts.md` | exactly-once delivery / no double-credit (XS-1 source/dest pairing) |
@@ -342,4 +359,4 @@ D1's `aggregate_conserved()` lambda (`main.cpp:26933–26943`) is **Form B of §
 
 ## 7. Status
 
-**Test shipped** — `determ test-cross-shard-supply-invariant` (D1, commit `7ee49da`), 30 PASS assertions, integrated into the FAST `tools/run_all.sh` suite. **Proof complete** (XS-1..XS-5). The §2.2 supply-component list (7 fields: `accounts_[d].balance`, `stakes_[d].locked`, `genesis_total_`, `accumulated_subsidy_`, `accumulated_inbound_`, `accumulated_slashed_`, `accumulated_outbound_`) matches `src/chain/chain.cpp` exactly; there is no separate `outbound_receipts_` member — the source-side in-flight signal is the `accumulated_outbound_` counter, consistent with D1's test.
+**Test shipped** — `determ test-cross-shard-supply-invariant` (D1, commit `7ee49da`), 30 PASS assertions, integrated into the FAST `tools/run_all.sh` suite. **Proof complete** (XS-1..XS-5). The §2.2 supply-component list (8 fields: `accounts_[d].balance`, `stakes_[d].locked`, `genesis_total_`, `accumulated_subsidy_`, `accumulated_inbound_`, `accumulated_slashed_`, `accumulated_outbound_`, and the §3.22 `accumulated_shielded_`) matches `src/chain/chain.cpp` exactly; there is no separate `outbound_receipts_` member — the source-side in-flight signal is the `accumulated_outbound_` counter, consistent with D1's test. D1 runs shield-free (`accumulated_shielded_ ≡ 0`), so it pins Form B in the shield-free regime; the `+ accumulated_shielded` term of Form A/B (§2.4) is exercised by the single-shard shield regressions (`test-shield` / `test-unshield` / `test-confidential-transfer`) plus the always-on six-term A1 apply-tail assertion (`chain.cpp:1866–1888`), and its single-shard restriction is limitation 7 of §5.

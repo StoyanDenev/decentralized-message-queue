@@ -28,7 +28,7 @@ For a reachable chain state, write the A1 identity as the predicate
 A1(C)  :≡   live_total_supply(C)  ==  expected_total(C)
 ```
 
-where (from `chain.cpp:548-553` and `chain.hpp:443-449`)
+where (from `chain.cpp:699-704` and `chain.hpp:590-597`)
 
 ```
 live_total_supply(C)  =  Σ_{d ∈ accounts_} balance[d]  +  Σ_{d ∈ stakes_} locked[d]
@@ -37,6 +37,7 @@ expected_total(C)     =  genesis_total_
                        + accumulated_inbound_
                        − accumulated_slashed_
                        − accumulated_outbound_
+                       − accumulated_shielded_       (§3.22; 0 on shield-free chains)
 ```
 
 This document proves three theorems jointly over the three supply-touching surfaces:
