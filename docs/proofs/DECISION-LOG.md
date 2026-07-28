@@ -1600,3 +1600,27 @@ this entry (ten) until the next convergence sweep. License-map files updated: `d
 **Still open (NOT folded in here — separate owner decision):** the two rank-1 consensus-integrity findings (EQV-INGRESS forged-slash `validator.cpp:378`; empty-committee beacon `node.cpp:1973`, RpcIngressGateAudit §2). They are pre-genesis, in the no-migrations consensus path, and independent of the DSSO tail. They still await an owner directive on the fix; this entry does not authorize them.
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-26; recorded by Claude Fable at his direction).
+
+## 2026-07-27 — Verifiable computation replaces the zk-VM: sum-check/GKR + extended Bulletproofs, proved per fixed circuit; Determ is a curated God-protocol rail, not a universal provable-compute VM
+
+**Problem.** The zk-VM (Bundle B) was the single largest complexity import in the design — a whole proving stack that cannot live under the from-scratch-C99 / zero-heavy-deps / Minix-portable doctrine (RISC Zero / SP1 are large Rust stacks), whose succinct on-chain verifier needs either a pairing curve Determ does not have (new, non-PQ crypto) or a STARK. It gated four v1.2 DApps (D.4/D.6/D.7/D.8) and nothing on the v1.1 critical path. "zk-VM" conflates two things: **general verifiable computation** (the capability actually needed) and a **general-purpose VM that auto-proves arbitrary third-party bytecode** (a developer-convenience layer that is the source of the complexity).
+
+**Decision (owner, 2026-07-27).** Drop the general zk-VM substrate. Provide verifiable computation by proving each specific, fixed computation as its own circuit, using only doctrine-compliant, transparent (no trusted setup) schemes that reuse the shipped stack:
+- **sum-check / GKR (Spartan-style)** for computations needing PQ + succinct verification — minimal new crypto (sum-check + a hash-based polynomial commitment over the shipped SHA-256); PQ-capable; soundness proof simple enough (a degree/union-bound argument) to be falsify-on-mutant-gated, which a zk-VM's compiler+prover stack never is.
+- **extended Bulletproofs** for small fixed circuits now — the shipped inner-product argument (`ipa.c`) generalizes from range proofs to R1CS / arithmetic-circuit satisfiability; zero new curve, transparent, already audited. Cost recorded: O(n) verify + non-PQ (discrete log over P-256) — acceptable for small circuits, not the default for large or PQ-required ones.
+
+**Positioning — God protocol (Nick Szabo).** Determ remains a God-protocol emulator: **correctness + minimal-disclosure privacy under mutual distrust are preserved for every function instantiated.** The mutual-distrust/privacy leg lives in the K-of-K consensus + threshold layer (DSSO t-of-n OPRF, Shamir, D.10 threshold decryption) and is untouched. What is dropped is *universality* — "God computes any unforeseen program" — a coverage property, not a security property, that no real protocol fully achieves and that nothing on the roadmap requires. This better honors Szabo's core principle ("trusted third parties are security holes; minimize what must be trusted"): a small hand-built circuit + auditable sum-check trusts far less than an opaque zk-VM toolchain. The market claim narrows accordingly — Determ is the **trust-minimized rail for a curated set of God-protocol functions**, not a universal provable-compute platform for arbitrary third-party programs.
+
+**Per-DApp consequence (deliberately harder — the point).** Each Tier-2 computation must be expressed as a specific circuit rather than compiled from arbitrary bytecode. Higher per-DApp effort is chosen intentionally: hand-built circuits are smaller, auditable, provable, and doctrine-clean — pressure that yields trust-minimized DApps.
+- **D.6 private rollup:** state-transition function as a fixed sum-check circuit.
+- **D.4 AI-agent:** authorized-parameter check as a policy circuit (or signatures + policy where full VC is unnecessary).
+- **D.7 verifiable inference:** reclassified **RESEARCH** — zkML for a specific small model as a fixed circuit, or deferred until feasible; not a launch commitment.
+- **D.8 anonymous credentials:** re-homed onto shipped primitives (P-256; BBS+/CL-style), pending a spec check — anonymous credentials are a fixed-statement proof and likely need no general VC at all.
+
+**Supersedes / amends.** Closes the zk-VM stack-choice open question (V1.1-PLAN §3 "biggest open question" — moot: no stack to choose). Amends the 2026-06-06 "God-Stack" entry's zk-VM dependency: the God-Stack capability is delivered by threshold crypto + per-circuit verifiable computation, not a VM.
+
+**Consistency.** Minimalism (removes the largest complexity import); from-scratch C99 (both verifiers vendorable; no pairing curve, no Rust stack); PQ (sum-check + hash commitment is PQ-capable; the non-PQ Bulletproofs path is flagged for small circuits only); B3 (sum-check soundness is auditable/falsifiable vs trusting a compiler); no-migrations (verifiable computation is DApp-layer + additive; no consensus change). v1.2 concern only.
+
+**Caveat.** Engineering maturity of Spartan/Brakedown-class implementations moves fast and post-dates the current knowledge horizon; confirm current reference implementations + proof-size/prover-time numbers for the actual D.6/D.4 circuit sizes before building. Each Tier-2 circuit must be pinned before choosing the linear-verify Bulletproofs path vs the succinct sum-check path.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-27; recorded by Claude Fable at his direction).
