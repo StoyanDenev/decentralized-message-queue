@@ -11,8 +11,14 @@
 # candidates → empty set (byte-neutral); one empty view empties the intersection
 # (fail-closed); and the committee_sig_root formula is order-independent over the
 # sig set + binds the source_shard_id + the actual K-of-K signature set (the
-# anti-wedge pure-function invariant). Composes with test_shard_tip_fold (the
-# apply-path fold) and test_contrib_wire_verify (the DTM-STV-v1 signed-view binding).
+# anti-wedge pure-function invariant). It ALSO drives the VALIDATOR gate
+# BlockValidator::check_shardtip_reconciliation in isolation (gate-gap audit
+# wf_6c5a9e49): a well-formed EXTENDED intersection block ACCEPTED, a record NOT in
+# reconcile_intersection REJECTED ("not in committee-view intersection"), and a
+# view list not matching its committed root REJECTED ("does not match committed
+# root") — falsify-on-mutant: deleting the subset-reject loop flips the middle leg
+# RED. Composes with test_shard_tip_fold (the apply-path fold) and
+# test_contrib_wire_verify (the DTM-STV-v1 signed-view binding).
 set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh

@@ -12957,6 +12957,65 @@ int main(int argc, char** argv) {
                   "committee_sig_root is a pure function of the tip (co-signers agree)");
         }
 
+        // === STMC-4 VALIDATOR ENFORCEMENT (gate-gap audit wf_6c5a9e49): drive
+        //     BlockValidator::check_shardtip_reconciliation directly through the
+        //     read-only seam. The gate is wired into validate() at validator.cpp:57,
+        //     AFTER check_block_sigs (:51), so a hand-built EXTENDED block can never
+        //     reach it live — it shipped with the subset-reject loop UNTESTED (the
+        //     producer-side build_body fold above never runs a Block through the
+        //     validator). These three legs are the falsify-on-mutant coverage:
+        //     deleting the subset-reject loop (validator.cpp ~:1547-1550) flips the
+        //     neg-1 leg RED while the positive control stays green. ===
+        {
+            node::BlockValidator v;
+            v.set_sharding_mode(ShardingMode::EXTENDED);   // the sole gate the check reads
+            // chain (built above) + a registry are (void)/unused by the check, but the
+            // seam mirrors check_shardtip_witnesses_for_test's 3-arg arity.
+            node::NodeRegistry reg = node::NodeRegistry::build_from_chain(chain, chain.height());
+
+            // Three unanimous committee views over {r1, r2}; each root authenticates
+            // its list (compute_view_root(list) == root). reconcile_intersection over
+            // three identical lists is exactly {hash(r1), hash(r2)}.
+            std::vector<Hash> view = { node::hash_shard_tip(r1), node::hash_shard_tip(r2) };
+            Hash vroot = node::compute_view_root(view);
+            std::vector<Hash> good_roots = { vroot, vroot, vroot };
+            auto mk_block = [&](const std::vector<ShardTipRecord>& recs,
+                                const std::vector<Hash>& roots) {
+                Block b;
+                b.creators = { "n1", "n2", "n3" };
+                b.creator_view_shardtip_lists = { view, view, view };
+                b.creator_view_shardtip_roots = roots;
+                b.shard_tip_records = recs;
+                return b;
+            };
+
+            {   // positive control — every folded record IS in the full-K intersection
+                Block b = mk_block({ r1, r2 }, good_roots);
+                auto r = v.check_shardtip_reconciliation_for_test(b, chain, reg);
+                check(r.ok, "STMC-4: well-formed intersection block ACCEPTED");
+            }
+            {   // NEG-1 (the falsify-on-mutant leg) — the subset-reject loop
+                //   (validator.cpp ~:1547-1550): a record whose hash is in NO
+                //   committee view is smuggled into shard_tip_records. Deleting the
+                //   loop makes this ACCEPT — the mutant the gate-gap audit named.
+                ShardTipRecord rX = mkrec(3, 40, 1, "ap", 0xD0);   // absent from every view
+                Block b = mk_block({ r1, r2, rX }, good_roots);
+                auto r = v.check_shardtip_reconciliation_for_test(b, chain, reg);
+                check(!r.ok && r.error.find("not in committee-view intersection") != std::string::npos,
+                      "STMC-4: a record NOT in reconcile_intersection is REJECTED (subset-reject loop)");
+            }
+            {   // NEG-2 — view-root authentication (validator.cpp ~:1540): flip ONE
+                //   creator's committed root so compute_view_root(list) != root. Same
+                //   records as the positive control — only the root differs.
+                std::vector<Hash> bad_roots = good_roots;
+                bad_roots[1][0] ^= 0x01;
+                Block b = mk_block({ r1, r2 }, bad_roots);
+                auto r = v.check_shardtip_reconciliation_for_test(b, chain, reg);
+                check(!r.ok && r.error.find("does not match committed root") != std::string::npos,
+                      "STMC-4: a view list not matching its committed root is REJECTED");
+            }
+        }
+
         std::cout << (fail == 0 ? "PASS" : "FAIL")
                   << ": shardtip-reconciliation "
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";

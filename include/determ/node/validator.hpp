@@ -95,6 +95,29 @@ public:
         return check_shardtip_witnesses(b, chain, registry);
     }
 
+    // STMC-4 test seam (ShardTipMergeClosureSoundness, STMC-4; gate-gap audit
+    // wf_6c5a9e49): run the D3.5d-ii Layer-1 reconciliation check in isolation —
+    // same const-forwarder pattern as check_shardtip_witnesses_for_test above. The
+    // trailing NodeRegistry is UNNAMED and unused: check_shardtip_reconciliation
+    // reads only b + chain (chain itself is (void)-reserved), but the seam mirrors
+    // the witnesses seam's arity so the two shard-tip gates are driven identically.
+    // The gate is wired into validate() at validator.cpp:57, AFTER check_block_sigs
+    // (:51), so a hand-built EXTENDED block can never reach it live — hence the
+    // subset-reject loop shipped UNTESTED (only the producer-side fold was
+    // witnessed). This seam lets the falsifier drive an EXTENDED block whose
+    // shard_tip_records carries a record NOT in
+    // reconcile_intersection(creator_view_shardtip_lists) and assert the SPECIFIC
+    // "not in committee-view intersection" reject (the mutant: delete the
+    // subset-reject loop at validator.cpp ~:1547-1550), plus the
+    // "does not match committed root" view-root-bind reject — without assembling a
+    // fully-signed committee block whose block-sig/digest gates would otherwise
+    // mask a corrupted view list.
+    Result check_shardtip_reconciliation_for_test(const chain::Block& b,
+                                                  const chain::Chain& chain,
+                                                  const NodeRegistry&) const {
+        return check_shardtip_reconciliation(b, chain);
+    }
+
     // SR-5 test seam: run the cross-shard-receipt misroute check in isolation
     // (same const-forwarder pattern) so the falsifier can drive a receipt whose
     // dst_shard != ρ(to) without assembling a fully-signed committee block. Note

@@ -55,7 +55,7 @@ block validator (`src/node/validator.cpp:857-939`) and mempool admission
 (`src/node/node.cpp:2509-2515`). Pinning tests, all in the FAST set:
 `test-eligible-count` (14 assertions), `test-shard-tip-records` (15),
 `test-shard-tip-fold` (11), `test-contrib-wire-verify` (18),
-`test-shardtip-reconciliation` (11), and the falsifier `test-s036-merge-witness`
+`test-shardtip-reconciliation` (18, incl. 3 STMC-4 validator-gate legs), and the falsifier `test-s036-merge-witness`
 (8), plus the live regressions `tools/test_under_quorum_merge.sh` and
 `tools/test_current_multishard_byte_neutral.sh`. FAST is 227/0 both platforms.
 
@@ -228,18 +228,19 @@ into those outer vectors, so an outer `.empty()` test would reject block 1 on ev
 SINGLE/CURRENT chain (the producer self-applies its in-memory body before `to_json`
 strips the zero entries).
 
-**Argument.** The check is wired into `check_transactions`
-(`src/node/validator.cpp:55`). The non-EXTENDED branch is exactly `if (sharding_mode_
-!= ShardingMode::EXTENDED) { if (!b.shard_tip_records.empty()) return {false, …};
-return {true, ""}; }` (`:1466-1470`) — it inspects only the record set, with an
-inline warning (`:1459-1465`) never to guard the outer vectors. The EXTENDED branch
-then enforces `creator_view_shardtip_lists.size() == creators.size()` (`:1478-1479`),
+**Argument.** The check is wired directly into `validate()`
+(`src/node/validator.cpp:57`), immediately after `check_block_sigs` (`:51`). The
+non-EXTENDED branch is exactly `if (sharding_mode_ != ShardingMode::EXTENDED) { if
+(!b.shard_tip_records.empty()) return {false, …}; return {true, ""}; }`
+(`:1515-1519`) — it inspects only the record set, with an inline warning
+(`:1505-1514`) never to guard the outer vectors. The EXTENDED branch then enforces
+`creator_view_shardtip_lists.size() == creators.size()` (`:1527-1528`),
 authenticates each list against its signed root with a zero-root v1 sentinel
-(`:1480-1494`), and rejects any committed record not in
-`reconcile_intersection(b.creator_view_shardtip_lists)` (`:1496-1501`) — the same
-full-K intersection the producer folded (STMC-3), so producer and validator share
-`reconcile_intersection` + `hash_shard_tip` and a well-formed block always
-validates while a fabricated-record block fails closed.
+(`:1529-1543`, mismatch reject `:1540-1542`), and rejects any committed record not in
+`reconcile_intersection(b.creator_view_shardtip_lists)` (the subset-reject loop
+`:1544-1550`) — the same full-K intersection the producer folded (STMC-3), so
+producer and validator share `reconcile_intersection` + `hash_shard_tip` and a
+well-formed block always validates while a fabricated-record block fails closed.
 
 **Excluded failure.** A CRITICAL self-halt (the design-pass catch): a naive
 non-EXTENDED guard testing the outer `creator_view_*` vectors would reject block 1
@@ -247,12 +248,26 @@ on *every* SINGLE/CURRENT chain — a total-liveness outage invisible to an
 EXTENDED-only test plan. Mirrors the shipped `check_inbound_receipts`, which guards
 only `b.inbound_receipts`.
 
-**Witness.** `test-shardtip-reconciliation` (`src/main.cpp:11748-11771`): the
-full-K exclusion + empty-view-empties-intersection assertions exercise the exact
-predicate the EXTENDED branch enforces (`validator.cpp:1496-1501`); the
-non-EXTENDED self-halt guard is covered live by every SINGLE/CURRENT FAST cluster
-remaining green (a 3-node CURRENT cluster produces, self-applies, and agrees with
-no fork — `tools/test_current_multishard_byte_neutral.sh`).
+**Witness.** `test-shardtip-reconciliation` covers this claim at two layers.
+*Producer side:* the `build_body` full-K exclusion + empty-view-empties-intersection
+assertions exercise the reconciliation predicate over the assembler. *Validator side
+(gate-gap audit `wf_6c5a9e49`):* three legs drive `check_shardtip_reconciliation`
+itself in isolation through the read-only const seam
+`check_shardtip_reconciliation_for_test` (`include/determ/node/validator.hpp`) — a
+well-formed EXTENDED intersection block is ACCEPTED (positive control); a block whose
+`shard_tip_records` carries a record NOT in
+`reconcile_intersection(creator_view_shardtip_lists)` is REJECTED with `"not in
+committee-view intersection"` (the subset-reject loop, `validator.cpp:1544-1550`); and
+a block with one `creator_view_shardtip_roots[i]` flipped so
+`compute_view_root(list) != root` is REJECTED with `"does not match committed root"`
+(`validator.cpp:1540-1542`). *Falsify-on-mutant (MSVC Release verified):* deleting the
+subset-reject loop (`validator.cpp:1544-1550`) flips ONLY the middle leg RED while the
+positive control and the root-bind leg stay green — the gate was UNTESTED before this
+seam because it sits at `validate():57`, after `check_block_sigs` (`:51`), and is
+therefore unreachable by a hand-built block whose earlier gates would mask a corrupted
+view list. The non-EXTENDED self-halt guard is covered live by every SINGLE/CURRENT
+FAST cluster remaining green (a 3-node CURRENT cluster produces, self-applies, and
+agrees with no fork — `tools/test_current_multishard_byte_neutral.sh`).
 
 ## STMC-5 — TWO-GATE MERGE_EVENT FAIL-CLOSE: the reachable attack path is rejected at both mempool admission and block validation; on a BEACON, a BEGIN requires contiguous sub-2K committed distress over the source-height window (D3.6 + D3.8)
 
