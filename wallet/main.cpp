@@ -8931,6 +8931,165 @@ int cmd_selftest_committee_quorum(int, char**) {
     std::cout << "  FAIL: selftest-committee-quorum\n"; return 1;
 }
 
+// ── selftest-envelope-param-reject ── falsify gate for the DWE2 params-slot and
+// decrypt-path KDF-parameter rejection edges claimed by KeyfileArgon2Migration.md
+// KM-4 ("deserialize/decrypt reject every malformed/degenerate envelope with
+// std::nullopt"). The DWE1 STRUCTURAL edges (parts count, magic width, salt<8,
+// nonce!=12, ct<16) are already pinned via the CLI by
+// tools/test_wallet_envelope_decrypt_malformed_edge.sh. The DWE2 params-slot
+// guards and the decrypt() argon2/iters degeneracy guards were UNGATED: no test
+// fed a DWE2 blob to deserialize() nor called decrypt() on a hand-built
+// degenerate Envelope. This pure in-process gate (FAST, OFFLINE, no daemon)
+// closes exactly those:
+//
+//   deserialize (never invokes the KDF — rejects the blob directly):
+//     D1 DWE2 params slot 16 bytes (!=12; valid t|m|p in the first 12) -> nullopt
+//        Falsifies envelope.cpp:251 `if (params.size()!=12) return nullopt`:
+//        DELETE it and the first 12 bytes read IN-BOUNDS as VALID params, so
+//        deserialize would ACCEPT a mis-sized DWE2 blob -> D1 flips RED. This is
+//        the deterministic, platform-independent anchor for :251.
+//     D2 DWE2 params slot 4 bytes                                      -> nullopt
+//        The OOB case the finder flagged: with :251 deleted, rd_u32_le(params,4)
+//        and rd_u32_le(params,8) (envelope.cpp:254-255) index a 4-byte vector via
+//        the unchecked operator[] in rd_u32_le (:200) -> heap OOB READ on
+//        attacker-supplied file input. ASan/UBSan (WSL ci_local) trips on the
+//        mutant; with :251 present this simply returns nullopt and never reads
+//        the out-of-range bytes.
+//     D3 DWE2 argon2_t==0   D4 argon2_p==0   D5 argon2_m_kib < 8*argon2_p -> nullopt
+//        Falsify envelope.cpp:256-257, one clause each (blobs are crafted so only
+//        the named clause trips) -> deleting any single clause flips its case.
+//     D6 DWE1 pbkdf2_iters==0                                          -> nullopt
+//        Falsifies envelope.cpp:262.
+//
+//   decrypt (hand-built degenerate Envelope). deserialize would reject these
+//   BEFORE decrypt ever sees them, so the decrypt() guards are reachable ONLY via
+//   a directly-constructed struct — that is why this MUST be in-process, not a
+//   CLI blob test:
+//     C1 Kdf::ARGON2ID argon2_p==0     C2 Kdf::ARGON2ID argon2_t==0  -> nullopt, NO throw
+//        Falsify envelope.cpp:145-146: DELETE the guard and derive_key_argon2
+//        calls determ_argon2id with parallelism/t_cost==0, which returns -1
+//        (argon2id.c:139-141, before any allocation) -> derive_key_argon2 throws
+//        std::runtime_error UNCAUGHT inside decrypt -> process abort. The gate
+//        catches the throw and scores it RED. (The `m<8*p` sub-clause is NOT
+//        falsifiable through decrypt(): determ_argon2id CLAMPS m up to 8*p
+//        (argon2id.c:142) rather than erroring, then the all-zero AEAD tag fails
+//        -> nullopt regardless; that edge is pinned on the deserialize side by D5.)
+//     C4 Kdf::PBKDF2 pbkdf2_iters==0                                  -> nullopt, NO throw
+//        Falsifies envelope.cpp:150: determ_pbkdf2_hmac_sha256 returns -1 on
+//        iters==0 (pbkdf2.c:22) -> derive_key_pbkdf2 throws; the guard converts
+//        it to nullopt.
+//
+//   Positive controls P1 (DWE2) / P2 (DWE1) prove the negatives are meaningful —
+//   a well-formed blob deserializes to a non-null Envelope whose params match and
+//   decrypts back to the plaintext — so a "deserialize/decrypt always returns
+//   nullopt" regression cannot vacuously pass the battery. Tiny KDF params keep
+//   the controls FAST.
+int cmd_selftest_envelope_param_reject(int, char**) {
+    int pass = 0, fail = 0;
+    auto ok = [&](bool c, const char* m) {
+        if (c) { std::cout << "  ok:   " << m << "\n"; pass++; }
+        else   { std::cout << "  FAIL: " << m << "\n"; fail++; }
+    };
+    std::cout << "=== selftest-envelope-param-reject: DWE2 / decrypt-path KDF-param "
+                 "rejection (KeyfileArgon2Migration.md KM-4) ===\n";
+
+    // Shared WELL-FORMED field hex (deserialize accepts these lengths, so only
+    // the params slot / KDF-param under test can cause a rejection).
+    const std::string M2    = "44574532";                          // "DWE2" magic LE
+    const std::string M1    = "44574531";                          // "DWE1" magic LE
+    const std::string SALT  = "000102030405060708090a0b0c0d0e0f";  // 16 B (>= 8)
+    const std::string NONCE = "0102030405060708090a0b0c";          // 12 B (== NONCE_LEN)
+    const std::string AAD   = "";                                  // empty aad
+    const std::string CT    = "000102030405060708090a0b0c0d0e0f";  // 16 B (== TAG_LEN)
+    // Valid 12-byte DWE2 params: t=3, m=65536 KiB, p=1 (each u32 LE).
+    const std::string P_VALID = std::string("03000000") + "00000100" + "01000000";
+    auto blob = [&](const std::string& magic, const std::string& params) {
+        return magic + "." + SALT + "." + params + "." + NONCE + "." + AAD + "." + CT;
+    };
+
+    // ── Positive control P1: a genuine DWE2 (Argon2id) envelope round-trips ────
+    {
+        const std::vector<uint8_t> pt = {0xde, 0xad, 0xbe, 0xef};
+        // Tiny cost (8 KiB / 1 pass) keeps this FAST; still a real Argon2id KDF.
+        auto env = envelope::encrypt_argon2id(pt, "pw", {}, /*t*/1, /*m_kib*/8, /*p*/1);
+        auto d   = envelope::deserialize(envelope::serialize(env));
+        ok(d.has_value() && d->kdf == envelope::Kdf::ARGON2ID
+               && d->argon2_t == 1 && d->argon2_m_kib == 8 && d->argon2_p == 1,
+           "P1 valid DWE2 blob deserializes to matching Argon2id params");
+        bool round = false;
+        if (d) { auto r = envelope::decrypt(*d, "pw", {}); round = r && *r == pt; }
+        ok(round, "P1 valid DWE2 envelope decrypts back to the plaintext");
+    }
+    // ── Positive control P2: a genuine DWE1 (PBKDF2) envelope round-trips ──────
+    {
+        const std::vector<uint8_t> pt = {0x01, 0x02, 0x03};
+        auto env = envelope::encrypt_pbkdf2(pt, "pw", {}, /*iters*/2);   // FAST
+        auto d   = envelope::deserialize(envelope::serialize(env));
+        ok(d.has_value() && d->kdf == envelope::Kdf::PBKDF2 && d->pbkdf2_iters == 2,
+           "P2 valid DWE1 blob deserializes to matching PBKDF2 iters");
+        bool round = false;
+        if (d) { auto r = envelope::decrypt(*d, "pw", {}); round = r && *r == pt; }
+        ok(round, "P2 valid DWE1 envelope decrypts back to the plaintext");
+    }
+
+    // ── deserialize rejection battery (never invokes the KDF) ─────────────────
+    auto rej = [&](const std::string& b) { return !envelope::deserialize(b).has_value(); };
+
+    ok(rej(blob(M2, P_VALID + "deadbeef")),
+       "D1 DWE2 16-byte params slot rejected [falsify envelope.cpp:251]");
+    ok(rej(blob(M2, "03000000")),
+       "D2 DWE2 4-byte params slot rejected, no OOB read [falsify envelope.cpp:251]");
+    ok(rej(blob(M2, std::string("00000000") + "00000100" + "01000000")),
+       "D3 DWE2 argon2_t==0 rejected [falsify envelope.cpp:256-257]");
+    ok(rej(blob(M2, std::string("03000000") + "00000100" + "00000000")),
+       "D4 DWE2 argon2_p==0 rejected [falsify envelope.cpp:256-257]");
+    ok(rej(blob(M2, std::string("03000000") + "04000000" + "01000000")),
+       "D5 DWE2 argon2_m_kib<8*p rejected [falsify envelope.cpp:256-257]");
+    ok(rej(blob(M1, "00000000")),
+       "D6 DWE1 pbkdf2_iters==0 rejected [falsify envelope.cpp:262]");
+
+    // ── decrypt rejection battery (hand-built degenerate Envelope) ────────────
+    // A common WELL-FORMED AEAD frame so decrypt() reaches the KDF-param guard
+    // (ct >= TAG_LEN, nonce == NONCE_LEN, aad matches) before the degeneracy.
+    auto mk = [&](envelope::Kdf k) {
+        envelope::Envelope e;
+        e.kdf        = k;
+        e.salt       = std::vector<uint8_t>(16, 0x11);
+        e.nonce      = std::vector<uint8_t>(12, 0x22);   // == NONCE_LEN
+        e.aad        = {};
+        e.ciphertext = std::vector<uint8_t>(16, 0x00);   // == TAG_LEN
+        return e;
+    };
+    // The guard's contract: nullopt WITHOUT throwing. A throw means the
+    // degenerate params reached the KDF -> the guard is gone -> RED.
+    auto dec_rejects = [&](const envelope::Envelope& e) {
+        try { return !envelope::decrypt(e, "pw", {}).has_value(); }
+        catch (...) { return false; }
+    };
+    {
+        auto e = mk(envelope::Kdf::ARGON2ID);
+        e.argon2_t = 3; e.argon2_m_kib = 65536; e.argon2_p = 0;
+        ok(dec_rejects(e),
+           "C1 decrypt Argon2id argon2_p==0 -> nullopt, no throw [falsify envelope.cpp:145-146]");
+    }
+    {
+        auto e = mk(envelope::Kdf::ARGON2ID);
+        e.argon2_t = 0; e.argon2_m_kib = 65536; e.argon2_p = 1;
+        ok(dec_rejects(e),
+           "C2 decrypt Argon2id argon2_t==0 -> nullopt, no throw [falsify envelope.cpp:145-146]");
+    }
+    {
+        auto e = mk(envelope::Kdf::PBKDF2);
+        e.pbkdf2_iters = 0;
+        ok(dec_rejects(e),
+           "C4 decrypt PBKDF2 pbkdf2_iters==0 -> nullopt, no throw [falsify envelope.cpp:150]");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-envelope-param-reject\n"; return 0; }
+    std::cout << "  FAIL: selftest-envelope-param-reject\n"; return 1;
+}
+
 // ── bft-quorum ───────────────────────────────────────────────────────────────
 //
 // Offline calculator for the two-level BFT committee/quorum arithmetic the
@@ -25578,6 +25737,7 @@ int main(int argc, char** argv) {
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "selftest-committee-quorum") return cmd_selftest_committee_quorum(argc - 2, argv + 2);
+    if (cmd == "selftest-envelope-param-reject") return cmd_selftest_envelope_param_reject(argc - 2, argv + 2);
     if (cmd == "verify-equivocation") return cmd_verify_equivocation(argc - 2, argv + 2);
     if (cmd == "bft-quorum")      return cmd_bft_quorum     (argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
