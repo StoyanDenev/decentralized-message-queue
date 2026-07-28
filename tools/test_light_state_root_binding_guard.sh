@@ -38,6 +38,26 @@
 #       POSITIVE single-term count pins it. I3e (SR-1): the block_hash is
 #       recomputed LOCALLY via b.compute_hash(), never re-sourced from a
 #       daemon-returned field.
+#       I3f/I3g (PRW-3(b), StateProofRaceWindowSoundness.md — the successor-sig
+#       fail-closed leg). The prev_hash binding (I3b/I3d) only certifies the
+#       anchor's state_root if the SUCCESSOR header is genuinely committee-signed.
+#       committee_bound_state_root gets that from
+#         auto vbs = verify_block_sigs(succ_hdr, ...);   // returns a struct, NOT a throw
+#         if (!vbs.ok) { throw ... "committee-sig check failed" ...; }
+#       verify_block_sigs RETURNS a VerifyResult (it does not throw), so deleting
+#       or ungating the `if (!vbs.ok) throw` SILENTLY discards the verdict: a MITM
+#       daemon then serves a forged full block (swapped state_root R_A) + an
+#       UNSIGNED successor whose prev_hash = compute_hash(forged block); vbs.ok is
+#       ignored, succ_prev == recomputed_hex passes (attacker-set), and R_A is
+#       reported as committee-verified -> forged balance/supply. I3b/I3d/I3e all
+#       stay GREEN under that mutant (they pin the prev_hash compare + local
+#       recompute, not the successor-sig gate), so a dedicated pin is required.
+#       I3f: the successor's committee sigs ARE verified (`verify_block_sigs(succ_hdr`).
+#       I3g: that verdict is acted on FAIL-CLOSED — an `if (!vbs.ok)`-gated throw
+#       carrying the unique "committee-sig check failed" diagnostic (windowed grep
+#       ties the gate to the throw, so deleting OR ungating the throw drops it).
+#       Distinct from the SIXTH-register committee-size gates, which test
+#       verify_block_sigs' INTERNAL correctness — not this CALLER acting on its result.
 #
 # LIVENESS (SELFTEST=1): re-runs the three checks against scratch COPIES of the real
 # files with a regression injected into each, and asserts the guard flags every one.
@@ -135,6 +155,38 @@ check_invariants() {
     else
       bad "I3e EXPECTED_RECOMPUTE=1 but found $i3e — 'recomputed' no longer bound to a LOCAL b.compute_hash() (daemon-field trust?)"
     fi
+
+    # I3f (PRW-3(b)): the SUCCESSOR header's committee sigs MUST be verified. The
+    # prev_hash binding (I3b/I3d) is only load-bearing if the successor whose
+    # prev_hash we match is genuinely committee-signed. `verify_block_sigs(succ_hdr`
+    # is unique to committee_bound_state_root (the chain walk uses `(h, cj`), so a
+    # POSITIVE count pins it: stub/remove the successor verify -> 0.
+    local i3f
+    i3f=$(grep -cE 'verify_block_sigs\(succ_hdr' "$helper" 2>/dev/null)
+    if [ "$i3f" -ge 1 ]; then
+      ok "I3f helper verifies the committee-signed SUCCESSOR header (verify_block_sigs(succ_hdr; $i3f call(s))"
+    else
+      bad "I3f helper no longer verifies the successor header's committee sigs — an UNSIGNED forged successor could bind a swapped state_root"
+    fi
+
+    # I3g (PRW-3(b)): the successor-sig verdict MUST be acted on FAIL-CLOSED.
+    # verify_block_sigs RETURNS a struct (no throw), so the load-bearing line is
+    # `if (!vbs.ok) { throw ... "committee-sig check failed" ...; }`. Deleting that
+    # throw silently discards a bad-sig successor; ungating it (`if (false)`) does
+    # the same. The "committee-sig check failed" diagnostic is UNIQUE to this throw
+    # (the chain-walk throw says "verify-chain: block at index"). Pin the GATE→throw
+    # link with a windowed grep: for every `if (!vbs.ok) {` brace-guard, does its
+    # body (next 4 lines) carry the diagnostic? Exactly ONE guard (this one) must.
+    # Deleting the throw removes the diagnostic; ungating removes the guard match —
+    # either way the windowed count drops 1 -> 0.
+    local i3g
+    i3g=$(grep -A4 -E 'if[[:space:]]*\([[:space:]]*!vbs\.ok[[:space:]]*\)[[:space:]]*\{' "$helper" 2>/dev/null \
+            | grep -cE 'committee-sig check failed')
+    if [ "$i3g" = "1" ]; then
+      ok "I3g successor-sig verdict is FAIL-CLOSED (if (!vbs.ok) -> throw \"committee-sig check failed\"; EXPECTED_SUCC_THROW=1)"
+    else
+      bad "I3g EXPECTED_SUCC_THROW=1 but found $i3g — the successor committee-sig throw was removed or ungated; a caller-discards-verdict defect (an UNSIGNED forged successor binds a swapped state_root)"
+    fi
   fi
 }
 
@@ -202,9 +254,28 @@ if [ "${SELFTEST:-}" = "1" ]; then
   sed 's/recomputed = b.compute_hash()/recomputed = from_hex(full.value("block_hash", std::string{}))/' "$clean/trustless_read.cpp" > "$r6/trustless_read.cpp"
   st_expect_red "R6 recomputed sourced from daemon field, not compute_hash() (I3e must catch)" "$r6"
 
+  # R7 (PRW-3(b)): DISCARD the successor-sig verdict by ungating the fail-closed
+  # throw. Scoped to the successor region (range from `verify_block_sigs(succ_hdr`
+  # to the unique `committee-sig check failed` diagnostic) so the chain-walk's
+  # own `if (!vbs.ok) {` guards are untouched. This is the exact caller-discards-
+  # verdict mutant the finding calls out: `if (!vbs.ok)` -> `if (false)` makes the
+  # throw dead code, so vbs.ok=false is ignored and a forged UNSIGNED successor
+  # binds. I3g (windowed grep) must flag it (the guard no longer matches).
+  r7="$tmproot/r7"; mkdir -p "$r7"; cp "$clean"/* "$r7"/
+  sed '/verify_block_sigs(succ_hdr/,/committee-sig check failed/ s/if (!vbs.ok) {/if (false) {/' \
+      "$clean/trustless_read.cpp" > "$r7/trustless_read.cpp"
+  st_expect_red "R7 successor-sig throw ungated ('if (!vbs.ok)'->'if (false)'), verdict discarded (I3g must catch)" "$r7"
+
+  # R8 (PRW-3(b)): NEUTER the successor-sig verify itself (stub it out) so the
+  # verdict is never computed. I3f (positive count of verify_block_sigs(succ_hdr)
+  # must flag it (2 -> 0).
+  r8="$tmproot/r8"; mkdir -p "$r8"; cp "$clean"/* "$r8"/
+  sed 's/verify_block_sigs(succ_hdr/stub_always_ok(succ_hdr/g' "$clean/trustless_read.cpp" > "$r8/trustless_read.cpp"
+  st_expect_red "R8 successor-sig verify stubbed out (verify_block_sigs(succ_hdr removed) (I3f must catch)" "$r8"
+
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_state_root_binding_guard SELFTEST (flags all 6 regression classes)"
+    echo "  PASS: test_light_state_root_binding_guard SELFTEST (flags all 8 regression classes)"
     exit 0
   else
     echo "  FAIL: test_light_state_root_binding_guard SELFTEST ($ST_FAIL self-test failure(s))"
@@ -217,7 +288,7 @@ check_invariants light
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_light_state_root_binding_guard (S-042 binding intact: no field-trust anchor; all readers route through committee_bound_state_root; helper binding pieces present; binding IF is single-term (I3d) and recompute is local (I3e))"
+  echo "  PASS: test_light_state_root_binding_guard (S-042 binding intact: no field-trust anchor; all readers route through committee_bound_state_root; helper binding pieces present; binding IF is single-term (I3d), recompute is local (I3e), successor sigs are verified (I3f) and acted on fail-closed (I3g))"
   exit 0
 else
   echo "  FAIL: test_light_state_root_binding_guard ($VIOLATIONS S-042 regression(s) — a trustless reader may again trust an unsigned state_root field)"
