@@ -9,6 +9,15 @@ layer of G4 (§6 below). Two gates:
 - `determ test-dsso-assertion` (`tools/test_dsso_assertion.sh`, FAST) — the §5
   dual-hash RP token, security claim **C6** (§6 below).
 
+## 0.0 ⚠ Soundness corrections (2026-07-28, round-11 post-ship audit `wf_f1ca5dcc`)
+
+Three claims below do **not** hold of shipped code. One is closed; two are owner-gated. Read §§ AKE-2, property 3, and the §6 residual subject to this.
+
+- **AKE-2 (§ "mutual authentication") is FALSE as stated.** "`server_mac` … is verifiable only by a party that derived `Km2`, which requires **the server's** private DH contributions" — in fact **any** `(sk_s′, esk_s′)` pair works, because the client's `pk_s` is an unauthenticated caller argument (`opaque3dh.c:209`, consumed at `:229`), the transcript (`hash_preamble`, `:86-124`) binds **neither** static public key, and the credential envelope is sealed with **AAD = NULL** (`main.cpp:14618`) so it carries no `server_public_key`. An attacker holding only the victim's **public** `pk_c` impersonates the IdP and derives the same `sso_key` — **verified by executing the attack** against `tools/verify_opaque3dh.py`. AKE-2 holds only under an unstated assumption that `pk_s` is authentic, which nothing in the shipped design or spec establishes (no out-of-band / pinning / TLS assumption appears in any DSSO doc). **OWNER-GATED** (fix = RFC 9807 §4.1.1 CleartextCredentials binding; a format change).
+- **Property 3 ("a token whose `H1'` came from a different `sso_key` does not verify — *(verifier-side)*") is FALSE.** The shipped rule (`main.cpp:14892-14895`) takes **both** `H1'` and `H2` from the presenter and never touches `sso_key`; a complete token minted under a different `sso_key` verifies **by construction**. The parenthetical in this document already states the winning condition ("to accept a chosen `H1'` you need `HMAC(tenant_key, H1')`") and then labels the property verifier-side anyway. **OWNER-GATED** (fix = make the IdP-supplied-`H2'` rule normative).
+- **The §6 residual marked RESOLVED by Option A is NOT resolved.** Option A's four legs are evaluated on a cleartext claim the RP cannot authenticate, so **claim substitution at presentation** — explicitly named as unhandled earlier in that same section — survives all of them (the attacker rewrites `nonce`, `iat`/`exp`, and `sub`). Only the *replay-of-a-verbatim-token* and *expiry* legs are genuinely closed. **OWNER-GATED.**
+- **CLOSED (`e6bad81`):** the §6 "future" leg was listed as gated but the verifier bounded `iat` only from below; the upper bound now ships, gated falsify-on-mutant by **E2E-7b** in `test-dsso-login-e2e`.
+
 ## 1. What this proves, and what it does not
 
 The DSSO "Sign-In With Determ" login (spec §4) is a **t-of-n, unordered
