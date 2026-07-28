@@ -120,7 +120,15 @@ then asserts, beyond the existing binding check:
 - a **replayed** token (same `(challenge, H1', H2)` presented twice) is accepted
   once and **rejected** the second time (nonce cache);
 - an **expired** claim (`exp < now`) is **rejected** (clock);
-- a **future/backdated** claim (`iat > now + skew`) is **rejected**;
+- a **future/backdated** claim (`iat > now + skew`) is **rejected** — *this leg was
+  CLAIMED here but NOT enforced until the round-11 DSSO audit (`wf_f1ca5dcc`):
+  `rp_verify` bounded `iat` only from BELOW (`now − skew ≤ iat`), so a claim dated
+  far in the future satisfied every condition (the whole `[iat, exp]` window is
+  merely shifted forward, so the `exp − iat ≤ T_max` bounded-lifetime guard is
+  nullified) and, once the RP evicted the nonce after its `T_max + skew` retention,
+  the identical token replayed indefinitely — one honest login yielding a long-lived
+  bearer credential. Closed by the upper bound `iat > now + skew → reject`, gated
+  falsify-on-mutant by **E2E-7b** in `test-dsso-login-e2e`;*
 - a **fresh, in-window, first-use** token is accepted.
 
 These are the four freshness legs the current `test-dsso-assertion` explicitly

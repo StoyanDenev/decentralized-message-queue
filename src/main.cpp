@@ -14784,6 +14784,7 @@ int main(int argc, char** argv) {
                 if (std::memcmp(H2, H2ref_idp, 32) != 0) return false;        // token / session invalid
                 if (cl.aud != RP_AUD) return false;                            // audience binding
                 if (!(NOW - SKEW <= cl.iat)) return false;                     // not stale
+                if (cl.iat > NOW + SKEW) return false;                         // not future-dated
                 if (!(cl.exp > NOW)) return false;                             // not expired
                 if (cl.exp - cl.iat > TMAX) return false;                      // bounded lifetime
                 std::string nk((const char*)cl.nonce, 32);
@@ -14822,6 +14823,30 @@ int main(int argc, char** argv) {
                 check(!rp_verify(a1, a2, expd) && !rp_verify(b1, b2, stal) && !rp_verify(c1, c2, lng),
                       "E2E-7 freshness: an expired (exp<=now), a stale (iat<now-skew), and an over-long "
                       "(exp-iat>T_max) claim are each rejected");
+            }
+            // E2E-7b: FUTURE-DATED claim rejected (the missing upper iat bound).
+            //   DssoAssertionFreshness.md §5 states "a future/backdated claim
+            //   (iat > now + skew) is REJECTED" and DssoThresholdOprfSoundness.md §6
+            //   lists "future" among the four gated Option-A legs — but rp_verify
+            //   bounded iat only from BELOW (NOW-SKEW <= iat), so a claim dated far in
+            //   the future passed every condition: HMAC ok, aud ok, iat >= NOW-SKEW ok
+            //   (it is ABOVE the window, not below), exp > NOW ok, exp-iat <= T_max ok
+            //   (the whole window is simply shifted forward), nonce unseen. The
+            //   bounded-lifetime guard is nullified by placing the window in the
+            //   future, and once the RP evicts the nonce (retention T_max+skew) the
+            //   IDENTICAL token replays — a single honest login yielding a long-lived
+            //   bearer credential, exactly what the ratified Option A rule exists to
+            //   prevent. The upper bound `iat > NOW + SKEW -> reject` is a strict
+            //   ACCEPT-NARROWING (no format/design change) that makes the already
+            //   ratified claim true. Falsify-on-mutant: delete that bound and this leg
+            //   goes RED while E2E-5 (honest, in-window) stays green.
+            {
+                Claim fut = base; fut.iat = NOW + SKEW + 1; fut.exp = fut.iat + 200;
+                for (int i = 0; i < 32; ++i) fut.nonce[i] = (uint8_t)(0x66 ^ i);
+                uint8_t f1[32], f2[32]; h1(login_sso, fut, f1); idp_h2(fut, f2);
+                check(!rp_verify(f1, f2, fut),
+                      "E2E-7b freshness: a FUTURE-DATED claim (iat > now+skew) is rejected "
+                      "(upper iat bound; DssoAssertionFreshness.md §5)");
             }
             // E2E-8: audience binding — a token for a different audience is rejected.
             {
