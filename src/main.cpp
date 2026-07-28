@@ -39661,6 +39661,29 @@ int main(int argc, char** argv) {
             auto reg_after = c.registrant("alice");
             check(reg_after.has_value() && reg_after->inactive_from == 3,
                   "pre-deactivate equivocate: inactive_from OVERRIDDEN to b.index+1 = 3");
+
+            // FA-Apply-16 anti-dodge (StakeForfeitureCascade T-C1): the whole
+            // unstake_delay slashing-window design rests on a DEREGISTERed
+            // (staked-pending-unlock) equivocator STILL forfeiting its entire
+            // locked stake — the equivocation branch (chain.cpp) reads only
+            // stakes_[d].locked, NEVER stakes_[d].unlock_height, so slashing is
+            // unlock_height-insensitive. Here alice DEREGISTERed at block 1
+            // (unlock_height > 2) then equivocated at block 2 (2 < unlock_height),
+            // i.e. the exact pending-unlock window. Before this, scenario 4
+            // asserted ONLY the registry override (inactive_from==3); a surgical
+            // mutant that made the forfeit unlock_height-sensitive (skip the slash
+            // when b.index < unlock_height, leaving registry deactivation intact)
+            // dodged forfeiture yet passed every scenario — the anti-dodge
+            // property was unproven-by-gate. alice's genesis stake (500) is still
+            // fully locked after DEREGISTER (DEREGISTER moves inactive_from, not
+            // locked), so the equivocation must zero it and fold 500 into
+            // accumulated_slashed.
+            check(c.stake("alice") == 0,
+                  "pre-deactivate equivocate: pending-unlock stake FORFEITED "
+                  "(anti-dodge — slash ignores unlock_height)");
+            check(c.accumulated_slashed() == 500,
+                  "pre-deactivate equivocate: forfeited 500 folds into "
+                  "accumulated_slashed");
         }
 
         // === Determinism: replay produces same state ===
