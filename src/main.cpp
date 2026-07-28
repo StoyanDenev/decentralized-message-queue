@@ -10302,6 +10302,50 @@ int main(int argc, char** argv) {
             check(threw, "deserialize throws on truncated JSON");
         }
 
+        // 8b. WIRE-1: an OVERSIZE BINARY envelope is rejected BEFORE its payload
+        //     is decoded. Peer::read_body applies max_message_bytes only AFTER
+        //     Message::deserialize returns, so without a pre-decode cap a
+        //     hostile peer's frame (up to kMaxFrameBytes = 16 MB) is fully
+        //     decoded — decode_binary reaches nlohmann::json::parse over the
+        //     whole length-prefixed payload — before the type-aware ceiling is
+        //     ever consulted. That makes the framing ceiling an amplification
+        //     vector, which the messages.hpp cap commentary asserts it is not.
+        //
+        //     This vector is WELL-FORMED: it decodes cleanly at any size, so a
+        //     rejection can only come from the size cap itself (not from a
+        //     parse error). Type CONTRIB caps at 1 MB; the frame is ~1.2 MB.
+        //     Falsify-on-mutant: delete the pre-decode cap in
+        //     Message::deserialize and this leg goes RED (deserialize
+        //     succeeds and returns CONTRIB) while the well-formed
+        //     UNDER-cap round-trips above stay green.
+        {
+            const size_t payload_len = 1200000;          // > 1 MB CONTRIB cap
+            std::string pay = "{\"pad\":\"";
+            pay.append(payload_len, 'a');
+            pay += "\"}";
+            std::vector<uint8_t> frame;
+            frame.push_back(0xB1);                                    // magic
+            frame.push_back(0x01);                                    // version
+            frame.push_back(static_cast<uint8_t>(MsgType::CONTRIB));  // type @2
+            frame.push_back(0x00);                                    // reserved
+            uint32_t plen = static_cast<uint32_t>(pay.size());
+            frame.push_back(static_cast<uint8_t>(plen & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
+            frame.insert(frame.end(), pay.begin(), pay.end());
+
+            check(frame.size() > max_message_bytes(MsgType::CONTRIB),
+                  "WIRE-1 setup: the binary frame exceeds the CONTRIB S-022 cap");
+            bool threw = false;
+            try {
+                Message::deserialize(frame.data(), frame.size());
+            } catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "WIRE-1: an oversize BINARY envelope is rejected BEFORE payload "
+                  "decode (pre-decode S-022 cap, not a parse error)");
+        }
+
         // === S-022 per-message-type cap golden vectors ===
 
         // 9. SNAPSHOT_RESPONSE + CHAIN_RESPONSE caps are 16 MB

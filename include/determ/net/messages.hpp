@@ -96,8 +96,24 @@ inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
 // deserialize, the per-message-type cap (max_message_bytes) is applied —
 // only SNAPSHOT_RESPONSE and CHAIN_RESPONSE actually need the 16 MB
 // ceiling; everything else is bounded much tighter at the type-aware
-// layer, so a flooder cannot use the framing ceiling as an attack vector
-// against a node that's not currently bootstrapping.
+// layer.
+//
+// ⚠ ORDERING CAVEAT (round-12 hostile-wire audit, wf_c277c6d1). This
+// commentary previously concluded "so a flooder cannot use the framing
+// ceiling as an attack vector" — that did NOT hold, because Peer::read_body
+// applies max_message_bytes only AFTER Message::deserialize has already
+// decoded the body. A hostile peer's 16 MB frame was therefore fully parsed
+// before the type-aware ceiling was consulted (measured: ~52x heap
+// amplification and multi-second CPU on the JSON path).
+//   * BINARY envelopes now carry a PRE-DECODE cap in Message::deserialize —
+//     the type is readable in the clear at offset 2, so the ceiling is
+//     applied before any payload work (the rule the light client already
+//     shipped on this wire format). Gated by WIRE-1 in test-binary-codec.
+//   * The legacy JSON-envelope path still parses before the type is known
+//     (the type lives inside the document), so the ceiling there remains
+//     kMaxFrameBytes. Bounding it needs a nesting-depth/element ceiling and
+//     a decision on whether large types may arrive as JSON — OWNER-GATED,
+//     escalated; do not read this block as asserting that path is bounded.
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
 
 // S-022: per-message-type body-size cap, applied AFTER `Message::deserialize`
