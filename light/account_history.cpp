@@ -221,6 +221,27 @@ std::string genesis_row_state_root(const std::string& served_state_root) {
     return std::string{};
 }
 
+// AH-1b (declared in account_history.hpp): the provenance label for a row's
+// balance/next_nonce. The daemon's state_proof/account RPCs are HEAD-ONLY, so
+// balance/nonce are Merkle-PROVEN only at the head row. A non-head row does NOT
+// carry D's balance/next_nonce AT its own height — it carries the HEAD's value,
+// which differs from the value-at-h whenever D's balance/nonce changed between h
+// and the head (this is true even against an HONEST daemon, so it is a
+// tool-correctness labeling obligation, not a consensus defense). The label
+// must make that unmistakable so a reader can never mistake a non-head row's
+// balance for the balance-at-that-height:
+//   merkle_verified == true  -> "merkle@<H>" : Merkle-proven AT this row's own
+//                                               height (H is the proof height).
+//   merkle_verified == false -> "head@<H>"   : the HEAD's value (proven at height
+//                                               H), NOT proven at this row's height.
+// Exposed for the offline `selftest-account-history-label` falsify gate: mutating
+// the non-head arm to a "merkle@..." form (falsely claiming a per-height Merkle
+// proof) flips that gate RED.
+std::string balance_source_label(bool merkle_verified, uint64_t proven_at_height) {
+    return (merkle_verified ? std::string("merkle@") : std::string("head@"))
+           + std::to_string(proven_at_height);
+}
+
 int run_account_history(const AccountHistoryOptions& opts) {
     try {
         // 1. Load genesis + build committee.
@@ -344,6 +365,12 @@ int run_account_history(const AccountHistoryOptions& opts) {
                     {"state_root",               r.state_root_hex},
                     {"balance_merkle_verified",  r.balance_merkle_verified},
                     {"balance_proven_at_height", r.balance_proven_at_height},
+                    // AH-1b: unambiguous provenance — "head@H" marks a row that
+                    // carries the HEAD value (NOT the value at that row's own
+                    // height); "merkle@H" marks the head row Merkle-proven at H.
+                    {"balance_source",           balance_source_label(
+                                                     r.balance_merkle_verified,
+                                                     r.balance_proven_at_height)},
                 });
             }
             json out = {
@@ -360,16 +387,20 @@ int run_account_history(const AccountHistoryOptions& opts) {
                       << " (head_height=" << head_height
                       << ", genesis pinned " << short_root(genesis_hash_hex)
                       << ")\n";
-            std::cout << "  each row's state_root is read from a "
-                         "committee-verified header at that height;\n"
-                      << "  balance/next_nonce are Merkle-verified at the "
-                         "head (state_proof is head-only).\n\n";
+            std::cout << "  each row's state_root is committee-verified at that "
+                         "height (AH-1a);\n"
+                      << "  balance/next_nonce are Merkle-PROVEN only at the head "
+                         "(state_proof is head-only) —\n"
+                      << "  every non-head row carries the HEAD's balance/"
+                         "next_nonce (labeled head@H under\n"
+                      << "  balance_src), NOT the value at that row's height "
+                         "(AH-1b).\n\n";
             std::cout << "  "
                       << std::left << std::setw(10) << "height"
                       << std::setw(14) << "balance"
                       << std::setw(12) << "next_nonce"
                       << std::setw(18) << "state_root"
-                      << "verified\n";
+                      << "balance_src\n";
             std::cout << "  "
                       << std::string(10 + 14 + 12 + 18 + 8, '-') << "\n";
             for (auto& r : rows) {
@@ -378,9 +409,8 @@ int run_account_history(const AccountHistoryOptions& opts) {
                           << std::setw(14) << r.balance
                           << std::setw(12) << r.next_nonce
                           << std::setw(18) << short_root(r.state_root_hex)
-                          << (r.balance_merkle_verified
-                                  ? "merkle(head)"
-                                  : "committee")
+                          << balance_source_label(r.balance_merkle_verified,
+                                                  r.balance_proven_at_height)
                           << "\n";
             }
             std::cout << "\n  " << rows.size()

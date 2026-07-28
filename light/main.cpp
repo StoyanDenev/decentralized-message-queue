@@ -10170,6 +10170,59 @@ int cmd_selftest_genesis_row(int argc, char** argv) {
     return 1;
 }
 
+// selftest-account-history-label — offline, NO daemon: drive the pure
+// balance_source_label formatter to prove the AH-1b tool-correctness fix.
+// account-history's state_proof/account RPCs are HEAD-ONLY, so balance/nonce are
+// Merkle-PROVEN only at the head; the tool copies the head's balance/nonce onto
+// EVERY sampled row. For a non-head height whose balance/nonce changed by the
+// head, that row therefore shows the HEAD's value against a non-head height —
+// even against an HONEST daemon. If a non-head row were labeled as though it were
+// Merkle-proven at its own height, a reader would mistake the head value for
+// D's balance-at-h (the false verdict AccountHistorySoundness.md AH-1/§2.3/Gate-3
+// used to over-claim). The FIX labels a non-head row `head@H` (head-sourced,
+// NOT proven-at-this-height) and only the head row `merkle@H`.
+// NEG (the security-relevant, falsify target): a non-head row is labeled
+// head-sourced and NEVER claims a per-height Merkle proof. CTRL / non-vacuity:
+// the head row is labeled merkle@H. Falsify (make the non-head arm return
+// "merkle@..."): the NEG asserts flip RED; CTRL stays green.
+int cmd_selftest_account_history_label(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int pass = 0, fail = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) { std::cout << "  PASS: " << what << "\n"; ++pass; }
+        else    { std::cout << "  FAIL: " << what << "\n"; ++fail; }
+    };
+
+    // A non-head sampled row (balance_merkle_verified=false) — the daemon served
+    // no per-height proof, so the row carries the HEAD's value proven at height 31.
+    const std::string non_head =
+        balance_source_label(/*merkle_verified=*/false, /*proven_at_height=*/31);
+    // NEG: it is labeled head-sourced (head@H), never as balance-at-this-height.
+    check(non_head.rfind("head@", 0) == 0,
+          "NEG: a non-head row is labeled head@H (head-sourced), not proven-at-this-height");
+    // NEG-2: the label NEVER contains "merkle" — no per-height Merkle claim.
+    check(non_head.find("merkle") == std::string::npos,
+          "NEG-2: a non-head row's label NEVER claims a Merkle proof (no 'merkle')");
+    // NEG-3: it carries the proof height so the reader knows WHERE it was proven.
+    check(non_head == "head@31",
+          "NEG-3: the non-head label carries the head proof height (head@31)");
+
+    // CTRL / non-vacuity: the head row (balance_merkle_verified=true) IS
+    // Merkle-proven at its own height — labeled merkle@H, never head@H. This
+    // path is unaffected by the falsify mutant, so it stays green under it.
+    const std::string head =
+        balance_source_label(/*merkle_verified=*/true, /*proven_at_height=*/31);
+    check(head.rfind("merkle@", 0) == 0 && head.find("head@") == std::string::npos,
+          "CTRL: the head row is labeled merkle@H (Merkle-proven at its own height)");
+    check(head == "merkle@31",
+          "CTRL-2: the head label carries its own proof height (merkle@31)");
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-account-history-label\n"; return 0; }
+    std::cout << "  FAIL: selftest-account-history-label\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -10252,6 +10305,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-tx-inclusion-height") return cmd_selftest_tx_inclusion_height(sub_argc, sub_argv);
         if (cmd == "selftest-watch-label")  return cmd_selftest_watch_label(sub_argc, sub_argv);
         if (cmd == "selftest-genesis-row")  return cmd_selftest_genesis_row(sub_argc, sub_argv);
+        if (cmd == "selftest-account-history-label") return cmd_selftest_account_history_label(sub_argc, sub_argv);
         if (cmd == "verify-rand")           return cmd_verify_rand(sub_argc, sub_argv);
         if (cmd == "verify-selection")      return cmd_verify_selection(sub_argc, sub_argv);
         if (cmd == "verify-selection-offline") return cmd_verify_selection_offline(sub_argc, sub_argv);
