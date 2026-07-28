@@ -47,13 +47,18 @@ If for some `i ∈ [0, K)`, `t.hash ∈ B.creator_tx_lists[i]`, then under V7 (P
 
 ### Lemma L-2.2 — Phase-1 commitment binds tx_hashes
 
-For each `i ∈ [0, K)`, V4 (Preliminaries §5) requires that `B.creator_ed_sigs[i]` is a valid Ed25519 signature by `pk_{B.creators[i]}` over the commitment:
+For each `i ∈ [0, K)`, V4 (Preliminaries §5) requires that `B.creator_ed_sigs[i]` is a valid Ed25519 signature by `pk_{B.creators[i]}` over the commitment (`make_contrib_commitment`, `src/node/producer.cpp:249–313`):
 
 ```
-commit_i = SHA256(B.index ‖ B.prev_hash ‖ inner_root(B.creator_tx_lists[i]) ‖ B.creator_dh_inputs[i])
+commit_i = SHA256(
+    B.index ‖ B.prev_hash ‖ inner_root(B.creator_tx_lists[i]) ‖ B.creator_dh_inputs[i]
+    [ ‖ "DTM-F2-v1"  ‖ view_eq_root[i] ‖ view_abort_root[i] ‖ view_inbound_root[i] ]   // when any of the three F2 view roots is non-zero
+    [ ‖ "DTM-TS-v1"  ‖ proposer_time[i] ]                                              // when proposer_time ≠ 0 — i.e. every production block
+    [ ‖ "DTM-STV-v1" ‖ view_shardtip_root[i] ]                                         // when the shard-tip view root is non-zero — EXTENDED beacon blocks
+)
 ```
 
-where `inner_root` is the SHA-256 of the concatenation of `tx_hashes` entries in order.
+where `inner_root` is the SHA-256 of the concatenation of `tx_hashes` entries in order. The first four fields are the v1 base and are always present; the three bracketed tails are appended only when their field is non-zero, each behind a distinct ASCII domain separator (`DTM-F2-v1` / `DTM-TS-v1` / `DTM-STV-v1`) so an F2 / timestamp / shard-tip pre-image cannot collide with the v1-shape pre-image or with each other (`producer.cpp:281–311`). The tx-hash binding via `inner_root` is unchanged by the presence of any tail, so L-2.2's conclusion — an honest member's signed commitment pins exactly the `tx_hashes` set it snapshotted — holds regardless of which tails the block carries.
 
 Under EUF-CMA (A1) and collision resistance (A2): if member `v_i = B.creators[i]` is honest, then `B.creator_tx_lists[i]` is exactly the tx_hashes set that `v_i` snapshotted from its mempool at Phase-1 start (§4 H4) — no other set is consistent with `v_i`'s signed commitment.
 

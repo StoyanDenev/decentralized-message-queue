@@ -21,6 +21,7 @@ Let `K` be the genesis-pinned committee size. Let `k_bft := ⌈2K/3⌉` be the B
 - **(L3) BFT-escalation enabled**: `bft_enabled = true` at genesis. (Optional; without it, the theorem holds for MD-mode rounds only and requires `(1-p)^K > 0` for liveness; see §4.)
 - **(L4) Committee rotation per round is uniform-random** (modeled in §6 of Preliminaries; hybrid selector — rejection sampling at `2K ≤ N`, partial Fisher-Yates shuffle at `2K > N` — both uniform under ROM on the seed).
 - **(L5) Synchrony window contains the round**: the round timer `T_round ≥ 2Δ + ε` for some small `ε`, so message delivery completes before timeout.
+- **(L6) Pool margin ≥ escalation headroom, maintained throughout the height**: `N − |E_h| ≥ k_use` holds at every round of height `h`, where `E_h` is the set of validators escalated out of the available pool at `h` (crashed, partitioned, or aborted past the round window) and `k_use = k_bft = ⌈2K/3⌉` in BFT mode / `k_use = K` in MD mode. This is the standing-pool precondition the round-selection path requires: when the available pool falls below `k_use`, `Node::check_if_selected` takes the silent terminal `return` at `src/node/node.cpp:1038` (`avail_domains.size() < k_use`) — an **absorbing IDLE state** in which no round is ever started, so no Phase-1/Phase-2 timeout fires and the S-050 stall valve (phase-gated to `CONTRIB` / `BLOCK_SIG` at `node.cpp:1669` / `:1721`) never runs. The `K = 2` genesis is a degenerate crash-stop under this hypothesis: `bft_committee_size(2) = 2 = K` leaves no escalation headroom and `abort_claim_quorum(2) = 2` is unsatisfiable (`include/determ/chain/params.hpp:143–160`), so a single unavailability wedges the height with no recovery. The validity boundary of this hypothesis is proved in `AbortCascadeLiveness.md` T-2 (flagged there in §6 F-3).
 
 then:
 
@@ -28,7 +29,7 @@ then:
    $$
    \mathbb{E}[\text{rounds to finalize block at } h] \;\leq\; \frac{1}{(1-p)^K} \;+\; T_{\text{threshold}} \cdot \mathbb{E}[\text{BFT-mode rounds}]
    $$
-2. **Probability of indefinite stall** is zero. If at least one round can be completed in MD mode `(1-p)^K > 0`, or escalation engages successfully (FA5 conditions met), some block at `h` finalizes with probability 1.
+2. **Probability of indefinite stall** is zero **given (L6)**. Under (L6) the round-selection path always starts a round, so if at least one round can be completed in MD mode `(1-p)^K > 0`, or escalation engages successfully (FA5 conditions met), some block at `h` finalizes with probability 1. Without (L6) — a pool that drops below `k_use` mid-height — an absorbing IDLE stall exists (the `node.cpp:1038` terminal return) that neither MD retry, BFT escalation, nor the S-050 valve rescues; see the (L6) note above and `AbortCascadeLiveness.md` T-2 (§6 F-3).
 
 In plain terms: the chain *can* stall transiently (a few rounds of aborts under bad luck), but cannot stall permanently as long as some availability exists. The expected delay is bounded by a geometric expectation in MD mode, augmented by a bounded BFT fallback when MD repeatedly fails.
 
@@ -149,12 +150,14 @@ Both finite. The chain makes steady progress at the geometric expectation, with 
 
 **Step 4 — Probability of indefinite stall.**
 
-Suppose the chain stalls indefinitely at height `h`. Then `T_threshold` rounds of MD failures occur, escalation engages, and BFT-mode rounds also fail indefinitely.
+Suppose the chain stalls indefinitely at height `h`. **Assume (L6)** — the available pool stays ≥ `k_use` for the whole height, so `Node::check_if_selected` starts a round every time rather than taking the absorbing IDLE `return` at `src/node/node.cpp:1038`. Then `T_threshold` rounds of MD failures occur, escalation engages, and BFT-mode rounds also fail indefinitely.
 
 - `Pr[MD failure forever] = 0` if `(1-p)^K > 0` (a positive probability of success per round, so almost-surely a success eventually).
 - `Pr[BFT failure forever] = 0` under (L3) and (L5), with the analogous geometric argument.
 
-By Borel-Cantelli (or the equivalent for geometric random variables): `Pr[indefinite stall] = 0`.   ∎
+By Borel-Cantelli (or the equivalent for geometric random variables): `Pr[indefinite stall] = 0` **under (L1)–(L6)**.   ∎
+
+**(L6) is load-bearing, not cosmetic.** If the pool falls below `k_use` mid-height (mass honest unavailability, or a `K = 2` crash-stop), the height enters the IDLE absorbing state *before any round starts*: no Phase-1/Phase-2 timer is armed, so the S-050 stall valve — which fires only from the `CONTRIB` / `BLOCK_SIG` timeout handlers (`node.cpp:1669` / `:1721`) — cannot reset the round, and neither MD retry nor BFT escalation applies. This is a genuine absorbing indefinite-stall state under mere (L2) unavailability, and is why T-4 carries (L6). Its validity boundary is proved in `AbortCascadeLiveness.md` T-2 (flagged there in §6 F-3).
 
 ---
 
