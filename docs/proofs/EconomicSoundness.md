@@ -39,7 +39,7 @@ After every block apply:
        − accumulated_slashed − accumulated_outbound − accumulated_shielded
 ```
 
-Enforced via direct C++ assertion at `apply_transactions` tail (`chain.cpp:1866-1888`); mismatch throws with a "unitary-balance invariant violated" diagnostic. `accumulated_shielded` (§3.22) subtracts the value currently held as opaque commitments in the confidential pool: that value left the transparent live sum but was not burned, so real total supply is `live_total_supply() + accumulated_shielded_` (chain.hpp:585-589). The term is `0` on shield-free chains; the diagnostic's per-field breakdown itemizes the five transparent operands (the shielded term is folded into `expected`, not printed separately).
+Enforced via direct C++ assertion at `apply_transactions` tail (`chain.cpp:1866-1892`); mismatch throws with a "unitary-balance invariant violated" diagnostic. `accumulated_shielded` (§3.22) subtracts the value currently held as opaque commitments in the confidential pool: that value left the transparent live sum but was not burned, so real total supply is `live_total_supply() + accumulated_shielded_` (chain.hpp:585-589). The term is `0` on shield-free chains; the diagnostic's per-field breakdown itemizes all six operands (`genesis`/`subsidy`/`inbound`/`slashed`/`outbound`/`shielded`), so it reconciles to `expected` on a shielded chain with no manual add-back.
 
 ### E1 NEF flow
 
@@ -243,7 +243,7 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 | `live_total_supply()` | `src/chain/chain.cpp:699-704` |
 | Genesis-time `genesis_total_` initialization | `src/chain/chain.cpp::apply_transactions` `b.index == 0` branch (`chain.cpp:905-944`; all six counters zeroed incl. `accumulated_shielded_` at `:939`) |
 | Per-block delta tracking | `src/chain/chain.cpp::apply_transactions` (per-tx delta accumulation) |
-| Apply-tail assertion | `src/chain/chain.cpp:1866-1888` (A1 invariant assertion at tail) |
+| Apply-tail assertion | `src/chain/chain.cpp:1866-1892` (A1 invariant assertion at tail) |
 | §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER `accumulated_shielded_` mutation | `src/chain/chain.cpp:1037` (`+= A`) / `:1081` (`−= A`) / `:1172` (`−= fee`); single-shard reject at `:1059` |
 | E1 NEF distribution | REGISTER branch in `apply_transactions` |
 | Zeroth address validator guard | `src/node/validator.cpp::check_transactions` (rejects `from == ZEROTH_ADDRESS`) |
