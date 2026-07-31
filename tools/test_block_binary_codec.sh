@@ -33,7 +33,7 @@
 # Mirroring keeps the two paths from ever disagreeing on accept/reject for the
 # same block. (Owner decision, 2026-08-01; BF-10 and BF-11 pin it.)
 #
-# 15 assertions:
+# 14 assertions:
 #
 #   BF-0  the empty frame is exactly 297 bytes. Pins kMinBlockFrame, from
 #         which the witness Layer-1 cap is derived — if that constant drifts

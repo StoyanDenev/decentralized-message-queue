@@ -266,6 +266,79 @@ Each appendage is **skipped when its gate is false**, so a v1 / non-cross-shard 
 
 The final values of every excluded field are bound into the **block hash** via `signing_bytes()` (§4.1), so the block's identity uniquely binds the entire post-apply state even though the Phase-2 digest doesn't.
 
+### 4.4 Canonical binary container (D2-inc5)
+
+`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. They ship **alongside** `to_json` / `from_json` and **no call site uses them yet**: the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) and chain storage switch over in later D2 increments. Nothing in this section describes bytes currently on the wire or on disk; the wire still carries those five as length-prefixed JSON inside the binary envelope (§9.1).
+
+**The theorem is information equivalence with the JSON container, not field-for-field round-trip:**
+
+```
+decode_frame(encode_frame(b))  ==json==  from_json(to_json(b))
+```
+
+for every Block `b`. That is the property that makes the later container swap provably behavior-preserving — whatever a node would have believed after a JSON round trip, it believes after a binary one.
+
+```
+Layout, in Block::to_json emission order so the two are diffable side by side.
+All integers little-endian; Hash = 32 raw bytes; Signature = 64 raw;
+lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
+
+  index u64 · prev_hash 32 · timestamp i64-as-u64
+  transactions           ⟨n⟩ × [u32 frame_len][Transaction frame]
+  creators               ⟨n⟩ × lp_str
+  creator_tx_lists       ⟨n⟩ × ( ⟨m⟩ × 32 )
+  creator_ed_sigs        ⟨n⟩ × 64
+  creator_dh_inputs      ⟨n⟩ × 32
+  creator_view_eq_roots / _abort_roots / _inbound_roots        ⟨n⟩ × 32   (×3)
+  creator_view_inbound_lists / _eq_lists / _abort_lists   ⟨n⟩ × (⟨m⟩ × 32) (×3)
+  creator_view_shardtip_roots ⟨n⟩ × 32 · _shardtip_lists ⟨n⟩ × (⟨m⟩ × 32)
+  creator_proposer_times ⟨n⟩ × u64
+  creator_dh_secrets     ⟨n⟩ × 32
+  tx_root 32 · delay_seed 32 · delay_output 32
+  consensus_mode u8 · bft_proposer lp_str
+  creator_block_sigs     ⟨n⟩ × 64
+  cumulative_rand 32
+  abort_events           ⟨n⟩ × ABORT_EVENT_REC
+  equivocation_events    ⟨n⟩ × EQUIV_REC
+  cross_shard_receipts   ⟨n⟩ × RECEIPT_REC
+  inbound_receipts       ⟨n⟩ × RECEIPT_REC
+  initial_state          ⟨n⟩ × ALLOC_REC
+  state_root 32 · partner_subset_hash 32 · signature_form u8
+  eligible_count u32 · source_shard_id u32
+  shard_tip_records      ⟨n⟩ × [u8 rec_len][ShardTipRecord::encode()]
+  shard_tip_witnesses    ⟨n⟩ × [u32 frame_len][BLOCK FRAME]
+
+  ABORT_EVENT_REC  [round u8][aborting_node lp_str][timestamp i64-as-u64]
+                   [event_hash 32][u32 claims_len][encode_abort_claims blob]
+  EQUIV_REC        [equivocator lp_str][block_index u64][digest_a 32][sig_a 64]
+                   [digest_b 32][sig_b 64][shard_id u32][beacon_anchor_height u64]
+  RECEIPT_REC      [src_shard u32][dst_shard u32][src_block_index u64]
+                   [src_block_hash 32][tx_hash 32][from lp_str][to lp_str]
+                   [amount u64][fee u64][nonce u64]
+  ALLOC_REC        [domain lp_str][ed_pub 32][balance u64][stake u64][region lp_str]
+```
+
+An empty Block frame — every fixed field at its width plus the 23 two-byte counts, all empty — is exactly **297 bytes** (`kMinBlockFrame`, pinned by gate BF-0 so the constant cannot drift out of agreement with the encoder; set too high it would reject legitimate one-witness frames).
+
+**Where `to_json` discards information, the frame mirrors the discard.** The encoder writes the discarded-equivalent value rather than the live one, in exactly two places:
+
+* the six-key `creator_view_*` bundle (`_eq_roots`, `_abort_roots`, `_inbound_roots`, `_inbound_lists`, `_eq_lists`, `_abort_lists`) is written **empty** unless some inbound/eq/abort root is non-zero — `to_json`'s `any_view_root` gate; the shard-tip pair (`creator_view_shardtip_roots` / `_shardtip_lists`) rides its own independent `any_shardtip_root` gate identically;
+* `source_shard_id` is written **zero** unless `eligible_count != 0` — the gate under which `to_json` emits it.
+
+Carrying those faithfully instead would preserve data JSON drops, which sounds strictly better but is not. **None of the discarded values is covered by `Block::signing_bytes` (§4.1) or `compute_block_digest` (§4.3):** the `creator_view_*` arrays never enter `signing_bytes` at all, and enter the digest only as the boolean `any_nonzero` gate of §4.3 — the root *values* are never appended, so an all-zero-root block binds neither the roots nor the lists; `source_shard_id` is bound by `signing_bytes` and by the digest only under the same `eligible_count != 0` gate, so at `eligible_count == 0` it is bound by neither. A relayer can therefore append any of them to a valid block without breaking its hash or invalidating a single signature. `to_json` normalizes that injection away; a faithful binary frame would carry it through to the validator and let an otherwise-valid block be rejected — a remotely-triggerable rejection, i.e. a censorship / liveness vector under the fork-free doctrine. Mirroring is what keeps the two containers from ever disagreeing on accept/reject for the same block. (Owner decision, 2026-08-01.)
+
+**Everything else is structurally always-present** — no presence bitmap, no per-section tag. Every `to_json` emit gate is derived from the VALUE, never from a separate flag, so the container carries the value and never the gate. A bitmap would admit two encodings of one Block (bit clear, vs bit set with a zero payload) and reopen the canonicality question D2 exists to close.
+
+**Counts are u16 LE**, matching `encode_abort_claims` (§5.4) and the `COMPOSABLE_BATCH` payload (§14.5). The encoder **throws on overflow — it never clamps**; a clamped length beside an unclamped body is exactly the defect fixed one commit earlier in the transaction codec this one delegates to.
+
+**Three length prefixes are mandatory, not stylistic.** Every nested codec — `Transaction::decode_frame`, `decode_abort_claims`, `ShardTipRecord::decode` — is exact-consuming over the whole buffer it is handed and rejects trailing bytes, so none of them can be handed a suffix and asked to stop at the right place. Hence `[u32]` on a transaction frame, `[u32]` on a witness frame, `[u32]` on the claims blob inside an abort-event record (last within its record but not last within the frame), and `[u8]` on a shard-tip record. Same rationale as the `COMPOSABLE_BATCH` per-frame prefix (§14.5).
+
+**Fail-closed.** Every count is bounds-checked against the bytes actually remaining **before** any `reserve` and before any loop (the WIRE-1 lesson — a cap that runs after the work is not a cap): a `⟨n⟩` claiming more elements than `bytes_remaining / min_element_size` is rejected having allocated nothing. Decode ends with an exact-consumption check, so trailing bytes are rejected. Reject strings are `"block frame: "`-prefixed via a dedicated block-frame helper pair — reusing the transaction-frame helpers would misreport a truncated `creators[3]` as `"tx frame: truncated lp_str body"`. A malformed shard-tip record is rejected explicitly, because `ShardTipRecord::decode` returns `nullopt` rather than throwing and would otherwise be silently dropped.
+
+**Witness recursion is bounded at depth 2 by construction.** Each `shard_tip_witnesses` entry decodes with `allow_witnesses = false`, and both leaf rules — a witness carries no nested witnesses and no `shard_tip_records` — are enforced **inline** in the decoder, before the elements they gate are parsed, so exactly one site produces each reject string. This is the same depth-1 witness rule `from_json` enforces on the JSON path.
+
+Test: `tools/test_block_binary_codec.sh` + in-process `determ test-block-binary-codec` — 14 assertions (BF-0 … BF-12b), including BF-1 information equivalence over a block exercising all 37 fields, BF-2 one canonical encoding (`encode(decode(x)) == x` byte-for-byte), BF-3 `signing_bytes` + `compute_hash` byte-identical across the round trip, BF-4 an all-default block resurrecting none of the nine gated keys, BF-6 every proper prefix rejected, BF-7 a 65535 count backed by 10 bytes rejected before any reserve, BF-8a/BF-8b witness depth, BF-10/BF-11 the two mirroring properties, and BF-12a/BF-12b a hostile-bytes sweep in which every input either decodes or throws.
+
 ## 5. Consensus protocol
 
 ### 5.1 Two phases per block
@@ -598,7 +671,7 @@ Payload encodings, all fail-closed with exact consumption:
 
   **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests carried in the message itself (§6.1). No digest, signature or block hash changed when these types left the JSON path.
 
-* **The remaining eight types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE. These binarize per-type in the remaining D2 increments — the envelope is the stable extension point. The WIRE-2 structural ceiling below stays live until the last of them is gone.
+* **The remaining eight types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE. These binarize per-type in the remaining D2 increments — the envelope is the stable extension point. The WIRE-2 structural ceiling below stays live until the last of them is gone. The canonical binary `Block` container the five block-carrying types will use (§4.4) is already built, but **no wire path uses it yet** — every `Block` on the wire today is JSON.
 
 **Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.

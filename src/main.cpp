@@ -23868,7 +23868,7 @@ int main(int argc, char** argv) {
                        "(the cap runs before the reserve and before the loop)");
         }
 
-        // ── BF-8/9. Witness depth + leaf rules, each enforced INLINE so exactly
+        // ── BF-8. Witness depth + leaf rules, each enforced INLINE so exactly
         //    one site produces each string.
         {
             Block leaf;
