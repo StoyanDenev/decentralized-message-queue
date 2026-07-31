@@ -29,15 +29,15 @@
 # ceiling is intentionally loose (snapshot/chain need it), and the tight
 # per-type cap (1 MB consensus chatter / 4 MB block-class) is what actually
 # bounds a flooder. A decoder that enforced only the 16 MB ceiling — or that
-# applied the WRONG tier's cap — would silently accept a 3.9 MB STATUS_RESPONSE
+# applied the WRONG tier's cap — would silently accept a 3.9 MB CONTRIB
 # that the daemon's peer.cpp:90 would drop. This test pins the boundary:
 #
 # Assertions:
-#   1. STATUS_RESPONSE (1 MB tier) at EXACTLY 1 MB total  → VALID,     exit 0.
+#   1. CONTRIB (1 MB tier) at EXACTLY 1 MB total          → VALID,     exit 0.
 #      (cap is inclusive: `buf.size() > cap` is strict-greater.)
-#   2. STATUS_RESPONSE at 1 MB + 1                         → MALFORMED, exit 3,
+#   2. CONTRIB at 1 MB + 1                         → MALFORMED, exit 3,
 #      detail mentions the S-022 cap.
-#   3. TYPE-AWARENESS: a STATUS_RESPONSE sized to 1 MB + 4096 (well under the
+#   3. TYPE-AWARENESS: a CONTRIB sized to 1 MB + 4096 (well under the
 #      4 MB BLOCK cap, well under the 16 MB framing ceiling) is STILL rejected
 #      → MALFORMED, exit 3. This proves the gate uses the PER-TYPE cap, not
 #      the global ceiling or a fatter tier's cap.
@@ -99,49 +99,53 @@ run_decode() {  # run_decode <file> [extra args...]; sets RC + OUT globals
   set -e
 }
 
-CAP_1M=1048576          # 1 MB  — STATUS_RESPONSE / consensus-chatter tier
+CAP_1M=1048576          # 1 MB  — consensus-chatter tier
 OVER_1M=1048577         # 1 MB + 1
 MID=$((CAP_1M + 4096))  # 1 MB + 4096 — over the 1 MB cap, under the 4 MB cap
-MSG_STATUS=8            # STATUS_RESPONSE → 1 MB cap
+MSG_CONTRIB=4           # CONTRIB → 1 MB cap, and still carries a
+                        # length-prefixed JSON payload after D2-inc6a
+                        # moved the request/status types to fixed
+                        # frames (STATUS_RESPONSE, formerly used
+                        # here, now maxes out at 73 bytes).
 MSG_BLOCK=1             # BLOCK          → 4 MB cap
 
-echo "=== 1. STATUS_RESPONSE at EXACTLY 1 MB total → VALID exit 0 (cap inclusive) ==="
-craft_lp_json_sized "$TMP/at_cap.bin" "$MSG_STATUS" "$CAP_1M"
+echo "=== 1. CONTRIB at EXACTLY 1 MB total → VALID exit 0 (cap inclusive) ==="
+craft_lp_json_sized "$TMP/at_cap.bin" "$MSG_CONTRIB" "$CAP_1M"
 run_decode "$TMP/at_cap.bin"
 if [ "$RC" = "0" ] && echo "$OUT" | head -1 | grep -q "VALID"; then
-  assert "true" "STATUS_RESPONSE @ 1 MB (== cap) → VALID exit 0"
+  assert "true" "CONTRIB @ 1 MB (== cap) → VALID exit 0"
 else
-  echo "$OUT"; assert "false" "STATUS_RESPONSE @ 1 MB (== cap) → VALID exit 0 (rc=$RC)"
+  echo "$OUT"; assert "false" "CONTRIB @ 1 MB (== cap) → VALID exit 0 (rc=$RC)"
 fi
 
 echo
-echo "=== 2. STATUS_RESPONSE at 1 MB + 1 → MALFORMED exit 3 (S-022 cap) ==="
-craft_lp_json_sized "$TMP/over_cap.bin" "$MSG_STATUS" "$OVER_1M"
+echo "=== 2. CONTRIB at 1 MB + 1 → MALFORMED exit 3 (S-022 cap) ==="
+craft_lp_json_sized "$TMP/over_cap.bin" "$MSG_CONTRIB" "$OVER_1M"
 run_decode "$TMP/over_cap.bin"
 if [ "$RC" = "3" ] && echo "$OUT" | grep -q "MALFORMED" \
    && echo "$OUT" | grep -qi "cap"; then
-  assert "true" "STATUS_RESPONSE @ 1 MB+1 → MALFORMED exit 3 with cap detail"
+  assert "true" "CONTRIB @ 1 MB+1 → MALFORMED exit 3 with cap detail"
 else
-  echo "$OUT"; assert "false" "STATUS_RESPONSE @ 1 MB+1 → MALFORMED exit 3 (rc=$RC)"
+  echo "$OUT"; assert "false" "CONTRIB @ 1 MB+1 → MALFORMED exit 3 (rc=$RC)"
 fi
 
 echo
-echo "=== 3. TYPE-AWARE: STATUS_RESPONSE @ 1 MB+4096 (< 4 MB, < 16 MB) still MALFORMED ==="
+echo "=== 3. TYPE-AWARE: CONTRIB @ 1 MB+4096 (< 4 MB, < 16 MB) still MALFORMED ==="
 # Proves the gate uses the PER-TYPE cap, not the 16 MB framing ceiling and not
 # a fatter tier — this size would be VALID for a BLOCK but must be rejected
-# for a STATUS_RESPONSE.
-craft_lp_json_sized "$TMP/status_mid.bin" "$MSG_STATUS" "$MID"
-run_decode "$TMP/status_mid.bin"
+# for a CONTRIB.
+craft_lp_json_sized "$TMP/contrib_mid.bin" "$MSG_CONTRIB" "$MID"
+run_decode "$TMP/contrib_mid.bin"
 if [ "$RC" = "3" ] && echo "$OUT" | grep -q "MALFORMED"; then
-  assert "true" "STATUS_RESPONSE @ 1 MB+4096 → MALFORMED exit 3 (per-type cap)"
+  assert "true" "CONTRIB @ 1 MB+4096 → MALFORMED exit 3 (per-type cap)"
 else
-  echo "$OUT"; assert "false" "STATUS_RESPONSE @ 1 MB+4096 → MALFORMED exit 3 (rc=$RC)"
+  echo "$OUT"; assert "false" "CONTRIB @ 1 MB+4096 → MALFORMED exit 3 (rc=$RC)"
 fi
 
 echo
 echo "=== 4. CONTROL: BLOCK @ the SAME 1 MB+4096 size → VALID exit 0 (4 MB tier) ==="
 # Identical byte count, only the discriminator byte (offset 2) differs:
-# 8 (STATUS_RESPONSE, 1 MB cap) → rejected; 1 (BLOCK, 4 MB cap) → accepted.
+# 4 (CONTRIB, 1 MB cap) → rejected; 1 (BLOCK, 4 MB cap) → accepted.
 craft_lp_json_sized "$TMP/block_mid.bin" "$MSG_BLOCK" "$MID"
 run_decode "$TMP/block_mid.bin"
 if [ "$RC" = "0" ] && echo "$OUT" | head -1 | grep -q "VALID"; then

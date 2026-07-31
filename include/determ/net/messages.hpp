@@ -402,7 +402,11 @@ inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {
     return {MsgType::GET_CHAIN, {{"from", from_index}, {"count", count}}};
 }
 inline Message make_status_request() {
-    return {MsgType::STATUS_REQUEST, {}};
+    // Empty OBJECT, not a null json. The STATUS_REQUEST binary frame is
+    // zero-length and its decoder materialises an empty object, so the
+    // builder must agree or an encode->decode cycle would not be a fixed
+    // point. (Pre-D2-inc6a this was `{}`, which value-initialises to null.)
+    return {MsgType::STATUS_REQUEST, nlohmann::json::object()};
 }
 inline Message make_status_response(uint64_t height, const std::string& genesis_hash) {
     return {MsgType::STATUS_RESPONSE, {{"height", height}, {"genesis", genesis_hash}}};

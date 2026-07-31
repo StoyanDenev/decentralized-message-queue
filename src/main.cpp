@@ -10240,10 +10240,12 @@ int main(int argc, char** argv) {
 
         // === Binary envelope round-trip (free functions) ===
 
-        // 4. STATUS_RESPONSE binary round-trip.
+        // 4. STATUS_RESPONSE binary round-trip through its D2-inc6a fixed
+        //    frame. Built via the BUILDER (the pre-inc6a leg used an
+        //    invented {head_index, head_hash} schema no producer emits, so
+        //    it could not have caught a field-binding regression).
         {
-            json status = {{"head_index", 100}, {"head_hash", "abcd1234"}};
-            Message m{MsgType::STATUS_RESPONSE, status};
+            Message m = make_status_response(100, std::string(64, 'a'));
             auto framed = m.serialize_binary();
             auto body = strip_frame(framed);
             check(!body.empty(),
@@ -10253,6 +10255,56 @@ int main(int argc, char** argv) {
             Message back = Message::deserialize(body.data(), body.size());
             check(back.type == MsgType::STATUS_RESPONSE,
                   "STATUS_RESPONSE binary round-trip: type preserved");
+            check(back.payload["height"] == 100
+                      && back.payload["genesis"] == std::string(64, 'a'),
+                  "STATUS_RESPONSE round-trip: height + genesis preserved");
+        }
+
+        // 4b. D2-inc6a request/status frames: every one is a byte fixed
+        //     point through the builder, and the EMPTY-genesis case (an
+        //     empty chain) survives — a fixed-width genesis field would
+        //     encode it as 64 zeros and turn "unknown genesis" into "wrong
+        //     genesis", excluding an honest bootstrapping peer from sync.
+        {
+            auto rt = [&](const Message& m, const char* label) {
+                auto body = strip_frame(m.serialize_binary());
+                Message back = Message::deserialize(body.data(), body.size());
+                check(back.type == m.type && back.payload == m.payload, label);
+            };
+            rt(make_get_chain(42, 7),          "GET_CHAIN frame round-trips");
+            rt(make_status_request(),          "STATUS_REQUEST frame round-trips (zero-length)");
+            rt(make_status_response(0, ""),    "STATUS_RESPONSE frame round-trips with EMPTY genesis");
+            rt(make_snapshot_request(99),      "SNAPSHOT_REQUEST frame round-trips");
+            rt(make_headers_request(5, 256),   "HEADERS_REQUEST frame round-trips");
+
+            // Fail-closed: exact byte lengths, with the SPECIFIC reject.
+            auto expect_reject = [&](std::vector<uint8_t> body, const char* needle,
+                                     const char* label) {
+                bool hit = false;
+                try { (void)Message::deserialize(body.data(), body.size()); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find(needle) != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit, label);
+            };
+            { auto b = strip_frame(make_get_chain(1, 2).serialize_binary());
+              b.push_back(0x00);
+              expect_reject(b, "bad GET_CHAIN frame length",
+                    "GET_CHAIN: a padded frame is REJECTED (exact length)"); }
+            { auto b = strip_frame(make_status_request().serialize_binary());
+              b.push_back(0x00);
+              expect_reject(b, "STATUS_REQUEST frame not empty",
+                    "STATUS_REQUEST: any payload byte is REJECTED"); }
+            { auto b = strip_frame(make_headers_request(1, 2).serialize_binary());
+              b.pop_back();
+              expect_reject(b, "bad HEADERS_REQUEST frame length",
+                    "HEADERS_REQUEST: a truncated frame is REJECTED"); }
+            { // genesis length outside {0, 64} — narrows what a peer can pin.
+              auto b = strip_frame(make_status_response(1, "abc").serialize_binary());
+              expect_reject(b, "genesis length",
+                    "STATUS_RESPONSE: a genesis string that is neither empty "
+                    "nor 64 chars is REJECTED"); }
         }
 
         // 5. D2 negative gate: a legacy JSON envelope body ('{' 0x7B) is
@@ -10718,12 +10770,11 @@ int main(int argc, char** argv) {
         // tamper-rejection is upheld.
         auto check_tamper_loud_fail = [&](const Message& m, const char* label) {
             auto bytes = encode_binary(m);
-            if (bytes.size() < 8) {
-                // Too small to meaningfully tamper past the header.
-                // The JSON-fallback path always has a 4-byte json_len
-                // prefix + at least "{}" body, so this branch only
-                // hits for an unusually empty payload. Skip rather
-                // than flake.
+            if (bytes.size() <= 4) {
+                // Only the 4-byte envelope header — no payload byte exists
+                // to tamper (STATUS_REQUEST's frame is zero-length by
+                // design; its emptiness is pinned by its own reject leg in
+                // test-binary-codec). Skip rather than flake.
                 return;
             }
             // Sweep several positions past the envelope header. Any
@@ -10735,11 +10786,16 @@ int main(int argc, char** argv) {
                 (bytes.size() * 3) / 4,
                 bytes.size() - 1,
             };
-            // Force probes to be >= 8 (past envelope header + any
-            // length prefix), bounded by buffer.
+            // Probe past the 4-byte envelope header only. (Pre-D2-inc6a
+            // this floored at 8 to clear the JSON-payload length prefix —
+            // but a fixed frame has no prefix, and an 8-byte frame like
+            // SNAPSHOT_REQUEST's then had EVERY probe skipped, so the leg
+            // passed vacuously. Flipping a byte of the JSON path's u32
+            // length prefix is loud-fail too, so the lower floor only
+            // strengthens the remaining JSON types.)
             bool loud_fail = false;
             for (size_t at : probes) {
-                if (at < 8 || at >= bytes.size()) continue;
+                if (at < 4 || at >= bytes.size()) continue;
                 auto mutated = bytes;
                 mutated[at] ^= 0xFF;
                 try {
@@ -10920,8 +10976,16 @@ int main(int argc, char** argv) {
             run_msgtype(m, "STATUS_REQUEST");
         }
         {
-            Message m = make_status_response(/*height=*/100, "deadbeef");
+            // D2-inc6a: the frame accepts a genesis of 0 or 64 chars (a
+            // real producer emits to_hex of a 32-byte hash, or "" on an
+            // empty chain) — the old 8-char "deadbeef" fixture was never a
+            // shape any producer emits.
+            Message m = make_status_response(/*height=*/100, std::string(64, 'd'));
             run_msgtype(m, "STATUS_RESPONSE");
+        }
+        {
+            Message m = make_status_response(/*height=*/0, "");
+            run_msgtype(m, "STATUS_RESPONSE (empty genesis — empty chain)");
         }
 
         // ─── SNAPSHOT_REQUEST / SNAPSHOT_RESPONSE ───────────────────────────
@@ -10976,12 +11040,16 @@ int main(int argc, char** argv) {
             check(threw, "decode_binary throws on truncated header (< 4 bytes)");
         }
 
-        // ─── Truncated payload diagnostics (JSON-fallback path) ─────────────
+        // ─── Truncated payload diagnostics (JSON-payload path) ──────────────
         // Build a valid envelope but truncate inside the JSON payload
         // body. decode_binary should reject (either the length-prefix
-        // bounds check or the inner JSON parser).
+        // bounds check or the inner JSON parser). Uses CONTRIB — a type
+        // that still carries a length-prefixed JSON payload (STATUS_RESPONSE
+        // moved to a fixed frame in D2-inc6a).
         {
-            Message m{MsgType::STATUS_RESPONSE, {{"height", 100}}};
+            node::ContribMsg cm;
+            cm.block_index = 42; cm.signer = "node-1";
+            Message m = make_contrib(cm);
             auto bytes = encode_binary(m);
             // Truncate to header + 6 bytes (less than the JSON payload).
             std::vector<uint8_t> truncated(bytes.begin(),
@@ -52169,8 +52237,9 @@ int main(int argc, char** argv) {
         //     through serialize_binary + strip the 4-byte framing
         //     prefix to inspect the magic.
         {
-            json status = {{"height", 100}, {"genesis", "abcd"}};
-            Message m{MsgType::STATUS_RESPONSE, status};
+            // D2-inc6a: STATUS_RESPONSE has a fixed binary frame, so the
+            // fixture must be builder-shaped (genesis is 0 or 64 chars).
+            Message m = make_status_response(100, std::string(64, 'a'));
             auto framed = m.serialize_binary();
             // Strip the 4-byte big-endian framing length prefix.
             std::vector<uint8_t> body(framed.begin() + 4, framed.end());

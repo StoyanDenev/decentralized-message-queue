@@ -8554,6 +8554,11 @@ int cmd_committee_at_height(int argc, char** argv) {
 //         trailer's length-prefixed from/to/sig/hash fit exactly, and an
 //         optional trailing [u32 LE len][bytes] pq_auth section (§3.21)
 //         consumes the remainder exactly when present.
+//       - GET_CHAIN (5) / STATUS_REQUEST (7) / STATUS_RESPONSE (8) /
+//         SNAPSHOT_REQUEST (15) / HEADERS_REQUEST (17): the D2-inc6a fixed
+//         request/status frames — exact byte lengths (10 / 0 / 9..73 / 4 /
+//         12), and STATUS_RESPONSE's genesis_len must be 0 (empty chain) or
+//         64 (hex of a 32-byte hash) and must consume the frame exactly.
 //       - all other types: a [u32 LE json_len][json_bytes] payload whose
 //         declared length matches the remaining body exactly and whose
 //         bytes parse as JSON.
@@ -8868,6 +8873,54 @@ int cmd_decode_wire(int argc, char** argv) {
             } else if (msg_type == 2 /* TRANSACTION */) {
                 report["payload_kind"] = "tx_frame";
                 decode_wire_tx(body, body_len, report);
+            } else if (msg_type == 5  /* GET_CHAIN        */ ||
+                       msg_type == 7  /* STATUS_REQUEST   */ ||
+                       msg_type == 8  /* STATUS_RESPONSE  */ ||
+                       msg_type == 15 /* SNAPSHOT_REQUEST */ ||
+                       msg_type == 17 /* HEADERS_REQUEST  */) {
+                // D2-inc6a fixed request/status frames — re-implemented
+                // independently from the published layout, consumed exactly.
+                report["payload_kind"] = "req_frame";
+                auto exact = [&](size_t want, const char* what) {
+                    if (body_len != want)
+                        throw WireMalformed(std::string(tname) + " frame is " +
+                                            std::to_string(body_len) +
+                                            " bytes, want " +
+                                            std::to_string(want) + " (" +
+                                            what + ")");
+                };
+                if (msg_type == 5) {
+                    exact(10, "from u64 + count u16");
+                    report["from"]  = wire_le_u64(body);
+                    report["count"] = wire_le_u16(body + 8);
+                } else if (msg_type == 7) {
+                    exact(0, "no fields");
+                } else if (msg_type == 8) {
+                    if (body_len < 9)
+                        throw WireMalformed("STATUS_RESPONSE truncated "
+                                            "(need height u64 + genesis_len u8)");
+                    uint64_t height = wire_le_u64(body);
+                    uint8_t  glen   = body[8];
+                    if (9 + static_cast<size_t>(glen) != body_len)
+                        throw WireMalformed("STATUS_RESPONSE genesis_len=" +
+                                            std::to_string(glen) +
+                                            " does not consume the frame");
+                    // A conforming responder emits 0 (empty chain) or 64.
+                    if (glen != 0 && glen != 64)
+                        throw WireMalformed("STATUS_RESPONSE genesis length "
+                                            "must be 0 or 64, got " +
+                                            std::to_string(glen));
+                    report["height"]  = height;
+                    report["genesis"] = std::string(
+                        reinterpret_cast<const char*>(body + 9), glen);
+                } else if (msg_type == 15) {
+                    exact(4, "headers u32");
+                    report["headers"] = wire_le_u32(body);
+                } else {  // 17
+                    exact(12, "from u64 + count u32");
+                    report["from"]  = wire_le_u64(body);
+                    report["count"] = wire_le_u32(body + 8);
+                }
             } else {
                 // [u32 LE json_len][json_bytes] — declared length must
                 // match the remaining body EXACTLY and parse as JSON.
@@ -8944,7 +8997,12 @@ int cmd_decode_wire(int argc, char** argv) {
                       << report["msg_type_name"].get<std::string>() << ")\n"
                       << "  body_len:  " << report["body_len"] << "\n"
                       << "  type_cap:  " << report["type_cap"] << "\n";
-            if (report["payload_kind"] == "tx_frame") {
+            // Dispatch on the decoded payload kind. (Pre-D2-inc6a this was a
+            // two-way tx_frame/else split, so every non-TRANSACTION frame was
+            // printed as lp_json — which threw on the fixed frames, whose
+            // report carries no json_len/json_type.)
+            const std::string kind = report["payload_kind"].get<std::string>();
+            if (kind == "tx_frame") {
                 std::cout << "  payload:   tx_frame\n"
                           << "  amount:    " << report["amount"] << "\n"
                           << "  fee:       " << report["fee"] << "\n"
@@ -8953,6 +9011,20 @@ int cmd_decode_wire(int argc, char** argv) {
                           << "  from:      " << report["from"].get<std::string>() << "\n"
                           << "  to:        " << report["to"].get<std::string>() << "\n"
                           << "  hash:      " << report["hash"].get<std::string>() << "\n";
+            } else if (kind == "hello_frame" || kind == "req_frame") {
+                std::cout << "  payload:   " << kind << "\n";
+                // Emit whichever decoded scalars this frame carries.
+                for (const char* k : {"domain", "port", "role", "shard_id",
+                                      "wire_version", "from", "count",
+                                      "height", "genesis", "headers"}) {
+                    if (!report.contains(k)) continue;
+                    std::cout << "  " << k << ": ";
+                    if (report[k].is_string())
+                        std::cout << report[k].get<std::string>();
+                    else
+                        std::cout << report[k];
+                    std::cout << "\n";
+                }
             } else {
                 std::cout << "  payload:   lp_json (" << report["json_len"]
                           << " bytes, " << report["json_type"].get<std::string>()

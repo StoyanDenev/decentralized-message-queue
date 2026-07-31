@@ -97,11 +97,26 @@
 //     4+D     4     shard_id: u32 LE
 //     8+D     1     wire_version: u8 (advertised max — see module comment)
 //
+// PAYLOAD: REQUEST / STATUS FRAMES (fixed layout, D2-inc6a)
+//   The five small control messages that carry no signature and no consensus
+//   commitment. Each is fail-closed with EXACT consumption:
+//
+//     GET_CHAIN        [from: u64 LE][count: u16 LE]                  10 B
+//     STATUS_REQUEST   (no fields)                                     0 B
+//     STATUS_RESPONSE  [height: u64 LE][genesis_len: u8][genesis]     9..73 B
+//                        genesis_len is 0 (empty chain) or 64 (hex of the
+//                        genesis block hash) — nothing else is accepted.
+//     SNAPSHOT_REQUEST [headers: u32 LE]                                4 B
+//     HEADERS_REQUEST  [from: u64 LE][count: u32 LE]                   12 B
+//
+//   GET_CHAIN's count is u16 and HEADERS_REQUEST's is u32 — deliberately not
+//   unified; the two handler signatures differ.
+//
 // PAYLOAD: ALL OTHER MSGTYPES
 //   For BLOCK, CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT,
 //   EQUIVOCATION_EVIDENCE, BEACON_HEADER, SHARD_TIP,
-//   CROSS_SHARD_RECEIPT_BUNDLE, GET_CHAIN, CHAIN_RESPONSE,
-//   STATUS_REQUEST, STATUS_RESPONSE, SNAPSHOT_REQUEST, SNAPSHOT_RESPONSE:
+//   CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE, SNAPSHOT_RESPONSE,
+//   HEADERS_RESPONSE:
 //
 //   v1 falls back to a *length-prefixed JSON payload* inside the binary
 //   envelope:
@@ -257,6 +272,101 @@ nlohmann::json decode_hello_frame(const uint8_t* data, size_t len) {
     return j;
 }
 
+// ─── request / status frames (fixed layout, D2-inc6a) ────────────────────────
+//
+// The five small fixed-shape control messages that carry NO signature and NO
+// consensus commitment: GET_CHAIN, STATUS_REQUEST, STATUS_RESPONSE,
+// SNAPSHOT_REQUEST, HEADERS_REQUEST. Each frame is fail-closed with
+// EXACT-consumption semantics (the HELLO discipline): a conforming encoder
+// produces exactly these bytes, so trailing or missing bytes are a
+// non-conforming peer and WIRE-3 closes the connection.
+//
+// Field widths mirror the builders in messages.hpp and the reads in
+// GossipNet::handle_message. Note GET_CHAIN's count is u16 while
+// HEADERS_REQUEST's is u32 — deliberately NOT unified, because the two
+// handler signatures differ (on_get_chain takes uint16_t).
+
+void encode_get_chain_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u64(out, m.payload.value("from",  uint64_t{0}));
+    le_put_u16(out, m.payload.value("count", uint16_t{64}));
+}
+
+nlohmann::json decode_get_chain_frame(const uint8_t* data, size_t len) {
+    if (len != 8 + 2)
+        throw std::runtime_error("binary_codec: bad GET_CHAIN frame length");
+    nlohmann::json j;
+    j["from"]  = le_get_u64(data);
+    j["count"] = le_get_u16(data + 8);
+    return j;
+}
+
+void encode_status_request_frame(std::vector<uint8_t>&, const Message&) {
+    // No fields — the request is the message. Zero-length payload.
+}
+
+nlohmann::json decode_status_request_frame(const uint8_t*, size_t len) {
+    if (len != 0)
+        throw std::runtime_error("binary_codec: STATUS_REQUEST frame not empty");
+    return nlohmann::json::object();
+}
+
+void encode_status_response_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u64(out, m.payload.value("height", uint64_t{0}));
+    // `genesis` is the hex of the genesis block hash — 64 chars — or EMPTY
+    // when the responder's chain is empty, and the consumer branches on that
+    // emptiness (`!genesis.empty() && genesis != ours`). A fixed 32-byte slot
+    // would encode "unknown" as 64 zeros and silently turn it into "wrong
+    // genesis", excluding an honest bootstrapping peer from sync — so the
+    // field is length-prefixed and the empty case is preserved exactly.
+    put_lp_str(out, m.payload.value("genesis", std::string{}));
+}
+
+nlohmann::json decode_status_response_frame(const uint8_t* data, size_t len) {
+    if (len < 8 + 1)
+        throw std::runtime_error("binary_codec: truncated STATUS_RESPONSE frame");
+    size_t off = 0;
+    uint64_t height = le_get_u64(data); off += 8;
+    std::string genesis = get_lp_str(data, len, off);
+    if (off != len)
+        throw std::runtime_error("binary_codec: STATUS_RESPONSE frame trailing bytes");
+    // A conforming responder emits exactly 0 (empty chain) or 64 (hex of a
+    // 32-byte hash) characters. Narrowing to those bounds the string a peer
+    // can pin and costs no legitimate message.
+    if (!genesis.empty() && genesis.size() != 64)
+        throw std::runtime_error("binary_codec: STATUS_RESPONSE genesis length "
+                                 "must be 0 or 64");
+    nlohmann::json j;
+    j["height"]  = height;
+    j["genesis"] = genesis;
+    return j;
+}
+
+void encode_snapshot_request_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u32(out, m.payload.value("headers", uint32_t{16}));
+}
+
+nlohmann::json decode_snapshot_request_frame(const uint8_t* data, size_t len) {
+    if (len != 4)
+        throw std::runtime_error("binary_codec: bad SNAPSHOT_REQUEST frame length");
+    nlohmann::json j;
+    j["headers"] = le_get_u32(data);
+    return j;
+}
+
+void encode_headers_request_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u64(out, m.payload.value("from",  uint64_t{0}));
+    le_put_u32(out, m.payload.value("count", uint32_t{16}));
+}
+
+nlohmann::json decode_headers_request_frame(const uint8_t* data, size_t len) {
+    if (len != 8 + 4)
+        throw std::runtime_error("binary_codec: bad HEADERS_REQUEST frame length");
+    nlohmann::json j;
+    j["from"]  = le_get_u64(data);
+    j["count"] = le_get_u32(data + 8);
+    return j;
+}
+
 // ─── envelope ────────────────────────────────────────────────────────────────
 
 constexpr uint8_t kBinaryMagic   = 0xB1;
@@ -296,7 +406,17 @@ std::vector<uint8_t> encode_binary(const Message& m) {
         return out;
     }
 
-    // All other types: length-prefixed JSON inside the binary envelope.
+    // D2-inc6a: true fixed-layout frames for the request/status types.
+    switch (m.type) {
+    case MsgType::GET_CHAIN:        encode_get_chain_frame(out, m);        return out;
+    case MsgType::STATUS_REQUEST:   encode_status_request_frame(out, m);   return out;
+    case MsgType::STATUS_RESPONSE:  encode_status_response_frame(out, m);  return out;
+    case MsgType::SNAPSHOT_REQUEST: encode_snapshot_request_frame(out, m); return out;
+    case MsgType::HEADERS_REQUEST:  encode_headers_request_frame(out, m);  return out;
+    default: break;
+    }
+
+    // Remaining types: length-prefixed JSON inside the binary envelope.
     // Tracked as follow-up: replace per-type with true fixed-layout frames.
     std::string s = m.payload.dump();
     if (s.size() > 0xFFFFFFFFu)
@@ -338,6 +458,21 @@ Message decode_binary(const uint8_t* data, size_t len) {
         chain::Transaction tx = decode_tx_frame(body, body_len);
         m.payload = tx.to_json();
         return m;
+    }
+
+    // D2-inc6a: fixed-layout request/status frames.
+    switch (m.type) {
+    case MsgType::GET_CHAIN:
+        m.payload = decode_get_chain_frame(body, body_len);        return m;
+    case MsgType::STATUS_REQUEST:
+        m.payload = decode_status_request_frame(body, body_len);   return m;
+    case MsgType::STATUS_RESPONSE:
+        m.payload = decode_status_response_frame(body, body_len);  return m;
+    case MsgType::SNAPSHOT_REQUEST:
+        m.payload = decode_snapshot_request_frame(body, body_len); return m;
+    case MsgType::HEADERS_REQUEST:
+        m.payload = decode_headers_request_frame(body, body_len);  return m;
+    default: break;
     }
 
     if (body_len < 4)

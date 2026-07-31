@@ -119,6 +119,24 @@ open(out, "wb").write(bytes(body))
 EOF
 }
 
+# craft_status_response <out> <height> <genesis_hex_or_empty> [<pad>]
+# Writes the D2-inc6a fixed STATUS_RESPONSE frame:
+#   [0xB1][0x01][8][0x00][height u64 LE][genesis_len u8][genesis]
+# pad appends N stray trailing bytes (for the exact-consumption legs).
+craft_status_response() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+out, height, genesis = sys.argv[1:4]
+pad = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+body = bytearray([0xB1, 0x01, 0x08, 0x00])
+body += struct.pack("<Q", int(height))
+gb = genesis.encode("utf-8")
+body += bytes([len(gb)]) + gb
+body += bytes(pad)
+open(out, "wb").write(bytes(body))
+EOF
+}
+
 run_decode() {  # run_decode <file> [extra args...]; sets RC + OUT globals
   set +e
   OUT=$("$DETERM_LIGHT" decode-wire --in "$1" "${@:2}" 2>&1)
@@ -126,8 +144,8 @@ run_decode() {  # run_decode <file> [extra args...]; sets RC + OUT globals
   set -e
 }
 
-echo "=== 1. Well-formed STATUS_RESPONSE (lp-json) → VALID exit 0 ==="
-craft_lp_json "$TMP/status.bin" 0xB1 0x01 8 0x00 '{"height":42,"genesis":"abc"}'
+echo "=== 1. Well-formed STATUS_RESPONSE (D2-inc6a fixed frame) → VALID exit 0 ==="
+craft_status_response "$TMP/status.bin" 42 "$(printf 'a%.0s' $(seq 1 64))"
 run_decode "$TMP/status.bin"
 if [ "$RC" = "0" ] && echo "$OUT" | head -1 | grep -q "VALID"; then
   assert "true" "STATUS_RESPONSE frame → VALID exit 0"
@@ -150,6 +168,40 @@ if [ "$NAME" = "VALID/STATUS_RESPONSE" ]; then
 else
   echo "$OUT"; assert "false" "--json verdict/name (got $NAME)"
 fi
+
+echo
+echo "=== 2b. STATUS_RESPONSE frame: decoded fields + fail-closed arms ==="
+FIELDS=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s' % (d.get('payload_kind'), d.get('height'), len(d.get('genesis',''))))
+except Exception: print('ERR')
+")
+if [ "$FIELDS" = "req_frame/42/64" ]; then
+  assert "true" "STATUS_RESPONSE: payload_kind=req_frame, height=42, genesis 64 chars"
+else
+  assert "false" "STATUS_RESPONSE decoded fields (got $FIELDS)"
+fi
+# EMPTY genesis (an empty chain) is LEGAL and must stay distinguishable from
+# a 64-zero hash — the light mirror of the daemon's length-prefixed field.
+craft_status_response "$TMP/status_empty.bin" 0 ""
+run_decode "$TMP/status_empty.bin"
+[ "$RC" = "0" ] && assert "true" "STATUS_RESPONSE with EMPTY genesis → VALID (empty chain)" \
+                 || { echo "$OUT"; assert "false" "STATUS_RESPONSE empty genesis → VALID (rc=$RC)"; }
+# A genesis length outside {0, 64} is rejected.
+craft_status_response "$TMP/status_badlen.bin" 1 "abc"
+run_decode "$TMP/status_badlen.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "genesis length"; then
+  assert "true" "STATUS_RESPONSE genesis length not in {0,64} → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "STATUS_RESPONSE bad genesis length → exit 3 (rc=$RC)"
+fi
+# Trailing bytes after the frame → MALFORMED (exact consumption).
+craft_status_response "$TMP/status_pad.bin" 1 "" 3
+run_decode "$TMP/status_pad.bin"
+[ "$RC" = "3" ] && assert "true" "STATUS_RESPONSE trailing bytes → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "STATUS_RESPONSE trailing bytes → exit 3 (rc=$RC)"; }
 
 echo
 echo "=== 3. Bad magic (0x7B legacy-JSON sentinel) → MALFORMED exit 3 ==="
@@ -240,15 +292,17 @@ fi
 
 echo
 echo "=== 8. lp-json declared length != body → MALFORMED exit 3 ==="
+# Carried by CONTRIB (4) — a type that still uses the length-prefixed JSON
+# payload after D2-inc6a moved the request/status types to fixed frames.
 # JSON is 7 bytes; declare 99.
-craft_lp_json "$TMP/lenmis.bin" 0xB1 0x01 8 0x00 '{"x":1}' 99
+craft_lp_json "$TMP/lenmis.bin" 0xB1 0x01 4 0x00 '{"x":1}' 99
 run_decode "$TMP/lenmis.bin"
 [ "$RC" = "3" ] && assert "true" "json_len mismatch → exit 3" \
                  || { echo "$OUT"; assert "false" "json_len mismatch → exit 3 (rc=$RC)"; }
 
 echo
 echo "=== 9. lp-json payload not valid JSON → MALFORMED exit 3 ==="
-craft_lp_json "$TMP/notjson.bin" 0xB1 0x01 8 0x00 'not-json-at-all'
+craft_lp_json "$TMP/notjson.bin" 0xB1 0x01 4 0x00 'not-json-at-all'
 run_decode "$TMP/notjson.bin"
 [ "$RC" = "3" ] && assert "true" "invalid JSON payload → exit 3" \
                  || { echo "$OUT"; assert "false" "invalid JSON payload → exit 3 (rc=$RC)"; }
