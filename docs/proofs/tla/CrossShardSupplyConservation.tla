@@ -6,10 +6,11 @@ FA-Apply-17 (`docs/proofs/CrossShardSupplyConservation.md`, theorems
 XS-1..XS-5): the cross-shard generalization of the per-shard A1
 unitary-supply invariant.
 
-Where FB46 (UnitarySupplyLedger.tla) models the FIVE-TERM A1 identity for
+Where FB46 (UnitarySupplyLedger.tla) models the SIX-TERM A1 identity for
 ONE shard in isolation — the `live_total_supply() == expected_total()`
 assertion the apply path checks after every block on a single `Chain`
-object — THIS spec is the K-SHARD COMPOSITION of that single-shard model.
+object, including the §3.22 accumulated_shielded term — THIS spec is the
+K-SHARD COMPOSITION of that single-shard model.
 FB46 proves each shard's ledger closes; FB54 proves that the SUM over a
 set of K sibling shards also closes, INCLUDING value that has left a
 source shard but not yet been credited on its destination shard
@@ -25,20 +26,23 @@ than the per-receipt delivery contract.
 
 --------------------------------------------------------------------------
 The headline contract — the K-shard aggregate identity (XS-5, Form B of
-CrossShardSupplyConservation.md §2.4, the quantity D1's
-`aggregate_conserved()` lambda computes at main.cpp:26933-26943):
+CrossShardSupplyConservation.md §2.4). The GENERAL (six-accumulator) form
+adds the §3.22 shard-local +accumulated_shielded term to the five-term
+quantity D1's `aggregate_conserved()` lambda computes at
+src/main.cpp:48646-48656:
 
       aggregate  =  Sum_s [ live_total_supply(C_s)
                           + accumulated_outbound(C_s)
                           + accumulated_slashed(C_s)
+                          + accumulated_shielded(C_s)      (§3.22, single-shard-local)
                           - accumulated_inbound(C_s)
                           - accumulated_subsidy(C_s) ]
 
       Claim (XS-5):  aggregate  =  Sum_s genesis_total(C_s)  =:  G
 
-for every reachable multi-shard state. Each shard's five supply-bearing
+for every reachable multi-shard state. Each shard's six supply-bearing
 accumulators are exactly those of the per-shard A1 identity
-(chain.hpp:443-449 / chain.cpp:548-553):
+(chain.hpp:590-597 / chain.cpp:699-704):
 
       live_total_supply(C_s) =  Sum(accounts_[d].balance)
                               + Sum(stakes_[d].locked)           (fields 1+2)
@@ -47,20 +51,31 @@ accumulators are exactly those of the per-shard A1 identity
                               + accumulated_inbound              (field 5, +)
                               - accumulated_slashed              (field 6, -)
                               - accumulated_outbound             (field 7, -)
+                              - accumulated_shielded             (field 8, -, §3.22)
 
 Substituting live == expected_total (the per-shard A1, asserted at
-chain.cpp:1397-1419) term-by-term into a shard's contribution collapses
+chain.cpp:1866-1892) term-by-term into a shard's contribution collapses
 it to genesis_total(C_s) (XS-1), so the aggregate over all K shards is
 the FIXED genesis baseline G regardless of how many cross-shard transfers
-are in flight.
+are in flight OR how much value each shard has moved into its confidential
+pool. accumulated_shielded is SINGLE-SHARD-LOCAL (a cross-shard UNSHIELD
+credit is rejected at chain.cpp:1059), so it needs no cross-shard netting —
+it enters the aggregate purely through that shard's own per-shard A1 (it
+appears with the +outbound/+slashed subtracted-in-expected_total terms on
+the aggregate's LHS). D1's `aggregate_conserved()` lambda omits the
++accumulated_shielded operand because its fixtures never shield
+(accumulated_shielded == 0 on every shard) — the shield-free empirical
+instance of this general Form B, exactly as D1 runs the subsidy channel at
+zero.
 
 --------------------------------------------------------------------------
 The K-shard composition. State is a FUNCTION `shard` from the shard index
-set `Shards = 0..K-1` to a per-shard record holding the seven
+set `Shards = 0..K-1` to a per-shard record holding the eight
 supply-bearing terms FB46 tracks per shard (balance + locked split into
-the two live-supply components; the five accumulators genesis_total /
-acc_subsidy / acc_inbound / acc_slashed / acc_outbound). The inbound
-dedup is modeled as a SHARED set `applied` of (src_shard, tx_hash) pairs
+the two live-supply components; the six accumulators genesis_total /
+acc_subsidy / acc_inbound / acc_slashed / acc_outbound / acc_shielded).
+The inbound dedup is modeled as a SHARED set `applied` of (src_shard,
+tx_hash) pairs
 — the key structure of `applied_inbound_receipts_` per XS-2 (the dedup
 key is the PAIR, so the same tx_hash from two different source shards is
 two distinct keys; chain.cpp:1365 + FA-Apply-9 T-R3). A replayed inbound
@@ -101,8 +116,27 @@ CreditInbound, one shard's balance + acc_inbound under the dedup guard):
     <-> locked moves (STAKE / UNSTAKE), NO accumulator change. Included
     because live_total_supply sums BOTH components; a balance->locked move
     must leave the aggregate unchanged.
+  * ShieldLocal(s, d, amt) — §3.22 SHIELD on shard s (chain.cpp:1037).
+    Debit shard s's account d + bump s.acc_shielded by the same amt.
+    SINGLE-SHARD-LOCAL: no receipt is emitted, no cross-shard accumulator
+    moves. Net on the aggregate: -amt to live(C_s), +amt via the LHS
+    +acc_shielded term => zero (value moved into shard s's confidential
+    pool, still counted).
+  * UnshieldLocal(s, d, amt) — §3.22b UNSHIELD on shard s (chain.cpp:1081).
+    Credit shard s's account d + DECREMENT s.acc_shielded by the same amt.
+    Guarded by acc_shielded >= amt (Pedersen binding; chain.cpp:1067-1073).
+    Net on the aggregate: +amt to live(C_s), -amt via the shrinking
+    +acc_shielded term => zero. The DESTINATION is on-shard — a cross-shard
+    UNSHIELD credit is rejected (chain.cpp:1059), which is why acc_shielded
+    never leaves its home shard's per-shard A1 and needs no netting.
+  * ConfidentialTransferLocal(s, d, amt) — §3.22c CONFIDENTIAL_TRANSFER fee
+    arm on shard s (chain.cpp:1172): only the public fee `amt` leaves the
+    pool to a transparent creator balance d. Same state-shape as
+    UnshieldLocal (credit balance + decrement s.acc_shielded), a DISTINCT
+    apply branch. Net on the aggregate: zero (the hidden note re-shuffle is
+    conservation-internal to the pool, invisible to the supply identity).
   * SerializeRestore(s) — snapshot round-trip on shard s. Models XS-4:
-    serialize_state -> restore_from_snapshot reproduces all seven
+    serialize_state -> restore_from_snapshot reproduces all eight
     supply-bearing fields + the dedup set verbatim, so it is the IDENTITY
     on the aggregate (chain.cpp:1614-1618 counters + 1586-1592/1778-1783
     dedup set; FA-Apply-2 T-S3 + FA-Apply-12 T-R4). Modeled as an explicit
@@ -116,9 +150,10 @@ Invariants (mapping XS-1..XS-5):
          the right shapes; all amounts Nat-valued + bounded for TLC.
   (T-X1) Inv_PerStepConservation (XS-1) — at EVERY reachable state, each
          shard's per-shard A1 closes: live(C_s) + slashed(C_s) +
-         outbound(C_s) = genesis(C_s) + subsidy(C_s) + inbound(C_s). This
-         is the per-shard `live == expected_total` lifted to the
-         state-machine layer (chain.cpp:1397). Because XS-1 proves each
+         outbound(C_s) + shielded(C_s)
+             = genesis(C_s) + subsidy(C_s) + inbound(C_s). This is the
+         per-shard `live == expected_total` (six-term, §3.22) lifted to the
+         state-machine layer (chain.cpp:1866-1892). Because XS-1 proves each
          step leaves the aggregate fixed BY collapsing each shard's
          contribution to genesis_total, the per-shard closure IS the
          per-step conservation mechanism.
@@ -136,17 +171,19 @@ Invariants (mapping XS-1..XS-5):
          cross-shard receipt principal — fees are excluded from outbound.
   (T-X4) Inv_SnapshotRestoreInvariance (XS-4) — SerializeRestore(s) is the
          identity on the aggregate: the saved snapshot of shard s holds
-         the same seven terms the live shard holds, so restoring rebuilds
+         the same eight terms the live shard holds, so restoring rebuilds
          the same contribution. State-form: whenever a snapshot exists for
          shard s, its contribution-to-aggregate equals the live shard's,
          and equals genesis(C_s).
   (T-X5) Inv_AggregateIdentity (XS-5) — THE HEADLINE. The K-shard
          aggregate equals the fixed genesis baseline G at every reachable
          state:
-              Sum_s [ live(C_s) + outbound(C_s) + slashed(C_s) ]
+              Sum_s [ live(C_s) + outbound(C_s) + slashed(C_s)
+                        + shielded(C_s) ]
             = Sum_s [ genesis(C_s) + inbound(C_s) + subsidy(C_s) ]
          (the Nat-safe rearrangement of Sum_s contrib(C_s) = G with the
-         subtracted accumulators moved to the RHS, mirroring FB46's
+         subtracted-in-expected_total accumulators — slashed, outbound AND
+         the §3.22 shielded — moved to the LHS, mirroring FB46's
          Inv_A1UnitarySupply discipline — no subtraction crosses zero).
   (T-X6) Prop_AggregateAlwaysConserved — temporal []-restatement of T-X5.
 
@@ -155,10 +192,21 @@ model-checked later):
 
   * CONSTANT K (= Cardinality(Shards)) shards; recommended K = 3 to match
     D1's K=3 instance. Genesis supply is pre-seeded per shard (a fixed
-    constant per shard) and never mutated afterwards (chain.cpp:711).
+    constant per shard) and never mutated afterwards (chain.cpp:934).
   * Amounts bounded by MaxDelta; action count bounded by MaxSteps — keeps
     TLC's state space finite. The C++ checked_add_u64 overflow guards are
     out of scope (every FB-track economic spec abstracts them away).
+  * §3.22 shielded pool. The confidential pool is abstracted to its
+    per-shard supply-bearing counter acc_shielded alone (commitment set /
+    nullifiers / Pedersen binding are ShieldedPoolSoundness territory). It
+    is SINGLE-SHARD-LOCAL: ShieldLocal / UnshieldLocal /
+    ConfidentialTransferLocal each mutate exactly ONE shard's balance +
+    acc_shielded and emit NO cross-shard receipt (a cross-shard UNSHIELD
+    credit is rejected at chain.cpp:1059), so acc_shielded never touches
+    inflight / applied / acc_inbound / acc_outbound. The pool therefore
+    enters the aggregate only through its home shard's per-shard A1 (XS-1),
+    needing no cross-shard netting — the K-shard reason the CrossShardSupply-
+    Conservation.md §5 lim. 7 note gives for keeping it shard-local.
   * The gossip transit / CROSS_SHARD_RECEIPT_LATENCY admission gate /
     multi-stage snapshot pipeline of FB32 are ABSTRACTED: an emitted
     receipt lands directly in a shared `inflight` pool, and CreditInbound
@@ -173,10 +221,12 @@ model-checked later):
 
 Companion analytic proof: `docs/proofs/CrossShardSupplyConservation.md`
 (FA-Apply-17, theorems XS-1..XS-5). Empirical pin: D1's regression
-`determ test-cross-shard-supply-invariant` (main.cpp:26838-27144;
-wrapper tools/test_cross_shard_supply_invariant.sh; 30 PASS).
+`determ test-cross-shard-supply-invariant` (src/main.cpp:48646-48656
+aggregate_conserved() lambda; wrapper
+tools/test_cross_shard_supply_invariant.sh) — the shield-free five-term
+instance of the general six-accumulator Form B this spec models.
 
-Adjacent specs: FB46 (UnitarySupplyLedger — single-shard five-term A1;
+Adjacent specs: FB46 (UnitarySupplyLedger — single-shard six-term A1;
 THIS spec is the K-shard composition), FB14 (CrossShardReceiptDedup —
 dst-side dedup), FB17 (AppliedReceiptRestore — dedup-set snapshot
 survival), FB18 (CrossShardOutboundApply — src-side debit), FB32
@@ -235,15 +285,17 @@ Receipt == [src_shard: Shards,
 KeyOf(r) == [src_shard |-> r.src_shard, tx_hash |-> r.tx_hash]
 
 \* Per-shard supply-bearing record. balance + locked are the two
-\* live_total_supply components (fields 1+2); genesis + the four
-\* accumulators are fields 3-7 of CrossShardSupplyConservation.md §2.2.
+\* live_total_supply components (fields 1+2); genesis + the five
+\* accumulators are fields 3-8 of CrossShardSupplyConservation.md §2.2
+\* (acc_shielded is the §3.22 field 8, single-shard-local).
 ShardState == [balance:      [Accounts -> Nat],
                locked:       [Accounts -> Nat],
                genesis:      Nat,
                acc_subsidy:  Nat,
                acc_inbound:  Nat,
                acc_slashed:  Nat,
-               acc_outbound: Nat]
+               acc_outbound: Nat,
+               acc_shielded: Nat]
 
 ----------------------------------------------------------------------------
 \* §2. State.
@@ -271,7 +323,7 @@ SumOverAccounts_(f, as) ==
 
 SumOverAccounts(f) == SumOverAccounts_(f, Accounts)
 
-\* live_total_supply(C_s) — the two-component live sum at chain.cpp:548-553.
+\* live_total_supply(C_s) — the two-component live sum at chain.cpp:699-704.
 LiveOf(st) == SumOverAccounts(st.balance) + SumOverAccounts(st.locked)
 
 \* Sum of amounts across a sequence of in-flight receipts. The aggregate's
@@ -308,13 +360,15 @@ SlashedFn  == [s \in Shards |-> shard[s].acc_slashed]
 InboundFn  == [s \in Shards |-> shard[s].acc_inbound]
 SubsidyFn  == [s \in Shards |-> shard[s].acc_subsidy]
 GenesisFn  == [s \in Shards |-> shard[s].genesis]
+ShieldedFn == [s \in Shards |-> shard[s].acc_shielded]   \* §3.22 shard-local
 
 ----------------------------------------------------------------------------
 \* §4. Initial state. Each shard pre-allocates its genesis evenly across
 \* its accounts (so the live sum at genesis equals GenesisPerShard[s], the
-\* C++ load path chain.cpp:711 sets genesis_total_ = the live sum at
-\* genesis). All stake starts at zero; all four delta accumulators start
-\* at zero. The in-flight pool and the dedup set start empty.
+\* C++ load path chain.cpp:934 sets genesis_total_ = the live sum at
+\* genesis). All stake starts at zero; all five delta accumulators (incl.
+\* the §3.22 acc_shielded — the pool is empty at genesis) start at zero.
+\* The in-flight pool and the dedup set start empty.
 
 InitShard(s) ==
     [balance      |-> [a \in Accounts |-> GenesisPerShard[s] \div Cardinality(Accounts)],
@@ -323,7 +377,8 @@ InitShard(s) ==
      acc_subsidy  |-> 0,
      acc_inbound  |-> 0,
      acc_slashed  |-> 0,
-     acc_outbound |-> 0]
+     acc_outbound |-> 0,
+     acc_shielded |-> 0]
 
 Init ==
     /\ shard    = [s \in Shards |-> InitShard(s)]
@@ -487,8 +542,65 @@ StakeUnlock(s, d, amt) ==
     /\ UNCHANGED <<inflight, applied>>
     /\ steps' = steps + 1
 
+\* ShieldLocal(s, d, amt): §3.22 SHIELD on shard s (chain.cpp:1037). Move
+\* amt OUT of shard s's account d INTO shard s's confidential pool. Debit
+\* balance[d] + bump s.acc_shielded by the same amt. SINGLE-SHARD-LOCAL: no
+\* receipt, no cross-shard accumulator. Net on the aggregate: -amt to
+\* live(C_s), +amt via the +acc_shielded term on the LHS => zero.
+\* Pre-condition: balance[d] >= amt (the S-049-checked cost debit).
+ShieldLocal(s, d, amt) ==
+    /\ steps < MaxSteps
+    /\ s \in Shards
+    /\ d \in Accounts
+    /\ amt \in 1..MaxDelta
+    /\ shard[s].balance[d] >= amt
+    /\ shard' = [shard EXCEPT
+           ![s].balance[d]   = @ - amt,
+           ![s].acc_shielded = @ + amt]
+    /\ UNCHANGED <<inflight, applied>>
+    /\ steps' = steps + 1
+
+\* UnshieldLocal(s, d, amt): §3.22b UNSHIELD on shard s (chain.cpp:1081).
+\* Move amt from shard s's pool BACK into its account d (the destination is
+\* ON-shard — a cross-shard UNSHIELD credit is rejected at chain.cpp:1059).
+\* Credit balance[d] + DECREMENT s.acc_shielded by the same amt. Net on the
+\* aggregate: +amt to live(C_s), -amt via the shrinking +acc_shielded term
+\* => zero. Pre-condition: acc_shielded >= amt (Pedersen binding: a note
+\* cannot withdraw more than it shielded, so acc_shielded never wraps < 0).
+UnshieldLocal(s, d, amt) ==
+    /\ steps < MaxSteps
+    /\ s \in Shards
+    /\ d \in Accounts
+    /\ amt \in 1..MaxDelta
+    /\ shard[s].acc_shielded >= amt
+    /\ shard' = [shard EXCEPT
+           ![s].balance[d]   = @ + amt,
+           ![s].acc_shielded = @ - amt]
+    /\ UNCHANGED <<inflight, applied>>
+    /\ steps' = steps + 1
+
+\* ConfidentialTransferLocal(s, d, amt): §3.22c CONFIDENTIAL_TRANSFER fee
+\* arm on shard s (chain.cpp:1172). Only the public fee `amt` leaves shard
+\* s's pool back to a transparent creator balance d. Structurally identical
+\* to UnshieldLocal (credit balance + decrement s.acc_shielded) but a
+\* DISTINCT apply branch — the hidden n_in->m note re-shuffle is
+\* conservation-internal to the pool and invisible to the supply identity.
+\* Net on the aggregate: +amt to live(C_s), -amt via +acc_shielded => zero.
+\* Pre-condition: acc_shielded >= amt (Pedersen binding bounds the fee).
+ConfidentialTransferLocal(s, d, amt) ==
+    /\ steps < MaxSteps
+    /\ s \in Shards
+    /\ d \in Accounts
+    /\ amt \in 1..MaxDelta
+    /\ shard[s].acc_shielded >= amt
+    /\ shard' = [shard EXCEPT
+           ![s].balance[d]   = @ + amt,
+           ![s].acc_shielded = @ - amt]
+    /\ UNCHANGED <<inflight, applied>>
+    /\ steps' = steps + 1
+
 \* SerializeRestore(s): snapshot round-trip on shard s (XS-4).
-\* serialize_state -> restore_from_snapshot reproduces all seven
+\* serialize_state -> restore_from_snapshot reproduces all eight
 \* supply-bearing fields + the dedup set verbatim (chain.cpp:1614-1618 +
 \* 1586-1592/1778-1783; FA-Apply-2 T-S3 + FA-Apply-12 T-R4), so the
 \* round-trip is the IDENTITY on the aggregate. Modeled as a stuttering
@@ -521,6 +633,12 @@ Next ==
           StakeLock(s, d, amt)
     \/ \E s \in Shards, d \in Accounts, amt \in 1..MaxDelta :
           StakeUnlock(s, d, amt)
+    \/ \E s \in Shards, d \in Accounts, amt \in 1..MaxDelta :
+          ShieldLocal(s, d, amt)
+    \/ \E s \in Shards, d \in Accounts, amt \in 1..MaxDelta :
+          UnshieldLocal(s, d, amt)
+    \/ \E s \in Shards, d \in Accounts, amt \in 1..MaxDelta :
+          ConfidentialTransferLocal(s, d, amt)
     \/ \E s \in Shards : SerializeRestore(s)
 
 \* Weak fairness on CreditInboundReceipt drives the temporal witness: an
@@ -551,23 +669,29 @@ Inv_TypeOK ==
           /\ shard[s].acc_inbound  \in 0..(MaxDelta * MaxSteps)
           /\ shard[s].acc_slashed  \in 0..(MaxDelta * MaxSteps)
           /\ shard[s].acc_outbound \in 0..(MaxDelta * MaxSteps)
+          \* §3.22: only ShieldLocal increments acc_shielded (<= MaxDelta
+          \* per step); Unshield/ConfidentialTransfer only decrement it, and
+          \* the acc_shielded >= amt guard keeps it >= 0. Same ceiling.
+          /\ shard[s].acc_shielded \in 0..(MaxDelta * MaxSteps)
     /\ inflight \in Seq(Receipt)
     /\ applied  \in SUBSET DedupKey
     /\ steps \in 0..MaxSteps
 
 \* T-X1 / Inv_PerStepConservation (XS-1): at EVERY reachable state, each
 \* shard's per-shard A1 closes —
-\*       live(C_s) + slashed(C_s) + outbound(C_s)
+\*       live(C_s) + slashed(C_s) + outbound(C_s) + shielded(C_s)
 \*     = genesis(C_s) + subsidy(C_s) + inbound(C_s).
-\* This is the per-shard `live_total_supply() == expected_total()`
-\* assertion (chain.cpp:1397) lifted to the state-machine layer, with the
-\* subtracted accumulators moved to the RHS so both sides are manifestly
-\* Nat-valued. Because XS-1 collapses each shard's contribution to
+\* This is the per-shard six-term `live_total_supply() == expected_total()`
+\* assertion (chain.cpp:1866-1892) lifted to the state-machine layer, with
+\* the subtracted-in-expected_total accumulators (slashed, outbound AND the
+\* §3.22 shielded) moved to the LEFT so both sides are manifestly Nat-
+\* valued. Because XS-1 collapses each shard's contribution to
 \* genesis_total via exactly this closure, per-shard A1 IS the per-step
 \* conservation mechanism for the aggregate.
 Inv_PerStepConservation ==
     \A s \in Shards :
        LiveOf(shard[s]) + shard[s].acc_slashed + shard[s].acc_outbound
+             + shard[s].acc_shielded
            = shard[s].genesis + shard[s].acc_subsidy + shard[s].acc_inbound
 
 \* T-X2 / Inv_NoDoubleCredit (XS-2): a receipt key credits acc_inbound at
@@ -603,30 +727,34 @@ Inv_FeeHandling ==
 \* SerializeRestore(s) is the identity on shard[s], so the post-restore
 \* contribution equals the pre-restore contribution equals genesis(C_s).
 \* This is the per-shard contribution form of XS-1 read as the restore
-\* invariant: restore preserves the seven terms, so it preserves the
-\* contribution.
+\* invariant: restore preserves the eight terms (incl. the §3.22
+\* acc_shielded), so it preserves the contribution.
 Inv_SnapshotRestoreInvariance ==
     \A s \in Shards :
        LiveOf(shard[s]) + shard[s].acc_outbound + shard[s].acc_slashed
+             + shard[s].acc_shielded
            = shard[s].genesis + shard[s].acc_inbound + shard[s].acc_subsidy
 
 \* T-X5 / Inv_AggregateIdentity (XS-5): THE HEADLINE — the K-shard
 \* aggregate equals the fixed genesis baseline G at every reachable state.
 \* This is Form B of CrossShardSupplyConservation.md §2.4
-\*       Sum_s [ live + outbound + slashed - inbound - subsidy ] = G
-\* rearranged into the Nat-safe additive form (subtracted accumulators on
-\* the RHS, mirroring FB46's Inv_A1UnitarySupply — no subtraction crosses
-\* zero):
-\*       Sum_s [ live(C_s) + outbound(C_s) + slashed(C_s) ]
+\*   Sum_s [ live + outbound + slashed + shielded - inbound - subsidy ] = G
+\* rearranged into the Nat-safe additive form (subtracted-in-expected_total
+\* accumulators — outbound, slashed AND the §3.22 shielded — on the LEFT,
+\* mirroring FB46's Inv_A1UnitarySupply — no subtraction crosses zero):
+\*       Sum_s [ live(C_s) + outbound(C_s) + slashed(C_s) + shielded(C_s) ]
 \*     = Sum_s [ genesis(C_s) + inbound(C_s) + subsidy(C_s) ].
 \* The RHS equals G + Sum inbound + Sum subsidy; the headline claim
 \* "aggregate == G" follows by netting the two added accumulators back out
 \* per §2.4. The Inv_PerStepConservation per-shard closure summed over
 \* Shards yields exactly this equality, so XS-5 is the K-shard sum of XS-1.
+\* The +shielded term is single-shard-local (chain.cpp:1059), so it appears
+\* once per shard on the LHS with no cross-shard netting.
 Inv_AggregateIdentity ==
     SumOverShards(LiveFn)
       + SumOverShards(OutboundFn)
       + SumOverShards(SlashedFn)
+      + SumOverShards(ShieldedFn)
     = SumOverShards(GenesisFn)
       + SumOverShards(InboundFn)
       + SumOverShards(SubsidyFn)
@@ -640,7 +768,8 @@ Inv_AggregateIdentity ==
 Inv_AggregateEqualsGenesis ==
     (SumOverShards(LiveFn)
        + SumOverShards(OutboundFn)
-       + SumOverShards(SlashedFn))
+       + SumOverShards(SlashedFn)
+       + SumOverShards(ShieldedFn))
     - (SumOverShards(InboundFn) + SumOverShards(SubsidyFn))
     = G
 
@@ -655,6 +784,7 @@ Prop_AggregateAlwaysConserved ==
     [](  SumOverShards(LiveFn)
            + SumOverShards(OutboundFn)
            + SumOverShards(SlashedFn)
+           + SumOverShards(ShieldedFn)
        = SumOverShards(GenesisFn)
            + SumOverShards(InboundFn)
            + SumOverShards(SubsidyFn) )
@@ -662,13 +792,15 @@ Prop_AggregateAlwaysConserved ==
 ============================================================================
 \* Cross-references.
 \*
-\* FB46 (UnitarySupplyLedger.tla) — the SINGLE-SHARD five-term A1 ledger.
-\*   THIS spec (FB54) is its K-shard composition: Inv_PerStepConservation
-\*   is FB46's Inv_A1UnitarySupply applied per shard, and
+\* FB46 (UnitarySupplyLedger.tla) — the SINGLE-SHARD six-term A1 ledger
+\*   (incl. the §3.22 acc_shielded term). THIS spec (FB54) is its K-shard
+\*   composition: Inv_PerStepConservation is FB46's Inv_A1UnitarySupply
+\*   applied per shard (both carry acc_shielded on the LHS), and
 \*   Inv_AggregateIdentity is the sum of those per-shard closures over the
 \*   shard set. FB46 proves each shard's ledger closes; FB54 proves the
 \*   K-shard sum closes, with the +acc_outbound / -acc_inbound terms
-\*   carrying value that is in flight between shards.
+\*   carrying value that is in flight between shards and the acc_shielded
+\*   term staying shard-local (chain.cpp:1059).
 \*
 \* FB32 (CrossShardReceiptRoundtrip.tla) — the receipt LIFECYCLE (source
 \*   emit + gossip + time-ordered admission + dst dedup + snapshot). FB54
@@ -696,19 +828,25 @@ Prop_AggregateAlwaysConserved ==
 \*   Prop_AggregateAlwaysConserved = XS-5.
 \*
 \* C++ enforcement:
-\*   src/chain/chain.cpp:1397-1419 : per-shard A1 post-apply assertion
+\*   src/chain/chain.cpp:1866-1892 : per-shard A1 post-apply assertion
 \*       (live_total_supply() == expected_total()) — Inv_PerStepConservation.
-\*   src/chain/chain.cpp:548-553 : live_total_supply() (fields 1+2).
-\*   include/determ/chain/chain.hpp:443-449 : expected_total() five-term form.
-\*   src/chain/chain.cpp:680-717 : genesis bootstrap (genesis_total_ + zeroed
-\*       accumulators) — Init / G.
+\*   src/chain/chain.cpp:699-704 : live_total_supply() (fields 1+2).
+\*   include/determ/chain/chain.hpp:590-597 : expected_total() six-term form
+\*       (incl. the §3.22 -accumulated_shielded, field 8).
+\*   src/chain/chain.cpp:905-944 : genesis bootstrap (genesis_total_ + six
+\*       zeroed accumulators, acc_shielded at :939) — Init / G.
 \*   src/chain/chain.cpp:742-769 : cross-shard TRANSFER source arm
 \*       (debit + block_outbound += amount; fee stays local) —
 \*       EmitOutboundReceipt + FeeRedistribute.
+\*   src/chain/chain.cpp:1037 / 1081 / 1172 : §3.22 SHIELD / UNSHIELD /
+\*       CONFIDENTIAL_TRANSFER shield arms (acc_shielded += A / -= A / -= fee)
+\*       — ShieldLocal / UnshieldLocal / ConfidentialTransferLocal; the
+\*       single-shard reject at :1059.
 \*   src/chain/chain.cpp:1363-1381 : inbound-receipt dedup-guard + credit —
 \*       CreditInboundReceipt (XS-1 dst + XS-2 dedup).
-\*   src/chain/chain.cpp:1391-1395 : accumulator fold (the only per-block
-\*       mutation of fields 4-7).
+\*   src/chain/chain.cpp:1859-1864 : apply-tail accumulator fold (the only
+\*       per-block mutation of the four monotone accumulators, fields 4-7;
+\*       acc_shielded field 8 is folded in the tx arms above, not the tail).
 \*   src/chain/chain.cpp:1279-1305 : fee -> creator distribution (XS-3) —
 \*       FeeRedistribute.
 \*   src/chain/chain.cpp:1614-1618 + 1586-1592 + 1778-1783 + 1867-1877 :
@@ -716,9 +854,11 @@ Prop_AggregateAlwaysConserved ==
 \*       + genesis back-solve (XS-4) — SerializeRestore.
 \*
 \* Runtime regression:
-\*   determ test-cross-shard-supply-invariant (D1; main.cpp:26838-27144;
-\*       30 PASS) — the empirical pin; aggregate_conserved() lambda
-\*       (main.cpp:26933-26943) is Form B verbatim.
+\*   determ test-cross-shard-supply-invariant (D1) — the empirical pin;
+\*       aggregate_conserved() lambda (src/main.cpp:48646-48656) is the
+\*       SHIELD-FREE (five-term) Form B instance: its fixtures never shield,
+\*       so accumulated_shielded == 0 on every shard and the +shielded
+\*       operand is absent (exactly as the subsidy channel runs at zero).
 \*   tools/test_cross_shard_supply_invariant.sh — run-from-root wrapper.
 \*   tools/operator_supply_check.sh — read-only operator-facing auditor.
 \*
@@ -728,5 +868,9 @@ Prop_AggregateAlwaysConserved ==
 \*   Accounts = {a1, a2}, Hashes = {h1, h2},
 \*   GenesisPerShard = (0 :> 4 @@ 1 :> 0 @@ 2 :> 0)  (each a multiple of
 \*   |Accounts|=2; mirrors D1's funded-source / unfunded-peers instance),
-\*   MaxDelta = 2, MaxSteps = 4.
+\*   MaxDelta = 2, MaxSteps = 4. Such a config would exercise the §3.22
+\*   ShieldLocal / UnshieldLocal / ConfidentialTransferLocal arms on the
+\*   funded shard (balance 2 per account >= MaxDelta), witnessing the
+\*   shard-local acc_shielded term of Inv_AggregateIdentity — the general
+\*   Form B that D1's shield-free empirical pin specializes.
 ============================================================================

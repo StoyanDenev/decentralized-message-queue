@@ -1869,12 +1869,16 @@ void Chain::apply_transactions(const Block& b) {
         // Hot-path string formatting only fires on bug, never in steady
         // state. Throwing surfaces the bug to the apply-path caller (Node /
         // validator / load) loudly rather than silently corrupting state.
-        char buf[256];
+        char buf[384];
         int64_t delta = (int64_t)actual - (int64_t)expected;
+        // §3.22: expected_total() folds six operands (see chain.hpp:590-597);
+        // itemize all six so the printed breakdown reconciles to `expected` on
+        // a shielded chain (accumulated_shielded_ is subtractive, like slashed/
+        // outbound). Diagnostic-only — fires solely on a supply-invariant bug.
         std::snprintf(buf, sizeof(buf),
             "unitary-balance invariant violated at block %llu: "
             "expected=%llu actual=%llu delta=%lld "
-            "(genesis=%llu +subsidy=%llu +inbound=%llu -slashed=%llu -outbound=%llu)",
+            "(genesis=%llu +subsidy=%llu +inbound=%llu -slashed=%llu -outbound=%llu -shielded=%llu)",
             (unsigned long long)b.index,
             (unsigned long long)expected,
             (unsigned long long)actual,
@@ -1883,7 +1887,8 @@ void Chain::apply_transactions(const Block& b) {
             (unsigned long long)accumulated_subsidy_,
             (unsigned long long)accumulated_inbound_,
             (unsigned long long)accumulated_slashed_,
-            (unsigned long long)accumulated_outbound_);
+            (unsigned long long)accumulated_outbound_,
+            (unsigned long long)accumulated_shielded_);
         throw std::runtime_error(buf);
     }
 
