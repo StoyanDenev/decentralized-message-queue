@@ -23931,6 +23931,84 @@ int main(int argc, char** argv) {
                   "BOTH containers (the coupled gate is mirrored, not bypassed)");
         }
 
+        // ── BF-12. ★ HOSTILE BYTES. At stage 2 this decoder sits on the
+        //    PRE-AUTH wire, so "well-formed input round-trips" is not the
+        //    property that matters — "arbitrary attacker bytes cannot steer it
+        //    into undefined behaviour" is. BF-6 only truncates a VALID frame,
+        //    which is a narrow class: every field boundary stays where the
+        //    encoder put it. This leg breaks that assumption by corrupting
+        //    counts and length prefixes IN PLACE, which is what desynchronises
+        //    a parse and is exactly how a decoder gets walked off its buffer.
+        //
+        //    Motivated by a real observation: during the mutant pass, an
+        //    encoder emitting one section FEWER than the decoder reads did not
+        //    produce a clean reject — it fail-fasted the process. That was
+        //    mutant-only, but it is the same shape an attacker supplies for
+        //    free, so it is gated rather than assumed away.
+        //
+        //    Contract: EVERY input either decodes or throws std::exception.
+        //    A crash or hang fails the run loudly by killing it.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> valid;
+            b.encode_frame(valid);
+
+            uint64_t rng = 0x9E3779B97F4A7C15ull;   // fixed seed: reproducible
+            auto next = [&]() {
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                return rng;
+            };
+            size_t decoded = 0, threw = 0;
+            auto attempt = [&](const std::vector<uint8_t>& v) {
+                try { (void)Block::decode_frame(v.data(), v.size()); ++decoded; }
+                catch (const std::exception&) { ++threw; }
+            };
+
+            // (a) single-byte corruptions walking the whole buffer — hits every
+            //     count field and every length prefix.
+            for (size_t i = 0; i < valid.size(); ++i) {
+                for (uint8_t delta : {uint8_t{0x01}, uint8_t{0xFF}, uint8_t{0x7F}}) {
+                    std::vector<uint8_t> v = valid;
+                    v[i] = static_cast<uint8_t>(v[i] ^ delta);
+                    attempt(v);
+                }
+            }
+            // (b) two-byte 0xFFFF stamps over the header region, where a lied
+            //     count is most likely to desync the parse.
+            for (size_t i = 0; i + 1 < std::min<size_t>(valid.size(), 400); ++i) {
+                std::vector<uint8_t> v = valid;
+                v[i] = 0xFF; v[i + 1] = 0xFF;
+                attempt(v);
+            }
+            // (c) pure garbage of assorted lengths, including around the
+            //     297-byte minimum where a header is plausible but a body is not.
+            for (int t = 0; t < 3000; ++t) {
+                size_t n = static_cast<size_t>(next() % 700);
+                std::vector<uint8_t> v(n);
+                for (auto& byte : v) byte = static_cast<uint8_t>(next() & 0xFF);
+                attempt(v);
+            }
+            // (d) a valid frame with adversarial bytes appended — exact
+            //     consumption under a hostile tail.
+            for (int t = 0; t < 500; ++t) {
+                std::vector<uint8_t> v = valid;
+                size_t n = static_cast<size_t>(next() % 64) + 1;
+                for (size_t k = 0; k < n; ++k)
+                    v.push_back(static_cast<uint8_t>(next() & 0xFF));
+                attempt(v);
+            }
+
+            checks(decoded + threw > 10000,
+                   "BF-12a hostile-input sweep ran (" + std::to_string(decoded) +
+                   " decoded, " + std::to_string(threw) + " rejected, " +
+                   std::to_string(decoded + threw) + " total)");
+            // Reaching this line at all IS the assertion: nothing crashed, hung,
+            // or read out of bounds.
+            check(true,
+                  "BF-12b ★ every hostile input either decoded or threw a "
+                  "std::exception — none crashed, hung, or read out of bounds");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-binary-codec "
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";

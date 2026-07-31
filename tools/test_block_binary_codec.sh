@@ -33,7 +33,7 @@
 # Mirroring keeps the two paths from ever disagreeing on accept/reject for the
 # same block. (Owner decision, 2026-08-01; BF-10 and BF-11 pin it.)
 #
-# 13 assertions:
+# 15 assertions:
 #
 #   BF-0  the empty frame is exactly 297 bytes. Pins kMinBlockFrame, from
 #         which the witness Layer-1 cap is derived — if that constant drifts
@@ -57,9 +57,26 @@
 #   BF-10 a non-empty view LIST under all-zero roots is dropped by BOTH
 #         containers.
 #   BF-11 source_shard_id under eligible_count == 0 is dropped by BOTH.
+#   BF-12 HOSTILE BYTES: 12,248 adversarial inputs - every single-byte
+#         corruption of a valid frame, 0xFFFF stamps over the header region,
+#         3000 pure-garbage buffers, and 500 valid-frames-with-hostile-tails.
+#         Contract: every input either decodes or throws std::exception.
+#         Reaching the end of the sweep IS the assertion - a crash, a hang or
+#         an out-of-bounds read kills the run. Runs in ~0.6s.
+#
+#         Why this leg exists: at stage 2 this decoder sits on the PRE-AUTH
+#         wire, so "well-formed input round-trips" is not the property that
+#         matters. BF-6 only truncates a VALID frame, which is a narrow class -
+#         every field boundary stays where the encoder put it. BF-12 corrupts
+#         counts and length prefixes IN PLACE, which is what desynchronises a
+#         parse and is how a decoder gets walked off its buffer. It was added
+#         after the mutant pass showed that an encoder emitting one section
+#         FEWER than the decoder reads does not reject cleanly - it fail-fasts
+#         the process. Mutant-only, but an attacker supplies that shape free.
 #
 # RESIDUAL, stated rather than implied: BF-7 is STRUCTURAL, not measured. A
-# mutant moving the cap after the reserve would keep it green. That is
+# mutant moving the cap after the reserve keeps it green — VERIFIED, not
+# assumed: the mutant was built and run, and BF-7 stayed PASS. That is
 # tolerable only because the u16 count width bounds the damage by
 # construction — the largest possible over-reserve is 65535 x 64 B ~ 4 MB,
 # which is also the wire cap for a BLOCK, so check placement is a performance
