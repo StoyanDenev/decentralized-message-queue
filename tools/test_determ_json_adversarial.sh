@@ -5,7 +5,7 @@
 # The swap-safety property (docs/proofs/MinixTacticalProfile.md §5): before
 # determ::djson can replace nlohmann on the byte-critical wire/digest/HMAC path,
 # the two impls must AGREE on accept-vs-reject for EVERY input a hostile peer can
-# send — a divergence forks (one accepts a claims_json the other rejects) or
+# send — a divergence forks (one accepts a wire payload the other rejects) or
 # desyncs the RPC HMAC. inc.1 proved dump-parity + ~24 rejection cases; this
 # sweeps the adversarial boundary comprehensively: literal-case lookalikes,
 # NaN/Infinity barewords, the full number-malformation grammar, structural

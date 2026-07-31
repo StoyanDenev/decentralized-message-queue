@@ -1824,9 +1824,18 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     ev.aborting_node = msg.missing_creator;
     ev.timestamp     = ts;
     ev.event_hash    = ah;
-    nlohmann::json claims_arr = nlohmann::json::array();
-    for (auto& [_, c] : bucket) claims_arr.push_back(c.to_json());
-    ev.claims_json = claims_arr;
+    // D2-inc3: typed claim list (bucket is keyed by claimer, so the order
+    // is deterministic — std::map iteration).
+    for (auto& [_, c] : bucket) {
+        chain::AbortClaim ac;
+        ac.block_index     = c.block_index;
+        ac.round           = c.round;
+        ac.prev_hash       = c.prev_hash;
+        ac.missing_creator = c.missing_creator;
+        ac.claimer         = c.claimer;
+        ac.ed_sig          = c.ed_sig;
+        ev.claims.push_back(std::move(ac));
+    }
     current_aborts_.push_back(ev);
 
     std::cout << "[node] abort quorum (round " << int(msg.round)
@@ -1859,15 +1868,15 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
 
     // Validate the K-1 claim quorum carried inline. We can do this
     // independently of whether we ever heard the individual AbortClaimMsgs
-    // ourselves — that's the whole point of this message.
-    if (!ev.claims_json.is_array()) return;
+    // ourselves — that's the whole point of this message. (D2-inc3: the
+    // list is TYPED — a malformed claims blob already threw at the parse
+    // boundary, so there is no shape check left to do here.)
     // S-044 (F-a): identical max(2, K-1) floor as the formation path.
     size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
-    if (ev.claims_json.size() < needed) return;
+    if (ev.claims.size() < needed) return;
 
     std::set<std::string> seen_claimers;
-    for (auto& cj : ev.claims_json) {
-        auto m_ = node::AbortClaimMsg::from_json(cj);
+    for (auto& m_ : ev.claims) {
         if (m_.block_index     != block_index)       return;
         if (m_.round           != ev.round)          return;
         if (m_.prev_hash       != prev_hash)         return;

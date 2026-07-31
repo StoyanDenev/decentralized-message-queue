@@ -653,15 +653,19 @@ EOF
   #     canonical (so a producer!=light field-swap drift surfaces RED); (b) the
   #     producer (chain::) and light (determ::chain::) spelling of the SAME body
   #     normalize EQUAL (so ns-qualifier alone is NOT flagged — no false positive).
+  # D2-inc3: claims preimage is the canonical binary encoding (domain v2),
+  # emitted into a local `enc` and appended as raw bytes. The self-test
+  # fixtures mirror the shipped shape.
   ST_SUB_CANON=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
 Hash hash_abort_event(const chain::AbortEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(std::string("DTM-F2-ABORT-v2"));
     b.append(e.round);
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    b.append(chain::canonical_abort_claims_dump(e.claims_json));
+    auto enc = chain::encode_abort_claims(e.claims);
+    b.append(enc.data(), enc.size());
     return b.finalize();
 }
 EOF
@@ -669,12 +673,13 @@ EOF
   ST_SUB_DRIFT=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
 Hash hash_abort_event(const determ::chain::AbortEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(std::string("DTM-F2-ABORT-v2"));
     b.append(e.aborting_node);
     b.append(e.round);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
+    auto enc = determ::chain::encode_abort_claims(e.claims);
+    b.append(enc.data(), enc.size());
     return b.finalize();
 }
 EOF
@@ -682,12 +687,13 @@ EOF
   ST_SUB_LIGHT=$(extract_subhasher_appends /dev/stdin hash_abort_event <<'EOF'
 Hash hash_abort_event(const determ::chain::AbortEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(std::string("DTM-F2-ABORT-v2"));
     b.append(e.round);
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
+    auto enc = determ::chain::encode_abort_claims(e.claims);
+    b.append(enc.data(), enc.size());
     return b.finalize();
 }
 EOF
@@ -808,7 +814,7 @@ fi
 # order. Pin the two copies of each sub-hasher EQUAL, append-for-append, so a
 # reorder/add/drop/recast in either copy (which would drift the committee-signed
 # view root for cross-shard/reconciled blocks with no runtime red) is RED here.
-check_subhasher hash_abort_event         DTM-F2-ABORT-v1    # register ADC-3
+check_subhasher hash_abort_event         DTM-F2-ABORT-v2    # register ADC-3 (D2-inc3: binary claims)
 check_subhasher hash_equivocation_event  DTM-F2-EQ-v1       # same class (F2 equivocation view)
 check_subhasher hash_cross_shard_receipt DTM-F2-RCPT-v1     # same class (F2 inbound-receipt view)
 

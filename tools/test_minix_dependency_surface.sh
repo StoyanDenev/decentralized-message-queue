@@ -59,8 +59,10 @@ fi
 # ── 1b. Vendored nlohmann/json header is byte-pinned (SHA-256 ratchet) ──────
 # Any edit to the vendored third-party header — a silent local patch, an
 # unreviewed version bump — goes RED until the owner re-pins. The two
-# byte-exact JSON contracts (the hash_abort_event claims_json.dump() consensus
-# digest + the RPC HMAC canonical dump) make the JSON writer consensus-adjacent.
+# byte-exact JSON contract that remains — the RPC HMAC canonical dump — keeps
+# the JSON writer auth-adjacent. (The hash_abort_event consensus digest was the
+# other one until D2-inc3 typed the claim list and moved that preimage to the
+# canonical binary chain::encode_abort_claims.)
 JSON_HDR="third_party/nlohmann/json.hpp"
 JSON_PIN="9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6"
 if [ ! -f "$JSON_HDR" ]; then

@@ -1,40 +1,38 @@
 #!/usr/bin/env bash
-# Abort-event digest CANONICALIZATION hardening. hash_abort_event() hashes the
-# canonical claims form (only the six consensus-bound fields, sorted; unknown
-# members stripped) instead of the verbatim peer JSON, via ONE shared helper
-# (include/determ/chain/abort_canonical.hpp) called by BOTH the daemon
-# (producer.cpp) and the light-client mirror (light/verify.cpp). This stops an
-# attacker-injected extra member in an otherwise-valid abort claim — which the
-# per-claim signature does not cover and per-claim validation ignores — from
-# riding the K-of-K block digest, and it unblocks the minix determ::djson swap
-# for this site (no attacker-controlled double reaches dump()).
+# TYPED abort-claims codec + digest gate (D2-inc3). AbortEvent carries
+# std::vector<chain::AbortClaim> — the six consensus-bound fields per claim —
+# encoded by the ONE shared canonical binary codec
+# (chain::encode_abort_claims / decode_abort_claims, src/chain/block.cpp),
+# which is BOTH the hash_abort_event digest preimage (domain DTM-F2-ABORT-v2,
+# daemon + light mirror) and, hex-wrapped, the block-container form.
 #
-# The same rebuild also runs on INGEST: AbortEvent::from_json stores
-# canonical_abort_claims(...) rather than the verbatim peer JSON. That closes
-# round-13 F-10 — `claims_json` was schema-free and to_json re-emits it, so an
-# injected member could carry arbitrary NESTING into a block nothing
-# authenticates (signing_bytes binds only event_hash), and the WIRE-2 depth
-# ceiling is ENVELOPE-RELATIVE (claim at depth 6 under BLOCK, 8 under
-# CHAIN_RESPONSE), so such a block committed fleet-wide but could never be
-# re-served, wedging sync. See docs/proofs/S022WireFormatCaps.md F-10.
+# This SUPERSEDES the JSON canonicalization layer it replaced
+# (include/determ/chain/abort_canonical.hpp, deleted). The channels that layer
+# policed are now STRUCTURALLY impossible rather than stripped: a typed claim
+# has no unknown members, no float-encoded ints, no hex case, and contributes
+# ZERO JSON nesting — which closes round-13 F-10 at its source. The old wedge
+# needed a schema-free claims value whose injected nesting the
+# container-relative WIRE-2 ceiling accepted on ingest (BLOCK payload) and
+# rejected on serve (CHAIN_RESPONSE payload, two levels deeper); "claims" is
+# now ONE hex STRING at every depth. See docs/proofs/S022WireFormatCaps.md F-10.
 #
-# `determ test-abort-claims-canonical` asserts (23): BYTE-NEUTRALITY for honest
-# claims (canonical == verbatim → every honest abort block's digest UNCHANGED,
-# no fork/migration), three non-semantic channels STRIPPED (unknown members, the
-# numeric-VALUE encoding of int fields — a float-encoded block_index truncates
-# past validation but is canonicalized away — and hex case), each LOAD-BEARING
-# (the variation DOES change the verbatim bytes), the non-array / malformed
-# / empty fallbacks, and the INGEST legs: the F-10 wedge reproduced as a
-# PRECONDITION (accepted as BLOCK, rejected as CHAIN_RESPONSE — so the fix legs
-# cannot pass vacuously), the block RE-SERVING at CHAIN_RESPONSE depth after
-# ingest, the injected member GONE from the stored body, and ingest
-# byte-neutrality (honest block round-trips identically; ingested poisoned block
-# == honest block; abort-event digest unchanged). Also pinned: every claim that
-# falls back to VERBATIM is REJECTED by per-claim validation, so the fallback
-# cannot reach a committed block. The
-# whole-suite witness that the digest is byte-neutral is that every existing
-# abort test (test-abort-event-apply, the FA abort traces) + the consensus
-# goldens stay green with this change in.
+# `determ test-abort-claims-canonical` asserts: (1) CODEC round-trip fidelity
+# (all six fields of every claim, sig bytes byte-identical so verification
+# outcomes are invariant) + byte-determinism + empty-list round-trip;
+# (2) PER-FIELD DIGEST BINDING — each of the six fields, plus claim ORDER and
+# COUNT, changes the digest (falsify-on-mutant: drop any field's append from
+# encode_abort_claims and its leg goes RED); (3) FAIL-CLOSED decode with
+# specific reject strings (truncated count header, truncated claim, truncated
+# trailing string, trailing bytes after the last claim); (4) F-10 STRUCTURAL
+# CLOSURE — the container claims value is a string, the abort-carrying block is
+# accepted at BOTH BLOCK and CHAIN_RESPONSE depths (no wedge band), the block
+# round-trips as a byte fixed point with its digest intact, and the pre-D2
+# JSON-array claims shape is REJECTED at the parse boundary (both ingress
+# callers share the one decode, so the second-ingress hazard is closed by
+# construction); (5) the ABORT_EVENT gossip round-trip keeps the typed claims
+# and the digest. The whole-suite witness is that every existing abort test
+# (test-abort-event-apply, test-abort-cert-validation, the FA abort traces) and
+# the cross-binary digest parity guard stay green with this change in.
 #
 # Run from repo root: bash tools/test_abort_claims_canonical.sh
 set -u
@@ -44,7 +42,7 @@ source tools/common.sh
 if [ -z "${DETERM:-}" ] || [ ! -x "$DETERM" ]; then
     echo "  SKIP: determ binary not found"; exit 0; fi
 
-echo "=== abort-event digest canonicalization (strip injected members; byte-neutral for honest) ==="
+echo "=== typed abort-claims codec + digest (D2-inc3 binary preimage; F-10 closed structurally) ==="
 OUT=$("$DETERM" test-abort-claims-canonical 2>&1); rc=$?
 echo "$OUT"
 echo ""

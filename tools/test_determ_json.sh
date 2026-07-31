@@ -3,9 +3,10 @@
 #
 # The load-bearing minix property (docs/proofs/MinixTacticalProfile.md §5): a
 # from-scratch in-tree JSON module must dump() BYTE-IDENTICALLY to the vendored
-# nlohmann on the subset the daemon puts on a consensus/HMAC path — the
-# abort-event digest (hash_abort_event SHA-256s claims_json.dump(), mirrored in
-# the light client) and the RPC HMAC (method|params.dump()). nlohmann is the
+# nlohmann on the subset the daemon puts on a byte-critical path — since
+# D2-inc3 moved the abort-event digest to a canonical BINARY claims preimage
+# (chain::encode_abort_claims), that subset is the RPC HMAC
+# (method|params.dump()) alone. nlohmann is the
 # FROZEN reference, linked in the same `determ` binary, so parity is measured
 # empirically (parse→dump both, byte-compare), not predicted. This increment is
 # ADDITIVE (introduces determ::djson + proves the property); no production

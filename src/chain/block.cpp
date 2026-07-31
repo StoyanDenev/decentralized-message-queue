@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/chain/block.hpp>
-#include <determ/chain/abort_canonical.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
 #include <cstring>
@@ -337,13 +336,76 @@ GenesisAlloc GenesisAlloc::from_json(const json& j) {
 
 // ─── AbortEvent ──────────────────────────────────────────────────────────────
 
+// ─── AbortClaim list codec (canonical, D2-inc3) ─────────────────────────────
+//
+// The one shared byte-counting definition (MergeEvent/ShardTipRecord
+// discipline) for the in-block claim list. These bytes are BOTH the
+// hash_abort_event digest preimage and (hex-wrapped) the block-container
+// form, so the stored value and the hashed bytes cannot drift.
+//
+// D2-inc3 note on F-10: the typed fixed layout supersedes the JSON
+// canonicalize-on-ingest defense (abort_canonical.hpp, deleted) — unknown
+// members, float-encoded ints, mixed-case hex and injected nesting are
+// structurally impossible here, so claim depth is a constant of the schema
+// again and nothing attacker-shaped survives ingest to be re-served.
+
+std::vector<uint8_t> encode_abort_claims(const std::vector<AbortClaim>& claims) {
+    if (claims.size() > 0xFFFF)
+        throw std::runtime_error("abort claims: count exceeds u16");
+    std::vector<uint8_t> out;
+    le_put_u16(out, static_cast<uint16_t>(claims.size()));
+    for (const auto& c : claims) {
+        le_put_u64(out, c.block_index);
+        out.push_back(c.round);
+        out.insert(out.end(), c.prev_hash.begin(), c.prev_hash.end());
+        out.insert(out.end(), c.ed_sig.begin(), c.ed_sig.end());
+        put_lp_str(out, c.missing_creator);
+        put_lp_str(out, c.claimer);
+    }
+    return out;
+}
+
+std::vector<AbortClaim> decode_abort_claims(const std::vector<uint8_t>& bytes) {
+    if (bytes.size() < 2)
+        throw std::runtime_error("abort claims: truncated count header");
+    uint16_t count = le_get_u16(bytes.data());
+    size_t off = 2;
+    std::vector<AbortClaim> claims;
+    claims.reserve(count <= 64 ? count : 64);
+    for (uint16_t i = 0; i < count; ++i) {
+        AbortClaim c;
+        // Fixed section: u64 + u8 + 32 + 64 = 105 bytes.
+        if (bytes.size() - off < 105)
+            throw std::runtime_error("abort claims: truncated claim "
+                                     + std::to_string(i));
+        c.block_index = le_get_u64(bytes.data() + off); off += 8;
+        c.round       = bytes[off++];
+        std::copy(bytes.begin() + off, bytes.begin() + off + 32,
+                  c.prev_hash.begin());
+        off += 32;
+        std::copy(bytes.begin() + off, bytes.begin() + off + 64,
+                  c.ed_sig.begin());
+        off += 64;
+        c.missing_creator = get_lp_str(bytes.data(), bytes.size(), off);
+        c.claimer         = get_lp_str(bytes.data(), bytes.size(), off);
+        claims.push_back(std::move(c));
+    }
+    if (off != bytes.size())
+        throw std::runtime_error("abort claims: trailing bytes after last claim");
+    return claims;
+}
+
 json AbortEvent::to_json() const {
     json j;
     j["round"]         = round;
     j["aborting_node"] = aborting_node;
     j["timestamp"]     = timestamp;
     j["event_hash"]    = to_hex(event_hash);
-    j["claims"]        = claims_json.is_null() ? json::array() : claims_json;
+    // D2-inc3: the claim list travels as ONE hex-of-binary string (the
+    // shard_tip_records container pattern) — unconditional, like the old
+    // JSON array was.
+    auto enc = encode_abort_claims(claims);
+    j["claims"]        = to_hex(enc.data(), enc.size());
     return j;
 }
 
@@ -354,16 +416,12 @@ AbortEvent AbortEvent::from_json(const json& j) {
     ae.aborting_node = json_require<std::string>(j, "aborting_node");
     ae.timestamp     = json_require<int64_t>(j, "timestamp");
     ae.event_hash    = from_hex_arr<32>(json_require_hex(j, "event_hash", 64));
-    // F-10 (round-13 hostile-wire audit): store the CANONICAL rebuild — the six
-    // consensus-bound fields only — not the verbatim peer JSON. `claims_json`
-    // is otherwise schema-free, and to_json re-emits it verbatim, so an
-    // injected unknown member could carry arbitrary NESTING into a block that
-    // the K-of-K digest does not cover (signing_bytes binds only event_hash) —
-    // which honest validators sign, and which the envelope-relative WIRE-2
-    // depth ceiling then refuses to re-serve. CONSENSUS-BYTE-NEUTRAL: the
-    // digest applies this same idempotent helper, so every block's hash is
-    // unchanged. See abort_canonical.hpp.
-    ae.claims_json   = canonical_abort_claims(j.value("claims", json::array()));
+    // D2-inc3: fail-closed typed decode. The pre-D2 schema-free JSON array
+    // (and with it the whole F-10 canonicalize-on-ingest machinery) is
+    // gone — a non-string "claims", bad hex, or a malformed blob throws
+    // here, at the parse boundary, with a specific reason.
+    ae.claims        = decode_abort_claims(
+        from_hex(json_require<std::string>(j, "claims")));
     return ae;
 }
 

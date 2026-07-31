@@ -64,7 +64,6 @@
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
 #include <determ/json/json.hpp>                // minix JSON phase 2 inc.1: determ::json (test-determ-json dual-oracle)
-#include <determ/chain/abort_canonical.hpp>   // abort-event digest canonicalization (test-abort-claims-canonical)
 #include <determ/net/rate_limiter.hpp>
 // minix: LoopTimer works over ANY EventLoop (native or virtual) — both
 // platforms' test batteries use it.
@@ -11153,9 +11152,19 @@ int main(int argc, char** argv) {
             ae.aborting_node = "carol";
             ae.timestamp = 1234567890;
             ae.event_hash = patterned_hash(0xC0);
-            ae.claims_json = json::array();  // empty inline claims OK
+            // D2-inc3: a typed claim, so the claim list round-trips through
+            // the hex-of-binary container (the pre-D2 JSON array never
+            // asserted claims survived to_json/from_json).
+            chain::AbortClaim ac;
+            ac.block_index = 1; ac.round = 1;
+            ac.missing_creator = "dave"; ac.claimer = "carol";
+            ac.prev_hash = patterned_hash(0xC1);
+            ac.ed_sig    = patterned_sig(0xC2);
+            ae.claims = { ac };
 
             json j = ae.to_json();
+            check(j["claims"].is_string(),
+                  "AbortEvent: claims serialize as one hex string (D2-inc3 container)");
             AbortEvent back = AbortEvent::from_json(j);
 
             check(back.round == ae.round,
@@ -11166,6 +11175,12 @@ int main(int argc, char** argv) {
                   "AbortEvent round-trip: timestamp preserved");
             check(back.event_hash == ae.event_hash,
                   "AbortEvent round-trip: event_hash preserved");
+            check(back.claims.size() == 1
+                      && back.claims[0].block_index == ac.block_index
+                      && back.claims[0].claimer == ac.claimer
+                      && back.claims[0].prev_hash == ac.prev_hash
+                      && back.claims[0].ed_sig == ac.ed_sig,
+                  "AbortEvent round-trip: typed claim list preserved (all six fields)");
         }
 
         // === EquivocationEvent round-trip ===
@@ -20094,7 +20109,7 @@ int main(int argc, char** argv) {
             a.aborting_node = "alice.tld";
             a.timestamp     = 1700000000;
             a.event_hash    = patterned_hash(0x55);
-            a.claims_json   = nlohmann::json::array();
+            a.claims        = {};
             Hash h1 = hash_abort_event(a);
             Hash h2 = hash_abort_event(a);
             check(h1 == h2, "hash_abort_event: deterministic");
@@ -22509,7 +22524,7 @@ int main(int argc, char** argv) {
             ae1.aborting_node = "carol";
             ae1.timestamp = 5000;
             ae1.event_hash = pattern_hash(0xA0);
-            ae1.claims_json = json::array();
+            ae1.claims = {};
             b.abort_events.push_back(ae1);
 
             AbortEvent ae2;
@@ -22517,7 +22532,7 @@ int main(int argc, char** argv) {
             ae2.aborting_node = "dan";
             ae2.timestamp = 5001;
             ae2.event_hash = pattern_hash(0xA1);
-            ae2.claims_json = json::array();
+            ae2.claims = {};
             b.abort_events.push_back(ae2);
 
             json j = b.to_json();
@@ -34224,7 +34239,8 @@ int main(int argc, char** argv) {
         // Self-consistent block builder: re-derives creators + commitments so the
         // five pre-gates pass for ANY abort input.
         auto build_block = [&](const std::string& aborting, const Hash& evh,
-                               const nlohmann::json& claims, uint8_t round,
+                               const std::vector<chain::AbortClaim>& claims,
+                               uint8_t round,
                                ConsensusMode mode = ConsensusMode::MUTUAL_DISTRUST,
                                size_t m = 0) {
             if (m == 0) m = K;      // MSVC C2587: K cannot be a default argument
@@ -34233,7 +34249,7 @@ int main(int argc, char** argv) {
             b.consensus_mode = mode;
             AbortEvent ae;
             ae.round = round; ae.aborting_node = aborting;
-            ae.timestamp = 0;  ae.event_hash = evh; ae.claims_json = claims;
+            ae.timestamp = 0;  ae.event_hash = evh; ae.claims = claims;
             b.abort_events.push_back(ae);
             std::vector<std::string> avail;
             for (auto& d : pool_doms) if (d != aborting) avail.push_back(d);
@@ -34270,18 +34286,32 @@ int main(int argc, char** argv) {
 
         auto mk_claims = [&](const std::vector<std::string>& claimers,
                              const std::string& missing, uint8_t round) {
-            nlohmann::json arr = nlohmann::json::array();
-            for (auto& cl : claimers)
-                arr.push_back(make_abort_claim(key_of(cl), cl, 1, round,
-                                               prev_hash, missing).to_json());
-            return arr;
+            // D2-inc3: typed claim list (the gossip AbortClaimMsg fields
+            // copied into the chain-layer AbortClaim twin).
+            std::vector<chain::AbortClaim> v;
+            for (auto& cl : claimers) {
+                auto m = make_abort_claim(key_of(cl), cl, 1, round,
+                                          prev_hash, missing);
+                chain::AbortClaim ac;
+                ac.block_index     = m.block_index;
+                ac.round           = m.round;
+                ac.prev_hash       = m.prev_hash;
+                ac.missing_creator = m.missing_creator;
+                ac.claimer         = m.claimer;
+                ac.ed_sig          = m.ed_sig;
+                v.push_back(std::move(ac));
+            }
+            return v;
         };
 
-        // Every distinct check_abort_certs reject marker.
+        // Every distinct check_abort_certs reject marker. (D2-inc3: the
+        // old "claims missing" non-array reject died with the typed list —
+        // a malformed claims blob now throws at Block::from_json, gated in
+        // test-abort-claims-canonical.)
         auto abort_cert_err = [](const std::string& e) {
             static const char* pats[] = {
                 "abort_events present at genesis", "insufficient eligible nodes at abort_event",
-                "aborting_node not in selected set", "claims missing",
+                "aborting_node not in selected set",
                 "claim count !=", "claim block_index mismatch", "claim round mismatch",
                 "claim prev_hash mismatch", "claim missing_creator mismatch",
                 "claimer == missing", "claimer not in at-event set",
@@ -34639,12 +34669,13 @@ int main(int argc, char** argv) {
         }
 
         // --- MUTANTS: each must produce its SPECIFIC V10 reject --------------
-        // Values only, never JSON shape: AbortClaimMsg::from_json uses
-        // json_require and THROWS on a missing/mistyped field, which would
-        // escape validate() as an exception rather than a Result.
-        auto mutant = [&](const std::function<void(nlohmann::json&)>& edit,
+        // D2-inc3: mutations are TYPED field/vector edits. The old JSON-shape
+        // mutant class (non-array claims, mistyped fields) died with the
+        // typed list — a malformed claims blob throws at Block::from_json's
+        // fail-closed decode, gated in test-abort-claims-canonical.
+        auto mutant = [&](const std::function<void(std::vector<chain::AbortClaim>&)>& edit,
                           const char* want, const char* label) {
-            nlohmann::json cl = mk_claims(claimers, aborting, 1);
+            std::vector<chain::AbortClaim> cl = mk_claims(claimers, aborting, 1);
             edit(cl);
             Block b = build_block(aborting, evh, cl, 1);
             auto r = bv.validate(b, c, reg);
@@ -34653,43 +34684,37 @@ int main(int argc, char** argv) {
             check(hit, label);
         };
 
-        mutant([](nlohmann::json& j){ j[0]["block_index"] = 99; },
+        mutant([](std::vector<chain::AbortClaim>& v){ v[0].block_index = 99; },
                "claim block_index mismatch",
                "T-C4: claim block_index != block.index -> reject");
-        mutant([](nlohmann::json& j){ j[0]["round"] = 2; },
+        mutant([](std::vector<chain::AbortClaim>& v){ v[0].round = 2; },
                "claim round mismatch",
                "T-C4: claim round != event round -> reject (phase smuggle)");
-        mutant([](nlohmann::json& j){
-                   j[0]["prev_hash"] = std::string(64, 'a'); },
+        mutant([](std::vector<chain::AbortClaim>& v){
+                   v[0].prev_hash.fill(0xAA); },
                "claim prev_hash mismatch",
                "T-C4: claim prev_hash != chain head -> reject");
-        mutant([&](nlohmann::json& j){ j[0]["missing_creator"] = outsider; },
+        mutant([&](std::vector<chain::AbortClaim>& v){ v[0].missing_creator = outsider; },
                "claim missing_creator mismatch",
                "T-C4: claim missing_creator != event aborting_node -> reject");
-        mutant([&](nlohmann::json& j){ j[0]["claimer"] = aborting; },
+        mutant([&](std::vector<chain::AbortClaim>& v){ v[0].claimer = aborting; },
                "claimer == missing",
                "T-C5: the accused cannot claim toward its own slash");
-        mutant([&](nlohmann::json& j){ j[0]["claimer"] = outsider; },
+        mutant([&](std::vector<chain::AbortClaim>& v){ v[0].claimer = outsider; },
                "claimer not in at-event set",
                "T-C1: a non-member of the at-event committee cannot claim");
-        mutant([](nlohmann::json& j){ j[1]["claimer"] = j[0]["claimer"]; },
+        mutant([](std::vector<chain::AbortClaim>& v){ v[1].claimer = v[0].claimer; },
                "duplicate claimer in cert",
                "T-C5: duplicate claimer cannot pad the quorum");
-        mutant([](nlohmann::json& j){
-                   std::string s = j[0]["ed_sig"];
-                   s[0] = (s[0] == '0' ? '1' : '0');
-                   j[0]["ed_sig"] = s; },
+        mutant([](std::vector<chain::AbortClaim>& v){ v[0].ed_sig[0] ^= 0xFF; },
                "claim sig invalid from",
                "T-C3: a claim with a forged/corrupt Ed25519 signature is rejected");
-        mutant([](nlohmann::json& j){ j.erase(1); },
+        mutant([](std::vector<chain::AbortClaim>& v){ v.erase(v.begin() + 1); },
                "claim count !=",
                "T-C5: under-sized certificate (1 of 2) rejected (exact-count)");
-        mutant([](nlohmann::json& j){ j.push_back(j[0]); },
+        mutant([](std::vector<chain::AbortClaim>& v){ v.push_back(v[0]); },
                "claim count !=",
                "T-C5: over-sized certificate (3 of 2) rejected (exact-count)");
-        mutant([](nlohmann::json& j){ j = nlohmann::json::object(); },
-               "claims missing",
-               "T-C5: non-array claims_json rejected");
 
         // aborting_node itself must be an at-event member. This one cannot be a
         // claims-only mutation: check_creator_selection reads aborting_node, so
@@ -46763,20 +46788,22 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "test-abort-claims-canonical") {
-        // Abort-event digest CANONICALIZATION hardening. hash_abort_event()
-        // now hashes the canonical claims form (only the six consensus-bound
-        // fields, sorted; unknown members stripped) instead of the verbatim
-        // peer JSON, so an attacker-injected extra member in an otherwise-valid
-        // claim can no longer ride the K-of-K block digest. ONE shared helper
-        // (abort_canonical.hpp) is used by the daemon AND the light mirror.
-        // Asserts: (1) BYTE-NEUTRAL for honest claims (canonical == verbatim →
-        // every honest abort block's digest is UNCHANGED, no fork/migration);
-        // (2) the injected member is STRIPPED (same digest with/without it) —
-        // the security property; (3) the fix is LOAD-BEARING (injection DOES
-        // change the verbatim bytes, so without canonicalization the digest
-        // would differ); (4) fallbacks preserve prior behavior.
+        // D2-inc3: the TYPED abort-claims codec + digest gate. AbortEvent
+        // carries std::vector<chain::AbortClaim> (six consensus-bound fields
+        // per claim) encoded by the ONE shared canonical binary codec
+        // (chain::encode_abort_claims / decode_abort_claims, block.cpp),
+        // which is BOTH the hash_abort_event digest preimage (domain
+        // DTM-F2-ABORT-v2) and — hex-wrapped — the block-container form.
+        // This supersedes the JSON canonicalization gate: the channels it
+        // policed (unknown members, float-encoded ints, hex case, injected
+        // nesting / the F-10 wedge) are now STRUCTURALLY impossible, and
+        // this gate pins (1) codec round-trip fidelity + determinism,
+        // (2) per-field digest binding (falsify-on-mutant: drop any field
+        // from the encoder → its leg goes RED), (3) fail-closed decode with
+        // specific reject strings, (4) container round-trip + digest
+        // stability, (5) the structural closure of the old injection
+        // channel at the parse boundary.
         using namespace determ;
-        namespace dc = determ::chain;
         using njson = nlohmann::json;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
@@ -46784,162 +46811,139 @@ int main(int argc, char** argv) {
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
 
-        // Two honest claims, built exactly as a producer would (AbortClaimMsg::to_json).
+        // Two deterministic claims (sig bytes are fills — verification is
+        // the validator gate's job; THIS gate pins byte fidelity, which is
+        // what verification outcomes are a function of).
         auto mk_claim = [&](const std::string& claimer, uint8_t fill) {
-            node::AbortClaimMsg m;
-            m.block_index = 10; m.round = 2; m.missing_creator = "n2"; m.claimer = claimer;
-            for (auto& x : m.prev_hash) x = fill;
-            for (auto& x : m.ed_sig)    x = static_cast<uint8_t>(fill ^ 0x5a);
-            return m.to_json();
+            chain::AbortClaim c;
+            c.block_index = 10; c.round = 2; c.missing_creator = "n2";
+            c.claimer = claimer;
+            c.prev_hash.fill(fill);
+            c.ed_sig.fill(static_cast<uint8_t>(fill ^ 0x5a));
+            return c;
         };
-        njson clean = njson::array();
-        clean.push_back(mk_claim("n1", 0xab));   // hex fills with letters, so the
-        clean.push_back(mk_claim("n3", 0xcd));   // hex-case channel is exercisable
+        std::vector<chain::AbortClaim> clean = { mk_claim("n1", 0xab),
+                                                 mk_claim("n3", 0xcd) };
 
-        // The same claims with an attacker-injected extra member — incl. the
-        // exact double from the determ::djson swap-blocker (`"z":0.1`).
-        njson inj = clean;
-        inj[0]["z"] = 0.1;
-        inj[1]["extra_note"] = "junk";
-
-        auto mk_event = [&](const njson& claims) {
+        auto mk_event = [&](const std::vector<chain::AbortClaim>& claims) {
             chain::AbortEvent e;
             e.round = 2; e.aborting_node = "n2"; e.timestamp = 123456;
             for (auto& x : e.event_hash) x = 0x7e;
-            e.claims_json = claims;
+            e.claims = claims;
             return e;
         };
         chain::AbortEvent ev_clean = mk_event(clean);
-        chain::AbortEvent ev_inj   = mk_event(inj);
-
-        // (1) BYTE-NEUTRAL: an honest claims array canonicalizes to its own
-        //     verbatim dump → the digest of every honest abort block is unchanged.
-        check(dc::canonical_abort_claims_dump(clean) == clean.dump(),
-              "byte-neutral: honest claims canonical dump == verbatim dump (digest unchanged)");
         Hash hc = node::hash_abort_event(ev_clean);
-        check(node::hash_abort_event(ev_clean) == hc,
-              "byte-neutral: honest abort-event digest is deterministic");
 
-        // (3) LOAD-BEARING: the injection DOES change the verbatim bytes, so
-        //     without canonicalization the two digests would differ.
-        check(clean.dump() != inj.dump(),
-              "load-bearing: injected member changes the VERBATIM claims bytes");
-
-        // (2) SECURITY: canonicalization strips the injected members, so the
-        //     digest binds only semantic content — same digest with/without them.
-        check(dc::canonical_abort_claims_dump(inj) == dc::canonical_abort_claims_dump(clean),
-              "security: canonical dump strips attacker-injected unknown members");
-        check(node::hash_abort_event(ev_inj) == hc,
-              "security: injected unknown members do NOT change the abort-event digest");
-
-        // (2b) NUMERIC-VALUE channel (adversarial-review finding): nlohmann's
-        //      get<uint64_t> TRUNCATES a float without throwing (10.9 -> 10),
-        //      exactly like json_require, so a float-encoded int field is
-        //      ACCEPTED by validation. The canonicalization re-derives ints
-        //      through the typed parse, collapsing every encoding of the same
-        //      integer → same digest (a verbatim copy would leave "10.9").
+        // (1) Codec round-trip fidelity + determinism.
         {
-            njson floaty = clean;
-            floaty[0]["block_index"] = 10.0;   // double; validation truncates to 10
-            floaty[1]["round"]       = 2.0;    // double; validation truncates to 2
-            check(dc::canonical_abort_claims_dump(floaty) == dc::canonical_abort_claims_dump(clean),
-                  "security: float-encoded int fields canonicalize away (numeric channel)");
-            check(node::hash_abort_event(mk_event(floaty)) == hc,
-                  "security: float-encoded block_index/round do NOT change the digest");
-            check(floaty.dump() != clean.dump(),
-                  "load-bearing: float encoding changes the VERBATIM claims bytes");
+            auto enc  = chain::encode_abort_claims(clean);
+            auto enc2 = chain::encode_abort_claims(clean);
+            check(enc == enc2,
+                  "codec: encode_abort_claims is byte-deterministic");
+            auto back = chain::decode_abort_claims(enc);
+            bool eq = back.size() == clean.size();
+            for (size_t i = 0; eq && i < back.size(); ++i)
+                eq = back[i].block_index     == clean[i].block_index
+                  && back[i].round           == clean[i].round
+                  && back[i].prev_hash       == clean[i].prev_hash
+                  && back[i].ed_sig          == clean[i].ed_sig
+                  && back[i].missing_creator == clean[i].missing_creator
+                  && back[i].claimer         == clean[i].claimer;
+            check(eq,
+                  "codec: encode -> decode round-trips ALL six fields of every claim "
+                  "(sig bytes byte-identical, so verification outcomes are invariant)");
+            auto empty_rt = chain::decode_abort_claims(
+                chain::encode_abort_claims({}));
+            check(empty_rt.empty(),
+                  "codec: the empty claim list round-trips ([count=0] only)");
+            check(node::hash_abort_event(mk_event(back)) == hc,
+                  "codec: the digest of a round-tripped event is UNCHANGED");
         }
-        // (2c) HEX-CASE channel: hex is accepted case-insensitively (the sig
-        //      covers the decoded BYTES), so upper/mixed-case hex canonicalizes
-        //      to lowercase → same digest.
+
+        // (2) Per-field digest binding — every one of the six fields changes
+        //     the digest. Falsify-on-mutant: remove ANY field's append from
+        //     encode_abort_claims and its leg goes RED (digest unchanged).
         {
-            njson upper = clean;
-            auto toup = [](std::string s){
-                for (char& ch : s) if (ch >= 'a' && ch <= 'f') ch = static_cast<char>(ch - 'a' + 'A');
-                return s;
+            auto differs = [&](void (*mut)(chain::AbortClaim&), const char* label) {
+                auto v = clean;
+                mut(v[0]);
+                check(node::hash_abort_event(mk_event(v)) != hc, label);
             };
-            upper[0]["prev_hash"] = toup(clean[0]["prev_hash"].get<std::string>());
-            upper[1]["ed_sig"]    = toup(clean[1]["ed_sig"].get<std::string>());
-            check(node::hash_abort_event(mk_event(upper)) == hc,
-                  "security: upper-case hex fields canonicalize to lowercase (same digest)");
-            check(upper.dump() != clean.dump(),
-                  "load-bearing: hex case changes the VERBATIM claims bytes");
+            differs([](chain::AbortClaim& c){ c.block_index++; },
+                    "digest binds claim.block_index");
+            differs([](chain::AbortClaim& c){ c.round++; },
+                    "digest binds claim.round");
+            differs([](chain::AbortClaim& c){ c.prev_hash[0] ^= 1; },
+                    "digest binds claim.prev_hash");
+            differs([](chain::AbortClaim& c){ c.ed_sig[0] ^= 1; },
+                    "digest binds claim.ed_sig");
+            differs([](chain::AbortClaim& c){ c.missing_creator += "x"; },
+                    "digest binds claim.missing_creator");
+            differs([](chain::AbortClaim& c){ c.claimer += "x"; },
+                    "digest binds claim.claimer");
+            // Order + count bind too (the count prefix + concatenation).
+            {
+                auto v = clean; std::swap(v[0], v[1]);
+                check(node::hash_abort_event(mk_event(v)) != hc,
+                      "digest binds claim ORDER");
+            }
+            {
+                auto v = clean; v.pop_back();
+                check(node::hash_abort_event(mk_event(v)) != hc,
+                      "digest binds claim COUNT");
+            }
         }
 
-        // (4) Fallbacks preserve prior behavior + never throw on the hash path.
-        njson notarr = "not-an-array";
-        check(dc::canonical_abort_claims_dump(notarr) == notarr.dump(),
-              "fallback: a non-array claims value → verbatim dump");
-        njson mal = njson::array();
-        { njson bad; bad["block_index"] = 1; mal.push_back(bad); }  // missing 5 required keys
-        check(dc::canonical_abort_claims_dump(mal) == mal.dump(),
-              "fallback: a malformed claim (missing keys) → verbatim dump (rejected upstream)");
-        njson empty = njson::array();
-        check(dc::canonical_abort_claims_dump(empty) == empty.dump(),
-              "fallback: an empty claims array → \"[]\"");
-
-        // ── (5) INGEST PATH — F-10 (round-13 hostile-wire audit) ────────────
-        // Canonicalizing the DIGEST alone left the injected bytes in the block
-        // BODY, which to_json re-emits verbatim. `claims_json` was schema-free,
-        // so an injected member could carry arbitrary NESTING — and the WIRE-2
-        // structural ceiling is CONTAINER-RELATIVE: since the D2 binary-only
-        // wire, the ceiling scans the length-prefixed JSON payload inside the
-        // 0xB1 envelope, where the same claim object sits at depth 5 under a
-        // BLOCK payload but 7 under a CHAIN_RESPONSE payload ({"blocks":[..]}
-        // adds two levels). A claim nested L ∈ {kMaxJsonDepth−6,
-        // kMaxJsonDepth−5} levels deep is therefore ACCEPTED on every ingest
-        // path and REJECTED on every serve path, so the block commits
-        // fleet-wide (signing_bytes binds only event_hash, so honest
-        // validators sign it) and could never be served again — WIRE-3
-        // escalating that from a dropped frame to a disconnect loop, and no
-        // new node able to sync past that height. (Pre-D2 the JSON envelope
-        // added one level on both sides — band {cap−7, cap−6}; the D2 strip
-        // shifted the base, not the asymmetry.)
-        //
-        // AbortEvent::from_json now stores the CANONICAL rebuild, so nothing
-        // survives ingest to inflate depth. Falsify-on-mutant: restore the
-        // verbatim `ae.claims_json = j.value("claims", json::array())` and the
-        // two F-10 legs below go RED while every leg above stays GREEN.
+        // (3) Fail-closed decode — specific reject strings, exact
+        //     consumption (mutant: decoder ignoring trailing bytes or a
+        //     truncated claim goes RED here).
         {
-            // Expressed against the cap, not hard-coded: the wedge band is
-            // {cap−6, cap−5} for EVERY value of kMaxJsonDepth, so this tracks
-            // the constant instead of rotting if it is ever retuned.
-            const size_t kInject = net::kMaxJsonDepth - 6;
+            auto expect_reject = [&](std::vector<uint8_t> bytes, const char* needle,
+                                     const char* label) {
+                bool hit = false;
+                try { (void)chain::decode_abort_claims(bytes); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find(needle) != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit, label);
+            };
+            expect_reject({0x01}, "truncated count header",
+                  "decode: 1-byte blob rejected 'truncated count header'");
+            auto enc = chain::encode_abort_claims(clean);
+            { auto t = enc; t.resize(t.size() - 1);
+              expect_reject(t, "truncated lp_str",
+                  "decode: last byte missing rejected (truncated trailing string)"); }
+            { auto t = enc; t.resize(2 + 50);   // mid-claim cut
+              expect_reject(t, "truncated claim",
+                  "decode: mid-claim cut rejected 'truncated claim'"); }
+            { auto t = enc; t.push_back(0x00);
+              expect_reject(t, "trailing bytes after last claim",
+                  "decode: trailing byte rejected 'trailing bytes after last claim'"); }
+        }
 
-            auto mk_block = [&](const njson& claims) {
+        // ── (5) F-10 STRUCTURAL CLOSURE (round-13 hostile-wire audit) ───────
+        // The F-10 wedge required a SCHEMA-FREE claims value: an injected
+        // unknown member carrying nesting that the container-relative WIRE-2
+        // ceiling accepted on ingest (BLOCK payload) and rejected on serve
+        // (CHAIN_RESPONSE payload, two levels deeper). The typed claim list
+        // closes the channel at its source: "claims" is ONE hex STRING at
+        // every depth — a claim contributes ZERO JSON nesting — and the old
+        // attack SHAPE (a JSON array with injected members) is REJECTED at
+        // the parse boundary, not canonicalized. Falsify-on-mutant: accept a
+        // JSON-array "claims" in AbortEvent::from_json again and leg (5c)
+        // goes RED.
+        {
+            auto mk_block = [&](const std::vector<chain::AbortClaim>& claims) {
                 chain::Block b;
                 b.index = 0; b.prev_hash = Hash{}; b.timestamp = 1;
                 b.cumulative_rand = Hash{};
-                chain::AbortEvent ae;
-                ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = 123456;
-                for (auto& x : ae.event_hash) x = 0x7e;
-                ae.claims_json = claims;
-                b.abort_events.push_back(ae);
+                b.abort_events.push_back(mk_event(claims));
                 return b;
             };
-
-            // A poisoned claim: honest in all six consensus-bound fields, plus
-            // ONE unknown member nesting kInject levels deep. Built at the JSON
-            // level, exactly as a hostile-but-registered claimant would put it
-            // on the wire — per-claim validation reads only the six and the
-            // Ed25519 sig covers none of the JSON, so this claim is VALID.
-            njson deep = njson::array();
-            {
-                njson* cur = &deep;
-                for (size_t i = 1; i < kInject; ++i) {
-                    cur->push_back(njson::array());
-                    cur = &(*cur)[0];
-                }
-            }
-            njson poisoned = clean;
-            poisoned[0]["z"] = deep;
-
             const njson wire_clean = mk_block(clean).to_json();
-            const njson wire_pois  = mk_block(poisoned).to_json();
 
-            // D2 binary-only wire: the payload rides length-prefixed inside
-            // the 0xB1 envelope (the WIRE-2 ceiling scans exactly these
-            // payload bytes).
             auto envelope = [&](net::MsgType t, const njson& payload) {
                 const std::string s = payload.dump();
                 std::vector<uint8_t> f;
@@ -46960,90 +46964,83 @@ int main(int argc, char** argv) {
                 catch (const std::exception&) { return false; }
             };
 
-            // (5a) The wedge PRECONDITION — the asymmetry is real and this
-            //      vector sits inside the band. If either half flipped, every
-            //      leg below would be vacuous, so both are asserted.
-            njson cr_pois; cr_pois["blocks"] = njson::array({ wire_pois });
-            check(accepts(envelope(net::MsgType::BLOCK, wire_pois)),
-                  "F-10 precondition: the poisoned block IS accepted as a BLOCK envelope");
-            check(!accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr_pois)),
-                  "F-10 precondition: the SAME verbatim bytes are REJECTED as CHAIN_RESPONSE "
-                  "(envelope-relative ceiling — this is the wedge)");
+            // (5a) The claims value is a STRING — structurally flat. The
+            //      abort-carrying block is accepted under BOTH the shallow
+            //      (BLOCK) and deep (CHAIN_RESPONSE) payload wrappers: no
+            //      ingest/serve asymmetry exists for claims content anymore.
+            check(wire_clean.at("abort_events").at(0).at("claims").is_string(),
+                  "F-10 closure: the container claims value is one hex STRING "
+                  "(a claim contributes zero JSON nesting)");
+            njson cr; cr["blocks"] = njson::array({ wire_clean });
+            check(accepts(envelope(net::MsgType::BLOCK, wire_clean))
+                      && accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr)),
+                  "F-10 closure: the abort-carrying block is accepted at BOTH "
+                  "BLOCK and CHAIN_RESPONSE depths (no wedge band for claims)");
 
-            // (5b) THE FIX. After ingest the stored block re-serves at
-            //      CHAIN_RESPONSE depth, so the sync wedge is gone.
-            chain::Block ingested = chain::Block::from_json(wire_pois);
-            njson cr_ing; cr_ing["blocks"] = njson::array({ ingested.to_json() });
-            check(accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr_ing)),
-                  "F-10 CLOSED: after ingest the block RE-SERVES at CHAIN_RESPONSE depth");
-            check(!ingested.abort_events.at(0).claims_json.at(0).contains("z"),
-                  "F-10: the injected unknown member is GONE from the stored block body");
-
-            // (5c) CONSENSUS-BYTE-NEUTRAL. An honest block round-trips through
-            //      ingest byte-identically, the ingested poisoned block is
-            //      byte-identical to the honest one, and the abort-event digest
-            //      is the one it already had — no fork, no golden migration.
-            check(chain::Block::from_json(wire_clean).to_json().dump() == wire_clean.dump(),
-                  "byte-neutral: an honest block round-trips through ingest byte-identically");
+            // (5b) Container round-trip: block-level dump is a byte fixed
+            //      point and the digest survives.
+            chain::Block ingested = chain::Block::from_json(wire_clean);
             check(ingested.to_json().dump() == wire_clean.dump(),
-                  "byte-neutral: the ingested poisoned block == the honest block, byte for byte");
+                  "byte-fixed-point: block with typed claims round-trips "
+                  "through the container byte-identically");
             check(node::hash_abort_event(ingested.abort_events.at(0)) == hc,
-                  "byte-neutral: the ingested abort-event digest is UNCHANGED");
+                  "byte-fixed-point: the ingested abort-event digest is UNCHANGED");
 
-            // (5d) The SECOND ingress. AbortEvent::from_json has exactly two
-            //      callers: Block::from_json (above) and the standalone
-            //      MsgType::ABORT_EVENT gossip handler (net/gossip.cpp), which
-            //      materialises an event with NO Block around it. That path is
-            //      the SHALLOWEST envelope — claim at depth 5 versus 6 under
-            //      BLOCK — so it admits the DEEPEST injection, making it the
-            //      ingress an argument reasoning only about blocks would miss.
-            //      Pinned separately so a future refactor cannot canonicalize
-            //      one caller and not the other.
+            // (5c) The OLD attack shape — "claims" as a JSON array (with the
+            //      round-13 deep-nested unknown member) — is REJECTED at the
+            //      parse boundary with the S-018 wrong-type diagnostic. Both
+            //      ingress callers of AbortEvent::from_json (Block::from_json
+            //      and the standalone ABORT_EVENT gossip handler) share this
+            //      one decode, so the second-ingress hazard is closed by
+            //      construction.
             {
-                const njson ev_wire = wire_pois.at("abort_events").at(0);
-                chain::AbortEvent ev_in = chain::AbortEvent::from_json(ev_wire);
-                check(!ev_in.claims_json.at(0).contains("z"),
-                      "F-10: the standalone ABORT_EVENT gossip ingress canonicalizes too "
-                      "(the second caller of AbortEvent::from_json)");
-                check(node::hash_abort_event(ev_in) == hc,
-                      "byte-neutral: the standalone-ingested abort event keeps its digest");
+                njson old_form = wire_clean;
+                njson arr = njson::array();
+                njson claim_obj;
+                claim_obj["block_index"] = 10; claim_obj["round"] = 2;
+                claim_obj["prev_hash"] = std::string(64, 'a');
+                claim_obj["ed_sig"] = std::string(128, 'b');
+                claim_obj["missing_creator"] = "n2"; claim_obj["claimer"] = "n1";
+                claim_obj["z"] = njson::array({njson::array({njson::array()})});
+                arr.push_back(claim_obj);
+                old_form["abort_events"][0]["claims"] = arr;
+                bool hit = false;
+                try { (void)chain::Block::from_json(old_form); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find("claims") != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit,
+                      "F-10 closure: the pre-D2 JSON-array claims shape is "
+                      "REJECTED at the parse boundary (S-018 'claims' "
+                      "diagnostic) — the injection door is closed, not "
+                      "canonicalized");
+            }
+            // (5d) Bad hex in the claims string is rejected fail-closed too.
+            {
+                njson bad = wire_clean;
+                bad["abort_events"][0]["claims"] = "zz";
+                bool threw = false;
+                try { (void)chain::Block::from_json(bad); }
+                catch (const std::exception&) { threw = true; }
+                check(threw,
+                      "F-10 closure: non-hex claims blob is rejected at parse");
             }
         }
 
-        // ── (6) FALLBACK SOUNDNESS ──────────────────────────────────────────
-        // Ingest KEEPS a claim it cannot canonicalize rather than rejecting it:
-        // from_json throwing is a parse failure, and under WIRE-3 a parse
-        // failure now CLOSES THE PEER, so rejecting would turn a malformed
-        // gossiped claim into a disconnect for no security gain. That is sound
-        // only because canonicalization is strictly WEAKER than per-claim
-        // validation — `at(k).get<T>()` versus `json_require<T>` (the same
-        // get<T>, plus a contains() check, plus an exact hex-length check on
-        // the two hex fields). So nothing that survives validation can reach
-        // the fallback, and no committed block can carry un-stripped bytes.
-        // Pin that implication rather than asserting it in prose.
+        // ── (6) ABORT_EVENT WIRE ROUND-TRIP (S-043 discipline) ─────────────
+        // The standalone gossip path: make_abort_event wraps e.to_json(), the
+        // handler re-parses via AbortEvent::from_json. The typed claims must
+        // survive that cycle byte-for-byte with the digest intact (there is
+        // no canonicalization fallback anymore — a blob either decodes or the
+        // frame is rejected at the parse boundary).
         {
-            auto canon_falls_back = [&](const njson& claim) {
-                njson arr = njson::array({ claim });
-                return dc::canonical_abort_claims(arr) == arr;   // unchanged ⇒ fell back
-            };
-            auto validation_rejects = [&](const njson& claim) {
-                try { (void)node::AbortClaimMsg::from_json(claim); return false; }
-                catch (const std::exception&) { return true; }
-            };
-
-            std::vector<njson> bad;
-            { njson c = clean[0]; c.erase("ed_sig");                 bad.push_back(c); }
-            { njson c = clean[0]; c["block_index"] = "ten";          bad.push_back(c); }
-            { njson c = clean[0]; c["prev_hash"]   = 7;              bad.push_back(c); }
-            { njson c = clean[0]; c["claimer"]     = njson::array(); bad.push_back(c); }
-            bad.push_back(njson("not-an-object"));
-
-            bool implication = true;
-            for (const auto& c : bad)
-                implication = implication && canon_falls_back(c) && validation_rejects(c);
-            check(implication,
-                  "fallback soundness: every claim that falls back to VERBATIM is also "
-                  "REJECTED by per-claim validation (the fallback cannot reach a block)");
+            net::Message m = net::make_abort_event(ev_clean, 10, Hash{});
+            auto ev_in = chain::AbortEvent::from_json(m.payload.at("event"));
+            check(ev_in.claims.size() == clean.size()
+                      && node::hash_abort_event(ev_in) == hc,
+                  "wire round-trip: ABORT_EVENT carries the typed claims "
+                  "intact (digest unchanged through the gossip envelope)");
         }
 
         std::cout << (fail ? "  FAIL: test-abort-claims-canonical\n"
@@ -47055,9 +47052,10 @@ int main(int argc, char** argv) {
         //
         // The load-bearing minix property (docs/proofs/MinixTacticalProfile.md
         // §5): a from-scratch determ::json must dump() BYTE-IDENTICALLY to
-        // nlohmann on the narrow subset the daemon puts on a consensus/HMAC
-        // path — the abort-event digest (producer.cpp / light verify.cpp hash
-        // claims_json.dump()) and the RPC HMAC (method|params.dump()). nlohmann
+        // nlohmann on the narrow subset the daemon puts on a byte-critical
+        // path — since D2-inc3 moved the abort-event digest to a canonical
+        // BINARY claims preimage, that subset is the RPC HMAC
+        // (method|params.dump()) alone. nlohmann
         // is the FROZEN reference, linked in this very binary, so parity is
         // measured empirically (parse→dump both, byte-compare), not predicted.
         // This increment is ADDITIVE: it introduces determ::json + proves the
@@ -47149,11 +47147,14 @@ int main(int argc, char** argv) {
         check(dj::Value::parse("{\"b\":2,\"a\":1,\"c\":3}").dump() == "{\"a\":1,\"b\":2,\"c\":3}",
               "canonical: object keys sorted byte-lexicographically");
 
-        // ── The two byte-critical consensus shapes (§5) ─────────────────────
-        // Abort claims_json: an array of sorted-key claim objects.
+        // ── The byte-critical shapes (§5) ───────────────────────────────────
+        // Array-of-objects shape (HISTORICAL: this was the abort-claims
+        // consensus-digest shape until D2-inc3 typed the claim list and moved
+        // the digest preimage to canonical binary; the parity surface it
+        // still gates is the RPC-HMAC dump convention).
         parity("[{\"missing\":[\"val1\",\"val2\"],\"node\":\"val3\",\"round\":7},"
                "{\"missing\":[],\"node\":\"val4\",\"round\":7}]",
-               "abort claims_json shape: byte-identical dump (consensus digest)");
+               "array-of-objects shape: byte-identical dump");
         // RPC params (sorted + unsorted inputs both canonicalize identically).
         parity("{\"height\":42,\"key\":\"s:val3\",\"namespace\":\"stake\"}",
                "RPC params shape (sorted): byte-identical dump (HMAC)");
@@ -47249,17 +47250,15 @@ int main(int argc, char** argv) {
 
         // ── determ::djson does NOT yet match nlohmann's shortest-round-trip
         //    dtoa; this WITNESSES the gap (no silent cap). The abort-event digest
-        //    — once the concrete worry, since an unknown member in a verbatim-
-        //    stored claim could have ridden claims_json.dump() into the block
-        //    digest — is now CLOSED at the source: hash_abort_event() hashes
-        //    chain::canonical_abort_claims_dump() (abort_canonical.hpp, SHIPPED),
-        //    which rebuilds each claim from only the six typed fields, stripping
-        //    injected members + float-encoded ints (see test-abort-claims-
-        //    canonical). So the remaining double gap is a swap-COMPLETENESS item
-        //    (a matching dtoa), not a fork vector: the residual reachable path is
+        //    — once the concrete worry — is now OFF JSON entirely: D2-inc3
+        //    typed the claim list and hash_abort_event digests the canonical
+        //    BINARY encoding (chain::encode_abort_claims, block.cpp; see
+        //    test-abort-claims-canonical). So the remaining double gap is a
+        //    swap-COMPLETENESS item (a matching dtoa), not a fork vector: the
+        //    residual reachable path is
         //    the RPC-HMAC re-dump, which fails auth CLOSED on a divergence, plus
         //    node Config (off every wire/digest path). See DetermJsonParitySoundness
-        //    NC-1 + AbortDigestCanonicalizationSoundness.
+        //    NC-1.
         //    NOTE TO FUTURE DEV: when dtoa parity lands, `diverge` -> 0 flips this
         //    assertion RED — convert it to a real double parity() sweep.
         {
@@ -47307,10 +47306,9 @@ int main(int argc, char** argv) {
         //
         // The swap-safety property (docs/proofs/MinixTacticalProfile.md §5,
         // DetermJsonParitySoundness DJP-5): for determ::djson to replace nlohmann
-        // on the byte-critical wire/digest/HMAC path, the two impls must AGREE on
+        // on the byte-critical wire/HMAC path, the two impls must AGREE on
         // accept-vs-reject for every input IN THE IN-SCOPE GRAMMAR — a divergence
-        // means a swapped node forks (accepts a claims_json the fleet rejects, or
-        // vice versa) or desyncs its HMAC. Agreement is NOT claimed on the
+        // desyncs a swapped node's R Agreement is NOT claimed on the
         // DELIBERATE stricter-than-nlohmann carve-outs (NC-4): the nesting depth
         // cap and the trailing-NUL rejection (determ rejects; nlohmann accepts) —
         // peer-facing hardening on inputs the honest consensus subset never
@@ -47584,12 +47582,14 @@ int main(int argc, char** argv) {
             tp.amount = 0; tp.fee = 1; tp.nonce = 8; tp.payload = std::vector<uint8_t>(33, 0xab);
             surface(tp.to_json().dump(), "surface: Transaction (payload-carrying)");
         }
-        // 2. AbortEvent with a real claim array (the consensus-digest shape).
+        // 2. AbortEvent with a typed claim (D2-inc3: claims travel as one
+        //    hex-of-binary string in the container).
         {
-            node::AbortClaimMsg m; m.block_index = 10; m.round = 2; m.missing_creator = "n2";
-            m.claimer = "n1"; fillh(m.prev_hash, 0xcd); fills(m.ed_sig, 0x5b);
+            chain::AbortClaim ac; ac.block_index = 10; ac.round = 2;
+            ac.missing_creator = "n2"; ac.claimer = "n1";
+            fillh(ac.prev_hash, 0xcd); fills(ac.ed_sig, 0x5b);
             AbortEvent ae; ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = 1234567890;
-            fillh(ae.event_hash, 0x7e); ae.claims_json = njson::array({ m.to_json() });
+            fillh(ae.event_hash, 0x7e); ae.claims = { ac };
             surface(ae.to_json().dump(), "surface: AbortEvent (with claim)");
         }
         // 3. EquivocationEvent.
@@ -47620,10 +47620,11 @@ int main(int argc, char** argv) {
             fillh(b.tx_root, 0x22); fillh(b.delay_seed, 0x33);
             b.creator_block_sigs = { s1, s2 };
             surface(b.to_json().dump(), "surface: Block (creators + txs + sigs)");
-            node::AbortClaimMsg m; m.block_index = 5; m.round = 2; m.missing_creator = "val2";
-            m.claimer = "val1"; fillh(m.prev_hash, 0xcd); fills(m.ed_sig, 0x5b);
+            chain::AbortClaim ac; ac.block_index = 5; ac.round = 2;
+            ac.missing_creator = "val2"; ac.claimer = "val1";
+            fillh(ac.prev_hash, 0xcd); fills(ac.ed_sig, 0x5b);
             AbortEvent ae; ae.round = 2; ae.aborting_node = "val2"; ae.timestamp = 222;
-            fillh(ae.event_hash, 0x7e); ae.claims_json = njson::array({ m.to_json() });
+            fillh(ae.event_hash, 0x7e); ae.claims = { ac };
             b.abort_events = { ae };
             surface(b.to_json().dump(), "surface: Block (abort-carrying)");
         }

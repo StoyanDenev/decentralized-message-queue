@@ -6,7 +6,6 @@
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
-#include <determ/chain/abort_canonical.hpp>  // canonical abort-claims dump for the digest
 #include <algorithm>
 #include <map>
 #include <optional>
@@ -437,20 +436,23 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
 
 Hash hash_abort_event(const chain::AbortEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-ABORT-v1"));
+    // D2-inc3: domain tag bumped v1 → v2 with the claims preimage change
+    // (JSON dump → canonical binary), so the two formulas' domains are
+    // disjoint by construction. Pre-genesis free; block HASHES are
+    // unaffected (Block::signing_bytes binds only event_hash).
+    b.append(std::string("DTM-F2-ABORT-v2"));
     b.append(e.round);
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    // claims_json: hash the CANONICAL form (rebuilt from ONLY the six
-    // consensus-bound fields, sorted keys), NOT the verbatim peer JSON. This
-    // strips attacker-injectable unknown members — which the per-claim
-    // signature does not cover and per-claim validation ignores — so the
-    // digest binds only semantic content. BYTE-NEUTRAL for honest claims
-    // (already exactly six keys, so canonical == verbatim). One shared helper
-    // (abort_canonical.hpp) is called here AND in the light-client mirror
-    // (light/verify.cpp), so the two digests cannot drift.
-    b.append(chain::canonical_abort_claims_dump(e.claims_json));
+    // claims: the canonical fixed-layout binary encoding — the ONE shared
+    // byte-counting definition (chain::encode_abort_claims, block.cpp),
+    // called here AND in the light-client mirror (light/verify.cpp), so
+    // the two digests cannot drift. The typed list carries exactly the six
+    // consensus-bound fields per claim; the old JSON canonicalization
+    // layer is deleted (nothing schema-free remains to strip).
+    auto enc = chain::encode_abort_claims(e.claims);
+    b.append(enc.data(), enc.size());
     return b.finalize();
 }
 

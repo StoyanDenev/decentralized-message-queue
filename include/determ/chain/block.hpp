@@ -352,16 +352,51 @@ std::vector<Transaction> decode_batch_payload(const std::vector<uint8_t>& payloa
 namespace determ::node { struct AbortClaimMsg; }
 namespace determ::chain {
 
+// S7 + D2-inc3: ONE abort claim, TYPED — the six consensus-bound fields,
+// the chain-layer twin of node::AbortClaimMsg (which stays the per-claim
+// GOSSIP representation). Typing the in-block claim list closes the whole
+// schema-free-JSON exposure at its source: unknown members, float-encoded
+// ints, mixed-case hex and arbitrary nesting (the F-10 wedge) are all
+// structurally impossible — the canonicalization layer they required
+// (abort_canonical.hpp) is deleted with it.
+struct AbortClaim {
+    uint64_t    block_index{0};
+    uint8_t     round{0};
+    Hash        prev_hash{};
+    std::string missing_creator;
+    std::string claimer;
+    // Ed25519 over make_abort_claim_message(block_index, round, prev_hash,
+    // missing_creator) — the preimage never covered any serialization, so
+    // claim signatures are UNCHANGED by the container swap.
+    Signature   ed_sig{};
+};
+
+// Canonical fixed-layout binary encoding of a claim list (the
+// MergeEvent/ShardTipRecord discipline — one shared byte-counting
+// definition for the producer, the validator, the apply path and the
+// light mirror). Layout, LE where noted:
+//   [count: u16 LE]
+//   count × [block_index: u64 LE][round: u8][prev_hash: 32 B]
+//           [ed_sig: 64 B][missing_creator_len: u8][missing_creator]
+//           [claimer_len: u8][claimer]
+// This is BOTH the digest preimage (hash_abort_event appends exactly
+// these bytes) and the block-container form ("claims" carries its hex).
+// encode throws on a name > 255 bytes or count > 65535; decode is
+// fail-closed with exact-consumption semantics and throws
+// std::runtime_error with a specific reason on any violation.
+std::vector<uint8_t>    encode_abort_claims(const std::vector<AbortClaim>& claims);
+std::vector<AbortClaim> decode_abort_claims(const std::vector<uint8_t>& bytes);
+
 struct AbortEvent {
     uint8_t     round{0};
     std::string aborting_node;
     int64_t     timestamp{0};
     Hash        event_hash{};
 
-    // S7: each AbortEvent carries the M-1 signed AbortClaimMsgs that
-    // authorized it. Encoded inline as JSON so block.cpp doesn't need to
-    // include node/producer.hpp.
-    nlohmann::json claims_json;
+    // S7: the max(2, K-1) signed claims that authorized this event, typed
+    // (D2-inc3; was a schema-free nlohmann::json). Carried in the JSON
+    // block container as hex of encode_abort_claims(claims).
+    std::vector<AbortClaim> claims;
 
     nlohmann::json    to_json() const;
     static AbortEvent from_json(const nlohmann::json& j);

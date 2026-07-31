@@ -21,7 +21,6 @@
 #include <determ/types.hpp>
 #include <determ/chain/block.hpp>
 #include <determ/chain/params.hpp>          // bft_committee_size (mirror the node's k_bft)
-#include <determ/chain/abort_canonical.hpp>  // shared canonical abort-claims dump (mirror)
 #include <set>
 #include <vector>
 #include <stdexcept>
@@ -87,16 +86,17 @@ Hash hash_equivocation_event(const determ::chain::EquivocationEvent& e) {
 
 Hash hash_abort_event(const determ::chain::AbortEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-ABORT-v1"));
+    // D2-inc3 mirror of producer.cpp::hash_abort_event: domain v2, claims
+    // preimage = the canonical binary encoding via the ONE shared codec
+    // (chain::encode_abort_claims, block.cpp — linked by both binaries),
+    // so the light digest cannot drift from the node's.
+    b.append(std::string("DTM-F2-ABORT-v2"));
     b.append(e.round);
     b.append(e.aborting_node);
     b.append(static_cast<uint64_t>(e.timestamp));
     b.append(e.event_hash);
-    // Mirror of producer.cpp::hash_abort_event: hash the CANONICAL claims form
-    // (only the six consensus-bound fields, sorted; strips attacker-injectable
-    // unknown members) via the ONE shared helper so the light digest cannot
-    // drift from the node's. Byte-neutral for honest claims.
-    b.append(determ::chain::canonical_abort_claims_dump(e.claims_json));
+    auto enc = determ::chain::encode_abort_claims(e.claims);
+    b.append(enc.data(), enc.size());
     return b.finalize();
 }
 

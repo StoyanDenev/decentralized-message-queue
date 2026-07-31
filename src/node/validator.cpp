@@ -314,24 +314,24 @@ BlockValidator::Result BlockValidator::check_abort_certs(
             return {false, "abort_event[" + std::to_string(i)
                          + "] aborting_node not in selected set"};
 
-        // claims_json: must be an array of M-1 valid AbortClaimMsg JSON objects.
-        if (!ae.claims_json.is_array())
-            return {false, "abort_event[" + std::to_string(i) + "] claims missing"};
-
+        // claims: the typed M-1 claim list (D2-inc3). A malformed claims
+        // blob cannot reach here — Block::from_json's fail-closed
+        // decode_abort_claims already threw at the parse boundary, which
+        // also retires the old shape hazard where AbortClaimMsg::from_json
+        // could ESCAPE validate() as an exception on a mistyped field.
+        //
         // S-044 (F-a): the abort-claim quorum is max(2, K-1) — identical to the
         // producer/gossip formation floor (chain::abort_claim_quorum). This is
         // an EXACT-count check (!=) so it must move in lockstep with the two
         // node.cpp sites; at K=2 the quorum is unsatisfiable so no K=2 block can
         // ever carry an abort_event (crash-stop, AbortCascadeLiveness.md §4.1).
         size_t needed = chain::abort_claim_quorum(domains_at_event.size());
-        if (ae.claims_json.size() != needed)
+        if (ae.claims.size() != needed)
             return {false, "abort_event[" + std::to_string(i)
                          + "] claim count != max(2,K-1)"};
 
         std::set<std::string> seen_claimers;
-        for (auto& cj : ae.claims_json) {
-            auto m_ = node::AbortClaimMsg::from_json(cj);
-
+        for (auto& m_ : ae.claims) {
             if (m_.block_index     != b.index)              return {false, "claim block_index mismatch"};
             if (m_.round           != ae.round)             return {false, "claim round mismatch"};
             if (m_.prev_hash       != prev_hash)            return {false, "claim prev_hash mismatch"};
