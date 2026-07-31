@@ -15386,8 +15386,10 @@ int cmd_derive_tx_hash(int argc, char** argv) {
 //   MERGE_EVENT      canonical 25-byte structure (event_type, shard_id,
 //                    partner_id, effective_height, evidence_window_start,
 //                    + optional region tail).
-//   COMPOSABLE_BATCH JSON array of inner txs (just emit the inner count;
-//                    a full nested decode would explode output).
+//   COMPOSABLE_BATCH D2 binary batch payload — [u16 LE inner_count] +
+//                    count x [u32 LE frame_len][tx frame] (just emit the
+//                    inner count + per-inner type bytes; a full nested
+//                    decode would explode output).
 //   DAPP_REGISTER    op-byte, then (op=0) 32B service_pubkey + url_len +
 //                    url + topic_count + (topic_len + topic)* +
 //                    retention + metalen + metadata; (op=1) deactivate.
@@ -15782,38 +15784,59 @@ int cmd_inspect_tx(int argc, char** argv) {
             break;
         }
         case 8: {  // COMPOSABLE_BATCH
-            // Payload = JSON array of inner txs. Don't recursively decode
-            // each inner (would explode output); just report the inner
-            // count + a peek at the inner types.
-            try {
-                std::string s(payload_bytes.begin(), payload_bytes.end());
-                auto arr = nlohmann::json::parse(s);
-                if (!arr.is_array()) {
-                    payload_decode_note = "COMPOSABLE_BATCH payload is JSON "
-                                           "but not an array (malformed)";
+            // D2 canonical binary batch payload (chain/block.hpp):
+            //   [inner_count: u16 LE]
+            //   inner_count × [frame_len: u32 LE][Transaction frame bytes]
+            // Independently re-implemented here (the wallet stays decoupled
+            // from the daemon's chain codec — same conformance-oracle
+            // stance as decode-wire-frame). Don't recursively decode each
+            // inner (would explode output); report the inner count + a
+            // peek at each inner's type byte (frame trailer offset 128).
+            {
+                if (payload_bytes.size() < 2) {
+                    payload_decode_note = "COMPOSABLE_BATCH payload shorter "
+                                          "than the u16 inner_count header";
                     break;
                 }
-                payload_decoded["inner_count"] = arr.size();
+                const uint16_t n = static_cast<uint16_t>(payload_bytes[0])
+                    | (static_cast<uint16_t>(payload_bytes[1]) << 8);
                 nlohmann::json inner_types = nlohmann::json::array();
-                for (auto& inner : arr) {
-                    if (inner.is_object() && inner.contains("type")) {
-                        if (inner["type"].is_number()) {
-                            int t = inner["type"].get<int>();
-                            inner_types.push_back(int_to_type_mnemonic(t));
-                        } else if (inner["type"].is_string()) {
-                            inner_types.push_back(
-                                inner["type"].get<std::string>());
-                        }
-                    } else {
-                        inner_types.push_back("?");
+                size_t off = 2;
+                bool malformed = false;
+                for (uint16_t i = 0; i < n; ++i) {
+                    if (off + 4 > payload_bytes.size()) {
+                        payload_decode_note =
+                            "COMPOSABLE_BATCH truncated frame length prefix "
+                            "(inner " + std::to_string(i) + ")";
+                        malformed = true;
+                        break;
                     }
+                    uint32_t flen = static_cast<uint32_t>(payload_bytes[off])
+                        | (static_cast<uint32_t>(payload_bytes[off + 1]) << 8)
+                        | (static_cast<uint32_t>(payload_bytes[off + 2]) << 16)
+                        | (static_cast<uint32_t>(payload_bytes[off + 3]) << 24);
+                    off += 4;
+                    if (flen > payload_bytes.size() - off || flen < 131) {
+                        payload_decode_note =
+                            "COMPOSABLE_BATCH truncated/short inner frame "
+                            "(inner " + std::to_string(i) + ")";
+                        malformed = true;
+                        break;
+                    }
+                    // Inner type byte: frame trailer offset 128.
+                    inner_types.push_back(
+                        int_to_type_mnemonic(payload_bytes[off + 128]));
+                    off += flen;
                 }
+                if (malformed) break;
+                if (off != payload_bytes.size()) {
+                    payload_decode_note = "COMPOSABLE_BATCH trailing bytes "
+                                          "after the last inner frame";
+                    break;
+                }
+                payload_decoded["inner_count"] = n;
                 payload_decoded["inner_types"] = std::move(inner_types);
                 payload_decode_known = true;
-            } catch (std::exception& e) {
-                payload_decode_note =
-                    std::string("COMPOSABLE_BATCH JSON parse failed: ") +
-                    e.what();
             }
             break;
         }

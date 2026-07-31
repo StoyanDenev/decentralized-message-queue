@@ -206,132 +206,19 @@ inline std::string get_lp_str(const uint8_t* data, size_t len, size_t& off) {
 }
 
 // ─── transaction frame (4×256-bit + trailer) ─────────────────────────────────
+//
+// D2: the frame codec MOVED to the chain layer
+// (chain::Transaction::encode_frame / decode_frame, src/chain/block.cpp) so
+// the COMPOSABLE_BATCH validator accept rule and apply path share the ONE
+// codec without a chain→net dependency. The byte layout documented above is
+// unchanged; these wrappers keep the wire dispatch below readable.
 
-void encode_tx_frame(std::vector<uint8_t>& out, const chain::Transaction& tx) {
-    // sender_pubkey slot — 32 bytes, derived from tx.from. tx.from is the
-    // string-form account identifier (typically a domain string, e.g.
-    // "alice.det"); we stuff its bytes into the slot for now and rely on
-    // the trailer's `from_len + from` to reconstruct it. Plan note: when
-    // identity becomes raw-pubkey first-class, this slot becomes the
-    // canonical address.
-    put_padded(out,
-        reinterpret_cast<const uint8_t*>(tx.from.data()),
-        tx.from.size(),
-        32);
-
-    // amount block: 32 bytes total — [amount LE][fee LE][nonce LE][reserved LE]
-    le_put_u64(out, tx.amount);
-    le_put_u64(out, tx.fee);
-    le_put_u64(out, tx.nonce);
-    le_put_u64(out, 0);             // reserved — must be zero (deterministic)
-
-    // recipient_pubkey slot
-    put_padded(out,
-        reinterpret_cast<const uint8_t*>(tx.to.data()),
-        tx.to.size(),
-        32);
-
-    // payload slot — first 32 bytes of tx.payload (right-padded if shorter)
-    put_padded(out,
-        tx.payload.data(),
-        tx.payload.size(),
-        32);
-
-    // trailer
-    out.push_back(static_cast<uint8_t>(tx.type));
-    uint16_t payload_len = static_cast<uint16_t>(
-        tx.payload.size() > 0xFFFF ? 0xFFFF : tx.payload.size());
-    le_put_u16(out, payload_len);
-    if (tx.payload.size() > 32) {
-        size_t overflow = tx.payload.size() - 32;
-        out.insert(out.end(),
-            tx.payload.begin() + 32, tx.payload.begin() + 32 + overflow);
-    }
-    put_lp_str(out, tx.from);
-    put_lp_str(out, tx.to);
-    out.insert(out.end(), tx.sig.begin(),  tx.sig.end());
-    out.insert(out.end(), tx.hash.begin(), tx.hash.end());
-
-    // §3.21: optional DPQ1 PQ authenticator — appended ONLY when present so
-    // every non-PQ tx frame is byte-identical to the pre-§3.21 layout. Without
-    // this section the binary wire silently DROPPED pq_auth, so a PQ_TRANSFER
-    // could not survive v1 transit once the JSON fallback is gone (D2).
-    if (!tx.pq_auth.empty()) {
-        if (tx.pq_auth.size() > 0xFFFFFFFFu)
-            throw std::runtime_error("binary_codec: pq_auth exceeds u32 length");
-        le_put_u32(out, static_cast<uint32_t>(tx.pq_auth.size()));
-        out.insert(out.end(), tx.pq_auth.begin(), tx.pq_auth.end());
-    }
+inline void encode_tx_frame(std::vector<uint8_t>& out, const chain::Transaction& tx) {
+    tx.encode_frame(out);
 }
 
-chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
-    chain::Transaction tx;
-    if (len < 128 + 1 + 2)
-        throw std::runtime_error("binary_codec: tx frame too short");
-
-    // Read the canonical numeric fields from the fixed-slot area (where
-    // encode_tx_frame writes them). Prior to this read, the decoder was
-    // dropping amount/fee/nonce on the binary-wire path — the trailer
-    // doesn't carry them, so a binary round-trip produced a tx with
-    // zero values for these fields. That bug stayed latent because
-    // (a) the JSON wire path was often negotiated in practice, and
-    // (b) admission-side sig verification (S-002) wasn't wired, so the
-    // corrupted txs entered mempool and were filtered later. Closing
-    // S-002 forced this fix. See docs/proofs/S002-Mempool-Sig-Verify.md.
-    tx.amount = le_get_u64(data + 32);
-    tx.fee    = le_get_u64(data + 40);
-    tx.nonce  = le_get_u64(data + 48);
-    uint64_t reserved = le_get_u64(data + 56);
-    if (reserved != 0)
-        throw std::runtime_error("binary_codec: reserved field non-zero");
-
-    // Trailer starts at offset 128 — type, payload_len, overflow, etc.
-    // The 4×32-byte fixed-slot area (offsets 0..127) carries the numeric
-    // fields above plus pubkey + recipient slots whose authoritative
-    // values still come from the trailer's length-prefixed strings.
-    size_t off = 128;
-
-    tx.type = static_cast<chain::TxType>(data[off++]);
-    uint16_t payload_len = le_get_u16(data + off); off += 2;
-
-    if (payload_len <= 32) {
-        // payload lives entirely in the fixed slot at offset 96..96+payload_len
-        tx.payload.assign(data + 96, data + 96 + payload_len);
-    } else {
-        size_t overflow = payload_len - 32;
-        if (off + overflow > len)
-            throw std::runtime_error("binary_codec: truncated payload overflow");
-        tx.payload.reserve(payload_len);
-        tx.payload.insert(tx.payload.end(), data + 96, data + 128);
-        tx.payload.insert(tx.payload.end(), data + off, data + off + overflow);
-        off += overflow;
-    }
-
-    tx.from = get_lp_str(data, len, off);
-    tx.to   = get_lp_str(data, len, off);
-    if (off + 64 + 32 > len)
-        throw std::runtime_error("binary_codec: truncated sig/hash");
-    std::memcpy(tx.sig.data(),  data + off, 64); off += 64;
-    std::memcpy(tx.hash.data(), data + off, 32); off += 32;
-
-    // §3.21: optional pq_auth section. A frame ending exactly at the hash is a
-    // non-PQ tx (pq_auth stays empty). Any bytes beyond the hash MUST form a
-    // well-formed [u32 LE len][len bytes] section consuming the frame EXACTLY:
-    // fail-closed on trailing garbage, and a zero-length section is rejected so
-    // the encoding stays canonical (encode omits the section when pq_auth is
-    // empty — no two distinct byte strings decode to the same tx).
-    if (off != len) {
-        if (off + 4 > len)
-            throw std::runtime_error("binary_codec: truncated pq_auth header");
-        uint32_t pq_len = le_get_u32(data + off); off += 4;
-        if (pq_len == 0)
-            throw std::runtime_error("binary_codec: empty pq_auth section");
-        if (pq_len != len - off)
-            throw std::runtime_error("binary_codec: pq_auth length mismatch");
-        tx.pq_auth.assign(data + off, data + off + pq_len);
-        off += pq_len;
-    }
-    return tx;
+inline chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
+    return chain::Transaction::decode_frame(data, len);
 }
 
 // ─── HELLO frame (fixed layout, D2 binary-only wire) ─────────────────────────

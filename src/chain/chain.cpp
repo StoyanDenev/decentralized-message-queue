@@ -1411,25 +1411,21 @@ void Chain::apply_transactions(const Block& b) {
         //
         // The actual committee stress branch + partner_subset_hash
         // + witness-window validation are downstream (R4 Phase 3+).
-        // v2.4: composable-tx batch. Payload is JSON array of inner txs;
-        // each inner is independently signed (validated upstream). Outer
-        // fee is charged whether inner txs succeed or fail (block-space
-        // billing — same model as gas in EVMs). Inner txs run inside
-        // chain.atomic_scope; any inner failure rolls back ALL inner
+        // v2.4 + D2: composable-tx batch. Payload is the canonical binary
+        // batch encoding (decode_batch_payload — the ONE shared helper with
+        // the validator accept rule; the pre-D2 JSON array was deleted
+        // pre-genesis). Each inner is independently signed (validated
+        // upstream). Outer fee is charged whether inner txs succeed or fail
+        // (block-space billing — same model as gas in EVMs). Inner txs run
+        // inside chain.atomic_scope; any inner failure rolls back ALL inner
         // mutations atomically. Outer nonce advances once regardless.
         case TxType::COMPOSABLE_BATCH: {
             if (!charge_fee(sender, tx.fee)) continue;
             sender.next_nonce++;
 
-            // Decode inner txs from JSON payload.
             std::vector<Transaction> inner_txs;
             try {
-                std::string s(tx.payload.begin(), tx.payload.end());
-                auto arr = json::parse(s);
-                if (!arr.is_array()) break;
-                for (auto& j : arr) {
-                    inner_txs.push_back(Transaction::from_json(j));
-                }
+                inner_txs = decode_batch_payload(tx.payload);
             } catch (...) {
                 // Malformed payload: outer fee + nonce already consumed;
                 // inner txs don't apply. Defensive — validator should
@@ -1459,6 +1455,9 @@ void Chain::apply_transactions(const Block& b) {
                     if (inner.type != TxType::TRANSFER) return false;
                     // Inner fee must be 0 — outer pays
                     if (inner.fee != 0) return false;
+                    // No pq_auth on inners (validator/apply symmetry —
+                    // PQ inner txs are not in the v2.4 whitelist)
+                    if (!inner.pq_auth.empty()) return false;
                     // No cross-shard inner txs in v2.4
                     if (c.is_cross_shard(inner.to)) return false;
                     // Inner sender's nonce must match its current chain nonce

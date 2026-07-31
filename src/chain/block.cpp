@@ -4,7 +4,9 @@
 #include <determ/chain/abort_canonical.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
+#include <cstring>
 #include <set>
+#include <stdexcept>
 
 namespace determ::chain {
 
@@ -73,6 +75,238 @@ Transaction Transaction::from_json(const json& j) {
     if (j.contains("pq_auth") && j["pq_auth"].is_string())
         tx.pq_auth = from_hex(j["pq_auth"].get<std::string>());
     return tx;
+}
+
+// ─── Transaction binary frame (canonical, D2) ────────────────────────────────
+//
+// Moved here from src/net/binary_codec.cpp (which now delegates) so the
+// chain layer — the COMPOSABLE_BATCH validator accept rule and apply path —
+// can share the ONE frame codec without a chain→net dependency. The byte
+// layout is UNCHANGED (the wire gates test-tx-binary-codec /
+// test-binary-codec-roundtrip-exhaustive pin it); the full layout comment
+// lives in binary_codec.cpp.
+
+namespace {
+
+inline void le_put_u16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+inline void le_put_u32(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
+}
+
+inline void le_put_u64(std::vector<uint8_t>& out, uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
+}
+
+inline uint16_t le_get_u16(const uint8_t* p) {
+    return  static_cast<uint16_t>(p[0])
+         | (static_cast<uint16_t>(p[1]) << 8);
+}
+
+inline uint32_t le_get_u32(const uint8_t* p) {
+    return  static_cast<uint32_t>(p[0])
+         | (static_cast<uint32_t>(p[1]) <<  8)
+         | (static_cast<uint32_t>(p[2]) << 16)
+         | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+inline uint64_t le_get_u64(const uint8_t* p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<uint64_t>(p[i]) << (i * 8);
+    return v;
+}
+
+// Append `n` bytes of `src` (right-padded with 0x00 if shorter than n).
+inline void put_padded(std::vector<uint8_t>& out, const uint8_t* src, size_t src_len, size_t n) {
+    size_t take = src_len < n ? src_len : n;
+    out.insert(out.end(), src, src + take);
+    out.insert(out.end(), n - take, 0x00);
+}
+
+// Append a u8-length-prefixed string (length capped at 255).
+inline void put_lp_str(std::vector<uint8_t>& out, const std::string& s) {
+    size_t n = s.size();
+    if (n > 255) throw std::runtime_error("tx frame: string > 255 bytes");
+    out.push_back(static_cast<uint8_t>(n));
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+inline std::string get_lp_str(const uint8_t* data, size_t len, size_t& off) {
+    if (off + 1 > len) throw std::runtime_error("tx frame: truncated lp_str header");
+    uint8_t n = data[off++];
+    if (off + n > len) throw std::runtime_error("tx frame: truncated lp_str body");
+    std::string s(reinterpret_cast<const char*>(data + off), n);
+    off += n;
+    return s;
+}
+
+} // namespace
+
+void Transaction::encode_frame(std::vector<uint8_t>& out) const {
+    // sender_pubkey slot — 32 bytes, derived from `from`. `from` is the
+    // string-form account identifier; the trailer's `from_len + from`
+    // reconstructs it authoritatively.
+    put_padded(out,
+        reinterpret_cast<const uint8_t*>(from.data()),
+        from.size(),
+        32);
+
+    // amount block: 32 bytes total — [amount LE][fee LE][nonce LE][reserved LE]
+    le_put_u64(out, amount);
+    le_put_u64(out, fee);
+    le_put_u64(out, nonce);
+    le_put_u64(out, 0);             // reserved — must be zero (deterministic)
+
+    // recipient_pubkey slot
+    put_padded(out,
+        reinterpret_cast<const uint8_t*>(to.data()),
+        to.size(),
+        32);
+
+    // payload slot — first 32 bytes of payload (right-padded if shorter)
+    put_padded(out,
+        payload.data(),
+        payload.size(),
+        32);
+
+    // trailer
+    out.push_back(static_cast<uint8_t>(type));
+    uint16_t payload_len = static_cast<uint16_t>(
+        payload.size() > 0xFFFF ? 0xFFFF : payload.size());
+    le_put_u16(out, payload_len);
+    if (payload.size() > 32) {
+        size_t overflow = payload.size() - 32;
+        out.insert(out.end(),
+            payload.begin() + 32, payload.begin() + 32 + overflow);
+    }
+    put_lp_str(out, from);
+    put_lp_str(out, to);
+    out.insert(out.end(), sig.begin(),  sig.end());
+    out.insert(out.end(), hash.begin(), hash.end());
+
+    // §3.21: optional DPQ1 PQ authenticator — appended ONLY when present so
+    // every non-PQ tx frame is byte-identical to the pre-§3.21 layout.
+    if (!pq_auth.empty()) {
+        if (pq_auth.size() > 0xFFFFFFFFu)
+            throw std::runtime_error("tx frame: pq_auth exceeds u32 length");
+        le_put_u32(out, static_cast<uint32_t>(pq_auth.size()));
+        out.insert(out.end(), pq_auth.begin(), pq_auth.end());
+    }
+}
+
+Transaction Transaction::decode_frame(const uint8_t* data, size_t len) {
+    Transaction tx;
+    if (len < 128 + 1 + 2)
+        throw std::runtime_error("tx frame too short");
+
+    // Canonical numeric fields live in the fixed-slot area (S-002: the
+    // admission-side sig verify reads them from here, not the trailer).
+    tx.amount = le_get_u64(data + 32);
+    tx.fee    = le_get_u64(data + 40);
+    tx.nonce  = le_get_u64(data + 48);
+    uint64_t reserved = le_get_u64(data + 56);
+    if (reserved != 0)
+        throw std::runtime_error("tx frame: reserved field non-zero");
+
+    // Trailer starts at offset 128.
+    size_t off = 128;
+
+    tx.type = static_cast<TxType>(data[off++]);
+    uint16_t payload_len = le_get_u16(data + off); off += 2;
+
+    if (payload_len <= 32) {
+        tx.payload.assign(data + 96, data + 96 + payload_len);
+    } else {
+        size_t overflow = payload_len - 32;
+        if (off + overflow > len)
+            throw std::runtime_error("tx frame: truncated payload overflow");
+        tx.payload.reserve(payload_len);
+        tx.payload.insert(tx.payload.end(), data + 96, data + 128);
+        tx.payload.insert(tx.payload.end(), data + off, data + off + overflow);
+        off += overflow;
+    }
+
+    tx.from = get_lp_str(data, len, off);
+    tx.to   = get_lp_str(data, len, off);
+    if (off + 64 + 32 > len)
+        throw std::runtime_error("tx frame: truncated sig/hash");
+    std::memcpy(tx.sig.data(),  data + off, 64); off += 64;
+    std::memcpy(tx.hash.data(), data + off, 32); off += 32;
+
+    // §3.21: optional pq_auth section — [u32 LE len][len bytes], consuming
+    // the frame EXACTLY. Fail-closed on trailing garbage; a zero-length
+    // section is rejected so the encoding stays canonical.
+    if (off != len) {
+        if (off + 4 > len)
+            throw std::runtime_error("tx frame: truncated pq_auth header");
+        uint32_t pq_len = le_get_u32(data + off); off += 4;
+        if (pq_len == 0)
+            throw std::runtime_error("tx frame: empty pq_auth section");
+        if (pq_len != len - off)
+            throw std::runtime_error("tx frame: pq_auth length mismatch");
+        tx.pq_auth.assign(data + off, data + off + pq_len);
+        off += pq_len;
+    }
+    return tx;
+}
+
+// ─── COMPOSABLE_BATCH payload codec (canonical, D2) ─────────────────────────
+//
+// [inner_count: u16 LE] + inner_count × [frame_len: u32 LE][frame bytes].
+// The per-frame length prefix is load-bearing: the tx frame's optional
+// pq_auth tail is "present iff bytes remain", so bare concatenation would
+// be ambiguous. Count-BOUNDS policy (1..MAX_COMPOSABLE_INNER) deliberately
+// stays in the validator so its pinned reject strings keep firing; decode
+// here is total over the structure (work is O(payload bytes) — every
+// declared frame must be backed by payload bytes, so a huge claimed count
+// on a small payload throws at the first missing frame).
+
+std::vector<uint8_t> encode_batch_payload(const std::vector<Transaction>& inner) {
+    if (inner.size() > MAX_COMPOSABLE_INNER)
+        throw std::runtime_error(
+            "batch payload: inner count exceeds MAX_COMPOSABLE_INNER");
+    std::vector<uint8_t> out;
+    le_put_u16(out, static_cast<uint16_t>(inner.size()));
+    std::vector<uint8_t> frame;
+    for (const auto& tx : inner) {
+        frame.clear();
+        tx.encode_frame(frame);
+        le_put_u32(out, static_cast<uint32_t>(frame.size()));
+        out.insert(out.end(), frame.begin(), frame.end());
+    }
+    return out;
+}
+
+std::vector<Transaction> decode_batch_payload(const std::vector<uint8_t>& payload) {
+    if (payload.size() < 2)
+        throw std::runtime_error("batch payload: truncated inner_count header");
+    uint16_t count = le_get_u16(payload.data());
+    size_t off = 2;
+    std::vector<Transaction> inner;
+    inner.reserve(count <= MAX_COMPOSABLE_INNER ? count : MAX_COMPOSABLE_INNER);
+    for (uint16_t i = 0; i < count; ++i) {
+        if (off + 4 > payload.size())
+            throw std::runtime_error(
+                "batch payload: truncated frame length prefix (inner "
+                + std::to_string(i) + ")");
+        uint32_t flen = le_get_u32(payload.data() + off); off += 4;
+        if (flen > payload.size() - off)
+            throw std::runtime_error(
+                "batch payload: truncated inner frame (inner "
+                + std::to_string(i) + ")");
+        inner.push_back(Transaction::decode_frame(payload.data() + off, flen));
+        off += flen;
+    }
+    if (off != payload.size())
+        throw std::runtime_error(
+            "batch payload: trailing bytes after last inner frame");
+    return inner;
 }
 
 // ─── GenesisAlloc ────────────────────────────────────────────────────────────

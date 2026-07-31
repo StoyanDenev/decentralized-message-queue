@@ -7293,12 +7293,10 @@ int main(int argc, char** argv) {
             t.hash    = t.compute_hash();
             return t;
         };
-        // Helper: package inner txs into a COMPOSABLE_BATCH JSON payload.
+        // Helper: package inner txs into the canonical binary COMPOSABLE_BATCH
+        // payload (D2 — the shared codec the validator + apply path decode).
         auto pack_batch = [](const std::vector<Transaction>& inner) {
-            nlohmann::json arr = nlohmann::json::array();
-            for (auto& t : inner) arr.push_back(t.to_json());
-            std::string s = arr.dump();
-            return std::vector<uint8_t>(s.begin(), s.end());
+            return encode_batch_payload(inner);
         };
         // Helper: build a block carrying a single COMPOSABLE_BATCH outer tx.
         auto build_batch_block = [&](const std::string& outer_from,
@@ -34528,10 +34526,8 @@ int main(int argc, char** argv) {
         // through Chain::append (apply path), which never runs check_transactions.
         {
             auto pack = [](const std::vector<Transaction>& inner) {
-                nlohmann::json arr = nlohmann::json::array();
-                for (auto& t : inner) arr.push_back(t.to_json());
-                std::string s = arr.dump();
-                return std::vector<uint8_t>(s.begin(), s.end());
+                // D2: the canonical binary batch payload (the shared codec).
+                return chain::encode_batch_payload(inner);
             };
             // one inner TRANSFER n1->n2, fee 0, signed by n1 (clears the
             // type / fee / payload-size / registry gates ahead of :1201).
@@ -34570,6 +34566,75 @@ int main(int argc, char** argv) {
                 auto r = run_batch(/*forge_inner=*/true);
                 check(!r.ok && r.error.find("COMPOSABLE_BATCH inner[0] signature invalid") != std::string::npos,
                       "VAL-batch-inner-sig: a forged inner-tx signature is REJECTED at :1201 (no forged inner transfers)");
+            }
+
+            // --- D2 batch-codec fail-closed legs (decode_batch_payload) -----
+            // The batch payload is the canonical binary encoding; these legs
+            // pin the shared decode helper's fail-closed arms with SPECIFIC
+            // reject strings. Outer is always validly signed over the
+            // (tampered) payload so the rejection provably comes from the
+            // batch decode / accept rule, never the outer-sig gate.
+            auto run_batch_payload = [&](std::vector<uint8_t> payload) {
+                Transaction outer;
+                outer.type = TxType::COMPOSABLE_BATCH; outer.from = "n0"; outer.to = "";
+                outer.amount = 0; outer.fee = 0; outer.nonce = 0;
+                outer.payload = std::move(payload);
+                auto sb = outer.signing_bytes();
+                outer.sig = sign(key_of("n0"), sb.data(), sb.size());
+                Block b; b.index = 1; b.transactions = { outer };
+                return bv.check_transactions_for_test(b, c, reg);
+            };
+            // (a) Trailing byte after the last frame. Falsify-on-mutant:
+            //     delete decode_batch_payload's exact-consumption check and
+            //     this leg goes RED (the padded batch is accepted).
+            {
+                auto p = chain::encode_batch_payload({ mk_inner(false) });
+                p.push_back(0x00);
+                auto r = run_batch_payload(p);
+                check(!r.ok && r.error.find("trailing bytes after last inner frame") != std::string::npos,
+                      "D2-batch: a trailing byte after the last inner frame is REJECTED "
+                      "'trailing bytes after last inner frame'");
+            }
+            // (b) Truncated inner frame (declared frame_len exceeds the
+            //     remaining payload bytes).
+            {
+                auto p = chain::encode_batch_payload({ mk_inner(false) });
+                p.resize(p.size() - 1);
+                auto r = run_batch_payload(p);
+                check(!r.ok && r.error.find("truncated inner frame") != std::string::npos,
+                      "D2-batch: a truncated inner frame is REJECTED 'truncated inner frame'");
+            }
+            // (c) The DELETED pre-D2 JSON-array payload is rejected — the
+            //     bytes of a legacy batch cannot decode as the binary form.
+            {
+                nlohmann::json arr = nlohmann::json::array();
+                arr.push_back(mk_inner(false).to_json());
+                std::string s = arr.dump();
+                auto r = run_batch_payload(std::vector<uint8_t>(s.begin(), s.end()));
+                check(!r.ok && r.error.find("COMPOSABLE_BATCH payload malformed") != std::string::npos,
+                      "D2-batch: a legacy JSON-array batch payload is REJECTED "
+                      "(the pre-D2 encoding is dead, never silently parsed)");
+            }
+            // (d) An inner frame carrying a pq_auth section is rejected by
+            //     the accept rule (unsigned-stuffing channel closed;
+            //     pq_auth is NOT in signing_bytes, so the inner sig is
+            //     still VALID — the rejection is provably the new check).
+            {
+                auto it = mk_inner(false);
+                it.pq_auth = {0x11, 0x22, 0x33};
+                auto r = run_batch_payload(chain::encode_batch_payload({ it }));
+                check(!r.ok && r.error.find("carries pq_auth") != std::string::npos,
+                      "D2-batch: an inner tx carrying pq_auth is REJECTED 'carries pq_auth' "
+                      "(PQ inners not in the v2.4 whitelist)");
+            }
+            // (e) Empty batch: decode returns 0 inners; the validator's
+            //     pinned empty-batch string still fires (count policy
+            //     deliberately stays in the validator).
+            {
+                auto r = run_batch_payload(chain::encode_batch_payload({}));
+                check(!r.ok && r.error.find("COMPOSABLE_BATCH empty") != std::string::npos,
+                      "D2-batch: an empty batch is REJECTED with the validator's "
+                      "pinned 'COMPOSABLE_BATCH empty' string");
             }
         }
 

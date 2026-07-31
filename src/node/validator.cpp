@@ -1126,14 +1126,22 @@ BlockValidator::Result BlockValidator::check_transactions(
             break;
         }
         case TxType::COMPOSABLE_BATCH: {
-            // v2.4: validate the batch envelope + each inner tx's shape
-            // and signature. Constraints:
-            //   - Payload decodes as a JSON array of inner txs
+            // v2.4 + D2: validate the batch envelope + each inner tx's shape
+            // and signature. The payload is the canonical binary batch
+            // encoding ([u16 LE inner_count] + count × length-prefixed
+            // Transaction frames — decode_batch_payload in chain/block.cpp,
+            // the ONE shared helper with the apply path; the pre-D2 JSON
+            // array was deleted pre-genesis). Constraints:
+            //   - Payload decodes as the canonical binary batch
             //   - Inner count in [1, MAX_COMPOSABLE_INNER]
             //   - Each inner.type == TRANSFER (v2.4 restriction)
             //   - Each inner.fee == 0 (outer pays the chain fee)
             //   - Each inner.payload.size() <= 32 (same as a standalone
             //     TRANSFER)
+            //   - Each inner carries NO pq_auth section (PQ inner txs are
+            //     not in the v2.4 whitelist; the frame tolerates the
+            //     section structurally, the accept rule bans it — closing
+            //     an unsigned-stuffing channel)
             //   - Each inner is independently signed by its inner.from
             //     (anon address parse for bearer; registry lookup for
             //     registered domain)
@@ -1146,14 +1154,7 @@ BlockValidator::Result BlockValidator::check_transactions(
             // nonce mismatches). Same for balance checks.
             std::vector<Transaction> inner;
             try {
-                std::string s(tx.payload.begin(), tx.payload.end());
-                auto arr = nlohmann::json::parse(s);
-                if (!arr.is_array()) {
-                    return {false, "COMPOSABLE_BATCH payload not a JSON array"};
-                }
-                for (auto& j : arr) {
-                    inner.push_back(Transaction::from_json(j));
-                }
+                inner = decode_batch_payload(tx.payload);
             } catch (std::exception& e) {
                 return {false,
                     std::string("COMPOSABLE_BATCH payload malformed: ") + e.what()};
@@ -1183,6 +1184,12 @@ BlockValidator::Result BlockValidator::check_transactions(
                     return {false, "COMPOSABLE_BATCH inner["
                                  + std::to_string(ii)
                                  + "] payload exceeds 32 bytes"};
+                }
+                if (!it.pq_auth.empty()) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] carries pq_auth (PQ inner txs not in "
+                                   "the v2.4 whitelist)"};
                 }
                 // Inner-tx signature verification: derive the inner.from's
                 // pubkey (parse_anon_pubkey for bearer / registry.find for

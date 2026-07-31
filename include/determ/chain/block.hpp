@@ -77,9 +77,20 @@ enum class TxType : uint8_t {
     //   - Multi-sig parallel approval (M signers act independently,
     //     commit iff all M land in the batch)
     //
-    // Payload encoding (canonical, LE where noted):
+    // Payload encoding (canonical length-prefixed binary, LE where noted;
+    // D2 — the pre-D2 implementation carried a JSON array, deleted
+    // pre-genesis):
     //   [inner_count: u16 LE]                 # 1..MAX_COMPOSABLE_INNER
-    //   inner_count × Transaction (binary_codec serialized)
+    //   inner_count × [frame_len: u32 LE][Transaction frame bytes]
+    // Each frame is the canonical Transaction frame
+    // (Transaction::encode_frame — the same layout the p2p wire uses for
+    // MsgType::TRANSACTION) and decodes with EXACT-consumption semantics
+    // against its declared frame_len. The per-frame length prefix is
+    // load-bearing: the frame's optional trailing pq_auth section is
+    // "present iff bytes remain", so bare concatenation would be
+    // ambiguous. Codec: encode_batch_payload / decode_batch_payload —
+    // THE one shared helper (S-044 discipline) used by BOTH the
+    // validator accept rule and the apply path.
     //
     // Validator constraints:
     //   - inner_count in [1, MAX_COMPOSABLE_INNER]; reject empty or
@@ -309,7 +320,32 @@ struct Transaction {
 
     nlohmann::json       to_json() const;
     static Transaction   from_json(const nlohmann::json& j);
+
+    // Canonical binary Transaction frame (D2). THE single frame layout:
+    // the p2p wire's MsgType::TRANSACTION payload (src/net/binary_codec.cpp
+    // delegates here) and the COMPOSABLE_BATCH inner-tx container both use
+    // it. 4×32-byte fixed-slot area + trailer
+    // ([type u8][payload_len u16 LE][overflow][from lp][to lp][sig 64]
+    //  [hash 32][optional pq_auth: u32 LE len + bytes, present iff
+    //  non-empty]) — full layout documented in binary_codec.cpp.
+    // decode_frame is fail-closed with EXACT-consumption semantics over
+    // [data, data+len) and throws std::runtime_error with a specific
+    // reason on any violation.
+    void                 encode_frame(std::vector<uint8_t>& out) const;
+    static Transaction   decode_frame(const uint8_t* data, size_t len);
 };
+
+// v2.4 + D2: canonical binary COMPOSABLE_BATCH payload codec — the one
+// shared helper for the validator accept rule (node/validator.cpp), the
+// apply path (chain.cpp), and every producer. Layout documented at the
+// TxType::COMPOSABLE_BATCH enum comment. encode throws on
+// count > MAX_COMPOSABLE_INNER; decode is fail-closed (truncated header /
+// truncated frame / trailing bytes / inner frame violations all throw
+// std::runtime_error with a specific reason) and returns exactly the
+// declared inner_count transactions. Count-BOUNDS policy (1..64) stays in
+// the validator so its pinned reject strings keep firing.
+std::vector<uint8_t>     encode_batch_payload(const std::vector<Transaction>& inner);
+std::vector<Transaction> decode_batch_payload(const std::vector<uint8_t>& payload);
 
 // Forward declaration — full struct lives in node/producer.hpp.
 } // namespace determ::chain
