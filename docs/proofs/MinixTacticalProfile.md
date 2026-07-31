@@ -407,20 +407,29 @@ ratchet green.
 ## 5. JSON track — nlohmann_json → in-tree (SURVEYED)
 
 A full usage survey (~975 references, 60+ files, all three binaries) settled
-the confirm-before-swapping question. **TWO sites require byte-exact canonical
+the confirm-before-swapping question. **ONE site requires byte-exact canonical
 JSON serialization across implementations:**
 
-1. **CONSENSUS DIGEST — `hash_abort_event()` SHA-256s `claims_json.dump()`**
-   ([producer.cpp:350](../../src/node/producer.cpp)), and that hash feeds
-   `compute_block_digest` via the abort view root (producer.cpp:667-672) — i.e.
-   the K-of-K-signed block digest of any abort-carrying block depends on
-   nlohmann's canonical dump bytes (sorted keys, compact separators). The light
-   client MIRRORS the same dump-hash ([verify.cpp:84](../../light/verify.cpp)).
-   A one-byte writer divergence forks consensus on abort-carrying chains.
-2. **RPC HMAC** over `method+"|"+params.dump()` computed independently by the
-   server ([rpc.cpp:51-56](../../src/rpc/rpc.cpp)) and by wallet/light clients —
+1. **RPC HMAC** over `method+"|"+params.dump()` computed independently by the
+   server ([rpc.cpp:52-57](../../src/rpc/rpc.cpp)) and by wallet/light clients —
    a mixed-implementation fleet must dump byte-identically (pinned by
    `test-rpc-auth-hmac`, which explicitly guards an ordered_json/bump swap).
+
+**RETIRED as of D2-inc3 (commit `c8a63d2`) — the CONSENSUS-DIGEST site.** Until
+that increment there was a second, harder site: `hash_abort_event()` SHA-256'd
+`claims_json.dump()`, and that hash fed `compute_block_digest` via the abort
+view root ([producer.cpp:807-811](../../src/node/producer.cpp)) — so the
+K-of-K-signed block digest of any abort-carrying block depended on nlohmann's
+canonical dump bytes, with the light client mirroring the same dump-hash. A
+one-byte writer divergence forked consensus on abort-carrying chains.
+`AbortEvent`'s claim list is now the typed `std::vector<chain::AbortClaim>` and
+the digest preimage is the canonical fixed-layout **binary** encoding
+`chain::encode_abort_claims` (`src/chain/block.cpp`), appended under domain
+`DTM-F2-ABORT-v2` by [producer.cpp:437](../../src/node/producer.cpp) and
+append-for-append mirrored by [verify.cpp:87](../../light/verify.cpp).
+**No consensus digest is computed over JSON bytes any more** — the byte-exact
+JSON surface is the RPC HMAC alone, where a divergence fails auth CLOSED
+(mismatch) rather than forking.
 
 Everything else is schema-only: the state root is over BINARY domain-prefixed
 leaves (not JSON bytes) and `restore_from_snapshot` re-verifies it against the
@@ -453,8 +462,8 @@ ASCII/UTF-8 strings). The load-bearing property is established EMPIRICALLY:
 nlohmann is the frozen reference, already linked in the `determ` binary, so
 `determ test-determ-json` (`tools/test_determ_json.sh`, FAST) MEASURES parity —
 `determ::djson::parse(s).dump() == nlohmann::json::parse(s).dump()` byte for
-byte — over a corpus that includes the two byte-critical shapes (the abort
-`claims_json` array + RPC `params`), plus round-trip idempotence, key-sort
+byte — over a corpus that includes the byte-critical RPC `params` shape (and
+the historical abort array-of-objects shape), plus round-trip idempotence, key-sort
 canonicalization, strict-UTF-8 fail-closed on dump (both impls throw),
 parse-rejection AGREEMENT on malformed peer input (both impls reject), and the
 peer-facing depth-cap + strict-UTF-8 hardening §5 anticipated. Soundness record
@@ -518,27 +527,25 @@ runs. This closes the determ::djson validation ladder: corpus (inc.1) → real
 surfaces (inc.2) → valid-value fuzz (inc.3) → adversarial corpus (inc.4) →
 adversarial fuzz (inc.5).
 
-**PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the two
-byte-critical sites (and the wider nlohmann surface) onto `determ::djson` behind
-an API-compatible shim — 1.5-3 KLOC of consensus-adjacent code, gated by
-widening the dual-oracle dump-equality corpus to HELLO + `Block::to_json` + full
-snapshots + the existing pin tests, AND a mixed-fleet cluster test (one node per
-implementation) exercising abort events. Increment 1 built + proved the module
-the swap needs; the swap itself stays owner-gated. **The inc.1 adversarial
-review surfaced a hard SWAP-BLOCKER (DetermJsonParitySoundness.md NC-1): a
-double IS adversarially reachable on the abort-event digest (`claims_json` is
-stored VERBATIM from peer JSON with unknown members kept; the per-claim sig
-covers only typed scalars), so the swap must FIRST close double dump-parity —
-either a shortest-round-trip `dump_double` matching nlohmann byte for byte, or
-re-canonicalizing `claims_json` from typed `AbortClaimMsg` fields before hashing
-(which also hardens the pre-existing weakness that the abort digest binds
-attacker-injectable non-semantic bytes even today under nlohmann). The gate
-WITNESSES the current double gap so it cannot be forgotten.** **The abort-site
-fork vector is now CLOSED (`AbortDigestCanonicalizationSoundness.md`):
-`hash_abort_event` canonicalizes the claims (strips unknown members) before
-hashing, so no attacker double reaches that serializer — the swap-blocker
-narrows to a swap *robustness* item (RPC-HMAC double divergence fails auth
-CLOSED, not a fork).**
+**PHASE 2 REMAINING (owner-gated): the CONSUMER SWAP.** Swapping the
+byte-critical RPC-HMAC site (and the wider nlohmann surface) onto
+`determ::djson` behind an API-compatible shim — 1.5-3 KLOC, gated by widening
+the dual-oracle dump-equality corpus to HELLO + `Block::to_json` + full
+snapshots + the existing pin tests, AND a mixed-fleet test (server on one
+implementation, wallet/light client on the other) exercising RPC auth.
+Increment 1 built + proved the module the swap needs; the swap itself stays
+owner-gated. **The inc.1 adversarial review surfaced what was then a hard
+SWAP-BLOCKER (DetermJsonParitySoundness.md NC-1): a double was adversarially
+reachable on the abort-event CONSENSUS digest (`claims_json` was stored VERBATIM
+from peer JSON with unknown members kept; the per-claim sig covers only typed
+scalars), so the swap had to close double dump-parity first. That vector is now
+gone STRUCTURALLY, not filtered: D2-inc3 typed the claim list
+(`chain::AbortClaim`) and moved the digest preimage to
+`chain::encode_abort_claims`' canonical binary bytes, so no JSON serializer runs
+on any consensus digest path and there is no schema-free container left to
+inject a double into. The swap-blocker therefore narrows to a swap *robustness*
+item — an RPC-HMAC double divergence fails auth CLOSED, not a fork — and the
+gate still WITNESSES the current double gap so it cannot be forgotten.**
 
 ## 6. OpenSSL track — test-oracle split (SHIPPED `217191a`)
 

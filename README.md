@@ -187,11 +187,13 @@ AbortEvent {
     aborting_node : string
     timestamp     : int64
     event_hash    : [32]        // chained for verifiability
-    claims_json   : json[]      // K-1 signed AbortClaimMsgs forming the quorum
+    claims        : AbortClaim[]  // K-1 signed claims forming the quorum
 }
 ```
 
 A round aborts when `K-1` distinct committee members each broadcast an `AbortClaimMsg` against the same missing creator at the same round. The aggregated quorum is recorded as an `AbortEvent` baked into the next finalized block.
+
+The claim list is a **typed** vector of the six consensus-bound fields, carried and hashed as one canonical fixed-layout binary encoding — `[count u16 LE]` then, per claim, `[block_index u64 LE][round u8][prev_hash 32][ed_sig 64][len u8]missing_creator[len u8]claimer`. Those exact bytes are both the `hash_abort_event` digest preimage (domain `DTM-F2-ABORT-v2`, recomputed identically by the light client) and, hex-wrapped, the block-container value, so the stored form and the hashed form cannot drift. Decoding is fail-closed with exact-consumption semantics. The per-claim Ed25519 signature covers `(block_index, round, prev_hash, missing_creator)` only — never any serialization.
 
 ### 3.7 Block
 

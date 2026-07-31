@@ -9,20 +9,25 @@
 // nlohmann::json's default `dump()` on the narrow subset the daemon puts on
 // a consensus/HMAC path (see docs/proofs/MinixTacticalProfile.md §5):
 //
-//   * CONSENSUS DIGEST: hash_abort_event() SHA-256s `claims_json.dump()`
-//     (src/node/producer.cpp, mirrored in light/verify.cpp) → abort view
-//     root → the K-of-K-signed block digest. A one-byte writer divergence
-//     forks abort-carrying chains across a mixed-implementation fleet.
 //   * RPC HMAC over `method + "|" + params.dump()` (src/rpc/rpc.cpp),
 //     computed independently by the server and by wallet/light clients.
+//
+// As of D2-inc3 that is the ONLY byte-exact site. hash_abort_event() used to
+// SHA-256 `claims_json.dump()` — a CONSENSUS digest over JSON bytes, feeding
+// the abort view root and so the K-of-K-signed block digest. The claim list
+// is now TYPED (`std::vector<chain::AbortClaim>`, six fields) and its digest
+// preimage is a canonical BINARY encoding (chain::encode_abort_claims,
+// src/chain/block.cpp; domain DTM-F2-ABORT-v2, mirrored append-for-append in
+// light/verify.cpp), so no consensus digest is computed over any JSON
+// serializer's output any more.
 //
 // The load-bearing property is therefore byte-exact `dump()` parity with
 // nlohmann on that subset: sorted-key objects, arrays, booleans, null,
 // unsigned/signed 64-bit integers, and ASCII/UTF-8 strings. This module is
 // ADDITIVE — increment 1 introduces it and proves the parity property under
 // a dual-oracle gate (`determ test-determ-json`) against the vendored
-// nlohmann; no production consumer is swapped onto it yet. Swapping the two
-// byte-critical sites is the owner-gated serial follow-on increment.
+// nlohmann; no production consumer is swapped onto it yet. Swapping the
+// byte-critical site is the owner-gated serial follow-on increment.
 //
 // Canonical `dump()` form (matches nlohmann's default compact dump):
 //   * objects  {"a":1,"b":2}  — keys in byte-lexicographic (std::map) order,
@@ -33,7 +38,8 @@
 //     every other byte (including multi-byte UTF-8) is emitted literally
 //     (nlohmann's default `ensure_ascii=false`). Forward slash is NOT
 //     escaped. Invalid UTF-8 THROWS on dump (nlohmann's strict handler),
-//     which is what makes the abort-path binary leaf keys fail closed.
+//     which is what makes a non-UTF-8 binary leaf fail CLOSED instead of
+//     silently serializing to a divergent byte string.
 //   * integers plain decimal; unsigned and signed dump identically.
 //
 // SCOPE / non-parity (documented, not silently dropped): doubles are stored
@@ -41,14 +47,15 @@
 // shortest-round-trip dtoa (dump_double uses %.17g, e.g. 0.1 -> "0.10000...1"
 // vs nlohmann's "0.1"). This is a swap *robustness* item, NOT a live fork
 // vector: the abort-event digest — once the concrete worry, because
-// AbortEvent::claims_json was hashed VERBATIM (unknown members kept) while the
-// per-claim signature covers only typed scalars — is now CLOSED at the source.
-// hash_abort_event() no longer SHA-256s claims_json.dump(); it hashes
-// chain::canonical_abort_claims_dump() (include/determ/chain/abort_canonical.hpp,
-// shipped), which rebuilds each claim from ONLY the six typed fields, so an
-// injected `"z":0.1` (or a float-encoded int) is stripped and never reaches
-// any serializer. The residual double concern is the RPC-HMAC path
-// (method|params.dump()), where a serializer divergence fails auth CLOSED
+// AbortEvent::claims_json was a schema-free nlohmann::json hashed VERBATIM
+// (unknown members kept) while the per-claim signature covers only typed
+// scalars — is now CLOSED at the source, and STRUCTURALLY. D2-inc3 typed the
+// claim list (chain::AbortClaim — the six consensus-bound fields) and moved
+// the digest preimage to chain::encode_abort_claims' canonical binary bytes,
+// so an injected `"z":0.1` (or a float-encoded int) has nowhere to live: no
+// JSON serializer runs on that digest path at all. The residual double
+// concern is the RPC-HMAC path (method|params.dump()), where a serializer
+// divergence fails auth CLOSED
 // (mismatch), not a fork; and node Config (off every wire/digest/HMAC path).
 // So double dump-parity remains a swap-completeness item (a matching dtoa),
 // tracked by the test-determ-json double witness, not a blocker. See
@@ -82,15 +89,15 @@ struct parse_error : std::runtime_error {
 };
 
 // Thrown when serializing a string that is not valid UTF-8 — the fail-closed
-// behavior nlohmann's strict error handler gives, load-bearing for the
-// abort-path binary leaf keys.
+// behavior nlohmann's strict error handler gives, load-bearing wherever a
+// binary-valued leaf would otherwise serialize to divergent bytes.
 struct dump_error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Default nesting depth cap for parse(). The consensus subset (abort claims
-// arrays, RPC params, HELLO, snapshots) nests only a handful deep; 64 is a
-// generous ceiling that still bounds adversarial peer input.
+// Default nesting depth cap for parse(). The remaining JSON subset (RPC
+// params, HELLO, snapshots) nests only a handful deep; 64 is a generous
+// ceiling that still bounds adversarial peer input.
 inline constexpr size_t kDefaultMaxDepth = 64;
 
 class Value {

@@ -103,10 +103,12 @@ Already present and verified:
   inbound (line 454). `validate_view_reconciliation` (`producer.cpp:458-496`) already
   validates all three (V21-V26).
 - **Canonical event hashers exist.** `hash_equivocation_event`
-  (`producer.cpp:280-295`, domain `DTM-F2-EQ-v1`) and `hash_abort_event`
-  (`producer.cpp:297-310`, domain `DTM-F2-ABORT-v1`) hash all consensus-bound fields
-  in declared order. Cross-domain separators make the three view-list types
-  un-mixable.
+  (`src/node/producer.cpp:356-372`, domain `DTM-F2-EQ-v1`) and `hash_abort_event`
+  (`src/node/producer.cpp:437-457`, domain `DTM-F2-ABORT-v2` — bumped from `v1`
+  by D2-inc3 `c8a63d2` when the claim list became typed and its digest preimage
+  became the canonical binary `chain::encode_abort_claims`) hash all
+  consensus-bound fields in declared order. Cross-domain separators make the
+  three view-list types un-mixable.
 - **JSON backward-compat gating exists for roots.** `src/chain/block.cpp:401-425`
   emits the view roots (and `creator_view_inbound_lists`) only when at least one root
   is non-zero; `block.cpp:521-538` reads them back conditionally.
@@ -451,7 +453,7 @@ assembler cannot emit the event. Resolution:
 ### 3.4 Forensic-field provenance (verdict Risk-5, eq only)
 
 `hash_equivocation_event` includes `shard_id` and `beacon_anchor_height`
-(producer.cpp:292-293). The same equivocation observed at two provenance points
+(`src/node/producer.cpp:368-369`). The same equivocation observed at two provenance points
 hashes differently and both copies land in the union. This is **acceptable and
 intended**: they are independent witnesses to the same misbehavior, and the apply
 path (FA-Apply-10) slashes the equivocator once regardless (the apply keys on the

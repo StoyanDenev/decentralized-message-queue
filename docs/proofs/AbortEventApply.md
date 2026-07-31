@@ -12,19 +12,30 @@ The proof is mechanical: each AbortEvent in `b.abort_events` is consumed by one 
 
 ### 1.1 The `AbortEvent` struct
 
-Per `include/determ/chain/block.hpp:319–332`:
+Per `include/determ/chain/block.hpp:362–403`:
 
 ```cpp
+struct AbortClaim {                  // typed as of D2-inc3, commit c8a63d2
+    uint64_t    block_index{0};
+    uint8_t     round{0};
+    Hash        prev_hash{};
+    std::string missing_creator;
+    std::string claimer;
+    Signature   ed_sig{};
+};
+
 struct AbortEvent {
     uint8_t     round{0};            // 1 (Phase-1, commit) or 2 (Phase-2, reveal)
     std::string aborting_node;       // = missing_creator from the M-1 quorum claims
     int64_t     timestamp{0};        // first quorum claim's timestamp
     Hash        event_hash{};        // SHA256(round || aborting_node || timestamp || prev_random_state)
-    nlohmann::json claims_json;      // inline array of M-1 signed AbortClaimMsgs that quorumed
+    std::vector<AbortClaim> claims;  // the M-1 signed claims that quorumed
 };
 ```
 
-`b.abort_events` is `std::vector<AbortEvent>`. Each entry is the chain's deterministic record that committee member `aborting_node` failed to contribute at the specified round. The M-1 claims in `claims_json` are the validator-verified evidence of the abort — V10 of F0 binds the apply path to events that already cleared the validator's quorum check, so the apply branch can assume `aborting_node` is honestly identified.
+`b.abort_events` is `std::vector<AbortEvent>`. Each entry is the chain's deterministic record that committee member `aborting_node` failed to contribute at the specified round. The M-1 claims in `claims` are the validator-verified evidence of the abort — V10 of F0 binds the apply path to events that already cleared the validator's quorum check, so the apply branch can assume `aborting_node` is honestly identified.
+
+**The D2-inc3 container swap is apply-invisible.** The claim list was a schema-free `nlohmann::json claims_json` until commit `c8a63d2`; it is now the typed `std::vector<AbortClaim>` above, carried in the block container as the hex of the canonical binary `chain::encode_abort_claims` and decoded fail-closed by `AbortEvent::from_json`. The apply path reads **only** `ae.round` and `ae.aborting_node` (§1.3, T-A1) — it never touched the claim container — so every theorem below is unchanged by the swap, and a malformed claim blob is now rejected at the parse boundary rather than reaching either the validator or apply.
 
 ### 1.2 The S-032 `abort_records_` cache
 

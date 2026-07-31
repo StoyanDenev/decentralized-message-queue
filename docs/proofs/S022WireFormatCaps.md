@@ -690,7 +690,9 @@ This is the gap the old §2.4 text papered over by citing a non-existent "asio a
 
 *(The interim options recorded here — ship WIRE-2 without WIRE-3, or hold both — are superseded: the root-cause fix was taken, so WIRE-2 + WIRE-3 now ship against a chain that cannot accept a poisoned abort claim in the first place.)*
 
-**On the claim this finding falsified.** Gate 8d's comment and the `messages.hpp` sizing note say Block nesting "cannot recurse past that second level". That was true of the Block **schema** and false of the depth the schema **admitted**, because `claims_json` was schema-free. The ingest fix makes `claims_json` schema-bound (six scalars), so the statement is now true as written — but it was asserted before it was earned, and that is the reportable part: the sizing note was reasoning about the schema while the ceiling measures the instance.
+**On the claim this finding falsified.** Gate 8d's comment and the `messages.hpp` sizing note say Block nesting "cannot recurse past that second level". That was true of the Block **schema** and false of the depth the schema **admitted**, because `claims_json` was schema-free. The ingest fix made the claim list schema-bound (six scalars), so the statement became true as written — but it was asserted before it was earned, and that is the reportable part: the sizing note was reasoning about the schema while the ceiling measures the instance.
+
+**Superseding closure (D2-inc3, commit `c8a63d2`).** The JSON canonicalize-on-ingest fix has been replaced by a stronger, structural one: the claim list is now a TYPED `std::vector<chain::AbortClaim>` carried and hashed as a canonical fixed-layout binary encoding (`chain::encode_abort_claims`), so the container value is ONE hex string at every depth. A claim contributes **zero** JSON nesting, the wedge band does not exist for claims at any cap value, and the pre-D2 JSON-array shape is rejected at the parse boundary rather than canonicalized. `include/determ/chain/abort_canonical.hpp` is deleted with the channel it policed. The wedge-precondition legs below therefore no longer have a reachable vector to reproduce; the rewritten `test-abort-claims-canonical` pins the structural closure instead (container value is a string; the abort-carrying block is accepted at BOTH BLOCK and CHAIN_RESPONSE payload depths; the old shape is rejected at parse).
 
 **Finding F-9 (`determ-light decode-wire` has the cap ordering right but no structural ceiling — NOT network-reachable).** The light client carries a deliberately duplicated copy of the wire constants (`light/main.cpp`, "Duplicated ON PURPOSE: this decoder validates an artifact against the PUBLISHED spec"). Its ordering is already correct — the S-022 per-type cap is applied *before* the payload parse — but the parse itself (`json::parse(body + 4, body + 4 + plen)`) has no `kMaxJsonDepth` / `kMaxJsonNodes` equivalent, so a hostile 16 MB artifact claiming SNAPSHOT_RESPONSE expands in the same way the daemon's did.
 
@@ -768,16 +770,22 @@ Delivered this round: **WIRE-2** (structural DOM ceiling, both wire formats as t
 
 #### Round-13 follow-on — the F-10 root fix (Windows/MSVC)
 
+*(Historical record of the round-13 JSON canonicalization fix. Superseded by
+D2-inc3 `c8a63d2`, which typed the claim list — see the superseding-closure note
+in §6 F-10. The gate below was rewritten with that increment; its current legs
+pin codec round-trip fidelity, per-field digest binding, fail-closed decode and
+the structural closure, and it stays GREEN.)*
+
 | Gate | Result |
 |---|---|
-| `test-abort-claims-canonical` (13 → **23** assertions) | GREEN — incl. both wedge PRECONDITION legs, so the fix legs are provably non-vacuous |
+| `test-abort-claims-canonical` (13 → **23** assertions at round-13; rewritten for the typed codec in D2-inc3) | GREEN — at round-13 incl. both wedge PRECONDITION legs, so the fix legs were provably non-vacuous |
 | `test-binary-codec` / `test-net-virtual` (WIRE-1/2/3, unchanged by this fix) | GREEN |
 | `test_block_digest_xbinary_parity` (ADC-3: producer == light) | GREEN — the helper split did not break the shared-helper property |
 | Abort + state-root families run directly (10 suites: `abort_cert_validation`, `abort_event_apply`, `abort_reselection`, `fa_abort_trace`, `f2_eqabort_reconciliation`, `f2_eqabort_snapshot`, `state_root`, `state_root_determinism`, + the two above) | GREEN — the whole-suite witness of ADC-1/ADC-7 byte-neutrality |
 | FAST suite, Windows/MSVC | **293/293 GREEN, 0 FAIL** |
 | Doc-coherence guards (`doc_citation_bounds`, `doc_tier_check`, `docs_link_check`) | GREEN |
 
-**Falsify-on-mutant M4** (restore the verbatim `ae.claims_json = j.value("claims", json::array())`): exactly **4** legs RED — re-serve-at-CHAIN_RESPONSE, member-stripped, poisoned-==-honest, and the standalone `ABORT_EVENT` ingress — while **every** digest-path leg stays GREEN, including *both* "digest is UNCHANGED" legs. The green half is the informative half: it separates the wire-level property being fixed from the consensus-level property being preserved, so the mutant *witnesses* ADC-7's byte-neutrality rather than merely failing to refute it.
+**Falsify-on-mutant M4** (round-13 record; the mutant's target — the JSON-array ingest — no longer exists after D2-inc3, whose own mutant drops `claimer` from `encode_abort_claims` and reds the per-field digest-binding + round-trip legs). Restoring the verbatim `ae.claims_json = j.value("claims", json::array())` reddened exactly **4** legs — re-serve-at-CHAIN_RESPONSE, member-stripped, poisoned-==-honest, and the standalone `ABORT_EVENT` ingress — while **every** digest-path leg stays GREEN, including *both* "digest is UNCHANGED" legs. The green half is the informative half: it separates the wire-level property being fixed from the consensus-level property being preserved, so the mutant *witnesses* ADC-7's byte-neutrality rather than merely failing to refute it.
 
 **A note on red-test classification, since it bit twice this round.** Two earlier FAST runs showed 40 and then 16 reds; **all** were missing-binary artifacts of a partial build (`determ-light`/`determ-wallet`/`determ-cryptotest`, then `determ-dsf`/`d5rp` had not been built in the fresh worktree), and every one carried run_all's `(no marker)` tag or was a `*_c99` suite with no binary to invoke. Building the full target set produced 293/293. The lesson matches §8's existing one: **a red whose test never ran is not evidence about the change**, and `(no marker)` is precisely the signal that distinguishes "ran and failed" from "could not run" — classify on it before attributing anything to the diff.
 

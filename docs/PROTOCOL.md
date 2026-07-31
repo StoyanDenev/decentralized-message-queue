@@ -180,7 +180,7 @@ struct Block {
     ConsensusMode         consensus_mode;        // 0=MUTUAL_DISTRUST (K-of-K), 1=BFT (k_bft = ⌈2K/3⌉ committee, Q = ⌈2·k_bft/3⌉ quorum — see §5.3)
     string                bft_proposer;          // empty unless mode==BFT
     Hash                  cumulative_rand;       // SHA256(prev.cumulative_rand || delay_output)
-    AbortEvent[]          abort_events;          // claims-quorum-certified prior round aborts
+    AbortEvent[]          abort_events;          // claims-quorum-certified prior round aborts (§5.4)
     EquivocationEvent[]   equivocation_events;   // two-sig proofs against same height
     CrossShardReceipt[]   cross_shard_receipts;  // outbound (this shard → others)
     CrossShardReceipt[]   inbound_receipts;      // inbound (other shards → this shard)
@@ -433,17 +433,36 @@ abort_claim_message = SHA256(block_index (u64)
                           || missing_creator (length-prefixed UTF-8))
 ```
 
-`make_abort_claim_message(block_index, round, prev_hash, missing_creator)` in `src/crypto/random.cpp` is the canonical encoder.
+`make_abort_claim_message(block_index, round, prev_hash, missing_creator)` in `src/node/producer.cpp` is the canonical encoder. (`src/crypto/random.cpp` holds the different `compute_abort_hash` / `chain_abort_hash` helpers that build `event_hash`.)
 
 ```cpp
 struct AbortEvent {
-    uint8     round;                  // 1 or 2 (matches the underlying claims)
-    string    aborting_node;          // = missing_creator from the claims
-    int64     timestamp;              // first quorum claim's timestamp
-    Hash      event_hash;             // SHA256(round || aborting_node || timestamp || prev_random_state)
-    JSON      claims_json;            // inline array of the M-1 signed AbortClaimMsgs that quorumed
+    uint8            round;           // 1 or 2 (matches the underlying claims)
+    string           aborting_node;   // = missing_creator from the claims
+    int64            timestamp;       // first quorum claim's timestamp
+    Hash             event_hash;      // SHA256(round || aborting_node || timestamp || prev_random_state)
+    AbortClaim[]     claims;          // the max(2,K-1) signed claims that quorumed (TYPED)
+};
+
+struct AbortClaim {                   // the six consensus-bound fields
+    uint64    block_index;
+    uint8     round;
+    Hash      prev_hash;
+    string    missing_creator;
+    string    claimer;
+    Signature ed_sig;                 // over make_abort_claim_message(...) above
 };
 ```
+
+The claim list is carried and hashed in a canonical fixed-layout binary encoding (`chain::encode_abort_claims`, `src/chain/block.cpp`) — the D2 migration replaced the pre-genesis JSON array:
+
+```
+[count: u16 LE]
+count × [block_index: u64 LE][round: u8][prev_hash: 32 B][ed_sig: 64 B]
+        [missing_creator_len: u8][missing_creator][claimer_len: u8][claimer]
+```
+
+These bytes are **both** the `hash_abort_event` digest preimage (domain `DTM-F2-ABORT-v2`; mirrored byte-for-byte in the light client) and — hex-wrapped — the block-container `claims` value, so the stored value and the hashed bytes cannot drift. Decoding is fail-closed with exact consumption. Typing the list is what makes the digest bind only semantic content: unknown members, alternate integer encodings, hex case and injected nesting are unrepresentable rather than filtered.
 
 `event_hash` mixes into the next round's randomness (§5.2 committee selection's `rand = SHA256(prev_rand ‖ abort_event.event_hash)`), so different abort sequences yield different committee re-selections — this is what defeats the "cartel keeps picking the same victim" pattern (S-011 closure depends on the rotation here being unpredictable to the cartel).
 

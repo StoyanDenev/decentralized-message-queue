@@ -613,8 +613,8 @@ so the F2 collections are never populated and the sub-hasher never runs on both
 sides with the same input). The existing `test_block_digest_xbinary_parity.sh`
 guard reduces the whole abort view root to ONE token (`ABORT_ROOT`) and so never
 saw the sub-hasher's internal field order — exactly the surviving-mutant the
-register named (swap `hash_abort_event` lines 90/91 in light, or drop the
-`timestamp` append).
+register named (swap `hash_abort_event`'s round/aborting_node appends in light —
+`light/verify.cpp:94-95` — or drop the `timestamp` append at `light/verify.cpp:96`).
 
 Closed by **extending `tools/test_block_digest_xbinary_parity.sh`** (the same
 static cross-binary guard, already FAST both platforms) with an
@@ -625,7 +625,7 @@ to `ARG` with the `determ::` / `chain::` / `std::` namespace qualifiers stripped
 light append sequences are EQUAL, non-empty (anti-vacuity), and carry the expected
 `DTM-F2-*` domain tag. The same mechanism trivially covers the two SIBLING F2
 sub-hashers of the identical gap class, so all three are closed in one pass:
-**`hash_abort_event` (ADC-3, `DTM-F2-ABORT-v1`) + `hash_equivocation_event`
+**`hash_abort_event` (ADC-3, `DTM-F2-ABORT-v2`) + `hash_equivocation_event`
 (`DTM-F2-EQ-v1`) + `hash_cross_shard_receipt` (`DTM-F2-RCPT-v1`)**. A `SELFTEST=1`
 leg proves the extractor flags a reordered field AND that the `chain::` vs
 `determ::chain::` spelling normalizes equal (no false positive). No new file, no
@@ -636,6 +636,35 @@ Swapping `b.append(e.round)` / `b.append(e.aborting_node)` in
 `light/verify.cpp::hash_abort_event` makes the guard FAIL (`sub-hasher
 hash_abort_event: producer != light`); the coherent tree passes. Verified on both
 git-bash (MSVC side) and WSL Ubuntu (Linux gate) — main + selftest identical.
+
+**D2-inc3 update (commit `c8a63d2`) — the gate legs moved with the formula, ADC-3
+stays CLOSED.** `hash_abort_event` no longer SHA-256s `claims_json.dump()`: the
+claim list is the typed `std::vector<chain::AbortClaim>` and its digest preimage
+is the canonical fixed-layout binary encoding `chain::encode_abort_claims`
+(`src/chain/block.cpp`), under the bumped domain `DTM-F2-ABORT-v2`. Both copies
+of the sub-hasher moved lock-step (`src/node/producer.cpp:437`,
+`light/verify.cpp:87`) and the three `hash_abort_event` heredocs in
+`test_block_digest_xbinary_parity.sh` were re-derived, so the append-sequence
+extractor still asserts producer == light on the v2 formula. The claims leg is
+now *stronger* than a mirrored append: both binaries CALL the one shared codec,
+so that portion cannot be hand-mirrored wrong at all. The
+`AbortDigestCanonicalizationSoundness.md` companion gate
+(`determ test-abort-claims-canonical`) was rewritten against the codec and now
+pins (1) codec round-trip fidelity over all six fields + byte-determinism +
+empty-list round-trip, (2) PER-FIELD digest binding for each of the six fields
+plus claim ORDER and COUNT — falsify-on-mutant by deleting a field's append from
+`encode_abort_claims` (e.g. `claimer`), which reddens exactly that leg while the
+digest is otherwise unchanged, (3) fail-closed decode with four specific reject
+strings (`truncated count header`, `truncated claim`, `truncated lp_str`,
+`trailing bytes after last claim`), and (4) the F-10 STRUCTURAL closure — the
+container "claims" value is one hex string at every depth, the abort-carrying
+block is accepted at BOTH `BLOCK` and `CHAIN_RESPONSE` payload depths, it
+round-trips as a byte fixed point with its digest intact, and the pre-D2
+JSON-array shape is REJECTED at the parse boundary. The JSON canonicalization
+helper the old legs exercised (`include/determ/chain/abort_canonical.hpp`,
+`canonical_abort_claims{,_dump}`) is DELETED — the channel it policed is
+structurally impossible on a typed claim, so there is no surviving mutant of that
+class left to gate.
 
 ## 3p. T-1 CLOSED — the RPC HMAC canonical-pre-image source-parity guard (offline)
 
@@ -1312,7 +1341,7 @@ gate-cost. **SP-2 (§3i), SB-3 (§3j), AL-5 (§3k), STMC-5 (§3l), T-3 (§3m), P
 |---|---|---|---|---|---|---|
 | 1 | SP-2 | StakeProofSoundness | MED | trivial | **CLOSED §3i** | SURVIVING MUTATION: light/main.cpp:2395 `if (computed_value_hash != proof_value_hash)` -> `if (false)` (or a -Wunused-safe `if (computed_value_hash != |
 | 2 | SR-1 | StateRootAnchorSoundness | MED | moderate | **CLOSED §3y** | Surviving mutation: light/trustless_read.cpp:637 `if (succ_prev != recomputed_hex && false) {` (equivalently, at :577 source `recomputed` from the dae |
-| 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (line 92) OR swap lines 90/91 (`b.appen |
+| 3 | ADC-3 | AbortDigestCanonicalizationSoundness | MED | trivial | **CLOSED §3o** (legs re-derived on the D2-inc3 `DTM-F2-ABORT-v2` binary preimage) | Surviving mutant: in light/verify.cpp::hash_abort_event delete `b.append(static_cast<uint64_t>(e.timestamp));` (now line 96) OR swap the round/aborting_node appends (now lines 94/95) |
 | 4 | T-1 | RpcAuthHmacSoundness | MED | trivial | **CLOSED §3p** | SURVIVING MUTATION: src/rpc/rpc.cpp:52 `canonical_for_hmac` -> `return params.dump();` (drop the `method + "\|"` prefix). It survives every existing g |
 | 5 | OSB-5 | OfflineStateBundleSoundness | MED | trivial | **CLOSED §3ab** | Surviving mutation: delete verify_state_bundle.cpp:455-478 (or set the compare to `if(false)`). It survives EVERY existing gate. test_light_state_bund |
 | 6 | SB-3 | SubsidyAccountingSoundness | MED | trivial | **CLOSED §3j** | SURVIVING MUTANT: chain.cpp:1761 replace `if (!checked_add_u64(bal, per_creator, &bal)) { throw }` with `bal += per_creator;`. It survives EVERY exist |

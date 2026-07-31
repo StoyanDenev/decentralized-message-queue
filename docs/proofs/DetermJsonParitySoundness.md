@@ -7,7 +7,7 @@ It is the minix JSON-track counterpart of the crypto dual-oracle proofs: a
 from-scratch component whose correctness is pinned against a frozen reference.
 
 See [MinixTacticalProfile.md](MinixTacticalProfile.md) §5 for the track design
-and the two byte-critical sites; this doc is the property/soundness record.
+and the byte-critical site; this doc is the property/soundness record.
 
 ## 1. Why this exists
 
@@ -15,21 +15,29 @@ The minix goal (`MinixTacticalProfile.md`) is a minimal, fully-auditable
 external-dependency footprint. JSON is one of the last two third-party source
 libraries: nlohmann_json is **phase-1 vendored** in-tree
 (`third_party/nlohmann/json.hpp`, SHA-256 byte-ratcheted). Phase 2 replaces it
-with an in-tree module. The blocker that gates any such replacement is that
-**two daemon sites serialize JSON onto a byte-exact consensus/authentication
-path**, so a replacement writer must be byte-identical to nlohmann there or it
-forks a mixed-implementation fleet:
+with an in-tree module. The blocker that gates any such replacement is that a
+daemon site serializes JSON onto a **byte-exact authentication path**, so a
+replacement writer must be byte-identical to nlohmann there or it breaks a
+mixed-implementation fleet:
 
-1. **Consensus digest.** `hash_abort_event()` SHA-256s `claims_json.dump()`
-   (`src/node/producer.cpp`), and that hash feeds `compute_block_digest` via the
-   abort view root — i.e. the K-of-K-signed block digest of any abort-carrying
-   block depends on nlohmann's canonical dump bytes (sorted keys, compact
-   separators). The light client MIRRORS the same dump-hash (`light/verify.cpp`).
-   A one-byte writer divergence forks consensus on abort-carrying chains.
-2. **RPC HMAC.** The HMAC pre-image is `method + "|" + params.dump()`
+1. **RPC HMAC.** The HMAC pre-image is `method + "|" + params.dump()`
    (`src/rpc/rpc.cpp`), computed independently by the server and by
    wallet/light clients. A mixed-implementation fleet must dump byte-identically
    or authentication fails across implementations.
+
+**RETIRED (D2-inc3, commit `c8a63d2`) — the consensus-digest site.** This doc
+formerly named a second, stronger site: `hash_abort_event()` SHA-256'd
+`claims_json.dump()` (`src/node/producer.cpp`), that hash fed
+`compute_block_digest` via the abort view root, and the light client mirrored
+the same dump-hash (`light/verify.cpp`) — so a one-byte writer divergence
+forked consensus on abort-carrying chains. `AbortEvent::claims_json` is now the
+typed `std::vector<chain::AbortClaim>` and the digest preimage is the canonical
+fixed-layout **binary** encoding `chain::encode_abort_claims`
+(`src/chain/block.cpp`, domain `DTM-F2-ABORT-v2`, mirrored append-for-append in
+`light/verify.cpp`). **No consensus digest is computed over JSON bytes any
+more**, so the surviving justification for byte-parity is the RPC HMAC alone —
+where a divergence fails auth CLOSED (mismatch) rather than forking. That
+narrowing is what demotes NC-1 from swap-BLOCKER to swap-robustness item.
 
 Everything else is schema-only: the state root is over binary domain-prefixed
 leaves (not JSON bytes), and snapshots are re-verified against the
@@ -59,10 +67,9 @@ ambiguous everywhere. The module keeps its descriptive name (“the in-tree
 determ JSON module”); the namespace just sidesteps the alias.
 
 Increment 1 is **additive**: it introduces the module and PROVES the parity
-property. No production consumer is swapped onto it. Swapping the two
-byte-critical sites (and the wider nlohmann surface) is the owner-gated serial
-follow-on, at which point a mixed-fleet abort-event cluster test becomes an
-additional gate.
+property. No production consumer is swapped onto it. Swapping the byte-critical
+site (and the wider nlohmann surface) is the owner-gated serial follow-on, at
+which point a mixed-fleet RPC-auth test becomes an additional gate.
 
 ## 3. The dual oracle
 
@@ -76,10 +83,11 @@ determ::djson::Value::parse(s).dump()  ==  nlohmann::json::parse(s).dump()
 ```
 
 byte for byte, plus round-trip idempotence, over a corpus spanning the in-scope
-subset AND the two exact byte-critical shapes (an abort `claims_json` array of
-sorted-key claim objects; a sorted-and-unsorted RPC `params` object). Any
-divergence on any covered value fails the gate; the property is checked, not
-asserted.
+subset AND the exact byte-critical shape (a sorted-and-unsorted RPC `params`
+object). The corpus also retains an array-of-sorted-key-objects shape — the
+pre-D2 abort-`claims_json` shape, now HISTORICAL for that site but still live
+coverage of the array/nested-object dump convention. Any divergence on any
+covered value fails the gate; the property is checked, not asserted.
 
 ## 4. Properties
 
@@ -87,9 +95,9 @@ asserted.
 in-scope subset — sorted-key objects, arrays, booleans, null, unsigned/signed
 64-bit integers, and strings over valid UTF-8 — `determ::djson::dump()` equals
 nlohmann's default `dump()` byte for byte. Established empirically by the §3
-dual oracle over a representative corpus that includes the two byte-critical
-shapes; the parity of the abort-`claims_json` and RPC-`params` shapes is a
-direct corpus assertion, not an extrapolation.
+dual oracle over a representative corpus that includes the byte-critical
+RPC-`params` shape (and the historical array-of-objects shape); the parity of
+those shapes is a direct corpus assertion, not an extrapolation.
 
 **DJP-2 (key canonicalization = the HMAC-canonical form).** Objects dump keys in
 byte-lexicographic order (backed by `std::map`), matching nlohmann's
@@ -105,7 +113,7 @@ every corpus item.
 **DJP-4 (strict-UTF-8 fail-closed on dump).** Serializing a String node (or
 object key) whose bytes are not valid UTF-8 THROWS (`dump_error`), matching
 nlohmann's strict error handler. This is load-bearing: it is what makes a
-non-UTF-8 abort-path leaf key fail closed instead of silently serializing to a
+non-UTF-8 binary-valued leaf fail closed instead of silently serializing to a
 divergent byte string. The gate cross-checks that nlohmann throws on the same
 input.
 
@@ -190,7 +198,8 @@ the cap cannot false-reject an honest consensus input. Every `s[pos]` /
 `s[pos+k]` access is bounds-checked before use.
 
 **DJP-7 (additive / goldens byte-identical).** Increment 1 changes no production
-serialization path: the two byte-critical sites still call nlohmann, so every
+serialization path: every nlohmann consumer (the byte-critical RPC-HMAC site
+included) still calls nlohmann, so every
 consensus, snapshot, and state-root golden is byte-identical (the FAST golden
 corpus is the witness), and the minix dependency-surface ratchet stays green
 because `determ::djson` is dependency-free (it includes NO nlohmann; only the
@@ -198,45 +207,46 @@ in-binary test does, as the oracle).
 
 ## 5. Non-claims
 
-- **NC-1 (double dump-parity is a SWAP-BLOCKER, not out of scope — corrected
-  after adversarial review).** `determ::djson` stores and dumps doubles
-  best-effort (`%.17g`) and does NOT yet match nlohmann's shortest-round-trip
-  dtoa (e.g. `0.1` → `"0.10000000000000001"` vs `"0.1"`). An earlier draft
-  claimed doubles never reach a digest path and excluded them from scope; the
-  review REFUTED that. A double IS adversarially reachable on the abort-event
-  K-of-K digest: `src/chain/block.cpp` stores `AbortEvent::claims_json`
-  VERBATIM from peer JSON (unknown members kept), the per-claim Ed25519
-  signature covers only typed scalars (`make_abort_claim_message` hashes
-  `block_index‖round‖prev_hash‖missing_creator`, not the JSON), and
-  `hash_abort_event()` SHA-256s `claims_json.dump()` into the digest — so an
-  attacker can inject `"z":0.1` into an otherwise-valid claim and it rides the
-  digest. Therefore the consumer swap (owner-gated) MUST close double
-  dump-parity before it touches this site — either (a) give `dump_double` a
-  shortest-round-trip serializer matching nlohmann byte for byte, or (b)
-  re-canonicalize `claims_json` from typed `AbortClaimMsg` fields before hashing
-  (stripping unknown members; this also hardens the pre-existing weakness that
-  the abort digest today binds attacker-injectable non-semantic bytes even under
-  nlohmann). `test-determ-json` WITNESSES the current double gap (a passing
-  `diverge > 0` tripwire that flips RED when parity lands) so it cannot be
-  forgotten. Any integer literal exceeding `uint64` also falls back to double
-  (stricter classification), on the same footing. **UPDATE: the concrete fork
-  vector this finding named — an injected double riding the abort-event digest —
-  is now CLOSED at the source by
-  [AbortDigestCanonicalizationSoundness.md](AbortDigestCanonicalizationSoundness.md):
-  `hash_abort_event` canonicalizes the claims (stripping unknown members) before
-  hashing, so no attacker-controlled double reaches that serializer. The residual
-  double concern for the swap is the RPC-HMAC path (`method|params.dump()`),
+- **NC-1 (double dump-parity — a swap ROBUSTNESS item; was a SWAP-BLOCKER, the
+  fork vector is now structurally gone).** `determ::djson` stores and dumps
+  doubles best-effort (`%.17g`) and does NOT yet match nlohmann's
+  shortest-round-trip dtoa (e.g. `0.1` → `"0.10000000000000001"` vs `"0.1"`).
+  *History, kept deliberately.* An earlier draft claimed doubles never reach a
+  digest path and excluded them from scope; adversarial review REFUTED that. A
+  double WAS adversarially reachable on the abort-event K-of-K digest:
+  `src/chain/block.cpp` stored `AbortEvent::claims_json` VERBATIM from peer JSON
+  (unknown members kept), the per-claim Ed25519 signature covers only typed
+  scalars (`make_abort_claim_message` hashes
+  `block_index‖round‖prev_hash‖missing_creator`, not the container), and
+  `hash_abort_event()` SHA-256'd `claims_json.dump()` into the digest — so an
+  attacker could inject `"z":0.1` into an otherwise-valid claim and it rode the
+  digest. That made double dump-parity a hard blocker on the consumer swap.
+  **CLOSED at the source, structurally (D2-inc3, commit `c8a63d2`).** The claim
+  list is now the typed `std::vector<chain::AbortClaim>` — exactly the six
+  consensus-bound fields — and `hash_abort_event` appends the canonical binary
+  bytes of `chain::encode_abort_claims` (domain `DTM-F2-ABORT-v2`) rather than
+  any serializer's output. There is no schema-free container left to inject a
+  double (or a float-encoded int, or an unknown member) into, and no JSON
+  writer on the digest path at all; the earlier JSON canonicalize-before-hash
+  remedy this note proposed was superseded by that change and its helper
+  (`include/determ/chain/abort_canonical.hpp`) is deleted. The residual double
+  concern for the swap is therefore the RPC-HMAC path (`method|params.dump()`),
   where a serializer divergence fails auth CLOSED (mismatch) rather than forking
-  consensus. Double dump-parity therefore remains a swap *robustness* item, not a
-  live fork vector.**
+  consensus, plus node `Config` (off every wire/digest/HMAC path). Double
+  dump-parity remains a swap *robustness* item, not a live fork vector.
+  `test-determ-json` WITNESSES the current double gap (a passing `diverge > 0`
+  tripwire that flips RED when parity lands) so it cannot be forgotten. Any
+  integer literal exceeding `uint64` also falls back to double (stricter
+  classification), on the same footing.
 - **NC-2 (property, not yet a consumer).** DJP-1 is a property of the module.
-  Increment 1 does not make `determ::djson` the writer at any consensus byte
+  Increment 1 does not make `determ::djson` the writer at any byte-critical
   path; the swap is the owner-gated increment where a mixed-implementation
-  abort-event cluster test is the additional gate.
+  RPC-auth test (server on one implementation, wallet/light client on the
+  other) is the additional gate.
 - **NC-3 (empirical, corpus-bounded — now widened to the daemon's real
   surfaces).** Parity is established against nlohmann as the reference over a
-  representative corpus plus the two exact shapes — not a formal proof over all
-  inputs. **Increment 2 (`determ test-determ-json-surfaces`) widens the coverage
+  representative corpus plus the exact byte-critical shape — not a formal proof
+  over all inputs. **Increment 2 (`determ test-determ-json-surfaces`) widens the coverage
   to the daemon's ACTUAL serialization:** for each real object the daemon emits
   — Transaction, Block (incl. an abort-carrying block), AbortEvent+claim,
   EquivocationEvent, GenesisAlloc, `Chain::serialize_state` snapshot, RPC params,
@@ -279,7 +289,8 @@ in-binary test does, as the oracle).
 
 `determ test-determ-json` (`tools/test_determ_json.sh`, FAST via
 `determ_json`): the §3 dual-oracle parity corpus + idempotence, explicit
-key-sort canonicalization, the two byte-critical shapes, the builder path
+key-sort canonicalization, the byte-critical RPC-`params` shape (plus the
+historical array-of-objects shape), the builder path
 (programmatic construction dumps canonically), strict-UTF-8 fail-closed on dump
 (both implementations throw), the parse-rejection agreement corpus, and the
 depth-cap hardening (over-deep rejected; within-cap still byte-parity). **inc.2
