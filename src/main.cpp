@@ -767,6 +767,7 @@ In-process tests (deterministic, no network):
                                               tunable fields (ports / peers /
                                               rate-limits / region / enums)
   determ test-tx-binary-codec                 Transaction binary codec
+  determ test-block-binary-codec              Block binary container (D2-inc5)
                                               (encode_tx_frame / decode_tx_frame
                                               via encode_binary / decode_binary)
                                               — S-002 fixed-slot amount/fee/
@@ -23606,6 +23607,333 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-binary-codec " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // D2-inc5: the canonical binary Block container. Ships alongside
+    // to_json/from_json; no call site uses it yet (the wire and storage switch
+    // over in later increments), so this gate is the ONLY thing standing
+    // between the codec and a silent defect.
+    //
+    // The theorem it asserts is INFORMATION EQUIVALENCE with the JSON
+    // container, not field-for-field round-trip:
+    //     decode_frame(encode_frame(b))  ==json==  from_json(to_json(b))
+    // That is the property that makes the later container swap provably
+    // behavior-preserving. Field-for-field would be the WRONG theorem: to_json
+    // deliberately discards information in two places (the creator_view_*
+    // bundle under a zero root, and source_shard_id when eligible_count == 0),
+    // and the frame mirrors that discard on purpose.
+    if (cmd == "test-block-binary-codec") {
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::cout << "  " << (cond ? "PASS" : "FAIL") << ": " << msg << "\n";
+            if (!cond) ++fail;
+        };
+        auto checks = [&](bool cond, const std::string& msg) { check(cond, msg.c_str()); };
+
+        // A block exercising every one of the 37 fields, so a dropped section
+        // cannot hide behind a default value.
+        auto make_maximal = [&]() {
+            Block b;
+            b.index = 42;
+            b.prev_hash.fill(0x11);
+            b.timestamp = -1234567890;          // negative: i64 through a u64 slot
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+                tx.amount = 7; tx.fee = 1; tx.nonce = 2;
+                tx.payload.assign(40, 0xEE);    // > 32, exercises the overflow
+                tx.sig.fill(0xA1); tx.hash = tx.compute_hash();
+                b.transactions.push_back(tx);
+                Transaction tx2 = tx;
+                tx2.nonce = 3; tx2.pq_auth.assign(50, 0xC3);  // optional tail
+                tx2.hash = tx2.compute_hash();
+                b.transactions.push_back(tx2);
+            }
+            b.creators = {"n1", "n2", "n3"};
+            b.creator_tx_lists = {{Hash{}}, {}, {Hash{}, Hash{}}};
+            b.creator_tx_lists[0][0].fill(0x21);
+            b.creator_ed_sigs.resize(3);
+            for (size_t i = 0; i < 3; ++i) b.creator_ed_sigs[i].fill(0x30 + uint8_t(i));
+            b.creator_dh_inputs.resize(3);
+            for (size_t i = 0; i < 3; ++i) b.creator_dh_inputs[i].fill(0x40 + uint8_t(i));
+            b.creator_view_eq_roots.resize(3);
+            b.creator_view_eq_roots[0].fill(0x51);          // non-zero: gate ON
+            b.creator_view_abort_roots.resize(3);
+            b.creator_view_abort_roots[1].fill(0x52);
+            b.creator_view_inbound_roots.resize(3);
+            b.creator_view_inbound_roots[2].fill(0x53);
+            b.creator_view_inbound_lists = {{Hash{}}, {}, {}};
+            b.creator_view_inbound_lists[0][0].fill(0x61);
+            b.creator_view_eq_lists      = {{}, {Hash{}}, {}};
+            b.creator_view_eq_lists[1][0].fill(0x62);
+            b.creator_view_abort_lists   = {{}, {}, {Hash{}}};
+            b.creator_view_abort_lists[2][0].fill(0x63);
+            b.creator_view_shardtip_roots.resize(2);
+            b.creator_view_shardtip_roots[0].fill(0x71);    // non-zero: gate ON
+            b.creator_view_shardtip_lists = {{Hash{}}, {}};
+            b.creator_view_shardtip_lists[0][0].fill(0x72);
+            b.creator_proposer_times = {100, 200, 300};
+            b.creator_dh_secrets.resize(3);
+            for (size_t i = 0; i < 3; ++i) b.creator_dh_secrets[i].fill(0x80 + uint8_t(i));
+            b.tx_root.fill(0x91);
+            b.delay_seed.fill(0x92);
+            b.delay_output.fill(0x93);
+            b.consensus_mode = ConsensusMode::BFT;
+            b.bft_proposer = "n1";
+            b.creator_block_sigs.resize(3);
+            for (size_t i = 0; i < 3; ++i) b.creator_block_sigs[i].fill(0xB0 + uint8_t(i));
+            b.cumulative_rand.fill(0xC1);
+            {
+                AbortEvent ae;
+                ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = -99;
+                ae.event_hash.fill(0xD1);
+                AbortClaim c;
+                c.block_index = 42; c.round = 2; c.prev_hash.fill(0xD2);
+                c.missing_creator = "n3"; c.claimer = "n1"; c.ed_sig.fill(0xD3);
+                ae.claims.push_back(c);
+                b.abort_events.push_back(ae);
+            }
+            {
+                EquivocationEvent ev;
+                ev.equivocator = "mallory"; ev.block_index = 41;
+                ev.digest_a.fill(0xE1); ev.sig_a.fill(0xE2);
+                ev.digest_b.fill(0xE3); ev.sig_b.fill(0xE4);
+                ev.shard_id = 3; ev.beacon_anchor_height = 7;
+                b.equivocation_events.push_back(ev);
+            }
+            {
+                CrossShardReceipt r;
+                r.src_shard = 1; r.dst_shard = 2; r.src_block_index = 40;
+                r.src_block_hash.fill(0xF1); r.tx_hash.fill(0xF2);
+                r.from = "alice"; r.to = "bob";
+                r.amount = 5; r.fee = 1; r.nonce = 9;
+                b.cross_shard_receipts.push_back(r);
+                r.src_shard = 2; r.dst_shard = 1;
+                b.inbound_receipts.push_back(r);
+            }
+            {
+                GenesisAlloc a;
+                a.domain = "alice"; a.ed_pub.fill(0x1A);
+                a.balance = 1000; a.stake = 10; a.region = "eu";
+                b.initial_state.push_back(a);
+                GenesisAlloc a2 = a;
+                a2.domain = "bob"; a2.region = "";      // empty region
+                b.initial_state.push_back(a2);
+            }
+            b.state_root.fill(0x2B);
+            b.partner_subset_hash.fill(0x3B);
+            b.signature_form = 2;
+            b.eligible_count = 17;
+            b.source_shard_id = 4;
+            return b;
+        };
+
+        // ── BF-0. The empty-frame size, pinned. kMinWitness is derived from
+        //    this, and the Layer-1 cap uses kMinWitness to bound the witness
+        //    count — so if the constant drifts ABOVE the true minimum the cap
+        //    rejects legitimate one-witness frames. That is exactly the bug
+        //    this leg caught during development (the length prefix was counted
+        //    twice), and a size-only assertion is what makes it impossible to
+        //    reintroduce silently.
+        {
+            Block empty;
+            std::vector<uint8_t> buf;
+            empty.encode_frame(buf);
+            checks(buf.size() == 297,
+                   "BF-0 an empty Block frame is exactly 297 bytes (actual " +
+                   std::to_string(buf.size()) + ") — pins kMinBlockFrame, from "
+                   "which the witness Layer-1 cap is derived");
+        }
+
+        // ── BF-1. THE THEOREM: information equivalence with the JSON path.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            Block viaBin = Block::decode_frame(buf.data(), buf.size());
+            Block viaJson = Block::from_json(b.to_json());
+            check(viaBin.to_json() == viaJson.to_json(),
+                  "BF-1 the binary container carries EXACTLY the information the "
+                  "JSON container does: decode(encode(b)) == from_json(to_json(b))");
+        }
+
+        // ── BF-2. Canonical: re-encoding a decoded frame is byte-identical.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            std::vector<uint8_t> again;
+            Block::decode_frame(buf.data(), buf.size()).encode_frame(again);
+            check(again == buf,
+                  "BF-2 encode(decode(x)) == x byte-for-byte (one canonical "
+                  "encoding per value)");
+        }
+
+        // ── BF-3. Hash neutrality: the container touches no consensus hash.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            Block back = Block::decode_frame(buf.data(), buf.size());
+            check(back.signing_bytes() == b.signing_bytes()
+                      && back.compute_hash() == b.compute_hash(),
+                  "BF-3 signing_bytes and compute_hash are byte-identical across "
+                  "the binary round trip");
+        }
+
+        // ── BF-4. A default block still omits all nine gated to_json keys.
+        {
+            Block b;
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            Block back = Block::decode_frame(buf.data(), buf.size());
+            auto j = back.to_json();
+            const char* gated[] = {
+                "creator_view_eq_roots", "creator_view_shardtip_roots",
+                "creator_proposer_times", "state_root", "partner_subset_hash",
+                "signature_form", "eligible_count", "shard_tip_records",
+                "shard_tip_witnesses"};
+            bool none = true;
+            for (auto* k : gated) if (j.contains(k)) { none = false; break; }
+            check(none,
+                  "BF-4 an all-default block round-trips WITHOUT resurrecting any "
+                  "of the nine gated keys (always-present must not leak a value)");
+        }
+
+        // ── BF-5. Exact consumption.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            buf.push_back(0x00);
+            bool hit = false;
+            try { (void)Block::decode_frame(buf.data(), buf.size()); }
+            catch (const std::exception& e) {
+                hit = std::string(e.what()).find("trailing bytes after last section")
+                      != std::string::npos;
+            }
+            check(hit, "BF-5 a trailing byte is REJECTED 'trailing bytes after "
+                       "last section' (exact consumption)");
+        }
+
+        // ── BF-6. Every truncation throws; none silently succeeds.
+        {
+            Block b = make_maximal();
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            bool all_threw = true;
+            size_t survived = 0;
+            for (size_t n = 0; n < buf.size(); ++n) {
+                try { (void)Block::decode_frame(buf.data(), n); all_threw = false; ++survived; }
+                catch (const std::exception&) { /* expected */ }
+            }
+            checks(all_threw,
+                   "BF-6 EVERY proper prefix of a valid frame is rejected (" +
+                   std::to_string(buf.size()) + " truncations, " +
+                   std::to_string(survived) + " silently accepted)");
+        }
+
+        // ── BF-7. The Layer-1 cap: a declared count must be backed by bytes
+        //    that could actually hold it, checked BEFORE any reserve or loop.
+        //
+        //    RESIDUAL, stated rather than implied: this leg is STRUCTURAL, not
+        //    measured. A mutant moving the check after the reserve would keep
+        //    it green. That is tolerable here only because the owner's u16
+        //    count decision bounds the damage by construction — the largest
+        //    possible over-reserve is 65535 x 64 B (creator_block_sigs /
+        //    creator_ed_sigs) ≈ 4 MB, which is also the wire cap for a BLOCK,
+        //    so check placement is a performance question and not the
+        //    unbounded WIRE-1 amplification class (16 MB -> 831 MB, 51.9x).
+        //    Had the counts been u32 this leg would HAVE to count allocations,
+        //    which needs a global operator-new counter this binary does not
+        //    carry. Revisit if any count width is ever widened.
+        {
+            // creator_ed_sigs declaring 0xFFFF elements with almost no body.
+            Block b;
+            std::vector<uint8_t> pre;
+            b.encode_frame(pre);
+            // Locate the creator_ed_sigs count: index(8) prev(32) ts(8)
+            // transactions(2) creators(2) creator_tx_lists(2) = offset 54.
+            std::vector<uint8_t> evil(pre.begin(), pre.begin() + 54);
+            evil.push_back(0xFF); evil.push_back(0xFF);   // count = 65535
+            evil.insert(evil.end(), 10, 0x00);            // 10 bytes of body
+            bool hit = false;
+            try { (void)Block::decode_frame(evil.data(), evil.size()); }
+            catch (const std::exception& e) {
+                hit = std::string(e.what()).find("declares 65535 elements") != std::string::npos;
+            }
+            check(hit, "BF-7 a count of 65535 backed by 10 bytes is REJECTED "
+                       "'declares 65535 elements but only N bytes remain' "
+                       "(the cap runs before the reserve and before the loop)");
+        }
+
+        // ── BF-8/9. Witness depth + leaf rules, each enforced INLINE so exactly
+        //    one site produces each string.
+        {
+            Block leaf;
+            leaf.index = 1;
+            Block parent;
+            parent.shard_tip_witnesses.push_back(leaf);
+            std::vector<uint8_t> ok;
+            parent.encode_frame(ok);
+            bool decodes = true;
+            try { (void)Block::decode_frame(ok.data(), ok.size()); }
+            catch (const std::exception&) { decodes = false; }
+            check(decodes, "BF-8a a one-level witness decodes (depth control)");
+
+            Block nested;
+            nested.shard_tip_witnesses.push_back(leaf);   // witness with a witness
+            Block bad;
+            bad.shard_tip_witnesses.push_back(nested);
+            std::vector<uint8_t> buf;
+            bad.encode_frame(buf);
+            bool hit = false;
+            try { (void)Block::decode_frame(buf.data(), buf.size()); }
+            catch (const std::exception& e) {
+                hit = std::string(e.what()).find("must be a leaf block") != std::string::npos;
+            }
+            check(hit, "BF-8b a NESTED witness is REJECTED 'must be a leaf block' "
+                       "(decode depth bounded at 2)");
+        }
+
+        // ── BF-10. The view-list mirroring: zero roots DROP the lists, exactly
+        //    as to_json does, so binary and JSON cannot disagree on the block.
+        {
+            Block b;
+            b.creators = {"n1"};
+            b.creator_view_eq_lists = {{Hash{}}};    // non-empty list...
+            b.creator_view_eq_lists[0][0].fill(0x77);
+            // ...under all-ZERO roots. to_json drops it; so must the frame.
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            Block viaBin  = Block::decode_frame(buf.data(), buf.size());
+            Block viaJson = Block::from_json(b.to_json());
+            check(viaBin.creator_view_eq_lists.empty()
+                      && viaJson.creator_view_eq_lists.empty(),
+                  "BF-10 a non-empty view LIST under all-zero roots is dropped by "
+                  "BOTH containers (mirroring: the frame must not preserve data "
+                  "the JSON path discards — those bytes are neither signed nor "
+                  "hashed, so preserving them lets a relayer trigger a rejection)");
+        }
+
+        // ── BF-11. source_shard_id is mirrored under the eligible_count gate.
+        {
+            Block b;
+            b.eligible_count = 0;
+            b.source_shard_id = 9;      // dropped by to_json's coupled gate
+            std::vector<uint8_t> buf;
+            b.encode_frame(buf);
+            Block viaBin  = Block::decode_frame(buf.data(), buf.size());
+            Block viaJson = Block::from_json(b.to_json());
+            check(viaBin.source_shard_id == 0 && viaJson.source_shard_id == 0,
+                  "BF-11 source_shard_id under eligible_count == 0 is dropped by "
+                  "BOTH containers (the coupled gate is mirrored, not bypassed)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-binary-codec "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1 seed: in-process unit test for Chain's append +

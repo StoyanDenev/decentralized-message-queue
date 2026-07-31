@@ -863,6 +863,54 @@ struct Block {
     std::vector<uint8_t> signing_bytes() const;
     Hash                 compute_hash() const;
 
+    // ── D2-inc5: the canonical binary Block container ───────────────────────
+    //
+    // Ships ALONGSIDE to_json/from_json; no call site uses it yet. The wire
+    // (BLOCK / CHAIN_RESPONSE / BEACON_HEADER / SHARD_TIP /
+    // CROSS_SHARD_RECEIPT_BUNDLE) and storage switch over in later increments.
+    //
+    // THE INVARIANT THIS CODEC IS BUILT TO SATISFY — and the one its gate
+    // asserts — is not field-for-field round-trip but INFORMATION EQUIVALENCE
+    // with the JSON container:
+    //
+    //     decode_frame(encode_frame(b))  ==json==  from_json(to_json(b))
+    //
+    // for every Block b. That is the property that makes the later container
+    // swap provably behavior-preserving: whatever a node would have believed
+    // after a JSON round trip, it believes after a binary one.
+    //
+    // Consequently the frame is structurally ALWAYS-PRESENT (no presence
+    // bitmap, no per-section tag — every to_json emit gate is derived from the
+    // VALUE, so the container carries the value and never the gate), but where
+    // a to_json gate DISCARDS information the encoder writes the discarded-
+    // equivalent value rather than the live one. Two places do this:
+    //   * the six-key creator_view_* bundle, written empty unless some
+    //     inbound/eq/abort root is non-zero (to_json's `any_view_root`), and
+    //     likewise the shard-tip pair under `any_shardtip_root`;
+    //   * source_shard_id, written zero unless eligible_count != 0.
+    // Carrying those faithfully instead would preserve data JSON drops, which
+    // sounds strictly better but is not: none of them is covered by
+    // signing_bytes or compute_block_digest, so a relayer can append them to a
+    // valid block without breaking its hash or signatures. to_json normalizes
+    // that injection away; a faithful binary frame would carry it and let the
+    // validator reject an otherwise-valid block — a remotely-triggerable
+    // rejection, i.e. a censorship/liveness vector under the fork-free
+    // doctrine. Mirroring keeps the two paths from ever disagreeing on
+    // accept/reject for the same block. (Owner decision, 2026-08-01.)
+    //
+    // Counts are u16 LE (matching encode_abort_claims / encode_batch_payload).
+    // The encoder THROWS on overflow — never clamps; a clamped length beside an
+    // unclamped body is exactly the defect fixed in 1a1b98f.
+    //
+    // Fail-closed: every count is bounds-checked against the bytes actually
+    // remaining BEFORE any reserve or loop (the WIRE-1 lesson — a cap that runs
+    // after the work is not a cap), and decode ends with exact consumption.
+    void encode_frame(std::vector<uint8_t>& out) const;
+    static Block decode_frame(const uint8_t* data, size_t len);
+    // Internal: `allow_witnesses=false` parses a shard-tip witness, which must
+    // be a LEAF (no nested witnesses, no records). Bounds decode depth at 2.
+    static Block decode_frame(const uint8_t* data, size_t len, bool allow_witnesses);
+
     nlohmann::json to_json() const;
     static Block   from_json(const nlohmann::json& j);
     // D3.5e-7: internal overload. A carried witness is a LEAF block; the public

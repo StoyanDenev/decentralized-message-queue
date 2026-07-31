@@ -1207,4 +1207,556 @@ Block Block::from_json(const json& j, bool allow_witnesses) {
     return b;
 }
 
+// ─── Block binary frame (canonical, D2-inc5) ─────────────────────────────────
+//
+// Layout, in Block::to_json emission order so the two are diffable side by
+// side. All integers little-endian; Hash = 32 raw bytes; Signature = 64 raw;
+// PubKey = 32 raw; lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
+//
+//   index u64 · prev_hash 32 · timestamp i64-as-u64
+//   transactions          ⟨n⟩ × [u32 frame_len][tx frame]
+//   creators              ⟨n⟩ × lp_str
+//   creator_tx_lists      ⟨n⟩ × ( ⟨m⟩ × 32 )
+//   creator_ed_sigs       ⟨n⟩ × 64
+//   creator_dh_inputs     ⟨n⟩ × 32
+//   creator_view_eq_roots / _abort_roots / _inbound_roots      ⟨n⟩ × 32   (×3)
+//   creator_view_inbound_lists / _eq_lists / _abort_lists  ⟨n⟩ × (⟨m⟩ × 32) (×3)
+//   creator_view_shardtip_roots ⟨n⟩ × 32 · _shardtip_lists ⟨n⟩ × (⟨m⟩ × 32)
+//   creator_proposer_times ⟨n⟩ × u64
+//   creator_dh_secrets    ⟨n⟩ × 32
+//   tx_root 32 · delay_seed 32 · delay_output 32
+//   consensus_mode u8 · bft_proposer lp_str
+//   creator_block_sigs    ⟨n⟩ × 64
+//   cumulative_rand 32
+//   abort_events          ⟨n⟩ × ABORT_EVENT_REC
+//   equivocation_events   ⟨n⟩ × EQUIV_REC
+//   cross_shard_receipts  ⟨n⟩ × RECEIPT_REC
+//   inbound_receipts      ⟨n⟩ × RECEIPT_REC
+//   initial_state         ⟨n⟩ × ALLOC_REC
+//   state_root 32 · partner_subset_hash 32 · signature_form u8
+//   eligible_count u32 · source_shard_id u32
+//   shard_tip_records     ⟨n⟩ × [u8 rec_len][ShardTipRecord::encode()]
+//   shard_tip_witnesses   ⟨n⟩ × [u32 frame_len][BLOCK FRAME]
+//
+// The three length prefixes ([u32] on a tx frame and a witness frame, [u8] on a
+// record) are MANDATORY, not stylistic: every nested codec is exact-consuming
+// over the whole buffer it is handed (Transaction::decode_frame,
+// decode_abort_claims, ShardTipRecord::decode all reject trailing bytes), so
+// none of them can be handed a suffix and asked to stop at the right place.
+// The claims blob inside ABORT_EVENT_REC needs one for the same reason — it is
+// last within its record but not last within the frame.
+//
+//   ABORT_EVENT_REC  [round u8][aborting_node lp_str][timestamp i64-as-u64]
+//                    [event_hash 32][u32 claims_len][encode_abort_claims bytes]
+//   EQUIV_REC        [equivocator lp_str][block_index u64][digest_a 32]
+//                    [sig_a 64][digest_b 32][sig_b 64][shard_id u32]
+//                    [beacon_anchor_height u64]
+//   RECEIPT_REC      [src_shard u32][dst_shard u32][src_block_index u64]
+//                    [src_block_hash 32][tx_hash 32][from lp_str][to lp_str]
+//                    [amount u64][fee u64][nonce u64]
+//   ALLOC_REC        [domain lp_str][ed_pub 32][balance u64][stake u64]
+//                    [region lp_str]
+
+namespace {
+
+// Minimum encoded size of ONE element of each counted array. Used to reject an
+// impossible count BEFORE allocating for it: a 2-byte prefix claiming 65535
+// elements must be backed by at least count*min bytes of body, or it is a lie.
+// This is the whole defense against a count-driven allocation blow-up, so it
+// runs before every reserve and every loop.
+constexpr size_t kMinTxFrame        = 131 + 4; // decode_frame minimum + length prefix
+constexpr size_t kMinLpStr          = 1;       // the length byte alone (empty string)
+constexpr size_t kMinInnerHashList  = 2;       // an inner ⟨m⟩ count of zero
+constexpr size_t kMinHash           = 32;
+constexpr size_t kMinSig            = 64;
+constexpr size_t kMinU64            = 8;
+constexpr size_t kMinAbortEvent     = 1 + 1 + 8 + 32 + 4;      // + claims blob
+constexpr size_t kMinEquivEvent     = 1 + 8 + 32 + 64 + 32 + 64 + 4 + 8;
+constexpr size_t kMinReceipt        = 4 + 4 + 8 + 32 + 32 + 1 + 1 + 8 + 8 + 8;
+constexpr size_t kMinAlloc          = 1 + 32 + 8 + 8 + 1;
+constexpr size_t kMinShardTipRecord = 1 + 49;                  // u8 len + minimum record
+// The smallest possible Block frame: every fixed field at its width plus the
+// 23 two-byte counts, all empty. Pinned by a gate (BF-0) so this constant
+// cannot silently drift out of agreement with the encoder — if it were set too
+// HIGH, the Layer-1 cap would reject legitimate one-witness frames.
+constexpr size_t kMinBlockFrame     = 297;
+constexpr size_t kMinWitness        = 4 + kMinBlockFrame;      // u32 len + frame
+
+[[noreturn]] void bf_throw(const std::string& what) {
+    throw std::runtime_error("block frame: " + what);
+}
+
+void bf_need(size_t off, size_t need, size_t len, const char* what) {
+    if (off + need > len) bf_throw(std::string("truncated ") + what);
+}
+
+// Write a u16 count, refusing rather than clamping — the 1a1b98f lesson.
+void bf_put_count(std::vector<uint8_t>& out, size_t n, const char* what) {
+    if (n > 0xFFFF)
+        bf_throw(std::string(what) + " exceeds the u16 count field (" +
+                 std::to_string(n) + ")");
+    out.push_back(static_cast<uint8_t>(n & 0xFF));
+    out.push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
+}
+
+// Read a u16 count AND prove the body can back it, before the caller reserves.
+uint16_t bf_get_count(const uint8_t* data, size_t len, size_t& off,
+                      size_t min_elem, const char* what) {
+    bf_need(off, 2, len, what);
+    uint16_t n = static_cast<uint16_t>(data[off]) |
+                 static_cast<uint16_t>(static_cast<uint16_t>(data[off + 1]) << 8);
+    off += 2;
+    // The cap runs HERE — before any reserve, before the loop. A frame
+    // declaring more elements than its remaining bytes could possibly hold is
+    // rejected having allocated nothing.
+    if (min_elem != 0 && static_cast<size_t>(n) > (len - off) / min_elem)
+        bf_throw(std::string(what) + " declares " + std::to_string(n) +
+                 " elements but only " + std::to_string(len - off) +
+                 " bytes remain");
+    return n;
+}
+
+// lp_str with block-frame diagnostics. The tx-frame helper cannot be reused
+// here: its throws say "tx frame: ...", which would misreport a truncated
+// creators[3] inside a Block as a transaction-framing fault.
+void bf_put_lp_str(std::vector<uint8_t>& out, const std::string& s,
+                   const char* what) {
+    if (s.size() > 255)
+        bf_throw(std::string(what) + " exceeds 255 bytes (" +
+                 std::to_string(s.size()) + ")");
+    out.push_back(static_cast<uint8_t>(s.size()));
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+std::string bf_get_lp_str(const uint8_t* data, size_t len, size_t& off,
+                          const char* what) {
+    bf_need(off, 1, len, what);
+    uint8_t n = data[off++];
+    bf_need(off, n, len, what);
+    std::string s(reinterpret_cast<const char*>(data + off), n);
+    off += n;
+    return s;
+}
+
+void bf_put_u32(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
+}
+void bf_put_u64(std::vector<uint8_t>& out, uint64_t v) {
+    for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
+}
+uint32_t bf_get_u32(const uint8_t* data, size_t len, size_t& off, const char* what) {
+    bf_need(off, 4, len, what);
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(data[off + i]) << (i * 8);
+    off += 4;
+    return v;
+}
+uint64_t bf_get_u64(const uint8_t* data, size_t len, size_t& off, const char* what) {
+    bf_need(off, 8, len, what);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(data[off + i]) << (i * 8);
+    off += 8;
+    return v;
+}
+void bf_put_bytes(std::vector<uint8_t>& out, const uint8_t* p, size_t n) {
+    out.insert(out.end(), p, p + n);
+}
+void bf_get_bytes(const uint8_t* data, size_t len, size_t& off,
+                  uint8_t* dst, size_t n, const char* what) {
+    bf_need(off, n, len, what);
+    std::memcpy(dst, data + off, n);
+    off += n;
+}
+
+void bf_put_hash_vec(std::vector<uint8_t>& out, const std::vector<Hash>& v,
+                     const char* what) {
+    bf_put_count(out, v.size(), what);
+    for (auto& h : v) bf_put_bytes(out, h.data(), 32);
+}
+std::vector<Hash> bf_get_hash_vec(const uint8_t* data, size_t len, size_t& off,
+                                  const char* what) {
+    uint16_t n = bf_get_count(data, len, off, kMinHash, what);
+    std::vector<Hash> v;
+    v.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        Hash h{};
+        bf_get_bytes(data, len, off, h.data(), 32, what);
+        v.push_back(h);
+    }
+    return v;
+}
+
+void bf_put_hash_lists(std::vector<uint8_t>& out,
+                       const std::vector<std::vector<Hash>>& v, const char* what) {
+    bf_put_count(out, v.size(), what);
+    for (auto& list : v) {
+        bf_put_count(out, list.size(), what);
+        for (auto& h : list) bf_put_bytes(out, h.data(), 32);
+    }
+}
+std::vector<std::vector<Hash>> bf_get_hash_lists(const uint8_t* data, size_t len,
+                                                 size_t& off, const char* what) {
+    uint16_t n = bf_get_count(data, len, off, kMinInnerHashList, what);
+    std::vector<std::vector<Hash>> v;
+    v.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        uint16_t m = bf_get_count(data, len, off, kMinHash, what);
+        std::vector<Hash> one;
+        one.reserve(m);
+        for (uint16_t k = 0; k < m; ++k) {
+            Hash h{};
+            bf_get_bytes(data, len, off, h.data(), 32, what);
+            one.push_back(h);
+        }
+        v.push_back(std::move(one));
+    }
+    return v;
+}
+
+void bf_put_sig_vec(std::vector<uint8_t>& out, const std::vector<Signature>& v,
+                    const char* what) {
+    bf_put_count(out, v.size(), what);
+    for (auto& s : v) bf_put_bytes(out, s.data(), 64);
+}
+std::vector<Signature> bf_get_sig_vec(const uint8_t* data, size_t len, size_t& off,
+                                      const char* what) {
+    uint16_t n = bf_get_count(data, len, off, kMinSig, what);
+    std::vector<Signature> v;
+    v.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        Signature s{};
+        bf_get_bytes(data, len, off, s.data(), 64, what);
+        v.push_back(s);
+    }
+    return v;
+}
+
+void bf_put_receipts(std::vector<uint8_t>& out,
+                     const std::vector<CrossShardReceipt>& v, const char* what) {
+    bf_put_count(out, v.size(), what);
+    for (auto& r : v) {
+        bf_put_u32(out, r.src_shard);
+        bf_put_u32(out, r.dst_shard);
+        bf_put_u64(out, r.src_block_index);
+        bf_put_bytes(out, r.src_block_hash.data(), 32);
+        bf_put_bytes(out, r.tx_hash.data(), 32);
+        bf_put_lp_str(out, r.from, what);
+        bf_put_lp_str(out, r.to, what);
+        bf_put_u64(out, r.amount);
+        bf_put_u64(out, r.fee);
+        bf_put_u64(out, r.nonce);
+    }
+}
+std::vector<CrossShardReceipt> bf_get_receipts(const uint8_t* data, size_t len,
+                                               size_t& off, const char* what) {
+    uint16_t n = bf_get_count(data, len, off, kMinReceipt, what);
+    std::vector<CrossShardReceipt> v;
+    v.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        CrossShardReceipt r;
+        r.src_shard       = bf_get_u32(data, len, off, what);
+        r.dst_shard       = bf_get_u32(data, len, off, what);
+        r.src_block_index = bf_get_u64(data, len, off, what);
+        bf_get_bytes(data, len, off, r.src_block_hash.data(), 32, what);
+        bf_get_bytes(data, len, off, r.tx_hash.data(), 32, what);
+        r.from  = bf_get_lp_str(data, len, off, what);
+        r.to    = bf_get_lp_str(data, len, off, what);
+        r.amount = bf_get_u64(data, len, off, what);
+        r.fee    = bf_get_u64(data, len, off, what);
+        r.nonce  = bf_get_u64(data, len, off, what);
+        v.push_back(std::move(r));
+    }
+    return v;
+}
+
+} // namespace
+
+void Block::encode_frame(std::vector<uint8_t>& out) const {
+    bf_put_u64(out, index);
+    bf_put_bytes(out, prev_hash.data(), 32);
+    bf_put_u64(out, static_cast<uint64_t>(timestamp));
+
+    bf_put_count(out, transactions.size(), "transactions");
+    for (auto& tx : transactions) {
+        std::vector<uint8_t> f;
+        tx.encode_frame(f);
+        if (f.size() > 0xFFFFFFFFu) bf_throw("transaction frame exceeds u32 length");
+        bf_put_u32(out, static_cast<uint32_t>(f.size()));
+        out.insert(out.end(), f.begin(), f.end());
+    }
+
+    bf_put_count(out, creators.size(), "creators");
+    for (auto& c : creators) bf_put_lp_str(out, c, "creators");
+
+    bf_put_hash_lists(out, creator_tx_lists, "creator_tx_lists");
+    bf_put_sig_vec(out, creator_ed_sigs, "creator_ed_sigs");
+    bf_put_hash_vec(out, creator_dh_inputs, "creator_dh_inputs");
+
+    // to_json emits the six-key view bundle only when some root is non-zero,
+    // and DISCARDS the lists otherwise. Mirror that exactly (see block.hpp):
+    // carrying the lists here instead would let a relayer append unsigned,
+    // unhashed data that the validator then rejects.
+    bool any_view_root = false;
+    for (auto& h : creator_view_inbound_roots) if (h != Hash{}) { any_view_root = true; break; }
+    if (!any_view_root)
+        for (auto& h : creator_view_eq_roots) if (h != Hash{}) { any_view_root = true; break; }
+    if (!any_view_root)
+        for (auto& h : creator_view_abort_roots) if (h != Hash{}) { any_view_root = true; break; }
+    static const std::vector<Hash> kNoRoots;
+    static const std::vector<std::vector<Hash>> kNoLists;
+    bf_put_hash_vec(out, any_view_root ? creator_view_eq_roots      : kNoRoots, "creator_view_eq_roots");
+    bf_put_hash_vec(out, any_view_root ? creator_view_abort_roots   : kNoRoots, "creator_view_abort_roots");
+    bf_put_hash_vec(out, any_view_root ? creator_view_inbound_roots : kNoRoots, "creator_view_inbound_roots");
+    bf_put_hash_lists(out, any_view_root ? creator_view_inbound_lists : kNoLists, "creator_view_inbound_lists");
+    bf_put_hash_lists(out, any_view_root ? creator_view_eq_lists     : kNoLists, "creator_view_eq_lists");
+    bf_put_hash_lists(out, any_view_root ? creator_view_abort_lists  : kNoLists, "creator_view_abort_lists");
+
+    bool any_shardtip_root = false;
+    for (auto& h : creator_view_shardtip_roots) if (h != Hash{}) { any_shardtip_root = true; break; }
+    bf_put_hash_vec(out, any_shardtip_root ? creator_view_shardtip_roots : kNoRoots, "creator_view_shardtip_roots");
+    bf_put_hash_lists(out, any_shardtip_root ? creator_view_shardtip_lists : kNoLists, "creator_view_shardtip_lists");
+
+    bf_put_count(out, creator_proposer_times.size(), "creator_proposer_times");
+    for (uint64_t t : creator_proposer_times) bf_put_u64(out, t);
+
+    bf_put_hash_vec(out, creator_dh_secrets, "creator_dh_secrets");
+
+    bf_put_bytes(out, tx_root.data(), 32);
+    bf_put_bytes(out, delay_seed.data(), 32);
+    bf_put_bytes(out, delay_output.data(), 32);
+    out.push_back(static_cast<uint8_t>(consensus_mode));
+    bf_put_lp_str(out, bft_proposer, "bft_proposer");
+
+    bf_put_sig_vec(out, creator_block_sigs, "creator_block_sigs");
+    bf_put_bytes(out, cumulative_rand.data(), 32);
+
+    bf_put_count(out, abort_events.size(), "abort_events");
+    for (auto& ae : abort_events) {
+        out.push_back(ae.round);
+        bf_put_lp_str(out, ae.aborting_node, "abort_events.aborting_node");
+        bf_put_u64(out, static_cast<uint64_t>(ae.timestamp));
+        bf_put_bytes(out, ae.event_hash.data(), 32);
+        // The shared claim-list codec is exact-consuming over the whole buffer
+        // it is handed, so inside a larger frame it needs an explicit window.
+        auto blob = encode_abort_claims(ae.claims);
+        if (blob.size() > 0xFFFFFFFFu) bf_throw("abort_events claims blob exceeds u32 length");
+        bf_put_u32(out, static_cast<uint32_t>(blob.size()));
+        out.insert(out.end(), blob.begin(), blob.end());
+    }
+
+    bf_put_count(out, equivocation_events.size(), "equivocation_events");
+    for (auto& ev : equivocation_events) {
+        bf_put_lp_str(out, ev.equivocator, "equivocation_events.equivocator");
+        bf_put_u64(out, ev.block_index);
+        bf_put_bytes(out, ev.digest_a.data(), 32);
+        bf_put_bytes(out, ev.sig_a.data(), 64);
+        bf_put_bytes(out, ev.digest_b.data(), 32);
+        bf_put_bytes(out, ev.sig_b.data(), 64);
+        bf_put_u32(out, ev.shard_id);
+        bf_put_u64(out, ev.beacon_anchor_height);
+    }
+
+    bf_put_receipts(out, cross_shard_receipts, "cross_shard_receipts");
+    bf_put_receipts(out, inbound_receipts, "inbound_receipts");
+
+    bf_put_count(out, initial_state.size(), "initial_state");
+    for (auto& a : initial_state) {
+        bf_put_lp_str(out, a.domain, "initial_state.domain");
+        bf_put_bytes(out, a.ed_pub.data(), 32);
+        bf_put_u64(out, a.balance);
+        bf_put_u64(out, a.stake);
+        bf_put_lp_str(out, a.region, "initial_state.region");
+    }
+
+    bf_put_bytes(out, state_root.data(), 32);
+    bf_put_bytes(out, partner_subset_hash.data(), 32);
+    out.push_back(signature_form);
+    bf_put_u32(out, eligible_count);
+    // to_json emits source_shard_id ONLY under the eligible_count != 0 gate, so
+    // a block with eligible_count == 0 loses it across a JSON round trip.
+    // Mirror that: write zero, or the two containers would disagree.
+    bf_put_u32(out, eligible_count != 0 ? source_shard_id : 0u);
+
+    bf_put_count(out, shard_tip_records.size(), "shard_tip_records");
+    for (auto& r : shard_tip_records) {
+        auto enc = r.encode();
+        if (enc.size() > 255) bf_throw("shard_tip_records record exceeds 255 bytes");
+        out.push_back(static_cast<uint8_t>(enc.size()));
+        out.insert(out.end(), enc.begin(), enc.end());
+    }
+
+    bf_put_count(out, shard_tip_witnesses.size(), "shard_tip_witnesses");
+    for (auto& w : shard_tip_witnesses) {
+        std::vector<uint8_t> f;
+        w.encode_frame(f);
+        if (f.size() > 0xFFFFFFFFu) bf_throw("witness frame exceeds u32 length");
+        bf_put_u32(out, static_cast<uint32_t>(f.size()));
+        out.insert(out.end(), f.begin(), f.end());
+    }
+}
+
+Block Block::decode_frame(const uint8_t* data, size_t len) {
+    return decode_frame(data, len, /*allow_witnesses=*/true);
+}
+
+Block Block::decode_frame(const uint8_t* data, size_t len, bool allow_witnesses) {
+    Block b;
+    size_t off = 0;
+
+    b.index = bf_get_u64(data, len, off, "index");
+    bf_get_bytes(data, len, off, b.prev_hash.data(), 32, "prev_hash");
+    b.timestamp = static_cast<int64_t>(bf_get_u64(data, len, off, "timestamp"));
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinTxFrame, "transactions");
+        b.transactions.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            uint32_t flen = bf_get_u32(data, len, off, "transactions frame length");
+            bf_need(off, flen, len, "transactions frame body");
+            b.transactions.push_back(Transaction::decode_frame(data + off, flen));
+            off += flen;
+        }
+    }
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinLpStr, "creators");
+        b.creators.reserve(n);
+        for (uint16_t i = 0; i < n; ++i)
+            b.creators.push_back(bf_get_lp_str(data, len, off, "creators"));
+    }
+
+    b.creator_tx_lists   = bf_get_hash_lists(data, len, off, "creator_tx_lists");
+    b.creator_ed_sigs    = bf_get_sig_vec(data, len, off, "creator_ed_sigs");
+    b.creator_dh_inputs  = bf_get_hash_vec(data, len, off, "creator_dh_inputs");
+
+    b.creator_view_eq_roots      = bf_get_hash_vec(data, len, off, "creator_view_eq_roots");
+    b.creator_view_abort_roots   = bf_get_hash_vec(data, len, off, "creator_view_abort_roots");
+    b.creator_view_inbound_roots = bf_get_hash_vec(data, len, off, "creator_view_inbound_roots");
+    b.creator_view_inbound_lists = bf_get_hash_lists(data, len, off, "creator_view_inbound_lists");
+    b.creator_view_eq_lists      = bf_get_hash_lists(data, len, off, "creator_view_eq_lists");
+    b.creator_view_abort_lists   = bf_get_hash_lists(data, len, off, "creator_view_abort_lists");
+
+    b.creator_view_shardtip_roots = bf_get_hash_vec(data, len, off, "creator_view_shardtip_roots");
+    b.creator_view_shardtip_lists = bf_get_hash_lists(data, len, off, "creator_view_shardtip_lists");
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinU64, "creator_proposer_times");
+        b.creator_proposer_times.reserve(n);
+        for (uint16_t i = 0; i < n; ++i)
+            b.creator_proposer_times.push_back(bf_get_u64(data, len, off, "creator_proposer_times"));
+    }
+
+    b.creator_dh_secrets = bf_get_hash_vec(data, len, off, "creator_dh_secrets");
+
+    bf_get_bytes(data, len, off, b.tx_root.data(), 32, "tx_root");
+    bf_get_bytes(data, len, off, b.delay_seed.data(), 32, "delay_seed");
+    bf_get_bytes(data, len, off, b.delay_output.data(), 32, "delay_output");
+    bf_need(off, 1, len, "consensus_mode");
+    b.consensus_mode = static_cast<ConsensusMode>(data[off++]);
+    b.bft_proposer = bf_get_lp_str(data, len, off, "bft_proposer");
+
+    b.creator_block_sigs = bf_get_sig_vec(data, len, off, "creator_block_sigs");
+    bf_get_bytes(data, len, off, b.cumulative_rand.data(), 32, "cumulative_rand");
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinAbortEvent, "abort_events");
+        b.abort_events.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            AbortEvent ae;
+            bf_need(off, 1, len, "abort_events.round");
+            ae.round = data[off++];
+            ae.aborting_node = bf_get_lp_str(data, len, off, "abort_events.aborting_node");
+            ae.timestamp = static_cast<int64_t>(bf_get_u64(data, len, off, "abort_events.timestamp"));
+            bf_get_bytes(data, len, off, ae.event_hash.data(), 32, "abort_events.event_hash");
+            uint32_t clen = bf_get_u32(data, len, off, "abort_events claims length");
+            bf_need(off, clen, len, "abort_events claims blob");
+            ae.claims = decode_abort_claims(std::vector<uint8_t>(data + off, data + off + clen));
+            off += clen;
+            b.abort_events.push_back(std::move(ae));
+        }
+    }
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinEquivEvent, "equivocation_events");
+        b.equivocation_events.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            EquivocationEvent ev;
+            ev.equivocator = bf_get_lp_str(data, len, off, "equivocation_events.equivocator");
+            ev.block_index = bf_get_u64(data, len, off, "equivocation_events.block_index");
+            bf_get_bytes(data, len, off, ev.digest_a.data(), 32, "equivocation_events.digest_a");
+            bf_get_bytes(data, len, off, ev.sig_a.data(), 64, "equivocation_events.sig_a");
+            bf_get_bytes(data, len, off, ev.digest_b.data(), 32, "equivocation_events.digest_b");
+            bf_get_bytes(data, len, off, ev.sig_b.data(), 64, "equivocation_events.sig_b");
+            ev.shard_id = bf_get_u32(data, len, off, "equivocation_events.shard_id");
+            ev.beacon_anchor_height = bf_get_u64(data, len, off, "equivocation_events.beacon_anchor_height");
+            b.equivocation_events.push_back(std::move(ev));
+        }
+    }
+
+    b.cross_shard_receipts = bf_get_receipts(data, len, off, "cross_shard_receipts");
+    b.inbound_receipts     = bf_get_receipts(data, len, off, "inbound_receipts");
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinAlloc, "initial_state");
+        b.initial_state.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            GenesisAlloc a;
+            a.domain = bf_get_lp_str(data, len, off, "initial_state.domain");
+            bf_get_bytes(data, len, off, a.ed_pub.data(), 32, "initial_state.ed_pub");
+            a.balance = bf_get_u64(data, len, off, "initial_state.balance");
+            a.stake   = bf_get_u64(data, len, off, "initial_state.stake");
+            a.region  = bf_get_lp_str(data, len, off, "initial_state.region");
+            b.initial_state.push_back(std::move(a));
+        }
+    }
+
+    bf_get_bytes(data, len, off, b.state_root.data(), 32, "state_root");
+    bf_get_bytes(data, len, off, b.partner_subset_hash.data(), 32, "partner_subset_hash");
+    bf_need(off, 1, len, "signature_form");
+    b.signature_form = data[off++];
+    b.eligible_count = bf_get_u32(data, len, off, "eligible_count");
+    b.source_shard_id = bf_get_u32(data, len, off, "source_shard_id");
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinShardTipRecord, "shard_tip_records");
+        // A witness is a LEAF: it carries no records. Enforced INLINE (not as a
+        // parent-side post-check) so exactly one site produces this string and
+        // it fires before the records are parsed.
+        if (!allow_witnesses && n != 0)
+            bf_throw("shard_tip_witnesses: a witness must carry empty shard_tip_records");
+        b.shard_tip_records.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            bf_need(off, 1, len, "shard_tip_records length");
+            uint8_t rlen = data[off++];
+            bf_need(off, rlen, len, "shard_tip_records body");
+            auto rec = ShardTipRecord::decode(
+                std::vector<uint8_t>(data + off, data + off + rlen));
+            // ShardTipRecord::decode returns nullopt rather than throwing, so a
+            // malformed record would be SILENTLY DROPPED without this.
+            if (!rec) bf_throw("shard_tip_records: malformed record");
+            off += rlen;
+            b.shard_tip_records.push_back(*rec);
+        }
+    }
+
+    {
+        uint16_t n = bf_get_count(data, len, off, kMinWitness, "shard_tip_witnesses");
+        if (!allow_witnesses && n != 0)
+            bf_throw("shard_tip_witnesses: a witness must be a leaf block (no nested witnesses)");
+        b.shard_tip_witnesses.reserve(n);
+        for (uint16_t i = 0; i < n; ++i) {
+            uint32_t flen = bf_get_u32(data, len, off, "shard_tip_witnesses frame length");
+            bf_need(off, flen, len, "shard_tip_witnesses frame body");
+            b.shard_tip_witnesses.push_back(
+                decode_frame(data + off, flen, /*allow_witnesses=*/false));
+            off += flen;
+        }
+    }
+
+    if (off != len)
+        bf_throw("trailing bytes after last section (" +
+                 std::to_string(len - off) + ")");
+    return b;
+}
+
 } // namespace determ::chain
