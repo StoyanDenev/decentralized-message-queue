@@ -1663,3 +1663,17 @@ Each step gated falsify-on-mutant against the byte-golden vectors (B3); byte-neu
 **Consistency.** Canonical-binary (removes JSON from the mandated paths); zero-heavy-deps (deletes the nlohmann dependency); minimalism (two JSON impls → zero); C99/Minix (removes the C++-template blocker for the reference build); no-migrations (wire + storage container settled pre-genesis). Sequenced after D.5 so it does not preempt the active front.
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-28; recorded by Claude Fable at his direction).
+
+## 2026-07-28 — Sequence-before-harden: D2 JSON→binary migration promoted to ACTIVE front; freeze hardening on the doomed JSON paths
+
+**Problem.** The pool has been spending B3 hardening / perf effort on the JSON wire-envelope and serialization code that the D2 migration will delete (most recently `cb6ff49` — moving the payload subtree out of the JSON envelope; `b982332` — S-022 cap on the binary-vs-JSON envelope decode). Securing code scheduled for replacement is wasted proof-work: the artifact being hardened will not exist after D2. Security is the top goal — which is exactly why the hardening budget must land on the *final* code, not the transitional code.
+
+**Decision (owner, 2026-07-28).**
+1. **New doctrine — sequence-before-harden:** do not spend falsify-on-mutant / perf effort on code scheduled for replacement; execute the replacement first, then gate the survivor. Recorded in CLAUDE.md PROJECT DOCTRINE.
+2. **Promote D2 to the ACTIVE front, now** (was NEXT). The D.5 reference RP + RP SDK are built (inc.6b + `sdk/rp`) and G5/G6 shipped, so the DSSO tail no longer blocks it. The pool executes the JSON→binary migration (wire envelope + storage/genesis + keyfiles; delete both JSON parsers; regenerate vectors as binary) before further hardening.
+3. **Freeze** new hardening on the JSON-path files (`src/net/gossip.cpp`, `messages.cpp`, `binary_codec.cpp`; `src/chain/block.cpp`, `chain.cpp`, `genesis.cpp`) until D2 rewrites them; gate the binary replacements instead.
+4. **Exemption:** consensus accept-rule / logic fixes that survive a container swap are NOT frozen — specifically the two rank-1 holes (`validator.cpp:378`, `node.cpp:1973`) are serialization-independent and remain the real security priority (still owner-gated).
+
+**Consistency.** Serves provable security (B3) by directing the finite proof budget at the code that ships, not code that is deleted; minimalism (removes the JSON surface sooner); no-migrations (wire portion is genesis-deadline). No change to any accept rule — a sequencing directive.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-28; recorded by Claude Fable at his direction).
