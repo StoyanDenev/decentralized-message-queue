@@ -330,9 +330,12 @@ builder) — no analysis workflow needed.
 
 ### 2h. VAL-batch-inner-sig (COMPOSABLE_BATCH inner-transaction authenticity)
 
-**#8 VAL-batch-inner-sig** — `src/node/validator.cpp:1201`, inside the `TxType::COMPOSABLE_BATCH` case
-of `check_transactions`. A v2.4 atomic batch carries a JSON array of inner TRANSFERs; each inner tx
-moves funds from its OWN `inner.from` account, so each must be independently signed by that sender:
+**#8 VAL-batch-inner-sig** — inside the `TxType::COMPOSABLE_BATCH` case of `check_transactions`
+(`src/node/validator.cpp`; `:1201` at audit time). A v2.4 atomic batch carries inner TRANSFERs
+(since D2-inc4 `7bcd32d` as the canonical binary batch payload — `[u16 LE inner_count]` +
+count × length-prefixed `Transaction` frames via the shared `decode_batch_payload`; at audit time
+as a JSON array); each inner tx moves funds from its OWN `inner.from` account, so each must be
+independently signed by that sender:
 
 ```cpp
 auto sb = it.signing_bytes();
@@ -351,8 +354,8 @@ through the validator; the reject string is asserted nowhere. (Same apply-path-v
 EQV finding.)
 
 **Gate (in-process, both platforms).** Hosted in `test-abort-cert-validation` (reuses n0..n3 + `key_of`),
-with inline JSON packaging (`arr.push_back(it.to_json()); arr.dump()` — the same format
-`Transaction::from_json` parses). A `run_batch(forge)` helper: build one inner TRANSFER n1→n2 (fee 0,
+packing via the shared codec (`chain::encode_batch_payload` since D2-inc4; at audit time inline JSON
+`arr.push_back(it.to_json()); arr.dump()`). A `run_batch(forge)` helper: build one inner TRANSFER n1→n2 (fee 0,
 signed by n1 — clears the type / fee / payload-size / registry gates ahead of `:1201`), optionally flip
 one byte of the inner `sig`, pack it into `outer.payload`, then sign the OUTER `COMPOSABLE_BATCH` tx
 (from n0) over that payload; drive `check_transactions_for_test`. Legs: **positive control** — validly

@@ -988,16 +988,20 @@ Three additional TxTypes shipped post-rev.9 ground the atomic-apply substrate an
 A4 / v2.4 — atomic execution of multiple inner transactions under one outer envelope. Either all inner txs apply or none do; the outer fee + nonce slot is consumed regardless of inner success (same model as EVM gas).
 
 ```
-Payload (canonical, LE where noted):
+Payload (canonical length-prefixed binary, LE where noted; shipped by the
+D2 migration — the transitional JSON-array payload was deleted pre-genesis):
   [inner_count: u16 LE]   # 1..MAX_COMPOSABLE_INNER (= 64)
-  inner_count × Transaction   # binary_codec serialised
+  inner_count × [frame_len: u32 LE][Transaction frame bytes]
 ```
+
+Each frame is the canonical Transaction frame (`Transaction::encode_frame`, the same layout the p2p wire uses for `TRANSACTION` messages) and decodes with exact-consumption semantics against its declared `frame_len`. The per-frame length prefix is load-bearing: the frame's optional trailing `pq_auth` section is "present iff bytes remain", so bare concatenation would be ambiguous. Codec: `encode_batch_payload` / `decode_batch_payload` (`src/chain/block.cpp`) — the one shared helper used by both the validator accept rule and the apply path.
 
 Validator constraints:
 1. `inner_count ∈ [1, MAX_COMPOSABLE_INNER]`.
 2. Each inner tx must validate independently (shape + sig + known sender for non-bearer types).
-3. Inner txs MUST NOT themselves be `COMPOSABLE_BATCH` (flat, no recursion).
+3. Inner txs MUST NOT themselves be `COMPOSABLE_BATCH` (flat, no recursion; v2.4 restricts inners to `TRANSFER`).
 4. Inner txs MUST have `fee == 0` (outer batch pays the chain fee).
+5. Inner frames MUST NOT carry a `pq_auth` section (PQ inners are not in the v2.4 whitelist; the accept rule closes the unsigned-stuffing channel).
 
 Apply semantics:
 - Outer batch consumes submitter's `next_nonce` (one slot).
