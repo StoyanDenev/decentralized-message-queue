@@ -10399,6 +10399,106 @@ int main(int argc, char** argv) {
               expect_reject2(b, "exactly one claim",
                     "ABORT_CLAIM: a frame carrying two claims is REJECTED "
                     "(canonical single-claim encoding)"); }
+
+            // 4d. EXACT-LENGTH SWEEP over every fixed-layout frame, BOTH
+            //     directions. Found by a falsify-on-mutant pass: the per-frame
+            //     legs above each probed ONE direction (GET_CHAIN and BLOCK_SIG
+            //     padded, HEADERS_REQUEST and EQUIVOCATION truncated,
+            //     SNAPSHOT_REQUEST neither), so relaxing an exact `len != N`
+            //     to a one-sided `len < N` left every gate GREEN while the
+            //     decoder silently accepted trailing bytes — a non-canonical
+            //     second encoding of the same message, which is exactly what
+            //     D2 exists to eliminate. A one-sided length leg is not a
+            //     length gate. The table is the completeness statement: a new
+            //     fixed frame that is not listed here has no exactness gate.
+            {
+                struct LenCase {
+                    const char*          name;
+                    std::vector<uint8_t> body;
+                    const char*          pad_needle;
+                    const char*          trunc_needle;   // nullptr = zero-length
+                };
+                chain::Transaction tx;
+                tx.type = chain::TxType::TRANSFER;
+                tx.from = "n1"; tx.to = "n2";
+                tx.amount = 5; tx.fee = 1; tx.nonce = 3;
+                tx.sig.fill(0x44); tx.hash.fill(0x55);
+
+                std::vector<LenCase> cases = {
+                  {"HELLO",
+                   strip_frame(make_hello("n1", 9000, ChainRole::SINGLE, 0, 1)
+                                   .serialize_binary()),
+                   "HELLO frame trailing bytes", "truncated HELLO frame"},
+                  {"TRANSACTION",
+                   strip_frame(make_transaction(tx).serialize_binary()),
+                   "tx frame", "tx frame"},
+                  {"GET_CHAIN",
+                   strip_frame(make_get_chain(1, 2).serialize_binary()),
+                   "bad GET_CHAIN frame length", "bad GET_CHAIN frame length"},
+                  {"STATUS_REQUEST",
+                   strip_frame(make_status_request().serialize_binary()),
+                   "STATUS_REQUEST frame not empty", nullptr},
+                  // Three frames END in a length-prefixed string (genesis /
+                  // the claim's `claimer`), so dropping the last byte is
+                  // caught by the lp_str bound BEFORE the frame-level
+                  // exactness check — the reject names that mechanism, and
+                  // the padded direction is what exercises exact consumption.
+                  {"STATUS_RESPONSE",
+                   strip_frame(make_status_response(1, std::string(64, 'a'))
+                                   .serialize_binary()),
+                   "STATUS_RESPONSE frame trailing bytes",
+                   "binary_codec: truncated lp_str body"},
+                  {"SNAPSHOT_REQUEST",
+                   strip_frame(make_snapshot_request(9).serialize_binary()),
+                   "bad SNAPSHOT_REQUEST frame length",
+                   "bad SNAPSHOT_REQUEST frame length"},
+                  {"HEADERS_REQUEST",
+                   strip_frame(make_headers_request(1, 2).serialize_binary()),
+                   "bad HEADERS_REQUEST frame length",
+                   "bad HEADERS_REQUEST frame length"},
+                  {"ABORT_CLAIM",
+                   strip_frame(make_abort_claim(ac).serialize_binary()),
+                   "trailing bytes after last claim",
+                   "tx frame: truncated lp_str body"},
+                  {"BLOCK_SIG",
+                   strip_frame(make_block_sig(bs).serialize_binary()),
+                   "bad BLOCK_SIG frame length", "bad BLOCK_SIG frame length"},
+                  {"EQUIVOCATION_EVIDENCE",
+                   strip_frame(make_equivocation_evidence(eq).serialize_binary()),
+                   "bad EQUIVOCATION_EVIDENCE frame length",
+                   "bad EQUIVOCATION_EVIDENCE frame length"},
+                  {"ABORT_EVENT",
+                   strip_frame(make_abort_event(ae, 7, prev).serialize_binary()),
+                   "trailing bytes after last claim",
+                   "tx frame: truncated lp_str body"},
+                };
+                check(cases.size() == 11,
+                      "exact-length sweep covers all 11 fixed-layout frames "
+                      "(the 19 wire types minus the 8 still on lp-JSON)");
+                for (auto& c : cases) {
+                    // Control: the unmodified body must DECODE. Without this a
+                    // builder change that broke the body would make both
+                    // rejection legs pass vacuously.
+                    bool ok = true;
+                    try { (void)Message::deserialize(c.body.data(), c.body.size()); }
+                    catch (const std::exception&) { ok = false; }
+                    std::string l0 = std::string("exact-length control: a valid ")
+                                   + c.name + " body decodes";
+                    check(ok, l0.c_str());
+
+                    auto padded = c.body; padded.push_back(0x00);
+                    std::string l1 = std::string("exact length: ") + c.name
+                                   + " + one trailing byte is REJECTED";
+                    expect_reject2(padded, c.pad_needle, l1.c_str());
+
+                    if (c.trunc_needle) {
+                        auto cut = c.body; cut.pop_back();
+                        std::string l2 = std::string("exact length: ") + c.name
+                                       + " - one byte is REJECTED";
+                        expect_reject2(cut, c.trunc_needle, l2.c_str());
+                    }
+                }
+            }
         }
 
         // 5. D2 negative gate: a legacy JSON envelope body ('{' 0x7B) is
