@@ -3,14 +3,36 @@
 FB70 — TLA+ specification of the ATOMIC FIVE-COUNTER SUPPLY READ: the
 `determ-light supply-trustless` composition (light/main.cpp::
 cmd_supply_trustless, main.cpp:6175-6578, R51 posture) that reads the five
-A1 supply counters from the committee-verified `c:` namespace of a possibly
-Byzantine daemon and recomputes the closed-form A1 unitary-supply identity
+ALWAYS-ON A1 supply counters from the committee-verified `c:` namespace of a
+possibly Byzantine daemon and recomputes the TRANSPARENT closed-form supply
+identity
 
-    expected_total = genesis_total + accumulated_subsidy
-                   + accumulated_inbound - accumulated_slashed
-                   - accumulated_outbound          (chain.hpp:443-449)
+    transparent_total = genesis_total + accumulated_subsidy
+                      + accumulated_inbound - accumulated_slashed
+                      - accumulated_outbound
 
-entirely from committee-committed values. The single-leaf trust reductions
+entirely from committee-committed values.
+
+§3.22 NARROWING (v2.20 confidential pool). The full `expected_total()`
+(chain.hpp:590-597) carries a SIXTH, subtractive term, so
+
+    expected_total = transparent_total - accumulated_shielded
+                   = live_total_supply
+
+But the sixth counter's `c:accumulated_shielded` state-root leaf is
+CONDITIONAL — `const_leaf` emits it only when non-zero (chain.cpp:502-503),
+unlike the five always-on counters (chain.cpp:494-498) — and a sorted-leaves
+Merkle tree proves POSITIVE membership only. So an ABSENT sixth leaf is
+UNVERIFIABLE, NEVER silently read as 0: a light client cannot distinguish
+`accumulated_shielded == 0` (shield-free) from a withheld leaf. This module
+therefore models the five-counter recompute of `transparent_total`, which
+equals `expected_total` / `live_total_supply` EXACTLY on a shield-free chain
+(accumulated_shielded == 0, leaf absent) and exceeds `live_total_supply` by
+exactly `accumulated_shielded` otherwise. The sixth term is out of this
+read's verifiable scope, so the CONSERVED/VIOLATED verdict modeled below is
+over the five transparent counters (never a silent 0 for the sixth).
+
+The single-leaf trust reductions
 (genesis anchor, committee-signed head, Merkle path, value-hash bind) are
 the a:/s:/d:/r: sibling readers' territory (FB50 / FB53 / FB60, FB44,
 FB23); what is NEW here — and what this module pins — is the COMPOSITION
@@ -58,8 +80,9 @@ Byzantine actions modeled, per the three attack classes:
 Any rejection fails the WHOLE read closed (the C++ loop breaks; verdict
 UNVERIFIABLE exit 3, or the stale/committee-binding throw exit 1 — both
 non-accept, folded to one UNVERIFIABLE here). Only when all five counters
-are accepted against the single anchor does the client recompute the A1
-closed form: CONSERVED (exit 0) when non-negative and consistent, VIOLATED
+are accepted against the single anchor does the client recompute the
+transparent closed form (§3.22 narrowing above): CONSERVED (exit 0) when
+non-negative and consistent, VIOLATED
 (exit 2) when the committee-committed counters themselves underflow the
 identity (slashed+outbound > genesis+subsidy+inbound — the defense-in-
 depth branch, main.cpp:6486-6519; unreachable on a chain whose apply path
@@ -466,7 +489,9 @@ Probe_ConservedUnreachable == verdict /= "CONSERVED"
 \* SupplyProofSoundness.md (FB70 prose companion) ->
 \*   SU-1 (committee-signed state_root binds the c: leaf — the S2 root
 \*   gates), SU-2 (Merkle + value-hash bind — the S3 bind gate), SU-3
-\*   (the five-counter A1 identity recompute — S1 + INV_VerdictFaithful),
+\*   (the five-counter TRANSPARENT-identity recompute — S1 +
+\*   INV_VerdictFaithful; the §3.22 sixth term accumulated_shielded is
+\*   UNVERIFIABLE, see the header narrowing),
 \*   SU-4 (leaf_count root-wrapper binding — inside the FB44 abstraction).
 \*   Its §3 single-root precondition is exactly the anchor discipline
 \*   this module pins.
@@ -479,11 +504,13 @@ Probe_ConservedUnreachable == verdict /= "CONSERVED"
 \*   RejectReason SPLIT_ROOT), merkle verify (:6440-6448, FB44
 \*   abstraction), underflow guard + A1 recompute + verdict (:6486-6519 /
 \*   Finalize), exit codes 0/2/3 (:6567-6573).
-\*   src/chain/chain.cpp const_leaf (:380-384) + the five c: counters
-\*   (:403-408) — the committed leaf encoding SHA256(u64_be(value));
-\*   include/determ/chain/chain.hpp:443-449 expected_total (the A1 closed
-\*   form Finalize recomputes); src/node/node.cpp rpc_state_proof "c"
-\*   branch (:3305-3311) — the served proof envelope.
+\*   src/chain/chain.cpp const_leaf (:464-468) + the five always-on c:
+\*   counters (:494-498) — the committed leaf encoding SHA256(u64_be(value));
+\*   the conditional c:accumulated_shielded leaf (:502-503, §3.22, emitted
+\*   only when non-zero); include/determ/chain/chain.hpp:590-597 expected_total
+\*   (the SIX-term identity; Finalize recomputes its five transparent terms);
+\*   src/node/node.cpp rpc_state_proof "c" branch (:3305-3311) — the served
+\*   proof envelope.
 \*
 \* Sibling specs (style template + abstraction sources):
 \*   DAppRegistrationRead.tla (FB50) / UnstakeEligibilityRead.tla (FB53) /
