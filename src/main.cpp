@@ -46702,6 +46702,158 @@ int main(int argc, char** argv) {
         check(dc::canonical_abort_claims_dump(empty) == empty.dump(),
               "fallback: an empty claims array → \"[]\"");
 
+        // ── (5) INGEST PATH — F-10 (round-13 hostile-wire audit) ────────────
+        // Canonicalizing the DIGEST alone left the injected bytes in the block
+        // BODY, which to_json re-emits verbatim. `claims_json` was schema-free,
+        // so an injected member could carry arbitrary NESTING — and the WIRE-2
+        // structural ceiling is ENVELOPE-RELATIVE: the same claim object sits
+        // at depth 6 under BLOCK but 8 under CHAIN_RESPONSE. A claim nested
+        // L ∈ {kMaxJsonDepth−7, kMaxJsonDepth−6} levels deep was therefore
+        // ACCEPTED on every ingest path and REJECTED on every serve path, so
+        // the block committed fleet-wide (signing_bytes binds only event_hash,
+        // so honest validators sign it) and could never be served again —
+        // WIRE-3 escalating that from a dropped frame to a disconnect loop, and
+        // no new node able to sync past that height.
+        //
+        // AbortEvent::from_json now stores the CANONICAL rebuild, so nothing
+        // survives ingest to inflate depth. Falsify-on-mutant: restore the
+        // verbatim `ae.claims_json = j.value("claims", json::array())` and the
+        // two F-10 legs below go RED while every leg above stays GREEN.
+        {
+            // Expressed against the cap, not hard-coded: the wedge band is
+            // {cap−7, cap−6} for EVERY value of kMaxJsonDepth, so this tracks
+            // the constant instead of rotting if it is ever retuned.
+            const size_t kInject = net::kMaxJsonDepth - 7;
+
+            auto mk_block = [&](const njson& claims) {
+                chain::Block b;
+                b.index = 0; b.prev_hash = Hash{}; b.timestamp = 1;
+                b.cumulative_rand = Hash{};
+                chain::AbortEvent ae;
+                ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = 123456;
+                for (auto& x : ae.event_hash) x = 0x7e;
+                ae.claims_json = claims;
+                b.abort_events.push_back(ae);
+                return b;
+            };
+
+            // A poisoned claim: honest in all six consensus-bound fields, plus
+            // ONE unknown member nesting kInject levels deep. Built at the JSON
+            // level, exactly as a hostile-but-registered claimant would put it
+            // on the wire — per-claim validation reads only the six and the
+            // Ed25519 sig covers none of the JSON, so this claim is VALID.
+            njson deep = njson::array();
+            {
+                njson* cur = &deep;
+                for (size_t i = 1; i < kInject; ++i) {
+                    cur->push_back(njson::array());
+                    cur = &(*cur)[0];
+                }
+            }
+            njson poisoned = clean;
+            poisoned[0]["z"] = deep;
+
+            const njson wire_clean = mk_block(clean).to_json();
+            const njson wire_pois  = mk_block(poisoned).to_json();
+
+            auto envelope = [&](net::MsgType t, const njson& payload) {
+                njson e;
+                e["type"]    = static_cast<uint8_t>(t);
+                e["payload"] = payload;
+                const std::string s = e.dump();
+                return std::vector<uint8_t>(s.begin(), s.end());
+            };
+            auto accepts = [&](const std::vector<uint8_t>& b) {
+                try { (void)net::Message::deserialize(b.data(), b.size()); return true; }
+                catch (const std::exception&) { return false; }
+            };
+
+            // (5a) The wedge PRECONDITION — the asymmetry is real and this
+            //      vector sits inside the band. If either half flipped, every
+            //      leg below would be vacuous, so both are asserted.
+            njson cr_pois; cr_pois["blocks"] = njson::array({ wire_pois });
+            check(accepts(envelope(net::MsgType::BLOCK, wire_pois)),
+                  "F-10 precondition: the poisoned block IS accepted as a BLOCK envelope");
+            check(!accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr_pois)),
+                  "F-10 precondition: the SAME verbatim bytes are REJECTED as CHAIN_RESPONSE "
+                  "(envelope-relative ceiling — this is the wedge)");
+
+            // (5b) THE FIX. After ingest the stored block re-serves at
+            //      CHAIN_RESPONSE depth, so the sync wedge is gone.
+            chain::Block ingested = chain::Block::from_json(wire_pois);
+            njson cr_ing; cr_ing["blocks"] = njson::array({ ingested.to_json() });
+            check(accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr_ing)),
+                  "F-10 CLOSED: after ingest the block RE-SERVES at CHAIN_RESPONSE depth");
+            check(!ingested.abort_events.at(0).claims_json.at(0).contains("z"),
+                  "F-10: the injected unknown member is GONE from the stored block body");
+
+            // (5c) CONSENSUS-BYTE-NEUTRAL. An honest block round-trips through
+            //      ingest byte-identically, the ingested poisoned block is
+            //      byte-identical to the honest one, and the abort-event digest
+            //      is the one it already had — no fork, no golden migration.
+            check(chain::Block::from_json(wire_clean).to_json().dump() == wire_clean.dump(),
+                  "byte-neutral: an honest block round-trips through ingest byte-identically");
+            check(ingested.to_json().dump() == wire_clean.dump(),
+                  "byte-neutral: the ingested poisoned block == the honest block, byte for byte");
+            check(node::hash_abort_event(ingested.abort_events.at(0)) == hc,
+                  "byte-neutral: the ingested abort-event digest is UNCHANGED");
+
+            // (5d) The SECOND ingress. AbortEvent::from_json has exactly two
+            //      callers: Block::from_json (above) and the standalone
+            //      MsgType::ABORT_EVENT gossip handler (net/gossip.cpp), which
+            //      materialises an event with NO Block around it. That path is
+            //      the SHALLOWEST envelope — claim at depth 5 versus 6 under
+            //      BLOCK — so it admits the DEEPEST injection, making it the
+            //      ingress an argument reasoning only about blocks would miss.
+            //      Pinned separately so a future refactor cannot canonicalize
+            //      one caller and not the other.
+            {
+                const njson ev_wire = wire_pois.at("abort_events").at(0);
+                chain::AbortEvent ev_in = chain::AbortEvent::from_json(ev_wire);
+                check(!ev_in.claims_json.at(0).contains("z"),
+                      "F-10: the standalone ABORT_EVENT gossip ingress canonicalizes too "
+                      "(the second caller of AbortEvent::from_json)");
+                check(node::hash_abort_event(ev_in) == hc,
+                      "byte-neutral: the standalone-ingested abort event keeps its digest");
+            }
+        }
+
+        // ── (6) FALLBACK SOUNDNESS ──────────────────────────────────────────
+        // Ingest KEEPS a claim it cannot canonicalize rather than rejecting it:
+        // from_json throwing is a parse failure, and under WIRE-3 a parse
+        // failure now CLOSES THE PEER, so rejecting would turn a malformed
+        // gossiped claim into a disconnect for no security gain. That is sound
+        // only because canonicalization is strictly WEAKER than per-claim
+        // validation — `at(k).get<T>()` versus `json_require<T>` (the same
+        // get<T>, plus a contains() check, plus an exact hex-length check on
+        // the two hex fields). So nothing that survives validation can reach
+        // the fallback, and no committed block can carry un-stripped bytes.
+        // Pin that implication rather than asserting it in prose.
+        {
+            auto canon_falls_back = [&](const njson& claim) {
+                njson arr = njson::array({ claim });
+                return dc::canonical_abort_claims(arr) == arr;   // unchanged ⇒ fell back
+            };
+            auto validation_rejects = [&](const njson& claim) {
+                try { (void)node::AbortClaimMsg::from_json(claim); return false; }
+                catch (const std::exception&) { return true; }
+            };
+
+            std::vector<njson> bad;
+            { njson c = clean[0]; c.erase("ed_sig");                 bad.push_back(c); }
+            { njson c = clean[0]; c["block_index"] = "ten";          bad.push_back(c); }
+            { njson c = clean[0]; c["prev_hash"]   = 7;              bad.push_back(c); }
+            { njson c = clean[0]; c["claimer"]     = njson::array(); bad.push_back(c); }
+            bad.push_back(njson("not-an-object"));
+
+            bool implication = true;
+            for (const auto& c : bad)
+                implication = implication && canon_falls_back(c) && validation_rejects(c);
+            check(implication,
+                  "fallback soundness: every claim that falls back to VERBATIM is also "
+                  "REJECTED by per-claim validation (the fallback cannot reach a block)");
+        }
+
         std::cout << (fail ? "  FAIL: test-abort-claims-canonical\n"
                            : "  PASS: test-abort-claims-canonical\n");
         return fail ? 1 : 0;

@@ -9,13 +9,29 @@
 # riding the K-of-K block digest, and it unblocks the minix determ::djson swap
 # for this site (no attacker-controlled double reaches dump()).
 #
-# `determ test-abort-claims-canonical` asserts (14): BYTE-NEUTRALITY for honest
+# The same rebuild also runs on INGEST: AbortEvent::from_json stores
+# canonical_abort_claims(...) rather than the verbatim peer JSON. That closes
+# round-13 F-10 — `claims_json` was schema-free and to_json re-emits it, so an
+# injected member could carry arbitrary NESTING into a block nothing
+# authenticates (signing_bytes binds only event_hash), and the WIRE-2 depth
+# ceiling is ENVELOPE-RELATIVE (claim at depth 6 under BLOCK, 8 under
+# CHAIN_RESPONSE), so such a block committed fleet-wide but could never be
+# re-served, wedging sync. See docs/proofs/S022WireFormatCaps.md F-10.
+#
+# `determ test-abort-claims-canonical` asserts (23): BYTE-NEUTRALITY for honest
 # claims (canonical == verbatim → every honest abort block's digest UNCHANGED,
 # no fork/migration), three non-semantic channels STRIPPED (unknown members, the
 # numeric-VALUE encoding of int fields — a float-encoded block_index truncates
 # past validation but is canonicalized away — and hex case), each LOAD-BEARING
-# (the variation DOES change the verbatim bytes), and the non-array / malformed
-# / empty fallbacks. The
+# (the variation DOES change the verbatim bytes), the non-array / malformed
+# / empty fallbacks, and the INGEST legs: the F-10 wedge reproduced as a
+# PRECONDITION (accepted as BLOCK, rejected as CHAIN_RESPONSE — so the fix legs
+# cannot pass vacuously), the block RE-SERVING at CHAIN_RESPONSE depth after
+# ingest, the injected member GONE from the stored body, and ingest
+# byte-neutrality (honest block round-trips identically; ingested poisoned block
+# == honest block; abort-event digest unchanged). Also pinned: every claim that
+# falls back to VERBATIM is REJECTED by per-claim validation, so the fallback
+# cannot reach a committed block. The
 # whole-suite witness that the digest is byte-neutral is that every existing
 # abort test (test-abort-event-apply, the FA abort traces) + the consensus
 # goldens stay green with this change in.

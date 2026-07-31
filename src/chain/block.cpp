@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/chain/block.hpp>
+#include <determ/chain/abort_canonical.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/util/json_validate.hpp>
 #include <set>
@@ -119,7 +120,16 @@ AbortEvent AbortEvent::from_json(const json& j) {
     ae.aborting_node = json_require<std::string>(j, "aborting_node");
     ae.timestamp     = json_require<int64_t>(j, "timestamp");
     ae.event_hash    = from_hex_arr<32>(json_require_hex(j, "event_hash", 64));
-    ae.claims_json   = j.value("claims", json::array());
+    // F-10 (round-13 hostile-wire audit): store the CANONICAL rebuild — the six
+    // consensus-bound fields only — not the verbatim peer JSON. `claims_json`
+    // is otherwise schema-free, and to_json re-emits it verbatim, so an
+    // injected unknown member could carry arbitrary NESTING into a block that
+    // the K-of-K digest does not cover (signing_bytes binds only event_hash) —
+    // which honest validators sign, and which the envelope-relative WIRE-2
+    // depth ceiling then refuses to re-serve. CONSENSUS-BYTE-NEUTRAL: the
+    // digest applies this same idempotent helper, so every block's hash is
+    // unchanged. See abort_canonical.hpp.
+    ae.claims_json   = canonical_abort_claims(j.value("claims", json::array()));
     return ae;
 }
 
