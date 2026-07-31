@@ -2742,6 +2742,26 @@ std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
                "non-EXTENDED beacon holds no `t:` distress records)";
     }
 
+    // D2: refuse a payload the binary tx frame cannot represent. `payload_len`
+    // is a u16, so above TX_FRAME_PAYLOAD_MAX the frame's declared length and
+    // its written overflow section disagree and a peer decodes a DIFFERENT
+    // transaction (Transaction::encode_frame throws rather than emit that, but
+    // gossip's per-peer `catch (...)` would swallow it and the tx would simply
+    // never propagate — silently). Rejecting here turns that silence into an
+    // error the submitter can see.
+    //
+    // Nothing legitimate is excluded: every payload-bearing type is capped far
+    // lower (TRANSFER 128, DAPP_CALL / CT 16384, COMPOSABLE_BATCH 47554). The
+    // check is deliberately TYPE-INDEPENDENT because several types carry a
+    // payload with no per-type cap at all, and Transaction::from_json applies
+    // no bound on the RPC ingress. A wire-received tx cannot exceed this by
+    // construction (decode_frame reads payload_len as u16), so this gate is the
+    // only place an oversized payload can enter.
+    if (tx.payload.size() > chain::TX_FRAME_PAYLOAD_MAX) {
+        return "tx payload exceeds the binary frame limit ("
+             + std::to_string(chain::TX_FRAME_PAYLOAD_MAX) + " bytes)";
+    }
+
     // Check if this tx would REPLACE an existing one at (from, nonce).
     // A replace doesn't add to the mempool count — same slot, same sender.
     auto existing_it = tx_by_account_nonce_.find({tx.from, tx.nonce});

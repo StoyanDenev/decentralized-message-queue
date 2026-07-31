@@ -176,8 +176,18 @@ void Transaction::encode_frame(std::vector<uint8_t>& out) const {
 
     // trailer
     out.push_back(static_cast<uint8_t>(type));
-    uint16_t payload_len = static_cast<uint16_t>(
-        payload.size() > 0xFFFF ? 0xFFFF : payload.size());
+    // FAIL-CLOSED, not clamped. `payload_len` is a u16, but the overflow
+    // section below writes payload.size() - 32 bytes UNCLAMPED. Clamping the
+    // declared length while writing the true length desynchronizes encode from
+    // decode: for payload.size() > 0xFFFF the decoder reads only 0xFFFF - 32
+    // overflow bytes and then parses `from`'s length prefix out of the middle
+    // of the payload — attacker-chosen bytes, silently, with no error. So the
+    // encoder refuses instead, exactly like the pq_auth sibling 15 lines below.
+    // Ingress rejects such a payload first (Node::mempool_admit_check); this is
+    // the backstop that makes the ambiguity unrepresentable at the codec.
+    if (payload.size() > TX_FRAME_PAYLOAD_MAX)
+        throw std::runtime_error("tx frame: payload exceeds u16 length");
+    uint16_t payload_len = static_cast<uint16_t>(payload.size());
     le_put_u16(out, payload_len);
     if (payload.size() > 32) {
         size_t overflow = payload.size() - 32;

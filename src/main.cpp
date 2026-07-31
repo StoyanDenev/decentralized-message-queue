@@ -23512,6 +23512,97 @@ int main(int argc, char** argv) {
                   "(decode_tx_frame bounds check; register BinaryCodecRoundTripSoundness T-3)");
         }
 
+        // 11. D2: an oversized payload is REFUSED by the encoder, not clamped.
+        //     `payload_len` is a u16 but the overflow section is written
+        //     UNCLAMPED, so the pre-fix encoder emitted a frame whose declared
+        //     length and written length disagree above 0xFFFF: the decoder read
+        //     0xFFFF-32 overflow bytes and then parsed `from`'s length prefix
+        //     out of the MIDDLE of the payload — attacker-chosen bytes, with no
+        //     error anywhere. Reachable from the RPC ingress
+        //     (Node::rpc_submit_tx -> Transaction::from_json applies no payload
+        //     bound -> mempool_admit_check -> gossip broadcast -> encode_frame).
+        {
+            auto mk = [&](size_t payload_bytes) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+                tx.amount = 1; tx.fee = 0; tx.nonce = 0;
+                tx.payload.assign(payload_bytes, 0xAB);
+                tx.hash = tx.compute_hash();
+                return tx;
+            };
+
+            // Positive control at the exact boundary: 0xFFFF still round-trips
+            // field-for-field. Without this the reject leg below could pass
+            // vacuously if the bound were mistakenly set too low.
+            {
+                Transaction tx = mk(chain::TX_FRAME_PAYLOAD_MAX);
+                std::vector<uint8_t> buf;
+                bool ok = false;
+                try {
+                    tx.encode_frame(buf);
+                    Transaction back = Transaction::decode_frame(buf.data(), buf.size());
+                    ok = back.payload == tx.payload && back.from == tx.from
+                      && back.to == tx.to && back.amount == tx.amount
+                      && back.hash == tx.hash;
+                } catch (...) { ok = false; }
+                check(ok, "tx frame: a payload of exactly TX_FRAME_PAYLOAD_MAX "
+                          "(65535) round-trips field-for-field (boundary control)");
+            }
+
+            // One byte over: the encoder must REFUSE. Pre-fix this silently
+            // produced a mis-decodable frame.
+            {
+                Transaction tx = mk(chain::TX_FRAME_PAYLOAD_MAX + 1);
+                std::vector<uint8_t> buf;
+                bool threw = false;
+                try { tx.encode_frame(buf); }
+                catch (const std::exception& e) {
+                    threw = std::string(e.what())
+                                .find("tx frame: payload exceeds u16 length")
+                            != std::string::npos;
+                }
+                check(threw, "tx frame: a payload of TX_FRAME_PAYLOAD_MAX+1 is "
+                             "REJECTED 'payload exceeds u16 length' (fail-closed, "
+                             "not clamped)");
+            }
+
+            // The regression itself, stated as a property: for every payload
+            // size the encoder ACCEPTS, decode must reproduce the payload
+            // exactly. This is the leg that reddens if the throw is reverted to
+            // a clamp — the 70000-byte case then encodes, and decode returns a
+            // DIFFERENT transaction instead of throwing.
+            {
+                bool all_faithful = true;
+                std::string why;
+                for (size_t n : {size_t{0}, size_t{31}, size_t{32}, size_t{33},
+                                 size_t{65534}, chain::TX_FRAME_PAYLOAD_MAX,
+                                 chain::TX_FRAME_PAYLOAD_MAX + 1, size_t{70000}}) {
+                    Transaction tx = mk(n);
+                    std::vector<uint8_t> buf;
+                    try { tx.encode_frame(buf); }
+                    catch (const std::exception&) { continue; }  // refused: fine
+                    try {
+                        Transaction back =
+                            Transaction::decode_frame(buf.data(), buf.size());
+                        if (back.payload != tx.payload || back.from != tx.from) {
+                            all_faithful = false;
+                            why = "payload/from differ at n=" + std::to_string(n);
+                            break;
+                        }
+                    } catch (const std::exception& e) {
+                        all_faithful = false;
+                        why = std::string("threw at n=") + std::to_string(n)
+                            + ": " + e.what();
+                        break;
+                    }
+                }
+                if (!all_faithful) std::cout << "    got: [" << why << "]\n";
+                check(all_faithful,
+                      "tx frame: EVERY payload size the encoder accepts decodes "
+                      "back to the SAME transaction (no silent clamp desync)");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-binary-codec " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

@@ -299,6 +299,21 @@ inline constexpr uint64_t DAPP_GRACE_BLOCKS       = 100;
 // PARAM_CHANGE-promoted if the ecosystem demands it.
 inline constexpr uint32_t MAX_DAPP_CALL_PAYLOAD   = 16384; // 16 KB
 
+// D2: the binary tx frame carries `payload_len` in a u16 (see the frame layout
+// on Transaction::encode_frame), so a payload above 0xFFFF has NO representable
+// length on the wire. This is the exact capacity of that field, not a policy
+// number — raising it requires widening the frame field, which is a format
+// change, not a config change.
+//
+// Every payload-bearing tx type is already capped far below it (TRANSFER 128,
+// REGISTER 33, DAPP_CALL / CONFIDENTIAL_TRANSFER 16384, COMPOSABLE_BATCH 47554
+// = 64 inner frames whose own payloads are capped at 32), so no honest tx comes
+// near this bound and enforcing it costs nothing legitimate. It exists because
+// several tx types carry a payload with NO per-type cap at all (STAKE, UNSTAKE,
+// DEREGISTER, REGION_CHANGE, ...), and the RPC ingress accepts an arbitrary
+// payload from Transaction::from_json.
+inline constexpr size_t TX_FRAME_PAYLOAD_MAX = 0xFFFF;
+
 struct Transaction {
     TxType               type{TxType::TRANSFER};
     std::string          from;
