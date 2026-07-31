@@ -45,6 +45,12 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
   1. Strip JSON from the p2p wire envelope (src/net/gossip.cpp, messages.cpp,
      binary_codec.cpp) + storage/genesis (src/chain/block.cpp, chain.cpp,
      genesis.cpp) + wallet keyfiles. Wire portion is GENESIS-DEADLINE (no-migrations).
+     PROGRESS 2026-07-31: the ENVELOPE strip is DONE (b29d422 pq_auth tx-frame
+     gap + ce31c6f binary-only envelope/HELLO, negotiation deleted, mirrors +
+     gates rewritten, mutant-verified, FAST green). 16 non-HELLO/non-TRANSACTION
+     types still carry length-prefixed JSON PAYLOADS inside the binary envelope
+     (WIRE-2 stays until those binarize per-type); storage/genesis/keyfiles not
+     started.
   2. Delete third_party/nlohmann/json.hpp AND include/determ/json/json.hpp;
      regenerate test vectors as binary. RPC/CLI/config may keep optional text.
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.

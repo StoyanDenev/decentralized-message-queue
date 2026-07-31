@@ -2,9 +2,11 @@
 
 This document formalizes the S-022 closure shipped in `src/net/peer.cpp::read_body` and `include/determ/net/messages.hpp::max_message_bytes` (the per-message-type body-size cap and its single call-site enforcement). The pre-S-022 surface admitted bodies up to `kMaxFrameBytes` (16 MB) for **every** `MsgType`, which meant a flooder could send 16 MB CONTRIB or BLOCK_SIG frames at the framing-layer ceiling — even though the legitimate maximum for a CONTRIB envelope is well under 64 KB and a BLOCK_SIG is a fixed-shape ~200-byte struct. S-022 tightens this by interposing a second, type-aware cap **after** `Message::deserialize` returns: the framing layer reads at most 16 MB, the deserialize-time check then enforces `max_message_bytes(msg.type)` (1 MB for consensus chatter, 4 MB for blocks / headers / bundles, 16 MB only for `SNAPSHOT_RESPONSE` / `CHAIN_RESPONSE`), and a violation closes the connection (same disposition the framing-layer overflow path applies).
 
-> **⚠ READ FIRST — round-12 revision (hostile-wire audit wf_c277c6d1).** Three load-bearing claims in this document were **false** and are corrected in place: §2.2's "`Message::deserialize` returns `msg.type` cheaply", §2.4's *Defended* verdict on the sustained 16-MB-padded CONTRIB flood, and a citation to an "asio accept-loop concurrency cap" that does not exist in this tree. The root cause is a single pattern — **every guard was correct but sat downstream of the cost it bounded** — which T-1..T-5 are structurally unable to detect, because they reason about *whether* a guard fires and never about *what has already been spent* when it does. **T-6** is the added theorem that covers pre-dispatch work. Two gaps remain open and owner-gated: **F-6** (in-ceiling DOM residual) and **F-7** (no inbound-connection cap). See §8 for the full revision record.
+> **⚠ READ FIRST — round-12 revision (hostile-wire audit wf_c277c6d1).** Three load-bearing claims in this document were **false** and are corrected in place: §2.2's "`Message::deserialize` returns `msg.type` cheaply", §2.4's *Defended* verdict on the sustained 16-MB-padded CONTRIB flood, and a citation to an "asio accept-loop concurrency cap" that does not exist in this tree. The root cause is a single pattern — **every guard was correct but sat downstream of the cost it bounded** — which T-1..T-5 are structurally unable to detect, because they reason about *whether* a guard fires and never about *what has already been spent* when it does. **T-6** is the added theorem that covers pre-dispatch work.
+>
+> **⚠ D2 revision (2026-07-31).** The legacy JSON envelope path this document repeatedly reasons about was **deleted pre-genesis** by the D2 binary-only wire strip (`ce31c6f`, on the `b29d422` binary-TRANSACTION groundwork): `Message::serialize()` and the deserialize JSON branch are gone, `Message::deserialize` rejects any non-0xB1 body ("not a binary envelope") before any parse, and the per-pair v0/v1 wire-version negotiation is deleted. Claims below that argued a bound was unattainable *because of the JSON path* carry dated reconciliation notes in place. **F-6 as originally defined (the JSON-envelope residual) is CLOSED-BY-DELETION** (§6.2); the surviving binary-path residual — the attacker-chosen type byte at offset 2 buying the 16 MB tier — remains bounded by WIRE-2, not eliminated. **F-7** (no inbound-connection cap) remains open. See §8 for the full revision record.
 
-The proof is short and structural — there are no cryptographic assumptions; this is a pure length-bound argument. T-1 establishes completeness of the `max_message_bytes` mapping (every MsgType is bounded, with a tight 1 MB default branch absorbing future variants). T-2 establishes that the framing-layer ceiling (`kMaxFrameBytes`) acts as the outer defense before any type byte is interpreted. T-3 isolates the post-deserialize defense-in-depth posture: caps fire after framing succeeds but before `on_msg_` dispatch, so a deserialize that "leniently" accepts a padded body still cannot deliver an oversize payload to the message handler. T-4 covers the connection-close disposition: a violation triggers `Peer::close()` via the existing `on_close_` callback, not a silent drop — so a sustained flooder pays a TCP-reconnect cost on every oversize attempt. T-5 establishes the multiplicative composition with the S-014 rate limiter: bounded per-message work × bounded per-connection rate = bounded per-connection bandwidth. **T-6** (added round 12) covers the property the other five miss: that pre-dispatch work is bounded by a guard running *before* the parser allocates, on both wire formats and independently of any attacker-chosen field. T-1..T-4 are statements about *whether* a guard fires; T-5's parse term silently assumed the answer implied a work bound. It did not — see the READ FIRST note above.
+The proof is short and structural — there are no cryptographic assumptions; this is a pure length-bound argument. T-1 establishes completeness of the `max_message_bytes` mapping (every MsgType is bounded, with a tight 1 MB default branch absorbing future variants). T-2 establishes that the framing-layer ceiling (`kMaxFrameBytes`) acts as the outer defense before any type byte is interpreted. T-3 isolates the post-deserialize defense-in-depth posture: caps fire after framing succeeds but before `on_msg_` dispatch, so a deserialize that "leniently" accepts a padded body still cannot deliver an oversize payload to the message handler. T-4 covers the connection-close disposition: a violation triggers `Peer::close()` via the existing `on_close_` callback, not a silent drop — so a sustained flooder pays a TCP-reconnect cost on every oversize attempt. T-5 establishes the multiplicative composition with the S-014 rate limiter: bounded per-message work × bounded per-connection rate = bounded per-connection bandwidth. **T-6** (added round 12) covers the property the other five miss: that pre-dispatch work is bounded by a guard running *before* the parser allocates, on both wire formats as then shipped (post-D2 the single binary format — see T-6's clause-1 deletion note) and independently of any attacker-chosen field. T-1..T-4 are statements about *whether* a guard fires; T-5's parse term silently assumed the answer implied a work bound. It did not — see the READ FIRST note above.
 
 **Companion documents:** `Preliminaries.md` §3 (network model) for the `Peer` framing-layer assumption underlying T-2; `S014RateLimiterSoundness.md` (S-014 closure) for the rate-limit composition theorem T-5 references; `S014ConcurrencyAnalysis.md` for the event-loop concurrency model that the per-connection `Peer::read_header` → `Peer::read_body` chain runs on (note: that model is now the native IOCP / epoll `net::` seam — **ASIO is deleted from this tree**, so any "asio" wording carried over from the original draft refers to the pre-minix-§7 backend and should be read as the `EventLoop` worker pool); `S006ContribMsgEquivocation.md` for the structural-additivity proof style mirrored here; `S030-D2-Analysis.md` for the state-divergence threat model that S-022 helps mitigate by bounding per-block work; `docs/SECURITY.md` §S-022 (quick-fix summary in §6.5) for the closure-status narrative this proof formalizes.
 
@@ -12,23 +14,23 @@ The proof is short and structural — there are no cryptographic assumptions; th
 
 ## 1. Theorem statements
 
-**Setup.** Let `kMaxFrameBytes` denote the framing-layer ceiling (`include/determ/net/messages.hpp:101`):
+**Setup.** Let `kMaxFrameBytes` denote the framing-layer ceiling (`include/determ/net/messages.hpp:119`):
 
 ```cpp
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;   // 16 MB
 ```
 
-Let `max_message_bytes : MsgType → size_t` denote the per-MsgType body-cap function defined at `include/determ/net/messages.hpp:124-152`. The function is a `switch` over the `MsgType` enum (values 0-18 at `include/determ/net/messages.hpp:13-82`) with three returnable values:
+Let `max_message_bytes : MsgType → size_t` denote the per-MsgType body-cap function defined at `include/determ/net/messages.hpp:142-170`. The function is a `switch` over the `MsgType` enum (values 0-18 at `include/determ/net/messages.hpp:13-82`) with three returnable values:
 
 - **16 MB** for `MsgType::SNAPSHOT_RESPONSE` (16) and `MsgType::CHAIN_RESPONSE` (6).
 - **4 MB** for `MsgType::BLOCK` (1), `MsgType::BEACON_HEADER` (12), `MsgType::SHARD_TIP` (13), `MsgType::CROSS_SHARD_RECEIPT_BUNDLE` (14), `MsgType::HEADERS_RESPONSE` (18).
 - **1 MB** (default branch) for every other variant: `HELLO`, `TRANSACTION`, `BLOCK_SIG`, `CONTRIB`, `GET_CHAIN`, `STATUS_REQUEST`, `STATUS_RESPONSE`, `ABORT_CLAIM`, `ABORT_EVENT`, `EQUIVOCATION_EVIDENCE`, `SNAPSHOT_REQUEST`, `HEADERS_REQUEST`.
 
-The default branch is **tight** (1 MB) by deliberate design — any new MsgType added without explicit categorisation inherits the strict cap rather than the permissive 16 MB ceiling. The `include/determ/net/messages.hpp:145-150` comment names this explicitly:
+The default branch is **tight** (1 MB) by deliberate design — any new MsgType added without explicit categorisation inherits the strict cap rather than the permissive 16 MB ceiling. The `include/determ/net/messages.hpp:161-166` comment names this explicitly:
 
 > Default branch keeps the cap tight even if new MsgType variants get added without explicit categorisation — better to be too strict and catch a regression in review than to let a new unbounded type slip through unchecked.
 
-The peer read loop is at `src/net/peer.cpp::read_header` + `Peer::read_body`. After a 4-byte big-endian length header is read at lines 58-67, `read_header` applies the framing-layer guard:
+The peer read loop is at `src/net/peer.cpp::read_header` + `Peer::read_body`. After a 4-byte big-endian length header is read and decoded (`src/net/peer.cpp:48-51`), `read_header` applies the framing-layer guard (`peer.cpp:54-57`):
 
 ```cpp
 if (len == 0 || len > kMaxFrameBytes) {
@@ -37,7 +39,7 @@ if (len == 0 || len > kMaxFrameBytes) {
 }
 ```
 
-then calls `read_body(len)` which reads `len` bytes into `body_buf_`, deserializes the body via `Message::deserialize` (a format-detecting JSON / binary dispatch at `messages.hpp:170` / `binary_codec.cpp`), and immediately applies the per-type cap at `src/net/peer.cpp:90-97`:
+then calls `read_body(len)` which reads `len` bytes into `body_buf_`, deserializes the body via `Message::deserialize` (binary-only post-D2: 0xB1 magic check → WIRE-1 pre-decode per-type cap → `decode_binary`; `src/net/messages.cpp:82-116` — the pre-D2 format-detecting JSON / binary dispatch is deleted), and immediately applies the per-type cap at `src/net/peer.cpp:80-87`:
 
 ```cpp
 if (self->body_buf_.size() > max_message_bytes(msg.type)) {
@@ -51,7 +53,7 @@ if (self->body_buf_.size() > max_message_bytes(msg.type)) {
 if (self->on_msg_) self->on_msg_(self, msg);
 ```
 
-Let `M = (type, payload)` denote a `Message` (struct at `include/determ/net/messages.hpp:154-171`). Let `|body(M)|` denote the body-buffer length on the wire (the 4-byte-header-stripped payload, as observed at `Peer::read_body`'s `body_buf_.size()`).
+Let `M = (type, payload)` denote a `Message` (struct at `include/determ/net/messages.hpp:280-292`). Let `|body(M)|` denote the body-buffer length on the wire (the 4-byte-header-stripped payload, as observed at `Peer::read_body`'s `body_buf_.size()`).
 
 **Theorem T-1 (Body-Cap Enforcement Completeness).** For every `MsgType m`, `max_message_bytes(m)` returns a finite size. The mapping is exhaustive across the 19 declared variants (`HELLO` = 0 .. `HEADERS_RESPONSE` = 18) plus the default branch, with three monotone tiers:
 
@@ -62,7 +64,7 @@ $$
 
 The default branch returns the tightest tier (1 MB), so any future `MsgType` variant added without explicit categorisation inherits the 1-MB cap. No `MsgType` value can produce an unbounded result.
 
-**Theorem T-2 (Framing-Layer Outer Ceiling).** Any TCP read whose 4-byte length header decodes to a value `len > kMaxFrameBytes` is aborted at `Peer::read_header` (line 64) before `read_body` is invoked. The receiver therefore never allocates `body_buf_.resize(len)` for any `len > 16 MB`. Furthermore: the framing-layer abort fires before the type byte is read from the body, so an attacker cannot pre-allocate gigabyte buffers via a malformed framing header that lies about the message type.
+**Theorem T-2 (Framing-Layer Outer Ceiling).** Any TCP read whose 4-byte length header decodes to a value `len > kMaxFrameBytes` is aborted at `Peer::read_header` (`peer.cpp:54`) before `read_body` is invoked. The receiver therefore never allocates `body_buf_.resize(len)` for any `len > 16 MB`. Furthermore: the framing-layer abort fires before the type byte is read from the body, so an attacker cannot pre-allocate gigabyte buffers via a malformed framing header that lies about the message type.
 
 **Theorem T-3 (Post-Deserialize Defense-in-Depth).** For every body successfully read by `Peer::read_body`, the per-type cap is applied **after** `Message::deserialize` returns the `Message` value but **before** `on_msg_` is invoked. Specifically:
 
@@ -70,17 +72,17 @@ The default branch returns the tightest tier (1 MB), so any future `MsgType` var
 - The cap is enforced at the framing boundary regardless of `Message::deserialize`'s internal leniency on padding, trailing bytes, or duplicate keys. Even a deserialize that "leniently" accepts more bytes than the canonical wire form requires cannot defeat the cap, because the gate compares `body_buf_.size()` (the wire-read length) rather than any post-deserialize measure of the value.
 - The post-deserialize position is **deliberate**: the cap needs `msg.type` to choose the per-type ceiling, and `msg.type` is only available after `Message::deserialize` parses the type byte from the body.
 
-  **⚠ CORRECTED.** This bullet previously added: *"The type byte cannot be peeked at before deserialize because the binary envelope's magic prefix at `binary_codec.cpp` is not bit-equivalent across the JSON and binary paths."* **That was false for the binary path** — the binary envelope carries its type in the clear at body offset 2, and `b982332` now peeks exactly there. It remains true for the JSON path only. Two further consequences, neither visible to T-3 as originally stated:
+  **⚠ CORRECTED.** This bullet previously added: *"The type byte cannot be peeked at before deserialize because the binary envelope's magic prefix at `binary_codec.cpp` is not bit-equivalent across the JSON and binary paths."* **That was false for the binary path** — the binary envelope carries its type in the clear at body offset 2, and `b982332` now peeks exactly there. It remained true for the JSON path only — and the D2 strip (`ce31c6f`, 2026-07-31) then deleted that path outright: `Message::deserialize` is binary-only, so on the shipped wire the type is always readable pre-parse at offset 2 (WIRE-1 consumes it, `src/net/messages.cpp:106-114`). Two further consequences, neither visible to T-3 as originally stated:
   - Peeking the type does **not** make the cap sound on its own, because offset 2 is attacker-chosen (§2.3 fact 2). A hostile frame simply claims a 16 MB type.
   - T-3 reasons only about *whether* the cap gates dispatch. It says nothing about *what has already been spent* when the cap fires — which is where the 51.9× amplification lived. **T-3 as stated is true and was never violated; it was simply not a statement about resource consumption.** T-6 below is the theorem that covers the missing property.
 
 The cap is therefore the **first** defense that knows the type and the **last** defense before dispatch — a defense-in-depth posture that closes the per-type gap without requiring a redesign of either the framing layer or the codec. It is **not** a bound on pre-dispatch work; that is T-6's job.
 
-**Theorem T-4 (Connection-Close on Cap Violation).** A cap violation triggers `Peer::close()` via the existing `on_close_` callback chain (`src/net/peer.cpp:95`), not a silent message drop. Specifically:
+**Theorem T-4 (Connection-Close on Cap Violation).** A cap violation triggers `Peer::close()` via the existing `on_close_` callback chain (`src/net/peer.cpp:85`), not a silent message drop. Specifically:
 
-1. The oversize-message branch invokes `if (self->on_close_) self->on_close_(self)` at line 95 — the same handler that fires on framing-layer overflow (line 65) and on TCP-level read errors (lines 54-56).
+1. The oversize-message branch invokes `if (self->on_close_) self->on_close_(self)` at line 85 — the same handler that fires on framing-layer overflow (line 55) and on TCP-level read errors (`peer.cpp:44-46`, `67-69`).
 2. `on_close_` is the standard `GossipNet`-supplied closure-callback that removes the peer from the `peers_` map (`src/net/gossip.cpp`) and shuts down the socket via `Peer::~Peer` → `Peer::close`.
-3. The `return` at line 96 prevents the read-loop from re-entering `read_header` — so no further messages from the offending peer are processed on the same connection.
+3. The `return` at line 86 prevents the read-loop from re-entering `read_header` — so no further messages from the offending peer are processed on the same connection.
 
 A malicious peer flooding with oversize messages therefore incurs a per-message TCP-reconnect cost (a new SYN handshake + the gossip-layer attach + the HELLO exchange) **before** they can attempt another oversize frame. The amplification factor for the attacker's per-byte work is reduced from `O(1)` (per-message dispatch + parse cost) to `O(connection_setup_latency)` per attempted oversize frame.
 
@@ -112,15 +114,15 @@ S-022 reduces the adversary's bandwidth ceiling by 16× on the consensus-chatter
 > $$W_{\text{msg}} \;\leq\; W_{\text{parse}}(\texttt{kMaxFrameBytes}) + W_{\text{dispatch}}(\texttt{max\_message\_bytes}(m)),$$
 > i.e. the **parse** term was bounded by the 16 MB framing ceiling for *every* type, not by the type's own cap — and `W_parse` is not linear in body size (the DOM expansion is ~52× at the pathological extreme), so even that bound was far looser than the arithmetic above implies. T-5's *conclusion* about the dispatch term and the S-014 composition stands; its parse term did not, and T-6 is what restores it.
 >
-> **Corrected form.** With WIRE-2 in place, `W_parse` is bounded by the structural ceiling rather than by the byte ceiling alone, uniformly across both wire formats and independently of the attacker-chosen type. T-5's multiplicative composition with S-014 is then sound as stated, with `W_parse` read as the WIRE-2-bounded quantity.
+> **Corrected form.** With WIRE-2 in place, `W_parse` is bounded by the structural ceiling rather than by the byte ceiling alone, uniformly across the wire (both formats then; post-D2 the single binary format) and independently of the attacker-chosen type. T-5's multiplicative composition with S-014 is then sound as stated, with `W_parse` read as the WIRE-2-bounded quantity.
 
-**Theorem T-6 (Pre-dispatch work is bounded before the parser allocates).** For every body admitted by `Peer::read_header`, on **both** wire formats, the work performed before `on_msg_` dispatch is bounded by a quantity that does **not** depend on any attacker-chosen field, and the bound is enforced by a guard that runs **before** `nlohmann::json::parse` is invoked:
+**Theorem T-6 (Pre-dispatch work is bounded before the parser allocates).** For every body admitted by `Peer::read_header`, the work performed before `on_msg_` dispatch is bounded by a quantity that does **not** depend on any attacker-chosen field, and the bound is enforced by a guard that runs **before** `nlohmann::json::parse` is invoked (at round 12 this held on both wire formats; post-D2 clause 1 closes by deletion):
 
-1. **JSON envelope.** `Message::deserialize` calls `json_structural_precheck(data, len)` before `json::parse`. The scan is allocation-free, single-pass, and aborts at the first byte that exceeds `kMaxJsonDepth` or `kMaxJsonNodes` — so a body whose structure exceeds either ceiling costs only the prefix scanned, never a parse.
-2. **Binary envelope.** `decode_binary` calls `json_structural_precheck(body + 4, plen)` before its payload `json::parse`, closing the path a hostile frame reaches by claiming a 16 MB type at offset 2.
-3. **Parse failure terminates the connection.** Any exception from either path propagates to `Peer::read_body`'s `catch`, which invokes `on_close_` and returns without re-arming — so the cost of a rejected frame is paid at most once per connection (WIRE-3).
+1. **JSON envelope — CLOSED BY DELETION (D2, `ce31c6f`, 2026-07-31).** At round 12, `Message::deserialize`'s JSON branch called `json_structural_precheck(data, len)` before `json::parse` — allocation-free, single-pass, aborting at the first byte that exceeds `kMaxJsonDepth` or `kMaxJsonNodes`. The D2 strip deleted the branch (and `Message::serialize()`) outright: a non-0xB1 body is now rejected by the magic check (`src/net/messages.cpp:82-87`) with **no parse at all** — strictly stronger than the guarded parse it replaces.
+2. **Binary envelope.** `decode_binary` calls `json_structural_precheck(body + 4, plen)` (`src/net/binary_codec.cpp:468`) before its payload `json::parse`, closing the path a hostile frame reaches by claiming a 16 MB type at offset 2. This is the wire's single surviving parse site: the 17 non-HELLO/non-TRANSACTION types still carry length-prefixed JSON payloads inside the binary envelope, so the precheck survives the D2 strip and retires only with the D2 tail (true binary frames per type).
+3. **Parse failure terminates the connection.** Any exception from the deserialize path propagates to `Peer::read_body`'s `catch`, which invokes `on_close_` and returns without re-arming — so the cost of a rejected frame is paid at most once per connection (WIRE-3).
 
-Consequently the resulting DOM is bounded by `O(kMaxJsonNodes)` nodes at depth `≤ kMaxJsonDepth` regardless of `msg.type`, and the per-connection repeat rate of a rejected frame is bounded by the TCP reconnect cost rather than by zero. **Residual:** T-6 bounds the DOM, not the *ratio* of DOM to input; a 16 MB frame within the ceilings still reaches a measured 482 MB (25.5×), or 525 MB (41.4×) including the `payload` deep copy — versus 130 MB (8.1×) for the densest legitimate message. Eliminating that residual requires a protocol decision — see F-6 and the measured table in §2.3.
+Consequently the resulting DOM is bounded by `O(kMaxJsonNodes)` nodes at depth `≤ kMaxJsonDepth` regardless of `msg.type`, and the per-connection repeat rate of a rejected frame is bounded by the TCP reconnect cost rather than by zero. **Residual:** T-6 bounds the DOM, not the *ratio* of DOM to input; a 16 MB frame within the ceilings still reaches a measured 482 MB (25.5×) — versus 130 MB (8.1×) for the densest legitimate message. (The 525 MB / 41.4× figure that added the JSON-envelope `payload` deep copy is retired: D2 deleted that copy site, and `decode_binary` parses directly into `m.payload`, `binary_codec.cpp:469`.) Eliminating that residual now means binarizing the remaining JSON payloads (the D2 tail) — see F-6 and the measured table in §2.3.
 
 ---
 
@@ -156,6 +158,8 @@ Three structural facts make the two-tier design clean:
 
   The correct statement is: **the per-type cap is keyed on a quantity that is not available until after the expensive work.** That is why bounding the input length is insufficient on its own and why the WIRE-2 structural ceiling (§2.3) was added — it is the only guard in this chain that runs *before* the parser allocates.
 
+  **D2 note (2026-07-31, `ce31c6f`): the JSON path described above is deleted.** `Message::deserialize` is binary-only, so no shipped wire path carries a type readable only post-parse; the 831 MB measurement is a record of the deleted path. WIRE-2 survives because `decode_binary` still parses length-prefixed JSON payloads for the 17 non-HELLO/non-TRANSACTION types — and the type at offset 2 remains attacker-chosen, so the binary half of this correction is still live.
+
 - **The default branch is the right place to put the tight ceiling.** A new MsgType variant added without explicit categorisation (a common slip during development) would inherit whatever the `switch` default returns. The S-022 closure deliberately makes the default branch tight (1 MB) — so a regression is louder (a legitimate new large-payload type would visibly fail in QA with the strict default, prompting the developer to add an explicit case) rather than silent (a new large-payload type would silently consume up to 16 MB and only surface as an operational anomaly).
 
 The closure is therefore additive at two sites (one `switch` in `messages.hpp::max_message_bytes` + one if-statement in `peer.cpp::read_body`) and uses zero new types, no new validator predicates, and no new apply branches. The price: ~50 LOC at the type-cap table + ~10 LOC at the read-body site.
@@ -164,16 +168,16 @@ The closure is therefore additive at two sites (one `switch` in `messages.hpp::m
 
 A byte cap bounds the **input**; it does not bound the **DOM the parser builds from that input**. `nlohmann` materialises roughly one 16-byte node per value plus a container allocation per array/object, so a body composed entirely of structural bytes expands by a large constant factor — measured at 51.9× above. Three facts make the byte caps structurally unable to close this:
 
-1. **The JSON path's byte ceiling cannot be tightened below `kMaxFrameBytes`.** Its type is only readable *after* the parse, so the ceiling must be the maximum over all types. And it cannot be argued away by declaring the 16 MB types binary-only: `Peer::send` (`src/net/peer.cpp:103`) selects the JSON encoding whenever the peer's negotiated `wire_version` is `0`, which is the **default** (`peer.hpp:64`) until a HELLO is processed (`gossip.cpp:190`). `Node::on_snapshot_request` (`node.cpp:2317`) and `Node::on_get_chain` (`node.cpp:3102`) both reply through that same `peer->send`, and `peer_message_allowed` returns `true` unconditionally for the snapshot types while the role filter is skipped entirely for peers that have not sent HELLO (`gossip.cpp:115`). **SNAPSHOT_RESPONSE and CHAIN_RESPONSE therefore legitimately arrive as JSON envelopes at the 16 MB ceiling.** Option (ii) of the audit's decision — capping the JSON path at the 1 MB chatter ceiling — is **refuted by the send paths**.
+1. **~~The JSON path's byte ceiling cannot be tightened below `kMaxFrameBytes`~~ — MOOT: the JSON path is DELETED (D2, `ce31c6f`, 2026-07-31).** As shipped at round 12 this fact held and was load-bearing: the JSON envelope's type was only readable *after* the parse, so its ceiling had to be the maximum over all types — and the send paths (`Peer::send` selecting JSON at the default negotiated `wire_version` 0, plus the pre-HELLO window) made 16 MB JSON envelopes legitimate, refuting option (ii) of the audit's decision (capping the JSON path at the 1 MB chatter ceiling). The D2 strip dissolved the dilemma by deletion rather than capping: `Message::serialize()` and the deserialize JSON branch are gone, `Peer::send` is unconditionally binary with the silent catch-all JSON fallback deleted (`src/net/peer.cpp:114-124`), the `wire_version_` peer member and the `min(ours, theirs)` negotiation are deleted (HELLO's `wire_version` field is an advertisement nothing reads today, `src/net/gossip.cpp:185-188`), and `Message::deserialize` rejects any non-0xB1 body — "not a binary envelope" — before any parse (`src/net/messages.cpp:82-87`). The bound the round-12 argument proved unattainable is attained by deletion: no wire path parses an unprefixed JSON document at all. The pre-HELLO reachability itself is unchanged and still matters for fact 2: `SNAPSHOT_REQUEST` needs no HELLO (the role filter applies only after `hello_received()`, `src/net/gossip.cpp:170`; the snapshot types are role-agnostic, `gossip.cpp:130-138`), and the replies (`node.cpp:2317`, `node.cpp:3102`) legitimately reach 16 MB — but they now travel as binary envelopes whose payload parse is WIRE-2-guarded.
 
 2. **The binary path's per-type cap is keyed on an attacker-chosen field.** `b982332` reads the type from body offset 2 and applies `max_message_bytes` before decoding. But offset 2 is *attacker-controlled*: a hostile frame claiming `SNAPSHOT_RESPONSE` (16) or `CHAIN_RESPONSE` (6) buys the full 16 MB ceiling and lands in `decode_binary`'s payload parse with the amplification intact. WIRE-1 **narrowed** the vector to the two 16 MB types; it did not remove it.
 
 3. **Nothing upstream meters the cost.** `GossipNet::accept_loop` (`src/net/gossip.cpp:46-57`) accepts unconditionally with no inbound-connection cap, and the S-014 per-IP token bucket (`gossip.cpp:163`) lives in `handle_message` — the `on_msg_` callback invoked at `peer.cpp:88`, strictly **downstream** of both the parse and the cap. It meters none of this.
 
-The WIRE-2 ceiling (`kMaxJsonDepth = 64`, `kMaxJsonNodes = 4000000`, `include/determ/net/messages.hpp`) therefore bounds the DOM directly, in a single allocation-free pass over the raw bytes, applied **before** the parser runs on **both** wire formats (`Message::deserialize`'s JSON branch and `decode_binary`'s payload parse). Sizing, soundness and the residual are stated in the header commentary; the two facts that matter here:
+The WIRE-2 ceiling (`kMaxJsonDepth = 64`, `kMaxJsonNodes = 4000000`, `include/determ/net/messages.hpp:271-272`) therefore bounds the DOM directly, in a single allocation-free pass over the raw bytes, applied **before** the parser runs at the wire's single surviving parse site (`decode_binary`'s length-prefixed payload parse, `src/net/binary_codec.cpp:468` — at round 12 there was a second site, `Message::deserialize`'s JSON branch, deleted per D2). Sizing, soundness and the residual are stated in the header commentary; the two facts that matter here:
 
 - **It aborts at the offending byte.** The 16 MB `'['` flood is rejected after reading 65 bytes.
-- **The depth ceiling exists to prevent a CRASH, not a heap spike.** This is worth stating precisely, because the obvious reading — "the node ceiling already stops a `'['` flood at 4M, so depth is redundant" — is true about heap and **wrong about safety**. Measured: nlohmann 3.11.3 parses iteratively and its destructor is stack-safe, so a depth-3,900,000 document parses *and destroys* cleanly while consuming only 3.9M nodes — i.e. the node ceiling alone **would have admitted it**. But `serializer::dump()` recurses, and `Message::serialize()` calls `envelope.dump()`, so a node that accepted such a document and re-emitted it dies of stack exhaustion on the **send** path. Measured on an 8 MB stack (g++ -O2): depth 50,000 dumps fine, depth 200,000 **segfaults**. `kMaxJsonDepth = 64` sits ~1000× below that threshold and 8× above the deepest legitimate document. ⚠ Do not relax it on redundancy grounds.
+- **The depth ceiling exists to prevent a CRASH, not a heap spike.** This is worth stating precisely, because the obvious reading — "the node ceiling already stops a `'['` flood at 4M, so depth is redundant" — is true about heap and **wrong about safety**. Measured: nlohmann 3.11.3 parses iteratively and its destructor is stack-safe, so a depth-3,900,000 document parses *and destroys* cleanly while consuming only 3.9M nodes — i.e. the node ceiling alone **would have admitted it**. But `serializer::dump()` recurses, and the send path still dumps — post-D2 via `encode_binary`'s `m.payload.dump()` for the 17 JSON-payload types (`src/net/binary_codec.cpp:414`; pre-D2 it was `Message::serialize()`'s `envelope.dump()`) — so a node that accepted such a document and re-emitted it dies of stack exhaustion on the **send** path. Measured on an 8 MB stack (g++ -O2): depth 50,000 dumps fine, depth 200,000 **segfaults**. `kMaxJsonDepth = 64` sits ~1000× below that threshold and 8× above the deepest legitimate document. ⚠ Do not relax it on redundancy grounds.
 - **It removes the UNBOUNDED cases, not the constant factor.** ⚠ An earlier revision of this section claimed the in-ceiling residual was "of order 100 MB (≈6-8×)". **That was measurably wrong** — it rested on a "~16 bytes per value" DOM model that ignores `object_t = std::map`, where each `{` costs a map allocation plus a red-black-tree node per entry (~144 B for a single-entry object). Measured on the shipped ceilings (g++ -O2, counting global `operator new`):
 
   | shape | wire | DOM peak | factor |
@@ -184,7 +188,7 @@ The WIRE-2 ceiling (`kMaxJsonDepth = 64`, `kMaxJsonNodes = 4000000`, `include/de
   | objects + envelope, incl. the `payload` deep copy | 12.7 MB | 525 MB | **41.4×** |
   | — *legitimate* densest 16 MB snapshot, for calibration | 16.0 MB | 130 MB | 8.1× |
 
-  So the honest statement is: **51.9× → 25.5× (41.4× counting the payload copy), against 8.1× for a legitimate large message.** The ceiling's real value is that it makes the worst case *finite and shape-independent* — it forecloses the 16.7M-container and arbitrary-depth families entirely — not that it reaches 100 MB. Eliminating the remaining factor requires capping the JSON path itself at the chatter ceiling, which per fact (1) is a **protocol decision**. See F-6 in §6.2.
+  So the honest statement is: **51.9× → 25.5×, against 8.1× for a legitimate large message.** (The 41.4× payload-copy row and the 51.9× unmitigated figure were measured on the JSON envelope; D2 deleted both the envelope and the `m.payload = envelope["payload"]` copy site — `decode_binary` parses directly into `m.payload` — so the 25.5× depth-63 row is the in-ceiling worst case on the shipped wire.) The ceiling's real value is that it makes the worst case *finite and shape-independent* — it forecloses the 16.7M-container and arbitrary-depth families entirely — not that it reaches 100 MB. Post-D2 the remaining factor no longer waits on a protocol decision about the JSON path (fact 1 is moot); it retires when the 17 length-prefixed JSON payloads inside the binary envelope binarize (the D2 tail). See F-6 in §6.2.
 
 ### 2.4 Adversary model
 
@@ -197,7 +201,7 @@ The S-022 closure defends against three adversary families:
    - **"Rejected at the framing boundary" was wrong about ordering.** The per-type cap runs *after* `Message::deserialize`, so a 16-MB-padded CONTRIB was fully parsed — 831 MB peak heap, ~4.3-4.8 s CPU — and only *then* rejected. Every guard existed and was individually correct; each simply sat downstream of the cost it was supposed to bound. **Check-ordering is its own vulnerability class**, and neither T-3 nor T-4 detects it: both reason about *whether* the cap fires, never about *what has already been spent* when it does.
    - **"Adversary pays a TCP-reconnect cost" was wrong for the parse-error path.** True for the oversize branch, which returns after `on_close_`. But a frame that *fails to deserialize* hit the `catch` branch, which logged and re-armed `read_header()` — no close, so the cost was infinitely repeatable on one connection at zero cost to the sender. Closed as WIRE-3 (`src/net/peer.cpp`); T-4 is extended to cover it below.
 
-   **Current status: MITIGATED, not eliminated (T-2 + T-3 + T-4 + T-6).** The WIRE-2 structural ceiling (§2.3) now aborts the pathological shapes before the parser allocates — the 16 MB `'['` flood dies after 65 bytes — and WIRE-3 closes the connection on any parse failure, restoring the per-attempt reconnect cost. The residual is the in-ceiling DOM — a measured 482 MB (25.5×) from a 16 MB frame, 525 MB (41.4×) with the `payload` copy, rather than 831 MB (51.9×); see F-6 and the table in §2.3.
+   **Current status: MITIGATED, not eliminated (T-2 + T-3 + T-4 + T-6).** The WIRE-2 structural ceiling (§2.3) now aborts the pathological shapes before the parser allocates — the 16 MB `'['` flood dies after 65 bytes — and WIRE-3 closes the connection on any parse failure, restoring the per-attempt reconnect cost. The D2 strip (`ce31c6f`) then deleted the JSON envelope the 831 MB (51.9×) figure was measured on. The residual is the in-ceiling DOM on the binary envelope's length-prefixed JSON payloads — a measured 482 MB (25.5×) from a 16 MB frame, reachable only by claiming a 16 MB type at offset 2; see F-6 and the table in §2.3.
 
 2. **Multi-IP coordinated flood at the per-IP cap.** N attackers, N distinct IPs, each sending one oversize frame per connection before reconnecting. The per-IP rate-limit bound (T-1 of `S014RateLimiterSoundness.md`) prevents the per-IP burst from exceeding `C + r·Δ`; the per-message body-cap (T-1 + T-2 + T-3 here) further bounds the per-message work by `W_msg(m)`. The composite per-IP bandwidth bound from T-5 above is `(C + r·Δ) · W_msg(m)`. **Partially defended (T-5).** Aggregate-rate limiting across all IPs requires upstream throttling (out of scope for S-022's per-message layer; see `docs/SECURITY.md` §S-014 for the aggregate-rate discussion).
 
@@ -215,7 +219,7 @@ The closure does not address (and is not designed to address) the following:
 
 ### 3.1 The per-MsgType cap table
 
-Per `include/determ/net/messages.hpp:124-152`:
+Per `include/determ/net/messages.hpp:142-170`:
 
 ```cpp
 inline constexpr size_t max_message_bytes(MsgType type) {
@@ -249,7 +253,7 @@ inline constexpr size_t max_message_bytes(MsgType type) {
 }
 ```
 
-The framing-layer outer ceiling at `include/determ/net/messages.hpp:101`:
+The framing-layer outer ceiling at `include/determ/net/messages.hpp:119`:
 
 ```cpp
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
@@ -259,7 +263,7 @@ inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
 
 > **Environment note (doc-consolidation inc.4 drift-repair).** The `asio::async_read` / `asio::buffer` calls quoted below describe the pre-migration transport. `asio` is deleted from the tree; the gossip framing now runs behind the native `net::Transport` seam (IOCP on Windows, epoll on POSIX — see `MinixTacticalProfile.md`). The code walk-through is retained as the finding's original context; the per-`MsgType` body-cap enforcement it analyses lives in the `Peer::read_header`/`read_body` framing logic, not in asio.
 
-The framing-layer guard at `src/net/peer.cpp:50-70`:
+The framing-layer guard at `src/net/peer.cpp:40-60`:
 
 ```cpp
 void Peer::read_header() {
@@ -285,7 +289,7 @@ void Peer::read_header() {
 }
 ```
 
-The per-MsgType cap at `src/net/peer.cpp:72-105`:
+The per-MsgType cap at `src/net/peer.cpp:62-112`:
 
 ```cpp
 void Peer::read_body(uint32_t len) {
@@ -333,17 +337,17 @@ The checks are placed so the read-loop has three distinct rejection paths, **all
 
 1. **Framing-layer rejection** (`read_header`): `len > kMaxFrameBytes` or `len == 0` → close.
 2. **Per-MsgType cap rejection** (`read_body`): `body_buf_.size() > max_message_bytes(msg.type)` → close.
-3. **Deserialize-exception rejection** (the `catch` branch): `Message::deserialize` throws → log + **close** (WIRE-3). This includes throws from the WIRE-1 pre-decode cap and the WIRE-2 structural ceiling, so a frame rejected by either is paid for exactly once per connection. **⚠ CORRECTED:** this line previously read *"log + iterate (connection stays open; S-018 territory)"* — that disposition was the amplifier, not a neutral S-018 detail. S-018 still governs *what counts as* malformed; this proof governs what happens to the connection.
+3. **Deserialize-exception rejection** (the `catch` branch): `Message::deserialize` throws → log + **close** (WIRE-3). This includes throws from the D2 binary-only magic check ("not a binary envelope" — the reject any deleted-format or garbage body hits), the WIRE-1 pre-decode cap and the WIRE-2 structural ceiling, so a frame rejected by any of them is paid for exactly once per connection. **⚠ CORRECTED:** this line previously read *"log + iterate (connection stays open; S-018 territory)"* — that disposition was the amplifier, not a neutral S-018 detail. S-018 still governs *what counts as* malformed; this proof governs what happens to the connection.
 
 ### 3.3 The MsgType enum surface
 
-Per `include/determ/net/messages.hpp:13-82`, the full MsgType enum is:
+Per `include/determ/net/messages.hpp:13-82`, the full MsgType enum is. (D2 note: every body on the wire is the 0xB1 binary envelope with the type byte at offset 2 — HELLO and TRANSACTION are fixed binary frames; the other 17 types carry the JSON payload shape below length-prefixed inside the envelope.)
 
 | Value | Name | Body shape | Cap tier |
 |:---:|---|---|---|
-| 0 | `HELLO` | 5-field JSON: `{domain, port, role, shard_id, wire_version}` | 1 MB (default) |
+| 0 | `HELLO` | Fixed binary frame `[u8 dlen][domain][u16 LE port][u8 role][u32 LE shard_id][u8 wire_version]` (D2; `wire_version` is an advertisement only) | 1 MB (default) |
 | 1 | `BLOCK` | Full `chain::Block` JSON | 4 MB |
-| 2 | `TRANSACTION` | Single `chain::Transaction` JSON | 1 MB (default) |
+| 2 | `TRANSACTION` | Fixed binary tx frame (128-byte core + trailer, incl. `pq_auth` per `b29d422`) | 1 MB (default) |
 | 3 | `BLOCK_SIG` | Fixed-shape `BlockSigMsg` (block_hash + ed_sig + dh_secret + delay_output) | 1 MB (default) |
 | 4 | `CONTRIB` | `ContribMsg` (Phase-1 commit + view-roots; ~few KB typical) | 1 MB (default) |
 | 5 | `GET_CHAIN` | `{from, count}` envelope | 1 MB (default) |
@@ -369,7 +373,7 @@ Every MsgType is in one of three tiers; the table is exhaustive on the 19 curren
 
 ### Lemma L-1 (Total coverage of the MsgType enum)
 
-The `MsgType` enum at `include/determ/net/messages.hpp:13-82` declares 19 variants with values 0 .. 18 (inclusive). The `switch` statement at `messages.hpp:124-152` enumerates:
+The `MsgType` enum at `include/determ/net/messages.hpp:13-82` declares 19 variants with values 0 .. 18 (inclusive). The `switch` statement at `messages.hpp:142-170` enumerates:
 
 - 2 explicit cases returning 16 MB: `SNAPSHOT_RESPONSE`, `CHAIN_RESPONSE`.
 - 5 explicit cases returning 4 MB: `BLOCK`, `BEACON_HEADER`, `SHARD_TIP`, `CROSS_SHARD_RECEIPT_BUNDLE`, `HEADERS_RESPONSE`.
@@ -385,7 +389,7 @@ The tiering reflects the **legitimate maximum** per type: the cap is loose enoug
 
 ### Lemma L-3 (Framing-layer ceiling abort happens before any type-aware work)
 
-Inspect `Peer::read_header` at `src/net/peer.cpp:50-70`. The function:
+Inspect `Peer::read_header` at `src/net/peer.cpp:40-60`. The function:
 
 1. Issues `asio::async_read` to fill the 4-byte `header_buf_`.
 2. On completion (no I/O error), decodes the 4 bytes as a big-endian uint32 `len`.
@@ -401,7 +405,7 @@ Equivalently: the framing-layer abort is **type-blind** — it cannot know which
 
 ### Lemma L-4 (Per-MsgType cap fires after deserialize-succeeded but before on_msg_)
 
-Inspect `Peer::read_body` at `src/net/peer.cpp:72-105`. The function:
+Inspect `Peer::read_body` at `src/net/peer.cpp:62-112`. The function:
 
 1. Issues `asio::async_read` to fill `body_buf_` with `len` bytes.
 2. On completion (no I/O error), wraps the body-handler in a `try`/`catch`.
@@ -421,7 +425,7 @@ The placement is structurally sound: there is no path from `Message::deserialize
 
 Compare the two cap-failure paths:
 
-| Aspect | Framing-layer overflow (`peer.cpp:64-67`) | Per-MsgType overflow (`peer.cpp:90-97`) |
+| Aspect | Framing-layer overflow (`peer.cpp:54-57`) | Per-MsgType overflow (`peer.cpp:80-87`) |
 |---|---|---|
 | Trigger | `len == 0 \|\| len > kMaxFrameBytes` after header read | `body_buf_.size() > max_message_bytes(msg.type)` after deserialize |
 | Allocation cost | None (body never read) | `body_buf_.resize(len)` already paid + deserialize parse cost |
@@ -484,7 +488,7 @@ This is the key reason the closure is forward-compatible without operator interv
 
 **Proof of T-1 (Body-Cap Enforcement Completeness).** Direct from L-1 + L-2. By L-1, `max_message_bytes` is total over `MsgType` (every variant produces a finite result). By L-2, the three returnable values are `{1 MB, 4 MB, 16 MB}` — every variant maps to exactly one tier. The default branch returns 1 MB (the tightest tier), so any future variant added without explicit categorisation inherits the strict cap (L-7). The mapping is forward-compatible and complete. ∎
 
-**Proof of T-2 (Framing-Layer Outer Ceiling).** Direct from L-3. The framing-layer guard at `peer.cpp:64` fires **before** the body is read into `body_buf_` and **before** the type byte is consumed. So:
+**Proof of T-2 (Framing-Layer Outer Ceiling).** Direct from L-3. The framing-layer guard at `peer.cpp:54` fires **before** the body is read into `body_buf_` and **before** the type byte is consumed. So:
 
 1. `body_buf_.resize(len)` is never invoked for `len > kMaxFrameBytes`. The receiver's RAM commitment is bounded by the 4-byte header (effectively zero).
 2. `Message::deserialize` is never invoked. The receiver's CPU commitment is bounded by the comparison.
@@ -498,14 +502,14 @@ The cap is enforced on `body_buf_.size()` — the wire-read length, not any post
 
 The position is uniquely correct: the cap must come after deserialize (to know `msg.type`) and must come before dispatch (to gate `on_msg_`). The S-022 closure places it at exactly the unique well-defined point. ∎
 
-**Proof of T-4 (Connection-Close on Cap Violation).** Direct from L-5. A cap violation invokes `if (self->on_close_) self->on_close_(self)` at `peer.cpp:95`, the same path used by:
+**Proof of T-4 (Connection-Close on Cap Violation).** Direct from L-5. A cap violation invokes `if (self->on_close_) self->on_close_(self)` at `peer.cpp:85`, the same path used by:
 
-1. Framing-layer overflow (line 65).
-2. TCP-level read errors (lines 54-56 of `read_header`, lines 76-79 of `read_body`).
+1. Framing-layer overflow (line 55).
+2. TCP-level read errors (lines 44-46 of `read_header`, lines 67-69 of `read_body`).
 
 The `on_close_` callback is installed by `GossipNet` (or the RPC layer) at peer-attach time; its standard implementation removes the peer from `peers_`, decrements peer counts, and shuts down the socket. The Peer's destructor `~Peer()` additionally calls `close()` which invokes `socket_.shutdown` + `socket_.close`.
 
-The `return` after the `on_close_` call (line 96) prevents the read-loop from iterating back to `read_header` on this Peer. Subsequent messages on the same TCP connection cannot be processed; the OS-level FIN reaches the peer; the peer must establish a new TCP connection (with a full SYN handshake + HELLO + handshake-complete latency) before sending any further messages.
+The `return` after the `on_close_` call (line 86) prevents the read-loop from iterating back to `read_header` on this Peer. Subsequent messages on the same TCP connection cannot be processed; the OS-level FIN reaches the peer; the peer must establish a new TCP connection (with a full SYN handshake + HELLO + handshake-complete latency) before sending any further messages.
 
 This is strictly stronger than a "drop and continue" disposition: it imposes a per-violation reconnect cost on the attacker (~1 RTT + handshake latency, bounded by OS accept-loop concurrency), reducing the work-per-byte amplification factor. ∎
 
@@ -526,13 +530,13 @@ The two defenses are also operationally orthogonal: disabling the rate limiter (
 
 **Proof of T-6 (Pre-dispatch work is bounded before the parser allocates).** By inspection of the three call sites, each of which is a straight-line statement with no branch between it and the parse it guards:
 
-1. `src/net/messages.cpp`, `Message::deserialize` — the JSON branch calls `json_structural_precheck(data, len)` on the line immediately preceding `nlohmann::json::parse(data, data + len)`. The precheck allocates nothing (three scalars of loop state) and `throw`s from inside the scan loop, so control never reaches the parse once a ceiling trips, and the bytes examined are exactly the prefix up to the offending index.
-2. `src/net/binary_codec.cpp`, `decode_binary` — calls `json_structural_precheck(body + 4, plen)` immediately before its payload parse. This is the site that matters for the attacker-chosen-type bypass: `m.type` is read from `data[2]` and never gates this call, so a frame claiming a 16 MB type is scanned on exactly the same terms as any other.
+1. `src/net/messages.cpp`, `Message::deserialize` — **the JSON branch this clause guarded is deleted (D2, `ce31c6f`).** The shipped function rejects any non-0xB1 body at the magic check (`messages.cpp:82-87`) and applies the WIRE-1 pre-decode cap (`messages.cpp:106-114`) before `decode_binary`; no parse of an unprefixed JSON document exists to guard. (As proved at round 12, the branch called the precheck on the line immediately preceding `nlohmann::json::parse(data, data + len)` — allocation-free, throwing from inside the scan loop — which is why the clause held then; deletion is strictly stronger.)
+2. `src/net/binary_codec.cpp`, `decode_binary` — calls `json_structural_precheck(body + 4, plen)` immediately before its payload parse (`binary_codec.cpp:468`). This is the site that matters for the attacker-chosen-type bypass: `m.type` is read from `data[2]` and never gates this call, so a frame claiming a 16 MB type is scanned on exactly the same terms as any other.
 3. `src/net/peer.cpp`, `Peer::read_body` — the `catch (std::exception&)` branch invokes `on_close_(self)` and `return`s. Since `read_header()` is reached only by falling off the end of the `try`, no execution path re-arms the read loop after a throw from either precheck (or from the parse itself).
 
 The string-state argument in the `messages.hpp` commentary discharges the no-false-reject obligation: for any input the parser accepts, the scan's depth and node counts are exact, so clauses 1 and 2 cannot reject a document that would otherwise have parsed. Clause 3 then bounds repetition: a connection that emits a frame rejected by clauses 1-2 is closed, so the cost is paid once per TCP connection rather than once per frame.
 
-Each clause is pinned by a gate that reddens when it is removed, verified by targeted mutant (§7): removing clause 1 reddens WIRE-2's JSON legs while the binary leg stays green; removing clause 2 reddens the bypass leg **while WIRE-1 stays green**; removing clause 3 reddens both WIRE-3 legs. ∎
+Each surviving clause is pinned by a gate that reddens when it is removed, verified by targeted mutant (§7). Clause 1's round-12 mutant (removing the JSON-branch precheck reddened WIRE-2's JSON legs while the binary leg stayed green) retired with the branch — its place is taken by the D2 negative leg in `test-binary-codec` (leg 5: a well-formed legacy JSON envelope is rejected with the specific string "not a binary envelope", so a mutant that re-admits a JSON parse path goes RED). Removing clause 2 reddens the bypass leg **while WIRE-1 stays green** (the WIRE-2 legs were rebuilt as binary-envelope vectors with under-WIRE-1-cap setup assertions, `ce31c6f`); removing clause 3 reddens both WIRE-3 legs. ∎
 
 ---
 
@@ -542,7 +546,7 @@ Each clause is pinned by a gate that reddens when it is removed, verified by tar
 
 The S-022 closure defends against:
 
-**(a) Per-connection oversize flood.** One attacker, one connection, repeated 16-MB-padded MsgType::CONTRIB / BLOCK_SIG frames. **⚠ CORRECTED — previously "Defended (T-2 + T-3 + T-4)"; now MITIGATED (T-2 + T-3 + T-4 + T-6).** The old verdict rested on "rejected at the framing boundary", which was false about ordering: the frame was fully parsed first (measured 831 MB / 4.3-4.8 s) and rejected afterwards. WIRE-2 now bounds the DOM before the parser allocates and WIRE-3 restores the per-attempt reconnect cost; the in-ceiling residual (a measured 25.5×, or 41.4× with the `payload` copy, rather than 51.9×) is F-6. See §2.4 family 1 for the full correction.
+**(a) Per-connection oversize flood.** One attacker, one connection, repeated 16-MB-padded MsgType::CONTRIB / BLOCK_SIG frames. **⚠ CORRECTED — previously "Defended (T-2 + T-3 + T-4)"; now MITIGATED (T-2 + T-3 + T-4 + T-6).** The old verdict rested on "rejected at the framing boundary", which was false about ordering: the frame was fully parsed first (measured 831 MB / 4.3-4.8 s) and rejected afterwards. WIRE-2 now bounds the DOM before the parser allocates and WIRE-3 restores the per-attempt reconnect cost; the in-ceiling residual (a measured 25.5× — the 41.4× payload-copy row and the 51.9× worst case died with the JSON envelope, D2) is tracked under F-6. See §2.4 family 1 for the full correction.
 
 **(b) Multi-IP coordinated oversize flood.** N attackers, N connections, each sending oversize frames. **Partially defended (T-5).** Each connection's oversize is rejected per (a); the per-IP rate-limit (S-014) bounds the accepted-message count; the per-MsgType cap (S-022) bounds the per-message work. Aggregate-rate limiting requires upstream throttling.
 
@@ -583,7 +587,7 @@ The 16 MB ceiling is therefore loose **by design** (snapshots need it), but the 
 
 A finer cap could be introduced (e.g., 8 MB hard cap on SNAPSHOT_RESPONSE bodies, with operators expected to bootstrap from smaller-state phases of the chain) but this introduces a UX regression for legitimate operators bootstrapping mature chains. The current loose-cap-with-structural-defense posture is the right trade-off.
 
-**Finding F-3 (Asymmetric logging between framing-layer and per-MsgType cap paths).** The framing-layer cap-failure path at `peer.cpp:64-67` is **silent** (no log line is emitted; only `on_close_` fires). The per-MsgType cap-failure path at `peer.cpp:90-97` **does** emit a log line:
+**Finding F-3 (Asymmetric logging between framing-layer and per-MsgType cap paths).** The framing-layer cap-failure path at `peer.cpp:54-57` is **silent** (no log line is emitted; only `on_close_` fires). The per-MsgType cap-failure path at `peer.cpp:80-87` **does** emit a log line:
 
 ```cpp
 std::cerr << "[peer] oversize message from " << self->address_
@@ -596,7 +600,7 @@ The asymmetry is operationally awkward: an operator monitoring for "oversize att
 
 **Severity:** Low (operational visibility, not a soundness gap — the abort still fires; just no log).
 
-**Recommended mitigation:** add a parallel `std::cerr` line at `peer.cpp:64-67` mirroring the per-MsgType path. Effort: ~5 LOC. Defense-in-depth; no observed defect in the closure itself.
+**Recommended mitigation:** add a parallel `std::cerr` line at `peer.cpp:54-57` mirroring the per-MsgType path. Effort: ~5 LOC. Defense-in-depth; no observed defect in the closure itself.
 
 This is a chip-task candidate (see end of file).
 
@@ -621,7 +625,9 @@ If there are pending writes in `write_queue_` at the moment of the cap violation
 
 The current compile-time-constant posture is acceptable for v1.x; v2.x deployment-profile work may introduce operator-facing knobs as part of the deployment-spec polish.
 
-**Finding F-6 (JSON-path DOM residual — OWNER DECISION, protocol-level).** With WIRE-2 in place, a 16 MB frame within the ceilings still reaches a **measured 482 MB (25.5×)**, or 525 MB (41.4×) counting the `payload` deep copy — down from 831 MB (51.9×) unmitigated, against 130 MB (8.1×) for the densest *legitimate* message (table in §2.3). Eliminating the residual entirely means capping the JSON envelope path at the 1 MB chatter ceiling — which **cannot be done without a protocol decision**, because the two 16 MB types legitimately arrive as JSON. The reachability was established from the send paths, not assumed:
+**Finding F-6 (JSON-path DOM residual — ✅ CLOSED-BY-DELETION, D2 binary-only wire strip `ce31c6f`, 2026-07-31).** This finding's defining premise was the JSON envelope path: its type was discoverable only *after* a full parse, and the send-path evidence below established that the two 16 MB types legitimately travelled as JSON — so eliminating the residual meant capping the JSON path, a protocol decision, and the finding was owner-gated on that decision. The D2 strip resolved the premise by **deletion**: `Message::serialize()` and the deserialize JSON branch are deleted, `Peer::send` is unconditionally binary with the silent catch-all JSON fallback removed (`src/net/peer.cpp:114-124`), the `wire_version_` member and the v0/v1 negotiation are deleted, and any non-0xB1 body is rejected — "not a binary envelope" — before any parse (`src/net/messages.cpp:82-87`). No wire path parses an unprefixed JSON document.
+
+As originally recorded, the residual's reachability was established from the send paths, not assumed (the table is kept as the pre-D2 audit trail; the four wire-version rows now cite **deleted** code):
 
 | Step | Citation | Fact |
 |---|---|---|
@@ -634,15 +640,17 @@ The current compile-time-constant posture is acceptable for v1.x; v2.x deploymen
 | A request needs no HELLO first | `src/net/gossip.cpp:115` | role filter applies only `if (peer->hello_received())` |
 | …and snapshot types are role-agnostic | `src/net/gossip.cpp:131` | `SNAPSHOT_REQUEST/RESPONSE → return true` |
 
-So a peer can connect and immediately send `SNAPSHOT_REQUEST` **without any HELLO**; the reply is serialized as JSON at `wire_version_ == 0` and can legitimately reach 16 MB. Capping the JSON path at 1 MB would break snapshot/chain sync for any `wire_version`-0 peer and inside the pre-HELLO window on every connection.
+**Post-D2 disposition of the table (each row re-verified against the shipped tree, 2026-07-31):** the `peer.hpp:64` default-version member, the `gossip.cpp:190` `set_wire_version` negotiation, and both `peer.cpp:103` / `:105-111` JSON-selection rows cite deleted code (HELLO's `wire_version` survives only as an advertisement nothing reads, `src/net/gossip.cpp:185-188`). The two reply sites survive at their cited lines (`node.cpp:2317`, `node.cpp:3102`) and now serialize binary; the two no-HELLO reachability rows remain true (the role filter applies only after `hello_received()`, `src/net/gossip.cpp:170`; the snapshot types are role-agnostic, `gossip.cpp:130-138`). So a peer can still connect and immediately send `SNAPSHOT_REQUEST` without any HELLO, and the reply can legitimately reach 16 MB — but it travels as a binary envelope, and the pre-D2 conclusion ("capping the JSON path at 1 MB would break `wire_version`-0 peers and the pre-HELLO window") has nothing left to refer to.
 
-**Options for the owner:**
-- **(A) Accept the residual.** 25.5× (41.4× with the payload copy) on a 16 MB frame, with WIRE-3 making each attempt cost a reconnect. No compatibility impact. *Current posture.*
-- **(B) Require HELLO before serving the large types**, then drop `wire_version`-0 support and cap the JSON path at 1 MB. **This is the only option that actually closes it.** Costs legacy-peer compatibility and needs a protocol-version decision.
+**Options as recorded for the owner, dispositioned by the D2 strip:**
+- **(A) Accept the residual.** ~~25.5× (41.4× with the payload copy) on a 16 MB frame, with WIRE-3 making each attempt cost a reconnect. No compatibility impact. *Current posture.*~~ Superseded — no longer the accepted posture; see the closure note below.
+- **(B) Require HELLO before serving the large types**, then drop `wire_version`-0 support and cap the JSON path at 1 MB. This was flagged as the only option that actually closes it, at the cost of legacy-peer compatibility. **D2 took a strictly stronger move**: it did not gate the large types on HELLO or a negotiated version — it deleted the JSON format pre-genesis, so no legacy `wire_version`-0 peer exists to break (no-migrations satisfied trivially).
 - **(C) Tighten `kMaxJsonNodes`.** ⚠ **ARITHMETICALLY DEAD — do not pursue.** An earlier revision offered this as "cheap, ~2.5× headroom". Measurement kills it: the densest *legitimate* 16 MB snapshot is 1,597,828 units and already costs **129.9 MB** of DOM. Bounding an attacker to ~130 MB therefore requires a cap at or below the legitimate ceiling — i.e. **no non-false-rejecting value of `kMaxJsonNodes` meaningfully improves the bound.** Charging `:` as an extra unit was also evaluated and rejected: it raises the legitimate snapshot to 2.80M units (headroom 2.5× → 1.4×) while moving the attacker's best only from 276 MB to 195 MB.
-- **(D) Drop the `payload` deep copy.** `src/net/messages.cpp` does `m.payload = envelope["payload"]` with `envelope` still alive, which is the difference between the 25.5× and 41.4× rows. `std::move(envelope["payload"])` (or `envelope.at("payload").swap(m.payload)`) is a local, compatibility-free change that removes ~40% of peak. **Cheapest real win available; not taken this round because it is a hot-path edit outside the audited residuals.**
+- **(D) Drop the `payload` deep copy.** `src/net/messages.cpp` did `m.payload = envelope["payload"]` with `envelope` still alive, the difference between the 25.5× and 41.4× rows. **Moot** — the copy site was deleted with the JSON envelope; `decode_binary` parses directly into `m.payload` (`src/net/binary_codec.cpp:469`).
 
-**Severity:** Medium (pre-auth resource amplification, no consensus-safety implication). **Status: OWNER-GATED.** The decision-relevant fact is that (C) is dead and (A) understates the exposure by ~4×, which the pre-measurement version of this table got wrong in both directions.
+**What this closure does NOT claim.** The binary path's residual is untouched and remains exactly as fact (2) of §2.3 states it: the type byte at offset 2 is **attacker-chosen**, so a hostile frame claiming `SNAPSHOT_RESPONSE` (16) or `CHAIN_RESPONSE` (6) still buys the 16 MB tier and lands in `decode_binary`'s length-prefixed JSON payload parse — the 17 non-HELLO/non-TRANSACTION types still carry JSON there. That in-ceiling DOM (measured 482 MB / 25.5× at the worst admitted shape) is **bounded by WIRE-2** (`kMaxJsonDepth` / `kMaxJsonNodes`, applied pre-parse at `binary_codec.cpp:468`), not eliminated; it retires with the D2 tail (true binary frames per type), at which point WIRE-2 retires with it.
+
+**Severity:** was Medium, owner-gated on a protocol decision. **Status: CLOSED-BY-DELETION (2026-07-31, `ce31c6f`)** — the JSON-envelope premise (post-parse type discovery + legitimate 16 MB JSON traffic) no longer exists; the binary-path in-ceiling residual persists under WIRE-2 and is tracked to the D2 tail, not to an owner decision. The historical decision-relevant fact stands for the record: (C) was measured dead, and the pre-measurement version of this table got the exposure wrong in both directions.
 
 **Finding F-7 (No inbound-connection cap — the accept loop is unconditional).** `GossipNet::accept_loop` (`src/net/gossip.cpp:46-57`) accepts every inbound connection with no cap, no per-IP connection limit and no accept-rate gate; it re-arms unconditionally. The S-014 token bucket does not help — it is per-message and lives downstream in `handle_message`. Since `Node` spawns `hardware_concurrency()` event-loop threads, a small number of concurrent connections each feeding expensive frames can occupy every loop thread and stall consensus I/O. WIRE-2 reduces the per-frame cost but does not bound the number of concurrent attackers.
 
@@ -678,7 +686,7 @@ This is the gap the old §2.4 text papered over by citing a non-existent "asio a
 
 **Two escapes that do NOT work, so they are not offered as options:**
 - *Raise `kMaxJsonDepth`.* The accept/reject band is `{cap−7, cap−6}` — exactly 2 values wide **for every value of the cap**. Raising it relocates the band; it never removes it.
-- *Drop the depth ceiling.* The node ceiling does bound the `'['` flood, so this looks free — but §2.3 records the measurement that kills it: `dump()` recurses and segfaults between depth 50,000 and 200,000, and `Message::serialize()` dumps. Removing the depth ceiling trades a sync wedge for a remote **crash** on the send path.
+- *Drop the depth ceiling.* The node ceiling does bound the `'['` flood, so this looks free — but §2.3 records the measurement that kills it: `dump()` recurses and segfaults between depth 50,000 and 200,000, and the send path dumps (`encode_binary`'s `m.payload.dump()` post-D2; `Message::serialize()` pre-D2). Removing the depth ceiling trades a sync wedge for a remote **crash** on the send path.
 
 *(The interim options recorded here — ship WIRE-2 without WIRE-3, or hold both — are superseded: the root-cause fix was taken, so WIRE-2 + WIRE-3 now ship against a chain that cannot accept a poisoned abort claim in the first place.)*
 
@@ -690,9 +698,9 @@ This is the gap the old §2.4 text papered over by citing a non-existent "asio a
 
 **Severity:** Low. **Status: OPEN, reported not fixed** — deliberately out of scope for this round, which was scoped to the pre-auth daemon path. Worth closing on the repo's own "same rule, two binaries" convention (the light client is where the pre-decode cap rule *originated*), and cheap to do — it just costs a `determ-light` rebuild that this round's verification chain did not need.
 
-The findings (F-1 confirmed-sufficient, F-2 design-intent, F-3 log-asymmetry, F-4 close-eager-but-not-synchronous, F-5 not-configurable, F-6 JSON-DOM residual, F-7 no-accept-cap, F-8 WIRE-3-behaviour-change, F-9 light-client mirror, **F-10 envelope-relative depth wedge**) are surfaced for completeness.
+The findings (F-1 confirmed-sufficient, F-2 design-intent, F-3 log-asymmetry, F-4 close-eager-but-not-synchronous, F-5 not-configurable, F-6 JSON-DOM residual — closed-by-deletion per D2, F-7 no-accept-cap, F-8 WIRE-3-behaviour-change, F-9 light-client mirror, **F-10 envelope-relative depth wedge**) are surfaced for completeness.
 
-**F-10 gated shipping and is now CLOSED.** F-1 through F-5 are advisory. F-6, F-7 and F-9 are open gaps that this change set does not make worse. **F-10 was a hazard this change set INTRODUCED** — it did not exist without the WIRE-2 depth ceiling, and WIRE-3 escalated its consequence. It was found by adversarial audit of the fix itself, not of the original code, which is the argument for auditing changes with the same lenses used on the code they harden. It was closed at the root (`claims_json` canonicalized on ingest) rather than by retuning the ceiling, because the accept/reject band is exactly 2 wide for *every* cap value. **F-6 and F-7 remain open gaps** and are the reason §2.4 family 1 now reads MITIGATED rather than Defended.
+**F-10 gated shipping and is now CLOSED.** F-1 through F-5 are advisory. F-6, F-7 and F-9 are open gaps that this change set does not make worse. **F-10 was a hazard this change set INTRODUCED** — it did not exist without the WIRE-2 depth ceiling, and WIRE-3 escalated its consequence. It was found by adversarial audit of the fix itself, not of the original code, which is the argument for auditing changes with the same lenses used on the code they harden. It was closed at the root (`claims_json` canonicalized on ingest) rather than by retuning the ceiling, because the accept/reject band is exactly 2 wide for *every* cap value. **F-7 remains an open gap; F-6's JSON-envelope premise is closed-by-deletion (D2) while its binary-path in-ceiling residual persists under WIRE-2** — which is why §2.4 family 1 still reads MITIGATED rather than Defended.
 
 ---
 
@@ -703,13 +711,15 @@ The findings (F-1 confirmed-sufficient, F-2 design-intent, F-3 log-asymmetry, F-
 | Gate | Where | Asserts | Falsified by |
 |---|---|---|---|
 | **WIRE-1** | `determ test-binary-codec` (8b) | An oversize **binary** envelope is rejected before payload decode | Deleting the pre-decode cap in `Message::deserialize` |
-| **WIRE-2** (deep, JSON) | `test-binary-codec` (8c) | A *valid, balanced* JSON envelope past `kMaxJsonDepth` is rejected pre-parse | Deleting `json_structural_precheck` in `messages.cpp` → **RED**, binary leg stays green |
+| **D2 negative** | `test-binary-codec` (5) | A well-formed **legacy JSON envelope** body (`'{'` 0x7B) is rejected with the specific string "not a binary envelope" — the JSON wire path is deleted, never silently parsed | Re-admitting a JSON parse path in `Message::deserialize` |
 | **WIRE-2** (accept) | `test-binary-codec` (8d) | The deepest *legitimate* envelope (CHAIN_RESPONSE, depth 8) still deserializes | Over-tightening `kMaxJsonDepth` |
 | **WIRE-2** (string state) | `test-binary-codec` (8e) | Structural bytes past an **escaped quote** are data — no false reject | Dropping the escape arm of the scan |
 | **WIRE-2** (nodes) | `test-binary-codec` (8f) | A *flat, depth-2* envelope past `kMaxJsonNodes` is rejected — the shape depth cannot see | Dropping the `,` arm of the scan |
 | **WIRE-2** (binary bypass) | `test-binary-codec` (8g) | A binary envelope **claiming SNAPSHOT_RESPONSE** cannot use its 16 MB cap to bypass the ceiling | Deleting `json_structural_precheck` in `decode_binary` → **RED while WIRE-1 stays GREEN** |
 | **WIRE-3** | `determ test-net-virtual` (4d-2) | A malformed frame closes the peer; a **well-formed frame queued behind it is never dispatched** | Restoring `read_header()` in the catch branch → both legs RED |
 | **F-10** | `determ test-abort-claims-canonical` (5a-5d, 6) | A block carrying a claim nested `kMaxJsonDepth`−7 deep is accepted as a `BLOCK` envelope and rejected as `CHAIN_RESPONSE` (**the wedge, asserted as a precondition**), but **after ingest it re-serves at CHAIN_RESPONSE depth** — and is byte-identical to the honest block, with an unchanged abort-event digest | Restoring the verbatim `ae.claims_json = j.value("claims", json::array())` → 4 legs RED (re-serve, member-stripped, poisoned-==-honest, and the standalone ABORT_EVENT ingress), every digest-path leg GREEN — including both "digest UNCHANGED" legs |
+
+**D2 note on the table (2026-07-31).** The round-12 WIRE-2 legs were built on JSON-envelope vectors; those died with the envelope, and `ce31c6f` rebuilt them as **binary-envelope** vectors carrying length-prefixed JSON payloads, each with an under-WIRE-1-cap setup assertion so the structural ceiling is provably the rejecter. The deep-reject duty of the old 8c leg is carried by 8g (its vector nests `kMaxJsonDepth + 8`), and an object-density leg (8h) pins the node ceiling on the map-costed shape. The former "WIRE-2 (deep, JSON)" row is replaced above by the D2 negative leg, which pins the deletion itself.
 
 Two notes on gate design, both learned the hard way during this round:
 
@@ -721,6 +731,7 @@ The remaining table records the pre-existing indirect coverage.
 | Test | Source | Coverage |
 |---|---|---|
 | `tools/test_binary_codec_roundtrip_exhaustive.sh` (via `determ test-binary-codec-roundtrip-exhaustive`) | `src/main.cpp` exhaustive per-MsgType binary-roundtrip suite | Walks every non-HELLO MsgType in `MsgType` (1..18) with a representative payload, exercising `encode_binary` → `decode_binary`. Implicitly validates that the in-spec wire forms are well-within their per-MsgType cap (every test payload is small; the test does not synthesize cap-boundary or cap-violation cases). Pins the cap table indirectly: if `max_message_bytes` returned 0 for any type, all such roundtrips would fail at the framing boundary — but the test does not currently inject 16 MB padded payloads to verify the cap-rejection path. |
+| `determ test-wire-caps-discriminator` (via `tools/test_wire_caps_discriminator.sh`) | `src/main.cpp` — **renamed from `test-wire-negotiation`** when the JSON envelope + v0/v1 negotiation were deleted (D2); the negotiation section died with that surface | Pins the two surviving invariants around the binary codec: (B) framing-vs-cap **layering** — every `max_message_bytes(t)` ≤ `kMaxFrameBytes`, the cap table partitions into exactly the three documented tiers, tiers strictly ordered, default branch lands in the tightest tier; (C) **discriminator-byte preservation** — for every MsgType, HELLO included since D2 gave it a binary frame, the encoded offset-2 byte equals the cast value and `decode_binary` recovers the same MsgType. |
 | `tools/test_binary_codec.sh` | High-level binary-codec smoke test | Exercises one or two MsgTypes per code path; comments at `test_binary_codec_roundtrip_exhaustive.sh:6` reference "the S-022 cap table" — the smoke test pins that decode_binary itself does NOT enforce the 16 MB framing cap; that is the `Peer::read_body` responsibility. |
 | `tools/operator_block_size_audit.sh` | Operator audit script | Reports per-block size distribution against the `--max-block-size-bytes` reference (default 16 MB). Flags blocks >75% as `block_size_cap_approach` and blocks within 1 KB of the cap as `block_size_cap_hit`. The audit script's `Wire-cap reference` table at lines 35-42 documents the per-MsgType cap values verbatim — drift between the script and `messages.hpp::max_message_bytes` would surface in operator review. |
 | Cap-violation test (deferred) | n/a | A dedicated test injecting a `body_buf_` larger than the per-MsgType cap (e.g., a 2-MB-padded CONTRIB) and asserting (a) the receive lambda invokes `on_close_`, (b) the connection's read-loop exits, (c) the offending peer is removed from `GossipNet::peers_`, (d) the "oversize message" log line is emitted — would close the test-coverage gap. The detection logic is structurally short (~7 LOC at lines 90-97 of peer.cpp) and exercised on every body-read path; the absence of a dedicated test reflects S-022's "dormant on honest paths" property rather than test-coverage neglect. A future test could synthesize via a unit-test framework injecting a `Peer` with a pre-filled `body_buf_` and asserting the lambda's outputs. |
@@ -737,7 +748,9 @@ The composition test-suite (binary-codec roundtrip exhaustive for the per-MsgTyp
 
 > **Check-ordering is its own vulnerability class.** Every guard in this chain existed and was individually correct. Each simply sat *downstream* of the cost it was meant to bound — the per-type cap after the parse, the rate limiter after the dispatch decision, the close-on-error after a re-arm. A proof that reasons about *whether* a guard fires (T-3, T-4) is structurally blind to this; only a theorem about *what has been spent when it fires* (T-6) can see it.
 
-Delivered this round: **WIRE-2** (structural DOM ceiling, both wire formats — including the bypass where a hostile binary frame claims a 16 MB type, which `b982332`'s per-type cap did **not** close), **WIRE-3** (close on parse error), and — closing the finding that gated them — the **F-10 root fix** (`claims_json` canonicalized on ingest, consensus-byte-neutral; [AbortDigestCanonicalizationSoundness.md](AbortDigestCanonicalizationSoundness.md) §2.1). Still open and owner-gated: **F-6** (in-ceiling DOM residual; eliminating it is a protocol decision because the 16 MB types legitimately travel as JSON), **F-7** (no inbound-connection cap in the accept loop), and **F-9** (light-client mirror).
+Delivered this round: **WIRE-2** (structural DOM ceiling, both wire formats as then shipped — including the bypass where a hostile binary frame claims a 16 MB type, which `b982332`'s per-type cap did **not** close), **WIRE-3** (close on parse error), and — closing the finding that gated them — the **F-10 root fix** (`claims_json` canonicalized on ingest, consensus-byte-neutral; [AbortDigestCanonicalizationSoundness.md](AbortDigestCanonicalizationSoundness.md) §2.1). Still open: **F-7** (no inbound-connection cap in the accept loop) and **F-9** (light-client mirror). **F-6 is closed-by-deletion as of D2** (`ce31c6f`, 2026-07-31) — the JSON envelope whose legitimate 16 MB traffic made the residual a protocol decision no longer exists; the binary-path in-ceiling residual persists under WIRE-2 and retires with the D2 tail (§6.2).
+
+**D2 binary-only wire revision (2026-07-31, `b29d422` + `ce31c6f`).** The GENESIS-DEADLINE D2 strip deleted the surface half of what the round-12 corrections were about: `Message::serialize()` (the JSON envelope encoder), the deserialize JSON branch, the per-pair v0/v1 wire-version negotiation and the `wire_version_` peer state, and `Peer::send`'s silent catch-all JSON fallback. `Message::deserialize` is binary-only — 0xB1 magic check ("not a binary envelope", the specific reject string pinned by `test-binary-codec` leg 5) → WIRE-1 pre-decode per-type cap → `decode_binary` — and HELLO travels as a fixed binary frame (`b29d422` first carried `pq_auth` through the binary TRANSACTION frame so deleting the fallback could not strand PQ_TRANSFER). WIRE-2 and WIRE-3 survive unchanged: `decode_binary` still parses length-prefixed JSON payloads for the 17 non-HELLO/non-TRANSACTION types (the structural precheck guards that single site, `binary_codec.cpp:468`), and the `read_body` framing + post-deserialize cap + close-on-parse-error disposition is untouched. The `test-wire-negotiation` gate lost its negotiation section with the deleted surface and was renamed `test-wire-caps-discriminator` (cap-layering + discriminator sections survive; HELLO now included). Claims in this document that leaned on the JSON path carry dated reconciliation notes in place (READ FIRST, §2.2, §2.3 fact 1, T-3, T-6, F-6).
 
 **F-10's own lesson, distinct from the check-ordering one above.** The wedge was not created by a missing guard; it was created by adding a *correct* guard to a field whose depth nothing else bounded. The ceiling measures the **instance**, while the sizing argument reasoned about the **schema** — and one field (`claims_json`) was schema-free, so the two diverged silently. Generalizing: **before adding a structural ceiling, enumerate the fields the schema does not constrain**, because those are exactly where an accepted document and a servable document can come apart. The same enumeration is what makes the fix durable — `claims_json` is now schema-bound, so the ceiling's sizing argument is finally true of the instances as well.
 
@@ -751,7 +764,7 @@ Delivered this round: **WIRE-2** (structural DOM ceiling, both wire formats — 
 | Doc-coherence guards | 14/14 GREEN |
 | **Live cluster tier, Windows/MSVC** | **446 tests + the 3 remaining multi-node clusters (`weak_3node`, `web_hybrid`, `zero_trust_cross_chain`) — no regressions** |
 
-**Falsify-on-mutant.** M1 (drop the precheck in `Message::deserialize`) → WIRE-2's JSON legs RED, binary leg GREEN. M2 (drop it in `decode_binary`) → the bypass leg RED **while WIRE-1 stays GREEN**. M3 (restore `read_header()` in the catch branch) → both WIRE-3 legs RED.
+**Falsify-on-mutant.** M1 (drop the precheck in `Message::deserialize`) → WIRE-2's JSON legs RED, binary leg GREEN. M2 (drop it in `decode_binary`) → the bypass leg RED **while WIRE-1 stays GREEN**. M3 (restore `read_header()` in the catch branch) → both WIRE-3 legs RED. *(Round-12 record. Post-D2, M1's target — the JSON-branch call — no longer exists; the deletion itself is pinned by the D2 negative leg, and the rebuilt binary-envelope WIRE-2 legs keep M2/M3 as live mutants.)*
 
 #### Round-13 follow-on — the F-10 root fix (Windows/MSVC)
 
@@ -782,13 +795,13 @@ Delivered this round: **WIRE-2** (structural DOM ceiling, both wire formats — 
 
 Implementation surfaces:
 
-- `include/determ/net/messages.hpp:124-152` — `max_message_bytes(MsgType)` cap table (this proof's primary object).
-- `include/determ/net/messages.hpp:101` — `kMaxFrameBytes` outer ceiling constant.
+- `include/determ/net/messages.hpp:142-170` — `max_message_bytes(MsgType)` cap table (this proof's primary object).
+- `include/determ/net/messages.hpp:119` — `kMaxFrameBytes` outer ceiling constant.
 - `include/determ/net/messages.hpp:13-82` — `MsgType` enum (the cap table's domain).
 - `src/net/peer.cpp` — `Peer::read_header` framing-layer guard (T-2 closure).
 - `src/net/peer.cpp` — `Peer::read_body` per-MsgType cap enforcement (T-1 + T-3 + T-4 closure) **and the WIRE-3 close-on-parse-error disposition** (T-6 clause 3).
-- `include/determ/net/messages.hpp` — `kMaxJsonDepth` / `kMaxJsonNodes` structural ceilings + the threat-model, sizing and soundness commentary (T-6).
-- `src/net/messages.cpp` — `json_structural_precheck` implementation; the WIRE-1 pre-decode per-type cap in `Message::deserialize`; the WIRE-2 pre-parse call on the JSON branch (T-6 clause 1).
+- `include/determ/net/messages.hpp:271-272` — `kMaxJsonDepth` / `kMaxJsonNodes` structural ceilings + the threat-model, sizing and soundness commentary (T-6).
+- `src/net/messages.cpp` — `json_structural_precheck` implementation; the WIRE-1 pre-decode per-type cap in `Message::deserialize` (`messages.cpp:106-114`); the D2 binary-only magic reject (`messages.cpp:82-87` — T-6 clause 1 closed by deletion; the JSON-branch pre-parse call is gone with the branch).
 - `src/net/binary_codec.cpp` — the WIRE-2 pre-parse call in `decode_binary`, closing the attacker-chosen-type bypass (T-6 clause 2).
 - `docs/SECURITY.md` §2 row + §6.5 quick-fix summary — audit-side closure record (S-022 row).
 - `docs/PROTOCOL.md` §9.2 — wire-type table including per-type body-cap column.
@@ -806,13 +819,13 @@ The closure is **localized** in the sense of Track A (~50 LOC for the `max_messa
 ### Implementation references
 
 - `include/determ/net/messages.hpp:13-82` — `MsgType` enum (19 declared variants).
-- `include/determ/net/messages.hpp:101` — `kMaxFrameBytes` framing-layer outer ceiling (16 MB).
-- `include/determ/net/messages.hpp:124-152` — `max_message_bytes(MsgType)` per-type cap function (the proof's primary object).
-- `include/determ/net/messages.hpp:154-171` — `Message` struct + `serialize` / `serialize_binary` / `deserialize`.
-- `src/net/peer.cpp:50-70` — `Peer::read_header` framing-layer guard (T-2).
-- `src/net/peer.cpp:72-105` — `Peer::read_body` per-MsgType cap enforcement + `on_msg_` dispatch gate (T-1 + T-3 + T-4).
-- `src/net/peer.cpp:90-97` — the specific cap-enforcement if-statement.
-- `src/net/binary_codec.cpp` — the binary envelope format-detect path used by `Message::deserialize` (referenced for the magic-byte mechanism that distinguishes JSON vs binary).
+- `include/determ/net/messages.hpp:119` — `kMaxFrameBytes` framing-layer outer ceiling (16 MB).
+- `include/determ/net/messages.hpp:142-170` — `max_message_bytes(MsgType)` per-type cap function (the proof's primary object).
+- `include/determ/net/messages.hpp:280-292` — `Message` struct + `serialize_binary` / `deserialize` (D2: `Message::serialize`, the JSON envelope encoder, is deleted).
+- `src/net/peer.cpp:40-60` — `Peer::read_header` framing-layer guard (T-2).
+- `src/net/peer.cpp:62-112` — `Peer::read_body` per-MsgType cap enforcement + `on_msg_` dispatch gate (T-1 + T-3 + T-4).
+- `src/net/peer.cpp:80-87` — the specific cap-enforcement if-statement.
+- `src/net/binary_codec.cpp` — `encode_binary` / `decode_binary` + `is_binary_envelope` (D2: the magic check is a fail-closed gate, not a JSON/binary format dispatch — non-0xB1 bodies are rejected by `Message::deserialize`).
 - `src/net/gossip.cpp` — gossip-layer `on_close_` callback implementation (peer removal on cap-violation close, per T-4).
 - `tools/operator_block_size_audit.sh:35-42` — operator-facing cap reference table.
 - `tools/test_binary_codec_roundtrip_exhaustive.sh` — exhaustive per-MsgType roundtrip regression.
@@ -826,7 +839,7 @@ The closure is **localized** in the sense of Track A (~50 LOC for the `max_messa
 - `docs/proofs/S017UnstakeApplyConsistency.md` — sibling Track-A closure proof; multi-layer defense-in-depth pattern (admission gate + apply-time defense) mirrors S-022's framing-layer + per-MsgType two-tier defense.
 - `docs/proofs/S030-D2-Analysis.md` — state-divergence threat model. S-022 helps mitigate the per-block work amplification that an attacker could otherwise use to slow apply layers across multiple peers simultaneously — bounding per-block work bounds the per-block divergence window.
 - `docs/proofs/BlockchainStateIntegrity.md` — composition theorem on state-integrity; T-3 (apply-time state divergence detection) is the structural defense that compositions with S-022's per-message work bound to make snapshot abuse (F-2 in §6.2 above) tractable.
-- `docs/proofs/JsonValidationSoundness.md` — S-018 closure proof; covers the deserialize-exception disposition (the catch-and-log path at `peer.cpp:99-102`) that S-022's cap-enforcement path is structurally orthogonal to.
+- `docs/proofs/JsonValidationSoundness.md` — S-018 closure proof; governs *what counts as* a malformed message. The connection disposition on a parse failure is this proof's (WIRE-3: the `catch` branch at `peer.cpp:89-108` closes — the pre-round-12 "log + iterate" version of this reference called the two "structurally orthogonal", corrected in §2.4 (d)).
 
 ### Documentation references
 
@@ -848,4 +861,4 @@ The closure is **localized** in the sense of Track A (~50 LOC for the `max_messa
 
 The §6 finding-register surfaces F-3 (asymmetric logging) as a small operational-visibility improvement. Suggested as a chip task for a follow-on:
 
-- **F-3 fix (asymmetric log line on framing-layer cap-failure path).** Add a `std::cerr` line at `src/net/peer.cpp:65` mirroring the per-MsgType cap-failure log at line 91. Effort: ~5 LOC. Restores operator-visible signal on coordinated `kMaxFrameBytes`-boundary floods. Defense-in-depth; no observed defect in the S-022 closure itself.
+- **F-3 fix (asymmetric log line on framing-layer cap-failure path).** Add a `std::cerr` line at `src/net/peer.cpp:55` mirroring the per-MsgType cap-failure log at line 81. Effort: ~5 LOC. Restores operator-visible signal on coordinated `kMaxFrameBytes`-boundary floods. Defense-in-depth; no observed defect in the S-022 closure itself.

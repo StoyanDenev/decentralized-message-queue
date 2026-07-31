@@ -3,9 +3,18 @@
 This document records the analytic guarantees of the S-018 closure pattern:
 the `json_require<T>` / `json_require_hex` / `json_require_array` helpers in
 `include/determ/util/json_validate.hpp` and their application across every
-attack-relevant wire-format consumer (gossip envelope, Phase-1/2 consensus
-chatter, BLOCK + envelope-wrapped variants, snapshot bodies, operator-edited
-keyfiles, and the genesis schema).
+attack-relevant wire-format consumer (per-message-type gossip payloads +
+sub-envelope fields, Phase-1/2 consensus chatter, BLOCK + envelope-wrapped
+variants, snapshot bodies, operator-edited keyfiles, and the genesis schema).
+
+**D2 note (2026-07-28, binary-only wire).** The JSON wire ENVELOPE is deleted:
+`net::Message::deserialize` is binary-only and rejects any non-0xB1 body
+fail-closed (`"not a binary envelope"`), so the former `json_require` unwrap of
+the `{type, payload}` envelope no longer exists. Peer-supplied JSON now enters
+only as the length-prefixed payloads `decode_binary` still carries inside the
+binary envelope; the S-018 field-name diagnostics survive unchanged at the
+per-message-type payload parsers (`Block::from_json` etc.), the gossip
+sub-envelope unwrap, RPC, snapshot, keyfile, and genesis layers below.
 
 **Companion documents:** `docs/SECURITY.md` §S-018 (closure narrative);
 `docs/proofs/S002-Mempool-Sig-Verify.md` (paired wire-format hardening);
@@ -34,8 +43,9 @@ its caller. Every nlohmann-internal exception is caught inside the helpers
 and re-thrown as a `std::runtime_error` carrying the field-name context.
 
 **T-3 (Defense-in-Depth at Multiple Layers).** The helpers fire at every
-layer where peer- or operator-supplied JSON enters the system: (1) gossip
-envelope + per-message-type payload, (2) RPC structured-payload args, (3)
+layer where peer- or operator-supplied JSON enters the system: (1) per-
+message-type gossip payload + sub-envelope fields (D2: the JSON wire
+envelope itself is deleted), (2) RPC structured-payload args, (3)
 snapshot replay (file + SNAPSHOT_RESPONSE gossip), (4) operator keyfile,
 (5) operator genesis JSON. No layer admits structured JSON via a parallel
 bypass that skips the helpers.
@@ -164,7 +174,7 @@ S-018-flavored diagnostic on scalar misuse.
 
 | Consumer | Source | Exposure |
 |---|---|---|
-| `net::Message::deserialize` | `src/net/messages.cpp:44` | every peer JSON message lands here first |
+| ~~`net::Message::deserialize` envelope unwrap~~ — DELETED (D2) | `src/net/messages.cpp:82-116` | the JSON wire envelope + its `json_require<uint8_t>(envelope, "type")` unwrap were deleted 2026-07-28; `deserialize` is binary-only (non-0xB1 bodies rejected `"not a binary envelope"`) and peer JSON lands only at the per-type from_json rows below |
 | `Transaction::from_json` | `src/chain/block.cpp:57-65` | gossip TRANSFER + RPC submit_tx |
 | `AbortEvent::from_json` | `src/chain/block.cpp:110-113` | baked into BLOCK |
 | `EquivocationEvent::from_json` | `src/chain/block.cpp:139-144` | RPC submit_equivocation + gossip evidence |
@@ -246,14 +256,18 @@ the `"S-018: "` prefix and the assertion would fail. The test passes
 
 By construction across each layer's entry point:
 
-**Wire (gossip).** `net::Message::deserialize` calls `json_require<uint8_t>
-(envelope, "type")` + `contains("payload")` before dispatch. The per-
-message-type from_json (every gossip row in §3.3) handles the payload.
+**Wire (gossip).** D2 (2026-07-28): the JSON wire envelope is deleted —
+`net::Message::deserialize` (`src/net/messages.cpp:82-116`) is binary-only
+and rejects any non-0xB1 body fail-closed (`"not a binary envelope"`), so
+the former `json_require<uint8_t>(envelope, "type")` unwrap no longer
+exists. Peer-supplied JSON enters only as the length-prefixed payloads
+`decode_binary` still carries inside the binary envelope; the per-
+message-type from_json (every gossip row in §3.3) handles that payload.
 Sub-envelope-wrapped types (ABORT_EVENT, SHARD_TIP,
 CROSS_SHARD_RECEIPT_BUNDLE) extract their per-envelope `shard_id` /
 `block_index` / `prev_hash` via `json_require_*` and gate the inner
 payload via `contains()` before deferring to the inner Block / AbortEvent
-from_json. See `src/net/gossip.cpp:212-258`.
+from_json. See `src/net/gossip.cpp:208-259`.
 
 **RPC.** `src/rpc/rpc.cpp::RpcServer::dispatch` is the single RPC entry.
 Scalar params use `params.value(key, default)` (right pattern: missing
@@ -348,10 +362,12 @@ S-018 operates inside the larger model in `docs/proofs/Preliminaries.md`
 (V0 network adversary; Byzantine peer membership). Relevant capabilities:
 
 **A1 — Byzantine peer sending malformed gossip.** Adversary feeds
-arbitrary byte sequences as JSON envelopes. Every malformed message
-produces a clean `std::runtime_error` naming the failing field. Gossip
-handler silently drops or (per S-022 framing cap) closes the connection.
-No malformed peer crashes the daemon.
+arbitrary byte sequences as wire bodies. A body that is not a 0xB1 binary
+envelope — including the deleted legacy JSON envelope — is rejected
+fail-closed at `Message::deserialize` (D2); a malformed JSON payload
+inside the envelope produces a clean `std::runtime_error` naming the
+failing field. Either way the peer layer closes the connection (WIRE-3;
+previously log-and-drop). No malformed peer crashes the daemon.
 
 **A2 — Malicious RPC client.** Attacker submits malformed `submit_tx` or
 `submit_equivocation` payloads. The dispatcher routes through the same
@@ -491,7 +507,7 @@ hash` mismatch at the chain-level rejection boundary.
 | `src/chain/block.cpp` | `Transaction`, `GenesisAlloc`, `AbortEvent`, `EquivocationEvent`, `CrossShardReceipt`, `Block` from_json. |
 | `src/node/producer.cpp` | `ContribMsg`, `AbortClaimMsg`, `BlockSigMsg` from_json. |
 | `src/chain/genesis.cpp` | `GenesisConfig::from_json`. |
-| `src/net/messages.cpp` | Gossip envelope `deserialize`. |
+| `src/net/messages.cpp` | Binary-only `Message::deserialize` (D2) — rejects non-binary bodies fail-closed; peer JSON enters only as payloads inside the binary envelope. |
 | `src/net/gossip.cpp` | ABORT_EVENT / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE envelope sub-field validation. |
 | `src/crypto/keys.cpp` | `load_node_key` keyfile validation. |
 | `src/chain/chain.cpp` | `restore_from_snapshot` collection-field validation. |

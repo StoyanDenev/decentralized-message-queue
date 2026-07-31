@@ -254,7 +254,9 @@ Cross-references:
   - SECURITY.md §S-022 : per-message-type size caps closure narrative.
       FB47 formalizes the two-stage gate at the state-machine layer.
   - docs/proofs/tla/HelloHandshake.tla (FB37) : sibling spec at the
-      gossip admission surface (HELLO chain_id + wire_version gate).
+      gossip admission surface (HELLO chain_id gate; the wire_version
+      gate was deleted with the D2 binary-only wire — the field is an
+      advertisement).
       FB37 explicitly DEFERS the S-022 cap surface ("the S-022 per-
       message-type size caps ... are NOT modeled here ... both gates
       fire before the handshake admission gate this spec models");
@@ -753,15 +755,16 @@ PROP_NoSilentOversizeDispatch ==
 \*     reassembly of the four header bytes) is the C++ side's domain.
 \*     The spec models the gate DECISIONS on the decoded value.
 \*
-\*   * The Message::deserialize format-detecting dispatch (JSON vs
-\*     binary, messages.hpp:166-171; binary_codec.cpp) is NOT
-\*     modeled. The spec carries the recovered MsgType directly as
-\*     the frame's type field; the BUFFERED stage collapses the
-\*     body-read + deserialize step. The binary-codec round-trip +
-\*     version negotiation are adjacent surfaces (the codec layer);
-\*     this spec models the SIZE-admission gate, not the codec.
-\*     The HELLO-always-JSON carve-out + wire-version negotiation are
-\*     FB37 HelloHandshake.tla territory.
+\*   * The Message::deserialize binary-envelope decode
+\*     (messages.cpp; binary_codec.cpp — binary-only since the D2
+\*     envelope strip) is NOT modeled. The spec carries the
+\*     recovered MsgType directly as the frame's type field; the
+\*     BUFFERED stage collapses the body-read + deserialize step.
+\*     The binary-codec round-trip is an adjacent surface (the
+\*     codec layer); this spec models the SIZE-admission gate, not
+\*     the codec. The HELLO admission gate is FB37
+\*     HelloHandshake.tla territory (its wire-version negotiation
+\*     was deleted by D2).
 \*
 \*   * The async-read completion-handler chain (asio buffers + the
 \*     self shared_ptr lifetime extension + the re-arm
@@ -868,11 +871,12 @@ PROP_NoSilentOversizeDispatch ==
 \*   FB47 formalizes the two-stage gate at the state-machine layer.
 \*
 \* FB37 HelloHandshake.tla : sibling spec at the gossip admission
-\*   surface (HELLO chain_id + wire_version gate). FB37 explicitly
-\*   DEFERS the S-022 cap surface ("the S-022 per-message-type size
-\*   caps ... are NOT modeled here"); FB47 is the missing state-
-\*   machine witness. A frame transits FB47's size gate (Stages 1+2)
-\*   before FB37's HELLO admission gate ever runs.
+\*   surface (HELLO chain_id gate; wire-version negotiation deleted
+\*   by D2). FB37 explicitly DEFERS the S-022 cap surface ("the
+\*   S-022 per-message-type size caps ... are NOT modeled here");
+\*   FB47 is the missing state-machine witness. A frame transits
+\*   FB47's size gate (Stages 1+2) before FB37's HELLO admission
+\*   gate ever runs.
 \*
 \* FB39 TcpKeepaliveReap.tla : sibling spec at the gossip resource-
 \*   exhaustion surface (per-IP slot lifetime). FB39's §7 cites

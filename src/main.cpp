@@ -489,11 +489,13 @@ In-process tests (deterministic, no network):
                                               including Phase-2-reveal fields +
                                               partner_subset_hash + state_root
                                               zero-skip backward-compat
-  determ test-binary-codec                    Wire-format codec (A3 / S8) — JSON
-                                              envelope v0 + binary envelope v1
-                                              round-trip + format-detecting
-                                              deserializer + malformed-input
-                                              rejection + S-022 per-MsgType cap
+  determ test-binary-codec                    Wire-format codec (D2 binary-only
+                                              wire) — binary round-trip incl. the
+                                              fixed HELLO frame + the D2 negative
+                                              gate (legacy JSON envelope rejected
+                                              'not a binary envelope') +
+                                              malformed-input rejection + WIRE-1/
+                                              WIRE-2 legs + S-022 per-MsgType cap
                                               table golden vectors
   determ test-wire-types                      Block-internal wire types JSON
                                               round-trip — CrossShardReceipt +

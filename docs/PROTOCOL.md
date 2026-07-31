@@ -4,7 +4,7 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 
 **Status:** v1 (rev. 8 + sharding through B6.basic) plus shipped v2 foundation. Frozen for the v1 series.
 
-**Shipped v2 items covered here:** v2.1 state Merkle root (§4.1.1), v2.2 light-client `state_proof` RPC (§10.2), v2.3 snapshot state_root verification (§11.1), v2.4 atomic apply + COMPOSABLE_BATCH (§14.5), v2.5 registry cache (transparent), v2.6 gossip out of lock (transparent), v2.16 HMAC RPC auth (§10.1), v2.17 passphrase keyfile envelopes (§1.2), v2.18 DAPP_REGISTER (§14.5), v2.19 DAPP_CALL (§14.5), A3 binary wire codec + version negotiation (§16.1).
+**Shipped v2 items covered here:** v2.1 state Merkle root (§4.1.1), v2.2 light-client `state_proof` RPC (§10.2), v2.3 snapshot state_root verification (§11.1), v2.4 atomic apply + COMPOSABLE_BATCH (§14.5), v2.5 registry cache (transparent), v2.6 gossip out of lock (transparent), v2.16 HMAC RPC auth (§10.1), v2.17 passphrase keyfile envelopes (§1.2), v2.18 DAPP_REGISTER (§14.5), v2.19 DAPP_CALL (§14.5), A3 binary wire codec, binary-only since the D2 envelope strip (§16.1).
 
 **v2 items NOT yet covered (not yet shipped):** v2.7 F2 view reconciliation (full S-030 D2 closure; `docs/proofs/F2-SPEC.md` is the implementation spec), v2.8 post-quantum signature migration, v2.10 threshold randomness aggregation (**block-beacon application de-scoped; the v1 MPDH commit-reveal beacon is retained**, see `docs/proofs/FROST_DEVIATION_NOTICE.md` §9; FROST removed from the chain consensus path entirely, then deleted from the tree 2026-07-09 per the same NOTICE §8), v2.14 real OPAQUE wallet recovery (gates on Windows MSVC porting of upstream VLAs), v2.22-v2.24 confidential transactions + cross-chain bridge + audit hooks, v2.25-v2.26 distributed identity provider + on-chain key rotation. See `docs/V2-DESIGN.md` for the full design space.
 
@@ -535,27 +535,34 @@ The v2.7 F2 (`docs/proofs/F2-SPEC.md`) consensus-layer closure **SHIPPED** and s
 ## 9. Wire protocol
 
 ### 9.1 Framing
-Each message is `4-byte big-endian length || JSON envelope`.
+Each message is `4-byte big-endian length || binary envelope`. The wire is **binary-only** (D2, DECISION-LOG 2026-07-28): the legacy JSON envelope (`{"type", "payload"}`, wire-version 0) and the per-pair version negotiation were deleted pre-genesis; a body whose first bytes are not the envelope magic is rejected fail-closed and the connection closed (WIRE-3).
 
-**Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. Per-message-type cap is applied after deserialize in `Peer::read_body`:
+```
+Envelope (src/net/binary_codec.cpp):
+  offset 0  u8  magic    = 0xB1
+  offset 1  u8  version  = 0x01
+  offset 2  u8  msg_type (MsgType discriminator)
+  offset 3  u8  reserved = 0x00 (non-zero rejected fail-closed)
+  offset 4+     payload (per msg_type)
+```
+
+Payload encodings: **HELLO** — fixed binary frame `[u8 domain_len][domain][u16 LE port][u8 role][u32 LE shard_id][u8 wire_version]`, consumed exactly. **TRANSACTION** — the 4×256-bit fixed frame + trailer (+ optional fail-closed `[u32 LE len][bytes]` pq_auth section, §3.21). **All other types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope; these binarize per-type in the remaining D2 increments — the envelope is the stable extension point).
+
+**Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
-* **4 MB** — bulk payload: BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE.
+* **4 MB** — bulk payload: BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, HEADERS_RESPONSE.
 * **16 MB** — bootstrap-only: SNAPSHOT_RESPONSE, CHAIN_RESPONSE.
-Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table.
-
-```
-Envelope: { "type": uint8, "payload": <message-specific JSON> }
-```
+Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table. JSON payloads inside the envelope are additionally bounded pre-parse by the WIRE-2 structural ceiling (`kMaxJsonDepth` / `kMaxJsonNodes`).
 
 ### 9.2 Message types
 
-The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator. The body-size cap column lists the per-type ceiling applied by `Peer::read_body` after JSON deserialize (`include/determ/net/messages.hpp::max_message_bytes`); the framing layer enforces the global 16 MB ceiling before this check.
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content; for every type except HELLO and TRANSACTION it currently travels as length-prefixed JSON inside the binary envelope (§9.1).
 
 | ID | Name | Direction | Body cap | Payload |
 |---|---|---|---|---|
-| 0  | HELLO                     | initial handshake | 1 MB  | `{domain, port, role, shard_id, wire_version}` |
+| 0  | HELLO                     | initial handshake | 1 MB  | fixed binary frame: `{domain, port, role, shard_id, wire_version}` (§9.1); `wire_version` is an advertisement — the additive post-genesis upgrade escape hatch |
 | 1  | BLOCK                     | gossip            | 4 MB  | `Block` JSON |
-| 2  | TRANSACTION               | gossip            | 1 MB  | `Transaction` JSON |
+| 2  | TRANSACTION               | gossip            | 1 MB  | binary tx frame (§9.1; optional pq_auth section for PQ_TRANSFER) |
 | 3  | BLOCK_SIG                 | committee         | 1 MB  | `BlockSigMsg` JSON (Phase 2: digest sig + dh_secret) |
 | 4  | CONTRIB                   | committee         | 1 MB  | `ContribMsg` JSON (Phase 1: tx_commit + dh_input + ed sig) |
 | 5  | GET_CHAIN                 | sync              | 1 MB  | `{from, count}` |
@@ -1110,41 +1117,23 @@ This document specifies v1. Backward-incompatible changes (new block fields, mod
 
 The reference implementation tags v1 at the commit corresponding to this document's freeze.
 
-### 16.1 Wire-version negotiation (A3 / S8)
+### 16.1 Wire version (D2 binary-only)
 
-The gossip layer supports per-pair wire-format negotiation, independent of this document's protocol version:
+The wire has a single shipped format:
 
 ```
-kWireVersionLegacy = 0    # JSON-over-TCP envelope (§9.1 default)
-kWireVersionBinary = 1    # binary codec (src/net/binary_codec.cpp)
-kWireVersionMax    = 1    # highest version this build understands
+kWireVersionBinary = 1    # the binary envelope + codec (src/net/binary_codec.cpp)
 ```
 
-HELLO carries the sender's `wire_version` field:
+The legacy JSON-over-TCP envelope (wire-version 0) and the per-pair `min(ours, theirs)` negotiation were **deleted pre-genesis** (D2, DECISION-LOG 2026-07-28 — the wire portion is genesis-frozen under no-migrations, so the deletion had to land before v1 freeze). Every body is the 0xB1 binary envelope (§9.1); HELLO travels as its fixed binary frame like every other message.
 
-```json
-{
-  "domain":       "<peer's domain>",
-  "port":         <u16>,
-  "role":         <u8>,           // ChainRole — 0=SINGLE, 1=BEACON, 2=SHARD
-  "shard_id":     <u32>,
-  "wire_version": <u8>            // sender's kWireVersionMax
-}
-```
-
-On HELLO receipt, each peer sets the negotiated version for the pair to `min(local_max, remote_advertised)`. Subsequent outbound messages on that connection use the negotiated codec.
-
-* Pre-A3 peers omit `wire_version`; the field defaults to `0` (legacy JSON) — backward compat.
-* HELLO itself is **always JSON** regardless of negotiated version: both sides must parse it before any negotiation has happened, and the JSON encoding is what carries the `wire_version` advertisement in the first place.
-* Binary codec falls back to JSON serialization if it cannot encode a particular message type (current binary codec covers the high-volume types; large/rare types stay JSON). Failure is silent and per-message; connection stays alive.
-
-The negotiation is a pure bandwidth optimization. Block content + hash inputs are codec-agnostic — a block serialized JSON and re-serialized binary produces byte-identical bytes after canonicalization.
+HELLO still carries a `wire_version` u8 field as an **advertisement** — the additive post-genesis upgrade escape hatch. With one shipped version it decides nothing; a future v2-capable build advertises 2, keeps *sending* v1 frames, and may upgrade a connection only after reading the peer's advertised max. The envelope's version byte (offset 1) is the per-frame discriminator a future format would bump.
 
 ### 16.2 Protocol-version vs wire-version
 
 | Axis | Version | Bumps when | Backward-compat policy |
 |---|---|---|---|
 | Protocol (this document) | v1 | Block format, hash input, validator rules change | Hard fork — new genesis identity |
-| Wire-version (gossip codec) | 0 → 1 | New codec lands | Soft — old peers stay on JSON, new peers negotiate up |
+| Wire-version (gossip codec) | 1 | A future codec lands (post-genesis: additive-only, via the HELLO advertisement) | New peers negotiate up off the advertisement; v1 frames remain the floor |
 
 The v1.x → v2.X work tracked in `docs/V2-DESIGN.md` is mostly protocol-additive (new tx types, new state fields, new optional behaviors) with backward-compat shims (e.g. `state_root` conditional binding — pre-S-033 blocks remain valid). Specific v2 items that do require a flag-day are called out per-item in V2-DESIGN.md.

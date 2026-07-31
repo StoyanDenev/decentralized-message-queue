@@ -10,13 +10,13 @@ The proof is short and structural — there are no cryptographic assumptions; th
 
 ## 1. Current MsgType enumeration
 
-The `MsgType` enum at `include/determ/net/messages.hpp:13-82` is reproduced below verbatim (variant ordering matches source order, which matches the on-wire `uint8_t` value):
+The `MsgType` enum at `include/determ/net/messages.hpp:13-82` is reproduced below verbatim (variant ordering matches source order, which matches the on-wire `uint8_t` value). D2 note (2026-07-31, `ce31c6f`): every body on the wire is the 0xB1 binary envelope with the type byte at offset 2 — the legacy JSON envelope is deleted pre-genesis; HELLO and TRANSACTION are fixed binary frames, and the other 17 variants carry their JSON payload length-prefixed inside the envelope:
 
 | Source line | Value | Variant name | Wire purpose |
 |---|:---:|---|---|
-| 14 | 0 | `HELLO` | Pre-negotiation handshake (domain + port + role + shard_id + wire_version). Always JSON. |
+| 14 | 0 | `HELLO` | Handshake (domain + port + role + shard_id + `wire_version` advertisement). Fixed binary frame since D2 — "always JSON" and the v0/v1 negotiation described the deleted wire; nothing reads `wire_version` today. |
 | 15 | 1 | `BLOCK` | Full `chain::Block` JSON for gossip + replay. |
-| 16 | 2 | `TRANSACTION` | Single `chain::Transaction` JSON for mempool propagation. |
+| 16 | 2 | `TRANSACTION` | Single `chain::Transaction` for mempool propagation — fixed binary frame (128-byte core + trailer, incl. `pq_auth` per `b29d422`). |
 | 17 | 3 | `BLOCK_SIG` | Phase-2 signed block digest + VDF output + dh_secret. |
 | 18 | 4 | `CONTRIB` | Phase-1 `ContribMsg` — TxCommit + DhInput + Ed25519 sig. |
 | 19 | 5 | `GET_CHAIN` | Historical chain-slice request `{from, count}`. |
@@ -43,7 +43,7 @@ The parent proof's §3.3 enumeration table covers all 19 variants currently decl
 Future additions (any new MsgType value at index 19+) MUST be reflected in both:
 
 1. The §2 per-MsgType cap table here.
-2. The `switch` statement at `include/determ/net/messages.hpp:124-152`.
+2. The `switch` statement at `include/determ/net/messages.hpp:142-170`.
 
 The maintenance contract is formalized in §5 below (T-3).
 
@@ -51,7 +51,7 @@ The maintenance contract is formalized in §5 below (T-3).
 
 ## 2. Per-MsgType cap table
 
-The `max_message_bytes(MsgType)` function at `include/determ/net/messages.hpp:124-152` is a `switch` over the 19-variant enum, returning one of three tier values: `1 MB` (2²⁰), `4 MB` (2²²), or `16 MB` (2²⁴). The table below is the canonical mapping, grouped by tier:
+The `max_message_bytes(MsgType)` function at `include/determ/net/messages.hpp:142-170` is a `switch` over the 19-variant enum, returning one of three tier values: `1 MB` (2²⁰), `4 MB` (2²²), or `16 MB` (2²⁴). The table below is the canonical mapping, grouped by tier:
 
 ### 2.1 16 MB tier (bootstrap-state channels)
 
@@ -76,7 +76,7 @@ These are MsgTypes that wrap a full `chain::Block` (or a 256-header page thereof
 | `CROSS_SHARD_RECEIPT_BUNDLE` (14) | `{src_shard, src_block}` wrapping `chain::Block` | Full source block so destination can verify K-of-K sigs against derived committee | ~2 MB |
 | `HEADERS_RESPONSE` (18) | Up to 256 stripped-header blocks | Server-capped at `HEADERS_PAGE_MAX = 256`; each header ~16 KB (block minus heavy collections) | 256 × 16 KB ≤ 4 MB |
 
-**Cap rationale.** The 4 MB ceiling absorbs 2× headroom over the current ~2 MB max and accommodates future growth in block-fill density without requiring a cap revision. The comment at `messages.hpp:135-140` notes the HEADERS_RESPONSE math explicitly.
+**Cap rationale.** The 4 MB ceiling absorbs 2× headroom over the current ~2 MB max and accommodates future growth in block-fill density without requiring a cap revision. The comment at `messages.hpp:153-158` notes the HEADERS_RESPONSE math explicitly.
 
 ### 2.3 1 MB tier (default branch — consensus chatter, requests, status)
 
@@ -84,7 +84,7 @@ These are MsgTypes that fall through to the `default` branch. Every one has a st
 
 | Variant | Body shape | Default tier rationale | Realistic max payload |
 |---|---|---|---|
-| `HELLO` (0) | 5-field JSON: `{domain, port, role, shard_id, wire_version}` | Fixed-shape handshake | ~200 bytes |
+| `HELLO` (0) | 5-field fixed binary frame (D2): `[dlen][domain][port][role][shard_id][wire_version]` | Fixed-shape handshake | ~200 bytes |
 | `TRANSACTION` (2) | Fixed-shape `Transaction` + `payload[128]` | Single tx with bounded payload | ~500–2000 bytes |
 | `BLOCK_SIG` (3) | Fixed-shape `BlockSigMsg` (block_hash + ed_sig + dh_secret + delay_output) | 4 hashes + 1 sig | ~200 bytes |
 | `CONTRIB` (4) | `ContribMsg` with `tx_hashes[]` list + view-roots | List bounded by per-creator tx cap | ~few KB at K=256 |
@@ -97,7 +97,7 @@ These are MsgTypes that fall through to the `default` branch. Every one has a st
 | `SNAPSHOT_REQUEST` (15) | `{headers: N}` | Request envelope | ~30 bytes |
 | `HEADERS_REQUEST` (17) | `{from, count}` | Request envelope | ~50 bytes |
 
-**Cap rationale.** Even the loosest entry (`ABORT_EVENT` at maximum K) leaves ≥3× headroom against the 1 MB cap; the tightest (`STATUS_REQUEST`) has ~30,000× headroom. The default branch is **deliberately tight** so future MsgType variants added without explicit categorisation inherit the strict ceiling rather than the permissive 16 MB framing-layer outer cap (see `messages.hpp:145-150` comment, `S022WireFormatCaps.md` §2.2 design rationale).
+**Cap rationale.** Even the loosest entry (`ABORT_EVENT` at maximum K) leaves ≥3× headroom against the 1 MB cap; the tightest (`STATUS_REQUEST`) has ~30,000× headroom. The default branch is **deliberately tight** so future MsgType variants added without explicit categorisation inherit the strict ceiling rather than the permissive 16 MB framing-layer outer cap (see `messages.hpp:161-166` comment, `S022WireFormatCaps.md` §2.2 design rationale).
 
 ### 2.4 Coverage summary
 
@@ -114,7 +114,7 @@ The 19 declared variants map 1-to-1 onto the cap-table coverage. Two variants ar
 
 ## 3. Completeness theorem (T-1)
 
-**Theorem T-1 (Cap-Table Completeness).** Let `MsgType` denote the enum at `include/determ/net/messages.hpp:13-82` with declared variants `V = {V_0, V_1, ..., V_18}`. Let `max_message_bytes : MsgType → size_t` denote the `switch` function at `messages.hpp:124-152`. Then:
+**Theorem T-1 (Cap-Table Completeness).** Let `MsgType` denote the enum at `include/determ/net/messages.hpp:13-82` with declared variants `V = {V_0, V_1, ..., V_18}`. Let `max_message_bytes : MsgType → size_t` denote the `switch` function at `messages.hpp:142-170`. Then:
 
 $$
 \forall\, m \in V \cup \{\text{any future variant added to } \texttt{MsgType}\}:\quad \texttt{max\_message\_bytes}(m) \in \{2^{20},\; 2^{22},\; 2^{24}\}.
@@ -152,7 +152,9 @@ The `default:` branch returns `1 * 1024 * 1024` = 2²⁰ bytes for every variant
 
 **Step 3: forward compatibility.** The default branch covers not just the currently-declared 12 default-tier variants (HELLO, TRANSACTION, BLOCK_SIG, CONTRIB, GET_CHAIN, STATUS_REQUEST, STATUS_RESPONSE, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, SNAPSHOT_REQUEST, HEADERS_REQUEST) but also any future variant added to the enum without an explicit case. The default value is the tightest tier (1 MB), so the safe-default property of the closure is preserved.
 
-**Step 4: enum-value range.** The `MsgType` enum is declared with underlying type `uint8_t` (`include/determ/net/messages.hpp:13`), so the wire-side type byte takes values in `[0, 255]`. The currently-declared variants occupy values 0–18. Any wire-side byte value in `[19, 255]` that decodes as `MsgType` (which the deserializer permits — the binary codec reads the type byte as `static_cast<MsgType>(byte)`) hits the default branch and is capped at 1 MB. So even a malformed binary envelope claiming `MsgType::255` cannot exceed the default tier's 1 MB cap at the per-MsgType gate.
+**Step 4: enum-value range.** The `MsgType` enum is declared with underlying type `uint8_t` (`include/determ/net/messages.hpp:13`), so the wire-side type byte takes values in `[0, 255]`. The currently-declared variants occupy values 0–18. Any wire-side byte value in `[19, 255]` that decodes as `MsgType` (which the deserializer permits — the binary codec reads the type byte as `static_cast<MsgType>(data[2])`, `src/net/binary_codec.cpp:430`) hits the default branch and is capped at 1 MB. So even a malformed binary envelope claiming `MsgType::255` cannot exceed the default tier's 1 MB cap at the per-MsgType gate.
+
+**D2 note on step 4 (2026-07-31, `ce31c6f`): the offset-2 type byte is now the wire's ONLY type channel.** The legacy JSON envelope — whose type travelled as an in-document `"type"` field readable only after a full parse — is deleted; `Message::deserialize` rejects any non-0xB1 body ("not a binary envelope") before any parse. The step's conclusion is also enforced *earlier* than this gate requires: the WIRE-1 pre-decode cap in `Message::deserialize` (`src/net/messages.cpp:106-114`) applies `max_message_bytes(static_cast<MsgType>(data[2]))` before `decode_binary` runs, so a synthesized type byte in `[19, 255]` is bounded at the default 1 MB tier before any payload work — not merely at the post-deserialize per-MsgType gate in `Peer::read_body`. Step 4's bound holds at both gates; neither weakens the other.
 
 **Conclusion.** Every MsgType value — declared or undeclared, currently-valid or future-added — produces a finite size in `{2²⁰, 2²², 2²⁴}` bytes. The cap-table is total, exhaustive, and forward-compatible. ∎
 
@@ -188,7 +190,7 @@ Furthermore, **no MsgType variant has been observed to exceed its tier cap in pr
 **1 MB tier.** Per the §2.3 cap-rationale paragraph, every default-tier variant has a structural ceiling at least 3× under the cap:
 
 - Worst case: `ABORT_EVENT` at K=1000 carries K-1 ≈ 999 inline `AbortClaim` records × ~300 bytes ≈ 300 KB. Headroom 1024 KB / 300 KB ≈ 3.4×.
-- Best case: `STATUS_REQUEST` is an empty JSON envelope `{}` (~30 bytes). Headroom 1024 KB / 30 B ≈ 35,000×.
+- Best case: `STATUS_REQUEST` is an empty JSON payload `{}` inside the binary envelope (~30 bytes). Headroom 1024 KB / 30 B ≈ 35,000×.
 
 The tier cap is therefore loose enough that no honest sender hits it under any reasonable committee size, transaction density, or operator configuration. A flooder who tries to weaponize the 1 MB ceiling pays the full 1 MB allocation + parse cost on a connection that gets closed immediately afterward (T-3 + T-4 of `S022WireFormatCaps.md`).
 
@@ -196,7 +198,7 @@ The tier cap is therefore loose enough that no honest sender hits it under any r
 
 - `BLOCK` at mainnet-density: ~500 KB at 256-tx blocks, scaling linearly with tx count. The `TRANSFER_PAYLOAD_MAX = 128` per-tx cap × ~8 KB per tx (worst case with all fields populated) × ~256 txs ≈ 2 MB at the production-density cap. The 4 MB cap leaves ~2× headroom.
 - `BEACON_HEADER` / `SHARD_TIP` / `CROSS_SHARD_RECEIPT_BUNDLE`: same shape (wrap a full `Block`); same realistic maximum.
-- `HEADERS_RESPONSE` at the 256-header page cap: 256 × ~16 KB stripped-header ≤ 4 MB. The page cap is enforced server-side (`HEADERS_PAGE_MAX = 256`); the 4 MB cap is exactly at the structural maximum here, with the comment at `messages.hpp:135-140` documenting the math.
+- `HEADERS_RESPONSE` at the 256-header page cap: 256 × ~16 KB stripped-header ≤ 4 MB. The page cap is enforced server-side (`HEADERS_PAGE_MAX = 256`); the 4 MB cap is exactly at the structural maximum here, with the comment at `messages.hpp:153-158` documenting the math.
 
 The 4 MB cap is therefore tight against the HEADERS_RESPONSE structural maximum and loose-with-2×-headroom for the other block-payload variants. Both calibrations are sound: the tightness on HEADERS_RESPONSE means an adversary cannot push beyond the legitimate page-cap × header-size product without the cap firing.
 
@@ -301,9 +303,9 @@ If a contributor adds a new MsgType variant without honoring T-3:
 
 **Violation type A (forgotten `case` label, legitimate max ≤ 1 MB)**: no operational regression. The default tier handles it. The contract was violated but the safe-default property catches it. T-1 holds; T-2's tightness is preserved.
 
-**Violation type B (forgotten `case` label, legitimate max > 1 MB)**: legitimate senders hit the 1 MB cap; their messages get rejected with the "oversize message" log line at `peer.cpp:91-94`. This is **loud** — the QA / regression suite + operator monitoring catches the regression because the log line is emitted with the offending MsgType + size + cap. The fix is straightforward (add the explicit `case` label).
+**Violation type B (forgotten `case` label, legitimate max > 1 MB)**: legitimate senders hit the 1 MB cap; their messages get rejected with the "oversize message" log line at `peer.cpp:81-84`. This is **loud** — the QA / regression suite + operator monitoring catches the regression because the log line is emitted with the offending MsgType + size + cap. The fix is straightforward (add the explicit `case` label).
 
-**Violation type C (explicit `case` label, value above 16 MB)**: this would exceed `kMaxFrameBytes` and never trigger — the framing-layer guard at `peer.cpp:64` rejects messages > 16 MB before the per-MsgType cap is consulted. The new tier value would be **dead code**. T-1 still holds (the per-MsgType result is finite); T-2's tightness is preserved (the effective cap is `min(per-type-cap, framing-cap)` = `kMaxFrameBytes`).
+**Violation type C (explicit `case` label, value above 16 MB)**: this would exceed `kMaxFrameBytes` and never trigger — the framing-layer guard at `peer.cpp:54` rejects messages > 16 MB before the per-MsgType cap is consulted. The new tier value would be **dead code**. T-1 still holds (the per-MsgType result is finite); T-2's tightness is preserved (the effective cap is `min(per-type-cap, framing-cap)` = `kMaxFrameBytes`).
 
 **Violation type D (explicit `case` label, value < 1 MB but unnecessarily tight)**: no operational regression for honest senders (the cap is still loose against the structural max); the chosen-tier rationale just deviates from the established 1 MB / 4 MB / 16 MB pattern. Caught at PR review.
 
@@ -331,7 +333,7 @@ The three-axis composition (per-message-size × per-signer-count × per-IP-rate)
 
 - **`docs/proofs/S006ContribMsgEquivocation.md`** — Phase-1 dual of S-022 + S-013. Detects same-generation duplicate `ContribMsg` envelopes; the cap-and-detect pattern parallels S-022's cap-and-close pattern.
 - **`docs/proofs/S017UnstakeApplyConsistency.md`** — multi-layer defense-in-depth pattern (admission gate + apply-time defense) mirrors S-022's framing-layer + per-MsgType two-tier defense.
-- **`docs/proofs/JsonValidationSoundness.md`** — S-018 closure (in progress). Handles the deserialize-exception disposition orthogonal to S-022's cap-enforcement disposition. S-022 covers oversize-but-well-formed; S-018 covers in-cap-but-malformed.
+- **`docs/proofs/JsonValidationSoundness.md`** — S-018 closure (in progress). Governs *what counts as* a malformed message; the connection disposition on a parse failure is the parent proof's (WIRE-3 closes — the earlier "orthogonal" framing of the two dispositions was retracted in the parent's §2.4 (d)). S-022 covers oversize-but-well-formed; S-018 covers in-cap-but-malformed.
 - **`docs/proofs/BlockchainStateIntegrity.md`** — composition theorem on state-integrity. T-3 (apply-time state divergence detection) is the structural defense that composes with S-022's per-message work bound to make snapshot-cap-abuse (F-2 in S022WireFormatCaps.md §6.2) tractable.
 - **`docs/proofs/Preliminaries.md`** §3 — network model. The `Peer` framing-layer assumption underlying `S022WireFormatCaps.md` T-2 carries through to T-1 here.
 - **`docs/proofs/UnitTestCoverageMap.md`** — meta-coverage proof for the in-process unit-test suite. The recommended T-3 test guard (§5.1 above) would be a future addition tracked there.
@@ -360,10 +362,10 @@ The three-axis composition (per-message-size × per-signer-count × per-IP-rate)
 Implementation surfaces (unchanged from `S022WireFormatCaps.md` §8):
 
 - `include/determ/net/messages.hpp:13-82` — `MsgType` enum (19 declared variants; the proof's primary object).
-- `include/determ/net/messages.hpp:124-152` — `max_message_bytes(MsgType)` cap table (T-1's exhaustive switch).
-- `include/determ/net/messages.hpp:101` — `kMaxFrameBytes` outer-ceiling constant.
-- `src/net/peer.cpp:50-70` — `Peer::read_header` framing-layer guard.
-- `src/net/peer.cpp:72-105` — `Peer::read_body` per-MsgType cap enforcement.
+- `include/determ/net/messages.hpp:142-170` — `max_message_bytes(MsgType)` cap table (T-1's exhaustive switch).
+- `include/determ/net/messages.hpp:119` — `kMaxFrameBytes` outer-ceiling constant.
+- `src/net/peer.cpp:40-60` — `Peer::read_header` framing-layer guard.
+- `src/net/peer.cpp:62-112` — `Peer::read_body` per-MsgType cap enforcement.
 
 Coverage-test surfaces (T-3's recommended guard, deferred):
 

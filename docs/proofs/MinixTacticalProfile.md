@@ -169,8 +169,9 @@ the subscriber path in `src/node/node.cpp` established the surface a
 
 **Consumers + patterns.**
 - **Peer** (gossip framing): 4-byte big-endian length prefix baked into
-  `Message::serialize`/`serialize_binary` (`messages.cpp:17-23/63-70`,
-  `kMaxFrameBytes` 16 MB); exactly ONE `async_read` outstanding (header →
+  `Message::serialize_binary` (`messages.cpp:122-132`; the JSON
+  `Message::serialize` encoder it survey-listed alongside is deleted — D2
+  binary-only wire; `kMaxFrameBytes` 16 MB); exactly ONE `async_read` outstanding (header →
   body → dispatch → loop) and ONE `async_write` pump over a `write_mutex_`-guarded
   unbounded `write_queue_`; every handler captures `shared_from_this()`;
   `set_option(keep_alive)` (S-026); dual size caps (framing ceiling at
@@ -424,9 +425,12 @@ JSON serialization across implementations:**
 Everything else is schema-only: the state root is over BINARY domain-prefixed
 leaves (not JSON bytes) and `restore_from_snapshot` re-verifies it against the
 committee-signed header; config/genesis/RPC shapes/snapshots need fidelity, not
-cross-implementation byte-equality. The wire is JSON-heavy (wire v0 pure JSON;
-the v1 "binary" envelope wraps `payload.dump()` for every type except
-TRANSACTION; HELLO always JSON). **The used subset is narrow:** bool, u8-u64
+cross-implementation byte-equality. The wire ENVELOPE is binary-only as of the
+D2 strip (2026-07-28: the v0 JSON envelope + the per-pair HELLO negotiation are
+deleted; HELLO and TRANSACTION travel as fixed binary frames), but the other 17
+MsgTypes still carry `payload.dump()` length-prefixed INSIDE the binary
+envelope until the later D2 increments — so the wire remains a JSON consumer
+for now. **The used subset is narrow:** bool, u8-u64
 ints, ASCII/hex strings, arrays, sorted-key objects; doubles appear ONLY in
 node Config (never on a wire/digest path); zero
 ordered_json/json_pointer/CBOR/msgpack/SAX usage; nlohmann's throw-on-invalid-
