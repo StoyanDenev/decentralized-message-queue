@@ -38,9 +38,21 @@
 #      chain::bft_committee_size(cfg_.k_block_sigs) in check_if_selected — NOT an
 #      inline (2K+2)/3 (which risks producer/validator drift, the S-043 class).
 #      The helper's ceil(2K/3) body is separately pinned in params.hpp (C7).
-#   C4 SINGLE-CLEAR-SITE (unchanged): current_aborts_.clear() appears EXACTLY once
-#      (on-accept) and no erase/pop/resize/assign/swap/= removal exists. F-b decay
-#      was rejected (§4.2); if it lands this goes RED.
+#   C4 CLEAR-SITES (two SANCTIONED full-scratch clears, no F-b decay):
+#      current_aborts_.clear() appears EXACTLY twice, one in each sanctioned fn —
+#      (1) on-accept in post_append_bookkeeping_locked; (2) the S-050 round-stall
+#      valve maybe_stall_reset_locked, a safety-neutral scratch-only reset that
+#      fires on total stall (blocks self-certify their abort events, so the cleared
+#      scratch is NOT a validation input — RoundStallValveSoundness.md C-1). This is
+#      categorically NOT the rejected F-b (AbortCascadeLiveness §4.2): F-b was
+#      per-entry WALL-CLOCK decay biasing LIVE committee derivation with no
+#      convergence mechanism; the valve is a one-shot FULL reset on an already-
+#      stalled round, coupled to an explicit re-sync (STATUS_REQUEST +
+#      stalled_resync_ + S-047 relay). A THIRD clear, a clear OUTSIDE those two fns,
+#      or any erase/pop/resize/assign/swap/= removal is F-b decay and goes RED.
+#      (Pin widened 1->2 on 2026-07-31: the S-050 valve `48bc54f` added the second
+#      clear 13 days after this pin was first written at ==1; the guard is not in
+#      the FAST ONLY_PATTERN, so the staleness went unnoticed until a full run.)
 #   C5 QUORUM-FLOOR (S-044 fix): the abort-claim quorum in BOTH writers routes
 #      through chain::abort_claim_quorum(...) — on_abort_claim (formation) and
 #      on_abort_event (gossip adoption). The bare `size()-1` ternary is GONE from
@@ -60,9 +72,9 @@
 #
 # LIVENESS (SELFTEST=1): feeds the canonical FIXED snippet (green) + regression
 # variants (each must go RED at the right pin): revert-quorum-floor -> C5;
-# inline-k_bft -> C3; second-clear -> C4; erase-decay -> C4; retry-return -> C2;
-# OR-relaxation -> C1; floor-body-removed -> C6; θ-bumped -> C8; web-K2 -> C9;
-# docs-flip-to-OPEN -> C10.
+# inline-k_bft -> C3; third-clear -> C4; erase-decay -> C4; valve-clear-relocated
+# -> C4; retry-return -> C2; OR-relaxation -> C1; floor-body-removed -> C6;
+# θ-bumped -> C8; web-K2 -> C9; docs-flip-to-OPEN -> C10.
 #
 # Pure read-only SOURCE check (awk/grep/sed). Comment-strip is `//`-only. No
 # determ binary, never SKIPs, does not source common.sh. run_all.sh auto-discovers.
@@ -105,6 +117,8 @@ fn_body_ns() {
     !inreg && fn=="cis" && /void +Node::check_if_selected\(\) *\{/ { inreg=1; next }
     !inreg && fn=="oae" && /void +Node::on_abort_event\(/          { inreg=1; next }
     !inreg && fn=="oac" && /void +Node::on_abort_claim\(/          { inreg=1; next }
+    !inreg && fn=="pab" && /void +Node::post_append_bookkeeping_locked\(/ { inreg=1; next }
+    !inreg && fn=="msr" && /bool +Node::maybe_stall_reset_locked\(/       { inreg=1; next }
     !inreg { next }
     /^\}/ { exit }
     { line=$0; sub(/\/\/.*/, "", line); gsub(/[ \t]/, "", line); printf "%s", line }
@@ -170,11 +184,18 @@ run_checks() {
     esac
   fi
 
-  # ── C4 SINGLE-CLEAR-SITE (unchanged: no decay/expiry) ──
-  local nclear nother
+  # ── C4 CLEAR-SITES: exactly the two SANCTIONED full-scratch clears, no decay ──
+  #    (1) on-accept (post_append_bookkeeping_locked) + (2) S-050 valve
+  #    (maybe_stall_reset_locked). count==2 AND one clear in EACH sanctioned fn ⇒
+  #    no clear anywhere else. A 3rd clear (decay fn) or a clear moved OUT of a
+  #    sanctioned fn reddens; erase/pop/… still reddens via nother.
+  local nclear nother pab msr c4ok=1
   nclear=$(count_clear_sites "$file"); nother=$(count_other_removals "$file")
-  [ "$nclear" = "1" ] && ok "C4 current_aborts_.clear() appears EXACTLY once (on-accept)" \
-                       || bad "C4 current_aborts_.clear() count is $nclear, want 1 (decay landed, or on-accept clear lost)"
+  pab=$(fn_body_ns "$file" pab); msr=$(fn_body_ns "$file" msr)
+  [ "$nclear" = "2" ] || { bad "C4 current_aborts_.clear() count is $nclear, want 2 (on-accept + S-050 valve; a 3rd is F-b decay, a loss drops a sanctioned clear)"; c4ok=0; }
+  case "$pab" in *'current_aborts_.clear();'*) : ;; *) bad "C4 on-accept current_aborts_.clear() NOT in post_append_bookkeeping_locked (moved/lost)"; c4ok=0 ;; esac
+  case "$msr" in *'current_aborts_.clear();'*) : ;; *) bad "C4 S-050 valve current_aborts_.clear() NOT in maybe_stall_reset_locked (moved/lost; RoundStallValveSoundness C-1)"; c4ok=0 ;; esac
+  [ "$c4ok" = "1" ] && ok "C4 current_aborts_.clear() appears EXACTLY twice — on-accept (post_append_bookkeeping_locked) + S-050 valve (maybe_stall_reset_locked, scratch-only reset); no third/decay clear"
   [ "$nother" = "0" ] && ok "C4 no non-clear current_aborts_ removal (erase/pop/resize/assign/swap/=)" \
                       || bad "C4 found $nother non-clear current_aborts_ removal — F-b decay landed; reconcile SECURITY.md"
 
@@ -290,10 +311,18 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
     current_aborts_.push_back(ev);
 }
 
-void Node::apply_block_locked(const chain::Block& b) {
+void Node::post_append_bookkeeping_locked(const chain::Block& b) {
     // current_aborts_.clear();   <- commented decoy must NOT count
-    current_aborts_.clear();
+    current_aborts_.clear();      // on-accept clear (the one sanctioned block-apply clear)
     reset_round();
+}
+
+bool Node::maybe_stall_reset_locked() {
+    // S-050 stall valve: safety-neutral scratch-only reset on total stall
+    // (blocks self-certify their abort events — RoundStallValveSoundness C-1).
+    current_aborts_.clear();      // S-050 valve clear (the second sanctioned clear)
+    reset_round();
+    return true;
 }
 EOF
 
@@ -338,9 +367,9 @@ EOF
   r2="$tmproot/r2.cpp"; sed 's|chain::bft_committee_size(cfg_.k_block_sigs);   // ceil|(2 * cfg_.k_block_sigs + 2) / 3;   // ceil|' "$clean" > "$r2"
   st_red "R2 inline k_bft" "C3" "$r2" "$params" "$genesis" "$sec_mit"
 
-  # R3 second clear -> C4
+  # R3 third clear (unsanctioned decay fn) -> C4 (count 3 != 2)
   r3="$tmproot/r3.cpp"; cp "$clean" "$r3"; printf '\nvoid Node::decay() { current_aborts_.clear(); }\n' >> "$r3"
-  st_red "R3 second clear site" "C4" "$r3" "$params" "$genesis" "$sec_mit"
+  st_red "R3 third clear site (unsanctioned decay fn)" "C4" "$r3" "$params" "$genesis" "$sec_mit"
 
   # R4 erase decay -> C4
   r4="$tmproot/r4.cpp"; cp "$clean" "$r4"; printf '\nvoid Node::decay() { current_aborts_.erase(current_aborts_.begin()); }\n' >> "$r4"
@@ -372,6 +401,16 @@ EOF
 ### S-045 — BFT escalation unreachable at the default threshold (counter freeze) — ⛔ OPEN (High, liveness)
 EOF
   st_red "R10 docs flipped back to OPEN" "C10" "$clean" "$params" "$genesis" "$sec_open"
+
+  # R11 valve clear relocated OUT of maybe_stall_reset_locked into an unsanctioned
+  # fn (total count stays 2, but the per-fn anchor must still catch it) -> C4
+  r11="$tmproot/r11.cpp"
+  awk '/bool Node::maybe_stall_reset_locked/{inmsr=1}
+       inmsr && /current_aborts_\.clear\(\);/{next}
+       /^\}/{if(inmsr)inmsr=0}
+       {print}' "$clean" > "$r11"
+  printf '\nvoid Node::rogue_clear() { current_aborts_.clear(); }\n' >> "$r11"
+  st_red "R11 valve clear relocated to unsanctioned fn (count still 2)" "C4" "$r11" "$params" "$genesis" "$sec_mit"
 
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
