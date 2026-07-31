@@ -47,10 +47,18 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      genesis.cpp) + wallet keyfiles. Wire portion is GENESIS-DEADLINE (no-migrations).
      PROGRESS 2026-07-31: the ENVELOPE strip is DONE (b29d422 pq_auth tx-frame
      gap + ce31c6f binary-only envelope/HELLO, negotiation deleted, mirrors +
-     gates rewritten, mutant-verified, FAST green). 16 non-HELLO/non-TRANSACTION
-     types still carry length-prefixed JSON PAYLOADS inside the binary envelope
-     (WIRE-2 stays until those binarize per-type); storage/genesis/keyfiles not
-     started.
+     gates rewritten, mutant-verified, FAST green). PER-TYPE PAYLOAD frames:
+     7bcd32d COMPOSABLE_BATCH, c8a63d2+40d61cd abort claims typed,
+     ad595bb inc6a (5 request/status), e845b44 inc6b (4 consensus-chatter),
+     2803a13 the both-directions exact-length gate. 11 of the 19 types are now
+     fixed binary frames; 8 still carry length-prefixed JSON PAYLOADS inside
+     the binary envelope (BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER,
+     SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE,
+     HEADERS_RESPONSE) — WIRE-2 stays until those binarize per-type. Next is
+     inc5 (Block frame), the keystone: BLOCK/BEACON_HEADER/SHARD_TIP/
+     CROSS_SHARD_RECEIPT_BUNDLE/CHAIN_RESPONSE all carry a Block, and chain
+     storage (inc8) has a TOTAL hard dependency on it. Storage/genesis/keyfiles
+     not started.
   2. Delete third_party/nlohmann/json.hpp AND include/determ/json/json.hpp;
      regenerate test vectors as binary. RPC/CLI/config may keep optional text.
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.

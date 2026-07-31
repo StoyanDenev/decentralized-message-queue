@@ -10,22 +10,22 @@ The proof is short and structural — there are no cryptographic assumptions; th
 
 ## 1. Current MsgType enumeration
 
-The `MsgType` enum at `include/determ/net/messages.hpp:13-82` is reproduced below verbatim (variant ordering matches source order, which matches the on-wire `uint8_t` value). D2 note (2026-07-31, `ce31c6f` + `ad595bb`): every body on the wire is the 0xB1 binary envelope with the type byte at offset 2 — the legacy JSON envelope is deleted pre-genesis. **Seven** variants are true fixed binary frames (HELLO and TRANSACTION per `ce31c6f` / `b29d422`; GET_CHAIN, STATUS_REQUEST, STATUS_RESPONSE, SNAPSHOT_REQUEST and HEADERS_REQUEST per D2-inc6a `ad595bb`); the remaining **12** carry their JSON payload length-prefixed inside the envelope. The "carries lp-JSON" column below is the authoritative per-type record of that split; the cap table in §2 is **unchanged** by the split — all five newly-framed types were already in, and remain in, the 1 MB default tier:
+The `MsgType` enum at `include/determ/net/messages.hpp:13-82` is reproduced below verbatim (variant ordering matches source order, which matches the on-wire `uint8_t` value). D2 note (2026-07-31, `ce31c6f` + `ad595bb` + `e845b44`): every body on the wire is the 0xB1 binary envelope with the type byte at offset 2 — the legacy JSON envelope is deleted pre-genesis. **Eleven** variants are true fixed binary frames (HELLO and TRANSACTION per `ce31c6f` / `b29d422`; GET_CHAIN, STATUS_REQUEST, STATUS_RESPONSE, SNAPSHOT_REQUEST and HEADERS_REQUEST per D2-inc6a `ad595bb`; ABORT_CLAIM, BLOCK_SIG, EQUIVOCATION_EVIDENCE and ABORT_EVENT per D2-inc6b `e845b44`); the remaining **8** carry their JSON payload length-prefixed inside the envelope. The "carries lp-JSON" column below is the authoritative per-type record of that split; the cap table in §2 is **unchanged** by either increment — all nine newly-framed types were already in, and remain in, the 1 MB default tier:
 
 | Source line | Value | Variant name | lp-JSON? | Wire purpose |
 |---|:---:|---|:---:|---|
 | 14 | 0 | `HELLO` | fixed frame | Handshake (domain + port + role + shard_id + `wire_version` advertisement). Fixed binary frame since D2 — "always JSON" and the v0/v1 negotiation described the deleted wire; nothing reads `wire_version` today. |
 | 15 | 1 | `BLOCK` | yes | Full `chain::Block` JSON for gossip + replay. |
 | 16 | 2 | `TRANSACTION` | fixed frame | Single `chain::Transaction` for mempool propagation — fixed binary frame (128-byte core + trailer, incl. `pq_auth` per `b29d422`). |
-| 17 | 3 | `BLOCK_SIG` | yes | Phase-2 signed block digest + VDF output + dh_secret. |
+| 17 | 3 | `BLOCK_SIG` | fixed frame | Phase-2 signed block digest + VDF output + dh_secret — fixed frame `[block_index u64 LE][u8 len + signer][delay_output 32][dh_secret 32][ed_sig 64]`, exactly 137 + \|signer\| payload bytes, since `e845b44`. |
 | 18 | 4 | `CONTRIB` | yes | Phase-1 `ContribMsg` — TxCommit + DhInput + Ed25519 sig. |
 | 19 | 5 | `GET_CHAIN` | fixed frame | Historical chain-slice request `{from, count}` — fixed 10-byte frame `[from u64 LE][count u16 LE]` since `ad595bb`. |
 | 20 | 6 | `CHAIN_RESPONSE` | yes | Historical chain-slice response (variable-size). |
 | 21 | 7 | `STATUS_REQUEST` | fixed frame | Peer status probe — **zero-length** frame since `ad595bb`; the type byte is the whole message. |
 | 22 | 8 | `STATUS_RESPONSE` | fixed frame | `{height, genesis}` response — fixed frame `[height u64 LE][genesis_len u8][genesis]`, 9..73 payload bytes, `genesis_len ∈ {0, 64}`, since `ad595bb`. |
-| 23 | 9 | `ABORT_CLAIM` | yes | Single signed abort claim (rev.8). |
-| 30 | 10 | `ABORT_EVENT` | yes | Assembled K-1 abort claims inline (rev.8 follow-on). |
-| 36 | 11 | `EQUIVOCATION_EVIDENCE` | yes | Two `(digest, sig)` pairs by the same signer (rev.8 follow-on). |
+| 23 | 9 | `ABORT_CLAIM` | fixed frame | Single signed abort claim (rev.8) — fixed frame since `e845b44`: the shared `chain::encode_abort_claims` blob with `count == 1`, exactly 109 + \|missing_creator\| + \|claimer\| payload bytes. |
+| 30 | 10 | `ABORT_EVENT` | fixed frame | Assembled K-1 abort claims inline (rev.8 follow-on) — fixed frame since `e845b44`: 82 + \|aborting_node\| + the claims blob payload bytes, the blob itself being 2 + Σ(107 + \|missing_creator\|ᵢ + \|claimer\|ᵢ) and travelling **last** so exact consumption is decidable. |
+| 36 | 11 | `EQUIVOCATION_EVIDENCE` | fixed frame | Two `(digest, sig)` pairs by the same signer (rev.8 follow-on) — fixed frame since `e845b44`, exactly 213 + \|equivocator\| payload bytes. |
 | 45 | 12 | `BEACON_HEADER` | yes | Full beacon `chain::Block` for shard-side light-header sync (rev.9 B2c.1). |
 | 51 | 13 | `SHARD_TIP` | yes | Shard's latest block wrapped with `shard_id` envelope (rev.9 B2c.3). |
 | 60 | 14 | `CROSS_SHARD_RECEIPT_BUNDLE` | yes | `{src_shard, src_block}` for destination-shard receipt pickup (rev.9 B3.3). |
@@ -34,11 +34,13 @@ The `MsgType` enum at `include/determ/net/messages.hpp:13-82` is reproduced belo
 | 80 | 17 | `HEADERS_REQUEST` | fixed frame | `{from, count}` light-client header-sync request (v2.2) — fixed 12-byte frame `[from u64 LE][count u32 LE]` since `ad595bb`. |
 | 81 | 18 | `HEADERS_RESPONSE` | yes | Page of stripped-header blocks (v2.2). |
 
-**Total: 19 variants, values 0–18 inclusive — 7 fixed binary frames, 12 length-prefixed JSON.** The frame layouts and their fail-closed decode contracts are proved in `BinaryCodecRoundTripSoundness.md` (§3.4–§3.6, T-2/T-3); this document is concerned only with the fact that the split leaves every variant's *cap* unchanged. The lp-JSON column is load-bearing for the WIRE-2 argument in `S022WireFormatCaps.md`: `json_structural_precheck` guards exactly the 12 "yes" rows, and retires only when that column is empty.
+**Total: 19 variants, values 0–18 inclusive — 11 fixed binary frames, 8 length-prefixed JSON.** The frame layouts and their fail-closed decode contracts are proved in `BinaryCodecRoundTripSoundness.md` (§3.4–§3.7, T-2/T-3); this document is concerned only with the fact that the split leaves every variant's *cap* unchanged. The lp-JSON column is load-bearing for the WIRE-2 argument in `S022WireFormatCaps.md`: `json_structural_precheck` guards exactly the 8 remaining "yes" rows, so **WIRE-2 does not retire at D2-inc6b** — it retires only when that column is empty.
+
+**Exactness is gated, not asserted (D2-inc6b).** "Every fixed frame has exactly one canonical encoding" is the property that makes the lp-JSON → fixed-frame migration worth doing at all, and it is pinned by a table-driven **exact-length sweep** in `determ test-binary-codec` (`src/main.cpp:10403-10501`). For each of the eleven fixed-layout frames the sweep asserts three legs: the unmodified body decodes (the control, without which both rejection legs could pass vacuously), the body **plus one trailing byte** is rejected against that frame's specific reject string, and — where the frame is not zero-length — the body **minus one byte** is likewise rejected. It exists because a falsify-on-mutant pass found the per-frame legs each probed only ONE direction (GET_CHAIN and BLOCK_SIG padded, HEADERS_REQUEST and EQUIVOCATION_EVIDENCE truncated, SNAPSHOT_REQUEST neither), so relaxing an exact `len != N` guard to a one-sided `len < N` left every gate GREEN while the decoder silently accepted trailing bytes — a second, non-canonical encoding of the same message, which is precisely what D2 exists to eliminate. Two mutants confirm the sweep reddens: EQUIVOCATION_EVIDENCE `!=`→`>` and SNAPSHOT_REQUEST `!=`→`<`. The soundness statement is `BinaryCodecRoundTripSoundness.md` L-9; **the completeness statement is this table** — a new fixed frame that is not listed in it has no exactness gate, which is why §5.2's checklist carries the entry.
 
 ### 1.1 Cross-reference against `S022WireFormatCaps.md`
 
-The parent proof's §3.3 enumeration table covers all 19 variants currently declared (HELLO=0 through HEADERS_RESPONSE=18). No new MsgType variant has been added since the parent proof was authored — the enum surface is stable. D2-inc6a (`ad595bb`) changed the *payload encoding* of five existing variants, not the enum: no value was added, removed, or renumbered, and `max_message_bytes` was not touched, so T-1 / T-2 / T-3 below hold verbatim over the same 19 variants. The §3 enumeration here is byte-for-byte consistent with the parent proof's §3.3 enumeration; this proof's contribution is the **canonical cross-checked table** that an external auditor can compare against `include/determ/net/messages.hpp` directly without re-reading the parent proof's prose.
+The parent proof's §3.3 enumeration table covers all 19 variants currently declared (HELLO=0 through HEADERS_RESPONSE=18). No new MsgType variant has been added since the parent proof was authored — the enum surface is stable. D2-inc6a (`ad595bb`) and D2-inc6b (`e845b44`) changed the *payload encoding* of nine existing variants between them, not the enum: no value was added, removed, or renumbered, and `max_message_bytes` was not touched, so T-1 / T-2 / T-3 below hold verbatim over the same 19 variants. The §3 enumeration here is byte-for-byte consistent with the parent proof's §3.3 enumeration; this proof's contribution is the **canonical cross-checked table** that an external auditor can compare against `include/determ/net/messages.hpp` directly without re-reading the parent proof's prose.
 
 Future additions (any new MsgType value at index 19+) MUST be reflected in both:
 
@@ -86,20 +88,22 @@ These are MsgTypes that fall through to the `default` branch. Every one has a st
 |---|---|---|---|
 | `HELLO` (0) | 5-field fixed binary frame (D2): `[dlen][domain][port][role][shard_id][wire_version]` | Fixed-shape handshake | ~200 bytes |
 | `TRANSACTION` (2) | Fixed-shape `Transaction` + `payload[128]` | Single tx with bounded payload | ~500–2000 bytes |
-| `BLOCK_SIG` (3) | Fixed-shape `BlockSigMsg` (block_hash + ed_sig + dh_secret + delay_output) | 4 hashes + 1 sig | ~200 bytes |
+| `BLOCK_SIG` (3) | Fixed binary frame (D2-inc6b): `[block_index u64 LE][u8 len + signer][delay_output 32][dh_secret 32][ed_sig 64]` | Fixed-shape signed digest + VDF output | **141 + \|signer\| bytes** (4 envelope + 137 + \|signer\|); ≤ 396 |
 | `CONTRIB` (4) | `ContribMsg` with `tx_hashes[]` list + view-roots | List bounded by per-creator tx cap | ~few KB at K=256 |
 | `GET_CHAIN` (5) | Fixed binary frame (D2-inc6a): `[from u64 LE][count u16 LE]` | Fixed-shape request | **exactly 14 bytes** (4 envelope + 10) |
 | `STATUS_REQUEST` (7) | Fixed binary frame (D2-inc6a): no fields | Fixed-shape probe | **exactly 4 bytes** (envelope header only) |
 | `STATUS_RESPONSE` (8) | Fixed binary frame (D2-inc6a): `[height u64 LE][genesis_len u8][genesis]`, `genesis_len ∈ {0, 64}` | Fixed-shape 2-field response | **13 or 77 bytes** (4 envelope + 9 or 73) |
-| `ABORT_CLAIM` (9) | Fixed-shape `AbortClaimMsg` | Single signed claim | ~300 bytes |
-| `ABORT_EVENT` (10) | `{block_index, prev_hash, event}` wrapping `AbortEvent` with K-1 claims | List bounded by committee size K | ~K × 300 bytes |
-| `EQUIVOCATION_EVIDENCE` (11) | Two `(digest, sig)` pairs + signer info | Fixed-shape evidence record | ~300 bytes |
+| `ABORT_CLAIM` (9) | Fixed binary frame (D2-inc6b): the shared `chain::encode_abort_claims` blob with `count == 1` — `[u16 count][block_index u64][round u8][prev_hash 32][ed_sig 64][u8 len + missing_creator][u8 len + claimer]` | Single signed claim | **113 + \|missing_creator\| + \|claimer\| bytes** (4 envelope + 109 + …); ≤ 623 |
+| `ABORT_EVENT` (10) | Fixed binary frame (D2-inc6b): `[block_index u64][prev_hash 32][round u8][u8 len + aborting_node][timestamp u64][event_hash 32][claims blob]` | List bounded by committee size K | **86 + \|aborting_node\| + claims blob**, blob = 2 + Σ(107 + \|missing_creator\|ᵢ + \|claimer\|ᵢ) — ~167 KB at K=1000 with 32-byte identifiers |
+| `EQUIVOCATION_EVIDENCE` (11) | Fixed binary frame (D2-inc6b): `[u8 len + equivocator][block_index u64][digest_a 32][sig_a 64][digest_b 32][sig_b 64][shard_id u32][beacon_anchor_height u64]` | Fixed-shape evidence record | **217 + \|equivocator\| bytes** (4 envelope + 213); ≤ 472 |
 | `SNAPSHOT_REQUEST` (15) | Fixed binary frame (D2-inc6a): `[headers u32 LE]` | Fixed-shape request | **exactly 8 bytes** (4 envelope + 4) |
 | `HEADERS_REQUEST` (17) | Fixed binary frame (D2-inc6a): `[from u64 LE][count u32 LE]` | Fixed-shape request | **exactly 16 bytes** (4 envelope + 12) |
 
-**Cap rationale.** Even the loosest entry (`ABORT_EVENT` at maximum K) leaves ≥3× headroom against the 1 MB cap; the tightest (`STATUS_REQUEST`) is a 4-byte body against a 2²⁰ cap — 262,144× headroom. The default branch is **deliberately tight** so future MsgType variants added without explicit categorisation inherit the strict ceiling rather than the permissive 16 MB framing-layer outer cap (see `messages.hpp:161-166` comment, `S022WireFormatCaps.md` §2.2 design rationale).
+**Cap rationale.** Even the loosest entry (`ABORT_EVENT` at K=1000 with realistic identifiers, ~167 KB) leaves ≥6× headroom against the 1 MB cap; the tightest (`STATUS_REQUEST`) is a 4-byte body against a 2²⁰ cap — 262,144× headroom. The default branch is **deliberately tight** so future MsgType variants added without explicit categorisation inherit the strict ceiling rather than the permissive 16 MB framing-layer outer cap (see `messages.hpp:161-166` comment, `S022WireFormatCaps.md` §2.2 design rationale).
 
 **D2-inc6a note (`ad595bb`).** Five of these twelve rows became *exactly-sized* frames rather than approximately-sized JSON envelopes. The cap table did not change — all five were already in the 1 MB default tier and remain there — but the tightness argument for those rows strengthens from an estimate to an arithmetic identity: the codec rejects any body of the wrong length outright (`"bad GET_CHAIN frame length"`, `"STATUS_REQUEST frame not empty"`, `"bad SNAPSHOT_REQUEST frame length"`, `"bad HEADERS_REQUEST frame length"`, and for the one variable-length frame `"truncated STATUS_RESPONSE frame"` / `"STATUS_RESPONSE frame trailing bytes"` / `"STATUS_RESPONSE genesis length must be 0 or 64"`), so for these five the *effective* ceiling is the frame length itself, four to five orders of magnitude under the 1 MB tier. The tier cap is now defence-in-depth for them rather than the binding constraint. See `BinaryCodecRoundTripSoundness.md` §3.6 / T-3 for the fail-closed decode proof and §5.1(h) for the adversary model.
+
+**D2-inc6b note (`e845b44`).** Four more rows became fixed frames — `BLOCK_SIG`, `ABORT_CLAIM`, `ABORT_EVENT`, `EQUIVOCATION_EVIDENCE` — leaving `CONTRIB` as the only length-prefixed-JSON payload in this tier. The cap table again did not change; all four were already in the 1 MB default tier and remain there. The estimate → arithmetic-identity strengthening carries over to three of them, whose wrong-length rejects are `"bad BLOCK_SIG frame length"`, `"bad EQUIVOCATION_EVIDENCE frame length"` and, for `ABORT_CLAIM` through the shared sub-codec, `"abort claims: trailing bytes after last claim"` plus the canonicality check `"binary_codec: ABORT_CLAIM must carry exactly one claim"`. **`ABORT_EVENT` is the exception, and it is the row that keeps S-022 load-bearing in this tier:** its claims blob is count-prefixed with a **u16**, so the frame layout alone admits 65,535 claims (≈38.6 MB — past even the 16 MB framing ceiling). For that row the tier cap is not defence-in-depth but the binding constraint on the claim list, enforced at the WIRE-1 pre-decode cap and again in `Peer::read_body`, never inside the frame decoder. See `BinaryCodecRoundTripSoundness.md` §3.7 / L-8 / L-9.
 
 ### 2.4 Coverage summary
 
@@ -154,11 +158,11 @@ The `default:` branch returns `1 * 1024 * 1024` = 2²⁰ bytes for every variant
 
 **Step 3: forward compatibility.** The default branch covers not just the currently-declared 12 default-tier variants (HELLO, TRANSACTION, BLOCK_SIG, CONTRIB, GET_CHAIN, STATUS_REQUEST, STATUS_RESPONSE, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, SNAPSHOT_REQUEST, HEADERS_REQUEST) but also any future variant added to the enum without an explicit case. The default value is the tightest tier (1 MB), so the safe-default property of the closure is preserved.
 
-**Step 4: enum-value range.** The `MsgType` enum is declared with underlying type `uint8_t` (`include/determ/net/messages.hpp:13`), so the wire-side type byte takes values in `[0, 255]`. The currently-declared variants occupy values 0–18. Any wire-side byte value in `[19, 255]` that decodes as `MsgType` (which the deserializer permits — the binary codec reads the type byte as `static_cast<MsgType>(data[2])`, `src/net/binary_codec.cpp:437`) hits the default branch and is capped at 1 MB. So even a malformed binary envelope claiming `MsgType::255` cannot exceed the default tier's 1 MB cap at the per-MsgType gate.
+**Step 4: enum-value range.** The `MsgType` enum is declared with underlying type `uint8_t` (`include/determ/net/messages.hpp:13`), so the wire-side type byte takes values in `[0, 255]`. The currently-declared variants occupy values 0–18. Any wire-side byte value in `[19, 255]` that decodes as `MsgType` (which the deserializer permits — the binary codec reads the type byte as `static_cast<MsgType>(data[2])`, `src/net/binary_codec.cpp:632`) hits the default branch and is capped at 1 MB. So even a malformed binary envelope claiming `MsgType::255` cannot exceed the default tier's 1 MB cap at the per-MsgType gate.
 
 **D2 note on step 4 (2026-07-31, `ce31c6f`): the offset-2 type byte is now the wire's ONLY type channel.** The legacy JSON envelope — whose type travelled as an in-document `"type"` field readable only after a full parse — is deleted; `Message::deserialize` rejects any non-0xB1 body ("not a binary envelope") before any parse. The step's conclusion is also enforced *earlier* than this gate requires: the WIRE-1 pre-decode cap in `Message::deserialize` (`src/net/messages.cpp:106-114`) applies `max_message_bytes(static_cast<MsgType>(data[2]))` before `decode_binary` runs, so a synthesized type byte in `[19, 255]` is bounded at the default 1 MB tier before any payload work — not merely at the post-deserialize per-MsgType gate in `Peer::read_body`. Step 4's bound holds at both gates; neither weakens the other.
 
-**D2-inc6a note on step 4 (`ad595bb`): the fixed-frame dispatch does not narrow step 4's domain.** `decode_binary` now routes seven type values to fixed-frame decoders via two `if`s plus a `switch` (`src/net/binary_codec.cpp:452-476`). Each arm matches only its own declared enum value and the `switch` carries a `default: break;`, so every byte in `[19, 255]` — and every declared value outside the seven — still falls through to the length-prefixed-JSON tail exactly as before. The cast at `binary_codec.cpp:437` remains the sole type-byte interpretation, and the cap consulted for an out-of-enum byte is still the 1 MB default. Step 4 is unchanged.
+**D2-inc6a / inc6b note on step 4 (`ad595bb`, `e845b44`): the fixed-frame dispatch does not narrow step 4's domain.** `decode_binary` now routes eleven type values to fixed-frame decoders via two `if`s plus a nine-arm `switch` (`src/net/binary_codec.cpp:659-680`). Each arm matches only its own declared enum value and the `switch` carries a `default: break;`, so every byte in `[19, 255]` — and every declared value outside the eleven — still falls through to the length-prefixed-JSON tail exactly as before. The cast at `binary_codec.cpp:632` remains the sole type-byte interpretation, and the cap consulted for an out-of-enum byte is still the 1 MB default. Step 4 is unchanged.
 
 **Conclusion.** Every MsgType value — declared or undeclared, currently-valid or future-added — produces a finite size in `{2²⁰, 2²², 2²⁴}` bytes. The cap-table is total, exhaustive, and forward-compatible. ∎
 
@@ -183,7 +187,7 @@ $$
 
 with the per-tier ratio `max_message_bytes(m) / B_legit(m)` providing **headroom**:
 
-- **1 MB tier**: minimum headroom ≥ 3× (ABORT_EVENT at K=1000) to 262,144× (STATUS_REQUEST, whose D2-inc6a frame is exactly 4 bytes).
+- **1 MB tier**: minimum headroom ≥ 6× (ABORT_EVENT at K=1000, whose D2-inc6b frame is ~167 KB at realistic identifier lengths) to 262,144× (STATUS_REQUEST, whose D2-inc6a frame is exactly 4 bytes).
 - **4 MB tier**: ~2× headroom (BLOCK at ~2 MB peak; HEADERS_RESPONSE at exactly 4 MB at 256-header page × 16 KB stripped-header).
 - **16 MB tier**: ~1.3-3× headroom (SNAPSHOT_RESPONSE at ~5-12 MB production-state).
 
@@ -191,9 +195,9 @@ Furthermore, **no MsgType variant has been observed to exceed its tier cap in pr
 
 ### 4.1 Proof of T-2 (per-tier breakdown)
 
-**1 MB tier.** Per the §2.3 cap-rationale paragraph, every default-tier variant has a structural ceiling at least 3× under the cap:
+**1 MB tier.** Per the §2.3 cap-rationale paragraph, every default-tier variant has a structural ceiling at least 6× under the cap at realistic field lengths:
 
-- Worst case: `ABORT_EVENT` at K=1000 carries K-1 ≈ 999 inline `AbortClaim` records × ~300 bytes ≈ 300 KB. Headroom 1024 KB / 300 KB ≈ 3.4×.
+- Worst case: `ABORT_EVENT` at K=1000 carries K-1 = 999 inline `AbortClaim` records, each exactly `107 + |missing_creator| + |claimer|` bytes since D2-inc6b — 171 B at 32-byte identifiers, so the frame is ~167 KB. Headroom 1024 KB / 167 KB ≈ 6.1×. (The binary frame is materially smaller than the JSON payload it replaced: hex-encoded hashes and signatures became raw bytes, and the field names are gone.) Pad every identifier to the codec's 255-byte lp-string cap and the same K=1000 frame reaches ~602 KB — still under the tier, at ≈1.7× headroom. Beyond that the cap is doing real work rather than sitting idle: the blob's u16 count would admit 65,535 claims, so nothing in the frame layout bounds the list.
 - Best case: `STATUS_REQUEST` is a **zero-length** D2-inc6a frame inside the 4-byte binary envelope header — exactly 4 bytes on the wire (`ad595bb`; pre-inc6a it was an empty JSON payload `{}`, ~10 bytes). Headroom 2²⁰ / 4 = 262,144×.
 
 The tier cap is therefore loose enough that no honest sender hits it under any reasonable committee size, transaction density, or operator configuration. A flooder who tries to weaponize the 1 MB ceiling pays the full 1 MB allocation + parse cost on a connection that gets closed immediately afterward (T-3 + T-4 of `S022WireFormatCaps.md`).
@@ -286,7 +290,7 @@ TEST_CASE("max_message_bytes covers every declared MsgType variant") {
 
 The test fails if any variant returns a value outside the three-tier set or if the default tier silently grows. It does NOT (and cannot, without C++ reflection) auto-detect a new enum variant added to the source — the test's array literal must be updated in tandem. The PR-review surface for the test array literal makes the maintenance contract explicit.
 
-A follow-on improvement would synthesize the array via the binary-codec-roundtrip-exhaustive test's enumeration (`tools/test_binary_codec_roundtrip_exhaustive.sh` walks every MsgType with a representative payload — HELLO and the five D2-inc6a request/status types included, each driven from its `messages.hpp` builder). Reusing that test's variant list as the source-of-truth would let a single update propagate across both tests.
+A follow-on improvement would synthesize the array via the binary-codec-roundtrip-exhaustive test's enumeration (`tools/test_binary_codec_roundtrip_exhaustive.sh` walks every MsgType with a representative payload — HELLO, the five D2-inc6a request/status types and the four D2-inc6b consensus-chatter types included, each driven from its `messages.hpp` builder). Reusing that test's variant list as the source-of-truth would let a single update propagate across both tests.
 
 ### 5.2 Code-review checklist for MsgType additions
 
@@ -295,7 +299,7 @@ When reviewing a PR that adds a new MsgType variant, the reviewer SHOULD verify:
 1. **`MsgType` enum**: the new variant has an explicit underlying-type value (`uint8_t`) and a documentation comment explaining the wire purpose.
 2. **`max_message_bytes`**: either an explicit `case` label is added with the chosen tier, or the contributor confirms in PR description that the default 1 MB tier is sufficient.
 3. **Realistic-max table**: the §2 per-tier cap table in this proof is updated to include the new variant, **and the §1 `lp-JSON?` column records whether it ships a fixed binary frame or a length-prefixed JSON payload** — that column is what `S022WireFormatCaps.md`'s WIRE-2 argument enumerates over, so a new lp-JSON type silently widens the structural-precheck surface if the column is not updated.
-4. **Roundtrip test**: `tools/test_binary_codec_roundtrip_exhaustive.sh` is extended to cover the new variant; a fixed-frame variant additionally needs a round-trip **and** a fail-closed reject-string leg in `tools/test_binary_codec.sh` (the leg-4b pattern), and a mirror in the light `decode-wire` conformance decoder.
+4. **Roundtrip test**: `tools/test_binary_codec_roundtrip_exhaustive.sh` is extended to cover the new variant; a fixed-frame variant additionally needs a round-trip **and** a fail-closed reject-string leg in `tools/test_binary_codec.sh` (the leg-4b pattern), an entry in the **4d exact-length sweep table** (`src/main.cpp:10403-10501`) — a fixed frame absent from that table has no exactness gate in either direction, and the sweep's own `cases.size() == 11` assertion is what makes the omission visible — and a mirror in the light `decode-wire` conformance decoder.
 5. **Wire-spec docs**: `docs/PROTOCOL.md` §9.2 wire-type table is updated.
 6. **Operator audit**: `tools/operator_block_size_audit.sh` cap-reference table (lines 35-42) is updated if the new variant is in the 4 MB or 16 MB tier.
 
@@ -335,7 +339,7 @@ The three-axis composition (per-message-size × per-signer-count × per-IP-rate)
 
 ### 6.3 Adjacent proofs
 
-- **`docs/proofs/BinaryCodecRoundTripSoundness.md`** — the decode-correctness companion. Its T-1 establishes that `static_cast<MsgType>(data[2])` is the sole, bounds-safe type interpretation (pairs with T-1 step 4 here); its T-4 discharges the "deserialize returns / does not read OOB" precondition the parent proof's cap argument assumes; and its §3.4–§3.6 + L-4/L-6/L-7 prove the seven fixed-frame layouts that the §1 `lp-JSON?` column partitions the enum by.
+- **`docs/proofs/BinaryCodecRoundTripSoundness.md`** — the decode-correctness companion. Its T-1 establishes that `static_cast<MsgType>(data[2])` is the sole, bounds-safe type interpretation (pairs with T-1 step 4 here); its T-4 discharges the "deserialize returns / does not read OOB" precondition the parent proof's cap argument assumes; and its §3.4–§3.7 + L-4/L-6/L-7/L-8 prove the eleven fixed-frame layouts that the §1 `lp-JSON?` column partitions the enum by, with L-9 establishing that each is exact-consuming in **both** directions (the property the §1 exact-length sweep gates).
 - **`docs/proofs/S006ContribMsgEquivocation.md`** — Phase-1 dual of S-022 + S-013. Detects same-generation duplicate `ContribMsg` envelopes; the cap-and-detect pattern parallels S-022's cap-and-close pattern.
 - **`docs/proofs/S017UnstakeApplyConsistency.md`** — multi-layer defense-in-depth pattern (admission gate + apply-time defense) mirrors S-022's framing-layer + per-MsgType two-tier defense.
 - **`docs/proofs/JsonValidationSoundness.md`** — S-018 closure (in progress). Governs *what counts as* a malformed message; the connection disposition on a parse failure is the parent proof's (WIRE-3 closes — the earlier "orthogonal" framing of the two dispositions was retracted in the parent's §2.4 (d)). S-022 covers oversize-but-well-formed; S-018 covers in-cap-but-malformed.
@@ -367,12 +371,14 @@ The three-axis composition (per-message-size × per-signer-count × per-IP-rate)
 Implementation surfaces (unchanged from `S022WireFormatCaps.md` §8):
 
 - `include/determ/net/messages.hpp:13-82` — `MsgType` enum (19 declared variants; the proof's primary object).
-- `include/determ/net/messages.hpp:142-170` — `max_message_bytes(MsgType)` cap table (T-1's exhaustive switch) — **unchanged by D2-inc6a**.
+- `include/determ/net/messages.hpp:142-170` — `max_message_bytes(MsgType)` cap table (T-1's exhaustive switch) — **unchanged by D2-inc6a and D2-inc6b**.
 - `include/determ/net/messages.hpp:119` — `kMaxFrameBytes` outer-ceiling constant.
 - `src/net/peer.cpp:40-60` — `Peer::read_header` framing-layer guard.
 - `src/net/peer.cpp:62-112` — `Peer::read_body` per-MsgType cap enforcement.
-- `src/net/binary_codec.cpp:431-493` — `decode_binary`: the type-byte cast at 437 (T-1 step 4) and the fixed-frame dispatch at 452-476 that partitions the §1 `lp-JSON?` column; the surviving WIRE-2 pre-scan at 490 guards exactly the 12 lp-JSON rows.
-- `src/net/binary_codec.cpp:275-368` — the five D2-inc6a request/status frame codecs (the §1 rows that flipped to "fixed frame"; proved in `BinaryCodecRoundTripSoundness.md` §3.6).
+- `src/net/binary_codec.cpp:626-697` — `decode_binary`: the type-byte cast at 632 (T-1 step 4) and the fixed-frame dispatch at 659-680 that partitions the §1 `lp-JSON?` column; the surviving WIRE-2 pre-scan at 694 guards exactly the 8 lp-JSON rows.
+- `src/net/binary_codec.cpp:301-394` — the five D2-inc6a request/status frame codecs (proved in `BinaryCodecRoundTripSoundness.md` §3.6).
+- `src/net/binary_codec.cpp:396-557` — the four D2-inc6b consensus-chatter frame codecs, layout comment at `binary_codec.cpp:115-140` (proved in `BinaryCodecRoundTripSoundness.md` §3.7). `ABORT_CLAIM` and `ABORT_EVENT` delegate their claim list to the shared `chain::encode_abort_claims` / `decode_abort_claims` pair (`src/chain/block.cpp:352-396`), so the gossiped claim and the block-stored claim cannot drift.
+- `src/main.cpp:10403-10501` — the 4d exact-length sweep: eleven fixed frames × {control decode, +1 trailing byte, −1 byte} against each frame's specific reject string (§1).
 
 Coverage-test surfaces (T-3's recommended guard, deferred):
 

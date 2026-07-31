@@ -581,7 +581,24 @@ Payload encodings, all fail-closed with exact consumption:
 
   `STATUS_RESPONSE.genesis` is length-prefixed, not a fixed 32-byte slot, because an empty chain legitimately answers with an **empty** genesis and the requester branches on that emptiness — a fixed slot would encode "unknown" as 64 zeros and turn it into "wrong genesis". `genesis_len` must be 0 or 64; nothing else is accepted. `GET_CHAIN.count` is u16 while `HEADERS_REQUEST.count` is u32, matching their respective handlers.
 
-* **All remaining types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope; these binarize per-type in the remaining D2 increments — the envelope is the stable extension point).
+* **Consensus-chatter frames** — the four messages whose field sets are **unconditional**: no emission gates, no unbounded collections. (CONTRIB is not among them — it has two conditional field blocks and four unbounded hash lists that need explicit caps.) Sizes are exact; `|x|` is the byte length of the UTF-8 string `x` (≤ 255 — its 1-byte length prefix is already counted in the base).
+
+| Type | Frame | Size |
+|---|---|---|
+| `ABORT_CLAIM` | the `chain::encode_abort_claims` blob (§5.4) carrying exactly one claim | 109 B + \|missing_creator\| + \|claimer\| |
+| `BLOCK_SIG` | `[block_index u64 LE][signer_len u8][signer][delay_output 32 B][dh_secret 32 B][ed_sig 64 B]` | 137 B + \|signer\| |
+| `EQUIVOCATION_EVIDENCE` | `[equivocator_len u8][equivocator][block_index u64 LE][digest_a 32 B][sig_a 64 B][digest_b 32 B][sig_b 64 B][shard_id u32 LE][beacon_anchor_height u64 LE]` | 213 B + \|equivocator\| |
+| `ABORT_EVENT` | `[block_index u64 LE][prev_hash 32 B]` then the event: `[round u8][aborting_node_len u8][aborting_node][timestamp i64-as-u64 LE][event_hash 32 B][claims blob]` | 82 B + \|aborting_node\| + claim blob |
+
+  **ABORT_CLAIM cannot drift from the block-stored claim.** The frame *is* `encode_abort_claims({claim})` — the same encoder the in-block claim list uses (§5.4). The gossiped claim and the stored claim are therefore the same bytes produced by the same function, so no divergence between the two encodings is representable (the S-044 one-shared-helper discipline). Decode rejects any count other than 1 (`ABORT_CLAIM must carry exactly one claim`), keeping one encoding per claim.
+
+  **`BLOCK_SIG.dh_secret` occupies a fixed slot even when all-zero.** S-009's rule on the superseded JSON path was *absent means zero*, so an all-zero 32-byte slot denotes exactly the value an absent field denoted — the mapping is total and value-preserving, and unlike an optional field it admits no second encoding of the same value. Fixing the slot is therefore what keeps the encoding canonical, not a cost paid for simplicity.
+
+  **`ABORT_EVENT` puts the claim blob last** because `decode_abort_claims` consumes its input exactly; only a terminal blob makes the frame's own exact-consumption check decidable. Same rationale as the transaction frame's optional `pq_auth` tail.
+
+  **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests carried in the message itself (§6.1). No digest, signature or block hash changed when these types left the JSON path.
+
+* **The remaining eight types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE. These binarize per-type in the remaining D2 increments — the envelope is the stable extension point. The WIRE-2 structural ceiling below stays live until the last of them is gone.
 
 **Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
@@ -591,22 +608,22 @@ Oversize messages close the connection. See `include/determ/net/messages.hpp::ma
 
 ### 9.2 Message types
 
-The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. HELLO, TRANSACTION and the five request/status types travel as fixed binary frames (§9.1); every other type currently travels as length-prefixed JSON inside the binary envelope.
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. Eleven of the nineteen types travel as fixed binary frames (§9.1) — HELLO, TRANSACTION, the five request/status types and the four consensus-chatter types; the remaining eight currently travel as length-prefixed JSON inside the binary envelope.
 
 | ID | Name | Direction | Body cap | Payload |
 |---|---|---|---|---|
 | 0  | HELLO                     | initial handshake | 1 MB  | fixed binary frame: `{domain, port, role, shard_id, wire_version}` (§9.1); `wire_version` is an advertisement — the additive post-genesis upgrade escape hatch |
 | 1  | BLOCK                     | gossip            | 4 MB  | `Block` JSON |
 | 2  | TRANSACTION               | gossip            | 1 MB  | binary tx frame (§9.1; optional pq_auth section for PQ_TRANSFER) |
-| 3  | BLOCK_SIG                 | committee         | 1 MB  | `BlockSigMsg` JSON (Phase 2: digest sig + dh_secret) |
+| 3  | BLOCK_SIG                 | committee         | 1 MB  | fixed binary frame `{block_index, signer, delay_output, dh_secret, ed_sig}` (§9.1; Phase 2: digest sig + dh_secret reveal) |
 | 4  | CONTRIB                   | committee         | 1 MB  | `ContribMsg` JSON (Phase 1: tx_commit + dh_input + ed sig) |
 | 5  | GET_CHAIN                 | sync              | 1 MB  | fixed frame `{from, count}` (§9.1) |
 | 6  | CHAIN_RESPONSE            | sync              | 16 MB | `{blocks, has_more}` (bootstrap-only) |
 | 7  | STATUS_REQUEST            | sync              | 1 MB  | fixed frame, zero-length (§9.1) |
 | 8  | STATUS_RESPONSE           | sync              | 1 MB  | fixed frame `{height, genesis}` (§9.1; `genesis` may be empty on an empty chain); peer-discovery only — role/shard_id come from HELLO |
-| 9  | ABORT_CLAIM               | committee         | 1 MB  | `AbortClaimMsg` JSON |
-| 10 | ABORT_EVENT               | gossip            | 1 MB  | `{block_index, prev_hash, event}` (event carries inline signed claims) |
-| 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | `EquivocationEvent` JSON |
+| 9  | ABORT_CLAIM               | committee         | 1 MB  | fixed binary frame — the shared one-claim `encode_abort_claims` blob (§9.1, §5.4) |
+| 10 | ABORT_EVENT               | gossip            | 1 MB  | fixed binary frame `{block_index, prev_hash, event}` (§9.1; event carries inline signed claims) |
+| 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | fixed binary frame — the `EquivocationEvent` fields (§9.1) |
 | 12 | BEACON_HEADER             | beacon→shard      | 4 MB  | `Block` JSON (beacon block; shard verifies K-of-K from prior-verified pool) |
 | 13 | SHARD_TIP                 | shard→beacon      | 4 MB  | `{shard_id, tip}` where `tip` is a full `Block` JSON |
 | 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `{src_shard, src_block}` (full source block for independent K-of-K verify) |

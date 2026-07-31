@@ -152,7 +152,7 @@ multiple FA theorems.
 
 | Test name | FA proof / S finding | What it pins |
 |---|---|---|
-| `test-binary-codec` | A3 / S8 / S-022 | JSON + binary envelope round-trip; per-MsgType cap table golden vectors |
+| `test-binary-codec` | A3 / S8 / S-022 / D2 | binary envelope round-trip (the JSON envelope legs died with the D2 strip; the leg that remains is the NEGATIVE one — a well-formed legacy JSON envelope must be rejected `"not a binary envelope"`); the 11 fixed-frame round-trips + their exact-length sweep in both directions; per-MsgType cap table golden vectors |
 | `test-binary-codec-roundtrip-exhaustive` | A3 / S8 / wire format | exhaustive serialize→deserialize for every MsgType + edge-case body sizes |
 | `test-tx-binary-codec` | S-002 / wire format | amount/fee/nonce preserved through binary path (pre-S-002 dropped these) |
 | `test-tx-signing-bytes` | wire format / FA1 | byte-layout invariant — type at offset 0; amount/fee/nonce BE at [3..26] |
