@@ -117,17 +117,18 @@ Hence `E[h_d - h_s] ≤ Δ_g / Δ_block + 1 / (1 - p_abort)`. ∎
 
 ## 5. Proof of Corollary T-7.1
 
-Per-shard A1 (V15 apply in Preliminaries §5; implementation in `Chain::expected_total`):
+Per-shard A1 (V15 apply in Preliminaries §5; implementation in `Chain::expected_total`; the §3.22 `accumulated_shielded_s` term is single-shard — UNSHIELD rejects cross-shard `tx.to` at `chain.cpp:1059` — so it carries through the shard sum below with no cross-shard netting):
 
 ```
 LiveLocal(s) = genesis_s + accumulated_subsidy_s + accumulated_inbound_s
               - accumulated_slashed_s - accumulated_outbound_s
+              - accumulated_shielded_s
 ```
 
 Sum over shards:
 
 ```
-LiveGlobal = GenesisGlobal + SubsidyGlobal + Σ_s inbound_s - SlashedGlobal - Σ_s outbound_s
+LiveGlobal = GenesisGlobal + SubsidyGlobal + Σ_s inbound_s - SlashedGlobal - Σ_s outbound_s - ShieldedGlobal
 ```
 
 By T-7's no-double-credit and no-fabrication: every credited receipt corresponds to one and only one source-side debit. Define `Delivered(s_dst, s_src) =` set of receipts originating at `s_src`, credited at `s_dst`. Then:
@@ -143,18 +144,18 @@ By T-7's no-double-credit and no-fabrication: every credited receipt corresponds
 Substituting:
 
 ```
-LiveGlobal = GenesisGlobal + SubsidyGlobal - SlashedGlobal
+LiveGlobal = GenesisGlobal + SubsidyGlobal - SlashedGlobal - ShieldedGlobal
             + (Σ inbound) - (Σ outbound)
-           = GenesisGlobal + SubsidyGlobal - SlashedGlobal - Pending
+           = GenesisGlobal + SubsidyGlobal - SlashedGlobal - ShieldedGlobal - Pending
 ```
 
 Rearranging:
 
 ```
-LiveGlobal + Pending = GenesisGlobal + SubsidyGlobal - SlashedGlobal
+LiveGlobal + Pending = GenesisGlobal + SubsidyGlobal - SlashedGlobal - ShieldedGlobal
 ```
 
-The right-hand side is a global invariant whose components evolve only by genesis allocation (one-time), block subsidy (monotone, capped by `subsidy_pool_initial` under E4), and slashing (forfeit, monotone). The cross-shard flow contributes only the `Pending` term, which is positive in flight and zero at quiescence. ∎
+The right-hand side is a global invariant whose components evolve only by genesis allocation (one-time), block subsidy (monotone, capped by `subsidy_pool_initial` under E4), slashing (forfeit, monotone), and confidential shielding (`ShieldedGlobal`, §3.22 — single-shard per `chain.cpp:1059`, so it carries no cross-shard netting term). The cross-shard flow contributes only the `Pending` term, which is positive in flight and zero at quiescence. ∎
 
 ---
 

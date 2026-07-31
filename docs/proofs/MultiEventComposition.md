@@ -47,7 +47,7 @@ accumulated_outbound_ += block_outbound;
 accumulated_slashed_  += block_slashed;
 ```
 
-The A1 closure at lines 1397–1419 then evaluates `expected_total() = genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ - accumulated_slashed_ - accumulated_outbound_` and asserts `live_total_supply() == expected_total`. The five-term linear equation is **additive over the per-block contributions** by construction — each surface contributes to exactly one or two of the four ± channels, and the sum-of-contributions equals the chain-wide post-block delta.
+The A1 closure at lines 1397–1419 then evaluates `expected_total() = genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ - accumulated_slashed_ - accumulated_outbound_ - accumulated_shielded_` and asserts `live_total_supply() == expected_total`. The six-term linear equation is **additive over the per-block contributions** by construction — each surface contributes to exactly one or two of the four tail-folded ± channels (subsidy / inbound / outbound / slashed); the sixth term `− accumulated_shielded_` (§3.22) is applied inline by the SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER branches rather than folded at the tail, and is zero on shield-free chains. The sum-of-contributions equals the chain-wide post-block delta.
 
 ### 1.3 The disjoint-write claim
 

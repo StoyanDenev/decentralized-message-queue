@@ -59,9 +59,10 @@ The composition is structural: the per-site arithmetic invariant + the A9 atomic
      + accumulated_inbound_
      - accumulated_slashed_
      - accumulated_outbound_
+     - accumulated_shielded_
 ```
 
-The left-hand side is `Chain::live_total_supply()` at `chain.cpp:548–553`; the right-hand side is `Chain::expected_total()`. The equality is asserted at `chain.cpp:1397–1419` ("unitary-balance invariant violated" diagnostic on mismatch).
+The left-hand side is `Chain::live_total_supply()` at `chain.cpp:699–704`; the right-hand side is `Chain::expected_total()` (`chain.hpp:590–597`). The equality is asserted at `chain.cpp:1397–1419` ("unitary-balance invariant violated" diagnostic on mismatch). The sixth term `− accumulated_shielded_` is §3.22's confidential-pool counter — zero on shield-free chains, and its inline `+= A` at `chain.cpp:1037` is bounded by the S-049-checked SHIELD debit rather than a `checked_add_u64` on the counter itself, so it is not among the guarded credit sites §4 enumerates.
 
 **A9 atomic-apply** (FA-Apply-1 I-1, sketched in `chain.cpp:646–670` + `1489–1501`): a `StateSnapshot __snapshot = create_state_snapshot()` is captured at apply entry; the entire apply body runs inside `try { ... } catch (...) { restore_state_snapshot(std::move(__snapshot)); throw; }`. Any throw anywhere in the apply body — including from `checked_add_u64`'s caller — leaves the chain byte-identical to apply-entry.
 
@@ -181,7 +182,7 @@ I-5 (balance-arithmetic channel enumeration) lists every credit channel and its 
 
 ### 5.2 Composition with FA11 (EconomicSoundness)
 
-FA11 §2 (A1 closed-form invariant) is the chain-wide statement: `Σ balances + Σ locked == genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound` after every block apply. T-3 (this proof) composes with FA11 by closing the conditional under which FA11's left-hand side computation is meaningful — if a silent wrap occurred mid-apply, `Σ balances` would compute over a corrupted state and the chain-wide closure would happen to coincidentally pass (because the wrap rewrites `balance` to a small value, but the running accumulators on the right-hand side don't track the wrap event). S-007's runtime guard ensures the wrap is impossible, so FA11's closure is meaningful — pass implies consistency, not the trivial "happens to balance" case.
+FA11 §2 (A1 closed-form invariant) is the chain-wide statement: `Σ balances + Σ locked == genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound − accumulated_shielded` after every block apply (the sixth term is §3.22's confidential-pool counter — zero on shield-free chains, and its inline `+= A` at `chain.cpp:1037` is bounded by the S-049-checked SHIELD debit rather than a `checked_add_u64` on the counter itself). T-3 (this proof) composes with FA11 by closing the conditional under which FA11's left-hand side computation is meaningful — if a silent wrap occurred mid-apply, `Σ balances` would compute over a corrupted state and the chain-wide closure would happen to coincidentally pass (because the wrap rewrites `balance` to a small value, but the running accumulators on the right-hand side don't track the wrap event). S-007's runtime guard ensures the wrap is impossible, so FA11's closure is meaningful — pass implies consistency, not the trivial "happens to balance" case.
 
 The chip-task interpretation: pre-S-007, A1 would have *silently* passed on a wrapped block. Post-S-007, A1 passes iff the actual unitary supply is conserved.
 
