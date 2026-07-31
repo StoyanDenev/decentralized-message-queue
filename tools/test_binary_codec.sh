@@ -15,7 +15,8 @@
 # This test exercises the codec directly + locks in the cap table
 # byte-for-byte against include/determ/net/messages.hpp.
 #
-# 35 assertions in four blocks:
+# 48 assertions. The four blocks below enumerate the original 35; the
+# hostile-wire block added after them is described at the end.
 #
 #   JSON envelope (v0) round-trip (8):
 #     1-4. HELLO — including the pre-negotiation always-JSON
@@ -50,6 +51,34 @@
 #        "default-tight" invariant prevents a new MsgType added
 #        without explicit categorisation from slipping past the
 #        S-022 fence into the 16 MB tier.
+#
+#   Hostile-wire ordering gates (round-12 audit wf_c277c6d1):
+#     WIRE-1. An OVERSIZE BINARY envelope is rejected BEFORE its
+#        payload is decoded (pre-decode per-type cap). The vector is
+#        well-formed at any size, so only the cap can reject it.
+#     WIRE-2. The structural ceiling (kMaxJsonDepth / kMaxJsonNodes)
+#        bounds the DOM before the parser allocates. A byte cap bounds
+#        the INPUT, not the DOM built from it — 16 MB of '[' was
+#        measured at ~831 MB peak heap (51.9x). Five legs:
+#          * a VALID, BALANCED JSON envelope past the depth ceiling is
+#            rejected pre-parse (a setup leg asserts it really is valid
+#            JSON, so the rejection cannot be a parse error);
+#          * the DEEPEST LEGITIMATE envelope (CHAIN_RESPONSE, depth 8)
+#            still deserializes — the anti-over-tightening leg;
+#          * structural bytes past an ESCAPED quote are data, not
+#            structure — pins the scan's string-state tracking against
+#            a false reject;
+#          * a FLAT (depth-2) envelope past the node ceiling is
+#            rejected — the shape the depth ceiling cannot see;
+#          * a BINARY envelope CLAIMING SNAPSHOT_RESPONSE cannot use
+#            that type's 16 MB cap to bypass the ceiling. The type at
+#            offset 2 is attacker-chosen, so WIRE-1 alone does not
+#            close this; the setup leg asserts the frame is UNDER its
+#            WIRE-1 cap, proving WIRE-1 is not what rejects it.
+#
+#   (WIRE-3 — a malformed frame CLOSES the peer — lives in
+#    `determ test-net-virtual`, since it needs a real Peer over a
+#    Connection rather than the codec in isolation.)
 #
 # Run from repo root: bash tools/test_binary_codec.sh
 set -u

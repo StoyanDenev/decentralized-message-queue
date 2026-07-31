@@ -218,11 +218,15 @@ try {
     if (self->on_msg_) self->on_msg_(self, msg);
 } catch (std::exception& e) {
     std::cerr << "[peer] message parse error from " << self->address_ << ...;
+    if (self->on_close_) self->on_close_(self);   // WIRE-3
+    return;
 }
 self->read_header();
 ```
 
-every `dec` throw is caught and logged (connection stays open; the loop iterates to `read_header`), and every `dec` success is gated by the S-022 cap before `on_msg_` dispatch. So `dec`'s totality lifts to "every peer body is safely processed": decoded-and-capped, or dropped-and-logged. □
+every `dec` throw is caught, logged, and **closes the connection** (the loop does NOT iterate to `read_header`), and every `dec` success is gated by the S-022 cap before `on_msg_` dispatch. So `dec`'s totality lifts to "every peer body is safely processed": decoded-and-capped, or dropped-and-disconnected.
+
+**⚠ CORRECTED (round-12 hostile-wire audit, wf_c277c6d1).** This passage previously read *"connection stays open; the loop iterates to `read_header`"* and concluded "dropped-and-logged". That was accurate at the time and is why T-4 here discharged the totality precondition — but the disposition it described was itself the defect: re-arming after a parse failure made every pre-auth parse cost infinitely repeatable at zero cost to the sender. **`dec`'s totality is unchanged** (it still throws rather than returning garbage, which is all this theorem needs); only the connection disposition after a throw changed. See `S022WireFormatCaps.md` T-6. □
 
 ---
 

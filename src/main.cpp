@@ -10346,6 +10346,180 @@ int main(int argc, char** argv) {
                   "decode (pre-decode S-022 cap, not a parse error)");
         }
 
+        // 8c. WIRE-2: a WELL-FORMED but pathologically NESTED JSON envelope is
+        //     rejected BEFORE the parser materialises a DOM. The byte cap
+        //     bounds the INPUT, not the DOM built from it — nlohmann allocates
+        //     a node per value plus a container allocation per array/object, so
+        //     a body of pure structural bytes expands ~52x (MEASURED: 16 MB of
+        //     '[' -> ~831 MB peak heap, 33.5M allocations, ~4.3-4.8 s CPU on a
+        //     SINGLE pre-auth connection).
+        //
+        //     The vector is BALANCED and VALID JSON — asserted below — so the
+        //     rejection can only come from the structural ceiling, never from a
+        //     parse error. Falsify-on-mutant: delete json_structural_precheck's
+        //     call in Message::deserialize and this leg goes RED (the envelope
+        //     deserializes cleanly) while 8d/8e stay green.
+        {
+            const size_t nest = kMaxJsonDepth + 8;
+            std::string s = "{\"type\":4,\"payload\":";
+            s.append(nest, '[');
+            s.append(nest, ']');
+            s += "}";
+
+            bool valid_json = true;
+            try { (void)nlohmann::json::parse(s); }
+            catch (const std::exception&) { valid_json = false; }
+            check(valid_json,
+                  "WIRE-2 setup: the deep envelope is VALID, BALANCED JSON "
+                  "(only the ceiling can reject it — not a parse error)");
+
+            std::vector<uint8_t> bytes(s.begin(), s.end());
+            bool threw = false;
+            try { Message::deserialize(bytes.data(), bytes.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "WIRE-2: a well-formed JSON envelope nested past kMaxJsonDepth "
+                  "is rejected BEFORE the parse");
+        }
+
+        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate envelope is
+        //     CHAIN_RESPONSE at depth 8: envelope -> {"blocks":[..]} -> blocks[]
+        //     -> Block -> shard_tip_witnesses[] -> witness Block ->
+        //     creator_tx_lists[] -> inner list. (Block::from_json parses
+        //     witnesses with allow_witnesses=false, so Block nesting cannot
+        //     recurse past that second level.) It must still deserialize —
+        //     otherwise the ceiling is a liveness bug, not a defence.
+        {
+            std::string s =
+                "{\"type\":6,\"payload\":{\"blocks\":[{\"shard_tip_witnesses\":"
+                "[{\"creator_tx_lists\":[[\"ab\"]]}]}]}}";
+            std::vector<uint8_t> b(s.begin(), s.end());
+            bool ok = false;
+            try {
+                Message m = Message::deserialize(b.data(), b.size());
+                ok = (m.type == MsgType::CHAIN_RESPONSE);
+            } catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "WIRE-2 anti-over-tightening: the DEEPEST legitimate envelope "
+                  "(CHAIN_RESPONSE, depth 8) still deserializes");
+        }
+
+        // 8e. WIRE-2 string-state soundness. Structural bytes inside a string
+        //     literal are DATA, not structure, and an ESCAPED quote does not
+        //     end the string. The payload here is one string whose contents are
+        //     `a"` followed by 256 '[' — if the scan mishandled the \" escape it
+        //     would treat the string as ended and count those 256 brackets as
+        //     nesting, rejecting a perfectly legal message. Pins the escape
+        //     tracking against exactly that false-reject.
+        {
+            std::string s = "{\"type\":0,\"payload\":\"a\\\"";
+            s.append(kMaxJsonDepth * 4, '[');
+            s += "\"}";
+            std::vector<uint8_t> b(s.begin(), s.end());
+            bool ok = false;
+            try {
+                Message m = Message::deserialize(b.data(), b.size());
+                ok = (m.type == MsgType::HELLO && m.payload.is_string());
+            } catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "WIRE-2 soundness: structural bytes inside a string (past an "
+                  "ESCAPED quote) are data — no false reject");
+        }
+
+        // 8f. WIRE-2 node ceiling. A FLAT array of scalars sits at depth 2, so
+        //     the depth ceiling cannot see it — yet each value still costs a
+        //     DOM node. This is the shape depth alone misses; kMaxJsonNodes is
+        //     what bounds it. Balanced and valid JSON again, so only the
+        //     ceiling can be the rejecter. Falsify: raise kMaxJsonNodes past
+        //     the vector (or drop the ',' arm of the scan) and this goes RED.
+        {
+            std::string s = "{\"type\":4,\"payload\":[0";
+            s.reserve(2 * kMaxJsonNodes + 64);
+            for (size_t i = 0; i <= kMaxJsonNodes; ++i) s += ",0";
+            s += "]}";
+            std::vector<uint8_t> b(s.begin(), s.end());
+            bool threw = false;
+            try { Message::deserialize(b.data(), b.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "WIRE-2: a FLAT (depth-2) envelope past kMaxJsonNodes is "
+                  "rejected — the node ceiling catches what depth cannot");
+        }
+
+        // 8g. WIRE-2 on the BINARY path — the WIRE-1 BYPASS. The pre-decode cap
+        //     added in b982332 reads the type from offset 2, which is
+        //     ATTACKER-CHOSEN: a frame claiming SNAPSHOT_RESPONSE (16) or
+        //     CHAIN_RESPONSE (6) buys the full 16 MB ceiling, sails past WIRE-1
+        //     and lands in decode_binary's payload parse — reproducing the exact
+        //     amplification WIRE-1 was meant to remove. The setup leg asserts
+        //     the frame is UNDER its per-type cap, so WIRE-1 provably is not
+        //     what rejects it. Falsify: delete json_structural_precheck's call
+        //     in decode_binary and this goes RED while 8b stays green.
+        {
+            const size_t nest = kMaxJsonDepth + 8;
+            std::string pay;
+            pay.append(nest, '[');
+            pay.append(nest, ']');
+
+            std::vector<uint8_t> frame;
+            frame.push_back(0xB1);                                            // magic
+            frame.push_back(0x01);                                            // version
+            frame.push_back(static_cast<uint8_t>(MsgType::SNAPSHOT_RESPONSE));// type @2
+            frame.push_back(0x00);                                            // reserved
+            uint32_t plen = static_cast<uint32_t>(pay.size());
+            frame.push_back(static_cast<uint8_t>(plen & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
+            frame.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
+            frame.insert(frame.end(), pay.begin(), pay.end());
+
+            check(frame.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
+                  "WIRE-2 setup: the binary frame is UNDER its WIRE-1 per-type "
+                  "cap (so WIRE-1 provably is not what rejects it)");
+            bool threw = false;
+            try { Message::deserialize(frame.data(), frame.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "WIRE-2: a BINARY envelope claiming SNAPSHOT_RESPONSE cannot "
+                  "use its 16 MB cap to bypass the structural ceiling");
+        }
+
+        // 8h. WIRE-2 OBJECT DENSITY. 8f's vector is a flat array of scalars —
+        //     which is exactly the CHEAPEST shape per unit (~24 B of DOM each),
+        //     and the one the original cost model was built on. Objects are the
+        //     expensive shape: nlohmann's default object_t is std::map, so every
+        //     '{' costs a map allocation PLUS a red-black-tree node per entry
+        //     (~144 B for a single-entry object, MEASURED). Without this leg
+        //     nothing pins that the node counter charges for '{' at all, and the
+        //     shape that dominates the residual would be untested.
+        //     Falsify: drop the '[' / '{' arm's ++nodes (leaving only the ','
+        //     arm) and this goes RED while 8f stays green, because 8f's units
+        //     come almost entirely from commas.
+        {
+            // `[{},{},...]` — 2 units per element (1 open + 1 comma) at 3 bytes
+            // each, so it crosses kMaxJsonNodes in ~6 MB rather than ~14 MB.
+            const size_t elems = kMaxJsonNodes / 2 + 16;
+            std::string s = "{\"type\":4,\"payload\":[{}";
+            s.reserve(3 * elems + 64);
+            for (size_t i = 1; i < elems; ++i) s += ",{}";
+            s += "]}";
+            std::vector<uint8_t> b(s.begin(), s.end());
+
+            bool valid_json = true;
+            try { (void)nlohmann::json::parse(s); }
+            catch (const std::exception&) { valid_json = false; }
+            check(valid_json,
+                  "WIRE-2 setup: the object-density vector is VALID, BALANCED "
+                  "JSON (only the ceiling can reject it)");
+
+            bool threw = false;
+            try { Message::deserialize(b.data(), b.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "WIRE-2: an OBJECT-dense envelope past kMaxJsonNodes is "
+                  "rejected — the counter charges for '{', not just for ','");
+        }
+
         // === S-022 per-message-type cap golden vectors ===
 
         // 9. SNAPSHOT_RESPONSE + CHAIN_RESPONSE caps are 16 MB
@@ -30268,6 +30442,96 @@ int main(int argc, char** argv) {
                       "connect-then-accept order also rendezvouses (TCP backlog analogue)");
                 if (s2) s2->close();
                 if (c2) c2->close();
+            }
+
+            // 4d-2. WIRE-3 (round-12 hostile-wire audit): a frame whose body
+            //     fails to deserialize CLOSES the peer. Peer::read_body's
+            //     catch branch used to log to stderr and fall through to
+            //     read_header(), re-arming the connection — so a hostile peer
+            //     paid nothing for a rejected frame and could repeat it
+            //     forever on the SAME connection. The S-014 per-IP token
+            //     bucket cannot meter that: it lives in
+            //     GossipNet::handle_message, i.e. the on_msg_ callback, which
+            //     is strictly DOWNSTREAM of the parse. It also contradicted
+            //     the disposition every neighbouring branch applies (the
+            //     framing-layer overflow and the per-type oversize branch both
+            //     close).
+            //
+            //     The frame below is well-formed AT THE FRAMING LAYER — a
+            //     correct 4-byte big-endian length prefix over a body that is
+            //     truncated JSON — so read_header accepts it and the close can
+            //     only come from the deserialize catch branch.
+            //     Falsify-on-mutant: restore `self->read_header();` in place of
+            //     the close and this leg goes RED (times out, never closed)
+            //     while every other net-virtual assertion stays green.
+            {
+                auto pr3 = pair_up();
+                auto s3 = pr3.first;
+                auto c3 = pr3.second;
+                check(s3 && c3,
+                      "WIRE-3 setup: a fresh Connection pair for the peer-close contract");
+                if (s3 && c3) {
+                    // Ownership note: the handlers below outlive this scope
+                    // (the Peer holds them, and a completion can fire during
+                    // teardown), so the state they touch is held by
+                    // shared_ptr and captured BY VALUE. Capturing these by
+                    // reference dangles — observed as a spurious
+                    // "Promise already satisfied" abort during loop shutdown.
+                    auto closed_p  = std::make_shared<std::promise<void>>();
+                    auto closed    = std::make_shared<std::atomic<bool>>(false);
+                    auto delivered = std::make_shared<std::atomic<int>>(0);
+                    auto peer      = std::make_shared<Peer>(s3);
+                    peer->start(
+                        [delivered](std::shared_ptr<Peer>, const Message&) {
+                            delivered->fetch_add(1);
+                        },
+                        [closed, closed_p](std::shared_ptr<Peer>) {
+                            if (!closed->exchange(true)) closed_p->set_value();
+                        });
+
+                    auto framed = [](const std::string& body) {
+                        std::vector<uint8_t> f;
+                        uint32_t n = static_cast<uint32_t>(body.size());
+                        f.push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
+                        f.push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
+                        f.push_back(static_cast<uint8_t>((n >> 8)  & 0xFF));
+                        f.push_back(static_cast<uint8_t>( n        & 0xFF));
+                        f.insert(f.end(), body.begin(), body.end());
+                        return f;
+                    };
+
+                    // Frame 1: truncated JSON body behind a VALID length
+                    // prefix — the framing layer accepts it, so only the
+                    // deserialize catch branch can reject it.
+                    auto bad = framed("{\"type\":0,");
+                    // Frame 2: a perfectly WELL-FORMED STATUS_REQUEST written
+                    // back-to-back behind it. This is the discriminator, and
+                    // it is timing-INDEPENDENT: "closed" vs "re-armed" is
+                    // observationally exactly "is frame 2 ever dispatched?".
+                    // Asserting only that on_close_ fires would be vacuous —
+                    // the connection also closes later for unrelated reasons
+                    // (teardown, EOF), so a re-arming mutant could still go
+                    // green on a slow enough wait.
+                    auto good = framed("{\"type\":7,\"payload\":{}}");
+                    check(c3->write_all(bad.data(), bad.size()) &&
+                          c3->write_all(good.data(), good.size()),
+                          "WIRE-3 setup: a malformed frame and a WELL-FORMED "
+                          "frame written back-to-back (both validly framed)");
+
+                    auto cf3 = closed_p->get_future();
+                    bool did_close = cf3.wait_for(std::chrono::seconds(15)) ==
+                                     std::future_status::ready;
+                    check(did_close,
+                          "WIRE-3: a frame whose body fails to deserialize CLOSES "
+                          "the peer — the pre-auth parse cost is not infinitely "
+                          "repeatable on one connection");
+                    check(delivered->load() == 0,
+                          "WIRE-3 discriminator: the WELL-FORMED frame queued "
+                          "behind the malformed one is NEVER dispatched — the "
+                          "read loop stopped rather than re-arming");
+                    peer->close();
+                    c3->close();
+                }
             }
 
             // 4e. Refused connect: no listener on the port → error, posted.

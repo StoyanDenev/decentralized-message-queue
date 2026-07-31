@@ -386,6 +386,14 @@ Message decode_binary(const uint8_t* data, size_t len) {
     uint32_t plen = le_get_u32(body);
     if (4 + static_cast<size_t>(plen) > body_len)
         throw std::runtime_error("binary_codec: truncated payload body");
+    // S-022 / WIRE-2: bound the DOM before parsing. The pre-decode per-type
+    // cap in Message::deserialize (WIRE-1) reads the type from offset 2 —
+    // which is ATTACKER-CHOSEN. A hostile frame claiming SNAPSHOT_RESPONSE
+    // (16) or CHAIN_RESPONSE (6) buys the full 16 MB ceiling and lands here,
+    // where an unbounded json::parse reproduces the exact amplification
+    // WIRE-1 was meant to remove (measured ~52x heap on a 16 MB body of '[').
+    // The structural ceiling is what actually closes it, on both wire formats.
+    json_structural_precheck(body + 4, plen);
     m.payload = nlohmann::json::parse(body + 4, body + 4 + plen);
     return m;
 }

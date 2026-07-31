@@ -27,6 +27,70 @@ std::vector<uint8_t> Message::serialize() const {
     return out;
 }
 
+// S-022 / WIRE-2: allocation-free structural pre-scan. See the ceiling
+// commentary in messages.hpp for the threat model, the sizing rationale and
+// the soundness argument. Aborts at the offending byte so a hostile body
+// costs only the bytes scanned before the ceiling trips.
+void json_structural_precheck(const uint8_t* data, size_t len) {
+    size_t depth = 0;
+    size_t nodes = 0;
+    bool   in_string = false;
+    bool   escaped   = false;
+
+    for (size_t i = 0; i < len; ++i) {
+        const uint8_t c = data[i];
+        if (in_string) {
+            // Structural bytes inside a string literal are DATA, not
+            // structure. Track the escape state so a trailing backslash
+            // cannot smuggle the closing quote past us.
+            if (escaped)        escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"')  in_string = false;
+            continue;
+        }
+        switch (c) {
+        case '"':
+            in_string = true;
+            break;
+        case '[':
+        case '{':
+            if (++depth > kMaxJsonDepth) {
+                throw std::runtime_error(
+                    "S-022/WIRE-2: JSON nesting depth exceeds "
+                    + std::to_string(kMaxJsonDepth)
+                    + " at byte offset " + std::to_string(i)
+                    + " — rejected before parse");
+            }
+            if (++nodes > kMaxJsonNodes) {
+                throw std::runtime_error(
+                    "S-022/WIRE-2: JSON node count exceeds "
+                    + std::to_string(kMaxJsonNodes)
+                    + " at byte offset " + std::to_string(i)
+                    + " — rejected before parse");
+            }
+            break;
+        case ']':
+        case '}':
+            // Underflow (a close with no matching open) is left to the
+            // parser: this scan is a ceiling, not a validator, and must
+            // never be the thing that decides well-formedness.
+            if (depth > 0) --depth;
+            break;
+        case ',':
+            if (++nodes > kMaxJsonNodes) {
+                throw std::runtime_error(
+                    "S-022/WIRE-2: JSON node count exceeds "
+                    + std::to_string(kMaxJsonNodes)
+                    + " at byte offset " + std::to_string(i)
+                    + " — rejected before parse");
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 // Format-detecting deserializer (A3 / S8). Reads the body's first byte:
 // the binary envelope is identified by its magic byte (0xB1) + version,
 // while the legacy JSON envelope always starts with '{' (0x7B). This lets
@@ -64,6 +128,12 @@ Message Message::deserialize(const uint8_t* data, size_t len) {
         }
         return decode_binary(data, len);
     }
+    // S-022 / WIRE-2: the legacy JSON envelope cannot be byte-capped below
+    // kMaxFrameBytes (16 MB) — its type is only readable AFTER the parse, and
+    // SNAPSHOT_RESPONSE / CHAIN_RESPONSE legitimately arrive here at that size
+    // whenever the peer's negotiated wire_version is 0 (the default until a
+    // HELLO is processed; Peer::send). Bound the DOM instead, pre-parse.
+    json_structural_precheck(data, len);
     nlohmann::json envelope = nlohmann::json::parse(data, data + len);
     // S-018: the gossip envelope is the outermost wire-format consumer
     // — every peer-supplied JSON message lands here. Field-name

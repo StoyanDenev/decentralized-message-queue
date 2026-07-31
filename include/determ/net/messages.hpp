@@ -105,15 +105,25 @@ inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
 // decoded the body. A hostile peer's 16 MB frame was therefore fully parsed
 // before the type-aware ceiling was consulted (measured: ~52x heap
 // amplification and multi-second CPU on the JSON path).
-//   * BINARY envelopes now carry a PRE-DECODE cap in Message::deserialize —
-//     the type is readable in the clear at offset 2, so the ceiling is
-//     applied before any payload work (the rule the light client already
-//     shipped on this wire format). Gated by WIRE-1 in test-binary-codec.
-//   * The legacy JSON-envelope path still parses before the type is known
-//     (the type lives inside the document), so the ceiling there remains
-//     kMaxFrameBytes. Bounding it needs a nesting-depth/element ceiling and
-//     a decision on whether large types may arrive as JSON — OWNER-GATED,
-//     escalated; do not read this block as asserting that path is bounded.
+//   * BINARY envelopes carry a PRE-DECODE cap in Message::deserialize — the
+//     type is readable in the clear at offset 2, so the ceiling is applied
+//     before any payload work (the rule the light client already shipped on
+//     this wire format). Gated by WIRE-1 in test-binary-codec.
+//   * That cap alone did NOT close the binary path: the type at offset 2 is
+//     ATTACKER-CHOSEN, so a hostile frame claiming SNAPSHOT_RESPONSE (16) or
+//     CHAIN_RESPONSE (6) buys the full 16 MB ceiling and reaches the same
+//     unbounded DOM expansion in decode_binary's payload parse. The
+//     per-type cap narrows the vector to the two 16 MB types; it does not
+//     remove it.
+//   * The legacy JSON-envelope path parses before the type is known (the
+//     type lives inside the document), so its byte ceiling is necessarily
+//     kMaxFrameBytes — and it cannot be tightened, because those same two
+//     16 MB types legitimately travel as JSON (Peer::send falls back to the
+//     JSON encoding whenever the peer's negotiated wire_version is 0, which
+//     is the DEFAULT until a HELLO is processed).
+//   Both paths are therefore bounded by the STRUCTURAL ceiling below
+//   (kMaxJsonDepth / kMaxJsonNodes, WIRE-2), applied pre-parse in each. Read
+//   that block for what remains un-eliminated.
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
 
 // S-022: per-message-type body-size cap, applied AFTER `Message::deserialize`
@@ -166,6 +176,114 @@ inline constexpr size_t max_message_bytes(MsgType type) {
         return 1  * 1024 * 1024;        // 1 MB
     }
 }
+
+// S-022 / WIRE-2: pre-parse STRUCTURAL ceiling for every attacker-supplied
+// JSON document on the wire path (round-12 hostile-wire audit, wf_c277c6d1).
+//
+// WHY A BYTE CAP IS NOT ENOUGH. The per-type byte cap above bounds the INPUT,
+// not the DOM the parser builds from it. A 16 MB body of '[' was MEASURED at
+// ~831 MB peak heap (51.9x), 33.5M allocations and ~4.3-4.8 s CPU on a SINGLE
+// connection, pre-auth. And the byte cap cannot be tightened past 16 MB,
+// because SNAPSHOT_RESPONSE / CHAIN_RESPONSE legitimately reach it (see the
+// JSON-reachability note below).
+//
+// ⚠ THE DOM COST MODEL IS NOT "16 BYTES PER VALUE". An earlier draft of this
+// block said nlohmann materialises "one ~16-byte node per value plus a
+// container allocation". `sizeof(nlohmann::json)` is indeed 16 — but the
+// default `object_t` is `std::map` (third_party/nlohmann/json.hpp), so every
+// '{' costs a map allocation PLUS one red-black-tree node per entry: ~144 B
+// per single-entry object, not ~16 B. Measured on the shipped ceilings
+// (g++ -O2, counting global operator new):
+//
+//   shape                                wire      DOM     factor
+//   flat scalars   [0,0,...]            3.8 MB    48 MB     12.6x
+//   objects        [{"":0},...]        13.4 MB   276 MB     20.7x
+//   depth-63 object chain              18.9 MB   482 MB     25.5x
+//   objects + envelope (payload copy)  12.7 MB   525 MB     41.4x
+//
+// The last row includes `m.payload = envelope["payload"]` in
+// Message::deserialize, which deep-copies while the envelope is still alive.
+//
+// For calibration, the DENSEST LEGITIMATE 16 MB snapshot measures 1,597,828
+// units and 129.9 MB of DOM (8.1x) — i.e. a legitimate large message is ALREADY
+// an 8x expansion. That is the number that makes the residual irreducible: no
+// ceiling admitting 1.6M legitimate units can bound an attacker below ~200 MB.
+//
+// The ceiling therefore bounds the DOM directly, in a single allocation-free
+// pass over the raw bytes BEFORE the parser runs:
+//
+//   * kMaxJsonDepth  — nesting depth. Kills the pathological case outright:
+//     the 16 MB '[' flood aborts after reading 65 bytes.
+//     Its LOAD-BEARING justification is not heap, though — it is a CRASH.
+//     nlohmann 3.11.3 parses iteratively and its destructor is stack-safe
+//     (MEASURED: a depth-3,900,000 document parses and destroys cleanly, and
+//     uses only 3.9M nodes, so the node ceiling alone would have admitted it).
+//     But `serializer::dump()` RECURSES, and Message::serialize() calls
+//     `envelope.dump()` — so a node that accepted a deep document and re-emitted
+//     it would die of stack exhaustion on the SEND path. MEASURED on an 8 MB
+//     stack (g++ -O2): depth 50,000 dumps fine, depth 200,000 SEGFAULTS. A cap
+//     of 64 sits ~1000x below that threshold and 8x above the deepest
+//     legitimate document, so it forecloses the crash with wide margin on both
+//     sides. ⚠ Do NOT relax this ceiling on the reasoning that the node ceiling
+//     already bounds the '[' flood — it does, but it does not bound dump().
+//   * kMaxJsonNodes  — a proxy for the node count (container opens + commas).
+//     Bounds the shapes depth alone misses: one flat array of 8M integers, or
+//     millions of sibling empty containers.
+//     ⚠ It is NOT "within ~2x and conservative" (an earlier draft claimed
+//     this). It errs in the UNSAFE direction on objects: `{"":0}` is 1 unit but
+//     costs ~144 B, so measured cost per unit ranges 72 B (shallow objects) to
+//     126 B (depth-63 chains) against ~24 B for flat scalars. Charging ':' as
+//     well was evaluated and REJECTED: it raises the densest legitimate
+//     snapshot from 1.60M to 2.80M units (headroom 2.5x -> 1.4x, too tight to
+//     be safe) while only moving the attacker's best from 276 MB to 195 MB.
+//
+// SIZING. The deepest LEGITIMATE envelope is CHAIN_RESPONSE at depth 8
+// (envelope -> {"blocks":[...]} -> blocks[] -> Block -> shard_tip_witnesses[]
+// -> witness Block -> creator_tx_lists[] -> inner list); witness Blocks are
+// parsed with allow_witnesses=false, so Block nesting cannot recurse further.
+// 64 leaves 8x headroom.
+//
+// For kMaxJsonNodes the binding case is the DENSEST legitimate envelope, which
+// is a snapshot at the 16 MB ceiling. Worst-case density comes from the
+// smallest repeating record the snapshot schema can emit — an account entry
+// with a 1-char domain and single-digit values, which nlohmann dumps with
+// sorted keys as `{"balance":0,"domain":"a","next_nonce":0}` = 41 bytes, plus
+// 1 byte for the array separator. That record costs 4 counter units (1 brace +
+// 2 inner commas + 1 array comma), so the ceiling density is
+//   16 MB / 42 bytes  x  4 units  ~=  1.6M units.
+// 4M therefore leaves ~2.5x headroom over a snapshot no real deployment would
+// produce (real domains are longer and balances larger, both of which lower
+// the density). Mirrors the headroom style of the byte caps above (1 MB over
+// ~64 KB of real traffic). ⚠ If a denser repeating record is ever added to
+// serialize_state, re-run this arithmetic — it is the whole basis for 4M.
+//
+// SOUNDNESS. The scan tracks JSON string state (quote + backslash escape), so
+// structural bytes INSIDE strings are not counted. For any input that parses
+// successfully the string boundaries are unambiguous left-to-right, hence the
+// counts are exact and no valid document is ever rejected by miscounting. For
+// input that does not parse, the scan may be inaccurate — but the parse
+// rejects it anyway, so the composition stays fail-closed either way.
+//
+// ⚠ THIS IS MITIGATION, NOT ELIMINATION. Within the ceilings a 16 MB frame
+// still reaches a MEASURED 482 MB (25.5x), or 525 MB (41.4x) counting the
+// payload copy — against 831 MB (51.9x) unmitigated and 130 MB (8.1x) for the
+// densest LEGITIMATE message. So the ceiling buys roughly 1.7-2x over the
+// unmitigated worst case and leaves the attacker ~3.7x a legitimate sender —
+// it removes the UNBOUNDED cases (16.7M containers, arbitrary depth), which is
+// its real job, not the constant factor. Closing that fully needs the JSON path
+// itself capped at the 1 MB chatter ceiling, which is a PROTOCOL decision (it
+// would break snapshot/chain sync to any wire_version-0 peer, and inside the
+// pre-HELLO window on every connection) — see F-6 in
+// docs/proofs/S022WireFormatCaps.md §6.2 for the options and the send-path
+// evidence, and §2.3 for the structural argument.
+inline constexpr size_t kMaxJsonDepth = 64;
+inline constexpr size_t kMaxJsonNodes = 4000000;
+
+// Throws std::runtime_error if `data[0..len)` exceeds either ceiling above.
+// Allocation-free, single pass, safe on arbitrary (including non-JSON) bytes.
+// Aborts at the offending byte, so a hostile body costs O(bytes scanned before
+// the ceiling trips), not O(len).
+void json_structural_precheck(const uint8_t* data, size_t len);
 
 struct Message {
     MsgType        type{MsgType::HELLO};

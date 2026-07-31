@@ -87,8 +87,25 @@ void Peer::read_body(uint32_t len) {
                 }
                 if (self->on_msg_) self->on_msg_(self, msg);
             } catch (std::exception& e) {
+                // WIRE-3 (round-12 hostile-wire audit): a malformed frame
+                // CLOSES the connection. This branch previously logged and
+                // fell through to read_header(), re-arming the peer — which
+                // contradicted both the disposition the framing layer applies
+                // (read_header's oversize/zero-length branch closes) and the
+                // one the oversize branch just above applies, and made every
+                // pre-auth parse cost infinitely repeatable at zero reconnect
+                // cost to the sender. The S-014 per-IP token bucket cannot
+                // meter it: that lives in GossipNet::handle_message, i.e. the
+                // on_msg_ callback below, strictly DOWNSTREAM of the parse.
+                //
+                // Fail-closed by design: a legitimate peer emitting one
+                // malformed frame is now disconnected rather than tolerated.
+                // That is the intended trade — a well-behaved peer never emits
+                // one, and gossip reconnects.
                 std::cerr << "[peer] message parse error from " << self->address_
-                          << ": " << e.what() << "\n";
+                          << ": " << e.what() << " — closing connection\n";
+                if (self->on_close_) self->on_close_(self);
+                return;
             }
             self->read_header();
         });
