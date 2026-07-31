@@ -275,12 +275,22 @@ server.session_key`. Both sides compute the same unordered triple of shared poin
 schedule is a pure function of shared inputs. *Gate:* the "both parties derive the
 SAME session_key" assertion.
 
-**AKE-2 (mutual authentication).** `server_mac = HMAC(Km2, SHA256(preamble))` is
+**AKE-2 (mutual authentication).** ⚠ **FALSE as written — see the finding at the top
+of this document; OWNER-GATED.** The server-authentication half does not hold: the
+claim below reads "the server's private DH contributions", but `Km2` is derived from
+`(dh1, dh2, dh3)`, and **any** `(sk_s′, esk_s′)` reproduces all three against a client
+whose `pk_s` is attacker-supplied — `dh2 = sk_s′·epk_c` and `dh3 = esk_s′·pk_c` need
+only the **public** `pk_c`. The article "**the**" server smuggles in an authenticity
+assumption for `pk_s` that nothing in the design supplies. The CLIENT-authentication
+half (`client_mac`, which does require `sk_c`) is unaffected.
+
+~~`server_mac = HMAC(Km2, SHA256(preamble))` is
 verifiable only by a party that derived `Km2`, which requires the server's private
-DH contributions; `client_mac = HMAC(Km3, SHA256(preamble‖server_mac))` symmetric.
+DH contributions~~; `client_mac = HMAC(Km3, SHA256(preamble‖server_mac))` symmetric.
 The honest client accepts the server MAC and the server's `expected_client_mac`
 equals the client's produced MAC. *Gates:* "client verifies the server MAC" +
-"expected client MAC == client MAC".
+"expected client MAC == client MAC" — note these gate **agreement between two honest
+parties**, not authentication; no gate feeds the client a `pk_s` it was not given.
 
 **AKE-3 (transcript binding).** Every output is keyed on `SHA256(preamble)`, and
 the preamble streams every wire field (context, both identities, both nonces, both
