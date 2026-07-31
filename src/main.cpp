@@ -10307,6 +10307,100 @@ int main(int argc, char** argv) {
                     "nor 64 chars is REJECTED"); }
         }
 
+        // 4c. D2-inc6b consensus-chatter frames. Every one is a byte fixed
+        //     point through its builder, and every field survives — these
+        //     carry signatures whose verification depends on the exact
+        //     bytes, so field-for-field fidelity is the security property.
+        {
+            node::AbortClaimMsg ac;
+            ac.block_index = 7; ac.round = 2;
+            ac.missing_creator = "n2"; ac.claimer = "n1";
+            ac.prev_hash.fill(0xAB); ac.ed_sig.fill(0xCD);
+
+            node::BlockSigMsg bs;
+            bs.block_index = 9; bs.signer = "n3";
+            bs.delay_output.fill(0x11); bs.dh_secret.fill(0x22);
+            bs.ed_sig.fill(0x33);
+
+            chain::EquivocationEvent eq;
+            eq.equivocator = "mallory"; eq.block_index = 42;
+            eq.digest_a.fill(0xD0); eq.sig_a.fill(0xD1);
+            eq.digest_b.fill(0xD2); eq.sig_b.fill(0xD3);
+            eq.shard_id = 3; eq.beacon_anchor_height = 100;
+
+            chain::AbortEvent ae;
+            ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = 1234567890;
+            ae.event_hash.fill(0x7E);
+            { chain::AbortClaim c;
+              c.block_index = 7; c.round = 2; c.prev_hash.fill(0xAB);
+              c.missing_creator = "n2"; c.claimer = "n1"; c.ed_sig.fill(0xCD);
+              ae.claims.push_back(c); }
+            Hash prev{}; prev.fill(0x5A);
+
+            auto rt = [&](const Message& m, const char* label) {
+                auto body = strip_frame(m.serialize_binary());
+                Message back = Message::deserialize(body.data(), body.size());
+                check(back.type == m.type && back.payload == m.payload, label);
+            };
+            rt(make_abort_claim(ac),  "ABORT_CLAIM frame round-trips (all six fields)");
+            rt(make_block_sig(bs),    "BLOCK_SIG frame round-trips");
+            rt(make_equivocation_evidence(eq),
+                                      "EQUIVOCATION_EVIDENCE frame round-trips (8 fields)");
+            rt(make_abort_event(ae, 7, prev),
+                                      "ABORT_EVENT frame round-trips (envelope + typed claims)");
+
+            // A NEGATIVE timestamp must round-trip bit-exactly through the
+            // u64 slot — AbortEvent::timestamp is int64_t.
+            { chain::AbortEvent neg = ae; neg.timestamp = -1234567890;
+              auto m = make_abort_event(neg, 7, prev);
+              auto body = strip_frame(m.serialize_binary());
+              Message back = Message::deserialize(body.data(), body.size());
+              check(back.payload["event"]["timestamp"] == -1234567890,
+                    "ABORT_EVENT: a NEGATIVE timestamp round-trips bit-exactly"); }
+
+            // A zero dh_secret is the S-009 legacy/absent reveal — the fixed
+            // slot must preserve it as all-zero, not as an absent field.
+            { node::BlockSigMsg z = bs; z.dh_secret = Hash{};
+              auto m = make_block_sig(z);
+              auto body = strip_frame(m.serialize_binary());
+              Message back = Message::deserialize(body.data(), body.size());
+              check(back.payload["dh_secret"] == std::string(64, '0'),
+                    "BLOCK_SIG: an all-zero dh_secret (S-009 absent reveal) is preserved"); }
+
+            auto expect_reject2 = [&](std::vector<uint8_t> body, const char* needle,
+                                      const char* label) {
+                bool hit = false;
+                try { (void)Message::deserialize(body.data(), body.size()); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find(needle) != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit, label);
+            };
+            { auto b = strip_frame(make_block_sig(bs).serialize_binary());
+              b.push_back(0x00);
+              expect_reject2(b, "bad BLOCK_SIG frame length",
+                    "BLOCK_SIG: a padded frame is REJECTED (exact length)"); }
+            { auto b = strip_frame(make_equivocation_evidence(eq).serialize_binary());
+              b.pop_back();
+              expect_reject2(b, "bad EQUIVOCATION_EVIDENCE frame length",
+                    "EQUIVOCATION_EVIDENCE: a truncated frame is REJECTED"); }
+            { auto b = strip_frame(make_abort_event(ae, 7, prev).serialize_binary());
+              b.push_back(0x00);
+              expect_reject2(b, "trailing bytes after last claim",
+                    "ABORT_EVENT: a trailing byte is REJECTED by the shared "
+                    "claim-list codec's exact consumption"); }
+            { // An ABORT_CLAIM carrying two claims is non-canonical: the
+              //  shared codec is count-prefixed, so the count is checked.
+              auto two = chain::encode_abort_claims({ae.claims[0], ae.claims[0]});
+              std::vector<uint8_t> b{0xB1, 0x01,
+                  static_cast<uint8_t>(MsgType::ABORT_CLAIM), 0x00};
+              b.insert(b.end(), two.begin(), two.end());
+              expect_reject2(b, "exactly one claim",
+                    "ABORT_CLAIM: a frame carrying two claims is REJECTED "
+                    "(canonical single-claim encoding)"); }
+        }
+
         // 5. D2 negative gate: a legacy JSON envelope body ('{' 0x7B) is
         //    REJECTED by the binary-only deserializer with the specific
         //    reject string. This is the leg that pins the envelope strip —
@@ -57384,31 +57478,51 @@ int main(int argc, char** argv) {
         //     binary envelope's type byte (offset 2) equals the cast value,
         //     and decode_binary recovers the exact same MsgType. The
         //     discriminator IS the receive-side dispatch key — a silent
-        //     corruption would route a message to the wrong handler. Use an
-        //     empty-object payload (the JSON-payload path) for generic
-        //     types; TRANSACTION uses its fixed-frame codec, so feed it a
-        //     minimal tx JSON; HELLO's fixed frame reads named fields with
-        //     defaults, so the empty object encodes cleanly.
+        //     corruption would route a message to the wrong handler.
+        //
+        //     Payload per type: the fixed-frame types are fed a
+        //     BUILDER-SHAPED payload (their encoders route through the
+        //     struct's from_json, which requires every field), the
+        //     request/status frames and HELLO read named fields with
+        //     defaults so an empty object suffices, and the remaining
+        //     JSON-payload types take an empty object. (Pre-D2-inc6b every
+        //     type got an empty object; that stopped working the moment a
+        //     struct-backed frame needed real fields.)
         {
+            const std::string h64(64, '0'), h128(128, '0');
+            auto minimal_payload = [&](MsgType t) -> json {
+                switch (t) {
+                case MsgType::TRANSACTION:
+                    return {{"type", 0}, {"from", "a"}, {"to", "b"},
+                            {"amount", 1}, {"fee", 0}, {"nonce", 0},
+                            {"payload", ""}, {"sig", h128}, {"hash", h64}};
+                case MsgType::ABORT_CLAIM:
+                    return {{"block_index", 1}, {"round", 1},
+                            {"prev_hash", h64}, {"missing_creator", "n2"},
+                            {"claimer", "n1"}, {"ed_sig", h128}};
+                case MsgType::BLOCK_SIG:
+                    return {{"block_index", 1}, {"signer", "n1"},
+                            {"delay_output", h64}, {"dh_secret", h64},
+                            {"ed_sig", h128}};
+                case MsgType::EQUIVOCATION_EVIDENCE:
+                    return {{"equivocator", "m"}, {"block_index", 1},
+                            {"digest_a", h64}, {"sig_a", h128},
+                            {"digest_b", h64}, {"sig_b", h128},
+                            {"shard_id", 0}, {"beacon_anchor_height", 0}};
+                case MsgType::ABORT_EVENT:
+                    return {{"block_index", 1}, {"prev_hash", h64},
+                            {"event", {{"round", 1}, {"aborting_node", "n2"},
+                                       {"timestamp", 1}, {"event_hash", h64},
+                                       {"claims", "0000"}}}};
+                default:
+                    return json::object();
+                }
+            };
             bool all_disc_ok = true;
             for (MsgType t : all_types) {
                 Message m;
                 m.type = t;
-                if (t == MsgType::TRANSACTION) {
-                    // TRANSACTION uses the fixed-frame codec, which routes
-                    // through Transaction::from_json — every required field
-                    // (type/from/to/amount/nonce/payload/sig/hash) must be
-                    // present and hex-shaped or from_json throws (S-018).
-                    m.payload = {
-                        {"type", 0}, {"from", "a"}, {"to", "b"},
-                        {"amount", 1}, {"fee", 0}, {"nonce", 0},
-                        {"payload", ""},
-                        {"sig",  std::string(128, '0')},
-                        {"hash", std::string(64,  '0')}
-                    };
-                } else {
-                    m.payload = json::object();
-                }
+                m.payload = minimal_payload(t);
                 std::vector<uint8_t> bytes;
                 try {
                     bytes = encode_binary(m);

@@ -112,9 +112,35 @@
 //   GET_CHAIN's count is u16 and HEADERS_REQUEST's is u32 — deliberately not
 //   unified; the two handler signatures differ.
 //
+// PAYLOAD: CONSENSUS-CHATTER FRAMES (fixed layout, D2-inc6b)
+//   The four control messages with UNCONDITIONAL field sets. All are
+//   signature-transparent: the sigs bind binary field hashes
+//   (make_abort_claim_message / compute_block_digest / the inline digests),
+//   never a serialization. Fail-closed, consumed exactly:
+//
+//     ABORT_CLAIM      the shared chain::encode_abort_claims blob carrying
+//                      EXACTLY one claim — the same six-field layout the
+//                      in-block claim list uses, so the gossiped claim and
+//                      the stored claim cannot drift.
+//     BLOCK_SIG        [block_index: u64 LE][signer: u8 len + utf8]
+//                      [delay_output: 32 B][dh_secret: 32 B][ed_sig: 64 B]
+//                        dh_secret's all-zero value is the S-009
+//                        legacy/absent reveal — a fixed slot is exactly the
+//                        JSON path's absent-means-zero rule.
+//     EQUIVOCATION_EVIDENCE
+//                      [equivocator: u8 len + utf8][block_index: u64 LE]
+//                      [digest_a: 32][sig_a: 64][digest_b: 32][sig_b: 64]
+//                      [shard_id: u32 LE][beacon_anchor_height: u64 LE]
+//     ABORT_EVENT      [block_index: u64 LE][prev_hash: 32 B]   (envelope)
+//                      [round: u8][aborting_node: u8 len + utf8]
+//                      [timestamp: i64 as u64 LE][event_hash: 32 B]
+//                      [claims: chain::encode_abort_claims blob]  (LAST —
+//                        the blob is count-prefixed and self-delimiting, and
+//                        being last is what makes exact consumption
+//                        decidable)
+//
 // PAYLOAD: ALL OTHER MSGTYPES
-//   For BLOCK, CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT,
-//   EQUIVOCATION_EVIDENCE, BEACON_HEADER, SHARD_TIP,
+//   For BLOCK, CONTRIB, BEACON_HEADER, SHARD_TIP,
 //   CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE, SNAPSHOT_RESPONSE,
 //   HEADERS_RESPONSE:
 //
@@ -367,6 +393,169 @@ nlohmann::json decode_headers_request_frame(const uint8_t* data, size_t len) {
     return j;
 }
 
+// ─── consensus-chatter frames (fixed layout, D2-inc6b) ───────────────────────
+//
+// The four control messages whose field sets are UNCONDITIONAL — no emit
+// gates, no unbounded collections. (CONTRIB is deliberately excluded: it has
+// two conditional field blocks and four unbounded hash lists that need
+// explicit caps, so it gets its own increment.)
+//
+// SIGNATURE-TRANSPARENT by construction: every signature these carry binds a
+// binary field hash that never touched the JSON container —
+// make_abort_claim_message (ABORT_CLAIM, and the claims inside ABORT_EVENT),
+// compute_block_digest (BLOCK_SIG), and for EQUIVOCATION_EVIDENCE the two
+// inline sigs verify against digests carried in the message itself. So no
+// signature verification outcome can change; only the container does.
+//
+// Each frame is fail-closed with EXACT consumption. The decoders rebuild the
+// same payload DOM the builders produce, so every gossip handler and every
+// downstream consumer is untouched by the swap.
+
+// Convert between the gossip claim (node::AbortClaimMsg) and the chain-layer
+// claim (chain::AbortClaim). The two carry the SAME six consensus-bound
+// fields; sharing chain::encode_abort_claims for both the in-block list and
+// the gossiped single claim is what keeps their byte layouts from drifting
+// (the S-044 one-shared-helper discipline).
+chain::AbortClaim to_chain_claim(const node::AbortClaimMsg& m) {
+    chain::AbortClaim c;
+    c.block_index     = m.block_index;
+    c.round           = m.round;
+    c.prev_hash       = m.prev_hash;
+    c.missing_creator = m.missing_creator;
+    c.claimer         = m.claimer;
+    c.ed_sig          = m.ed_sig;
+    return c;
+}
+
+nlohmann::json from_chain_claim(const chain::AbortClaim& c) {
+    node::AbortClaimMsg m;
+    m.block_index     = c.block_index;
+    m.round           = c.round;
+    m.prev_hash       = c.prev_hash;
+    m.missing_creator = c.missing_creator;
+    m.claimer         = c.claimer;
+    m.ed_sig          = c.ed_sig;
+    return m.to_json();
+}
+
+void encode_abort_claim_frame(std::vector<uint8_t>& out, const Message& m) {
+    auto claim = to_chain_claim(node::AbortClaimMsg::from_json(m.payload));
+    auto enc = chain::encode_abort_claims({claim});
+    out.insert(out.end(), enc.begin(), enc.end());
+}
+
+nlohmann::json decode_abort_claim_frame(const uint8_t* data, size_t len) {
+    auto claims = chain::decode_abort_claims(std::vector<uint8_t>(data, data + len));
+    // The shared codec is count-prefixed; a gossiped ABORT_CLAIM carries
+    // exactly one. Rejecting any other count keeps the encoding canonical.
+    if (claims.size() != 1)
+        throw std::runtime_error("binary_codec: ABORT_CLAIM must carry exactly one claim");
+    return from_chain_claim(claims[0]);
+}
+
+void encode_block_sig_frame(std::vector<uint8_t>& out, const Message& m) {
+    node::BlockSigMsg s = node::BlockSigMsg::from_json(m.payload);
+    le_put_u64(out, s.block_index);
+    put_lp_str(out, s.signer);
+    out.insert(out.end(), s.delay_output.begin(), s.delay_output.end());
+    // S-009: dh_secret is all-zero on a legacy/absent reveal. A fixed 32-byte
+    // slot is exactly equivalent to the JSON path's absent-means-zero rule,
+    // and it removes that path's S-018 asymmetry (dh_secret was the one hex
+    // field read WITHOUT json_require_hex, so a wrong-length value threw an
+    // anonymous "hex length mismatch" instead of a field-named diagnostic).
+    out.insert(out.end(), s.dh_secret.begin(), s.dh_secret.end());
+    out.insert(out.end(), s.ed_sig.begin(), s.ed_sig.end());
+}
+
+nlohmann::json decode_block_sig_frame(const uint8_t* data, size_t len) {
+    node::BlockSigMsg s;
+    size_t off = 0;
+    if (len < 8) throw std::runtime_error("binary_codec: truncated BLOCK_SIG frame");
+    s.block_index = le_get_u64(data); off += 8;
+    s.signer = get_lp_str(data, len, off);
+    if (off + 32 + 32 + 64 != len)
+        throw std::runtime_error("binary_codec: bad BLOCK_SIG frame length");
+    std::copy(data + off, data + off + 32, s.delay_output.begin()); off += 32;
+    std::copy(data + off, data + off + 32, s.dh_secret.begin());    off += 32;
+    std::copy(data + off, data + off + 64, s.ed_sig.begin());
+    return s.to_json();
+}
+
+void encode_equivocation_frame(std::vector<uint8_t>& out, const Message& m) {
+    chain::EquivocationEvent e = chain::EquivocationEvent::from_json(m.payload);
+    put_lp_str(out, e.equivocator);
+    le_put_u64(out, e.block_index);
+    out.insert(out.end(), e.digest_a.begin(), e.digest_a.end());
+    out.insert(out.end(), e.sig_a.begin(),    e.sig_a.end());
+    out.insert(out.end(), e.digest_b.begin(), e.digest_b.end());
+    out.insert(out.end(), e.sig_b.begin(),    e.sig_b.end());
+    le_put_u32(out, e.shard_id);
+    le_put_u64(out, e.beacon_anchor_height);
+}
+
+nlohmann::json decode_equivocation_frame(const uint8_t* data, size_t len) {
+    chain::EquivocationEvent e;
+    size_t off = 0;
+    e.equivocator = get_lp_str(data, len, off);
+    if (off + 8 + 32 + 64 + 32 + 64 + 4 + 8 != len)
+        throw std::runtime_error("binary_codec: bad EQUIVOCATION_EVIDENCE frame length");
+    e.block_index = le_get_u64(data + off); off += 8;
+    std::copy(data + off, data + off + 32, e.digest_a.begin()); off += 32;
+    std::copy(data + off, data + off + 64, e.sig_a.begin());    off += 64;
+    std::copy(data + off, data + off + 32, e.digest_b.begin()); off += 32;
+    std::copy(data + off, data + off + 64, e.sig_b.begin());    off += 64;
+    e.shard_id             = le_get_u32(data + off); off += 4;
+    e.beacon_anchor_height = le_get_u64(data + off);
+    return e.to_json();
+}
+
+void encode_abort_event_frame(std::vector<uint8_t>& out, const Message& m) {
+    // Envelope (block_index + prev_hash) then the event. Neither is covered
+    // by any signature — the claims inside carry their own.
+    le_put_u64(out, m.payload.value("block_index", uint64_t{0}));
+    Hash prev = from_hex_arr<32>(
+        m.payload.value("prev_hash", std::string(64, '0')));
+    out.insert(out.end(), prev.begin(), prev.end());
+
+    chain::AbortEvent e = chain::AbortEvent::from_json(m.payload.at("event"));
+    out.push_back(e.round);
+    put_lp_str(out, e.aborting_node);
+    // int64 timestamp round-trips bit-exactly through the u64 slot.
+    le_put_u64(out, static_cast<uint64_t>(e.timestamp));
+    out.insert(out.end(), e.event_hash.begin(), e.event_hash.end());
+    // Claims LAST: the shared codec is self-delimiting via its own count
+    // prefix, and being last is what makes exact consumption decidable.
+    auto enc = chain::encode_abort_claims(e.claims);
+    out.insert(out.end(), enc.begin(), enc.end());
+}
+
+nlohmann::json decode_abort_event_frame(const uint8_t* data, size_t len) {
+    size_t off = 0;
+    if (len < 8 + 32) throw std::runtime_error("binary_codec: truncated ABORT_EVENT frame");
+    uint64_t block_index = le_get_u64(data); off += 8;
+    Hash prev{};
+    std::copy(data + off, data + off + 32, prev.begin()); off += 32;
+
+    chain::AbortEvent e;
+    if (off + 1 > len) throw std::runtime_error("binary_codec: truncated ABORT_EVENT event");
+    e.round = data[off++];
+    e.aborting_node = get_lp_str(data, len, off);
+    if (off + 8 + 32 > len)
+        throw std::runtime_error("binary_codec: truncated ABORT_EVENT event fields");
+    e.timestamp = static_cast<int64_t>(le_get_u64(data + off)); off += 8;
+    std::copy(data + off, data + off + 32, e.event_hash.begin()); off += 32;
+    // decode_abort_claims is itself exact-consuming over the tail, so a
+    // trailing byte after the claim list is rejected there.
+    e.claims = chain::decode_abort_claims(
+        std::vector<uint8_t>(data + off, data + len));
+
+    nlohmann::json j;
+    j["block_index"] = block_index;
+    j["prev_hash"]   = to_hex(prev);
+    j["event"]       = e.to_json();
+    return j;
+}
+
 // ─── envelope ────────────────────────────────────────────────────────────────
 
 constexpr uint8_t kBinaryMagic   = 0xB1;
@@ -413,6 +602,12 @@ std::vector<uint8_t> encode_binary(const Message& m) {
     case MsgType::STATUS_RESPONSE:  encode_status_response_frame(out, m);  return out;
     case MsgType::SNAPSHOT_REQUEST: encode_snapshot_request_frame(out, m); return out;
     case MsgType::HEADERS_REQUEST:  encode_headers_request_frame(out, m);  return out;
+    // D2-inc6b: unconditional consensus-chatter frames.
+    case MsgType::ABORT_CLAIM:      encode_abort_claim_frame(out, m);      return out;
+    case MsgType::BLOCK_SIG:        encode_block_sig_frame(out, m);        return out;
+    case MsgType::EQUIVOCATION_EVIDENCE:
+                                    encode_equivocation_frame(out, m);     return out;
+    case MsgType::ABORT_EVENT:      encode_abort_event_frame(out, m);      return out;
     default: break;
     }
 
@@ -472,6 +667,15 @@ Message decode_binary(const uint8_t* data, size_t len) {
         m.payload = decode_snapshot_request_frame(body, body_len); return m;
     case MsgType::HEADERS_REQUEST:
         m.payload = decode_headers_request_frame(body, body_len);  return m;
+    // D2-inc6b: unconditional consensus-chatter frames.
+    case MsgType::ABORT_CLAIM:
+        m.payload = decode_abort_claim_frame(body, body_len);      return m;
+    case MsgType::BLOCK_SIG:
+        m.payload = decode_block_sig_frame(body, body_len);        return m;
+    case MsgType::EQUIVOCATION_EVIDENCE:
+        m.payload = decode_equivocation_frame(body, body_len);     return m;
+    case MsgType::ABORT_EVENT:
+        m.payload = decode_abort_event_frame(body, body_len);      return m;
     default: break;
     }
 

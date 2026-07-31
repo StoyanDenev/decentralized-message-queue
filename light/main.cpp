@@ -8559,6 +8559,11 @@ int cmd_committee_at_height(int argc, char** argv) {
 //         request/status frames — exact byte lengths (10 / 0 / 9..73 / 4 /
 //         12), and STATUS_RESPONSE's genesis_len must be 0 (empty chain) or
 //         64 (hex of a 32-byte hash) and must consume the frame exactly.
+//       - BLOCK_SIG (3) / ABORT_CLAIM (9) / ABORT_EVENT (10) /
+//         EQUIVOCATION_EVIDENCE (11): the D2-inc6b fixed consensus-chatter
+//         frames — every length-prefixed string and fixed slot must fit and
+//         the frame must be consumed exactly; ABORT_CLAIM must carry
+//         EXACTLY one claim in the shared claim-list blob.
 //       - all other types: a [u32 LE json_len][json_bytes] payload whose
 //         declared length matches the remaining body exactly and whose
 //         bytes parse as JSON.
@@ -8921,6 +8926,74 @@ int cmd_decode_wire(int argc, char** argv) {
                     report["from"]  = wire_le_u64(body);
                     report["count"] = wire_le_u32(body + 8);
                 }
+            } else if (msg_type == 3  /* BLOCK_SIG             */ ||
+                       msg_type == 9  /* ABORT_CLAIM           */ ||
+                       msg_type == 10 /* ABORT_EVENT           */ ||
+                       msg_type == 11 /* EQUIVOCATION_EVIDENCE */) {
+                // D2-inc6b fixed consensus-chatter frames — re-implemented
+                // independently from the published layout, consumed exactly.
+                report["payload_kind"] = "chatter_frame";
+                size_t off = 0;
+                auto take = [&](size_t n, const char* what) {
+                    if (off + n > body_len)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated at " + what);
+                    size_t at = off; off += n; return at;
+                };
+                auto take_lp = [&](const char* what) {
+                    if (off + 1 > body_len)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated " + what + " length");
+                    uint8_t n = body[off++];
+                    if (off + n > body_len)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated " + what + " body");
+                    std::string s(reinterpret_cast<const char*>(body + off), n);
+                    off += n;
+                    return s;
+                };
+                // The shared claim-list blob: [u16 count] + count x
+                // [u64][u8][32][64][u8 len + s][u8 len + s]. Mirrors
+                // chain::decode_abort_claims; returns the claim count.
+                auto take_claims = [&]() {
+                    if (off + 2 > body_len)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated claims count");
+                    uint16_t n = wire_le_u16(body + off); off += 2;
+                    for (uint16_t i = 0; i < n; ++i) {
+                        take(8 + 1 + 32 + 64, "claim fixed fields");
+                        take_lp("claim missing_creator");
+                        take_lp("claim claimer");
+                    }
+                    return n;
+                };
+                if (msg_type == 3) {
+                    report["block_index"] = wire_le_u64(body + take(8, "block_index"));
+                    report["signer"]      = take_lp("signer");
+                    take(32 + 32 + 64, "delay_output/dh_secret/ed_sig");
+                } else if (msg_type == 9) {
+                    uint16_t n = take_claims();
+                    // A gossiped ABORT_CLAIM carries exactly one claim.
+                    if (n != 1)
+                        throw WireMalformed("ABORT_CLAIM must carry exactly one "
+                                            "claim, got " + std::to_string(n));
+                    report["claims"] = n;
+                } else if (msg_type == 10) {
+                    report["block_index"] = wire_le_u64(body + take(8, "block_index"));
+                    take(32, "prev_hash");
+                    take(1, "round");
+                    report["aborting_node"] = take_lp("aborting_node");
+                    take(8 + 32, "timestamp/event_hash");
+                    report["claims"] = take_claims();
+                } else {  // 11
+                    report["equivocator"] = take_lp("equivocator");
+                    take(8 + 32 + 64 + 32 + 64 + 4 + 8,
+                         "block_index/digests/sigs/shard_id/anchor");
+                }
+                if (off != body_len)
+                    throw WireMalformed(std::string(tname) + " has " +
+                                        std::to_string(body_len - off) +
+                                        " trailing byte(s)");
             } else {
                 // [u32 LE json_len][json_bytes] — declared length must
                 // match the remaining body EXACTLY and parse as JSON.
@@ -9011,12 +9084,15 @@ int cmd_decode_wire(int argc, char** argv) {
                           << "  from:      " << report["from"].get<std::string>() << "\n"
                           << "  to:        " << report["to"].get<std::string>() << "\n"
                           << "  hash:      " << report["hash"].get<std::string>() << "\n";
-            } else if (kind == "hello_frame" || kind == "req_frame") {
+            } else if (kind == "hello_frame" || kind == "req_frame"
+                       || kind == "chatter_frame") {
                 std::cout << "  payload:   " << kind << "\n";
                 // Emit whichever decoded scalars this frame carries.
                 for (const char* k : {"domain", "port", "role", "shard_id",
                                       "wire_version", "from", "count",
-                                      "height", "genesis", "headers"}) {
+                                      "height", "genesis", "headers",
+                                      "block_index", "signer", "aborting_node",
+                                      "equivocator", "claims"}) {
                     if (!report.contains(k)) continue;
                     std::cout << "  " << k << ": ";
                     if (report[k].is_string())
