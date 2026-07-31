@@ -81,15 +81,12 @@ enum class MsgType : uint8_t {
     HEADERS_RESPONSE  = 18,
 };
 
-// A3 / S8: per-pair wire-version negotiation.
-//   v0 = JSON-over-TCP (legacy, default).
-//   v1 = binary envelope (see src/net/binary_codec.cpp for layout).
-// Highest version this build understands. HELLO advertises this; both sides
-// negotiate down to min(ours, theirs). Default per-peer until HELLO arrives
-// is kWireVersionLegacy (0) so we stay compatible with pre-A3 peers.
-inline constexpr uint8_t kWireVersionLegacy  = 0;
+// D2: the wire is binary-only — v1 is the single shipped format and the
+// per-pair v0/v1 negotiation is gone (deleted pre-genesis with the JSON
+// envelope). HELLO still ADVERTISES this value as the additive post-genesis
+// upgrade escape hatch: a future v2-capable peer advertises 2, keeps sending
+// v1 frames, and upgrades only after reading the peer's advertised max.
 inline constexpr uint8_t kWireVersionBinary  = 1;
-inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
 
 // S-022: wire-level framing ceiling. The peer layer reads this many bytes
 // max before deserialization (drops the connection otherwise). After
@@ -104,26 +101,21 @@ inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
 // applies max_message_bytes only AFTER Message::deserialize has already
 // decoded the body. A hostile peer's 16 MB frame was therefore fully parsed
 // before the type-aware ceiling was consulted (measured: ~52x heap
-// amplification and multi-second CPU on the JSON path).
-//   * BINARY envelopes carry a PRE-DECODE cap in Message::deserialize — the
-//     type is readable in the clear at offset 2, so the ceiling is applied
-//     before any payload work (the rule the light client already shipped on
-//     this wire format). Gated by WIRE-1 in test-binary-codec.
-//   * That cap alone did NOT close the binary path: the type at offset 2 is
+// amplification and multi-second CPU on the since-deleted JSON path).
+//   * Every envelope carries a PRE-DECODE cap in Message::deserialize
+//     (WIRE-1) — the type is readable in the clear at offset 2, so the
+//     ceiling is applied before any payload work (the rule the light client
+//     already shipped on this wire format). Gated in test-binary-codec.
+//   * That cap alone does NOT close the path: the type at offset 2 is
 //     ATTACKER-CHOSEN, so a hostile frame claiming SNAPSHOT_RESPONSE (16) or
-//     CHAIN_RESPONSE (6) buys the full 16 MB ceiling and reaches the same
+//     CHAIN_RESPONSE (6) buys the full 16 MB ceiling and reaches the
 //     unbounded DOM expansion in decode_binary's payload parse. The
 //     per-type cap narrows the vector to the two 16 MB types; it does not
 //     remove it.
-//   * The legacy JSON-envelope path parses before the type is known (the
-//     type lives inside the document), so its byte ceiling is necessarily
-//     kMaxFrameBytes — and it cannot be tightened, because those same two
-//     16 MB types legitimately travel as JSON (Peer::send falls back to the
-//     JSON encoding whenever the peer's negotiated wire_version is 0, which
-//     is the DEFAULT until a HELLO is processed).
-//   Both paths are therefore bounded by the STRUCTURAL ceiling below
-//   (kMaxJsonDepth / kMaxJsonNodes, WIRE-2), applied pre-parse in each. Read
-//   that block for what remains un-eliminated.
+//   The residue is bounded by the STRUCTURAL ceiling below (kMaxJsonDepth /
+//   kMaxJsonNodes, WIRE-2), applied pre-parse on decode_binary's
+//   length-prefixed JSON payloads. Both retire together when every payload
+//   becomes a true binary frame (D2 tail).
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
 
 // S-022: per-message-type body-size cap, applied AFTER `Message::deserialize`
@@ -289,22 +281,17 @@ struct Message {
     MsgType        type{MsgType::HELLO};
     nlohmann::json payload;
 
-    // Serialize using the JSON envelope (legacy / wire-version 0). Kept as
-    // the default to preserve byte-for-byte compatibility with older peers.
-    std::vector<uint8_t> serialize() const;
-
-    // Serialize using the binary envelope (wire-version 1). HELLO is
-    // rejected — HELLOs are always JSON because they happen pre-negotiation.
+    // Serialize using the binary envelope — the only wire format (D2).
+    // Every MsgType including HELLO encodes.
     std::vector<uint8_t> serialize_binary() const;
 
-    // Format-detecting deserializer: reads the body's first byte and
-    // dispatches to the JSON or binary path as appropriate. This is what
-    // the read side calls — it does not require pre-knowledge of the
-    // peer's wire-version.
+    // Binary-only deserializer: rejects any body that is not a 0xB1 binary
+    // envelope (the legacy JSON envelope was deleted pre-genesis), applies
+    // the WIRE-1 pre-decode per-type cap, then decodes.
     static Message       deserialize(const uint8_t* data, size_t len);
 };
 
-// Format-detection helper exported for tests / diagnostics. True iff the
+// Envelope-header check exported for tests / diagnostics. True iff the
 // body starts with the binary envelope magic byte + version.
 bool is_binary_envelope(const uint8_t* data, size_t len);
 
@@ -315,16 +302,15 @@ Message              decode_binary(const uint8_t* data, size_t len);
 inline Message make_hello(const std::string& domain, uint16_t port,
                             determ::ChainRole role = determ::ChainRole::SINGLE,
                             ShardId shard_id = 0,
-                            uint8_t wire_version = kWireVersionMax) {
+                            uint8_t wire_version = kWireVersionBinary) {
     // rev.9 B2c.5: HELLO carries the sender's chain identity so peers can
-    // tag connections and apply role-based message filtering. Older
-    // peers without role/shard_id fields default to SINGLE / 0 (matches
-    // the rev.7/8 behavior — single-chain everyone is SINGLE).
+    // tag connections and apply role-based message filtering.
     //
-    // A3 / S8: HELLO additionally carries `wire_version` — the highest
-    // wire format the sender understands. Each side negotiates down to
-    // min(ours, theirs) on receipt. Pre-A3 peers omit the field; the
-    // receiver defaults their version to 0 (legacy JSON) in that case.
+    // D2: `wire_version` is an ADVERTISEMENT only — the highest wire format
+    // the sender understands. With v1 the single shipped format it decides
+    // nothing today; it is the additive post-genesis upgrade escape hatch
+    // (see the kWireVersionBinary comment). HELLO travels as the fixed
+    // binary frame in binary_codec.cpp like every other message.
     return {MsgType::HELLO, {
         {"domain",       domain},
         {"port",         port},

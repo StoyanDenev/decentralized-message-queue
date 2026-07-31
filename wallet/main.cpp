@@ -12982,11 +12982,10 @@ int cmd_verify_batch(int argc, char** argv) {
 //      1 MiB. A body over its type cap is dropped + the peer closed, the
 //      same disposition as a framing overflow.
 //
-// The body is self-describing by its first byte (src/net/binary_codec.cpp):
+// The body format (src/net/binary_codec.cpp — D2: the wire is binary-only;
+// the legacy '{' 0x7B JSON envelope was deleted pre-genesis and any
+// non-0xB1 first byte is REJECTED):
 //
-//   '{' (0x7B)  → legacy JSON envelope (wire-version 0). The JSON object
-//                 carries {"type": <u8>, "payload": ...}. msg_type is read
-//                 from the "type" field.
 //   0xB1        → binary envelope, version 1. Header is 4 bytes:
 //                   [0] magic    = 0xB1
 //                   [1] version  = 0x01
@@ -13059,9 +13058,8 @@ int cmd_decode_wire_frame(int argc, char** argv) {
                 "       (BLOCK/BEACON_HEADER/SHARD_TIP/CROSS_SHARD_RECEIPT_BUNDLE/\n"
                 "       HEADERS_RESPONSE), 1 MiB for everything else.\n"
                 "\n"
-                "  Self-describing first byte (src/net/binary_codec.cpp):\n"
-                "    '{' (0x7B) → legacy JSON envelope (wire-version 0);\n"
-                "                 msg_type from the JSON \"type\" field.\n"
+                "  Body format (src/net/binary_codec.cpp; D2 binary-only —\n"
+                "  the legacy 0x7B JSON envelope is deleted and rejected):\n"
                 "    0xB1       → binary envelope v1; 4-byte header\n"
                 "                 [magic 0xB1][version 0x01][msg_type u8]\n"
                 "                 [reserved 0x00], payload at offset 4.\n"
@@ -13144,7 +13142,6 @@ int cmd_decode_wire_frame(int argc, char** argv) {
     const uint64_t kMaxFrameBytes = 16ull * 1024 * 1024;   // S-022 ceiling
     const uint8_t  kBinaryMagic    = 0xB1;
     const uint8_t  kBinaryVersion  = 0x01;
-    const uint8_t  kJsonFirstByte  = 0x7B;                  // '{'
 
     // MsgType name table — index == discriminator value (messages.hpp
     // enum class MsgType : uint8_t, 0..18 contiguous).
@@ -13179,7 +13176,7 @@ int cmd_decode_wire_frame(int argc, char** argv) {
     };
 
     // ── Classify the envelope by first byte ────────────────────────────────
-    std::string envelope;       // "binary" | "json"
+    std::string envelope;       // "binary" | "unknown" (D2: binary-only wire)
     int         msg_type = -1;
     std::string parse_error;    // non-empty on a structural failure
     int         binary_version = -1;
@@ -13200,36 +13197,15 @@ int cmd_decode_wire_frame(int argc, char** argv) {
             msg_type       = body[2];
             reserved_byte  = body[3];
         }
-    } else if (body[0] == kJsonFirstByte) {
-        envelope = "json";
-        nlohmann::json env;
-        try { env = nlohmann::json::parse(body.begin(), body.end()); }
-        catch (std::exception& e) {
-            parse_error = std::string("JSON envelope parse error: ") + e.what();
-        }
-        if (parse_error.empty()) {
-            if (!env.is_object() || !env.contains("type")) {
-                parse_error = "JSON envelope missing required \"type\" field";
-            } else if (!env["type"].is_number_integer() &&
-                       !env["type"].is_number_unsigned()) {
-                parse_error = "JSON envelope \"type\" is not an integer";
-            } else {
-                int64_t t = env["type"].get<int64_t>();
-                if (t < 0 || t > 0xFF) {
-                    parse_error = "JSON envelope \"type\" out of u8 range (" +
-                                  std::to_string(t) + ")";
-                } else {
-                    msg_type = static_cast<int>(t);
-                }
-            }
-        }
     } else {
         envelope = "unknown";
         std::ostringstream fb;
         fb << "0x" << std::hex << std::setw(2) << std::setfill('0')
            << static_cast<int>(body[0]);
         parse_error = "unrecognised first byte " + fb.str() +
-                      " (expected 0x7B '{' JSON or 0xB1 binary)";
+                      " (expected the 0xB1 binary envelope — the wire is "
+                      "binary-only; the legacy 0x7B JSON envelope was "
+                      "deleted by D2)";
     }
 
     // ── Resolve name + caps ────────────────────────────────────────────────
@@ -25202,10 +25178,10 @@ void print_usage() {
         "    (--in <hex> | --in-file <file|->)        inter-peer message body (the bytes inside the\n"
         "    [--json]                                 transport [u32 length BE] frame). Reproduces\n"
         "                                             src/net/peer.cpp Peer::read_body byte-for-byte:\n"
-        "                                             NO daemon, socket, or chain state. Detects the\n"
-        "                                             envelope by first byte ('{' 0x7B = legacy JSON\n"
-        "                                             wire-v0; 0xB1 = binary envelope v1, 4-byte\n"
-        "                                             header [magic][version][msg_type][reserved]),\n"
+        "                                             NO daemon, socket, or chain state. Validates the\n"
+        "                                             D2 binary-only envelope (0xB1 v1, 4-byte\n"
+        "                                             header [magic][version][msg_type][reserved];\n"
+        "                                             any other first byte is rejected),\n"
         "                                             names the MsgType, then applies the S-022 two-\n"
         "                                             stage gate: framing ceiling kMaxFrameBytes =\n"
         "                                             16 MiB, then per-type cap max_message_bytes(\n"

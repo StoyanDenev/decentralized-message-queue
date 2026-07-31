@@ -10,10 +10,11 @@
 # per-type max_message_bytes cap).
 #
 # Wire constants under test (pinned to include/determ/net/messages.hpp +
-# src/net/binary_codec.cpp):
-#   * First byte '{' (0x7B) = legacy JSON envelope; msg_type from "type".
+# src/net/binary_codec.cpp; D2: the wire is BINARY-ONLY — the legacy '{'
+# 0x7B JSON envelope was deleted pre-genesis and is REJECTED):
 #   * First byte 0xB1       = binary envelope v1; 4-byte header
 #                             [magic 0xB1][version 0x01][msg_type u8][reserved 0x00].
+#   * Any other first byte  = rejected (envelope=unknown, exit 2).
 #   * Cap tiers: 16 MiB SNAPSHOT_RESPONSE(16)/CHAIN_RESPONSE(6);
 #                4 MiB BLOCK(1)/BEACON_HEADER(12)/SHARD_TIP(13)/
 #                CROSS_SHARD_RECEIPT_BUNDLE(14)/HEADERS_RESPONSE(18);
@@ -42,14 +43,14 @@
 #  11.  Binary SNAPSHOT_RESPONSE: name=SNAPSHOT_RESPONSE, cap=16MiB, accepted.
 #  12.  Binary CHAIN_RESPONSE: cap=16MiB.
 #  13.  Binary HEADERS_RESPONSE: cap=4MiB.
-#  14.  JSON envelope: envelope=json, name=STATUS_RESPONSE, accepted, exit 0.
-#  15.  JSON --in-file via stdin: parses identically.
+#  14.  Legacy JSON envelope ('{' 0x7B): envelope=unknown, REJECTED exit 2
+#       (D2 negative — this leg INVERTED when the JSON wire was deleted).
+#  15.  Binary body via --in-file stdin: parses identically to --in.
 #  16.  Unknown first byte: envelope=unknown, accepted=false, exit 2.
 #  17.  Binary unknown MsgType (99): accepted=false, exit 2.
 #  18.  Binary bad reserved byte: reserved_ok=false, accepted=false, exit 2.
 #  19.  Binary truncated header (<4 bytes): accepted=false, exit 2.
 #  20.  Binary unsupported version: accepted=false, exit 2.
-#  21.  JSON missing "type" field: accepted=false, exit 2.
 #  22.  --json shape has all expected keys.
 #  23.  Text-mode msg_type_name == JSON-mode.
 #  24.  Determinism — two runs give identical JSON.
@@ -107,9 +108,8 @@ BAD_RESERVED="b1010205"                   # reserved byte = 0x05 (must be 0)
 TRUNC_BIN="b101"                          # only 2 header bytes
 BAD_VER="b102020000"                      # version byte = 0x02 (only 0x01)
 
-# JSON envelope: {"type":8,...} → STATUS_RESPONSE.
+# Legacy JSON envelope bytes — DELETED wire format; must be REJECTED (D2).
 JSON_BODY=$($PY -c "print('{\"type\":8,\"payload\":{}}'.encode().hex())")
-JSON_NOTYPE=$($PY -c "print('{\"payload\":{}}'.encode().hex())")
 UNKNOWN_FIRST=$($PY -c "print('ff0102'.lower())")   # 0xFF first byte
 
 field() {  # field <json> <key>
@@ -213,21 +213,22 @@ assert_eq "$(field "$J" msg_type_name)" "HEADERS_RESPONSE" "binary HDRS: name=HE
 assert_eq "$(field "$J" per_type_cap)"  "$CAP_4M"          "binary HDRS: cap=4MiB"
 
 echo
-echo "=== 14. JSON envelope: name=STATUS_RESPONSE, accepted ==="
+echo "=== 14. Legacy JSON envelope → REJECTED exit 2 (D2 negative) ==="
+# Pre-D2 this leg asserted the JSON envelope was ACCEPTED; the wire is now
+# binary-only, so a '{' first byte is an unknown envelope — fail-closed.
 set +e
 J=$("$WALLET" decode-wire-frame --in "$JSON_BODY" --json 2>&1)
 RC=$?
 J=$(printf '%s' "$J" | tr -d '\r')
 set -e
-assert_eq "$RC" "0" "JSON envelope exits 0"
-assert_eq "$(field "$J" envelope)"      "json"            "JSON: envelope=json"
-assert_eq "$(field "$J" msg_type_name)" "STATUS_RESPONSE" "JSON: name=STATUS_RESPONSE"
-assert_eq "$(field "$J" accepted)"      "True"            "JSON: accepted"
+assert_eq "$RC" "2" "legacy JSON envelope exits 2 (rejected)"
+assert_eq "$(field "$J" envelope)" "unknown" "legacy JSON: envelope=unknown"
+assert_eq "$(field "$J" accepted)" "False"   "legacy JSON: not accepted"
 
 echo
-echo "=== 15. JSON via --in-file stdin parses identically ==="
-J2=$(printf '%s\n' "$JSON_BODY" | "$WALLET" decode-wire-frame --in-file - --json 2>&1 | tr -d '\r')
-assert_eq "$(field "$J2" msg_type_name)" "STATUS_RESPONSE" "stdin JSON: name=STATUS_RESPONSE"
+echo "=== 15. Binary body via --in-file stdin parses identically ==="
+J2=$(printf '%s\n' "$SNAP_BIN" | "$WALLET" decode-wire-frame --in-file - --json 2>&1 | tr -d '\r')
+assert_eq "$(field "$J2" msg_type_name)" "SNAPSHOT_RESPONSE" "stdin binary: name=SNAPSHOT_RESPONSE"
 
 echo
 echo "=== 16. Unknown first byte: accepted=false, exit 2 ==="
@@ -281,16 +282,6 @@ J=$(printf '%s' "$J" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "unsupported version exits 2"
 assert_eq "$(field "$J" accepted)" "False" "unsupported version: not accepted"
-
-echo
-echo "=== 21. JSON missing \"type\": exit 2 ==="
-set +e
-J=$("$WALLET" decode-wire-frame --in "$JSON_NOTYPE" --json 2>&1)
-RC=$?
-J=$(printf '%s' "$J" | tr -d '\r')
-set -e
-assert_eq "$RC" "2" "JSON missing type exits 2"
-assert_eq "$(field "$J" accepted)" "False" "JSON missing type: not accepted"
 
 echo
 echo "=== 22. --json shape has all expected keys ==="

@@ -389,8 +389,8 @@ In-process tests (deterministic, no network):
                                               tampering negative paths
   determ test-protocol-version-pinning        PROTOCOL.md §16 version contract pinning —
                                               MsgType enum integers (gossip envelope type
-                                              byte), wire-version negotiation constants
-                                              (kWireVersionLegacy=0/Binary=1/Max), binary
+                                              byte), the wire-version constant
+                                              (kWireVersionBinary=1, D2 binary-only), binary
                                               envelope magic+version bytes (0xB1 0x01),
                                               snapshot version field (S-018 gate at
                                               version=1), chain envelope schema (S-021
@@ -401,7 +401,7 @@ In-process tests (deterministic, no network):
                                               S-018 field-name diagnostics on missing
                                               required fields), HELLO wire_version
                                               field (default + override + round-trip),
-                                              HELLO-always-JSON invariant. Defends against
+                                              HELLO-is-binary contract (D2). Defends against
                                               migration drift where a regression would
                                               either accept arbitrary version numbers
                                               (silent format fork) or break v1 parsers.
@@ -1691,15 +1691,14 @@ Additional in-process tests:
                                               completeness (mutating any of
                                               domain / port / role / shard_id /
                                               wire_version changes the bytes),
-                                              HELLO-always-JSON contract
-                                              (encode_binary(HELLO) THROWS,
-                                              is_binary_envelope returns false
-                                              for HELLO body), boundary values
-                                              (wire_version=0/Max, empty domain,
+                                              HELLO-is-binary contract (D2:
+                                              encode_binary(HELLO) succeeds,
+                                              the body IS a binary envelope),
+                                              boundary values
+                                              (wire_version=0/1, empty domain,
                                               200-char domain, port=0/65535),
-                                              canonical encoding (alphabetical
-                                              key ordering on dump is insertion-
-                                              order independent).
+                                              insertion-order independence of
+                                              the fixed binary frame layout.
   determ test-genesis-determinism             GenesisConfig::to_json +
                                               make_genesis_block byte-identity
                                               contract — pins JSON round-trip
@@ -1884,22 +1883,20 @@ Additional in-process tests:
                                               transition; and c:-namespace
                                               state_root sensitivity to the
                                               clamped accumulated_subsidy.
-  determ test-wire-negotiation                A3 / S8 wire-version negotiation +
-                                              S-022 framing/cap layering — pins
-                                              the min(ours,theirs) handshake
-                                              arithmetic from gossip.cpp
-                                              (clamp-to-our-max, pass-through-
-                                              when-lower, idempotence, symmetry,
-                                              monotonicity, missing-field default
-                                              to legacy), the framing-vs-cap
-                                              layering invariant (every per-type
+  determ test-wire-caps-discriminator         S-022 framing/cap layering +
+                                              discriminator contract for the D2
+                                              binary-only wire (was test-wire-
+                                              negotiation; the v0/v1 negotiation
+                                              died with the JSON envelope) —
+                                              pins the framing-vs-cap layering
+                                              invariant (every per-type
                                               max_message_bytes <= kMaxFrameBytes;
                                               tiers strictly ordered 1<4<16 MB;
                                               partition completeness; fail-closed
                                               default to 1 MB for a future
                                               MsgType), and discriminator-byte
-                                              preservation (every non-HELLO
-                                              MsgType encodes its type byte at
+                                              preservation (EVERY MsgType, HELLO
+                                              included, encodes its type byte at
                                               envelope offset 2 + decode_binary
                                               recovers the exact MsgType, keyed
                                               on the envelope not the payload).
@@ -2928,7 +2925,7 @@ static int cmd_headers(int argc, char** argv) {
             client.connect(host, port);
 
             auto write_msg = [&](const net::Message& msg) {
-                auto buf = msg.serialize();
+                auto buf = msg.serialize_binary();
                 client.write_all(buf.data(), buf.size());
             };
 
@@ -4502,7 +4499,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
         client.connect(host, port);
 
         auto write_msg = [&](const net::Message& msg) {
-            auto buf = msg.serialize();
+            auto buf = msg.serialize_binary();
             client.write_all(buf.data(), buf.size());
         };
 
@@ -10125,11 +10122,11 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1 seed: in-process unit test for the wire-format
-    // codec (A3 / S8 closure). Exercises `Message::serialize` (legacy
-    // JSON envelope, default v0), `Message::serialize_binary` (v1
-    // binary envelope), the `Message::deserialize` format-detecting
-    // dispatcher, `encode_binary` / `decode_binary` directly, and
-    // `is_binary_envelope` detection. Plus locks in `max_message_bytes`
+    // codec. D2: the wire is BINARY-ONLY — exercises
+    // `Message::serialize_binary`, the binary-only `Message::deserialize`
+    // (which REJECTS the deleted legacy JSON envelope fail-closed),
+    // `encode_binary` / `decode_binary` directly, and the
+    // `is_binary_envelope` header check. Plus locks in `max_message_bytes`
     // per-MsgType caps (S-022 surface) so future MsgType additions
     // don't slip through unbounded.
     //
@@ -10161,17 +10158,20 @@ int main(int argc, char** argv) {
             return body;
         };
 
-        // === JSON envelope (v0) round-trip across multiple MsgTypes ===
+        // === Binary round-trip across multiple MsgTypes (D2 wire) ===
 
-        // 1. HELLO round-trip via JSON envelope. HELLO is special: it
-        //    happens pre-negotiation, so it's ALWAYS JSON regardless of
-        //    the peer's wire-version. Test that explicitly.
+        // 1. HELLO round-trip via the fixed binary HELLO frame — the first
+        //    frame on every connection now travels binary like everything
+        //    else (the JSON pre-negotiation carve-out died with the JSON
+        //    envelope).
         {
             Message m = make_hello("alice", 12345, ChainRole::SINGLE, 0, 1);
-            auto framed = m.serialize();
+            auto framed = m.serialize_binary();
             check(framed.size() > 4,
-                  "HELLO JSON serialize produces framed bytes");
+                  "HELLO binary serialize produces framed bytes");
             auto body = strip_frame(framed);
+            check(is_binary_envelope(body.data(), body.size()),
+                  "HELLO body IS a binary envelope (0xB1 magic — D2)");
             Message back = Message::deserialize(body.data(), body.size());
             check(back.type == MsgType::HELLO,
                   "HELLO round-trip: type preserved");
@@ -10179,39 +10179,69 @@ int main(int argc, char** argv) {
                   "HELLO round-trip: domain field preserved");
             check(back.payload["port"] == 12345,
                   "HELLO round-trip: port field preserved");
+            check(back.payload["role"] == 0 && back.payload["shard_id"] == 0
+                      && back.payload["wire_version"] == 1,
+                  "HELLO round-trip: role/shard_id/wire_version preserved");
+        }
+
+        // 1b. Malformed HELLO frames are rejected fail-closed: truncated
+        //     fixed fields, and trailing bytes after the last field (a
+        //     future ADDITIVE field must arrive behind a bumped
+        //     wire_version advertisement, never as silent padding).
+        {
+            Message m = make_hello("bob", 7);
+            auto body = strip_frame(m.serialize_binary());
+            auto expect_reject = [&](std::vector<uint8_t> f, const char* needle) {
+                try { (void)Message::deserialize(f.data(), f.size()); return false; }
+                catch (const std::exception& e) {
+                    return std::string(e.what()).find(needle) != std::string::npos;
+                }
+            };
+            auto truncated = body;
+            truncated.resize(body.size() - 1);
+            check(expect_reject(truncated, "truncated HELLO frame"),
+                  "binary HELLO: truncated frame rejected 'truncated HELLO frame'");
+            auto padded = body;
+            padded.push_back(0x00);
+            check(expect_reject(padded, "HELLO frame trailing bytes"),
+                  "binary HELLO: trailing byte rejected 'HELLO frame trailing bytes'");
         }
 
         // 2. STATUS_REQUEST round-trip (consensus-chatter category).
         {
             Message m{MsgType::STATUS_REQUEST, json::object()};
-            auto framed = m.serialize();
+            auto framed = m.serialize_binary();
             auto body = strip_frame(framed);
             Message back = Message::deserialize(body.data(), body.size());
             check(back.type == MsgType::STATUS_REQUEST,
                   "STATUS_REQUEST round-trip: type preserved");
         }
 
-        // 3. TRANSACTION round-trip with non-trivial payload.
+        // 3. TRANSACTION round-trip through the fixed tx frame (full
+        //    required field set — the frame codec routes through
+        //    Transaction::from_json / to_json).
         {
             json tx_payload = {
-                {"from", "alice"}, {"to", "bob"}, {"amount", 100},
-                {"fee", 1}, {"nonce", 5}, {"hash", "deadbeef"}
+                {"type", 0}, {"from", "alice"}, {"to", "bob"},
+                {"amount", 100}, {"fee", 1}, {"nonce", 5},
+                {"payload", "dead"},
+                {"sig",  std::string(128, '0')},
+                {"hash", std::string(64,  '0')}
             };
             Message m{MsgType::TRANSACTION, tx_payload};
-            auto framed = m.serialize();
+            auto framed = m.serialize_binary();
             auto body = strip_frame(framed);
             Message back = Message::deserialize(body.data(), body.size());
             check(back.type == MsgType::TRANSACTION,
                   "TRANSACTION round-trip: type preserved");
-            check(back.payload == tx_payload,
-                  "TRANSACTION round-trip: payload preserved byte-for-byte");
+            check(back.payload["from"] == "alice" && back.payload["amount"] == 100
+                      && back.payload["nonce"] == 5,
+                  "TRANSACTION round-trip: scalar fields preserved");
         }
 
-        // === Binary envelope (v1) round-trip ===
+        // === Binary envelope round-trip (free functions) ===
 
-        // 4. STATUS_RESPONSE binary round-trip. Use STATUS_RESPONSE
-        //    rather than HELLO because HELLO is rejected by the
-        //    binary path (it's always JSON pre-negotiation).
+        // 4. STATUS_RESPONSE binary round-trip.
         {
             json status = {{"head_index", 100}, {"head_hash", "abcd1234"}};
             Message m{MsgType::STATUS_RESPONSE, status};
@@ -10226,14 +10256,25 @@ int main(int argc, char** argv) {
                   "STATUS_RESPONSE binary round-trip: type preserved");
         }
 
-        // 5. Format detection — JSON-encoded bytes do NOT trigger
-        //    is_binary_envelope.
+        // 5. D2 negative gate: a legacy JSON envelope body ('{' 0x7B) is
+        //    REJECTED by the binary-only deserializer with the specific
+        //    reject string. This is the leg that pins the envelope strip —
+        //    a mutant that re-admits a JSON parse path goes RED here.
         {
-            Message m{MsgType::STATUS_REQUEST, json::object()};
-            auto json_framed = m.serialize();
-            auto json_body = strip_frame(json_framed);
-            check(!is_binary_envelope(json_body.data(), json_body.size()),
-                  "is_binary_envelope returns false for JSON-encoded bytes");
+            std::string legacy = "{\"type\":7,\"payload\":{}}";
+            std::vector<uint8_t> body(legacy.begin(), legacy.end());
+            check(!is_binary_envelope(body.data(), body.size()),
+                  "is_binary_envelope returns false for JSON-envelope bytes");
+            bool rejected = false;
+            try { (void)Message::deserialize(body.data(), body.size()); }
+            catch (const std::exception& e) {
+                rejected = std::string(e.what()).find("not a binary envelope")
+                               != std::string::npos;
+            }
+            check(rejected,
+                  "D2: a well-formed LEGACY JSON envelope is rejected "
+                  "'not a binary envelope' (the JSON wire path is deleted, "
+                  "never silently parsed)");
         }
 
         // 6. encode_binary / decode_binary directly (free-function path).
@@ -10277,10 +10318,8 @@ int main(int argc, char** argv) {
 
         // === Malformed input rejection ===
 
-        // 7. Garbage bytes (not valid JSON, not valid binary envelope).
-        //    is_binary_envelope returns false (no 0xB1 magic byte), so
-        //    deserialize falls through to JSON parse which throws on
-        //    invalid JSON.
+        // 7. Garbage bytes (no 0xB1 magic): rejected 'not a binary
+        //    envelope' — deserialize never attempts any other parse.
         {
             std::vector<uint8_t> garbage = {0xFF, 0xFE, 0xFD, 0xFC};
             bool threw = false;
@@ -10290,16 +10329,15 @@ int main(int argc, char** argv) {
             check(threw, "deserialize throws on garbage bytes");
         }
 
-        // 8. Truncated valid JSON (envelope missing closing brace).
-        //    Catches partial-payload regressions in the framing layer.
+        // 8. A truncated binary envelope (fewer than the 4 header bytes)
+        //    is rejected before any payload work.
         {
-            std::string truncated = "{\"type\":0,\"payload\":{";
-            std::vector<uint8_t> bytes(truncated.begin(), truncated.end());
+            std::vector<uint8_t> bytes = {0xB1, 0x01};
             bool threw = false;
             try {
                 Message::deserialize(bytes.data(), bytes.size());
             } catch (const std::exception&) { threw = true; }
-            check(threw, "deserialize throws on truncated JSON");
+            check(threw, "deserialize throws on a truncated envelope header");
         }
 
         // 8b. WIRE-1: an OVERSIZE BINARY envelope is rejected BEFORE its payload
@@ -10346,62 +10384,44 @@ int main(int argc, char** argv) {
                   "decode (pre-decode S-022 cap, not a parse error)");
         }
 
-        // 8c. WIRE-2: a WELL-FORMED but pathologically NESTED JSON envelope is
-        //     rejected BEFORE the parser materialises a DOM. The byte cap
-        //     bounds the INPUT, not the DOM built from it — nlohmann allocates
-        //     a node per value plus a container allocation per array/object, so
-        //     a body of pure structural bytes expands ~52x (MEASURED: 16 MB of
-        //     '[' -> ~831 MB peak heap, 33.5M allocations, ~4.3-4.8 s CPU on a
-        //     SINGLE pre-auth connection).
-        //
-        //     The vector is BALANCED and VALID JSON — asserted below — so the
-        //     rejection can only come from the structural ceiling, never from a
-        //     parse error. Falsify-on-mutant: delete json_structural_precheck's
-        //     call in Message::deserialize and this leg goes RED (the envelope
-        //     deserializes cleanly) while 8d/8e stay green.
-        {
-            const size_t nest = kMaxJsonDepth + 8;
-            std::string s = "{\"type\":4,\"payload\":";
-            s.append(nest, '[');
-            s.append(nest, ']');
-            s += "}";
+        // Helper for the WIRE-2 legs below: a binary envelope carrying a
+        // length-prefixed JSON payload (the format the 16 pending types
+        // still use inside the D2 binary-only wire).
+        auto bin_json_frame = [](MsgType t, const std::string& pay) {
+            std::vector<uint8_t> f;
+            f.push_back(0xB1);
+            f.push_back(0x01);
+            f.push_back(static_cast<uint8_t>(t));
+            f.push_back(0x00);
+            uint32_t plen = static_cast<uint32_t>(pay.size());
+            f.push_back(static_cast<uint8_t>(plen & 0xFF));
+            f.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
+            f.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
+            f.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
+            f.insert(f.end(), pay.begin(), pay.end());
+            return f;
+        };
 
-            bool valid_json = true;
-            try { (void)nlohmann::json::parse(s); }
-            catch (const std::exception&) { valid_json = false; }
-            check(valid_json,
-                  "WIRE-2 setup: the deep envelope is VALID, BALANCED JSON "
-                  "(only the ceiling can reject it — not a parse error)");
-
-            std::vector<uint8_t> bytes(s.begin(), s.end());
-            bool threw = false;
-            try { Message::deserialize(bytes.data(), bytes.size()); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "WIRE-2: a well-formed JSON envelope nested past kMaxJsonDepth "
-                  "is rejected BEFORE the parse");
-        }
-
-        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate envelope is
-        //     CHAIN_RESPONSE at depth 8: envelope -> {"blocks":[..]} -> blocks[]
+        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate payload is
+        //     CHAIN_RESPONSE at depth 7: {"blocks":[..]} -> blocks[]
         //     -> Block -> shard_tip_witnesses[] -> witness Block ->
         //     creator_tx_lists[] -> inner list. (Block::from_json parses
         //     witnesses with allow_witnesses=false, so Block nesting cannot
         //     recurse past that second level.) It must still deserialize —
         //     otherwise the ceiling is a liveness bug, not a defence.
         {
-            std::string s =
-                "{\"type\":6,\"payload\":{\"blocks\":[{\"shard_tip_witnesses\":"
-                "[{\"creator_tx_lists\":[[\"ab\"]]}]}]}}";
-            std::vector<uint8_t> b(s.begin(), s.end());
+            std::string pay =
+                "{\"blocks\":[{\"shard_tip_witnesses\":"
+                "[{\"creator_tx_lists\":[[\"ab\"]]}]}]}";
+            auto b = bin_json_frame(MsgType::CHAIN_RESPONSE, pay);
             bool ok = false;
             try {
                 Message m = Message::deserialize(b.data(), b.size());
                 ok = (m.type == MsgType::CHAIN_RESPONSE);
             } catch (const std::exception&) { ok = false; }
             check(ok,
-                  "WIRE-2 anti-over-tightening: the DEEPEST legitimate envelope "
-                  "(CHAIN_RESPONSE, depth 8) still deserializes");
+                  "WIRE-2 anti-over-tightening: the DEEPEST legitimate payload "
+                  "(CHAIN_RESPONSE, depth 7) still deserializes");
         }
 
         // 8e. WIRE-2 string-state soundness. Structural bytes inside a string
@@ -10412,37 +10432,41 @@ int main(int argc, char** argv) {
         //     nesting, rejecting a perfectly legal message. Pins the escape
         //     tracking against exactly that false-reject.
         {
-            std::string s = "{\"type\":0,\"payload\":\"a\\\"";
-            s.append(kMaxJsonDepth * 4, '[');
-            s += "\"}";
-            std::vector<uint8_t> b(s.begin(), s.end());
+            std::string pay = "\"a\\\"";
+            pay.append(kMaxJsonDepth * 4, '[');
+            pay += "\"";
+            auto b = bin_json_frame(MsgType::CONTRIB, pay);
             bool ok = false;
             try {
                 Message m = Message::deserialize(b.data(), b.size());
-                ok = (m.type == MsgType::HELLO && m.payload.is_string());
+                ok = (m.type == MsgType::CONTRIB && m.payload.is_string());
             } catch (const std::exception&) { ok = false; }
             check(ok,
                   "WIRE-2 soundness: structural bytes inside a string (past an "
                   "ESCAPED quote) are data — no false reject");
         }
 
-        // 8f. WIRE-2 node ceiling. A FLAT array of scalars sits at depth 2, so
+        // 8f. WIRE-2 node ceiling. A FLAT array of scalars sits at depth 1, so
         //     the depth ceiling cannot see it — yet each value still costs a
         //     DOM node. This is the shape depth alone misses; kMaxJsonNodes is
-        //     what bounds it. Balanced and valid JSON again, so only the
-        //     ceiling can be the rejecter. Falsify: raise kMaxJsonNodes past
+        //     what bounds it. Carried by SNAPSHOT_RESPONSE (16 MB tier) and
+        //     asserted UNDER its WIRE-1 cap, so only the structural ceiling
+        //     can be the rejecter. Falsify: raise kMaxJsonNodes past
         //     the vector (or drop the ',' arm of the scan) and this goes RED.
         {
-            std::string s = "{\"type\":4,\"payload\":[0";
-            s.reserve(2 * kMaxJsonNodes + 64);
-            for (size_t i = 0; i <= kMaxJsonNodes; ++i) s += ",0";
-            s += "]}";
-            std::vector<uint8_t> b(s.begin(), s.end());
+            std::string pay = "[0";
+            pay.reserve(2 * kMaxJsonNodes + 64);
+            for (size_t i = 0; i <= kMaxJsonNodes; ++i) pay += ",0";
+            pay += "]";
+            auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
+            check(b.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
+                  "WIRE-2 setup: the flat-array frame is UNDER its WIRE-1 "
+                  "per-type cap (so WIRE-1 provably is not what rejects it)");
             bool threw = false;
             try { Message::deserialize(b.data(), b.size()); }
             catch (const std::exception&) { threw = true; }
             check(threw,
-                  "WIRE-2: a FLAT (depth-2) envelope past kMaxJsonNodes is "
+                  "WIRE-2: a FLAT payload past kMaxJsonNodes is "
                   "rejected — the node ceiling catches what depth cannot");
         }
 
@@ -10498,25 +10522,30 @@ int main(int argc, char** argv) {
         {
             // `[{},{},...]` — 2 units per element (1 open + 1 comma) at 3 bytes
             // each, so it crosses kMaxJsonNodes in ~6 MB rather than ~14 MB.
+            // Carried by SNAPSHOT_RESPONSE (16 MB tier) so WIRE-1 provably is
+            // not the rejecter.
             const size_t elems = kMaxJsonNodes / 2 + 16;
-            std::string s = "{\"type\":4,\"payload\":[{}";
-            s.reserve(3 * elems + 64);
-            for (size_t i = 1; i < elems; ++i) s += ",{}";
-            s += "]}";
-            std::vector<uint8_t> b(s.begin(), s.end());
+            std::string pay = "[{}";
+            pay.reserve(3 * elems + 64);
+            for (size_t i = 1; i < elems; ++i) pay += ",{}";
+            pay += "]";
 
             bool valid_json = true;
-            try { (void)nlohmann::json::parse(s); }
+            try { (void)nlohmann::json::parse(pay); }
             catch (const std::exception&) { valid_json = false; }
             check(valid_json,
                   "WIRE-2 setup: the object-density vector is VALID, BALANCED "
                   "JSON (only the ceiling can reject it)");
 
+            auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
+            check(b.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
+                  "WIRE-2 setup: the object-density frame is UNDER its WIRE-1 "
+                  "per-type cap");
             bool threw = false;
             try { Message::deserialize(b.data(), b.size()); }
             catch (const std::exception&) { threw = true; }
             check(threw,
-                  "WIRE-2: an OBJECT-dense envelope past kMaxJsonNodes is "
+                  "WIRE-2: an OBJECT-dense payload past kMaxJsonNodes is "
                   "rejected — the counter charges for '{', not just for ','");
         }
 
@@ -10601,15 +10630,14 @@ int main(int argc, char** argv) {
     //
     // Companion to `test-binary-codec` — that test exercises the codec
     // surface at a high level (one or two MsgTypes per code path plus
-    // the S-022 cap table). This test walks every non-HELLO MsgType
+    // the S-022 cap table). This test walks every MsgType
     // variant defined in include/determ/net/messages.hpp with a
     // representative payload and pins three invariants per type:
     //
     //   1. encode_binary → decode_binary preserves MsgType + payload.
-    //      For the JSON-fallback path, payload-JSON equality is
+    //      For the JSON-payload path, payload-JSON equality is
     //      structural (nlohmann::json::operator==), not byte-level —
-    //      that's the same contract the JSON envelope (v0) round-trip
-    //      enforces and is what every receive-side from_json() depends on.
+    //      that is what every receive-side from_json() depends on.
     //   2. Magic header is present and well-formed: byte[0] == 0xB1,
     //      byte[1] == 0x01, byte[2] == MsgType, byte[3] == 0x00.
     //   3. Tamper-rejection: flipping a byte inside the encoded payload
@@ -10620,8 +10648,8 @@ int main(int argc, char** argv) {
     //      defense is loud-fail either way, never silent-accept.)
     //
     // Plus the binary-codec contract invariants:
-    //   * HELLO is rejected by encode_binary (always JSON
-    //     pre-negotiation).
+    //   * HELLO encodes via its fixed binary frame (D2 — the old
+    //     always-JSON carve-out is deleted).
     //   * decode_binary on a malformed header (wrong magic, wrong
     //     version, truncated) throws with a clean diagnostic.
     //   * encode_binary itself does NOT enforce the 16 MB framing-
@@ -10747,15 +10775,13 @@ int main(int argc, char** argv) {
             check_tamper_loud_fail(m, label);
         };
 
-        // ─── HELLO is the contract exception ─────────────────────────────────
-        // HELLO is encoded ONLY as JSON (pre-negotiation). encode_binary
-        // throws — this is the documented contract per binary_codec.cpp.
+        // ─── HELLO (fixed binary frame, D2) ─────────────────────────────────
+        // HELLO travels binary like every other message — the old
+        // always-JSON carve-out (encode_binary throwing) died with the
+        // JSON envelope. Full round-trip + header + tamper coverage.
         {
             Message m = make_hello("alice", 1234, ChainRole::SINGLE, 0, 1);
-            bool threw = false;
-            try { (void)encode_binary(m); }
-            catch (const std::exception&) { threw = true; }
-            check(threw, "HELLO: encode_binary rejected (binary-codec contract)");
+            run_msgtype(m, "HELLO (binary frame)");
         }
 
         // ─── TRANSACTION (fixed-layout 4×256-bit frame) ─────────────────────
@@ -30539,8 +30565,10 @@ int main(int argc, char** argv) {
             //
             //     The frame below is well-formed AT THE FRAMING LAYER — a
             //     correct 4-byte big-endian length prefix over a body that is
-            //     truncated JSON — so read_header accepts it and the close can
-            //     only come from the deserialize catch branch.
+            //     a truncated BINARY envelope (D2: the wire is binary-only,
+            //     so the malformed-body vector is binary too) — read_header
+            //     accepts it and the close can only come from the deserialize
+            //     catch branch.
             //     Falsify-on-mutant: restore `self->read_header();` in place of
             //     the close and this leg goes RED (times out, never closed)
             //     while every other net-virtual assertion stays green.
@@ -30569,7 +30597,7 @@ int main(int argc, char** argv) {
                             if (!closed->exchange(true)) closed_p->set_value();
                         });
 
-                    auto framed = [](const std::string& body) {
+                    auto framed = [](const std::vector<uint8_t>& body) {
                         std::vector<uint8_t> f;
                         uint32_t n = static_cast<uint32_t>(body.size());
                         f.push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
@@ -30580,19 +30608,20 @@ int main(int argc, char** argv) {
                         return f;
                     };
 
-                    // Frame 1: truncated JSON body behind a VALID length
+                    // Frame 1: a binary envelope claiming STATUS_REQUEST with
+                    // a truncated payload-length header, behind a VALID length
                     // prefix — the framing layer accepts it, so only the
                     // deserialize catch branch can reject it.
-                    auto bad = framed("{\"type\":0,");
-                    // Frame 2: a perfectly WELL-FORMED STATUS_REQUEST written
-                    // back-to-back behind it. This is the discriminator, and
-                    // it is timing-INDEPENDENT: "closed" vs "re-armed" is
-                    // observationally exactly "is frame 2 ever dispatched?".
-                    // Asserting only that on_close_ fires would be vacuous —
-                    // the connection also closes later for unrelated reasons
-                    // (teardown, EOF), so a re-arming mutant could still go
-                    // green on a slow enough wait.
-                    auto good = framed("{\"type\":7,\"payload\":{}}");
+                    auto bad = framed({0xB1, 0x01, 0x07, 0x00, 0xFF});
+                    // Frame 2: a perfectly WELL-FORMED binary STATUS_REQUEST
+                    // written back-to-back behind it. This is the
+                    // discriminator, and it is timing-INDEPENDENT: "closed"
+                    // vs "re-armed" is observationally exactly "is frame 2
+                    // ever dispatched?". Asserting only that on_close_ fires
+                    // would be vacuous — the connection also closes later for
+                    // unrelated reasons (teardown, EOF), so a re-arming
+                    // mutant could still go green on a slow enough wait.
+                    auto good = make_status_request().serialize_binary();
                     check(c3->write_all(bad.data(), bad.size()) &&
                           c3->write_all(good.data(), good.size()),
                           "WIRE-3 setup: a malformed frame and a WELL-FORMED "
@@ -51965,16 +51994,16 @@ int main(int argc, char** argv) {
     //      most cited drift risk because adding a new MsgType is a
     //      common feature-PR shape.
     //
-    //   2. Wire-version negotiation constants (kWireVersionLegacy=0 /
-    //      kWireVersionBinary=1 / kWireVersionMax=1 — A3 / S8). HELLO
-    //      advertises `wire_version: u8` and peers negotiate down to
-    //      min(local, remote). Pre-A3 peers omit the field — defaults
-    //      to 0 (legacy JSON) for backward compat.
+    //   2. The wire-version constant (kWireVersionBinary=1 — D2: the
+    //      single shipped format; the v0 JSON envelope and the per-pair
+    //      negotiation were deleted pre-genesis). HELLO advertises
+    //      `wire_version: u8` as the additive post-genesis upgrade
+    //      escape hatch; nothing negotiates on it today.
     //
     //   3. Binary envelope magic + version (0xB1 0x01 — the first two
-    //      body bytes of an A3 binary message). is_binary_envelope
-    //      gates the format-detecting deserializer; getting these
-    //      wrong = silent JSON parse failure on every binary peer.
+    //      body bytes of every message). is_binary_envelope
+    //      gates the binary-only deserializer; getting these
+    //      wrong = every peer rejects every frame.
     //
     //   4. Snapshot version field (snap["version"] == 1 — S-018
     //      gate at chain.cpp::restore_from_snapshot). version=0
@@ -52004,9 +52033,10 @@ int main(int argc, char** argv) {
     //      produces an operator-triagable error.
     //
     //   8. HELLO `wire_version` field. Tests that make_hello sets
-    //      kWireVersionMax by default + accepts an override. The
+    //      kWireVersionBinary by default + accepts an override. The
     //      wire_version field is the only protocol-version-adjacent
-    //      data in HELLO; pin its default + override semantics.
+    //      data in HELLO; pin its default + override semantics (it is
+    //      an ADVERTISEMENT — the upgrade escape hatch, not a switch).
     //
     // Defends against migration drift where a regression would either
     // silently accept arbitrary version numbers (silent format change)
@@ -52040,20 +52070,13 @@ int main(int argc, char** argv) {
         check(static_cast<uint8_t>(MsgType::BLOCK_SIG) == 3,
               "(1) MsgType::BLOCK_SIG == 3 (Phase 2 consensus chatter)");
 
-        // ── (2) Wire-version negotiation constants (A3 / S8). These
-        //     are the values HELLO advertises. PROTOCOL.md §16.1 pins:
-        //         kWireVersionLegacy = 0    (JSON-over-TCP)
-        //         kWireVersionBinary = 1    (binary codec)
-        //         kWireVersionMax    = 1    (highest understood)
-        //     Bumping kWireVersionMax without a corresponding codec
-        //     upgrade would break negotiation silently — peers would
-        //     advertise a version no one implements.
-        check(kWireVersionLegacy == 0,
-              "(2) kWireVersionLegacy == 0 (legacy JSON envelope)");
+        // ── (2) The wire-version constant. D2: binary (1) is the single
+        //     shipped format — v0 (JSON) and the negotiation constants were
+        //     deleted pre-genesis. HELLO advertises this value; bumping it
+        //     without a corresponding codec upgrade would advertise a
+        //     version no build implements.
         check(kWireVersionBinary == 1,
-              "(2) kWireVersionBinary == 1 (binary codec)");
-        check(kWireVersionMax == kWireVersionBinary,
-              "(2) kWireVersionMax == kWireVersionBinary (current build's max)");
+              "(2) kWireVersionBinary == 1 (the single shipped wire format)");
 
         // ── (3) Binary envelope magic + version bytes. A binary
         //     message's body starts with [0xB1, 0x01, msg_type,
@@ -52287,59 +52310,60 @@ int main(int argc, char** argv) {
                   "S-018 field-name diagnostic");
         }
 
-        // ── (8) HELLO `wire_version` field — the in-message carrier
-        //     of the A3 / S8 negotiation value. make_hello defaults
-        //     `wire_version` to kWireVersionMax (sender advertises
-        //     its highest); the override parameter lets a test or
-        //     deliberate downgrade peer ship a lower value. Pin:
-        //       8a. default = kWireVersionMax (= 1)
-        //       8b. explicit 0 (legacy-only) accepted
-        //       8c. round-trip preserves the field
+        // ── (8) HELLO `wire_version` field — the ADVERTISEMENT carrier
+        //     (D2: the upgrade escape hatch, not a negotiation switch).
+        //     make_hello defaults `wire_version` to kWireVersionBinary;
+        //     the override parameter lets a future-version peer advertise
+        //     higher. Pin:
+        //       8a. default = kWireVersionBinary (= 1)
+        //       8b. explicit override accepted
+        //       8c. BINARY round-trip preserves the field
         {
             // 8a. Default.
             Message hello_default = make_hello("alice", 7777);
             check(hello_default.payload.value("wire_version",
                                                   uint8_t{255})
-                    == kWireVersionMax,
-                  "(8) make_hello defaults wire_version to kWireVersionMax");
+                    == kWireVersionBinary,
+                  "(8) make_hello defaults wire_version to kWireVersionBinary");
 
-            // 8b. Explicit downgrade — peers may advertise legacy.
-            Message hello_legacy = make_hello("bob", 7777,
-                                              ChainRole::SINGLE, 0,
-                                              kWireVersionLegacy);
-            check(hello_legacy.payload.value("wire_version",
-                                                 uint8_t{255})
-                    == kWireVersionLegacy,
-                  "(8) make_hello override wire_version=0 (legacy) accepted");
+            // 8b. Explicit override — a future build may advertise higher.
+            Message hello_v2 = make_hello("bob", 7777,
+                                          ChainRole::SINGLE, 0,
+                                          uint8_t{2});
+            check(hello_v2.payload.value("wire_version",
+                                                 uint8_t{255}) == 2,
+                  "(8) make_hello override wire_version=2 accepted "
+                  "(advertisement only — frames stay v1)");
 
-            // 8c. Round-trip preserves wire_version. HELLO is
-            //     always JSON pre-negotiation; deserialize must
-            //     surface the field unchanged.
-            auto framed = hello_default.serialize();
+            // 8c. Round-trip preserves wire_version through the binary
+            //     HELLO frame.
+            auto framed = hello_default.serialize_binary();
             std::vector<uint8_t> body(framed.begin() + 4, framed.end());
             Message back = Message::deserialize(body.data(), body.size());
             check(back.type == MsgType::HELLO
                     && back.payload.value("wire_version", uint8_t{255})
-                          == kWireVersionMax,
-                  "(8) HELLO JSON round-trip preserves wire_version");
+                          == kWireVersionBinary,
+                  "(8) HELLO binary round-trip preserves wire_version");
         }
 
-        // ── (9) Defense-in-depth: HELLO is the ONLY pre-negotiation
-        //     message, and it must NEVER be sent via binary codec
-        //     (the receiver doesn't yet know the codec). Pin that
-        //     encode_binary(HELLO) throws — defends against a
-        //     future bug that omits the HELLO carve-out.
+        // ── (9) D2 inversion of the old HELLO-always-JSON carve-out:
+        //     HELLO now encodes via the binary codec like every other
+        //     message (the JSON envelope is deleted; there is no
+        //     pre-negotiation format ambiguity to protect). Pin that
+        //     encode_binary(HELLO) SUCCEEDS and stamps type byte 0 —
+        //     the old §9 pinned the opposite (a throw); this leg is the
+        //     deliberate flip recorded with the envelope strip.
         {
             Message hello = make_hello("alice", 7777);
-            bool threw = false;
-            std::string what;
-            try { (void)encode_binary(hello); }
-            catch (const std::exception& e) {
-                threw = true; what = e.what();
-            }
-            check(threw && what.find("HELLO") != std::string::npos,
-                  "(9) encode_binary(HELLO) throws — HELLO must always be JSON "
-                  "(pre-negotiation invariant)");
+            bool ok = false;
+            try {
+                auto bytes = encode_binary(hello);
+                ok = bytes.size() >= 4 && bytes[0] == 0xB1
+                     && bytes[2] == 0x00;
+            } catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "(9) encode_binary(HELLO) succeeds with type byte 0 — the "
+                  "binary-only wire has no JSON HELLO carve-out (D2 flip)");
         }
 
         // ── (10) Total MsgType count — the wire-format namespace size
@@ -56706,16 +56730,15 @@ int main(int argc, char** argv) {
     //
     // Scope: pin every byte-level invariant the HELLO handshake relies on.
     // HELLO is the FIRST wire message in any Determ peer connection — it
-    // exchanges domain / port / role / shard_id / wire_version BEFORE any
-    // codec negotiation is complete, so it MUST be transmitted as JSON
-    // unconditionally (the receiver doesn't yet know whether the binary
-    // envelope is in play). Two byte-divergent encodings of "the same"
-    // HELLO would have downstream consequences: a fingerprint-based
-    // anti-DDoS layer would see two distinct peers, and any peer-id
-    // hashing scheme that consumed the wire bytes would key off the wrong
-    // value.
+    // exchanges domain / port / role / shard_id / wire_version. D2: it
+    // travels as the FIXED BINARY HELLO FRAME (binary_codec.cpp) like every
+    // other message — the JSON pre-negotiation carve-out died with the JSON
+    // envelope. Two byte-divergent encodings of "the same" HELLO would have
+    // downstream consequences: a fingerprint-based anti-DDoS layer would
+    // see two distinct peers, and any peer-id hashing scheme that consumed
+    // the wire bytes would key off the wrong value.
     //
-    // Coverage axes (7 scenarios, ~18 assertions):
+    // Coverage axes (7 scenarios):
     //   (1) Replay determinism: encoding the same HelloMsg 3 times in a
     //       row yields 3 byte-identical outputs (no hidden global / object
     //       state mutation).
@@ -56723,33 +56746,29 @@ int main(int argc, char** argv) {
     //       byte-identical output for both all-fields-populated HELLO
     //       and a minimal HELLO (defaults only).
     //   (3) Cross-instance byte-identity: two distinct HelloMsg objects
-    //       with identical field values produce byte-identical JSON
+    //       with identical field values produce byte-identical frames
     //       (proves serialization depends ONLY on field values, not on
     //       object identity).
     //   (4) Field-binding completeness: mutating each HELLO field
     //       (domain / port / role / shard_id / wire_version) changes
     //       the encoded output. This is the "no silently-dropped
-    //       field" contract — defends against a future from_json that
+    //       field" contract — defends against a future decoder that
     //       reads a field and silently drops it from the round-trip.
-    //   (5) HELLO-always-JSON contract: encode_binary(HELLO) THROWS
-    //       per binary_codec.cpp's HELLO carve-out; the JSON-serialized
-    //       HELLO body does NOT match is_binary_envelope (the body
-    //       starts with '{' not the 0xB1 magic). Pins the pre-
-    //       negotiation invariant that HELLO never reaches the binary
-    //       codec path.
-    //   (6) Boundary values: wire_version=kWireVersionLegacy (0),
-    //       wire_version=kWireVersionMax, empty domain, long domain,
-    //       port=0 / port=65535 — all round-trip cleanly.
-    //   (7) Canonical encoding: nlohmann::json's std::map-backed key
-    //       ordering produces stable alphabetical output regardless of
-    //       insertion order. Two HelloMsg objects constructed by different
-    //       paths but holding the same JSON fields encode to byte-
-    //       identical output (no insertion-order sensitivity).
+    //   (5) HELLO-is-binary contract (D2 flip of the old always-JSON
+    //       carve-out): encode_binary(HELLO) SUCCEEDS, and the
+    //       serialized body IS a binary envelope with type byte 0.
+    //   (6) Boundary values: wire_version=0 / =kWireVersionBinary,
+    //       empty domain, long domain, port=0 / port=65535 — all
+    //       round-trip cleanly.
+    //   (7) Insertion-order independence: the binary HELLO frame reads
+    //       NAMED fields from the payload DOM, so two Messages built with
+    //       different field-insertion orders encode byte-identically, and
+    //       a decode → re-encode cycle is a byte fixed point.
     //
     // Companion to test-protocol-version-pinning §8/§9 (which pin the
-    // wire_version field surface + the encode_binary(HELLO) reject path
-    // as part of the broader PROTOCOL.md §16 surface). This test
-    // exercises the full HelloMsg encode/decode pipeline byte-for-byte
+    // wire_version advertisement surface + the encode_binary(HELLO)
+    // success path as part of the broader PROTOCOL.md §16 surface). This
+    // test exercises the full HELLO encode/decode pipeline byte-for-byte
     // across replay / round-trip / field-binding / boundary axes.
     //
     // Companion to test-protocol-version-pinning (PROTOCOL.md §16
@@ -56769,11 +56788,11 @@ int main(int argc, char** argv) {
         };
 
         // Helper: serialize a Message and strip the 4-byte big-endian
-        // framing length prefix that Message::serialize prepends. Returns
-        // the inner JSON envelope body — the actual wire payload that
+        // framing length prefix that Message::serialize_binary prepends.
+        // Returns the binary envelope body — the actual wire payload that
         // peers parse via Message::deserialize.
         auto encode_hello_body = [](const Message& m) -> std::vector<uint8_t> {
-            auto framed = m.serialize();
+            auto framed = m.serialize_binary();
             return std::vector<uint8_t>(framed.begin() + 4, framed.end());
         };
 
@@ -56806,9 +56825,9 @@ int main(int argc, char** argv) {
             check(enc2 == enc3,
                   "(1) Replay determinism: encode #2 == encode #3 "
                   "(no hidden state mutation across three calls)");
-            check(!enc1.empty() && enc1[0] == static_cast<uint8_t>('{'),
+            check(!enc1.empty() && enc1[0] == 0xB1,
                   "(1) Replay determinism: encoded HELLO body starts with "
-                  "'{' — JSON envelope, NOT the binary 0xB1 magic byte");
+                  "the binary envelope magic 0xB1 (D2 binary-only wire)");
         }
 
         // === Scenario 2: Round-trip identity ===
@@ -56816,7 +56835,7 @@ int main(int argc, char** argv) {
         // Encode HELLO → deserialize → re-encode. Output must equal input
         // byte-for-byte. Tested with both an all-fields-populated HELLO
         // and a minimal HELLO (defaults only — role=SINGLE, shard_id=0,
-        // wire_version=kWireVersionMax).
+        // wire_version=kWireVersionBinary).
         //
         // 4 assertions: full-field round-trip preserves bytes + preserves
         // type==HELLO + payload semantic-equal + minimal HELLO also
@@ -56927,63 +56946,59 @@ int main(int argc, char** argv) {
             // 4e. Mutate wire_version.
             {
                 Message m = baseline;
-                m.payload["wire_version"] = kWireVersionLegacy;
+                m.payload["wire_version"] = uint8_t{0};
                 check(encode_hello_body(m) != base_bytes,
                       "(4) Field binding: mutating 'wire_version' changes "
-                      "the encoded HELLO bytes (A3 / S8 negotiation field)");
+                      "the encoded HELLO bytes (the upgrade-advertisement field)");
             }
         }
 
-        // === Scenario 5: HELLO-always-JSON contract ===
+        // === Scenario 5: HELLO-is-binary contract (D2 flip) ===
         //
-        // PROTOCOL.md + binary_codec.cpp guarantee:
-        //   (a) encode_binary(HELLO) THROWS — the pre-negotiation
-        //       invariant. A peer sending a HELLO via the binary codec
-        //       would be unparseable because the receiver hasn't yet
-        //       negotiated which codec is in use.
-        //   (b) The JSON-encoded HELLO body does NOT start with the
-        //       binary envelope magic byte (0xB1) — is_binary_envelope
-        //       returns false. This guarantees that even if a future
-        //       receive-side bug routed HELLO bytes through the
-        //       format-detecting deserialize, the JSON path would
-        //       still be taken.
+        // The old contract pinned encode_binary(HELLO) THROWING (the JSON
+        // pre-negotiation carve-out). D2 deleted the JSON envelope, so the
+        // contract INVERTS deliberately:
+        //   (a) encode_binary(HELLO) SUCCEEDS with type byte 0;
+        //   (b) the serialized HELLO body IS a binary envelope
+        //       (is_binary_envelope true).
         //
         // 2 assertions.
         {
             Message hello = make_populated_hello();
 
-            // 5a. encode_binary(HELLO) throws — pin the carve-out.
-            bool threw = false;
-            try { (void)encode_binary(hello); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "(5) HELLO-always-JSON: encode_binary(HELLO) THROWS "
-                  "(binary codec rejects HELLO per pre-negotiation invariant)");
+            // 5a. encode_binary(HELLO) succeeds — pin the flip.
+            bool ok = false;
+            try {
+                auto bytes = encode_binary(hello);
+                ok = bytes.size() >= 4 && bytes[2] == 0x00;
+            } catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "(5) HELLO-is-binary: encode_binary(HELLO) SUCCEEDS with "
+                  "type byte 0 (D2 flip of the old always-JSON carve-out)");
 
-            // 5b. The JSON-encoded HELLO body is NOT a binary envelope.
+            // 5b. The serialized HELLO body IS a binary envelope.
             auto body = encode_hello_body(hello);
-            check(!is_binary_envelope(body.data(), body.size()),
-                  "(5) HELLO-always-JSON: JSON HELLO body is NOT detected "
-                  "as binary envelope (no 0xB1 magic — first byte is '{')");
+            check(is_binary_envelope(body.data(), body.size()),
+                  "(5) HELLO-is-binary: serialized HELLO body IS a binary "
+                  "envelope (0xB1 magic + version 0x01)");
         }
 
         // === Scenario 6: Boundary values ===
         //
-        // wire_version=0 (kWireVersionLegacy — pre-A3 peers default here);
-        // wire_version=kWireVersionMax (modern peers); empty domain
+        // wire_version=0 (u8 floor) and =kWireVersionBinary; empty domain
         // (legal — listener may not yet have its DNS name); a fairly long
         // domain (255-char DNS label limit); port=0 (some test fixtures
         // use this); port=65535 (max). All must round-trip byte-for-byte.
         //
         // 3 assertions covering the three boundary classes.
         {
-            // 6a. wire_version boundaries (0 and Max).
+            // 6a. wire_version boundaries (0 and the shipped version).
             Message hv_low = make_hello("a", uint16_t{1234},
                                         ChainRole::SINGLE, ShardId{0},
-                                        kWireVersionLegacy);
+                                        uint8_t{0});
             Message hv_high = make_hello("a", uint16_t{1234},
                                          ChainRole::SINGLE, ShardId{0},
-                                         kWireVersionMax);
+                                         kWireVersionBinary);
             auto b_low_1  = encode_hello_body(hv_low);
             auto b_low_2  = encode_hello_body(Message::deserialize(
                                 b_low_1.data(), b_low_1.size()));
@@ -56991,8 +57006,8 @@ int main(int argc, char** argv) {
             auto b_high_2 = encode_hello_body(Message::deserialize(
                                 b_high_1.data(), b_high_1.size()));
             check(b_low_1 == b_low_2 && b_high_1 == b_high_2,
-                  "(6) Boundary: wire_version=0 (Legacy) and "
-                  "wire_version=kWireVersionMax both round-trip "
+                  "(6) Boundary: wire_version=0 and "
+                  "wire_version=kWireVersionBinary both round-trip "
                   "byte-for-byte through encode → deserialize → encode");
 
             // 6b. domain length extremes — empty and long.
@@ -57027,17 +57042,14 @@ int main(int argc, char** argv) {
 
         // === Scenario 7: Canonical encoding (insertion-order independent) ===
         //
-        // nlohmann::json defaults to a std::map-backed object — keys are
-        // emitted in alphabetical order on dump regardless of insertion
-        // order. Construct two HELLO Messages with the SAME field set but
-        // different field-insertion orderings; assert both encode to
-        // byte-identical JSON. Pins the canonical-output contract so a
-        // future migration to nlohmann::ordered_json (which preserves
-        // insertion order) doesn't silently break wire-byte determinism
-        // across peers that build HELLO from differently-ordered sources.
+        // The binary HELLO frame reads NAMED fields from the payload DOM and
+        // writes them in a FIXED layout, so the wire bytes cannot depend on
+        // how the payload object was built. Construct two HELLO Messages
+        // with the SAME field set but different field-insertion orderings;
+        // assert both encode to byte-identical frames, and that a decode →
+        // re-encode cycle is a byte fixed point.
         //
-        // 2 assertions: pretty-form key-ordering canonical; same Message
-        // re-built from cross-source dumps round-trips identically.
+        // 2 assertions.
         {
             Message m1{MsgType::HELLO, json::object()};
             m1.payload["domain"]       = "alice";
@@ -57060,19 +57072,16 @@ int main(int argc, char** argv) {
             check(enc_m1 == enc_m2,
                   "(7) Canonical encoding: two HelloMsg with identical "
                   "fields inserted in opposite orders produce byte-"
-                  "identical JSON (alphabetical key ordering on dump)");
+                  "identical binary frames (fixed field layout)");
 
-            // 7b. The serialized envelope ("type" + "payload" wrapping)
-            //     also has canonical ordering — re-encoding after a
-            //     round-trip yields the SAME bytes as the original.
-            //     "payload" alphabetizes AFTER "type" so the envelope
-            //     should always have type first, payload second.
+            // 7b. Decode → re-encode is a byte fixed point (the frame
+            //     carries every field, and encode reads exactly the
+            //     fields decode wrote).
             Message back = Message::deserialize(enc_m1.data(), enc_m1.size());
             auto enc_back = encode_hello_body(back);
             check(enc_back == enc_m1,
-                  "(7) Canonical encoding: envelope key ordering survives "
-                  "the round-trip (type before payload, payload-object "
-                  "keys alphabetical — no diff churn across reorderings)");
+                  "(7) Canonical encoding: decode → re-encode reproduces "
+                  "the SAME frame bytes (no field drift through the DOM)");
         }
 
         std::fputs("\n  ", stdout);
@@ -57083,28 +57092,18 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
-    // A3 / S8 + S-022 wire-version negotiation + framing/cap layering contract.
+    // S-022 framing/cap layering + discriminator contract (binary-only wire).
+    //
+    // D2 NOTE: this command was `test-wire-negotiation` until the JSON
+    // envelope + the per-pair v0/v1 negotiation were deleted pre-genesis —
+    // its section (A) (min(ours,theirs) negotiation arithmetic) died with
+    // that surface. The two surviving sections gate the BINARY wire's
+    // load-bearing invariants (sequence-before-harden: gate the survivor).
     //
     // This test pins the network-layer invariants that surround the binary
     // codec but are NOT the codec round-trip itself (test-binary-codec and
     // test-binary-codec-roundtrip-exhaustive own that) and are NOT the HELLO
-    // encode/field-binding (test-hello-handshake-determinism owns that). The
-    // three orthogonal surfaces here are the ones a peer would actually get
-    // wrong on the wire under adversarial conditions:
-    //
-    //   (A) NEGOTIATION ARITHMETIC. The live handshake in src/net/gossip.cpp
-    //       computes `negotiated = their_v < kWireVersionMax ? their_v
-    //       : kWireVersionMax` — i.e. min(ours, theirs) — and binary_codec.cpp
-    //       documents the same min(our_max, their_max) contract. A receiver
-    //       that mis-negotiated UP would send a binary body to a peer that
-    //       can't parse it (silent connection death); negotiating DOWN
-    //       incorrectly costs efficiency but is safe. We pin: clamp-to-our-max,
-    //       pass-through-when-lower, idempotence, symmetry (both sides reach
-    //       the SAME version), monotonicity, and the pre-HELLO / missing-field
-    //       default to kWireVersionLegacy (0). The negotiation is reproduced
-    //       here as a local lambda mirroring gossip.cpp byte-for-byte so a
-    //       drift in the contract surfaces in the unit suite, not in a 3-node
-    //       cluster bring-up.
+    // encode/field-binding (test-hello-handshake-determinism owns that):
     //
     //   (B) FRAMING-vs-CAP LAYERING. S-022 has TWO ceilings: kMaxFrameBytes
     //       (16 MB, enforced in Peer::read_body BEFORE deserialize) and the
@@ -57119,13 +57118,13 @@ int main(int argc, char** argv) {
     //       lands in the tightest tier — the "fail closed on a new type" rule.
     //
     //   (C) DISCRIMINATOR-BYTE PRESERVATION. The binary envelope carries the
-    //       MsgType at offset 2 (uint8_t cast). For every non-HELLO MsgType we
-    //       assert the encoded discriminator byte equals the cast value AND
-    //       that decode_binary recovers the exact same MsgType — the wire
-    //       type-tag is the dispatch key on the receive side, so a silent
-    //       discriminator corruption would route a BLOCK to the TRANSACTION
-    //       handler. HELLO is excluded (encode_binary rejects it by contract).
-    if (cmd == "test-wire-negotiation") {
+    //       MsgType at offset 2 (uint8_t cast). For EVERY MsgType — HELLO
+    //       included since D2 gave it a binary frame — we assert the encoded
+    //       discriminator byte equals the cast value AND that decode_binary
+    //       recovers the exact same MsgType — the wire type-tag is the
+    //       dispatch key on the receive side, so a silent discriminator
+    //       corruption would route a BLOCK to the TRANSACTION handler.
+    if (cmd == "test-wire-caps-discriminator") {
         using namespace determ;
         using namespace determ::net;
         using nlohmann::json;
@@ -57134,118 +57133,6 @@ int main(int argc, char** argv) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
-
-        // Local mirror of the negotiation arithmetic in src/net/gossip.cpp
-        // (the on_hello handler) and the contract in src/net/binary_codec.cpp:
-        //   negotiated = their_v < our_max ? their_v : our_max
-        // i.e. min(our_max, their_v). Reproduced verbatim so a future change
-        // to the gossip-side rule that diverges from this min() trips here.
-        auto negotiate = [](uint8_t our_max, uint8_t their_v) -> uint8_t {
-            return their_v < our_max ? their_v : our_max;
-        };
-
-        // === (A) Negotiation arithmetic ===
-
-        // 1. Clamp-to-our-max: a peer advertising a HIGHER version than we
-        //    understand negotiates DOWN to our max (never up — we can't
-        //    speak a codec we don't have).
-        {
-            uint8_t n = negotiate(kWireVersionMax,
-                                  static_cast<uint8_t>(kWireVersionMax + 5));
-            check(n == kWireVersionMax,
-                  "(1) negotiate: peer advertising version > our max clamps "
-                  "to our max (never negotiate UP to an unknown codec)");
-        }
-
-        // 2. Pass-through-when-lower: a peer advertising a LOWER version
-        //    pins the pair to that lower version (legacy compat).
-        {
-            uint8_t n = negotiate(kWireVersionMax, kWireVersionLegacy);
-            check(n == kWireVersionLegacy,
-                  "(2) negotiate: peer advertising legacy (0) pins the pair "
-                  "to legacy JSON — backward compat with pre-A3 peers");
-        }
-
-        // 3. Exact-match: identical maxima negotiate to that shared value.
-        {
-            check(negotiate(kWireVersionBinary, kWireVersionBinary) ==
-                  kWireVersionBinary,
-                  "(3) negotiate: matching maxima resolve to the shared "
-                  "version (both binary-capable → binary)");
-        }
-
-        // 4. Idempotence: re-negotiating an already-negotiated version
-        //    against our max is a fixed point (re-running the handshake
-        //    arithmetic on a settled pair changes nothing).
-        {
-            uint8_t once  = negotiate(kWireVersionMax, kWireVersionBinary);
-            uint8_t twice = negotiate(kWireVersionMax, once);
-            check(once == twice,
-                  "(4) negotiate: idempotent — re-applying min() to an "
-                  "already-negotiated value is a fixed point");
-        }
-
-        // 5. Symmetry: both endpoints independently compute the SAME
-        //    negotiated version from their own max + the peer's advertised
-        //    max. This is the property that guarantees a pair AGREES on the
-        //    codec without a round-trip ack — each side runs min() locally.
-        {
-            uint8_t our_max   = kWireVersionMax;       // 1
-            uint8_t their_max = kWireVersionLegacy;    // 0 (legacy-only peer)
-            uint8_t our_view   = negotiate(our_max,   their_max);
-            uint8_t their_view = negotiate(their_max, our_max);
-            check(our_view == their_view,
-                  "(5) negotiate: symmetric — both endpoints reach the same "
-                  "min(our,their) without an explicit ack (no split-brain "
-                  "codec where one side sends binary the other can't read)");
-            check(our_view == kWireVersionLegacy,
-                  "(5) negotiate: mixed binary+legacy pair resolves to "
-                  "legacy (the lower common version)");
-        }
-
-        // 6. Monotonicity: for a fixed our_max, raising the peer's advertised
-        //    version never LOWERS the negotiated result. Guards against an
-        //    inverted comparison that would make a more-capable peer
-        //    negotiate to a worse codec.
-        {
-            uint8_t lo = negotiate(kWireVersionMax, kWireVersionLegacy);
-            uint8_t hi = negotiate(kWireVersionMax, kWireVersionBinary);
-            check(hi >= lo,
-                  "(6) negotiate: monotone in the peer's advertised version "
-                  "(a more-capable peer never yields a worse codec)");
-        }
-
-        // 7. Missing-field default: gossip.cpp reads
-        //    `msg.payload.value("wire_version", kWireVersionLegacy)` — a peer
-        //    that omits the field (pre-A3) is treated as legacy. Reproduce
-        //    that default extraction against a HELLO built WITHOUT the field.
-        {
-            json hello_no_version = {
-                {"domain", "old-peer"}, {"port", 9000}
-            };
-            uint8_t their_v = hello_no_version.value("wire_version",
-                                                     kWireVersionLegacy);
-            check(their_v == kWireVersionLegacy,
-                  "(7) negotiate: HELLO omitting wire_version defaults the "
-                  "peer to legacy (0) — pre-A3 compatibility preserved");
-            check(negotiate(kWireVersionMax, their_v) == kWireVersionLegacy,
-                  "(7) negotiate: a field-less HELLO negotiates the pair to "
-                  "legacy JSON end-to-end");
-        }
-
-        // 8. make_hello default carries kWireVersionMax — a current-build
-        //    peer advertises the highest version it knows, so two current
-        //    builds negotiate to kWireVersionMax (binary today).
-        {
-            Message hello = make_hello("self", uint16_t{7000});
-            uint8_t advertised = hello.payload.value("wire_version",
-                                                     kWireVersionLegacy);
-            check(advertised == kWireVersionMax,
-                  "(8) make_hello defaults wire_version to kWireVersionMax "
-                  "(advertise the best we speak)");
-            check(negotiate(kWireVersionMax, advertised) == kWireVersionMax,
-                  "(8) two current builds negotiate to kWireVersionMax");
-        }
 
         // === (B) Framing-vs-cap layering (S-022) ===
 
@@ -57340,17 +57227,18 @@ int main(int argc, char** argv) {
 
         // === (C) Discriminator-byte preservation ===
 
-        // 13. For every non-HELLO MsgType, the binary envelope's type byte
-        //     (offset 2) equals the cast value, and decode_binary recovers
-        //     the exact same MsgType. The discriminator IS the receive-side
-        //     dispatch key — a silent corruption would route a message to
-        //     the wrong handler. Use an empty-object payload (the JSON-
-        //     fallback path) for non-TRANSACTION types; TRANSACTION uses
-        //     its fixed-frame codec, so feed it a minimal tx JSON.
+        // 13. For EVERY MsgType — HELLO included (D2 binary frame) — the
+        //     binary envelope's type byte (offset 2) equals the cast value,
+        //     and decode_binary recovers the exact same MsgType. The
+        //     discriminator IS the receive-side dispatch key — a silent
+        //     corruption would route a message to the wrong handler. Use an
+        //     empty-object payload (the JSON-payload path) for generic
+        //     types; TRANSACTION uses its fixed-frame codec, so feed it a
+        //     minimal tx JSON; HELLO's fixed frame reads named fields with
+        //     defaults, so the empty object encodes cleanly.
         {
             bool all_disc_ok = true;
             for (MsgType t : all_types) {
-                if (t == MsgType::HELLO) continue;   // encode_binary rejects
                 Message m;
                 m.type = t;
                 if (t == MsgType::TRANSACTION) {
@@ -57385,9 +57273,9 @@ int main(int argc, char** argv) {
                 if (back.type != t) all_disc_ok = false;
             }
             check(all_disc_ok,
-                  "(13) discriminator: every non-HELLO MsgType encodes its "
-                  "type byte at offset 2 and decode_binary recovers the exact "
-                  "same MsgType (dispatch key never silently corrupts)");
+                  "(13) discriminator: EVERY MsgType (HELLO included) encodes "
+                  "its type byte at offset 2 and decode_binary recovers the "
+                  "exact same MsgType (dispatch key never silently corrupts)");
         }
 
         // 14. The discriminator byte is INDEPENDENT of payload — two
@@ -57410,7 +57298,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": wire-negotiation "
+                  << ": wire-caps-discriminator "
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }

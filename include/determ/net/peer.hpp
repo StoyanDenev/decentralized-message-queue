@@ -41,13 +41,6 @@ public:
     bool hello_received() const { return hello_received_; }
     void mark_hello_received()  { hello_received_ = true; }
 
-    // A3 / S8: the per-pair wire-format version, negotiated via HELLO.
-    // 0 = legacy JSON (pre-A3 default). 1 = binary envelope. Stays at 0
-    // until HELLO arrives; that lets us interop seamlessly with peers
-    // that never advertise a version.
-    uint8_t wire_version() const            { return wire_version_; }
-    void    set_wire_version(uint8_t v)     { wire_version_ = v; }
-
 private:
     void read_header();
     void read_body(uint32_t len);
@@ -59,9 +52,6 @@ private:
     ChainRole              chain_role_{ChainRole::SINGLE};
     ShardId                       shard_id_{0};
     bool                          hello_received_{false};
-    // A3 / S8: per-pair negotiated wire format. Default 0 (legacy JSON)
-    // until HELLO upgrades us. Updated by GossipNet on HELLO receipt.
-    uint8_t                       wire_version_{kWireVersionLegacy};
     std::array<uint8_t, 4>        header_buf_{};
     std::vector<uint8_t>          body_buf_;
     std::deque<std::vector<uint8_t>> write_queue_;

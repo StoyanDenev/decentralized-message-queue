@@ -25,16 +25,23 @@
 # Assertions:
 #   1. Well-formed STATUS_RESPONSE (lp-json) frame → VALID, exit 0.
 #   2. --json report carries verdict=VALID + correct msg_type_name.
-#   3. Bad magic byte (0x7B, the legacy-JSON sentinel) → MALFORMED, exit 3.
+#   3. Bad magic byte (0x7B — the DELETED legacy-JSON first byte; D2
+#      binary-only wire) → MALFORMED, exit 3.
 #   4. Wrong version (0x02) → MALFORMED, exit 3.
 #   5. Non-zero reserved byte → MALFORMED, exit 3.
 #   6. msg_type out of range (99) → MALFORMED, exit 3.
-#   7. HELLO (msg_type 0) inside a binary envelope → MALFORMED, exit 3.
+#   7. HELLO (msg_type 0): the D2 fixed binary HELLO frame → VALID with
+#      decoded domain/port/role/shard_id/wire_version (this leg INVERTED
+#      when D2 gave HELLO a binary frame — pre-D2 binary HELLO was
+#      MALFORMED); truncated fields and trailing bytes → MALFORMED.
 #   8. lp-json declared length != body length → MALFORMED, exit 3.
 #   9. lp-json payload that is not valid JSON → MALFORMED, exit 3.
 #  10. Well-formed TRANSACTION frame → VALID with decoded amount/fee/nonce.
 #  11. TRANSACTION with non-zero amount-block reserved slot → MALFORMED.
-#  12. TRANSACTION with trailing bytes after sig/hash → MALFORMED.
+#  12. TRANSACTION with stray bytes after sig/hash → MALFORMED via the
+#      §3.21 pq_auth section rules (truncated header / empty section /
+#      length mismatch); a WELL-FORMED [u32 len][bytes] pq_auth section →
+#      VALID with pq_auth_len reported (D2-inc1 mirror).
 #  13. --expect-type mismatch → MALFORMED, exit 3.
 #  14. Missing --in → exit 1 (usage, not MALFORMED).
 #  15. Frame shorter than the 4-byte header → MALFORMED, exit 3.
@@ -176,13 +183,59 @@ run_decode "$TMP/badtype.bin"
                  || { echo "$OUT"; assert "false" "msg_type 99 → exit 3 (rc=$RC)"; }
 
 echo
-echo "=== 7. HELLO (msg_type 0) in binary envelope → MALFORMED exit 3 ==="
-craft_lp_json "$TMP/hello.bin" 0xB1 0x01 0 0x00 '{"domain":"x"}'
-run_decode "$TMP/hello.bin"
-if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "HELLO"; then
-  assert "true" "binary HELLO → MALFORMED exit 3"
+echo "=== 7. HELLO (msg_type 0): D2 fixed binary frame → VALID exit 0 ==="
+# craft_hello <out> <domain> <port> <role> <shard_id> <wire_version> <pad>
+# Writes the D2 binary HELLO frame: [u8 dlen][domain][u16 LE port][u8 role]
+# [u32 LE shard_id][u8 wire_version]. pad appends N stray trailing bytes.
+craft_hello() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+out, domain, port, role, shard, wv, pad = sys.argv[1:8]
+body = bytearray()
+body += bytes([0xB1, 0x01, 0x00, 0x00])       # envelope header, HELLO
+db = domain.encode("utf-8")
+body += bytes([len(db)]) + db
+body += struct.pack("<H", int(port))
+body += bytes([int(role)])
+body += struct.pack("<I", int(shard))
+body += bytes([int(wv)])
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_hello "$TMP/hello.bin" "node-a.example" 17777 2 3 1 0
+run_decode "$TMP/hello.bin" --json
+HELLO_FIELDS=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s/%s/%s' % (d.get('verdict'), d.get('domain'),
+        d.get('port'), d.get('role'), d.get('shard_id'),
+        d.get('wire_version')))
+except Exception: print('ERR')
+")
+if [ "$HELLO_FIELDS" = "VALID/node-a.example/17777/2/3/1" ]; then
+  assert "true" "binary HELLO frame → VALID with decoded fields (D2 flip: pre-D2 this was MALFORMED)"
 else
-  echo "$OUT"; assert "false" "binary HELLO → MALFORMED exit 3 (rc=$RC)"
+  echo "$OUT"; assert "false" "binary HELLO frame decode (got $HELLO_FIELDS)"
+fi
+# 7b. Truncated HELLO (missing wire_version byte) → MALFORMED.
+craft_hello "$TMP/hello_tr.bin" "x" 1 0 0 1 0
+"$PY" -c "
+d=open('$TMP/hello_tr.bin','rb').read()
+open('$TMP/hello_tr.bin','wb').write(d[:-1])
+"
+run_decode "$TMP/hello_tr.bin"
+[ "$RC" = "3" ] && assert "true" "truncated HELLO frame → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "truncated HELLO → exit 3 (rc=$RC)"; }
+# 7c. Trailing byte after wire_version → MALFORMED (fail-closed; additive
+#     fields must arrive behind a bumped wire_version, never as padding).
+craft_hello "$TMP/hello_pad.bin" "x" 1 0 0 1 1
+run_decode "$TMP/hello_pad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
+  assert "true" "HELLO trailing byte → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "HELLO trailing byte → exit 3 (rc=$RC)"
 fi
 
 echo
@@ -226,13 +279,61 @@ run_decode "$TMP/txres.bin"
                  || { echo "$OUT"; assert "false" "tx reserved slot → exit 3 (rc=$RC)"; }
 
 echo
-echo "=== 12. TRANSACTION trailing bytes after sig/hash → MALFORMED ==="
-craft_tx "$TMP/txpad.bin" 500 3 7 0 0 alice bob 5
-run_decode "$TMP/txpad.bin"
-if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
-  assert "true" "tx trailing garbage → MALFORMED exit 3"
+echo "=== 12. TRANSACTION stray bytes after sig/hash → pq_auth rules ==="
+# D2-inc1: bytes after the hash must form a well-formed [u32 LE len][bytes]
+# pq_auth section consuming the frame exactly. Stray pads now hit the
+# section's fail-closed arms instead of a generic trailing-byte reject.
+# 12a. 3 pad bytes: too short for the section header.
+craft_tx "$TMP/txpad3.bin" 500 3 7 0 0 alice bob 3
+run_decode "$TMP/txpad3.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "pq_auth"; then
+  assert "true" "3 stray bytes → MALFORMED (truncated pq_auth section header)"
 else
-  echo "$OUT"; assert "false" "tx trailing garbage → exit 3 (rc=$RC)"
+  echo "$OUT"; assert "false" "3 stray bytes → pq_auth reject (rc=$RC)"
+fi
+# 12b. 4 zero bytes: a zero-length section is non-canonical.
+craft_tx "$TMP/txpad4.bin" 500 3 7 0 0 alice bob 4
+run_decode "$TMP/txpad4.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "empty pq_auth"; then
+  assert "true" "zero-length pq_auth section → MALFORMED (non-canonical)"
+else
+  echo "$OUT"; assert "false" "zero-length pq_auth → reject (rc=$RC)"
+fi
+# 12c. A WELL-FORMED pq_auth section → VALID with pq_auth_len reported.
+craft_tx "$TMP/txpq.bin" 500 3 7 0 11 pqbearer bob 0
+"$PY" -c "
+import struct
+d = bytearray(open('$TMP/txpq.bin','rb').read())
+sec = bytes(range(1, 41))                     # 40-byte pq_auth stand-in
+d += struct.pack('<I', len(sec)) + sec
+open('$TMP/txpq.bin','wb').write(bytes(d))
+"
+run_decode "$TMP/txpq.bin" --json
+PQ=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s' % (d.get('verdict'), d.get('pq_auth_len')))
+except Exception: print('ERR')
+")
+if [ "$PQ" = "VALID/40" ]; then
+  assert "true" "well-formed pq_auth section → VALID, pq_auth_len=40 (D2-inc1 mirror)"
+else
+  echo "$OUT"; assert "false" "pq_auth section decode (got $PQ)"
+fi
+# 12d. Declared pq_auth length short of the remainder → MALFORMED.
+craft_tx "$TMP/txpqbad.bin" 500 3 7 0 11 pqbearer bob 0
+"$PY" -c "
+import struct
+d = bytearray(open('$TMP/txpqbad.bin','rb').read())
+d += struct.pack('<I', 9) + bytes(5)          # declare 9, supply 5
+open('$TMP/txpqbad.bin','wb').write(bytes(d))
+"
+run_decode "$TMP/txpqbad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "pq_auth length mismatch"; then
+  assert "true" "pq_auth length mismatch → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "pq_auth length mismatch → exit 3 (rc=$RC)"
 fi
 
 echo

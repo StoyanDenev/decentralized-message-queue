@@ -14,16 +14,15 @@
 #      critical assignments. Reordering would mis-route every
 #      peer-to-peer message.
 #
-#   2. Wire-version negotiation constants (A3 / S8):
-#         kWireVersionLegacy = 0    (JSON-over-TCP)
-#         kWireVersionBinary = 1    (binary codec)
-#         kWireVersionMax    = 1    (highest understood)
-#      Bumping kWireVersionMax without a codec implementation
-#      would break negotiation silently.
+#   2. The wire-version constant (D2 binary-only wire):
+#         kWireVersionBinary = 1    (the single shipped format)
+#      The v0 JSON envelope and the negotiation constants were
+#      deleted pre-genesis; HELLO advertises this value as the
+#      additive post-genesis upgrade escape hatch.
 #
 #   3. Binary envelope magic + version (0xB1 0x01 — the first two
-#      body bytes of an A3 binary message). is_binary_envelope
-#      gates the format-detecting deserializer; decode_binary
+#      body bytes of every message). is_binary_envelope
+#      gates the binary-only deserializer; decode_binary
 #      rejects unsupported versions with diagnostic.
 #
 #   4. Snapshot version field (S-018 / chain.cpp::
@@ -47,11 +46,12 @@
 #      field-name diagnostics on missing required fields).
 #
 #   8. HELLO `wire_version` field — make_hello defaults to
-#      kWireVersionMax + accepts override + round-trips intact.
+#      kWireVersionBinary + accepts override + round-trips intact
+#      through the binary HELLO frame (advertisement only).
 #
-#   9. HELLO-always-JSON invariant: encode_binary(HELLO) throws
-#      because HELLO happens pre-negotiation and must be parseable
-#      by every peer (binary codec is opt-in per peer).
+#   9. HELLO-is-binary contract (D2 flip of the old always-JSON
+#      carve-out): encode_binary(HELLO) SUCCEEDS with type byte 0 —
+#      the binary-only wire has no JSON HELLO exception.
 #
 #  10. MsgType numbering integrity — highest assigned value is 18
 #      (HEADERS_RESPONSE); S-022 default-branch cap (1 MB) covers

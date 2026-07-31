@@ -18,10 +18,11 @@
 #     (determ-wallet decode-wire-frame) and only REPORTS per_type_cap as a
 #     field on tiny frames; it never sizes a frame over a cap to force
 #     rejection.
-#   * tools/test_wire_negotiation.sh checks the cap-TABLE arithmetic via
-#     `determ test-wire-negotiation` (a daemon unit test) — it asserts the
-#     tiers are ordered and reachable, but never drives the light binary
-#     against an oversize frame on disk.
+#   * tools/test_wire_caps_discriminator.sh checks the cap-TABLE arithmetic
+#     via `determ test-wire-caps-discriminator` (a daemon unit test; was
+#     test-wire-negotiation pre-D2) — it asserts the tiers are ordered and
+#     reachable, but never drives the light binary against an oversize
+#     frame on disk.
 # So no test anywhere makes the light decoder REJECT an oversize frame.
 #
 # The S-022 cap is the load-bearing anti-flood property: the 16 MB framing

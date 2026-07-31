@@ -182,15 +182,9 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             peer->set_chain_role(static_cast<ChainRole>(
                 msg.payload.value("role", uint8_t{0})));
             peer->set_shard_id(msg.payload.value("shard_id", ShardId{0}));
-            // A3 / S8: negotiate wire-version down to min(ours, theirs).
-            // Pre-A3 peers omit the field — `value(..., 0)` defaults them
-            // to legacy JSON, matching today's behavior. Subsequent
-            // outbound messages on this peer use the negotiated codec.
-            uint8_t their_v = msg.payload.value("wire_version",
-                                                kWireVersionLegacy);
-            uint8_t negotiated = their_v < kWireVersionMax
-                               ? their_v : kWireVersionMax;
-            peer->set_wire_version(negotiated);
+            // D2: no wire-format negotiation — binary is the only format.
+            // The HELLO's `wire_version` field is an advertisement kept for
+            // the additive post-genesis upgrade path; nothing reads it today.
             peer->mark_hello_received();
             break;
         }

@@ -112,23 +112,11 @@ void Peer::read_body(uint32_t len) {
 }
 
 void Peer::send(const Message& msg) {
-    // A3 / S8: pick the wire format based on the per-peer negotiated
-    // version. HELLO is always JSON regardless — both sides need to be
-    // able to parse it pre-negotiation, and the JSON encoding is also
-    // what carries the `wire_version` advertisement field.
-    std::vector<uint8_t> bytes;
-    if (wire_version_ >= kWireVersionBinary && msg.type != MsgType::HELLO) {
-        try {
-            bytes = msg.serialize_binary();
-        } catch (...) {
-            // Fallback to JSON if binary encoding rejects this message
-            // (e.g. encoder doesn't yet support a particular type). Keeps
-            // the connection alive; caller still gets the message through.
-            bytes = msg.serialize();
-        }
-    } else {
-        bytes = msg.serialize();
-    }
+    // D2: the wire is binary-only — every message, HELLO included, encodes
+    // via the single binary codec. The old silent catch-all JSON fallback is
+    // deliberately NOT reproduced: an encode failure is a local bug and must
+    // surface loudly at the call site, never mask itself as legacy traffic.
+    std::vector<uint8_t> bytes = msg.serialize_binary();
     std::lock_guard<std::mutex> lock(write_mutex_);
     bool idle = write_queue_.empty();
     write_queue_.push_back(std::move(bytes));

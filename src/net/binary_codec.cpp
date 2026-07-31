@@ -6,39 +6,22 @@
 // section "A3 — Binary wire codec / S8".
 //
 // PURPOSE
-//   Provide a compact, deterministic binary alternative to the JSON-over-TCP
-//   path used for inter-peer messages. JSON path is retained as default
-//   (wire-version 0). Binary is opt-in (wire-version 1), negotiated per-pair
-//   via the HELLO handshake.
-//
-// WIRE-FORMAT NEGOTIATION
-//   1. Connection opens. Both sides immediately send a HELLO. HELLO is
-//      ALWAYS encoded as JSON (so v0-only legacy peers can parse it).
-//      HELLO carries a `wire_version: u8` field listing the highest
-//      version the sender supports.
-//   2. On HELLO receipt, each side records the peer's advertised version
-//      and sets `peer.wire_version = min(our_max, their_max)`.
-//      Pre-HELLO default is 0. A peer that omits the field is treated as
-//      v0 (legacy JSON-only).
-//   3. After HELLO has been received, every subsequent outbound message
-//      is encoded according to peer.wire_version. The receive side is
-//      version-agnostic: it dispatches on the first byte of the body
-//      (see "FRAMING" below).
+//   The single, mandatory wire codec for inter-peer messages (D2,
+//   DECISION-LOG 2026-07-28: the p2p envelope is binary-only). The legacy
+//   JSON envelope (wire-version 0) and the per-pair HELLO version
+//   negotiation were removed pre-genesis; every body on the wire is the
+//   0xB1 binary envelope below. HELLO still CARRIES a `wire_version` u8
+//   advertisement — with a single shipped version it decides nothing, but
+//   it is the additive post-genesis upgrade escape hatch (no-migrations:
+//   a future v2 peer advertises 2, keeps SENDING v1 frames, and upgrades
+//   only after reading the peer's advertised max).
 //
 // FRAMING (compatible with the existing transport layer)
 //   The transport layer in `Peer` already prepends a [u32 length, big-endian]
-//   length header to every body it sends. We keep that wrapper unchanged
-//   so the binary path is a drop-in body replacement.
-//
-//   The body itself is now self-describing by its first byte:
-//
-//     '{' (0x7B)  →  legacy JSON envelope (wire-version 0).
-//     0xB1        →  binary envelope, version 1.
-//
-//   This makes the body format orthogonal to the negotiated version on
-//   the read path — a v1-capable peer can still receive a JSON body
-//   from a v0 peer without confusion. The negotiated version only
-//   controls what we *send*.
+//   length header to every body it sends. We keep that wrapper unchanged.
+//   Inside it, every body starts with the envelope magic 0xB1; anything
+//   else is rejected fail-closed by Message::deserialize (WIRE-3 closes
+//   the connection on the resulting parse error).
 //
 // BINARY ENVELOPE v1 LAYOUT
 //   offset  size  field
@@ -100,9 +83,19 @@
 //   work: once R3+ migrates account identity to raw pubkeys, the trailer
 //   can be eliminated.
 //
-// PAYLOAD: HELLO
-//   HELLO is NEVER encoded with this codec. Always JSON. See module-level
-//   comment.
+// PAYLOAD: HELLO (fixed binary frame, D2)
+//   HELLO is the first frame on every connection and travels binary like
+//   everything else (the JSON pre-negotiation carve-out died with the JSON
+//   envelope). Layout after the 4-byte envelope header — fail-closed, the
+//   frame must be consumed EXACTLY (no trailing bytes):
+//
+//     offset  size  field
+//     0       1     domain_len: u8
+//     1       D     domain bytes (utf8, verbatim)
+//     1+D     2     port: u16 LE
+//     3+D     1     role: u8 (ChainRole)
+//     4+D     4     shard_id: u32 LE
+//     8+D     1     wire_version: u8 (advertised max — see module comment)
 //
 // PAYLOAD: ALL OTHER MSGTYPES
 //   For BLOCK, CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT,
@@ -341,6 +334,42 @@ chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
     return tx;
 }
 
+// ─── HELLO frame (fixed layout, D2 binary-only wire) ─────────────────────────
+
+void encode_hello_frame(std::vector<uint8_t>& out, const Message& m) {
+    // Field set + defaults mirror make_hello (messages.hpp) and the tolerant
+    // reads in GossipNet::handle_message's HELLO case.
+    const std::string domain = m.payload.value("domain", std::string{});
+    put_lp_str(out, domain);
+    le_put_u16(out, m.payload.value("port", uint16_t{0}));
+    out.push_back(m.payload.value("role", uint8_t{0}));
+    le_put_u32(out, m.payload.value("shard_id", uint32_t{0}));
+    out.push_back(m.payload.value("wire_version", uint8_t{kWireVersionBinary}));
+}
+
+nlohmann::json decode_hello_frame(const uint8_t* data, size_t len) {
+    size_t off = 0;
+    std::string domain = get_lp_str(data, len, off);
+    if (off + 2 + 1 + 4 + 1 > len)
+        throw std::runtime_error("binary_codec: truncated HELLO frame");
+    uint16_t port         = le_get_u16(data + off); off += 2;
+    uint8_t  role         = data[off++];
+    uint32_t shard_id     = le_get_u32(data + off); off += 4;
+    uint8_t  wire_version = data[off++];
+    // Fail-closed: the frame must be consumed exactly. Trailing bytes mean a
+    // non-conforming encoder; a future ADDITIVE field arrives behind a bumped
+    // wire_version advertisement, never as silent padding.
+    if (off != len)
+        throw std::runtime_error("binary_codec: HELLO frame trailing bytes");
+    nlohmann::json j;
+    j["domain"]       = domain;
+    j["port"]         = port;
+    j["role"]         = role;
+    j["shard_id"]     = shard_id;
+    j["wire_version"] = wire_version;
+    return j;
+}
+
 // ─── envelope ────────────────────────────────────────────────────────────────
 
 constexpr uint8_t kBinaryMagic   = 0xB1;
@@ -362,17 +391,17 @@ bool is_binary_envelope(const uint8_t* data, size_t len) {
         && data[1] == kBinaryVersion;
 }
 
-// Encode a Message in binary (v1) envelope form.
-//
-// HELLO is rejected here — callers must serialize HELLO via JSON regardless
-// of negotiated wire-version (see module-level comment).
+// Encode a Message in binary (v1) envelope form. Every MsgType encodes —
+// the wire is binary-only (D2); HELLO uses its fixed frame.
 std::vector<uint8_t> encode_binary(const Message& m) {
-    if (m.type == MsgType::HELLO)
-        throw std::runtime_error("binary_codec: HELLO must be sent as JSON");
-
     std::vector<uint8_t> out;
     out.reserve(64);
     put_envelope_header(out, m.type);
+
+    if (m.type == MsgType::HELLO) {
+        encode_hello_frame(out, m);
+        return out;
+    }
 
     if (m.type == MsgType::TRANSACTION) {
         chain::Transaction tx = chain::Transaction::from_json(m.payload);
@@ -412,6 +441,11 @@ Message decode_binary(const uint8_t* data, size_t len) {
         throw std::runtime_error("binary_codec: reserved envelope byte non-zero");
     const uint8_t* body = data + 4;
     size_t body_len = len - 4;
+
+    if (m.type == MsgType::HELLO) {
+        m.payload = decode_hello_frame(body, body_len);
+        return m;
+    }
 
     if (m.type == MsgType::TRANSACTION) {
         chain::Transaction tx = decode_tx_frame(body, body_len);

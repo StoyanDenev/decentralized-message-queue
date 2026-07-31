@@ -8537,18 +8537,23 @@ int cmd_committee_at_height(int argc, char** argv) {
 //     reserved byte = 0x00 (the codec zeroes it on encode; we reject
 //     non-zero rather than silently ignore, since a stray reserved byte
 //     means the artifact was not produced by a conforming encoder).
-//   * msg_type byte in the known MsgType range [0, 18]. HELLO (0) is
-//     rejected: HELLO is ALWAYS JSON pre-negotiation and is never legally
-//     carried inside a binary envelope (encode_binary throws on it).
+//   * msg_type byte in the known MsgType range [0, 18].
 //   * S-022 per-type body-size cap: the post-deserialize body length must
 //     not exceed max_message_bytes(msg_type) (1 MB consensus chatter /
 //     4 MB block-class / 16 MB snapshot+chain). Reimplemented locally from
 //     the documented table so the artifact is checked against the SPEC,
 //     not against whatever the producing build happened to compile.
 //   * Payload well-formedness:
+//       - HELLO (0): the D2 fixed binary HELLO frame — [u8 domain_len]
+//         [domain][u16 LE port][u8 role][u32 LE shard_id][u8 wire_version],
+//         consumed exactly (trailing bytes → MALFORMED). Pre-D2 this
+//         decoder REJECTED HELLO-in-binary (HELLO was always JSON); the
+//         flip is deliberate and moves lock-step with the daemon codec.
 //       - TRANSACTION: the 4×256-bit fixed frame + trailer parses cleanly,
-//         reserved amount-block slot is zero, lengths are consistent, and
-//         the trailer's length-prefixed from/to/sig/hash fit exactly.
+//         reserved amount-block slot is zero, lengths are consistent, the
+//         trailer's length-prefixed from/to/sig/hash fit exactly, and an
+//         optional trailing [u32 LE len][bytes] pq_auth section (§3.21)
+//         consumes the remainder exactly when present.
 //       - all other types: a [u32 LE json_len][json_bytes] payload whose
 //         declared length matches the remaining body exactly and whose
 //         bytes parse as JSON.
@@ -8716,14 +8721,31 @@ void decode_wire_tx(const uint8_t* body, size_t blen, json& report) {
     std::string sig_hex  = to_hex(body + off, 64); off += 64;
     std::string hash_hex = to_hex(body + off, 32); off += 32;
 
-    // After hash there must be NOTHING left — a conforming encoder writes
-    // sig+hash as the final fields. Trailing bytes mean a malformed or
-    // attacker-padded frame.
-    if (off != blen)
-        throw WireMalformed("TRANSACTION has " + std::to_string(blen - off) +
-                            " trailing byte(s) after sig/hash");
+    // §3.21 / D2-inc1 mirror: an OPTIONAL pq_auth section may follow the
+    // hash — [u32 LE len][len bytes], emitted only when the tx carries a
+    // DPQ1 authenticator. A frame ending at the hash is a non-PQ tx. Any
+    // bytes beyond MUST form a well-formed section consuming the frame
+    // EXACTLY (zero-length rejected; trailing garbage rejected) — the same
+    // fail-closed rule as the daemon's decode_tx_frame.
+    size_t pq_auth_len = 0;
+    if (off != blen) {
+        if (off + 4 > blen)
+            throw WireMalformed("TRANSACTION truncated pq_auth section header");
+        uint32_t pq_len = wire_le_u32(body + off); off += 4;
+        if (pq_len == 0)
+            throw WireMalformed("TRANSACTION empty pq_auth section "
+                                "(non-canonical: encode omits the section "
+                                "when pq_auth is empty)");
+        if (pq_len != blen - off)
+            throw WireMalformed("TRANSACTION pq_auth length mismatch "
+                                "(declared " + std::to_string(pq_len) +
+                                ", have " + std::to_string(blen - off) + ")");
+        pq_auth_len = pq_len;
+        off += pq_len;
+    }
 
     report["amount"]      = amount;
+    report["pq_auth_len"] = pq_auth_len;
     report["fee"]         = fee;
     report["nonce"]       = nonce;
     report["tx_type"]     = static_cast<unsigned>(type);
@@ -8780,7 +8802,8 @@ int cmd_decode_wire(int argc, char** argv) {
                 throw WireMalformed("bad magic byte (got 0x" +
                                     to_hex(buf.data(), 1) +
                                     ", want 0xb1) — not a binary envelope "
-                                    "(0x7b would be legacy JSON)");
+                                    "(the wire is binary-only; the legacy "
+                                    "0x7b JSON envelope was deleted by D2)");
             if (buf[1] != kWireBinaryVersion)
                 throw WireMalformed("unsupported binary version 0x" +
                                     to_hex(buf.data() + 1, 1) + " (want 0x01)");
@@ -8793,10 +8816,6 @@ int cmd_decode_wire(int argc, char** argv) {
                 throw WireMalformed("msg_type " + std::to_string(msg_type) +
                                     " out of known range [0, " +
                                     std::to_string(kWireMsgTypeMax) + "]");
-            if (msg_type == 0)
-                throw WireMalformed("HELLO must never be carried in a binary "
-                                    "envelope (it is always JSON pre-"
-                                    "negotiation)");
 
             const char* tname = wire_msgtype_name(msg_type);
             report["msg_type"]      = static_cast<unsigned>(msg_type);
@@ -8815,7 +8834,38 @@ int cmd_decode_wire(int argc, char** argv) {
                                     std::to_string(cap) + " bytes)");
 
             const uint8_t* body = buf.data() + 4;
-            if (msg_type == 2 /* TRANSACTION */) {
+            if (msg_type == 0 /* HELLO */) {
+                // D2 fixed binary HELLO frame — validated independently
+                // against the published layout, consumed exactly.
+                report["payload_kind"] = "hello_frame";
+                size_t off = 0;
+                if (body_len < 1)
+                    throw WireMalformed("HELLO truncated domain length prefix");
+                uint8_t dlen = body[off++];
+                if (off + dlen > body_len)
+                    throw WireMalformed("HELLO truncated domain (declared " +
+                                        std::to_string(dlen) + " bytes)");
+                std::string domain(reinterpret_cast<const char*>(body + off),
+                                   dlen);
+                off += dlen;
+                if (off + 2 + 1 + 4 + 1 > body_len)
+                    throw WireMalformed("HELLO truncated fixed fields (need "
+                                        "port/role/shard_id/wire_version)");
+                uint16_t port         = wire_le_u16(body + off); off += 2;
+                uint8_t  role         = body[off++];
+                uint32_t shard_id     = wire_le_u32(body + off); off += 4;
+                uint8_t  wire_version = body[off++];
+                if (off != body_len)
+                    throw WireMalformed("HELLO has " +
+                                        std::to_string(body_len - off) +
+                                        " trailing byte(s) after "
+                                        "wire_version");
+                report["domain"]       = domain;
+                report["port"]         = port;
+                report["role"]         = static_cast<unsigned>(role);
+                report["shard_id"]     = shard_id;
+                report["wire_version"] = static_cast<unsigned>(wire_version);
+            } else if (msg_type == 2 /* TRANSACTION */) {
                 report["payload_kind"] = "tx_frame";
                 decode_wire_tx(body, body_len, report);
             } else {
