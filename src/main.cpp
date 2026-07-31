@@ -46815,14 +46815,19 @@ int main(int argc, char** argv) {
         // Canonicalizing the DIGEST alone left the injected bytes in the block
         // BODY, which to_json re-emits verbatim. `claims_json` was schema-free,
         // so an injected member could carry arbitrary NESTING — and the WIRE-2
-        // structural ceiling is ENVELOPE-RELATIVE: the same claim object sits
-        // at depth 6 under BLOCK but 8 under CHAIN_RESPONSE. A claim nested
-        // L ∈ {kMaxJsonDepth−7, kMaxJsonDepth−6} levels deep was therefore
-        // ACCEPTED on every ingest path and REJECTED on every serve path, so
-        // the block committed fleet-wide (signing_bytes binds only event_hash,
-        // so honest validators sign it) and could never be served again —
-        // WIRE-3 escalating that from a dropped frame to a disconnect loop, and
-        // no new node able to sync past that height.
+        // structural ceiling is CONTAINER-RELATIVE: since the D2 binary-only
+        // wire, the ceiling scans the length-prefixed JSON payload inside the
+        // 0xB1 envelope, where the same claim object sits at depth 5 under a
+        // BLOCK payload but 7 under a CHAIN_RESPONSE payload ({"blocks":[..]}
+        // adds two levels). A claim nested L ∈ {kMaxJsonDepth−6,
+        // kMaxJsonDepth−5} levels deep is therefore ACCEPTED on every ingest
+        // path and REJECTED on every serve path, so the block commits
+        // fleet-wide (signing_bytes binds only event_hash, so honest
+        // validators sign it) and could never be served again — WIRE-3
+        // escalating that from a dropped frame to a disconnect loop, and no
+        // new node able to sync past that height. (Pre-D2 the JSON envelope
+        // added one level on both sides — band {cap−7, cap−6}; the D2 strip
+        // shifted the base, not the asymmetry.)
         //
         // AbortEvent::from_json now stores the CANONICAL rebuild, so nothing
         // survives ingest to inflate depth. Falsify-on-mutant: restore the
@@ -46830,9 +46835,9 @@ int main(int argc, char** argv) {
         // two F-10 legs below go RED while every leg above stays GREEN.
         {
             // Expressed against the cap, not hard-coded: the wedge band is
-            // {cap−7, cap−6} for EVERY value of kMaxJsonDepth, so this tracks
+            // {cap−6, cap−5} for EVERY value of kMaxJsonDepth, so this tracks
             // the constant instead of rotting if it is ever retuned.
-            const size_t kInject = net::kMaxJsonDepth - 7;
+            const size_t kInject = net::kMaxJsonDepth - 6;
 
             auto mk_block = [&](const njson& claims) {
                 chain::Block b;
@@ -46865,12 +46870,23 @@ int main(int argc, char** argv) {
             const njson wire_clean = mk_block(clean).to_json();
             const njson wire_pois  = mk_block(poisoned).to_json();
 
+            // D2 binary-only wire: the payload rides length-prefixed inside
+            // the 0xB1 envelope (the WIRE-2 ceiling scans exactly these
+            // payload bytes).
             auto envelope = [&](net::MsgType t, const njson& payload) {
-                njson e;
-                e["type"]    = static_cast<uint8_t>(t);
-                e["payload"] = payload;
-                const std::string s = e.dump();
-                return std::vector<uint8_t>(s.begin(), s.end());
+                const std::string s = payload.dump();
+                std::vector<uint8_t> f;
+                f.push_back(0xB1);
+                f.push_back(0x01);
+                f.push_back(static_cast<uint8_t>(t));
+                f.push_back(0x00);
+                uint32_t plen = static_cast<uint32_t>(s.size());
+                f.push_back(static_cast<uint8_t>(plen & 0xFF));
+                f.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
+                f.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
+                f.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
+                f.insert(f.end(), s.begin(), s.end());
+                return f;
             };
             auto accepts = [&](const std::vector<uint8_t>& b) {
                 try { (void)net::Message::deserialize(b.data(), b.size()); return true; }
