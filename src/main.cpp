@@ -23092,6 +23092,86 @@ int main(int argc, char** argv) {
                   "binary tx: UINT64_MAX nonce round-trips");
         }
 
+        // 9. §3.21 / D2-inc1: the DPQ1 pq_auth authenticator round-trips
+        //    through the binary frame. Pre-fix, encode_tx_frame's trailer
+        //    ended at the hash and pq_auth was silently DROPPED — a
+        //    PQ_TRANSFER could not survive the v1 binary wire (its
+        //    authenticator arrived empty, verify_pq_transaction failed), a
+        //    liveness hole that goes live the moment the JSON envelope path
+        //    is deleted. Falsify-on-mutant: revert the encoder's pq_auth
+        //    append → the equality assertion goes RED.
+        {
+            Transaction tx;
+            tx.type = TxType::PQ_TRANSFER;
+            tx.from = "pqbearer"; tx.to = "bob";
+            tx.amount = 9; tx.fee = 1; tx.nonce = 3;
+            tx.payload = {0x01};
+            tx.pq_auth.resize(2000);            // realistic DPQ1 (ML-DSA) scale
+            for (size_t i = 0; i < tx.pq_auth.size(); ++i)
+                tx.pq_auth[i] = uint8_t(i * 7 + 1);
+            tx.hash = tx.compute_hash();
+
+            Transaction back = tx_roundtrip(tx);
+            check(back.pq_auth == tx.pq_auth,
+                  "binary PQ_TRANSFER: pq_auth preserved through the frame (dropped silently pre-D2-inc1)");
+            check(back.compute_hash() == tx.compute_hash(),
+                  "binary PQ_TRANSFER: hash invariant (pq_auth is NOT in signing_bytes)");
+
+            // Byte-compat: the section is exactly [u32 len][bytes], emitted
+            // only when non-empty — a non-PQ twin's frame is exactly 4+Q
+            // bytes shorter and decodes with pq_auth empty.
+            Transaction plain = tx; plain.pq_auth.clear();
+            Message m_pq{MsgType::TRANSACTION, tx.to_json()};
+            Message m_pl{MsgType::TRANSACTION, plain.to_json()};
+            auto b_pq = encode_binary(m_pq);
+            auto b_pl = encode_binary(m_pl);
+            check(b_pq.size() == b_pl.size() + 4 + tx.pq_auth.size(),
+                  "binary PQ_TRANSFER: pq_auth section is exactly [u32 len][bytes] (canonical layout)");
+            check(tx_roundtrip(plain).pq_auth.empty(),
+                  "binary tx: empty pq_auth emits no section and stays empty");
+        }
+
+        // 10. Fail-closed pq_auth decode: bytes after the hash that do not
+        //     form a well-formed section consuming the frame exactly are
+        //     rejected with the SPECIFIC reject string (mutant: decoder
+        //     ignores trailing bytes → these legs go RED).
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER; tx.from = "a"; tx.to = "b";
+            tx.amount = 1; tx.fee = 0; tx.nonce = 0; tx.hash = tx.compute_hash();
+            Message m{MsgType::TRANSACTION, tx.to_json()};
+            auto base = encode_binary(m);
+
+            auto expect_reject = [&](std::vector<uint8_t> frame, const char* needle) {
+                try { (void)decode_binary(frame.data(), frame.size()); return false; }
+                catch (const std::exception& e) {
+                    return std::string(e.what()).find(needle) != std::string::npos;
+                }
+            };
+
+            // (a) 1..3 trailing bytes: too short for a section header.
+            auto g1 = base; g1.push_back(0xEE);
+            check(expect_reject(g1, "truncated pq_auth header"),
+                  "binary tx: trailing garbage after hash rejected 'truncated pq_auth header'");
+            // (b) a zero-length section is non-canonical.
+            auto g2 = base; g2.insert(g2.end(), {0x00, 0x00, 0x00, 0x00});
+            check(expect_reject(g2, "empty pq_auth section"),
+                  "binary tx: zero-length pq_auth section rejected 'empty pq_auth section'");
+            // (c) declared length disagrees with the remaining bytes.
+            auto g3 = base; g3.insert(g3.end(), {0x05, 0x00, 0x00, 0x00, 0xAA, 0xBB, 0xCC});
+            check(expect_reject(g3, "pq_auth length mismatch"),
+                  "binary tx: short pq_auth body rejected 'pq_auth length mismatch'");
+            // (d) extra byte after a valid section: must not be ignored.
+            Transaction pqtx = tx;
+            pqtx.type = TxType::PQ_TRANSFER;
+            pqtx.pq_auth = {0x11, 0x22, 0x33};
+            pqtx.hash = pqtx.compute_hash();
+            Message mq{MsgType::TRANSACTION, pqtx.to_json()};
+            auto g4 = encode_binary(mq); g4.push_back(0x00);
+            check(expect_reject(g4, "pq_auth length mismatch"),
+                  "binary tx: byte appended after pq_auth section rejected 'pq_auth length mismatch'");
+        }
+
         // Negative: a TRANSACTION envelope whose tx-frame body is shorter than
         // decode_tx_frame's 128+1+2 minimum is rejected 'tx frame too short'
         // (binary_codec.cpp). Register BinaryCodecRoundTripSoundness T-3: deleting

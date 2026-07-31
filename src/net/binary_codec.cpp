@@ -83,6 +83,15 @@
 //     ...     8     to_len + to      u8 len followed by `to` bytes (utf8)
 //     ...     64    sig              Ed25519 signature
 //     ...     32    hash             SHA-256
+//     ...     4+Q   pq_auth          OPTIONAL §3.21 DPQ1 authenticator:
+//                                      [u32 LE len][len bytes]. Emitted ONLY
+//                                      when tx.pq_auth is non-empty (mirrors
+//                                      the to_json convention), so every
+//                                      non-PQ frame is byte-identical to the
+//                                      pre-§3.21 layout. Decode is fail-closed:
+//                                      the section must consume the frame
+//                                      exactly, and a zero-length section is
+//                                      rejected (canonical encoding is unique).
 //
 //   We encode the address strings (`from`, `to`) verbatim alongside the
 //   pubkey bytes for now — current code uses domain strings (e.g. utf-8
@@ -249,6 +258,17 @@ void encode_tx_frame(std::vector<uint8_t>& out, const chain::Transaction& tx) {
     put_lp_str(out, tx.to);
     out.insert(out.end(), tx.sig.begin(),  tx.sig.end());
     out.insert(out.end(), tx.hash.begin(), tx.hash.end());
+
+    // §3.21: optional DPQ1 PQ authenticator — appended ONLY when present so
+    // every non-PQ tx frame is byte-identical to the pre-§3.21 layout. Without
+    // this section the binary wire silently DROPPED pq_auth, so a PQ_TRANSFER
+    // could not survive v1 transit once the JSON fallback is gone (D2).
+    if (!tx.pq_auth.empty()) {
+        if (tx.pq_auth.size() > 0xFFFFFFFFu)
+            throw std::runtime_error("binary_codec: pq_auth exceeds u32 length");
+        le_put_u32(out, static_cast<uint32_t>(tx.pq_auth.size()));
+        out.insert(out.end(), tx.pq_auth.begin(), tx.pq_auth.end());
+    }
 }
 
 chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
@@ -300,6 +320,24 @@ chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
         throw std::runtime_error("binary_codec: truncated sig/hash");
     std::memcpy(tx.sig.data(),  data + off, 64); off += 64;
     std::memcpy(tx.hash.data(), data + off, 32); off += 32;
+
+    // §3.21: optional pq_auth section. A frame ending exactly at the hash is a
+    // non-PQ tx (pq_auth stays empty). Any bytes beyond the hash MUST form a
+    // well-formed [u32 LE len][len bytes] section consuming the frame EXACTLY:
+    // fail-closed on trailing garbage, and a zero-length section is rejected so
+    // the encoding stays canonical (encode omits the section when pq_auth is
+    // empty — no two distinct byte strings decode to the same tx).
+    if (off != len) {
+        if (off + 4 > len)
+            throw std::runtime_error("binary_codec: truncated pq_auth header");
+        uint32_t pq_len = le_get_u32(data + off); off += 4;
+        if (pq_len == 0)
+            throw std::runtime_error("binary_codec: empty pq_auth section");
+        if (pq_len != len - off)
+            throw std::runtime_error("binary_codec: pq_auth length mismatch");
+        tx.pq_auth.assign(data + off, data + off + pq_len);
+        off += pq_len;
+    }
     return tx;
 }
 
