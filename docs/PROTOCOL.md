@@ -565,7 +565,23 @@ Envelope (src/net/binary_codec.cpp):
   offset 4+     payload (per msg_type)
 ```
 
-Payload encodings: **HELLO** — fixed binary frame `[u8 domain_len][domain][u16 LE port][u8 role][u32 LE shard_id][u8 wire_version]`, consumed exactly. **TRANSACTION** — the 4×256-bit fixed frame + trailer (+ optional fail-closed `[u32 LE len][bytes]` pq_auth section, §3.21). **All other types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope; these binarize per-type in the remaining D2 increments — the envelope is the stable extension point).
+Payload encodings, all fail-closed with exact consumption:
+
+* **HELLO** — `[u8 domain_len][domain][u16 LE port][u8 role][u32 LE shard_id][u8 wire_version]`.
+* **TRANSACTION** — the 4×256-bit fixed frame + trailer (+ optional `[u32 LE len][bytes]` pq_auth section, §3.21).
+* **Request / status frames** — the five control messages that carry no signature and no consensus commitment:
+
+| Type | Frame | Size |
+|---|---|---|
+| `GET_CHAIN` | `[from u64 LE][count u16 LE]` | 10 B |
+| `STATUS_REQUEST` | *(no fields)* | 0 B |
+| `STATUS_RESPONSE` | `[height u64 LE][genesis_len u8][genesis]` | 9–73 B |
+| `SNAPSHOT_REQUEST` | `[headers u32 LE]` | 4 B |
+| `HEADERS_REQUEST` | `[from u64 LE][count u32 LE]` | 12 B |
+
+  `STATUS_RESPONSE.genesis` is length-prefixed, not a fixed 32-byte slot, because an empty chain legitimately answers with an **empty** genesis and the requester branches on that emptiness — a fixed slot would encode "unknown" as 64 zeros and turn it into "wrong genesis". `genesis_len` must be 0 or 64; nothing else is accepted. `GET_CHAIN.count` is u16 while `HEADERS_REQUEST.count` is u32, matching their respective handlers.
+
+* **All remaining types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope; these binarize per-type in the remaining D2 increments — the envelope is the stable extension point).
 
 **Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
@@ -575,7 +591,7 @@ Oversize messages close the connection. See `include/determ/net/messages.hpp::ma
 
 ### 9.2 Message types
 
-The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content; for every type except HELLO and TRANSACTION it currently travels as length-prefixed JSON inside the binary envelope (§9.1).
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. HELLO, TRANSACTION and the five request/status types travel as fixed binary frames (§9.1); every other type currently travels as length-prefixed JSON inside the binary envelope.
 
 | ID | Name | Direction | Body cap | Payload |
 |---|---|---|---|---|
@@ -584,19 +600,19 @@ The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry i
 | 2  | TRANSACTION               | gossip            | 1 MB  | binary tx frame (§9.1; optional pq_auth section for PQ_TRANSFER) |
 | 3  | BLOCK_SIG                 | committee         | 1 MB  | `BlockSigMsg` JSON (Phase 2: digest sig + dh_secret) |
 | 4  | CONTRIB                   | committee         | 1 MB  | `ContribMsg` JSON (Phase 1: tx_commit + dh_input + ed sig) |
-| 5  | GET_CHAIN                 | sync              | 1 MB  | `{from, count}` |
+| 5  | GET_CHAIN                 | sync              | 1 MB  | fixed frame `{from, count}` (§9.1) |
 | 6  | CHAIN_RESPONSE            | sync              | 16 MB | `{blocks, has_more}` (bootstrap-only) |
-| 7  | STATUS_REQUEST            | sync              | 1 MB  | `{}` |
-| 8  | STATUS_RESPONSE           | sync              | 1 MB  | `{height, genesis}` (peer-discovery only; role/shard_id come from HELLO) |
+| 7  | STATUS_REQUEST            | sync              | 1 MB  | fixed frame, zero-length (§9.1) |
+| 8  | STATUS_RESPONSE           | sync              | 1 MB  | fixed frame `{height, genesis}` (§9.1; `genesis` may be empty on an empty chain); peer-discovery only — role/shard_id come from HELLO |
 | 9  | ABORT_CLAIM               | committee         | 1 MB  | `AbortClaimMsg` JSON |
 | 10 | ABORT_EVENT               | gossip            | 1 MB  | `{block_index, prev_hash, event}` (event carries inline signed claims) |
 | 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | `EquivocationEvent` JSON |
 | 12 | BEACON_HEADER             | beacon→shard      | 4 MB  | `Block` JSON (beacon block; shard verifies K-of-K from prior-verified pool) |
 | 13 | SHARD_TIP                 | shard→beacon      | 4 MB  | `{shard_id, tip}` where `tip` is a full `Block` JSON |
 | 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `{src_shard, src_block}` (full source block for independent K-of-K verify) |
-| 15 | SNAPSHOT_REQUEST          | client→peer       | 1 MB  | `{headers}` |
+| 15 | SNAPSHOT_REQUEST          | client→peer       | 1 MB  | fixed frame `{headers}` (§9.1) |
 | 16 | SNAPSHOT_RESPONSE         | peer→client       | 16 MB | serialized chain-state JSON (bootstrap-only) |
-| 17 | HEADERS_REQUEST           | client→peer       | 1 MB  | `{from, count}` — v2.2 light-client header-slice request |
+| 17 | HEADERS_REQUEST           | client→peer       | 1 MB  | fixed frame `{from, count}` (§9.1) — v2.2 light-client header-slice request |
 | 18 | HEADERS_RESPONSE          | peer→client       | 4 MB  | `{headers, from, count, height}` — same envelope as the `headers` RPC; light clients consume gossip vs RPC interchangeably |
 
 ### 9.3 Role-based filter
