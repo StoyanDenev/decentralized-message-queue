@@ -36,8 +36,8 @@ struct StakeEntry {
 
 Every chain mutation lands in one of two functions:
 
-- `Chain::apply_transactions(const Block& b)` (`src/chain/chain.cpp:633`) — the per-block apply path. All `AccountState` mutations covered here happen inside this function.
-- `Chain::atomic_scope` (`src/chain/chain.cpp:519`) — a per-fn atomic-scope wrapper used by the COMPOSABLE_BATCH branch. State changes inside `atomic_scope` are either all committed or all rolled back via `restore_state_snapshot`.
+- `Chain::apply_transactions(const Block& b)` (`src/chain/chain.cpp:828`) — the per-block apply path. All `AccountState` mutations covered here happen inside this function.
+- `Chain::atomic_scope` (`src/chain/chain.cpp:665`) — a per-fn atomic-scope wrapper used by the COMPOSABLE_BATCH branch. State changes inside `atomic_scope` are either all committed or all rolled back via `restore_state_snapshot`.
 
 `apply_transactions` is wrapped at line 671–1501 in `try { ... } catch (...) { restore_state_snapshot(...); throw; }`. Any exception thrown from the apply body (including S-007 overflow throws, unitary-balance violations, and S-033 state-root mismatches) leaves the chain in its pre-apply state. This is the A9 atomic-apply property; the invariants below are stated about successfully-applied blocks, which equivalently means "blocks for which the apply path did not throw."
 
@@ -55,14 +55,14 @@ Let `state_n` denote the chain state after the n-th block has been applied (so `
 
 **Formal statement.** For every account `a` in `state_n.accounts_` and every successful apply of `B_{n+1}`, all debits from `a.balance` are gated by a strict precondition `balance ≥ debit` evaluated before the subtraction. The four debit channels are:
 
-1. **TRANSFER source** (`chain.cpp:743–745`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;` where `cost = tx.amount + tx.fee`.
-2. **STAKE** (`chain.cpp:863–865`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;`.
-3. **DAPP_CALL** (`chain.cpp:1212–1214`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;`.
-4. **charge_fee lambda** (`chain.cpp:727–732`), shared by REGISTER / DEREGISTER / UNSTAKE / PARAM_CHANGE / MERGE_EVENT / DAPP_REGISTER fee paths: `if (acct.balance < fee) return false;` then `acct.balance -= fee; return true;`. The caller skips the rest of the tx body if `charge_fee` returns false.
+1. **TRANSFER source** (`chain.cpp:984–985`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;` where `cost = tx.amount + tx.fee`.
+2. **STAKE** (`chain.cpp:1327–1328`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;`.
+3. **DAPP_CALL** (`chain.cpp:1680–1681`): `if (sender.balance < cost) continue;` then `sender.balance -= cost;`.
+4. **charge_fee lambda** (`chain.cpp:954–963`), shared by REGISTER / DEREGISTER / UNSTAKE / PARAM_CHANGE / MERGE_EVENT / DAPP_REGISTER fee paths: `if (acct.balance < fee) return false;` then `acct.balance -= fee; return true;`. The caller skips the rest of the tx body if `charge_fee` returns false. The **SHIELD** debit (`chain.cpp:1026–1032`) uses the same pre-check on the S-049-checked `cost = tx.amount + tx.fee`.
 
-The COMPOSABLE_BATCH inner-TRANSFER path uses the same balance check (`chain.cpp:1002`: `if (isender.balance < inner.amount) return false;`), but its failure path triggers the surrounding `atomic_scope` to roll back any inner debits already applied.
+The COMPOSABLE_BATCH inner-TRANSFER path uses the same balance check (`chain.cpp:1467`: `if (isender.balance < inner.amount) return false;`), but its failure path triggers the surrounding `atomic_scope` to roll back any inner debits already applied.
 
-Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`chain.cpp:33`), which returns `false` on overflow. Every credit path that uses it either throws an S-007 diagnostic (TRANSFER recipient at line 757, DAPP_CALL recipient at line 1216, inbound receipt at line 1368, per-creator subsidy/fee distribution at lines 1292 and 1300, per-block inbound sum at line 1377) or returns from the COMPOSABLE_BATCH inner fn to trigger rollback (line 1006). The S-007 throws are caught by the outer try/catch and trigger `restore_state_snapshot`, leaving `accounts_` exactly as it was at apply entry.
+Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`chain.cpp:42`), which returns `false` on overflow. Every credit path that uses it either throws an S-007 diagnostic (TRANSFER recipient at line 997, DAPP_CALL recipient at line 1683, UNSHIELD recipient at line 1084, inbound receipt at line 1837, per-creator subsidy/fee distribution at lines 1761 and 1769, per-block inbound sum at line 1846) or returns from the COMPOSABLE_BATCH inner fn to trigger rollback (line 1470). The S-007 throws are caught by the outer try/catch and trigger `restore_state_snapshot`, leaving `accounts_` exactly as it was at apply entry.
 
 **Test surface.** `tools/test_overflow_paths.sh` exercises the S-007 overflow throws on TRANSFER recipient, DAPP_CALL recipient, inbound receipt, and subsidy distribution paths, asserting that the chain rolls back rather than wraps. `tools/test_tx_edge_cases.sh` exercises the skip-vs-success boundary: a tx whose amount+fee exactly equals `sender.balance` succeeds; a tx whose amount+fee exceeds it by one is silently skipped (the nonce does NOT bump, per I-2). Both tests defend the invariant against the most common regression class — an unguarded subtraction on a u64 producing a near-`UINT64_MAX` value.
 
@@ -73,9 +73,9 @@ Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`ch
 **Formal statement.** For every account `a` and every pair of consecutive successful applies `state_n → state_{n+1}`:
 
 1. **(Monotone.)** `state_{n+1}.accounts_[a].next_nonce ≥ state_n.accounts_[a].next_nonce`.
-2. **(Strict-equality gate.)** Any transaction `tx` with `tx.from == a` included in `B_{n+1}` is evaluated against `if (tx.nonce != sender.next_nonce) continue;` at `chain.cpp:739` before any state mutation. A tx whose nonce does not match is silently skipped, including no nonce bump.
+2. **(Strict-equality gate.)** Any transaction `tx` with `tx.from == a` included in `B_{n+1}` is evaluated against `if (tx.nonce != sender.next_nonce) continue;` at `chain.cpp:970` before any state mutation. A tx whose nonce does not match is silently skipped, including no nonce bump.
 3. **(At most +1 per applied tx.)** Each transaction that passes the spend-attempt gate executes exactly one `sender.next_nonce++` on its success path. The TRANSFER path bumps at line 768; STAKE at line 869; UNSTAKE at line 892 (both on the success path and on the early-return refund path at line 886, since the validator can't always pre-check `unlock_height`); REGISTER at line 835; DEREGISTER at line 854 (and at line 842 if there is no registrant); PARAM_CHANGE at line 926; COMPOSABLE_BATCH at line 957 (outer; inner-tx nonces bump at line 1010 only on the all-or-nothing inner success); MERGE_EVENT at line 1037; DAPP_REGISTER at line 1051; DAPP_CALL at lines 1138 / 1144 / 1153 / 1160 / 1173 / 1184 / 1193 / 1198 / 1207 / 1222 (every branch that consumed the fee bumps the nonce).
-4. **(Insufficient-balance does NOT bump.)** TRANSFER / STAKE / DAPP_CALL with `sender.balance < cost` execute `continue;` without bumping the nonce (lines 744 / 864 / 1213). The validator should have rejected these txs upstream; the apply-path no-op is a safety net for blocks containing such txs.
+4. **(Insufficient-balance does NOT bump.)** TRANSFER / STAKE / DAPP_CALL / SHIELD with `sender.balance < cost` execute `continue;` without bumping the nonce (lines 984 / 1327 / 1680 / 1026). The validator should have rejected these txs upstream; the apply-path no-op is a safety net for blocks containing such txs.
 
 **Test surface.** `tools/test_tx_replay_protection.sh` constructs two successive blocks each containing a TRANSFER from the same `(from, nonce)`; the first applies and bumps nonce, the second's tx is silently skipped (nonce mismatch), and the recipient's balance reflects exactly one credit. `tools/test_tx_edge_cases.sh` exercises the insufficient-balance branch and asserts no nonce bump in that case. Together they pin both halves of the invariant: matched-nonce txs that pass the spend gate advance state; everything else is a no-op.
 
@@ -86,11 +86,11 @@ Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`ch
 **Formal statement.** For every domain `d` and every successful apply `state_n → state_{n+1}`:
 
 1. **(Disjoint storage.)** `state.accounts_[d].balance` and `state.stakes_[d].locked` live in separate maps (`accounts_` and `stakes_`); no apply path reads from one map and writes to the other except via the explicit channels in (2)–(4).
-2. **(STAKE channel: balance → locked.)** STAKE transactions (`chain.cpp:858–871`) read `amount` from the 8-byte payload, decrement `sender.balance` by `amount + fee`, then increment `stakes_[tx.from].locked` by exactly `amount`. The fee is added to `total_fees` and distributed to creators at block-tail (it does not enter stake).
-3. **(UNSTAKE channel: locked → balance, post-unlock.)** UNSTAKE transactions (`chain.cpp:873–894`) require `height ≥ stakes_[tx.from].unlock_height` AND `locked ≥ amount`. On success, `sit->second.locked -= amount; sender.balance += amount;`. On failure (early UNSTAKE or insufficient lock), the fee is refunded (`sender.balance += tx.fee; total_fees -= tx.fee;`) and the nonce still bumps. The unlock-height gate prevents the channel from running during the active-registration window.
+2. **(STAKE channel: balance → locked.)** STAKE transactions (`chain.cpp:1317–1336`) read `amount` from the 8-byte payload, decrement `sender.balance` by `amount + fee`, then increment `stakes_[tx.from].locked` by exactly `amount`. The fee is added to `total_fees` and distributed to creators at block-tail (it does not enter stake).
+3. **(UNSTAKE channel: locked → balance, post-unlock.)** UNSTAKE transactions (`chain.cpp:1338–1359`) require `height ≥ stakes_[tx.from].unlock_height` AND `locked ≥ amount`. On success, `sit->second.locked -= amount; sender.balance += amount;`. On failure (early UNSTAKE or insufficient lock), the fee is refunded (`sender.balance += tx.fee; total_fees -= tx.fee;`) and the nonce still bumps. The unlock-height gate prevents the channel from running during the active-registration window.
 4. **(Slashing channel: locked → ∅, no balance change.)** Two apply-path branches decrease `stakes_[d].locked` without touching `accounts_[d].balance`:
-   - Suspension slash for Phase-1 abort events (`chain.cpp:1313–1328`): `deduct = min(suspension_slash_, sit->second.locked); sit->second.locked -= deduct;`.
-   - Full equivocation slash (`chain.cpp:1344–1356`): `sit->second.locked = 0;` plus `rit->second.inactive_from = b.index + 1;`.
+   - Suspension slash for Phase-1 abort events (`chain.cpp:1782–1797`): `deduct = min(suspension_slash_, sit->second.locked); sit->second.locked -= deduct;`.
+   - Full equivocation slash (`chain.cpp:1813–1825`): `sit->second.locked = 0;` plus `rit->second.inactive_from = b.index + 1;`.
    Both branches add the deducted amount to the per-block `block_slashed` counter, which feeds into the A1 invariant (I-6). Neither writes to `accounts_[d].balance`. The slashed value leaves the live supply for the purpose of A1.
 
 **Test surface.** `tools/test_stake_accounting.sh` exercises STAKE / UNSTAKE state transitions including the unlock-height gate and the fee-refund path on early UNSTAKE. `tools/test_equivocation_slashing.sh` confirms that equivocation zeros `stakes_[equivocator].locked` without affecting `accounts_[equivocator].balance`. The A1 invariant (I-6) provides a second-order check: if any apply path leaked between balance and stake without crediting `block_slashed` or `block_outbound`, the unitary-balance check would throw at apply tail.
@@ -101,14 +101,15 @@ Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`ch
 
 **Formal statement.** An `accounts_` map entry for domain `d` is created at the FIRST successful apply that satisfies any of:
 
-1. **(TRANSFER credit-on-receipt.)** `chain.cpp:756` — `auto& rcv = accounts_[tx.to].balance;` creates an entry for `tx.to` if it doesn't exist, then `checked_add_u64(rcv, tx.amount, &rcv)` credits it. Same-shard TRANSFER only; cross-shard TRANSFER does not credit on the source side (the receipt-side credit creates the entry on the destination shard).
-2. **(Inbound cross-shard receipt.)** `chain.cpp:1367` — `auto& rcv = accounts_[r.to].balance;` creates an entry for `r.to`, then `checked_add_u64(rcv, r.amount, &rcv)` credits it.
-3. **(Sender reference.)** `chain.cpp:735` — `AccountState& sender = accounts_[tx.from];` creates an entry for `tx.from` if it doesn't exist. This path is normally a no-op when the sender has no balance: the strict-nonce gate at line 739 rejects (continue) before any mutation, leaving the freshly-created zero-balance/zero-nonce entry in `accounts_`. The validator's V15 + ed25519 signature check filter out senders without ed25519-key authority earlier; the apply-time creation is a defensive consequence of `operator[]`.
-4. **(NEF distribution.)** `chain.cpp:830` — `accounts_[tx.from].balance += nef;` creates an entry for the new registrant if the REGISTER fee already pre-created one (which it does via the `sender` reference at line 735); this is therefore redundant with (3) for registrants and exists for the credit semantics.
-5. **(Per-creator subsidy + fee distribution.)** `chain.cpp:1291` — `auto& bal = accounts_[domain].balance;` for each `domain` in `b.creators`. Creators must be registered (V2) and therefore have already been auto-created at REGISTER time (their REGISTER tx referenced `sender` at line 735), so this is a lookup not a creation in steady state. The path is safe even if a creator's accounts entry was somehow removed: the auto-create yields a zero-balance entry and the credit proceeds normally.
-6. **(DAPP_CALL credit.)** `chain.cpp:1215` — `auto& rcv = accounts_[tx.to].balance;`, analogous to TRANSFER credit.
+1. **(TRANSFER credit-on-receipt.)** `chain.cpp:996` — `auto& rcv = accounts_[tx.to].balance;` creates an entry for `tx.to` if it doesn't exist, then `checked_add_u64(rcv, tx.amount, &rcv)` credits it. Same-shard TRANSFER only; cross-shard TRANSFER does not credit on the source side (the receipt-side credit creates the entry on the destination shard).
+2. **(Inbound cross-shard receipt.)** `chain.cpp:1836` — `auto& rcv = accounts_[r.to].balance;` creates an entry for `r.to`, then `checked_add_u64(rcv, r.amount, &rcv)` credits it.
+3. **(Sender reference.)** `chain.cpp:966` — `AccountState& sender = accounts_[tx.from];` creates an entry for `tx.from` if it doesn't exist. This path is normally a no-op when the sender has no balance: the strict-nonce gate at line 970 rejects (continue) before any mutation, leaving the freshly-created zero-balance/zero-nonce entry in `accounts_`. The validator's V15 + ed25519 signature check filter out senders without ed25519-key authority earlier; the apply-time creation is a defensive consequence of `operator[]`.
+4. **(NEF distribution.)** `chain.cpp:1289` — `accounts_[tx.from].balance += nef;` creates an entry for the new registrant if the REGISTER fee already pre-created one (which it does via the `sender` reference at line 966); this is therefore redundant with (3) for registrants and exists for the credit semantics.
+5. **(Per-creator subsidy + fee distribution.)** `chain.cpp:1760` — `auto& bal = accounts_[domain].balance;` for each `domain` in `b.creators`. Creators must be registered (V2) and therefore have already been auto-created at REGISTER time (their REGISTER tx referenced `sender` at line 966), so this is a lookup not a creation in steady state. The path is safe even if a creator's accounts entry was somehow removed: the auto-create yields a zero-balance entry and the credit proceeds normally.
+6. **(DAPP_CALL credit.)** `chain.cpp:1682` — `auto& rcv = accounts_[tx.to].balance;`, analogous to TRANSFER credit.
+7. **(UNSHIELD destination credit.)** `chain.cpp:1083` — `auto& rcv = accounts_[tx.to].balance;` creates an entry for `tx.to` on a §3.22 confidential→transparent withdraw, then `checked_add_u64(rcv, credit, &rcv)` (`1084`, `credit = tx.amount − tx.fee`) credits it. Same-shard only (the apply rejects a cross-shard `tx.to` at `1059`), analogous to TRANSFER/DAPP_CALL credit.
 
-DEREGISTER (`chain.cpp:839–856`) does NOT auto-create an `accounts_` entry beyond the sender reference at line 735; the `find` at line 841 is in `registrants_`, not `accounts_`. A DEREGISTER from a non-registrant nonetheless bumps `sender.next_nonce` (line 842), and the sender reference auto-creates an account entry in `accounts_` if none existed. This is the observed "defensive design" behavior tested in `tools/test_account_create_on_credit.sh`.
+DEREGISTER (`chain.cpp:1298–1315`) does NOT auto-create an `accounts_` entry beyond the sender reference at line 966; the `find` at line 1300 is in `registrants_`, not `accounts_`. A DEREGISTER from a non-registrant nonetheless bumps `sender.next_nonce` (line 1301), and the sender reference auto-creates an account entry in `accounts_` if none existed. This is the observed "defensive design" behavior tested in `tools/test_account_create_on_credit.sh`.
 
 **Test surface.** `tools/test_account_create_on_credit.sh` is the canonical defense. It exercises five scenarios across 11 assertions: TRANSFER to a non-existent domain creates an entry with `balance = amount`; inbound cross-shard receipt to a non-existent domain creates an entry; DEREGISTER from a non-registrant bumps nonce without creating a registry entry; stacked credit (receipt + TRANSFER to the same fresh domain in the same block) sums correctly; and determinism — the same auto-creation sequence produces a byte-identical state_root and identical `accounts_` size. The determinism assertion catches any non-deterministic auto-creation path (e.g., one keyed off iteration order of an unsorted container) that would silently fork the state_root.
 
@@ -122,28 +123,30 @@ DEREGISTER (`chain.cpp:839–856`) does NOT auto-create an `accounts_` entry bey
 
 | Channel | Apply site | Magnitude per event |
 |---|---|---|
-| TRANSFER source (same-shard or cross-shard) | `chain.cpp:745` | `tx.amount + tx.fee` |
-| STAKE lock | `chain.cpp:865` | `payload.amount + tx.fee` |
-| DAPP_CALL source | `chain.cpp:1214` | `tx.amount + tx.fee` |
-| COMPOSABLE_BATCH inner TRANSFER source | `chain.cpp:1004` | `inner.amount` (outer fee charged separately) |
-| Fee-only debit (REGISTER / DEREGISTER / UNSTAKE / PARAM_CHANGE / MERGE_EVENT / DAPP_REGISTER) | `charge_fee` at `chain.cpp:729` | `tx.fee` |
-| NEF source (Zeroth pool) | `chain.cpp:829` | `pool_balance / 2` |
-| UNSTAKE fee refund (negation of the immediately-prior fee debit, on early-unstake failure) | `chain.cpp:884` | `+tx.fee` (this is a credit) |
+| TRANSFER source (same-shard or cross-shard) | `chain.cpp:985` | `tx.amount + tx.fee` |
+| STAKE lock | `chain.cpp:1328` | `payload.amount + tx.fee` |
+| DAPP_CALL source | `chain.cpp:1681` | `tx.amount + tx.fee` |
+| SHIELD source (transparent → confidential pool) | `chain.cpp:1032` | `tx.amount + tx.fee` (S-049-checked `cost` at `1025`) |
+| COMPOSABLE_BATCH inner TRANSFER source | `chain.cpp:1469` | `inner.amount` (outer fee charged separately) |
+| Fee-only debit (REGISTER / DEREGISTER / UNSTAKE / PARAM_CHANGE / MERGE_EVENT / DAPP_REGISTER) | `charge_fee` at `chain.cpp:961` | `tx.fee` |
+| NEF source (Zeroth pool) | `chain.cpp:1288` | `pool_balance / 2` |
+| UNSTAKE fee refund (negation of the immediately-prior fee debit, on early-unstake failure) | `chain.cpp:1349` | `+tx.fee` (this is a credit) |
 
 **Credit channels (balance increases):**
 
 | Channel | Apply site | Magnitude per event |
 |---|---|---|
-| TRANSFER same-shard credit | `chain.cpp:757` | `tx.amount` |
-| DAPP_CALL same-shard credit | `chain.cpp:1216` | `tx.amount` |
-| COMPOSABLE_BATCH inner TRANSFER credit | `chain.cpp:1006` | `inner.amount` |
-| UNSTAKE post-unlock credit | `chain.cpp:891` | `tx.payload.amount` |
-| Inbound cross-shard receipt | `chain.cpp:1368` | `r.amount` |
-| Subsidy + fee distribution to creator | `chain.cpp:1292` | `total_distributed / |creators|` |
-| Subsidy + fee dust to creator[0] | `chain.cpp:1300` | `total_distributed mod |creators|` |
-| NEF destination (first-time REGISTER) | `chain.cpp:830` | `pool_balance / 2` |
+| TRANSFER same-shard credit | `chain.cpp:997` | `tx.amount` |
+| DAPP_CALL same-shard credit | `chain.cpp:1683` | `tx.amount` |
+| UNSHIELD destination credit (confidential → transparent) | `chain.cpp:1083-1084` | `tx.amount − tx.fee` |
+| COMPOSABLE_BATCH inner TRANSFER credit | `chain.cpp:1470` | `inner.amount` |
+| UNSTAKE post-unlock credit | `chain.cpp:1356` | `tx.payload.amount` |
+| Inbound cross-shard receipt | `chain.cpp:1837` | `r.amount` |
+| Subsidy + fee distribution to creator | `chain.cpp:1761` | `total_distributed / |creators|` |
+| Subsidy + fee dust to creator[0] | `chain.cpp:1769` | `total_distributed mod |creators|` |
+| NEF destination (first-time REGISTER) | `chain.cpp:1289` | `pool_balance / 2` |
 
-There are NO other apply-path writes to `accounts_[d].balance`. Genesis (line 689) writes initial balances at index-0 apply; it is not a delta over a prior state since there is no prior state — it bootstraps `state_0`. The two A1 counters `accumulated_subsidy_` (line 1391) and `accumulated_inbound_` / `accumulated_outbound_` / `accumulated_slashed_` (lines 1393–1395) are running-sum aggregators, not balance writes.
+There are NO other apply-path writes to `accounts_[d].balance` (the SHIELD debit and UNSHIELD credit above are the §3.22 confidential-pool channels; CONFIDENTIAL_TRANSFER is pool→pool and writes no transparent balance — its only transparent effect is the fee accrual to creators). Genesis (line 912) writes initial balances at index-0 apply; it is not a delta over a prior state since there is no prior state — it bootstraps `state_0`. The A1 counters `accumulated_subsidy_` (line 1860) and `accumulated_inbound_` / `accumulated_outbound_` / `accumulated_slashed_` (lines 1862–1864), plus `accumulated_shielded_` (mutated in-branch by SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER at `chain.cpp:1037`/`1081`/`1172`), are running-sum aggregators, not balance writes.
 
 **Test surface.** `tools/test_supply_invariant.sh`, `tools/test_supply_lifecycle.sh`, and `tools/test_fee_distribution_edge.sh` collectively traverse the listed channels under varied block compositions (TRANSFER-only, STAKE+UNSTAKE, NEF on first REGISTER, lottery subsidy, finite-pool exhaustion). Each test asserts the A1 unitary-balance closing equality at block tail, which would diverge if any channel produced a balance change not captured in the per-block deltas `total_fees + subsidy_this_block + block_inbound − block_outbound − block_slashed`. The structural property is therefore checked indirectly via the A1 invariant — if a hypothetical phantom credit channel were introduced, A1 would throw at apply tail.
 
@@ -164,7 +167,9 @@ There are NO other apply-path writes to `accounts_[d].balance`. Genesis (line 68
    − state_{n+1}.accumulated_shielded_
 ```
 
-The left-hand side is computed by `Chain::live_total_supply()` (`chain.cpp:548`). The right-hand side is `Chain::expected_total()`. The equality is asserted at `chain.cpp:1397–1419`; a mismatch throws a "unitary-balance invariant violated" diagnostic with the per-counter breakdown, which is caught by the outer try/catch and rolls the apply back via `restore_state_snapshot`.
+The sixth term `− accumulated_shielded_` (v2.20 §3.22, `chain.hpp:898`) is the confidential-pool counter: SHIELD moves transparent balance into the opaque commitment set (so it leaves the LHS live sum), UNSHIELD / CONFIDENTIAL_TRANSFER move value back out of it; it is `0` on any shield-free chain.
+
+The left-hand side is computed by `Chain::live_total_supply()` (`chain.cpp:699`). The right-hand side is `Chain::expected_total()` (`chain.hpp:590–597`). The equality is asserted at `chain.cpp:1866–1890`; a mismatch throws a "unitary-balance invariant violated" diagnostic (whose per-counter breakdown itemizes all six apply-tail-folded operands, including the subtractive `− accumulated_shielded_`), which is caught by the outer try/catch and rolls the apply back via `restore_state_snapshot`.
 
 This invariant is the chain-level companion of the per-account view. The full proof is in `EconomicSoundness.md` T-12 (and T-13 for the NEF supply-neutrality subclaim, and T-14 for the E3 / E4 expected-value preservation under lottery + finite pool). The relevance to AccountState is structural: every channel listed in I-5 contributes to exactly one of the first five right-hand-side terms, the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER branches feed the sixth (`− accumulated_shielded_`) term (zero on shield-free chains), and the equality at apply-tail confirms the per-account deltas closed correctly.
 
@@ -188,17 +193,17 @@ The invariants in §2 are stated as predicates over `state_n`. The corresponding
 
 *Proof.* By inspection of all apply-path branches in `apply_transactions`. The STAKE, UNSTAKE, suspension, and equivocation branches are the only ones that read or write `stakes_`; each follows the I-3 channel pattern. ∎
 
-**Theorem T-A4 (Auto-creation enumeration).** For every domain `d`, an entry `accounts_[d]` is created exactly when one of the six channels in I-4 fires.
+**Theorem T-A4 (Auto-creation enumeration).** For every domain `d`, an entry `accounts_[d]` is created exactly when one of the seven channels in I-4 fires.
 
 *Proof.* By inspection of every `accounts_[...]` reference in `apply_transactions`. Each is either a read (no entry creation in `std::map` if the key is missing — `accounts_.find(...)` is used in those cases), or it is one of the listed `accounts_[d]` / `accounts_[d].balance` / `accounts_[d].next_nonce` writes that auto-create on first reference. The enumeration in I-4 is the union of these write sites. ∎
 
-**Theorem T-A5 (Exhaustive balance-channel decomposition).** Every `Δaccounts_[d].balance` across a successful apply is the sum of contributions from exactly the eight credit channels and seven debit channels in I-5 (a UNSTAKE fee refund counts as a negation of the immediately-prior fee debit).
+**Theorem T-A5 (Exhaustive balance-channel decomposition).** Every `Δaccounts_[d].balance` across a successful apply is the sum of contributions from exactly the nine credit channels and eight debit channels in I-5 (a UNSTAKE fee refund counts as a negation of the immediately-prior fee debit; the SHIELD debit / UNSHIELD credit are the §3.22 confidential-pool channels).
 
 *Proof.* By inspection of every `accounts_[...].balance` write in `apply_transactions`. The §2 I-5 tables enumerate them; no other site writes to `.balance`. ∎
 
 **Theorem T-A6 (A1 contribution).** The per-account state at `state_n` sums (across all `accounts_` keys plus all `stakes_` keys) to `expected_total(state_n)`.
 
-*Proof.* See `EconomicSoundness.md` T-12, which establishes the chain-level invariant by induction on block height. The per-account I-5 decomposition is the inductive step's enumeration of balance deltas; the per-stake decomposition is the I-3 channel enumeration. The six running counters absorb the corresponding deltas (`accumulated_subsidy_` accepts the per-block subsidy debit from the implicit mint; `accumulated_inbound_` / `accumulated_outbound_` accept the cross-shard credits / debits; `accumulated_slashed_` accepts the suspension + equivocation slash; `accumulated_shielded_` accepts the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER confidential-pool moves — zero on shield-free chains; `genesis_total_` is the index-0 anchor). Apply-tail assertion at `chain.cpp:1399` would throw if the per-account deltas failed to close. ∎
+*Proof.* See `EconomicSoundness.md` T-12, which establishes the chain-level invariant by induction on block height. The per-account I-5 decomposition is the inductive step's enumeration of balance deltas; the per-stake decomposition is the I-3 channel enumeration. The six running counters absorb the corresponding deltas (`accumulated_subsidy_` accepts the per-block subsidy debit from the implicit mint; `accumulated_inbound_` / `accumulated_outbound_` accept the cross-shard credits / debits; `accumulated_slashed_` accepts the suspension + equivocation slash; `accumulated_shielded_` accepts the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER confidential-pool moves — zero on shield-free chains; `genesis_total_` is the index-0 anchor). Apply-tail assertion at `chain.cpp:1866-1890` would throw if the per-account deltas failed to close. ∎
 
 ---
 
@@ -206,11 +211,11 @@ The invariants in §2 are stated as predicates over `state_n`. The corresponding
 
 If any apply-path branch were to violate one of I-1 through I-6, the consequence is well-defined:
 
-- **I-1 violation (debit underflow).** A u64 wrap would produce a near-`UINT64_MAX` balance. Subsequent A1 evaluation at apply tail would detect a `live_total_supply > expected_total` by approximately `2^64 - debit`. The throw at line 1418 would trigger `restore_state_snapshot` and reject the block. The S-033 state-root re-derivation at line 1430 would also detect the corruption locally (the producer's tentative-chain dry-run would produce a state_root incompatible with any other honest node's apply).
-- **I-2 violation (replay).** The strict-equality nonce gate at line 739 would fail. The apply-side branch is `continue` (silent skip), so a replay attempt produces no state change. The validator V15's transaction-apply check would have rejected the block earlier if the block's overall apply produced an invalid state, but a pure replay tx is silently ignored at apply-time.
-- **I-3 violation (balance ↔ stake leakage).** No legitimate apply path can produce this; a regression introducing it would manifest as an A1 mismatch (the leaked value is unaccounted for in any per-block counter). The throw at line 1418 would catch it.
+- **I-1 violation (debit underflow).** A u64 wrap would produce a near-`UINT64_MAX` balance. Subsequent A1 evaluation at apply tail would detect a `live_total_supply > expected_total` by approximately `2^64 - debit`. The throw at line 1887 would trigger `restore_state_snapshot` and reject the block. The S-033 state-root re-derivation at line 1430 would also detect the corruption locally (the producer's tentative-chain dry-run would produce a state_root incompatible with any other honest node's apply).
+- **I-2 violation (replay).** The strict-equality nonce gate at line 970 would fail. The apply-side branch is `continue` (silent skip), so a replay attempt produces no state change. The validator V15's transaction-apply check would have rejected the block earlier if the block's overall apply produced an invalid state, but a pure replay tx is silently ignored at apply-time.
+- **I-3 violation (balance ↔ stake leakage).** No legitimate apply path can produce this; a regression introducing it would manifest as an A1 mismatch (the leaked value is unaccounted for in any per-block counter). The throw at line 1887 would catch it.
 - **I-4 violation (silent auto-creation).** A regression introducing an unguarded `accounts_[key]` access on an unintended path would create a phantom zero-balance entry that contributes to the S-033 state_root. On the producer's apply this is benign (the entry is empty); on a receiving node applying the same block from a different code revision, the produced state_root would diverge. The S-033 gate at line 1430 would detect this on the validator side, reject the block, and roll back via the catch path at line 1499.
-- **I-5 violation (phantom balance channel).** A regression introducing a balance change not captured in the per-block deltas would produce an A1 mismatch at line 1399. Same throw-and-rollback path as I-1 and I-3.
+- **I-5 violation (phantom balance channel).** A regression introducing a balance change not captured in the per-block deltas would produce an A1 mismatch at line 1868. Same throw-and-rollback path as I-1 and I-3.
 - **I-6 violation (A1 mismatch directly).** Already the failure path for I-1 / I-3 / I-5. The chain explicitly rejects the block; no partial state survives.
 
 In every failure mode, the A9 atomic-apply guarantee (try/catch at lines 671 / 1489) ensures that observers see either the full block applied or no change at all. There is no partial-apply state that could leak to peers via gossip — the producer's try_finalize_round + tentative-chain dry-run (`Node::try_finalize_round`, per the S-038 closure noted in PROTOCOL.md §5.1) catches I-1 / I-3 / I-4 / I-5 / I-6 violations on the local node before the block is broadcast.
@@ -237,10 +242,10 @@ In every failure mode, the A9 atomic-apply guarantee (try/catch at lines 671 / 1
 | `include/determ/chain/chain.hpp` (lines 18–21) | `AccountState` struct declaration. |
 | `include/determ/chain/chain.hpp` (lines 23–30) | `StakeEntry` struct declaration. |
 | `include/determ/chain/chain.hpp` (lines 32–44) | `RegistryEntry` struct declaration (ed_pub lives here, not on `AccountState`). |
-| `src/chain/chain.cpp` (lines 633–1502) | `Chain::apply_transactions`; every apply-path mutation. |
-| `src/chain/chain.cpp` (line 33) | `checked_add_u64` helper (S-007). |
-| `src/chain/chain.cpp` (line 519) | `Chain::atomic_scope` (COMPOSABLE_BATCH wrapper). |
-| `src/chain/chain.cpp` (lines 1397–1419) | A1 unitary-balance assertion + rollback throw. |
+| `src/chain/chain.cpp:828` (function body) | `Chain::apply_transactions`; every apply-path mutation. |
+| `src/chain/chain.cpp` (line 42) | `checked_add_u64` helper (S-007). |
+| `src/chain/chain.cpp` (line 665) | `Chain::atomic_scope` (COMPOSABLE_BATCH wrapper). |
+| `src/chain/chain.cpp` (lines 1866–1888) | A1 unitary-balance assertion + rollback throw. |
 
 ---
 

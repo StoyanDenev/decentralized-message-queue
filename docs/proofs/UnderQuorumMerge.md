@@ -41,14 +41,15 @@ When this shard absorbs refugees (i.e., `Chain::shards_absorbed_by(my_shard)` re
 
 All three apply the same extension logic; producers and validators see identical pools.
 
-### Validator gates
+### Validator gates (`src/node/validator.cpp::check_transactions`, MERGE_EVENT branch)
 
+- `chain_role == BEACON` required (`validator.cpp:862-866`). A shard's `t:` ring is always empty (only a BEACON producer under EXTENDED populates `b.shard_tip_records`), so only a BEACON chain can verify the historical distress witness below; accepting a shard-submitted MERGE_BEGIN would admit a fabricated-distress committee dilution unchecked (the reachable S-036 exploit).
 - `sharding_mode == EXTENDED` required.
 - Canonical 26+region_len byte payload.
 - `event_type ∈ {0, 1}` and `partner_id ≠ shard_id`.
 - Region charset `[a-z0-9-_]`, `≤ 32` bytes.
 - `effective_height ≥ block.index + merge_grace_blocks` (R4 Phase 6 bound).
-- BEGIN: `evidence_window_start + merge_threshold_blocks ≤ block.index` (R4 Phase 6 bound).
+- BEGIN: the **historical-witness admission gate** (`validator.cpp:898-945`, S-036 closure, v2.11). Iterate every source-shard height `h ∈ [evidence_window_start, evidence_window_start + merge_threshold_blocks)` and require a committed `t:` shard-tip distress record (`chain.shard_tip_records().find({shard_id, h})`) attesting sub-2K eligibility at each; **fail-closed** on any absent record (`A_beacon_omit`, or the window predates the retained ring) or any record attesting healthy (`eligible_count ≥ 2K`). Guarded by `merge_threshold_blocks != 0` and a u64-overflow check on `evidence_window_start + threshold` (`validator.cpp:915-926`, the overflow guard at `922-926`). **This SUPERSEDES the old `evidence_window_start + merge_threshold_blocks ≤ block.index` arithmetic bound** (`validator.cpp:910-914`): that compared the source-height window against the BEACON containing-block height and — since shards outrun the beacon — false-rejected legitimate windows; `block.index` is no longer used in the BEGIN check.
 
 ---
 
@@ -108,7 +109,7 @@ Bonus: the apply-time idempotency guard (duplicate BEGIN with same (shard, partn
 
 ## 4. What the proof does NOT cover
 
-- **S-036 captured-beacon attack.** A fully-compromised beacon committee could fabricate the MERGE_BEGIN payload's `evidence_window_start` field, claiming a trigger condition that never actually held. R4 Phase 6 ships partial mitigation (bounds checks: window must lie in past, effective_height must respect grace), but full historical validation against on-chain SHARD_TIP records remains a v1.1 work item (currently SHARD_TIP is gossip-only — no on-chain commitment to its absence).
+- **S-036 captured-beacon attack — CLOSED (v2.11).** A fully-compromised beacon committee could once fabricate the MERGE_BEGIN payload's `evidence_window_start` field, claiming a trigger condition that never actually held. This is now closed: the BEGIN historical-witness admission gate (`validator.cpp:898-945`) validates the claimed window against the on-chain `t:` SHARD_TIP distress records — every source-shard height in `[evidence_window_start, +merge_threshold_blocks)` must carry a committed sub-2K record, fail-closed on any absent record or any record attesting health. The `t:` ring is **state-root-bound** (folded into `compute_state_root` at `chain.cpp:402-414`) and snapshot-inherited, so archive and snapshot-bootstrapped BEACON nodes verify against the same committed set, and a beacon that tried to forge a distress claim would have to rewrite the committed `t:` leaves — breaking `state_root` and tripping the S-033 gate. The gate is BEACON-only (`validator.cpp:862-866`), since a shard's `t:` ring is empty and cannot verify. Residual (not a safety hole): the gate verifies the *committed presence* of distress records but cannot manufacture them — activating the end-to-end merge flow (beacon emitter + beacon→shard propagation) is an owner-gated Layer-2 item, so the merge feature is dormant until that ships.
 - **Cascading merges.** If shard T (currently absorbing S) also drops below 2K and tries to merge with U, the protocol does not chain S→T→U. v1.x first-trigger-wins; v1.1 work item per the design doc.
 - **Auto-detection trigger.** The beacon-side observation logic that emits MERGE_BEGIN automatically based on `eligible_in_region < 2K` over the window is v1.1. Operator-driven MERGE_EVENT via `determ submit-merge-event` is the v1.x path.
 - **Slashing during merge.** Refugees misbehaving on T's merged block are slashed on S (their home chain). Per the R4 design, eligibility clears via the stress-branch predicate the next time S's pool is queried. The cross-chain slashing mechanic (B5 EquivocationEvent relay) already supports this — no special-case logic required.
@@ -120,8 +121,10 @@ Bonus: the apply-time idempotency guard (duplicate BEGIN with same (shard, partn
 | Component | Source |
 |---|---|
 | `MergeEvent` struct + canonical codec | `include/determ/chain/block.hpp::MergeEvent`; `src/chain/block.cpp` |
-| Validator MERGE_EVENT case (gate + bounds) | `src/node/validator.cpp::check_transactions` MERGE_EVENT branch |
-| `Chain::merge_state_` + insert/erase apply | `src/chain/chain.cpp::apply_transactions` |
+| Validator MERGE_EVENT case (gate + bounds) | `src/node/validator.cpp:862-949` (MERGE_EVENT branch: BEACON-role gate `862-866`, shape/charset/grace bounds, BEGIN witness gate) |
+| BEGIN historical-witness admission gate (S-036 closure, v2.11) | `src/node/validator.cpp:898-945` (iterate `[evidence_window_start, +merge_threshold_blocks)` over `chain.shard_tip_records()`, fail-closed on absent/healthy; overflow guard `922-926`) |
+| `t:` SHARD_TIP distress-record ring, state-root-bound | `src/chain/chain.cpp:402-414` (`build_state_leaves`, folds `shard_tip_records_` into `state_root`) |
+| `Chain::merge_state_` + insert/erase apply | `src/chain/chain.cpp::apply_transactions` (MERGE_EVENT branch ~1482) |
 | `Chain::shards_absorbed_by(partner)` inverse lookup | `include/determ/chain/chain.hpp` |
 | Producer-side stress branch | `src/node/node.cpp::check_if_selected` |
 | Validator-side stress branch | `src/node/validator.cpp::check_creator_selection`, `check_abort_certs` |
@@ -134,7 +137,7 @@ A reviewer can confirm safety preservation by:
 1. Reading the stress-branch extension at both producer and validator sites; confirm both call the same helper (`chain.shards_absorbed_by`) and same registry filter (`registry.eligible_in_region(refugee_region)`).
 2. Confirming `merge_state_` mutations happen only inside `apply_transactions` and only on canonical MERGE_EVENT input.
 3. Tracing that the snapshot path round-trips `merge_state` with `refugee_region` so a snapshot-bootstrapped node resumes mid-merge correctly.
-4. Confirming the Phase 6 bounds in `check_transactions` reject obviously-forged windows.
+4. Confirming the BEGIN historical-witness gate (`validator.cpp:898-945`) rejects a MERGE_BEGIN whose `[evidence_window_start, +merge_threshold_blocks)` window lacks a committed sub-2K `t:` record at any source height (fail-closed on absent/healthy), that the gate is BEACON-only (`862-866`), and that the `t:` ring folds into `state_root` (`chain.cpp:402-414`) so the verified records are snapshot-inherited and tamper-evident.
 
 ---
 
@@ -142,6 +145,6 @@ A reviewer can confirm safety preservation by:
 
 T-9 + T-9a establish that R4's under-quorum merge mechanism preserves the safety properties of FA1 and FA7 without modifying their cryptographic reductions — the stress branch extends the eligible pool but does not relax any structural check. The validator mirrors the producer's pool extension, eliminating the divergence surface that would otherwise be a forking risk.
 
-The Phase 6 bounds (effective_height grace, BEGIN evidence window past-bound) constrain the captured-beacon attack surface but do not fully close S-036. Full closure requires on-chain SHARD_TIP records — a v1.1 work item that does not block v1.x acceptance.
+The Phase 6 effective_height-grace bound plus the BEGIN **historical-witness admission gate** (`validator.cpp:898-945`) **close S-036** (v2.11): the gate validates the claimed distress window against the state-root-bound on-chain `t:` SHARD_TIP records, requiring a committed sub-2K record at every in-window source height and failing closed on any absent-or-healthy record. On-chain SHARD_TIP records — once a v1.1 work item — are now shipped and folded into `state_root` (`chain.cpp:402-414`), so a captured beacon can no longer admit a fabricated-distress merge without breaking `state_root`. The gate is BEACON-only (`validator.cpp:862-866`); end-to-end activation of the merge flow (beacon emitter + beacon→shard propagation) remains an owner-gated Layer-2 item, so the mechanism is dormant-but-safe.
 
 Determ's v1.x merge mechanism is operator-driven (submit-merge-event CLI), audit-trace-friendly (every event is a canonical 26+region_len byte payload in a finalized block), and provably-safety-preserving under standard cryptographic assumptions.
