@@ -24,7 +24,8 @@
 //    fd-reuse stale-event/stale-poll hazard for both halves.
 //  - write_all/read_line/set_send_timeout: the synchronous half (RpcServer
 //    sessions + the dapp_subscribe writer) — send/recv loops that park in
-//    poll() on EAGAIN. MSG_NOSIGNAL on every send (SIGPIPE immunity — the
+//    poll() on EAGAIN. MSG_NOSIGNAL (Linux) / per-fd SO_NOSIGPIPE (Darwin)
+//    on every send (SIGPIPE immunity — the
 //    sync_client lesson). A cross-thread close()'s shutdown wakes the poll
 //    promptly (POSIX gives the sync half the wake IOCP needed an
 //    event-abort design for); set_send_timeout bounds the stalled-peer

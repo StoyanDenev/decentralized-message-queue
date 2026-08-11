@@ -35,6 +35,15 @@ std::string format_endpoint(const sockaddr_in& sa) {
 
 // Portable non-blocking flip (no accept4/SOCK_NONBLOCK: this code is
 // destined to be shared verbatim with the kqueue policy — §4.5).
+// SIGPIPE immunity for every send: MSG_NOSIGNAL where it exists (Linux).
+// Darwin has no MSG_NOSIGNAL — SO_NOSIGPIPE is set per-fd in the
+// ReactorConnection ctor instead, and the send flag collapses to 0.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendNoSigpipe = MSG_NOSIGNAL;
+#else
+constexpr int kSendNoSigpipe = 0;
+#endif
+
 bool set_nonblocking(int fd) {
     int fl = ::fcntl(fd, F_GETFL, 0);
     return fl >= 0 && ::fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
@@ -48,6 +57,12 @@ ReactorConnection::ReactorConnection(ReactorEventLoop& loop, int fd,
                                      std::string endpoint)
     : loop_(loop), fd_(fd), endpoint_(std::move(endpoint)) {
     set_nonblocking(fd_);
+#ifdef SO_NOSIGPIPE
+    // Darwin SIGPIPE immunity (no MSG_NOSIGNAL there): per-fd, and this
+    // ctor is the single choke point for accepted AND connected sockets.
+    int one = 1;
+    ::setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
 }
 
 ReactorConnection::~ReactorConnection() {
@@ -66,7 +81,7 @@ bool ReactorConnection::advance_locked(Op& op, bool is_read,
         if (is_read) {
             r = ::recv(fd_, op.buf + op.done, op.n - op.done, 0);
         } else {
-            r = ::send(fd_, op.buf + op.done, op.n - op.done, MSG_NOSIGNAL);
+            r = ::send(fd_, op.buf + op.done, op.n - op.done, kSendNoSigpipe);
         }
         if (r > 0) {
             op.done += static_cast<std::size_t>(r);
@@ -200,7 +215,7 @@ bool ReactorConnection::write_all(const void* buf, std::size_t n) {
     std::size_t off = 0;
     while (off < n) {
         if (closed_.load()) return false;
-        ssize_t r = ::send(fd_, p + off, n - off, MSG_NOSIGNAL);
+        ssize_t r = ::send(fd_, p + off, n - off, kSendNoSigpipe);
         if (r > 0) {
             off += static_cast<std::size_t>(r);
             continue;

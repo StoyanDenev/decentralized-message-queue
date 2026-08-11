@@ -1677,3 +1677,62 @@ Each step gated falsify-on-mutant against the byte-golden vectors (B3); byte-neu
 **Consistency.** Serves provable security (B3) by directing the finite proof budget at the code that ships, not code that is deleted; minimalism (removes the JSON surface sooner); no-migrations (wire portion is genesis-deadline). No change to any accept rule — a sequencing directive.
 
 **Authority:** Stoyan Denev (owner directive, 2026-07-28; recorded by Claude Fable at his direction).
+
+## 2026-07-31 — Authorized: close the two rank-1 consensus holes (Hole 1 = same-height binding; Hole 2 = unify beacon-header committee verify)
+
+**Problem.** Two rank-1, remote-unauthenticated consensus-integrity holes have been owner-gated since the 2026-07-23 RpcIngressGateAudit §2, unfixed. Both are consensus/wire changes → genesis-frozen under no-migrations, so they must close pre-genesis. They are the top provable-security (B3) gap and the last blocker on a production-ready core.
+
+**Decision (owner, 2026-07-31) — AUTHORIZED FOR IMPLEMENTATION; security-critical pre-genesis; parallel to D2 (disjoint files):**
+
+**Hole 1 — EQV-INGRESS forged-slash (`validator.cpp:378-402`, ingress `node.cpp:1902`) → Option A.** The equivocation-evidence check never binds the two signed digests to the same height, so an attacker replays an honest validator's normal cross-height signatures as "equivocation" and forges a full-stake slash + deregistration of any honest validator, remotely and unauthenticated. **Fix:** extend `EquivocationEvent` to carry the two conflicting block headers (or the minimal fields to recompute `compute_block_digest`); the verifier recomputes both digests and asserts `header_a.index == header_b.index == ev.block_index`. Wire-format change to slashing evidence — **pre-genesis**. Gate via the existing `check_equivocation_events_for_test` seam, falsify-on-mutant (genuine cross-height pair → REJECT; honest same-height → ACCEPT; mutant on the height-equality assertion falsifies).
+
+**Hole 2 — INGRESS-beacon-header empty-committee (`node.cpp:1973-2007`, `on_beacon_header`) → Option B.** An empty `creators` list passes all three K-of-K checks vacuously, letting an untrusted mesh peer seed attacker-chosen `cumulative_rand` and bias epoch committee selection. **Fix:** route `on_beacon_header` through the SAME committee-signature verifier as `verify_shard_tip_committee_sig_root` (which already enforces non-empty + `required_k`), replacing the divergent hand-rolled path — includes the empty-check + `signed_count >= required_k` floor AND eliminates the divergence bug-class (one gated verifier, not two). Consensus accept-rule on the gossip path — **pre-genesis**. Gate via a new `on_beacon_header_for_test` seam + `test-beacon-header-committee`, falsify-on-mutant.
+
+**Consistency.** Provable security (both bind the missing property explicitly + falsify-on-mutant gated); no-migrations (both settled pre-genesis — Hole 1 wire change, Hole 2 accept rule); minimalism (Hole 2 unifies two verifiers into one). Both EXEMPT from the sequence-before-harden JSON freeze — consensus accept-rule/logic, serialization-independent, survive D2. Disjoint files from D2 (validator.cpp/node.cpp vs the JSON wire/storage paths) → implementable in parallel.
+
+**Deeper adjacent item (NOT authorized here — separate future decision):** the BEACON role is self-declared in the unauthenticated HELLO; Hole 2's floor closes the immediate hole, but authenticating the beacon-producer role is a larger separate hardening.
+
+**Authority:** Stoyan Denev (owner directive, 2026-07-31; recorded by Claude Fable at his direction).
+
+## 2026-08-11 — Pre-genesis backlog — macOS/Darwin support (dev env moved to MacBook Pro)
+
+1. RNG Darwin branch (security-critical). `src/crypto/rng/` branches Windows/Linux only; macOS falls through to the generic `/dev/urandom` POSIX path, which carries a known undisclosed `n==0` corner. Add a `__APPLE__` branch using `getentropy(2)`/`arc4random_buf`, fail-fatal like the siblings, and gate it. Entropy is on the security-critical path — no unaudited fallback.
+2. Script portability (BSD vs GNU). `tools/apply_spdx_headers.sh` uses GNU `sed -i "1i …"` which fails under BSD sed; audit `tools/*.sh` for `grep -P`, GNU `date`, `readlink -f`, `sha256sum` (→ `shasum -a 256`).
+3. Determinism validation, not golden regeneration. First Mac build runs the full KAT + golden-vector suite. Match → the cross-platform determinism claim strengthens (add a macOS CI runner to lock it in). Mismatch → root-cause it; never regenerate Mac-specific goldens, since that would mask the exact defect the apparatus exists to catch. Prime suspect: `char` signedness (unsigned by default on Apple Silicon, signed on x86).
+4. AppleClang C++20 coverage check, and APFS case-insensitivity watch.
+
+**Authority:** Stoyan Denev (owner directive, 2026-08-11; recorded by Claude Fable at his direction).
+
+## 2026-08-11 — macOS/Darwin port LANDED: first native Darwin/arm64 green (FAST 294/0); backlog items 1–2 closed, item 3 FAST-half validated
+
+**Problem.** Execute the pre-genesis macOS/Darwin backlog recorded earlier today (this log, above) after the dev-env move to a MacBook Pro (Darwin arm64, AppleClang 21.0.0).
+
+**What landed** (Linux reference re-verified 294/0 after every change):
+- **RNG (item 1):** `__APPLE__` branch in `src/crypto/rng/rng.c` — `getentropy(2)` chunked at its 256-byte cap, fail-fatal, no `/dev/urandom` fallback; closes the generic-POSIX `n==0` corner on Darwin. Gated by the existing `test-rng-c99` (the 64 KiB fill crosses the chunk cap 256×, so a chunk-bound mutant goes red via `EINVAL`).
+- **Net:** kqueue backend for `ReactorEventLoop` — the §4.5 "kqueue policy split" the header reserved. Wake pipe as the `EFD_SEMAPHORE` analogue (one byte = one wakeup unit), `EV_ONESHOT` per filter (the no-split-read property preserved), exact-interest re-arm (stale sibling filter deleted), single-change `kevent` submissions with an empty eventlist (batched receipt changelists can dequeue-and-drop pending events, and a batched delete's `ENOENT` can abort sibling changes). SIGPIPE immunity: `MSG_NOSIGNAL` → `kSendNoSigpipe` + per-fd `SO_NOSIGPIPE` (ReactorConnection ctor as the single choke point; SyncClient's two socket sites).
+- **Scripts (item 2):** BSD/GNU portability (portable SPDX prepend replacing GNU `sed -i "1i"`; `shasum -a 256` fallback; `sysctl hw.ncpu` jobs; `timeout`→`gtimeout` shim) and the python shim: macOS's `/usr/bin/python` is an xcode-select STUB that exists (so `command -v` succeeds) but fails on exec, and `/usr/bin/python3` is a trampoline dispatching on argv[0] — the shim therefore guards on EXECUTION, not existence, and installs a wrapper (never a symlink) that `exec python3 "$@"`. 358 scripts invoke bare `python`; the shim rides PATH via `tools/common.sh` (352 scripts) + 6 standalone copies.
+- Two `-Wcomment` nested-`/*` doc fixes (`enote.h`, `crypto.h`); truthfulness updates to the reactor/native header comments.
+
+**Validation (item 3 discipline — validate, never regenerate).** First native Darwin/arm64 run: AppleClang 21 C++20 build green; FAST suite + doc guards **294/0**; every KAT/byte-freeze pin FAST exercises matched — notably `test-p256-ctx-bundle`'s dual-oracle SHA-256 pin — with **zero goldens regenerated**. kqueue backend additionally runtime-verified on Linux under libkqueue emulation (11/12 semantics; the 12th is a proven emulation limit, and the Darwin suite is the real gate — now green). Item-3 amendment: Apple's arm64 ABI pins `char` **signed** (the unsigned default is ARM *Linux*), so the recorded char-signedness suspect is void for the x86→Darwin pair; it stays live for any future Linux-ARM runner.
+
+**Machine-move ledger (operational):** stale build trees from the previous machine must be deleted (their CMake caches pin foreign paths and `build/Release/determ.exe` poisons `common.sh` detection); use ONE consistent build user (root/user mixing yields EPERM in `_deps`); this MacBook additionally carries the owner-applied `sudo ln -s /Library/Developer/CommandLineTools/usr/bin/python3 .../python`, which satisfies the xcselect stub at the CLT layer — the repo shim is guard-inert while that holds and takes over on machines without it.
+
+**Remaining tail (NOT closed here):** full `run_all` on Darwin (needs `pip3 install pynacl` for the XChaCha oracle in `test_c99_vector_files`, which is outside FAST); a macOS CI runner to lock the cross-platform determinism claim in; APFS case-insensitivity watch. Item 4's AppleClang C++20 coverage is confirmed by the green build.
+
+**Authority:** Stoyan Denev (owner-directed session, 2026-08-11; recorded by Claude Fable at his direction).
+
+## 2026-08-11 — Security fix: bound untrusted KDF cost in the wallet envelope (unbounded-work DoS); tamper-fuzz expectation corrected
+
+**Problem.** `wallet/envelope.cpp` bounded the Argon2id/PBKDF2 cost read from an envelope only from BELOW (`argon2_t==0`, `argon2_p==0`, `argon2_m_kib < 8*p`, `pbkdf2_iters==0`) — no upper bound. Both the deserialize path (:256) and the decrypt path (:145) fed attacker-controlled cost straight into the KDF. A tampered/malicious envelope with a huge `t_cost`/`m_kib`/`iters` drives the KDF for effectively unbounded time; the AES-GCM tag check that is supposed to reject the tamper never runs. Surfaced by `test_wallet_backup_tamper_fuzz` on the first Darwin `run_all` (a single-byte XOR flip took `t_cost` 3 → 67,108,867 and the `determ-wallet envelope decrypt` child hung). Reproduced on Linux → pre-existing and cross-platform, NOT a macOS-port regression.
+
+**Decision (owner-directed, 2026-08-11) — fail-closed upper bounds, reject BEFORE any KDF runs.** New `MAX_*` caps in `wallet/envelope.hpp` (`MAX_ARGON2_T_COST=64`, `MAX_ARGON2_M_COST_KIB=1 GiB`, `MAX_ARGON2_LANES=16`, `MAX_PBKDF2_ITERS=100M`), enforced at both the deserialize and decrypt guards → `std::nullopt` (structural reject) before the KDF is invoked. The caps sit far above every value the encrypt paths ever write (Argon2id always uses the fixed defaults t=3/m=64 MiB/p=1; PBKDF2 `--iters` is the sole tunable), so no legitimately-created envelope is ever rejected. Ceilings are `constexpr`, owner-tunable if a higher-cost profile is adopted.
+
+**Gate (B3, falsify-on-mutant).** Extended the existing pure in-process gate `selftest-envelope-param-reject` (`test_wallet_envelope_param_reject.sh`, FAST) with five cases: D7/D8/D9 (deserialize rejects over-cap t/m/iters) and C5/C6 (decrypt rejects over-cap t/iters fast). C5 encodes the exact reported value (67,108,867): with the cap it returns nullopt instantly; deleting the cap HANGS the selftest — the falsify signal. Gate now 18 pass / 0.
+
+**Test-expectation correction.** `test_wallet_backup_tamper_fuzz` R2 asserted a byte-tamper of any field is contained at the AEAD layer (verify 0, decrypt 2). A flip of the KDF-cost field ('iters'/DWE2 params slot) can now push cost out of the fail-closed bounds and is legitimately contained STRUCTURALLY (verify 2, decrypt 1) — a stronger rejection (before any KDF). The test was never green here before (those cases hung); corrected to accept either coherent fail-closed shape while still failing hard on any false-accept (decrypt rc==0). Now 125 pass / 0.
+
+**Consistency.** Provable security / fail-closed (bounds the missing property, gated falsify-on-mutant); no-migrations (wallet keyfile/envelope layer, no consensus/wire/genesis change — the wire format is unchanged, only an accept-rule tightened; every previously-writable envelope with default cost still decrypts); minimalism (four one-line guard extensions + four `constexpr`). Verified: reported hang → fast reject; gate 18/0; fuzz 125/0; envelope/keyfile suite green; FAST 294/0.
+
+**Adjacent (NOT fixed here):** `light/rpc_client.cpp` and `wallet/main.cpp` `::send` with flags 0 (SIGPIPE-exposed on a raced close, cross-platform) — pre-existing, separate from both this fix and the macOS port; left for a future backlog item.
+
+**Authority:** Stoyan Denev (owner-directed session, 2026-08-11; recorded by Claude Fable at his direction).

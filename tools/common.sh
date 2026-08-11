@@ -55,6 +55,8 @@ elif [ -x "build/determ.exe" ]; then
     DETERM="build/determ.exe"           # Windows single-config (rare)
 elif [ -x "build/determ" ]; then
     DETERM="build/determ"               # Linux / Mac single-config
+elif [ -x "build-linux/determ" ]; then
+    DETERM="build-linux/determ"   # tools/ci_local.sh tree (Linux/macOS)
 elif [ -x "build/Release/determ" ]; then
     DETERM="build/Release/determ"       # Linux / Mac multi-config (rare)
 else
@@ -63,6 +65,7 @@ else
     echo "  build/determ.exe        (Windows single-config)" >&2
     echo "  build/determ            (Linux/Mac single-config)" >&2
     echo "  build/Release/determ    (Linux/Mac multi-config)" >&2
+    echo "  build-linux/determ      (tools/ci_local.sh tree)" >&2
     echo "Set DETERM_BIN=/absolute/path to override." >&2
     exit 1
 fi
@@ -76,6 +79,8 @@ elif [ -x "build/determ-wallet.exe" ]; then
     DETERM_WALLET="build/determ-wallet.exe"
 elif [ -x "build/determ-wallet" ]; then
     DETERM_WALLET="build/determ-wallet"
+elif [ -x "build-linux/determ-wallet" ]; then
+    DETERM_WALLET="build-linux/determ-wallet"   # tools/ci_local.sh tree (Linux/macOS)
 elif [ -x "build/Release/determ-wallet" ]; then
     DETERM_WALLET="build/Release/determ-wallet"
 else
@@ -98,6 +103,8 @@ elif [ -x "build/determ-light.exe" ]; then
     DETERM_LIGHT="build/determ-light.exe"
 elif [ -x "build/determ-light" ]; then
     DETERM_LIGHT="build/determ-light"
+elif [ -x "build-linux/determ-light" ]; then
+    DETERM_LIGHT="build-linux/determ-light"   # tools/ci_local.sh tree (Linux/macOS)
 elif [ -x "build/Release/determ-light" ]; then
     DETERM_LIGHT="build/Release/determ-light"
 else
@@ -120,6 +127,8 @@ elif [ -x "build/determ-cryptotest.exe" ]; then
     DETERM_CRYPTOTEST="build/determ-cryptotest.exe"
 elif [ -x "build/determ-cryptotest" ]; then
     DETERM_CRYPTOTEST="build/determ-cryptotest"
+elif [ -x "build-linux/determ-cryptotest" ]; then
+    DETERM_CRYPTOTEST="build-linux/determ-cryptotest"   # tools/ci_local.sh tree (Linux/macOS)
 elif [ -x "build/Release/determ-cryptotest" ]; then
     DETERM_CRYPTOTEST="build/Release/determ-cryptotest"
 else
@@ -139,6 +148,8 @@ elif [ -x "build/determ-dsf.exe" ]; then
     DETERM_DSF="build/determ-dsf.exe"
 elif [ -x "build/determ-dsf" ]; then
     DETERM_DSF="build/determ-dsf"
+elif [ -x "build-linux/determ-dsf" ]; then
+    DETERM_DSF="build-linux/determ-dsf"   # tools/ci_local.sh tree (Linux/macOS)
 elif [ -x "build/Release/determ-dsf" ]; then
     DETERM_DSF="build/Release/determ-dsf"
 else
@@ -175,3 +186,30 @@ DETERM_LIGHT="$(_dt_abs "$DETERM_LIGHT")"
 DETERM_CRYPTOTEST="$(_dt_abs "$DETERM_CRYPTOTEST")"
 
 export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT DETERM_CRYPTOTEST
+
+# ── macOS/BSD portability shim ────────────────────────────────────────────────
+# Stock macOS ships no `timeout(1)` (GNU coreutils). Homebrew coreutils
+# provides it as `gtimeout`; map it so tests can call `timeout` uniformly.
+if ! command -v timeout >/dev/null 2>&1 && command -v gtimeout >/dev/null 2>&1; then
+    timeout() { gtimeout "$@"; }
+fi
+# Stock macOS ships a /usr/bin/python STUB: the file EXISTS (so
+# `command -v python` succeeds) but only errors "xcode-select: Failed to
+# locate 'python'" when actually run. Hundreds of tests invoke bare
+# `python`. So the guard must test EXECUTION, not existence: when python3
+# works but bare `python` does NOT actually run, prepend a shim dir with a
+# `python` WRAPPER that execs python3 (a wrapper, not a symlink — a link
+# named `python` would re-trigger the same argv[0] stub lookup). This also
+# covers python entirely absent. On a real working `python`, the guard is
+# false and nothing is shimmed.
+if command -v python3 >/dev/null 2>&1 && ! python -c '' >/dev/null 2>&1; then
+    _dt_pyshim="${TMPDIR:-/tmp}/determ-pyshim"
+    if mkdir -p "$_dt_pyshim" 2>/dev/null; then
+        rm -f "$_dt_pyshim/python" 2>/dev/null   # drop any stale shim
+        if printf '#!/bin/sh\nexec python3 "$@"\n' > "$_dt_pyshim/python" 2>/dev/null \
+            && chmod +x "$_dt_pyshim/python" 2>/dev/null; then
+            PATH="$_dt_pyshim:$PATH"
+            export PATH
+        fi
+    fi
+fi

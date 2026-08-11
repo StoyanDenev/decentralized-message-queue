@@ -2,15 +2,17 @@
 // Copyright 2026 Determ Contributors
 //
 // ReactorEventLoop — the native POSIX backend for net::EventLoop (minix
-// §4.5, epoll today; the kqueue policy split happens when a BSD/macOS gate
-// exists). One epoll instance services everything: socket readiness
-// (ReactorTransport), posted closures (an EFD_SEMAPHORE eventfd — each
-// post() wakes exactly one run() thread, which pops exactly one closure),
-// and timer expiries via the shared net::TimerService deadline thread.
+// §4.5 — epoll on Linux, kqueue on Darwin since the 2026-08-11 macOS port).
+// One kernel poller instance services everything: socket readiness
+// (ReactorTransport), posted closures (Linux: an EFD_SEMAPHORE eventfd;
+// Darwin: a wake pipe, one byte per unit — either way each post() wakes
+// exactly one run() thread, which pops exactly one closure), and timer
+// expiries via the shared net::TimerService deadline thread.
 //
 // run() keeps the interface's multi-thread contract: N worker threads all
-// blocked in epoll_wait on the same instance. Socket interest is registered
-// ONE-SHOT (EPOLLONESHOT) — the §4.5 requirement that makes N-thread
+// blocked in the kernel wait on the same instance. Socket interest is
+// registered ONE-SHOT (EPOLLONESHOT / EV_ONESHOT per filter) — the §4.5
+// requirement that makes N-thread
 // dispatch safe: two threads' epoll_wait calls CAN return the same fd
 // simultaneously under plain level-triggering, silently splitting one
 // logical exactly-N read across threads (a byte-scrambling, error-free
@@ -29,7 +31,8 @@
 //
 // stop() is permanent (no restart), matching the IocpEventLoop contract.
 // This header is OS-include-free (§4.5 layout rule): fds are plain ints;
-// all <sys/epoll.h>/<sys/eventfd.h> usage lives in src/net/*.cpp.
+// all <sys/epoll.h>/<sys/eventfd.h>/<sys/event.h> usage lives in
+// src/net/*.cpp.
 #pragma once
 #include <determ/net/event_loop.hpp>
 #include <determ/net/timer_service.hpp>
@@ -61,7 +64,8 @@ constexpr uint32_t kEventError = 0x4;
 
 class ReactorEventLoop final : public EventLoop {
 public:
-    ReactorEventLoop();               // epoll + eventfd; throws on failure
+    ReactorEventLoop();               // epoll+eventfd (Linux) / kqueue+wake
+                                      // pipe (Darwin); throws on failure
     ~ReactorEventLoop() override;     // stop + timer shutdown + close fds;
                                       // undelivered posts are dropped (the
                                       // never-dispatched-handler semantics)
@@ -90,8 +94,12 @@ public:
     void timer_cancel(uint64_t id) override { timers_.cancel(id); }
 
 private:
-    int               epfd_   = -1;
-    int               wake_fd_ = -1;   // EFD_SEMAPHORE eventfd
+    int               epfd_   = -1;   // epoll (Linux) / kqueue (Darwin)
+    int               wake_fd_ = -1;   // EFD_SEMAPHORE eventfd (Linux) /
+                                       // wake-pipe read end (Darwin)
+    int               wake_wr_ = -1;   // written by post()/stop(): the same
+                                       // eventfd (Linux) / pipe write end
+                                       // (Darwin)
     std::atomic<bool> stopped_{false};
     std::atomic<int>  threads_in_run_{0};   // stop() writes one unit each
 

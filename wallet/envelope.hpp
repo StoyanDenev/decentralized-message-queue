@@ -65,6 +65,18 @@ inline constexpr uint32_t DEFAULT_ARGON2_T_COST     = 3;
 inline constexpr uint32_t DEFAULT_ARGON2_M_COST_KIB = 65'536;   // 64 MiB
 inline constexpr uint32_t DEFAULT_ARGON2_LANES      = 1;
 
+// Upper bounds on KDF cost read from an UNTRUSTED envelope. decode + decrypt
+// reject (fail-closed, no KDF run) any envelope exceeding these, closing an
+// unbounded-work DoS: a tampered params slot could otherwise drive the KDF for
+// effectively unbounded time (one flipped byte took t_cost 3 -> 67,108,867).
+// The caps sit far above every value the encrypt paths ever write (Argon2id
+// always uses the fixed defaults above; PBKDF2 --iters is the sole tunable), so
+// no legitimately-created envelope is ever rejected. Owner-tunable.
+inline constexpr uint32_t MAX_ARGON2_T_COST     = 64;          // vs default 3
+inline constexpr uint32_t MAX_ARGON2_M_COST_KIB = 1u << 20;    // 1 GiB vs 64 MiB
+inline constexpr uint32_t MAX_ARGON2_LANES      = 16;          // vs default 1
+inline constexpr uint32_t MAX_PBKDF2_ITERS      = 100'000'000; // ~seconds vs 600k
+
 // Salt length used for fresh envelopes. 16 bytes is plenty given the
 // per-envelope nonce; longer salts add no useful entropy.
 inline constexpr size_t   DEFAULT_SALT_LEN     = 16;

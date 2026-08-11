@@ -143,11 +143,16 @@ decrypt(const Envelope& env,
     std::vector<uint8_t> key;
     if (env.kdf == Kdf::ARGON2ID) {
         if (env.argon2_t == 0 || env.argon2_p == 0
-            || env.argon2_m_kib < 8 * env.argon2_p) return std::nullopt;
+            || env.argon2_m_kib < 8 * env.argon2_p
+            || env.argon2_t     > MAX_ARGON2_T_COST       // reject unbounded-work
+            || env.argon2_m_kib > MAX_ARGON2_M_COST_KIB   // KDF cost from an
+            || env.argon2_p     > MAX_ARGON2_LANES)       // untrusted envelope
+            return std::nullopt;
         key = derive_key_argon2(password, env.salt,
                                 env.argon2_t, env.argon2_m_kib, env.argon2_p);
     } else {
-        if (env.pbkdf2_iters == 0) return std::nullopt;
+        if (env.pbkdf2_iters == 0 || env.pbkdf2_iters > MAX_PBKDF2_ITERS)
+            return std::nullopt;
         key = derive_key_pbkdf2(password, env.salt, env.pbkdf2_iters);
     }
 
@@ -254,12 +259,16 @@ std::optional<Envelope> deserialize(const std::string& blob) {
             env.argon2_m_kib = rd_u32_le(params, 4);
             env.argon2_p     = rd_u32_le(params, 8);
             if (env.argon2_t == 0 || env.argon2_p == 0
-                || env.argon2_m_kib < 8 * env.argon2_p) return std::nullopt;
+                || env.argon2_m_kib < 8 * env.argon2_p
+                || env.argon2_t     > MAX_ARGON2_T_COST
+                || env.argon2_m_kib > MAX_ARGON2_M_COST_KIB
+                || env.argon2_p     > MAX_ARGON2_LANES) return std::nullopt;
         } else {
             if (params.size() != 4) return std::nullopt;     // iters
             env.kdf          = Kdf::PBKDF2;
             env.pbkdf2_iters = rd_u32_le(params, 0);
-            if (env.pbkdf2_iters == 0) return std::nullopt;
+            if (env.pbkdf2_iters == 0 || env.pbkdf2_iters > MAX_PBKDF2_ITERS)
+                return std::nullopt;
         }
 
         env.nonce = from_hex(parts[3]);

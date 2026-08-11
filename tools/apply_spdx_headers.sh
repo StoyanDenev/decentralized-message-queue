@@ -10,7 +10,12 @@ APACHE="Apache-2.0"
 stamp() {
   grep -qI "SPDX-License-Identifier" "$1" && { echo "skip  $1"; return; }
   case "$1" in
-    *.c|*.h|*.cc|*.cpp|*.hpp|*.hh) sed -i "1i // SPDX-License-Identifier: $2" "$1";;
+    *.c|*.h|*.cc|*.cpp|*.hpp|*.hh)
+      # portable prepend (GNU `sed -i "1i"` breaks under BSD sed); cat-back
+      # keeps the original inode + mode
+      tmp="$1.spdx.tmp"
+      { printf '// SPDX-License-Identifier: %s\n' "$2"; cat "$1"; } > "$tmp"
+      cat "$tmp" > "$1" && rm -f "$tmp";;
     *) echo "??  $1 (unhandled type)"; return;;
   esac
   echo "stamp $2  $1"

@@ -113,6 +113,11 @@ void SyncClient::connect(const std::string& host, uint16_t port) {
             throw std::runtime_error(
                 "SyncClient: socket() failed connecting to " + where);
         }
+#ifdef SO_NOSIGPIPE
+        // Darwin has no MSG_NOSIGNAL (see write_all): per-fd SO_NOSIGPIPE
+        // keeps the raced-close send an error path, not a SIGPIPE death.
+        { int one = 1; ::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port   = htons(port);
@@ -152,6 +157,9 @@ void SyncClient::connect(const std::string& host, uint16_t port) {
         sock_t cand = ::socket(p->ai_family, p->ai_socktype,
                                p->ai_protocol);
         if (cand == kOsInvalid) continue;
+#ifdef SO_NOSIGPIPE
+        { int one = 1; ::setsockopt(cand, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
         if (::connect(cand, p->ai_addr,
                       static_cast<int>(p->ai_addrlen)) == 0) {
             s = cand;

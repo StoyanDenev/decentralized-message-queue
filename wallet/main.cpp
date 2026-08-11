@@ -9048,6 +9048,14 @@ int cmd_selftest_envelope_param_reject(int, char**) {
     ok(rej(blob(M1, "00000000")),
        "D6 DWE1 pbkdf2_iters==0 rejected [falsify envelope.cpp:262]");
 
+    // ── over-cap KDF cost rejected: the unbounded-work DoS (t/m/iters upper bound) ──
+    ok(rej(blob(M2, std::string("41000000") + "00000100" + "01000000")),   // t=65 > MAX 64
+       "D7 DWE2 argon2_t > MAX rejected [falsify argon2 upper-bound]");
+    ok(rej(blob(M2, std::string("03000000") + "01001000" + "01000000")),   // m=1048577 > MAX 1 GiB
+       "D8 DWE2 argon2_m_kib > MAX rejected [falsify argon2 upper-bound]");
+    ok(rej(blob(M1, "01e1f505")),                                          // iters=100000001 > MAX 100M
+       "D9 DWE1 pbkdf2_iters > MAX rejected [falsify pbkdf2 upper-bound]");
+
     // ── decrypt rejection battery (hand-built degenerate Envelope) ────────────
     // A common WELL-FORMED AEAD frame so decrypt() reaches the KDF-param guard
     // (ct >= TAG_LEN, nonce == NONCE_LEN, aad matches) before the degeneracy.
@@ -9083,6 +9091,21 @@ int cmd_selftest_envelope_param_reject(int, char**) {
         e.pbkdf2_iters = 0;
         ok(dec_rejects(e),
            "C4 decrypt PBKDF2 pbkdf2_iters==0 -> nullopt, no throw [falsify envelope.cpp:150]");
+    }
+    {
+        // The reported hang, encoded: a tampered envelope with argon2_t flipped
+        // to 67,108,867. The cap must reject it FAST (before the KDF) -> nullopt;
+        // without the cap this line HANGS (the falsify signal).
+        auto e = mk(envelope::Kdf::ARGON2ID);
+        e.argon2_t = 67108867; e.argon2_m_kib = 65536; e.argon2_p = 1;
+        ok(dec_rejects(e),
+           "C5 decrypt Argon2id argon2_t > MAX -> nullopt fast, no hang [falsify argon2 upper-bound]");
+    }
+    {
+        auto e = mk(envelope::Kdf::PBKDF2);
+        e.pbkdf2_iters = 200000000;   // > MAX 100M
+        ok(dec_rejects(e),
+           "C6 decrypt PBKDF2 pbkdf2_iters > MAX -> nullopt fast [falsify pbkdf2 upper-bound]");
     }
 
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";

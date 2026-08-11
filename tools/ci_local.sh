@@ -34,7 +34,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
-JOBS=$( (command -v nproc >/dev/null && nproc) || echo 4 )
+JOBS=$( (command -v nproc >/dev/null && nproc) \
+     || (command -v sysctl >/dev/null && sysctl -n hw.ncpu 2>/dev/null) \
+     || echo 4 )
 SKIP_BUILD=0
 BUILD_DIR=""
 SANITIZE=0

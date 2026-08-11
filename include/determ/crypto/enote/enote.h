@@ -57,7 +57,7 @@ extern "C" {
 /* Seal `pt` (ptlen bytes; ptlen may be 0) to `recipient_pub` (33B compressed
  * P-256) with caller-supplied fresh `eph_sk` (32B, in [1, n-1]). Writes
  * exactly ptlen + DETERM_ENOTE_OVERHEAD bytes to `out` and sets *out_len.
- * Returns 0, or -1 (out/*out_len untouched) on a NULL arg, a bad recipient
+ * Returns 0, or -1 (out / *out_len untouched) on a NULL arg, a bad recipient
  * point, a degenerate/out-of-range `eph_sk`, or internal failure.
  * `out` must have room for ptlen + DETERM_ENOTE_OVERHEAD bytes. */
 int determ_enote_seal(const uint8_t recipient_pub[33],

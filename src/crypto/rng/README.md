@@ -27,6 +27,10 @@ no userspace RNG state, no seeding logic, no DRBG:
   is initialized once at boot, never returns weak bytes. `EINTR` is retried;
   any other error (e.g. `ENOSYS` on pre-3.17 kernels) falls through to the
   `/dev/urandom` path for the remaining bytes.
+- **macOS:** `getentropy(2)` (kernel CSPRNG, macOS 10.12+). Capped at 256
+  bytes per call (`EINVAL` above), so requests are chunked at 256. No
+  `/dev/urandom` fallback on Darwin: that generic path is unaudited here and
+  a failing `getentropy` means a broken system — the call fails fatal (−1).
 - **Other POSIX:** `/dev/urandom` read loop (`EINTR` retried; `open` failure,
   read error, or EOF → −1).
 
@@ -46,7 +50,7 @@ never be used. In-tree consumers all enforce this:
 ## 2. Provenance + construction
 
 Written from scratch against the platform API documentation (MSDN
-`BCryptGenRandom`, `getrandom(2)` / `urandom(4)` man pages); no vendored
+`BCryptGenRandom`, `getrandom(2)` / `getentropy(2)` / `urandom(4)` man pages); no vendored
 code, no upstream to version-pin — the pins are the OS interfaces
 themselves. License posture: **public domain**, matching the family. Build
 wiring: `CMakeLists.txt` adds `rng.c` to `determ-crypto-c99` and links
@@ -63,7 +67,10 @@ fork-safety, zeroization) without adding entropy. So the module adds none.
 direct smoke gate: contract edges (n==0 no-op, draws succeed), all-zero
 output, repeated consecutive draws, a constant 256-byte window inside a
 64 KiB chunked fill, and coarse byte-value uniformity bounds — catastrophic-
-breakage detection, not a randomness proof. Additional posture:
+breakage detection, not a randomness proof. The gate exercises whichever
+platform branch the build selects; on a macOS build that is the `getentropy`
+branch (the n==0 check pins the no-op contract, and the 64 KiB fill crosses
+the 256-byte chunk cap 256×, so a chunk-bound mutant goes red via `EINVAL`). Additional posture:
 
 - **Exercised indirectly on every keygen/sign path**: `test-ed25519` calls
   `generate_node_key` directly (fresh keys for its sign/verify checks), the
@@ -107,8 +114,8 @@ auditable-in-one-screen call into the platform CSPRNG.
 - **Generic-POSIX `n == 0` corner**: on the non-Windows, non-Linux
   `/dev/urandom` path, an `n == 0` call still opens the device (and returns
   −1 if it cannot) — a deviation from the header's "no-op success" on that
-  theoretical platform. Windows and Linux, the two verified toolchains,
-  return 0 with no OS call.
+  theoretical platform. Windows, Linux, and macOS return 0 with
+  no OS call; the corner is confined to the residual generic-POSIX path.
 - **Audit pass owed** — `determ test-rng-c99` shipped (§3), but the module
   is not yet covered by `docs/proofs/C99CryptoStackAudit.md` (which predates
   it); a source-review pass is the open item.

@@ -58,7 +58,7 @@ if [ ! -f "$JAR" ]; then
   echo "  PASS: test_tla_model_check (SKIP — no tla2tools.jar)"
   exit 0
 fi
-GOT_SHA=$(sha256sum "$JAR" | awk '{print $1}')
+GOT_SHA=$( (sha256sum "$JAR" 2>/dev/null || shasum -a 256 "$JAR") | awk '{print $1}')
 if [ "$GOT_SHA" != "$JAR_SHA256" ]; then
   echo "  FAIL: test_tla_model_check ($JAR sha256=$GOT_SHA != pinned $JAR_SHA256 — refuse to run an unpinned model checker)"
   exit 1

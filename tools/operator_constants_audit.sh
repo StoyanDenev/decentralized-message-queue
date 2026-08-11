@@ -100,6 +100,19 @@
 #   1   args/setup error, or >=1 per-row ERROR with no MISMATCH and no
 #       UNVERIFIABLE
 set -u
+# macOS ships a /usr/bin/python STUB that exists but errors on run (this
+# script invokes `python`). Guard on EXECUTION not existence; shim a
+# python->python3 wrapper onto PATH (mirrors tools/common.sh).
+if command -v python3 >/dev/null 2>&1 && ! python -c '' >/dev/null 2>&1; then
+    _pyshim="${TMPDIR:-/tmp}/determ-pyshim"
+    if mkdir -p "$_pyshim" 2>/dev/null; then
+        rm -f "$_pyshim/python" 2>/dev/null
+        if printf '#!/bin/sh\nexec python3 "$@"\n' > "$_pyshim/python" 2>/dev/null \
+            && chmod +x "$_pyshim/python" 2>/dev/null; then
+            PATH="$_pyshim:$PATH"; export PATH
+        fi
+    fi
+fi
 
 SCRIPT=operator_constants_audit
 

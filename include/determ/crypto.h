@@ -15,7 +15,7 @@
  *   - BLAKE2b                                    (blake2/blake2b.h, §3.6 dep)
  *   - Argon2id                                   (argon2/argon2id.h, §3.6)
  *   - ChaCha20, Poly1305, ChaCha20-Poly1305,
- *     HChaCha20 + XChaCha20-Poly1305             (chacha20/*,       §3.4)
+ *     HChaCha20 + XChaCha20-Poly1305             (chacha20/,        §3.4)
  *   - AES-256 block + AES-256-GCM                (aes/aes.h,        §3.5)
  *   - Ed25519 sign/verify                        (ed25519/ed25519.h, §3.2)
  *   - X25519                                     (x25519/x25519.h,  §3.3)

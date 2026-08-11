@@ -19,7 +19,25 @@ int determ_rng_bytes(uint8_t *buf, size_t n) {
     return 0;
 }
 
-#else /* POSIX */
+#elif defined(__APPLE__)
+
+#include <sys/random.h> /* getentropy(2), macOS 10.12+ */
+
+int determ_rng_bytes(uint8_t *buf, size_t n) {
+    /* getentropy(2): direct kernel CSPRNG; EINVAL above 256 bytes, so chunk.
+     * Fail-fatal like the siblings — no /dev/urandom fallback on Darwin (the
+     * generic path below is unaudited here, and a failing getentropy means a
+     * broken system). n == 0 iterates zero times: no-op success per rng.h. */
+    while (n) {
+        size_t chunk = (n > 256u) ? 256u : n;
+        if (getentropy(buf, chunk) != 0) return -1;
+        buf += chunk;
+        n   -= chunk;
+    }
+    return 0;
+}
+
+#else /* generic POSIX */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -63,4 +81,4 @@ int determ_rng_bytes(uint8_t *buf, size_t n) {
     }
 }
 
-#endif /* _WIN32 / POSIX */
+#endif /* _WIN32 / __APPLE__ / POSIX */

@@ -2,8 +2,8 @@
  *
  * The one primitive the from-scratch stack cannot synthesize: fresh entropy.
  * Thin, auditable shim over the operating system's CSPRNG — BCryptGenRandom
- * (system-preferred RNG) on Windows, getrandom(2) with a /dev/urandom
- * fallback elsewhere. No userspace RNG state, no seeding logic, no fallback
+ * (system-preferred RNG) on Windows, getentropy(2) on macOS, getrandom(2)
+ * with a /dev/urandom fallback elsewhere. No userspace RNG state, no seeding logic, no fallback
  * to anything weaker: if the OS source fails, the call fails and the caller
  * must treat it as fatal (an all-zero or partial secret must never be used).
  *

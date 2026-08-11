@@ -218,24 +218,28 @@ for case in range(num_cases):
         env_tamp = os.path.join(tmp, f"env_{case}_crypto.json")
         json.dump(d, open(env_tamp, "w"))
 
-        # backup-verify is structure-only: a byte-flip keeps the blob
-        # deserializable, so it STILL accepts (exit 0). This documents the
-        # boundary: structural verify catches shape, AEAD catches content.
-        r = run(["backup-verify", "--shares", sh_path, "--envelopes", env_tamp])
-        if r.returncode == 0:
-            ok(f"case {case}: byte-tamper '{sect_name}' still structurally valid")
-        else:
-            fail(f"case {case}: byte-tamper '{sect_name}' verify rc={r.returncode} "
-                 f"(expected structural 0)")
+        vr = run(["backup-verify", "--shares", sh_path,
+                  "--envelopes", env_tamp]).returncode
+        dr = run(["envelope", "decrypt", "--envelope", mutated,
+                  "--password", f"kh-pw-{victim}"]).returncode
 
-        # The tampered envelope itself must FAIL to decrypt (AEAD tag rejects).
-        r = run(["envelope", "decrypt", "--envelope", mutated, "--password",
-                 f"kh-pw-{victim}"])
-        if r.returncode == 2:
-            ok(f"case {case}: AEAD rejects '{sect_name}' tamper (exit 2)")
+        # Containment invariant: a byte-tamper must NEVER decrypt (no false
+        # ACCEPT). Two coherent fail-closed shapes are allowed:
+        #   (a) AEAD:       structural-valid (verify 0) + AEAD-reject   (decrypt 2)
+        #   (b) structural: verify-reject   (verify 2) + deserialize-reject (decrypt 1)
+        # A flip of the KDF-cost field ('iters'/DWE2 params slot) can push the
+        # cost outside the fail-closed bounds (envelope.cpp MAX_* upper caps and
+        # the p!=0 / m>=8p lower guards), legitimately taking shape (b) — a
+        # STRONGER rejection, before any KDF runs, so an out-of-range cost can
+        # never drive an unbounded-work KDF. Every other field takes shape (a).
+        if dr == 0:
+            fail(f"case {case}: FALSE ACCEPT — tampered '{sect_name}' decrypted (rc=0)")
+        elif vr == 0 and dr == 2:
+            ok(f"case {case}: '{sect_name}' tamper contained at AEAD (verify 0, decrypt 2)")
+        elif sect_name == "iters" and vr == 2 and dr == 1:
+            ok(f"case {case}: '{sect_name}' cost-tamper contained structurally (verify 2, decrypt 1)")
         else:
-            fail(f"case {case}: tampered '{sect_name}' decrypt rc={r.returncode} "
-                 f"(expected 2 AEAD failure)")
+            fail(f"case {case}: '{sect_name}' tamper incoherent (verify {vr}, decrypt {dr})")
 
         # Containment: if threshold < N, recovery from the OTHER untouched
         # shares still reproduces the KNOWN original secret.

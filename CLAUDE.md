@@ -69,8 +69,18 @@ Harden the binary survivors after the swap.
 
 PRE-GENESIS BACKLOG (must land before mainnet) — DApp substrate Q2/Q3/Q4 code
 (DECISION-LOG 2026-07-28): governed payload cap; enforce topic routing; accept_anon.
+Also: macOS/Darwin support — LANDED (DECISION-LOG 2026-08-11, both entries): RNG
+__APPLE__ getentropy branch, kqueue reactor backend, script portability; first
+native Darwin/arm64 build green, FAST 294/0, byte-freeze pins matched, no goldens
+regenerated. Tail: full run_all on Darwin (pip3 pynacl), macOS CI runner, APFS.
 
-STILL OWNER-GATED, do not start: the two rank-1 consensus fixes
-(RpcIngressGateAudit.md section 2). These SURVIVE D2 (accept-rule logic, not
-serialization) so they are EXEMPT from the freeze — they are the real security
-priority; await explicit owner sign-off.
+AUTHORIZED (owner 2026-07-31), security-critical pre-genesis — run in parallel with
+D2 (disjoint files): close the two rank-1 consensus holes (DECISION-LOG 2026-07-31).
+  - Hole 1 forged-slash (validator.cpp:378): bind equivocation evidence to same height —
+    carry the conflicting headers; assert header_a.index==header_b.index==ev.block_index
+    (wire-format change; gate via check_equivocation_events_for_test).
+  - Hole 2 empty-committee beacon (node.cpp:1973): route on_beacon_header through the
+    verify_shard_tip_committee_sig_root verifier (non-empty + required_k floor; kills the
+    divergence class; gate via on_beacon_header_for_test).
+  Both falsify-on-mutant; both pre-genesis; both EXEMPT from the JSON hardening freeze.
+NOT authorized (separate future item): authenticate the self-declared BEACON role in HELLO.

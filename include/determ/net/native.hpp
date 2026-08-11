@@ -12,9 +12,9 @@
 // Current selection:
 //   Windows: the native IOCP backend (§4.5b increment 2 — the daemon cutover;
 //            no transport library on this platform anymore).
-//   POSIX:   the native epoll reactor backend (§4.5 — no transport library
-//            here either; the kqueue policy split lands when a BSD/macOS
-//            gate exists). The daemon no longer constructs ANY asio type —
+//   POSIX:   the native reactor backend (§4.5 — epoll on Linux, kqueue on
+//            Darwin since the 2026-08-11 macOS port; no transport library
+//            here either). The daemon no longer constructs ANY asio type —
 //            the Asio* backends survive only for test-net-seam's contract
 //            pins until asio is deleted outright (§7 step 4).
 //

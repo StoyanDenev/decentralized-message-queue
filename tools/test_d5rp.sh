@@ -17,6 +17,19 @@
 # NB: never `echo "$OUT"` raw on success (the subcommand's FAIL: lines on a
 # failing run would reach run_all's tail-10 marker scan).
 set -u
+# macOS ships a /usr/bin/python STUB that exists but errors on run (this
+# script invokes `python`). Guard on EXECUTION not existence; shim a
+# python->python3 wrapper onto PATH (mirrors tools/common.sh).
+if command -v python3 >/dev/null 2>&1 && ! python -c '' >/dev/null 2>&1; then
+    _pyshim="${TMPDIR:-/tmp}/determ-pyshim"
+    if mkdir -p "$_pyshim" 2>/dev/null; then
+        rm -f "$_pyshim/python" 2>/dev/null
+        if printf '#!/bin/sh\nexec python3 "$@"\n' > "$_pyshim/python" 2>/dev/null \
+            && chmod +x "$_pyshim/python" 2>/dev/null; then
+            PATH="$_pyshim:$PATH"; export PATH
+        fi
+    fi
+fi
 cd "$(dirname "$0")/.."
 
 # Locate d5rp: prefer the ci_local export (native build), else probe the
