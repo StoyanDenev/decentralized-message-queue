@@ -1860,3 +1860,33 @@ Consequence: the ALREADY-COMMITTED v3 `gen` mechanism becomes CORRECT — this i
 **Test-first is mandatory and is the point.** A reproduction gate that drives the valve path with an EMPTY abort tail and asserts an honest validator is NOT slashed MUST be written first and MUST FAIL at HEAD (a1a0cf1). That failure is the anchor: this session's central lesson is that a green, mutant-verified gate can prove the wrong property, so the fix is only credible if the gate demonstrably captures the real hazard BEFORE the fix exists. If the hazard cannot be reproduced as described, that is itself a finding to be reported — not worked around.
 
 **Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction).
+
+## 2026-08-12 (final) — Hole 1b: hazard REPRODUCED end-to-end; the authorized round-reset-marker design FAILED adversarial review and was NOT committed
+
+**1. The hazard is REAL and is now reproduced in production code, not by analogy.**
+A test-first gate (`test-honest-reround-not-slashed`) drives the genuine path — `handle_contrib_timeout` → `maybe_stall_reset_locked` → `clear + reset_round` → `check_if_selected` → `start_contrib_phase` (fresh `rng_.fill` dh_input) → gossip → peer `on_contrib` duplicate-signer assembly → gossip → independent V11 verify — with no attacker, no forged message and no tampered frame. Deterministic (3/3 byte-identical, 0.11 s). At the then-HEAD it FAILED on three arms:
+- **H1** the peer's evidence pool NAMES the honest validator (it admits the re-round contrib because `msg.aborts_gen == current_aborts_.size()` is `0 == 0` on both sides, sees a duplicate signer, and assembles evidence);
+- **H2** the victim itself ADOPTS the gossiped evidence against itself — it passes EVERY V11 clause including the Q2 `gen_a == gen_b` assert that was believed to close this;
+- **H3** the victim's stake goes **1000 → 0** through the real `chain.cpp apply_transactions` full-forfeit path.
+Five witness arms stayed green so the failure is not vacuous (peer really admitted contrib #1; its pool was empty beforehand, excluding the S-047 byte-identical rebroadcasts as the cause; the real valve fired; the abort tail was empty on both sides of the re-round; the victim re-entered CONTRIB at the same height).
+Minimal reproducing topology: K=2 with one committee member never constructed (so `abort_claim_quorum(2) = max(2,1) = 2` is unsatisfiable and the tail stays EMPTY), plus a peer below `min_stake` — never selected, never arms a round timer, never valves — which therefore holds the first contrib indefinitely. That is the idle-follower asymmetry from the S-050 straggler entry, now in its slashing form.
+
+**2. The authorized fix design FAILED review and is NOT in the tree.**
+The gossiped round-reset marker was implemented and then attacked from three lenses (liveness/reconvergence, residual honest-slash, consensus agreement). **15 findings confirmed on independent re-derivation, 2 false alarms** — 1 Critical, 11 High. It was reverted rather than committed, because several defects are worse than the bug:
+- **It inverts the deterrent.** Nothing bound a marker to an ACTUAL stall, so any committee member could mint a round boundary and **launder a genuine same-height double-sign out of the evidence rules** — a real equivocator escapes slashing.
+- **One member could halt the chain.** `ROUND_RESET` was a unilateral, un-quorumed round teardown that erased the abort-claim state used to evict a faulty member; it also wiped not-yet-baked AbortEvents on every adopter, so abort-driven suspension slashing could be suppressed remotely.
+- **Not a CRDT.** Adoption compared `new_gen` against the SUM but replaced only one term, so identical message sets in different orders yield different generations — two honest nodes diverge permanently at one height and wedge K-of-K. `round_generation()` composed a max-CRDT with the additive abort tail into something order-dependent.
+- **In-memory only.** A validator restart regresses the generation to 0 at an unchanged `(height, prev_hash)` and **reopens the exact hazard**.
+- **Unbounded magnitude.** One message setting `new_gen = kRoundGenMax` permanently disables the S-050 stall valve at that height for every adopter.
+- The S-048 reorg path emitted `new_gen = 1` unconditionally (minted after the generation was already zeroed), colliding with any pre-reorg round at gen 1 — the Critical.
+
+**3. What this means for the design (owner input needed before the next attempt).**
+The failure is not merely implementational. A round-reset marker that any single member can mint at will is simultaneously a liveness weapon and a slashing escape hatch, so the next attempt must decide how a round boundary is AUTHORIZED — options include a quorumed marker (K-of-K or a claim quorum, like abort events), or a proof-carrying marker bound to evidence of an actual stall (e.g. the timed-out round's own state), rather than a unilateral declaration. It must additionally be: **persisted** (restart must not regress the generation), **order-independent** (a genuine CRDT, or derived from a single monotonic source rather than a sum of two), **magnitude-bounded**, and **coherent with the S-048 reorg path**. Whether the committed v3 evidence tags and the 246/245-byte frames survive that design is open.
+
+**4. State of the tree.** Reverted to f3c0793; `ci_local` green (FAST 302/0 + doc guards). The reproduction gate and the failed-fix patch are preserved as session artifacts and are NOT committed — the reproduction depends on a `src/main.cpp` gate block plus four read-only `*_for_test` seams in `include/determ/node/node.hpp`, and it must be re-landed with the next attempt (registered OUT of FAST until it passes, since it is expected-RED while the hazard is open). Recreating it is cheap given §1 above, which specifies the topology and every arm.
+
+**5. Interim posture is unchanged and deliberate:** documented, no softener. Nothing is launched; no stake is at risk today. `determ-light verify-equivocation`'s PROVEN verdict already tells operators to corroborate before acting on a slash.
+
+**Hole 1b remains OPEN and remains a GENESIS BLOCKER.**
+
+**Authority:** reproduction + adversarial-review findings recorded by Claude Fable, 2026-08-12; the round-boundary authorization design is escalated to Stoyan Denev and is NOT decided here.
