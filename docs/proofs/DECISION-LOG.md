@@ -2088,3 +2088,45 @@ kind-0 (BFT block family) still excludes an honest validator with no attacker pr
 **Design constraints the spec must satisfy** (each is a confirmed defect or invariant from this session): the time value must be **committed and signed** — carried in the block header AND in the contrib, because the stalled case has no block yet — since `check_creator_selection` re-derives the committee from committed state and rejects a mismatch, and a replaying node has no "now"; validation therefore splits into a **live** check (bucket within tolerance of local clock) and a **replay** check (monotonic, bounded increment vs the previous block); the live derivation and the D3.3b / S-036 `cc:[epoch]` frozen checkpoint must not diverge, because that is a **state_root fork**; abort claims key on committee membership, so a rotating committee requires the claim buckets to key on the round identity too; and **bucket granularity must be finer than the minimum re-round interval** (the valve enforces >= 5 s) or honest collisions persist — the central tunable, trading Hole-1b closure against grinding surface (~60 candidates at 1 s granularity within the ±30 s window, ~12 at 5 s, ~2 at 30 s but with collisions back).
 
 **Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction). Design + adversarial review authorized; implementation is NOT.
+
+## 2026-08-12 (final+9) — Time-bucketed per-block committee selection: REFUTED at design stage. No code written.
+
+**All four analysis lenses returned FATAL; the synthesis verdict is NOT VIABLE; the adversarial pass confirmed 21 findings (3 false alarms). Nothing was implemented — the design-first discipline paid for itself.**
+
+### 1. At K == M, committee rotation is impossible by definition
+
+`select_m_creators(rand, node_count, k_use)` selecting M of M is the identity function: **the set is seed-invariant**. No time term, no seed change, no rotation can evict a splitter when the committee is the entire validator set. The proposal's core purpose — reseat the committee so a splitter is not seated forever — cannot be achieved at K == M by any seed whatsoever. This is the simplest and most complete refutation, and it re-derives the same wall the exclusion designs hit.
+
+### 2. No bucket granularity G exists — three pairwise-contradictory requirements
+
+One value was asked to be both a selection seed and a round identity:
+
+| Requirement | Forces | Source |
+|---|---|---|
+| **R-agree** — all honest members derive the SAME bucket BEFORE the first contrib | G ≫ clock+propagation spread; ≥ 2× the tolerated ±30 s skew ⇒ **G ≥ 60 s** | `check_if_selected` selects, then gates `start_contrib_phase()` (`node.cpp:1046-1050`) |
+| **R-rotate** — consecutive honest attempts must land in DIFFERENT buckets | **G < 5 s** (`kRoundStallSoftWindow`, `node.cpp:1613`) | else no halt-break and no V11 exemption |
+| **R-noevade** — an equivocator must have at most ONE admissible bucket | G ≥ 2W (W = admission half-window) | else it signs two messages under two labels and V11 exempts it |
+
+60 > 5. **No G satisfies R-agree and R-rotate simultaneously.** Concrete consequence, measured against the code: two honest nodes 2 s apart are 2 buckets apart at G = 1 s on *every* attempt, forever — deterministic non-convergence, not probabilistic. The valve re-entry draws a fresh local bucket that disagrees again; nothing converges them.
+
+### 3. The owner's one-step-ahead argument is TRUE of `cumulative_rand` and FALSE of the block hash — and that is exactly why the current code uses the former
+
+Traced end to end: `dh_input = SHA256(secret ‖ pubkey)` (commit-checked, `validator.cpp:502-527`) → `delay_seed` → `delay_output` (`producer.cpp:1031-1037`, re-derived `validator.cpp:539-557`) → `cumulative_rand` (`producer.cpp:1268-1272`) → `epoch_rand` → `epoch_committee_seed` → `select_m_creators`. **For `cumulative_rand` the argument HOLDS**: every input is digest-covered or commit-reveal-pinned, and the K secrets at H+1 do not exist when block H is minted. That is precisely why the current design routes committee selection and the subsidy lottery through `cumulative_rand` and **not** through the block hash.
+
+The proposal reverses that decision, and the block hash does not have the property. `Block::compute_hash()` (`src/chain/block.cpp:817-826`) hashes `signing_bytes()` and then **appends `creator_block_sigs`**. Ed25519 verification (`src/crypto/ed25519/ed25519.c:321-348`) checks only pk-y canonicality, `S < L`, and the group equation — RFC 8032's deterministic nonce is a **signer-side convention no verifier can check**. So a Byzantine member that broadcasts its `BlockSigMsg` last (indistinguishable from network latency; it already holds the other K−1 sigs) can enumerate unboundedly many *valid* signatures over the SAME `compute_block_digest`, each yielding a different block hash, and publish the one that seats its preferred committee at H+1. Cost: one Ed25519 sign per trial (~10⁵–10⁶/s). No abort, no equivocation, one message, nothing any existing gate records. And it **compounds**: once a coalition owns a full K-committee it owns all K secrets, hence `delay_output`, hence `cumulative_rand`, hence `epoch_rand` and the lottery.
+
+**This finding is independently valuable: the block hash is malleable under a fixed digest, so it must never seed anything security-relevant.** The existing architecture already gets this right; the proposal would have broken it.
+
+### 4. Two further structural blockers
+
+**Circularity.** If the bucket derives from `b.timestamp`, `check_timestamp` (`validator.cpp:1903-1909`) requires `b.timestamp == reconcile_median_time(b.creator_proposer_times)` with that vector parallel to `b.creators` — so the selection *input* would depend on the selection *output*. Every reconciled-clock scheme inherits this, because reconciliation medians the SELECTED committee's committed times.
+
+**No replay seam.** `Chain::load` (`chain.cpp:3483-3554`) calls `apply_transactions` plus the S-021 head-hash gate and **never calls `BlockValidator::validate`** — a replaying node performs no committee derivation at all, so there is nowhere to attach a replay-side monotonicity rule. Worse, sync-from-peer uses the same `validate` as live and a validator cannot distinguish a tip block from a year-old catch-up block (`apply_block_locked` routes past/future indices elsewhere, so everything reaching `validate` has `b.index == height()`).
+
+### Status
+
+**Hole 1b remains OPEN and a GENESIS BLOCKER after six designs.** The correction to this log's earlier claim stands and is now sharpened: bounded clock skew is *not* enough to serve as an external anchor here, because the bucket must be agreed BEFORE the round begins and the protocol's own ±30 s tolerance is two orders of magnitude coarser than the ≥5 s re-round interval it would have to distinguish.
+
+What the session has established remains: the predicate cannot be made sound by construction; the consequence cannot be made safe at K == M; committee rotation is impossible at K == M; and the honest landing point is a configuration-aware rule whose K == M branch takes **no automated action**.
+
+**Authority:** design analysis recorded by Claude Fable, 2026-08-12. No implementation was performed.
