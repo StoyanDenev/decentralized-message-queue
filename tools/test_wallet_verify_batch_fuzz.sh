@@ -79,10 +79,11 @@ N=8
 SEED=20260607          # fixed seed → fully reproducible fuzz
 CASES=24               # >=20 randomized tamper cases
 
-"$WALLET" account-create-batch --count 2 --out "$T/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$T/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][1]['address'])")
-$PY -c "import json; d=json.load(open('$T/keys.json')); json.dump(d['accounts'][0], open('$T/key_a.json','w'))"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$KPRIV_A" --out "$T/key_a.json" >/dev/null 2>&1
 
 # Distinct amounts/fees/nonces per record so a per-index verdict is
 # unambiguous and a body-field perturbation can never collide with another

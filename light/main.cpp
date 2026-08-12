@@ -218,7 +218,7 @@ void print_usage() {
         "      (incompatible with --resume/--persist).\n"
         "      --persist caches the verified anchor (genesis pin + head height /\n"
         "      block_hash / state_root) to <path> (default: $DETERM_LIGHT_STATE,\n"
-        "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
+        "      else ~/.determ-light/state.bin) — written only AFTER full verify.\n"
         "      --resume re-pins the genesis against a cached anchor and verifies\n"
         "      ONLY the suffix the daemon added above it (skips re-walking the\n"
         "      committee-signed prefix); falls back to a full verify when the\n"
@@ -741,18 +741,22 @@ void print_usage() {
         "      double-sign proof carried by the EQUIVOCATION_EVIDENCE gossip\n"
         "      message + the submit_equivocation RPC). Re-runs the daemon's V11\n"
         "      slash gate (BlockValidator::check_equivocation_events)\n"
-        "      INDEPENDENTLY: digest_a != digest_b, sig_a != sig_b, and BOTH\n"
-        "      Ed25519 signatures verify against the equivocator's registered\n"
-        "      key. Supply that key directly with --pubkey, or resolve it from\n"
-        "      a {domain, ed_pub}[] committee/genesis-committee file via\n"
-        "      --committee + the event's own `equivocator` domain (the key\n"
-        "      MUST come from a source YOU trust, never from the event). All\n"
-        "      four conditions holding is cryptographic proof the signer\n"
-        "      double-signed at one height — EQUIVOCATION-PROVEN (exit 0), a\n"
-        "      slash is justified. Any condition failing (equal digests, equal\n"
-        "      sigs, or a sig that does not verify) is NOT-EQUIVOCATION (exit\n"
-        "      3): the evidence does NOT prove a double-sign, fail-closed,\n"
-        "      never a false PROVEN. Per FA6 (EquivocationSlashing.md) this has\n"
+        "      INDEPENDENTLY (EQV-height-bind form): kind <= 1, index_a ==\n"
+        "      index_b == block_index, body_root_a != body_root_b, sig_a !=\n"
+        "      sig_b, and BOTH Ed25519 signatures verify against digests\n"
+        "      DERIVED from the (index, body_root) openings under the kind's\n"
+        "      domain tag, against the equivocator's registered key. Supply\n"
+        "      that key directly with --pubkey, or resolve it from a {domain,\n"
+        "      ed_pub}[] committee/genesis-committee file via --committee +\n"
+        "      the event's own `equivocator` domain (the key MUST come from a\n"
+        "      source YOU trust, never from the event). All conditions holding\n"
+        "      is cryptographic proof the signer double-signed at one height —\n"
+        "      EQUIVOCATION-PROVEN (exit 0), a slash is justified. Any\n"
+        "      condition failing (unknown kind, mismatched heights, equal\n"
+        "      roots, equal sigs, or a sig that does not verify) is\n"
+        "      NOT-EQUIVOCATION (exit 3): the evidence does NOT prove a\n"
+        "      double-sign, fail-closed, never a false PROVEN. Per FA6\n"
+        "      (EquivocationSlashing.md) this has\n"
         "      no false positives under Ed25519 EUF-CMA — an honest validator\n"
         "      can never be PROVEN here. A malformed event / bad hex / unknown\n"
         "      domain is a usage error (exit 1). Read the event from stdin with\n"
@@ -2002,9 +2006,11 @@ int cmd_state(int argc, char** argv) {
             std::cout << "cleared persisted anchor at " << path << "\n";
             return 0;
         }
-        // SELFTEST — offline round-trip + reject-path verification.
+        // SELFTEST — offline round-trip + reject-path verification over the
+        // canonical binary DLS1 container (D2). Each reject case maps 1:1 to
+        // a named guard in load_light_state; deleting a guard flips its case.
         const std::string tp = state_path.empty()
-            ? (std::filesystem::temp_directory_path() / "determ-light-selftest.json").string()
+            ? (std::filesystem::temp_directory_path() / "determ-light-selftest.bin").string()
             : path;  // honor an explicit --state target if the operator gave one
         int checks = 0, fails = 0;
         auto check = [&](bool cond, const std::string& name) {
@@ -2012,8 +2018,22 @@ int cmd_state(int argc, char** argv) {
             if (cond) { std::cout << "  PASS " << name << "\n"; }
             else      { std::cout << "  FAIL " << name << "\n"; ++fails; }
         };
+        auto load_rejects = [&]() {
+            try { load_light_state(tp); } catch (const std::exception&) { return true; }
+            return false;
+        };
+        auto write_bytes = [&](const std::vector<uint8_t>& b2) {
+            std::ofstream f(tp, std::ios::binary | std::ios::trunc);
+            f.write(reinterpret_cast<const char*>(b2.data()),
+                    static_cast<std::streamsize>(b2.size()));
+        };
+        auto read_bytes = [&]() {
+            std::ifstream f(tp, std::ios::binary);
+            return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+        };
 
-        // (1) round-trip: save → load → byte-equal
+        // (1) round-trip with state_root: save → load → field-equal; 113 bytes
         LightState in;
         in.schema_version  = 1;
         in.genesis_hash    = std::string(64, 'a');
@@ -2021,49 +2041,66 @@ int cmd_state(int argc, char** argv) {
         in.head_block_hash = std::string(64, 'b');
         in.head_state_root = std::string(64, 'c');
         save_light_state(tp, in);
+        const auto full_bytes = read_bytes();
         LightState out = load_light_state(tp);
         check(out.schema_version == in.schema_version &&
               out.genesis_hash == in.genesis_hash &&
               out.head_height == in.head_height &&
               out.head_block_hash == in.head_block_hash &&
-              out.head_state_root == in.head_state_root,
-              "round-trip preserves every field");
+              out.head_state_root == in.head_state_root &&
+              full_bytes.size() == 113,
+              "round-trip preserves every field (113-byte DLS1)");
 
-        // (2) empty state_root round-trips as empty (pre-S-033 chain)
+        // (2) empty state_root round-trips as empty (81-byte container)
         LightState in2 = in; in2.head_state_root.clear();
         save_light_state(tp, in2);
-        check(load_light_state(tp).head_state_root.empty(),
-              "empty head_state_root round-trips as empty");
+        const auto base_bytes = read_bytes();
+        check(load_light_state(tp).head_state_root.empty()
+                  && base_bytes.size() == 81,
+              "empty head_state_root round-trips as empty (81-byte DLS1)");
 
-        // (3) malformed JSON → reject
-        { std::ofstream f(tp, std::ios::binary | std::ios::trunc); f << "{ not json"; }
-        bool rejected = false;
-        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
-        check(rejected, "malformed JSON is rejected (fail-closed)");
+        // (3) wrong magic → reject
+        { auto b2 = full_bytes; b2[0] = 'X'; write_bytes(b2); }
+        check(load_rejects(), "wrong magic is rejected (fail-closed)");
 
-        // (4) wrong schema_version → reject
+        // (4) schema_version 999 → reject
+        { auto b2 = full_bytes; b2[4] = 0xe7; b2[5] = 0x03; write_bytes(b2); }
+        check(load_rejects(), "unsupported schema_version is rejected");
+
+        // (5) has_state_root flag = 2 → reject
+        { auto b2 = full_bytes; b2[80] = 2; write_bytes(b2); }
+        check(load_rejects(), "has_state_root flag 2 is rejected");
+
+        // (6) truncation at EVERY field boundary → reject
+        //     (offsets: 3 inside magic, 7 schema, 39 genesis, 47 height,
+        //      79 block hash, 80 flag, 112 state root)
+        {
+            bool all = true;
+            for (size_t n : {size_t(3), size_t(7), size_t(39), size_t(47),
+                             size_t(79), size_t(80), size_t(112)}) {
+                auto b2 = full_bytes;
+                b2.resize(n);
+                write_bytes(b2);
+                if (!load_rejects()) { all = false; break; }
+            }
+            check(all, "truncation at every field boundary is rejected");
+        }
+
+        // (7) trailing byte → reject (both container lengths)
+        {
+            auto b2 = full_bytes; b2.push_back(0x00); write_bytes(b2);
+            bool r1 = load_rejects();
+            auto b3 = base_bytes; b3.push_back(0x00); write_bytes(b3);
+            bool r2 = load_rejects();
+            check(r1 && r2, "trailing byte is rejected (81- and 113-byte forms)");
+        }
+
+        // (8) legacy JSON state file → reject (deleted format, D2)
         { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
-          f << "{\"schema_version\":999,\"genesis_hash\":\"" << std::string(64,'a')
+          f << "{\"schema_version\":1,\"genesis_hash\":\"" << std::string(64,'a')
             << "\",\"head_height\":1,\"head_block_hash\":\"" << std::string(64,'b')
             << "\",\"head_state_root\":\"\"}"; }
-        rejected = false;
-        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
-        check(rejected, "unsupported schema_version is rejected");
-
-        // (5) short / non-hex genesis_hash → reject
-        { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
-          f << "{\"schema_version\":1,\"genesis_hash\":\"deadbeef\",\"head_height\":1,"
-               "\"head_block_hash\":\"" << std::string(64,'b') << "\",\"head_state_root\":\"\"}"; }
-        rejected = false;
-        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
-        check(rejected, "short genesis_hash is rejected");
-
-        // (6) missing required field → reject
-        { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
-          f << "{\"schema_version\":1,\"head_height\":1}"; }
-        rejected = false;
-        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
-        check(rejected, "missing genesis_hash/head_block_hash is rejected");
+        check(load_rejects(), "legacy JSON state file is rejected");
 
         // cleanup the temp file (only when we used the default temp target)
         if (state_path.empty()) {
@@ -7503,20 +7540,26 @@ int cmd_verify_account(int argc, char** argv) {
 // message + the submit_equivocation RPC) and the equivocator's registered
 // Ed25519 public key, it INDEPENDENTLY re-runs the V11 check the daemon's
 // BlockValidator::check_equivocation_events applies before a slash is
-// finalized:
+// finalized (EQV-height-bind form — the event carries per-side OPENINGS
+// (index, body_root), and each signed digest is DERIVED as
+// SHA256(TAG || index u64 BE || body_root) with TAG = "DTM-BLKDIG-v2" for
+// kind 0 / "DTM-CONTRIB-v2" for kind 1):
 //
-//   1. digest_a != digest_b   (two DISTINCT signed values — not a replay)
-//   2. sig_a    != sig_b       (two distinct signatures)
-//   3. Verify(pk, digest_a, sig_a) == 1
-//   4. Verify(pk, digest_b, sig_b) == 1
+//   1. kind <= 1               (known digest family)
+//   2. index_a == index_b == block_index   (the height bind)
+//   3. body_root_a != body_root_b (two DISTINCT signed values — not a replay)
+//   4. sig_a      != sig_b      (two distinct signatures)
+//   5. Verify(pk, derive(index_a, body_root_a), sig_a) == 1
+//   6. Verify(pk, derive(index_b, body_root_b), sig_b) == 1
 //
-// All four passing is cryptographic proof the holder of `pk` signed two
-// conflicting block_digests (or contrib commitments — V11 is digest-
-// agnostic) at the SAME block_index: a deliberate double-sign that
-// forfeits the equivocator's full stake on apply. FA6 (EquivocationSlashing.md)
-// proves this has no false positives under Ed25519 EUF-CMA: an honest
-// validator can NEVER be named here, because reproducing it would require
-// forging a signature by an honest key.
+// All passing is cryptographic proof the holder of `pk` signed two
+// conflicting digests of ONE family at the SAME block_index: a deliberate
+// double-sign that forfeits the equivocator's full stake on apply.
+// FA6 (EquivocationSlashing.md) proves this has no false positives under
+// Ed25519 EUF-CMA: an honest validator can NEVER be named here, because
+// reproducing it would require forging a signature by an honest key (and,
+// post height-bind, replaying honest signatures from two DIFFERENT heights
+// no longer qualifies — the openings pin each signature to its height).
 //
 // The public key is supplied directly via --pubkey <64-hex> (the
 // equivocator's registered ed_pub) OR resolved from a committee/genesis
@@ -7527,12 +7570,13 @@ int cmd_verify_account(int argc, char** argv) {
 // carries the key.
 //
 // Verdict discipline mirrors verify-tx-inclusion / decode-wire:
-//   EQUIVOCATION-PROVEN → exit 0 (all four V11 conditions hold; a slash
+//   EQUIVOCATION-PROVEN → exit 0 (all V11 conditions hold; a slash
 //                         against this signer is cryptographically justified)
-//   NOT-EQUIVOCATION    → exit 3 (a V11 condition fails: equal digests,
-//                         equal sigs, or either sig does not verify — the
-//                         evidence does NOT prove a double-sign; fail-closed,
-//                         never a false PROVEN)
+//   NOT-EQUIVOCATION    → exit 3 (a V11 condition fails: unknown kind,
+//                         mismatched heights, equal body roots, equal sigs,
+//                         or either sig does not verify against its DERIVED
+//                         digest — the evidence does NOT prove a double-sign;
+//                         fail-closed, never a false PROVEN)
 //   I/O / usage error   → exit 1 (missing file, bad hex, unknown domain)
 //
 // This is the read-side counterpart to the daemon's detection +
@@ -7576,10 +7620,10 @@ int cmd_verify_equivocation(int argc, char** argv) {
 
     try {
         // Parse the EquivocationEvent via the canonical from_json. It already
-        // enforces the field-name + hex-length contract (digest_a/digest_b
-        // 64-hex, sig_a/sig_b 128-hex) and throws a clear S-018 diagnostic on
-        // a malformed document — those are usage errors (exit 1), not a
-        // NOT-EQUIVOCATION verdict.
+        // enforces the field-name + hex-length contract (body_root_a/b
+        // 64-hex, sig_a/sig_b 128-hex, kind <= 1) and throws a clear S-018
+        // diagnostic on a malformed document — those are usage errors
+        // (exit 1), not a NOT-EQUIVOCATION verdict.
         json doc = (in_path == "-") ? json::parse(std::cin)
                                     : read_json_file(in_path);
         determ::chain::EquivocationEvent ev =
@@ -7604,22 +7648,48 @@ int cmd_verify_equivocation(int argc, char** argv) {
             pk = it->second;
         }
 
-        // V11, re-run independently of the daemon. Each clause that fails
-        // collapses the verdict to NOT-EQUIVOCATION with a precise reason —
-        // the evidence is structurally well-formed but does not prove a
-        // double-sign, so we fail closed rather than emit a false PROVEN.
+        // V11, re-run independently of the daemon (EQV-height-bind form).
+        // Each clause that fails collapses the verdict to NOT-EQUIVOCATION
+        // with a precise reason — the evidence is structurally well-formed
+        // but does not prove a double-sign, so we fail closed rather than
+        // emit a false PROVEN. The two signed digests are DERIVED from the
+        // carried (index, body_root) openings via an inline compose (the
+        // offline mirror of producer.cpp::compose_block_digest /
+        // compose_contrib_commitment — tag strings byte-identical).
+        auto derive_digest = [&](uint64_t index, const Hash& body_root) {
+            determ::crypto::SHA256Builder h;
+            h.append(std::string(ev.kind == 0 ? "DTM-BLKDIG-v2"
+                                              : "DTM-CONTRIB-v2"));
+            h.append(index);
+            h.append(body_root);
+            return h.finalize();
+        };
         EquivVerdict verdict = EquivVerdict::PROVEN;
         std::string  reason;
-        bool digests_distinct = (ev.digest_a != ev.digest_b);
-        bool sigs_distinct     = (ev.sig_a   != ev.sig_b);
-        bool sig_a_ok = digests_distinct && determ::crypto::verify(
-            pk, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a);
-        bool sig_b_ok = digests_distinct && determ::crypto::verify(
-            pk, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b);
+        bool kind_known       = (ev.kind <= 1);
+        bool heights_match    = (ev.index_a == ev.block_index
+                                 && ev.index_b == ev.block_index);
+        bool roots_distinct   = (ev.body_root_a != ev.body_root_b);
+        bool sigs_distinct    = (ev.sig_a != ev.sig_b);
+        Hash digest_a{}, digest_b{};
+        if (kind_known) {
+            digest_a = derive_digest(ev.index_a, ev.body_root_a);
+            digest_b = derive_digest(ev.index_b, ev.body_root_b);
+        }
+        bool sig_a_ok = kind_known && roots_distinct && determ::crypto::verify(
+            pk, digest_a.data(), digest_a.size(), ev.sig_a);
+        bool sig_b_ok = kind_known && roots_distinct && determ::crypto::verify(
+            pk, digest_b.data(), digest_b.size(), ev.sig_b);
 
-        if (!digests_distinct) {
+        if (!kind_known) {
             verdict = EquivVerdict::NOT_EQUIVOCATION;
-            reason  = "digest_a == digest_b (replay, not equivocation)";
+            reason  = "unknown kind (expected 0=BLOCK_DIGEST or 1=CONTRIB_COMMIT)";
+        } else if (!heights_match) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "index_a/index_b/block_index heights do not match";
+        } else if (!roots_distinct) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "body_root_a == body_root_b (replay, not equivocation)";
         } else if (!sigs_distinct) {
             verdict = EquivVerdict::NOT_EQUIVOCATION;
             reason  = "sig_a == sig_b (single signature, not two)";
@@ -7638,9 +7708,14 @@ int cmd_verify_equivocation(int argc, char** argv) {
                 {"proven",       proven},
                 {"equivocator",  ev.equivocator},
                 {"block_index",  ev.block_index},
+                {"kind",         ev.kind},
                 {"pubkey",       to_hex(pk)},
-                {"digest_a",     to_hex(ev.digest_a)},
-                {"digest_b",     to_hex(ev.digest_b)},
+                {"index_a",      ev.index_a},
+                {"body_root_a",  to_hex(ev.body_root_a)},
+                {"index_b",      ev.index_b},
+                {"body_root_b",  to_hex(ev.body_root_b)},
+                {"derived_digest_a", to_hex(digest_a)},
+                {"derived_digest_b", to_hex(digest_b)},
                 {"sig_a_valid",  sig_a_ok},
                 {"sig_b_valid",  sig_b_ok},
             };
@@ -7654,10 +7729,18 @@ int cmd_verify_equivocation(int argc, char** argv) {
             std::cout << equiv_verdict_str(verdict) << "\n"
                       << "  equivocator:  " << ev.equivocator << "\n"
                       << "  block_index:  " << ev.block_index << "\n"
+                      << "  kind:         " << unsigned(ev.kind)
+                      << (ev.kind == 0 ? " (BLOCK_DIGEST)"
+                          : ev.kind == 1 ? " (CONTRIB_COMMIT)" : " (UNKNOWN)")
+                      << "\n"
                       << "  pubkey:       " << to_hex(pk) << "\n"
-                      << "  digest_a:     " << to_hex(ev.digest_a)
+                      << "  side a:       index=" << ev.index_a
+                      << " body_root=" << to_hex(ev.body_root_a) << "\n"
+                      << "    derived digest: " << to_hex(digest_a)
                       << "  (sig " << (sig_a_ok ? "VALID" : "INVALID") << ")\n"
-                      << "  digest_b:     " << to_hex(ev.digest_b)
+                      << "  side b:       index=" << ev.index_b
+                      << " body_root=" << to_hex(ev.body_root_b) << "\n"
+                      << "    derived digest: " << to_hex(digest_b)
                       << "  (sig " << (sig_b_ok ? "VALID" : "INVALID") << ")\n";
             if (ev.shard_id != 0 || ev.beacon_anchor_height != 0) {
                 std::cout << "  shard_id:     " << ev.shard_id << "\n"

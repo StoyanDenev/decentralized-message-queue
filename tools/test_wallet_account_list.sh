@@ -3,7 +3,7 @@
 #
 # Verifies the keyfile-directory enumerator. Coverage:
 #   * Build a fixture directory containing all three canonical keyfile shapes
-#     (plaintext-single, plaintext-batch, encrypted-DETERM-NODE-V1) plus a
+#     (plaintext-single, plaintext-batch, encrypted-DNK1) plus a
 #     non-keyfile junk file (should be classified as "unknown" but not error).
 #   * Run account-list --keyfiles-dir <fixture> --json
 #   * Assert all three keyfiles are detected with the correct types.
@@ -11,7 +11,7 @@
 #     extracted address matches the underlying fixture privkey's anon-addr.
 #   * Assert plaintext-batch carries the canonical "addresses" array; every
 #     element matches the underlying batch fixture's addresses 1:1.
-#   * Assert encrypted-DETERM-NODE-V1 carries header_tag, pbkdf2_iters,
+#   * Assert encrypted-DNK1 carries header_tag, pbkdf2_iters,
 #     salt_hex, nonce_hex; cross-check the metadata against keyfile-info's
 #     output on the same file.
 #   * Junk file (non-JSON, non-keyfile) shows type=unknown with a
@@ -99,7 +99,12 @@ assert_eq "$RC" "0" "account-import produces plaintext-single fixture"
 "$WALLET" account-create-batch --count 3 --out "$FIXTURE/batch.json" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "account-create-batch produces plaintext-batch fixture"
-BATCH_ADDRS=$($PY -c "import json; d=json.load(open('$FIXTURE/batch.json')); print(','.join(a['address'] for a in d['accounts']))")
+# batch.json is the binary DAB1 container (D2) — decode it for the oracle.
+BATCH_ADDRS=$($PY -c "
+d = open('$FIXTURE/batch.json','rb').read()
+assert d[:4] == b'DAB1'
+count = int.from_bytes(d[4:6], 'little')
+print(','.join('0x' + d[6+64*i:6+64*i+32].hex() for i in range(count)))")
 
 # (c) encrypted keyfile via keyfile-create
 KEYPAIR_ENC=$("$WALLET" account-create-batch --count 1 --json 2>&1 | tr -d '\r')
@@ -142,7 +147,7 @@ echo
 echo "=== 4. All three keyfile types detected ==="
 assert_contains "$JSON" "\"plaintext-single\": 1" "by_type has plaintext-single=1"
 assert_contains "$JSON" "\"plaintext-batch\": 1" "by_type has plaintext-batch=1"
-assert_contains "$JSON" "\"encrypted-DETERM-NODE-V1\": 1" "by_type has encrypted=1"
+assert_contains "$JSON" "\"encrypted-DNK1\": 1" "by_type has encrypted=1"
 assert_contains "$JSON" "\"unknown\": 1" "by_type has unknown=1 (the junk file)"
 
 # ── 5. Address extraction matches fixture ────────────────────────────────────
@@ -162,7 +167,7 @@ EXTRACTED_ENC=$($PY - <<PY_EOF
 import json
 d = json.loads("""$JSON""")
 for kf in d["keyfiles"]:
-    if kf["type"] == "encrypted-DETERM-NODE-V1":
+    if kf["type"] == "encrypted-DNK1":
         print(kf["address"]); break
 PY_EOF
 )
@@ -196,7 +201,7 @@ LIST_ITERS=$($PY - <<PY_EOF
 import json
 d = json.loads("""$JSON""")
 for kf in d["keyfiles"]:
-    if kf["type"] == "encrypted-DETERM-NODE-V1":
+    if kf["type"] == "encrypted-DNK1":
         print(kf["pbkdf2_iters"]); break
 PY_EOF
 )
@@ -206,7 +211,7 @@ LIST_SALT_HEX=$($PY - <<PY_EOF
 import json
 d = json.loads("""$JSON""")
 for kf in d["keyfiles"]:
-    if kf["type"] == "encrypted-DETERM-NODE-V1":
+    if kf["type"] == "encrypted-DNK1":
         print(kf["salt_hex"]); break
 PY_EOF
 )
@@ -219,7 +224,7 @@ LIST_NONCE_HEX=$($PY - <<PY_EOF
 import json
 d = json.loads("""$JSON""")
 for kf in d["keyfiles"]:
-    if kf["type"] == "encrypted-DETERM-NODE-V1":
+    if kf["type"] == "encrypted-DNK1":
         print(kf["nonce_hex"]); break
 PY_EOF
 )
@@ -231,11 +236,11 @@ LIST_HDR_TAG=$($PY - <<PY_EOF
 import json
 d = json.loads("""$JSON""")
 for kf in d["keyfiles"]:
-    if kf["type"] == "encrypted-DETERM-NODE-V1":
+    if kf["type"] == "encrypted-DNK1":
         print(kf["header_tag"]); break
 PY_EOF
 )
-assert_eq "$LIST_HDR_TAG" "DETERM-NODE-V1" "header_tag = DETERM-NODE-V1"
+assert_eq "$LIST_HDR_TAG" "DNK1" "header_tag = DNK1"
 
 # ── 8. mixed_encrypted_and_plaintext_in_same_dir warning ─────────────────────
 echo
@@ -274,8 +279,8 @@ assert_eq "$RECUR_FIELD" "True" "recursive=True in --recursive output"
 echo
 echo "=== 10. --include-encrypted=off filters encrypted out ==="
 NO_ENC_JSON=$("$WALLET" account-list --keyfiles-dir "$FIXTURE" --include-encrypted=off 2>&1 | tr -d '\r')
-ENC_COUNT=$($PY -c "import json; d=json.loads('''$NO_ENC_JSON'''); print(d['summary']['by_type'].get('encrypted-DETERM-NODE-V1', 0))")
-assert_eq "$ENC_COUNT" "0" "encrypted-DETERM-NODE-V1 not in by_type with --include-encrypted=off"
+ENC_COUNT=$($PY -c "import json; d=json.loads('''$NO_ENC_JSON'''); print(d['summary']['by_type'].get('encrypted-DNK1', 0))")
+assert_eq "$ENC_COUNT" "0" "encrypted-DNK1 not in by_type with --include-encrypted=off"
 
 PT_S_COUNT=$($PY -c "import json; d=json.loads('''$NO_ENC_JSON'''); print(d['summary']['by_type'].get('plaintext-single', 0))")
 PT_B_COUNT=$($PY -c "import json; d=json.loads('''$NO_ENC_JSON'''); print(d['summary']['by_type'].get('plaintext-batch', 0))")
@@ -288,7 +293,7 @@ echo "=== 11. --include-plaintext=off filters plaintext out ==="
 NO_PT_JSON=$("$WALLET" account-list --keyfiles-dir "$FIXTURE" --include-plaintext=off 2>&1 | tr -d '\r')
 PT_S2=$($PY -c "import json; d=json.loads('''$NO_PT_JSON'''); print(d['summary']['by_type'].get('plaintext-single', 0))")
 PT_B2=$($PY -c "import json; d=json.loads('''$NO_PT_JSON'''); print(d['summary']['by_type'].get('plaintext-batch', 0))")
-ENC2=$($PY -c "import json; d=json.loads('''$NO_PT_JSON'''); print(d['summary']['by_type'].get('encrypted-DETERM-NODE-V1', 0))")
+ENC2=$($PY -c "import json; d=json.loads('''$NO_PT_JSON'''); print(d['summary']['by_type'].get('encrypted-DNK1', 0))")
 assert_eq "$PT_S2" "0" "plaintext-single filtered out"
 assert_eq "$PT_B2" "0" "plaintext-batch filtered out"
 assert_eq "$ENC2" "1" "encrypted still present with --include-plaintext=off"

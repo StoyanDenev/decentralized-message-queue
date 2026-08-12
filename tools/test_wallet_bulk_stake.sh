@@ -99,16 +99,11 @@ echo '{"stakes":[]}' > $T/empty.json
 # For these "missing arg" smoke checks the keyfile just needs to be
 # parseable; we'll replace it with the registered-validator keyfile
 # below once the daemon is up.
-"$WALLET" account-create-batch --count 1 --out $T/staker.json >/dev/null 2>&1
-$PY -c "
-import json
-with open('$T/staker.json') as f: d=json.load(f)
-acc = d['accounts'][0]
-out = {'address': acc['address'], 'privkey_hex': acc['privkey_hex']}
-with open('$T/staker_single.json','w') as f: json.dump(out, f)
-"
+"$WALLET" account-create-batch --count 1 --json > $T/staker.json 2>/dev/null
+STAKER_PRIV=$($PY -c "import json; print(json.load(open('$T/staker.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$STAKER_PRIV" --out $T/staker_single.json >/dev/null 2>&1
 set +e
-ERR=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+ERR=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/empty.json 2>&1)
 RC=$?
 set -e
@@ -119,7 +114,7 @@ assert_contains "$ERR" "rpc-port" "diagnostic mentions --rpc-port"
 echo
 echo "=== 4. File-not-found on --stake-list: exit 1 ==="
 set +e
-ERR=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+ERR=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/does-not-exist.json --dry-run 2>&1)
 RC=$?
 set -e
@@ -138,15 +133,14 @@ echo "=== 5. Init single-node daemon + fund the validator domain ==="
 $DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1 >/dev/null
 $DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
-# Repurpose the node's key as the wallet keyfile (address="node1").
+# D2: the DAK1 keyfile always carries an anon identity; the domain-staker
+# flow now goes through --from-domain. Repurpose the node's key as a DAK1
+# keyfile and stake from its registered validator domain "node1".
 NODE_PRIV=$($PY -c "import json; print(json.load(open('$T/n1/node_key.json'))['priv_seed'])")
-$PY -c "
-import json
-out = {'address': 'node1', 'privkey_hex': '$NODE_PRIV'}
-with open('$T/staker_single.json','w') as f: json.dump(out, f)
-"
+"$WALLET" account-import --priv "$NODE_PRIV" --out $T/staker_single.json --force >/dev/null 2>&1
 ADDR_S=node1
-echo "  Staker  ADDR_S = $ADDR_S (registered validator domain)"
+BULK_STAKE_EXTRA="--from-domain node1"
+echo "  Staker  ADDR_S = $ADDR_S (registered validator domain via --from-domain)"
 
 GEN_FUND_S=1000000
 cat > $T/gen.json <<EOF
@@ -232,7 +226,7 @@ except: print(0)")
 echo "  pre-stake locked = $STAKE_PRE"
 
 set +e
-OUT=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+OUT=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/stakes.json --rpc-port $RPC_PORT 2>&1 | tr -d '\r')
 RC=$?
 set -e
@@ -294,7 +288,7 @@ validator2.v,$EX_2b
 validator3.v,$EX_3b
 EOF
 set +e
-OUT2=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+OUT2=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
         --stake-list $T/stakes.csv --rpc-port $RPC_PORT 2>&1 | tr -d '\r')
 RC2=$?
 set -e
@@ -323,7 +317,7 @@ echo
 echo "=== 8. --dry-run: no submission, signed_tx present ==="
 PRE_DRY_STAKE=$STAKE_AFTER_CSV
 set +e
-OUT3=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+OUT3=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
         --stake-list $T/stakes.json --rpc-port $RPC_PORT --dry-run 2>&1 | tr -d '\r')
 RC3=$?
 set -e
@@ -419,7 +413,7 @@ echo "  current next_nonce = $CUR_NONCE"
 cat > $T/stakes_block.json <<EOF
 {"stakes":[{"domain":"blocker.v","amount":7}]}
 EOF
-"$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+"$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/stakes_block.json --rpc-port $RPC_PORT \
        --starting-nonce $((CUR_NONCE + 1)) >/dev/null 2>&1 || true
 
@@ -433,7 +427,7 @@ cat > $T/stakes_mixed.json <<EOF
 ]}
 EOF
 set +e
-"$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+"$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
         --stake-list $T/stakes_mixed.json --rpc-port $RPC_PORT \
         --starting-nonce $CUR_NONCE --continue-on-error > $T/out5.raw 2>&1
 RC5=$?
@@ -470,12 +464,12 @@ CUR_NONCE2=$($DETERM nonce $ADDR_S --rpc-port $RPC_PORT 2>/dev/null | \
 try:
     d=json.load(sys.stdin); print(d.get('next_nonce',0))
 except: print(0)")
-"$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+"$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/stakes_block.json --rpc-port $RPC_PORT \
        --starting-nonce $((CUR_NONCE2 + 1)) >/dev/null 2>&1 || true
 
 set +e
-"$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+"$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
         --stake-list $T/stakes_mixed.json --rpc-port $RPC_PORT \
         --starting-nonce $CUR_NONCE2 > $T/out6.raw 2>&1
 RC6=$?
@@ -507,7 +501,7 @@ assert_eq "$ENV_OK" "ok" "top-level keys are {keyfile, batch_size, submitted, fa
 echo
 echo "=== 12. --starting-nonce override pins the start ==="
 set +e
-OUT7=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+OUT7=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
         --stake-list $T/stakes.json --rpc-port $RPC_PORT \
         --dry-run --starting-nonce 999 2>&1 | tr -d '\r')
 RC7=$?
@@ -529,7 +523,7 @@ cat > $T/bad.csv <<EOF
 validator-only-no-amount
 EOF
 set +e
-ERR=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+ERR=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/bad.csv --dry-run 2>&1)
 RC=$?
 set -e
@@ -546,7 +540,7 @@ cat > $T/zero.json <<EOF
 ]}
 EOF
 set +e
-ERR=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+ERR=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/zero.json --dry-run 2>&1)
 RC=$?
 set -e
@@ -559,7 +553,7 @@ good.v,5
 zero.v,0
 EOF
 set +e
-ERR=$("$WALLET" bulk-stake --priv-keyfile $T/staker_single.json \
+ERR=$("$WALLET" bulk-stake ${BULK_STAKE_EXTRA:-} --priv-keyfile $T/staker_single.json \
        --stake-list $T/zero.csv --dry-run 2>&1)
 RC=$?
 set -e
@@ -598,6 +592,11 @@ assert_eq "$TX_HSHL" "64"       "signed_tx.hash length = 64 hex chars (32 bytes 
 echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
+# Tear the cluster down BEFORE the final exit and clear the trap — on macOS
+# the EXIT-trap teardown has been observed to clobber the script's exit
+# status while reaping the daemons.
+trap - EXIT INT
+cleanup || true
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet bulk-stake"
   exit 0

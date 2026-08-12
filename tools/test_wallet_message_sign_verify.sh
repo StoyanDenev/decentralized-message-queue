@@ -75,8 +75,13 @@ assert_eq() {
   else echo "  FAIL: $3"; echo "       expected: $2"; echo "       got:      $1"; fail_count=$((fail_count + 1)); fi
 }
 assert_contains() {
-  if echo "$1" | grep -q -- "$2"; then echo "  PASS: $3"; pass_count=$((pass_count + 1))
-  else echo "  FAIL: $3"; echo "       missing substring: $2"; echo "       in:                $1"; fail_count=$((fail_count + 1)); fi
+  # Pure-bash literal substring test. NOT `echo | grep -q`: on macOS that
+  # pipeline can miss matches past ~64KiB of piped builtin-echo output
+  # (observed against the >100KiB `help` text), flaking the help asserts.
+  case "$1" in
+    *"$2"*) echo "  PASS: $3"; pass_count=$((pass_count + 1)) ;;
+    *) echo "  FAIL: $3"; echo "       missing substring: $2"; echo "       in:                $1"; fail_count=$((fail_count + 1)) ;;
+  esac
 }
 assert_neq() {
   if [ "$1" != "$2" ]; then echo "  PASS: $3"; pass_count=$((pass_count + 1))
@@ -86,23 +91,19 @@ assert_neq() {
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
-# ── Generate fresh keypairs + export single-account keyfiles ───────────────────
-# sign-arbitrary expects a `--priv-keyfile` that is a single-account JSON
-# (the shape `account-export` would emit). account-create-batch emits a
-# *list*-shaped {accounts:[...]} JSON; we extract per-index and rewrite
-# into the single-account shape using Python.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
-$PY - <<PY_EOF
-import json
-keys = json.load(open("$TMP/keys.json"))
-for i, a in enumerate(keys["accounts"]):
-    with open("$TMP/key_%d.json" % i, "w") as f:
-        json.dump({"address": a["address"], "privkey_hex": a["privkey_hex"]}, f)
-PY_EOF
+# ── Generate fresh keypairs + mint single-account keyfiles ─────────────────────
+# sign-arbitrary expects a `--priv-keyfile` that is the canonical binary
+# DAK1 container (D2). Mint each via account-import --out from the batch
+# --json stdout VIEW.
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
+PRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
+PRIV_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['privkey_hex'])")
+"$WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_0.json" >/dev/null
+"$WALLET" account-import --priv "$PRIV_B" --out "$TMP/key_1.json" >/dev/null
 
-ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/key_0.json'))['address'])")
+ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 PUB_A="${ADDR_A#0x}"
-ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/key_1.json'))['address'])")
+ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['address'])")
 PUB_B="${ADDR_B#0x}"
 
 echo "=== 1. Help mentions sign-arbitrary + verify-arbitrary ==="

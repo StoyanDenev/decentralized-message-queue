@@ -126,8 +126,8 @@ assert_eq "$RC" "1" "exit 1 on missing --shares file"
 
 # Build a reference share-set for the rest of the tests.
 SECRET="deadbeefcafebabe0011223344556677"
-"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 --json \
-    > "$TMP/orig.json"
+"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 \
+    --out "$TMP/orig.json" >/dev/null
 if [ ! -s "$TMP/orig.json" ]; then
     echo "  FAIL: shamir-split produced empty output"; exit 1
 fi
@@ -165,29 +165,29 @@ assert_contains "$ERR" "same file" "diagnostic mentions same file"
 
 # ── 7. Malformed JSON --shares → exit 1 ──────────────────────────────────
 echo
-echo "=== 7. Malformed JSON --shares → exit 1 ==="
-echo "not json {{{" > "$TMP/bad.json"
+echo "=== 7. Malformed (non-DSS1) --shares → exit 1 ==="
+echo "not a dss1 container {{{" > "$TMP/bad.json"
 set +e
 ERR=$("$WALLET" shamir-rotate --shares "$TMP/bad.json" --threshold 3 \
     --shares-out "$TMP/out.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on malformed JSON"
-assert_contains "$ERR" "JSON parse" "JSON parse diagnostic"
+assert_eq "$RC" "1" "exit 1 on malformed (non-DSS1) file"
+assert_contains "$ERR" "DSS1" "DSS1 diagnostic"
 
 # ── 8. Empty shares array → exit 1 ────────────────────────────────────────
 echo
-echo "=== 8. Empty shares array → exit 1 ==="
-echo '{"shares":[]}' > "$TMP/empty.json"
+echo "=== 8. count=0 DSS1 container → exit 1 ==="
+printf 'DSS1\x00\x10\x00\x00\x00' > "$TMP/empty.json"
 set +e
 ERR=$("$WALLET" shamir-rotate --shares "$TMP/empty.json" --threshold 3 \
     --shares-out "$TMP/out.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on empty shares array"
-assert_contains "$ERR" "empty" "empty-array diagnostic"
+assert_eq "$RC" "1" "exit 1 on count=0 DSS1 container"
+assert_contains "$ERR" "DSS1" "DSS1 diagnostic"
 
 # ── 9. Unknown argument → exit 1 ──────────────────────────────────────────
 echo
@@ -205,11 +205,16 @@ assert_contains "$ERR" "unknown argument" "unknown-argument diagnostic"
 echo
 echo "=== 10. Insufficient input (2 shares, T=3) → exit 2 ==="
 $PY - "$TMP/orig.json" "$TMP/two_shares.json" <<'PY_EOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-d["shares"] = d["shares"][:2]
-with open(sys.argv[2], "w") as f:
-    json.dump(d, f)
+import sys
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"DSS1"
+y_len = int.from_bytes(d[5:9], "little")
+recs = []
+off = 9
+for _ in range(d[4]):
+    recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
+out = b"DSS1" + bytes([2]) + y_len.to_bytes(4, "little") + recs[0] + recs[1]
+open(sys.argv[2], "wb").write(out)
 PY_EOF
 set +e
 ERR=$("$WALLET" shamir-rotate --shares "$TMP/two_shares.json" --threshold 3 \
@@ -228,32 +233,52 @@ echo "=== 11. Rotated shares recover original secret ==="
 RECOVERED=$("$WALLET" shamir-combine --shares "$TMP/rotated.json" | tr -d '\r\n')
 assert_eq "$RECOVERED" "$SECRET" "rotated shares recover ORIGINAL secret"
 
+# Extract fields from a binary DSS1 file: dss1_field <file> {x|y|n|ylen}
+dss1_field() {
+  $PY -c "
+import sys
+d = open('$TMP/' + '' if False else sys.argv[1], 'rb').read()
+assert d[:4] == b'DSS1', 'not DSS1'
+count = d[4]
+y_len = int.from_bytes(d[5:9], 'little')
+recs = []
+off = 9
+for _ in range(count):
+    recs.append((d[off], d[off+1:off+1+y_len].hex())); off += 1 + y_len
+mode = sys.argv[2]
+if mode == 'x':    print(','.join(str(x) for x, _ in recs))
+elif mode == 'y':  print(','.join(y for _, y in recs))
+elif mode == 'n':  print(count)
+elif mode == 'ylen': print(y_len)
+" "$1" "$2"
+}
+
 # ── 12. Polynomial actually changed: y_hex differs ────────────────────────
 echo
 echo "=== 12. Polynomial changed: y_hex differs ==="
-ORIG_Y=$($PY -c "import json; d=json.load(open('$TMP/orig.json')); print(','.join(s['y_hex'] for s in d['shares']))")
-ROTATED_Y=$($PY -c "import json; d=json.load(open('$TMP/rotated.json')); print(','.join(s['y_hex'] for s in d['shares']))")
+ORIG_Y=$(dss1_field "$TMP/orig.json" y)
+ROTATED_Y=$(dss1_field "$TMP/rotated.json" y)
 assert_neq "$ORIG_Y" "$ROTATED_Y" "y_hex differs after rotation"
 
 # ── 13. x-coordinates preserved ───────────────────────────────────────────
 echo
 echo "=== 13. x-coordinates preserved ==="
-ORIG_X=$($PY -c "import json; d=json.load(open('$TMP/orig.json')); print(','.join(str(s['x']) for s in d['shares']))")
-ROTATED_X=$($PY -c "import json; d=json.load(open('$TMP/rotated.json')); print(','.join(str(s['x']) for s in d['shares']))")
+ORIG_X=$(dss1_field "$TMP/orig.json" x)
+ROTATED_X=$(dss1_field "$TMP/rotated.json" x)
 assert_eq "$ROTATED_X" "$ORIG_X" "x-coordinates preserved in same order"
 
 # ── 14. Output share count == input share count ──────────────────────────
 echo
 echo "=== 14. Output share count == input share count ==="
-ORIG_N=$($PY -c "import json; print(len(json.load(open('$TMP/orig.json'))['shares']))")
-ROTATED_N=$($PY -c "import json; print(len(json.load(open('$TMP/rotated.json'))['shares']))")
+ORIG_N=$(dss1_field "$TMP/orig.json" n)
+ROTATED_N=$(dss1_field "$TMP/rotated.json" n)
 assert_eq "$ROTATED_N" "$ORIG_N" "share count unchanged"
 
 # ── 15. Output y-byte-length == input y-byte-length ──────────────────────
 echo
 echo "=== 15. y-byte-length preserved ==="
-ORIG_YLEN=$($PY -c "import json; print(len(json.load(open('$TMP/orig.json'))['shares'][0]['y_hex']))")
-ROTATED_YLEN=$($PY -c "import json; print(len(json.load(open('$TMP/rotated.json'))['shares'][0]['y_hex']))")
+ORIG_YLEN=$(dss1_field "$TMP/orig.json" ylen)
+ROTATED_YLEN=$(dss1_field "$TMP/rotated.json" ylen)
 assert_eq "$ROTATED_YLEN" "$ORIG_YLEN" "y-byte-length preserved"
 
 # ── 16. Old + new mix cannot combine to original secret ──────────────────
@@ -265,14 +290,22 @@ assert_eq "$ROTATED_YLEN" "$ORIG_YLEN" "y-byte-length preserved"
 echo
 echo "=== 16. Mixed old + new shares do NOT reconstruct original ==="
 $PY - "$TMP/orig.json" "$TMP/rotated.json" "$TMP/mixed.json" <<'PY_EOF'
-import json, sys
-o = json.load(open(sys.argv[1]))
-r = json.load(open(sys.argv[2]))
+import sys
+def load(p):
+    d = open(p, "rb").read()
+    assert d[:4] == b"DSS1"
+    y_len = int.from_bytes(d[5:9], "little")
+    recs = []
+    off = 9
+    for _ in range(d[4]):
+        recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
+    return y_len, recs
+y_len, o = load(sys.argv[1])
+_, r = load(sys.argv[2])
 # Pick 2 from orig (x=1, x=2) + 1 from rotated (x=3). Same x-coords as a
 # valid 3-share set, but the y values come from two different polynomials.
-mix = [o["shares"][0], o["shares"][1], r["shares"][2]]
-with open(sys.argv[3], "w") as f:
-    json.dump({"shares": mix}, f)
+out = b"DSS1" + bytes([3]) + y_len.to_bytes(4, "little") + o[0] + o[1] + r[2]
+open(sys.argv[3], "wb").write(out)
 PY_EOF
 set +e
 MIXED=$("$WALLET" shamir-combine --shares "$TMP/mixed.json" 2>&1 | tr -d '\r\n')
@@ -346,10 +379,22 @@ assert_eq "$RECOVERED3" "$SECRET" "3 chained rotations recover SECRET"
 # ── 23. Intermediate share-sets all differ pairwise ──────────────────────
 echo
 echo "=== 23. Each rotation produces distinct polynomial ==="
-Y0=$($PY -c "import json; print(json.load(open('$TMP/orig.json'))['shares'][0]['y_hex'])")
-Y1=$($PY -c "import json; print(json.load(open('$TMP/r1.json'))['shares'][0]['y_hex'])")
-Y2=$($PY -c "import json; print(json.load(open('$TMP/r2.json'))['shares'][0]['y_hex'])")
-Y3=$($PY -c "import json; print(json.load(open('$TMP/r3.json'))['shares'][0]['y_hex'])")
+Y0=$($PY -c "
+d = open('$TMP/orig.json','rb').read()
+y_len = int.from_bytes(d[5:9], 'little')
+print(d[10:10+y_len].hex())")
+Y1=$($PY -c "
+d = open('$TMP/r1.json','rb').read()
+y_len = int.from_bytes(d[5:9], 'little')
+print(d[10:10+y_len].hex())")
+Y2=$($PY -c "
+d = open('$TMP/r2.json','rb').read()
+y_len = int.from_bytes(d[5:9], 'little')
+print(d[10:10+y_len].hex())")
+Y3=$($PY -c "
+d = open('$TMP/r3.json','rb').read()
+y_len = int.from_bytes(d[5:9], 'little')
+print(d[10:10+y_len].hex())")
 assert_neq "$Y0" "$Y1" "orig.y[0] != r1.y[0]"
 assert_neq "$Y1" "$Y2" "r1.y[0] != r2.y[0]"
 assert_neq "$Y2" "$Y3" "r2.y[0] != r3.y[0]"
@@ -359,8 +404,8 @@ assert_neq "$Y0" "$Y3" "orig.y[0] != r3.y[0]"
 echo
 echo "=== 24. T = N edge case (5-of-5) ==="
 SECRET_TN="aabbccddeeff"
-"$WALLET" shamir-split --secret "$SECRET_TN" --threshold 5 --shares 5 --json \
-    > "$TMP/tn_orig.json"
+"$WALLET" shamir-split --secret "$SECRET_TN" --threshold 5 --shares 5 \
+    --out "$TMP/tn_orig.json" >/dev/null
 "$WALLET" shamir-rotate --shares "$TMP/tn_orig.json" --threshold 5 \
     --shares-out "$TMP/tn_rot.json" >/dev/null
 TN_RECOVERED=$("$WALLET" shamir-combine --shares "$TMP/tn_rot.json" | tr -d '\r\n')
@@ -370,8 +415,8 @@ assert_eq "$TN_RECOVERED" "$SECRET_TN" "T=N rotation recovers secret"
 echo
 echo "=== 25. T = 1 edge case (1-of-3) ==="
 SECRET_T1="cafef00d"
-"$WALLET" shamir-split --secret "$SECRET_T1" --threshold 1 --shares 3 --json \
-    > "$TMP/t1_orig.json"
+"$WALLET" shamir-split --secret "$SECRET_T1" --threshold 1 --shares 3 \
+    --out "$TMP/t1_orig.json" >/dev/null
 "$WALLET" shamir-rotate --shares "$TMP/t1_orig.json" --threshold 1 \
     --shares-out "$TMP/t1_rot.json" >/dev/null
 T1_RECOVERED=$("$WALLET" shamir-combine --shares "$TMP/t1_rot.json" | tr -d '\r\n')
@@ -381,13 +426,13 @@ assert_eq "$T1_RECOVERED" "$SECRET_T1" "T=1 rotation recovers secret"
 echo
 echo "=== 26. Large N=50 rotation ==="
 SECRET_50="cc11dd22ee33ff44aa55bb66"
-"$WALLET" shamir-split --secret "$SECRET_50" --threshold 10 --shares 50 --json \
-    > "$TMP/n50_orig.json"
+"$WALLET" shamir-split --secret "$SECRET_50" --threshold 10 --shares 50 \
+    --out "$TMP/n50_orig.json" >/dev/null
 "$WALLET" shamir-rotate --shares "$TMP/n50_orig.json" --threshold 10 \
     --shares-out "$TMP/n50_rot.json" >/dev/null
 N50_RECOVERED=$("$WALLET" shamir-combine --shares "$TMP/n50_rot.json" | tr -d '\r\n')
 assert_eq "$N50_RECOVERED" "$SECRET_50" "N=50 rotation recovers secret"
-N50_COUNT=$($PY -c "import json; print(len(json.load(open('$TMP/n50_rot.json'))['shares']))")
+N50_COUNT=$($PY -c "print(open('$TMP/n50_rot.json','rb').read()[4])")
 assert_eq "$N50_COUNT" "50" "N=50 output has 50 shares"
 
 # ── 27. Various secret sizes ──────────────────────────────────────────────
@@ -396,8 +441,8 @@ echo "=== 27. Secret sizes 1, 16, 32, 64 bytes round-trip ==="
 for SZ in 1 16 32 64; do
     # Build a secret of SZ bytes (deterministic).
     SECRET_SZ=$($PY -c "print('ab' * $SZ)")
-    "$WALLET" shamir-split --secret "$SECRET_SZ" --threshold 2 --shares 3 --json \
-        > "$TMP/sz_${SZ}_orig.json"
+    "$WALLET" shamir-split --secret "$SECRET_SZ" --threshold 2 --shares 3 \
+        --out "$TMP/sz_${SZ}_orig.json" >/dev/null
     "$WALLET" shamir-rotate --shares "$TMP/sz_${SZ}_orig.json" --threshold 2 \
         --shares-out "$TMP/sz_${SZ}_rot.json" >/dev/null
     SZ_REC=$("$WALLET" shamir-combine --shares "$TMP/sz_${SZ}_rot.json" | tr -d '\r\n')
@@ -454,11 +499,11 @@ assert_eq "$RC" "1" "exit 1 on --threshold abc"
 echo
 echo "=== 32. Duplicate x in input → exit 1 ==="
 $PY - "$TMP/orig.json" "$TMP/dup_x.json" <<'PY_EOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-d["shares"][1]["x"] = d["shares"][0]["x"]
-with open(sys.argv[2], "w") as f:
-    json.dump(d, f)
+import sys
+d = bytearray(open(sys.argv[1], "rb").read())
+y_len = int.from_bytes(d[5:9], "little")
+d[9 + (1 + y_len)] = d[9]           # record 2's x := record 1's x
+open(sys.argv[2], "wb").write(bytes(d))
 PY_EOF
 set +e
 ERR=$("$WALLET" shamir-rotate --shares "$TMP/dup_x.json" --threshold 3 \
@@ -467,7 +512,7 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on duplicate x"
-assert_contains "$ERR" "duplicate" "diagnostic mentions duplicate"
+assert_contains "$ERR" "DSS1" "diagnostic names the DSS1 decode gate"
 
 # ── 33. Two consecutive rotations of same input produce DIFFERENT outputs ─
 # Same input → same recovered secret, but each rotate draws fresh random
@@ -478,8 +523,8 @@ echo "=== 33. Two consecutive rotations diverge (fresh randomness) ==="
     --shares-out "$TMP/run_a.json" --force >/dev/null
 "$WALLET" shamir-rotate --shares "$TMP/orig.json" --threshold 3 \
     --shares-out "$TMP/run_b.json" --force >/dev/null
-YA=$($PY -c "import json; d=json.load(open('$TMP/run_a.json')); print(','.join(s['y_hex'] for s in d['shares']))")
-YB=$($PY -c "import json; d=json.load(open('$TMP/run_b.json')); print(','.join(s['y_hex'] for s in d['shares']))")
+YA=$(dss1_field "$TMP/run_a.json" y)
+YB=$(dss1_field "$TMP/run_b.json" y)
 assert_neq "$YA" "$YB" "two consecutive rotations produce DIFFERENT shares"
 # But both must recover the same secret.
 REC_A=$("$WALLET" shamir-combine --shares "$TMP/run_a.json" | tr -d '\r\n')

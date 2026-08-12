@@ -63,7 +63,7 @@ assert_eq() {
 }
 
 # ── Two fresh real keypairs: A is the signer, B is a second real account ──────
-"$W" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$W" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 if [ ! -s "$TMP/keys.json" ]; then
   echo "  SKIP: account-create-batch produced no keys (cannot run)"; exit 0
 fi
@@ -73,9 +73,8 @@ ADDR_B=$($PY -c "import json;print(json.load(open('$TMP/keys.json'))['accounts']
 PUB_A="${ADDR_A#0x}"     # anon address == 0x + 64-hex Ed25519 pubkey
 PUB_B="${ADDR_B#0x}"
 
-cat > "$TMP/key_a.json" <<EOF
-{"address":"$ADDR_A","privkey_hex":"$PRIV_A"}
-EOF
+# Keyfile = the canonical binary DAK1 container (D2), via account-import.
+"$W" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 
 # ── Sign a REAL TRANSFER A -> B with the production signer ────────────────────
 "$W" sign-anon-tx --keyfile "$TMP/key_a.json" --to "$ADDR_B" \

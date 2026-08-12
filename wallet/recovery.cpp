@@ -3,36 +3,22 @@
 #include "recovery.hpp"
 #include <determ/crypto/ed25519/ed25519.h>
 #include <determ/crypto/sha2/sha2.h>
-#include <nlohmann/json.hpp>
-#include <iomanip>
-#include <sstream>
+#include <cstring>
 #include <stdexcept>
 
 namespace determ::wallet::recovery {
 
-using nlohmann::json;
-
 namespace {
 
-std::string to_hex(const std::vector<uint8_t>& v) {
-    std::ostringstream o;
-    o << std::hex << std::setfill('0');
-    for (auto b : v) o << std::setw(2) << static_cast<int>(b);
-    return o.str();
+void put_u32_le(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
 }
 
-std::vector<uint8_t> from_hex(const std::string& s) {
-    if (s.size() % 2 != 0) throw std::invalid_argument("from_hex: odd length");
-    std::vector<uint8_t> out;
-    out.reserve(s.size() / 2);
-    for (size_t i = 0; i < s.size(); i += 2) {
-        unsigned int byte;
-        std::istringstream ss(s.substr(i, 2));
-        ss >> std::hex >> byte;
-        if (ss.fail()) throw std::invalid_argument("from_hex: non-hex char");
-        out.push_back(static_cast<uint8_t>(byte));
-    }
-    return out;
+uint32_t rd_u32_le(const uint8_t* p) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v |= uint32_t(p[i]) << (8 * i);
+    return v;
 }
 
 // AAD binds the guardian_id + scheme tag into each envelope's tag so
@@ -73,7 +59,6 @@ RecoverySetup create(const std::vector<uint8_t>& secret,
 
     RecoverySetup setup;
     setup.version         = 1;
-    setup.scheme          = "shamir-aead-passphrase";
     setup.threshold       = threshold;
     setup.share_count     = share_count;
     setup.secret_len      = secret.size();
@@ -135,45 +120,86 @@ recover(const RecoverySetup& setup,
     return secret;
 }
 
-std::string to_json(const RecoverySetup& setup) {
-    json envs = json::array();
-    for (auto& env : setup.envelopes) envs.push_back(envelope::serialize(env));
-    return json{
-        {"version",         setup.version},
-        {"scheme",          setup.scheme},
-        {"threshold",       setup.threshold},
-        {"share_count",     setup.share_count},
-        {"secret_len",      setup.secret_len},
-        {"guardian_x",      setup.guardian_x},
-        {"envelopes",       envs},
-        {"pubkey_checksum", to_hex(setup.pubkey_checksum)}
-    }.dump(2);
+std::vector<uint8_t> to_bytes(const RecoverySetup& setup) {
+    // Writers fail closed: refuse to emit a container from_bytes rejects.
+    if (setup.version != 1)
+        throw std::invalid_argument("recovery: DRS1 version must be 1");
+    if (setup.threshold == 0)
+        throw std::invalid_argument("recovery: threshold must be >= 1");
+    if (setup.share_count < setup.threshold)
+        throw std::invalid_argument("recovery: share_count < threshold");
+    if (setup.secret_len == 0 || setup.secret_len > 4096)
+        throw std::invalid_argument("recovery: secret_len outside 1..=4096");
+    if (!setup.pubkey_checksum.empty() && setup.pubkey_checksum.size() != 32)
+        throw std::invalid_argument("recovery: pubkey_checksum must be 0 or 32 bytes");
+    if (setup.guardian_x.size() != setup.share_count
+        || setup.envelopes.size() != setup.share_count)
+        throw std::invalid_argument("recovery: guardian_x/envelopes size mismatch");
+
+    std::vector<uint8_t> out;
+    out.insert(out.end(), {'D', 'R', 'S', '1'});
+    put_u32_le(out, setup.version);
+    out.push_back(setup.threshold);
+    out.push_back(setup.share_count);
+    put_u32_le(out, static_cast<uint32_t>(setup.secret_len));
+    out.push_back(static_cast<uint8_t>(setup.pubkey_checksum.size()));
+    out.insert(out.end(), setup.pubkey_checksum.begin(),
+               setup.pubkey_checksum.end());
+    bool seen[256] = {false};
+    for (uint8_t i = 0; i < setup.share_count; ++i) {
+        const uint8_t x = setup.guardian_x[i];
+        if (x == 0)
+            throw std::invalid_argument("recovery: guardian_x must be 1..=255");
+        if (seen[x])
+            throw std::invalid_argument("recovery: duplicate guardian_x");
+        seen[x] = true;
+        auto env_bytes = envelope::serialize_bytes(setup.envelopes[i]);
+        out.push_back(x);
+        put_u32_le(out, static_cast<uint32_t>(env_bytes.size()));
+        out.insert(out.end(), env_bytes.begin(), env_bytes.end());
+    }
+    return out;
 }
 
-std::optional<RecoverySetup> from_json(const std::string& blob) {
-    try {
-        auto j = json::parse(blob);
-        RecoverySetup s;
-        s.version       = j.value("version",     uint32_t{1});
-        s.scheme        = j.value("scheme",      std::string{});
-        s.threshold     = j.value("threshold",   uint8_t{0});
-        s.share_count   = j.value("share_count", uint8_t{0});
-        s.secret_len    = j.value("secret_len",  size_t{0});
-        if (j.contains("guardian_x"))
-            for (auto& x : j["guardian_x"]) s.guardian_x.push_back(x.get<uint8_t>());
-        if (j.contains("envelopes")) {
-            for (auto& es : j["envelopes"]) {
-                auto env_opt = envelope::deserialize(es.get<std::string>());
-                if (!env_opt) return std::nullopt;
-                s.envelopes.push_back(std::move(*env_opt));
-            }
-        }
-        std::string ck_hex = j.value("pubkey_checksum", std::string{});
-        if (!ck_hex.empty()) s.pubkey_checksum = from_hex(ck_hex);
-        return s;
-    } catch (std::exception&) {
-        return std::nullopt;
+std::optional<RecoverySetup> from_bytes(const uint8_t* data, size_t len) {
+    if (data == nullptr || len < 15) return std::nullopt;
+    if (std::memcmp(data, "DRS1", 4) != 0) return std::nullopt;
+    RecoverySetup s;
+    s.version = rd_u32_le(data + 4);
+    if (s.version != 1) return std::nullopt;
+    s.threshold   = data[8];
+    s.share_count = data[9];
+    if (s.threshold == 0) return std::nullopt;
+    if (s.share_count < s.threshold) return std::nullopt;
+    const uint32_t secret_len = rd_u32_le(data + 10);
+    if (secret_len == 0 || secret_len > 4096) return std::nullopt;
+    s.secret_len = secret_len;
+    const size_t checksum_len = data[14];
+    if (checksum_len != 0 && checksum_len != 32) return std::nullopt;
+    size_t off = 15;
+    if (len - off < checksum_len) return std::nullopt;
+    s.pubkey_checksum.assign(data + off, data + off + checksum_len);
+    off += checksum_len;
+    bool seen[256] = {false};
+    for (size_t i = 0; i < s.share_count; ++i) {
+        if (len - off < 5) return std::nullopt;           // x + env_len
+        const uint8_t x = data[off]; off += 1;
+        if (x == 0 || seen[x]) return std::nullopt;       // 1..=255, DISTINCT
+        seen[x] = true;
+        const uint32_t env_len = rd_u32_le(data + off); off += 4;
+        if (env_len > len - off) return std::nullopt;     // length vs body
+        auto env = envelope::deserialize_bytes(data + off, env_len);
+        if (!env) return std::nullopt;
+        off += env_len;
+        s.guardian_x.push_back(x);
+        s.envelopes.push_back(std::move(*env));
     }
+    if (off != len) return std::nullopt;                  // exact length
+    return s;
+}
+
+std::optional<RecoverySetup> from_bytes(const std::vector<uint8_t>& bytes) {
+    return from_bytes(bytes.data(), bytes.size());
 }
 
 } // namespace determ::wallet::recovery

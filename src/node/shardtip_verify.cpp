@@ -14,6 +14,47 @@
 
 namespace determ::node {
 
+std::optional<size_t> verify_committee_sigs(
+    const std::map<std::string, PubKey>& member_pub,
+    const std::vector<std::string>&      creators,
+    const std::vector<Signature>&        creator_block_sigs,
+    const Hash&                          digest,
+    size_t                               required_k,
+    const std::string&                   diag_ctx) {
+    if (creators.empty()) {
+        std::cerr << "[node] " << diag_ctx << ": empty committee rejected\n";
+        return std::nullopt;
+    }
+    if (creator_block_sigs.size() != creators.size()) {
+        std::cerr << "[node] " << diag_ctx << ": creator_block_sigs size mismatch\n";
+        return std::nullopt;
+    }
+    Signature zero_sig{};
+    size_t signed_count = 0;
+    for (size_t i = 0; i < creators.size(); ++i) {
+        if (creator_block_sigs[i] == zero_sig) continue;
+        auto pit = member_pub.find(creators[i]);
+        if (pit == member_pub.end()) {
+            std::cerr << "[node] " << diag_ctx << ": creator '" << creators[i]
+                      << "' not in committee pool\n";
+            return std::nullopt;
+        }
+        if (!crypto::verify(pit->second, digest.data(), digest.size(),
+                              creator_block_sigs[i])) {
+            std::cerr << "[node] " << diag_ctx << ": invalid sig from "
+                      << creators[i] << "\n";
+            return std::nullopt;
+        }
+        ++signed_count;
+    }
+    if (signed_count < required_k) {
+        std::cerr << "[node] " << diag_ctx << ": insufficient sigs ("
+                  << signed_count << "/" << required_k << ")\n";
+        return std::nullopt;
+    }
+    return signed_count;
+}
+
 std::optional<Hash> verify_shard_tip_committee_sig_root(
     const chain::Chain&      chain,
     const NodeRegistry&      present_head,
@@ -100,27 +141,16 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
     std::map<std::string, PubKey> frozen_pub;
     for (auto& nd : pool_nodes) frozen_pub[nd.domain] = nd.pubkey;
 
-    if (tip.creator_block_sigs.size() != tip.creators.size()) return std::nullopt;
     Hash digest = compute_block_digest(tip);
-    Signature zero_sig{};
-    size_t signed_count = 0;
-    for (size_t i = 0; i < tip.creators.size(); ++i) {
-        if (tip.creator_block_sigs[i] == zero_sig) continue;
-        auto pit = frozen_pub.find(tip.creators[i]);
-        if (pit == frozen_pub.end()) return std::nullopt;   // not a frozen committee member
-        if (!crypto::verify(pit->second, digest.data(), digest.size(),
-                              tip.creator_block_sigs[i])) {
-            std::cerr << "[node] shard tip: invalid sig from " << tip.creators[i] << "\n";
-            return std::nullopt;
-        }
-        ++signed_count;
-    }
     size_t required = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
-    if (signed_count < required) {
-        std::cerr << "[node] shard tip: insufficient sigs (" << signed_count
-                  << "/" << required << ")\n";
+    // DECISION-LOG 2026-07-31 Hole 2: the shared committee-signature core —
+    // verdict-identical extraction of the loop that lived here (the empty-floor
+    // arm is unreachable on this path: creators.size()==expected_k>=1 was
+    // enforced above).
+    if (!verify_committee_sigs(frozen_pub, tip.creators, tip.creator_block_sigs,
+                               digest, required, "shard tip"))
         return std::nullopt;
-    }
+    Signature zero_sig{};   // the sig-set-root loop below skips zero sentinels
 
     // ── committee_sig_root (VERBATIM) — commitment to the ACTUAL verified sig SET.
     // A PURE function of (tip, region, shard_id): every honest verifier that accepts

@@ -205,8 +205,8 @@ for i in $(seq 1 "$N_CASES"); do
        [ "$REC2_SEED" = "$PRIV" ] && [ "$REC2_PUB" = "$EXP_PUB" ]; then
         c_p3=0; else c_p3=1; fi
     # header pubkey preserved byte-for-byte across the rotation
-    H_ORIG=$(sed -n '1p' "$ENC" | tr -d '\r')
-    H_RE=$(sed -n '1p' "$REENC" | tr -d '\r')
+    H_ORIG=$($PY -c "print(open('$ENC','rb').read()[:36].hex())")
+    H_RE=$($PY -c "print(open('$REENC','rb').read()[:36].hex())")
     [ "$H_ORIG" = "$H_RE" ] && c_hdr=0 || c_hdr=1
 
     # ── P4a: wrong passphrase on the ORIGINAL file fails (exit 2, no leak) ───
@@ -223,35 +223,20 @@ for i in $(seq 1 "$N_CASES"); do
     rc=$?
     if [ "$rc" = "2" ] && [ ! -e "$T/c${i}_oldfail.json" ]; then c_p4b=0; else c_p4b=1; fi
 
-    # ── P5: XOR-flip one nibble of the ciphertext field => AEAD rejects ──────
-    # The envelope blob (line 2) is dot-separated hex fields; the LAST field is
-    # the ciphertext+tag. XOR-flip a deterministically-chosen nibble so the
-    # mutation is ALWAYS a real change, then confirm decrypt fails (exit 2).
+    # ── P5: XOR-flip one byte of the embedded ciphertext => AEAD rejects ─────
+    # The DNK1 container embeds the DWE envelope at offset 40; its ciphertext
+    # occupies the tail. XOR-flip a deterministically-chosen byte in the last
+    # 16 bytes (inside ct||tag) so the mutation is ALWAYS a real change, then
+    # confirm decrypt fails (exit 2).
     nibble_sel=$(( r3 % 997 ))
     $PY - "$ENC" "$TAMPER" "$nibble_sel" <<'PY_EOF'
 import sys
 inp, outp, sel = sys.argv[1], sys.argv[2], int(sys.argv[3])
-with open(inp) as f:
-    lines = f.read().split("\n")
-# locate the blob line (the one with dot-separated hex fields)
-bidx = None
-for j, ln in enumerate(lines):
-    if ln.count(".") >= 4:
-        bidx = j; break
-assert bidx is not None, "no envelope blob line found"
-fields = lines[bidx].split(".")
-ct = fields[-1]
-assert len(ct) > 0 and all(c in "0123456789abcdefABCDEF" for c in ct), "ciphertext field not hex"
-pos = sel % len(ct)
-orig = ct[pos]
-# XOR the nibble value with 1 -> guaranteed different hex digit
-flipped = "%x" % (int(orig, 16) ^ 1)
-ct2 = ct[:pos] + flipped + ct[pos+1:]
-assert ct2 != ct, "XOR-flip produced no change"
-fields[-1] = ct2
-lines[bidx] = ".".join(fields)
-with open(outp, "w") as f:
-    f.write("\n".join(lines))
+d = bytearray(open(inp, "rb").read())
+assert d[:4] == b"DNK1" and len(d) > 56, "not a DNK1 container"
+pos = len(d) - 1 - (sel % 16)     # inside the trailing ct||tag bytes
+d[pos] ^= 0x01
+open(outp, "wb").write(bytes(d))
 PY_EOF
     tamper_built=$?
     rm -f "$TAMPER_OUT"
@@ -287,10 +272,10 @@ FS_PRIV=$(extract_priv "$KP")
 FS_PUB=$(extract_addr "$KP"); FS_PUB=${FS_PUB#0x}
 "$WALLET" keyfile-create --priv "$FS_PRIV" --passphrase-from "env:KFL_FS" --out "$T/fs_a.enc" >/dev/null 2>&1
 "$WALLET" keyfile-create --priv "$FS_PRIV" --passphrase-from "env:KFL_FS" --out "$T/fs_b.enc" >/dev/null 2>&1
-BLOB_A=$(sed -n '2p' "$T/fs_a.enc" | tr -d '\r')
-BLOB_B=$(sed -n '2p' "$T/fs_b.enc" | tr -d '\r')
-HDR_A=$(sed -n '1p' "$T/fs_a.enc" | tr -d '\r')
-HDR_B=$(sed -n '1p' "$T/fs_b.enc" | tr -d '\r')
+BLOB_A=$($PY -c "print(open('$T/fs_a.enc','rb').read()[40:].hex())")
+BLOB_B=$($PY -c "print(open('$T/fs_b.enc','rb').read()[40:].hex())")
+HDR_A=$($PY -c "print(open('$T/fs_a.enc','rb').read()[:36].hex())")
+HDR_B=$($PY -c "print(open('$T/fs_b.enc','rb').read()[:36].hex())")
 assert_ne "$BLOB_A" "$BLOB_B" "two encryptions of same key+pw differ (fresh salt+nonce)"
 assert_eq "$HDR_A" "$HDR_B" "header (pubkey) is identical across the two encryptions"
 # Both must still decrypt to the SAME original seed (distinct envelope, one key).
@@ -313,19 +298,12 @@ S_PRIV=$(extract_priv "$KP")
 $PY - "$T/salt_src.enc" "$T/salt_tamper.enc" <<'PY_EOF'
 import sys
 inp, outp = sys.argv[1], sys.argv[2]
-with open(inp) as f:
-    lines = f.read().split("\n")
-bidx = next(j for j, ln in enumerate(lines) if ln.count(".") >= 4)
-fields = lines[bidx].split(".")
-# fields: magic.salt.iters.nonce.aad.ciphertext  -> salt is index 1
-salt = fields[1]
-pos = 0
-flipped = "%x" % (int(salt[pos], 16) ^ 1)
-fields[1] = salt[:pos] + flipped + salt[pos+1:]
-assert fields[1] != salt
-lines[bidx] = ".".join(fields)
-with open(outp, "w") as f:
-    f.write("\n".join(lines))
+d = bytearray(open(inp, "rb").read())
+# DNK1 container: envelope at offset 40; DWE layout: magic(4) salt_len(1)
+# salt... -> first salt byte sits at offset 40 + 5.
+assert d[:4] == b"DNK1" and len(d) > 46, "not a DNK1 container"
+d[45] ^= 0x01
+open(outp, "wb").write(bytes(d))
 PY_EOF
 rm -f "$T/salt_tamper.json"
 "$WALLET" keyfile-decrypt --in "$T/salt_tamper.enc" --passphrase-from "env:KFL_S" \

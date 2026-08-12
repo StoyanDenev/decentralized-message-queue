@@ -135,8 +135,27 @@ assert_eq "$n_blocks" "5" "N=5 emits exactly 5 'account[' lines"
 assert_contains "$OUT" "account\[0\]:" "first index is 0"
 assert_contains "$OUT" "account\[4\]:" "last index is 4 (0-based)"
 
+# Decode a binary DAB1 batch keyfile (D2 at-rest form) into the JSON view
+# {accounts:[{address, privkey_hex}]} for the shape assertions below.
+dab1_view() {  # $1 = DAB1 file, $2 = output JSON view; echoes OK on success
+  $PY - "$1" "$2" <<'PY_EOF'
+import json, sys
+data = open(sys.argv[1], 'rb').read()
+assert data[:4] == b'DAB1', 'bad magic %r' % data[:4]
+count = int.from_bytes(data[4:6], 'little')
+assert len(data) == 6 + 64 * count, 'bad length %d for count %d' % (len(data), count)
+accounts = []
+for i in range(count):
+    rec = data[6 + 64*i : 6 + 64*(i+1)]
+    accounts.append({'address': '0x' + rec[:32].hex(),
+                     'privkey_hex': rec[32:].hex()})
+json.dump({'accounts': accounts}, open(sys.argv[2], 'w'))
+print('OK')
+PY_EOF
+}
+
 echo
-echo "=== 4. N=10 via --out writes JSON with expected fields ==="
+echo "=== 4. N=10 via --out writes a binary DAB1 with the expected records ==="
 "$WALLET" account-derive-batch --seed "$SEED1" --count 10 --out "$TMP/batch10.json" > "$TMP/stdout10.txt" 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 on N=10 with --out"
@@ -147,12 +166,24 @@ if [ -s "$TMP/batch10.json" ]; then
 else
     echo "  FAIL: --out file is empty"; fail_count=$((fail_count + 1))
 fi
-LEN=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(len(d['accounts']))" "$TMP/batch10.json")
-assert_eq "$LEN" "10" "JSON accounts[] length 10"
-CNT=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['count'])" "$TMP/batch10.json")
-assert_eq "$CNT" "10" "JSON count field == 10"
-HAS_HASH=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print('yes' if 'master_seed_hash_hex' in d else 'no')" "$TMP/batch10.json")
-assert_eq "$HAS_HASH" "yes" "JSON contains master_seed_hash_hex"
+VIEW_OK=$(dab1_view "$TMP/batch10.json" "$TMP/batch10.view.json" 2>&1 | tail -1)
+assert_eq "$VIEW_OK" "OK" "--out file is a well-formed binary DAB1 container"
+LEN=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(len(d['accounts']))" "$TMP/batch10.view.json")
+assert_eq "$LEN" "10" "DAB1 carries 10 account records"
+# The count / master_seed_hash_hex metadata live on the --json stdout VIEW
+# (deterministic derivation => same accounts as the file).
+"$WALLET" account-derive-batch --seed "$SEED1" --count 10 --json > "$TMP/batch10.doc.json" 2>/dev/null
+CNT=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['count'])" "$TMP/batch10.doc.json")
+assert_eq "$CNT" "10" "--json view count field == 10"
+HAS_HASH=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print('yes' if 'master_seed_hash_hex' in d else 'no')" "$TMP/batch10.doc.json")
+assert_eq "$HAS_HASH" "yes" "--json view contains master_seed_hash_hex"
+FILE_MATCHES_DOC=$($PY -c "
+import json,sys
+v = json.load(open('$TMP/batch10.view.json'))['accounts']
+d = json.load(open('$TMP/batch10.doc.json'))['accounts']
+print('MATCH' if [(a['address'],a['privkey_hex']) for a in v] ==
+      [(a['address'],a['privkey_hex']) for a in d] else 'MISMATCH')")
+assert_eq "$FILE_MATCHES_DOC" "MATCH" "DAB1 file records == --json view records (deterministic)"
 
 echo
 echo "=== 5. --json (no --out) prints JSON to stdout, parseable ==="
@@ -189,7 +220,9 @@ fi
 echo
 echo "=== 9. Different seed -> disjoint address set ==="
 "$WALLET" account-derive-batch --seed "$SEED2" --count 8 --out "$TMP/seed2.json" >/dev/null 2>&1
-DIFFER=$($PY - "$TMP/det_a.json" "$TMP/seed2.json" <<'PY_EOF'
+dab1_view "$TMP/det_a.json" "$TMP/det_a.view.json" >/dev/null
+dab1_view "$TMP/seed2.json" "$TMP/seed2.view.json" >/dev/null
+DIFFER=$($PY - "$TMP/det_a.view.json" "$TMP/seed2.view.json" <<'PY_EOF'
 import json, sys
 a = json.load(open(sys.argv[1]))["accounts"]
 b = json.load(open(sys.argv[2]))["accounts"]
@@ -202,7 +235,7 @@ assert_eq "$DIFFER" "DISJOINT" "different seeds produce disjoint address sets"
 
 echo
 echo "=== 10. Every address is anon-format (0x + 64 lowercase hex) ==="
-$PY - "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$TMP/batch10.view.json" <<'PY_EOF'
 import json, re, sys
 d = json.load(open(sys.argv[1]))
 shape = re.compile(r"^0x[0-9a-f]{64}$")
@@ -214,7 +247,7 @@ assert_eq "$RC" "0" "every address matches anon-format (0x + 64 lowercase hex)"
 
 echo
 echo "=== 11. Every privkey_hex is 64 lowercase hex ==="
-$PY - "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$TMP/batch10.view.json" <<'PY_EOF'
 import json, re, sys
 d = json.load(open(sys.argv[1]))
 shape = re.compile(r"^[0-9a-f]{64}$")
@@ -226,7 +259,7 @@ assert_eq "$RC" "0" "every privkey_hex is 64 lowercase hex"
 
 echo
 echo "=== 12. All addresses unique within a batch ==="
-$PY - "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$TMP/batch10.view.json" <<'PY_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 addrs = [a["address"] for a in d["accounts"]]
@@ -237,7 +270,7 @@ assert_eq "$RC" "0" "all 10 addresses unique within batch"
 
 echo
 echo "=== 13. All privkey_hex unique within a batch ==="
-$PY - "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$TMP/batch10.view.json" <<'PY_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 keys = [a["privkey_hex"] for a in d["accounts"]]
@@ -249,7 +282,7 @@ assert_eq "$RC" "0" "all 10 privkey_hex unique within batch"
 echo
 echo "=== 14. master_seed_hash_hex == SHA-256(seed bytes) ==="
 EXPECTED_HASH=$($PY -c "import hashlib; print(hashlib.sha256(bytes.fromhex('$SEED1')).hexdigest())")
-ACTUAL_HASH=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['master_seed_hash_hex'])" "$TMP/batch10.json")
+ACTUAL_HASH=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['master_seed_hash_hex'])" "$TMP/batch10.doc.json")
 assert_eq "$ACTUAL_HASH" "$EXPECTED_HASH" "master_seed_hash_hex matches independent Python SHA-256"
 
 echo
@@ -258,7 +291,7 @@ echo "=== 15. Cross-machine reproducibility (Python re-derives identical account
 # the documented algorithm, and compare every account byte-for-byte.
 # Catches: integer encoding direction (endianness), preimage layout,
 # ed25519 primitive substitution, hex casing.
-$PY - "$SEED1" "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$SEED1" "$TMP/batch10.doc.json" <<'PY_EOF'
 import hashlib, json, sys
 try:
     from nacl.signing import SigningKey
@@ -299,7 +332,7 @@ fi
 
 echo
 echo "=== 16. Indices in JSON are exactly 0..N-1 in order ==="
-$PY - "$TMP/batch10.json" <<'PY_EOF'
+$PY - "$TMP/batch10.doc.json" <<'PY_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 got = [a["index"] for a in d["accounts"]]
@@ -410,8 +443,9 @@ assert_contains "$ERR" "--force"        "diagnostic suggests --force"
 "$WALLET" account-derive-batch --seed "$SEED1" --count 1 --out "$TMP/batch10.json" --force >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "--force overrides existing file"
-LEN_AFTER=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/batch10.json")
-assert_eq "$LEN_AFTER" "1" "after --force overwrite accounts[] is length 1"
+dab1_view "$TMP/batch10.json" "$TMP/batch10_force.view.json" >/dev/null
+LEN_AFTER=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/batch10_force.view.json")
+assert_eq "$LEN_AFTER" "1" "after --force overwrite the DAB1 carries 1 record"
 
 echo
 echo "=== 27. --out + --json: --out wins, no JSON on stdout ==="
@@ -426,7 +460,8 @@ assert_not_contains "$STDOUT" "privkey_hex" "stdout does NOT leak privkey to ter
 echo
 echo "=== 28. master_seed_hash_hex != raw master seed (sanity) ==="
 "$WALLET" account-derive-batch --seed "$SEED1" --count 1 --out "$TMP/hash_check.json" --force >/dev/null 2>&1
-ACTUAL_HASH=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['master_seed_hash_hex'])" "$TMP/hash_check.json")
+dab1_view "$TMP/hash_check.json" "$TMP/hash_check.view.json" >/dev/null
+ACTUAL_HASH=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['master_seed_hash_hex'])" "$TMP/batch10.doc.json")
 if [ "$ACTUAL_HASH" != "$SEED1" ]; then
     echo "  PASS: master_seed_hash_hex differs from raw seed (it's the SHA-256)"; pass_count=$((pass_count + 1))
 else
@@ -435,7 +470,7 @@ fi
 
 echo
 echo "=== 29. Output file does NOT contain raw seed_hex (defense in depth) ==="
-if grep -q "$SEED1" "$TMP/hash_check.json"; then
+if grep -q "$SEED1" "$TMP/hash_check.view.json"; then
     echo "  FAIL: --out file contains the raw master seed hex (leak)"; fail_count=$((fail_count + 1))
 else
     echo "  PASS: --out file does NOT contain the raw master seed"; pass_count=$((pass_count + 1))
@@ -443,7 +478,7 @@ fi
 
 echo
 echo "=== 30. SLIP-0010-style sanity: account[0] privkey == SHA-256(seed || 0x00000000) ==="
-$PY - "$SEED1" "$TMP/hash_check.json" <<'PY_EOF'
+$PY - "$SEED1" "$TMP/hash_check.view.json" <<'PY_EOF'
 import hashlib, json, sys
 seed = bytes.fromhex(sys.argv[1])
 expected = hashlib.sha256(seed + (0).to_bytes(4, "little")).hexdigest()

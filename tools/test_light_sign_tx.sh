@@ -43,18 +43,14 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 echo "=== 1. Mint two anon keypairs ==="
-"$DETERM_WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$DETERM_WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['address'])")
 PRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
 PUB_A="${ADDR_A#0x}"
 
-# Write canonical-shape keyfile for ADDR_A.
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json"
+# Mint the canonical binary DAK1 keyfile for ADDR_A (D2).
+"$DETERM_WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 
 echo "  alice address: $ADDR_A"
 echo "  bob address:   $ADDR_B"

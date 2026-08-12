@@ -125,38 +125,56 @@ echo
 echo "=== 6. Synthesize EquivocationEvent (two sigs from node1 over distinct digests) ==="
 python <<EOF
 import hashlib, json
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+# Ed25519 backend: prefer the cryptography module, fall back to PyNaCl (the
+# Darwin runner ships pynacl only). Both wrap the same RFC 8032 primitive.
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    def _signer(seed):
+        k = Ed25519PrivateKey.from_private_bytes(seed)
+        return lambda m: k.sign(m)
+except ModuleNotFoundError:
+    from nacl.signing import SigningKey
+    def _signer(seed):
+        k = SigningKey(seed)
+        return lambda m: k.sign(m).signature
 
 with open("$T/n1/node_key.json") as f:
     nk = json.load(f)
 priv_seed = bytes.fromhex(nk["priv_seed"])
 pubkey    = bytes.fromhex(nk["pubkey"])
-pkey = Ed25519PrivateKey.from_private_bytes(priv_seed)
+sign = _signer(priv_seed)
 
-# Two distinct digests at the same (claimed) block_index. The
-# protocol's only requirement is that the same key signed two
-# different digests at the same height. We use 1 as a safely-past
-# height; the chain has progressed beyond it.
-digest_a = hashlib.sha256(b"forensic-evidence-A").digest()
-digest_b = hashlib.sha256(b"forensic-evidence-B").digest()
-sig_a = pkey.sign(digest_a)
-sig_b = pkey.sign(digest_b)
+# EQV-height-bind: the evidence carries per-side OPENINGS (index, body_root)
+# of two-level digests; the verifier derives each signed digest as
+#   SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root)      (kind 0)
+# and asserts index_a == index_b == block_index. Synthesize two distinct
+# body roots at ONE height (1 — safely past; the chain has progressed
+# beyond it), compose, and sign the DERIVED digests.
+body_root_a = hashlib.sha256(b"forensic-evidence-A").digest()
+body_root_b = hashlib.sha256(b"forensic-evidence-B").digest()
+def compose(index, root):
+    return hashlib.sha256(b"DTM-BLKDIG-v2" + index.to_bytes(8, "big") + root).digest()
+sig_a = sign(compose(1, body_root_a))
+sig_b = sign(compose(1, body_root_b))
 
 ev = {
     "equivocator": "node1",
     "block_index": 1,
-    "digest_a": digest_a.hex(),
-    "sig_a":    sig_a.hex(),
-    "digest_b": digest_b.hex(),
-    "sig_b":    sig_b.hex(),
+    "kind": 0,
+    "index_a": 1,
+    "body_root_a": body_root_a.hex(),
+    "sig_a":       sig_a.hex(),
+    "index_b": 1,
+    "body_root_b": body_root_b.hex(),
+    "sig_b":       sig_b.hex(),
     "shard_id": 0,
     "beacon_anchor_height": 0,
 }
 with open("$T/ev.json","w") as f: json.dump(ev,f,indent=2)
 print("event written:", "$T/ev.json")
 print("  equivocator:", ev["equivocator"])
-print("  digest_a:",   ev["digest_a"][:16], "...")
-print("  digest_b:",   ev["digest_b"][:16], "...")
+print("  body_root_a:", ev["body_root_a"][:16], "...")
+print("  body_root_b:", ev["body_root_b"][:16], "...")
 EOF
 
 echo

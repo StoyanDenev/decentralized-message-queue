@@ -1146,6 +1146,13 @@ Additional in-process tests:
                                               against an unsigned gossiped-
                                               bundle tx_hash flood (SHARD-role
                                               in-process harness; drop-newest)
+  determ test-beacon-header-committee         INGRESS beacon-header committee
+                                              floor (DECISION-LOG 2026-07-31
+                                              Hole 2) — on_beacon_header routes
+                                              through verify_committee_sigs:
+                                              empty/under-K creators REJECTED,
+                                              honest full K-of-K ACCEPTED
+                                              (SHARD-role in-process harness)
   determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
                                               stake-lifecycle complement;
                                               fee refund on failure; A1
@@ -9714,8 +9721,9 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "mallory";
             ev.block_index = 42;
-            ev.digest_a = patterned_hash(0xE5);
-            ev.digest_b = patterned_hash(0xE6);
+            ev.kind = 0;
+            ev.index_a = 42; ev.body_root_a = patterned_hash(0xE5);
+            ev.index_b = 42; ev.body_root_b = patterned_hash(0xE6);
             ev.sig_a = patterned_sig(0xE7);
             ev.sig_b = patterned_sig(0xE8);
             b.equivocation_events.push_back(ev);
@@ -9839,8 +9847,9 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "mallory";
             ev.block_index = 42;
-            ev.digest_a = patterned_hash(0xD1);
-            ev.digest_b = patterned_hash(0xD2);
+            ev.kind = 0;
+            ev.index_a = 42; ev.body_root_a = patterned_hash(0xD1);
+            ev.index_b = 42; ev.body_root_b = patterned_hash(0xD2);
             ev.sig_a = patterned_sig(0xD3);
             ev.sig_b = patterned_sig(0xD4);
             b.equivocation_events.push_back(ev);
@@ -10093,8 +10102,9 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "mallory";
             ev.block_index = 7;
-            ev.digest_a = patterned_hash(0xC1);
-            ev.digest_b = patterned_hash(0xC2);
+            ev.kind = 0;
+            ev.index_a = 7; ev.body_root_a = patterned_hash(0xC1);
+            ev.index_b = 7; ev.body_root_b = patterned_hash(0xC2);
             ev.sig_a = patterned_sig(0xC3);
             ev.sig_b = patterned_sig(0xC4);
             b.equivocation_events.push_back(ev);
@@ -10325,8 +10335,9 @@ int main(int argc, char** argv) {
 
             chain::EquivocationEvent eq;
             eq.equivocator = "mallory"; eq.block_index = 42;
-            eq.digest_a.fill(0xD0); eq.sig_a.fill(0xD1);
-            eq.digest_b.fill(0xD2); eq.sig_b.fill(0xD3);
+            eq.kind = 0;
+            eq.index_a = 42; eq.body_root_a.fill(0xD0); eq.sig_a.fill(0xD1);
+            eq.index_b = 42; eq.body_root_b.fill(0xD2); eq.sig_b.fill(0xD3);
             eq.shard_id = 3; eq.beacon_anchor_height = 100;
 
             chain::AbortEvent ae;
@@ -10346,7 +10357,7 @@ int main(int argc, char** argv) {
             rt(make_abort_claim(ac),  "ABORT_CLAIM frame round-trips (all six fields)");
             rt(make_block_sig(bs),    "BLOCK_SIG frame round-trips");
             rt(make_equivocation_evidence(eq),
-                                      "EQUIVOCATION_EVIDENCE frame round-trips (8 fields)");
+                                      "EQUIVOCATION_EVIDENCE frame round-trips (11 fields)");
             rt(make_abort_event(ae, 7, prev),
                                       "ABORT_EVENT frame round-trips (envelope + typed claims)");
 
@@ -11114,9 +11125,11 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator          = "evil-node";
             ev.block_index          = 100;
-            // Distinct digests so the event represents real equivocation.
-            for (size_t i = 0; i < ev.digest_a.size(); ++i) ev.digest_a[i] = uint8_t(0xAA);
-            for (size_t i = 0; i < ev.digest_b.size(); ++i) ev.digest_b[i] = uint8_t(0xBB);
+            ev.kind                 = 0;
+            ev.index_a = 100; ev.index_b = 100;
+            // Distinct body roots so the event represents real equivocation.
+            for (size_t i = 0; i < ev.body_root_a.size(); ++i) ev.body_root_a[i] = uint8_t(0xAA);
+            for (size_t i = 0; i < ev.body_root_b.size(); ++i) ev.body_root_b[i] = uint8_t(0xBB);
             Message m = make_equivocation_evidence(ev);
             run_msgtype(m, "EQUIVOCATION_EVIDENCE");
         }
@@ -11451,9 +11464,12 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "mallory";
             ev.block_index = 42;
-            ev.digest_a = patterned_hash(0xD0);
+            ev.kind        = 1;
+            ev.index_a     = 42;
+            ev.body_root_a = patterned_hash(0xD0);
             ev.sig_a    = patterned_sig(0xD1);
-            ev.digest_b = patterned_hash(0xD2);
+            ev.index_b     = 42;
+            ev.body_root_b = patterned_hash(0xD2);
             ev.sig_b    = patterned_sig(0xD3);
             ev.shard_id = 3;
             ev.beacon_anchor_height = 100;
@@ -11465,12 +11481,18 @@ int main(int argc, char** argv) {
                   "EquivocationEvent round-trip: equivocator preserved");
             check(back.block_index == ev.block_index,
                   "EquivocationEvent round-trip: block_index preserved");
-            check(back.digest_a == ev.digest_a,
-                  "EquivocationEvent round-trip: digest_a preserved");
+            check(back.kind == ev.kind,
+                  "EquivocationEvent round-trip: kind preserved");
+            check(back.index_a == ev.index_a,
+                  "EquivocationEvent round-trip: index_a preserved");
+            check(back.body_root_a == ev.body_root_a,
+                  "EquivocationEvent round-trip: body_root_a preserved");
             check(back.sig_a == ev.sig_a,
                   "EquivocationEvent round-trip: sig_a preserved");
-            check(back.digest_b == ev.digest_b,
-                  "EquivocationEvent round-trip: digest_b preserved");
+            check(back.index_b == ev.index_b,
+                  "EquivocationEvent round-trip: index_b preserved");
+            check(back.body_root_b == ev.body_root_b,
+                  "EquivocationEvent round-trip: body_root_b preserved");
             check(back.sig_b == ev.sig_b,
                   "EquivocationEvent round-trip: sig_b preserved");
             check(back.shard_id == ev.shard_id,
@@ -11545,44 +11567,63 @@ int main(int argc, char** argv) {
                   "AbortEvent S-018 error message mentions 'round' field name");
         }
 
-        // EquivocationEvent: equivocator + block_index + digest_a/b +
-        // sig_a/b are all S-018 required. Test "digest_a" as the canary
-        // for the json_require_hex path (with size-check at 64 hex chars).
+        // EquivocationEvent: every consensus field (equivocator, block_index,
+        // kind, index_a/b, body_root_a/b, sig_a/b) is S-018 required —
+        // EQV-height-bind derives the signed digests from these very fields,
+        // so none may default. One missing-field probe per NEW field name,
+        // plus the hex-length and kind-range rejects.
         {
-            json bad = {
+            const json good = {
                 {"equivocator", "mallory"},
                 {"block_index", 42},
-                // digest_a missing
+                {"kind", 0},
+                {"index_a", 42},
+                {"body_root_a", to_hex(patterned_hash(0xD0))},
                 {"sig_a", to_hex(patterned_sig(0xD1))},
-                {"digest_b", to_hex(patterned_hash(0xD2))},
+                {"index_b", 42},
+                {"body_root_b", to_hex(patterned_hash(0xD2))},
                 {"sig_b", to_hex(patterned_sig(0xD3))}
             };
-            bool threw = false;
-            std::string what;
-            try { (void)EquivocationEvent::from_json(bad); }
-            catch (const std::exception& e) { threw = true; what = e.what(); }
-            check(threw,
-                  "EquivocationEvent::from_json throws on missing 'digest_a' (S-018)");
-            check(what.find("digest_a") != std::string::npos,
-                  "EquivocationEvent S-018 error message mentions 'digest_a' field name");
-        }
+            auto probe_missing = [&](const char* field) {
+                json bad = good;
+                bad.erase(field);
+                bool threw = false;
+                std::string what;
+                try { (void)EquivocationEvent::from_json(bad); }
+                catch (const std::exception& e) { threw = true; what = e.what(); }
+                check(threw && what.find(field) != std::string::npos,
+                      (std::string("EquivocationEvent::from_json names missing '")
+                           + field + "' (S-018)").c_str());
+            };
+            probe_missing("kind");
+            probe_missing("index_a");
+            probe_missing("body_root_a");
+            probe_missing("index_b");
+            probe_missing("body_root_b");
 
-        // EquivocationEvent: wrong-length hex for digest_a (S-018 hex
-        // length check — should be 64 hex chars for a 32-byte hash).
-        {
-            json bad = {
-                {"equivocator", "mallory"},
-                {"block_index", 42},
-                {"digest_a", "deadbeef"},  // only 4 bytes, not 32
-                {"sig_a", to_hex(patterned_sig(0xD1))},
-                {"digest_b", to_hex(patterned_hash(0xD2))},
-                {"sig_b", to_hex(patterned_sig(0xD3))}
-            };
-            bool threw = false;
-            try { (void)EquivocationEvent::from_json(bad); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "EquivocationEvent::from_json throws on wrong-length 'digest_a' hex (S-018)");
+            // Wrong-length hex for body_root_a (S-018 hex length check —
+            // should be 64 hex chars for a 32-byte hash).
+            {
+                json bad = good;
+                bad["body_root_a"] = "deadbeef";  // only 4 bytes, not 32
+                bool threw = false;
+                try { (void)EquivocationEvent::from_json(bad); }
+                catch (const std::exception&) { threw = true; }
+                check(threw,
+                      "EquivocationEvent::from_json throws on wrong-length 'body_root_a' hex (S-018)");
+            }
+            // kind > 1 fail-closes at the parse boundary (no compose function
+            // exists for it downstream).
+            {
+                json bad = good;
+                bad["kind"] = 2;
+                bool threw = false;
+                std::string what;
+                try { (void)EquivocationEvent::from_json(bad); }
+                catch (const std::exception& e) { threw = true; what = e.what(); }
+                check(threw && what.find("kind") != std::string::npos,
+                      "EquivocationEvent::from_json rejects kind > 1 (unknown digest family fail-closed)");
+            }
         }
 
         // GenesisAlloc: domain is the only S-018 required field; balance
@@ -19789,43 +19830,52 @@ int main(int argc, char** argv) {
                   "make_contrib_commitment: all-zero views == v1 short-circuit");
         }
 
-        // 18b. (register MakeContribCommitmentBackwardCompat T-1) The v1 (zero-
-        //      view) commit must be BYTE-IDENTICAL to the INDEPENDENT pre-F2
-        //      4-append pre-image — i.e. it must NOT carry the DTM-F2-v1 tag.
+        // 18b. (register MakeContribCommitmentBackwardCompat T-1, re-anchored by
+        //      EQV-height-bind) The zero-view commit must be BYTE-IDENTICAL to
+        //      an INDEPENDENT re-derivation of the TWO-LEVEL pre-image:
+        //        body   = SHA256( prev || inner_root || dh )       (no F2 tag)
+        //        commit = SHA256( "DTM-CONTRIB-v2" || u64BE(index) || body )
         //      Assertions 18 + 19 only compare F2-path hashes to EACH OTHER
         //      (18 = two zero-view calls; 19 = two non-zero-root calls differing
         //      by the root value), so both stay green if the v1 short-circuit is
-        //      removed (`any_view` forced true). This pins the actual v1 bytes
-        //      against an external reference (Lemma L-1), which is what the
-        //      backward-compat proof rests on: pre-F2 peers hash the 4-append
-        //      form, so the zero-view commit must reproduce it exactly.
+        //      removed (`any_view` forced true) OR the outer tag/index encoding
+        //      drifts. This pins the actual bytes against an external reference:
+        //      the zero-view BODY must reproduce the pre-F2 3-append form (no
+        //      DTM-F2-v1 tag), and the outer compose must bind exactly
+        //      TAG || index u64 BE || body — the opening the EquivocationEvent
+        //      verifier recomputes.
         {
             std::vector<Hash> tx = {patterned_hash(0x01), patterned_hash(0x02)};
             Hash prev = patterned_hash(0xAA);
             Hash dh   = patterned_hash(0x03);
-            // Independent v1 pre-image: SHA256( u64(index) || prev || inner_root
-            // || dh ), inner_root = SHA256( concat sorted_tx_hashes ). No F2 tag,
-            // no timestamp — the exact pre-F2 shape (producer.cpp:256-264).
+            // Independent two-level pre-image, re-derived from the spec (NOT
+            // via make_contrib_body_root / compose_contrib_commitment).
             determ::crypto::SHA256Builder inner;
             for (auto& h : tx) inner.append(h);
             Hash inner_root = inner.finalize();
-            determ::crypto::SHA256Builder b;
-            b.append((uint64_t)100);
-            b.append(prev);
-            b.append(inner_root);
-            b.append(dh);
-            Hash v1_ref = b.finalize();
+            determ::crypto::SHA256Builder body_b;
+            body_b.append(prev);
+            body_b.append(inner_root);
+            body_b.append(dh);
+            Hash body_ref = body_b.finalize();
+            determ::crypto::SHA256Builder outer;
+            outer.append(std::string("DTM-CONTRIB-v2"));
+            outer.append((uint64_t)100);   // SHA256Builder u64 = big-endian
+            outer.append(body_ref);
+            Hash ref = outer.finalize();
             Hash v1_zero_view = make_contrib_commitment(100, prev, tx, dh, Hash{}, Hash{}, Hash{});
-            check(v1_zero_view == v1_ref,
-                  "make_contrib_commitment: zero-view commit == independent v1 pre-image "
-                  "(no DTM-F2-v1 tag; register MakeContribCommitmentBackwardCompat T-1)");
+            check(v1_zero_view == ref,
+                  "make_contrib_commitment: zero-view commit == independent two-level pre-image "
+                  "(no DTM-F2-v1 tag in the body; outer = DTM-CONTRIB-v2 || index BE || body; "
+                  "register MakeContribCommitmentBackwardCompat T-1)");
             // Positive control: an F2 (non-zero eq_root) commit does NOT equal the
-            // v1 reference (the tag + roots are bound). Stays green under honest
-            // AND mutated code, so the negative leg above cannot pass vacuously.
+            // reference (the tag + roots are bound into the body). Stays green
+            // under honest AND mutated code, so the negative leg above cannot
+            // pass vacuously.
             Hash f2 = make_contrib_commitment(100, prev, tx, dh, patterned_hash(0xEE), Hash{}, Hash{});
-            check(f2 != v1_ref,
-                  "make_contrib_commitment: F2 (non-zero view) commit != independent v1 pre-image "
-                  "(positive control)");
+            check(f2 != ref,
+                  "make_contrib_commitment: F2 (non-zero view) commit != independent two-level "
+                  "pre-image (positive control)");
         }
 
         // 19. ANY non-zero view root produces a DIFFERENT hash.
@@ -20316,9 +20366,12 @@ int main(int argc, char** argv) {
             determ::chain::EquivocationEvent e;
             e.equivocator = "alice.tld";
             e.block_index = 100;
-            e.digest_a    = patterned_hash(0xA1);
+            e.kind        = 0;
+            e.index_a     = 100;
+            e.body_root_a = patterned_hash(0xA1);
             e.sig_a.fill(0xAA);
-            e.digest_b    = patterned_hash(0xB1);
+            e.index_b     = 100;
+            e.body_root_b = patterned_hash(0xB1);
             e.sig_b.fill(0xBB);
             e.shard_id              = 7;
             e.beacon_anchor_height  = 42;
@@ -20336,8 +20389,11 @@ int main(int argc, char** argv) {
             determ::chain::EquivocationEvent base;
             base.equivocator = "alice.tld";
             base.block_index = 100;
-            base.digest_a    = patterned_hash(0xA1);
-            base.digest_b    = patterned_hash(0xB1);
+            base.kind        = 0;
+            base.index_a     = 100;
+            base.body_root_a = patterned_hash(0xA1);
+            base.index_b     = 100;
+            base.body_root_b = patterned_hash(0xB1);
             Hash base_hash = hash_equivocation_event(base);
 
             auto e2 = base; e2.equivocator = "bob.tld";
@@ -20348,9 +20404,17 @@ int main(int argc, char** argv) {
             check(hash_equivocation_event(e3) != base_hash,
                   "hash_equivocation_event: block_index field binds");
 
-            auto e4 = base; e4.digest_a[0] ^= 0xFF;
+            auto e4 = base; e4.body_root_a[0] ^= 0xFF;
             check(hash_equivocation_event(e4) != base_hash,
-                  "hash_equivocation_event: digest_a field binds");
+                  "hash_equivocation_event: body_root_a field binds");
+
+            auto e4k = base; e4k.kind = 1;
+            check(hash_equivocation_event(e4k) != base_hash,
+                  "hash_equivocation_event: kind field binds");
+
+            auto e4i = base; e4i.index_a = 101;
+            check(hash_equivocation_event(e4i) != base_hash,
+                  "hash_equivocation_event: index_a field binds");
 
             auto e5 = base; e5.sig_a[0] ^= 0xFF;
             check(hash_equivocation_event(e5) != base_hash,
@@ -22823,9 +22887,10 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "mallory";
             ev.block_index = 50;
-            ev.digest_a = pattern_hash(0xB0);
+            ev.kind = 0;
+            ev.index_a = 50; ev.body_root_a = pattern_hash(0xB0);
             ev.sig_a = pattern_sig(0xB1);
-            ev.digest_b = pattern_hash(0xB2);
+            ev.index_b = 50; ev.body_root_b = pattern_hash(0xB2);
             ev.sig_b = pattern_sig(0xB3);
             ev.shard_id = 1;
             ev.beacon_anchor_height = 100;
@@ -23697,8 +23762,9 @@ int main(int argc, char** argv) {
             {
                 EquivocationEvent ev;
                 ev.equivocator = "mallory"; ev.block_index = 41;
-                ev.digest_a.fill(0xE1); ev.sig_a.fill(0xE2);
-                ev.digest_b.fill(0xE3); ev.sig_b.fill(0xE4);
+                ev.kind = 1;   // nonzero: exercises the kind byte in the frame
+                ev.index_a = 41; ev.body_root_a.fill(0xE1); ev.sig_a.fill(0xE2);
+                ev.index_b = 41; ev.body_root_b.fill(0xE3); ev.sig_b.fill(0xE4);
                 ev.shard_id = 3; ev.beacon_anchor_height = 7;
                 b.equivocation_events.push_back(ev);
             }
@@ -28816,10 +28882,12 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = target;
             ev.block_index = 1;
-            for (size_t i = 0; i < ev.digest_a.size(); ++i)
-                ev.digest_a[i] = uint8_t(0xAA);
-            for (size_t i = 0; i < ev.digest_b.size(); ++i)
-                ev.digest_b[i] = uint8_t(0xBB);
+            ev.kind = 0;
+            ev.index_a = 1; ev.index_b = 1;
+            for (size_t i = 0; i < ev.body_root_a.size(); ++i)
+                ev.body_root_a[i] = uint8_t(0xAA);
+            for (size_t i = 0; i < ev.body_root_b.size(); ++i)
+                ev.body_root_b[i] = uint8_t(0xBB);
             // sig_a + sig_b default-constructed; apply doesn't re-verify
             // (validator's job — we test apply semantics only).
             return ev;
@@ -29036,10 +29104,12 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = vs[size_t(j)];
             ev.block_index = b.index;
-            for (size_t t = 0; t < ev.digest_a.size(); ++t)
-                ev.digest_a[t] = uint8_t(next_rand() & 0xff);
-            for (size_t t = 0; t < ev.digest_b.size(); ++t)
-                ev.digest_b[t] = uint8_t(next_rand() & 0xff);
+            ev.kind = 0;
+            ev.index_a = b.index; ev.index_b = b.index;
+            for (size_t t = 0; t < ev.body_root_a.size(); ++t)
+                ev.body_root_a[t] = uint8_t(next_rand() & 0xff);
+            for (size_t t = 0; t < ev.body_root_b.size(); ++t)
+                ev.body_root_b[t] = uint8_t(next_rand() & 0xff);
             b.equivocation_events.push_back(ev);
 
             const uint64_t before_slashed = c.accumulated_slashed();
@@ -29150,10 +29220,12 @@ int main(int argc, char** argv) {
                 EquivocationEvent ev;
                 ev.equivocator = vs[size_t(j)];
                 ev.block_index = b.index;
-                for (size_t t = 0; t < ev.digest_a.size(); ++t)
-                    ev.digest_a[t] = uint8_t(rnd() & 0xff);
-                for (size_t t = 0; t < ev.digest_b.size(); ++t)
-                    ev.digest_b[t] = uint8_t(rnd() & 0xff);
+                ev.kind = 0;
+                ev.index_a = b.index; ev.index_b = b.index;
+                for (size_t t = 0; t < ev.body_root_a.size(); ++t)
+                    ev.body_root_a[t] = uint8_t(rnd() & 0xff);
+                for (size_t t = 0; t < ev.body_root_b.size(); ++t)
+                    ev.body_root_b[t] = uint8_t(rnd() & 0xff);
                 b.equivocation_events.push_back(ev);
                 cc.append(b);
             }
@@ -30019,10 +30091,12 @@ int main(int argc, char** argv) {
                 EquivocationEvent ev;
                 ev.equivocator = vs[size_t(jq)];
                 ev.block_index = b.index;
-                for (size_t t = 0; t < ev.digest_a.size(); ++t)
-                    ev.digest_a[t] = uint8_t(next_rand() & 0xff);
-                for (size_t t = 0; t < ev.digest_b.size(); ++t)
-                    ev.digest_b[t] = uint8_t(next_rand() & 0xff);
+                ev.kind = 0;
+                ev.index_a = b.index; ev.index_b = b.index;
+                for (size_t t = 0; t < ev.body_root_a.size(); ++t)
+                    ev.body_root_a[t] = uint8_t(next_rand() & 0xff);
+                for (size_t t = 0; t < ev.body_root_b.size(); ++t)
+                    ev.body_root_b[t] = uint8_t(next_rand() & 0xff);
                 b.equivocation_events.push_back(ev);
                 ++kinds;
             }
@@ -30231,10 +30305,12 @@ int main(int argc, char** argv) {
                     EquivocationEvent ev;
                     ev.equivocator = vs[size_t(jq)];
                     ev.block_index = b.index;
-                    for (size_t t = 0; t < ev.digest_a.size(); ++t)
-                        ev.digest_a[t] = uint8_t(rnd() & 0xff);
-                    for (size_t t = 0; t < ev.digest_b.size(); ++t)
-                        ev.digest_b[t] = uint8_t(rnd() & 0xff);
+                    ev.kind = 0;
+                    ev.index_a = b.index; ev.index_b = b.index;
+                    for (size_t t = 0; t < ev.body_root_a.size(); ++t)
+                        ev.body_root_a[t] = uint8_t(rnd() & 0xff);
+                    for (size_t t = 0; t < ev.body_root_b.size(); ++t)
+                        ev.body_root_b[t] = uint8_t(rnd() & 0xff);
                     b.equivocation_events.push_back(ev);
                 }
                 if (rnd() % 3 == 0) {
@@ -35164,52 +35240,129 @@ int main(int argc, char** argv) {
                   "TXROOT-union-bind: a header tx_root that mismatches the committed lists is rejected at :226");
         }
 
-        // --- EQV-sig-verify-forged-slash (validator.cpp:394) ----------------
-        // check_equivocation_events slashes an equivocator only on GENUINE
-        // evidence of a double-sign: for each event BOTH sig_a (over digest_a)
-        // and sig_b (over digest_b) must verify against the equivocator's
-        // committee key. Removing the :394 sig_a arm lets a producer FORGE a
-        // slash of an HONEST validator — submit an event whose sig_a was never
-        // signed by the equivocator. Driven in ISOLATION via the
+        // --- EQV-sig-verify-forged-slash + EQV-height-bind (validator.cpp
+        //     check_equivocation_events) ---------------------------------------
+        // The gate slashes an equivocator only on GENUINE evidence of a
+        // double-sign AT ONE HEIGHT. EQV-height-bind (DECISION-LOG 2026-07-31,
+        // Hole 1): the event carries per-side OPENINGS (index, body_root); the
+        // gate derives digest_x = compose_<kind>(index_x, body_root_x), verifies
+        // each sig against the DERIVED digest, and asserts index_a == index_b ==
+        // block_index. Without the height assert, one honest validator's two
+        // NORMAL block signatures from two DIFFERENT heights package into a
+        // full-stake slash. Driven in ISOLATION via the
         // check_equivocation_events_for_test const-forwarder seam (arg order
-        // b, registry, chain): the private gate is digest-bound only on an
-        // F2-reconciled signed block, so the seam avoids the block-sig masking
-        // and makes :394 the SOLE gate this fixture exercises. Genuinely
-        // un-pinned: every pre-existing "sig_a does not verify" assertion checks
-        // a local re-impl / a separate binary / the apply path (Chain::append,
-        // which never runs check_equivocation_events), never this validator gate.
+        // b, registry, chain), exactly as the DECISION-LOG directs.
         {
-            // GENUINE double-sign by registered committee creator n0: two
-            // distinct digests, each signed by n0 -> clears :382 (digests
-            // differ), :385 (sigs differ), :390 (n0 registered), :394 + :397.
-            Hash dA{}, dB{};
-            for (size_t j = 0; j < 32; ++j) { dA[j] = uint8_t(0xA0 + j); dB[j] = uint8_t(0xB0 + j); }
-            EquivocationEvent ev;
-            ev.equivocator = "n0"; ev.block_index = 1;
-            ev.digest_a = dA; ev.sig_a = sign(key_of("n0"), dA.data(), dA.size());
-            ev.digest_b = dB; ev.sig_b = sign(key_of("n0"), dB.data(), dB.size());
+            // Two distinct openings; the genuine pair is same-height (1).
+            Hash rA{}, rB{};
+            for (size_t j = 0; j < 32; ++j) { rA[j] = uint8_t(0xA0 + j); rB[j] = uint8_t(0xB0 + j); }
+            // mk_ev: build an event whose sigs are REAL n0 signatures over the
+            // digests DERIVED from the given per-side openings — so the ONLY
+            // arm a given case can trip is the one its parameters violate.
+            auto mk_ev = [&](uint8_t kind, uint64_t block_index,
+                             uint64_t ia, const Hash& ra,
+                             uint64_t ib, const Hash& rb) {
+                EquivocationEvent e;
+                e.equivocator = "n0"; e.block_index = block_index; e.kind = kind;
+                e.index_a = ia; e.body_root_a = ra;
+                e.index_b = ib; e.body_root_b = rb;
+                auto compose = [&](uint64_t ix, const Hash& r) {
+                    return kind == 0 ? compose_block_digest(ix, r)
+                                     : compose_contrib_commitment(ix, r);
+                };
+                Hash da = compose(ia, ra), db = compose(ib, rb);
+                e.sig_a = sign(key_of("n0"), da.data(), da.size());
+                e.sig_b = sign(key_of("n0"), db.data(), db.size());
+                return e;
+            };
+            auto run = [&](const EquivocationEvent& e) {
+                Block b; b.index = 1; b.equivocation_events = { e };
+                return bv.check_equivocation_events_for_test(b, reg, c);
+            };
 
-            // POSITIVE CONTROL — genuine evidence is ACCEPTED (proves the
-            // equivocator resolves present-head and both sigs verify, so the
-            // negative RED below is caused by the byte flip, not the fixture).
+            // 1. POSITIVE CONTROL — a genuine same-height double-sign in the
+            //    opening format is ACCEPTED (kind valid, heights equal, roots
+            //    distinct, both sigs verify against their derived digests), so
+            //    every RED below is caused by its named violation, not plumbing.
             {
-                Block b2; b2.index = 1; b2.equivocation_events = { ev };
-                auto r2 = bv.check_equivocation_events_for_test(b2, reg, c);
-                check(r2.ok,
-                      "EQV control: a genuine double-sign by a registered creator is ACCEPTED");
+                auto r = run(mk_ev(0, 1, 1, rA, 1, rB));
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "EQV control: a genuine same-height double-sign (opening format) is ACCEPTED");
             }
 
-            // FORGE: corrupt ONLY sig_a. forged.sig_a stays != forged.sig_b
-            // (clears :385) and sig_b stays genuine (clears :397), so :394 is
-            // the UNIQUE failing arm. Under the mutant (:394 short-circuited)
-            // the loop completes and returns {true} -> the forged slash is
-            // ACCEPTED -> the specific-string assertion flips RED.
-            EquivocationEvent forged = ev;
-            forged.sig_a[0] ^= 0xFF;
-            Block b; b.index = 1; b.equivocation_events = { forged };
-            auto r = bv.check_equivocation_events_for_test(b, reg, c);
-            check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
-                  "EQV-sig-verify-forged-slash: an event with a forged sig_a is REJECTED at :394 (no forged slash)");
+            // 2a. THE FALSIFIER — cross-height replay REJECTED. sig_b is a REAL
+            //     n0 signature over compose(2, rB) and index_b honestly says 2:
+            //     every other arm passes (kind valid, roots distinct, sigs
+            //     distinct, BOTH sigs verify against their own derived digests)
+            //     — the height assert is the UNIQUE rejecting arm. MUTANT:
+            //     delete/short-circuit the index_a/index_b == block_index assert
+            //     in check_equivocation_events -> this forged slash (assembled
+            //     from two different-height honest signatures) is ACCEPTED ->
+            //     the specific-string assertion flips RED.
+            {
+                auto r = run(mk_ev(0, 1, 1, rA, 2, rB));
+                check(!r.ok && r.error.find("height mismatch: index_a/index_b must equal block_index") != std::string::npos,
+                      "EQV-height-bind: two different-height honest sigs are REJECTED (no forged slash)");
+            }
+            // 2b. The `== ev.block_index` LEG specifically: both openings agree
+            //     with EACH OTHER (index_a == index_b == 2) but not with the
+            //     event's claimed height (1). A mutant weakening the assert to
+            //     `index_a == index_b` alone ACCEPTS this -> RED.
+            {
+                auto r = run(mk_ev(0, 1, 2, rA, 2, rB));
+                check(!r.ok && r.error.find("height mismatch: index_a/index_b must equal block_index") != std::string::npos,
+                      "EQV-height-bind: openings agreeing with each other but not block_index are REJECTED");
+            }
+
+            // 3. DERIVATION arm — flip body_root_a on the honest pair: the
+            //    DERIVED digest_a changes, so sig_a fails. Pins that signatures
+            //    are verified against digests derived from the carried openings,
+            //    never against anything carried opaquely in the event.
+            {
+                auto e = mk_ev(0, 1, 1, rA, 1, rB);
+                e.body_root_a[0] ^= 0x01;
+                auto r = run(e);
+                check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
+                      "EQV-derive: sigs verify against the DERIVED digest (tampered opening -> sig_a fails)");
+            }
+
+            // 4. KIND arm — an unknown digest family fail-closes.
+            {
+                auto e = mk_ev(0, 1, 1, rA, 1, rB);
+                e.kind = 2;
+                auto r = run(e);
+                check(!r.ok && r.error.find("unknown kind") != std::string::npos,
+                      "EQV-kind: kind=2 is REJECTED (unknown digest family fail-closed)");
+            }
+
+            // 5. CONTRIB-kind control + domain separation: a kind=1 pair
+            //    composed under DTM-CONTRIB-v2 is ACCEPTED; the SAME sigs
+            //    relabeled kind=0 derive under the block tag and fail — the
+            //    two digest families cannot be confused into a forged pair.
+            {
+                auto e1 = mk_ev(1, 1, 1, rA, 1, rB);
+                auto r1 = run(e1);
+                if (!r1.ok) std::cout << "    got: [" << r1.error << "]\n";
+                check(r1.ok,
+                      "EQV contrib-kind control: a kind=1 pair composed under the contrib tag is ACCEPTED");
+                auto e0 = e1; e0.kind = 0;
+                auto r0 = run(e0);
+                check(!r0.ok && r0.error.find("does not verify against equivocator's key") != std::string::npos,
+                      "EQV domain separation: contrib-signed sigs presented as kind=0 are REJECTED");
+            }
+
+            // 6. The original sig-arm falsifier, kept: corrupt ONLY sig_a on
+            //    the genuine pair. sig_a stays != sig_b and sig_b stays genuine,
+            //    so the sig_a verify is the UNIQUE failing arm; under a mutant
+            //    that short-circuits it, the forged slash is ACCEPTED -> RED.
+            {
+                auto forged = mk_ev(0, 1, 1, rA, 1, rB);
+                forged.sig_a[0] ^= 0xFF;
+                auto r = run(forged);
+                check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
+                      "EQV-sig-verify-forged-slash: an event with a forged sig_a is REJECTED (no forged slash)");
+            }
         }
 
         // --- VAL-param-multisig (validator.cpp:820 distinct-keyholder + :827
@@ -35807,8 +35960,10 @@ int main(int argc, char** argv) {
             EquivocationEvent evt;
             evt.equivocator = "n0";
             evt.block_index = 1;
-            for (size_t i = 0; i < evt.digest_a.size(); ++i) evt.digest_a[i] = uint8_t(0x30 + i);
-            for (size_t i = 0; i < evt.digest_b.size(); ++i) evt.digest_b[i] = uint8_t(0x50 + i);
+            evt.kind = 0;
+            evt.index_a = 1; evt.index_b = 1;
+            for (size_t i = 0; i < evt.body_root_a.size(); ++i) evt.body_root_a[i] = uint8_t(0x30 + i);
+            for (size_t i = 0; i < evt.body_root_b.size(); ++i) evt.body_root_b[i] = uint8_t(0x50 + i);
             const Hash ek = hash_equivocation_event(evt);
             Hash decoy{};
             for (size_t i = 0; i < decoy.size(); ++i) decoy[i] = uint8_t(0x99);
@@ -40839,10 +40994,12 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = target;
             ev.block_index = block_index;
-            for (size_t i = 0; i < ev.digest_a.size(); ++i)
-                ev.digest_a[i] = uint8_t(0xAA + i);
-            for (size_t i = 0; i < ev.digest_b.size(); ++i)
-                ev.digest_b[i] = uint8_t(0xBB + i);
+            ev.kind = 0;
+            ev.index_a = block_index; ev.index_b = block_index;
+            for (size_t i = 0; i < ev.body_root_a.size(); ++i)
+                ev.body_root_a[i] = uint8_t(0xAA + i);
+            for (size_t i = 0; i < ev.body_root_b.size(); ++i)
+                ev.body_root_b[i] = uint8_t(0xBB + i);
             return ev;
         };
 
@@ -43358,10 +43515,12 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = target;
             ev.block_index = block_index;
-            for (size_t i = 0; i < ev.digest_a.size(); ++i)
-                ev.digest_a[i] = uint8_t(0xAA + i);
-            for (size_t i = 0; i < ev.digest_b.size(); ++i)
-                ev.digest_b[i] = uint8_t(0xBB + i);
+            ev.kind = 0;
+            ev.index_a = block_index; ev.index_b = block_index;
+            for (size_t i = 0; i < ev.body_root_a.size(); ++i)
+                ev.body_root_a[i] = uint8_t(0xAA + i);
+            for (size_t i = 0; i < ev.body_root_b.size(); ++i)
+                ev.body_root_b[i] = uint8_t(0xBB + i);
             return ev;
         };
 
@@ -45749,6 +45908,274 @@ int main(int argc, char** argv) {
         fs::remove_all(dir, fec);
         std::cout << (fail ? "  FAIL: test-inbound-receipt-cap\n"
                            : "  PASS: test-inbound-receipt-cap\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-beacon-header-committee") {
+        // INGRESS beacon-header committee floor (DECISION-LOG 2026-07-31 Hole 2,
+        // Option B). Node::on_beacon_header's hand-rolled K-of-K loop was vacuous
+        // for an empty (or shrunken) b.creators list: size match 0==0, zero loop
+        // iterations, 0 != 0 false -> ACCEPTED, letting an untrusted mesh peer
+        // push a creator-less header carrying attacker-chosen cumulative_rand
+        // into beacon_headers_, which feeds shard epoch-committee selection
+        // (current_epoch_rand). The fix routes the handler through the ONE shared
+        // committee-signature core verify_committee_sigs (shardtip_verify.cpp):
+        // NON-EMPTY creators + signed_count >= cfg_.k_block_sigs, while KEEPING
+        // the caller-side signed_count == creators.size() completeness rule.
+        // In-process SHARD-role node harness (mirrors test-inbound-receipt-cap);
+        // rpc_status()["beacon_headers"] is the observable. Falsify-on-mutant:
+        // (a) re-admit the vacuous loop (bypass verify_committee_sigs) -> the
+        // EMPTY-COMMITTEE assert flips RED; (b) delete the signed_count <
+        // required_k arm in the helper -> the UNDER-K assert flips RED.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        crypto::NodeKey k0, k1;
+        for (int i = 0; i < 32; ++i) k0.priv_seed[i] = uint8_t(0x40 + i);
+        for (int i = 0; i < 32; ++i) k1.priv_seed[i] = uint8_t(0x90 + i);
+        determ_ed25519_pubkey_from_seed(k0.priv_seed.data(), k0.pub.data());
+        determ_ed25519_pubkey_from_seed(k1.priv_seed.data(), k1.pub.data());
+
+        fs::path dir = fs::temp_directory_path() / "determ-beacon-hdr-committee";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+        chain::GenesisConfig g;
+        g.chain_id = "beacon-hdr"; g.m_creators = 2; g.k_block_sigs = 2;
+        g.epoch_blocks = 1;
+        g.chain_role = ChainRole::SHARD; g.shard_id = 0; g.initial_shard_count = 2;
+        chain::GenesisCreator gc0;
+        gc0.domain = "node0"; gc0.ed_pub = k0.pub; gc0.initial_stake = 1000;
+        g.initial_creators.push_back(gc0);
+        chain::GenesisCreator gc1;
+        gc1.domain = "node1"; gc1.ed_pub = k1.pub; gc1.initial_stake = 1000;
+        g.initial_creators.push_back(gc1);
+        chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+        g.initial_balances.push_back(ab);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+        cfg.listen_port = 7683; cfg.key_path = (dir / "node0.key").string();
+        cfg.chain_path = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = 2; cfg.k_block_sigs = 2;
+        cfg.chain_role = ChainRole::SHARD; cfg.shard_id = 0;
+        cfg.initial_shard_count = 2; cfg.log_quiet = true;
+        fs::create_directories(cfg.data_dir);
+        crypto::save_node_key(k0, cfg.key_path);
+        VirtualNetwork vnet;
+        auto loop = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        node::Node n(cfg, determ::time::RealClock::instance(),
+                     loop.get(), transport.get());
+
+        auto headers = [&]() {
+            return n.rpc_status()["beacon_headers"].get<size_t>();
+        };
+        // Forged-header builder: index 1 (expected first index; prev_hash check
+        // is skipped while beacon_headers_ is empty), consensus_mode left at the
+        // default MUTUAL_DISTRUST, cumulative_rand filled with 0xEE — the
+        // attacker payload this hole would have seeded into epoch committee
+        // selection (irrelevant to acceptance; documents the injection target).
+        // Callers set b.creators BEFORE signing: compute_block_digest binds
+        // creators but excludes creator_block_sigs, so sign-after-fill is
+        // well-defined.
+        auto make_header = [&](std::vector<std::string> creators) {
+            chain::Block b;
+            b.index = 1;
+            b.cumulative_rand.fill(0xEE);
+            b.creators = std::move(creators);
+            b.creator_block_sigs.assign(b.creators.size(), Signature{});
+            return b;
+        };
+
+        check(headers() == 0, "setup: SHARD node, beacon_headers == 0");
+
+        // EMPTY-COMMITTEE FORGE — the headline falsifier. Reverting the fix
+        // (re-admitting the vacuous loop) accepts this header -> count 1 -> RED.
+        {
+            chain::Block b = make_header({});
+            n.on_beacon_header_for_test(b);
+            check(headers() == 0,
+                  "empty-committee beacon header is REJECTED (vacuous K-of-K closed; "
+                  "attacker cumulative_rand not seeded)");
+        }
+
+        // UNDER-K FORGE — complete "K-of-K" over a shrunken 1-member list (the
+        // old code accepted this). Falsifies the signed_count >= required_k arm
+        // ALONE: with that arm deleted, this header passes membership/verify/
+        // completeness and is accepted -> RED. (The explicit creators.empty()
+        // arm is individually subsumed by this floor since genesis enforces
+        // required_k >= 1; the EMPTY case above falsifies the pair-deletion
+        // mutant, this case pins the floor arm.)
+        {
+            chain::Block b = make_header({"node0"});
+            Hash d = determ::node::compute_block_digest(b);
+            b.creator_block_sigs[0] = crypto::sign(k0, d.data(), d.size());
+            n.on_beacon_header_for_test(b);
+            check(headers() == 0,
+                  "under-K committee (1 < k_block_sigs=2) is REJECTED by the "
+                  "signed_count >= required_k floor");
+        }
+
+        // ZERO-SENTINEL FORGE — pins the RETAINED caller-side completeness rule
+        // (signed_count == creators.size()) uniquely: 3 creators, node0+node1
+        // sign (signed=2 >= required_k=2 passes the helper floor), zero sentinel
+        // for unregistered "nodeX" -> only the 2 != 3 completeness check rejects.
+        {
+            chain::Block b = make_header({"node0", "node1", "nodeX"});
+            Hash d = determ::node::compute_block_digest(b);
+            b.creator_block_sigs[0] = crypto::sign(k0, d.data(), d.size());
+            b.creator_block_sigs[1] = crypto::sign(k1, d.data(), d.size());
+            // creator_block_sigs[2] stays the zero sentinel.
+            n.on_beacon_header_for_test(b);
+            check(headers() == 0,
+                  "incomplete K-of-K (zero sentinel, 3-creator) still REJECTED "
+                  "(signed_count == creators.size() retained)");
+        }
+
+        // POSITIVE CONTROL (last — all negatives left beacon_headers_ at 0, so
+        // the expected-index precondition never drifted): honest full K-of-K.
+        // Proves the negatives fail for the asserted reasons, not fixture
+        // breakage.
+        {
+            chain::Block b = make_header({"node0", "node1"});
+            Hash d = determ::node::compute_block_digest(b);
+            b.creator_block_sigs[0] = crypto::sign(k0, d.data(), d.size());
+            b.creator_block_sigs[1] = crypto::sign(k1, d.data(), d.size());
+            n.on_beacon_header_for_test(b);
+            check(headers() == 1,
+                  "honest full K-of-K beacon header is ACCEPTED (acceptance unchanged)");
+        }
+
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-beacon-header-committee\n"
+                           : "  PASS: test-beacon-header-committee\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-straggler-resync") {
+        // S-050 straggler recovery (DECISION-LOG 2026-08-12). apply_block_locked
+        // used to hand a FUTURE block (b.index > height() — a peer minted past
+        // our head while we are missing >=1 block) straight to validate(), which
+        // rejects it for prev_hash mismatch with NO catch-up. An idle
+        // non-committee follower arms no round timer, so the S-050 stall valve
+        // never fires for it and it strands permanently (spamming "prev_hash
+        // mismatch"). The fix triggers the SAME tolerance-0 catch-up the valve
+        // uses — stalled_resync_ + one STATUS_REQUEST — GUARDED to fire at most
+        // once per stall episode (!stalled_resync_) so a stream of future/dup
+        // blocks cannot become a re-broadcast amplifier. In-process single-node
+        // harness (mirrors test-beacon-header-committee); apply_block_for_test
+        // drives apply_block_locked, status_requests_sent_for_test /
+        // stalled_resync_for_test are the observables. Falsify-on-mutant:
+        // (a) delete the trigger -> the FUTURE-BLOCK assert flips RED; (b) widen
+        // b.index > height() to >= -> the NORMAL-NEXT boundary assert flips RED;
+        // (c) delete the !stalled_resync_ guard -> the ONCE (DoS) assert flips RED.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        crypto::NodeKey k0;
+        for (int i = 0; i < 32; ++i) k0.priv_seed[i] = uint8_t(0x50 + i);
+        determ_ed25519_pubkey_from_seed(k0.priv_seed.data(), k0.pub.data());
+
+        fs::path dir = fs::temp_directory_path() / "determ-straggler-resync";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+        chain::GenesisConfig g;
+        g.chain_id = "straggler"; g.m_creators = 1; g.k_block_sigs = 1;
+        chain::GenesisCreator gc0;
+        gc0.domain = "node0"; gc0.ed_pub = k0.pub; gc0.initial_stake = 1000;
+        g.initial_creators.push_back(gc0);
+        chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+        g.initial_balances.push_back(ab);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+        cfg.listen_port = 7690; cfg.key_path = (dir / "node0.key").string();
+        cfg.chain_path = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+        cfg.log_quiet = true;
+        fs::create_directories(cfg.data_dir);
+        crypto::save_node_key(k0, cfg.key_path);
+        VirtualNetwork vnet;
+        auto loop = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        node::Node n(cfg, determ::time::RealClock::instance(),
+                     loop.get(), transport.get());
+
+        const uint64_t h0 = n.rpc_status()["height"].get<uint64_t>();
+        auto future_block = [&](uint64_t idx) {
+            chain::Block b; b.index = idx; b.prev_hash.fill(0xAB);
+            return b;
+        };
+
+        check(!n.stalled_resync_for_test(),
+              "setup: fresh node is not in stalled_resync");
+        check(h0 >= 1, "setup: genesis applied (height >= 1)");
+
+        // NEGATIVE — a stale/duplicate block (index < height) takes the
+        // duplicate branch, never the future-catch-up trigger.
+        if (h0 >= 1) {
+            uint64_t s = n.status_requests_sent_for_test();
+            n.apply_block_for_test(future_block(h0 - 1));
+            check(!n.stalled_resync_for_test() &&
+                  n.status_requests_sent_for_test() == s,
+                  "stale/duplicate block (index < height) does NOT trigger catch-up");
+        }
+
+        // NEGATIVE — the NORMAL-NEXT block (index == height) falls through to
+        // validate(); it is rejected (bogus block) but must NOT resync. Pins the
+        // strict `>` boundary: a `>=` mutant fires here and reddens this.
+        {
+            uint64_t s = n.status_requests_sent_for_test();
+            n.apply_block_for_test(future_block(h0));
+            check(!n.stalled_resync_for_test() &&
+                  n.status_requests_sent_for_test() == s,
+                  "normal-next block (index == height) does NOT trigger catch-up "
+                  "(pins the strict > boundary)");
+        }
+
+        // POSITIVE — a FUTURE block (index > height) triggers the catch-up:
+        // stalled_resync_ set + exactly one STATUS_REQUEST broadcast. Deleting
+        // the trigger reddens this (the headline falsifier).
+        {
+            uint64_t s = n.status_requests_sent_for_test();
+            n.apply_block_for_test(future_block(h0 + 3));
+            check(n.stalled_resync_for_test() &&
+                  n.status_requests_sent_for_test() == s + 1,
+                  "future block (index > height) triggers catch-up "
+                  "(stalled_resync + one STATUS_REQUEST)");
+        }
+
+        // DoS GUARD — a SECOND future block while already stalled must NOT
+        // re-broadcast (the !stalled_resync_ guard). Deleting the guard makes
+        // this a per-block STATUS_REQUEST amplifier -> delta +1 -> RED.
+        {
+            uint64_t s = n.status_requests_sent_for_test();
+            n.apply_block_for_test(future_block(h0 + 5));
+            check(n.stalled_resync_for_test() &&
+                  n.status_requests_sent_for_test() == s,
+                  "second future block does NOT re-broadcast "
+                  "(once-per-stall DoS guard)");
+        }
+
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-straggler-resync\n"
+                           : "  PASS: test-straggler-resync\n");
         return fail ? 1 : 0;
     }
 
@@ -48354,7 +48781,8 @@ int main(int argc, char** argv) {
         // 3. EquivocationEvent.
         {
             EquivocationEvent ev; ev.equivocator = "mallory"; ev.block_index = 42;
-            fillh(ev.digest_a, 0xd0); fills(ev.sig_a, 0xd1); fillh(ev.digest_b, 0xd2);
+            ev.kind = 0; ev.index_a = 42; ev.index_b = 42;
+            fillh(ev.body_root_a, 0xd0); fills(ev.sig_a, 0xd1); fillh(ev.body_root_b, 0xd2);
             fills(ev.sig_b, 0xd3); ev.shard_id = 3; ev.beacon_anchor_height = 100;
             surface(ev.to_json().dump(), "surface: EquivocationEvent");
         }
@@ -51702,9 +52130,11 @@ int main(int argc, char** argv) {
         // 6. Missing field on EquivocationEvent — should name 'sig_b'.
         expect_throw_with("EquivocationEvent missing 'sig_b'", [] {
             json j = {{"equivocator", "node1"}, {"block_index", 5},
-                      {"digest_a", std::string(64, '0')},
+                      {"kind", 0}, {"index_a", 5},
+                      {"body_root_a", std::string(64, '0')},
                       {"sig_a",    std::string(128, '0')},
-                      {"digest_b", std::string(64, '1')}};
+                      {"index_b", 5},
+                      {"body_root_b", std::string(64, '1')}};
             EquivocationEvent::from_json(j);
         }, {"S-018", "missing", "'sig_b'"});
 
@@ -58103,8 +58533,9 @@ int main(int argc, char** argv) {
                             {"ed_sig", h128}};
                 case MsgType::EQUIVOCATION_EVIDENCE:
                     return {{"equivocator", "m"}, {"block_index", 1},
-                            {"digest_a", h64}, {"sig_a", h128},
-                            {"digest_b", h64}, {"sig_b", h128},
+                            {"kind", 0},
+                            {"index_a", 1}, {"body_root_a", h64}, {"sig_a", h128},
+                            {"index_b", 1}, {"body_root_b", h64}, {"sig_b", h128},
                             {"shard_id", 0}, {"beacon_anchor_height", 0}};
                 case MsgType::ABORT_EVENT:
                     return {{"block_index", 1}, {"prev_hash", h64},
@@ -61475,12 +61906,17 @@ int main(int argc, char** argv) {
     // pre-validated events with fake digests and default sigs).
     //
     // An EquivocationEvent is trustless proof that one Ed25519 key signed
-    // two DIFFERENT block_digests at the SAME block_index. The verifier
+    // two DIFFERENT digests of ONE family at the SAME height.
+    // EQV-height-bind: the event carries per-side OPENINGS (index, body_root)
+    // and each signed digest is DERIVED via compose_block_digest /
+    // compose_contrib_commitment (kind 0 / 1). The verifier
     // (src/node/validator.cpp::check_equivocation_events) accepts the
     // evidence iff ALL hold:
-    //   (a) digest_a != digest_b   (otherwise no contradiction),
+    //   (k) kind <= 1              (known digest family),
+    //   (h) index_a == index_b == block_index   (the height bind),
+    //   (a) body_root_a != body_root_b (otherwise no contradiction),
     //   (b) sig_a    != sig_b      (otherwise same signature, no double-sign),
-    //   (c) verify(key, digest_a, sig_a) AND verify(key, digest_b, sig_b)
+    //   (c) verify(key, derive(a), sig_a) AND verify(key, derive(b), sig_b)
     //       both pass against the equivocator's REGISTERED key.
     // Anyone — a full node, an offline auditor, or a light client holding
     // only the equivocator's pubkey — can run this predicate with no chain
@@ -61506,17 +61942,27 @@ int main(int argc, char** argv) {
         // the evidence is sound.
         auto verify_evidence = [](const EquivocationEvent& ev,
                                   const PubKey& key) -> bool {
-            if (ev.digest_a == ev.digest_b) return false;  // (a)
-            if (ev.sig_a == ev.sig_b)       return false;  // (b)
-            if (!verify(key, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+            if (ev.kind > 1) return false;                  // (k)
+            if (ev.index_a != ev.block_index
+                || ev.index_b != ev.block_index) return false;  // (h)
+            if (ev.body_root_a == ev.body_root_b) return false; // (a)
+            if (ev.sig_a == ev.sig_b)             return false; // (b)
+            auto derive = [&](uint64_t idx, const Hash& root) {
+                return ev.kind == 0
+                    ? node::compose_block_digest(idx, root)
+                    : node::compose_contrib_commitment(idx, root);
+            };
+            Hash da = derive(ev.index_a, ev.body_root_a);
+            Hash db = derive(ev.index_b, ev.body_root_b);
+            if (!verify(key, da.data(), da.size(), ev.sig_a))
                 return false;                               // (c) first
-            if (!verify(key, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+            if (!verify(key, db.data(), db.size(), ev.sig_b))
                 return false;                               // (c) second
             return true;
         };
 
-        // Deterministic distinct digests (stand in for two conflicting
-        // block_digests at the same height). Patterned, not zero, so a
+        // Deterministic distinct BODY ROOTS (stand in for two conflicting
+        // digest bodies at the same height). Patterned, not zero, so a
         // regression that zeroes them is visible.
         auto patterned = [](uint8_t seed) {
             Hash h{};
@@ -61528,18 +61974,25 @@ int main(int argc, char** argv) {
         // The equivocator's single key signs BOTH conflicting digests —
         // this is exactly what a double-signing validator does.
         NodeKey culprit = generate_node_key();
-        Hash dA = patterned(0xA0);
-        Hash dB = patterned(0xB0);
+        Hash rA = patterned(0xA0);
+        Hash rB = patterned(0xB0);
 
-        // Build a genuine, well-formed equivocation proof.
+        // Build a genuine, well-formed equivocation proof: both sigs over
+        // the DERIVED digests compose_block_digest(7, root) — kind 0, all
+        // three heights equal (the height-bound sound shape).
         auto make_genuine = [&]() {
             EquivocationEvent ev;
             ev.equivocator = "alice.tld";
             ev.block_index = 7;
-            ev.digest_a = dA;
-            ev.sig_a    = sign(culprit, dA.data(), dA.size());
-            ev.digest_b = dB;
-            ev.sig_b    = sign(culprit, dB.data(), dB.size());
+            ev.kind        = 0;
+            ev.index_a     = 7;
+            ev.body_root_a = rA;
+            Hash da = node::compose_block_digest(7, rA);
+            ev.sig_a    = sign(culprit, da.data(), da.size());
+            ev.index_b     = 7;
+            ev.body_root_b = rB;
+            Hash db = node::compose_block_digest(7, rB);
+            ev.sig_b    = sign(culprit, db.data(), db.size());
             ev.shard_id = 0;
             ev.beacon_anchor_height = 0;
             return ev;
@@ -61555,17 +62008,18 @@ int main(int argc, char** argv) {
                   "genuine: distinct digests + both sigs verify under culprit key → ACCEPT");
         }
 
-        // === REJECT (a): digest_a == digest_b is not a contradiction ===
+        // === REJECT (a): body_root_a == body_root_b is not a contradiction ===
 
-        // 2. If the two digests are equal, the key signed the SAME message
+        // 2. If the two openings are equal, the key signed the SAME message
         //    twice — Ed25519 is deterministic (test-ed25519 #6), so the two
         //    sigs would even be byte-identical. No equivocation occurred.
         {
             EquivocationEvent ev = make_genuine();
-            ev.digest_b = ev.digest_a;
-            ev.sig_b    = sign(culprit, ev.digest_b.data(), ev.digest_b.size());
+            ev.body_root_b = ev.body_root_a;
+            Hash db = node::compose_block_digest(ev.index_b, ev.body_root_b);
+            ev.sig_b    = sign(culprit, db.data(), db.size());
             check(!verify_evidence(ev, culprit.pub),
-                  "equal digests: same message signed twice → REJECT (no contradiction)");
+                  "equal body roots: same message signed twice → REJECT (no contradiction)");
         }
 
         // === REJECT (b): sig_a == sig_b means one signature, not two ===
@@ -61591,13 +62045,13 @@ int main(int argc, char** argv) {
                   "tampered sig_b: forged signature fails verify → REJECT");
         }
 
-        // 5. digest_a tampered after signing → sig_a no longer matches the
-        //    digest it accompanies. The signature binds the exact digest.
+        // 5. body_root_a tampered after signing → the DERIVED digest_a moves,
+        //    so sig_a no longer verifies. The signature binds the exact opening.
         {
             EquivocationEvent ev = make_genuine();
-            ev.digest_a[0] ^= 0xFF;
+            ev.body_root_a[0] ^= 0xFF;
             check(!verify_evidence(ev, culprit.pub),
-                  "tampered digest_a: sig no longer matches digest → REJECT");
+                  "tampered body_root_a: sig no longer matches the derived digest → REJECT");
         }
 
         // === REJECT (c): right proof, WRONG key (mis-attribution) ===
@@ -61622,11 +62076,64 @@ int main(int argc, char** argv) {
         {
             NodeKey innocent = generate_node_key();
             EquivocationEvent ev = make_genuine();
-            ev.sig_a = sign(innocent, ev.digest_a.data(), ev.digest_a.size());
+            Hash da = node::compose_block_digest(ev.index_a, ev.body_root_a);
+            ev.sig_a = sign(innocent, da.data(), da.size());
             check(!verify_evidence(ev, culprit.pub),
                   "split keys: sig_a under a different key → REJECT under culprit");
             check(!verify_evidence(ev, innocent.pub),
                   "split keys: sig_b under a different key → REJECT under innocent");
+        }
+
+        // === EQV-height-bind: cross-height and cross-kind pairs ===
+
+        // 7b. Cross-height REJECT: sig_b is a REAL culprit signature over
+        //     compose(8, rB) and index_b honestly says 8 — every other clause
+        //     holds; ONLY the height bind refuses it. This is the forged-slash
+        //     replay (two honest sigs from two heights) the fix kills.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.index_b = 8;
+            Hash db = node::compose_block_digest(8, ev.body_root_b);
+            ev.sig_b = sign(culprit, db.data(), db.size());
+            check(!verify_evidence(ev, culprit.pub),
+                  "cross-height: honest sigs from two heights → REJECT (height bind)");
+        }
+        // 7c. The == block_index leg: both openings at height 8, event claims 7.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.index_a = 8; ev.index_b = 8;
+            Hash da = node::compose_block_digest(8, ev.body_root_a);
+            Hash db = node::compose_block_digest(8, ev.body_root_b);
+            ev.sig_a = sign(culprit, da.data(), da.size());
+            ev.sig_b = sign(culprit, db.data(), db.size());
+            check(!verify_evidence(ev, culprit.pub),
+                  "cross-height: openings agree with each other but not block_index → REJECT");
+        }
+        // 7d. Contrib-kind ACCEPT + cross-kind REJECT (domain separation):
+        //     a kind=1 pair composed under DTM-CONTRIB-v2 is sound; the SAME
+        //     sigs relabeled kind=0 derive under the block tag and fail.
+        {
+            EquivocationEvent ev;
+            ev.equivocator = "alice.tld";
+            ev.block_index = 7; ev.kind = 1;
+            ev.index_a = 7; ev.body_root_a = rA;
+            Hash ca = node::compose_contrib_commitment(7, rA);
+            ev.sig_a = sign(culprit, ca.data(), ca.size());
+            ev.index_b = 7; ev.body_root_b = rB;
+            Hash cb = node::compose_contrib_commitment(7, rB);
+            ev.sig_b = sign(culprit, cb.data(), cb.size());
+            check(verify_evidence(ev, culprit.pub),
+                  "contrib kind: a kind=1 pair composed under the contrib tag → ACCEPT");
+            EquivocationEvent relabeled = ev; relabeled.kind = 0;
+            check(!verify_evidence(relabeled, culprit.pub),
+                  "cross-kind: contrib-signed sigs relabeled kind=0 → REJECT (domain separation)");
+        }
+        // 7e. Unknown kind fail-closes.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.kind = 2;
+            check(!verify_evidence(ev, culprit.pub),
+                  "unknown kind: kind=2 → REJECT (fail-closed)");
         }
 
         // === Wire round-trip preserves verifiability ===
@@ -61640,8 +62147,11 @@ int main(int argc, char** argv) {
                 EquivocationEvent::from_json(ev.to_json());
             check(back.equivocator == ev.equivocator
                   && back.block_index == ev.block_index
-                  && back.digest_a == ev.digest_a && back.sig_a == ev.sig_a
-                  && back.digest_b == ev.digest_b && back.sig_b == ev.sig_b,
+                  && back.kind == ev.kind
+                  && back.index_a == ev.index_a
+                  && back.body_root_a == ev.body_root_a && back.sig_a == ev.sig_a
+                  && back.index_b == ev.index_b
+                  && back.body_root_b == ev.body_root_b && back.sig_b == ev.sig_b,
                   "round-trip: every proof field survives to_json/from_json");
             check(verify_evidence(back, culprit.pub),
                   "round-trip: decoded evidence still ACCEPTS under culprit key");
@@ -61745,8 +62255,9 @@ int main(int argc, char** argv) {
             check(ev.has_value(), "genuine double-sign → evidence assembled");
             check(ev && ev->equivocator == "alice" && ev->block_index == 5,
                   "genuine: equivocator + height bound correctly");
-            check(ev && ev->digest_a != ev->digest_b && !(ev->sig_a == ev->sig_b),
-                  "genuine: two distinct digests + two distinct sigs captured");
+            check(ev && ev->kind == 0 && ev->index_a == 5 && ev->index_b == 5
+                      && ev->body_root_a != ev->body_root_b && !(ev->sig_a == ev->sig_b),
+                  "genuine: kind + same-height openings + distinct roots/sigs captured");
         }
 
         // === THE GUARD: size-short creator_block_sigs must NOT be indexed ===
@@ -61819,8 +62330,11 @@ int main(int argc, char** argv) {
     // pending_equivocation_evidence_ dedups on the equivocator ALONE, not on the
     // attacker-chosen, UNSIGNED block_index. Keying dedup on block_index let one
     // valid double-sign be re-gossiped/re-submitted with block_index = 0,1,2,…
-    // (each pair re-passes the two sig checks — only the raw digests are signed)
-    // into unbounded pool entries: a node-local memory-exhaustion DoS. The fix
+    // into unbounded pool entries: a node-local memory-exhaustion DoS.
+    // (Historically only the raw digests were signed; post-EQV-height-bind the
+    // height assert kills that replay at ingress too, but the pool identity
+    // deliberately STAYS equivocator-only — one proof per equivocator is all
+    // apply ever consumes, so keying on more would re-open pool growth.) The fix
     // is one shared identity predicate node::same_equivocation_identity used at
     // every dedup/inspect/prune site (on_equivocation_evidence, the self-built
     // detect path, the on_contrib S-006 detect, rpc_submit_equivocation's
@@ -61845,8 +62359,8 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = who;
             ev.block_index = bidx;
-            for (size_t i = 0; i < ev.digest_a.size(); ++i) ev.digest_a[i] = uint8_t(seed + i);
-            for (size_t i = 0; i < ev.digest_b.size(); ++i) ev.digest_b[i] = uint8_t(seed + 0x40 + i);
+            for (size_t i = 0; i < ev.body_root_a.size(); ++i) ev.body_root_a[i] = uint8_t(seed + i);
+            for (size_t i = 0; i < ev.body_root_b.size(); ++i) ev.body_root_b[i] = uint8_t(seed + 0x40 + i);
             for (size_t i = 0; i < ev.sig_a.size(); ++i)    ev.sig_a[i]    = uint8_t(seed + 0x10 + i);
             for (size_t i = 0; i < ev.sig_b.size(); ++i)    ev.sig_b[i]    = uint8_t(seed + 0x80 + i);
             return ev;

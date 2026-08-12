@@ -40,6 +40,9 @@ cleanup() {
   for pid in "${NODE_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   done
+  # kill on an already-dead pid returns 1; don't let the EXIT trap's last
+  # command overwrite the script's real exit status.
+  true
 }
 trap cleanup EXIT INT
 
@@ -56,15 +59,12 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 echo "=== 1. Mint two anon keypairs ==="
-"$DETERM_WALLET" account-create-batch --count 2 --out "$T/keys.json" >/dev/null 2>&1
+"$DETERM_WALLET" account-create-batch --count 2 --json > "$T/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][1]['address'])")
 
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$T/keys.json" "$T/key_a.json"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['privkey_hex'])")
+"$DETERM_WALLET" account-import --priv "$KPRIV_A" --out "$T/key_a.json" >/dev/null 2>&1
 
 echo
 echo "=== 2. Init 3-node cluster with alice funded ==="
@@ -136,8 +136,12 @@ echo "  chain height: $H"
 
 echo
 echo "=== 4. Capture pre-submit balance (trustless) ==="
-PRE=$($DETERM_LIGHT balance-trustless --rpc-port 8771 --genesis $T/gen.json \
-        --domain $ADDR_A --json 2>&1 | tail -1 | $PY -c "
+# Retry until the funded genesis balance is visible — an early read can race
+# the head binding and report 0, which would poison the step-7 comparison.
+PRE=0
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  PRE=$($DETERM_LIGHT balance-trustless --rpc-port 8771 --genesis $T/gen.json \
+          --domain $ADDR_A --json 2>&1 | tail -1 | $PY -c "
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
@@ -145,13 +149,19 @@ try:
 except Exception:
     print(0)
 ")
+  [ "$PRE" != "0" ] && break
+  sleep 3
+done
 echo "  pre-submit balance: $PRE"
 
 echo
 echo "=== 5. determ-light verify-and-submit (TRANSFER 100 from alice→bob) ==="
 set +e
+# --wait: the chain head may not have a committee-signed successor yet at
+# the instant we read it (the binary refuses to bind an unbound head and
+# says to pass --wait); 30s covers the next-block latency on slow runners.
 OUT=$($DETERM_LIGHT verify-and-submit --rpc-port 8771 --genesis $T/gen.json \
-        --keyfile $T/key_a.json --to $ADDR_B --amount 100 --fee 0 2>&1)
+        --keyfile $T/key_a.json --to $ADDR_B --amount 100 --fee 0 --wait 30 2>&1)
 RC=$?
 set -e
 echo "$OUT"
@@ -204,6 +214,11 @@ fi
 echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
+# Tear the cluster down BEFORE the final exit and clear the trap — on macOS
+# the EXIT-trap teardown has been observed to clobber the script's exit
+# status while reaping the daemons.
+trap - EXIT INT
+cleanup || true
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: test_light_verify_and_submit"; exit 0
 else

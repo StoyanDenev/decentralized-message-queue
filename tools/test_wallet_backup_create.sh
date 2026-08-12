@@ -174,9 +174,29 @@ echo "=== 6. inspect-envelope on each individual envelope ==="
 $PY - "$TMP/envelopes.json" "$TMP" "$WALLET_ABS" <<'PY_EOF'
 import json, os, subprocess, sys
 envs_path, tmp_dir, wallet = sys.argv[1], sys.argv[2], sys.argv[3]
-d = json.load(open(envs_path))
+def load_dss1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DSS1", "not DSS1"
+    y_len = int.from_bytes(d[5:9], "little")
+    shares, off = [], 9
+    for _ in range(d[4]):
+        shares.append({"x": d[off], "y_hex": d[off+1:off+1+y_len].hex()})
+        off += 1 + y_len
+    return shares
+
+def load_dbe1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DBE1", "not DBE1"
+    envs, off = [], 5
+    for _ in range(d[4]):
+        idx = d[off]; off += 1
+        n = int.from_bytes(d[off:off+4], "little"); off += 4
+        envs.append({"share_index": idx, "envelope_blob": d[off:off+n].hex()})
+        off += n
+    return envs
+
 ok = True
-for e in d["envelopes"]:
+for e in load_dbe1(envs_path):
     idx = e["share_index"]
     blob = e["envelope_blob"]
     blob_file = os.path.join(tmp_dir, f"env_{idx}.blob")
@@ -191,7 +211,7 @@ for e in d["envelopes"]:
         ok = False
         continue
     info = json.loads(r.stdout.strip().replace("\r",""))
-    if info.get("format") != "DWE1":
+    if info.get("format") not in ("DWE1", "DWE2"):
         print(f"  FAIL inspect-envelope idx={idx}: wrong format {info.get('format')!r}")
         ok = False
         continue
@@ -219,8 +239,29 @@ echo "=== 7. T-of-N reconstruction: decrypt 3 envelopes, combine, recover secret
 RECOVERED=$($PY - "$TMP/shares.json" "$TMP/envelopes.json" "$WALLET_ABS" "$TMP" <<'PY_EOF'
 import json, os, random, subprocess, sys
 shares_path, envs_path, wallet, tmp_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-shares = json.load(open(shares_path))["shares"]
-envs   = {e["share_index"]: e["envelope_blob"] for e in json.load(open(envs_path))["envelopes"]}
+def load_dss1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DSS1", "not DSS1"
+    y_len = int.from_bytes(d[5:9], "little")
+    shares, off = [], 9
+    for _ in range(d[4]):
+        shares.append({"x": d[off], "y_hex": d[off+1:off+1+y_len].hex()})
+        off += 1 + y_len
+    return shares
+
+def load_dbe1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DBE1", "not DBE1"
+    envs, off = [], 5
+    for _ in range(d[4]):
+        idx = d[off]; off += 1
+        n = int.from_bytes(d[off:off+4], "little"); off += 4
+        envs.append({"share_index": idx, "envelope_blob": d[off:off+n].hex()})
+        off += n
+    return envs
+
+shares = load_dss1(shares_path)
+envs   = {e["share_index"]: e["envelope_blob"] for e in load_dbe1(envs_path)}
 
 # Pick T=3 random share indices from {1..5}.
 random.seed(0xC0FFEE)
@@ -247,10 +288,16 @@ for rs in recovered_shares:
         print(f"YHEX_MISMATCH idx={rs['x']}", file=sys.stderr)
         sys.exit(3)
 
-# Feed the recovered shares to shamir-combine via a temp file.
+# Feed the recovered shares to shamir-combine via a temp DSS1 file.
+def write_dss1(recs, path):
+    y_len = len(bytes.fromhex(recs[0]["y_hex"]))
+    out = b"DSS1" + bytes([len(recs)]) + y_len.to_bytes(4, "little")
+    for r in recs:
+        out += bytes([r["x"]]) + bytes.fromhex(r["y_hex"])
+    open(path, "wb").write(out)
+
 sf = os.path.join(tmp_dir, "recovered_shares.json")
-with open(sf, "w") as f:
-    json.dump({"shares": recovered_shares}, f)
+write_dss1(recovered_shares, sf)
 r = subprocess.run(
     [wallet, "shamir-combine", "--shares", sf, "--json"],
     capture_output=True, text=True)
@@ -272,7 +319,19 @@ echo "=== 8. T-of-N with a DIFFERENT subset (any-3-of-5) ==="
 RECOVERED2=$($PY - "$TMP/shares.json" "$TMP/envelopes.json" "$WALLET_ABS" "$TMP" <<'PY_EOF'
 import json, os, subprocess, sys
 shares_path, envs_path, wallet, tmp_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-envs = {e["share_index"]: e["envelope_blob"] for e in json.load(open(envs_path))["envelopes"]}
+
+def load_dbe1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DBE1", "not DBE1"
+    envs, off = [], 5
+    for _ in range(d[4]):
+        idx = d[off]; off += 1
+        n = int.from_bytes(d[off:off+4], "little"); off += 4
+        envs.append({"share_index": idx, "envelope_blob": d[off:off+n].hex()})
+        off += n
+    return envs
+
+envs = {e["share_index"]: e["envelope_blob"] for e in load_dbe1(envs_path)}
 # Different subset: {2, 4, 5}.
 picked = [2, 4, 5]
 recovered = []
@@ -283,8 +342,11 @@ for idx in picked:
         capture_output=True, text=True, check=True)
     recovered.append({"x": idx, "y_hex": r.stdout.strip().replace("\r","")})
 sf = os.path.join(tmp_dir, "rec2.json")
-with open(sf, "w") as f:
-    json.dump({"shares": recovered}, f)
+y_len = len(bytes.fromhex(recovered[0]["y_hex"]))
+out = b"DSS1" + bytes([len(recovered)]) + y_len.to_bytes(4, "little")
+for rr in recovered:
+    out += bytes([rr["x"]]) + bytes.fromhex(rr["y_hex"])
+open(sf, "wb").write(out)
 r = subprocess.run([wallet, "shamir-combine", "--shares", sf, "--json"],
                     capture_output=True, text=True, check=True)
 print(json.loads(r.stdout.strip().replace("\r",""))["secret_hex"])
@@ -641,18 +703,19 @@ fi
 
 # ── 29. Shares file shape matches shamir-split --json shape ───────────────────
 echo
-echo "=== 29. Shares file shape matches shamir-split --json shape ==="
+echo "=== 29. Shares file is a canonical DSS1 container (5 shares, x=1..5) ==="
 $PY - "$TMP/shares.json" <<'PY_EOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert "shares" in d and isinstance(d["shares"], list), "missing shares array"
-assert len(d["shares"]) == 5, f"expected 5 shares, got {len(d['shares'])}"
+import sys
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"DSS1", "missing DSS1 magic"
+count = d[4]
+y_len = int.from_bytes(d[5:9], "little")
+assert count == 5, f"expected 5 shares, got {count}"
+assert len(d) == 9 + count * (1 + y_len), "bad total length"
 xs = set()
-for s in d["shares"]:
-    assert "x" in s and isinstance(s["x"], int), f"missing/bad x: {s}"
-    assert "y_hex" in s and isinstance(s["y_hex"], str), f"missing/bad y_hex: {s}"
-    assert 1 <= s["x"] <= 5, f"x out of range: {s['x']}"
-    xs.add(s["x"])
+off = 9
+for _ in range(count):
+    xs.add(d[off]); off += 1 + y_len
 assert xs == set(range(1, 6)), f"x values not 1..5: {xs}"
 PY_EOF
 if [ $? = 0 ]; then
@@ -665,20 +728,20 @@ fi
 echo
 echo "=== 30. Envelopes file shape matches backup-verify expectation ==="
 $PY - "$TMP/envelopes.json" <<'PY_EOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert "envelopes" in d and isinstance(d["envelopes"], list)
-assert len(d["envelopes"]) == 5
+import sys
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"DBE1", "missing DBE1 magic"
+count = d[4]
+assert count == 5
 idxs = set()
-for e in d["envelopes"]:
-    assert "share_index" in e and isinstance(e["share_index"], int)
-    assert "envelope_blob" in e and isinstance(e["envelope_blob"], str)
-    # Canonical blob is dot-separated lowercase hex. At least 6 sections.
-    parts = e["envelope_blob"].split(".")
-    assert len(parts) >= 6, f"blob has {len(parts)} parts: {parts!r}"
-    # First section is magic (4 bytes = 8 hex chars).
-    assert len(parts[0]) == 8, f"magic hex length wrong: {parts[0]!r}"
-    idxs.add(e["share_index"])
+off = 5
+for _ in range(count):
+    idxs.add(d[off]); off += 1
+    n = int.from_bytes(d[off:off+4], "little"); off += 4
+    # Embedded blob is a canonical DWE container: 4-byte ASCII magic.
+    assert d[off:off+4] in (b"DWE1", b"DWE2"), "embedded envelope magic wrong"
+    off += n
+assert off == len(d), "bad total length"
 assert idxs == set(range(1, 6))
 PY_EOF
 if [ $? = 0 ]; then
@@ -690,7 +753,11 @@ fi
 # ── 31. Wrong passphrase fails to decrypt (negative round-trip) ───────────────
 echo
 echo "=== 31. Wrong passphrase fails decrypt (negative round-trip) ==="
-BLOB=$($PY -c "import json,sys; d=json.load(open('$TMP/envelopes.json')); print(d['envelopes'][0]['envelope_blob'])")
+BLOB=$($PY -c "
+d = open('$TMP/envelopes.json','rb').read()
+assert d[:4] == b'DBE1'
+n = int.from_bytes(d[6:10], 'little')
+print(d[10:10+n].hex())")
 set +e
 "$WALLET" envelope decrypt --envelope "$BLOB" --password "wrong-pw" >/dev/null 2>&1
 RC=$?
@@ -704,7 +771,15 @@ echo "=== 32. Correct passphrase decrypts envelope[0] ==="
 DEC=$("$WALLET" envelope decrypt --envelope "$BLOB" --password "keyholder-pw-1" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "envelope decrypt succeeds with correct passphrase"
-EXPECTED_Y=$($PY -c "import json; d=json.load(open('$TMP/shares.json')); print(next(s['y_hex'] for s in d['shares'] if s['x']==1))")
+EXPECTED_Y=$($PY -c "
+d = open('$TMP/shares.json','rb').read()
+assert d[:4] == b'DSS1'
+y_len = int.from_bytes(d[5:9], 'little')
+off = 9
+for _ in range(d[4]):
+    if d[off] == 1:
+        print(d[off+1:off+1+y_len].hex()); break
+    off += 1 + y_len")
 assert_eq "$DEC" "$EXPECTED_Y" "decrypted y_hex matches shares file entry 1"
 
 # ── 33. Unknown argument rejected ─────────────────────────────────────────────

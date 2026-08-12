@@ -84,20 +84,14 @@ fi
 
 echo
 echo "=== 2. Setup: generate a known account via account-create-batch ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/batch.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/batch.json" 2>/dev/null
 RC=$?
 assert_eq "$RC" "0" "account-create-batch setup succeeded"
-# Extract the single account into a standalone single-account JSON file
-# (account-create-batch wraps in {"accounts":[...]}; account-export consumes
-# the single-account shape that account-import/account-recover emit).
+# Mint the standalone keyfile account-export consumes — the canonical binary
+# DAK1 container (D2), produced by account-import --out.
 SEED_PRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/batch.json")
 SEED_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/batch.json")
-$PY -c "
-import json, sys
-acc = json.load(open(sys.argv[1]))['accounts'][0]
-json.dump({'address': acc['address'], 'privkey_hex': acc['privkey_hex']},
-          open(sys.argv[2], 'w'), indent=2)
-" "$TMP/batch.json" "$TMP/acc.json"
+"$WALLET" account-import --priv "$SEED_PRIV" --out "$TMP/acc.json" >/dev/null
 echo "  setup: SEED_ADDR=$SEED_ADDR"
 
 echo
@@ -171,12 +165,14 @@ ROUND_ADDR=$(echo "$IMPORTED" | $PY -c "import json,sys; print(json.load(sys.std
 assert_eq "$ROUND_ADDR" "$SEED_ADDR" "round-trip address matches original"
 
 echo
-echo "=== 12. --out writes to file; stdout shows 'exported <format>: <path>' ==="
+echo "=== 12. --out writes the DAK1 container; stdout confirms ==="
+# D2: --out always re-emits the canonical binary DAK1 keyfile — the text
+# formats are stdout VIEWS only and never land on disk.
 "$WALLET" account-export --in "$TMP/acc.json" --format raw-hex --out "$TMP/exp.hex" > "$TMP/stdout12.txt" 2>&1
 RC=$?
-assert_eq "$RC" "0" "exit 0 on --out raw-hex"
+assert_eq "$RC" "0" "exit 0 on --out"
 STDOUT=$(cat "$TMP/stdout12.txt" | tr -d '\r')
-assert_contains "$STDOUT" "exported raw-hex:" "stdout starts with 'exported raw-hex:'"
+assert_contains "$STDOUT" "exported DAK1 keyfile:" "stdout confirms DAK1 keyfile export"
 if [ -s "$TMP/exp.hex" ]; then
     echo "  PASS: --out file is non-empty"; pass_count=$((pass_count + 1))
 else
@@ -184,19 +180,17 @@ else
 fi
 
 echo
-echo "=== 13. --out raw-hex file contains the privkey hex ==="
-FILE_HEX=$(cat "$TMP/exp.hex" | tr -d '\r\n')
-assert_eq "$FILE_HEX" "$SEED_PRIV" "raw-hex file contents equal input privkey_hex"
+echo "=== 13. --out file is a byte-exact DAK1 copy of the input keyfile ==="
+if cmp -s "$TMP/exp.hex" "$TMP/acc.json"; then
+    echo "  PASS: --out DAK1 file is byte-identical to the input keyfile"; pass_count=$((pass_count + 1))
+else
+    echo "  FAIL: --out DAK1 file differs from the input keyfile"; fail_count=$((fail_count + 1))
+fi
 
 echo
-echo "=== 14. --out backup-bundle file is valid JSON bundle ==="
-"$WALLET" account-export --in "$TMP/acc.json" --format backup-bundle --out "$TMP/bundle.json" > "$TMP/stdout14.txt" 2>&1
-RC=$?
-assert_eq "$RC" "0" "exit 0 on --out backup-bundle"
-FILE_SEED=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['seed_hex'])"     "$TMP/bundle.json")
-FILE_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['anon_address'])" "$TMP/bundle.json")
-assert_eq "$FILE_SEED" "$SEED_PRIV" "--out bundle file seed_hex matches input"
-assert_eq "$FILE_ADDR" "$SEED_ADDR" "--out bundle file anon_address matches input"
+echo "=== 14. --out file re-imports (round-trips through account-export --in) ==="
+RT_HEX=$("$WALLET" account-export --in "$TMP/exp.hex" | tr -d '\r\n')
+assert_eq "$RT_HEX" "$SEED_PRIV" "re-exported raw-hex view equals the original privkey"
 
 echo
 echo "=== 15. --out with missing parent directory fails ==="
@@ -223,19 +217,17 @@ assert_contains "$ERR" "--force"        "diagnostic suggests --force"
 echo
 echo "=== 17. --force overrides existing file ==="
 # Generate a different account, export to the SAME path with --force.
-"$WALLET" account-create-batch --count 1 --out "$TMP/other_batch.json" >/dev/null 2>&1
-$PY -c "
-import json, sys
-acc = json.load(open(sys.argv[1]))['accounts'][0]
-json.dump({'address': acc['address'], 'privkey_hex': acc['privkey_hex']},
-          open(sys.argv[2], 'w'), indent=2)
-" "$TMP/other_batch.json" "$TMP/other_acc.json"
-OTHER_PRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['privkey_hex'])" "$TMP/other_acc.json")
+"$WALLET" account-create-batch --count 1 --json > "$TMP/other_batch.json" 2>/dev/null
+OTHER_PRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/other_batch.json")
+"$WALLET" account-import --priv "$OTHER_PRIV" --out "$TMP/other_acc.json" >/dev/null
 "$WALLET" account-export --in "$TMP/other_acc.json" --format raw-hex --out "$TMP/exp.hex" --force >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 on --force overwrite"
-NEW_FILE_HEX=$(cat "$TMP/exp.hex" | tr -d '\r\n')
-assert_eq "$NEW_FILE_HEX" "$OTHER_PRIV" "after --force, file holds the new privkey_hex"
+NEW_FILE_PRIV=$($PY -c "
+d = open('$TMP/exp.hex','rb').read()
+assert d[:4] == b'DAK1'
+print(d[36:68].hex())")
+assert_eq "$NEW_FILE_PRIV" "$OTHER_PRIV" "after --force, the DAK1 file holds the new seed"
 
 echo
 echo "=== 18. --in missing fails ==="
@@ -258,71 +250,65 @@ assert_eq "$RC" "1" "exit 1 on missing --in file"
 assert_contains "$ERR" "open" "diagnostic mentions cannot open"
 
 echo
-echo "=== 20. --in malformed JSON fails ==="
-printf 'not-json{{{' > "$TMP/bad.json"
+echo "=== 20. --in that is not a DAK1 container fails ==="
+printf 'not-a-keyfile{{{' > "$TMP/bad.json"
 set +e
 ERR=$("$WALLET" account-export --in "$TMP/bad.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on bad-JSON --in"
-assert_contains "$ERR" "JSON" "diagnostic mentions JSON"
+assert_eq "$RC" "1" "exit 1 on non-DAK1 --in"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 echo
-echo "=== 21. --in missing 'address' field fails ==="
-$PY -c "
-import json, sys
-json.dump({'privkey_hex': '$SEED_PRIV'}, open(sys.argv[1], 'w'))
-" "$TMP/no_addr.json"
+echo "=== 21. --in truncated DAK1 (67 bytes) fails ==="
+head -c 67 "$TMP/acc.json" > "$TMP/no_addr.json"
 set +e
 ERR=$("$WALLET" account-export --in "$TMP/no_addr.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 when 'address' missing"
-assert_contains "$ERR" "address" "diagnostic mentions address"
+assert_eq "$RC" "1" "exit 1 on 67-byte truncated DAK1"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 echo
-echo "=== 22. --in missing 'privkey_hex' field fails ==="
-$PY -c "
-import json, sys
-json.dump({'address': '$SEED_ADDR'}, open(sys.argv[1], 'w'))
-" "$TMP/no_priv.json"
+echo "=== 22. --in DAK1 + trailing byte (69 bytes) fails ==="
+cp "$TMP/acc.json" "$TMP/no_priv.json"; printf '\x00' >> "$TMP/no_priv.json"
 set +e
 ERR=$("$WALLET" account-export --in "$TMP/no_priv.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 when 'privkey_hex' missing"
-assert_contains "$ERR" "privkey_hex" "diagnostic mentions privkey_hex"
+assert_eq "$RC" "1" "exit 1 on 69-byte (trailing byte) DAK1"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 echo
-echo "=== 23. --in address wrong shape (no 0x prefix) fails ==="
+echo "=== 23. --in wrong magic fails ==="
 $PY -c "
-import json, sys
-json.dump({'address': 'aabbccdd', 'privkey_hex': '$SEED_PRIV'}, open(sys.argv[1], 'w'))
-" "$TMP/bad_addr.json"
+d = bytearray(open('$TMP/acc.json','rb').read())
+d[0:4] = b'XXXX'
+open('$TMP/bad_addr.json','wb').write(bytes(d))"
 set +e
 ERR=$("$WALLET" account-export --in "$TMP/bad_addr.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on malformed address"
-assert_contains "$ERR" "address" "diagnostic mentions address"
+assert_eq "$RC" "1" "exit 1 on wrong magic"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 echo
-echo "=== 24. --in privkey_hex wrong length fails ==="
+echo "=== 24. --in pubkey/seed derive mismatch fails ==="
 $PY -c "
-import json, sys
-json.dump({'address': '$SEED_ADDR', 'privkey_hex': 'aabbcc'}, open(sys.argv[1], 'w'))
-" "$TMP/short_priv.json"
+d = bytearray(open('$TMP/acc.json','rb').read())
+d[4] ^= 0x01
+open('$TMP/short_priv.json','wb').write(bytes(d))"
 set +e
 ERR=$("$WALLET" account-export --in "$TMP/short_priv.json" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on short privkey_hex"
-assert_contains "$ERR" "privkey_hex" "diagnostic mentions privkey_hex"
+assert_eq "$RC" "1" "exit 1 on pubkey/seed derive mismatch"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 echo
 echo "=== 25. Bad --format value rejected ==="
@@ -344,21 +330,19 @@ set -e
 assert_eq "$RC" "1" "exit 1 on unknown argument"
 
 echo
-echo "=== 27. json passthrough preserves canonical fields exactly ==="
-# Re-export the json passthrough and check round-trip via Python JSON-equality.
+echo "=== 27. json view matches the decoded DAK1 record exactly ==="
 JSON_OUT=$("$WALLET" account-export --in "$TMP/acc.json" --format json | tr -d '\r')
-# Pass the source path as a positional arg so MSYS path translation kicks in
-# (inline literals get $TMP-substituted by bash AS-IS, which Python on Windows
-# can't open because the path is /tmp/tmp.XXXX-style instead of C:/...).
 ROUND_EQ=$(echo "$JSON_OUT" | $PY -c "
 import json, sys
 out = json.load(sys.stdin)
-src = json.load(open(sys.argv[1]))
+d = open(sys.argv[1], 'rb').read()
+assert d[:4] == b'DAK1'
+src = {'address': '0x' + d[4:36].hex(), 'privkey_hex': d[36:68].hex()}
 keys = {'address', 'privkey_hex'}
 ok = all(out.get(k) == src.get(k) for k in keys)
 print('YES' if ok else 'NO')
 " "$TMP/acc.json")
-assert_eq "$ROUND_EQ" "YES" "json passthrough preserves address+privkey_hex exactly"
+assert_eq "$ROUND_EQ" "YES" "json view preserves address+privkey_hex exactly"
 
 echo
 echo "=== 28. raw-hex stdout has no excess whitespace ==="

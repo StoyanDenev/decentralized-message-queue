@@ -47,9 +47,14 @@
 #
 # HOW IT WORKS
 # ------------
-# We isolate each function's body by NAME anchor (drift-robust; no line nums):
-#   producer: `Hash compute_block_digest(const Block& b) {`        .. `return h.finalize();`
-#   light:    `Hash light_compute_block_digest(const determ::chain::Block& b) {` .. `return h.finalize();`
+# We isolate each function's body by NAME anchor (drift-robust; no line nums).
+# EQV-height-bind: the digest is a TWO-LEVEL hash — an outer compose
+# SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root) over a BODY function
+# that binds everything else. The windows anchor on the BODY functions (the
+# leading index append moved up into the compose, which is pinned separately
+# by the tag-agreement check below):
+#   producer: `Hash compute_block_digest_body(const Block& b) {`        .. `return h.finalize();`
+#   light:    `Hash light_compute_block_digest_body(const determ::chain::Block& b) {` .. `return h.finalize();`
 # Every SHA256Builder append inside the body is reduced to a canonical TOKEN
 # (comments stripped first, so a commented-out append never counts):
 #       h.append(b.index)                              -> INDEX
@@ -74,10 +79,12 @@
 # names), so the SAME extractor token-maps both.
 #
 # ASSERTIONS
-#   * producer seq EXACTLY:
-#       INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER \
+#   * producer seq EXACTLY (no INDEX — it lives in the outer compose):
+#       PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER \
 #       CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT \
 #       PARTNER_SUBSET TIMESTAMP
+#   * EQV-height-bind tag agreement: the outer compose of BOTH files must
+#     carry the byte-identical "DTM-BLKDIG-v2" domain tag.
 #   * light seq EXACTLY EQUAL to the producer seq (full F-7 parity — every
 #     field, same order, including all three F2 roots).
 #   * LOAD-BEARING cross-site check: the LIVE producer seq == the LIVE light
@@ -119,7 +126,7 @@ cd "$(dirname "$0")/.."
 # D3.5e-6 (2026-07-14): + SOURCE_SHARD_ID (the producing shard's identity, bound
 # alongside ELIGIBLE_COUNT under the same EXTENDED-source gate — §S-036 Layer 2;
 # closes same-region cross-shard tip replay; 19 tokens).
-PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT SOURCE_SHARD_ID SHARD_TIP_RECORDS"
+PRODUCER_SEQ="PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP SIG_FORM ELIGIBLE_COUNT SOURCE_SHARD_ID SHARD_TIP_RECORDS"
 LIGHT_SEQ="$PRODUCER_SEQ"
 # The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
@@ -136,8 +143,8 @@ bad() { echo "  bad: $1" >&2; VIOLATIONS=$((VIOLATIONS + 1)); }
 # canonical token; non-append lines (comments, blanks, locals, control flow,
 # reserve()) produce nothing.
 #
-#   fn=producer  begin = `Hash compute_block_digest(const Block& b) {`
-#   fn=light     begin = `Hash light_compute_block_digest(const ... Block& b) {`
+#   fn=producer  begin = `Hash compute_block_digest_body(const Block& b) {`
+#   fn=light     begin = `Hash light_compute_block_digest_body(const ... Block& b) {`
 #
 # All regexes are LITERAL inside the awk program (NOT passed via -v, which would
 # mangle backslash escapes). Only the plain `fn` string is passed via -v.
@@ -147,8 +154,8 @@ extract_tokens() {
   awk -v fn="$fn" '
     BEGIN { inreg = 0 }
     # Enter the body at the begin anchor (the function signature opening brace).
-    !inreg && fn == "producer" && /Hash +compute_block_digest\(const +Block& +b\) +\{/ { inreg = 1; next }
-    !inreg && fn == "light"    && /Hash +light_compute_block_digest\(const +determ::chain::Block& +b\) +\{/ { inreg = 1; next }
+    !inreg && fn == "producer" && /Hash +compute_block_digest_body\(const +Block& +b\) +\{/ { inreg = 1; next }
+    !inreg && fn == "light"    && /Hash +light_compute_block_digest_body\(const +determ::chain::Block& +b\) +\{/ { inreg = 1; next }
     inreg {
       line = $0
       # Strip // comments so a commented-out append never counts as a token.
@@ -223,8 +230,8 @@ extract_triggers() {
   local file="$1" fn="$2"
   awk -v fn="$fn" '
     BEGIN { inreg = 0; psh = "NONE"; pt = "NONE" }
-    !inreg && fn == "producer" && /Hash +compute_block_digest\(const +Block& +b\) +\{/ { inreg = 1; next }
-    !inreg && fn == "light"    && /Hash +light_compute_block_digest\(const +determ::chain::Block& +b\) +\{/ { inreg = 1; next }
+    !inreg && fn == "producer" && /Hash +compute_block_digest_body\(const +Block& +b\) +\{/ { inreg = 1; next }
+    !inreg && fn == "light"    && /Hash +light_compute_block_digest_body\(const +determ::chain::Block& +b\) +\{/ { inreg = 1; next }
     inreg {
       line = $0
       sub(/\/\/.*/, "", line)
@@ -374,9 +381,8 @@ if [ "${SELFTEST:-}" = "1" ]; then
 
   # (0a) canonical producer snippet reduces to the canonical producer seq.
   st_seq "producer-sanity" producer "$PRODUCER_SEQ" <<'EOF'
-Hash compute_block_digest(const Block& b) {
+Hash compute_block_digest_body(const Block& b) {
     SHA256Builder h;
-    h.append(b.index);
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -424,9 +430,8 @@ EOF
   # (0b) canonical light snippet (post-F-7, with the F2 branch) reduces to the
   #      canonical light seq — which is now EQUAL to the producer seq.
   st_seq "light-sanity" light "$LIGHT_SEQ" <<'EOF'
-Hash light_compute_block_digest(const determ::chain::Block& b) {
+Hash light_compute_block_digest_body(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
-    h.append(b.index);
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -482,8 +487,7 @@ EOF
   # (1) merged-block TAIL SWAPPED in light (TIMESTAMP before PARTNER_SUBSET).
   #     The reduced light seq differs from canonical -> producer != light -> RED.
   L_SWAP=$(extract_tokens /dev/stdin light <<'EOF'
-Hash light_compute_block_digest(const determ::chain::Block& b) {
-    h.append(b.index);
+Hash light_compute_block_digest_body(const determ::chain::Block& b) {
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -522,8 +526,7 @@ EOF
   #     seq != canonical PRODUCER_SEQ, (b) cross-site (producer != light), and
   #     (c) the F2 presence check (producer must contain all three F2 tokens).
   P_MISS=$(extract_tokens /dev/stdin producer <<'EOF'
-Hash compute_block_digest(const Block& b) {
-    h.append(b.index);
+Hash compute_block_digest_body(const Block& b) {
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -565,8 +568,7 @@ EOF
   #     mode. light seq != canonical AND producer != light -> RED on both, and
   #     the F2 presence check fires (light must bind all three).
   L_MISS=$(extract_tokens /dev/stdin light <<'EOF'
-Hash light_compute_block_digest(const determ::chain::Block& b) {
-    h.append(b.index);
+Hash light_compute_block_digest_body(const determ::chain::Block& b) {
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -607,8 +609,7 @@ EOF
   # (4) dropped CORE field (DELAY_SEED) in producer -> producer seq != canonical
   #     AND producer != light -> RED on both checks.
   P_DROP=$(extract_tokens /dev/stdin producer <<'EOF'
-Hash compute_block_digest(const Block& b) {
-    h.append(b.index);
+Hash compute_block_digest_body(const Block& b) {
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(static_cast<uint8_t>(b.consensus_mode));
@@ -737,9 +738,9 @@ if [ ! -f "$PROD_FILE" ]; then
 else
   PSEQ=$(extract_tokens "$PROD_FILE" producer)
   if [ "$PSEQ" = "$PRODUCER_SEQ" ]; then
-    ok "producer.cpp::compute_block_digest -> [$PSEQ]"
+    ok "producer.cpp::compute_block_digest_body -> [$PSEQ]"
   else
-    bad "producer.cpp::compute_block_digest append-sequence DRIFT"
+    bad "producer.cpp::compute_block_digest_body append-sequence DRIFT"
     echo "       want: [$PRODUCER_SEQ]" >&2
     echo "       got:  [$PSEQ]" >&2
   fi
@@ -752,9 +753,9 @@ if [ ! -f "$LIGHT_FILE" ]; then
 else
   LSEQ=$(extract_tokens "$LIGHT_FILE" light)
   if [ "$LSEQ" = "$LIGHT_SEQ" ]; then
-    ok "light/verify.cpp::light_compute_block_digest -> [$LSEQ]  (full F-7 parity; all 3 F2 view roots bound)"
+    ok "light/verify.cpp::light_compute_block_digest_body -> [$LSEQ]  (full F-7 parity; all 3 F2 view roots bound)"
   else
-    bad "light/verify.cpp::light_compute_block_digest append-sequence DRIFT"
+    bad "light/verify.cpp::light_compute_block_digest_body append-sequence DRIFT"
     echo "       want: [$LIGHT_SEQ]  (byte-parity with producer)" >&2
     echo "       got:  [$LSEQ]" >&2
   fi
@@ -806,6 +807,35 @@ if [ -f "$LIGHT_FILE" ]; then
   fi
 fi
 
+# ── EQV-height-bind: outer-compose tag agreement ────────────────────────────────
+# The two-level digest split moved the leading index append into an outer
+# compose: digest = SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root).
+# The BODY windows above no longer see the tag or the index, so pin the tag
+# HERE: it must appear inside the compose function of BOTH files (a copy that
+# changed / dropped its tag would diverge every committee-signed digest).
+compose_has_tag() {
+  local file="$1" fn="$2"
+  awk -v fn="$fn" '
+    BEGIN { inreg = 0; found = 0 }
+    !inreg && $0 ~ ("^Hash +" fn "\\(") { inreg = 1; next }
+    inreg {
+      if ($0 ~ /DTM-BLKDIG-v2/) found = 1
+      if ($0 ~ /\.finalize\(\)/) exit
+    }
+    END { print found }
+  ' "$file"
+}
+if [ "$(compose_has_tag "$PROD_FILE" compose_block_digest)" = "1" ]; then
+  ok "compose tag: producer.cpp::compose_block_digest carries DTM-BLKDIG-v2"
+else
+  bad "compose tag: producer.cpp::compose_block_digest is missing DTM-BLKDIG-v2 (tag drift)"
+fi
+if [ "$(compose_has_tag "$LIGHT_FILE" light_compose_block_digest)" = "1" ]; then
+  ok "compose tag: light/verify.cpp::light_compose_block_digest carries DTM-BLKDIG-v2"
+else
+  bad "compose tag: light/verify.cpp::light_compose_block_digest is missing DTM-BLKDIG-v2 (tag drift)"
+fi
+
 # ── F2 sub-hasher source-parity (ADC-3 + siblings) ──────────────────────────────
 # The three F2 sub-hashers feed the akeys/ekeys/ikeys view roots the block digest
 # (checked above) binds. They are re-implemented in BOTH producer.cpp and
@@ -815,7 +845,7 @@ fi
 # reorder/add/drop/recast in either copy (which would drift the committee-signed
 # view root for cross-shard/reconciled blocks with no runtime red) is RED here.
 check_subhasher hash_abort_event         DTM-F2-ABORT-v2    # register ADC-3 (D2-inc3: binary claims)
-check_subhasher hash_equivocation_event  DTM-F2-EQ-v1       # same class (F2 equivocation view)
+check_subhasher hash_equivocation_event  DTM-F2-EQ-v2       # same class (F2 equivocation view; EQV-height-bind v2)
 check_subhasher hash_cross_shard_receipt DTM-F2-RCPT-v1     # same class (F2 inbound-receipt view)
 
 echo ""

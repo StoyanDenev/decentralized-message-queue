@@ -245,7 +245,11 @@ BlockSigMsg BlockSigMsg::from_json(const json& j) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
+// EQV-height-bind: the contrib-commitment BODY — the exact legacy commitment
+// preimage minus the leading block_index append, which moved up into
+// compose_contrib_commitment so the (block_index, body_root) opening can be
+// carried in an EquivocationEvent and the signed height re-derived.
+Hash make_contrib_body_root(const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
                               const Hash& dh_input,
                               const Hash& view_eq_root,
@@ -258,7 +262,6 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
     Hash inner_root = inner.finalize();
 
     SHA256Builder b;
-    b.append(block_index);
     b.append(prev_hash);
     b.append(inner_root);
     b.append(dh_input);
@@ -311,6 +314,45 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
     return b.finalize();
 }
 
+// Message-form overload (the S-043 discipline): every bound field comes from
+// the message itself, so an evidence-assembly recompute cannot silently omit
+// one via a trailing default-zero arg.
+Hash make_contrib_body_root(const ContribMsg& m) {
+    return make_contrib_body_root(m.prev_hash, m.tx_hashes,
+                                   m.dh_input, m.view_eq_root,
+                                   m.view_abort_root, m.view_inbound_root,
+                                   m.proposer_time, m.view_shardtip_root);
+}
+
+// EQV-height-bind: outer compose of the Phase-1 contrib commitment.
+//   contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64 BE || body_root)
+// The tag MUST differ from compose_block_digest's — a shared tag would let one
+// honest block-sig + one honest contrib-sig at the same height compose into a
+// same-height "equivocation" forgery (cross-family confusion).
+Hash compose_contrib_commitment(uint64_t block_index, const Hash& body_root) {
+    SHA256Builder b;
+    b.append(std::string("DTM-CONTRIB-v2"));
+    b.append(block_index);
+    b.append(body_root);
+    return b.finalize();
+}
+
+Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
+                              const std::vector<Hash>& sorted_tx_hashes,
+                              const Hash& dh_input,
+                              const Hash& view_eq_root,
+                              const Hash& view_abort_root,
+                              const Hash& view_inbound_root,
+                              uint64_t proposer_time,
+                              const Hash& view_shardtip_root) {
+    return compose_contrib_commitment(
+        block_index,
+        make_contrib_body_root(prev_hash, sorted_tx_hashes, dh_input,
+                               view_eq_root, view_abort_root,
+                               view_inbound_root, proposer_time,
+                               view_shardtip_root));
+}
+
 // Message-form overload (S-043 hardening). Extracts EVERY field the commitment
 // binds straight from the message, so a verification-side recompute cannot
 // silently omit one via a trailing default-zero arg (the S-043 root cause).
@@ -355,12 +397,18 @@ Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists) {
 
 Hash hash_equivocation_event(const chain::EquivocationEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-EQ-v1"));
+    // EQV-height-bind: tag bumped v1 → v2 with the struct change (the
+    // hash_abort_event D2-inc3 precedent) — digest_a/digest_b are gone;
+    // kind + the two (index, body_root, sig) openings are bound instead.
+    b.append(std::string("DTM-F2-EQ-v2"));
     b.append(e.equivocator);
     b.append(e.block_index);
-    b.append(e.digest_a);
+    b.append(e.kind);
+    b.append(e.index_a);
+    b.append(e.body_root_a);
     b.append(e.sig_a.data(), e.sig_a.size());
-    b.append(e.digest_b);
+    b.append(e.index_b);
+    b.append(e.body_root_b);
     b.append(e.sig_b.data(), e.sig_b.size());
     // Forensic-trace fields (shard_id, beacon_anchor_height): included
     // so peers' Hash matches across observers with identical struct
@@ -409,20 +457,29 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
     if (sidx >= stored.creator_block_sigs.size()
         || bidx >= b.creator_block_sigs.size()) return std::nullopt;
 
-    Hash digest_a = compute_block_digest(stored);
-    Hash digest_b = compute_block_digest(b);
+    // EQV-height-bind: carry the OPENINGS (index, body_root) of the two signed
+    // digests, not the opaque digests — the verifier recomputes each digest via
+    // compose_block_digest and asserts both signatures bind THIS height. Both
+    // blocks sit at the same height here (stored is chain.at(b.index)), so
+    // index_a == index_b == block_index by construction.
+    Hash root_a = compute_block_digest_body(stored);
+    Hash root_b = compute_block_digest_body(b);
     Signature sig_a = stored.creator_block_sigs[sidx];
     Signature sig_b = b.creator_block_sigs[bidx];
     // A genuine double-sign needs two DIFFERENT digests carrying two DIFFERENT
-    // signatures by the same proposer key.
-    if (digest_a == digest_b || sig_a == sig_b) return std::nullopt;
+    // signatures by the same proposer key. Same-height digests differ iff the
+    // body roots differ (the outer compose only adds the shared index).
+    if (root_a == root_b || sig_a == sig_b) return std::nullopt;
 
     chain::EquivocationEvent ev;
     ev.equivocator = stored.bft_proposer;
     ev.block_index = b.index;
-    ev.digest_a    = digest_a;
+    ev.kind        = chain::EquivocationEvent::KIND_BLOCK_DIGEST;
+    ev.index_a     = b.index;
+    ev.body_root_a = root_a;
     ev.sig_a       = sig_a;
-    ev.digest_b    = digest_b;
+    ev.index_b     = b.index;
+    ev.body_root_b = root_b;
     ev.sig_b       = sig_b;
     // rev.9 B2c.4 cross-chain provenance: SHARD-role detections record the
     // shard + latest verified beacon-anchor height; SINGLE/BEACON leave the
@@ -756,9 +813,12 @@ size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
 // reconciles at Phase 1→2 transition; canonical reconciliation feeds
 // the digest) is the correct fix. Tracked as a v2 work item; not in
 // this v1.x release.
-Hash compute_block_digest(const Block& b) {
+// EQV-height-bind: the block-digest BODY — the exact legacy digest preimage
+// minus the leading index append, which moved up into compose_block_digest so
+// the (index, body_root) opening can be carried in an EquivocationEvent and
+// the signed height re-derived by the verifier.
+Hash compute_block_digest_body(const Block& b) {
     SHA256Builder h;
-    h.append(b.index);
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -898,6 +958,23 @@ Hash compute_block_digest(const Block& b) {
         h.append(compute_view_root(tkeys));
     }
     return h.finalize();
+}
+
+// EQV-height-bind: outer compose of the Phase-2 block digest.
+//   block_digest = SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root)
+// Tag domain-separated from compose_contrib_commitment's DTM-CONTRIB-v2
+// (see that function's comment). Light mirror: light/verify.cpp — the tag
+// string must stay byte-identical in both (parity-guarded).
+Hash compose_block_digest(uint64_t index, const Hash& body_root) {
+    SHA256Builder h;
+    h.append(std::string("DTM-BLKDIG-v2"));
+    h.append(index);
+    h.append(body_root);
+    return h.finalize();
+}
+
+Hash compute_block_digest(const Block& b) {
+    return compose_block_digest(b.index, compute_block_digest_body(b));
 }
 
 // rev.9 S-009: post-Phase-2 randomness output. Computed once K secrets

@@ -11,21 +11,19 @@
 // guardian model with libopaque-mediated AKE against N distinct
 // guardian services.
 //
-// File layout for a recovery setup:
-//   recovery_meta.json     — wallet identity, threshold, N, scheme
-//   guardian_0.env         — envelope wrapping share 0 (x=1)
-//   guardian_1.env         — envelope wrapping share 1 (x=2)
-//   ...
-//   guardian_{N-1}.env     — envelope wrapping share N-1 (x=N)
+// At-rest form (D2, canonical binary — the JSON document is deleted):
+// the DRS1 container, byte-exact (integers LE; decode requires the EXACT
+// total length; every bound refuses, never clamps):
 //
-// recovery_meta.json schema (canonical, used by both create + recover):
-//   { "version": 1,
-//     "scheme": "shamir-aead-passphrase",  // Phase 4: "shamir-aead-opaque"
-//     "threshold": T,
-//     "share_count": N,
-//     "secret_len": SECRET_BYTES,
-//     "guardian_x": [1, 2, ..., N],
-//     "checksum": SHA-256(seed_pub) }   // optional public-key checksum
+//   [0..3]  "DRS1"          magic
+//   [4..7]  version u32 LE  (== 1; the old "scheme" string is implied)
+//   [8]     threshold u8    (>= 1)
+//   [9]     share_count u8  (>= threshold)
+//   [10..13] secret_len u32 LE (1..=4096)
+//   [14]    checksum_len u8 (0 | 32)
+//   [..]    pubkey_checksum  checksum_len bytes
+//   share_count x { guardian_x u8 (1..=255, DISTINCT)
+//                   || env_len u32 LE || DWE envelope bytes }
 //
 // On recover the checksum lets the wallet self-verify that the
 // reconstructed seed regenerates the expected public key — catches
@@ -43,7 +41,6 @@ namespace determ::wallet::recovery {
 
 struct RecoverySetup {
     uint32_t                              version{1};
-    std::string                           scheme;
     uint8_t                               threshold{0};
     uint8_t                               share_count{0};
     size_t                                secret_len{0};
@@ -77,11 +74,15 @@ recover(const RecoverySetup& setup,
           const std::string& password,
           const std::vector<uint8_t>& guardian_indices);
 
-// Serialize / deserialize a complete RecoverySetup to/from a single
-// JSON document. Used by the CLI's create-recovery / recover commands
-// when persisting to disk or transmitting between user devices.
-std::string to_json(const RecoverySetup& setup);
-std::optional<RecoverySetup> from_json(const std::string& blob);
+// Serialize / deserialize a complete RecoverySetup to/from the canonical
+// binary DRS1 container (layout above). Used by the CLI's create-recovery
+// / recover commands when persisting to disk or transmitting between user
+// devices. to_bytes throws std::invalid_argument on out-of-bounds fields;
+// from_bytes returns nullopt unless the buffer is EXACTLY one well-formed
+// container (DISTINCT guardian_x enforced on decode).
+std::vector<uint8_t> to_bytes(const RecoverySetup& setup);
+std::optional<RecoverySetup> from_bytes(const uint8_t* data, size_t len);
+std::optional<RecoverySetup> from_bytes(const std::vector<uint8_t>& bytes);
 
 // Compute the canonical pubkey_checksum for an Ed25519 seed. SHA-256
 // of the seed-derived public key. Stored in the recovery setup and

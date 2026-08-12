@@ -73,7 +73,7 @@ Options:
                        pass once per light client. If given zero times,
                        the determ-light default cache is audited
                        ($DETERM_LIGHT_STATE if set, else
-                       ~/.determ-light/state.json).
+                       ~/.determ-light/state.bin).
   -h, --help           Show this help (works without the binary).
 
 Classification:
@@ -144,7 +144,7 @@ fi
 
 # No explicit --state → audit the determ-light default cache. An empty
 # path string makes `state` fall back to default_state_path() internally
-# (DETERM_LIGHT_STATE or ~/.determ-light/state.json), matching the binary's
+# (DETERM_LIGHT_STATE or ~/.determ-light/state.bin), matching the binary's
 # own default and test_light_state.sh case #8.
 if [ "${#STATES[@]}" -eq 0 ]; then
   STATES=("")

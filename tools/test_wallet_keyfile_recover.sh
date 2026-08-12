@@ -12,7 +12,7 @@
 #   - Recover via keyfile-recover with a T-of-N subset → verify secret == original.
 #   - Run two DIFFERENT T-subsets from the same backup → both must reconstruct
 #     identical secret (Shamir any-T-of-N property).
-#   - --out path writes JSON {"secret_hex": "..."}.
+#   - --out path writes the RAW secret bytes (binary, D2).
 #   - --json on stdout same JSON shape.
 #   - --threshold T enforces minimum keyholder count.
 #
@@ -197,7 +197,7 @@ fi
 
 # ── 8. --out writes JSON file ─────────────────────────────────────────────────
 echo
-echo "=== 8. --out writes {\"secret_hex\":\"...\"} JSON file ==="
+echo "=== 8. --out writes the RAW secret bytes (binary, D2) ==="
 "$WALLET" keyfile-recover \
     --backup-shares "$TMP/shares.json" \
     --backup-envelopes "$TMP/envelopes.json" \
@@ -212,12 +212,11 @@ else
 fi
 $PY - "$TMP/recovered.json" <<PY_EOF
 import json, sys
-d = json.load(open(sys.argv[1]))
-assert "secret_hex" in d, "missing secret_hex"
-assert d["secret_hex"] == "$SECRET", f"secret mismatch: {d['secret_hex']!r}"
+d = open(sys.argv[1], "rb").read()
+assert d.hex() == "$SECRET", f"secret mismatch: {d.hex()!r}"
 PY_EOF
 if [ $? = 0 ]; then
-    echo "  PASS: --out file contains correct secret_hex"; pass_count=$((pass_count + 1))
+    echo "  PASS: --out file carries the raw secret bytes"; pass_count=$((pass_count + 1))
 else
     echo "  FAIL: --out file contents wrong"; fail_count=$((fail_count + 1))
 fi
@@ -580,8 +579,25 @@ echo
 echo "=== 31. Cross-verification: decrypted y matches shares file y_hex ==="
 # (This is implicitly already proven by the round-trip success in steps 3-6,
 # but we add an explicit assertion to lock it in as a regression target.)
-EXPECTED_Y1=$($PY -c "import json; d=json.load(open('$TMP/shares.json')); print(next(s['y_hex'] for s in d['shares'] if s['x']==1))")
-BLOB1=$($PY -c "import json; d=json.load(open('$TMP/envelopes.json')); print(next(e['envelope_blob'] for e in d['envelopes'] if e['share_index']==1))")
+EXPECTED_Y1=$($PY -c "
+d = open('$TMP/shares.json','rb').read()
+assert d[:4] == b'DSS1'
+y_len = int.from_bytes(d[5:9], 'little')
+off = 9
+for _ in range(d[4]):
+    if d[off] == 1:
+        print(d[off+1:off+1+y_len].hex()); break
+    off += 1 + y_len")
+BLOB1=$($PY -c "
+d = open('$TMP/envelopes.json','rb').read()
+assert d[:4] == b'DBE1'
+off = 5
+for _ in range(d[4]):
+    idx = d[off]; off += 1
+    n = int.from_bytes(d[off:off+4], 'little'); off += 4
+    if idx == 1:
+        print(d[off:off+n].hex()); break
+    off += n")
 DECRYPTED_Y1=$("$WALLET" envelope decrypt --envelope "$BLOB1" --password "keyholder-pw-1" 2>&1 | tr -d '\r')
 assert_eq "$DECRYPTED_Y1" "$EXPECTED_Y1" "envelope[1] decrypt y_hex matches shares file"
 

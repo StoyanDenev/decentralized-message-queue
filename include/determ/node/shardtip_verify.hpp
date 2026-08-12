@@ -6,6 +6,8 @@
 #include <determ/node/registry.hpp>
 #include <optional>
 #include <string>
+#include <map>
+#include <vector>
 
 // D3.5e-7b (ShardTipMergeDesign.md §9.6 pt4): the SHARED committee-derivation +
 // K-of-K signature verification + committee_sig_root computation for a source
@@ -47,5 +49,28 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
     size_t                   k_block_sigs,
     bool                     bft_enabled,
     const chain::Block&      tip);
+
+// DECISION-LOG 2026-07-31 Hole 2 — the ONE committee-signature core shared by
+// verify_shard_tip_committee_sig_root (beacon verifying a shard tip / the e-7d
+// fold-witness gate) and Node::on_beacon_header (shard verifying a beacon
+// header). Returns signed_count iff ALL hold:
+//   - !creators.empty()                       (vacuous-committee floor; with
+//     required_k >= 1 — genesis enforces 1 <= K <= M — the signed_count floor
+//     below subsumes this arm; it stays explicit as the named statement of the
+//     closed hole, fail-fast with an exact diagnostic)
+//   - creator_block_sigs.size() == creators.size()
+//   - every NON-ZERO sig's creator resolves in member_pub AND verifies over digest
+//   - signed_count >= required_k
+// std::nullopt on any failure (diagnostic on stderr, prefixed diag_ctx).
+// Zero-sentinel entries are skipped, exactly as both prior hand-rolled loops
+// did; callers layer their own completeness rules on top (on_beacon_header:
+// signed_count == creators.size(), the MD no-zero-sentinel rule).
+std::optional<size_t> verify_committee_sigs(
+    const std::map<std::string, PubKey>& member_pub,
+    const std::vector<std::string>&      creators,
+    const std::vector<Signature>&        creator_block_sigs,
+    const Hash&                          digest,
+    size_t                               required_k,
+    const std::string&                   diag_ctx);
 
 } // namespace determ::node

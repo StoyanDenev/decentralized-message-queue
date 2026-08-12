@@ -90,7 +90,7 @@ echo "=== Setup: generate a known keypair via account-create-batch ==="
 # can then re-import. This exercises the full round-trip path: generate
 # (account-create-batch) -> capture privkey (jq/python) -> import
 # (account-import) -> verify address matches.
-"$WALLET" account-create-batch --count 1 --out "$TMP/seed_key.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/seed_key.json" 2>/dev/null
 RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "  FAIL: account-create-batch setup failed (rc=$RC)"; fail_count=$((fail_count + 1))
@@ -195,11 +195,18 @@ else
 fi
 
 echo
-echo "=== 9. --out file contents: valid JSON, single-account shape ==="
-FILE_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])"     "$TMP/imported.json")
-FILE_PRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['privkey_hex'])" "$TMP/imported.json")
-assert_eq "$FILE_ADDR" "$SEED_ADDR" "--out file address matches input"
-assert_eq "$FILE_PRIV" "$SEED_PRIV" "--out file privkey_hex matches input"
+echo "=== 9. --out file contents: exact 68-byte binary DAK1 container ==="
+SZ=$(wc -c < "$TMP/imported.json" | tr -d ' ')
+assert_eq "$SZ" "68" "--out file is exactly 68 bytes (DAK1)"
+FILE_ADDR=$($PY -c "
+d = open('$TMP/imported.json','rb').read()
+assert d[:4] == b'DAK1', 'bad magic'
+print('0x' + d[4:36].hex())")
+FILE_PRIV=$($PY -c "
+d = open('$TMP/imported.json','rb').read()
+print(d[36:68].hex())")
+assert_eq "$FILE_ADDR" "$SEED_ADDR" "--out DAK1 pubkey-derived address matches input"
+assert_eq "$FILE_PRIV" "$SEED_PRIV" "--out DAK1 priv_seed matches input"
 
 echo
 echo "=== 10. --out with missing parent directory fails ==="
@@ -225,13 +232,16 @@ assert_contains "$ERR" "--force"        "diagnostic suggests --force"
 
 echo
 echo "=== 12. --force overrides existing file ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/other_key.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/other_key.json" 2>/dev/null
 OTHER_PRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/other_key.json")
 OTHER_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/other_key.json")
 "$WALLET" account-import --priv "$OTHER_PRIV" --out "$TMP/imported.json" --force > "$TMP/force_stdout.txt" 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 on --force overwrite"
-NEW_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/imported.json")
+NEW_ADDR=$($PY -c "
+d = open('$TMP/imported.json','rb').read()
+assert d[:4] == b'DAK1', 'bad magic'
+print('0x' + d[4:36].hex())")
 assert_eq "$NEW_ADDR" "$OTHER_ADDR" "after --force, file holds the new address"
 
 echo
@@ -314,19 +324,19 @@ JSON_RAW=$("$WALLET" account-import --priv "$SEED_PRIV" --json 2>&1 | tr -d '\r'
 assert_not_contains "$JSON_RAW" "imported account:" "--json stdout is pure JSON (no human-mode label)"
 
 echo
-echo "=== 21. --out file is the single-account object (no 'accounts' array wrapper) ==="
-# account-create-batch wraps in {"accounts":[...]}; account-import does NOT
-# because a single account doesn't need a list wrapper.
+echo "=== 21. --out file is a single DAK1 record (not the DAB1 batch container) ==="
+# account-create-batch --out writes the DAB1 batch container; account-import
+# writes the single-record DAK1 container (magic disambiguates).
 "$WALLET" account-import --priv "$SEED_PRIV" --out "$TMP/single.json" --force >/dev/null 2>&1
-HAS_ACCOUNTS_KEY=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print('YES' if 'accounts' in d else 'NO')" "$TMP/single.json")
-assert_eq "$HAS_ACCOUNTS_KEY" "NO" "--out file does NOT have an 'accounts' wrapper key"
-HAS_ADDR=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print('YES' if 'address' in d else 'NO')" "$TMP/single.json")
-assert_eq "$HAS_ADDR" "YES" "--out file has top-level 'address' key"
+MAGIC=$($PY -c "print(open('$TMP/single.json','rb').read(4).decode('ascii', 'replace'))")
+assert_eq "$MAGIC" "DAK1" "--out file magic is DAK1 (single record, no batch wrapper)"
+SZ=$(wc -c < "$TMP/single.json" | tr -d ' ')
+assert_eq "$SZ" "68" "--out file is exactly 68 bytes"
 
 echo
 echo "=== 22. Different seeds produce different addresses ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/k2.json" >/dev/null 2>&1
-"$WALLET" account-create-batch --count 1 --out "$TMP/k3.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/k2.json" 2>/dev/null
+"$WALLET" account-create-batch --count 1 --json > "$TMP/k3.json" 2>/dev/null
 PRIV2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/k2.json")
 PRIV3=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/k3.json")
 ADDR2=$("$WALLET" account-import --priv "$PRIV2" --json | $PY -c "import json,sys; print(json.load(sys.stdin)['address'])")
@@ -360,12 +370,16 @@ set -e
 assert_eq "$RC" "1" "exit 1 on 130-char --priv"
 
 echo
-echo "=== 25. Round-trip: --json output reparsed equals --out file content ==="
+echo "=== 25. Round-trip: --json output equals the --out DAK1 file content ==="
 JSON_STDOUT=$("$WALLET" account-import --priv "$SEED_PRIV" --json | tr -d '\r')
 "$WALLET" account-import --priv "$SEED_PRIV" --out "$TMP/rt.json" --force >/dev/null 2>&1
-JSON_FROM_FILE=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d, sort_keys=True))" "$TMP/rt.json")
+JSON_FROM_FILE=$($PY -c "
+import json
+d = open('$TMP/rt.json','rb').read()
+assert d[:4] == b'DAK1'
+print(json.dumps({'address': '0x' + d[4:36].hex(), 'privkey_hex': d[36:68].hex()}, sort_keys=True))")
 JSON_FROM_STDOUT=$(echo "$JSON_STDOUT" | $PY -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d, sort_keys=True))")
-assert_eq "$JSON_FROM_FILE" "$JSON_FROM_STDOUT" "--json stdout and --out file represent the same JSON object"
+assert_eq "$JSON_FROM_FILE" "$JSON_FROM_STDOUT" "--json stdout and --out DAK1 file carry the same record"
 
 echo
 echo "=== 26. --json AND --out: --out path wins (no JSON to stdout) ==="
@@ -375,8 +389,11 @@ STDOUT=$(cat "$TMP/both_stdout.txt" | tr -d '\r')
 assert_eq "$RC" "0" "exit 0 on --out + --json"
 assert_contains "$STDOUT" "imported account:"   "stdout has 'imported account:' (--out path won)"
 assert_not_contains "$STDOUT" '"privkey_hex"'   "stdout does NOT contain JSON document (--out won)"
-# File is the single-account JSON, valid.
-FILE_ADDR=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/both.json")
+# File is the single-account DAK1 container, valid.
+FILE_ADDR=$($PY -c "
+d = open('$TMP/both.json','rb').read()
+assert d[:4] == b'DAK1'
+print('0x' + d[4:36].hex())")
 assert_eq "$FILE_ADDR" "$SEED_ADDR" "--out file contains the expected address"
 
 echo

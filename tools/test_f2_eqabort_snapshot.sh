@@ -117,12 +117,28 @@ echo
 echo "=== 4. Synthesize + submit an EquivocationEvent for donor1 to all donors ==="
 python <<EOF
 import hashlib, json
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+# Ed25519 backend: prefer the cryptography module, fall back to PyNaCl (the
+# Darwin runner ships pynacl only). Both wrap the same RFC 8032 primitive.
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    def _signer(seed):
+        k = Ed25519PrivateKey.from_private_bytes(seed)
+        return lambda m: k.sign(m)
+except ModuleNotFoundError:
+    from nacl.signing import SigningKey
+    def _signer(seed):
+        k = SigningKey(seed)
+        return lambda m: k.sign(m).signature
 with open("$T/donor1/node_key.json") as f: nk = json.load(f)
-pkey = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(nk["priv_seed"]))
-da = hashlib.sha256(b"snap-eqabort-A").digest(); db = hashlib.sha256(b"snap-eqabort-B").digest()
-ev = {"equivocator":"donor1","block_index":1,"digest_a":da.hex(),"sig_a":pkey.sign(da).hex(),
-      "digest_b":db.hex(),"sig_b":pkey.sign(db).hex(),"shard_id":0,"beacon_anchor_height":0}
+sign = _signer(bytes.fromhex(nk["priv_seed"]))
+# EQV-height-bind: carry the (index, body_root) openings; sign the DERIVED
+# digests SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root) (kind 0).
+ra = hashlib.sha256(b"snap-eqabort-A").digest(); rb = hashlib.sha256(b"snap-eqabort-B").digest()
+def compose(i, r): return hashlib.sha256(b"DTM-BLKDIG-v2" + i.to_bytes(8, "big") + r).digest()
+ev = {"equivocator":"donor1","block_index":1,"kind":0,
+      "index_a":1,"body_root_a":ra.hex(),"sig_a":sign(compose(1, ra)).hex(),
+      "index_b":1,"body_root_b":rb.hex(),"sig_b":sign(compose(1, rb)).hex(),
+      "shard_id":0,"beacon_anchor_height":0}
 json.dump(ev, open("$T/ev.json","w"))
 print("  synthesized equivocation for donor1")
 EOF

@@ -14,10 +14,14 @@
 # from the public crypto primitives (generate_node_key / sign / verify)
 # and pins every accept/reject arm.
 #
-# An EquivocationEvent is sound iff ALL hold:
-#   (a) digest_a != digest_b   (otherwise no contradiction),
+# An EquivocationEvent is sound iff ALL hold (EQV-height-bind form —
+# per-side OPENINGS (index, body_root); digests DERIVED via
+# compose_block_digest / compose_contrib_commitment):
+#   (k) kind <= 1              (known digest family),
+#   (h) index_a == index_b == block_index   (the height bind),
+#   (a) body_root_a != body_root_b (otherwise no contradiction),
 #   (b) sig_a    != sig_b      (otherwise one signature, no double-sign),
-#   (c) verify(key, digest_a, sig_a) AND verify(key, digest_b, sig_b)
+#   (c) verify(key, derive(a), sig_a) AND verify(key, derive(b), sig_b)
 #       both pass under the equivocator's REGISTERED key.
 #
 # ~12 assertions in ten blocks:
@@ -31,7 +35,13 @@
 #
 #   Reject — cryptographic (2):
 #     - tampered sig_b (forged signature) → REJECT
-#     - tampered digest_a (sig no longer binds digest) → REJECT
+#     - tampered body_root_a (sig no longer binds the derived digest) → REJECT
+#
+#   Reject — height/kind binding (EQV-height-bind):
+#     - cross-height honest sigs (index_b at another height) → REJECT
+#     - openings agreeing with each other but not block_index → REJECT
+#     - kind=1 contrib pair ACCEPTs; the same sigs relabeled kind=0 REJECT
+#     - unknown kind (2) → REJECT
 #
 #   Reject — attribution (3):
 #     - genuine culprit proof rejected under an innocent key

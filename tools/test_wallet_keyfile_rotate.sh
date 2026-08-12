@@ -107,7 +107,7 @@ assert_eq "$?" "0" "keyfile-create produces the original-passphrase fixture"
 assert_exists "$ORIG_ENC" "original encrypted keyfile exists"
 
 # Capture the original envelope blob (line 2) for later distinctness comparison.
-ORIG_BLOB=$(sed -n '2p' "$ORIG_ENC" | tr -d '\r')
+ORIG_BLOB=$($PY -c "print(open('$ORIG_ENC','rb').read()[40:].hex())")
 assert_ne "$ORIG_BLOB" "" "original envelope blob is non-empty"
 
 # ── 3. Happy path: rotate to new passphrase via file: source ────────────────
@@ -158,12 +158,12 @@ assert_not_exists "$TMP/should_not_exist.json" "no --out leak on OLD-passphrase 
 # ── 6. Fresh crypto material: blob differs even between rotations ───────────
 echo
 echo "=== 6. Rotated envelope blob differs from original (fresh salt+nonce) ==="
-ROT_BLOB=$(sed -n '2p' "$ROT_OUT" | tr -d '\r')
+ROT_BLOB=$($PY -c "print(open('$ROT_OUT','rb').read()[40:].hex())")
 assert_ne "$ORIG_BLOB" "$ROT_BLOB" "rotated envelope blob differs from original"
 
 # Header is preserved byte-for-byte (same pubkey + magic).
-ORIG_HEADER=$(sed -n '1p' "$ORIG_ENC" | tr -d '\r')
-ROT_HEADER=$(sed -n '1p' "$ROT_OUT" | tr -d '\r')
+ORIG_HEADER=$($PY -c "print(open('$ORIG_ENC','rb').read()[:36].hex())")
+ROT_HEADER=$($PY -c "print(open('$ROT_OUT','rb').read()[:36].hex())")
 assert_eq "$ROT_HEADER" "$ORIG_HEADER" "header preserved across rotation"
 
 # ── 7. In-place rotation (--in == --out) ────────────────────────────────────
@@ -171,7 +171,7 @@ echo
 echo "=== 7. In-place rotation (--in == --out) ==="
 INPLACE_FILE="$TMP/inplace.enc"
 cp "$ORIG_ENC" "$INPLACE_FILE"
-ORIG_INPLACE_BLOB=$(sed -n '2p' "$INPLACE_FILE" | tr -d '\r')
+ORIG_INPLACE_BLOB=$($PY -c "print(open('$INPLACE_FILE','rb').read()[40:].hex())")
 "$WALLET" keyfile-rotate \
     --in "$INPLACE_FILE" \
     --out "$INPLACE_FILE" \
@@ -180,7 +180,7 @@ ORIG_INPLACE_BLOB=$(sed -n '2p' "$INPLACE_FILE" | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "in-place rotation exit 0"
 assert_exists "$INPLACE_FILE" "in-place file still exists after rotation"
-NEW_INPLACE_BLOB=$(sed -n '2p' "$INPLACE_FILE" | tr -d '\r')
+NEW_INPLACE_BLOB=$($PY -c "print(open('$INPLACE_FILE','rb').read()[40:].hex())")
 assert_ne "$ORIG_INPLACE_BLOB" "$NEW_INPLACE_BLOB" "in-place blob was actually replaced"
 # Verify the in-place rotation produced a NEW-passphrase keyfile.
 "$WALLET" keyfile-decrypt \
@@ -192,7 +192,7 @@ INPLACE_SEED=$($PY -c "import json; print(json.load(open('$TMP/inplace_dec.json'
 assert_eq "$INPLACE_SEED" "$PRIV_HEX" "in-place rotated seed matches original"
 
 # Verify no stale tmp file was left behind.
-assert_not_exists "${INPLACE_FILE}_tmp.json" "no tmp file left after successful in-place rotation"
+assert_not_exists "${INPLACE_FILE}_tmp.bin" "no tmp file left after successful in-place rotation"
 
 # ── 8. Wrong OLD passphrase exits 2, --out untouched ────────────────────────
 echo
@@ -200,7 +200,7 @@ echo "=== 8. Wrong OLD passphrase exits 2 ==="
 WRONG_OLD_FILE="$TMP/wrong_old.txt"
 printf '%s\n' "definitely-not-the-old-passphrase" > "$WRONG_OLD_FILE"
 WRONG_ROT_OUT="$TMP/wrong_rot.enc"
-rm -f "$WRONG_ROT_OUT" "${WRONG_ROT_OUT}_tmp.json"
+rm -f "$WRONG_ROT_OUT" "${WRONG_ROT_OUT}_tmp.bin"
 set +e
 ERR=$("$WALLET" keyfile-rotate \
     --in "$ORIG_ENC" \
@@ -213,7 +213,7 @@ ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "2" "exit 2 on wrong OLD passphrase"
 assert_contains "$ERR" "old passphrase wrong or corrupted keyfile" "diagnostic mentions wrong OLD passphrase"
 assert_not_exists "$WRONG_ROT_OUT" "no --out leak on wrong OLD passphrase"
-assert_not_exists "${WRONG_ROT_OUT}_tmp.json" "no tmp file leak on wrong OLD passphrase"
+assert_not_exists "${WRONG_ROT_OUT}_tmp.bin" "no tmp file leak on wrong OLD passphrase"
 
 # ── 9. Same OLD + NEW passphrase rejected without --force-same-passphrase ──
 echo
@@ -248,7 +248,7 @@ rm -f "$FORCE_SAME_OUT"
 RC=$?
 assert_eq "$RC" "0" "--force-same-passphrase exit 0"
 assert_exists "$FORCE_SAME_OUT" "force-same-passphrase --out exists"
-FORCE_BLOB=$(sed -n '2p' "$FORCE_SAME_OUT" | tr -d '\r')
+FORCE_BLOB=$($PY -c "print(open('$FORCE_SAME_OUT','rb').read()[40:].hex())")
 assert_ne "$FORCE_BLOB" "$ORIG_BLOB" "force-same-passphrase still produces a fresh blob (fresh nonce+salt)"
 # Decrypt with the same passphrase to confirm it's a valid keyfile.
 "$WALLET" keyfile-decrypt \
@@ -365,15 +365,17 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on empty --in"
-assert_contains "$ERR" "empty" "empty-file diagnostic"
+assert_contains "$ERR" "DNK1" "empty-file diagnostic names DNK1"
 assert_not_exists "$EMPTY_OUT" "no --out leak on empty --in"
 
 # ── 19. Malformed --in: wrong header magic ────────────────────────────────
 echo
 echo "=== 19. Malformed --in: wrong header magic rejected ==="
 BAD_HEADER_IN="$TMP/bad_header.enc"
-printf 'DETERM-FORK-V99 %s\n' "$EXPECTED_PUB" > "$BAD_HEADER_IN"
-echo "dummyblob" >> "$BAD_HEADER_IN"
+$PY -c "
+d = bytearray(open('$ORIG_ENC','rb').read())
+d[0:4] = b'XNK1'
+open('$BAD_HEADER_IN','wb').write(bytes(d))"
 set +e
 ERR=$("$WALLET" keyfile-rotate \
     --in "$BAD_HEADER_IN" \
@@ -384,7 +386,7 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on wrong header magic"
-assert_contains "$ERR" "DETERM-NODE-V1" "diagnostic names the expected magic"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected magic"
 
 # ── 20. --json output well-formed ──────────────────────────────────────────
 echo

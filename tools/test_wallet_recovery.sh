@@ -78,14 +78,13 @@ echo "=== 6. Recovery with 4 guardians where 1 is corrupted ==="
 # Corrupt one envelope's ciphertext by mutating a byte of guardian 0's
 # entry. The other 4 should still satisfy threshold=3.
 python -c "
-import json
-with open('$T_DIR/setup.json') as f: s = json.load(f)
-# Flip the last hex char of guardian 0's envelope
-parts = s['envelopes'][0].split('.')
-ct = parts[-1]
-parts[-1] = ct[:-1] + ('f' if ct[-1] != 'f' else 'e')
-s['envelopes'][0] = '.'.join(parts)
-with open('$T_DIR/setup_corrupted.json','w') as f: json.dump(s,f,indent=2)
+d = bytearray(open('$T_DIR/setup.json','rb').read())
+assert d[:4] == b'DRS1', 'not DRS1'
+# Guardian 0's record: header(15) + checksum(d[14]) + x(1) + env_len(4) + env.
+off = 15 + d[14]
+env_len = int.from_bytes(d[off+1:off+5], 'little')
+d[off + 5 + env_len - 1] ^= 0x01     # flip the last envelope byte (inside tag)
+open('$T_DIR/setup_corrupted.json','wb').write(bytes(d))
 "
 R_CORRUPT=$($WALLET recover --in $T_DIR/setup_corrupted.json --password "$PW" --guardians 0,1,2,3,4 | tr -d '\r')
 assert_eq "$R_CORRUPT" "$SEED" "tampered guardian 0 still recovers via others"
@@ -95,10 +94,10 @@ echo "=== 7. Pubkey checksum mismatch fails ==="
 # Forge a setup that decrypts successfully but reconstructs a different
 # seed. We mutate the stored pubkey_checksum so the gate fires.
 python -c "
-import json
-with open('$T_DIR/setup.json') as f: s = json.load(f)
-s['pubkey_checksum'] = 'deadbeef' + s['pubkey_checksum'][8:]
-with open('$T_DIR/setup_wrong_checksum.json','w') as f: json.dump(s,f,indent=2)
+d = bytearray(open('$T_DIR/setup.json','rb').read())
+assert d[:4] == b'DRS1' and d[14] == 32, 'not DRS1 with checksum'
+d[15] ^= 0x01                        # flip the first checksum byte
+open('$T_DIR/setup_wrong_checksum.json','wb').write(bytes(d))
 "
 R_CK=$($WALLET recover --in $T_DIR/setup_wrong_checksum.json --password "$PW" 2>&1 | tr -d '\r')
 if echo "$R_CK" | grep -q "reconstruction failed"; then

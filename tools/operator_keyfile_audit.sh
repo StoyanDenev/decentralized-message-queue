@@ -23,9 +23,9 @@
 #              recovery). This audit delegates to it.
 #
 #   PLAINTEXT  A JSON keyfile with the private key in the clear, in any of:
-#                 {address, privkey_hex}        (wallet single-account)
+#                 binary DAK1 (magic 'DAK1')    (wallet single-account, D2)
 #                 {pubkey, priv_seed}           (chain daemon node_key.json)
-#                 {accounts: [{address, privkey_hex}, ...]}  (wallet batch)
+#                 binary DAB1 (magic 'DAB1')    (wallet batch, D2)
 #              `keyfile-info` rejects these (its header doesn't start with
 #              the DETERM-NODE-V1 magic, so it exits 2). When delegation
 #              reports "not a canonical encrypted node keyfile", this audit
@@ -288,6 +288,27 @@ try:
         raw = f.read()
 except OSError as e:
     result["error"] = f"read_failed: {e}"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f)
+    sys.exit(0)
+
+# D2 canonical binary keyfiles: 4-byte magic sniff BEFORE any text decode.
+if raw[:4] == b"DAK1":
+    if len(raw) == 68:
+        result.update(classified=True, shape="single",
+                      address="0x" + raw[4:36].hex(), account_count=1)
+    else:
+        result["error"] = "dak1_malformed"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f)
+    sys.exit(0)
+if raw[:4] == b"DAB1":
+    count = int.from_bytes(raw[4:6], "little") if len(raw) >= 6 else 0
+    if count >= 1 and len(raw) == 6 + 64 * count:
+        result.update(classified=True, shape="batch",
+                      address="0x" + raw[6:38].hex(), account_count=count)
+    else:
+        result["error"] = "dab1_malformed"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f)
     sys.exit(0)

@@ -78,10 +78,11 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 # Generate two fresh keypairs.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['address'])")
-$PY -c "import json; d=json.load(open('$TMP/keys.json')); json.dump(d['accounts'][0], open('$TMP/key_a.json','w'))"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$KPRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 
 # Produce a baseline signed envelope (sign-anon-tx shape).
 "$WALLET" sign-anon-tx --keyfile "$TMP/key_a.json" --to "$ADDR_B" \

@@ -3,7 +3,7 @@
 #
 # `keyfile-decrypt` is the inverse of `keyfile-create`: given a
 # passphrase-encrypted node_key.json file (2-line canonical format with
-# a `DETERM-NODE-V1 <pubkey_hex>` header + a DWE1 envelope blob), it
+# the binary DNK1 container, D2), it
 # writes a plaintext node_key.json matching
 # src/crypto/keys.cpp::save_node_key byte-for-byte.
 #
@@ -23,7 +23,7 @@
 #     keyfile" diagnostic and does NOT create --out.
 #   - Pubkey-AAD tamper: editing the header pubkey breaks AEAD decrypt
 #     (exits 2, no --out leak).
-#   - Malformed --in: empty file, single-line, non-DETERM-NODE-V1 header,
+#   - Malformed --in: empty file, legacy text form, wrong magic,
 #     bad hex pubkey, empty blob line, malformed envelope blob → exit 1.
 #   - All 3 passphrase sources (file: / env: / prompt via stdin redirect).
 #   - --force overwrite semantics.
@@ -152,8 +152,8 @@ RE_ENC_FILE="$TMP/round_trip.enc"
     --out "$RE_ENC_FILE" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "re-encrypt with recovered seed succeeds"
-RE_HEADER=$(head -n 1 "$RE_ENC_FILE" | tr -d '\r')
-assert_contains "$RE_HEADER" "$EXPECTED_PUB" "re-encrypted header carries same pubkey"
+RE_HEADER=$($PY -c "print(open('$RE_ENC_FILE','rb').read()[4:36].hex())")
+assert_eq "$RE_HEADER" "$EXPECTED_PUB" "re-encrypted header carries same pubkey"
 
 # ── 6. Wrong passphrase exits 2, no --out file ────────────────────────────────
 echo
@@ -178,18 +178,13 @@ assert_not_exists "$WRONG_OUT" "--out not created on wrong-passphrase failure"
 echo
 echo "=== 7. Pubkey-AAD tamper: edited header pubkey breaks AEAD ==="
 TAMPER_FILE="$TMP/tamper.enc"
-# Replace the header pubkey hex with all-a's (still 64 hex chars,
-# so structural checks pass and AAD mismatch happens at the AEAD layer).
+# Replace the RAW 32-byte header pubkey (bytes 4..35 of the DNK1 container)
+# with all-0xaa — still structurally valid, so the decode passes and the
+# AAD mismatch surfaces at the AEAD layer.
 $PY - <<PY_EOF
-import sys
-with open("$ENC_FILE") as f:
-    lines = f.read().split("\n")
-# Line 0 is "DETERM-NODE-V1 <64-hex>"; replace with a syntactically-valid
-# but different pubkey so we hit the AAD layer, not header parsing.
-header_parts = lines[0].split(" ", 1)
-lines[0] = header_parts[0] + " " + "a"*64
-with open("$TAMPER_FILE", "w") as f:
-    f.write("\n".join(lines))
+d = bytearray(open("$ENC_FILE", "rb").read())
+d[4:36] = bytes([0xaa]) * 32
+open("$TAMPER_FILE", "wb").write(bytes(d))
 PY_EOF
 TAMPER_OUT="$TMP/tamper_out.json"
 rm -f "$TAMPER_OUT"
@@ -221,14 +216,14 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on empty --in"
-assert_contains "$ERR" "empty" "diagnostic mentions empty"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected DNK1 container"
 assert_not_exists "$EMPTY_OUT" "--out not created on empty --in"
 
-# ── 9. Malformed --in: single-line file (missing envelope-blob line) ──────────
+# ── 9. Malformed --in: legacy 2-line text keyfile rejected (D2) ───────────────
 echo
-echo "=== 9. Malformed --in: single-line (no blob) rejected ==="
-SINGLE_IN="$TMP/single_line.enc"
-printf 'DETERM-NODE-V1 %s\n' "$EXPECTED_PUB" > "$SINGLE_IN"
+echo "=== 9. Malformed --in: legacy 2-line text form rejected ==="
+SINGLE_IN="$TMP/legacy_text.enc"
+printf 'DETERM-NODE-V1 %s\ndeadbeef\n' "$EXPECTED_PUB" > "$SINGLE_IN"
 set +e
 ERR=$("$WALLET" keyfile-decrypt \
     --in "$SINGLE_IN" \
@@ -237,15 +232,17 @@ ERR=$("$WALLET" keyfile-decrypt \
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on single-line --in"
-assert_contains "$ERR" "missing the envelope-blob line" "diagnostic identifies the missing line"
+assert_eq "$RC" "1" "exit 1 on legacy 2-line text keyfile"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected DNK1 container"
 
-# ── 10. Malformed --in: wrong header magic ────────────────────────────────────
+# ── 10. Malformed --in: wrong magic rejected ──────────────────────────────────
 echo
-echo "=== 10. Malformed --in: wrong header magic rejected ==="
+echo "=== 10. Malformed --in: wrong magic rejected ==="
 BAD_HEADER_IN="$TMP/bad_header.enc"
-printf 'DETERM-FORK-V99 %s\n' "$EXPECTED_PUB" > "$BAD_HEADER_IN"
-echo "dummyblob" >> "$BAD_HEADER_IN"
+$PY -c "
+d = bytearray(open('$ENC_FILE','rb').read())
+d[0:4] = b'XNK1'
+open('$BAD_HEADER_IN','wb').write(bytes(d))"
 set +e
 ERR=$("$WALLET" keyfile-decrypt \
     --in "$BAD_HEADER_IN" \
@@ -254,15 +251,14 @@ ERR=$("$WALLET" keyfile-decrypt \
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on wrong header magic"
-assert_contains "$ERR" "DETERM-NODE-V1" "diagnostic names the expected magic"
+assert_eq "$RC" "1" "exit 1 on wrong magic"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected magic"
 
-# ── 11. Malformed --in: header pubkey wrong length ────────────────────────────
+# ── 11. Malformed --in: header truncated (39 bytes) rejected ──────────────────
 echo
-echo "=== 11. Malformed --in: header pubkey wrong length rejected ==="
+echo "=== 11. Malformed --in: 39-byte header truncation rejected ==="
 SHORT_PUB_IN="$TMP/short_pub.enc"
-printf 'DETERM-NODE-V1 abc123\n' > "$SHORT_PUB_IN"
-echo "dummyblob" >> "$SHORT_PUB_IN"
+head -c 39 "$ENC_FILE" > "$SHORT_PUB_IN"
 set +e
 ERR=$("$WALLET" keyfile-decrypt \
     --in "$SHORT_PUB_IN" \
@@ -270,49 +266,49 @@ ERR=$("$WALLET" keyfile-decrypt \
     --out "$TMP/short_pub_out.json" 2>&1)
 RC=$?
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on header pubkey wrong length"
-assert_contains "$ERR" "64 hex chars" "diagnostic mentions expected length"
+assert_eq "$RC" "1" "exit 1 on truncated DNK1 header"
 
-# ── 12. Malformed --in: header pubkey non-hex ─────────────────────────────────
+# ── 12. Malformed --in: env_len +1 lie rejected ───────────────────────────────
 echo
-echo "=== 12. Malformed --in: header pubkey non-hex rejected ==="
-NONHEX_PUB_IN="$TMP/nonhex_pub.enc"
-NONHEX_PUB=$($PY -c "print('zz' + 'a'*62)")
-printf 'DETERM-NODE-V1 %s\n' "$NONHEX_PUB" > "$NONHEX_PUB_IN"
-echo "dummyblob" >> "$NONHEX_PUB_IN"
+echo "=== 12. Malformed --in: env_len+1 (past EOF) rejected ==="
+LIE_IN="$TMP/envlen_lie.enc"
+$PY -c "
+d = bytearray(open('$ENC_FILE','rb').read())
+n = int.from_bytes(d[36:40], 'little') + 1
+d[36:40] = n.to_bytes(4, 'little')
+open('$LIE_IN','wb').write(bytes(d))"
 set +e
-ERR=$("$WALLET" keyfile-decrypt \
-    --in "$NONHEX_PUB_IN" \
-    --passphrase-from "file:$PASS_FILE" \
-    --out "$TMP/nonhex_pub_out.json" 2>&1)
+"$WALLET" keyfile-decrypt --in "$LIE_IN" \
+    --passphrase-from "file:$PASS_FILE" --out "$TMP/lie_out.json" >/dev/null 2>&1
 RC=$?
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on non-hex header pubkey"
+assert_eq "$RC" "1" "exit 1 on env_len past EOF"
 
-# ── 13. Malformed --in: empty envelope-blob line ──────────────────────────────
+# ── 13. Malformed --in: env_len -1 (trailing byte) rejected ───────────────────
 echo
-echo "=== 13. Malformed --in: empty blob line rejected ==="
-EMPTY_BLOB_IN="$TMP/empty_blob.enc"
-printf 'DETERM-NODE-V1 %s\n\n' "$EXPECTED_PUB" > "$EMPTY_BLOB_IN"
+echo "=== 13. Malformed --in: env_len-1 (trailing byte) rejected ==="
+LIE2_IN="$TMP/envlen_lie2.enc"
+$PY -c "
+d = bytearray(open('$ENC_FILE','rb').read())
+n = int.from_bytes(d[36:40], 'little') - 1
+d[36:40] = n.to_bytes(4, 'little')
+open('$LIE2_IN','wb').write(bytes(d))"
 set +e
-ERR=$("$WALLET" keyfile-decrypt \
-    --in "$EMPTY_BLOB_IN" \
-    --passphrase-from "file:$PASS_FILE" \
-    --out "$TMP/empty_blob_out.json" 2>&1)
+"$WALLET" keyfile-decrypt --in "$LIE2_IN" \
+    --passphrase-from "file:$PASS_FILE" --out "$TMP/lie2_out.json" >/dev/null 2>&1
 RC=$?
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on empty blob line"
-assert_contains "$ERR" "blob line is empty" "diagnostic identifies empty blob line"
+assert_eq "$RC" "1" "exit 1 on env_len short of EOF"
 
-# ── 14. Malformed --in: garbage envelope-blob line ────────────────────────────
+# ── 14. Malformed --in: garbage embedded envelope rejected ────────────────────
 echo
-echo "=== 14. Malformed --in: bad envelope blob rejected ==="
+echo "=== 14. Malformed --in: garbage envelope bytes rejected ==="
 BAD_BLOB_IN="$TMP/bad_blob.enc"
-printf 'DETERM-NODE-V1 %s\n' "$EXPECTED_PUB" > "$BAD_BLOB_IN"
-printf 'this.is.not.a.valid.envelope.blob.at.all\n' >> "$BAD_BLOB_IN"
+$PY -c "
+d = bytearray(open('$ENC_FILE','rb').read())
+for i in range(40, len(d)):
+    d[i] = 0x5a          # overwrite the whole envelope region (env_len intact)
+open('$BAD_BLOB_IN','wb').write(bytes(d))"
 set +e
 ERR=$("$WALLET" keyfile-decrypt \
     --in "$BAD_BLOB_IN" \
@@ -321,8 +317,7 @@ ERR=$("$WALLET" keyfile-decrypt \
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 on malformed envelope blob"
-assert_contains "$ERR" "malformed" "diagnostic mentions malformed"
+assert_eq "$RC" "1" "exit 1 on garbage embedded envelope"
 
 # ── 15. --passphrase-from env: source ─────────────────────────────────────────
 echo
@@ -438,7 +433,7 @@ required = {"pubkey","out","format","from"}
 missing = required - set(d.keys())
 assert not missing, f"missing fields: {missing}"
 assert d["format"] == "node_key.json", f"bad format: {d['format']!r}"
-assert d["from"]   == "DETERM-NODE-V1", f"bad from: {d['from']!r}"
+assert d["from"]   == "DNK1", f"bad from: {d['from']!r}"
 assert d["pubkey"] == "$EXPECTED_PUB", "pubkey mismatch in --json summary"
 PY_EOF
 if [ $? = 0 ]; then

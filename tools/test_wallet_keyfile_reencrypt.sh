@@ -102,8 +102,10 @@ ORIG_ENC="$TMP/node_key.enc"
     --out "$ORIG_ENC" >/dev/null 2>&1
 assert_eq "$?" "0" "keyfile-create produces the P1 fixture"
 assert_exists "$ORIG_ENC" "original encrypted keyfile exists"
-ORIG_BLOB=$(sed -n '2p' "$ORIG_ENC" | tr -d '\r')
-ORIG_HEADER=$(sed -n '1p' "$ORIG_ENC" | tr -d '\r')
+# Binary DNK1 container: header = bytes 0..39 (magic+pubkey+env_len);
+# blob = the embedded envelope bytes, as hex.
+ORIG_BLOB=$($PY -c "print(open('$ORIG_ENC','rb').read()[40:].hex())")
+ORIG_HEADER=$($PY -c "print(open('$ORIG_ENC','rb').read()[:36].hex())")
 assert_ne "$ORIG_BLOB" "" "original envelope blob is non-empty"
 
 # ── ASSERTION 1: reencrypt P1→P2; keyfile-info OK; decrypt P2 same address ──
@@ -187,8 +189,8 @@ assert_eq "$?" "0" "first fresh-salt reencrypt exit 0"
     --in "$ORIG_ENC" --out "$OUT_B" \
     --old-passphrase-env KFRE_OLD --new-passphrase-env KFRE_NEW >/dev/null 2>&1
 assert_eq "$?" "0" "second fresh-salt reencrypt exit 0"
-BLOB_A=$(sed -n '2p' "$OUT_A" | tr -d '\r')
-BLOB_B=$(sed -n '2p' "$OUT_B" | tr -d '\r')
+BLOB_A=$($PY -c "print(open('$OUT_A','rb').read()[40:].hex())")
+BLOB_B=$($PY -c "print(open('$OUT_B','rb').read()[40:].hex())")
 assert_ne "$BLOB_A" "$BLOB_B" "two reencrypt outputs differ byte-wise (fresh salt+nonce)"
 assert_ne "$BLOB_A" "$ORIG_BLOB" "reencrypt output differs from the original blob too"
 # Both must still decrypt under P2 to the SAME seed (distinct envelope, same key).
@@ -216,7 +218,7 @@ J_ADDR=$($PY -c "import json,sys; print(json.loads(sys.stdin.read())['anon_addre
 assert_eq "$J_PUB" "$EXPECTED_PUB" "--json ed_pub_hex == original pubkey"
 assert_eq "$J_ADDR" "0x$EXPECTED_PUB" "--json anon_address == original address"
 # Header preserved byte-for-byte across the rotation.
-OUT1_HEADER=$(sed -n '1p' "$OUT1" | tr -d '\r')
+OUT1_HEADER=$($PY -c "print(open('$OUT1','rb').read()[:36].hex())")
 assert_eq "$OUT1_HEADER" "$ORIG_HEADER" "header (pubkey) preserved byte-for-byte across reencrypt"
 
 # ── ASSERTION 6: --out overwrite guard (refuse w/o --force; allow w/ --force)─
@@ -234,13 +236,13 @@ assert_eq "$RC" "1" "exit 1 when --out exists without --force"
 assert_contains "$ERR" "already exists" "diagnostic mentions already exists"
 assert_contains "$ERR" "--force" "diagnostic mentions --force"
 # Capture the pre-overwrite blob so we can prove --force actually replaced it.
-PRE_FORCE_BLOB=$(sed -n '2p' "$OUT1" | tr -d '\r')
+PRE_FORCE_BLOB=$($PY -c "print(open('$OUT1','rb').read()[40:].hex())")
 "$WALLET" keyfile-reencrypt \
     --in "$ORIG_ENC" --out "$OUT1" \
     --old-passphrase-env KFRE_OLD --new-passphrase-env KFRE_NEW \
     --force >/dev/null 2>&1
 assert_eq "$?" "0" "--force on existing --out exits 0"
-POST_FORCE_BLOB=$(sed -n '2p' "$OUT1" | tr -d '\r')
+POST_FORCE_BLOB=$($PY -c "print(open('$OUT1','rb').read()[40:].hex())")
 assert_ne "$PRE_FORCE_BLOB" "$POST_FORCE_BLOB" "--force actually overwrote the file (fresh blob)"
 
 # ── ASSERTION 7: missing / empty NEW passphrase env → reject ────────────────
@@ -317,8 +319,10 @@ assert_contains "$ERR" "cannot open --in" "diagnostic mentions cannot open --in"
 echo
 echo "=== 10. Malformed --in: wrong header magic rejected ==="
 BAD_HEADER_IN="$TMP/bad_header.enc"
-printf 'DETERM-FORK-V99 %s\n' "$EXPECTED_PUB" > "$BAD_HEADER_IN"
-echo "dummyblob" >> "$BAD_HEADER_IN"
+$PY -c "
+d = bytearray(open('$ORIG_ENC','rb').read())
+d[0:4] = b'XNK1'
+open('$BAD_HEADER_IN','wb').write(bytes(d))"
 BAD_OUT="$TMP/bad_header_out.enc"
 rm -f "$BAD_OUT"
 set +e
@@ -329,7 +333,7 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on wrong header magic"
-assert_contains "$ERR" "DETERM-NODE-V1" "diagnostic names the expected magic"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected magic"
 assert_not_exists "$BAD_OUT" "no --out written on malformed --in"
 
 # ── 11. Malformed --in: empty file ──────────────────────────────────────────
@@ -345,7 +349,7 @@ RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on empty --in"
-assert_contains "$ERR" "empty" "empty-file diagnostic"
+assert_contains "$ERR" "DNK1" "empty-file diagnostic names DNK1"
 
 # ── 12. Unknown argument rejected ───────────────────────────────────────────
 echo

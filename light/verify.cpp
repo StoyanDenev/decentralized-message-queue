@@ -72,12 +72,18 @@ Hash hash_shard_tip(const determ::chain::ShardTipRecord& r) {
 
 Hash hash_equivocation_event(const determ::chain::EquivocationEvent& e) {
     SHA256Builder b;
-    b.append(std::string("DTM-F2-EQ-v1"));
+    // EQV-height-bind mirror of producer.cpp::hash_equivocation_event:
+    // tag v1 → v2 with the struct change (digest_a/digest_b deleted; kind +
+    // the two (index, body_root, sig) openings bound instead).
+    b.append(std::string("DTM-F2-EQ-v2"));
     b.append(e.equivocator);
     b.append(e.block_index);
-    b.append(e.digest_a);
+    b.append(e.kind);
+    b.append(e.index_a);
+    b.append(e.body_root_a);
     b.append(e.sig_a.data(), e.sig_a.size());
-    b.append(e.digest_b);
+    b.append(e.index_b);
+    b.append(e.body_root_b);
     b.append(e.sig_b.data(), e.sig_b.size());
     b.append(static_cast<uint64_t>(e.shard_id));
     b.append(e.beacon_anchor_height);
@@ -109,7 +115,7 @@ Hash compute_view_root(const std::vector<Hash>& items) {
 
 }  // namespace
 
-// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:619-731) — keep in sync.
+// COPY OF producer.cpp::compute_block_digest_body + compose_block_digest — keep in sync.
 //
 // Computes the digest the K-of-K committee signs in Phase 2. The light
 // client must recompute this byte-for-byte to verify each committee
@@ -136,9 +142,14 @@ Hash compute_view_root(const std::vector<Hash>& items) {
 // (transactions / cross_shard_receipts / initial_state / state_root are not in
 // the digest at all.) If the upstream byte-order or field set ever changes,
 // mirror it here.
-Hash light_compute_block_digest(const determ::chain::Block& b) {
+// EQV-height-bind: two-level split mirroring producer.cpp —
+//   light_compute_block_digest_body = legacy preimage minus the leading
+//   index append; light_compose_block_digest = the outer
+//   SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root). The tag string
+//   must stay byte-identical to producer.cpp::compose_block_digest's
+//   (pinned by tools/test_block_digest_xbinary_parity.sh).
+Hash light_compute_block_digest_body(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
-    h.append(b.index);
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
@@ -238,6 +249,19 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         h.append(compute_view_root(tkeys));
     }
     return h.finalize();
+}
+
+// Outer compose — the light mirror of producer.cpp::compose_block_digest.
+Hash light_compose_block_digest(uint64_t index, const Hash& body_root) {
+    determ::crypto::SHA256Builder h;
+    h.append(std::string("DTM-BLKDIG-v2"));
+    h.append(index);
+    h.append(body_root);
+    return h.finalize();
+}
+
+Hash light_compute_block_digest(const determ::chain::Block& b) {
+    return light_compose_block_digest(b.index, light_compute_block_digest_body(b));
 }
 
 nlohmann::json pad_stripped_header(nlohmann::json h) {

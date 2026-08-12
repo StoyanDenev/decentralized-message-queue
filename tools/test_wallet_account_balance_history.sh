@@ -117,11 +117,11 @@ echo "=== 8. Init single-node daemon + create anon accounts ==="
 $DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1 >/dev/null
 $DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
-"$WALLET" account-create-batch --count 3 --out $T/anons.json >/dev/null 2>&1
+"$WALLET" account-create-batch --count 3 --json > $T/anons.json 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$T/anons.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$T/anons.json'))['accounts'][1]['address'])")
 ADDR_C=$($PY -c "import json; print(json.load(open('$T/anons.json'))['accounts'][2]['address'])")
-"$WALLET" account-create-batch --count 1 --out $T/orphan.json >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > $T/orphan.json 2>/dev/null
 ADDR_D=$($PY -c "import json; print(json.load(open('$T/orphan.json'))['accounts'][0]['address'])")
 echo "  ADDR_A = $ADDR_A"
 echo "  ADDR_B = $ADDR_B"
@@ -548,6 +548,11 @@ assert_eq "$RC" "1" "--last 0 returns exit 1"
 echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
+# Tear the cluster down BEFORE the final exit and clear the trap — on macOS
+# the EXIT-trap teardown has been observed to clobber the script's exit
+# status while reaping the daemons.
+trap - EXIT INT
+cleanup || true
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet account-balance-history"
   exit 0

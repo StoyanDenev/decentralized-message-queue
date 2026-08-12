@@ -3,47 +3,34 @@
 #
 # WHAT THIS COVERS (and WHY it is not a duplicate):
 #   `envelope decrypt` has TWO distinct rejection layers with DIFFERENT exit
-#   codes, and only one of them is currently exercised by any test:
+#   codes:
 #
-#     • exit 2  — the blob deserialized fine (structurally valid DWE1) but the
-#                 AEAD tag check failed: wrong password, length-preserving
-#                 ciphertext tamper, or mismatched AAD VALUE.
+#     • exit 2  — the blob deserialized fine (structurally valid container)
+#                 but the AEAD tag check failed: wrong password, ciphertext
+#                 tamper, or mismatched AAD VALUE.
 #     • exit 1  — `envelope::deserialize(blob)` returned nullopt: the blob is
 #                 STRUCTURALLY malformed and never reaches the cipher at all
 #                 (diagnostic: "envelope deserialize failed (malformed blob)").
 #
-#   The existing envelope tests
-#       tools/test_wallet_envelope.sh                (wrong pw / ct-tamper / wrong-AAD-value)
-#       tools/test_wallet_envelope_roundtrip_fuzz.sh (round-trip / metadata / ct-tamper / wrong-pw)
-#   ONLY exercise the exit-2 auth layer. NEITHER ever feeds `envelope decrypt`
-#   a structurally-malformed blob, so the exit-1 deserialize-rejection boundary
-#   — the precise contract in wallet/envelope.cpp::deserialize — is UNTESTED.
-#   (`inspect-envelope` and `backup-verify` DO test malformed blobs, but those
-#   are different commands with different exit-code conventions; grep proof in
-#   the task notes. test_envelope.sh contains 0 `envelope decrypt` invocations.)
+#   The other envelope tests (test_wallet_envelope.sh, _roundtrip_fuzz.sh)
+#   only exercise the exit-2 auth layer; this one pins the exit-1 parse
+#   boundary of the D2 BINARY container's strict-hex CLI view.
 #
-#   This boundary is security-relevant: an attacker-supplied envelope reaches
-#   `envelope decrypt` directly, so its parse-rejection contract (reject BEFORE
-#   touching the cipher, with a distinct code, never leaking plaintext) matters.
-#
-# DESERIALIZE CONTRACT under test (wallet/envelope.cpp::deserialize):
-#   blob = magic.salt.iters.nonce.aad.ct  (exactly 6 dot-separated hex fields)
-#     parts.size()   != 6                 -> nullopt   (wrong field count)
-#     magic                               -> must hex-decode to 4 bytes == DWE1
-#     salt.size()    <  8 bytes           -> nullopt   (salt too short)
-#     iters bytes    != 4                 -> nullopt   (iters not u32)
-#     nonce.size()   != 12 (NONCE_LEN)    -> nullopt   (nonce wrong length)
-#     ct.size()      <  16 (TAG_LEN)      -> nullopt   (ciphertext under GCM tag)
-#     any field non-hex (from_hex throws) -> caught    -> nullopt
+# DESERIALIZE CONTRACT under test (wallet/envelope.cpp):
+#   The CLI blob is plain lowercase hex of the canonical binary container
+#   (wallet/envelope.hpp):
+#     magic(4) | salt_len u8 (8..=64) | salt | params (4B DWE1 / 12B DWE2)
+#     | nonce(12) | aad_len u16 LE (<=256) | aad | ct_len u32 LE (16..=1MiB)
+#     | ct    — decode requires the EXACT total length; trailing bytes reject.
+#   The strict-hex view additionally rejects odd length and any non-hex char
+#   (including '.', so the deleted legacy dot-separated text form fails).
 #   In every nullopt case cmd_envelope_decrypt prints
 #   "envelope deserialize failed (malformed blob)" and returns 1 — NOT 2.
 #
-# This test drives the REAL determ-wallet binary (no cipher re-implementation):
-# it builds one genuine valid envelope via `envelope encrypt`, then surgically
-# mutates each structural field and asserts the binary's own exit code +
-# diagnostic. It also asserts the exit-2 (auth) and exit-0 (happy) control
-# cases to PROVE the two rejection layers are distinct, and that no plaintext
-# leaks on any rejection path.
+# The test builds one genuine valid envelope via `envelope encrypt`, then
+# surgically mutates each structural field at its known hex offset and
+# asserts the binary's own exit code + diagnostic. Controls prove the two
+# rejection layers are distinct and that no plaintext leaks on rejection.
 #
 # Self-contained; cleans up its scratch dir; exit 0 on pass / 1 on fail.
 # Auto-discovered by run_all.sh's tools/test_*.sh glob (no run_all edit).
@@ -75,17 +62,11 @@ assert_contains() {
   else echo "  FAIL: $3"; echo "       missing substring: $2"; echo "       in:                $1"; fail_count=$((fail_count + 1)); fi
 }
 
-# decrypt_rc <blob> [aad]  -> echoes the wallet's OWN exit code on stdout.
-# NOTE: we redirect to /dev/null and capture $? directly (NOT through a
-# `| tr` pipe, which would mask the wallet's exit code behind tr's).
+# decrypt_rc <blob>  -> echoes the wallet's OWN exit code on stdout.
 decrypt_rc() {
-  local blob="$1" aad="${2:-}"
+  local blob="$1"
   set +e
-  if [ -n "$aad" ]; then
-    "$WALLET" envelope decrypt --envelope "$blob" --password "$PW" --aad "$aad" >/dev/null 2>&1
-  else
-    "$WALLET" envelope decrypt --envelope "$blob" --password "$PW" >/dev/null 2>&1
-  fi
+  "$WALLET" envelope decrypt --envelope "$blob" --password "$PW" >/dev/null 2>&1
   local rc=$?
   set -e
   echo "$rc"
@@ -104,18 +85,34 @@ PW="hunter2-correct-passphrase"
 ITERS=1000   # cheap PBKDF2 for test speed; identical code path to production.
 PLAIN="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
-# ── 0. Build one genuine valid envelope, then split into its 6 fields ────────
-echo "=== 0. Build a real valid DWE1 envelope (control fixture) ==="
+# ── 0. Build one genuine valid envelope; pin its field offsets ───────────────
+echo "=== 0. Build a real valid DWE1 binary envelope (control fixture) ==="
 ENV=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password "$PW" --iters "$ITERS" | tr -d '\r')
-assert_contains "$ENV" "^44574531\." "encrypt emits a DWE1-magic envelope blob"
-IFS='.' read -r F_MAGIC F_SALT F_ITERS F_NONCE F_AAD F_CT <<< "$ENV"
-# Field-shape sanity (locks the fixture so later mutations are meaningful).
-assert_eq "$F_MAGIC" "44574531" "magic field is DWE1 little-endian hex"
-assert_eq "${#F_SALT}" "32" "salt field is 16 bytes (32 hex) by default"
-assert_eq "${#F_NONCE}" "24" "nonce field is 12 bytes (24 hex)"
-# ct = body(plaintext bytes) + 16-byte GCM tag.
+assert_contains "$ENV" "^44574531" "encrypt emits a DWE1-magic binary-hex blob"
+if echo "$ENV" | grep -q '\.'; then
+  echo "  FAIL: blob contains a dot (legacy text form resurfaced)"; fail_count=$((fail_count + 1))
+else
+  echo "  PASS: blob is dot-free plain hex"; pass_count=$((pass_count + 1))
+fi
+# Hex-char offsets for a DWE1 blob with the default 16-byte salt, no AAD:
+#   magic 0..7 | salt_len 8..9 | salt 10..41 | iters 42..49 | nonce 50..73
+#   | aad_len 74..77 | ct_len 78..85 | ct 86..
+F_MAGIC="${ENV:0:8}"
+F_SALTLEN="${ENV:8:2}"
+F_SALT="${ENV:10:32}"
+F_ITERS="${ENV:42:8}"
+F_NONCE="${ENV:50:24}"
+F_AADLEN="${ENV:74:4}"
+F_CTLEN="${ENV:78:8}"
+F_CT="${ENV:86}"
 PT_BYTES=$(( ${#PLAIN} / 2 ))
+assert_eq "$F_SALTLEN" "10" "salt_len byte is 16 (0x10) by default"
+assert_eq "$F_AADLEN" "0000" "aad_len is 0 (no AAD)"
 assert_eq "${#F_CT}" "$(( (PT_BYTES + 16) * 2 ))" "ciphertext field is body+16B tag"
+assert_eq "${#ENV}" "$(( 86 + (PT_BYTES + 16) * 2 ))" "blob is the exact container length"
+# Rebuild helper: prefix through nonce is shared by most mutations.
+PRE_AADLEN="${ENV:0:74}"     # magic..nonce
+PRE_CTLEN="${ENV:0:78}"      # magic..aad_len (no aad)
 
 # ── CONTROL A: the genuine blob decrypts (exit 0) ───────────────────────────
 echo
@@ -128,7 +125,6 @@ assert_eq "$DEC" "$PLAIN" "decrypt recovers the original plaintext"
 # ── CONTROL B: structurally valid blob, WRONG passphrase -> exit 2 (auth) ───
 echo
 echo "=== B. CONTROL: valid blob + WRONG passphrase -> exit 2 (auth layer) ==="
-RC=$(decrypt_rc "$ENV" "")  # wrong pw exercised below via a different PW
 set +e
 "$WALLET" envelope decrypt --envelope "$ENV" --password "definitely-wrong" >/dev/null 2>&1
 RC_WRONG=$?
@@ -138,110 +134,78 @@ assert_eq "$RC_WRONG" "2" "wrong passphrase on a VALID blob exits 2 (auth, not p
 assert_contains "$ERR_WRONG" "AEAD tag failure" "wrong-pw diagnostic names the AEAD tag failure"
 
 # ── The malformed-blob (exit-1) battery ─────────────────────────────────────
-# Each case mutates exactly one structural property the deserializer checks.
-# All must hit the exit-1 "malformed blob" path — distinct from exit 2 above.
 echo
-echo "=== 1. Wrong field count: 5 fields (missing aad) -> exit 1 ==="
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.$F_NONCE.$F_CT"   # only 5 dots-fields
-assert_eq "$(decrypt_rc "$BLOB")" "1" "5-field blob exits 1 (parts.size()!=6)"
-assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "5-field diagnostic: malformed blob"
+echo "=== 1. Truncated container (last byte missing) -> exit 1 ==="
+BLOB="${ENV:0:$(( ${#ENV} - 2 ))}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "truncated blob exits 1 (ct shorter than ct_len)"
+assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "truncation diagnostic: malformed blob"
 
 echo
-echo "=== 2. Wrong field count: 7 fields (extra trailing) -> exit 1 ==="
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$F_CT.deadbeef"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "7-field blob exits 1 (parts.size()!=6)"
-assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "7-field diagnostic: malformed blob"
+echo "=== 2. Trailing byte appended -> exit 1 (exact-length contract) ==="
+BLOB="${ENV}00"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "trailing-byte blob exits 1 (off != len)"
+assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "trailing-byte diagnostic: malformed blob"
 
 echo
-echo "=== 3. Wrong magic (4 valid bytes, != DWE1) -> exit 1 ==="
-# 'deadbeef' decodes to 4 bytes but is not the DWE1 magic constant.
-BLOB="deadbeef.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "wrong-magic blob exits 1 (magic!=DWE1)"
+echo "=== 3. Wrong magic (4 valid bytes, != DWE1/DWE2) -> exit 1 ==="
+BLOB="deadbeef${ENV:8}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "wrong-magic blob exits 1 (magic check)"
 assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "wrong-magic diagnostic: malformed blob"
 
 echo
-echo "=== 4. Magic wrong byte-length (not 4 bytes) -> exit 1 ==="
-# 'dead' decodes to 2 bytes; deserialize requires magic_bytes.size()==4.
-BLOB="dead.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "2-byte magic exits 1 (magic_bytes.size()!=4)"
+echo "=== 4. salt_len 7 (below the 8-byte floor) -> exit 1 ==="
+BLOB="${F_MAGIC}07${ENV:10}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "salt_len=7 exits 1 (salt floor)"
 
 echo
-echo "=== 5. Salt too short (< 8 bytes) -> exit 1 ==="
-# 3-byte salt ('aabbcc') is below the 8-byte deserialize floor.
-BLOB="$F_MAGIC.aabbcc.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "3-byte salt exits 1 (salt.size()<8)"
-assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "short-salt diagnostic: malformed blob"
+echo "=== 5. salt_len 65 (above the 64-byte cap) -> exit 1 ==="
+BLOB="${F_MAGIC}41${ENV:10}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "salt_len=65 exits 1 (salt cap)"
 
 echo
-echo "=== 6. Salt exactly 7 bytes (off-by-one below floor) -> exit 1 ==="
-# Boundary: 7 bytes (14 hex) must still be rejected; floor is >=8.
-BLOB="$F_MAGIC.aabbccddeeff00.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"  # 7 bytes
-assert_eq "$(decrypt_rc "$BLOB")" "1" "7-byte salt exits 1 (just below 8-byte floor)"
+echo "=== 6. aad_len 257 (above MAX_AAD_LEN=256) -> exit 1 ==="
+BLOB="${PRE_AADLEN}0101${ENV:78}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "aad_len=257 exits 1 (MAX_AAD_LEN cap)"
 
 echo
-echo "=== 7. iters field not 4 bytes -> exit 1 ==="
-# A single byte for iters fails the iters_bytes.size()==4 check.
-BLOB="$F_MAGIC.$F_SALT.aa.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "1-byte iters exits 1 (iters_bytes.size()!=4)"
-
-echo
-echo "=== 8. Nonce wrong length (11 bytes, != 12) -> exit 1 ==="
-# Drop 2 hex chars from the 24-hex (12-byte) nonce -> 11 bytes.
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.${F_NONCE:0:22}.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "11-byte nonce exits 1 (nonce.size()!=NONCE_LEN)"
-assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "short-nonce diagnostic: malformed blob"
-
-echo
-echo "=== 9. Nonce too long (13 bytes, != 12) -> exit 1 ==="
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.${F_NONCE}ab.$F_AAD.$F_CT"  # 13 bytes
-assert_eq "$(decrypt_rc "$BLOB")" "1" "13-byte nonce exits 1 (nonce.size()!=NONCE_LEN)"
-
-echo
-echo "=== 10. Ciphertext shorter than the 16-byte GCM tag -> exit 1 ==="
-# 2-byte ct cannot even hold the tag; deserialize requires ct.size()>=TAG_LEN.
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.aabb"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "2-byte ciphertext exits 1 (ct.size()<TAG_LEN)"
+echo "=== 7. ct_len 15 with a 15-byte ct (below the 16B GCM tag) -> exit 1 ==="
+BLOB="${PRE_CTLEN}0f000000$(printf 'ab%.0s' $(seq 1 15))"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "15-byte ciphertext exits 1 (ct_len < TAG_LEN)"
 assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "short-ct diagnostic: malformed blob"
 
 echo
-echo "=== 11. Ciphertext exactly 15 bytes (one below the tag) -> exit 1 ==="
-# Boundary just under TAG_LEN=16: 15 bytes (30 hex) must be rejected.
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$(printf 'ab%.0s' $(seq 1 15))"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "15-byte ciphertext exits 1 (one below TAG_LEN)"
+echo "=== 8. ct_len larger than the ct actually present -> exit 1 ==="
+# Claim one more ct byte than the blob carries (length-vs-body).
+CT_TOTAL=$(( PT_BYTES + 16 ))
+CTLEN_LIE=$(printf '%02x000000' $(( CT_TOTAL + 1 )))
+BLOB="${PRE_CTLEN}${CTLEN_LIE}${F_CT}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "ct_len lie exits 1 (ct length-vs-body)"
 
 echo
-echo "=== 12. Non-hex character in the salt field -> exit 1 ==="
-# 'zz' is non-hex; from_hex throws, deserialize catches -> nullopt.
-BLOB="$F_MAGIC.zz${F_SALT:2}.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "non-hex salt exits 1 (from_hex throws -> caught)"
-assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "non-hex-salt diagnostic: malformed blob"
+echo "=== 9. Non-hex character in the blob -> exit 1 ==="
+BLOB="zz${ENV:2}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "non-hex char exits 1 (strict nibble decode)"
+assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "non-hex diagnostic: malformed blob"
 
 echo
-echo "=== 13. Non-hex character in the ciphertext field -> exit 1 ==="
-BLOB="$F_MAGIC.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.zz${F_CT:2}"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "non-hex ciphertext exits 1 (from_hex throws -> caught)"
+echo "=== 10. Odd-length hex (not byte-aligned) -> exit 1 ==="
+BLOB="${ENV:0:$(( ${#ENV} - 1 ))}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "odd-length hex exits 1 (even-length check)"
 
 echo
-echo "=== 14. Odd-length hex in a field (not byte-aligned) -> exit 1 ==="
-# Drop one hex char from the salt so the field is odd-length; from_hex rejects.
-BLOB="$F_MAGIC.${F_SALT:0:31}.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "odd-length salt hex exits 1 (not byte-aligned)"
+echo "=== 11. Legacy dot-separated text form -> exit 1 (deleted format) ==="
+BLOB="${F_MAGIC}.${F_SALT}.${F_ITERS}.${F_NONCE}..${F_CT}"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "legacy dot-hex form exits 1 ('.' is not hex)"
+assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "legacy-form diagnostic: malformed blob"
 
 echo
-echo "=== 15. Pure garbage (no dots at all) -> exit 1 ==="
+echo "=== 12. Pure garbage (not hex at all) -> exit 1 ==="
 BLOB="thisIsNotAnEnvelopeBlobAtAll"
-assert_eq "$(decrypt_rc "$BLOB")" "1" "dotless garbage exits 1 (single field, parts.size()==1)"
+assert_eq "$(decrypt_rc "$BLOB")" "1" "garbage exits 1"
 assert_contains "$(decrypt_err "$BLOB")" "malformed blob" "garbage diagnostic: malformed blob"
 
 echo
-echo "=== 16. All-dots blob (6 empty fields) -> exit 1 ==="
-# Exactly the right field count, but every field is empty -> magic decode fails.
-BLOB="....."
-assert_eq "$(decrypt_rc "$BLOB")" "1" "all-empty 6-field blob exits 1 (empty magic != DWE1)"
-
-echo
-echo "=== 17. Empty --envelope argument -> exit 1 (usage guard) ==="
-# Empty blob trips the up-front blob.empty() usage check (also exit 1).
+echo "=== 13. Empty --envelope argument -> exit 1 (usage guard) ==="
 set +e
 "$WALLET" envelope decrypt --envelope "" --password "$PW" >/dev/null 2>&1
 RC_EMPTY=$?
@@ -250,24 +214,20 @@ set -e
 assert_eq "$RC_EMPTY" "1" "empty --envelope exits 1"
 assert_contains "$ERR_EMPTY" "Usage:" "empty --envelope prints the usage line"
 
-# ── 18. CRITICAL: malformed-blob rejection is DISTINCT from auth (exit 1 != 2)
+# ── 14. CRITICAL: malformed-blob rejection is DISTINCT from auth (exit 1 != 2)
 echo
-echo "=== 18. Boundary: parse-reject (exit 1) is distinct from auth-reject (2) ==="
-# The wrong-magic blob is well-formed hex but not a DWE1 envelope: it must be
-# rejected at PARSE (exit 1), never reaching the cipher where it could only
-# ever produce exit 2. This is the whole point of the contract.
-WRONG_MAGIC_BLOB="deadbeef.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$F_CT"
+echo "=== 14. Boundary: parse-reject (exit 1) is distinct from auth-reject (2) ==="
+WRONG_MAGIC_BLOB="deadbeef${ENV:8}"
 RC_PARSE=$(decrypt_rc "$WRONG_MAGIC_BLOB")
 assert_eq "$RC_PARSE" "1" "wrong-magic parse-reject is exit 1, NOT the auth-layer exit 2"
-# And prove the diagnostics differ between the two layers.
 PARSE_MSG=$(decrypt_err "$WRONG_MAGIC_BLOB")
 assert_contains "$PARSE_MSG" "deserialize failed" "parse layer says 'deserialize failed'"
 # (auth layer said 'AEAD tag failure' back in control B — different message.)
 
-# ── 19. No plaintext leak on any rejection path ─────────────────────────────
+# ── 15. No plaintext leak on any rejection path ─────────────────────────────
 echo
-echo "=== 19. No plaintext leak: malformed-blob stdout never contains the secret ==="
-LEAK_OUT=$("$WALLET" envelope decrypt --envelope "deadbeef.$F_SALT.$F_ITERS.$F_NONCE.$F_AAD.$F_CT" --password "$PW" 2>&1 | tr -d '\r')
+echo "=== 15. No plaintext leak: malformed-blob output never contains the secret ==="
+LEAK_OUT=$("$WALLET" envelope decrypt --envelope "$WRONG_MAGIC_BLOB" --password "$PW" 2>&1 | tr -d '\r')
 if echo "$LEAK_OUT" | grep -q -- "$PLAIN"; then
   echo "  FAIL: malformed-blob output leaked the plaintext"; fail_count=$((fail_count + 1))
 else

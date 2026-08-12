@@ -91,35 +91,32 @@ assert_eq() {
 }
 
 # ── Mint a fresh anon keypair via determ-wallet ─────────────────────────
-# account-create-batch emits {"accounts":[{"address":"0x<64hex>",
-# "privkey_hex":"<64hex>"},...]}. The light keyfile loader
-# (light/keyfile.cpp:84) accepts exactly the {address, privkey_hex} shape,
-# so we hand it one account object verbatim. The wallet tx-sign-verify
-# --pubkey is the address with the 0x stripped (anon address == 0x + the
-# Ed25519 pubkey, per light/keyfile.cpp:132).
-"$DETERM_WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+# account-create-batch --json emits {"accounts":[{"address":"0x<64hex>",
+# "privkey_hex":"<64hex>"},...]} on stdout. The keyfile BOTH binaries load
+# is the canonical binary DAK1 container (D2), minted via account-import
+# --out. The wallet tx-sign-verify --pubkey is the address with the 0x
+# stripped (anon address == 0x + the Ed25519 pubkey).
+"$DETERM_WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 if [ ! -s "$TMP/keys.json" ]; then
     echo "  SKIP: account-create-batch produced no keys (wallet env issue)"
     exit 0
 fi
 
-# Use 'wb' so the byte-exact keyfile + addr files are LF-clean on Windows
-# (Python text mode would translate LF->CRLF and corrupt nothing here, but
-# we standardize on 'wb' for every file the native binaries read).
 $PY - "$TMP/keys.json" "$TMP" <<'PY_EOF'
 import json, sys
 keys_path, tmp = sys.argv[1], sys.argv[2]
 d = json.load(open(keys_path))
 a = d["accounts"][0]
 b = d["accounts"][1]
-# One account object verbatim = a valid light keyfile.
-with open(tmp + "/key_a.json", "wb") as f:
-    f.write(json.dumps(a).encode("utf-8"))
+with open(tmp + "/priv_a.txt", "wb") as f:
+    f.write(a["privkey_hex"].encode("utf-8"))
 with open(tmp + "/addr_a.txt", "wb") as f:
     f.write(a["address"].encode("utf-8"))
 with open(tmp + "/addr_b.txt", "wb") as f:
     f.write(b["address"].encode("utf-8"))
 PY_EOF
+"$DETERM_WALLET" account-import --priv "$(cat "$TMP/priv_a.txt")" --out "$TMP/key_a.json" >/dev/null 2>&1
+rm -f "$TMP/priv_a.txt"
 
 ADDR_A=$(cat "$TMP/addr_a.txt")
 ADDR_B=$(cat "$TMP/addr_b.txt")

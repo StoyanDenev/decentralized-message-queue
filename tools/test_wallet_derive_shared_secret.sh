@@ -84,33 +84,23 @@ fi
 # ── 2. Setup: generate two distinct wallet accounts ───────────────────────────
 echo
 echo "=== 2. Setup: generate two distinct keyfiles via account-create-batch ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/b1.json" >/dev/null 2>&1
+# The batch --json stdout VIEW carries {address, privkey_hex}; the at-rest
+# keyfile handed to --priv-keyfile must be the binary DAK1 container (D2),
+# minted deterministically via account-import --out.
+"$WALLET" account-create-batch --count 1 --json > "$TMP/b1.json" 2>/dev/null
 RC1=$?
-"$WALLET" account-create-batch --count 1 --out "$TMP/b2.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/b2.json" 2>/dev/null
 RC2=$?
 assert_eq "$RC1" "0" "account-create-batch (k1) succeeded"
 assert_eq "$RC2" "0" "account-create-batch (k2) succeeded"
 
-# Repackage each batch's single account as the single-account JSON shape
-# {"address":"0x..","privkey_hex":".."} — same shape account-export
-# consumes, which is what derive-shared-secret expects for --priv-keyfile.
-$PY -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-" "$TMP/b1.json" "$TMP/k1.json"
-$PY -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-" "$TMP/b2.json" "$TMP/k2.json"
+PRIV1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/b1.json")
+PRIV2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/b2.json")
+"$WALLET" account-import --priv "$PRIV1" --out "$TMP/k1.json" >/dev/null
+"$WALLET" account-import --priv "$PRIV2" --out "$TMP/k2.json" >/dev/null
 
-ADDR1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/k1.json")
-ADDR2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/k2.json")
+ADDR1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/b1.json")
+ADDR2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/b2.json")
 PUB1=${ADDR1#0x}
 PUB2=${ADDR2#0x}
 echo "  setup: ADDR1=$ADDR1"
@@ -241,20 +231,17 @@ ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "1" "exit 1 on non-existent --priv-keyfile"
 assert_contains "$ERR" "open" "diagnostic mentions cannot open"
 
-# ── 13. --priv-keyfile JSON missing 'privkey_hex' field fails ─────────────────
+# ── 13. --priv-keyfile that is not a valid DAK1 container fails ──────────────
 echo
-echo "=== 13. --priv-keyfile JSON missing 'privkey_hex' field fails ==="
-$PY -c "
-import json, sys
-json.dump({'address': '$ADDR1'}, open(sys.argv[1], 'w'))
-" "$TMP/no_priv.json"
+echo "=== 13. --priv-keyfile malformed (truncated DAK1) fails ==="
+head -c 40 "$TMP/k1.json" > "$TMP/no_priv.json"
 set +e
 ERR=$("$WALLET" derive-shared-secret --priv-keyfile "$TMP/no_priv.json" --pubkey "$PUB2" 2>&1)
 RC=$?
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "1" "exit 1 when 'privkey_hex' missing"
-assert_contains "$ERR" "privkey_hex" "diagnostic mentions privkey_hex"
+assert_eq "$RC" "1" "exit 1 on truncated DAK1 keyfile"
+assert_contains "$ERR" "DAK1" "diagnostic mentions DAK1"
 
 # ── 14. --pubkey wrong length fails ───────────────────────────────────────────
 echo

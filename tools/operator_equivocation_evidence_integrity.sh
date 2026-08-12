@@ -13,15 +13,19 @@
 #
 # This mirrors the OFFLINE-CHECKABLE subset of the node's apply-time
 # admission gate, src/node/validator.cpp::check_equivocation_events
-# (validator.cpp:322-347). That gate enforces, per event:
+# (EQV-height-bind form — the event carries per-side OPENINGS
+# (index, body_root); each signed digest is DERIVED as
+# SHA256(TAG || index u64 BE || body_root)). That gate enforces, per event:
 #
-#     (a) digest_a != digest_b        else "not equivocation"
+#     (k) kind <= 1                   else "unknown kind"
+#     (h) index_a == index_b == block_index   else "height mismatch"
+#     (a) body_root_a != body_root_b  else "not equivocation"
 #     (b) sig_a    != sig_b           else "same signature"
 #     (c) equivocator IN registry     else "equivocator not in registry"
-#     (d) ed25519_verify(pub, digest_a, sig_a)   else reject
-#     (e) ed25519_verify(pub, digest_b, sig_b)   else reject
+#     (d) ed25519_verify(pub, derive(index_a, body_root_a), sig_a)  else reject
+#     (e) ed25519_verify(pub, derive(index_b, body_root_b), sig_b)  else reject
 #
-# (a) and (b) are pure structural predicates an operator can re-check
+# (k), (h), (a) and (b) are pure structural predicates an operator can re-check
 # from observable RPC data without any crypto. (c) maps to whether the
 # equivocator's `ed_pub` is still resolvable via the `validators` RPC.
 # (d)/(e) — the actual Ed25519 verifications — require a signature-
@@ -45,8 +49,8 @@
 #   operator_equivocation_digest.sh
 #       Per-OFFENDER COUNT + slashed-amount digest over a window. It
 #       answers "who double-signed and how often" — it never inspects
-#       whether each event's digest_a/sig_a/digest_b/sig_b payload is
-#       structurally valid, and never checks key resolvability.
+#       whether each event's opening/sig payload is structurally valid,
+#       and never checks key resolvability.
 #   operator_slashing_ledger.sh
 #       Cumulative `accumulated_slashed` counter + A1 reconciliation +
 #       per-domain equiv/abort EVENT tallies. Sums penalties; does not
@@ -65,8 +69,9 @@
 #       Different signature set (per-block committee sigs, not the
 #       two-sig equivocation proof).
 #   THIS (operator_equivocation_evidence_integrity.sh)
-#       Per-EVENT structural well-formedness (I1 digest distinctness,
-#       I2 sig distinctness, I3 hex-length validity) + per-equivocator
+#       Per-EVENT structural well-formedness (I1 body-root distinctness,
+#       I2 sig distinctness, I3 hex/kind validity, I4 height binding) +
+#       per-equivocator
 #       verification-key resolvability (R1). The only tool that audits
 #       the EVIDENCE PAYLOAD itself.
 #
@@ -78,17 +83,19 @@
 #                                          receipts / inbound_receipts /
 #                                          initial_state (node.cpp:2652-
 #                                          2655), so equivocation_events
-#                                          (digest_a/sig_a/digest_b/sig_b)
+#                                          (kind + the two (index,
+#                                          body_root, sig) openings)
 #                                          are RETAINED on each header.
 #   * `determ validators --json`           domain -> ed_pub map
 #                                          (node.cpp:2805-2820) for the
 #                                          R1 key-resolvability check.
 #
-# EquivocationEvent JSON field names (block.cpp:120-131, to_json):
-#   equivocator, block_index, digest_a, sig_a, digest_b, sig_b,
-#   shard_id, beacon_anchor_height.
-# Hex lengths the node enforces on parse (block.cpp:141-144):
-#   digest_* = 64 hex chars (32 bytes), sig_* = 128 hex chars (64 bytes).
+# EquivocationEvent JSON field names (block.cpp to_json):
+#   equivocator, block_index, kind, index_a, body_root_a, sig_a,
+#   index_b, body_root_b, sig_b, shard_id, beacon_anchor_height.
+# Hex lengths the node enforces on parse:
+#   body_root_* = 64 hex chars (32 bytes), sig_* = 128 hex chars (64
+#   bytes); kind <= 1.
 #
 # Read-only; never sends a tx, never writes chain/snapshot files.
 #
@@ -99,8 +106,9 @@
 #
 # Output:
 #   Human (default): one row per event — containing block, height of the
-#     double-sign, equivocator, digest_a/digest_b prefixes, the per-event
-#     structural verdict (OK / I1 / I2 / I3) and R1 key-resolvability;
+#     double-sign, equivocator, body_root_a/body_root_b prefixes, the
+#     per-event structural verdict (OK / I1 / I2 / I3 / I4) and R1
+#     key-resolvability;
 #     then a footer with totals + an [OK] / [ANOMALY] verdict line.
 #   --json: {window, counts, events:[...], summary, anomalies:[...],
 #            rpc_port}
@@ -123,9 +131,12 @@ Structural well-formedness audit of FA6 equivocation EVIDENCE payloads in
 finalized blocks. Re-checks the offline-verifiable subset of the node's
 apply-time gate src/node/validator.cpp::check_equivocation_events:
 
-  I1 digest_a == digest_b   -> not equivocation (degenerate proof)
+  I1 body_root_a == body_root_b -> not equivocation (degenerate proof)
   I2 sig_a    == sig_b      -> same signature (degenerate proof)
-  I3 bad hex length         -> digest_* != 64 or sig_* != 128 hex chars
+  I3 bad hex/kind           -> body_root_* != 64 or sig_* != 128 hex
+                               chars, or kind > 1
+  I4 height mismatch        -> index_a/index_b != block_index (the
+                               EQV-height-bind assert)
 
 and the per-equivocator verification-key resolvability:
 
@@ -136,7 +147,7 @@ and the per-equivocator verification-key resolvability:
                                historical event legitimately loses its
                                key once the registry entry is gone)
 
-Only I1/I2/I3 are anomalies (they would mean the node admitted a
+Only I1/I2/I3/I4 are anomalies (they would mean the node admitted a
 malformed proof, or the served chain was tampered). R1 is reported
 for forensic completeness but never flips the exit code.
 
@@ -314,7 +325,7 @@ def is_hex(s, n):
     return isinstance(s, str) and len(s) == n and all(c in HEX for c in s)
 
 events = []
-n_i1 = n_i2 = n_i3 = n_r1 = 0
+n_i1 = n_i2 = n_i3 = n_i4 = n_r1 = 0
 
 for h in headers:
     if not isinstance(h, dict):
@@ -329,29 +340,38 @@ for h in headers:
             continue
         offender = ev.get("equivocator")
         dsign_h  = ev.get("block_index")          # height of the double-sign
-        da = ev.get("digest_a"); sa = ev.get("sig_a")
-        db = ev.get("digest_b"); sb = ev.get("sig_b")
+        kind     = ev.get("kind")
+        ia = ev.get("index_a"); ib = ev.get("index_b")
+        da = ev.get("body_root_a"); sa = ev.get("sig_a")
+        db = ev.get("body_root_b"); sb = ev.get("sig_b")
 
         viol = []
-        # I3: hex-field well-formedness (mirrors from_hex_arr<32>/<64>
-        # length enforcement at block.cpp:141-144). Checked first so the
-        # distinctness predicates below operate on the canonical strings.
+        # I3: hex-field + kind well-formedness (mirrors from_hex_arr<32>/<64>
+        # length enforcement and the kind<=1 parse reject). Checked first so
+        # the distinctness predicates below operate on the canonical strings.
         hex_ok = (is_hex(da, 64) and is_hex(db, 64)
-                  and is_hex(sa, 128) and is_hex(sb, 128))
+                  and is_hex(sa, 128) and is_hex(sb, 128)
+                  and isinstance(kind, int) and 0 <= kind <= 1)
         if not hex_ok:
             viol.append("I3")
             n_i3 += 1
-        # I1: digest_a != digest_b (validator.cpp:327). Compare case-
-        # insensitively — block.cpp to_hex emits lowercase, but a hand-
+        # I1: body_root_a != body_root_b (the "not equivocation" reject).
+        # Compare case-insensitively — to_hex emits lowercase, but a hand-
         # submitted proof could differ in case while encoding the same
         # bytes; the node compares the decoded byte arrays.
         if isinstance(da, str) and isinstance(db, str) and da.lower() == db.lower():
             viol.append("I1")
             n_i1 += 1
-        # I2: sig_a != sig_b (validator.cpp:330).
+        # I2: sig_a != sig_b.
         if isinstance(sa, str) and isinstance(sb, str) and sa.lower() == sb.lower():
             viol.append("I2")
             n_i2 += 1
+        # I4: the EQV-height-bind assert — both signed openings must carry
+        # the event's claimed height (index_a == index_b == block_index).
+        if not (isinstance(ia, int) and isinstance(ib, int)
+                and ia == dsign_h and ib == dsign_h):
+            viol.append("I4")
+            n_i4 += 1
 
         # R1: verification-key resolvability (maps to validator.cpp:334
         # "equivocator not in registry"). NOT an anomaly — a slashed
@@ -368,8 +388,11 @@ for h in headers:
             "double_sign_height":     dsign_h,
             "equivocator":            offender,
             "shard_id":               ev.get("shard_id", 0),
-            "digest_a_prefix":        (da[:16] if isinstance(da, str) else None),
-            "digest_b_prefix":        (db[:16] if isinstance(db, str) else None),
+            "kind":                   kind,
+            "index_a":                ia,
+            "index_b":                ib,
+            "body_root_a_prefix":     (da[:16] if isinstance(da, str) else None),
+            "body_root_b_prefix":     (db[:16] if isinstance(db, str) else None),
             "hex_ok":                 hex_ok,
             "violations":             viol,
             "key_resolvable":         bool(key_present),
@@ -385,12 +408,13 @@ anomalies = []
 if n_i1: anomalies.append("I1")
 if n_i2: anomalies.append("I2")
 if n_i3: anomalies.append("I3")
+if n_i4: anomalies.append("I4")
 
 summary = {
     "n_events":               total,
     "n_violating_events":     violating,
     "n_key_unresolvable":     n_r1,
-    "violation_counts":       {"I1": n_i1, "I2": n_i2, "I3": n_i3},
+    "violation_counts":       {"I1": n_i1, "I2": n_i2, "I3": n_i3, "I4": n_i4},
 }
 
 if json_out:
@@ -425,7 +449,7 @@ if anom_only and not rows:
           % total)
 else:
     print("  %-7s %-9s %-22s %-18s %-18s %-8s %s"
-          % ("blk", "dsHeight", "equivocator", "digest_a", "digest_b",
+          % ("blk", "dsHeight", "equivocator", "body_root_a", "body_root_b",
              "verdict", "key"))
     for e in rows:
         verdict = ",".join(e["violations"]) if e["violations"] else "OK"
@@ -434,22 +458,22 @@ else:
               % (str(e["containing_block_index"]),
                  str(e["double_sign_height"]),
                  (e["equivocator"] or "?")[:22],
-                 (e["digest_a_prefix"] or "?"),
-                 (e["digest_b_prefix"] or "?"),
+                 (e["body_root_a_prefix"] or "?"),
+                 (e["body_root_b_prefix"] or "?"),
                  verdict, key))
 
 print("  ---")
 print("  events: %d   structurally-violating: %d   key-unresolvable (R1): %d"
       % (total, violating, n_r1))
-print("  violation breakdown: I1(digest==)=%d  I2(sig==)=%d  I3(bad-hex)=%d"
-      % (n_i1, n_i2, n_i3))
+print("  violation breakdown: I1(root==)=%d  I2(sig==)=%d  I3(bad-hex/kind)=%d  I4(height)=%d"
+      % (n_i1, n_i2, n_i3, n_i4))
 if n_r1:
     print("  note: R1 key-unresolvable is expected for already-slashed "
           "(deactivated) equivocators; not an anomaly.")
 
 if anomaly:
     print("[ANOMALY] %d event(s) carry malformed equivocation evidence "
-          "(I1/I2/I3) -- admission gate or served-chain integrity suspect"
+          "(I1/I2/I3/I4) -- admission gate or served-chain integrity suspect"
           % violating)
 else:
     print("[OK] all %d event(s) structurally well-formed" % total)

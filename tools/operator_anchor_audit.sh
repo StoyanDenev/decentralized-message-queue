@@ -51,7 +51,7 @@
 #   one when a specific cache/daemon pair needs a verdict.
 #
 # Default --state mirrors light/persist.cpp default_state_path():
-#   $DETERM_LIGHT_STATE if set, else <home>/.determ-light/state.json
+#   $DETERM_LIGHT_STATE if set, else <home>/.determ-light/state.bin
 #   (home = USERPROFILE, else HOMEDRIVE+HOMEPATH, else HOME, else ".")
 #
 # Binary resolution (only resolved when a check needs it):
@@ -108,7 +108,7 @@ lines and an overall PASS/FAIL:
 
 Options:
   --state <path>    Anchor cache to audit (default: $DETERM_LIGHT_STATE
-                    if set, else <home>/.determ-light/state.json — the
+                    if set, else <home>/.determ-light/state.bin — the
                     same default the determ-light binary uses)
   --genesis <file>  Enable the genesis re-pin check (requires the
                     determ-light binary; $DETERM_LIGHT_BIN overrides
@@ -148,7 +148,7 @@ abspath() {
 }
 
 # Mirror light/persist.cpp default_state_path(): $DETERM_LIGHT_STATE wins,
-# else <home>/.determ-light/state.json. The binary's home_dir() prefers
+# else <home>/.determ-light/state.bin. The binary's home_dir() prefers
 # USERPROFILE on Win32 and HOME on POSIX; probing USERPROFILE first here
 # matches both (USERPROFILE is unset on plain POSIX), and keeps the path
 # in a form the NATIVE binary also understands under git-bash.
@@ -167,7 +167,7 @@ default_state_path() {
   else
     home="."
   fi
-  printf '%s/.determ-light/state.json\n' "$home"
+  printf '%s/.determ-light/state.bin\n' "$home"
 }
 
 # ── arg parse (--help first so it never trips validation) ─────────────────────

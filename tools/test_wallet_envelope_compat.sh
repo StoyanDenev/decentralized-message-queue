@@ -1,58 +1,44 @@
 #!/usr/bin/env bash
-# determ-wallet envelope FORMAT-FREEZE regression (backward compatibility).
+# determ-wallet envelope FORMAT-FREEZE regression (D2 binary container).
 #
-# Every other envelope test (tools/test_envelope.sh, tools/
-# test_wallet_envelope.sh, tools/test_wallet_envelope_roundtrip_fuzz.sh)
-# round-trips with the CURRENT binary: encrypt and decrypt both use the
-# code at HEAD, so a coordinated format change — a different KDF, a new
-# AEAD, a reordered wire layout — passes all of them while silently
-# orphaning every envelope already written to disk (encrypted keyfiles,
-# Shamir backup shares, cold-sign archives).
+# Two frozen contracts, both required:
 #
-# This test is the missing guard: it embeds an envelope blob PRODUCED BY
-# A PAST BUILD verbatim and requires every future backend to still
-# decrypt it to the exact pinned payload. The pinned blob is the on-disk
-# FORMAT CONTRACT for the DWE1 wire layout (wallet/envelope.hpp):
+#   A. REJECT-LEGACY: the pre-D2 dot-separated hex TEXT serialization
+#      ("magic.salt.params.nonce.aad.ct") is DELETED, pre-genesis, with no
+#      migration path. Readers must REJECT the legacy form at parse (exit 1,
+#      "deserialize failed") — never misparse it, never reach the cipher.
+#      The two legacy blobs below are the 2026-07-03 pinned fixtures kept
+#      verbatim as HOSTILE inputs.
 #
-#   [magic "DWE1"] [salt_len u8 + salt] [pbkdf2_iters u32 LE]
-#   [nonce 12B] [aad_len u16 LE + aad] [ct_len u32 LE + ct||tag]
-#   key = PBKDF2-HMAC-SHA-256(password, salt, iters, 32)
-#   cipher = AES-256-GCM, 16-byte tag appended to ciphertext
-#   hex serialization: magic.salt.iters.nonce.aad.ct (dot-separated)
+#   B. FORMAT-FREEZE (new form): the canonical binary DWE container
+#      (wallet/envelope.hpp byte layout, serialized on the CLI as plain
+#      lowercase hex, no dots) is the on-disk contract from here on. The
+#      pinned blobs below were produced 2026-08-12 by build-linux/
+#      determ-wallet at the D2 migration commit, exact commands:
 #
-# If this test goes RED, the change under test broke decryption of
-# every envelope in the field. That is a consensus-grade compatibility
-# break for wallet artifacts: do NOT "fix" the test by re-pinning the
-# blob unless a deliberate, versioned format migration (new magic, with
-# a legacy-decrypt path) is being shipped and documented.
+#        PLAIN=44455445524d20656e76656c6f706520666f726d617420667265657a65207631
+#              (= ASCII "DETERM envelope format freeze v1", 32 bytes)
+#        PW="determ-format-freeze-2026"
+#        determ-wallet envelope encrypt --plaintext $PLAIN --password "$PW" \
+#            --iters 10000                    # -> PINNED_BIN_DWE1 (no AAD)
+#        determ-wallet envelope encrypt --plaintext $PLAIN --password "$PW" \
+#            --aad cafebabe --iters 10000     # -> PINNED_BIN_DWE1_AAD
+#        determ-wallet envelope encrypt --plaintext $PLAIN --password "$PW" \
+#                                             # -> PINNED_BIN_DWE2 (Argon2id)
 #
-# Pinned fixture provenance — generated 2026-07-03 with the then-current
-# build/Release/determ-wallet.exe (wallet already on the determ::c99
-# crypto backend, post-1c migration), exact commands:
-#
-#   PLAIN=44455445524d20656e76656c6f706520666f726d617420667265657a65207631
-#         (= ASCII "DETERM envelope format freeze v1", 32 bytes)
-#   PW="determ-format-freeze-2026"
-#   determ-wallet envelope encrypt --plaintext $PLAIN --password "$PW" \
-#       --iters 10000                    # -> PINNED_ENV (no AAD)
-#   determ-wallet envelope encrypt --plaintext $PLAIN --password "$PW" \
-#       --aad cafebabe --iters 10000     # -> PINNED_ENV_AAD
-#
-# (10000 iters keeps the test fast; the iteration count is stored inside
-# the envelope, so decrypt exercises the exact same KDF/AEAD code path
-# as the production 600k-iter default.)
+#      Every future build must still decrypt them byte-for-byte. If a leg
+#      of B goes RED, the change under test broke decryption of every
+#      envelope in the field — do NOT re-pin unless a deliberate, versioned
+#      format migration (new magic + legacy-decrypt path) is being shipped.
 #
 # Coverage:
-#   1. Pinned no-AAD envelope decrypts to the pinned payload, byte-for-byte.
-#   2. Pinned AAD envelope decrypts with the pinned AAD, byte-for-byte.
-#   3. Wrong passphrase against the pinned envelope fails (exit 2, AEAD
-#      tag failure) — freezes the fail-closed contract, and proves leg 1
-#      is not a decrypt-anything stub.
-#   4. Wrong AAD against the pinned AAD envelope fails — freezes the
-#      AAD-binding semantics for old envelopes.
-#   5. Fresh round-trip (encrypt at HEAD -> decrypt at HEAD) sanity leg,
-#      so a RED run distinguishes "format broke old blobs" (1-4 fail,
-#      5 passes) from "envelope code is broken outright" (5 fails too).
+#   1. Legacy dot-hex blob (no AAD)  -> exit 1, parse reject (never exit 2).
+#   2. Legacy dot-hex blob (AAD)     -> exit 1, parse reject.
+#   3. Pinned binary DWE1 decrypts to the pinned payload, byte-for-byte.
+#   4. Pinned binary DWE1+AAD decrypts with the pinned AAD, byte-for-byte.
+#   5. Pinned binary DWE2 (Argon2id) decrypts, byte-for-byte.
+#   6. Wrong passphrase on a pinned binary blob -> exit 2 (AEAD, fail-closed).
+#   7. Fresh round-trip at HEAD; output is dot-free plain hex.
 #
 # Run from repo root: bash tools/test_wallet_envelope_compat.sh
 set -u
@@ -78,65 +64,106 @@ assert_contains() {
   else echo "  FAIL: $3"; echo "       missing substring: $2"; echo "       in:                $1"; fail_count=$((fail_count + 1)); fi
 }
 
-# ── Pinned fixtures (DO NOT REGENERATE — see header) ─────────────────────────
 PINNED_PW="determ-format-freeze-2026"
 PINNED_PLAIN="44455445524d20656e76656c6f706520666f726d617420667265657a65207631"
 PINNED_AAD="cafebabe"
 
-PINNED_ENV=$(cat <<'PINNED_ENV_EOF'
-44574531.416f500429b4b97ea53c39aeb9c3a8d8.10270000.2b6838502f2888e85a77da52..efa9a1b058ba0266c773fe977813733095f9b9ee5cdf355f35a183f28901947123ff04d30a7abc45042f4b8663b808aa
-PINNED_ENV_EOF
-)
+# ── LEGACY fixtures (pre-D2 dot-hex text; now HOSTILE inputs) ────────────────
+LEGACY_ENV="44574531.416f500429b4b97ea53c39aeb9c3a8d8.10270000.2b6838502f2888e85a77da52..efa9a1b058ba0266c773fe977813733095f9b9ee5cdf355f35a183f28901947123ff04d30a7abc45042f4b8663b808aa"
+LEGACY_ENV_AAD="44574531.aead3f328fe5dd5e5655b78acda08a0e.10270000.08d62bd4bdc21c8f3d65a429.cafebabe.5c958719c254eb25633521f705c146e6b965711dc1d8aa480e802cd52dc7050003fb227b84781ad9d665c845dca9bd11"
 
-PINNED_ENV_AAD=$(cat <<'PINNED_ENV_AAD_EOF'
-44574531.aead3f328fe5dd5e5655b78acda08a0e.10270000.08d62bd4bdc21c8f3d65a429.cafebabe.5c958719c254eb25633521f705c146e6b965711dc1d8aa480e802cd52dc7050003fb227b84781ad9d665c845dca9bd11
-PINNED_ENV_AAD_EOF
-)
+# ── PINNED binary-form fixtures (DO NOT REGENERATE — see header) ─────────────
+PINNED_BIN_DWE1="4457453110f33543665c8fad4a40d565096a0620f210270000ed1c1903d869fde234dc64470000300000004cdd8ea79bd736e0d6e9ddb7246d24f2e4f102460ab784bdf12e0c2dc96ea75179d9638818beabd6aa281d98da118b36"
+PINNED_BIN_DWE1_AAD="44574531109edf34567936415aabac72a1f2fcb9311027000041552d049c1359b2e67300ea0400cafebabe30000000da97aa1ede593786d0fc5da0600ceb75475dd89130c8a78ea7b9f0b8dd0e3d6fa4107b5010022c5923fe74c50953f3e5"
+PINNED_BIN_DWE2="44574532103ddb1acfff50ef3cf5a9ed5cbca6f3ec0300000000000100010000005bee1016bd697b25ee8bb2ce0000300000009aaeb6a3bbd52f24eebb011cc35c19d0a4ccdabff52691fb4c7566dfaaa8d83701da97e46ac960d71f78d3ed73d3a850"
 
-# ── 1. Pinned no-AAD envelope decrypts byte-for-byte ─────────────────────────
-echo "=== 1. Pinned envelope (no AAD) decrypts to pinned payload ==="
-DEC=$("$WALLET" envelope decrypt --envelope "$PINNED_ENV" --password "$PINNED_PW" 2>&1)
+# ── 1. Legacy dot-hex blob (no AAD) is rejected at PARSE ─────────────────────
+echo "=== 1. Legacy dot-hex envelope REJECTED at parse (exit 1, not 2) ==="
+set +e
+"$WALLET" envelope decrypt --envelope "$LEGACY_ENV" --password "$PINNED_PW" >/dev/null 2>&1
 RC=$?
+ERR=$("$WALLET" envelope decrypt --envelope "$LEGACY_ENV" --password "$PINNED_PW" 2>&1 | tr -d '\r')
+set -e
+assert_eq "$RC" "1" "legacy no-AAD blob exits 1 (parse reject, never reaches AEAD)"
+assert_contains "$ERR" "deserialize failed" "legacy no-AAD diagnostic: deserialize failed"
+
+# ── 2. Legacy dot-hex blob (AAD) is rejected at PARSE ────────────────────────
+echo
+echo "=== 2. Legacy dot-hex AAD envelope REJECTED at parse (exit 1) ==="
+set +e
+"$WALLET" envelope decrypt --envelope "$LEGACY_ENV_AAD" --password "$PINNED_PW" --aad "$PINNED_AAD" >/dev/null 2>&1
+RC=$?
+set -e
+assert_eq "$RC" "1" "legacy AAD blob exits 1 (parse reject)"
+
+# ── 3. Pinned binary DWE1 decrypts byte-for-byte ─────────────────────────────
+echo
+echo "=== 3. Pinned binary DWE1 envelope decrypts to pinned payload ==="
+set +e
+DEC=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1" --password "$PINNED_PW" 2>&1)
+RC=$?
+set -e
 DEC=$(echo "$DEC" | tr -d '\r')
-assert_eq "$RC" "0" "pinned envelope decrypt exit 0"
-assert_eq "$DEC" "$PINNED_PLAIN" "pinned envelope payload byte-for-byte"
+assert_eq "$RC" "0" "pinned binary DWE1 decrypt exit 0"
+assert_eq "$DEC" "$PINNED_PLAIN" "pinned binary DWE1 payload byte-for-byte"
 
-# ── 2. Pinned AAD envelope decrypts byte-for-byte ────────────────────────────
+# ── 4. Pinned binary DWE1+AAD decrypts byte-for-byte ─────────────────────────
 echo
-echo "=== 2. Pinned envelope (AAD-bound) decrypts to pinned payload ==="
-DEC_AAD=$("$WALLET" envelope decrypt --envelope "$PINNED_ENV_AAD" --password "$PINNED_PW" --aad "$PINNED_AAD" 2>&1)
+echo "=== 4. Pinned binary DWE1 AAD envelope decrypts to pinned payload ==="
+set +e
+DEC_AAD=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1_AAD" --password "$PINNED_PW" --aad "$PINNED_AAD" 2>&1)
 RC=$?
+set -e
 DEC_AAD=$(echo "$DEC_AAD" | tr -d '\r')
-assert_eq "$RC" "0" "pinned AAD envelope decrypt exit 0"
-assert_eq "$DEC_AAD" "$PINNED_PLAIN" "pinned AAD envelope payload byte-for-byte"
+assert_eq "$RC" "0" "pinned binary DWE1 AAD decrypt exit 0"
+assert_eq "$DEC_AAD" "$PINNED_PLAIN" "pinned binary DWE1 AAD payload byte-for-byte"
 
-# ── 3. Wrong passphrase against the pinned envelope fails ────────────────────
+# ── 5. Pinned binary DWE2 (Argon2id) decrypts byte-for-byte ──────────────────
 echo
-echo "=== 3. Wrong passphrase against pinned envelope rejected ==="
-ERR=$("$WALLET" envelope decrypt --envelope "$PINNED_ENV" --password "wrong-passphrase" 2>&1)
+echo "=== 5. Pinned binary DWE2 (Argon2id) envelope decrypts ==="
+set +e
+DEC2=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE2" --password "$PINNED_PW" 2>&1)
 RC=$?
-ERR=$(echo "$ERR" | tr -d '\r')
+set -e
+DEC2=$(echo "$DEC2" | tr -d '\r')
+assert_eq "$RC" "0" "pinned binary DWE2 decrypt exit 0"
+assert_eq "$DEC2" "$PINNED_PLAIN" "pinned binary DWE2 payload byte-for-byte"
+
+# ── 6. Wrong passphrase on a pinned binary blob fails closed ─────────────────
+echo
+echo "=== 6. Wrong passphrase against pinned binary envelope rejected ==="
+set +e
+"$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1" --password "wrong-passphrase" >/dev/null 2>&1
+RC=$?
+ERR=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1" --password "wrong-passphrase" 2>&1 | tr -d '\r')
+set -e
 assert_eq "$RC" "2" "wrong passphrase exit 2"
 assert_contains "$ERR" "AEAD tag failure" "wrong passphrase yields AEAD tag failure"
 
-# ── 4. Wrong AAD against the pinned AAD envelope fails ───────────────────────
+# ── 7. Fresh round-trip at HEAD; output is dot-free plain hex ────────────────
 echo
-echo "=== 4. Wrong AAD against pinned AAD envelope rejected ==="
-ERR_AAD=$("$WALLET" envelope decrypt --envelope "$PINNED_ENV_AAD" --password "$PINNED_PW" --aad "deadbeef" 2>&1)
-RC=$?
-ERR_AAD=$(echo "$ERR_AAD" | tr -d '\r')
-assert_eq "$RC" "2" "wrong AAD exit 2"
-assert_contains "$ERR_AAD" "AEAD tag failure" "wrong AAD yields AEAD tag failure"
-
-# ── 5. Fresh round-trip sanity leg (isolates format break vs code break) ─────
-echo
-echo "=== 5. Fresh encrypt->decrypt round-trip at HEAD ==="
+echo "=== 7. Fresh encrypt->decrypt round-trip at HEAD (dot-free hex) ==="
+set +e
 FRESH_ENV=$("$WALLET" envelope encrypt --plaintext "$PINNED_PLAIN" --password "$PINNED_PW" --iters 10000 2>&1)
 RC=$?
+set -e
 FRESH_ENV=$(echo "$FRESH_ENV" | tr -d '\r')
 assert_eq "$RC" "0" "fresh encrypt exit 0"
+if echo "$FRESH_ENV" | grep -q '\.'; then
+  echo "  FAIL: fresh envelope contains a dot (legacy text form resurfaced)"
+  fail_count=$((fail_count + 1))
+else
+  echo "  PASS: fresh envelope is dot-free plain hex"
+  pass_count=$((pass_count + 1))
+fi
+case "$FRESH_ENV" in
+  *[!0-9a-f]*) echo "  FAIL: fresh envelope is not lowercase hex"; fail_count=$((fail_count + 1)) ;;
+  *)           echo "  PASS: fresh envelope is lowercase hex only"; pass_count=$((pass_count + 1)) ;;
+esac
+set +e
 FRESH_DEC=$("$WALLET" envelope decrypt --envelope "$FRESH_ENV" --password "$PINNED_PW" 2>&1)
 RC=$?
+set -e
 FRESH_DEC=$(echo "$FRESH_DEC" | tr -d '\r')
 assert_eq "$RC" "0" "fresh decrypt exit 0"
 assert_eq "$FRESH_DEC" "$PINNED_PLAIN" "fresh round-trip payload matches"
@@ -150,9 +177,9 @@ if [ "$fail_count" = "0" ]; then
     exit 0
 else
     echo "  FAIL: test_wallet_envelope_compat"
-    echo "  NOTE: if legs 1-4 failed while leg 5 passed, the change under"
-    echo "        test broke decryption of PREVIOUSLY-WRITTEN envelopes"
-    echo "        (keyfiles, backup shares). Do not re-pin the fixture;"
+    echo "  NOTE: if the pinned-binary legs failed while leg 7 passed, the"
+    echo "        change under test broke decryption of PREVIOUSLY-WRITTEN"
+    echo "        binary envelopes (keyfiles, backup shares). Do not re-pin;"
     echo "        ship a versioned migration with a legacy-decrypt path."
     exit 1
 fi

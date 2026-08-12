@@ -89,7 +89,7 @@ echo "$H" | grep -q "account-import"; assert $? "help mentions account-import"
 echo
 echo "=== 1. Derive $NUM_CASES deterministic random accounts (the oracle) ==="
 "$WALLET" account-derive-batch --seed "$MASTER_SEED" --count "$NUM_CASES" \
-    --out "$TMP/batch.json" --json >/dev/null 2>&1
+    --json > "$TMP/batch.json" 2>/dev/null
 RC=$?
 assert_eq "$RC" "0" "account-derive-batch produced $NUM_CASES accounts"
 
@@ -128,9 +128,9 @@ for i in $(seq 0 $((NUM_CASES - 1))); do
     ORIG_ADDR=$(acc_field "$i" address)
     ORIG_PRIV=$(acc_field "$i" privkey_hex)
 
-    # Materialize the single-account input file account-export consumes.
-    $PY -c "import json,sys; json.dump({'address':sys.argv[2],'privkey_hex':sys.argv[3]}, open(sys.argv[1],'w'))" \
-        "$TMP/acc.json" "$ORIG_ADDR" "$ORIG_PRIV"
+    # Materialize the single-account input file account-export consumes —
+    # the canonical binary DAK1 container (D2), via account-import --out.
+    "$WALLET" account-import --priv "$ORIG_PRIV" --out "$TMP/acc.json" --force >/dev/null 2>&1 < /dev/null
 
     # ── raw-hex round-trip: export -> import --priv ──
     EXP_HEX=$("$WALLET" account-export --in "$TMP/acc.json" --format raw-hex 2>/dev/null | tr -d '\r\n')
@@ -241,7 +241,7 @@ echo "$ERR" | grep -qi "mismatch"; assert $? "rejection diagnostic mentions the 
 echo
 echo "=== 5. Determinism: re-deriving the same master seed reproduces the corpus ==="
 "$WALLET" account-derive-batch --seed "$MASTER_SEED" --count "$NUM_CASES" \
-    --out "$TMP/batch2.json" --json >/dev/null 2>&1
+    --json > "$TMP/batch2.json" 2>/dev/null
 SAME=$($PY -c "
 import json,sys
 a=json.load(open(sys.argv[1]))['accounts']

@@ -93,8 +93,10 @@ echo "=== 2. Round-trip across multiple secret sizes ==="
 for size in 16 32 64 1024; do
   # Build a hex secret of exactly $size bytes from /dev/urandom.
   SEC=$(head -c "$size" /dev/urandom | od -An -tx1 -v | tr -d ' \n')
-  "$WALLET" shamir-split --secret "$SEC" --threshold 3 --shares 5 --json \
-    > "$TMP/s_${size}.json"
+  # D2: the at-rest share-set combine reads is the binary DSS1 container,
+  # produced by shamir-split --out.
+  "$WALLET" shamir-split --secret "$SEC" --threshold 3 --shares 5 \
+    --out "$TMP/s_${size}.json" >/dev/null
   REC=$("$WALLET" shamir-combine --shares "$TMP/s_${size}.json")
   assert_eq "$REC" "$SEC" "round-trip ${size}B secret (T=3 N=5, all 5 shares)"
 done
@@ -102,33 +104,46 @@ done
 echo
 echo "=== 3. Every 3-of-5 subset reconstructs original (T=3 N=5) ==="
 SECRET="deadbeefcafebabe0011223344556677"
-"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 --json \
-  > "$TMP/full.json"
-# Enumerate C(5,3) = 10 subsets, write each to its own JSON file via Python.
+"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 \
+  --out "$TMP/full.json" >/dev/null
+# Enumerate C(5,3) = 10 subsets, write each as its own binary DSS1 file.
 $PY - "$TMP/full.json" "$TMP" <<'PY_EOF'
-import json, sys
+import sys
 from itertools import combinations
-full = json.load(open(sys.argv[1]))["shares"]
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"DSS1"
+count = d[4]
+y_len = int.from_bytes(d[5:9], "little")
+recs = []
+off = 9
+for _ in range(count):
+    recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
 outdir = sys.argv[2]
-for idx, subset in enumerate(combinations(range(len(full)), 3)):
-    j = {"shares": [full[i] for i in subset]}
-    with open(f"{outdir}/sub_{idx}.json", "w") as f:
-        json.dump(j, f)
+for idx, subset in enumerate(combinations(range(count), 3)):
+    out = b"DSS1" + bytes([len(subset)]) + y_len.to_bytes(4, "little")
+    for i in subset:
+        out += recs[i]
+    open(f"{outdir}/sub_{idx}.dss1", "wb").write(out)
 print(idx + 1)
 PY_EOF
 for idx in 0 1 2 3 4 5 6 7 8 9; do
-  R=$("$WALLET" shamir-combine --shares "$TMP/sub_${idx}.json")
+  R=$("$WALLET" shamir-combine --shares "$TMP/sub_${idx}.dss1")
   assert_eq "$R" "$SECRET" "3-of-5 subset #$idx reconstructs original"
 done
 
 echo
 echo "=== 4. T-1 insufficiency (2 shares for T=3 → != original) ==="
 $PY - "$TMP/full.json" "$TMP" <<'PY_EOF'
-import json, sys
-full = json.load(open(sys.argv[1]))["shares"]
-j = {"shares": full[:2]}
-with open(f"{sys.argv[2]}/t_minus_1.json", "w") as f:
-    json.dump(j, f)
+import sys
+d = open(sys.argv[1], "rb").read()
+assert d[:4] == b"DSS1"
+y_len = int.from_bytes(d[5:9], "little")
+recs = []
+off = 9
+for _ in range(d[4]):
+    recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
+out = b"DSS1" + bytes([2]) + y_len.to_bytes(4, "little") + recs[0] + recs[1]
+open(f"{sys.argv[2]}/t_minus_1.json", "wb").write(out)
 PY_EOF
 # combine() may succeed with garbage or signal mismatch — both acceptable.
 R_LOW=$("$WALLET" shamir-combine --shares "$TMP/t_minus_1.json" 2>/dev/null || echo "rejected")
@@ -206,15 +221,16 @@ assert_nonzero_exit \
   "rejects x = 0"
 
 echo
-echo "=== 6. JSON output parseable by Python ==="
-$PY - "$TMP/full.json" <<'PY_EOF'
+echo "=== 6. JSON stdout VIEW parseable by Python ==="
+SPLIT_JSON=$("$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 --json)
+echo "$SPLIT_JSON" | $PY -c '
 import json, sys
-d = json.load(open(sys.argv[1]))
+d = json.loads(sys.stdin.read())
 assert "shares" in d and isinstance(d["shares"], list) and len(d["shares"]) == 5
 for s in d["shares"]:
     assert isinstance(s["x"], int)
     assert isinstance(s["y_hex"], str)
-PY_EOF
+' 
 if [ $? = 0 ]; then
   echo "  PASS: shamir-split --json output parseable + well-formed"
   pass_count=$((pass_count + 1))
@@ -238,12 +254,12 @@ assert_eq "$PARSED_HEX" "$SECRET" "--json secret_hex matches original"
 echo
 echo "=== 7. Determinism: distinct splits produce distinct shares, "
 echo "                  but each set reconstructs the original ==="
-"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 --json \
-  > "$TMP/a.json"
-"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 --json \
-  > "$TMP/b.json"
-SET_A=$(cat "$TMP/a.json")
-SET_B=$(cat "$TMP/b.json")
+"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 \
+  --out "$TMP/a.json" >/dev/null
+"$WALLET" shamir-split --secret "$SECRET" --threshold 3 --shares 5 \
+  --out "$TMP/b.json" >/dev/null
+SET_A=$($PY -c "print(open('$TMP/a.json','rb').read().hex())")
+SET_B=$($PY -c "print(open('$TMP/b.json','rb').read().hex())")
 assert_neq "$SET_A" "$SET_B" "two splits of same secret produce DIFFERENT share sets"
 REC_A=$("$WALLET" shamir-combine --shares "$TMP/a.json")
 REC_B=$("$WALLET" shamir-combine --shares "$TMP/b.json")

@@ -5,11 +5,14 @@
 // entropy) instead of OpenSSL.
 // R58 (2026-07-04): fresh envelopes default to a memory-hard Argon2id KDF
 // (the DWE2 wire layout) instead of PBKDF2 (DWE1). Both layouts are read
-// AND written — decrypt/deserialize auto-detect from the 4-byte magic, so
-// every DWE1 envelope already on disk (keyfiles, backup shares) stays
-// readable byte-for-byte. Only the KDF and its parameter slot differ; the
-// AES-256-GCM AEAD (12-byte nonce, 16-byte tag appended to ciphertext) is
-// identical across both.
+// AND written — decrypt/deserialize auto-detect from the 4-byte magic.
+// Only the KDF and its parameter slot differ; the AES-256-GCM AEAD
+// (12-byte nonce, 16-byte tag appended to ciphertext) is identical across
+// both.
+// D2 (2026-08-12): the at-rest serialization is the canonical BINARY
+// container (serialize_bytes/deserialize_bytes; layout in envelope.hpp).
+// The legacy dot-separated hex TEXT form is deleted pre-genesis — readers
+// accept only the binary bytes or their plain lowercase-hex CLI view.
 #include "envelope.hpp"
 #include <determ/crypto/sha2/sha2.h>
 #include <determ/crypto/aes/aes.h>
@@ -180,106 +183,142 @@ std::string to_hex(const std::vector<uint8_t>& v) {
     return o.str();
 }
 
-std::vector<uint8_t> from_hex(const std::string& s) {
-    if (s.size() % 2 != 0)
-        throw std::invalid_argument("from_hex: odd length");
-    std::vector<uint8_t> out;
-    out.reserve(s.size() / 2);
-    for (size_t i = 0; i < s.size(); i += 2) {
-        unsigned int byte;
-        std::istringstream ss(s.substr(i, 2));
-        ss >> std::hex >> byte;
-        if (ss.fail())
-            throw std::invalid_argument("from_hex: non-hex char");
-        out.push_back(static_cast<uint8_t>(byte));
-    }
-    return out;
+// Strict nibble decode: [0-9a-fA-F] only. Returns -1 on anything else, so
+// the hex VIEW rejects dots (the deleted legacy form), whitespace, and
+// every other non-hex character instead of best-effort parsing.
+int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
-std::vector<uint8_t> u32_le(uint32_t v) {
-    std::vector<uint8_t> b(4);
-    for (int i = 0; i < 4; ++i) b[i] = static_cast<uint8_t>((v >> (8*i)) & 0xff);
-    return b;
+void put_u32_le(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
 }
 
-uint32_t rd_u32_le(const std::vector<uint8_t>& b, size_t off) {
+uint32_t rd_u32_le(const uint8_t* p) {
     uint32_t v = 0;
-    for (int i = 0; i < 4; ++i) v |= uint32_t(b[off + i]) << (8*i);
+    for (int i = 0; i < 4; ++i) v |= uint32_t(p[i]) << (8 * i);
     return v;
 }
 
 } // namespace
 
-std::string serialize(const Envelope& env) {
+std::vector<uint8_t> serialize_bytes(const Envelope& env) {
+    // Writers fail closed: refuse to emit a container deserialize_bytes
+    // would reject.
+    if (env.salt.size() < 8 || env.salt.size() > 64)
+        throw std::invalid_argument("envelope: salt_len outside 8..64");
+    if (env.nonce.size() != NONCE_LEN)
+        throw std::invalid_argument("envelope: nonce must be 12 bytes");
+    if (env.aad.size() > MAX_AAD_LEN)
+        throw std::invalid_argument("envelope: aad exceeds MAX_AAD_LEN");
+    if (env.ciphertext.size() < TAG_LEN || env.ciphertext.size() > MAX_CT_LEN)
+        throw std::invalid_argument("envelope: ciphertext outside 16..MAX_CT_LEN");
+
     const bool argon = (env.kdf == Kdf::ARGON2ID);
-    std::vector<uint8_t> params;
+    std::vector<uint8_t> out;
+    out.reserve(4 + 1 + env.salt.size() + (argon ? 12 : 4) + NONCE_LEN
+                + 2 + env.aad.size() + 4 + env.ciphertext.size());
+    put_u32_le(out, argon ? MAGIC2_LE : MAGIC1_LE);
+    out.push_back(static_cast<uint8_t>(env.salt.size()));
+    out.insert(out.end(), env.salt.begin(), env.salt.end());
     if (argon) {
-        params = u32_le(env.argon2_t);
-        auto m = u32_le(env.argon2_m_kib);
-        auto p = u32_le(env.argon2_p);
-        params.insert(params.end(), m.begin(), m.end());
-        params.insert(params.end(), p.begin(), p.end());
+        put_u32_le(out, env.argon2_t);
+        put_u32_le(out, env.argon2_m_kib);
+        put_u32_le(out, env.argon2_p);
     } else {
-        params = u32_le(env.pbkdf2_iters);
+        put_u32_le(out, env.pbkdf2_iters);
     }
-    std::ostringstream o;
-    o << to_hex(u32_le(argon ? MAGIC2_LE : MAGIC1_LE)) << "."
-      << to_hex(env.salt)       << "."
-      << to_hex(params)         << "."
-      << to_hex(env.nonce)      << "."
-      << to_hex(env.aad)        << "."
-      << to_hex(env.ciphertext);
-    return o.str();
+    out.insert(out.end(), env.nonce.begin(), env.nonce.end());
+    out.push_back(static_cast<uint8_t>(env.aad.size() & 0xff));
+    out.push_back(static_cast<uint8_t>((env.aad.size() >> 8) & 0xff));
+    out.insert(out.end(), env.aad.begin(), env.aad.end());
+    put_u32_le(out, static_cast<uint32_t>(env.ciphertext.size()));
+    out.insert(out.end(), env.ciphertext.begin(), env.ciphertext.end());
+    return out;
+}
+
+std::optional<Envelope> deserialize_bytes(const uint8_t* data, size_t len) {
+    if (data == nullptr) return std::nullopt;
+    size_t off = 0;
+    auto have = [&](size_t n) { return off <= len && len - off >= n; };
+
+    if (!have(4)) return std::nullopt;
+    const uint32_t magic = rd_u32_le(data + off); off += 4;
+    if (magic != MAGIC1_LE && magic != MAGIC2_LE) return std::nullopt;
+
+    Envelope env;
+    if (!have(1)) return std::nullopt;
+    const size_t salt_len = data[off]; off += 1;
+    if (salt_len < 8 || salt_len > 64) return std::nullopt;
+    if (!have(salt_len)) return std::nullopt;
+    env.salt.assign(data + off, data + off + salt_len); off += salt_len;
+
+    if (magic == MAGIC2_LE) {
+        if (!have(12)) return std::nullopt;                 // t | m | p
+        env.kdf          = Kdf::ARGON2ID;
+        env.argon2_t     = rd_u32_le(data + off);
+        env.argon2_m_kib = rd_u32_le(data + off + 4);
+        env.argon2_p     = rd_u32_le(data + off + 8);
+        off += 12;
+        if (env.argon2_t == 0 || env.argon2_p == 0
+            || env.argon2_m_kib < 8 * env.argon2_p
+            || env.argon2_t     > MAX_ARGON2_T_COST       // reject unbounded-work
+            || env.argon2_m_kib > MAX_ARGON2_M_COST_KIB   // KDF cost from an
+            || env.argon2_p     > MAX_ARGON2_LANES)       // untrusted envelope
+            return std::nullopt;
+    } else {
+        if (!have(4)) return std::nullopt;                  // iters
+        env.kdf          = Kdf::PBKDF2;
+        env.pbkdf2_iters = rd_u32_le(data + off); off += 4;
+        if (env.pbkdf2_iters == 0 || env.pbkdf2_iters > MAX_PBKDF2_ITERS)
+            return std::nullopt;
+    }
+
+    if (!have(NONCE_LEN)) return std::nullopt;
+    env.nonce.assign(data + off, data + off + NONCE_LEN); off += NONCE_LEN;
+
+    if (!have(2)) return std::nullopt;
+    const size_t aad_len = size_t(data[off]) | (size_t(data[off + 1]) << 8);
+    off += 2;
+    if (aad_len > MAX_AAD_LEN) return std::nullopt;
+    if (!have(aad_len)) return std::nullopt;                // length vs body
+    env.aad.assign(data + off, data + off + aad_len); off += aad_len;
+
+    if (!have(4)) return std::nullopt;
+    const uint32_t ct_len = rd_u32_le(data + off); off += 4;
+    if (ct_len < TAG_LEN || ct_len > MAX_CT_LEN) return std::nullopt;
+    if (!have(ct_len)) return std::nullopt;                 // length vs body
+    env.ciphertext.assign(data + off, data + off + ct_len); off += ct_len;
+
+    if (off != len) return std::nullopt;                    // exact length: trailing bytes reject
+    return env;
+}
+
+std::optional<Envelope> deserialize_bytes(const std::vector<uint8_t>& bytes) {
+    return deserialize_bytes(bytes.data(), bytes.size());
+}
+
+std::string serialize(const Envelope& env) {
+    return to_hex(serialize_bytes(env));
 }
 
 std::optional<Envelope> deserialize(const std::string& blob) {
-    std::vector<std::string> parts;
-    std::string current;
-    for (char c : blob) {
-        if (c == '.') { parts.push_back(std::move(current)); current.clear(); }
-        else current.push_back(c);
+    // Strict hex VIEW of the canonical bytes: even length, hex chars only.
+    // The legacy dot-separated form fails here ('.' is not hex).
+    if (blob.empty() || blob.size() % 2 != 0) return std::nullopt;
+    std::vector<uint8_t> bytes;
+    bytes.reserve(blob.size() / 2);
+    for (size_t i = 0; i < blob.size(); i += 2) {
+        const int hi = hex_nibble(blob[i]);
+        const int lo = hex_nibble(blob[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
     }
-    parts.push_back(std::move(current));
-    if (parts.size() != 6) return std::nullopt;
-    try {
-        auto magic_bytes = from_hex(parts[0]);
-        if (magic_bytes.size() != 4) return std::nullopt;
-        uint32_t magic = rd_u32_le(magic_bytes, 0);
-        if (magic != MAGIC1_LE && magic != MAGIC2_LE) return std::nullopt;
-
-        Envelope env;
-        env.salt = from_hex(parts[1]);
-        if (env.salt.size() < 8) return std::nullopt;
-
-        auto params = from_hex(parts[2]);
-        if (magic == MAGIC2_LE) {
-            if (params.size() != 12) return std::nullopt;   // t | m | p
-            env.kdf          = Kdf::ARGON2ID;
-            env.argon2_t     = rd_u32_le(params, 0);
-            env.argon2_m_kib = rd_u32_le(params, 4);
-            env.argon2_p     = rd_u32_le(params, 8);
-            if (env.argon2_t == 0 || env.argon2_p == 0
-                || env.argon2_m_kib < 8 * env.argon2_p
-                || env.argon2_t     > MAX_ARGON2_T_COST
-                || env.argon2_m_kib > MAX_ARGON2_M_COST_KIB
-                || env.argon2_p     > MAX_ARGON2_LANES) return std::nullopt;
-        } else {
-            if (params.size() != 4) return std::nullopt;     // iters
-            env.kdf          = Kdf::PBKDF2;
-            env.pbkdf2_iters = rd_u32_le(params, 0);
-            if (env.pbkdf2_iters == 0 || env.pbkdf2_iters > MAX_PBKDF2_ITERS)
-                return std::nullopt;
-        }
-
-        env.nonce = from_hex(parts[3]);
-        if (env.nonce.size() != NONCE_LEN) return std::nullopt;
-        env.aad        = from_hex(parts[4]);
-        env.ciphertext = from_hex(parts[5]);
-        if (env.ciphertext.size() < TAG_LEN) return std::nullopt;
-        return env;
-    } catch (std::exception&) {
-        return std::nullopt;
-    }
+    return deserialize_bytes(bytes.data(), bytes.size());
 }
 
 } // namespace determ::wallet::envelope

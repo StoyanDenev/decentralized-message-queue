@@ -129,8 +129,14 @@
 //                        JSON path's absent-means-zero rule.
 //     EQUIVOCATION_EVIDENCE
 //                      [equivocator: u8 len + utf8][block_index: u64 LE]
-//                      [digest_a: 32][sig_a: 64][digest_b: 32][sig_b: 64]
+//                      [kind: u8]
+//                      [index_a: u64 LE][body_root_a: 32][sig_a: 64]
+//                      [index_b: u64 LE][body_root_b: 32][sig_b: 64]
 //                      [shard_id: u32 LE][beacon_anchor_height: u64 LE]
+//                        EQV-height-bind: the two sides carry OPENINGS
+//                        (index, body_root) of the signed two-level digests,
+//                        not the digests; decode fail-closes on kind > 1.
+//                        Layout identical to the Block frame's EQUIV_REC.
 //     ABORT_EVENT      [block_index: u64 LE][prev_hash: 32 B]   (envelope)
 //                      [round: u8][aborting_node: u8 len + utf8]
 //                      [timestamp: i64 as u64 LE][event_hash: 32 B]
@@ -404,8 +410,10 @@ nlohmann::json decode_headers_request_frame(const uint8_t* data, size_t len) {
 // binary field hash that never touched the JSON container —
 // make_abort_claim_message (ABORT_CLAIM, and the claims inside ABORT_EVENT),
 // compute_block_digest (BLOCK_SIG), and for EQUIVOCATION_EVIDENCE the two
-// inline sigs verify against digests carried in the message itself. So no
-// signature verification outcome can change; only the container does.
+// inline sigs verify against digests DERIVED from the carried
+// (index, body_root) openings via compose_block_digest /
+// compose_contrib_commitment (EQV-height-bind). So no signature verification
+// outcome can change; only the container does.
 //
 // Each frame is fail-closed with EXACT consumption. The decoders rebuild the
 // same payload DOM the builders produce, so every gossip handler and every
@@ -485,10 +493,13 @@ void encode_equivocation_frame(std::vector<uint8_t>& out, const Message& m) {
     chain::EquivocationEvent e = chain::EquivocationEvent::from_json(m.payload);
     put_lp_str(out, e.equivocator);
     le_put_u64(out, e.block_index);
-    out.insert(out.end(), e.digest_a.begin(), e.digest_a.end());
-    out.insert(out.end(), e.sig_a.begin(),    e.sig_a.end());
-    out.insert(out.end(), e.digest_b.begin(), e.digest_b.end());
-    out.insert(out.end(), e.sig_b.begin(),    e.sig_b.end());
+    out.push_back(e.kind);
+    le_put_u64(out, e.index_a);
+    out.insert(out.end(), e.body_root_a.begin(), e.body_root_a.end());
+    out.insert(out.end(), e.sig_a.begin(),       e.sig_a.end());
+    le_put_u64(out, e.index_b);
+    out.insert(out.end(), e.body_root_b.begin(), e.body_root_b.end());
+    out.insert(out.end(), e.sig_b.begin(),       e.sig_b.end());
     le_put_u32(out, e.shard_id);
     le_put_u64(out, e.beacon_anchor_height);
 }
@@ -497,13 +508,23 @@ nlohmann::json decode_equivocation_frame(const uint8_t* data, size_t len) {
     chain::EquivocationEvent e;
     size_t off = 0;
     e.equivocator = get_lp_str(data, len, off);
-    if (off + 8 + 32 + 64 + 32 + 64 + 4 + 8 != len)
+    // Fixed portion after the lp_str: 8 + 1 + (8+32+64)*2 + 4 + 8 = 229.
+    if (off + 229 != len)
         throw std::runtime_error("binary_codec: bad EQUIVOCATION_EVIDENCE frame length");
     e.block_index = le_get_u64(data + off); off += 8;
-    std::copy(data + off, data + off + 32, e.digest_a.begin()); off += 32;
-    std::copy(data + off, data + off + 64, e.sig_a.begin());    off += 64;
-    std::copy(data + off, data + off + 32, e.digest_b.begin()); off += 32;
-    std::copy(data + off, data + off + 64, e.sig_b.begin());    off += 64;
+    e.kind        = data[off++];
+    // EQV-height-bind: fail-closed on an unknown digest family — no digest
+    // could be derived for it downstream, so reject at the parse boundary.
+    if (e.kind > 1)
+        throw std::runtime_error(
+            "binary_codec: EQUIVOCATION_EVIDENCE kind > 1 "
+            "(expected 0=BLOCK_DIGEST or 1=CONTRIB_COMMIT)");
+    e.index_a = le_get_u64(data + off); off += 8;
+    std::copy(data + off, data + off + 32, e.body_root_a.begin()); off += 32;
+    std::copy(data + off, data + off + 64, e.sig_a.begin());       off += 64;
+    e.index_b = le_get_u64(data + off); off += 8;
+    std::copy(data + off, data + off + 32, e.body_root_b.begin()); off += 32;
+    std::copy(data + off, data + off + 64, e.sig_b.begin());       off += 64;
     e.shard_id             = le_get_u32(data + off); off += 4;
     e.beacon_anchor_height = le_get_u64(data + off);
     return e.to_json();

@@ -363,12 +363,20 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 }
 
 // Each EquivocationEvent must contain two signatures by the same registered
-// key over two DIFFERENT block_digests at the SAME block_index. If valid,
-// this is unambiguous proof of equivocation: the equivocator's full stake
-// is forfeited at apply time (chain.cpp::apply_transactions). Validator
-// rejects events where the two digests are equal (no equivocation), the
-// equivocator isn't registered, the block_index doesn't match, or either
-// signature fails to verify.
+// key over two DIFFERENT digests of the SAME kind at the SAME height.
+// EQV-height-bind (DECISION-LOG 2026-07-31, Hole 1): both digest families
+// are openable two-level hashes, and the event carries the per-side
+// openings (index, body_root) instead of the opaque digests — so this gate
+// RECOMPUTES each signed digest via the kind's compose function, verifies
+// the signatures against the DERIVED digests, and asserts
+// index_a == index_b == ev.block_index. The height is thereby transitively
+// signature-bound: an honest key only ever signs composed digests carrying
+// its true height under the correct tag, so presenting a signature under a
+// different (index, body_root) opening of the same digest is a SHA-256
+// preimage break. Replaying one honest validator's signatures from two
+// DIFFERENT heights therefore no longer forges a slash. If valid, this is
+// unambiguous proof of equivocation: the equivocator's full stake is
+// forfeited at apply time (chain.cpp::apply_transactions).
 BlockValidator::Result BlockValidator::check_equivocation_events(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     // D3.3b-read: resolve the equivocator's key frozen-first with present-head
@@ -379,9 +387,25 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
     for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
         const auto& ev = b.equivocation_events[i];
 
-        if (ev.digest_a == ev.digest_b)
+        // (1) Known digest family only — an unknown kind has no compose
+        // function, so no digest could be derived; fail closed.
+        if (ev.kind > 1)
             return {false, "equivocation_event[" + std::to_string(i)
-                         + "] digest_a == digest_b (not equivocation)"};
+                         + "] unknown kind (expected 0=BLOCK_DIGEST or 1=CONTRIB_COMMIT)"};
+
+        // (2) THE HEIGHT ASSERT — both signed openings must carry the event's
+        // claimed height. Signature verification below runs against digests
+        // derived from these very indices, so this equality is what makes
+        // block_index signature-bound (the hole-1 closure).
+        if (ev.index_a != ev.block_index || ev.index_b != ev.block_index)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] height mismatch: index_a/index_b must equal block_index (EQV-height-bind)"};
+
+        // (3) Same-height digests differ iff the body roots differ (the outer
+        // compose adds only the shared tag + index).
+        if (ev.body_root_a == ev.body_root_b)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] body_root_a == body_root_b (not equivocation)"};
         if (ev.sig_a == ev.sig_b)
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_a == sig_b (same signature)"};
@@ -391,10 +415,21 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] equivocator not in registry: " + ev.equivocator};
 
-        if (!verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+        // (4) Derive each signed digest from its opening under the kind's
+        // domain tag, then verify the signature against the DERIVED value —
+        // never against anything carried opaquely in the event.
+        auto compose = [&](uint64_t index, const Hash& body_root) {
+            return ev.kind == chain::EquivocationEvent::KIND_BLOCK_DIGEST
+                       ? compose_block_digest(index, body_root)
+                       : compose_contrib_commitment(index, body_root);
+        };
+        Hash digest_a = compose(ev.index_a, ev.body_root_a);
+        Hash digest_b = compose(ev.index_b, ev.body_root_b);
+
+        if (!verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_a does not verify against equivocator's key"};
-        if (!verify(*ek, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+        if (!verify(*ek, digest_b.data(), digest_b.size(), ev.sig_b))
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] sig_b does not verify against equivocator's key"};
     }

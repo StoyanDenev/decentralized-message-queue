@@ -86,7 +86,7 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 # Generate two fresh anon addresses (canonical lowercase, "0x"+64 hex).
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['address'])")
 # Mixed-case spelling of ADDR_A: upper-case the hex tail.
@@ -136,8 +136,9 @@ assert_eq "$RC" "1" "nonexistent @file returns 1"
 echo
 echo "=== 6-8. Single canonical anon ==="
 set +e
-OUT_A=$("$WALLET" address-classify --address "$ADDR_A" --json 2>&1 | tr -d '\r')
+OUT_A_RAW=$("$WALLET" address-classify --address "$ADDR_A" --json 2>&1)
 RC=$?
+OUT_A=$(printf '%s' "$OUT_A_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "single canonical anon returns 0"
 KIND_A=$(echo "$OUT_A" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -152,8 +153,9 @@ assert_eq "$SUB_A" "True" "single canonical anon: submit_tx_ok=true"
 echo
 echo "=== 9-13. Mixed-case anon ==="
 set +e
-OUT_U=$("$WALLET" address-classify --address "$ADDR_A_UPPER" --json 2>&1 | tr -d '\r')
+OUT_U_RAW=$("$WALLET" address-classify --address "$ADDR_A_UPPER" --json 2>&1)
 RC=$?
+OUT_U=$(printf '%s' "$OUT_U_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "mixed-case anon returns 0 (valid)"
 KIND_U=$(echo "$OUT_U" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -168,8 +170,9 @@ assert_eq "$SUB_U" "False" "mixed-case: submit_tx_ok=false (strict-reject signal
 echo
 echo "=== 14-16. Single domain ==="
 set +e
-OUT_D=$("$WALLET" address-classify --address "alice.validator" --json 2>&1 | tr -d '\r')
+OUT_D_RAW=$("$WALLET" address-classify --address "alice.validator" --json 2>&1)
 RC=$?
+OUT_D=$(printf '%s' "$OUT_D_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "single domain returns 0"
 KIND_D=$(echo "$OUT_D" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -182,8 +185,9 @@ assert_eq "$HAS_PUB_D" "no" "single domain: no pubkey_hex field"
 echo
 echo "=== 17. Malformed 0x (too short): invalid, exit 2 ==="
 set +e
-OUT_S=$("$WALLET" address-classify --address "0xabc" --json 2>&1 | tr -d '\r')
+OUT_S_RAW=$("$WALLET" address-classify --address "0xabc" --json 2>&1)
 RC=$?
+OUT_S=$(printf '%s' "$OUT_S_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "too-short 0x returns 2"
 KIND_S=$(echo "$OUT_S" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -193,8 +197,9 @@ echo
 echo "=== 18. Malformed 0x (non-hex tail): invalid, exit 2 ==="
 BAD_HEX="0x${TAIL_A:0:63}z"   # 64-char tail but last char is non-hex
 set +e
-OUT_NH=$("$WALLET" address-classify --address "$BAD_HEX" --json 2>&1 | tr -d '\r')
+OUT_NH_RAW=$("$WALLET" address-classify --address "$BAD_HEX" --json 2>&1)
 RC=$?
+OUT_NH=$(printf '%s' "$OUT_NH_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "non-hex tail returns 2"
 KIND_NH=$(echo "$OUT_NH" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -203,8 +208,9 @@ assert_eq "$KIND_NH" "invalid" "non-hex tail: kind=invalid"
 echo
 echo "=== 19. Empty identifier: invalid, exit 2 ==="
 set +e
-OUT_E=$("$WALLET" address-classify --address "" --json 2>&1 | tr -d '\r')
+OUT_E_RAW=$("$WALLET" address-classify --address "" --json 2>&1)
 RC=$?
+OUT_E=$(printf '%s' "$OUT_E_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "empty identifier returns 2"
 KIND_E=$(echo "$OUT_E" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['results'][0]['kind'])")
@@ -223,9 +229,10 @@ assert_eq "$SHAPE_OK" "yes" "--json has count + results + summary"
 echo
 echo "=== 21-24. Multi-id (auto JSON): order + tallies ==="
 set +e
-OUT_M=$("$WALLET" address-classify \
-  --address "$ADDR_A" --address "bob.v" --address "0xabc" 2>&1 | tr -d '\r')
+OUT_M_RAW=$("$WALLET" address-classify \
+  --address "$ADDR_A" --address "bob.v" --address "0xabc" 2>&1)
 RC=$?
+OUT_M=$(printf '%s' "$OUT_M_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "2" "multi-id with one invalid returns 2"
 CNT_M=$(echo "$OUT_M" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['count'])")
@@ -256,8 +263,9 @@ assert_eq "$ORDER_OK" "yes" "multi-id results preserve input order"
 echo
 echo "=== 25. --addresses comma list parses (count==2) ==="
 set +e
-OUT_C=$("$WALLET" address-classify --addresses "$ADDR_A,carol.v" 2>&1 | tr -d '\r')
+OUT_C_RAW=$("$WALLET" address-classify --addresses "$ADDR_A,carol.v" 2>&1)
 RC=$?
+OUT_C=$(printf '%s' "$OUT_C_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "comma list (both valid) returns 0"
 CNT_C=$(echo "$OUT_C" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['count'])")
@@ -267,8 +275,9 @@ echo
 echo "=== 26. --addresses @file parses, skips blank + # lines (count==2) ==="
 printf '%s\n\n# a comment\n%s\n' "$ADDR_A" "$ADDR_B" > "$TMP/list.txt"
 set +e
-OUT_F=$("$WALLET" address-classify --addresses "@$TMP/list.txt" 2>&1 | tr -d '\r')
+OUT_F_RAW=$("$WALLET" address-classify --addresses "@$TMP/list.txt" 2>&1)
 RC=$?
+OUT_F=$(printf '%s' "$OUT_F_RAW" | tr -d '\r')
 set -e
 assert_eq "$RC" "0" "@file (both anon) returns 0"
 CNT_F=$(echo "$OUT_F" | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['count'])")

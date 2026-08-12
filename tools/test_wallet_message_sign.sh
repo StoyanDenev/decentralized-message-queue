@@ -80,8 +80,9 @@ assert_neq() {
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
-# Generate three fresh keypairs for the test suite.
-"$WALLET" account-create-batch --count 3 --out "$TMP/keys.json" >/dev/null 2>&1
+# Generate three fresh keypairs for the test suite (the --json stdout VIEW;
+# the --out file form is now the binary DAB1 container, D2).
+"$WALLET" account-create-batch --count 3 --json > "$TMP/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/keys.json")
 # Drop the "0x" prefix to get the bare pubkey hex.

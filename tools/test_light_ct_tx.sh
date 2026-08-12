@@ -34,9 +34,9 @@ pass(){ echo "  PASS: $1"; }
 fail(){ echo "  FAIL: $1"; rc=1; }
 
 # Mint an anon keypair + canonical light keyfile.
-"$DETERM_WALLET" account-create-batch --count 1 --out "$TMP/keys.json" >/dev/null 2>&1
-$PY -c "import json,sys; json.dump(json.load(open(sys.argv[1]))['accounts'][0], open(sys.argv[2],'w'))" \
-    "$TMP/keys.json" "$TMP/key.json"
+"$DETERM_WALLET" account-create-batch --count 1 --json > "$TMP/keys.json" 2>/dev/null
+KPRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
+"$DETERM_WALLET" account-import --priv "$KPRIV" --out "$TMP/key.json" >/dev/null 2>&1
 
 SEED=$(printf 'aa%.0s' $(seq 1 32))
 TO="0x$(printf 'b%.0s' $(seq 1 64))"

@@ -47,8 +47,12 @@ fi
 
 echo
 echo "=== 3. Tampered ciphertext rejected ==="
-# Flip the last hex char (inside the GCM tag area)
-TAMPERED=$(echo "$ENV" | sed 's/.$/f/')
+# XOR the last hex nibble (inside the GCM tag area) — a guaranteed change,
+# unlike a fixed replacement char which is a no-op 1 time in 16.
+TAMPERED=$(printf '%s' "$ENV" | python3 -c "
+import sys
+s = sys.stdin.read().strip()
+sys.stdout.write(s[:-1] + '%x' % (int(s[-1], 16) ^ 1))")
 DEC_T=$($WALLET envelope decrypt --envelope "$TAMPERED" --password "$PW" 2>&1 | tr -d '\r')
 if echo "$DEC_T" | grep -q "AEAD tag failure"; then
   echo "  PASS: tampered ciphertext rejected"; pass_count=$((pass_count + 1))

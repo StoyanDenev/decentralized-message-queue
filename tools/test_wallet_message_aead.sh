@@ -88,33 +88,23 @@ fi
 # ── 2. Setup: two distinct keyfiles via account-create-batch ─────────────────
 echo
 echo "=== 2. Setup: generate two distinct keyfiles ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/b1.json" >/dev/null 2>&1
+# The batch --json stdout VIEW carries {address, privkey_hex}; the at-rest
+# keyfile handed to --priv-keyfile must be the binary DAK1 container (D2),
+# minted deterministically via account-import --out.
+"$WALLET" account-create-batch --count 1 --json > "$TMP/b1.json" 2>/dev/null
 RC1=$?
-"$WALLET" account-create-batch --count 1 --out "$TMP/b2.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/b2.json" 2>/dev/null
 RC2=$?
 assert_eq "$RC1" "0" "account-create-batch (k1) succeeded"
 assert_eq "$RC2" "0" "account-create-batch (k2) succeeded"
 
-# Repackage each batch's single account as the single-account JSON shape
-# {"address":"0x..","privkey_hex":".."} — same shape encrypt-message /
-# decrypt-message read for --priv-keyfile.
-$PY -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-" "$TMP/b1.json" "$TMP/k1.json"
-$PY -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-" "$TMP/b2.json" "$TMP/k2.json"
+PRIV1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/b1.json")
+PRIV2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/b2.json")
+"$WALLET" account-import --priv "$PRIV1" --out "$TMP/k1.json" >/dev/null
+"$WALLET" account-import --priv "$PRIV2" --out "$TMP/k2.json" >/dev/null
 
-ADDR1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/k1.json")
-ADDR2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/k2.json")
+ADDR1=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/b1.json")
+ADDR2=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/b2.json")
 PUB1=${ADDR1#0x}
 PUB2=${ADDR2#0x}
 echo "  setup: ADDR1=$ADDR1"
@@ -236,15 +226,10 @@ echo
 echo "=== 10. Wrong peer pubkey fails with aead_tag_verify_failed ==="
 # Generate a third unrelated account and use ITS pubkey as the alleged
 # peer. The HKDF key will differ ⇒ tag verify fails.
-"$WALLET" account-create-batch --count 1 --out "$TMP/b3.json" >/dev/null 2>&1
-$PY -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-" "$TMP/b3.json" "$TMP/k3.json"
-ADDR3=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['address'])" "$TMP/k3.json")
+"$WALLET" account-create-batch --count 1 --json > "$TMP/b3.json" 2>/dev/null
+PRIV3=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/b3.json")
+"$WALLET" account-import --priv "$PRIV3" --out "$TMP/k3.json" >/dev/null
+ADDR3=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/b3.json")
 PUB3=${ADDR3#0x}
 
 set +e

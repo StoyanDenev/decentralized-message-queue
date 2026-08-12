@@ -155,28 +155,12 @@ fail_closed "(9) schema_version 0 (unsupported)"
 printf '' > "$SP"
 fail_closed "(10) empty file (zero bytes)"
 
-# (11) leading UTF-8 BOM (EF BB BF) then an otherwise-valid object.
-#      OBSERVED DETERMINISTIC BEHAVIOR: nlohmann::json::parse() skips a single
-#      leading UTF-8 BOM by default, so this payload is ACCEPTED and the anchor
-#      shows normally → exit 0. This is the ONE crafted case that does NOT fail
-#      closed; we assert the ACTUAL observed exit (0) rather than assuming a
-#      rejection. The robustness point still holds: the loader does not crash on
-#      the BOM, and it does not emit a false absence — it correctly parses the
-#      anchor. (If a future nlohmann bump flips BOM handling to a parse error,
-#      this assertion turns RED and this comment tells the next maintainer the
-#      expectation was pinned to OBSERVED v-current behavior, not a spec mandate.)
+# (11) legacy JSON state file (with a UTF-8 BOM for good measure) — the JSON
+#      at-rest form is DELETED (D2, binary DLS1 only), so this must fail
+#      CLOSED regardless of nlohmann's historical BOM tolerance.
 printf '\xef\xbb\xbf{"schema_version":1,"genesis_hash":"%s","head_height":42,"head_block_hash":"%s","head_state_root":""}\n' \
     "$H64a" "$H64b" > "$SP"
-bom_out=$("$DETERM_LIGHT" state --show --state "$SP" 2>&1); bom_rc=$?
-ck "$bom_rc" 0 "(11) leading UTF-8 BOM is ACCEPTED (nlohmann skips BOM; observed exit 0)"
-# Whatever the exit, the binary must NOT have crashed (>1 / signal) — exit 0
-# already proves that, but assert the anchor actually printed (no false absence
-# the other direction) for a complete contrast with the fail-closed cases.
-if echo "$bom_out" | grep -q "head_height:        42"; then
-    echo "  PASS: (11) BOM payload parsed to the real anchor (height 42)"; pass=$((pass+1))
-else
-    echo "  FAIL: (11) BOM payload did not surface the anchor"; echo "$bom_out" | sed 's/^/      /'; fail=$((fail+1))
-fi
+fail_closed "(11) legacy JSON state file (BOM-prefixed) rejected (deleted format)"
 
 # (12) trailing garbage AFTER a valid object: a complete object, a newline, then
 #      a bare token. nlohmann::json::parse() (whole-input, not stream) requires

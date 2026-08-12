@@ -121,19 +121,21 @@ assert_eq "$CLEAN" "$SECRET" "clean recovery == original secret"
 echo
 echo "=== 2. Flip one nibble of share x=1 y_hex (envelopes left intact) ==="
 "$PY" - "$T/sh.json" "$T/sh_tamp.json" <<'PYEOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
+import sys
+d = bytearray(open(sys.argv[1], "rb").read())
+assert d[:4] == b"DSS1", "not DSS1"
+y_len = int.from_bytes(d[5:9], "little")
 flipped = False
-for s in d["shares"]:
-    if s["x"] == 1:
-        h = s["y_hex"]
-        # Replace the first nibble with a DIFFERENT hex digit -> identical
-        # length, still all-hex, so the value silently drifts by one nibble.
-        new_first = '1' if h[0] != '1' else '2'
-        s["y_hex"] = new_first + h[1:]
+off = 9
+for _ in range(d[4]):
+    if d[off] == 1:
+        # XOR the first y byte -> identical length, silent value drift.
+        d[off + 1] ^= 0x01
         flipped = True
+        break
+    off += 1 + y_len
 assert flipped, "share x=1 not found"
-json.dump(d, open(sys.argv[2], "w"))
+open(sys.argv[2], "wb").write(bytes(d))
 PYEOF
 if [ -s "$T/sh_tamp.json" ]; then
     echo "  PASS: tampered shares file produced"; pass_count=$((pass_count + 1))

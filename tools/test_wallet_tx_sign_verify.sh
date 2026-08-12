@@ -93,13 +93,21 @@ command -v python >/dev/null 2>&1 || PY=python3
 
 # Generate two fresh keypairs via account-create-batch (these emit anon
 # addresses + the 32-byte Ed25519 seeds as hex).
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/keys.json")
 PUB_A="${ADDR_A#0x}"
 PRIV_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['privkey_hex'])" "$TMP/keys.json")
 ADDR_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['address'])"     "$TMP/keys.json")
 PUB_B="${ADDR_B#0x}"
+
+# Darwin tail: the independent Ed25519 signer needs python 'cryptography';
+# without it every synthetic-tx case would crash rather than fail cleanly.
+if ! $PY -c "import cryptography" >/dev/null 2>&1; then
+  echo "  SKIP: python 'cryptography' module unavailable; independent-signer"
+  echo "        cross-check cannot run on this host (see Darwin run_all tail)"
+  exit 0
+fi
 
 # Python helper: build signing_bytes + sign with Ed25519, emit JSON tx.
 # Outputs JSON to the path given by sys.argv[1].

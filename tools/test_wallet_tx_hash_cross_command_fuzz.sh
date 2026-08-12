@@ -69,28 +69,31 @@ assert() {  # assert <true|false> <label>
 #    is reproducible (same seed -> same accounts), so the whole test is a pure
 #    fixed-seed RNG. 8 sibling accounts give us a pool to draw from/to pairs. ──
 SEED=$($PY -c "print('5a'*32)")   # fixed 32-byte master seed
-"$W" account-derive-batch --seed "$SEED" --count 8 --out "$T/keys.json" >/dev/null 2>&1
+"$W" account-derive-batch --seed "$SEED" --count 8 --json > "$T/keys.json" 2>/dev/null
 if [ ! -s "$T/keys.json" ]; then
   echo "  FAIL: account-derive-batch produced no keys (cannot run fuzz)"
   echo "  FAIL: test_wallet_tx_hash_cross_command_fuzz"; exit 1
 fi
 
-# Emit each account's keyfile (canonical {address,privkey_hex} shape) + a flat
-# list of addresses. Done once in Python; the shell only consumes files.
+# Emit each account's keyfile (the canonical binary DAK1 container, D2)
+# via the production writer, plus a flat list of addresses.
 $PY - "$T/keys.json" "$T" <<'PY'
 import json, sys, os
 keys_path, tdir = sys.argv[1], sys.argv[2]
 d = json.load(open(keys_path))
 accs = d['accounts']
-addrs = []
-for i, a in enumerate(accs):
-    json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-              open(os.path.join(tdir, 'k%d.json' % i), 'w'))
-    addrs.append(a['address'])
+addrs = [a['address'] for a in accs]
+with open(os.path.join(tdir, 'privs.txt'), 'wb') as f:
+    for i, a in enumerate(accs):
+        f.write(('%d %s\n' % (i, a['privkey_hex'])).encode())
 # Binary write -> LF-only (text mode would emit CRLF on Windows, and the
 # trailing \r would corrupt every address read back via `mapfile -t`).
 open(os.path.join(tdir, 'addrs.txt'), 'wb').write(('\n'.join(addrs) + '\n').encode())
 PY
+while read -r ki kpriv; do
+  "$W" account-import --priv "$kpriv" --out "$T/k$ki.json" >/dev/null 2>&1 < /dev/null
+done < "$T/privs.txt"
+rm -f "$T/privs.txt"
 
 mapfile -t ADDRS < "$T/addrs.txt"
 NACC=${#ADDRS[@]}

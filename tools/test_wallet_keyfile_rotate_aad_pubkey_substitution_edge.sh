@@ -116,9 +116,8 @@ ORIG_ENC="$TMP/node_key.enc"
 assert_eq "$?" "0" "keyfile-create produces the fixture"
 assert_exists "$ORIG_ENC" "original encrypted keyfile exists"
 
-HEADER_LINE=$(sed -n '1p' "$ORIG_ENC" | tr -d '\r')
-BLOB_LINE=$(sed -n '2p' "$ORIG_ENC" | tr -d '\r')
-assert_contains "$HEADER_LINE" "DETERM-NODE-V1 $EXPECTED_PUB" "header carries the AAD-bound pubkey"
+HEADER_PUB=$($PY -c "print(open('$ORIG_ENC','rb').read()[4:36].hex())")
+assert_eq "$HEADER_PUB" "$EXPECTED_PUB" "header carries the AAD-bound pubkey"
 
 # ── 2. CONTROL A: happy-path rotate on the UNTAMPERED file (exit 0) ─────────
 # Proves the exit-2 below is caused by the header substitution, not by the
@@ -126,7 +125,7 @@ assert_contains "$HEADER_LINE" "DETERM-NODE-V1 $EXPECTED_PUB" "header carries th
 echo
 echo "=== 2. CONTROL A: untampered rotate with correct OLD passphrase → exit 0 ==="
 CTRL_OUT="$TMP/control_rotated.enc"
-rm -f "$CTRL_OUT" "${CTRL_OUT}_tmp.json"
+rm -f "$CTRL_OUT" "${CTRL_OUT}_tmp.bin"
 "$WALLET" keyfile-rotate \
     --in "$ORIG_ENC" \
     --out "$CTRL_OUT" \
@@ -164,7 +163,13 @@ else
     echo "  PASS: substituted pubkey differs from the AAD-bound original"; pass_count=$((pass_count + 1))
 fi
 SUB_ENC="$TMP/substituted_header.enc"
-printf 'DETERM-NODE-V1 %s\n%s\n' "$SUB_PUB" "$BLOB_LINE" > "$SUB_ENC"
+# Byte-level substitution: overwrite the RAW 32-byte header pubkey (bytes
+# 4..35 of the DNK1 container); the embedded envelope bytes are preserved
+# byte-for-byte, so only the AAD differs.
+$PY -c "
+d = bytearray(open('$ORIG_ENC','rb').read())
+d[4:36] = bytes.fromhex('$SUB_PUB')
+open('$SUB_ENC','wb').write(bytes(d))"
 
 # Sanity: keyfile-info accepts the substituted file structurally (proves the
 # substitution is NOT caught by any cheap structural guard — the rejection

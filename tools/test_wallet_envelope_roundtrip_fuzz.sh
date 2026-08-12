@@ -24,9 +24,10 @@
 #   (W) WRONG-PW:      decrypting with a different passphrase must FAIL.
 #
 # (M) cross-checks the diagnostic dumper against the actual on-the-wire
-# bytes (parsed by simple dot-split, not by AES), so a metadata-vs-bytes
-# divergence is caught without any crypto knowledge. (R)/(T)/(W) are
-# pure behavioural oracles. Fully OFFLINE — no daemon, no cluster.
+# bytes (sliced at the FIXED offsets of the D2 binary container's hex
+# view, not by AES), so a metadata-vs-bytes divergence is caught without
+# any crypto knowledge. (R)/(T)/(W) are pure behavioural oracles.
+# Fully OFFLINE — no daemon, no cluster.
 #
 # Fixed-seed PRNG -> deterministic case set. >=20 random cases.
 #
@@ -121,13 +122,19 @@ for ((c = 1; c <= N_CASES; c++)); do
   else
     ENV=$($WALLET envelope encrypt --plaintext "$PLAIN" --password "$PW" --iters "$ITERS" | tr -d '\r')
   fi
-  if [ -z "$ENV" ] || ! echo "$ENV" | grep -q '^44574531\.'; then
+  if [ -z "$ENV" ] || ! echo "$ENV" | grep -q '^44574531'; then
     echo "  FAIL[case $c]: encrypt produced no DWE1 envelope (pt_len=$PT_LEN)"
     fail_count=$((fail_count + 1)); continue
   fi
 
-  # Parse the serialized blob by dot-split: magic.salt.iters.nonce.aad.ct
-  IFS='.' read -r F_MAGIC F_SALT F_ITHEX F_NONCE F_AAD F_CT <<< "$ENV"
+  # Slice the binary-hex blob at its fixed offsets (16B default salt, DWE1):
+  #   magic 0..7 | salt_len 8..9 | salt 10..41 | iters 42..49 | nonce 50..73
+  #   | aad_len 74..77 (u16 LE) | aad (2*aad_bytes) | ct_len u32 LE (8) | ct
+  F_SALT="${ENV:10:32}"
+  F_NONCE="${ENV:50:24}"
+  AAD_HEXLEN=${#AAD}
+  CT_START=$(( 86 + AAD_HEXLEN ))
+  F_CT="${ENV:$CT_START}"
 
   # ── (M) metadata oracle: inspect-envelope --json vs the actual bytes ──────
   ENV_FILE="$T/case_${c}.env"
@@ -159,8 +166,8 @@ for ((c = 1; c <= N_CASES; c++)); do
   POS=$(( $(rnd) % BODY_NIBBLES ))
   ORIG_NIB="${F_CT:$POS:1}"
   NEW_NIB=$(printf '%x' $(( 0x$ORIG_NIB ^ 0x8 )))
-  TAMPERED_CT="${F_CT:0:$POS}${NEW_NIB}${F_CT:$((POS + 1))}"
-  TENV="${F_MAGIC}.${F_SALT}.${F_ITHEX}.${F_NONCE}.${F_AAD}.${TAMPERED_CT}"
+  ABS=$(( CT_START + POS ))
+  TENV="${ENV:0:$ABS}${NEW_NIB}${ENV:$((ABS + 1))}"
   assert "$( [ "$TENV" != "$ENV" ] && echo 0 || echo 1 )" "[case $c] tamper actually changed the blob"
   set +e
   if [ -n "$AAD" ]; then

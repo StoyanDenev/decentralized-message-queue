@@ -56,6 +56,15 @@ if [ ! -s "$ENV_NOAAD_FILE" ]; then
     echo "  FAIL: fixture envelope file is empty"; exit 1
 fi
 echo "  wrote $ENV_NOAAD_FILE ($(wc -c < "$ENV_NOAAD_FILE") bytes)"
+# D2: the serialized blob is plain lowercase hex of the binary container —
+# the legacy dot-separated text form is deleted. Pin dot-freeness here.
+if grep -q '\.' "$ENV_NOAAD_FILE"; then
+    echo "  FAIL: fixture blob contains a dot (legacy text form resurfaced)"
+    fail_count=$((fail_count + 1))
+else
+    echo "  PASS: fixture blob is dot-free plain hex"
+    pass_count=$((pass_count + 1))
+fi
 
 echo
 echo "=== 1. Human-readable inspect (no AAD) ==="
@@ -171,11 +180,12 @@ fi
 assert_contains "$ERR" "empty" "diagnostic mentions empty"
 
 echo
-echo "=== 8. Wrong-format file (random hex, not an envelope) → reject ==="
-# Six dot-separated hex sections but with WRONG magic value (not "DWE1").
+echo "=== 8. Wrong-format file (valid hex, wrong magic) → reject ==="
+# A structurally plausible hex blob whose 4-byte magic is not DWE1/DWE2.
 # Exercises the magic check in envelope::deserialize.
 WRONG_FILE="$SCRATCH/wrong_format.txt"
-echo "deadbeef.00112233445566778899aabbccddeeff.10270000.000102030405060708090a0b.cafebabe.00112233" > "$WRONG_FILE"
+WRONG_BLOB="deadbeef$(tail -c +9 "$ENV_NOAAD_FILE")"
+printf '%s' "$WRONG_BLOB" > "$WRONG_FILE"
 set +e
 $WALLET inspect-envelope --in "$WRONG_FILE" >/dev/null 2>&1
 RC=$?
@@ -188,6 +198,20 @@ else
     echo "  FAIL: wrong-format file accepted (rc=0)"; fail_count=$((fail_count + 1))
 fi
 assert_contains "$ERR" "malformed" "wrong-format diagnostic mentions malformed"
+
+echo
+echo "=== 8b. Legacy dot-separated text envelope → reject (deleted format) ==="
+LEGACY_FILE="$SCRATCH/legacy_dotted.txt"
+echo "44574531.00112233445566778899aabbccddeeff.10270000.000102030405060708090a0b.cafebabe.00112233445566778899aabbccddeeff" > "$LEGACY_FILE"
+set +e
+$WALLET inspect-envelope --in "$LEGACY_FILE" >/dev/null 2>&1
+RC=$?
+set -e
+if [ "$RC" != "0" ]; then
+    echo "  PASS: legacy dot-separated blob rejected (rc=$RC)"; pass_count=$((pass_count + 1))
+else
+    echo "  FAIL: legacy dot-separated blob accepted (rc=0)"; fail_count=$((fail_count + 1))
+fi
 
 echo
 echo "=== 9. inspect-envelope NEVER requires a password ==="

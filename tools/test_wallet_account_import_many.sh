@@ -68,8 +68,10 @@ else
 fi
 
 echo
-echo "=== Setup: mint 3 fresh accounts via account-create-batch ==="
-"$WALLET" account-create-batch --count 3 --out "$TMP/batch.json" >/dev/null 2>&1
+echo "=== Setup: mint 3 fresh accounts via account-create-batch (--json view) ==="
+# --in is foreign-interchange JSON (a transient import input, permitted per
+# D2); the source accounts come from the --json stdout VIEW.
+"$WALLET" account-create-batch --count 3 --json > "$TMP/batch.json" 2>/dev/null
 RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "  FAIL: account-create-batch setup failed (rc=$RC)"; fail_count=$((fail_count + 1))
@@ -287,14 +289,13 @@ fi
 echo
 echo "=== 11. Named record produces <name>.keyfile filename ==="
 if [ -f "$TMP/out_plain/alice.keyfile" ]; then
-    # And verify the keyfile content is the plaintext shape since
-    # out_plain was emitted without --passphrase-env.
+    # And verify the keyfile content is the binary DAK1 container (D2)
+    # since out_plain was emitted without --passphrase-env.
     HAS_ADDR=$($PY -c "
-import json
-d = json.load(open(r'$TMP/out_plain/alice.keyfile'))
-print('YES' if 'address' in d and 'privkey_hex' in d else 'NO')
+d = open(r'$TMP/out_plain/alice.keyfile', 'rb').read()
+print('YES' if d[:4] == b'DAK1' and len(d) == 68 else 'NO')
 ")
-    assert_eq "$HAS_ADDR" "YES" "named keyfile has plaintext {address, privkey_hex}"
+    assert_eq "$HAS_ADDR" "YES" "named keyfile is a 68-byte binary DAK1 container"
 else
     echo "  FAIL: alice.keyfile not present in out_plain"; fail_count=$((fail_count + 1))
 fi

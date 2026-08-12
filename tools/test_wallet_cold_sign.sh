@@ -86,8 +86,8 @@ assert_contains() {
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
-# Generate two fresh keypairs via account-create-batch.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+# Generate two fresh keypairs via account-create-batch (--json stdout VIEW).
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/keys.json")
 PUB_A="${ADDR_A#0x}"
@@ -95,13 +95,9 @@ PRIV_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts']
 ADDR_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['address'])"     "$TMP/keys.json")
 PUB_B="${ADDR_B#0x}"
 
-# Write per-account keyfiles (single-account shape, same as account-export).
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-json.dump(d['accounts'][1], open(sys.argv[3],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json" "$TMP/key_b.json"
+# Mint per-account binary DAK1 keyfiles (D2) via account-import --out.
+"$WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" >/dev/null
+"$WALLET" account-import --priv "$PRIV_B" --out "$TMP/key_b.json" >/dev/null
 
 # Helper: build an unsigned tx JSON (no sig field).
 build_unsigned() {
@@ -398,6 +394,9 @@ echo "=== 30. Round-trip: wallet sig matches Python-Ed25519 sig over same signin
 build_unsigned "$TMP/tx_rt.json" 0 "$ADDR_A" "$ADDR_B" 500 1 3 "cafebabe"
 "$WALLET" cold-sign --tx-json "$TMP/tx_rt.json" --priv-keyfile "$TMP/key_a.json" --out "$TMP/signed_rt.json" >/dev/null 2>&1
 WALLET_SIG=$($PY -c "import json; print(json.load(open('$TMP/signed_rt.json'))['sig'])")
+if ! $PY -c "import cryptography" >/dev/null 2>&1; then
+  echo "  SKIP: python 'cryptography' module unavailable; cross-binary parity leg omitted"
+else
 PYTHON_SIG=$($PY -c "
 import struct, sys
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -413,6 +412,7 @@ sb += bytes.fromhex('cafebabe')
 print(priv.sign(sb).hex())
 ")
 assert_eq "$WALLET_SIG" "$PYTHON_SIG" "wallet sig == Python Ed25519 sig (cross-binary parity)"
+fi
 
 echo
 echo "=== Test summary ==="

@@ -80,7 +80,7 @@ fi
 # ── 2. Generate a fresh account, extract priv seed + original address ─────────
 echo
 echo "=== 2. Setup: account-create-batch fresh account ==="
-"$WALLET" account-create-batch --count 1 --out "$TMP/orig.json" --json >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/orig.json" 2>/dev/null
 RC=$?
 assert_eq "$RC" "0" "account-create-batch exit 0"
 
@@ -181,9 +181,9 @@ else
     echo "  FAIL: --json shape or value wrong"; fail_count=$((fail_count + 1))
 fi
 
-# ── 7. --out writes JSON file ────────────────────────────────────────────────
+# ── 7. --out writes the binary DAK1 keyfile ──────────────────────────────────
 echo
-echo "=== 7. --out writes anon-account JSON file ==="
+echo "=== 7. --out writes the binary DAK1 keyfile ==="
 "$WALLET" account-recover \
     --shares "$TMP/shares.json" \
     --envelopes "$TMP/envelopes.json" \
@@ -198,10 +198,11 @@ else
     echo "  FAIL: --out file missing or empty"; fail_count=$((fail_count + 1))
 fi
 $PY - "$TMP/recovered.json" <<PY_EOF
-import json, sys
-d = json.load(open(sys.argv[1]))
-assert d["address"] == "$ORIG_ADDR", f"file address mismatch: {d['address']!r}"
-assert d["privkey_hex"] == "$ORIG_PRIV", f"file priv mismatch"
+import sys
+d = open(sys.argv[1], 'rb').read()
+assert d[:4] == b'DAK1' and len(d) == 68, "not a DAK1 container"
+assert '0x' + d[4:36].hex() == "$ORIG_ADDR", "file address mismatch"
+assert d[36:68].hex() == "$ORIG_PRIV", "file priv mismatch"
 PY_EOF
 if [ $? = 0 ]; then
     echo "  PASS: --out file contents match original account"; pass_count=$((pass_count + 1))

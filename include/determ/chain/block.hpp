@@ -418,24 +418,45 @@ struct AbortEvent {
 };
 
 // rev.8 follow-on: full equivocation slashing. An EquivocationEvent is
-// proof that `equivocator` signed two conflicting BlockSigMsgs at the same
-// `block_index` — i.e., signed two different `block_digest`s with the same
+// proof that `equivocator` double-signed at ONE height with the same
 // Ed25519 key. When baked into a finalized block, the equivocator's full
 // staked balance is forfeited on apply (much harsher than the
 // SUSPENSION_SLASH economic disincentive — equivocation is a deliberate
 // double-sign attack, not just absence).
 //
-// The two signed messages live inline (digest_a + sig_a, digest_b + sig_b)
-// so any node can independently verify the event by checking both sigs
-// against the equivocator's registered Ed25519 key. The validator rejects
-// events where digest_a == digest_b (no equivocation), or the two sigs
-// don't both verify, or the equivocator isn't registered.
+// TWO detection families feed this one event channel, discriminated by
+// `kind`:
+//   0 = BLOCK_DIGEST   Phase-2 BFT double-sign — two conflicting
+//                      compute_block_digest values (node::detect_equivocation).
+//   1 = CONTRIB_COMMIT Phase-1 contrib double-sign (S-006) — two conflicting
+//                      make_contrib_commitment values (Node::on_contrib).
+//
+// EQV-height-bind (DECISION-LOG 2026-07-31, Hole 1): both digest families
+// are OPENABLE two-level hashes —
+//   digest = SHA256(TAG || index u64 BE || body_root),
+//   TAG = "DTM-BLKDIG-v2" (kind 0) / "DTM-CONTRIB-v2" (kind 1)
+// — and the event carries, per side, the fixed-size opening
+// {index, body_root} plus the signature, NOT the opaque digest (the digests
+// are pure functions of the carried fields, so storing them would be
+// redundant surface). The verifier RECOMPUTES each digest from its opening,
+// verifies the signature against the derived digest, and asserts
+// index_a == index_b == block_index — so the height is transitively
+// signature-bound and replaying one honest validator's signatures from two
+// DIFFERENT heights can no longer forge a slash. The validator also rejects
+// kind > 1, body_root_a == body_root_b (no equivocation), sig_a == sig_b,
+// an unregistered equivocator, and either signature failing to verify.
 struct EquivocationEvent {
+    static constexpr uint8_t KIND_BLOCK_DIGEST   = 0;
+    static constexpr uint8_t KIND_CONTRIB_COMMIT = 1;
+
     std::string equivocator;          // domain whose key signed both digests
     uint64_t    block_index{0};       // height at which equivocation occurred
-    Hash        digest_a{};
+    uint8_t     kind{0};              // digest family (0/1 above); fail-closed on >1
+    uint64_t    index_a{0};           // side-a opening: signed height
+    Hash        body_root_a{};        // side-a opening: digest body root
     Signature   sig_a{};
-    Hash        digest_b{};
+    uint64_t    index_b{0};           // side-b opening: signed height
+    Hash        body_root_b{};        // side-b opening: digest body root
     Signature   sig_b{};
 
     // rev.9 B2c.4: cross-chain provenance. When the equivocation is

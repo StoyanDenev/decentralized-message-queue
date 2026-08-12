@@ -6,29 +6,36 @@
 // The passphrase-derived unwrap key protects wallet secrets at rest
 // (encrypted keyfiles, Shamir backup shares, cold-sign archives).
 //
-// Wire format is VERSIONED by a 4-byte magic prefix. Two KDF layouts
-// coexist; `decrypt` / `deserialize` auto-detect from the magic, so
-// every envelope ever written stays readable:
+// Canonical at-rest form is BINARY (D2: no JSON / no structured text on
+// storage paths). The container is versioned by a 4-byte magic prefix;
+// two KDF layouts coexist and `decrypt` / `deserialize_bytes` auto-detect
+// from the magic. Byte-exact layout (all integers little-endian; decode
+// requires EXACT total length — trailing bytes reject; every bound
+// refuses, never clamps):
 //
-//   DWE1 (legacy, PBKDF2 — still read+written on request):
-//     [magic "DWE1"] [salt] [pbkdf2_iters u32 LE]
-//     [nonce 12B]    [aad]  [ciphertext + 16B tag]
-//     key = PBKDF2-HMAC-SHA-256(password, salt, iters, len=32)
-//     hex serialization: magic.salt.iters.nonce.aad.ct   (6 dot-parts)
+//   [0..3]   magic       "DWE1" (44 57 45 31) | "DWE2" (44 57 45 32)
+//   [4]      salt_len    u8, accept 8..=64 (writers emit 16)
+//   [5..]    salt        salt_len bytes
+//   params   DWE1: pbkdf2_iters u32 LE            (1..=MAX_PBKDF2_ITERS)
+//            DWE2: t_cost u32 | m_cost_kib u32 | lanes u32
+//                  (existing MAX_* caps, m >= 8*lanes, t,p >= 1)
+//   nonce    12 bytes
+//   aad_len  u16 LE, accept 0..=MAX_AAD_LEN
+//   aad      aad_len bytes
+//   ct_len   u32 LE, accept 16..=MAX_CT_LEN
+//   ct       ct_len bytes (body || 16B GCM tag)
 //
-//   DWE2 (default for fresh envelopes, Argon2id — memory-hard):
-//     [magic "DWE2"] [salt] [t_cost u32 LE | m_cost_kib u32 LE | lanes u32 LE]
-//     [nonce 12B]    [aad]  [ciphertext + 16B tag]
-//     key = Argon2id(password, salt, t_cost, m_cost_kib, lanes, len=32)
-//     hex serialization: magic.salt.params.nonce.aad.ct  (6 dot-parts;
-//       the params slot is 12 bytes here vs 4 bytes for DWE1 — the magic
-//       disambiguates which the parser expects)
+// KDFs: DWE1 key = PBKDF2-HMAC-SHA-256(password, salt, iters, len=32);
+// DWE2 key = Argon2id(password, salt, t, m_kib, lanes, len=32). AEAD is
+// AES-256-GCM (12-byte nonce, 16-byte tag appended to the ciphertext) in
+// BOTH layouts; only the KDF (and the params slot) differ. `encrypt`
+// defaults to DWE2/Argon2id — the R58 keyfile KDF hardening. The legacy
+// PBKDF2 path is retained (encrypt_pbkdf2) for interop and the
+// `envelope encrypt --iters` CLI.
 //
-// AEAD is AES-256-GCM (12-byte nonce, 16-byte tag appended to the
-// ciphertext) in BOTH layouts; only the KDF (and the params slot)
-// differ. `encrypt` defaults to DWE2/Argon2id — the R58 keyfile KDF
-// hardening. The legacy PBKDF2 path is retained (encrypt_pbkdf2) for
-// interop and the `envelope encrypt --iters` CLI.
+// The legacy dot-separated hex TEXT serialization is DELETED (pre-genesis,
+// no migrations): readers accept only the binary container (or its plain
+// lowercase-hex view via `deserialize`, CLI/interchange only).
 
 #include <cstdint>
 #include <vector>
@@ -81,6 +88,14 @@ inline constexpr uint32_t MAX_PBKDF2_ITERS      = 100'000'000; // ~seconds vs 60
 // per-envelope nonce; longer salts add no useful entropy.
 inline constexpr size_t   DEFAULT_SALT_LEN     = 16;
 
+// Structural bounds on the binary container, enforced by serialize_bytes
+// (throw) and deserialize_bytes (nullopt). AAD is a short binding label
+// (share-index, raw pubkey, guardian id); ciphertext covers every wallet
+// artifact (seeds, shares, cold-sign payloads) with a 1 MiB ceiling that
+// also caps decode-side allocation from hostile length fields.
+inline constexpr size_t   MAX_AAD_LEN = 256;
+inline constexpr uint32_t MAX_CT_LEN  = 1u << 20;   // 1 MiB, includes 16B tag
+
 // Encrypt `plaintext` (a Shamir share, an identity key, etc.) under a
 // passphrase-derived key. Defaults to the memory-hard Argon2id KDF
 // (DWE2). AAD is optional binding data (guardian_id, share-index, pubkey,
@@ -113,10 +128,19 @@ decrypt(const Envelope& env,
           const std::string& password,
           const std::vector<uint8_t>& aad = {});
 
-// Canonical hex encoding for CLI / interchange. 6 dot-separated parts:
-//   DWE1: "<magic>.<salt>.<iters>.<nonce>.<aad>.<ct>"
-//   DWE2: "<magic>.<salt>.<t|m|p>.<nonce>.<aad>.<ct>"
-// Dot-separated so a single shell-quoted string survives copy/paste.
+// Canonical binary container (the D2 at-rest form; layout in the header
+// comment above). serialize_bytes throws std::invalid_argument on any
+// field outside the structural bounds; deserialize_bytes returns nullopt
+// unless the buffer is EXACTLY one well-formed container (trailing bytes
+// reject; every length/bound refuses, never clamps).
+std::vector<uint8_t> serialize_bytes(const Envelope& env);
+std::optional<Envelope> deserialize_bytes(const uint8_t* data, size_t len);
+std::optional<Envelope> deserialize_bytes(const std::vector<uint8_t>& bytes);
+
+// Hex text VIEW of the canonical bytes — CLI / interchange only, never an
+// at-rest authority. serialize = lowercase hex of serialize_bytes;
+// deserialize = strict hex decode (even length, hex chars only — the
+// legacy dot-separated form is rejected) then deserialize_bytes.
 std::string serialize(const Envelope& env);
 std::optional<Envelope> deserialize(const std::string& blob);
 

@@ -491,6 +491,26 @@ public:
                                                 const chain::Block& src_block) {
         on_cross_shard_receipt_bundle(src_shard, src_block, net::Message{});
     }
+    // INGRESS-beacon-header-committee test seam (DECISION-LOG 2026-07-31
+    // Hole 2): drive the SHARD-side gossiped-beacon-header ingress
+    // (on_beacon_header) in isolation so the falsifier can submit an
+    // empty-/under-K-committee header and assert the silent drop
+    // (beacon_headers_ unchanged; observable via rpc_status()["beacon_headers"]).
+    // Byte-neutral non-const forwarder (on_beacon_header mutates
+    // beacon_headers_); same seam pattern as on_tx_for_test.
+    void on_beacon_header_for_test(const chain::Block& b) { on_beacon_header(b); }
+    // S-050 straggler-recovery test seam (DECISION-LOG 2026-08-12): drive
+    // apply_block_locked in isolation so the falsifier can submit a FUTURE
+    // block (b.index > height()) and assert the catch-up trigger fired
+    // (status_requests_sent_ +1, stalled_resync_ set) exactly ONCE per stall
+    // episode. Takes the write lock, like the real on_block ingress path.
+    // Byte-neutral; same seam pattern as on_beacon_header_for_test.
+    void apply_block_for_test(const chain::Block& b) {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        apply_block_locked(b);
+    }
+    bool     stalled_resync_for_test() const { return stalled_resync_; }
+    uint64_t status_requests_sent_for_test() const { return status_requests_sent_; }
     // rev.9 B5: external submission of equivocation evidence. Forensics
     // tools and governance scripts can submit EquivocationEvent JSON
     // assembled off-chain (e.g., from log scraping that observed two
@@ -905,6 +925,12 @@ private:
     std::chrono::steady_clock::time_point    stall_soft_since_{}; // soft-window anchor
     size_t                                   stall_abort_count_{0};
     bool                                     stalled_resync_{false};
+    // S-050 straggler recovery (DECISION-LOG 2026-08-12): count of
+    // make_status_request broadcasts. Observed only by test-straggler-resync
+    // to pin BOTH the future-block catch-up trigger AND its once-per-stall
+    // DoS guard (a mutant that drops the guard re-broadcasts and reddens the
+    // delta assertion). Not consensus state; never serialized.
+    uint64_t                                 status_requests_sent_{0};
 
     std::atomic<bool>               running_{false};
     // S-031 partial mitigation: shared_mutex permits N concurrent readers

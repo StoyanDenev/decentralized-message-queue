@@ -83,10 +83,11 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 # Generate two fresh keypairs + a plaintext keyfile for the signer.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][1]['address'])")
-$PY -c "import json; d=json.load(open('$TMP/keys.json')); json.dump(d['accounts'][0], open('$TMP/key_a.json','w'))"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$KPRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 
 # Produce a real 3-tx signed batch via tx-batch-sign (the write-dual we
 # verify against). Distinct amounts so per-index verdicts are unambiguous.

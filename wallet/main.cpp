@@ -21,6 +21,7 @@
 #include "shamir.hpp"
 #include "envelope.hpp"
 #include "recovery.hpp"
+#include "keyfmt.hpp"
 #include <nlohmann/json.hpp>
 #include <determ/crypto/sha2/sha2.h>
 #include <determ/crypto/aes/aes.h>
@@ -200,6 +201,145 @@ inline bool arg_u64(const char* cmd, const char* flag, const char* v, uint64_t& 
     catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
 }
 
+// ── D2 binary keyfile I/O helpers ────────────────────────────────────────────
+// Canonical at-rest keyfiles are BINARY (wallet/keyfmt.hpp: DAK1/DAB1/DNK1).
+// These helpers centralize the read/write + 0600-perms + diagnostics pattern
+// shared by every keyfile-touching command.
+
+// Read an entire file as raw bytes (binary). nullopt on open/read failure.
+std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    std::vector<uint8_t> out((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+    if (f.bad()) return std::nullopt;
+    return out;
+}
+
+// Write raw bytes to a file (binary, truncate) and tighten to 0600 perms.
+// Prints "<cmd_label>: ..." diagnostics on failure.
+bool write_bytes_file_0600(const std::string& cmd_label,
+                           const std::string& out_path,
+                           const std::vector<uint8_t>& bytes) {
+    std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        std::cerr << cmd_label << ": cannot open output file for write: "
+                  << out_path << "\n";
+        return false;
+    }
+    if (!bytes.empty())
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    f.close();
+    if (!f) {
+        std::cerr << cmd_label << ": write failed: " << out_path << "\n";
+        return false;
+    }
+    // 0600 owner-only perms. Best-effort on Windows (NTFS ACL inherits from
+    // parent); non-fatal on exotic filesystems — operator may chmod manually.
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    (void)perm_ec;
+    return true;
+}
+
+// Read + decode a DAK1 plaintext keyfile. On success fills the 32-byte seed
+// and the DERIVED anon address ("0x" + hex(pubkey) — never stored, so the
+// old S-028 address cross-check is subsumed by the decoder's derive-equality
+// requirement). Zeroes every transient secret buffer. Prints
+// "<cmd_label>: ..." diagnostics on failure.
+bool read_dak1_keyfile(const std::string& cmd_label, const std::string& path,
+                       std::vector<uint8_t>& seed_out, std::string& address_out) {
+    auto bytes = read_bytes_file(path);
+    if (!bytes) {
+        std::cerr << cmd_label << ": cannot open keyfile: " << path << "\n";
+        return false;
+    }
+    auto kp = keyfmt::decode_dak1(*bytes);
+    if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+    if (!kp) {
+        std::cerr << cmd_label << ": keyfile is not a valid DAK1 binary "
+                     "keypair file (exactly 68 bytes: magic 'DAK1' || pubkey "
+                     "|| priv_seed, pubkey must match the seed derivation)\n";
+        return false;
+    }
+    seed_out.assign(kp->priv_seed.begin(), kp->priv_seed.end());
+    address_out = "0x" + to_hex(kp->pubkey);
+    determ_secure_zero(kp->priv_seed.data(), kp->priv_seed.size());
+    return true;
+}
+
+// Read + decode a DSS1 Shamir share-set file (D2 binary) into
+// shamir::Share records. The decoder enforces x DISTINCT in 1..=255,
+// consistent y lengths (1..=4096), and the exact total length. Prints
+// "<cmd_label>: ..." and returns nullopt on failure.
+std::optional<std::vector<shamir::Share>>
+read_dss1_shares(const std::string& cmd_label, const std::string& path) {
+    auto bytes = read_bytes_file(path);
+    if (!bytes) {
+        std::cerr << cmd_label << ": cannot open shares file: " << path << "\n";
+        return std::nullopt;
+    }
+    auto recs = keyfmt::decode_dss1(*bytes);
+    if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+    if (!recs) {
+        std::cerr << cmd_label << ": shares file is not a canonical DSS1 "
+                     "binary share-set (magic 'DSS1' || count u8 || y_len "
+                     "u32 LE || count x {x u8 || y}; x distinct, exact "
+                     "length)\n";
+        return std::nullopt;
+    }
+    std::vector<shamir::Share> out;
+    out.reserve(recs->size());
+    for (auto& r : *recs) {
+        shamir::Share sh;
+        sh.x = r.x;
+        sh.y = std::move(r.y);
+        out.push_back(std::move(sh));
+    }
+    return out;
+}
+
+// Encode shamir::Share records as canonical DSS1 bytes (throws on
+// out-of-bounds fields — writers fail closed).
+std::vector<uint8_t> encode_dss1_shares(const std::vector<shamir::Share>& shares) {
+    std::vector<keyfmt::Share> recs;
+    recs.reserve(shares.size());
+    for (const auto& sh : shares) {
+        keyfmt::Share r;
+        r.x = sh.x;
+        r.y = sh.y;
+        recs.push_back(std::move(r));
+    }
+    return keyfmt::encode_dss1(recs);
+}
+
+// Read + decode a DBE1 backup-envelopes file (D2 binary). The decoder
+// enforces share_index DISTINCT in 1..=255 and that every embedded blob
+// is one well-formed DWE envelope.
+std::optional<std::vector<keyfmt::ShareEnvelope>>
+read_dbe1_envelopes(const std::string& cmd_label, const std::string& path) {
+    auto bytes = read_bytes_file(path);
+    if (!bytes) {
+        std::cerr << cmd_label << ": cannot open envelopes file: " << path << "\n";
+        return std::nullopt;
+    }
+    auto recs = keyfmt::decode_dbe1(*bytes);
+    if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+    if (!recs) {
+        std::cerr << cmd_label << ": envelopes file is not a canonical DBE1 "
+                     "binary container (magic 'DBE1' || count u8 || count x "
+                     "{share_index u8 || env_len u32 LE || DWE bytes}; "
+                     "index distinct, exact length)\n";
+        return std::nullopt;
+    }
+    return recs;
+}
+
 int cmd_shamir_split(int argc, char** argv) {
     std::string secret_hex;
     int threshold = 0, share_count = 0;
@@ -283,7 +423,7 @@ int cmd_shamir(int argc, char** argv) {
 // backward compatibility with existing test fixtures + the
 // colon-separated wire format.
 int cmd_shamir_split_raw(int argc, char** argv) {
-    std::string secret_hex;
+    std::string secret_hex, out_path;
     int threshold = -1, shares = -1;
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
@@ -291,11 +431,12 @@ int cmd_shamir_split_raw(int argc, char** argv) {
         if      (a == "--secret"    && i + 1 < argc) secret_hex = argv[++i];
         else if (a == "--threshold" && i + 1 < argc) { if (!arg_i32("shamir-split", "--threshold", argv[++i], threshold)) return 1; }
         else if (a == "--shares"    && i + 1 < argc) { if (!arg_i32("shamir-split", "--shares", argv[++i], shares)) return 1; }
+        else if (a == "--out"       && i + 1 < argc) out_path   = argv[++i];
         else if (a == "--json")                      json_out   = true;
     }
     if (secret_hex.empty() || threshold < 0 || shares < 0) {
         std::cerr << "Usage: determ-wallet shamir-split --secret <hex> "
-                     "--threshold T --shares N [--json]\n";
+                     "--threshold T --shares N [--out <file>] [--json]\n";
         return 1;
     }
     if (threshold < 1) {
@@ -330,6 +471,21 @@ int cmd_shamir_split_raw(int argc, char** argv) {
     } catch (std::exception& e) {
         std::cerr << "shamir-split: " << e.what() << "\n"; return 1;
     }
+    if (!out_path.empty()) {
+        // D2: the at-rest share-set is the canonical binary DSS1 container.
+        // The stdout forms below remain non-authoritative views.
+        std::vector<uint8_t> bytes;
+        try { bytes = encode_dss1_shares(out); }
+        catch (std::exception& e) {
+            std::cerr << "shamir-split: " << e.what() << "\n"; return 1;
+        }
+        const bool ok = write_bytes_file_0600("shamir-split", out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        if (!ok) return 1;
+        std::cout << "wrote " << out.size() << " shares to " << out_path
+                  << " (DSS1)\n";
+        return 0;
+    }
     if (json_out) {
         nlohmann::json j;
         j["shares"] = nlohmann::json::array();
@@ -363,75 +519,10 @@ int cmd_shamir_combine_raw(int argc, char** argv) {
                      "[--json]\n";
         return 1;
     }
-    std::ifstream f(shares_path);
-    if (!f) {
-        std::cerr << "shamir-combine: cannot open --shares file: "
-                  << shares_path << "\n";
-        return 1;
-    }
-    std::string blob((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-    nlohmann::json j;
-    try { j = nlohmann::json::parse(blob); }
-    catch (std::exception& e) {
-        std::cerr << "shamir-combine: JSON parse failed: " << e.what() << "\n";
-        return 1;
-    }
-    if (!j.contains("shares") || !j["shares"].is_array()) {
-        std::cerr << "shamir-combine: JSON missing 'shares' array\n";
-        return 1;
-    }
-    std::vector<shamir::Share> in;
-    std::set<int> seen_x;
-    size_t y_len = 0;
-    for (auto& el : j["shares"]) {
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            std::cerr << "shamir-combine: each share must have integer 'x' "
-                         "and string 'y_hex'\n";
-            return 1;
-        }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            std::cerr << "shamir-combine: x must be in [1,255], got "
-                      << x << "\n";
-            return 1;
-        }
-        if (!seen_x.insert(x).second) {
-            std::cerr << "shamir-combine: duplicate x = " << x << "\n";
-            return 1;
-        }
-        std::string y_hex = el["y_hex"].get<std::string>();
-        if (y_hex.size() % 2 != 0) {
-            std::cerr << "shamir-combine: y_hex must have even length "
-                         "(x=" << x << ")\n";
-            return 1;
-        }
-        shamir::Share s;
-        s.x = static_cast<uint8_t>(x);
-        try { s.y = from_hex(y_hex); }
-        catch (std::exception& e) {
-            std::cerr << "shamir-combine: y_hex parse failed (x=" << x
-                      << "): " << e.what() << "\n";
-            return 1;
-        }
-        if (s.y.empty()) {
-            std::cerr << "shamir-combine: y_hex empty (x=" << x << ")\n";
-            return 1;
-        }
-        if (y_len == 0) y_len = s.y.size();
-        else if (s.y.size() != y_len) {
-            std::cerr << "shamir-combine: share y lengths mismatch "
-                         "(x=" << x << ": " << s.y.size()
-                      << " vs first: " << y_len << ")\n";
-            return 1;
-        }
-        in.push_back(std::move(s));
-    }
-    if (in.empty()) {
-        std::cerr << "shamir-combine: 'shares' array is empty\n"; return 1;
-    }
+    auto in_opt = read_dss1_shares("shamir-combine", shares_path);
+    if (!in_opt) return 1;
+    std::vector<shamir::Share> in = std::move(*in_opt);
+
     auto out = shamir::combine(in);
     if (!out) {
         std::cerr << "shamir-combine: reconstruction failed (shares "
@@ -506,32 +597,6 @@ int cmd_shamir_verify(int argc, char** argv) {
                      "[--threshold T] [--json]\n";
         return 1;
     }
-    std::ifstream f(shares_path);
-    if (!f) {
-        if (json_out) {
-            std::cout << "{\"valid\":false,\"errors\":[\"cannot open file\"]}\n";
-        } else {
-            std::cerr << "shamir-verify: cannot open --shares file: "
-                      << shares_path << "\n";
-        }
-        return 1;
-    }
-    std::string blob((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-    nlohmann::json j;
-    try { j = nlohmann::json::parse(blob); }
-    catch (std::exception& e) {
-        if (json_out) {
-            nlohmann::json r;
-            r["valid"] = false;
-            r["errors"] = nlohmann::json::array({std::string("JSON parse error: ") + e.what()});
-            std::cout << r.dump() << "\n";
-        } else {
-            std::cerr << "shamir-verify: JSON parse failed: " << e.what() << "\n";
-        }
-        return 1;
-    }
-
     auto report_fail = [&](const std::string& reason) {
         if (json_out) {
             nlohmann::json r;
@@ -543,85 +608,38 @@ int cmd_shamir_verify(int argc, char** argv) {
         }
     };
 
-    if (!j.is_object() || !j.contains("shares") || !j["shares"].is_array()) {
-        report_fail("top-level must be object with 'shares' array");
+    // ── Load + decode the DSS1 container (D2 binary) ─────────────────────
+    // The decoder enforces every structural invariant the old JSON loop
+    // checked field-by-field: magic, count >= 1, x in [1,255] DISTINCT,
+    // consistent y length in 1..=4096, exact total length.
+    auto bytes = read_bytes_file(shares_path);
+    if (!bytes) {
+        if (json_out) {
+            std::cout << "{\"valid\":false,\"errors\":[\"cannot open file\"]}\n";
+        } else {
+            std::cerr << "shamir-verify: cannot open --shares file: "
+                      << shares_path << "\n";
+        }
+        return 1;
+    }
+    auto recs = keyfmt::decode_dss1(*bytes);
+    if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+    if (!recs) {
+        report_fail("shares file is not a canonical DSS1 binary share-set "
+                    "(magic 'DSS1', x distinct in [1,255], consistent y "
+                    "lengths, exact total length)");
         return 2;
     }
-    const auto& arr = j["shares"];
-    if (arr.empty()) {
-        report_fail("shares array is empty");
-        return 2;
-    }
-
-    // Cheap hex-validity check (independent of from_hex which throws on
-    // odd length; we want to distinguish bad-char from odd-length so the
-    // operator gets a precise diagnostic).
-    auto is_hex_char = [](char c) {
-        return (c >= '0' && c <= '9')
-            || (c >= 'a' && c <= 'f')
-            || (c >= 'A' && c <= 'F');
-    };
-
-    std::set<int> seen_x;
+    const auto& arr = *recs;
     int x_min = 256, x_max = -1;
-    size_t y_byte_len = 0;
-    bool y_len_consistent = true;
-
-    for (size_t i = 0; i < arr.size(); ++i) {
-        const auto& el = arr[i];
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            report_fail("share #" + std::to_string(i)
-                        + ": must have integer 'x' and string 'y_hex'");
-            return 2;
-        }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            report_fail("share #" + std::to_string(i) + ": x = "
-                        + std::to_string(x) + " out of range [1, 255]");
-            return 2;
-        }
-        if (!seen_x.insert(x).second) {
-            report_fail("duplicate x = " + std::to_string(x)
-                        + " (Shamir invariant: all x must be distinct)");
-            return 2;
-        }
-        if (x < x_min) x_min = x;
-        if (x > x_max) x_max = x;
-
-        std::string y_hex = el["y_hex"].get<std::string>();
-        if (y_hex.size() % 2 != 0) {
-            report_fail("share x=" + std::to_string(x)
-                        + ": y_hex has odd length (" + std::to_string(y_hex.size()) + ")");
-            return 2;
-        }
-        for (char c : y_hex) {
-            if (!is_hex_char(c)) {
-                report_fail("share x=" + std::to_string(x)
-                            + ": y_hex contains non-hex character");
-                return 2;
-            }
-        }
-        size_t this_y_len = y_hex.size() / 2;
-        if (this_y_len == 0) {
-            report_fail("share x=" + std::to_string(x) + ": y_hex is empty");
-            return 2;
-        }
-        if (y_byte_len == 0) {
-            y_byte_len = this_y_len;
-        } else if (this_y_len != y_byte_len) {
-            // Flag the inconsistency precisely; reject (operator alert).
-            report_fail("share x=" + std::to_string(x) + ": y_hex length "
-                        + std::to_string(this_y_len)
-                        + " bytes differs from first share's "
-                        + std::to_string(y_byte_len)
-                        + " bytes (Shamir invariant: all shares must share "
-                        + "the same secret-size domain)");
-            y_len_consistent = false;
-            return 2;
-        }
+    std::set<int> seen_x;
+    for (const auto& sh : arr) {
+        seen_x.insert(sh.x);
+        if (sh.x < x_min) x_min = sh.x;
+        if (sh.x > x_max) x_max = sh.x;
     }
+    const size_t y_byte_len = arr.front().y.size();
+    const bool y_len_consistent = true;   // enforced by the decoder
 
     const int share_count    = static_cast<int>(arr.size());
     const int distinct_x_cnt = static_cast<int>(seen_x.size());
@@ -770,87 +788,15 @@ int cmd_shamir_rotate(int argc, char** argv) {
         return 1;
     }
 
-    // ── Read + parse input shares file ───────────────────────────────────
-    std::ifstream f(shares_path);
-    if (!f) {
-        std::cerr << "shamir-rotate: cannot open --shares file: "
-                  << shares_path << "\n";
-        return 1;
-    }
-    std::string blob((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-    nlohmann::json j;
-    try { j = nlohmann::json::parse(blob); }
-    catch (std::exception& e) {
-        std::cerr << "shamir-rotate: JSON parse failed: " << e.what() << "\n";
-        return 1;
-    }
-    if (!j.is_object() || !j.contains("shares") || !j["shares"].is_array()) {
-        std::cerr << "shamir-rotate: --shares JSON must be object with "
-                     "'shares' array\n";
-        return 1;
-    }
-    const auto& arr = j["shares"];
-    if (arr.empty()) {
-        std::cerr << "shamir-rotate: --shares array is empty\n"; return 1;
-    }
-
-    // Structural validation mirrors shamir-combine + shamir-verify so the
-    // rotate CLI never reaches the cryptographic layer with malformed
-    // input. Diagnostics are precise so operators can fix shares files
-    // before a costly distribution event.
-    std::vector<shamir::Share> in_shares;
-    std::set<int> seen_x;
+    // ── Read + decode the DSS1 input share-set (D2 binary) ───────────────
+    // The decoder enforces the structural invariants the old JSON loop
+    // checked (x distinct in [1,255], consistent non-empty y lengths).
+    auto in_opt = read_dss1_shares("shamir-rotate", shares_path);
+    if (!in_opt) return 1;
+    std::vector<shamir::Share> in_shares = std::move(*in_opt);
     int x_max_in = 0;
-    size_t y_len = 0;
-    for (size_t i = 0; i < arr.size(); ++i) {
-        const auto& el = arr[i];
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            std::cerr << "shamir-rotate: share #" << i
-                      << " must have integer 'x' and string 'y_hex'\n";
-            return 1;
-        }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            std::cerr << "shamir-rotate: x = " << x << " out of range "
-                         "[1, 255]\n";
-            return 1;
-        }
-        if (!seen_x.insert(x).second) {
-            std::cerr << "shamir-rotate: duplicate x = " << x
-                      << " (Shamir invariant: all x must be distinct)\n";
-            return 1;
-        }
-        if (x > x_max_in) x_max_in = x;
-        std::string y_hex = el["y_hex"].get<std::string>();
-        if (y_hex.size() % 2 != 0) {
-            std::cerr << "shamir-rotate: y_hex for x=" << x
-                      << " has odd length\n";
-            return 1;
-        }
-        shamir::Share s;
-        s.x = static_cast<uint8_t>(x);
-        try { s.y = from_hex(y_hex); }
-        catch (std::exception& e) {
-            std::cerr << "shamir-rotate: y_hex parse failed for x=" << x
-                      << ": " << e.what() << "\n";
-            return 1;
-        }
-        if (s.y.empty()) {
-            std::cerr << "shamir-rotate: y_hex empty for x=" << x << "\n";
-            return 1;
-        }
-        if (y_len == 0) y_len = s.y.size();
-        else if (s.y.size() != y_len) {
-            std::cerr << "shamir-rotate: share x=" << x
-                      << " y-length " << s.y.size()
-                      << " differs from first share's " << y_len << "\n";
-            return 1;
-        }
-        in_shares.push_back(std::move(s));
-    }
+    for (const auto& sh : in_shares)
+        if (sh.x > x_max_in) x_max_in = sh.x;
 
     const int n_in = static_cast<int>(in_shares.size());
 
@@ -946,38 +892,17 @@ int cmd_shamir_rotate(int argc, char** argv) {
         return 1;
     }
 
-    // ── Write the new share-set ──────────────────────────────────────────
-    nlohmann::json out_doc;
-    out_doc["shares"] = nlohmann::json::array();
-    for (const auto& s : new_shares) {
-        out_doc["shares"].push_back({
-            {"x",     static_cast<int>(s.x)},
-            {"y_hex", to_hex(s.y)},
-        });
-    }
+    // ── Write the new share-set (canonical binary DSS1, D2) ──────────────
     {
-        std::ofstream of(shares_out);
-        if (!of) {
-            std::cerr << "shamir-rotate: cannot open --shares-out for write: "
-                      << shares_out << "\n";
+        std::vector<uint8_t> bytes;
+        try { bytes = encode_dss1_shares(new_shares); }
+        catch (std::exception& e) {
+            std::cerr << "shamir-rotate: " << e.what() << "\n";
             return 1;
         }
-        of << out_doc.dump() << "\n";
-        if (!of) {
-            std::cerr << "shamir-rotate: write failed on --shares-out: "
-                      << shares_out << "\n";
-            return 1;
-        }
-    }
-    // Owner-only perms (POSIX); no-op on Windows.
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            shares_out,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+        const bool ok = write_bytes_file_0600("shamir-rotate", shares_out, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        if (!ok) return 1;
     }
 
     // ── Summary ──────────────────────────────────────────────────────────
@@ -1106,9 +1031,10 @@ int cmd_envelope(int argc, char** argv) {
 // not required and not accepted.
 //
 // Wire format (recap from envelope.hpp):
-//   "DWE1" magic (4B) | salt_len/salt | pbkdf2_iters (u32 LE)
-//   | nonce (12B) | aad_len/aad | ct_len/(ciphertext || 16B tag)
-// The serialized form is dot-separated lowercase hex of those fields.
+//   "DWE1"/"DWE2" magic (4B) | salt_len u8 + salt | params (4B / 12B)
+//   | nonce (12B) | aad_len u16 + aad | ct_len u32 + (ciphertext || 16B tag)
+// The serialized text form is plain lowercase hex of exactly those bytes
+// (D2: the legacy dot-separated form is deleted).
 int cmd_inspect_envelope(int argc, char** argv) {
     std::string in_path;
     bool json_output = false;
@@ -1317,9 +1243,13 @@ int cmd_account_create_batch(int argc, char** argv) {
         }
     }
 
-    // Build the accounts array via c99 Ed25519 keygen (1c): a fresh 32-byte
+    // Build the accounts via c99 Ed25519 keygen (1c): a fresh 32-byte
     // RFC 8032 seed from the OS CSPRNG per iteration, pubkey derived in-tree.
+    // `recs` feeds the binary DAB1 writer (--out); `arr` is the CLI JSON
+    // VIEW (--json / human stdout), non-authoritative per D2.
     nlohmann::json arr = nlohmann::json::array();
+    std::vector<keyfmt::Keypair> recs;
+    recs.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         std::array<uint8_t, 32> pub{};
         std::array<uint8_t, 32> priv_seed{};
@@ -1328,6 +1258,11 @@ int cmd_account_create_batch(int argc, char** argv) {
             return 1;
         }
         determ_ed25519_pubkey_from_seed(priv_seed.data(), pub.data());
+
+        keyfmt::Keypair kp;
+        kp.pubkey    = pub;
+        kp.priv_seed = priv_seed;
+        recs.push_back(kp);
 
         std::string address = "0x" + to_hex(pub);           // matches make_anon_address
         std::string privkey_hex = to_hex(priv_seed);        // 64 lowercase hex
@@ -1339,27 +1274,20 @@ int cmd_account_create_batch(int argc, char** argv) {
 
     // Dispatch on output mode.
     if (!out_path.empty()) {
-        nlohmann::json doc;
-        doc["accounts"] = std::move(arr);
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "account-create-batch: cannot open --out for write: "
-                      << out_path << "\n";
+        // D2: the at-rest batch keyfile is the canonical binary DAB1
+        // container ("DAB1" || count u16 LE || count x {pubkey || seed}).
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dab1(recs); }
+        catch (std::exception& e) {
+            std::cerr << "account-create-batch: " << e.what() << "\n";
             return 1;
         }
-        f << doc.dump(2) << "\n";
-        f.close();
-        // POSIX permissions tightening — owner-only read/write. On
-        // Windows the call is a no-op for the read/write bits (NTFS
-        // ACL inherits from parent); we ignore the error code there.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        // Intentionally non-fatal on perm-set failure: file is written;
-        // operator may need to chmod manually on exotic filesystems.
+        const bool ok = write_bytes_file_0600("account-create-batch",
+                                              out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        for (auto& kp : recs)
+            determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+        if (!ok) return 1;
         std::cout << "wrote " << count << " accounts to " << out_path << "\n";
         return 0;
     }
@@ -1552,7 +1480,11 @@ int cmd_account_derive_batch(int argc, char** argv) {
     // — this is what makes the derivation reproducible across machines.
     // A variable-width encoding (e.g. varint) could shift collision domains
     // between caller environments.
+    // `recs` feeds the binary DAB1 writer (--out); `arr` is the CLI JSON
+    // VIEW (--json / human stdout), non-authoritative per D2.
     nlohmann::json arr = nlohmann::json::array();
+    std::vector<keyfmt::Keypair> recs;
+    recs.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         // Build preimage: master_seed (32 B) || u32_le(i) (4 B) = 36 B.
         std::array<uint8_t, 36> preimage{};
@@ -1595,6 +1527,13 @@ int cmd_account_derive_batch(int argc, char** argv) {
             {"address",     address},
             {"privkey_hex", privkey_hex},
         });
+        {
+            // D2: collect the raw record for the binary DAB1 writer (--out).
+            keyfmt::Keypair kp;
+            std::memcpy(kp.pubkey.data(),    pub.data(),      32);
+            std::memcpy(kp.priv_seed.data(), sub_seed.data(), 32);
+            recs.push_back(kp);
+        }
         determ_secure_zero(sub_seed.data(), sub_seed.size());
     }
 
@@ -1611,22 +1550,21 @@ int cmd_account_derive_batch(int argc, char** argv) {
 
     // ── Dispatch on output mode ─────────────────────────────────────────────
     if (!out_path.empty()) {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "account-derive-batch: cannot open --out for write: "
-                      << out_path << "\n";
+        // D2: the at-rest batch keyfile is the canonical binary DAB1
+        // container. The master_seed_hash / index metadata remain available
+        // on the --json stdout view; the file carries only key material.
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dab1(recs); }
+        catch (std::exception& e) {
+            std::cerr << "account-derive-batch: " << e.what() << "\n";
             return 1;
         }
-        f << doc.dump(2) << "\n";
-        f.close();
-        // 0600 owner-only perms. On Windows the call is a no-op for the
-        // read/write bits (NTFS ACL inherits from parent); non-fatal.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
+        const bool ok = write_bytes_file_0600("account-derive-batch",
+                                              out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        for (auto& kp : recs)
+            determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+        if (!ok) return 1;
         std::cout << "derived " << count << " accounts to " << out_path << "\n";
         return 0;
     }
@@ -1816,29 +1754,22 @@ int cmd_account_import(int argc, char** argv) {
 
     // ── Dispatch on output mode ─────────────────────────────────────────────
     if (!out_path.empty()) {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "account-import: cannot open --out for write: "
-                      << out_path << "\n";
+        // D2: the at-rest keyfile is the canonical binary DAK1 container
+        // ("DAK1" || pubkey 32B || priv_seed 32B, exactly 68 bytes).
+        keyfmt::Keypair kp;
+        std::memcpy(kp.pubkey.data(),    derived_pub.data(), 32);
+        std::memcpy(kp.priv_seed.data(), seed.data(),        32);
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dak1(kp); }
+        catch (std::exception& e) {
+            determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+            std::cerr << "account-import: " << e.what() << "\n";
             return 1;
         }
-        f << record.dump(2) << "\n";
-        f.close();
-        if (!f) {
-            std::cerr << "account-import: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
-        // 0600 permissions — owner-only read/write. On Windows the
-        // read/write bits are a no-op (NTFS ACL inherits from parent);
-        // we ignore the error code as non-fatal there.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+        const bool ok = write_bytes_file_0600("account-import", out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+        if (!ok) return 1;
         std::cout << "imported account: " << address << "\n";
         return 0;
     }
@@ -1879,7 +1810,7 @@ int cmd_account_import(int argc, char** argv) {
 //                             keyfiles without --force.
 //   --passphrase-env <NAME> : optional. If set, each keyfile is encrypted
 //                             at rest using the same envelope shape as
-//                             `keyfile-create` (DETERM-NODE-V1 header +
+//                             `keyfile-create` (binary DNK1 container +
 //                             DWE1 envelope with AES-256-GCM + PBKDF2-HMAC-
 //                             SHA-256). All N records share the same
 //                             passphrase (drawn from the named env var).
@@ -2109,7 +2040,6 @@ int cmd_account_import_many(int argc, char** argv) {
 
         std::string pubkey_hex   = to_hex(derived_pub);
         std::string derived_addr = "0x" + pubkey_hex;
-        std::string priv_seed_hex = to_hex(seed);
 
         // Address verification ---------------------------------------------------
         // Spec: address is supplied as input; we reject mismatch so a
@@ -2172,28 +2102,24 @@ int cmd_account_import_many(int argc, char** argv) {
         bool write_ok = true;
         std::string write_err;
         if (encrypt) {
-            // Mirror keyfile-create's envelope shape: DETERM-NODE-V1 header
-            // + DWE1 envelope (AES-256-GCM + PBKDF2-HMAC-SHA-256). The
-            // plaintext inside is the canonical {pubkey, priv_seed} JSON
-            // (matches src/crypto/keys.cpp::load_node_key + keyfile-info
-            // expectations).
-            nlohmann::json keyfile_json = {
-                {"pubkey",    pubkey_hex},
-                {"priv_seed", priv_seed_hex}
-            };
-            std::string pt_str = keyfile_json.dump(2);
-            std::vector<uint8_t> pt_bytes(pt_str.begin(), pt_str.end());
-            std::vector<uint8_t> aad(pubkey_hex.begin(), pubkey_hex.end());
+            // Mirror keyfile-create's canonical DNK1 container (D2): the
+            // envelope plaintext is the RAW 32-byte seed; AAD = the RAW
+            // 32-byte pubkey (loadable via keyfile-decrypt / keyfile-info).
+            std::vector<uint8_t> pt_bytes(seed.begin(), seed.end());
+            std::array<uint8_t, 32> pub_arr{};
+            std::memcpy(pub_arr.data(), derived_pub.data(), 32);
+            std::vector<uint8_t> aad(pub_arr.begin(), pub_arr.end());
             try {
-                auto env  = envelope::encrypt(pt_bytes, passphrase, aad);
-                std::string blob = envelope::serialize(env);
-                std::ofstream f(out_path);
+                auto env       = envelope::encrypt(pt_bytes, passphrase, aad);
+                auto env_bytes = envelope::serialize_bytes(env);
+                auto nk_bytes  = keyfmt::encode_dnk1(pub_arr, env_bytes);
+                std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
                 if (!f) {
                     write_ok = false;
                     write_err = "cannot open output file for write";
                 } else {
-                    f << "DETERM-NODE-V1 " << pubkey_hex << "\n";
-                    f << blob << "\n";
+                    f.write(reinterpret_cast<const char*>(nk_bytes.data()),
+                            static_cast<std::streamsize>(nk_bytes.size()));
                     f.close();
                     if (!f) {
                         write_ok = false;
@@ -2204,25 +2130,34 @@ int cmd_account_import_many(int argc, char** argv) {
                 write_ok = false;
                 write_err = std::string("envelope encrypt failed: ") + e.what();
             }
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
         } else {
-            // Plaintext single-account JSON (matches account-import --out
-            // byte-for-byte: {address, privkey_hex}).
-            nlohmann::json acc_json = {
-                {"address",     address},
-                {"privkey_hex", priv_seed_hex}
-            };
-            std::ofstream f(out_path);
-            if (!f) {
-                write_ok = false;
-                write_err = "cannot open output file for write";
-            } else {
-                f << acc_json.dump(2) << "\n";
-                f.close();
+            // D2: plaintext keyfile is the canonical binary DAK1 container
+            // (matches account-import --out byte-for-byte).
+            keyfmt::Keypair kp;
+            std::memcpy(kp.pubkey.data(),    derived_pub.data(), 32);
+            std::memcpy(kp.priv_seed.data(), seed.data(),        32);
+            try {
+                auto bytes = keyfmt::encode_dak1(kp);
+                std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
                 if (!f) {
                     write_ok = false;
-                    write_err = "write failed";
+                    write_err = "cannot open output file for write";
+                } else {
+                    f.write(reinterpret_cast<const char*>(bytes.data()),
+                            static_cast<std::streamsize>(bytes.size()));
+                    f.close();
+                    if (!f) {
+                        write_ok = false;
+                        write_err = "write failed";
+                    }
                 }
+                determ_secure_zero(bytes.data(), bytes.size());
+            } catch (std::exception& e) {
+                write_ok = false;
+                write_err = std::string("DAK1 encode failed: ") + e.what();
             }
+            determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
         }
 
         determ_secure_zero(seed.data(), seed.size());
@@ -2287,10 +2222,10 @@ int cmd_account_import_many(int argc, char** argv) {
               << error_count << " errored\n";
     std::cout << "  out-dir:   " << out_dir << "\n";
     if (encrypt) {
-        std::cout << "  encrypted: yes (DETERM-NODE-V1 + DWE1 envelope, "
+        std::cout << "  encrypted: yes (binary DNK1 + DWE2 envelope, "
                      "passphrase from env:" << passphrase_env_name << ")\n";
     } else {
-        std::cout << "  encrypted: no (plaintext single-account JSON)\n";
+        std::cout << "  encrypted: no (binary DAK1 single-account keyfile)\n";
     }
     if (!summary_path.empty()) {
         std::cout << "  summary:   " << summary_path << "\n";
@@ -2310,11 +2245,11 @@ int cmd_account_import_many(int argc, char** argv) {
 // inspector).
 //
 // CLI:
-//   --in <file>: required. The single-account JSON file. Must contain at
-//                least `address` (string, "0x" + 64 lowercase hex) and
-//                `privkey_hex` (64-char lowercase hex). Extra fields are
-//                tolerated (they are ignored on `raw-hex` output, preserved
-//                on `json` passthrough, and dropped on `backup-bundle`).
+//   --in <file>: required. The single-account keyfile — the canonical
+//                binary DAK1 container (68 bytes: magic 'DAK1' || pubkey
+//                || priv_seed; D2). The decoder derives the pubkey from
+//                the seed and requires equality; the address is always
+//                the derived "0x" + hex(pubkey).
 //   --format <name>: optional, default `raw-hex`. One of:
 //                * raw-hex       — print the 64-char privkey hex on stdout,
 //                                  followed by a single newline. Useful for
@@ -2335,8 +2270,10 @@ int cmd_account_import_many(int argc, char** argv) {
 //                                  envelope is plaintext — actual AEAD
 //                                  wrapping requires a passphrase and lives
 //                                  in backup-create.
-//   --out <file>: optional. If set, writes the chosen format to file with
-//                 0600 permissions (best-effort on Windows; NTFS ACL).
+//   --out <file>: optional. If set, writes the canonical binary DAK1
+//                 container (a verified copy of the input keyfile) with
+//                 0600 permissions; the --format text forms are stdout
+//                 VIEWS only and never land on disk (D2).
 //                 Refuses overwrite without --force. Parent dir must exist.
 //   --force:      required to overwrite an existing --out.
 //   --json:       when set together with --format raw-hex, additionally
@@ -2401,78 +2338,30 @@ int cmd_account_export(int argc, char** argv) {
         return 1;
     }
 
-    // ── Read + parse the input account file ─────────────────────────────────
+    // ── Read + decode the input keyfile (canonical binary DAK1) ─────────────
     // File-level failures (missing, unreadable) and structural failures
-    // (bad JSON, missing required keys) both exit 1. We don't split into
-    // 1/2 here because account-export is a passive transform — operators
+    // (bad magic, wrong length, derive mismatch) both exit 1. We don't split
+    // into 1/2 here because account-export is a passive transform — operators
     // pointing it at the wrong file get the same "fix your input" feedback
-    // either way.
-    std::ifstream in_f(in_path);
-    if (!in_f) {
+    // either way. The decoder's derive-equality requirement subsumes the old
+    // JSON-era address/hex shape checks (S-028).
+    auto in_bytes = read_bytes_file(in_path);
+    if (!in_bytes) {
         std::cerr << "account-export: cannot open --in: " << in_path << "\n";
         return 1;
     }
-    nlohmann::json acc_doc;
-    try {
-        in_f >> acc_doc;
-    } catch (std::exception& e) {
-        std::cerr << "account-export: --in is not valid JSON: "
-                  << e.what() << "\n";
+    auto kp_opt = keyfmt::decode_dak1(*in_bytes);
+    if (!in_bytes->empty())
+        determ_secure_zero(in_bytes->data(), in_bytes->size());
+    if (!kp_opt) {
+        std::cerr << "account-export: --in is not a valid DAK1 binary keypair "
+                     "file (exactly 68 bytes: magic 'DAK1' || pubkey || "
+                     "priv_seed, pubkey must match the seed derivation)\n";
         return 1;
     }
-    if (!acc_doc.is_object()) {
-        std::cerr << "account-export: --in must be a JSON object "
-                     "{\"address\":..., \"privkey_hex\":...}; got non-object\n";
-        return 1;
-    }
-    if (!acc_doc.contains("address") || !acc_doc["address"].is_string()) {
-        std::cerr << "account-export: --in missing required string field "
-                     "'address'\n";
-        return 1;
-    }
-    if (!acc_doc.contains("privkey_hex")
-        || !acc_doc["privkey_hex"].is_string()) {
-        std::cerr << "account-export: --in missing required string field "
-                     "'privkey_hex'\n";
-        return 1;
-    }
-    std::string address     = acc_doc["address"].get<std::string>();
-    std::string privkey_hex = acc_doc["privkey_hex"].get<std::string>();
-
-    // ── Validate shape: address is 0x + 64 lowercase hex; privkey is 64 hex ─
-    // We deliberately accept exactly the canonical wallet shape here. If a
-    // future format adds longer or shorter forms, those callers should round-
-    // trip through account-import (which already supports the 128-hex form)
-    // before export.
-    if (address.size() != 66 || address.substr(0, 2) != "0x") {
-        std::cerr << "account-export: 'address' must be \"0x\" + 64 hex "
-                     "chars; got length " << address.size() << "\n";
-        return 1;
-    }
-    try { (void)from_hex(address.substr(2)); }
-    catch (std::exception& e) {
-        std::cerr << "account-export: 'address' hex body is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (privkey_hex.size() != 64) {
-        std::cerr << "account-export: 'privkey_hex' must be 64 hex chars "
-                     "(32-byte seed); got length " << privkey_hex.size()
-                  << "\n";
-        return 1;
-    }
-    std::vector<uint8_t> priv_bytes;
-    try { priv_bytes = from_hex(privkey_hex); }
-    catch (std::exception& e) {
-        std::cerr << "account-export: 'privkey_hex' is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (priv_bytes.size() != 32) {
-        std::cerr << "account-export: 'privkey_hex' decoded length must be "
-                     "32; got " << priv_bytes.size() << "\n";
-        return 1;
-    }
+    std::string pubkey_hex_in = to_hex(kp_opt->pubkey);
+    std::string address       = "0x" + pubkey_hex_in;
+    std::string privkey_hex   = to_hex(kp_opt->priv_seed);
 
     // ── --out preconditions ─────────────────────────────────────────────────
     // Mirrors account-create-batch / account-import: parent dir must exist;
@@ -2509,18 +2398,20 @@ int cmd_account_export(int argc, char** argv) {
             payload = privkey_hex;
         }
     } else if (format == "json") {
-        // Passthrough — but emit with a deterministic key order so
-        // downstream diffs and round-trip tests are stable. nlohmann/json's
-        // default ordering is lexicographic for std::map-backed objects.
-        payload = acc_doc.dump(2);
+        // JSON VIEW of the decoded DAK1 record (address derived from the
+        // pubkey; deterministic key order). Non-authoritative per D2 — the
+        // at-rest form is the binary container.
+        nlohmann::json view = {
+            {"address",     address},
+            {"privkey_hex", privkey_hex},
+        };
+        payload = view.dump(2);
     } else {
         // backup-bundle: derive an ISO-8601 UTC timestamp + emit the
         // envelope-ready JSON. The seed_hex field is named to match
         // backup-create's --secret <hex> input (which accepts the privkey
         // seed verbatim).
-        // pubkey_hex is the address minus the "0x" prefix; we already
-        // validated it as 64 lowercase hex above.
-        std::string pubkey_hex = address.substr(2);
+        std::string pubkey_hex = pubkey_hex_in;
 
         // ISO 8601 UTC. Use gmtime_r/gmtime_s for thread-safety where
         // available; on MSVC the _s suffix is the canonical form, on
@@ -2546,34 +2437,19 @@ int cmd_account_export(int argc, char** argv) {
 
     // ── Dispatch on output destination ─────────────────────────────────────
     if (!out_path.empty()) {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "account-export: cannot open --out for write: "
-                      << out_path << "\n";
+        // D2: files at rest are the canonical binary DAK1 container — the
+        // text formats above are stdout VIEWS only. --out therefore always
+        // re-emits DAK1 bytes (a verified copy of the input keyfile).
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dak1(*kp_opt); }
+        catch (std::exception& e) {
+            std::cerr << "account-export: " << e.what() << "\n";
             return 1;
         }
-        f << payload;
-        // raw-hex is single-line; the JSON formats already include their
-        // own internal newlines from dump(2). Either way, always finish
-        // the file with a trailing newline so POSIX tools don't complain.
-        if (payload.empty() || payload.back() != '\n') f << "\n";
-        f.close();
-        if (!f) {
-            std::cerr << "account-export: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
-        // 0600 permissions — owner-only read/write. On Windows the
-        // read/write bits are a no-op (NTFS ACL inherits from parent);
-        // we ignore the error code as non-fatal there.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
-        std::cout << "exported " << format << ": " << out_path << "\n";
+        const bool ok = write_bytes_file_0600("account-export", out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        if (!ok) return 1;
+        std::cout << "exported DAK1 keyfile: " << out_path << "\n";
         return 0;
     }
     // stdout — payload + single trailing newline (raw-hex needs the LF for
@@ -2660,9 +2536,8 @@ int cmd_backup_verify(int argc, char** argv) {
                      "  Verifies structural integrity of a complete wallet backup\n"
                      "  (Shamir shares + per-share AEAD envelopes) without decrypting.\n"
                      "\n"
-                     "  Shares file shape:    {\"shares\":    [{\"x\": int, \"y_hex\": \"...\"}, ...]}\n"
-                     "  Envelopes file shape: {\"envelopes\": [{\"share_index\": int, "
-                     "\"envelope_blob\": \"...\"}, ...]}\n";
+                     "  Shares file:    canonical binary DSS1 container (D2)\n"
+                     "  Envelopes file: canonical binary DBE1 container (D2)\n";
         return 1;
     }
 
@@ -2690,155 +2565,72 @@ int cmd_backup_verify(int argc, char** argv) {
         (void)share_count_hint;
     };
 
-    // ── Load + parse the shares file ────────────────────────────────────
-    std::ifstream sf(shares_path);
-    if (!sf) {
-        if (json_out) {
-            nlohmann::json r;
-            r["valid"]  = false;
-            r["errors"] = nlohmann::json::array(
-                {std::string("cannot open --shares file: ") + shares_path});
-            std::cout << r.dump() << "\n";
-        } else {
-            std::cerr << "backup-verify: cannot open --shares file: "
-                      << shares_path << "\n";
+    // ── Load + decode the shares file (canonical binary DSS1, D2) ───────
+    // The decoder enforces: magic, count >= 1, x DISTINCT in [1,255],
+    // consistent non-empty y lengths, exact total length.
+    std::vector<keyfmt::Share> shares_recs;
+    {
+        auto bytes = read_bytes_file(shares_path);
+        if (!bytes) {
+            if (json_out) {
+                nlohmann::json r;
+                r["valid"]  = false;
+                r["errors"] = nlohmann::json::array(
+                    {std::string("cannot open --shares file: ") + shares_path});
+                std::cout << r.dump() << "\n";
+            } else {
+                std::cerr << "backup-verify: cannot open --shares file: "
+                          << shares_path << "\n";
+            }
+            return 1;
         }
-        return 1;
-    }
-    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
-                              std::istreambuf_iterator<char>());
-    nlohmann::json sj;
-    try { sj = nlohmann::json::parse(shares_blob); }
-    catch (std::exception& e) {
-        if (json_out) {
-            nlohmann::json r;
-            r["valid"]  = false;
-            r["errors"] = nlohmann::json::array(
-                {std::string("shares JSON parse error: ") + e.what()});
-            std::cout << r.dump() << "\n";
-        } else {
-            std::cerr << "backup-verify: shares JSON parse failed: "
-                      << e.what() << "\n";
+        auto recs = keyfmt::decode_dss1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            report_fail("shares file: not a canonical DSS1 binary share-set");
+            return 2;
         }
-        return 1;
+        shares_recs = std::move(*recs);
     }
-
-    // ── Load + parse the envelopes file ─────────────────────────────────
-    std::ifstream ef(envelopes_path);
-    if (!ef) {
-        if (json_out) {
-            nlohmann::json r;
-            r["valid"]  = false;
-            r["errors"] = nlohmann::json::array(
-                {std::string("cannot open --envelopes file: ") + envelopes_path});
-            std::cout << r.dump() << "\n";
-        } else {
-            std::cerr << "backup-verify: cannot open --envelopes file: "
-                      << envelopes_path << "\n";
-        }
-        return 1;
-    }
-    std::string envs_blob((std::istreambuf_iterator<char>(ef)),
-                            std::istreambuf_iterator<char>());
-    nlohmann::json ej;
-    try { ej = nlohmann::json::parse(envs_blob); }
-    catch (std::exception& e) {
-        if (json_out) {
-            nlohmann::json r;
-            r["valid"]  = false;
-            r["errors"] = nlohmann::json::array(
-                {std::string("envelopes JSON parse error: ") + e.what()});
-            std::cout << r.dump() << "\n";
-        } else {
-            std::cerr << "backup-verify: envelopes JSON parse failed: "
-                      << e.what() << "\n";
-        }
-        return 1;
-    }
-
-    // ── Validate shares file shape ──────────────────────────────────────
-    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
-        report_fail("shares file: top-level must be object with 'shares' array");
-        return 2;
-    }
-    const auto& shares_arr = sj["shares"];
-    if (shares_arr.empty()) {
-        report_fail("shares file: 'shares' array is empty");
-        return 2;
-    }
-
-    auto is_hex_char = [](char c) {
-        return (c >= '0' && c <= '9')
-            || (c >= 'a' && c <= 'f')
-            || (c >= 'A' && c <= 'F');
-    };
-
     std::set<int> share_x;
     int x_min = 256, x_max = -1;
-    size_t y_byte_len = 0;
-    for (size_t i = 0; i < shares_arr.size(); ++i) {
-        const auto& el = shares_arr[i];
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            report_fail("shares file: share #" + std::to_string(i)
-                        + " must have integer 'x' and string 'y_hex'");
-            return 2;
-        }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            report_fail("shares file: share #" + std::to_string(i)
-                        + ": x = " + std::to_string(x)
-                        + " out of range [1, 255]");
-            return 2;
-        }
-        if (!share_x.insert(x).second) {
-            report_fail("shares file: duplicate x = " + std::to_string(x));
-            return 2;
-        }
-        if (x < x_min) x_min = x;
-        if (x > x_max) x_max = x;
+    for (const auto& sh : shares_recs) {
+        share_x.insert(sh.x);
+        if (sh.x < x_min) x_min = sh.x;
+        if (sh.x > x_max) x_max = sh.x;
+    }
+    const size_t y_byte_len = shares_recs.front().y.size();
 
-        std::string y_hex = el["y_hex"].get<std::string>();
-        if (y_hex.size() % 2 != 0) {
-            report_fail("shares file: share x=" + std::to_string(x)
-                        + ": y_hex has odd length");
-            return 2;
-        }
-        for (char c : y_hex) {
-            if (!is_hex_char(c)) {
-                report_fail("shares file: share x=" + std::to_string(x)
-                            + ": y_hex contains non-hex character");
-                return 2;
+    // ── Load + decode the envelopes file (canonical binary DBE1, D2) ────
+    std::vector<keyfmt::ShareEnvelope> env_recs;
+    {
+        auto bytes = read_bytes_file(envelopes_path);
+        if (!bytes) {
+            if (json_out) {
+                nlohmann::json r;
+                r["valid"]  = false;
+                r["errors"] = nlohmann::json::array(
+                    {std::string("cannot open --envelopes file: ") + envelopes_path});
+                std::cout << r.dump() << "\n";
+            } else {
+                std::cerr << "backup-verify: cannot open --envelopes file: "
+                          << envelopes_path << "\n";
             }
+            return 1;
         }
-        size_t this_y_len = y_hex.size() / 2;
-        if (this_y_len == 0) {
-            report_fail("shares file: share x=" + std::to_string(x)
-                        + ": y_hex is empty");
+        auto recs = keyfmt::decode_dbe1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            report_fail("envelopes file: not a canonical DBE1 binary container");
             return 2;
         }
-        if (y_byte_len == 0) y_byte_len = this_y_len;
-        else if (this_y_len != y_byte_len) {
-            report_fail("shares file: share x=" + std::to_string(x)
-                        + ": y_hex length differs from first share");
-            return 2;
-        }
+        env_recs = std::move(*recs);
     }
 
-    // ── Validate envelopes file shape ───────────────────────────────────
-    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
-        report_fail("envelopes file: top-level must be object with 'envelopes' array");
-        return 2;
-    }
-    const auto& env_arr = ej["envelopes"];
-    if (env_arr.empty()) {
-        report_fail("envelopes file: 'envelopes' array is empty");
-        return 2;
-    }
-
-    // Parse each envelope entry; collect per-entry diagnostics for the
-    // envelope_details JSON output.
+    // Per-envelope structural sanity + diagnostics for the JSON output.
+    // decode_dbe1 already validated each embedded DWE container; recheck
+    // the field bounds here so the report carries actual values and a
+    // future decoder relaxation cannot silently bypass this gate.
     struct EnvDetail {
         int      share_index{0};
         bool     is_argon{false};       // R58 DWE2/Argon2id vs DWE1/PBKDF2
@@ -2854,45 +2646,17 @@ int cmd_backup_verify(int argc, char** argv) {
     };
     std::vector<EnvDetail> details;
     std::set<int> env_idx;
-    for (size_t i = 0; i < env_arr.size(); ++i) {
-        const auto& el = env_arr[i];
-        if (!el.is_object()
-            || !el.contains("share_index")
-            || !el["share_index"].is_number_integer()
-            || !el.contains("envelope_blob")
-            || !el["envelope_blob"].is_string()) {
-            report_fail("envelopes file: entry #" + std::to_string(i)
-                        + " must have integer 'share_index' and string 'envelope_blob'");
-            return 2;
-        }
-        int idx = el["share_index"].get<int>();
-        if (idx < 1 || idx > 255) {
-            report_fail("envelopes file: entry #" + std::to_string(i)
-                        + ": share_index = " + std::to_string(idx)
-                        + " out of range [1, 255]");
-            return 2;
-        }
-        if (!env_idx.insert(idx).second) {
-            report_fail("envelopes file: duplicate share_index = "
-                        + std::to_string(idx));
-            return 2;
-        }
-        std::string blob = el["envelope_blob"].get<std::string>();
-        auto env_opt = envelope::deserialize(blob);
+    for (const auto& er : env_recs) {
+        const int idx = er.share_index;
+        env_idx.insert(idx);
+        auto env_opt = envelope::deserialize_bytes(er.env_bytes);
         if (!env_opt) {
             report_fail("envelopes file: entry share_index="
                         + std::to_string(idx)
-                        + ": envelope_blob deserialize failed "
-                        + "(bad magic, truncated, or non-hex content)");
+                        + ": embedded envelope failed deserialize");
             return 2;
         }
         const auto& env = *env_opt;
-        // Per-envelope structural sanity checks. envelope::deserialize
-        // already enforces salt >= 8B, nonce == 12B, ciphertext >= 16B,
-        // and a non-zero KDF cost, but recheck here so the JSON output
-        // reports the actual values and a future deserialize-relaxation
-        // doesn't silently bypass. KDF-aware: DWE1 keys on pbkdf2_iters,
-        // DWE2 (Argon2id) on the t_cost pass count.
         const bool kdf_cost_ok = (env.kdf == envelope::Kdf::ARGON2ID)
                                      ? (env.argon2_t != 0)
                                      : (env.pbkdf2_iters != 0);
@@ -2927,8 +2691,8 @@ int cmd_backup_verify(int argc, char** argv) {
     }
 
     // ── Cross-file consistency: counts + 1:1 index mapping ──────────────
-    const int share_count    = static_cast<int>(shares_arr.size());
-    const int envelope_count = static_cast<int>(env_arr.size());
+    const int share_count    = static_cast<int>(shares_recs.size());
+    const int envelope_count = static_cast<int>(env_recs.size());
     bool mapping_consistent = true;
     if (share_count != envelope_count) {
         report_fail("share count (" + std::to_string(share_count)
@@ -3279,8 +3043,7 @@ int cmd_backup_create(int argc, char** argv) {
     // the passphrase by share.x.
 
     // ── Per-share AEAD wrap ──────────────────────────────────────────────
-    nlohmann::json envs_arr = nlohmann::json::array();
-    nlohmann::json shares_arr = nlohmann::json::array();
+    std::vector<keyfmt::ShareEnvelope> env_recs;
     for (const auto& s : shares) {
         int idx = static_cast<int>(s.x);
         if (idx < 1 || idx > share_count || pw_by_index[idx].empty()) {
@@ -3296,28 +3059,30 @@ int cmd_backup_create(int argc, char** argv) {
                       << idx << "): " << e.what() << "\n";
             return 1;
         }
-        std::string blob = envelope::serialize(env);
-        envs_arr.push_back({
-            {"share_index",   idx},
-            {"envelope_blob", blob},
-        });
-        shares_arr.push_back({
-            {"x",     idx},
-            {"y_hex", to_hex(s.y)},
-        });
+        keyfmt::ShareEnvelope er;
+        er.share_index = s.x;
+        er.env_bytes   = envelope::serialize_bytes(env);
+        env_recs.push_back(std::move(er));
     }
 
-    // ── Write shares file ────────────────────────────────────────────────
+    // ── Write shares file (canonical binary DSS1, D2) ────────────────────
     {
-        std::ofstream f(shares_out);
+        std::vector<uint8_t> bytes;
+        try { bytes = encode_dss1_shares(shares); }
+        catch (std::exception& e) {
+            std::cerr << "backup-create: " << e.what() << "\n";
+            return 1;
+        }
+        std::ofstream f(shares_out, std::ios::binary | std::ios::trunc);
         if (!f) {
             std::cerr << "backup-create: cannot open --shares-out for write: "
                       << shares_out << "\n";
             return 1;
         }
-        nlohmann::json doc;
-        doc["shares"] = std::move(shares_arr);
-        f << doc.dump() << "\n";
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        f.close();
+        determ_secure_zero(bytes.data(), bytes.size());
         if (!f) {
             std::cerr << "backup-create: write failed on --shares-out: "
                       << shares_out << "\n";
@@ -3335,17 +3100,23 @@ int cmd_backup_create(int argc, char** argv) {
         (void)perm_ec;
     }
 
-    // ── Write envelopes file ─────────────────────────────────────────────
+    // ── Write envelopes file (canonical binary DBE1, D2) ─────────────────
     {
-        std::ofstream f(envs_out);
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dbe1(env_recs); }
+        catch (std::exception& e) {
+            std::cerr << "backup-create: " << e.what() << "\n";
+            return 1;
+        }
+        std::ofstream f(envs_out, std::ios::binary | std::ios::trunc);
         if (!f) {
             std::cerr << "backup-create: cannot open --envelopes-out for write: "
                       << envs_out << "\n";
             return 1;
         }
-        nlohmann::json doc;
-        doc["envelopes"] = std::move(envs_arr);
-        f << doc.dump() << "\n";
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        f.close();
         if (!f) {
             std::cerr << "backup-create: write failed on --envelopes-out: "
                       << envs_out << "\n";
@@ -3401,7 +3172,7 @@ int cmd_backup_create(int argc, char** argv) {
 // --passphrase` from src/main.cpp::cmd_account_create — established
 // precedent for envelope-wrapped key files):
 //
-//   line 1: "DETERM-NODE-V1 <pubkey_hex>\n"
+//   binary DNK1 container: "DNK1" || pubkey 32B || env_len u32 LE || DWE bytes
 //   line 2: "<envelope_blob>\n"
 //
 //   <pubkey_hex>   = 64-char lowercase hex of the Ed25519 public key.
@@ -3591,8 +3362,7 @@ int cmd_keyfile_create(int argc, char** argv) {
             return 1;
         }
     }
-    std::string pubkey_hex   = to_hex(derived_pub);
-    std::string priv_seed_hex = to_hex(seed);
+    std::string pubkey_hex = to_hex(derived_pub);
 
     // ── Read passphrase from configured source ──────────────────────────────
     std::string err;
@@ -3620,96 +3390,77 @@ int cmd_keyfile_create(int argc, char** argv) {
         }
     }
 
-    // ── Build the canonical keyfile JSON (plaintext-inside-envelope) ────────
-    // Matches src/crypto/keys.cpp::load_node_key exactly: top-level
-    // object with `pubkey` (64-hex) and `priv_seed` (64-hex) string
-    // fields. Both are required + S-018 length-validated by the daemon.
-    nlohmann::json keyfile_json = {
-        {"pubkey",    pubkey_hex},
-        {"priv_seed", priv_seed_hex}
-    };
-    std::string pt_str = keyfile_json.dump(2);
-    std::vector<uint8_t> pt_bytes(pt_str.begin(), pt_str.end());
+    // ── Build the canonical DNK1 container (D2) ─────────────────────────────
+    // Envelope plaintext = the RAW 32-byte seed (no inner JSON). AAD = the
+    // RAW 32-byte pubkey — binds the envelope to this validator's public
+    // key; a tampered header pubkey (or an envelope substituted from
+    // another validator, same passphrase) fails GCM tag verification.
+    std::vector<uint8_t> pt_bytes(seed.begin(), seed.end());
+    std::vector<uint8_t> aad(derived_pub.begin(), derived_pub.end());
 
-    // AAD = ASCII bytes of pubkey hex. Binds the envelope to this
-    // validator's public key — a tampered envelope substituted from
-    // another validator (same passphrase) will fail GCM tag verification.
-    std::vector<uint8_t> aad(pubkey_hex.begin(), pubkey_hex.end());
-
-    // ── Encrypt + write the canonical 2-line file ───────────────────────────
-    std::string blob;
+    std::vector<uint8_t> env_bytes;
     try {
         auto env  = envelope::encrypt(pt_bytes, passphrase, aad);
-        blob      = envelope::serialize(env);
+        env_bytes = envelope::serialize_bytes(env);
     } catch (std::exception& e) {
+        determ_secure_zero(pt_bytes.data(), pt_bytes.size());
         std::cerr << "keyfile-create: envelope encrypt failed: "
                   << e.what() << "\n";
         return 1;
     }
 
-    // ── Self-test round-trip: decrypt the freshly-written envelope ──────────
+    // ── Self-test round-trip: decrypt the exact bytes to be written ─────────
     // Catches any drift between encrypt + decrypt paths before the
     // operator ships the file. Cheap belt-and-suspenders: a wrong
-    // passphrase / corrupted blob fails here BEFORE we touch --out.
+    // passphrase / corrupted container fails here BEFORE we touch --out.
     {
-        auto roundtrip_env = envelope::deserialize(blob);
+        auto roundtrip_env = envelope::deserialize_bytes(env_bytes);
         if (!roundtrip_env) {
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
             std::cerr << "keyfile-create: internal: just-emitted envelope "
-                         "blob fails deserialize\n";
+                         "bytes fail deserialize\n";
             return 1;
         }
         auto rt_pt = envelope::decrypt(*roundtrip_env, passphrase, aad);
         if (!rt_pt) {
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
             std::cerr << "keyfile-create: internal: just-emitted envelope "
                          "fails decrypt round-trip\n";
             return 1;
         }
-        if (*rt_pt != pt_bytes) {
+        bool rt_match = (*rt_pt == pt_bytes);
+        determ_secure_zero(rt_pt->data(), rt_pt->size());
+        if (!rt_match) {
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
             std::cerr << "keyfile-create: internal: round-trip plaintext "
                          "mismatch\n";
             return 1;
         }
     }
 
-    {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "keyfile-create: cannot open --out for write: "
-                      << out_path << "\n";
-            return 1;
-        }
-        f << "DETERM-NODE-V1 " << pubkey_hex << "\n";
-        f << blob << "\n";
-        f.close();
-        if (!f) {
-            std::cerr << "keyfile-create: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
+    std::vector<uint8_t> nk_bytes;
+    try { nk_bytes = keyfmt::encode_dnk1(derived_pub, env_bytes); }
+    catch (std::exception& e) {
+        determ_secure_zero(pt_bytes.data(), pt_bytes.size());
+        std::cerr << "keyfile-create: " << e.what() << "\n";
+        return 1;
     }
-
-    // 0600 permissions tightening — best-effort on Windows.
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
-    }
+    const bool wrote = write_bytes_file_0600("keyfile-create", out_path, nk_bytes);
+    determ_secure_zero(pt_bytes.data(), pt_bytes.size());
+    determ_secure_zero(seed.data(), seed.size());
+    if (!wrote) return 1;
 
     if (json_out) {
         nlohmann::json r;
         r["pubkey"]      = pubkey_hex;
         r["out"]         = out_path;
-        r["format"]      = "DETERM-NODE-V1";
-        r["envelope"]    = "DWE1";
+        r["format"]      = "DNK1";
+        r["envelope"]    = "DWE2";
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "wrote encrypted node keyfile to " << out_path << "\n";
         std::cout << "  pubkey: " << pubkey_hex << "\n";
-        std::cout << "  format: DETERM-NODE-V1 (header) + DWE1 envelope\n";
+        std::cout << "  format: DNK1 (binary) + DWE2 envelope\n";
     }
     return 0;
 }
@@ -3727,7 +3478,7 @@ int cmd_keyfile_create(int argc, char** argv) {
 // Inputs:
 //   --in <file>           : encrypted keyfile produced by keyfile-create.
 //                           Canonical 2-line format:
-//                              line 1: "DETERM-NODE-V1 <pubkey_hex>\n"
+//                              the binary DNK1 container (D2)
 //                              line 2: "<DWE1 envelope blob>\n"
 //   --passphrase-from src : same as keyfile-create — `file:<path>`,
 //                           `env:<NAME>`, or `prompt` (no-echo interactive)
@@ -3792,60 +3543,27 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
         return 1;
     }
 
-    // ── Read --in and parse the canonical 2-line format ────────────────────
-    std::string header_line, blob_line;
+    // ── Read --in and decode the canonical DNK1 container (D2) ─────────────
+    // The decoder enforces: magic 'DNK1', 32-byte header pubkey, env_len
+    // reaching EOF exactly, and a well-formed embedded DWE envelope.
+    // Done before passphrase read so a structurally-broken file fails fast
+    // without prompting.
+    std::optional<keyfmt::NodeKeyfile> nk_opt;
     {
-        std::ifstream f(in_path);
-        if (!f) {
+        auto bytes = read_bytes_file(in_path);
+        if (!bytes) {
             std::cerr << "keyfile-decrypt: cannot open --in: " << in_path << "\n";
             return 1;
         }
-        if (!std::getline(f, header_line)) {
-            std::cerr << "keyfile-decrypt: --in is empty: " << in_path << "\n";
+        nk_opt = keyfmt::decode_dnk1(*bytes);
+        if (!nk_opt) {
+            std::cerr << "keyfile-decrypt: --in is not a canonical DNK1 "
+                         "encrypted node keyfile (magic 'DNK1' || pubkey 32B "
+                         "|| env_len u32 LE || DWE envelope bytes)\n";
             return 1;
         }
-        if (!std::getline(f, blob_line)) {
-            std::cerr << "keyfile-decrypt: --in is missing the envelope-blob "
-                         "line (expected 2-line format: header + blob): "
-                      << in_path << "\n";
-            return 1;
-        }
-        // Strip trailing CR (Windows-style line endings) for portability.
-        while (!header_line.empty()
-               && (header_line.back() == '\r' || header_line.back() == '\n'))
-            header_line.pop_back();
-        while (!blob_line.empty()
-               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
-            blob_line.pop_back();
     }
-
-    // Header shape: "DETERM-NODE-V1 <pubkey_hex>"
-    const std::string header_magic = "DETERM-NODE-V1 ";
-    if (header_line.rfind(header_magic, 0) != 0) {
-        std::cerr << "keyfile-decrypt: --in header does not start with "
-                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
-                     "keyfile)\n";
-        return 1;
-    }
-    std::string header_pubkey_hex = header_line.substr(header_magic.size());
-    if (header_pubkey_hex.size() != 64) {
-        std::cerr << "keyfile-decrypt: --in header pubkey must be 64 hex "
-                     "chars (32-byte Ed25519 pubkey); got "
-                  << header_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    // Validate the header pubkey is well-formed hex. Done before passphrase
-    // read so a structurally-broken file fails fast without prompting.
-    try { (void)from_hex(header_pubkey_hex); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-decrypt: --in header pubkey is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (blob_line.empty()) {
-        std::cerr << "keyfile-decrypt: --in envelope blob line is empty\n";
-        return 1;
-    }
+    std::string header_pubkey_hex = to_hex(nk_opt->pubkey);
 
     // ── Read passphrase ────────────────────────────────────────────────────
     std::string err;
@@ -3873,92 +3591,59 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
         }
     }
 
-    // ── Deserialize envelope blob ──────────────────────────────────────────
-    // A blob that fails to deserialize is a structural problem with the
-    // --in file — exit 1 with a specific diagnostic. Distinguishing from
-    // wrong-passphrase here is fine because it doesn't depend on
-    // passphrase knowledge.
-    auto env_opt = envelope::deserialize(blob_line);
-    if (!env_opt) {
-        std::cerr << "keyfile-decrypt: --in envelope blob is malformed "
-                     "(not a valid DWE1 serialization)\n";
-        return 1;
-    }
-
-    // ── Decrypt with pubkey_hex as AAD ─────────────────────────────────────
-    // AAD binding: keyfile-create binds the header pubkey into the GCM
-    // AAD. Any tampering with the header pubkey (or substitution of an
-    // envelope from a different validator) breaks AEAD verification
+    // ── Decrypt with the RAW header pubkey as AAD ──────────────────────────
+    // AAD binding: keyfile-create binds the raw 32-byte header pubkey into
+    // the GCM AAD. Any tampering with the header pubkey (or substitution of
+    // an envelope from a different validator) breaks AEAD verification
     // here — same exit code / diagnostic as wrong passphrase, so an
     // attacker cannot distinguish.
-    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    auto env_opt = envelope::deserialize_bytes(nk_opt->env_bytes);
+    if (!env_opt) {
+        // Unreachable after decode_dnk1 (which validates the embedded
+        // envelope) — kept as a belt-and-suspenders structural guard.
+        std::cerr << "keyfile-decrypt: --in embedded envelope is malformed\n";
+        return 1;
+    }
+    std::vector<uint8_t> aad(nk_opt->pubkey.begin(), nk_opt->pubkey.end());
     auto pt_opt = envelope::decrypt(*env_opt, passphrase, aad);
     if (!pt_opt) {
         std::cerr << "keyfile-decrypt: wrong passphrase or corrupted "
                      "keyfile\n";
         return 2;
     }
-    std::string pt_str(pt_opt->begin(), pt_opt->end());
 
-    // ── Parse decrypted plaintext as canonical node_key JSON ───────────────
-    // The decrypted plaintext is the same {"pubkey","priv_seed"} JSON the
-    // daemon's load_node_key path consumes. Bad JSON here is a structural
-    // problem (caller used keyfile-decrypt on a non-keyfile-create envelope)
-    // — exit 1 with a specific diagnostic.
-    nlohmann::json keyfile_json;
-    try {
-        keyfile_json = nlohmann::json::parse(pt_str);
-    } catch (std::exception& e) {
-        std::cerr << "keyfile-decrypt: decrypted plaintext is not valid JSON "
-                     "(this is not a canonical encrypted node keyfile): "
-                  << e.what() << "\n";
+    // ── Validate the plaintext: the RAW 32-byte seed (no inner JSON, D2) ───
+    // Derive-equality: pubkey(seed) must equal the header pubkey. The AAD
+    // already ties the header to the ciphertext, so a mismatch can only
+    // happen if a keyfile was hand-crafted outside the canonical
+    // keyfile-create path — surfaced as a structural problem (exit 1).
+    if (pt_opt->size() != 32) {
+        determ_secure_zero(pt_opt->data(), pt_opt->size());
+        std::cerr << "keyfile-decrypt: decrypted plaintext is not a raw "
+                     "32-byte seed (this is not a canonical DNK1 keyfile)\n";
         return 1;
     }
-    if (!keyfile_json.is_object()
-        || !keyfile_json.contains("pubkey")
-        || !keyfile_json.contains("priv_seed")
-        || !keyfile_json["pubkey"].is_string()
-        || !keyfile_json["priv_seed"].is_string()) {
-        std::cerr << "keyfile-decrypt: decrypted plaintext is missing the "
-                     "required 'pubkey' / 'priv_seed' string fields\n";
-        return 1;
+    {
+        std::array<uint8_t, 32> derived{};
+        determ_ed25519_pubkey_from_seed(pt_opt->data(), derived.data());
+        if (derived != nk_opt->pubkey) {
+            determ_secure_zero(pt_opt->data(), pt_opt->size());
+            std::cerr << "keyfile-decrypt: decrypted seed does not derive the "
+                         "header pubkey (" << header_pubkey_hex
+                      << "); the container was not produced by the canonical "
+                         "keyfile-create path\n";
+            return 1;
+        }
     }
-    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
-    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
-    if (inner_pubkey_hex.size() != 64) {
-        std::cerr << "keyfile-decrypt: inner 'pubkey' must be 64 hex chars; "
-                     "got " << inner_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    if (priv_seed_hex.size() != 64) {
-        std::cerr << "keyfile-decrypt: inner 'priv_seed' must be 64 hex "
-                     "chars; got " << priv_seed_hex.size() << "\n";
-        return 1;
-    }
-    // Hex validation (defense-in-depth — the daemon's S-018 path enforces
-    // this, but the operator probably wants the wallet to catch it first).
-    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-decrypt: inner JSON contains invalid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-
-    // ── Header-vs-inner pubkey defense-in-depth check ──────────────────────
-    // The AAD already ties the header pubkey to the ciphertext, so a
-    // mismatch here can only happen if a keyfile was hand-crafted outside
-    // the canonical keyfile-create path. We surface it as a structural
-    // problem with a clear diagnostic rather than silently using one or
-    // the other — the operator should investigate provenance.
-    if (inner_pubkey_hex != header_pubkey_hex) {
-        std::cerr << "keyfile-decrypt: inner 'pubkey' (" << inner_pubkey_hex
-                  << ") does not match header pubkey (" << header_pubkey_hex
-                  << "); the encrypted blob was not produced by the "
-                     "canonical keyfile-create path\n";
-        return 1;
-    }
+    std::string inner_pubkey_hex = header_pubkey_hex;
+    std::string priv_seed_hex    = to_hex(*pt_opt);
+    determ_secure_zero(pt_opt->data(), pt_opt->size());
 
     // ── Format canonical plaintext node_key.json ───────────────────────────
+    // D2-DEFERRED(src): node_key.json stays the daemon's JSON keyfile until
+    // the src-side D2 storage/keyfiles increment binarizes
+    // src/crypto/keys.cpp (save_node_key/load_node_key). Do NOT binarize
+    // this output wallet-side or the daemon can't load its key.
     // Matches src/crypto/keys.cpp::save_node_key byte-for-byte: nlohmann
     // dump with indent=2, fields {"pubkey","priv_seed"} as 64-hex strings.
     // The daemon's load_node_key only requires the two named fields to be
@@ -4002,7 +3687,7 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
         r["pubkey"]   = inner_pubkey_hex;
         r["out"]      = out_path;
         r["format"]   = "node_key.json";
-        r["from"]     = "DETERM-NODE-V1";
+        r["from"]     = "DNK1";
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "wrote plaintext node keyfile to " << out_path << "\n";
@@ -4047,7 +3732,7 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
 //
 // Flow:
 //   1. Read --in; parse the 2-line canonical format (header + blob).
-//   2. Validate header magic (DETERM-NODE-V1) + pubkey shape (64 hex).
+//   2. Decode the binary DNK1 container (magic + pubkey + envelope).
 //   3. Deserialize the DWE1 envelope blob.
 //   4. Resolve --old-passphrase-from + --new-passphrase-from.
 //   5. Reject same-passphrase rotation unless --force-same-passphrase.
@@ -4139,60 +3824,23 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     // Fallback string compare for robustness.
     if (!in_place && in_path == out_path) in_place = true;
 
-    // ── Read --in and parse the canonical 2-line format ────────────────────
-    std::string header_line, blob_line;
+    // ── Read --in and decode the canonical DNK1 container (D2) ─────────────
+    std::optional<keyfmt::NodeKeyfile> nk_opt;
     {
-        std::ifstream f(in_path);
-        if (!f) {
+        auto bytes = read_bytes_file(in_path);
+        if (!bytes) {
             std::cerr << "keyfile-rotate: cannot open --in: " << in_path << "\n";
             return 1;
         }
-        if (!std::getline(f, header_line)) {
-            std::cerr << "keyfile-rotate: --in is empty: " << in_path << "\n";
+        nk_opt = keyfmt::decode_dnk1(*bytes);
+        if (!nk_opt) {
+            std::cerr << "keyfile-rotate: --in is not a canonical DNK1 "
+                         "encrypted node keyfile (magic 'DNK1' || pubkey 32B "
+                         "|| env_len u32 LE || DWE envelope bytes)\n";
             return 1;
         }
-        if (!std::getline(f, blob_line)) {
-            std::cerr << "keyfile-rotate: --in is missing the envelope-blob "
-                         "line (expected 2-line format: header + blob): "
-                      << in_path << "\n";
-            return 1;
-        }
-        while (!header_line.empty()
-               && (header_line.back() == '\r' || header_line.back() == '\n'))
-            header_line.pop_back();
-        while (!blob_line.empty()
-               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
-            blob_line.pop_back();
     }
-
-    const std::string header_magic = "DETERM-NODE-V1 ";
-    if (header_line.rfind(header_magic, 0) != 0) {
-        std::cerr << "keyfile-rotate: --in header does not start with "
-                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
-                     "keyfile)\n";
-        return 1;
-    }
-    std::string header_pubkey_hex = header_line.substr(header_magic.size());
-    if (header_pubkey_hex.size() != 64) {
-        std::cerr << "keyfile-rotate: --in header pubkey must be 64 hex "
-                     "chars (32-byte Ed25519 pubkey); got "
-                  << header_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    try { (void)from_hex(header_pubkey_hex); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-rotate: --in header pubkey is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (blob_line.empty()) {
-        std::cerr << "keyfile-rotate: --in envelope blob line is empty\n";
-        return 1;
-    }
-
-    // Lowercase the pubkey hex for canonical anon-address; the AAD
-    // binding uses the bytes as supplied in the file header, so do NOT
-    // alter the AAD source — just derive a display-canonical address.
+    std::string header_pubkey_hex = to_hex(nk_opt->pubkey);
     std::string anon_address = "0x" + header_pubkey_hex;
 
     // ── Read OLD + NEW passphrases ─────────────────────────────────────────
@@ -4260,19 +3908,21 @@ int cmd_keyfile_rotate(int argc, char** argv) {
         }
     }
 
-    // ── Deserialize the envelope blob ──────────────────────────────────────
-    auto env_opt = envelope::deserialize(blob_line);
+    // ── Deserialize the embedded envelope bytes ────────────────────────────
+    auto env_opt = envelope::deserialize_bytes(nk_opt->env_bytes);
     if (!env_opt) {
+        // Unreachable after decode_dnk1 (which validates the embedded
+        // envelope) — kept as a belt-and-suspenders structural guard.
         determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         determ_secure_zero(new_passphrase.data(), new_passphrase.size());
-        std::cerr << "keyfile-rotate: --in envelope blob is malformed "
-                     "(not a valid DWE1 serialization)\n";
+        std::cerr << "keyfile-rotate: --in embedded envelope is malformed\n";
         return 1;
     }
 
     // ── Decrypt with OLD passphrase ────────────────────────────────────────
-    // AAD = ASCII bytes of header_pubkey_hex (matches keyfile-create).
-    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    // AAD = the RAW 32-byte header pubkey (matches keyfile-create); a
+    // tampered header pubkey substitutes a different AAD ⇒ AEAD failure.
+    std::vector<uint8_t> aad(nk_opt->pubkey.begin(), nk_opt->pubkey.end());
     auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
     if (!pt_opt) {
         determ_secure_zero(old_passphrase.data(), old_passphrase.size());
@@ -4300,81 +3950,42 @@ int cmd_keyfile_rotate(int argc, char** argv) {
             determ_secure_zero(new_passphrase.data(), new_passphrase.size());
     };
 
-    // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
-    std::string pt_str(pt_bytes.begin(), pt_bytes.end());
-    nlohmann::json keyfile_json;
-    try {
-        keyfile_json = nlohmann::json::parse(pt_str);
-    } catch (std::exception& e) {
+    // ── Validate the plaintext: raw 32-byte seed, derive-equality (D2) ─────
+    if (pt_bytes.size() != 32) {
         secure_zero_all();
-        std::cerr << "keyfile-rotate: decrypted plaintext is not valid JSON "
-                     "(this is not a canonical encrypted node keyfile): "
-                  << e.what() << "\n";
+        std::cerr << "keyfile-rotate: decrypted plaintext is not a raw "
+                     "32-byte seed (this is not a canonical DNK1 keyfile)\n";
         return 1;
     }
-    if (!keyfile_json.is_object()
-        || !keyfile_json.contains("pubkey")
-        || !keyfile_json.contains("priv_seed")
-        || !keyfile_json["pubkey"].is_string()
-        || !keyfile_json["priv_seed"].is_string()) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: decrypted plaintext is missing the "
-                     "required 'pubkey' / 'priv_seed' string fields\n";
-        return 1;
-    }
-    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
-    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
-    if (inner_pubkey_hex.size() != 64) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: inner 'pubkey' must be 64 hex chars; "
-                     "got " << inner_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    if (priv_seed_hex.size() != 64) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: inner 'priv_seed' must be 64 hex "
-                     "chars; got " << priv_seed_hex.size() << "\n";
-        return 1;
-    }
-    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
-    catch (std::exception& e) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: inner JSON contains invalid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (inner_pubkey_hex != header_pubkey_hex) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: inner 'pubkey' (" << inner_pubkey_hex
-                  << ") does not match header pubkey (" << header_pubkey_hex
-                  << "); the encrypted blob was not produced by the "
-                     "canonical keyfile-create path\n";
-        return 1;
+    {
+        std::array<uint8_t, 32> derived{};
+        determ_ed25519_pubkey_from_seed(pt_bytes.data(), derived.data());
+        if (derived != nk_opt->pubkey) {
+            secure_zero_all();
+            std::cerr << "keyfile-rotate: decrypted seed does not derive the "
+                         "header pubkey (" << header_pubkey_hex
+                      << "); the container was not produced by the canonical "
+                         "keyfile-create path\n";
+            return 1;
+        }
     }
 
     // ── Encrypt under the NEW passphrase (fresh salt + fresh nonce) ────────
     // envelope::encrypt generates a fresh 16-byte salt + fresh 12-byte
     // nonce per call (RAND_bytes) — rotation gets distinct crypto
     // material by construction, even with --force-same-passphrase.
-    std::string blob;
+    std::vector<uint8_t> nk_bytes;
     try {
-        auto new_env = envelope::encrypt(pt_bytes, new_passphrase, aad);
-        blob         = envelope::serialize(new_env);
-    } catch (std::exception& e) {
-        secure_zero_all();
-        std::cerr << "keyfile-rotate: envelope encrypt failed: "
-                  << e.what() << "\n";
-        return 1;
-    }
+        auto new_env   = envelope::encrypt(pt_bytes, new_passphrase, aad);
+        auto env_bytes = envelope::serialize_bytes(new_env);
 
-    // ── Self-test round-trip: decrypt the freshly-encrypted envelope ───────
-    // Catches encrypt/decrypt path drift BEFORE we overwrite --in.
-    {
-        auto rt_env = envelope::deserialize(blob);
+        // Self-test round-trip: decrypt the freshly-encrypted envelope
+        // BEFORE we overwrite --in (catches encrypt/decrypt path drift).
+        auto rt_env = envelope::deserialize_bytes(env_bytes);
         if (!rt_env) {
             secure_zero_all();
             std::cerr << "keyfile-rotate: internal: just-emitted envelope "
-                         "blob fails deserialize\n";
+                         "bytes fail deserialize\n";
             return 1;
         }
         auto rt_pt = envelope::decrypt(*rt_env, new_passphrase, aad);
@@ -4392,17 +4003,25 @@ int cmd_keyfile_rotate(int argc, char** argv) {
                          "mismatch under new passphrase\n";
             return 1;
         }
+
+        // Header pubkey preserved verbatim ⇒ on-chain identity unchanged.
+        nk_bytes = keyfmt::encode_dnk1(nk_opt->pubkey, env_bytes);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: envelope encrypt failed: "
+                  << e.what() << "\n";
+        return 1;
     }
 
-    // ── Atomic file write: stage to <out>_tmp.json + fsync + rename ────────
-    // 1. Write the full 2-line content to <out>_tmp.json.
+    // ── Atomic file write: stage to <out>_tmp.bin + fsync + rename ─────────
+    // 1. Write the full binary DNK1 container to <out>_tmp.bin.
     // 2. fflush the C++ stream.
     // 3. OS-level commit (fsync on POSIX, _commit on Windows) — without
     //    this the rename can complete before bytes hit disk, and a
     //    crash mid-window leaves an empty or torn file.
     // 4. Atomic rename via std::filesystem::rename (atomic for
     //    same-volume targets on both POSIX and Windows).
-    std::string tmp_path = out_path + "_tmp.json";
+    std::string tmp_path = out_path + "_tmp.bin";
     {
         // Remove a stale leftover tmp file from a prior crashed rotation.
         std::error_code rm_ec;
@@ -4417,8 +4036,8 @@ int cmd_keyfile_rotate(int argc, char** argv) {
                       << tmp_path << "\n";
             return 1;
         }
-        f << "DETERM-NODE-V1 " << header_pubkey_hex << "\n";
-        f << blob << "\n";
+        f.write(reinterpret_cast<const char*>(nk_bytes.data()),
+                static_cast<std::streamsize>(nk_bytes.size()));
         f.flush();
         if (!f) {
             secure_zero_all();
@@ -4558,7 +4177,7 @@ int cmd_keyfile_rotate(int argc, char** argv) {
 // Inputs:
 //   --in <file>                : existing encrypted DWE1 keyfile produced by
 //                                 keyfile-create (canonical 2-line shape:
-//                                 "DETERM-NODE-V1 <pubkey_hex>" + blob).
+//                                 the binary DNK1 container, D2).
 //   --out <file>               : destination for the re-encrypted keyfile.
 //                                 Refuses to overwrite an existing file
 //                                 without --force.
@@ -4571,7 +4190,7 @@ int cmd_keyfile_rotate(int argc, char** argv) {
 //
 // Flow (no plaintext ever touches disk):
 //   1. Read --in; parse the 2-line canonical format (header + blob).
-//   2. Validate header magic (DETERM-NODE-V1) + pubkey shape (64 hex).
+//   2. Decode the binary DNK1 container (magic + pubkey + envelope).
 //   3. Read OLD + NEW passphrases from their named env vars.
 //   4. Deserialize the DWE1 envelope blob.
 //   5. envelope::decrypt with OLD passphrase + AAD = header pubkey bytes.
@@ -4634,61 +4253,27 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
         return 1;
     }
 
-    // ── Read --in and parse the canonical 2-line format ────────────────────
-    std::string header_line, blob_line;
+    // ── Read --in and decode the canonical DNK1 container (D2) ─────────────
+    std::optional<keyfmt::NodeKeyfile> nk_opt;
     {
-        std::ifstream f(in_path);
-        if (!f) {
+        auto bytes = read_bytes_file(in_path);
+        if (!bytes) {
             std::cerr << "keyfile-reencrypt: cannot open --in: " << in_path << "\n";
             return 1;
         }
-        if (!std::getline(f, header_line)) {
-            std::cerr << "keyfile-reencrypt: --in is empty: " << in_path << "\n";
+        nk_opt = keyfmt::decode_dnk1(*bytes);
+        if (!nk_opt) {
+            std::cerr << "keyfile-reencrypt: --in is not a canonical DNK1 "
+                         "encrypted node keyfile (magic 'DNK1' || pubkey 32B "
+                         "|| env_len u32 LE || DWE envelope bytes)\n";
             return 1;
         }
-        if (!std::getline(f, blob_line)) {
-            std::cerr << "keyfile-reencrypt: --in is missing the envelope-blob "
-                         "line (expected 2-line format: header + blob): "
-                      << in_path << "\n";
-            return 1;
-        }
-        while (!header_line.empty()
-               && (header_line.back() == '\r' || header_line.back() == '\n'))
-            header_line.pop_back();
-        while (!blob_line.empty()
-               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
-            blob_line.pop_back();
     }
-
-    const std::string header_magic = "DETERM-NODE-V1 ";
-    if (header_line.rfind(header_magic, 0) != 0) {
-        std::cerr << "keyfile-reencrypt: --in header does not start with "
-                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
-                     "keyfile)\n";
-        return 1;
-    }
-    std::string header_pubkey_hex = header_line.substr(header_magic.size());
-    if (header_pubkey_hex.size() != 64) {
-        std::cerr << "keyfile-reencrypt: --in header pubkey must be 64 hex "
-                     "chars (32-byte Ed25519 pubkey); got "
-                  << header_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    try { (void)from_hex(header_pubkey_hex); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-reencrypt: --in header pubkey is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (blob_line.empty()) {
-        std::cerr << "keyfile-reencrypt: --in envelope blob line is empty\n";
-        return 1;
-    }
+    std::string header_pubkey_hex = to_hex(nk_opt->pubkey);
 
     // Display-canonical anon-address ("0x" + lowercase hex(pub)); matches
     // src/main.cpp::make_anon_address. Printed so the caller can assert the
-    // address is unchanged by the rotation. The AAD binding uses the bytes
-    // exactly as they appear in the file header — do NOT mutate that source.
+    // address is unchanged by the rotation.
     std::string anon_address = "0x" + header_pubkey_hex;
 
     // ── Read OLD + NEW passphrases from their named env vars ───────────────
@@ -4735,23 +4320,23 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
         }
     }
 
-    // ── Deserialize the envelope blob ──────────────────────────────────────
-    auto env_opt = envelope::deserialize(blob_line);
+    // ── Deserialize the embedded envelope bytes ────────────────────────────
+    auto env_opt = envelope::deserialize_bytes(nk_opt->env_bytes);
     if (!env_opt) {
+        // Unreachable after decode_dnk1; belt-and-suspenders.
         determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         determ_secure_zero(new_passphrase.data(), new_passphrase.size());
-        std::cerr << "keyfile-reencrypt: --in envelope blob is malformed "
-                     "(not a valid DWE1 serialization)\n";
+        std::cerr << "keyfile-reencrypt: --in embedded envelope is malformed\n";
         return 1;
     }
 
     // ── Decrypt with the OLD passphrase ────────────────────────────────────
-    // AAD = ASCII bytes of header_pubkey_hex (matches keyfile-create). A
+    // AAD = the RAW 32-byte header pubkey (matches keyfile-create). A
     // wrong OLD passphrase / tampered envelope / substituted blob all fail
     // here with the SAME exit 2 + diagnostic — indistinguishable to a
     // plaintext-recovering oracle. No --out has been opened yet, so a
     // failure here leaves zero output on disk (assertion: no file written).
-    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    std::vector<uint8_t> aad(nk_opt->pubkey.begin(), nk_opt->pubkey.end());
     auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
     if (!pt_opt) {
         determ_secure_zero(old_passphrase.data(), old_passphrase.size());
@@ -4774,84 +4359,45 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
             determ_secure_zero(new_passphrase.data(), new_passphrase.size());
     };
 
-    // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
-    std::string pt_str(pt_bytes.begin(), pt_bytes.end());
-    nlohmann::json keyfile_json;
-    try {
-        keyfile_json = nlohmann::json::parse(pt_str);
-    } catch (std::exception& e) {
+    // ── Validate the plaintext: raw 32-byte seed, derive-equality (D2) ─────
+    if (pt_bytes.size() != 32) {
         secure_zero_all();
-        std::cerr << "keyfile-reencrypt: decrypted plaintext is not valid JSON "
-                     "(this is not a canonical encrypted node keyfile): "
-                  << e.what() << "\n";
+        std::cerr << "keyfile-reencrypt: decrypted plaintext is not a raw "
+                     "32-byte seed (this is not a canonical DNK1 keyfile)\n";
         return 1;
     }
-    if (!keyfile_json.is_object()
-        || !keyfile_json.contains("pubkey")
-        || !keyfile_json.contains("priv_seed")
-        || !keyfile_json["pubkey"].is_string()
-        || !keyfile_json["priv_seed"].is_string()) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: decrypted plaintext is missing the "
-                     "required 'pubkey' / 'priv_seed' string fields\n";
-        return 1;
-    }
-    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
-    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
-    if (inner_pubkey_hex.size() != 64) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: inner 'pubkey' must be 64 hex chars; "
-                     "got " << inner_pubkey_hex.size() << "\n";
-        return 1;
-    }
-    if (priv_seed_hex.size() != 64) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: inner 'priv_seed' must be 64 hex "
-                     "chars; got " << priv_seed_hex.size() << "\n";
-        return 1;
-    }
-    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
-    catch (std::exception& e) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: inner JSON contains invalid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    // Address-invariance anchor: the inner pubkey must equal the header
-    // pubkey. By construction the rotation preserves the header verbatim,
-    // so this guarantees the recovered address is unchanged pre/post.
-    if (inner_pubkey_hex != header_pubkey_hex) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: inner 'pubkey' (" << inner_pubkey_hex
-                  << ") does not match header pubkey (" << header_pubkey_hex
-                  << "); the encrypted blob was not produced by the "
-                     "canonical keyfile-create path\n";
-        return 1;
+    // Address-invariance anchor: the seed must derive the header pubkey. By
+    // construction the rotation preserves the header verbatim, so this
+    // guarantees the recovered address is unchanged pre/post.
+    {
+        std::array<uint8_t, 32> derived{};
+        determ_ed25519_pubkey_from_seed(pt_bytes.data(), derived.data());
+        if (derived != nk_opt->pubkey) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: decrypted seed does not derive "
+                         "the header pubkey (" << header_pubkey_hex
+                      << "); the container was not produced by the canonical "
+                         "keyfile-create path\n";
+            return 1;
+        }
     }
 
     // ── Encrypt under the NEW passphrase (fresh salt + fresh nonce) ────────
     // envelope::encrypt draws a fresh 16-byte salt + fresh 12-byte nonce per
-    // call (RAND_bytes) — re-encrypting the same input under the same new
-    // passphrase twice produces byte-distinct envelopes by construction.
-    std::string blob;
+    // call — re-encrypting the same input under the same new passphrase
+    // twice produces byte-distinct outputs.
+    std::vector<uint8_t> nk_bytes;
     try {
         auto new_env_blob = envelope::encrypt(pt_bytes, new_passphrase, aad);
-        blob              = envelope::serialize(new_env_blob);
-    } catch (std::exception& e) {
-        secure_zero_all();
-        std::cerr << "keyfile-reencrypt: envelope encrypt failed: "
-                  << e.what() << "\n";
-        return 1;
-    }
+        auto env_bytes    = envelope::serialize_bytes(new_env_blob);
 
-    // ── Self-test round-trip: decrypt the freshly-encrypted envelope ───────
-    // Catches any encrypt/decrypt path drift BEFORE we write --out.
-    {
-        auto rt_env = envelope::deserialize(blob);
+        // Self-test round-trip: decrypt the freshly-encrypted envelope
+        // BEFORE we write --out (catches encrypt/decrypt path drift).
+        auto rt_env = envelope::deserialize_bytes(env_bytes);
         if (!rt_env) {
             secure_zero_all();
             std::cerr << "keyfile-reencrypt: internal: just-emitted envelope "
-                         "blob fails deserialize\n";
+                         "bytes fail deserialize\n";
             return 1;
         }
         auto rt_pt = envelope::decrypt(*rt_env, new_passphrase, aad);
@@ -4869,38 +4415,20 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
                          "mismatch under new passphrase\n";
             return 1;
         }
+
+        // Header pubkey preserved verbatim ⇒ address invariant pre/post.
+        nk_bytes = keyfmt::encode_dnk1(nk_opt->pubkey, env_bytes);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: envelope encrypt failed: "
+                  << e.what() << "\n";
+        return 1;
     }
 
-    // ── Write the canonical 2-line file (header preserved byte-for-byte) ───
-    {
-        std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            secure_zero_all();
-            std::cerr << "keyfile-reencrypt: cannot open --out for write: "
-                      << out_path << "\n";
-            return 1;
-        }
-        f << "DETERM-NODE-V1 " << header_pubkey_hex << "\n";
-        f << blob << "\n";
-        f.flush();
-        f.close();
-        if (!f) {
-            secure_zero_all();
-            std::cerr << "keyfile-reencrypt: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
-    }
-
-    // 0600 permissions tightening — best-effort on Windows.
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+    // ── Write the canonical binary DNK1 container ──────────────────────
+    if (!write_bytes_file_0600("keyfile-reencrypt", out_path, nk_bytes)) {
+        secure_zero_all();
+        return 1;
     }
 
     // ── Zero all plaintext + key buffers BEFORE emitting the summary ───────
@@ -5063,110 +4591,44 @@ int cmd_keyfile_recover(int argc, char** argv) {
         return 1;
     }
 
-    // ── Load + parse shares file ────────────────────────────────────────
-    std::ifstream sf(shares_path);
-    if (!sf) {
-        std::cerr << "keyfile-recover: cannot open --backup-shares file: "
-                  << shares_path << "\n";
-        return 1;
-    }
-    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
-                              std::istreambuf_iterator<char>());
-    nlohmann::json sj;
-    try { sj = nlohmann::json::parse(shares_blob); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-recover: shares JSON parse failed: "
-                  << e.what() << "\n";
-        return 2;
-    }
-    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
-        std::cerr << "keyfile-recover: shares file must be an object with "
-                     "'shares' array\n";
-        return 2;
-    }
-    const auto& shares_arr = sj["shares"];
-    if (shares_arr.empty()) {
-        std::cerr << "keyfile-recover: 'shares' array is empty\n";
-        return 2;
-    }
-    // Build x → y_hex map for the cross-verification check in step 3.
-    std::map<int, std::string> shares_y_by_x;
-    for (size_t i = 0; i < shares_arr.size(); ++i) {
-        const auto& el = shares_arr[i];
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            std::cerr << "keyfile-recover: shares entry #" << i
-                      << " must have integer 'x' and string 'y_hex'\n";
+    // ── Load + decode shares file (canonical binary DSS1, D2) ───────────
+    std::map<int, std::vector<uint8_t>> shares_y_by_x;
+    {
+        auto bytes = read_bytes_file(shares_path);
+        if (!bytes) {
+            std::cerr << "keyfile-recover: cannot open --backup-shares file: "
+                      << shares_path << "\n";
+            return 1;
+        }
+        auto recs = keyfmt::decode_dss1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            std::cerr << "keyfile-recover: --backup-shares is not a canonical "
+                         "DSS1 binary share-set\n";
             return 2;
         }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            std::cerr << "keyfile-recover: shares entry #" << i
-                      << ": x = " << x << " out of range [1, 255]\n";
-            return 2;
-        }
-        if (shares_y_by_x.count(x)) {
-            std::cerr << "keyfile-recover: duplicate x = " << x
-                      << " in shares file\n";
-            return 2;
-        }
-        shares_y_by_x[x] = el["y_hex"].get<std::string>();
+        for (auto& sh : *recs)
+            shares_y_by_x[sh.x] = std::move(sh.y);
     }
 
-    // ── Load + parse envelopes file ─────────────────────────────────────
-    std::ifstream ef(envelopes_path);
-    if (!ef) {
-        std::cerr << "keyfile-recover: cannot open --backup-envelopes file: "
-                  << envelopes_path << "\n";
-        return 1;
-    }
-    std::string env_blob((std::istreambuf_iterator<char>(ef)),
-                           std::istreambuf_iterator<char>());
-    nlohmann::json ej;
-    try { ej = nlohmann::json::parse(env_blob); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-recover: envelopes JSON parse failed: "
-                  << e.what() << "\n";
-        return 2;
-    }
-    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
-        std::cerr << "keyfile-recover: envelopes file must be an object with "
-                     "'envelopes' array\n";
-        return 2;
-    }
-    const auto& env_arr = ej["envelopes"];
-    if (env_arr.empty()) {
-        std::cerr << "keyfile-recover: 'envelopes' array is empty\n";
-        return 2;
-    }
-    // Build share_index → envelope_blob map.
-    std::map<int, std::string> env_blob_by_idx;
-    for (size_t i = 0; i < env_arr.size(); ++i) {
-        const auto& el = env_arr[i];
-        if (!el.is_object()
-            || !el.contains("share_index")
-            || !el["share_index"].is_number_integer()
-            || !el.contains("envelope_blob")
-            || !el["envelope_blob"].is_string()) {
-            std::cerr << "keyfile-recover: envelopes entry #" << i
-                      << " must have integer 'share_index' and string "
-                         "'envelope_blob'\n";
+    // ── Load + decode envelopes file (canonical binary DBE1, D2) ─────────
+    std::map<int, std::vector<uint8_t>> env_bytes_by_idx;
+    {
+        auto bytes = read_bytes_file(envelopes_path);
+        if (!bytes) {
+            std::cerr << "keyfile-recover: cannot open --backup-envelopes file: "
+                      << envelopes_path << "\n";
+            return 1;
+        }
+        auto recs = keyfmt::decode_dbe1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            std::cerr << "keyfile-recover: --backup-envelopes is not a canonical "
+                         "DBE1 binary container\n";
             return 2;
         }
-        int idx = el["share_index"].get<int>();
-        if (idx < 1 || idx > 255) {
-            std::cerr << "keyfile-recover: envelopes entry #" << i
-                      << ": share_index = " << idx
-                      << " out of range [1, 255]\n";
-            return 2;
-        }
-        if (env_blob_by_idx.count(idx)) {
-            std::cerr << "keyfile-recover: duplicate share_index = " << idx
-                      << " in envelopes file\n";
-            return 2;
-        }
-        env_blob_by_idx[idx] = el["envelope_blob"].get<std::string>();
+        for (auto& er : *recs)
+            env_bytes_by_idx[er.share_index] = std::move(er.env_bytes);
     }
 
     // ── Load + parse keyholders file (T-of-N subset) ────────────────────
@@ -5226,7 +4688,7 @@ int cmd_keyfile_recover(int argc, char** argv) {
                       << " in keyholders file\n";
             return 2;
         }
-        if (!env_blob_by_idx.count(idx)) {
+        if (!env_bytes_by_idx.count(idx)) {
             std::cerr << "keyfile-recover: keyholders share_index=" << idx
                       << " has no matching envelope in --backup-envelopes\n";
             return 2;
@@ -5278,12 +4740,11 @@ int cmd_keyfile_recover(int argc, char** argv) {
     std::vector<shamir::Share> recovered_shares;
     recovered_shares.reserve(kh_entries.size());
     for (const auto& [idx, pw] : kh_entries) {
-        const std::string& blob = env_blob_by_idx[idx];
-        auto env_opt = envelope::deserialize(blob);
+        auto env_opt = envelope::deserialize_bytes(env_bytes_by_idx[idx]);
         if (!env_opt) {
+            // Unreachable after decode_dbe1; belt-and-suspenders.
             std::cerr << "keyfile-recover: envelope share_index=" << idx
-                      << ": envelope_blob deserialize failed "
-                         "(malformed envelope in --backup-envelopes)\n";
+                      << ": embedded envelope failed deserialize\n";
             return 2;
         }
         // backup-create produces AAD-free envelopes — same here (empty aad).
@@ -5303,9 +4764,8 @@ int cmd_keyfile_recover(int argc, char** argv) {
         // Cross-verify decrypted y against the shares-file y_hex. Catches
         // a shares/envelopes file mismatch before Shamir reconstruction
         // silently emits a garbage secret.
-        std::string y_hex_decrypted = to_hex(y_bytes);
-        const std::string& y_hex_expected = shares_y_by_x[idx];
-        if (y_hex_decrypted != y_hex_expected) {
+        const std::vector<uint8_t>& y_expected = shares_y_by_x[idx];
+        if (y_bytes != y_expected) {
             std::cerr << "keyfile-recover: envelope share_index=" << idx
                       << ": decrypted y-bytes do NOT match the y_hex in "
                          "--backup-shares (envelope/shares file mismatch — "
@@ -5343,38 +4803,21 @@ int cmd_keyfile_recover(int argc, char** argv) {
 
     // ── Emit result ─────────────────────────────────────────────────────
     if (!out_path.empty()) {
-        nlohmann::json doc;
-        doc["secret_hex"] = secret_hex;
-        std::ofstream of(out_path);
-        if (!of) {
-            std::cerr << "keyfile-recover: cannot open --out for write: "
-                      << out_path << "\n";
-            return 1;
-        }
-        of << doc.dump() << "\n";
-        if (!of) {
-            std::cerr << "keyfile-recover: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
-        of.close();
-        // 0600 permissions tightening — best-effort on Windows.
-        {
-            std::error_code perm_ec;
-            std::filesystem::permissions(
-                out_path,
-                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                std::filesystem::perm_options::replace,
-                perm_ec);
-            (void)perm_ec;
-        }
+        // D2: the recovered secret lands on disk as RAW BYTES (binary) —
+        // the old {"secret_hex"} JSON wrapper is deleted. Text views stay
+        // available on stdout (--json / bare hex).
+        const bool ok = write_bytes_file_0600("keyfile-recover", out_path,
+                                              *secret_opt);
+        if (!ok) return 1;
         if (json_out) {
-            // --json + --out: also echo the JSON doc to stdout so the
+            // --json + --out: echo the hex view to stdout so the
             // operator's pipe-driven workflow sees the result.
+            nlohmann::json doc;
+            doc["secret_hex"] = secret_hex;
             std::cout << doc.dump() << "\n";
         } else {
             std::cout << "recovered secret written to " << out_path
-                      << " (" << recovered_shares.size()
+                      << " (raw bytes; " << recovered_shares.size()
                       << " shares combined)\n";
         }
     } else if (json_out) {
@@ -5515,109 +4958,44 @@ int cmd_account_recover(int argc, char** argv) {
         return 1;
     }
 
-    // ── Load + parse shares file ────────────────────────────────────────
-    std::ifstream sf(shares_path);
-    if (!sf) {
-        std::cerr << "account-recover: cannot open --shares file: "
-                  << shares_path << "\n";
-        return 1;
-    }
-    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
-                              std::istreambuf_iterator<char>());
-    nlohmann::json sj;
-    try { sj = nlohmann::json::parse(shares_blob); }
-    catch (std::exception& e) {
-        std::cerr << "account-recover: shares JSON parse failed: "
-                  << e.what() << "\n";
-        return 2;
-    }
-    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
-        std::cerr << "account-recover: shares file must be an object with "
-                     "'shares' array\n";
-        return 2;
-    }
-    const auto& shares_arr = sj["shares"];
-    if (shares_arr.empty()) {
-        std::cerr << "account-recover: 'shares' array is empty\n";
-        return 2;
-    }
-    // Build x → y_hex map for the cross-verification step.
-    std::map<int, std::string> shares_y_by_x;
-    for (size_t i = 0; i < shares_arr.size(); ++i) {
-        const auto& el = shares_arr[i];
-        if (!el.is_object()
-            || !el.contains("x")     || !el["x"].is_number_integer()
-            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
-            std::cerr << "account-recover: shares entry #" << i
-                      << " must have integer 'x' and string 'y_hex'\n";
+    // ── Load + decode shares file (canonical binary DSS1, D2) ───────────
+    std::map<int, std::vector<uint8_t>> shares_y_by_x;
+    {
+        auto bytes = read_bytes_file(shares_path);
+        if (!bytes) {
+            std::cerr << "account-recover: cannot open --shares file: "
+                      << shares_path << "\n";
+            return 1;
+        }
+        auto recs = keyfmt::decode_dss1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            std::cerr << "account-recover: --shares is not a canonical "
+                         "DSS1 binary share-set\n";
             return 2;
         }
-        int x = el["x"].get<int>();
-        if (x < 1 || x > 255) {
-            std::cerr << "account-recover: shares entry #" << i
-                      << ": x = " << x << " out of range [1, 255]\n";
-            return 2;
-        }
-        if (shares_y_by_x.count(x)) {
-            std::cerr << "account-recover: duplicate x = " << x
-                      << " in shares file\n";
-            return 2;
-        }
-        shares_y_by_x[x] = el["y_hex"].get<std::string>();
+        for (auto& sh : *recs)
+            shares_y_by_x[sh.x] = std::move(sh.y);
     }
 
-    // ── Load + parse envelopes file ─────────────────────────────────────
-    std::ifstream ef(envelopes_path);
-    if (!ef) {
-        std::cerr << "account-recover: cannot open --envelopes file: "
-                  << envelopes_path << "\n";
-        return 1;
-    }
-    std::string env_blob((std::istreambuf_iterator<char>(ef)),
-                           std::istreambuf_iterator<char>());
-    nlohmann::json ej;
-    try { ej = nlohmann::json::parse(env_blob); }
-    catch (std::exception& e) {
-        std::cerr << "account-recover: envelopes JSON parse failed: "
-                  << e.what() << "\n";
-        return 2;
-    }
-    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
-        std::cerr << "account-recover: envelopes file must be an object with "
-                     "'envelopes' array\n";
-        return 2;
-    }
-    const auto& env_arr = ej["envelopes"];
-    if (env_arr.empty()) {
-        std::cerr << "account-recover: 'envelopes' array is empty\n";
-        return 2;
-    }
-    std::map<int, std::string> env_blob_by_idx;
-    for (size_t i = 0; i < env_arr.size(); ++i) {
-        const auto& el = env_arr[i];
-        if (!el.is_object()
-            || !el.contains("share_index")
-            || !el["share_index"].is_number_integer()
-            || !el.contains("envelope_blob")
-            || !el["envelope_blob"].is_string()) {
-            std::cerr << "account-recover: envelopes entry #" << i
-                      << " must have integer 'share_index' and string "
-                         "'envelope_blob'\n";
+    // ── Load + decode envelopes file (canonical binary DBE1, D2) ─────────
+    std::map<int, std::vector<uint8_t>> env_bytes_by_idx;
+    {
+        auto bytes = read_bytes_file(envelopes_path);
+        if (!bytes) {
+            std::cerr << "account-recover: cannot open --envelopes file: "
+                      << envelopes_path << "\n";
+            return 1;
+        }
+        auto recs = keyfmt::decode_dbe1(*bytes);
+        if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+        if (!recs) {
+            std::cerr << "account-recover: --envelopes is not a canonical "
+                         "DBE1 binary container\n";
             return 2;
         }
-        int idx = el["share_index"].get<int>();
-        if (idx < 1 || idx > 255) {
-            std::cerr << "account-recover: envelopes entry #" << i
-                      << ": share_index = " << idx
-                      << " out of range [1, 255]\n";
-            return 2;
-        }
-        if (env_blob_by_idx.count(idx)) {
-            std::cerr << "account-recover: duplicate share_index = " << idx
-                      << " in envelopes file\n";
-            return 2;
-        }
-        env_blob_by_idx[idx] = el["envelope_blob"].get<std::string>();
+        for (auto& er : *recs)
+            env_bytes_by_idx[er.share_index] = std::move(er.env_bytes);
     }
 
     // ── Load + parse keyholders file (T-of-N subset) ────────────────────
@@ -5674,7 +5052,7 @@ int cmd_account_recover(int argc, char** argv) {
                       << " in keyholders file\n";
             return 2;
         }
-        if (!env_blob_by_idx.count(idx)) {
+        if (!env_bytes_by_idx.count(idx)) {
             std::cerr << "account-recover: keyholders share_index=" << idx
                       << " has no matching envelope in --envelopes\n";
             return 2;
@@ -5725,12 +5103,11 @@ int cmd_account_recover(int argc, char** argv) {
     std::vector<shamir::Share> recovered_shares;
     recovered_shares.reserve(kh_entries.size());
     for (const auto& [idx, pw] : kh_entries) {
-        const std::string& blob = env_blob_by_idx[idx];
-        auto env_opt = envelope::deserialize(blob);
+        auto env_opt = envelope::deserialize_bytes(env_bytes_by_idx[idx]);
         if (!env_opt) {
+            // Unreachable after decode_dbe1; belt-and-suspenders.
             std::cerr << "account-recover: envelope share_index=" << idx
-                      << ": envelope_blob deserialize failed "
-                         "(malformed envelope in --envelopes)\n";
+                      << ": embedded envelope failed deserialize\n";
             return 2;
         }
         // backup-create produces AAD-free envelopes — same here (empty aad).
@@ -5750,9 +5127,8 @@ int cmd_account_recover(int argc, char** argv) {
         // Cross-verify decrypted y against the shares-file y_hex. Catches
         // a shares/envelopes file mismatch before Shamir reconstruction
         // silently emits a garbage secret.
-        std::string y_hex_decrypted = to_hex(y_bytes);
-        const std::string& y_hex_expected = shares_y_by_x[idx];
-        if (y_hex_decrypted != y_hex_expected) {
+        const std::vector<uint8_t>& y_expected = shares_y_by_x[idx];
+        if (y_bytes != y_expected) {
             std::cerr << "account-recover: envelope share_index=" << idx
                       << ": decrypted y-bytes do NOT match the y_hex in "
                          "--shares (envelope/shares file mismatch — the "
@@ -5844,28 +5220,30 @@ int cmd_account_recover(int argc, char** argv) {
 
     // ── Emit result ────────────────────────────────────────────────────
     if (!out_path.empty()) {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "account-recover: cannot open --out for write: "
-                      << out_path << "\n";
+        // D2: the at-rest keyfile is the canonical binary DAK1 container
+        // (matches account-import --out byte-for-byte).
+        keyfmt::Keypair kp;
+        std::memcpy(kp.pubkey.data(),    derived_pub.data(), 32);
+        std::vector<uint8_t> seed_again;
+        try { seed_again = from_hex(privkey_hex); }
+        catch (...) { seed_again.clear(); }
+        if (seed_again.size() != 32) {
+            std::cerr << "account-recover: internal error rebuilding seed\n";
             return 1;
         }
-        f << record.dump(2) << "\n";
-        f.close();
-        if (!f) {
-            std::cerr << "account-recover: write failed on --out: "
-                      << out_path << "\n";
+        std::memcpy(kp.priv_seed.data(), seed_again.data(), 32);
+        determ_secure_zero(seed_again.data(), seed_again.size());
+        std::vector<uint8_t> bytes;
+        try { bytes = keyfmt::encode_dak1(kp); }
+        catch (std::exception& e) {
+            determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+            std::cerr << "account-recover: " << e.what() << "\n";
             return 1;
         }
-        // 0600 permissions — owner-only read/write. Best-effort on Windows
-        // (NTFS ACL inherits from parent); non-fatal on perm-set failure.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+        const bool ok = write_bytes_file_0600("account-recover", out_path, bytes);
+        determ_secure_zero(bytes.data(), bytes.size());
+        determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
+        if (!ok) return 1;
         if (json_out) {
             // --json + --out: also echo to stdout for pipe-driven workflows.
             std::cout << record.dump() << "\n";
@@ -5890,7 +5268,7 @@ int cmd_account_recover(int argc, char** argv) {
 // ── keyfile-info — passive diagnostic for an encrypted node keyfile ─────────
 //
 // S-004 keyfile-shape complement to `inspect-envelope`. Reads a 2-line
-// encrypted node keyfile (DETERM-NODE-V1 header + DWE1 envelope blob),
+// encrypted node keyfile (binary DNK1 container, D2),
 // parses both, and emits the combined metadata WITHOUT decrypting (no
 // passphrase, no AEAD, no plaintext recovery).
 //
@@ -5911,7 +5289,7 @@ int cmd_account_recover(int argc, char** argv) {
 //
 // Output (default human form):
 //   keyfile:           <path>
-//   header_version:    DETERM-NODE-V1
+//   header_version:    DNK1
 //   pubkey_hex:        <64-hex>
 //   anon_address:      0x<64-hex>
 //   envelope:
@@ -5924,7 +5302,7 @@ int cmd_account_recover(int argc, char** argv) {
 //
 // JSON shape (--json):
 //   {"valid":true,
-//    "header_version":"DETERM-NODE-V1",
+//    "header_version":"DNK1",
 //    "pubkey_hex":"...",
 //    "anon_address":"0x...",
 //    "envelope":{
@@ -5960,72 +5338,33 @@ int cmd_keyfile_info(int argc, char** argv) {
         return 1;
     }
 
-    // ── Read --in and parse the canonical 2-line format ────────────────────
+    // ── Read --in and decode the canonical DNK1 container (D2) ─────────────
     // File-level failures (missing, unreadable) exit 1. Structural failures
-    // (wrong header magic, truncated, bad hex, bad envelope) exit 2. The
-    // split lets monitoring scripts distinguish "pointed at the wrong
-    // path" from "file is corrupted / not a keyfile".
-    std::string header_line, blob_line;
+    // (wrong magic, truncated, env_len lie, malformed embedded envelope)
+    // exit 2. The split lets monitoring scripts distinguish "pointed at the
+    // wrong path" from "file is corrupted / not a keyfile".
+    std::optional<keyfmt::NodeKeyfile> nk_opt;
     {
-        std::ifstream f(in_path);
-        if (!f) {
+        auto bytes = read_bytes_file(in_path);
+        if (!bytes) {
             std::cerr << "keyfile-info: cannot open --in: " << in_path << "\n";
             return 1;
         }
-        if (!std::getline(f, header_line)) {
-            // Empty file is structurally malformed — there's no header line
-            // at all. Use exit 2 (malformed) rather than 1, since the file
-            // is reachable but its shape is wrong.
-            std::cerr << "keyfile-info: --in is empty (no header line): "
-                      << in_path << "\n";
+        nk_opt = keyfmt::decode_dnk1(*bytes);
+        if (!nk_opt) {
+            std::cerr << "keyfile-info: --in is not a canonical DNK1 "
+                         "encrypted node keyfile (magic 'DNK1' || pubkey 32B "
+                         "|| env_len u32 LE || DWE envelope bytes)\n";
             return 2;
         }
-        if (!std::getline(f, blob_line)) {
-            std::cerr << "keyfile-info: --in is missing the envelope-blob "
-                         "line (expected 2-line format: header + blob): "
-                      << in_path << "\n";
-            return 2;
-        }
-        // Strip trailing CR (Windows-style line endings) for portability.
-        while (!header_line.empty()
-               && (header_line.back() == '\r' || header_line.back() == '\n'))
-            header_line.pop_back();
-        while (!blob_line.empty()
-               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
-            blob_line.pop_back();
     }
+    std::string pubkey_hex = to_hex(nk_opt->pubkey);
 
-    // ── Header shape: "DETERM-NODE-V1 <pubkey_hex>" ─────────────────────────
-    const std::string header_magic = "DETERM-NODE-V1 ";
-    if (header_line.rfind(header_magic, 0) != 0) {
-        std::cerr << "keyfile-info: --in header does not start with "
-                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
-                     "keyfile)\n";
-        return 2;
-    }
-    std::string pubkey_hex = header_line.substr(header_magic.size());
-    if (pubkey_hex.size() != 64) {
-        std::cerr << "keyfile-info: --in header pubkey must be 64 hex "
-                     "chars (32-byte Ed25519 pubkey); got "
-                  << pubkey_hex.size() << "\n";
-        return 2;
-    }
-    try { (void)from_hex(pubkey_hex); }
-    catch (std::exception& e) {
-        std::cerr << "keyfile-info: --in header pubkey is not valid hex: "
-                  << e.what() << "\n";
-        return 2;
-    }
-    if (blob_line.empty()) {
-        std::cerr << "keyfile-info: --in envelope blob line is empty\n";
-        return 2;
-    }
-
-    // ── Deserialize envelope blob (no AEAD, no key derivation) ─────────────
-    auto env_opt = envelope::deserialize(blob_line);
+    // ── Deserialize embedded envelope (no AEAD, no key derivation) ─────────
+    auto env_opt = envelope::deserialize_bytes(nk_opt->env_bytes);
     if (!env_opt) {
-        std::cerr << "keyfile-info: --in envelope blob is malformed "
-                     "(not a valid DWE1 serialization)\n";
+        // Unreachable after decode_dnk1; belt-and-suspenders.
+        std::cerr << "keyfile-info: --in embedded envelope is malformed\n";
         return 2;
     }
     const auto& env = *env_opt;
@@ -6041,7 +5380,7 @@ int cmd_keyfile_info(int argc, char** argv) {
         // sub-object mirrors the spec in the command's doc-block above.
         std::cout << "{"
                   << "\"valid\":true,"
-                  << "\"header_version\":\"DETERM-NODE-V1\","
+                  << "\"header_version\":\"DNK1\","
                   << "\"pubkey_hex\":\""   << pubkey_hex   << "\","
                   << "\"anon_address\":\"" << anon_address << "\","
                   << "\"envelope\":{"
@@ -6060,7 +5399,7 @@ int cmd_keyfile_info(int argc, char** argv) {
     } else {
         const bool nk_argon = (env.kdf == envelope::Kdf::ARGON2ID);
         std::cout << "keyfile:           " << in_path           << "\n";
-        std::cout << "header_version:    DETERM-NODE-V1\n";
+        std::cout << "header_version:    DNK1\n";
         std::cout << "pubkey_hex:        " << pubkey_hex        << "\n";
         std::cout << "anon_address:      " << anon_address      << "\n";
         std::cout << "envelope:\n";
@@ -6085,13 +5424,13 @@ int cmd_keyfile_info(int argc, char** argv) {
 // ── account-list — enumerate keyfiles in a directory with metadata ──────────
 //
 // Pure local computation: walks --keyfiles-dir, classifies each regular file
-// as one of {plaintext-single, plaintext-batch, encrypted-DETERM-NODE-V1,
+// as one of {plaintext-single, plaintext-batch, encrypted-DNK1,
 // unknown}, and emits a per-file metadata record. No daemon RPC, no
 // decryption, no passphrase required.
 //
 // Detection rules (each file is read until a definitive classification or
 // the rules give up):
-//   * Read the first line as text. If it starts with "DETERM-NODE-V1 " AND
+//   * Sniff the 4-byte magic. If it is "DNK1" AND
 //     the second line is a parseable DWE1 envelope blob, it's encrypted.
 //   * Otherwise try JSON parse on the full content:
 //       - JSON object with string `address` (66 char "0x"+64hex) AND string
@@ -6105,7 +5444,7 @@ int cmd_keyfile_info(int argc, char** argv) {
 //     `--include-plaintext` flags only gate the keyfile-typed rows.
 //
 // Encrypted keyfile metadata mirrors `keyfile-info`: header_tag (the
-// "DETERM-NODE-V1" magic), pbkdf2_iters, salt_hex, nonce_hex. No decrypt is
+// "DNK1" magic), pbkdf2_iters, salt_hex, nonce_hex. No decrypt is
 // performed, so this is safe to run on a directory of production keyfiles
 // without passphrases on hand.
 //
@@ -6189,10 +5528,10 @@ int cmd_account_list(int argc, char** argv) {
                 "computation; no daemon RPC; no decryption.\n"
                 "\n"
                 "Detected types:\n"
-                "  plaintext-single             {\"address\":..., \"privkey_hex\":...}\n"
-                "  plaintext-batch              {\"accounts\":[{\"address\":..., ...}, ...]}\n"
-                "  encrypted-DETERM-NODE-V1     2-line: header + DWE1 envelope\n"
-                "  unknown                      neither JSON nor canonical keyfile\n"
+                "  plaintext-single             binary DAK1 (magic 'DAK1', 68 bytes)\n"
+                "  plaintext-batch              binary DAB1 (magic 'DAB1')\n"
+                "  encrypted-DNK1               encrypted node keyfile (binary)\n"
+                "  unknown                      not a canonical keyfile\n"
                 "\n"
                 "Summary warnings:\n"
                 "  mode_not_0600                       plaintext keyfile with mode != 0600 (POSIX)\n"
@@ -6305,42 +5644,52 @@ int cmd_account_list(int argc, char** argv) {
         std::string content((std::istreambuf_iterator<char>(f)),
                             std::istreambuf_iterator<char>());
 
-        // ── Detection #1: encrypted DETERM-NODE-V1 (2-line text format) ────
-        // The header magic is a tight prefix match; we only treat the file
-        // as encrypted if the header is well-formed AND the second line
-        // deserializes as a DWE1 envelope. Anything else falls through to
-        // the JSON detector.
-        const std::string header_magic = "DETERM-NODE-V1 ";
-        if (content.size() > header_magic.size()
-            && content.compare(0, header_magic.size(), header_magic) == 0) {
-            // Split on first newline.
-            auto nl = content.find('\n');
-            if (nl != std::string::npos) {
-                std::string header_line = content.substr(0, nl);
-                while (!header_line.empty()
-                       && (header_line.back() == '\r' || header_line.back() == '\n'))
-                    header_line.pop_back();
-                // Find the blob line (skip the LF + take until next LF or EOF).
-                std::string blob_line;
-                auto rest_start = nl + 1;
-                auto nl2 = content.find('\n', rest_start);
-                if (nl2 == std::string::npos) blob_line = content.substr(rest_start);
-                else                          blob_line = content.substr(rest_start,
-                                                                          nl2 - rest_start);
-                while (!blob_line.empty()
-                       && (blob_line.back() == '\r' || blob_line.back() == '\n'))
-                    blob_line.pop_back();
-
-                std::string pubkey_hex = header_line.substr(header_magic.size());
-                bool hdr_pub_ok = (pubkey_hex.size() == 64);
-                if (hdr_pub_ok) {
-                    try { (void)from_hex(pubkey_hex); }
-                    catch (...) { hdr_pub_ok = false; }
+        // ── Detection #0: canonical binary keyfiles (D2: DAK1 / DAB1) ──────
+        // 4-byte magic sniff first — the binary containers are the
+        // authoritative at-rest forms; the JSON shapes are deleted.
+        const auto* content_bytes =
+            reinterpret_cast<const uint8_t*>(content.data());
+        if (content.size() >= 4 && content.compare(0, 4, "DAK1") == 0) {
+            auto kp = keyfmt::decode_dak1(content_bytes, content.size());
+            if (kp) {
+                rec["type"]    = "plaintext-single";
+                rec["address"] = "0x" + to_hex(kp->pubkey);
+                determ_secure_zero(kp->priv_seed.data(), kp->priv_seed.size());
+                return rec;
+            }
+            rec["type"]        = "unknown";
+            rec["skip_reason"] = "dak1_malformed";
+            return rec;
+        }
+        if (content.size() >= 4 && content.compare(0, 4, "DAB1") == 0) {
+            auto recs_opt = keyfmt::decode_dab1(content_bytes, content.size());
+            if (recs_opt) {
+                nlohmann::json addrs = nlohmann::json::array();
+                for (auto& kp : *recs_opt) {
+                    addrs.push_back("0x" + to_hex(kp.pubkey));
+                    determ_secure_zero(kp.priv_seed.data(),
+                                       kp.priv_seed.size());
                 }
-                auto env_opt = envelope::deserialize(blob_line);
-                if (hdr_pub_ok && env_opt) {
-                    rec["type"]         = "encrypted-DETERM-NODE-V1";
-                    rec["header_tag"]   = "DETERM-NODE-V1";
+                rec["type"]      = "plaintext-batch";
+                rec["addresses"] = std::move(addrs);
+                return rec;
+            }
+            rec["type"]        = "unknown";
+            rec["skip_reason"] = "dab1_malformed";
+            return rec;
+        }
+
+        // ── Detection #1: encrypted DNK1 (canonical binary, D2) ────────────
+        // 4-byte magic sniff; the record is "encrypted" only when the full
+        // container decodes (header pubkey + embedded DWE envelope).
+        if (content.size() >= 4 && content.compare(0, 4, "DNK1") == 0) {
+            auto nk = keyfmt::decode_dnk1(content_bytes, content.size());
+            if (nk) {
+                auto env_opt = envelope::deserialize_bytes(nk->env_bytes);
+                if (env_opt) {
+                    std::string pubkey_hex = to_hex(nk->pubkey);
+                    rec["type"]         = "encrypted-DNK1";
+                    rec["header_tag"]   = "DNK1";
                     rec["pubkey_hex"]   = pubkey_hex;
                     rec["address"]      = "0x" + pubkey_hex;
                     rec["pbkdf2_iters"] = env_opt->pbkdf2_iters;
@@ -6348,59 +5697,29 @@ int cmd_account_list(int argc, char** argv) {
                     rec["nonce_hex"]    = to_hex(env_opt->nonce);
                     return rec;
                 }
-                // Header looked like ours but the envelope failed — fall
-                // through to "unknown". An operator-friendly skip_reason
-                // helps debug accidentally-corrupted keyfiles.
-                rec["type"]        = "unknown";
-                rec["skip_reason"] = "encrypted_keyfile_malformed";
-                return rec;
             }
+            // Magic looked like ours but the container failed — fall
+            // through to "unknown". An operator-friendly skip_reason
+            // helps debug accidentally-corrupted keyfiles.
+            rec["type"]        = "unknown";
+            rec["skip_reason"] = "encrypted_keyfile_malformed";
+            return rec;
         }
 
-        // ── Detection #2: plaintext JSON shapes (single + batch) ───────────
+        // ── Detection #2: node_key.json shape (D2-DEFERRED src format) ─────
+        // The plaintext DAK1/DAB1 JSON shapes are DELETED (binary-only, D2).
+        // The only JSON still recognized is the daemon's node_key.json
+        // ({pubkey, priv_seed}) — src-owned, binarized in the src-side D2
+        // storage/keyfiles increment.
         nlohmann::json doc;
         try {
             doc = nlohmann::json::parse(content);
         } catch (...) {
             rec["type"]        = "unknown";
-            rec["skip_reason"] = "not_json";
+            rec["skip_reason"] = "not_a_canonical_keyfile";
             return rec;
         }
-
-        // Single-account shape: top-level {address, privkey_hex} strings.
-        if (doc.is_object()
-            && doc.contains("address") && doc["address"].is_string()
-            && doc.contains("privkey_hex") && doc["privkey_hex"].is_string()
-            && is_anon_address(doc["address"].get<std::string>())) {
-            rec["type"]    = "plaintext-single";
-            rec["address"] = doc["address"].get<std::string>();
-            return rec;
-        }
-
-        // Batch shape: top-level {accounts: [{address, privkey_hex}, ...]}.
-        // Matches account-create-batch / account-derive-batch output. We
-        // accept either pure single-account entries or the derive-batch
-        // shape that adds an "index" field (so account-derive-batch output
-        // is recognized too).
-        if (doc.is_object() && doc.contains("accounts")
-            && doc["accounts"].is_array()) {
-            nlohmann::json addrs = nlohmann::json::array();
-            bool all_ok = true;
-            for (const auto& a : doc["accounts"]) {
-                if (!a.is_object()
-                    || !a.contains("address") || !a["address"].is_string()) {
-                    all_ok = false; break;
-                }
-                std::string addr = a["address"].get<std::string>();
-                if (!is_anon_address(addr)) { all_ok = false; break; }
-                addrs.push_back(addr);
-            }
-            if (all_ok && !addrs.empty()) {
-                rec["type"]      = "plaintext-batch";
-                rec["addresses"] = std::move(addrs);
-                return rec;
-            }
-        }
+        (void)is_anon_address;
 
         // ── Detection #3: pubkey/priv_seed shape (decrypted node keyfile) ──
         // This is the plaintext form keyfile-decrypt emits — it matches
@@ -6468,7 +5787,7 @@ int cmd_account_list(int argc, char** argv) {
     nlohmann::json kept = nlohmann::json::array();
     for (const auto& e : entries) {
         std::string t = e.value("type", "unknown");
-        if (t == "encrypted-DETERM-NODE-V1") {
+        if (t == "encrypted-DNK1") {
             encrypted_seen_anywhere = true;
             if (!include_encrypted) continue;
             ++n_encrypted_kept;
@@ -6593,11 +5912,16 @@ int cmd_create_recovery(int argc, char** argv) {
                                         static_cast<uint8_t>(threshold),
                                         static_cast<uint8_t>(share_count),
                                         checksum);
-        std::ofstream f(out_path);
+        // D2: the at-rest recovery setup is the canonical binary DRS1
+        // container (wallet/recovery.hpp).
+        auto bytes = recovery::to_bytes(setup);
+        std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
         if (!f) { std::cerr << "Cannot open --out for write: " << out_path << "\n"; return 1; }
-        f << recovery::to_json(setup);
-        std::cout << "wrote " << out_path << "\n";
-        std::cout << "  scheme:        " << setup.scheme       << "\n";
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        f.close();
+        if (!f) { std::cerr << "Write failed on --out: " << out_path << "\n"; return 1; }
+        std::cout << "wrote " << out_path << " (DRS1)\n";
         std::cout << "  threshold:     " << int(setup.threshold)   << " of "
                   << int(setup.share_count) << "\n";
         std::cout << "  secret bytes:  " << setup.secret_len   << "\n";
@@ -6621,13 +5945,13 @@ int cmd_recover(int argc, char** argv) {
                      "[--guardians <csv of 0..N-1 indices>]\n";
         return 1;
     }
-    std::ifstream f(in_path);
-    if (!f) { std::cerr << "Cannot open --in: " << in_path << "\n"; return 1; }
-    std::string blob((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-    auto setup_opt = recovery::from_json(blob);
+    auto bytes = read_bytes_file(in_path);
+    if (!bytes) { std::cerr << "Cannot open --in: " << in_path << "\n"; return 1; }
+    auto setup_opt = recovery::from_bytes(*bytes);
     if (!setup_opt) {
-        std::cerr << "recover: failed to parse recovery setup\n"; return 1;
+        std::cerr << "recover: --in is not a canonical DRS1 binary recovery "
+                     "setup\n";
+        return 1;
     }
     std::vector<uint8_t> guardian_indices;
     if (guardians_csv.empty()) {
@@ -7122,54 +6446,13 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     }
 
     // ── Load the priv keyfile ──────────────────────────────────────────────
-    // Same shape as cmd_account_export consumes: a single-account JSON file
-    // with {"address":"0x..","privkey_hex":".."} where privkey_hex is the
-    // 32-byte Ed25519 priv_seed.
-    std::ifstream in_f(priv_keyfile);
-    if (!in_f) {
-        std::cerr << "derive-shared-secret: cannot open --priv-keyfile: "
-                  << priv_keyfile << "\n";
-        return 1;
-    }
-    nlohmann::json acc_doc;
-    try {
-        in_f >> acc_doc;
-    } catch (std::exception& e) {
-        std::cerr << "derive-shared-secret: --priv-keyfile is not valid JSON: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (!acc_doc.is_object()) {
-        std::cerr << "derive-shared-secret: --priv-keyfile must be a JSON "
-                     "object {\"address\":..., \"privkey_hex\":...}; got non-"
-                     "object\n";
-        return 1;
-    }
-    if (!acc_doc.contains("privkey_hex")
-        || !acc_doc["privkey_hex"].is_string()) {
-        std::cerr << "derive-shared-secret: --priv-keyfile missing required "
-                     "string field 'privkey_hex'\n";
-        return 1;
-    }
-    std::string priv_hex = acc_doc["privkey_hex"].get<std::string>();
-    if (priv_hex.size() != 64) {
-        std::cerr << "derive-shared-secret: 'privkey_hex' must be 64 hex "
-                     "chars (32-byte Ed25519 priv_seed); got length "
-                  << priv_hex.size() << "\n";
-        return 1;
-    }
+    // Same file cmd_account_export consumes: the canonical binary DAK1
+    // container (D2). The decoder enforces the pubkey/seed derive-equality.
     std::vector<uint8_t> priv_seed;
-    try { priv_seed = from_hex(priv_hex); }
-    catch (std::exception& e) {
-        std::cerr << "derive-shared-secret: 'privkey_hex' is not valid hex: "
-                  << e.what() << "\n";
+    std::string keyfile_address_unused;
+    if (!read_dak1_keyfile("derive-shared-secret", priv_keyfile,
+                           priv_seed, keyfile_address_unused))
         return 1;
-    }
-    if (priv_seed.size() != 32) {
-        std::cerr << "derive-shared-secret: 'privkey_hex' decoded length "
-                     "must be 32; got " << priv_seed.size() << "\n";
-        return 1;
-    }
 
     // ── Parse the peer pubkey hex ──────────────────────────────────────────
     // 32-byte Ed25519 pubkey = 64 lowercase hex chars. We do NOT accept the
@@ -7508,56 +6791,15 @@ bool write_file_bytes(const std::string& path,
     return out_f.good();
 }
 
-// Load the operator's priv_seed + Ed25519 pubkey from a single-account
-// JSON keyfile ({"address":"0x..","privkey_hex":".."}). Used by both
-// encrypt-message and decrypt-message. On any error, prints a
-// diagnostic (prefixed by `cmd_label`) and returns false.
+// Load the operator's priv_seed from a single-account keyfile — the
+// canonical binary DAK1 container (D2). Used by both encrypt-message and
+// decrypt-message. On any error, prints a diagnostic (prefixed by
+// `cmd_label`) and returns false.
 bool load_priv_keyfile(const std::string& path,
                          const std::string& cmd_label,
                          std::vector<uint8_t>& priv_seed_out) {
-    std::ifstream in_f(path);
-    if (!in_f) {
-        std::cerr << cmd_label << ": cannot open --priv-keyfile: "
-                  << path << "\n";
-        return false;
-    }
-    nlohmann::json acc_doc;
-    try { in_f >> acc_doc; }
-    catch (std::exception& e) {
-        std::cerr << cmd_label << ": --priv-keyfile is not valid JSON: "
-                  << e.what() << "\n";
-        return false;
-    }
-    if (!acc_doc.is_object()) {
-        std::cerr << cmd_label << ": --priv-keyfile must be a JSON object "
-                     "{\"address\":..., \"privkey_hex\":...}; got non-object\n";
-        return false;
-    }
-    if (!acc_doc.contains("privkey_hex")
-        || !acc_doc["privkey_hex"].is_string()) {
-        std::cerr << cmd_label << ": --priv-keyfile missing required string "
-                     "field 'privkey_hex'\n";
-        return false;
-    }
-    std::string priv_hex = acc_doc["privkey_hex"].get<std::string>();
-    if (priv_hex.size() != 64) {
-        std::cerr << cmd_label << ": 'privkey_hex' must be 64 hex chars "
-                     "(32-byte Ed25519 priv_seed); got length "
-                  << priv_hex.size() << "\n";
-        return false;
-    }
-    try { priv_seed_out = from_hex(priv_hex); }
-    catch (std::exception& e) {
-        std::cerr << cmd_label << ": 'privkey_hex' is not valid hex: "
-                  << e.what() << "\n";
-        return false;
-    }
-    if (priv_seed_out.size() != 32) {
-        std::cerr << cmd_label << ": 'privkey_hex' decoded length must be 32; "
-                     "got " << priv_seed_out.size() << "\n";
-        return false;
-    }
-    return true;
+    std::string address_unused;
+    return read_dak1_keyfile(cmd_label, path, priv_seed_out, address_unused);
 }
 
 } // namespace
@@ -8201,29 +7443,41 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 // verify: that command verifies a block's K-of-K sigs against ONE
 // digest; this one verifies that ONE key signed TWO conflicting digests.
 //
-// The four conditions mirror validator.cpp::check_equivocation_events
-// exactly (a real EquivocationEvent must satisfy ALL of them; failing
-// any means the evidence does NOT prove equivocation):
-//   (1) digest_a != digest_b      — same digest is not a conflict
-//   (2) sig_a    != sig_b         — same signature is not two messages
-//   (3) sig_a verifies over digest_a against the equivocator's key
-//   (4) sig_b verifies over digest_b against the equivocator's key
+// The conditions mirror validator.cpp::check_equivocation_events exactly
+// (a real EquivocationEvent must satisfy ALL of them; failing any means
+// the evidence does NOT prove equivocation). EQV-height-bind: the event
+// carries per-side OPENINGS (index, body_root) of the two signed digests,
+// and each digest is DERIVED as SHA256(TAG || index u64 BE || body_root)
+// with TAG = "DTM-BLKDIG-v2" (kind 0) / "DTM-CONTRIB-v2" (kind 1):
+//   (1) kind <= 1                 — known digest family
+//   (2) index_a == index_b == block_index — the height bind (stops a
+//       forged slash assembled from two DIFFERENT-height honest sigs)
+//   (3) body_root_a != body_root_b — same opening is not a conflict
+//   (4) sig_a    != sig_b         — same signature is not two messages
+//   (5) sig_a verifies over the DERIVED digest_a against the key
+//   (6) sig_b verifies over the DERIVED digest_b against the key
 //
 // The equivocator's Ed25519 key is supplied as --pubkey (the operator
 // pins it from the beacon-anchored registry: `determ validators --json`
 // or the equivocator's registry entry). No daemon, no RPC, no chain-
-// library link, no file IO required for the inline form — pure crypto.
+// library link, no file IO required for the inline form — pure crypto
+// (the digest derivation uses the vendored determ_sha256).
 //
 // CLI:
 //   --pubkey  <hex64>   REQUIRED. Equivocator's 32-byte Ed25519 key.
-//   --digest-a <hex64>  REQUIRED. First signed 32-byte digest.
-//   --sig-a   <hex128>  REQUIRED. Ed25519 sig over digest-a.
-//   --digest-b <hex64>  REQUIRED. Second signed 32-byte digest.
-//   --sig-b   <hex128>  REQUIRED. Ed25519 sig over digest-b.
-//   --event   <file>    Alternative to the five hex args: an
+//   --kind    <0|1>     Inline form: digest family (0=BLOCK_DIGEST,
+//                       1=CONTRIB_COMMIT).
+//   --block-index <N>   Inline form: the event's claimed height.
+//   --index-a <N>       Inline form: side-a signed height (opening).
+//   --body-root-a <hex64> Inline form: side-a digest body root.
+//   --sig-a   <hex128>  Inline form: Ed25519 sig over the derived digest a.
+//   --index-b <N> --body-root-b <hex64> --sig-b <hex128>
+//                       Inline form: side b, symmetric.
+//   --event   <file>    Alternative to the inline args: an
 //                       EquivocationEvent JSON (EquivocationEvent::
-//                       to_json shape — equivocator/block_index/digest_a/
-//                       sig_a/digest_b/sig_b) OR a Block JSON whose
+//                       to_json shape — equivocator/block_index/kind/
+//                       index_a/body_root_a/sig_a/index_b/body_root_b/
+//                       sig_b) OR a Block JSON whose
 //                       equivocation_events[0] is used. --pubkey is still
 //                       REQUIRED (the event JSON names the equivocator
 //                       domain but NOT its key; the key comes from the
@@ -8232,31 +7486,72 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 //                       equivocation_events[N] (default 0).
 //   --json              One-line JSON.
 //
-// Output fields (JSON): proven, distinct_digests, distinct_sigs,
-//   sig_a_valid, sig_b_valid, pubkey_hex, digest_a_hex, digest_b_hex
-//   [, equivocator, block_index when sourced from --event].
+// Output fields (JSON): proven, kind_known, heights_match,
+//   distinct_body_roots, distinct_sigs, sig_a_valid, sig_b_valid,
+//   pubkey_hex, kind, block_index, index_a, body_root_a_hex, index_b,
+//   body_root_b_hex, derived_digest_a_hex, derived_digest_b_hex
+//   [, equivocator when sourced from --event].
 //
 // Exit codes:
-//   0  PROVEN — valid equivocation evidence (all four conditions hold)
+//   0  PROVEN — valid equivocation evidence (all conditions hold)
 //   2  NOT PROVEN — structurally fine but the evidence does not prove
-//      equivocation (auth-style alert: a sig failed, or the two digests/
-//      sigs are identical). Distinct from arg errors so monitors can
-//      branch on "evidence rejected" vs "tooling broke."
+//      equivocation (auth-style alert: unknown kind, mismatched heights,
+//      a sig failed, or the two roots/sigs are identical). Distinct from
+//      arg errors so monitors can branch on "evidence rejected" vs
+//      "tooling broke."
 //   1  args / parse / IO error
 int cmd_verify_equivocation(int argc, char** argv) {
-    std::string pubkey_hex, digest_a_hex, sig_a_hex, digest_b_hex, sig_b_hex;
+    std::string pubkey_hex, body_root_a_hex, sig_a_hex, body_root_b_hex, sig_b_hex;
     std::string event_path;
+    uint64_t kind_val = 0, block_index_val = 0, index_a_val = 0, index_b_val = 0;
+    bool have_kind = false, have_block_index = false,
+         have_index_a = false, have_index_b = false;
     int  ev_index = 0;
     bool json_out = false;
+    const char* usage =
+        "Usage: determ-wallet verify-equivocation --pubkey <hex64>\n"
+        "         (--kind <0|1> --block-index <N>\n"
+        "          --index-a <N> --body-root-a <hex64> --sig-a <hex128>\n"
+        "          --index-b <N> --body-root-b <hex64> --sig-b <hex128>\n"
+        "          | --event <file> [--index <N>]) [--json]\n";
+    auto parse_u64 = [](const char* label, const char* s, uint64_t& out) {
+        try {
+            size_t pos = 0;
+            unsigned long long v = std::stoull(s, &pos);
+            if (pos != std::string(s).size()) throw std::invalid_argument(s);
+            out = static_cast<uint64_t>(v);
+            return true;
+        } catch (std::exception&) {
+            std::cerr << "verify-equivocation: " << label
+                      << " must be a non-negative integer\n";
+            return false;
+        }
+    };
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--pubkey"   && i + 1 < argc) pubkey_hex   = argv[++i];
-        else if (a == "--digest-a" && i + 1 < argc) digest_a_hex = argv[++i];
-        else if (a == "--sig-a"    && i + 1 < argc) sig_a_hex    = argv[++i];
-        else if (a == "--digest-b" && i + 1 < argc) digest_b_hex = argv[++i];
-        else if (a == "--sig-b"    && i + 1 < argc) sig_b_hex    = argv[++i];
-        else if (a == "--event"    && i + 1 < argc) event_path   = argv[++i];
-        else if (a == "--index"    && i + 1 < argc) {
+        if      (a == "--pubkey"      && i + 1 < argc) pubkey_hex      = argv[++i];
+        else if (a == "--kind"        && i + 1 < argc) {
+            if (!parse_u64("--kind", argv[++i], kind_val)) return 1;
+            have_kind = true;
+        }
+        else if (a == "--block-index" && i + 1 < argc) {
+            if (!parse_u64("--block-index", argv[++i], block_index_val)) return 1;
+            have_block_index = true;
+        }
+        else if (a == "--index-a"     && i + 1 < argc) {
+            if (!parse_u64("--index-a", argv[++i], index_a_val)) return 1;
+            have_index_a = true;
+        }
+        else if (a == "--body-root-a" && i + 1 < argc) body_root_a_hex = argv[++i];
+        else if (a == "--sig-a"       && i + 1 < argc) sig_a_hex       = argv[++i];
+        else if (a == "--index-b"     && i + 1 < argc) {
+            if (!parse_u64("--index-b", argv[++i], index_b_val)) return 1;
+            have_index_b = true;
+        }
+        else if (a == "--body-root-b" && i + 1 < argc) body_root_b_hex = argv[++i];
+        else if (a == "--sig-b"       && i + 1 < argc) sig_b_hex       = argv[++i];
+        else if (a == "--event"       && i + 1 < argc) event_path      = argv[++i];
+        else if (a == "--index"       && i + 1 < argc) {
             try { ev_index = std::stoi(argv[++i]); }
             catch (std::exception&) {
                 std::cerr << "verify-equivocation: --index must be a "
@@ -8272,12 +7567,7 @@ int cmd_verify_equivocation(int argc, char** argv) {
         else if (a == "--json") json_out = true;
         else {
             std::cerr << "verify-equivocation: unknown argument '" << a
-                      << "'\n";
-            std::cerr << "Usage: determ-wallet verify-equivocation "
-                         "--pubkey <hex64>\n"
-                         "         (--digest-a <hex64> --sig-a <hex128> "
-                         "--digest-b <hex64> --sig-b <hex128>\n"
-                         "          | --event <file> [--index <N>]) [--json]\n";
+                      << "'\n" << usage;
             return 1;
         }
     }
@@ -8286,36 +7576,35 @@ int cmd_verify_equivocation(int argc, char** argv) {
     // the untrusted evidence. A real EquivocationEvent names the domain
     // but the key is bound by the beacon-anchored registry.
     if (pubkey_hex.empty()) {
-        std::cerr << "Usage: determ-wallet verify-equivocation "
-                     "--pubkey <hex64>\n"
-                     "         (--digest-a <hex64> --sig-a <hex128> "
-                     "--digest-b <hex64> --sig-b <hex128>\n"
-                     "          | --event <file> [--index <N>]) [--json]\n"
-                     "\n"
-                     "  OFFLINE FA6 equivocation-evidence verifier. Confirms\n"
-                     "  ONE registered key signed TWO distinct digests at the\n"
-                     "  same height — the two-sig proof the chain slashes on.\n"
-                     "  Reproduces validator.cpp::check_equivocation_events:\n"
-                     "  digest_a != digest_b, sig_a != sig_b, and BOTH sigs\n"
-                     "  verify against --pubkey. No daemon, no chain link.\n"
-                     "  Exit 0 PROVEN, 2 NOT PROVEN, 1 args/parse/IO.\n";
+        std::cerr << usage
+                  << "\n"
+                     "  OFFLINE FA6 equivocation-evidence verifier (EQV-height-bind\n"
+                     "  form). Confirms ONE registered key signed TWO distinct\n"
+                     "  digests of one family at the SAME height — the two-sig\n"
+                     "  proof the chain slashes on. Reproduces validator.cpp::\n"
+                     "  check_equivocation_events: kind <= 1, index_a == index_b ==\n"
+                     "  block_index, body_root_a != body_root_b, sig_a != sig_b,\n"
+                     "  and BOTH sigs verify against --pubkey over digests DERIVED\n"
+                     "  from the (index, body_root) openings. No daemon, no chain\n"
+                     "  link. Exit 0 PROVEN, 2 NOT PROVEN, 1 args/parse/IO.\n";
         return 1;
     }
 
     // Optional metadata carried through from an --event source (echoed
     // into the output but NOT trusted for the crypto check).
     std::string equivocator_meta;
-    bool        have_block_index = false;
-    uint64_t    block_index_meta = 0;
 
-    // If --event is supplied, pull the five hex fields out of it. The five
-    // explicit hex args and --event are mutually exclusive (an --event file
-    // is a self-contained record; mixing would be ambiguous).
+    // If --event is supplied, pull the evidence fields out of it. The
+    // explicit inline args and --event are mutually exclusive (an --event
+    // file is a self-contained record; mixing would be ambiguous).
     if (!event_path.empty()) {
-        if (!digest_a_hex.empty() || !sig_a_hex.empty()
-            || !digest_b_hex.empty() || !sig_b_hex.empty()) {
+        if (!body_root_a_hex.empty() || !sig_a_hex.empty()
+            || !body_root_b_hex.empty() || !sig_b_hex.empty()
+            || have_kind || have_block_index || have_index_a || have_index_b) {
             std::cerr << "verify-equivocation: --event is mutually exclusive "
-                         "with --digest-a/--sig-a/--digest-b/--sig-b\n";
+                         "with the inline evidence args (--kind/--block-index/"
+                         "--index-a/--body-root-a/--sig-a/--index-b/"
+                         "--body-root-b/--sig-b)\n";
             return 1;
         }
         nlohmann::json ej;
@@ -8351,18 +7640,26 @@ int cmd_verify_equivocation(int argc, char** argv) {
             src = ej;  // assume a bare EquivocationEvent object
         }
         if (!src.is_object()
-            || !src.contains("digest_a") || !src.contains("sig_a")
-            || !src.contains("digest_b") || !src.contains("sig_b")) {
+            || !src.contains("kind")        || !src.contains("block_index")
+            || !src.contains("index_a")     || !src.contains("index_b")
+            || !src.contains("body_root_a") || !src.contains("sig_a")
+            || !src.contains("body_root_b") || !src.contains("sig_b")) {
             std::cerr << "verify-equivocation: --event JSON is not an "
-                         "EquivocationEvent (needs digest_a/sig_a/digest_b/"
-                         "sig_b) nor a Block with equivocation_events\n";
+                         "EquivocationEvent (needs kind/block_index/index_a/"
+                         "body_root_a/sig_a/index_b/body_root_b/sig_b) nor a "
+                         "Block with equivocation_events\n";
             return 1;
         }
         try {
-            digest_a_hex = src.at("digest_a").get<std::string>();
-            sig_a_hex    = src.at("sig_a").get<std::string>();
-            digest_b_hex = src.at("digest_b").get<std::string>();
-            sig_b_hex    = src.at("sig_b").get<std::string>();
+            kind_val        = src.at("kind").get<uint64_t>();
+            block_index_val = src.at("block_index").get<uint64_t>();
+            index_a_val     = src.at("index_a").get<uint64_t>();
+            body_root_a_hex = src.at("body_root_a").get<std::string>();
+            sig_a_hex       = src.at("sig_a").get<std::string>();
+            index_b_val     = src.at("index_b").get<uint64_t>();
+            body_root_b_hex = src.at("body_root_b").get<std::string>();
+            sig_b_hex       = src.at("sig_b").get<std::string>();
+            have_kind = have_block_index = have_index_a = have_index_b = true;
         } catch (std::exception& e) {
             std::cerr << "verify-equivocation: --event field type error: "
                       << e.what() << "\n";
@@ -8370,22 +7667,20 @@ int cmd_verify_equivocation(int argc, char** argv) {
         }
         if (src.contains("equivocator") && src["equivocator"].is_string())
             equivocator_meta = src["equivocator"].get<std::string>();
-        if (src.contains("block_index") && src["block_index"].is_number_unsigned()) {
-            block_index_meta = src["block_index"].get<uint64_t>();
-            have_block_index = true;
-        }
     }
 
-    // All five hex values must now be present (whether inline or from
+    // Every evidence field must now be present (whether inline or from
     // --event).
-    if (digest_a_hex.empty() || sig_a_hex.empty()
-        || digest_b_hex.empty() || sig_b_hex.empty()) {
-        std::cerr << "verify-equivocation: need all of --digest-a/--sig-a/"
-                     "--digest-b/--sig-b (or supply --event)\n";
+    if (!have_kind || !have_block_index || !have_index_a || !have_index_b
+        || body_root_a_hex.empty() || sig_a_hex.empty()
+        || body_root_b_hex.empty() || sig_b_hex.empty()) {
+        std::cerr << "verify-equivocation: need all of --kind/--block-index/"
+                     "--index-a/--body-root-a/--sig-a/--index-b/"
+                     "--body-root-b/--sig-b (or supply --event)\n";
         return 1;
     }
 
-    // Shape + hex-decode all four artifacts. Digests are 32 bytes
+    // Shape + hex-decode the artifacts. Body roots are 32 bytes
     // (64 hex), sigs are 64 bytes (128 hex) — same widths the chain's
     // EquivocationEvent::from_json enforces (json_require_hex 64 / 128).
     auto decode_fixed = [](const std::string& label, const std::string& hex,
@@ -8412,68 +7707,113 @@ int cmd_verify_equivocation(int argc, char** argv) {
         return true;
     };
 
-    std::vector<uint8_t> pk, dig_a, sg_a, dig_b, sg_b;
-    if (!decode_fixed("--pubkey",   pubkey_hex,   64,  32, pk))    return 1;
-    if (!decode_fixed("--digest-a", digest_a_hex, 64,  32, dig_a)) return 1;
-    if (!decode_fixed("--sig-a",    sig_a_hex,    128, 64, sg_a))  return 1;
-    if (!decode_fixed("--digest-b", digest_b_hex, 64,  32, dig_b)) return 1;
-    if (!decode_fixed("--sig-b",    sig_b_hex,    128, 64, sg_b))  return 1;
+    std::vector<uint8_t> pk, root_a, sg_a, root_b, sg_b;
+    if (!decode_fixed("--pubkey",      pubkey_hex,      64,  32, pk))     return 1;
+    if (!decode_fixed("--body-root-a", body_root_a_hex, 64,  32, root_a)) return 1;
+    if (!decode_fixed("--sig-a",       sig_a_hex,       128, 64, sg_a))   return 1;
+    if (!decode_fixed("--body-root-b", body_root_b_hex, 64,  32, root_b)) return 1;
+    if (!decode_fixed("--sig-b",       sig_b_hex,       128, 64, sg_b))   return 1;
 
     if (!init_libsodium()) {
         std::cerr << "verify-equivocation: libsodium init failed\n";
         return 1;
     }
 
-    // ── The four-condition FA6 proof (validator.cpp parity) ───────────────
-    // (1) + (2): the two digests and the two sigs must differ. A repeated
-    // digest or a repeated sig is NOT equivocation (a signer may sign the
-    // same thing twice harmlessly). Compare on the canonical lowercase hex
-    // so case differences never spoof "distinct."
-    bool distinct_digests = (dig_a != dig_b);
-    bool distinct_sigs    = (sg_a  != sg_b);
+    // ── The FA6 proof, EQV-height-bind form (validator.cpp parity) ────────
+    // (1) known digest family; (2) THE HEIGHT ASSERT — both signed openings
+    // carry the event's claimed height (what stops a forged slash assembled
+    // from two different-height honest signatures).
+    bool kind_known    = (kind_val <= 1);
+    bool heights_match = (index_a_val == block_index_val
+                          && index_b_val == block_index_val);
 
-    // (3) + (4): each sig must verify over its OWN digest against the
-    // equivocator's key. crypto_sign_verify_detached returns 0 on valid.
-    bool sig_a_valid = (crypto_sign_verify_detached(
+    // (3) + (4): the two body roots and the two sigs must differ. A repeated
+    // root or a repeated sig is NOT equivocation (a signer may sign the
+    // same thing twice harmlessly).
+    bool distinct_body_roots = (root_a != root_b);
+    bool distinct_sigs       = (sg_a != sg_b);
+
+    // Derive each signed digest from its opening:
+    //   SHA256(TAG || index u64 BE || body_root), TAG per kind — the
+    //   offline mirror of producer.cpp::compose_block_digest /
+    //   compose_contrib_commitment (tag strings byte-identical).
+    auto derive_digest = [&](uint64_t index, const std::vector<uint8_t>& root) {
+        const char* tag = (kind_val == 0) ? "DTM-BLKDIG-v2" : "DTM-CONTRIB-v2";
+        std::vector<uint8_t> pre(tag, tag + std::strlen(tag));
+        for (int i = 7; i >= 0; --i)
+            pre.push_back(static_cast<uint8_t>((index >> (8 * i)) & 0xff));
+        pre.insert(pre.end(), root.begin(), root.end());
+        std::vector<uint8_t> out(32);
+        determ_sha256(pre.data(), pre.size(), out.data());
+        return out;
+    };
+    std::vector<uint8_t> dig_a(32, 0), dig_b(32, 0);
+    if (kind_known) {
+        dig_a = derive_digest(index_a_val, root_a);
+        dig_b = derive_digest(index_b_val, root_b);
+    }
+
+    // (5) + (6): each sig must verify over its OWN DERIVED digest against
+    // the equivocator's key. crypto_sign_verify_detached returns 0 on valid.
+    bool sig_a_valid = kind_known && (crypto_sign_verify_detached(
                             sg_a.data(), dig_a.data(), dig_a.size(),
                             pk.data()) == 0);
-    bool sig_b_valid = (crypto_sign_verify_detached(
+    bool sig_b_valid = kind_known && (crypto_sign_verify_detached(
                             sg_b.data(), dig_b.data(), dig_b.size(),
                             pk.data()) == 0);
 
-    bool proven = distinct_digests && distinct_sigs
+    bool proven = kind_known && heights_match
+               && distinct_body_roots && distinct_sigs
                && sig_a_valid && sig_b_valid;
 
     if (json_out) {
         nlohmann::json r;
-        r["proven"]           = proven;
-        r["distinct_digests"] = distinct_digests;
-        r["distinct_sigs"]    = distinct_sigs;
-        r["sig_a_valid"]      = sig_a_valid;
-        r["sig_b_valid"]      = sig_b_valid;
-        r["pubkey_hex"]       = pubkey_hex;
-        r["digest_a_hex"]     = digest_a_hex;
-        r["digest_b_hex"]     = digest_b_hex;
+        r["proven"]              = proven;
+        r["kind_known"]          = kind_known;
+        r["heights_match"]       = heights_match;
+        r["distinct_body_roots"] = distinct_body_roots;
+        r["distinct_sigs"]       = distinct_sigs;
+        r["sig_a_valid"]         = sig_a_valid;
+        r["sig_b_valid"]         = sig_b_valid;
+        r["pubkey_hex"]          = pubkey_hex;
+        r["kind"]                = kind_val;
+        r["block_index"]         = block_index_val;
+        r["index_a"]             = index_a_val;
+        r["body_root_a_hex"]     = body_root_a_hex;
+        r["index_b"]             = index_b_val;
+        r["body_root_b_hex"]     = body_root_b_hex;
+        r["derived_digest_a_hex"] = to_hex(dig_a);
+        r["derived_digest_b_hex"] = to_hex(dig_b);
         if (!equivocator_meta.empty()) r["equivocator"] = equivocator_meta;
-        if (have_block_index)          r["block_index"] = block_index_meta;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << (proven ? "PROVEN" : "NOT PROVEN")
                   << ": equivocation evidence\n";
-        std::cout << "  pubkey:           " << pubkey_hex   << "\n";
+        std::cout << "  pubkey:              " << pubkey_hex   << "\n";
         if (!equivocator_meta.empty())
-            std::cout << "  equivocator:      " << equivocator_meta << "\n";
-        if (have_block_index)
-            std::cout << "  block_index:      " << block_index_meta << "\n";
-        std::cout << "  digest_a:         " << digest_a_hex << "\n";
-        std::cout << "  digest_b:         " << digest_b_hex << "\n";
-        std::cout << "  distinct_digests: "
-                  << (distinct_digests ? "true" : "false") << "\n";
-        std::cout << "  distinct_sigs:    "
+            std::cout << "  equivocator:         " << equivocator_meta << "\n";
+        std::cout << "  kind:                " << kind_val
+                  << (kind_val == 0 ? " (BLOCK_DIGEST)"
+                      : kind_val == 1 ? " (CONTRIB_COMMIT)" : " (UNKNOWN)")
+                  << "\n";
+        std::cout << "  block_index:         " << block_index_val << "\n";
+        std::cout << "  index_a:             " << index_a_val << "\n";
+        std::cout << "  body_root_a:         " << body_root_a_hex << "\n";
+        std::cout << "  derived_digest_a:    " << to_hex(dig_a) << "\n";
+        std::cout << "  index_b:             " << index_b_val << "\n";
+        std::cout << "  body_root_b:         " << body_root_b_hex << "\n";
+        std::cout << "  derived_digest_b:    " << to_hex(dig_b) << "\n";
+        std::cout << "  kind_known:          "
+                  << (kind_known ? "true" : "false") << "\n";
+        std::cout << "  heights_match:       "
+                  << (heights_match ? "true" : "false") << "\n";
+        std::cout << "  distinct_body_roots: "
+                  << (distinct_body_roots ? "true" : "false") << "\n";
+        std::cout << "  distinct_sigs:       "
                   << (distinct_sigs ? "true" : "false") << "\n";
-        std::cout << "  sig_a_valid:      "
+        std::cout << "  sig_a_valid:         "
                   << (sig_a_valid ? "true" : "false") << "\n";
-        std::cout << "  sig_b_valid:      "
+        std::cout << "  sig_b_valid:         "
                   << (sig_b_valid ? "true" : "false") << "\n";
     }
     return proven ? 0 : 2;
@@ -8942,24 +8282,22 @@ int cmd_selftest_committee_quorum(int, char**) {
 // degenerate Envelope. This pure in-process gate (FAST, OFFLINE, no daemon)
 // closes exactly those:
 //
-//   deserialize (never invokes the KDF — rejects the blob directly):
-//     D1 DWE2 params slot 16 bytes (!=12; valid t|m|p in the first 12) -> nullopt
-//        Falsifies envelope.cpp:251 `if (params.size()!=12) return nullopt`:
-//        DELETE it and the first 12 bytes read IN-BOUNDS as VALID params, so
-//        deserialize would ACCEPT a mis-sized DWE2 blob -> D1 flips RED. This is
-//        the deterministic, platform-independent anchor for :251.
-//     D2 DWE2 params slot 4 bytes                                      -> nullopt
-//        The OOB case the finder flagged: with :251 deleted, rd_u32_le(params,4)
-//        and rd_u32_le(params,8) (envelope.cpp:254-255) index a 4-byte vector via
-//        the unchecked operator[] in rd_u32_le (:200) -> heap OOB READ on
-//        attacker-supplied file input. ASan/UBSan (WSL ci_local) trips on the
-//        mutant; with :251 present this simply returns nullopt and never reads
-//        the out-of-range bytes.
+//   deserialize (never invokes the KDF — rejects the blob directly). Since the
+//   D2 binary container the blobs are the strict-hex VIEW of the byte layout
+//   (magic | salt_len u8 | salt | params | nonce | aad_len u16 | aad |
+//   ct_len u32 | ct); the params region has NO length field, so a mis-sized
+//   params slot shifts every later field and must reject structurally:
+//     D1 DWE2 16-byte params region (valid t|m|p + 4 garbage bytes) -> nullopt
+//        (the shifted aad_len reads 2569 > MAX_AAD_LEN; pins the field-order/
+//        exact-layout discipline — no delimiter can re-sync a shifted parse).
+//     D2 DWE2 4-byte params region -> nullopt (shifted m_cost reads over the
+//        MAX_ARGON2_M_COST_KIB cap). Under the old dot-text form this was the
+//        heap-OOB anchor; the binary parser bounds-checks every read via
+//        have(), so the mutant class is now "delete a bound -> false ACCEPT".
 //     D3 DWE2 argon2_t==0   D4 argon2_p==0   D5 argon2_m_kib < 8*argon2_p -> nullopt
-//        Falsify envelope.cpp:256-257, one clause each (blobs are crafted so only
-//        the named clause trips) -> deleting any single clause flips its case.
-//     D6 DWE1 pbkdf2_iters==0                                          -> nullopt
-//        Falsifies envelope.cpp:262.
+//        Falsify the deserialize_bytes degeneracy clause, one clause each
+//        (blobs are crafted so only the named clause trips).
+//     D6 DWE1 pbkdf2_iters==0 -> nullopt.
 //
 //   decrypt (hand-built degenerate Envelope). deserialize would reject these
 //   BEFORE decrypt ever sees them, so the decrypt() guards are reachable ONLY via
@@ -8993,18 +8331,23 @@ int cmd_selftest_envelope_param_reject(int, char**) {
     std::cout << "=== selftest-envelope-param-reject: DWE2 / decrypt-path KDF-param "
                  "rejection (KeyfileArgon2Migration.md KM-4) ===\n";
 
-    // Shared WELL-FORMED field hex (deserialize accepts these lengths, so only
-    // the params slot / KDF-param under test can cause a rejection).
-    const std::string M2    = "44574532";                          // "DWE2" magic LE
-    const std::string M1    = "44574531";                          // "DWE1" magic LE
-    const std::string SALT  = "000102030405060708090a0b0c0d0e0f";  // 16 B (>= 8)
+    // Shared WELL-FORMED field hex for the BINARY container's strict-hex view
+    // (deserialize accepts these lengths, so only the params slot / KDF-param
+    // under test can cause a rejection). Byte layout per envelope.hpp:
+    // magic(4) | salt_len u8 | salt | params | nonce(12) | aad_len u16 LE |
+    // aad | ct_len u32 LE | ct.
+    const std::string M2    = "44574532";                          // "DWE2" magic
+    const std::string M1    = "44574531";                          // "DWE1" magic
+    const std::string SALT  = std::string("10")                    // salt_len = 16
+                            + "000102030405060708090a0b0c0d0e0f";  // 16 B (>= 8)
     const std::string NONCE = "0102030405060708090a0b0c";          // 12 B (== NONCE_LEN)
-    const std::string AAD   = "";                                  // empty aad
-    const std::string CT    = "000102030405060708090a0b0c0d0e0f";  // 16 B (== TAG_LEN)
+    const std::string AAD   = "0000";                              // aad_len = 0, no aad
+    const std::string CT    = std::string("10000000")              // ct_len = 16
+                            + "000102030405060708090a0b0c0d0e0f";  // 16 B (== TAG_LEN)
     // Valid 12-byte DWE2 params: t=3, m=65536 KiB, p=1 (each u32 LE).
     const std::string P_VALID = std::string("03000000") + "00000100" + "01000000";
     auto blob = [&](const std::string& magic, const std::string& params) {
-        return magic + "." + SALT + "." + params + "." + NONCE + "." + AAD + "." + CT;
+        return magic + SALT + params + NONCE + AAD + CT;
     };
 
     // ── Positive control P1: a genuine DWE2 (Argon2id) envelope round-trips ────
@@ -9111,6 +8454,521 @@ int cmd_selftest_envelope_param_reject(int, char**) {
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
     if (fail == 0) { std::cout << "  PASS: selftest-envelope-param-reject\n"; return 0; }
     std::cout << "  FAIL: selftest-envelope-param-reject\n"; return 1;
+}
+
+// ── selftest-envelope-bytes ── falsify gate for the canonical BINARY envelope
+// container (D2 at-rest form; byte layout in wallet/envelope.hpp). Legs:
+//   R1/R2  round-trip: serialize_bytes -> deserialize_bytes preserves every
+//          field (DWE2 and DWE1) and the result decrypts back to the plaintext.
+//   T      truncation sweep: EVERY strict prefix (length 0..N-1) of a valid
+//          container decodes nullopt — exact-length, short direction.
+//   X1     trailing-byte reject: valid container + 1 extra byte -> nullopt.
+//          SHARPEST mutant: delete the final `off != len` check in
+//          deserialize_bytes and X1 flips RED (exact-length, long direction).
+//   H1-H9  hostile bytes, one guard per case: wrong magic; salt_len 0/7/65;
+//          aad_len 257 (H5 is exact-length-valid, so ONLY the MAX_AAD_LEN cap
+//          can reject it); aad_len lying about the body; ct_len 15 (< TAG);
+//          ct_len MAX_CT_LEN+1 with a REAL 1MiB+1 body (ONLY the cap rejects);
+//          ct_len beyond the remaining bytes (length-vs-body, the 2803a13
+//          lesson). H0 is the positive control built by the SAME builder, so
+//          the hostile battery cannot vacuously pass.
+//   V1-V4  strict-hex view: odd length, non-hex char, and the deleted legacy
+//          dot-separated form all reject; the well-formed hex view round-trips
+//          (pins "readers accept ONLY the new form").
+int cmd_selftest_envelope_bytes(int, char**) {
+    int pass = 0, fail = 0;
+    auto ok = [&](bool c, const std::string& m) {
+        if (c) { std::cout << "  ok:   " << m << "\n"; pass++; }
+        else   { std::cout << "  FAIL: " << m << "\n"; fail++; }
+    };
+    std::cout << "=== selftest-envelope-bytes: canonical binary DWE container "
+                 "(exact-length, bounds, hex view) ===\n";
+
+    // ── R1/R2 round-trip field equality + decrypt ─────────────────────────────
+    const std::vector<uint8_t> pt  = {0xde, 0xad, 0xbe, 0xef};
+    const std::vector<uint8_t> aad = {0xaa, 0xbb};
+    // Tiny cost (8 KiB / 1 pass; 2 iters) keeps this FAST; still real KDFs.
+    auto env2 = envelope::encrypt_argon2id(pt, "pw", aad, /*t*/1, /*m_kib*/8, /*p*/1);
+    auto env1 = envelope::encrypt_pbkdf2 (pt, "pw", aad, /*iters*/2);
+    const auto b2 = envelope::serialize_bytes(env2);
+    const auto b1 = envelope::serialize_bytes(env1);
+    {
+        auto d = envelope::deserialize_bytes(b2);
+        ok(d.has_value() && d->kdf == envelope::Kdf::ARGON2ID
+               && d->salt == env2.salt && d->argon2_t == 1 && d->argon2_m_kib == 8
+               && d->argon2_p == 1 && d->nonce == env2.nonce && d->aad == env2.aad
+               && d->ciphertext == env2.ciphertext,
+           "R1 DWE2 serialize_bytes -> deserialize_bytes preserves every field");
+        bool round = false;
+        if (d) { auto r = envelope::decrypt(*d, "pw", aad); round = r && *r == pt; }
+        ok(round, "R1 DWE2 deserialized container decrypts back to the plaintext");
+    }
+    {
+        auto d = envelope::deserialize_bytes(b1);
+        ok(d.has_value() && d->kdf == envelope::Kdf::PBKDF2
+               && d->salt == env1.salt && d->pbkdf2_iters == 2
+               && d->nonce == env1.nonce && d->aad == env1.aad
+               && d->ciphertext == env1.ciphertext,
+           "R2 DWE1 serialize_bytes -> deserialize_bytes preserves every field");
+        bool round = false;
+        if (d) { auto r = envelope::decrypt(*d, "pw", aad); round = r && *r == pt; }
+        ok(round, "R2 DWE1 deserialized container decrypts back to the plaintext");
+    }
+
+    // ── T truncation sweep: every strict prefix rejects ───────────────────────
+    {
+        bool all2 = true, all1 = true;
+        for (size_t n = 0; n < b2.size(); ++n)
+            if (envelope::deserialize_bytes(b2.data(), n)) { all2 = false; break; }
+        for (size_t n = 0; n < b1.size(); ++n)
+            if (envelope::deserialize_bytes(b1.data(), n)) { all1 = false; break; }
+        ok(all2, "T1 DWE2 every strict prefix 0..N-1 -> nullopt [falsify any have() bound]");
+        ok(all1, "T2 DWE1 every strict prefix 0..N-1 -> nullopt [falsify any have() bound]");
+    }
+
+    // ── X1 trailing byte rejects (exact-length, long direction) ───────────────
+    {
+        auto longer = b2;
+        longer.push_back(0x00);
+        ok(!envelope::deserialize_bytes(longer),
+           "X1 valid container + 1 trailing byte -> nullopt [falsify off==len final check]");
+    }
+
+    // ── H hostile bytes (hand-built via one builder; H0 = positive control) ───
+    auto u16v = [](unsigned v) {
+        return std::vector<uint8_t>{uint8_t(v & 0xff), uint8_t((v >> 8) & 0xff)};
+    };
+    auto u32v = [](uint32_t v) {
+        std::vector<uint8_t> b(4);
+        for (int i = 0; i < 4; ++i) b[i] = uint8_t((v >> (8 * i)) & 0xff);
+        return b;
+    };
+    auto cat = [](std::initializer_list<std::vector<uint8_t>> ps) {
+        std::vector<uint8_t> o;
+        for (const auto& p : ps) o.insert(o.end(), p.begin(), p.end());
+        return o;
+    };
+    const std::vector<uint8_t> MAGIC2 = {'D', 'W', 'E', '2'};
+    const std::vector<uint8_t> SALT16(16, 0x5a);
+    const std::vector<uint8_t> NONCE12(12, 0x22);
+    const std::vector<uint8_t> CT16(16, 0x33);
+    const std::vector<uint8_t> P = cat({u32v(1), u32v(8), u32v(1)});   // t=1 m=8 p=1
+    auto build = [&](const std::vector<uint8_t>& magic, uint8_t salt_len,
+                     const std::vector<uint8_t>& salt,
+                     const std::vector<uint8_t>& aad_len_f, const std::vector<uint8_t>& aad_f,
+                     const std::vector<uint8_t>& ct_len_f,  const std::vector<uint8_t>& ct_f) {
+        return cat({magic, {salt_len}, salt, P, NONCE12, aad_len_f, aad_f, ct_len_f, ct_f});
+    };
+    auto rej = [&](const std::vector<uint8_t>& b) {
+        return !envelope::deserialize_bytes(b).has_value();
+    };
+    ok(!rej(build(MAGIC2, 16, SALT16, u16v(0), {}, u32v(16), CT16)),
+       "H0 positive control: well-formed hand-built container ACCEPTS");
+    ok(rej(build({'D', 'W', 'E', '3'}, 16, SALT16, u16v(0), {}, u32v(16), CT16)),
+       "H1 wrong magic -> nullopt [falsify magic check]");
+    ok(rej(build(MAGIC2, 0, {}, u16v(0), {}, u32v(16), CT16)),
+       "H2 salt_len 0 -> nullopt [falsify salt_len lower bound]");
+    ok(rej(build(MAGIC2, 7, std::vector<uint8_t>(7, 0x5a), u16v(0), {}, u32v(16), CT16)),
+       "H3 salt_len 7 -> nullopt [falsify salt_len lower bound]");
+    ok(rej(build(MAGIC2, 65, std::vector<uint8_t>(65, 0x5a), u16v(0), {}, u32v(16), CT16)),
+       "H4 salt_len 65 -> nullopt [falsify salt_len upper bound]");
+    ok(rej(build(MAGIC2, 16, SALT16, u16v(257), std::vector<uint8_t>(257, 0x01),
+                 u32v(16), CT16)),
+       "H5 aad_len 257 with real body -> nullopt [falsify MAX_AAD_LEN cap]");
+    ok(rej(build(MAGIC2, 16, SALT16, u16v(100), {}, u32v(16), CT16)),
+       "H6 aad_len 100 beyond remaining 20 bytes -> nullopt [falsify aad length-vs-body]");
+    ok(rej(build(MAGIC2, 16, SALT16, u16v(0), {}, u32v(15),
+                 std::vector<uint8_t>(15, 0x33))),
+       "H7 ct_len 15 (< 16B tag) -> nullopt [falsify ct_len lower bound]");
+    ok(rej(build(MAGIC2, 16, SALT16, u16v(0), {}, u32v(envelope::MAX_CT_LEN + 1),
+                 std::vector<uint8_t>(envelope::MAX_CT_LEN + 1, 0x00))),
+       "H8 ct_len MAX_CT_LEN+1 with real 1MiB+1 body -> nullopt [falsify MAX_CT_LEN cap]");
+    ok(rej(build(MAGIC2, 16, SALT16, u16v(0), {}, u32v(17), CT16)),
+       "H9 ct_len 17 beyond remaining 16 bytes -> nullopt [falsify ct length-vs-body]");
+
+    // ── V strict-hex view ─────────────────────────────────────────────────────
+    {
+        const std::string h = envelope::serialize(env2);
+        auto d = envelope::deserialize(h);
+        bool round = false;
+        if (d) { auto r = envelope::decrypt(*d, "pw", aad); round = r && *r == pt; }
+        ok(d.has_value() && round,
+           "V1 hex view round-trips and decrypts (serialize -> deserialize)");
+        ok(!envelope::deserialize(h + "0").has_value(),
+           "V2 odd-length hex -> nullopt [falsify even-length check]");
+        std::string bad = h; bad[0] = 'g';
+        ok(!envelope::deserialize(bad).has_value(),
+           "V3 non-hex char -> nullopt [falsify strict nibble decode]");
+        std::string dotted = h; dotted.insert(8, ".");
+        ok(!envelope::deserialize(dotted).has_value(),
+           "V4 legacy dot-separated form -> nullopt [pins: only the new form reads]");
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-envelope-bytes\n"; return 0; }
+    std::cout << "  FAIL: selftest-envelope-bytes\n"; return 1;
+}
+
+// ── selftest-keyfile-binary ── falsify gate for the canonical binary keyfile
+// containers (D2; layouts in wallet/keyfmt.hpp). Legs:
+//   DAK1: round-trip; 67/69-byte exact-length rejects; wrong magic;
+//         SHARPEST mutant — flip one pubkey byte and the decode must reject
+//         (pins the derive-equality check that replaced the S-028 address
+//         cross-check; delete it in keyfmt.cpp decode_dak1 and K4 flips
+//         RED as a false ACCEPT); flip one seed byte likewise.
+//   DAB1: round-trip; count=0 reject; count-vs-length mismatch rejected in
+//         BOTH directions; per-record derive-equality.
+//   DNK1: round-trip through the real encrypt/decrypt legs; env_len +/- 1
+//         reject; header-pubkey tamper => AEAD decrypt fails (pins AAD =
+//         the raw 32-byte pubkey — a mutant that passes empty AAD accepts
+//         => RED); ciphertext bitflip => nullopt; header truncation sweep.
+int cmd_selftest_keyfile_binary(int, char**) {
+    int pass = 0, fail = 0;
+    auto ok = [&](bool c, const std::string& m) {
+        if (c) { std::cout << "  ok:   " << m << "\n"; pass++; }
+        else   { std::cout << "  FAIL: " << m << "\n"; fail++; }
+    };
+    std::cout << "=== selftest-keyfile-binary: DAK1 / DAB1 / DNK1 binary "
+                 "containers ===\n";
+
+    auto mk_kp = [&](uint8_t fill) {
+        keyfmt::Keypair kp;
+        for (int i = 0; i < 32; ++i) kp.priv_seed[i] = uint8_t(fill + i);
+        determ_ed25519_pubkey_from_seed(kp.priv_seed.data(), kp.pubkey.data());
+        return kp;
+    };
+
+    // ── DAK1 ─────────────────────────────────────────────────────────────────
+    const auto kp1 = mk_kp(0x10);
+    const auto b1  = keyfmt::encode_dak1(kp1);
+    {
+        auto d = keyfmt::decode_dak1(b1);
+        ok(d.has_value() && d->pubkey == kp1.pubkey
+               && d->priv_seed == kp1.priv_seed,
+           "K0 DAK1 encode -> decode round-trips both fields");
+        ok(b1.size() == keyfmt::DAK1_SIZE,
+           "K0 DAK1 container is exactly 68 bytes");
+    }
+    ok(!keyfmt::decode_dak1(b1.data(), 67).has_value(),
+       "K1 DAK1 67-byte prefix -> nullopt [falsify exact-length]");
+    {
+        auto longer = b1; longer.push_back(0x00);
+        ok(!keyfmt::decode_dak1(longer).has_value(),
+           "K2 DAK1 69 bytes (trailing byte) -> nullopt [falsify exact-length]");
+    }
+    {
+        auto bad = b1; bad[0] = 'X';
+        ok(!keyfmt::decode_dak1(bad).has_value(),
+           "K3 DAK1 wrong magic -> nullopt [falsify magic check]");
+    }
+    {
+        auto bad = b1; bad[4] ^= 0x01;   // first pubkey byte
+        ok(!keyfmt::decode_dak1(bad).has_value(),
+           "K4 DAK1 pubkey byte flip -> nullopt [falsify derive-equality]");
+    }
+    {
+        auto bad = b1; bad[36] ^= 0x01;  // first seed byte
+        ok(!keyfmt::decode_dak1(bad).has_value(),
+           "K5 DAK1 seed byte flip -> nullopt [falsify derive-equality]");
+    }
+
+    // ── DAB1 ─────────────────────────────────────────────────────────────────
+    const std::vector<keyfmt::Keypair> batch = {mk_kp(0x20), mk_kp(0x40),
+                                                mk_kp(0x60)};
+    const auto bb = keyfmt::encode_dab1(batch);
+    {
+        auto d = keyfmt::decode_dab1(bb);
+        bool match = d.has_value() && d->size() == 3;
+        if (match)
+            for (size_t i = 0; i < 3; ++i)
+                match = match && (*d)[i].pubkey == batch[i].pubkey
+                              && (*d)[i].priv_seed == batch[i].priv_seed;
+        ok(match, "B0 DAB1 encode -> decode round-trips all records");
+        ok(bb.size() == 6 + 64 * 3, "B0 DAB1 container is exactly 6+64*count bytes");
+    }
+    {
+        std::vector<uint8_t> zero = {'D', 'A', 'B', '1', 0x00, 0x00};
+        ok(!keyfmt::decode_dab1(zero).has_value(),
+           "B1 DAB1 count=0 -> nullopt [falsify count floor]");
+    }
+    {
+        auto bad = bb; bad[4] = 4;       // count lies: says 4, carries 3
+        ok(!keyfmt::decode_dab1(bad).has_value(),
+           "B2 DAB1 count 4 with 3 records -> nullopt [falsify count-vs-length]");
+    }
+    {
+        auto bad = bb; bad[4] = 2;       // count lies: says 2, carries 3
+        ok(!keyfmt::decode_dab1(bad).has_value(),
+           "B3 DAB1 count 2 with 3 records -> nullopt [falsify count-vs-length]");
+    }
+    {
+        auto bad = bb; bad[6 + 64 + 3] ^= 0x01;   // record 2's pubkey byte
+        ok(!keyfmt::decode_dab1(bad).has_value(),
+           "B4 DAB1 record-2 pubkey flip -> nullopt [falsify per-record derive]");
+    }
+
+    // ── DNK1 (through the real AEAD legs; tiny KDF keeps this FAST) ──────────
+    {
+        const auto kp = mk_kp(0x80);
+        const std::vector<uint8_t> seed_pt(kp.priv_seed.begin(),
+                                           kp.priv_seed.end());
+        const std::vector<uint8_t> aad(kp.pubkey.begin(), kp.pubkey.end());
+        auto env = envelope::encrypt_argon2id(seed_pt, "pw", aad,
+                                              /*t*/1, /*m_kib*/8, /*p*/1);
+        const auto env_bytes = envelope::serialize_bytes(env);
+        const auto nk = keyfmt::encode_dnk1(kp.pubkey, env_bytes);
+        {
+            auto d = keyfmt::decode_dnk1(nk);
+            bool round = false;
+            if (d && d->pubkey == kp.pubkey) {
+                auto e2 = envelope::deserialize_bytes(d->env_bytes);
+                if (e2) {
+                    std::vector<uint8_t> aad2(d->pubkey.begin(),
+                                              d->pubkey.end());
+                    auto pt = envelope::decrypt(*e2, "pw", aad2);
+                    round = pt && *pt == seed_pt;
+                }
+            }
+            ok(round, "N0 DNK1 encode -> decode -> AEAD decrypt recovers the raw seed");
+        }
+        {
+            auto bad = nk;
+            // env_len + 1 (lies past EOF)
+            uint32_t env_len = uint32_t(env_bytes.size());
+            bad[36] = uint8_t((env_len + 1) & 0xff);
+            bad[37] = uint8_t(((env_len + 1) >> 8) & 0xff);
+            bad[38] = uint8_t(((env_len + 1) >> 16) & 0xff);
+            bad[39] = uint8_t(((env_len + 1) >> 24) & 0xff);
+            ok(!keyfmt::decode_dnk1(bad).has_value(),
+               "N1 DNK1 env_len+1 -> nullopt [falsify exact-EOF]");
+            bad = nk;
+            bad[36] = uint8_t((env_len - 1) & 0xff);
+            bad[37] = uint8_t(((env_len - 1) >> 8) & 0xff);
+            bad[38] = uint8_t(((env_len - 1) >> 16) & 0xff);
+            bad[39] = uint8_t(((env_len - 1) >> 24) & 0xff);
+            ok(!keyfmt::decode_dnk1(bad).has_value(),
+               "N2 DNK1 env_len-1 -> nullopt [falsify exact-EOF]");
+        }
+        {
+            // Header-pubkey tamper: the container still PARSES (structure is
+            // intact) but the AEAD must fail because AAD = the raw header
+            // pubkey. This is the DNK1 AAD-binding falsify case.
+            auto bad = nk; bad[4] ^= 0x01;
+            auto d = keyfmt::decode_dnk1(bad);
+            bool aead_rejected = false;
+            if (d) {
+                auto e2 = envelope::deserialize_bytes(d->env_bytes);
+                if (e2) {
+                    std::vector<uint8_t> aad2(d->pubkey.begin(),
+                                              d->pubkey.end());
+                    aead_rejected = !envelope::decrypt(*e2, "pw", aad2)
+                                         .has_value();
+                }
+            }
+            ok(aead_rejected,
+               "N3 DNK1 header-pubkey tamper -> AEAD decrypt fails "
+               "[falsify AAD = raw pubkey binding]");
+        }
+        {
+            // Ciphertext bitflip inside the embedded envelope -> nullopt.
+            auto bad = nk; bad[nk.size() - 1] ^= 0x01;
+            auto d = keyfmt::decode_dnk1(bad);
+            bool rejected = true;
+            if (d) {
+                auto e2 = envelope::deserialize_bytes(d->env_bytes);
+                if (e2) {
+                    std::vector<uint8_t> aad2(d->pubkey.begin(),
+                                              d->pubkey.end());
+                    rejected = !envelope::decrypt(*e2, "pw", aad2).has_value();
+                } else {
+                    rejected = true;
+                }
+            }
+            ok(rejected, "N4 DNK1 ciphertext bitflip -> decrypt nullopt");
+        }
+        {
+            bool all = true;
+            for (size_t n = 0; n < 40; ++n)
+                if (keyfmt::decode_dnk1(nk.data(), n)) { all = false; break; }
+            ok(all, "N5 DNK1 header truncation sweep 0..39 -> nullopt");
+        }
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-keyfile-binary\n"; return 0; }
+    std::cout << "  FAIL: selftest-keyfile-binary\n"; return 1;
+}
+
+// ── selftest-backup-binary ── falsify gate for the canonical binary backup /
+// recovery containers (D2; DSS1/DBE1 in wallet/keyfmt.hpp, DRS1 in
+// wallet/recovery.hpp). Legs:
+//   DSS1: round-trip; duplicate-x reject; y_len 0 / 4097 reject;
+//         exact-length BOTH directions (truncated + trailing byte).
+//   DBE1: round-trip; duplicate share_index reject; env_len lie reject.
+//   DRS1: version != 1 reject; threshold > share_count reject;
+//         checksum_len == 1 reject; duplicate guardian_x reject;
+//         end-to-end create -> to_bytes -> from_bytes -> recover == secret;
+//         wrong password => nullopt; checksum bitflip => nullopt (pins the
+//         pubkey-checksum gate).
+int cmd_selftest_backup_binary(int, char**) {
+    int pass = 0, fail = 0;
+    auto ok = [&](bool c, const std::string& m) {
+        if (c) { std::cout << "  ok:   " << m << "\n"; pass++; }
+        else   { std::cout << "  FAIL: " << m << "\n"; fail++; }
+    };
+    std::cout << "=== selftest-backup-binary: DSS1 / DBE1 / DRS1 binary "
+                 "containers ===\n";
+
+    // ── DSS1 ─────────────────────────────────────────────────────────────────
+    std::vector<keyfmt::Share> sh;
+    for (uint8_t x = 1; x <= 3; ++x) {
+        keyfmt::Share r;
+        r.x = x;
+        r.y = std::vector<uint8_t>(16, uint8_t(0x30 + x));
+        sh.push_back(std::move(r));
+    }
+    const auto sb = keyfmt::encode_dss1(sh);
+    {
+        auto d = keyfmt::decode_dss1(sb);
+        bool match = d.has_value() && d->size() == 3;
+        if (match)
+            for (size_t i = 0; i < 3; ++i)
+                match = match && (*d)[i].x == sh[i].x && (*d)[i].y == sh[i].y;
+        ok(match, "S0 DSS1 encode -> decode round-trips all shares");
+    }
+    {
+        auto dup = sh; dup[2].x = dup[0].x;
+        bool threw = false;
+        try { (void)keyfmt::encode_dss1(dup); } catch (std::exception&) { threw = true; }
+        ok(threw, "S1 DSS1 encode rejects duplicate x [falsify writer DISTINCT-x]");
+        // decode-side: patch the x byte directly (record 3's x at offset
+        // 9 + 2*(1+16) + 0).
+        auto bad = sb; bad[9 + 2 * 17] = bad[9];
+        ok(!keyfmt::decode_dss1(bad).has_value(),
+           "S2 DSS1 decode rejects duplicate x [falsify DISTINCT-x]");
+    }
+    {
+        std::vector<uint8_t> z = {'D', 'S', 'S', '1', 1, 0, 0, 0, 0, 1};
+        ok(!keyfmt::decode_dss1(z).has_value(),
+           "S3 DSS1 y_len 0 -> nullopt [falsify y_len floor]");
+        std::vector<uint8_t> big = {'D', 'S', 'S', '1', 1,
+                                    0x01, 0x10, 0, 0, 1};   // y_len 4097
+        big.resize(9 + 1 + 4097, 0x00);
+        ok(!keyfmt::decode_dss1(big).has_value(),
+           "S4 DSS1 y_len 4097 -> nullopt [falsify y_len cap]");
+    }
+    ok(!keyfmt::decode_dss1(sb.data(), sb.size() - 1).has_value(),
+       "S5 DSS1 truncated by 1 byte -> nullopt [falsify exact-length]");
+    {
+        auto longer = sb; longer.push_back(0x00);
+        ok(!keyfmt::decode_dss1(longer).has_value(),
+           "S6 DSS1 trailing byte -> nullopt [falsify exact-length]");
+    }
+
+    // ── DBE1 (tiny KDF keeps this FAST) ──────────────────────────────────────
+    std::vector<keyfmt::ShareEnvelope> ers;
+    for (uint8_t x = 1; x <= 2; ++x) {
+        auto env = envelope::encrypt_argon2id(sh[x - 1].y, "pw" + std::to_string(x),
+                                              {}, 1, 8, 1);
+        keyfmt::ShareEnvelope er;
+        er.share_index = x;
+        er.env_bytes   = envelope::serialize_bytes(env);
+        ers.push_back(std::move(er));
+    }
+    const auto bb = keyfmt::encode_dbe1(ers);
+    {
+        auto d = keyfmt::decode_dbe1(bb);
+        bool match = d.has_value() && d->size() == 2;
+        if (match)
+            for (size_t i = 0; i < 2; ++i)
+                match = match && (*d)[i].share_index == ers[i].share_index
+                              && (*d)[i].env_bytes == ers[i].env_bytes;
+        ok(match, "B0 DBE1 encode -> decode round-trips all envelopes");
+    }
+    {
+        auto dup = ers; dup[1].share_index = dup[0].share_index;
+        bool threw = false;
+        try { (void)keyfmt::encode_dbe1(dup); } catch (std::exception&) { threw = true; }
+        ok(threw, "B1 DBE1 encode rejects duplicate share_index");
+        auto bad = bb;
+        // record 2's index byte sits right after record 1 (5 + 1 + 4 + len1).
+        const size_t rec2 = 5 + 1 + 4 + ers[0].env_bytes.size();
+        bad[rec2] = bad[5];
+        ok(!keyfmt::decode_dbe1(bad).has_value(),
+           "B2 DBE1 decode rejects duplicate share_index [falsify DISTINCT]");
+    }
+    {
+        auto bad = bb;
+        // env_len of record 1 (+1): lies about the body -> misparse rejects.
+        uint32_t len1 = uint32_t(ers[0].env_bytes.size()) + 1;
+        for (int i = 0; i < 4; ++i)
+            bad[6 + i] = uint8_t((len1 >> (8 * i)) & 0xff);
+        ok(!keyfmt::decode_dbe1(bad).has_value(),
+           "B3 DBE1 env_len lie -> nullopt [falsify env length-vs-body]");
+    }
+
+    // ── DRS1 end-to-end (create -> bytes -> recover) ─────────────────────────
+    {
+        std::vector<uint8_t> secret(32);
+        for (int i = 0; i < 32; ++i) secret[i] = uint8_t(0x40 + i);
+        auto checksum = recovery::seed_pubkey_checksum(secret);
+        auto setup = recovery::create(secret, "pw", 2, 3, checksum);
+        auto bytes = recovery::to_bytes(setup);
+        auto rt = recovery::from_bytes(bytes);
+        ok(rt.has_value(), "R0 DRS1 to_bytes -> from_bytes round-trips");
+        bool rec_ok = false;
+        if (rt) {
+            auto got = recovery::recover(*rt, "pw", {0, 2});
+            rec_ok = got && *got == secret;
+        }
+        ok(rec_ok, "R1 DRS1 end-to-end recover == secret");
+        bool wrong_pw = false;
+        if (rt) wrong_pw = !recovery::recover(*rt, "WRONG", {0, 1, 2}).has_value();
+        ok(wrong_pw, "R2 DRS1 wrong password -> nullopt");
+        {
+            auto bad = bytes;
+            bad[4] = 2;              // version != 1
+            ok(!recovery::from_bytes(bad).has_value(),
+               "R3 DRS1 version != 1 -> nullopt [falsify version gate]");
+        }
+        {
+            auto bad = bytes;
+            bad[8] = 4;              // threshold 4 > share_count 3
+            ok(!recovery::from_bytes(bad).has_value(),
+               "R4 DRS1 threshold > share_count -> nullopt");
+        }
+        {
+            auto bad = bytes;
+            bad[14] = 1;             // checksum_len 1 (not 0|32)
+            ok(!recovery::from_bytes(bad).has_value(),
+               "R5 DRS1 checksum_len 1 -> nullopt");
+        }
+        {
+            // duplicate guardian_x: record 2's x byte = record 1's.
+            auto bad = bytes;
+            const size_t rec1_x = 15 + 32;   // after header + 32B checksum
+            auto env0_bytes = envelope::serialize_bytes(setup.envelopes[0]);
+            const size_t rec2_x = rec1_x + 1 + 4 + env0_bytes.size();
+            bad[rec2_x] = bad[rec1_x];
+            ok(!recovery::from_bytes(bad).has_value(),
+               "R6 DRS1 duplicate guardian_x -> nullopt [falsify DISTINCT]");
+        }
+        {
+            // checksum bitflip: container still parses; recover must refuse.
+            auto bad = bytes;
+            bad[15] ^= 0x01;         // first checksum byte
+            auto rt2 = recovery::from_bytes(bad);
+            bool refused = false;
+            if (rt2)
+                refused = !recovery::recover(*rt2, "pw", {0, 1, 2}).has_value();
+            ok(rt2.has_value() && refused,
+               "R7 DRS1 checksum bitflip -> recover nullopt [falsify checksum gate]");
+        }
+    }
+
+    std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
+    if (fail == 0) { std::cout << "  PASS: selftest-backup-binary\n"; return 0; }
+    std::cout << "  FAIL: selftest-backup-binary\n"; return 1;
 }
 
 // ── bft-quorum ───────────────────────────────────────────────────────────────
@@ -9633,50 +9491,14 @@ int cmd_cold_sign(int argc, char** argv) {
     }
 
     // ── Load the priv keyfile ──────────────────────────────────────────
-    // Same single-account JSON shape account-export emits.
-    std::ifstream kf(priv_keyfile);
-    if (!kf) {
-        std::cerr << "cold-sign: cannot open --priv-keyfile: "
-                  << priv_keyfile << "\n";
-        return 1;
-    }
-    nlohmann::json acc_doc;
-    try { kf >> acc_doc; }
-    catch (std::exception& e) {
-        std::cerr << "cold-sign: --priv-keyfile is not valid JSON: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (!acc_doc.is_object()
-        || !acc_doc.contains("address")
-        || !acc_doc["address"].is_string()
-        || !acc_doc.contains("privkey_hex")
-        || !acc_doc["privkey_hex"].is_string()) {
-        std::cerr << "cold-sign: --priv-keyfile must be a JSON object with "
-                     "string fields 'address' and 'privkey_hex' "
-                     "(account-export shape)\n";
-        return 1;
-    }
-    std::string keyfile_address = acc_doc["address"].get<std::string>();
-    std::string priv_hex        = acc_doc["privkey_hex"].get<std::string>();
-    if (priv_hex.size() != 64) {
-        std::cerr << "cold-sign: 'privkey_hex' must be 64 hex chars "
-                     "(32-byte Ed25519 priv_seed); got length "
-                  << priv_hex.size() << "\n";
-        return 1;
-    }
+    // The canonical binary DAK1 container (D2; the same file
+    // account-import/account-export emit). The keyfile address is DERIVED
+    // from the stored pubkey, which the decoder verified against the seed.
     std::vector<uint8_t> priv_seed;
-    try { priv_seed = from_hex(priv_hex); }
-    catch (std::exception& e) {
-        std::cerr << "cold-sign: 'privkey_hex' is not valid hex: "
-                  << e.what() << "\n";
+    std::string keyfile_address;
+    if (!read_dak1_keyfile("cold-sign", priv_keyfile,
+                           priv_seed, keyfile_address))
         return 1;
-    }
-    if (priv_seed.size() != 32) {
-        std::cerr << "cold-sign: 'privkey_hex' decoded length must be 32; got "
-                  << priv_seed.size() << "\n";
-        return 1;
-    }
 
     // ── Refusal: keyfile_address_mismatch ──────────────────────────────
     // tx.from must equal keyfile.address. Defense against accidentally
@@ -9919,17 +9741,14 @@ int cmd_sign_anon_tx(int argc, char** argv) {
                 "  signing_bytes), and writes the signed envelope to --out\n"
                 "  (or stdout with --allow-stdout). No network, no RPC.\n"
                 "\n"
-                "  --keyfile accepts both wallet shapes:\n"
-                "    canonical    {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
-                "                 (account-create-batch / account-import /\n"
-                "                  account-export single-record output)\n"
-                "    alternate    {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\",\n"
-                "                  \"anon_address\":\"0x...\"}\n"
-                "                 (some external tooling).\n"
+                "  --keyfile is the canonical binary DAK1 keypair file\n"
+                "    (magic 'DAK1' || pubkey || priv_seed, 68 bytes — the\n"
+                "    file account-import / account-export --out emit). The\n"
+                "    JSON keyfile shapes are deleted (D2, binary-only).\n"
                 "\n"
                 "  Validation (exit 1):\n"
-                "    * --keyfile address must be canonical lowercase 0x+64-hex\n"
-                "      (S-028) AND match its ed_pub derivation.\n"
+                "    * keyfile pubkey must match its seed derivation (the\n"
+                "      DAK1 decoder enforces this; subsumes S-028).\n"
                 "    * --to must be canonical lowercase if anon-shape (S-028);\n"
                 "      domain names pass through verbatim.\n"
                 "    * --amount > 0, --fee >= 0, --nonce >= 0.\n"
@@ -10042,75 +9861,24 @@ int cmd_sign_anon_tx(int argc, char** argv) {
         }
     }
 
-    // ── Load + parse the keyfile ──────────────────────────────────────────
-    std::ifstream kf(keyfile_path);
-    if (!kf) {
-        std::cerr << "sign-anon-tx: cannot open --keyfile: "
-                  << keyfile_path << "\n";
+    // ── Load + decode the keyfile ─────────────────────────────────────────
+    // The canonical binary DAK1 container ONLY (D2) — the JSON shapes
+    // (canonical wallet AND the alternate ed-pub spelling) are deleted
+    // pre-genesis. The address is DERIVED from the stored pubkey (always
+    // canonical lowercase by construction, satisfying S-028), and the
+    // decoder enforced pubkey == derive(seed).
+    std::string keyfile_address;
+    std::vector<uint8_t> priv_seed;
+    if (!read_dak1_keyfile("sign-anon-tx", keyfile_path,
+                           priv_seed, keyfile_address))
         return 1;
-    }
-    nlohmann::json acc_doc;
-    try { kf >> acc_doc; }
-    catch (std::exception& e) {
-        std::cerr << "sign-anon-tx: --keyfile is not valid JSON: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (!acc_doc.is_object()) {
-        std::cerr << "sign-anon-tx: --keyfile must be a JSON object\n";
-        return 1;
-    }
-
-    // Accept both keyfile shapes (canonical wallet, and the alternate
-    // ed-pub shape the task spec mentions). Either way we end up with
-    // (address, priv_hex) and an OPTIONAL pre-computed pub_hex used as a
-    // cross-check against the address derivation.
-    std::string keyfile_address, priv_hex, pub_hex_hint;
-    if (acc_doc.contains("address") && acc_doc["address"].is_string()
-        && acc_doc.contains("privkey_hex") && acc_doc["privkey_hex"].is_string()) {
-        // Canonical wallet shape.
-        keyfile_address = acc_doc["address"].get<std::string>();
-        priv_hex        = acc_doc["privkey_hex"].get<std::string>();
-    } else if (acc_doc.contains("anon_address") && acc_doc["anon_address"].is_string()
-               && acc_doc.contains("ed_priv_hex") && acc_doc["ed_priv_hex"].is_string()) {
-        // Alternate ed-pub shape from the task spec.
-        keyfile_address = acc_doc["anon_address"].get<std::string>();
-        priv_hex        = acc_doc["ed_priv_hex"].get<std::string>();
-        if (acc_doc.contains("ed_pub_hex") && acc_doc["ed_pub_hex"].is_string()) {
-            pub_hex_hint = acc_doc["ed_pub_hex"].get<std::string>();
-        }
-    } else {
-        std::cerr << "sign-anon-tx: --keyfile shape error: expected either\n"
-                     "  {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
-                     "  or\n"
-                     "  {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\","
-                     "\"anon_address\":\"0x...\"}\n";
-        return 1;
-    }
-
-    // Validate the address: must be canonical lowercase 0x+64-hex (S-028).
     if (!is_canonical_anon(keyfile_address)) {
+        // Unreachable for a decoded DAK1 (derived hex is lowercase); kept as
+        // a belt-and-suspenders S-028 assert.
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         std::cerr << "sign-anon-tx: --keyfile address is not canonical "
                      "lowercase 0x+64-hex (S-028); got '"
                   << keyfile_address << "'\n";
-        return 1;
-    }
-    if (priv_hex.size() != 64) {
-        std::cerr << "sign-anon-tx: keyfile priv must be 64 hex chars "
-                     "(32-byte Ed25519 priv_seed); got length "
-                  << priv_hex.size() << "\n";
-        return 1;
-    }
-    std::vector<uint8_t> priv_seed;
-    try { priv_seed = from_hex(priv_hex); }
-    catch (std::exception& e) {
-        std::cerr << "sign-anon-tx: keyfile priv is not valid hex: "
-                  << e.what() << "\n";
-        return 1;
-    }
-    if (priv_seed.size() != 32) {
-        std::cerr << "sign-anon-tx: keyfile priv decoded length must be 32; "
-                     "got " << priv_seed.size() << "\n";
         return 1;
     }
 
@@ -10145,25 +9913,6 @@ int cmd_sign_anon_tx(int argc, char** argv) {
                      "match Ed25519 pubkey of the priv seed per S-028)\n";
         return 1;
     }
-    // If the alternate shape supplied ed_pub_hex, cross-check it too.
-    if (!pub_hex_hint.empty()) {
-        std::string derived_pub_hex = to_hex(pub);
-        // Hint may be either case; normalize for compare.
-        std::string hint_lower = pub_hex_hint;
-        for (auto& c : hint_lower) {
-            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
-        }
-        if (hint_lower != derived_pub_hex) {
-            determ_secure_zero(sk.data(), sk.size());
-            std::cerr << "sign-anon-tx: --keyfile ed_pub_hex mismatch: "
-                         "ed_pub_hex=" << pub_hex_hint
-                      << " derived=" << derived_pub_hex
-                      << "\n  (keyfile is internally inconsistent — "
-                         "ed_pub_hex disagrees with ed_priv_hex's pubkey)\n";
-            return 1;
-        }
-    }
-
     // ── Build canonical signing_bytes (matches src/chain/block.cpp
     //    Transaction::signing_bytes; same encoding as cmd_cold_sign /
     //    cmd_tx_sign_verify / bulk-send) ──────────────────────────────────
@@ -10294,7 +10043,7 @@ int cmd_sign_anon_tx(int argc, char** argv) {
 //                               (canonical wallet {address, privkey_hex} OR
 //                               alternate {ed_priv_hex, ed_pub_hex,
 //                               anon_address}) AND the canonical encrypted
-//                               DETERM-NODE-V1 form produced by keyfile-
+//                               binary DNK1 form produced by keyfile-
 //                               create. The format is auto-detected by
 //                               sniffing the first line.
 //   --in  <path>              : required; JSON file with a top-level array
@@ -10311,7 +10060,7 @@ int cmd_sign_anon_tx(int argc, char** argv) {
 //                               from, to, amount, fee, nonce, payload, sig,
 //                               hash).
 //   --passphrase-env <NAME>   : optional; required iff --keyfile points at
-//                               an encrypted DETERM-NODE-V1 keyfile. Reads
+//                               an encrypted DNK1 keyfile. Reads
 //                               the passphrase from environment variable
 //                               <NAME>. Convenience alias for
 //                               --passphrase-from env:<NAME>.
@@ -10399,13 +10148,10 @@ int cmd_tx_batch_sign(int argc, char** argv) {
                 "     \"amount\":N, \"fee\":N, \"nonce\":N, \"payload\":\"\",\n"
                 "     \"sig\":\"<128 hex>\", \"hash\":\"<64 hex>\"}\n"
                 "\n"
-                "  Keyfile shapes accepted:\n"
-                "    plaintext canonical    {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
-                "    plaintext alternate    {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\",\n"
-                "                            \"anon_address\":\"0x...\"}\n"
-                "    encrypted              DETERM-NODE-V1 header + DWE1 blob\n"
-                "                           (requires --passphrase-env or\n"
-                "                            --passphrase-from)\n"
+                "  Keyfile shapes accepted (binary-only, D2):\n"
+                "    plaintext    DAK1 keypair container (magic 'DAK1')\n"
+                "    encrypted    node keyfile (requires --passphrase-env\n"
+                "                 or --passphrase-from)\n"
                 "\n"
                 "  Determinism: same input + same keyfile → byte-identical\n"
                 "  output (Ed25519 RFC 8032 is deterministic).\n"
@@ -10477,39 +10223,36 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     }
 
     // ── Load the keyfile — auto-detect plaintext vs encrypted ──────────────
-    // Sniff line 1: encrypted DETERM-NODE-V1 keyfiles start with the magic
-    // header "DETERM-NODE-V1 <pubkey_hex>". Plaintext JSON keyfiles start
-    // with '{'. Anything else is a structural error.
-    std::string keyfile_first_line;
+    // Sniff the 4-byte magic: encrypted node keyfiles are the binary DNK1
+    // container ("DNK1"); plaintext keyfiles are the binary DAK1 container
+    // ("DAK1"). Anything else is a structural error (D2: the JSON and
+    // 2-line text forms are deleted).
+    std::vector<uint8_t> keyfile_bytes;
     {
-        std::ifstream kf(keyfile_path);
-        if (!kf) {
+        auto bytes = read_bytes_file(keyfile_path);
+        if (!bytes) {
             std::cerr << "tx-batch-sign: cannot open --keyfile: "
                       << keyfile_path << "\n";
             return 1;
         }
-        if (!std::getline(kf, keyfile_first_line)) {
+        keyfile_bytes = std::move(*bytes);
+        if (keyfile_bytes.empty()) {
             std::cerr << "tx-batch-sign: --keyfile is empty: "
                       << keyfile_path << "\n";
             return 1;
         }
-        while (!keyfile_first_line.empty()
-               && (keyfile_first_line.back() == '\r'
-                   || keyfile_first_line.back() == '\n')) {
-            keyfile_first_line.pop_back();
-        }
     }
 
-    const std::string node_v1_magic = "DETERM-NODE-V1 ";
     const bool is_encrypted_keyfile =
-        (keyfile_first_line.rfind(node_v1_magic, 0) == 0);
+        keyfile_bytes.size() >= 4
+        && std::memcmp(keyfile_bytes.data(), "DNK1", 4) == 0;
 
     std::string keyfile_address;
     std::vector<uint8_t> priv_seed;
-    std::string priv_seed_hex_holder;  // owns the buffer if from encrypted path
+    std::string priv_seed_hex_holder;  // legacy name; unused on the DNK1 path
 
     if (is_encrypted_keyfile) {
-        // ── Encrypted DETERM-NODE-V1 path ────────────────────────────────
+        // ── Encrypted DNK1 path ──────────────────────────────────────────
         // Need a passphrase. Either --passphrase-env or --passphrase-from
         // must be supplied. If both are present, --passphrase-from wins
         // (it's the more expressive form — file:/env:/prompt — and an
@@ -10521,52 +10264,20 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         } else if (!passphrase_env_name.empty()) {
             pass_src = "env:" + passphrase_env_name;
         } else {
-            std::cerr << "tx-batch-sign: --keyfile is encrypted (DETERM-"
-                         "NODE-V1) but no passphrase source supplied\n"
+            std::cerr << "tx-batch-sign: --keyfile is encrypted (DNK1) but "
+                         "no passphrase source supplied\n"
                          "  (pass --passphrase-env <ENV_VAR_NAME> or "
                          "--passphrase-from <spec>)\n";
             return 1;
         }
 
-        // Read header pubkey and blob line.
-        std::string header_pubkey_hex =
-            keyfile_first_line.substr(node_v1_magic.size());
-        if (header_pubkey_hex.size() != 64) {
-            std::cerr << "tx-batch-sign: --keyfile header pubkey must be 64 "
-                         "hex chars; got " << header_pubkey_hex.size()
-                      << "\n";
+        auto nk_opt = keyfmt::decode_dnk1(keyfile_bytes);
+        if (!nk_opt) {
+            std::cerr << "tx-batch-sign: --keyfile is not a canonical DNK1 "
+                         "encrypted node keyfile\n";
             return 1;
         }
-        try { (void)from_hex(header_pubkey_hex); }
-        catch (std::exception& e) {
-            std::cerr << "tx-batch-sign: --keyfile header pubkey is not "
-                         "valid hex: " << e.what() << "\n";
-            return 1;
-        }
-
-        std::string blob_line;
-        {
-            // Re-open and skip first line — std::getline beats split-on-
-            // newline for portability across CRLF/LF mixes.
-            std::ifstream kf(keyfile_path);
-            std::string skip;
-            std::getline(kf, skip);
-            if (!std::getline(kf, blob_line)) {
-                std::cerr << "tx-batch-sign: --keyfile encrypted format "
-                             "missing blob line (expected 2-line: header + "
-                             "blob)\n";
-                return 1;
-            }
-            while (!blob_line.empty()
-                   && (blob_line.back() == '\r' || blob_line.back() == '\n')) {
-                blob_line.pop_back();
-            }
-        }
-        if (blob_line.empty()) {
-            std::cerr << "tx-batch-sign: --keyfile encrypted blob line "
-                         "is empty\n";
-            return 1;
-        }
+        std::string header_pubkey_hex = to_hex(nk_opt->pubkey);
 
         std::string err;
         std::string passphrase = passphrase_from_source(pass_src, err);
@@ -10575,14 +10286,16 @@ int cmd_tx_batch_sign(int argc, char** argv) {
             return 1;
         }
 
-        auto env_opt = envelope::deserialize(blob_line);
+        auto env_opt = envelope::deserialize_bytes(nk_opt->env_bytes);
         if (!env_opt) {
-            std::cerr << "tx-batch-sign: --keyfile blob is malformed "
-                         "(not a valid DWE1 envelope)\n";
+            // Unreachable after decode_dnk1; belt-and-suspenders.
+            determ_secure_zero(passphrase.data(), passphrase.size());
+            std::cerr << "tx-batch-sign: --keyfile embedded envelope is "
+                         "malformed\n";
             return 1;
         }
-        std::vector<uint8_t> aad(header_pubkey_hex.begin(),
-                                  header_pubkey_hex.end());
+        // AAD = the RAW 32-byte header pubkey (matches keyfile-create).
+        std::vector<uint8_t> aad(nk_opt->pubkey.begin(), nk_opt->pubkey.end());
         auto pt_opt = envelope::decrypt(*env_opt, passphrase, aad);
         // Scrub passphrase ASAP — past this point we only need the plaintext
         // priv_seed.
@@ -10592,131 +10305,37 @@ int cmd_tx_batch_sign(int argc, char** argv) {
                          "keyfile\n";
             return 2;
         }
-        std::string pt_str(pt_opt->begin(), pt_opt->end());
-        // Scrub the optional plaintext buffer; nlohmann will copy the
-        // string contents into its own structures below.
-        determ_secure_zero(pt_opt->data(), pt_opt->size());
-        nlohmann::json keyfile_json;
-        try { keyfile_json = nlohmann::json::parse(pt_str); }
-        catch (std::exception& e) {
-            determ_secure_zero(pt_str.data(), pt_str.size());
-            std::cerr << "tx-batch-sign: decrypted keyfile plaintext is "
-                         "not valid JSON: " << e.what() << "\n";
+        // D2: the plaintext is the RAW 32-byte seed. Derive-equality against
+        // the header pubkey replaces the old inner-JSON cross-check.
+        if (pt_opt->size() != 32) {
+            determ_secure_zero(pt_opt->data(), pt_opt->size());
+            std::cerr << "tx-batch-sign: decrypted plaintext is not a raw "
+                         "32-byte seed (not a canonical DNK1 keyfile)\n";
             return 1;
         }
-        determ_secure_zero(pt_str.data(), pt_str.size());
-        if (!keyfile_json.is_object()
-            || !keyfile_json.contains("pubkey")
-            || !keyfile_json.contains("priv_seed")
-            || !keyfile_json["pubkey"].is_string()
-            || !keyfile_json["priv_seed"].is_string()) {
-            std::cerr << "tx-batch-sign: decrypted keyfile is missing "
-                         "'pubkey' or 'priv_seed' fields\n";
-            return 1;
-        }
-        std::string inner_pubkey_hex =
-            keyfile_json["pubkey"].get<std::string>();
-        priv_seed_hex_holder =
-            keyfile_json["priv_seed"].get<std::string>();
-        if (inner_pubkey_hex != header_pubkey_hex) {
-            std::cerr << "tx-batch-sign: decrypted keyfile inner pubkey "
-                         "does not match header pubkey (corrupt or non-"
-                         "canonical encrypted keyfile)\n";
-            return 1;
-        }
-        if (priv_seed_hex_holder.size() != 64) {
-            std::cerr << "tx-batch-sign: decrypted 'priv_seed' must be 64 "
-                         "hex chars; got " << priv_seed_hex_holder.size()
-                      << "\n";
-            return 1;
-        }
-        try { priv_seed = from_hex(priv_seed_hex_holder); }
-        catch (std::exception& e) {
-            std::cerr << "tx-batch-sign: decrypted 'priv_seed' is not "
-                         "valid hex: " << e.what() << "\n";
-            return 1;
-        }
-        if (priv_seed.size() != 32) {
-            std::cerr << "tx-batch-sign: decrypted 'priv_seed' decoded "
-                         "length must be 32; got " << priv_seed.size()
-                      << "\n";
-            return 1;
-        }
-        keyfile_address = "0x" + inner_pubkey_hex;
-        // Defensive: keyfile addresses derived from DETERM-NODE-V1 should
-        // already be lowercase (the validator's keyfile-create path emits
-        // lowercase pubkey hex), but the field could have been tampered
-        // with off-line. Normalize to lowercase for the canonical-form
-        // check below.
-        for (auto& c : keyfile_address) {
-            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
-        }
-    } else {
-        // ── Plaintext path (canonical or alternate shape) ────────────────
-        // Re-open and parse as JSON. Same two-shape acceptance as
-        // sign-anon-tx — keep the parsing inline here rather than DRY'ing
-        // into a shared helper, mirroring the cmd_tx_sign_verify / cold-sign
-        // / sign-anon-tx convention.
-        std::ifstream kf(keyfile_path);
-        if (!kf) {
-            std::cerr << "tx-batch-sign: cannot re-open --keyfile: "
-                      << keyfile_path << "\n";
-            return 1;
-        }
-        nlohmann::json acc_doc;
-        try { kf >> acc_doc; }
-        catch (std::exception& e) {
-            std::cerr << "tx-batch-sign: --keyfile is not valid JSON: "
-                      << e.what() << "\n";
-            return 1;
-        }
-        if (!acc_doc.is_object()) {
-            std::cerr << "tx-batch-sign: --keyfile must be a JSON object "
-                         "(plaintext) or DETERM-NODE-V1 file (encrypted)\n";
-            return 1;
-        }
-        std::string priv_hex, pub_hex_hint;
-        if (acc_doc.contains("address") && acc_doc["address"].is_string()
-            && acc_doc.contains("privkey_hex")
-            && acc_doc["privkey_hex"].is_string()) {
-            keyfile_address = acc_doc["address"].get<std::string>();
-            priv_hex        = acc_doc["privkey_hex"].get<std::string>();
-        } else if (acc_doc.contains("anon_address")
-                   && acc_doc["anon_address"].is_string()
-                   && acc_doc.contains("ed_priv_hex")
-                   && acc_doc["ed_priv_hex"].is_string()) {
-            keyfile_address = acc_doc["anon_address"].get<std::string>();
-            priv_hex        = acc_doc["ed_priv_hex"].get<std::string>();
-            if (acc_doc.contains("ed_pub_hex")
-                && acc_doc["ed_pub_hex"].is_string()) {
-                pub_hex_hint = acc_doc["ed_pub_hex"].get<std::string>();
+        {
+            std::array<uint8_t, 32> derived{};
+            determ_ed25519_pubkey_from_seed(pt_opt->data(), derived.data());
+            if (derived != nk_opt->pubkey) {
+                determ_secure_zero(pt_opt->data(), pt_opt->size());
+                std::cerr << "tx-batch-sign: decrypted seed does not derive "
+                             "the header pubkey (corrupt or non-canonical "
+                             "encrypted keyfile)\n";
+                return 1;
             }
-        } else {
-            std::cerr << "tx-batch-sign: --keyfile shape error: expected "
-                         "either\n"
-                         "  {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
-                         "  or\n"
-                         "  {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\","
-                         "\"anon_address\":\"0x...\"}\n";
-            return 1;
         }
-        if (priv_hex.size() != 64) {
-            std::cerr << "tx-batch-sign: keyfile priv must be 64 hex chars; "
-                         "got length " << priv_hex.size() << "\n";
+        priv_seed.assign(pt_opt->begin(), pt_opt->end());
+        determ_secure_zero(pt_opt->data(), pt_opt->size());
+        keyfile_address = "0x" + header_pubkey_hex;   // lowercase by to_hex
+    } else {
+        // ── Plaintext path ───────────────────────────────────────────────
+        // D2: the plaintext keyfile is the canonical binary DAK1 container
+        // ONLY — the JSON shapes (canonical wallet AND the alternate ed-pub
+        // spelling) are deleted pre-genesis. Same reader as cold-sign /
+        // sign-anon-tx.
+        if (!read_dak1_keyfile("tx-batch-sign", keyfile_path,
+                               priv_seed, keyfile_address))
             return 1;
-        }
-        try { priv_seed = from_hex(priv_hex); }
-        catch (std::exception& e) {
-            std::cerr << "tx-batch-sign: keyfile priv is not valid hex: "
-                      << e.what() << "\n";
-            return 1;
-        }
-        if (priv_seed.size() != 32) {
-            std::cerr << "tx-batch-sign: keyfile priv decoded length must "
-                         "be 32; got " << priv_seed.size() << "\n";
-            return 1;
-        }
-        (void)pub_hex_hint;  // cross-check happens against derived_addr below.
     }
 
     // Validate the keyfile address is canonical lowercase 0x+64-hex (S-028).
@@ -16199,48 +15818,30 @@ bool b64_decode(const std::string& s, std::vector<uint8_t>& out,
     return true;
 }
 
-// Read the priv-keyfile JSON ({address, privkey_hex}; the same shape
-// `account-export` emits and `account-import` accepts) and return the
-// 32-byte Ed25519 seed. Returns false + err on any structural failure.
+// Read the priv-keyfile — the canonical binary DAK1 container (D2; the
+// same file `account-export` re-emits and `account-import` writes) — and
+// return the 32-byte Ed25519 seed plus the DERIVED anon address.
+// Returns false + err on any structural failure.
 bool load_priv_keyfile(const std::string& path,
                         std::vector<uint8_t>& seed_out,
                         std::string& address_out,
                         std::string& err) {
-    std::ifstream f(path);
-    if (!f) {
+    auto bytes = read_bytes_file(path);
+    if (!bytes) {
         err = std::string("cannot open --priv-keyfile: ") + path;
         return false;
     }
-    nlohmann::json doc;
-    try { f >> doc; }
-    catch (std::exception& e) {
-        err = std::string("--priv-keyfile is not valid JSON: ") + e.what();
+    auto kp = keyfmt::decode_dak1(*bytes);
+    if (!bytes->empty()) determ_secure_zero(bytes->data(), bytes->size());
+    if (!kp) {
+        err = "--priv-keyfile is not a valid DAK1 binary keypair file "
+              "(exactly 68 bytes: magic 'DAK1' || pubkey || priv_seed, "
+              "pubkey must match the seed derivation)";
         return false;
     }
-    if (!doc.is_object()
-        || !doc.contains("privkey_hex")
-        || !doc["privkey_hex"].is_string()
-        || !doc.contains("address")
-        || !doc["address"].is_string()) {
-        err = "--priv-keyfile must be a JSON object with string fields "
-              "'address' and 'privkey_hex' (account-export shape)";
-        return false;
-    }
-    address_out = doc["address"].get<std::string>();
-    std::string priv_hex = doc["privkey_hex"].get<std::string>();
-    if (priv_hex.size() != 64) {
-        err = "--priv-keyfile 'privkey_hex' must be 64 hex chars (32-byte seed)";
-        return false;
-    }
-    try { seed_out = from_hex(priv_hex); }
-    catch (std::exception& e) {
-        err = std::string("--priv-keyfile 'privkey_hex' invalid: ") + e.what();
-        return false;
-    }
-    if (seed_out.size() != 32) {
-        err = "--priv-keyfile 'privkey_hex' decoded to non-32 bytes";
-        return false;
-    }
+    seed_out.assign(kp->priv_seed.begin(), kp->priv_seed.end());
+    address_out = "0x" + to_hex(kp->pubkey);
+    determ_secure_zero(kp->priv_seed.data(), kp->priv_seed.size());
     return true;
 }
 
@@ -16925,6 +16526,13 @@ int cmd_bulk_send(int argc, char** argv) {
     bool     continue_on_error = false;
     int64_t  starting_nonce_override = -1;
     bool     json_out = false;  // accepted; output is always JSON
+    // D2: the DAK1 keyfile always carries an ANON identity (address derived
+    // from the pubkey). --from-domain restores the previously-supported
+    // domain-identity flow (e.g. a validator staking from its registered
+    // domain): the tx `from` becomes the named domain, signed with the
+    // keyfile seed; the daemon verifies against the domain's registered
+    // ed_pub, so a wrong key still fails closed server-side.
+    std::string from_domain;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--priv-keyfile"  && i + 1 < argc) priv_keyfile = argv[++i];
@@ -16934,13 +16542,14 @@ int cmd_bulk_send(int argc, char** argv) {
         else if (a == "--starting-nonce" && i + 1 < argc) { if (!arg_i64("bulk-send", "--starting-nonce", argv[++i], starting_nonce_override)) return 1; }
         else if (a == "--dry-run")                        dry_run             = true;
         else if (a == "--continue-on-error")              continue_on_error   = true;
+        else if (a == "--from-domain"   && i + 1 < argc)  from_domain         = argv[++i];
         else if (a == "--json")                           json_out            = true;
         else if (a == "--help" || a == "-h") {
             std::cout <<
                 "Usage: determ-wallet bulk-send --priv-keyfile <path> "
                 "--batch-file <path> --rpc-port <N>\n"
                 "       [--fee <N>] [--dry-run] [--starting-nonce <N>] "
-                "[--continue-on-error] [--json]\n"
+                "[--continue-on-error] [--from-domain <name>] [--json]\n"
                 "\n"
                 "  Batch TRANSFER submission from a single keyfile to many\n"
                 "  recipients with per-recipient nonce sequencing. --batch-file\n"
@@ -16981,6 +16590,7 @@ int cmd_bulk_send(int argc, char** argv) {
             return 1;
         }
     }
+    if (!from_domain.empty()) keyfile_address = from_domain;
 
     // ── Parse batch file ──────────────────────────────────────────────────
     // Auto-detect format: extension wins; otherwise sniff first non-ws byte.
@@ -17465,6 +17075,13 @@ int cmd_bulk_stake(int argc, char** argv) {
     bool     continue_on_error = false;
     int64_t  starting_nonce_override = -1;
     bool     json_out = false;  // accepted; output is always JSON
+    // D2: the DAK1 keyfile always carries an ANON identity (address derived
+    // from the pubkey). --from-domain restores the previously-supported
+    // domain-identity flow (e.g. a validator staking from its registered
+    // domain): the tx `from` becomes the named domain, signed with the
+    // keyfile seed; the daemon verifies against the domain's registered
+    // ed_pub, so a wrong key still fails closed server-side.
+    std::string from_domain;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--priv-keyfile"   && i + 1 < argc) priv_keyfile = argv[++i];
@@ -17474,13 +17091,14 @@ int cmd_bulk_stake(int argc, char** argv) {
         else if (a == "--starting-nonce" && i + 1 < argc) { if (!arg_i64("bulk-stake", "--starting-nonce", argv[++i], starting_nonce_override)) return 1; }
         else if (a == "--dry-run")                        dry_run             = true;
         else if (a == "--continue-on-error")              continue_on_error   = true;
+        else if (a == "--from-domain"   && i + 1 < argc)  from_domain         = argv[++i];
         else if (a == "--json")                           json_out            = true;
         else if (a == "--help" || a == "-h") {
             std::cout <<
                 "Usage: determ-wallet bulk-stake --priv-keyfile <path> "
                 "--stake-list <path> --rpc-port <N>\n"
                 "       [--fee <N>] [--dry-run] [--starting-nonce <N>] "
-                "[--continue-on-error] [--json]\n"
+                "[--continue-on-error] [--from-domain <name>] [--json]\n"
                 "\n"
                 "  Batch STAKE submission from a single keyfile across many\n"
                 "  validator domains with per-row nonce sequencing. STAKE\n"
@@ -17524,6 +17142,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             return 1;
         }
     }
+    if (!from_domain.empty()) keyfile_address = from_domain;
 
     // ── Parse stake-list ──────────────────────────────────────────────────
     struct StakeRow {
@@ -24560,10 +24179,10 @@ void print_usage() {
         "                                             named '<name>.keyfile' (or\n"
         "                                             '<address>.keyfile' if no name).\n"
         "                                             --passphrase-env NAME encrypts each\n"
-        "                                             keyfile using the DETERM-NODE-V1 + DWE1\n"
+        "                                             keyfile using the binary DNK1 + DWE2\n"
         "                                             envelope shape (same as keyfile-create;\n"
         "                                             loadable via keyfile-info); omit for\n"
-        "                                             plaintext single-account JSON. --summary\n"
+        "                                             the plaintext DAK1 keyfile. --summary\n"
         "                                             writes a JSON array of {address,\n"
         "                                             keyfile_path, status:\"ok\"|\"skipped\"|\n"
         "                                             \"error\", reason?} — one entry per input\n"
@@ -24616,10 +24235,9 @@ void print_usage() {
         "                                             is a 32-byte seed (64 hex) or 64-byte\n"
         "                                             keypair (128 hex). --passphrase-from is\n"
         "                                             file:<path>, env:<NAME>, or prompt.\n"
-        "                                             Output shape: header line\n"
-        "                                             'DETERM-NODE-V1 <pubkey_hex>' followed\n"
-        "                                             by a DWE1 envelope blob (plaintext =\n"
-        "                                             {\"pubkey\": \"...\", \"priv_seed\": \"...\"}).\n"
+        "                                             Output: the binary DNK1 container\n"
+        "                                             (magic || pubkey || DWE2 envelope whose\n"
+        "                                             plaintext is the raw 32-byte seed).\n"
         "  keyfile-decrypt --in <file>                Inverse of keyfile-create. Decrypts a\n"
         "                  --passphrase-from <src>    passphrase-encrypted node_key.json back to\n"
         "                  --out <file> [--force] [--json]\n"
@@ -24710,7 +24328,7 @@ void print_usage() {
         "                                             secret) exit 2 with a diagnostic.\n"
         "  keyfile-info --in <file> [--json]          Passive diagnostic for an encrypted node\n"
         "                                             keyfile (S-004). Parses the 2-line\n"
-        "                                             DETERM-NODE-V1 + DWE1 envelope shape and\n"
+        "                                             binary DNK1 + DWE envelope shape and\n"
         "                                             dumps header pubkey, derived anon-address,\n"
         "                                             and envelope metadata (pbkdf2_iters,\n"
         "                                             salt/nonce/ct lengths, AAD presence)\n"
@@ -24724,7 +24342,7 @@ void print_usage() {
         "               [--json]                       plaintext-single ({\"address\":..,\n"
         "                                             \"privkey_hex\":..}),\n"
         "                                             plaintext-batch ({\"accounts\":[...]}),\n"
-        "                                             encrypted-DETERM-NODE-V1 (2-line header +\n"
+        "                                             encrypted-DNK1 (binary node keyfile), or\n"
         "                                             DWE1 envelope), or unknown (skipped from\n"
         "                                             address extraction but still listed). For\n"
         "                                             encrypted keyfiles the metadata mirrors\n"
@@ -24841,36 +24459,45 @@ void print_usage() {
         "                                             pass, signers:[{domain,sig_present,\n"
         "                                             valid}]}.\n"
         "  verify-equivocation --pubkey <hex64>\n"
-        "                      (--digest-a <hex64> --sig-a <hex128>\n"
-        "                       --digest-b <hex64> --sig-b <hex128>\n"
+        "                      (--kind <0|1> --block-index <N>\n"
+        "                       --index-a <N> --body-root-a <hex64> --sig-a <hex128>\n"
+        "                       --index-b <N> --body-root-b <hex64> --sig-b <hex128>\n"
         "                       | --event <file> [--index <N>]) [--json]\n"
-        "                                             OFFLINE FA6 equivocation-evidence verifier.\n"
-        "                                             Confirms the EquivocationEvent two-sig proof:\n"
-        "                                             that ONE registered key (--pubkey, pinned\n"
-        "                                             from the beacon-anchored registry) signed TWO\n"
-        "                                             distinct 32-byte digests at the same height —\n"
+        "                                             OFFLINE FA6 equivocation-evidence verifier\n"
+        "                                             (EQV-height-bind form). Confirms the\n"
+        "                                             EquivocationEvent two-sig proof: that ONE\n"
+        "                                             registered key (--pubkey, pinned from the\n"
+        "                                             beacon-anchored registry) signed TWO distinct\n"
+        "                                             digests of one family at the SAME height —\n"
         "                                             the unambiguous proof the chain slashes the\n"
         "                                             equivocator's full stake on. Reproduces\n"
         "                                             validator.cpp check_equivocation_events byte-\n"
-        "                                             for-byte: PROVEN requires digest_a!=digest_b,\n"
-        "                                             sig_a!=sig_b, AND both sigs verify against\n"
-        "                                             --pubkey via crypto_sign_verify_detached.\n"
-        "                                             Forensic counterpart to committee-signature-\n"
-        "                                             verify (which checks K-of-K sigs over ONE\n"
-        "                                             digest; this checks ONE key over TWO digests)\n"
-        "                                             — lets anyone independently confirm a\n"
-        "                                             slashing was justified. Supply the five hex\n"
-        "                                             artifacts inline OR pass --event with an\n"
+        "                                             for-byte: PROVEN requires kind<=1,\n"
+        "                                             index_a==index_b==block_index,\n"
+        "                                             body_root_a!=body_root_b, sig_a!=sig_b, AND\n"
+        "                                             both sigs verify against --pubkey over\n"
+        "                                             digests DERIVED from the (index, body_root)\n"
+        "                                             openings: SHA256(TAG||index_be||body_root),\n"
+        "                                             TAG=DTM-BLKDIG-v2 (kind 0) / DTM-CONTRIB-v2\n"
+        "                                             (kind 1). Forensic counterpart to committee-\n"
+        "                                             signature-verify (which checks K-of-K sigs\n"
+        "                                             over ONE digest; this checks ONE key over TWO\n"
+        "                                             digests) — lets anyone independently confirm\n"
+        "                                             a slashing was justified. Supply the evidence\n"
+        "                                             fields inline OR pass --event with an\n"
         "                                             EquivocationEvent JSON (or a Block whose\n"
         "                                             equivocation_events[N] is checked); --pubkey\n"
         "                                             is ALWAYS required (never read from the\n"
         "                                             untrusted evidence). No daemon, no chain\n"
         "                                             link. Exit 0 PROVEN, 2 NOT PROVEN (auth-\n"
         "                                             style alert), 1 args/parse/IO. JSON output:\n"
-        "                                             {proven, distinct_digests, distinct_sigs,\n"
-        "                                             sig_a_valid, sig_b_valid, pubkey_hex,\n"
-        "                                             digest_a_hex, digest_b_hex[, equivocator,\n"
-        "                                             block_index]}.\n"
+        "                                             {proven, kind_known, heights_match,\n"
+        "                                             distinct_body_roots, distinct_sigs,\n"
+        "                                             sig_a_valid, sig_b_valid, pubkey_hex, kind,\n"
+        "                                             block_index, index_a, body_root_a_hex,\n"
+        "                                             index_b, body_root_b_hex,\n"
+        "                                             derived_digest_a_hex, derived_digest_b_hex\n"
+        "                                             [, equivocator]}.\n"
         "  bft-quorum --committee-size <K> [--mode md|bft]\n"
         "             [--pool <P>] [--aborts <A>] [--threshold <T>]\n"
         "             [--bft-enabled] [--json]\n"
@@ -24958,7 +24585,7 @@ void print_usage() {
         "                                             same two plaintext shapes sign-anon-tx does\n"
         "                                             ({address,privkey_hex} OR {ed_priv_hex,\n"
         "                                             ed_pub_hex, anon_address}) AND the canonical\n"
-        "                                             encrypted DETERM-NODE-V1 form (auto-\n"
+        "                                             encrypted DNK1 form (auto-\n"
         "                                             detected). Encrypted keyfiles require\n"
         "                                             --passphrase-env <NAME> or --passphrase-from\n"
         "                                             <spec>. Batches must be homogeneous — every\n"
@@ -25760,6 +25387,9 @@ int main(int argc, char** argv) {
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "selftest-committee-quorum") return cmd_selftest_committee_quorum(argc - 2, argv + 2);
     if (cmd == "selftest-envelope-param-reject") return cmd_selftest_envelope_param_reject(argc - 2, argv + 2);
+    if (cmd == "selftest-envelope-bytes") return cmd_selftest_envelope_bytes(argc - 2, argv + 2);
+    if (cmd == "selftest-keyfile-binary") return cmd_selftest_keyfile_binary(argc - 2, argv + 2);
+    if (cmd == "selftest-backup-binary") return cmd_selftest_backup_binary(argc - 2, argv + 2);
     if (cmd == "verify-equivocation") return cmd_verify_equivocation(argc - 2, argv + 2);
     if (cmd == "bft-quorum")      return cmd_bft_quorum     (argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);

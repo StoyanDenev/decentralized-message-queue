@@ -90,14 +90,9 @@ assert_contains "$ERR" "priv-keyfile" "diagnostic mentions --priv-keyfile"
 echo
 echo "=== 3. Missing --rpc-port (no --dry-run): exit 1 ==="
 echo '[]' > $T/empty.json
-"$WALLET" account-create-batch --count 1 --out $T/sender.json >/dev/null 2>&1
-$PY -c "
-import json
-with open('$T/sender.json') as f: d=json.load(f)
-acc = d['accounts'][0]
-out = {'address': acc['address'], 'privkey_hex': acc['privkey_hex']}
-with open('$T/sender_single.json','w') as f: json.dump(out, f)
-"
+"$WALLET" account-create-batch --count 1 --json > $T/sender.json 2>/dev/null
+SENDER_PRIV=$($PY -c "import json; print(json.load(open('$T/sender.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$SENDER_PRIV" --out $T/sender_single.json >/dev/null 2>&1
 set +e
 ERR=$("$WALLET" bulk-send --priv-keyfile $T/sender_single.json \
        --batch-file $T/empty.json 2>&1)
@@ -112,11 +107,11 @@ echo "=== 4. Init single-node daemon + create sender + 3 recipients ==="
 $DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1 >/dev/null
 $DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
-"$WALLET" account-create-batch --count 3 --out $T/recipients.json >/dev/null 2>&1
+"$WALLET" account-create-batch --count 3 --json > $T/recipients.json 2>/dev/null
 ADDR_X=$($PY -c "import json; print(json.load(open('$T/recipients.json'))['accounts'][0]['address'])")
 ADDR_Y=$($PY -c "import json; print(json.load(open('$T/recipients.json'))['accounts'][1]['address'])")
 ADDR_Z=$($PY -c "import json; print(json.load(open('$T/recipients.json'))['accounts'][2]['address'])")
-ADDR_A=$($PY -c "import json; print(json.load(open('$T/sender_single.json'))['address'])")
+ADDR_A=$($PY -c "import json; print(json.load(open('$T/sender.json'))['accounts'][0]['address'])")
 echo "  Sender   ADDR_A = $ADDR_A"
 echo "  Recipient ADDR_X = $ADDR_X"
 echo "  Recipient ADDR_Y = $ADDR_Y"
@@ -412,6 +407,11 @@ assert_eq "$R2N7" "1001" "row 2 nonce = 1001 (override + 2)"
 echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
+# Tear the cluster down BEFORE the final exit and clear the trap — on macOS
+# the EXIT-trap teardown has been observed to clobber the script's exit
+# status while reaping the daemons.
+trap - EXIT INT
+cleanup || true
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet bulk-send"
   exit 0

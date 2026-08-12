@@ -9,7 +9,7 @@
 //
 // TRUST MODEL (LightClientThreatModel.md §6 — trusted local environment): the
 // state file lives on the operator's own machine. A locally-tampered state file
-// is OUT of scope (a local attacker who can edit state.json can edit the binary
+// is OUT of scope (a local attacker who can edit state.bin can edit the binary
 // itself). What the code DOES enforce, so a stale or wrong-chain cache cannot
 // silently mislead:
 //   (1) genesis pin — on reuse, `genesis_hash` MUST equal the locally-recomputed
@@ -26,6 +26,18 @@
 //       regresses; stale/truncated state), and a daemon EXACTLY AT the cached
 //       height must present the cached anchor block itself (anchored_head's
 //       gates; the cache is load-bearing evidence, not just an optimization).
+//
+// AT-REST FORM (D2, canonical binary — the JSON document is deleted): the
+// DLS1 container, byte-exact (integers LE; decode requires the EXACT total
+// length of 81 or 113 bytes; every bound refuses, never clamps):
+//
+//   [0..3]    "DLS1"            magic
+//   [4..7]    schema_version    u32 LE (== 1)
+//   [8..39]   genesis_hash      32 bytes raw
+//   [40..47]  head_height       u64 LE
+//   [48..79]  head_block_hash   32 bytes raw
+//   [80]      has_state_root    u8 (0 | 1)
+//   [81..112] head_state_root   32 bytes raw, present iff flag == 1
 
 #pragma once
 #include <cstdint>
@@ -33,7 +45,9 @@
 
 namespace determ::light {
 
-// The locally-cached, committee-verified light-client anchor.
+// The locally-cached, committee-verified light-client anchor. Hash fields
+// stay lowercase-hex strings in memory (the call sites are hex-based); the
+// AT-REST form is the raw-byte DLS1 container above.
 struct LightState {
     uint32_t    schema_version = 1;   // bump on any field-set change
     std::string genesis_hash;         // 64-hex; pins the chain identity
@@ -43,18 +57,20 @@ struct LightState {
 };
 
 // Default state path: $DETERM_LIGHT_STATE if set, else
-// <home>/.determ-light/state.json (USERPROFILE on Win32, HOME on POSIX; "."
+// <home>/.determ-light/state.bin (USERPROFILE on Win32, HOME on POSIX; "."
 // as a last resort if neither is set).
 std::string default_state_path();
 
-// Write `s` to `path` as pretty JSON, creating parent directories.
-// Throws std::runtime_error on IO failure.
+// Write `s` to `path` as the canonical binary DLS1 container, creating
+// parent directories. Throws std::runtime_error on IO failure or when a
+// hash field is not exactly 64 hex chars (head_state_root may be "").
 void save_light_state(const std::string& path, const LightState& s);
 
 // Read + VALIDATE `path`. Throws std::runtime_error with a field-naming
-// diagnostic on: missing file, malformed JSON, unknown/missing schema_version,
-// or a missing / wrong-length / non-hex field. A clean return is a well-formed,
-// schema-current state — never a partially-populated one.
+// diagnostic on: missing file, wrong magic, unknown schema_version,
+// truncation at any field boundary, a bad has_state_root flag, or trailing
+// bytes. A clean return is a well-formed, schema-current state — never a
+// partially-populated one.
 LightState load_light_state(const std::string& path);
 
 // Cheap existence check (for --show / resume gating). No validation.

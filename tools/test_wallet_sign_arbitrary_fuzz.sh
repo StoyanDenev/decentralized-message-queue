@@ -79,14 +79,15 @@ assert_contains() {
 # resulting Ed25519 anon address is "0x" || ed_pub_hex, so the verify-time
 # --ed-pub is just the address with the 0x stripped.
 MASTER=$($PY -c "print('a7'*32)")    # 64 hex = 32-byte master seed
-$WALLET account-derive-batch --seed "$MASTER" --count "$NUM_CASES" --out "$T/keys.json" --force >/dev/null 2>&1
+$WALLET account-derive-batch --seed "$MASTER" --count "$NUM_CASES" --json > "$T/keys.json" 2>/dev/null
 if [ ! -s "$T/keys.json" ]; then
     echo "  FAIL: account-derive-batch produced no keyfile"; echo "  FAIL"; exit 1
 fi
 
-# Explode the {accounts:[...]} batch into per-index single-account keyfiles
-# (the {address,privkey_hex} shape sign-arbitrary's --priv-keyfile expects),
-# and emit the fixed-seed per-case plan as TSV lines:
+# Explode the {accounts:[...]} batch --json VIEW into per-index binary DAK1
+# keyfiles (the D2 shape sign-arbitrary's --priv-keyfile expects), minted
+# below via account-import --out, and emit the fixed-seed per-case plan as
+# TSV lines:
 #   idx  wrong_idx  msg_kind  msg_hex  flip_nibble_pos
 $PY - "$T/keys.json" "$T" "$NUM_CASES" "$SEED" > "$T/plan.tsv" <<'PY_EOF'
 import json, os, random, sys
@@ -94,9 +95,9 @@ keys_path, outdir, n, seed = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys
 accts = json.load(open(keys_path))["accounts"]
 assert len(accts) >= n, "not enough derived accounts"
 
-for i, a in enumerate(accts[:n]):
-    with open(os.path.join(outdir, "key_%d.json" % i), "w") as f:
-        json.dump({"address": a["address"], "privkey_hex": a["privkey_hex"]}, f)
+with open(os.path.join(outdir, "privs.txt"), "w") as f:
+    for i, a in enumerate(accts[:n]):
+        f.write("%d %s\n" % (i, a["privkey_hex"]))
 
 rng = random.Random(seed)
 rows = []
@@ -130,6 +131,12 @@ PY_EOF
 # Strip any CR the Windows-text-mode print may have appended (\r\n line
 # endings) so the trailing FLIP column is a clean integer for read/int().
 $PY -c "import sys;d=open(sys.argv[1],'rb').read().replace(b'\r\n',b'\n');open(sys.argv[1],'wb').write(d)" "$T/plan.tsv"
+
+# Mint the per-index binary DAK1 keyfiles from the extracted seeds (D2).
+while read -r ki kpriv; do
+  "$WALLET" account-import --priv "$kpriv" --out "$T/key_$ki.json" >/dev/null 2>&1 < /dev/null
+done < "$T/privs.txt"
+rm -f "$T/privs.txt"
 
 if [ ! -s "$T/plan.tsv" ]; then
     echo "  FAIL: fixed-seed plan generation produced no rows"; echo "  FAIL"; exit 1
@@ -169,8 +176,9 @@ while IFS=$'\t' read -r IDX WRONG KIND MSG_HEX FLIP; do
   MSGFILE="$T/msg_${IDX}.bin"
   hex_to_file "$MSGFILE" "$MSG_HEX"
 
-  PUB=$($PY -c "import json;print(json.load(open('$KEYFILE'))['address'][2:])")
-  WRONG_PUB=$($PY -c "import json;print(json.load(open('$T/key_${WRONG}.json'))['address'][2:])")
+  # Addresses come from the batch --json VIEW (keyfiles are binary DAK1, D2).
+  PUB=$($PY -c "import json;print(json.load(open('$T/keys.json'))['accounts'][$IDX]['address'][2:])")
+  WRONG_PUB=$($PY -c "import json;print(json.load(open('$T/keys.json'))['accounts'][$WRONG]['address'][2:])")
 
   # ── Sign (detached, default) ────────────────────────────────────────────────
   SIG=$($WALLET sign-arbitrary --priv-keyfile "$KEYFILE" --msg-file "$MSGFILE" 2>/dev/null | tr -d '\r')

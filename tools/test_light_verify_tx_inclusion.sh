@@ -78,14 +78,11 @@ assert() {
 }
 
 echo "=== 1. Mint two anon keypairs (alice funded, bob recipient) ==="
-"$DETERM_WALLET" account-create-batch --count 2 --out "$T/keys.json" >/dev/null 2>&1
+"$DETERM_WALLET" account-create-batch --count 2 --json > "$T/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][1]['address'])")
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$T/keys.json" "$T/key_a.json"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['privkey_hex'])")
+"$DETERM_WALLET" account-import --priv "$KPRIV_A" --out "$T/key_a.json" >/dev/null 2>&1
 echo "  alice=$ADDR_A"
 echo "  bob=  $ADDR_B"
 

@@ -16,8 +16,9 @@
 #   * S-028 normalization is REJECT-ON-INPUT (no silent mutation): both
 #     --keyfile address and --to (if anon-shape) must already be
 #     canonical lowercase.
-#   * Two keyfile shapes accepted: canonical wallet {address,
-#     privkey_hex} AND alternate {ed_priv_hex, ed_pub_hex, anon_address}.
+#   * ONLY the canonical binary DAK1 keyfile is accepted (D2); both legacy
+#     JSON shapes ({address, privkey_hex} and the alternate ed-pub
+#     spelling) are rejected — pinned by cases 23/24 below.
 #
 # Assertions (~25):
 #   1.  Global help mentions sign-anon-tx.
@@ -43,9 +44,9 @@
 #  20.  from field matches the keyfile address.
 #  21.  amount/fee/nonce echoed verbatim from CLI flags.
 #  22.  S-028: --to with uppercase hex digits is rejected (exit 1).
-#  23.  S-028: --keyfile with uppercase-hex address is rejected (exit 1).
-#  24.  Alternate keyfile shape (ed_priv_hex / ed_pub_hex / anon_address)
-#       signs successfully.
+#  23.  Legacy canonical JSON keyfile shape is rejected (exit 1, D2).
+#  24.  Legacy alternate JSON shape is rejected (exit 1); DAK1 re-sign
+#       determinism control.
 #  25.  --allow-stdout opt-in: signed JSON on stdout, exit 0.
 #  26.  Stdout-emitted envelope parses and has a 128-hex signature field.
 #  27.  Sibling verifier (tx-sign-verify) accepts the produced signature
@@ -83,36 +84,29 @@ assert_contains() {
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
-# Generate two fresh keypairs via account-create-batch.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+# Generate two fresh keypairs via account-create-batch (--json stdout VIEW).
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/keys.json")
 PUB_A="${ADDR_A#0x}"
 ADDR_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['address'])"     "$TMP/keys.json")
 
-# Write per-account keyfile (canonical wallet shape).
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json"
+# Mint the per-account keyfile — the canonical binary DAK1 container (D2).
+"$WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" >/dev/null
 
-# Write an alternate-shape keyfile for the same priv.
+# Write the two DELETED legacy JSON shapes as HOSTILE fixtures — both must
+# now be rejected (binary-only readers, D2).
 $PY -c "
 import json,sys
-d = json.load(open(sys.argv[1]))
-acc = d['accounts'][0]
-addr = acc['address']
-priv = acc['privkey_hex']
-# ed_pub_hex == 64-char tail of address (the 32-byte pubkey hex).
-pub_hex = addr[2:]
-alt = {
-    'ed_priv_hex':  priv,
-    'ed_pub_hex':   pub_hex,
-    'anon_address': addr,
-}
-json.dump(alt, open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a_alt.json"
+json.dump({'address': '$ADDR_A', 'privkey_hex': '$PRIV_A'},
+          open(sys.argv[1], 'w'))
+" "$TMP/key_a_legacy.json"
+$PY -c "
+import json,sys
+json.dump({'ed_priv_hex': '$PRIV_A', 'ed_pub_hex': '$ADDR_A'[2:],
+           'anon_address': '$ADDR_A'},
+          open(sys.argv[1], 'w'))
+" "$TMP/key_a_alt.json"
 
 echo "=== 1. Global help mentions sign-anon-tx ==="
 H=$("$WALLET" help 2>&1 | tr -d '\r')
@@ -285,32 +279,27 @@ assert_eq "$RC" "1" "S-028: uppercase --to rejected"
 assert_contains "$STDERR_OUT" "S-028" "diagnostic cites S-028"
 
 echo
-echo "=== 23. S-028: --keyfile with uppercase-hex address is rejected ==="
-$PY -c "
-import json
-d = json.load(open('$TMP/key_a.json'))
-d['address'] = '0x' + d['address'][2:].upper()
-json.dump(d, open('$TMP/key_a_upper.json','w'))
-"
+echo "=== 23. Legacy canonical JSON keyfile shape is REJECTED (D2 binary-only) ==="
 set +e
-"$WALLET" sign-anon-tx --keyfile "$TMP/key_a_upper.json" --to "$ADDR_B" --amount 100 --fee 1 --nonce 2 --out "$TMP/sig_keyup.json" >/dev/null 2>&1
+"$WALLET" sign-anon-tx --keyfile "$TMP/key_a_legacy.json" --to "$ADDR_B" --amount 100 --fee 1 --nonce 2 --out "$TMP/sig_keyup.json" >/dev/null 2>&1
 RC=$?
 set -e
-assert_eq "$RC" "1" "S-028: uppercase keyfile.address rejected"
+assert_eq "$RC" "1" "legacy {address,privkey_hex} JSON keyfile rejected"
 
 echo
-echo "=== 24. Alternate keyfile shape (ed_priv_hex/ed_pub_hex/anon_address) signs OK ==="
+echo "=== 24. Legacy alternate JSON shape (ed_priv_hex/...) is REJECTED ==="
 set +e
 "$WALLET" sign-anon-tx --keyfile "$TMP/key_a_alt.json" --to "$ADDR_B" --amount 250 --fee 2 --nonce 3 --out "$TMP/signed_alt.json" >/dev/null 2>&1
 RC=$?
 set -e
-assert_eq "$RC" "0" "alternate keyfile shape signs"
-# And the alt-shape sig must equal the canonical-shape sig over the same body
-# (Ed25519 deterministic): produce canonical-shape sig over an identical body.
+assert_eq "$RC" "1" "legacy alternate JSON keyfile shape rejected"
+# Determinism control on the canonical binary keyfile: two signs over the
+# same body must be byte-identical (Ed25519 RFC 8032 deterministic).
 "$WALLET" sign-anon-tx --keyfile "$TMP/key_a.json" --to "$ADDR_B" --amount 250 --fee 2 --nonce 3 --out "$TMP/signed_canon.json" >/dev/null 2>&1
-SIG_ALT=$($PY -c "import json; print(json.load(open('$TMP/signed_alt.json'))['signature'])")
-SIG_CAN=$($PY -c "import json; print(json.load(open('$TMP/signed_canon.json'))['signature'])")
-assert_eq "$SIG_ALT" "$SIG_CAN" "alt-shape sig == canonical-shape sig (Ed25519 deterministic)"
+"$WALLET" sign-anon-tx --keyfile "$TMP/key_a.json" --to "$ADDR_B" --amount 250 --fee 2 --nonce 3 --out "$TMP/signed_canon2.json" >/dev/null 2>&1
+SIG_C1=$($PY -c "import json; print(json.load(open('$TMP/signed_canon.json'))['signature'])")
+SIG_C2=$($PY -c "import json; print(json.load(open('$TMP/signed_canon2.json'))['signature'])")
+assert_eq "$SIG_C1" "$SIG_C2" "DAK1 keyfile re-sign is byte-identical (Ed25519 deterministic)"
 
 echo
 echo "=== 25. --allow-stdout opt-in: exit 0 ==="
@@ -347,20 +336,19 @@ set -e
 assert_eq "$RC" "0" "tx-sign-verify accepts sign-anon-tx envelope"
 
 echo
-echo "=== 28. Keyfile priv/address mismatch: exit 1 ==="
-# Build a keyfile whose privkey_hex stays valid but address belongs to another
-# account — the integrity check (address must derive from priv) must reject.
+echo "=== 28. Keyfile pubkey/seed mismatch: exit 1 (DAK1 derive-equality) ==="
+# Flip one byte of the stored pubkey (offset 4) in the binary DAK1 file —
+# the decoder's derive-equality check (pubkey == derive(seed)) must reject.
 $PY -c "
-import json
-d = json.load(open('$TMP/key_a.json'))
-d['address'] = '$ADDR_B'
-json.dump(d, open('$TMP/key_a_swapaddr.json','w'))
+data = bytearray(open('$TMP/key_a.json','rb').read())
+data[4] ^= 0x01
+open('$TMP/key_a_swapaddr.json','wb').write(bytes(data))
 "
 set +e
 "$WALLET" sign-anon-tx --keyfile "$TMP/key_a_swapaddr.json" --to "$ADDR_B" --amount 100 --fee 1 --nonce 5 --out "$TMP/sig_mismatch.json" >/dev/null 2>&1
 RC=$?
 set -e
-assert_eq "$RC" "1" "keyfile priv/address mismatch returns 1"
+assert_eq "$RC" "1" "keyfile pubkey/seed mismatch returns 1"
 
 echo
 echo "=== Test summary ==="

@@ -78,7 +78,7 @@ N=8   # C(8,2)=28 unordered pairs => 28 symmetry + 28 determinism checks.
 
 # ── 1. Setup: deterministically derive N accounts ─────────────────────────────
 echo "=== 1. Setup: derive $N deterministic accounts from fixed seed ==="
-"$WALLET" account-derive-batch --seed "$SEED" --count "$N" --out "$T/batch.json" --json >/dev/null 2>&1
+"$WALLET" account-derive-batch --seed "$SEED" --count "$N" --json > "$T/batch.json" 2>/dev/null
 RC=$?
 assert_eq "$RC" "0" "account-derive-batch (count=$N) succeeded"
 if [ "$RC" != "0" ] || [ ! -f "$T/batch.json" ]; then
@@ -88,18 +88,20 @@ if [ "$RC" != "0" ] || [ ! -f "$T/batch.json" ]; then
     exit 1
 fi
 
-# Explode the batch into per-account single-account keyfiles {address,privkey_hex}
-# (the shape --priv-keyfile expects) and emit "<index> <pubkey_hex>" lines.
+# Explode the batch --json VIEW into per-account binary DAK1 keyfiles (the
+# D2 shape --priv-keyfile expects), minted via account-import --out, and
+# emit "<index> <pubkey_hex>" lines.
 "$PY" -c "
 import json
 d = json.load(open('$T/batch.json'))
-accts = d['accounts']
-for a in accts:
-    i = a['index']
-    json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-              open('$T/k%d.json' % i, 'w'))
-    print('%d %s' % (i, a['address'][2:]))
-" > "$T/pubs.txt"
+for a in d['accounts']:
+    print('%d %s %s' % (a['index'], a['address'][2:], a['privkey_hex']))
+" > "$T/pubs_priv.txt"
+while read -r i pub priv; do
+  "$WALLET" account-import --priv "$priv" --out "$T/k$i.json" >/dev/null 2>&1 < /dev/null
+  echo "$i $pub"
+done < "$T/pubs_priv.txt" > "$T/pubs.txt"
+rm -f "$T/pubs_priv.txt"
 
 PUBCOUNT=$(grep -c . "$T/pubs.txt")
 assert_eq "$PUBCOUNT" "$N" "exploded $N per-account keyfiles + pubkey table"
@@ -138,6 +140,9 @@ echo "=== 2. ECDH symmetry derive(i,pub_j)==derive(j,pub_i) over all pairs ==="
 sym_pass=0
 sym_total=0
 for i in $(seq 0 $((N - 1))); do
+  # BSD/macOS seq counts DOWN when first > last (GNU emits nothing) —
+  # guard the empty range explicitly or i=N-1 fabricates bogus pairs.
+  [ $((i + 1)) -le $((N - 1)) ] || continue
   for j in $(seq $((i + 1)) $((N - 1))); do
     sym_total=$((sym_total + 1))
     PI=$(get_pub "$i"); PJ=$(get_pub "$j")
@@ -228,12 +233,12 @@ fi
 echo
 echo "=== 6. A different master seed yields a disjoint, non-overlapping secret ==="
 SEED2="ffeeddccbbaa00998877665544332211ffeeddccbbaa00998877665544332211"
-"$WALLET" account-derive-batch --seed "$SEED2" --count 2 --out "$T/batch2.json" --json >/dev/null 2>&1
+"$WALLET" account-derive-batch --seed "$SEED2" --count 2 --json > "$T/batch2.json" 2>/dev/null
+S2PRIV0=$("$PY" -c "import json;print(json.load(open('$T/batch2.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$S2PRIV0" --out "$T/s2_k0.json" >/dev/null 2>&1
 "$PY" -c "
 import json
-d = json.load(open('$T/batch2.json'))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']}, open('$T/s2_k0.json','w'))
+a = json.load(open('$T/batch2.json'))['accounts'][0]
 print(a['address'][2:])
 " > "$T/s2_pub.txt"
 S2P0=$(grep . "$T/s2_pub.txt")

@@ -76,18 +76,15 @@ NUM_CASES=24
 # Signer A signs every tx; --to rotates over B/C/D so the decoded `to`
 # field actually varies across cases (not a constant the test can't tell
 # apart from a hard-coded echo).
-"$W" account-create-batch --count 4 --out "$T/keys.json" >/dev/null 2>&1
+"$W" account-create-batch --count 4 --json > "$T/keys.json" 2>/dev/null
 if [ ! -s "$T/keys.json" ]; then
   echo "  FAIL: account-create-batch produced no keys (cannot run fuzz)"
   echo "  FAIL: test_wallet_inspect_tx_roundtrip_fuzz"; exit 1
 fi
 
-# Per-account signer keyfile (canonical wallet shape).
-$PY -c "
-import json
-d = json.load(open('$T/keys.json'))
-json.dump(d['accounts'][0], open('$T/signer.json', 'w'))
-"
+# Per-account signer keyfile — the canonical binary DAK1 container (D2).
+KPRIV_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['privkey_hex'])")
+"$W" account-import --priv "$KPRIV_A" --out "$T/signer.json" >/dev/null 2>&1
 ADDR_A=$($PY -c "import json; print(json.load(open('$T/keys.json'))['accounts'][0]['address'])")
 
 # Generate the fixed-seed case table: each line = amount fee nonce to_index.

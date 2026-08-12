@@ -313,13 +313,10 @@ echo "=== 9. Composes with tx-batch-sign output (signed envelopes) ==="
 # This is the batch-payroll-flow compose gate: sign a batch, then summarize
 # the SIGNED output array (type as int 0, plus sig/hash fields the summary
 # ignores). The summary must reflect the assigned nonces end-to-end.
-"$WALLET" account-create-batch --count 1 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/keys.json")
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$KPRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 # Build a homogeneous 3-tx input with nonces 7/8/9 (mirrors the use-case).
 $PY -c "
 import json

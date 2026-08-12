@@ -100,7 +100,27 @@ assert_contains "$OUT" "Account 1:" "first block labeled Account 1"
 assert_contains "$OUT" "Account 5:" "last block labeled Account 5"
 
 echo
-echo "=== 4. N=100 (larger batch) — written via --out, valid JSON ==="
+# Decode a binary DAB1 batch keyfile (D2 at-rest form: "DAB1" || count u16
+# LE || count x {pubkey 32B || seed 32B}, exact length) into the JSON view
+# {accounts:[{address, privkey_hex}]} for the shape assertions below.
+dab1_view() {  # $1 = DAB1 file, $2 = output JSON view; echoes OK on success
+  $PY - "$1" "$2" <<'PY_EOF'
+import json, sys
+data = open(sys.argv[1], 'rb').read()
+assert data[:4] == b'DAB1', 'bad magic %r' % data[:4]
+count = int.from_bytes(data[4:6], 'little')
+assert len(data) == 6 + 64 * count, 'bad length %d for count %d' % (len(data), count)
+accounts = []
+for i in range(count):
+    rec = data[6 + 64*i : 6 + 64*(i+1)]
+    accounts.append({'address': '0x' + rec[:32].hex(),
+                     'privkey_hex': rec[32:].hex()})
+json.dump({'accounts': accounts}, open(sys.argv[2], 'w'))
+print('OK')
+PY_EOF
+}
+
+echo "=== 4. N=100 (larger batch) — written via --out, valid binary DAB1 ==="
 "$WALLET" account-create-batch --count 100 --out "$TMP/batch100.json" > "$TMP/stdout100.txt" 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 on N=100 with --out"
@@ -111,9 +131,11 @@ if [ -s "$TMP/batch100.json" ]; then
 else
     echo "  FAIL: --out file is empty"; fail_count=$((fail_count + 1))
 fi
-# JSON parseable + array length matches.
-LEN=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(len(d['accounts']))" "$TMP/batch100.json")
-assert_eq "$LEN" "100" "JSON file has accounts[] of length 100"
+# Binary DAB1 decodes (magic + exact 6+64*count length) + count matches.
+VIEW_OK=$(dab1_view "$TMP/batch100.json" "$TMP/batch100.view.json" 2>&1 | tail -1)
+assert_eq "$VIEW_OK" "OK" "--out file is a well-formed binary DAB1 container"
+LEN=$($PY -c "import json,sys; d=json.load(open(sys.argv[1])); print(len(d['accounts']))" "$TMP/batch100.view.json")
+assert_eq "$LEN" "100" "DAB1 file carries 100 account records"
 
 echo
 echo "=== 5. --json (no --out) — JSON to stdout, parseable, length N ==="
@@ -135,7 +157,9 @@ echo
 echo "=== 7. Fresh-randomness invariant — two calls produce DIFFERENT keypairs ==="
 "$WALLET" account-create-batch --count 5 --out "$TMP/run_a.json" >/dev/null 2>&1
 "$WALLET" account-create-batch --count 5 --out "$TMP/run_b.json" >/dev/null 2>&1
-DIFFER=$($PY - "$TMP/run_a.json" "$TMP/run_b.json" <<'PY_EOF'
+dab1_view "$TMP/run_a.json" "$TMP/run_a.view.json" >/dev/null
+dab1_view "$TMP/run_b.json" "$TMP/run_b.view.json" >/dev/null
+DIFFER=$($PY - "$TMP/run_a.view.json" "$TMP/run_b.view.json" <<'PY_EOF'
 import json, sys
 a = json.load(open(sys.argv[1]))["accounts"]
 b = json.load(open(sys.argv[2]))["accounts"]
@@ -152,9 +176,9 @@ assert_eq "$DIFFER" "DISJOINT" "back-to-back batches produce disjoint addresses 
 
 echo
 echo "=== 8. Every emitted address is a valid anon-address ==="
-# Pull addresses from the 100-batch and validate the shape: 66 chars,
+# Pull addresses from the 100-batch VIEW and validate the shape: 66 chars,
 # "0x" prefix, 64 lowercase hex digits.
-$PY - "$TMP/batch100.json" <<'PY_EOF'
+$PY - "$TMP/batch100.view.json" <<'PY_EOF'
 import json, re, sys
 d = json.load(open(sys.argv[1]))
 shape = re.compile(r"^0x[0-9a-f]{64}$")
@@ -171,7 +195,7 @@ assert_eq "$RC" "0" "every address matches 0x + 64-lowercase-hex (anon-address s
 
 echo
 echo "=== 9. Every privkey_hex is 64 lowercase hex chars ==="
-$PY - "$TMP/batch100.json" <<'PY_EOF'
+$PY - "$TMP/batch100.view.json" <<'PY_EOF'
 import json, re, sys
 d = json.load(open(sys.argv[1]))
 shape = re.compile(r"^[0-9a-f]{64}$")
@@ -244,8 +268,9 @@ assert_contains "$ERR" "--force"        "diagnostic suggests --force"
 "$WALLET" account-create-batch --count 1 --out "$TMP/batch100.json" --force > "$TMP/force_stdout.txt" 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 with --force overrides existing file"
-LEN=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/batch100.json")
-assert_eq "$LEN" "1" "after --force overwrite file has accounts[] of length 1 (not the old 100)"
+dab1_view "$TMP/batch100.json" "$TMP/batch100_force.view.json" >/dev/null
+LEN=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/batch100_force.view.json")
+assert_eq "$LEN" "1" "after --force overwrite the DAB1 carries 1 record (not the old 100)"
 
 echo
 echo "=== 16. --out + --json: --out wins, no JSON document on stdout ==="
@@ -255,16 +280,18 @@ STDOUT=$(cat "$TMP/both_stdout.txt" | tr -d '\r')
 assert_eq "$RC" "0" "exit 0 on --out + --json"
 assert_contains "$STDOUT" "wrote 2 accounts to" "stdout has 'wrote ...' line (--out path won)"
 assert_not_contains "$STDOUT" '"accounts"' "stdout does NOT contain JSON document (--out won)"
-# File exists and is valid JSON.
-LEN=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/both.json")
-assert_eq "$LEN" "2" "the --out file has accounts[] of length 2"
+# File exists and is a well-formed DAB1 container of 2 records.
+dab1_view "$TMP/both.json" "$TMP/both.view.json" >/dev/null
+LEN=$($PY -c "import json,sys; print(len(json.load(open(sys.argv[1]))['accounts']))" "$TMP/both.view.json")
+assert_eq "$LEN" "2" "the --out DAB1 file carries 2 records"
 
 echo
 echo "=== 17. Within a single batch every address is unique ==="
 # Note: $TMP/batch100.json was overwritten in step 15 to N=1; generate a
 # fresh 100-batch here to keep the uniqueness assertion meaningful.
 "$WALLET" account-create-batch --count 100 --out "$TMP/uniq_check.json" >/dev/null 2>&1
-$PY - "$TMP/uniq_check.json" <<'PY_EOF'
+dab1_view "$TMP/uniq_check.json" "$TMP/uniq_check.view.json" >/dev/null
+$PY - "$TMP/uniq_check.view.json" <<'PY_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 addrs = [a["address"] for a in d["accounts"]]
@@ -278,7 +305,7 @@ assert_eq "$RC" "0" "100-batch has all unique addresses"
 
 echo
 echo "=== 18. Within a single batch every privkey_hex is unique ==="
-$PY - "$TMP/uniq_check.json" <<'PY_EOF'
+$PY - "$TMP/uniq_check.view.json" <<'PY_EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 keys = [a["privkey_hex"] for a in d["accounts"]]

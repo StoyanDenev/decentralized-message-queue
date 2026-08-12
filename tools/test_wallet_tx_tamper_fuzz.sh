@@ -37,13 +37,12 @@ assert() {
 }
 
 # Two fresh keypairs: A signs, B is the destination (+ a swap target).
-"$W" account-create-batch --count 2 --out "$T/keys.json" >/dev/null 2>&1
+# Keyfile k.json is the binary DAK1 container (D2), minted via account-import.
+"$W" account-create-batch --count 2 --json > "$T/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys;print(json.load(open('$T/keys.json'))['accounts'][0]['privkey_hex'])")
 ADDR_A=$($PY -c "import json,sys;print(json.load(open('$T/keys.json'))['accounts'][0]['address'])")
 ADDR_B=$($PY -c "import json,sys;print(json.load(open('$T/keys.json'))['accounts'][1]['address'])")
-cat > "$T/k.json" <<EOF
-{"address":"$ADDR_A","privkey_hex":"$PRIV_A"}
-EOF
+"$W" account-import --priv "$PRIV_A" --out "$T/k.json" >/dev/null 2>&1
 
 # Sign a real TRANSFER A -> B.
 "$W" sign-anon-tx --keyfile "$T/k.json" --to "$ADDR_B" --amount 100 --fee 1 --nonce 0 --out "$T/tx.json" >/dev/null 2>&1

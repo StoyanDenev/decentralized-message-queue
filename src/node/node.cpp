@@ -788,6 +788,7 @@ void Node::arm_startup_grace() {
             check_if_selected();
             return;
         }
+        ++status_requests_sent_;
         gossip_.broadcast(net::make_status_request());
     });
 }
@@ -1657,6 +1658,7 @@ bool Node::maybe_stall_reset_locked() {
     current_aborts_.clear();
     reset_round();
     stalled_resync_ = true;
+    ++status_requests_sent_;
     gossip_.broadcast(net::make_status_request());
     check_if_selected();
     return true;
@@ -1914,8 +1916,14 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
 void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
-    if (ev.digest_a == ev.digest_b) return;
-    if (ev.sig_a == ev.sig_b)       return;
+    // EQV-height-bind: same check set as the validator gate
+    // (BlockValidator::check_equivocation_events) — unknown kind, the height
+    // assert, degenerate openings/sigs, then both signatures verified against
+    // digests DERIVED from the carried (index, body_root) openings.
+    if (ev.kind > 1) return;
+    if (ev.index_a != ev.block_index || ev.index_b != ev.block_index) return;
+    if (ev.body_root_a == ev.body_root_b) return;
+    if (ev.sig_a == ev.sig_b)             return;
 
     // D3.3b-read STEP 3: frozen-first, present-head fallback (a non-committee /
     // cross-epoch equivocator still resolves present-head and stays slashable).
@@ -1923,9 +1931,16 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
                                               current_epoch_index(), ev.equivocator);
     if (!ek) return;
 
-    if (!crypto::verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+    auto compose = [&](uint64_t index, const Hash& body_root) {
+        return ev.kind == chain::EquivocationEvent::KIND_BLOCK_DIGEST
+                   ? compose_block_digest(index, body_root)
+                   : compose_contrib_commitment(index, body_root);
+    };
+    Hash digest_a = compose(ev.index_a, ev.body_root_a);
+    Hash digest_b = compose(ev.index_b, ev.body_root_b);
+    if (!crypto::verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
         return;
-    if (!crypto::verify(*ek, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+    if (!crypto::verify(*ek, digest_b.data(), digest_b.size(), ev.sig_b))
         return;
 
     // MEM-equiv-evidence-blockindex-amplification: dedup on the equivocator
@@ -1949,8 +1964,11 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
 //      first header's prev_hash if no prior context).
 //   3. consensus_mode is MD (beacon doesn't escalate to BFT — beacons
 //      always run K-of-K).
-//   4. Each non-zero entry in creator_block_sigs verifies against the
-//      corresponding creator's Ed25519 key, and signed_count == K.
+//   4. Committee signatures via the ONE shared verifier verify_committee_sigs
+//      (DECISION-LOG 2026-07-31 Hole 2): creators NON-EMPTY, every non-zero
+//      creator_block_sigs entry verifies against the corresponding creator's
+//      Ed25519 key, signed_count >= cfg_.k_block_sigs (build-sharded gives
+//      beacon and shards the same K), and signed_count == creators.size().
 //      The shard derives the validator pool from chain_.registrants()
 //      since shard genesis shares initial_creators with beacon (via
 //      genesis-tool build-sharded). This is correct at genesis time;
@@ -1983,47 +2001,52 @@ void Node::on_beacon_header(const chain::Block& b) {
         return;
     }
 
-    // 4. K-of-K signature verification. The shard's registry mirrors the
-    //    beacon's at genesis time (build-sharded shares initial_creators).
-    //    For B2c.2-minimal we use the shard's local registry as the pool.
+    // 4. Committee-signature verification through the ONE shared verifier
+    //    (verify_committee_sigs — DECISION-LOG 2026-07-31 Hole 2; the same
+    //    core verify_shard_tip_committee_sig_root routes through). The
+    //    shard's registry mirrors the beacon's at genesis time (build-sharded
+    //    shares initial_creators + K); for B2c.2-minimal the shard's local
+    //    registry is the pool. The verifier adds the floor the hand-rolled
+    //    loop lacked: NON-EMPTY creators and signed_count >= cfg_.k_block_sigs
+    //    — an empty or under-K creators list can no longer be the VEHICLE that
+    //    passes the K-of-K checks vacuously.
+    //
+    //    SCOPE (B3 — do not over-read this fix): the K-of-K creator_block_sigs
+    //    sign compute_block_digest, which does NOT cover b.cumulative_rand or
+    //    b.delay_output (those are bound into signing_bytes/compute_hash but
+    //    not the signature digest), and this ingest path does NOT run
+    //    check_cumulative_rand (that gate fires only on the apply path,
+    //    validator.cpp:52). So a MITM can still alter cumulative_rand on an
+    //    otherwise-valid header without breaking the sigs; for the first header
+    //    the prev_hash chain check above is also skipped, so a tampered rand
+    //    can seed ONE epoch's committee selection (node.cpp external
+    //    epoch-rand provider) — subsequent genuine headers then fail to chain
+    //    (a stall, not silent acceptance). Authenticating cumulative_rand on
+    //    the beacon-header path is the deeper item the DECISION-LOG 2026-07-31
+    //    entry flags as NOT authorized / separate owner decision.
     auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
-    if (b.creator_block_sigs.size() != b.creators.size()) {
-        std::cerr << "[node] beacon header: creator_block_sigs size mismatch\n";
-        return;
-    }
+    std::map<std::string, PubKey> member_pub;
+    for (auto& nd : reg.sorted_nodes()) member_pub[nd.domain] = nd.pubkey;
 
     Hash digest = compute_block_digest(b);
-    Signature zero_sig{};
-    size_t signed_count = 0;
-    for (size_t i = 0; i < b.creators.size(); ++i) {
-        if (b.creator_block_sigs[i] == zero_sig) continue;
-        auto e = reg.find(b.creators[i]);
-        if (!e) {
-            std::cerr << "[node] beacon header at h=" << b.index
-                      << ": creator '" << b.creators[i]
-                      << "' not in shard's tracked beacon pool\n";
-            return;
-        }
-        if (!crypto::verify(e->pubkey, digest.data(), digest.size(),
-                              b.creator_block_sigs[i])) {
-            std::cerr << "[node] beacon header at h=" << b.index
-                      << ": invalid sig from " << b.creators[i] << "\n";
-            return;
-        }
-        ++signed_count;
-    }
+    auto signed_count = verify_committee_sigs(
+        member_pub, b.creators, b.creator_block_sigs, digest,
+        cfg_.k_block_sigs,
+        "beacon header at h=" + std::to_string(b.index));
+    if (!signed_count) return;
+
     // K-of-K beacon: every committee member must have signed (no zero
     // sentinels permitted in MD mode).
-    if (signed_count != b.creators.size()) {
+    if (*signed_count != b.creators.size()) {
         std::cerr << "[node] beacon header at h=" << b.index
-                  << ": incomplete K-of-K (signed=" << signed_count
+                  << ": incomplete K-of-K (signed=" << *signed_count
                   << ", required=" << b.creators.size() << ")\n";
         return;
     }
 
     beacon_headers_.push_back(b);
     std::cout << "[node] verified beacon header #" << b.index
-              << " (K-of-K=" << signed_count << ")\n";
+              << " (K-of-K=" << *signed_count << ")\n";
 }
 
 // rev.9 B2c.3: beacon receives a shard's newly-applied block via gossip
@@ -2380,9 +2403,10 @@ void Node::apply_block_locked(const chain::Block& b) {
         // incoming block's hash differs from the block we already have at
         // b.index, AND it carries a non-empty bft_proposer (BFT-mode
         // block), that proposer signed two different digests for the
-        // same height — equivocation. Extract proof: digest_a/sig_a from
-        // the stored block, digest_b/sig_b from the incoming block, both
-        // by the same proposer key. Push to evidence pool, gossip.
+        // same height — equivocation. Extract proof: the (index, body_root)
+        // opening + sig of side a from the stored block, side b from the
+        // incoming block, both by the same proposer key (EQV-height-bind,
+        // kind=BLOCK_DIGEST). Push to evidence pool, gossip.
         // rev.8 equivocation detection + evidence assembly. The pure,
         // SIZE-GUARDED assembly is factored into node::detect_equivocation
         // (BlockIngress EQV-assemble-OOB): this duplicate/old-height branch
@@ -2415,6 +2439,31 @@ void Node::apply_block_locked(const chain::Block& b) {
         // everything else in this branch stays a duplicate/stale drop.
         if (chain_.height() >= 2 && b.index == chain_.height() - 1)
             maybe_reorg_to_locked(b);
+        return;
+    }
+
+    // S-050 straggler recovery (DECISION-LOG 2026-08-12). A block whose index
+    // is beyond our immediate next (b.index > height(); the normal next block
+    // is index == height() and falls through to validate below) proves a peer
+    // minted past our head while we are missing >= 1 block. validate() would
+    // reject it for prev_hash mismatch with NO catch-up, permanently stranding
+    // an idle non-committee follower: such a node arms no round timer, so the
+    // S-050 stall valve (handle_*_timeout) never fires for it, and no other
+    // path re-issues a STATUS_REQUEST. Trigger the SAME tolerance-0 catch-up
+    // the valve uses (stalled_resync_ + one STATUS_REQUEST). Recovery is purely
+    // message-driven — it needs no clock advance, so it works in production
+    // wall-clock time, not just under the test's virtual clock. GUARD: fire at
+    // most once per stall episode (!stalled_resync_), so a stream of future or
+    // duplicated blocks cannot turn this into a STATUS_REQUEST re-broadcast
+    // amplifier; stalled_resync_ clears on the next successful append
+    // (post_append_bookkeeping_locked), re-arming detection. No new message
+    // type, accept-rule, digest, or state — pure liveness, additive.
+    if (b.index > chain_.height()) {
+        if (!stalled_resync_) {
+            stalled_resync_ = true;
+            ++status_requests_sent_;
+            gossip_.broadcast(net::make_status_request());
+        }
         return;
     }
 
@@ -2929,11 +2978,13 @@ void Node::on_contrib(const ContribMsg& msg) {
     // commitments, both signed by the same key → conflicting evidence.
     //
     // Build an EquivocationEvent and route it through the same channel
-    // used by BlockSigMsg-level equivocation: the validator's
-    // check_equivocation_events doesn't care WHAT kind of digest the two
-    // halves are — it only checks "two distinct digests, both signatures
-    // verify under the equivocator's registered key". The contrib
-    // commitments slot into that contract cleanly.
+    // used by BlockSigMsg-level equivocation. EQV-height-bind: the channel
+    // is kind-DISCRIMINATED, not digest-agnostic — this family is
+    // kind=CONTRIB_COMMIT, so the validator recomputes each side via
+    // compose_contrib_commitment(index, body_root) under the
+    // DTM-CONTRIB-v2 tag and asserts both signed heights equal
+    // ev.block_index (cross-family and cross-height confusion both
+    // fail-closed).
     //
     // After detection, drop the duplicate from pending_contribs_ entry
     // anyway — we keep the earlier-arrived view as the canonical contrib
@@ -2941,17 +2992,15 @@ void Node::on_contrib(const ContribMsg& msg) {
     // separately at the next produced block.
     auto existing = pending_contribs_.find(msg.signer);
     if (existing != pending_contribs_.end()) {
-        // Same F2-aware + TS-aware commit re-derivation as the sig-verify
-        // path above: for v1 contribs all view roots are zero (short-circuit
-        // fires); for F2 contribs the DTM-F2-v1 path binds each member's
-        // view; the stored entry's proposer_time must be re-bound too —
-        // this digest becomes the slashing evidence's digest_a, and sig_a
-        // verifies downstream only against the FULL commitment the
-        // equivocator actually signed (DTM-TS-v1 tail included).
-        Hash existing_commit = make_contrib_commitment(existing->second);
-        // commit (declared above for the sig-verify path) is the new
-        // message's commitment (full, F2-view-root-bound).
-        //
+        // EQV-height-bind: the evidence carries the OPENINGS of the two
+        // signed commitments — per side (block_index, contrib body root) —
+        // not the opaque digests. The verifier recomputes each commitment
+        // via compose_contrib_commitment(index, body_root), so sig_a/sig_b
+        // verify downstream only against the FULL commitment the equivocator
+        // actually signed (F2 view roots + DTM-TS-v1 tail included in the
+        // body root, via the S-043 message-form recompute).
+        Hash existing_body = make_contrib_body_root(existing->second);
+        Hash new_body      = make_contrib_body_root(msg);
         // v2.7 F2 / S-016: equivocation DETECTION compares the v1 CORE commit
         // (tx set / prev_hash / dh_input) only — NOT the F2 view roots. A
         // committee member's view of pool-fed inputs (inbound-receipt evidence,
@@ -2960,7 +3009,7 @@ void Node::on_contrib(const ContribMsg& msg) {
         // reconciled by intersection downstream, not equality here. Comparing
         // the full view-bound commit would false-positive an honest member that
         // refreshed its view between rounds as a self-equivocator. The slashing
-        // EVIDENCE below keeps the full signed commits so the recorded sigs
+        // EVIDENCE below keeps the full signed openings so the recorded sigs
         // still verify against the equivocator's key.
         Hash existing_core = make_contrib_commitment(
             existing->second.block_index, existing->second.prev_hash,
@@ -2971,9 +3020,12 @@ void Node::on_contrib(const ContribMsg& msg) {
             chain::EquivocationEvent ev;
             ev.equivocator          = msg.signer;
             ev.block_index          = msg.block_index;
-            ev.digest_a             = existing_commit;
+            ev.kind                 = chain::EquivocationEvent::KIND_CONTRIB_COMMIT;
+            ev.index_a              = existing->second.block_index;
+            ev.body_root_a          = existing_body;
             ev.sig_a                = existing->second.ed_sig;
-            ev.digest_b             = commit;
+            ev.index_b              = msg.block_index;
+            ev.body_root_b          = new_body;
             ev.sig_b                = msg.ed_sig;
             ev.shard_id             = cfg_.shard_id;
             ev.beacon_anchor_height = beacon_headers_.empty()
@@ -4504,11 +4556,14 @@ json Node::rpc_submit_tx(const json& tx_json) {
 json Node::rpc_submit_equivocation(const json& ev_json) {
     auto ev = chain::EquivocationEvent::from_json(ev_json);
 
-    // Reuse the gossip handler's validation + dedup + acceptance path:
-    //   - rejects digest_a == digest_b
+    // Reuse the gossip handler's validation + dedup + acceptance path
+    // (EQV-height-bind check set, mirroring the validator gate):
+    //   - rejects kind > 1
+    //   - rejects index_a/index_b != block_index (the height assert)
+    //   - rejects body_root_a == body_root_b
     //   - rejects sig_a == sig_b
     //   - rejects unregistered equivocator
-    //   - verifies BOTH sigs against equivocator's pubkey
+    //   - verifies BOTH sigs against digests DERIVED from the openings
     //   - dedupes against pending pool
     // The handler grabs state_mutex_ itself.
     on_equivocation_evidence(ev);
@@ -4524,7 +4579,7 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
         // (it processes inbound), so we do it here on the submission path.
         gossip_.broadcast(net::make_equivocation_evidence(ev));
         return {{"accepted", true}, {"equivocator", ev.equivocator},
-                {"block_index", ev.block_index}};
+                {"block_index", ev.block_index}, {"kind", ev.kind}};
     }
     return {{"accepted", false},
             {"reason", "evidence rejected (invalid sigs, "

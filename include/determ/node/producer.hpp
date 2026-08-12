@@ -193,6 +193,60 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
 // Output is byte-identical to the field-form call with the message's fields.
 Hash make_contrib_commitment(const ContribMsg& m);
 
+// ── EQV-height-bind: two-level (openable) digest composition ──────────────
+//
+// Both digest families that feed the equivocation-evidence channel are
+// restructured into an OPENABLE two-level form so an EquivocationEvent can
+// carry, per side, the fixed-size opening {index u64, body_root Hash} and the
+// verifier can RECOMPUTE each signed digest and assert both signatures were
+// made at the SAME height (index_a == index_b == ev.block_index). Without
+// this, replaying one honest validator's signatures from two DIFFERENT
+// heights forged a full-stake slash (DECISION-LOG 2026-07-31, Hole 1).
+//
+//   block_digest   = SHA256("DTM-BLKDIG-v2"  || index       u64 BE || body_root)
+//   contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64 BE || body_root)
+//
+// The two outer tags MUST differ (domain separation): with a shared tag, one
+// honest block-sig plus one honest contrib-sig at the same height would
+// compose into a new same-height "equivocation" forgery. Integers inside the
+// digest preimage are BIG-endian (SHA256Builder convention) — deliberately
+// different from the LITTLE-endian frame/wire convention.
+//
+// Soundness of the opening: honest keys only ever sign composed digests
+// carrying their true height under the correct tag, so producing a signature
+// that verifies under a DIFFERENT (index, body_root) opening of the same
+// digest is a SHA-256 preimage break.
+
+// Outer compose for the Phase-2 block digest family (kind 0).
+Hash compose_block_digest(uint64_t index, const Hash& body_root);
+
+// The block-digest body: the exact legacy compute_block_digest preimage MINUS
+// the leading index append (which moved to the outer compose level). Mirrored
+// by light/verify.cpp::light_compute_block_digest_body (token-parity guarded
+// by tools/test_block_digest_xbinary_parity.sh).
+Hash compute_block_digest_body(const chain::Block& b);
+
+// Outer compose for the Phase-1 contrib-commitment family (kind 1).
+Hash compose_contrib_commitment(uint64_t block_index, const Hash& body_root);
+
+// The contrib-commitment body: the exact legacy make_contrib_commitment
+// preimage MINUS the leading block_index append. Same trailing default-zero
+// args (and the same all-zero ⇒ v1-shape short-circuit) as the field-form
+// make_contrib_commitment above.
+Hash make_contrib_body_root(const Hash& prev_hash,
+                            const std::vector<Hash>& sorted_tx_hashes,
+                            const Hash& dh_input,
+                            const Hash& view_eq_root = Hash{},
+                            const Hash& view_abort_root = Hash{},
+                            const Hash& view_inbound_root = Hash{},
+                            uint64_t proposer_time = 0,
+                            const Hash& view_shardtip_root = Hash{});
+
+// Message-form overload (the S-043 discipline, exactly like
+// make_contrib_commitment(const ContribMsg&)): extract EVERY bound field from
+// the message so an evidence-assembly site cannot silently omit one.
+Hash make_contrib_body_root(const ContribMsg& m);
+
 // Canonical tx_root: union of K-committee tx_hashes lists. Used in strong
 // mode (K=M_pool, every creator on committee) — censorship requires every
 // creator to omit a tx.
@@ -257,6 +311,9 @@ std::vector<Hash> reconcile_intersection(
 // included — F2 hashes a member's COMPLETE observation, and any peer
 // observing the same struct should produce the same Hash.
 
+// EQV-height-bind: tag bumped DTM-F2-EQ-v1 → -v2 with the struct change
+// (digest_a/digest_b deleted; kind + per-side (index, body_root, sig)
+// openings added — all bound, in declared order).
 Hash hash_equivocation_event(const chain::EquivocationEvent& e);
 
 // BlockIngress EQV-assemble-OOB (SnapshotRestore/RpcIngress sister register):
@@ -289,12 +346,15 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
 // (full-stake forfeit + deregister, chain.cpp apply) on the FIRST valid proof
 // REGARDLESS of block_index, and the credited-evidence prune erases by
 // equivocator alone — so pending_equivocation_evidence_ holds at most one
-// meaningful record per equivocator. block_index is an attacker-chosen field
-// bound by NEITHER of the two signatures, so keying dedup on it let ONE valid
+// meaningful record per equivocator. Historically block_index was bound by
+// NEITHER of the two signatures, so keying dedup on it let ONE valid
 // double-sign replay with block_index = 0,1,2,… into unbounded pool entries
-// (a node-local memory-exhaustion DoS, distinct from the owner-gated
-// EQV-height-unbound consensus vuln). Deduping on the equivocator alone bounds
-// the pool to |distinct equivocators| and defeats the replay amplification.
+// (a node-local memory-exhaustion DoS). EQV-height-bind has since made
+// block_index signature-bound (the verifier recomputes each signed digest
+// from its (index, body_root) opening and asserts index_a == index_b ==
+// block_index), which closed the companion consensus hole — but the dedup
+// identity deliberately STAYS equivocator-only: one proof per equivocator is
+// all apply ever consumes, so keying on more would only re-open pool growth.
 // ONE shared identity used at every dedup / inspect / prune site so they cannot
 // drift.
 inline bool same_equivocation_identity(const chain::EquivocationEvent& a,
@@ -401,7 +461,9 @@ Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
 
 // Phase 2 sig domain: hash that each creator_block_sigs[i] covers. Includes
 // every consensus-critical field of the block so equivocation on any of them
-// produces an unverifiable sig.
+// produces an unverifiable sig. EQV-height-bind: two-level —
+// compose_block_digest(b.index, compute_block_digest_body(b)); see the
+// compose declarations above.
 Hash compute_block_digest(const chain::Block& b);
 
 // rev.9 S-009: post-Phase-2 randomness output. delay_output is computed

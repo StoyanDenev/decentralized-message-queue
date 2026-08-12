@@ -328,29 +328,30 @@ else
     echo "  PASS: encrypted fixture built (keyfile-create rc=0)"
     pass_count=$((pass_count + 1))
 
-    # Helper: build a length-mutated copy by trimming N trailing hex chars off
-    # a chosen dot-separated envelope field (field indices: 1=magic 2=salt
-    # 3=iters 4=nonce 5=aad 6=ciphertext), then drive keyfile-decrypt on it.
-    # Writes the tampered keyfile byte-exact ('wb', no CRLF translation).
-    enc_tamper_run() {  # <label> <field-index> <trim-hex-chars> <outvar-leakfile>
-        local label="$1" field="$2" trim="$3" leak="$4"
+    # Helper: build a length-mutated copy of the binary DNK1 container (D2)
+    # per a named tamper mode, then drive keyfile-decrypt on it. Modes:
+    #   trim-tail:    drop 2 trailing bytes (ciphertext short of env_len)
+    #   salt-len-lie: decrement the embedded envelope's salt_len byte
+    #   env-len-lie:  increment the DNK1 env_len field past EOF
+    # Writes the tampered keyfile byte-exact.
+    enc_tamper_run() {  # <label> <mode> <outvar-leakfile>
+        local label="$1" mode="$2" leak="$3"
         local tfile="$TMP/enc_${label}.enc"
-        $PY - "$ENC_SRC" "$tfile" "$field" "$trim" <<'PY'
+        $PY - "$ENC_SRC" "$tfile" "$mode" <<'PY'
 import sys
-src, dst, field, trim = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-with open(src, "rb") as f:
-    raw = f.read()
-# 2-line file: header \n blob [\n]. Split on the FIRST newline only so the
-# header bytes are preserved verbatim; normalize CR off the blob line.
-nl = raw.find(b"\n")
-header = raw[:nl]
-blob = raw[nl+1:].replace(b"\r", b"").replace(b"\n", b"")
-fields = blob.split(b".")
-assert field-1 < len(fields), "field index out of range"
-fields[field-1] = fields[field-1][:-trim] if trim < len(fields[field-1]) else b""
-new_blob = b".".join(fields)
-with open(dst, "wb") as f:
-    f.write(header + b"\n" + new_blob + b"\n")
+src, dst, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+d = bytearray(open(src, "rb").read())
+assert d[:4] == b"DNK1" and len(d) > 60, "not a DNK1 container"
+if mode == "trim-tail":
+    d = d[:-2]
+elif mode == "salt-len-lie":
+    d[44] -= 1                      # envelope salt_len byte (offset 40+4)
+elif mode == "env-len-lie":
+    n = int.from_bytes(d[36:40], "little") + 1
+    d[36:40] = n.to_bytes(4, "little")
+else:
+    raise SystemExit("unknown mode " + mode)
+open(dst, "wb").write(bytes(d))
 PY
         rm -f "$leak"
         set +e
@@ -364,28 +365,24 @@ PY
         fail_closed "$label" "$rc" "$out" "$leak"
     }
 
-    # 7a. SHORT ciphertext: trim 4 hex (2 bytes) off the ciphertext+tag field.
-    #     AEAD tag no longer validates -> exit 2, no plaintext.
-    enc_tamper_run "enc-short-ciphertext" 6 4 "$TMP/leak_7a.json"
-    # 7b. WRONG-LENGTH salt: trim 2 hex (1 byte) off the salt -> KDF derives a
-    #     different key -> AEAD fails -> exit 2, no plaintext.
-    enc_tamper_run "enc-wrong-len-salt" 2 2 "$TMP/leak_7b.json"
-    # 7c. WRONG-LENGTH nonce: trim 2 hex off the fixed-width nonce -> DWE1
-    #     deserializer rejects -> exit 1, no plaintext.
-    enc_tamper_run "enc-wrong-len-nonce" 4 2 "$TMP/leak_7c.json"
+    # 7a. SHORT ciphertext: drop 2 trailing bytes -> the container's env_len
+    #     no longer reaches EOF -> structural reject, no plaintext.
+    enc_tamper_run "enc-short-ciphertext" trim-tail "$TMP/leak_7a.json"
+    # 7b. WRONG-LENGTH salt: decrement the embedded salt_len byte -> the
+    #     envelope layout shifts -> structural reject, no plaintext.
+    enc_tamper_run "enc-wrong-len-salt" salt-len-lie "$TMP/leak_7b.json"
+    # 7c. env_len LIE: claim one more envelope byte than the file carries ->
+    #     exact-EOF check rejects, no plaintext.
+    enc_tamper_run "enc-env-len-lie" env-len-lie "$TMP/leak_7c.json"
 fi
 unset KFROB_PW 2>/dev/null || true
 
 # ── 8. Valid-shape CONTROL — proves the suite discriminates ──────────────────
 echo
 echo "=== 8. Valid control: well-shaped keyfile LOADS (exit 0, key echoed) ==="
-$PY - "$TMP/c8.json" "$ADDR" "$SECRET_SEED" <<'PY'
-import sys
-p, addr, seed = sys.argv[1], sys.argv[2], sys.argv[3]
-blob = ('{"address":"%s","privkey_hex":"%s"}' % (addr, seed)).encode()
-with open(p, "wb") as f:
-    f.write(blob)
-PY
+# The valid control is the canonical binary DAK1 keyfile (D2), minted by
+# the production writer.
+"$WALLET" account-import --priv "$SECRET_SEED" --out "$TMP/c8.json" --force >/dev/null 2>&1
 set +e
 "$WALLET" account-export --in "$TMP/c8.json" > "$TMP/_ctrl.out" 2>&1
 CTRL_RC=$?

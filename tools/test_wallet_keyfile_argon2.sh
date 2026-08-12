@@ -87,15 +87,19 @@ assert_eq "${E1:0:8}" "44574531" "--iters envelope magic = DWE1"
 D1=$("$WALLET" envelope decrypt --envelope "$E1" --password "$PW" 2>&1 | tr -d '\r')
 assert_eq "$D1" "$PLAIN" "DWE1 envelope round-trips"
 
-# ── 3. BACK-COMPAT: a past-build DWE1 blob still decrypts byte-for-byte ───────
+# ── 3. D2: the legacy dot-separated DWE1 text form is REJECTED at parse ──────
 echo
-echo "=== 3. Legacy DWE1 fixture still decrypts (no orphaned envelopes) ==="
-# Same pinned fixture the format-freeze guard freezes (generated pre-R58).
+echo "=== 3. Legacy dot-hex DWE1 fixture is rejected (deleted format, D2) ==="
+# Same pinned pre-R58 fixture the (rewritten) format-freeze guard keeps as
+# a HOSTILE input: the dot-separated text serialization is deleted
+# pre-genesis, so readers must reject it at parse (exit 1, never exit 2).
 PINNED_PW="determ-format-freeze-2026"
-PINNED_PLAIN="44455445524d20656e76656c6f706520666f726d617420667265657a65207631"
 PINNED_ENV="44574531.416f500429b4b97ea53c39aeb9c3a8d8.10270000.2b6838502f2888e85a77da52..efa9a1b058ba0266c773fe977813733095f9b9ee5cdf355f35a183f28901947123ff04d30a7abc45042f4b8663b808aa"
-DECP=$("$WALLET" envelope decrypt --envelope "$PINNED_ENV" --password "$PINNED_PW" 2>&1 | tr -d '\r')
-assert_eq "$DECP" "$PINNED_PLAIN" "pinned pre-R58 DWE1 envelope decrypts"
+set +e
+"$WALLET" envelope decrypt --envelope "$PINNED_ENV" --password "$PINNED_PW" >/dev/null 2>&1
+RCP=$?
+set -e
+assert_eq "$RCP" "1" "legacy dot-hex DWE1 blob rejected at parse (exit 1)"
 
 # ── 4. Fail-closed on wrong passphrase, both layouts ─────────────────────────
 echo

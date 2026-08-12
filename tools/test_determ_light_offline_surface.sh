@@ -175,16 +175,14 @@ if [ -z "${DETERM_WALLET:-}" ] || [ ! -x "$DETERM_WALLET" ]; then
     echo "        the keyfile loader rejects an address that doesn't match its"
     echo "        Ed25519 pubkey (S-028), so a hand-rolled keyfile can't be used."
 else
-    # Mint two anon keypairs; write a minimal {address,privkey_hex} keyfile.
-    "$DETERM_WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
-    $PY -c "
+    # Mint two anon keypairs; the keyfile is the binary DAK1 container (D2).
+    "$DETERM_WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
+    KPRIV_A=$($PY -c "
 import json
 d = json.load(open('$TMP/keys.json'))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open('$TMP/key_a.json', 'w'))
 open('$TMP/addr_b.txt', 'w').write(d['accounts'][1]['address'])
-"
+print(d['accounts'][0]['privkey_hex'])")
+    "$DETERM_WALLET" account-import --priv "$KPRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
     ADDR_B=$(cat "$TMP/addr_b.txt")
 
     echo "  -- 9a. TRANSFER produces a signed envelope --"

@@ -142,6 +142,14 @@ while IFS=$'\t' read -r CID SECRET T_VAL N_VAL; do
 import sys, json, random
 split_path, outdir, cid, t, seed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
 shares = json.load(open(split_path))["shares"]
+
+def write_dss1(recs, path):
+    # Canonical binary DSS1 share-set container (D2).
+    y_len = len(bytes.fromhex(recs[0]["y_hex"]))
+    out = b"DSS1" + bytes([len(recs)]) + y_len.to_bytes(4, "little")
+    for r in recs:
+        out += bytes([r["x"]]) + bytes.fromhex(r["y_hex"])
+    open(path, "wb").write(out)
 n = len(shares)
 # Deterministic per-case sub-stream so the whole run is reproducible.
 rng = random.Random(seed * 1000003 + int(cid))
@@ -162,13 +170,12 @@ while written < k and attempts < 200:
         continue
     seen.add(idx)
     sub = [shares[i] for i in idx]
-    json.dump({"shares": sub}, open(f"{outdir}/case_{cid}_sub_{written}.json", "w"))
+    write_dss1(sub, f"{outdir}/case_{cid}_sub_{written}.json")
     written += 1
 
 # (T-1) insufficient subset (size t-1 >= 1 since t>=2).
 low_idx = sorted(rng.sample(range(n), t - 1))
-json.dump({"shares": [shares[i] for i in low_idx]},
-          open(f"{outdir}/case_{cid}_tminus1.json", "w"))
+write_dss1([shares[i] for i in low_idx], f"{outdir}/case_{cid}_tminus1.json")
 
 # Tampered exact-T subset: pick a fresh exact-T subset, XOR-flip one byte
 # of one share's y_hex so the mutation is GUARANTEED to be a real change.
@@ -180,7 +187,7 @@ pos = rng.randrange(len(yb))
 yb[pos] ^= (1 << rng.randrange(8))      # flip exactly one bit -> always differs
 tam[victim] = dict(tam[victim])
 tam[victim]["y_hex"] = yb.hex()
-json.dump({"shares": tam}, open(f"{outdir}/case_{cid}_tamper.json", "w"))
+write_dss1(tam, f"{outdir}/case_{cid}_tamper.json")
 
 print(written)
 PY_EOF
@@ -230,20 +237,40 @@ fi
 # ── Determinism-of-randomness property: same secret split twice yields DIFFERENT
 # share bytes (fresh polynomial), yet BOTH reconstruct the original. ─────────────
 DET_SECRET="cafebabedeadbeef0123456789abcdef"
-"$WALLET" shamir-split --secret "$DET_SECRET" --threshold 3 --shares 6 --json > "$T/det_a.json"
-"$WALLET" shamir-split --secret "$DET_SECRET" --threshold 3 --shares 6 --json > "$T/det_b.json"
-A=$(tr -d '\r' < "$T/det_a.json")
-B=$(tr -d '\r' < "$T/det_b.json")
+"$WALLET" shamir-split --secret "$DET_SECRET" --threshold 3 --shares 6 --out "$T/det_a.json" >/dev/null
+"$WALLET" shamir-split --secret "$DET_SECRET" --threshold 3 --shares 6 --out "$T/det_b.json" >/dev/null
+A=$("$PY" -c "print(open('$T/det_a.json','rb').read().hex())")
+B=$("$PY" -c "print(open('$T/det_b.json','rb').read().hex())")
 assert_neq "$A" "$B" "two splits of same secret produce DIFFERENT share sets"
 "$PY" - "$T/det_a.json" "$T/det_sub_a.json" <<'PY_EOF'
-import json,sys
-d=json.load(open(sys.argv[1]))["shares"]
-json.dump({"shares":[d[0],d[2],d[4]]}, open(sys.argv[2],"w"))
+import sys
+def load_dss1(p):
+    d = open(p, "rb").read()
+    assert d[:4] == b"DSS1"
+    y_len = int.from_bytes(d[5:9], "little")
+    recs = []
+    off = 9
+    for _ in range(d[4]):
+        recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
+    return y_len, recs
+y_len, d = load_dss1(sys.argv[1])
+out = b"DSS1" + bytes([3]) + y_len.to_bytes(4, "little") + d[0] + d[2] + d[4]
+open(sys.argv[2], "wb").write(out)
 PY_EOF
 "$PY" - "$T/det_b.json" "$T/det_sub_b.json" <<'PY_EOF'
-import json,sys
-d=json.load(open(sys.argv[1]))["shares"]
-json.dump({"shares":[d[1],d[3],d[5]]}, open(sys.argv[2],"w"))
+import sys
+def load_dss1(p):
+    d = open(p, "rb").read()
+    assert d[:4] == b"DSS1"
+    y_len = int.from_bytes(d[5:9], "little")
+    recs = []
+    off = 9
+    for _ in range(d[4]):
+        recs.append(d[off:off + 1 + y_len]); off += 1 + y_len
+    return y_len, recs
+y_len, d = load_dss1(sys.argv[1])
+out = b"DSS1" + bytes([3]) + y_len.to_bytes(4, "little") + d[1] + d[3] + d[5]
+open(sys.argv[2], "wb").write(out)
 PY_EOF
 REC_DA=$("$WALLET" shamir-combine --shares "$T/det_sub_a.json" 2>/dev/null | tr -d '\r')
 REC_DB=$("$WALLET" shamir-combine --shares "$T/det_sub_b.json" 2>/dev/null | tr -d '\r')

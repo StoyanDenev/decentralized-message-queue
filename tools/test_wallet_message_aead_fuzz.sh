@@ -78,21 +78,18 @@ assert() {
 NUM_CASES=24          # >= 20 random cases
 SEED=20260607         # fixed seed ⇒ reproducible plaintexts + tamper offsets
 
-# ── Helper: mint a fresh single-account keyfile in the {address,privkey_hex}
-#    shape that encrypt/decrypt-message read for --priv-keyfile. Echoes the
-#    bare pubkey (address minus the 0x prefix) on stdout. ─────────────────────
+# ── Helper: mint a fresh single-account keyfile — the binary DAK1 container
+#    (D2) that encrypt/decrypt-message read for --priv-keyfile — via
+#    account-import --out. Echoes the bare pubkey (address minus the 0x
+#    prefix) on stdout. ──────────────────────────────────────────────────────
 mint_keyfile() {
   # $1 = output keyfile path
-  local batch="$1.batch.json"
-  "$WALLET" account-create-batch --count 1 --out "$batch" >/dev/null 2>&1 || return 1
-  "$PY" -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-a = d['accounts'][0]
-json.dump({'address': a['address'], 'privkey_hex': a['privkey_hex']},
-          open(sys.argv[2], 'w'))
-print(a['address'][2:] if a['address'].startswith('0x') else a['address'])
-" "$batch" "$1"
+  local batch="$1.batch.json" priv addr
+  "$WALLET" account-create-batch --count 1 --json > "$batch" 2>/dev/null || return 1
+  priv=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$batch")
+  addr=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$batch")
+  "$WALLET" account-import --priv "$priv" --out "$1" >/dev/null 2>&1 || return 1
+  echo "${addr#0x}"
 }
 
 # ── Setup: a throwaway third keypair used by P3 (key-confusion). One is

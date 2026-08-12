@@ -104,27 +104,72 @@ def fail(msg): results.append(("FAIL", msg))
 def run(args, **kw):
     return subprocess.run([wallet] + args, capture_output=True, text=True, **kw)
 
-# Canonical envelope-blob section indices (dot-separated hex).
+# Canonical BINARY envelope sections (D2 DWE container):
+#   magic(4) | salt_len u8 | salt | params (4 DWE1 / 12 DWE2) | nonce(12)
+#   | aad_len u16 | aad | ct_len u32 | ct||tag
 MAGIC, SALT, ITERS, NONCE, AAD, CTTAG = 0, 1, 2, 3, 4, 5
 
-def xor_flip_section(blob, section_idx, rng):
-    """XOR one random byte of the given hex section; return mutated blob."""
-    parts = blob.split(".")
-    raw = bytearray.fromhex(parts[section_idx])
-    if len(raw) == 0:
-        return None  # nothing to flip (e.g. empty AAD)
-    pos = rng.randrange(len(raw))
-    raw[pos] ^= (1 << rng.randrange(8))
-    parts[section_idx] = raw.hex()
-    return ".".join(parts)
+def env_sections(raw):
+    """Return {section: (start, length)} byte ranges for a DWE container."""
+    assert raw[:4] in (b"DWE1", b"DWE2"), "not a DWE container"
+    salt_len = raw[4]
+    off = 5
+    salt = (off, salt_len); off += salt_len
+    params_len = 12 if raw[:4] == b"DWE2" else 4
+    params = (off, params_len); off += params_len
+    nonce = (off, 12); off += 12
+    aad_len = int.from_bytes(raw[off:off+2], "little"); off += 2
+    aad = (off, aad_len); off += aad_len
+    ct_len = int.from_bytes(raw[off:off+4], "little"); off += 4
+    ct = (off, ct_len)
+    return {MAGIC: (0, 4), SALT: salt, ITERS: params, NONCE: nonce,
+            AAD: aad, CTTAG: ct}
 
-def truncate_tag(blob):
-    """Chop the ct||tag section below the 16-byte GCM tag -> breaks structure."""
-    parts = blob.split(".")
-    raw = bytearray.fromhex(parts[CTTAG])
-    raw = raw[:8]  # shorter than a 16-byte tag => deserialize must fail
-    parts[CTTAG] = raw.hex()
-    return ".".join(parts)
+def xor_flip_section(blob_hex, section_idx, rng):
+    """XOR one random byte of the given section; return mutated hex blob."""
+    raw = bytearray.fromhex(blob_hex)
+    start, length = env_sections(raw)[section_idx]
+    if length == 0:
+        return None  # nothing to flip (e.g. empty AAD)
+    pos = start + rng.randrange(length)
+    raw[pos] ^= (1 << rng.randrange(8))
+    return raw.hex()
+
+def truncate_tag(blob_hex):
+    """Chop the ct||tag below the 16-byte GCM tag -> breaks structure."""
+    raw = bytearray.fromhex(blob_hex)
+    start, length = env_sections(raw)[CTTAG]
+    # Keep ct_len honest about the truncation: shrink both the field and
+    # the body to 8 bytes (< TAG) so the deserializer's floor rejects it.
+    new_ct = raw[start:start + 8]
+    head = raw[:start - 4]
+    out = head + (8).to_bytes(4, "little") + new_ct
+    return out.hex()
+
+def load_dbe1(path):
+    d = open(path, "rb").read()
+    assert d[:4] == b"DBE1", "not DBE1"
+    envs, off = [], 5
+    for _ in range(d[4]):
+        idx = d[off]; off += 1
+        n = int.from_bytes(d[off:off+4], "little"); off += 4
+        envs.append({"share_index": idx, "envelope_blob": d[off:off+n].hex()})
+        off += n
+    return envs
+
+def write_dbe1(envs, path):
+    out = b"DBE1" + bytes([len(envs)])
+    for e in envs:
+        raw = bytes.fromhex(e["envelope_blob"])
+        out += bytes([e["share_index"]]) + len(raw).to_bytes(4, "little") + raw
+    open(path, "wb").write(out)
+
+def write_dss1(recs, path):
+    y_len = len(bytes.fromhex(recs[0]["y_hex"]))
+    out = b"DSS1" + bytes([len(recs)]) + y_len.to_bytes(4, "little")
+    for r in recs:
+        out += bytes([r["x"]]) + bytes.fromhex(r["y_hex"])
+    open(path, "wb").write(out)
 
 def recover_secret(shares_path, env_path, skip_index, threshold, N):
     """Decrypt T envelopes (skipping skip_index if set) + shamir-combine.
@@ -132,7 +177,7 @@ def recover_secret(shares_path, env_path, skip_index, threshold, N):
     Returns (secret_hex, None) on success or (None, reason) on failure.
     Uses the wallet's own decrypt+combine -- NEVER reimplements the cipher."""
     envs = {e["share_index"]: e["envelope_blob"]
-            for e in json.load(open(env_path))["envelopes"]}
+            for e in load_dbe1(env_path)}
     avail = [i for i in sorted(envs) if i != skip_index]
     if len(avail) < threshold:
         return None, "insufficient_after_skip"
@@ -145,7 +190,7 @@ def recover_secret(shares_path, env_path, skip_index, threshold, N):
             return None, f"decrypt_fail idx={idx} rc={r.returncode}"
         rec.append({"x": idx, "y_hex": r.stdout.strip().replace("\r", "")})
     sf = os.path.join(tmp, f"rec_{skip_index}_{threshold}.json")
-    json.dump({"shares": rec}, open(sf, "w"))
+    write_dss1(rec, sf)
     r = run(["shamir-combine", "--shares", sf, "--json"])
     if r.returncode != 0:
         return None, f"combine_fail rc={r.returncode}"
@@ -207,16 +252,16 @@ for case in range(num_cases):
     # Choose a random envelope + a random crypto field, flip one byte.
     sect, sect_name = rng.choice(crypto_fields)
     victim = rng.randint(1, N)
-    d = json.load(open(env_path))
-    pos = next(k for k, e in enumerate(d["envelopes"]) if e["share_index"] == victim)
-    mutated = xor_flip_section(d["envelopes"][pos]["envelope_blob"], sect, rng)
+    envs_list = load_dbe1(env_path)
+    pos = next(k for k, e in enumerate(envs_list) if e["share_index"] == victim)
+    mutated = xor_flip_section(envs_list[pos]["envelope_blob"], sect, rng)
     if mutated is None:
         # Field had no bytes to flip; skip this sub-case cleanly.
         ok(f"case {case}: crypto field '{sect_name}' empty (no-op tamper skipped)")
     else:
-        d["envelopes"][pos]["envelope_blob"] = mutated
+        envs_list[pos]["envelope_blob"] = mutated
         env_tamp = os.path.join(tmp, f"env_{case}_crypto.json")
-        json.dump(d, open(env_tamp, "w"))
+        write_dbe1(envs_list, env_tamp)
 
         vr = run(["backup-verify", "--shares", sh_path,
                   "--envelopes", env_tamp]).returncode
@@ -254,12 +299,12 @@ for case in range(num_cases):
 
     # ---- R3: structural tampers -> backup-verify REJECTS (exit 2) ----------
     # (a) flip the 4-byte magic of a random envelope.
-    d = json.load(open(env_path))
-    vpos = rng.randrange(len(d["envelopes"]))
-    flipped = xor_flip_section(d["envelopes"][vpos]["envelope_blob"], MAGIC, rng)
-    d["envelopes"][vpos]["envelope_blob"] = flipped
+    envs_list = load_dbe1(env_path)
+    vpos = rng.randrange(len(envs_list))
+    flipped = xor_flip_section(envs_list[vpos]["envelope_blob"], MAGIC, rng)
+    envs_list[vpos]["envelope_blob"] = flipped
     env_magic = os.path.join(tmp, f"env_{case}_magic.json")
-    json.dump(d, open(env_magic, "w"))
+    write_dbe1(envs_list, env_magic)
     r = run(["backup-verify", "--shares", sh_path, "--envelopes", env_magic])
     if r.returncode == 2:
         ok(f"case {case}: magic-flip rejected by backup-verify (exit 2)")
@@ -267,12 +312,12 @@ for case in range(num_cases):
         fail(f"case {case}: magic-flip verify rc={r.returncode} (expected 2)")
 
     # (b) truncate the GCM tag of a random envelope.
-    d = json.load(open(env_path))
-    vpos = rng.randrange(len(d["envelopes"]))
-    d["envelopes"][vpos]["envelope_blob"] = truncate_tag(
-        d["envelopes"][vpos]["envelope_blob"])
+    envs_list = load_dbe1(env_path)
+    vpos = rng.randrange(len(envs_list))
+    envs_list[vpos]["envelope_blob"] = truncate_tag(
+        envs_list[vpos]["envelope_blob"])
     env_trunc = os.path.join(tmp, f"env_{case}_trunc.json")
-    json.dump(d, open(env_trunc, "w"))
+    write_dbe1(envs_list, env_trunc)
     r = run(["backup-verify", "--shares", sh_path, "--envelopes", env_trunc])
     if r.returncode == 2:
         ok(f"case {case}: tag-truncation rejected by backup-verify (exit 2)")

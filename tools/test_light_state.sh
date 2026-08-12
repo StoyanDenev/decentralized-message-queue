@@ -29,7 +29,22 @@ ck() { if [ "$1" = "$2" ]; then echo "  PASS: $3 (exit $1)"; pass=$((pass+1));
 
 T="$(mktemp -d 2>/dev/null || echo /tmp/determ_state_$$)"; mkdir -p "$T"
 trap 'rm -rf "$T" 2>/dev/null' EXIT INT
-SP="$T/state.json"
+SP="$T/state.bin"
+
+# Write a canonical binary DLS1 state fixture: write_state <path> <genesis64> <height> <block64> <root64-or-empty>
+write_state() {
+  "${PY:-python3}" -c "
+import sys
+path, gh, h, bh, sr = sys.argv[1:6]
+out = b'DLS1' + (1).to_bytes(4, 'little') + bytes.fromhex(gh)
+out += int(h).to_bytes(8, 'little') + bytes.fromhex(bh)
+if sr:
+    out += b'\x01' + bytes.fromhex(sr)
+else:
+    out += b'\x00'
+open(path, 'wb').write(out)
+" "$1" "$2" "$3" "$4" "$5"
+}
 H64a=$(printf 'a%.0s' $(seq 1 64))
 H64b=$(printf 'b%.0s' $(seq 1 64))
 H64c=$(printf 'c%.0s' $(seq 1 64))
@@ -51,8 +66,7 @@ $DETERM_LIGHT state --show --state "$SP" >/dev/null 2>&1
 ck $? 0 "--show on missing cache is graceful"
 
 # 2. a valid hand-written state shows + validates (exit 0) and echoes a field.
-printf '{"schema_version":1,"genesis_hash":"%s","head_height":42,"head_block_hash":"%s","head_state_root":"%s"}\n' \
-    "$H64a" "$H64b" "$H64c" > "$SP"
+write_state "$SP" "$H64a" 42 "$H64b" "$H64c"
 OUT=$($DETERM_LIGHT state --show --state "$SP" 2>&1); rc=$?
 if [ "$rc" = "0" ] && echo "$OUT" | grep -q "head_height:        42"; then
     echo "  PASS: --show prints a valid anchor (height 42)"; pass=$((pass+1))
@@ -75,8 +89,7 @@ ck $? 1 "--show on corrupt cache fails closed"
 
 # 5a. --show --json on a valid anchor: machine-readable, carries the fields +
 #     an age_seconds. (jq-free assertions: grep the dumped JSON.)
-printf '{"schema_version":1,"genesis_hash":"%s","head_height":42,"head_block_hash":"%s","head_state_root":"%s"}\n' \
-    "$H64a" "$H64b" "$H64c" > "$SP"
+write_state "$SP" "$H64a" 42 "$H64b" "$H64c"
 OUT=$($DETERM_LIGHT state --show --json --state "$SP" 2>&1); rc=$?
 if [ "$rc" = "0" ] && echo "$OUT" | grep -q '"present": true' \
    && echo "$OUT" | grep -q '"head_height": 42' \
@@ -143,14 +156,12 @@ GH=$($DETERM_LIGHT shard-route --genesis "$T/gen.json" --address alice --json 2>
      | "${PY:-python}" -c "import json,sys;print(json.load(sys.stdin).get('genesis_hash',''))" 2>/dev/null)
 if [ -n "$GH" ] && [ ${#GH} -eq 64 ]; then
     # 13. matching anchor → PASS (exit 0)
-    printf '{"schema_version":1,"genesis_hash":"%s","head_height":7,"head_block_hash":"%s","head_state_root":""}\n' \
-        "$GH" "$H64b" > "$SP"
+    write_state "$SP" "$GH" 7 "$H64b" ""
     $DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
     ck $? 0 "--verify-anchor PASS on matching genesis"
 
     # 14. wrong-chain anchor → MISMATCH (exit 2)
-    printf '{"schema_version":1,"genesis_hash":"%s","head_height":7,"head_block_hash":"%s","head_state_root":""}\n' \
-        "$H64a" "$H64b" > "$SP"
+    write_state "$SP" "$H64a" 7 "$H64b" ""
     $DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
     ck $? 2 "--verify-anchor MISMATCH on wrong-chain anchor (exit 2)"
 else

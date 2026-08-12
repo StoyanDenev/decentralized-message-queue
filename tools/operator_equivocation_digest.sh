@@ -186,8 +186,11 @@ EVENTS_JSON=$(printf '%s' "$RANGE_JSON" | jq -c '
         height:                 .block_index,
         shard_id:               (.shard_id // 0),
         beacon_anchor_height:   (.beacon_anchor_height // 0),
-        digest_a:               .digest_a,
-        digest_b:               .digest_b,
+        kind:                   (.kind // 0),
+        index_a:                .index_a,
+        body_root_a:            .body_root_a,
+        index_b:                .index_b,
+        body_root_b:            .body_root_b,
         slashed_amount:         (.slashed_amount // 0)
       }
   ]

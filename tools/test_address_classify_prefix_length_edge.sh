@@ -93,7 +93,7 @@ field() {  # $1 = json, $2 = key in results[0]
 # ── Build a real canonical lowercase anon address from the wallet ──────────
 # (the command's own account generator is the only ground-truth source —
 #  no algorithm re-implementation.)
-"$WALLET" account-create-batch --count 1 --out "$TMP/k.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 1 --json > "$TMP/k.json" 2>/dev/null
 ADDR=$($PY -c "import json; print(json.load(open('$TMP/k.json'))['accounts'][0]['address'])")
 TAIL="${ADDR:2}"                       # 64 lowercase hex chars
 

@@ -5,8 +5,8 @@
 # Determ operators store key material on disk in several distinct
 # formats. The chain daemon emits `node_key.json` (plaintext JSON with
 # `pubkey` + `priv_seed` hex strings) under its --data-dir. The wallet
-# binary emits per-account JSON keyfiles in either single-account shape
-# (`{address, privkey_hex}`) or batch shape (`{accounts: [...]}`),
+# binary emits per-account BINARY keyfiles (D2): single-account DAK1
+# (magic 'DAK1') or batch DAB1 (magic 'DAB1'),
 # alongside encrypted node-key keyfiles (the 2-line "DETERM-NODE-V1
 # <pubkey>\n<DWE1 envelope>\n" format from S-004), Shamir share files
 # (`{shares: [{x, y_hex}, ...]}`), and bare AEAD envelope blobs (the
@@ -39,12 +39,11 @@
 #
 # Detection rules:
 #
-#   PLAINTEXT_KEYFILE      JSON object whose top level matches either:
-#                          - {address: "0x"+64hex, privkey_hex: 64hex}
-#                          - {pubkey: 64hex, priv_seed: 64hex}
-#                            (chain daemon node_key.json shape)
-#                          - {accounts: [{address, privkey_hex}, ...]}
-#                            (wallet batch shape)
+#   PLAINTEXT_KEYFILE      Binary DAK1 (68 bytes, magic 'DAK1') or DAB1
+#                          (magic 'DAB1') container (wallet, D2); or the
+#                          chain daemon's node_key.json JSON shape
+#                          {pubkey: 64hex, priv_seed: 64hex} (src-owned,
+#                          D2-DEFERRED until the src keyfile increment)
 #
 #   ENCRYPTED_KEYFILE      Line 1 starts with "DETERM-NODE-V1 " followed
 #                          by 64 hex chars. Line 2 is a dot-separated
@@ -146,8 +145,8 @@ permission hygiene + leak hazards. Pure local-file linter; no daemon
 RPC, no decryption, no mutation of any audited file.
 
 Per-file classification:
-  PLAINTEXT_KEYFILE      JSON with {address, privkey_hex} or
-                         {pubkey, priv_seed} or {accounts:[...]}
+  PLAINTEXT_KEYFILE      binary DAK1/DAB1 container (D2), or the daemon's
+                         node_key.json {pubkey, priv_seed} JSON
   ENCRYPTED_KEYFILE      2-line: "DETERM-NODE-V1 <pubkey_hex>"
                          + DWE1 envelope blob (S-004)
   RECOVERY_SHARE_FILE    JSON with {shares:[{x, y_hex}, ...]}
@@ -363,20 +362,13 @@ def mode_bits(p):
     return stat.S_IMODE(st.st_mode)
 
 def classify_dwe1_envelope(blob):
-    # Canonical DWE1 envelope serialization: 6 dot-separated hex parts.
-    # Part 0 must decode to the 4-byte LE magic 0x31455744 = "DWE1".
-    parts = blob.split(".")
-    if len(parts) != 6:
+    # D2 canonical envelope serialization: plain lowercase hex of the binary
+    # DWE container. Structural sniff: even-length hex whose first 4 bytes
+    # are the "DWE1"/"DWE2" ASCII magic (44574531 / 44574532). The legacy
+    # dot-separated form is DELETED and no longer classifies.
+    if len(blob) < 8 or len(blob) % 2 != 0 or not is_hex(blob):
         return False
-    for p in parts:
-        if not is_hex(p):
-            return False
-    magic_hex = parts[0]
-    if len(magic_hex) != 8:
-        return False
-    # bytes 0..3 = "DWE1" in ASCII (little-endian uint32 0x31455744).
-    # The hex form is the bytes 0x44 0x57 0x45 0x31 = "44574531".
-    return magic_hex.lower() == "44574531"
+    return blob[:8].lower() in ("44574531", "44574532")
 
 def classify_file(path):
     """Returns dict with at least 'type', 'path'. May add address/pubkey
@@ -409,6 +401,25 @@ def classify_file(path):
             raw = f.read()
     except OSError:
         rec["hazards"].append("read_failed")
+        return rec
+
+    # ── Detection #0: canonical binary keyfiles (D2: DAK1 / DAB1) ──────────
+    if raw[:4] == b"DAK1":
+        if len(raw) == 68:
+            rec["type"]    = "PLAINTEXT_KEYFILE"
+            rec["pubkey"]  = raw[4:36].hex()
+            rec["address"] = "0x" + raw[4:36].hex()
+        else:
+            rec["hazards"].append("dak1_malformed")
+        return rec
+    if raw[:4] == b"DAB1":
+        count = int.from_bytes(raw[4:6], "little") if len(raw) >= 6 else 0
+        if count >= 1 and len(raw) == 6 + 64 * count:
+            rec["type"]    = "PLAINTEXT_KEYFILE"
+            rec["pubkey"]  = raw[6:38].hex()
+            rec["address"] = "0x" + raw[6:38].hex()
+        else:
+            rec["hazards"].append("dab1_malformed")
         return rec
 
     # Try UTF-8 decode. Binary garbage stays UNKNOWN.

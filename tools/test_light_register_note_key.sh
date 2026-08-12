@@ -38,9 +38,9 @@ pass(){ echo "  PASS: $1"; }
 fail(){ echo "  FAIL: $1"; rc=1; }
 
 # Mint an anon keypair + write a canonical light keyfile ({address,privkey_hex}).
-"$DETERM_WALLET" account-create-batch --count 1 --out "$TMP/keys.json" >/dev/null 2>&1
-$PY -c "import json,sys; json.dump(json.load(open(sys.argv[1]))['accounts'][0], open(sys.argv[2],'w'))" \
-    "$TMP/keys.json" "$TMP/key.json"
+"$DETERM_WALLET" account-create-batch --count 1 --json > "$TMP/keys.json" 2>/dev/null
+KPRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
+"$DETERM_WALLET" account-import --priv "$KPRIV" --out "$TMP/key.json" >/dev/null 2>&1
 
 # A well-formed 33-byte SEC1-compressed note_pk (0x02 || 32 bytes). The accept-
 # check does NOT validate on-curve (consensus-inert), so any 33 bytes suffice.
@@ -84,7 +84,7 @@ if "$DETERM_LIGHT" register-note-key --keyfile "$TMP/key.json" --note-pk "$NOTE_
 else pass "register-note-key rejects a 32-byte note-pk (must be 33; exit 1)"; fi
 
 # 7: a non-note-key tx (plain TRANSFER) -> verify-audit-tx INVALID (type gate).
-ADDR=$($PY -c "import json; print(json.load(open('$TMP/key.json'))['address'])")
+ADDR=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 "$DETERM_LIGHT" sign-tx --keyfile "$TMP/key.json" --type TRANSFER --to "$ADDR" \
      --amount 1 --fee 0 --nonce 0 --out "$TMP/xfer.json" >/dev/null 2>&1
 "$DETERM" verify-audit-tx --file "$TMP/xfer.json" >/dev/null 2>&1

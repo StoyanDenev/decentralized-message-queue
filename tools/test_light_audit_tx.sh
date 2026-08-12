@@ -35,9 +35,9 @@ pass(){ echo "  PASS: $1"; }
 fail(){ echo "  FAIL: $1"; rc=1; }
 
 # Mint an anon keypair + write a canonical light keyfile ({address,privkey_hex}).
-"$DETERM_WALLET" account-create-batch --count 1 --out "$TMP/keys.json" >/dev/null 2>&1
-$PY -c "import json,sys; json.dump(json.load(open(sys.argv[1]))['accounts'][0], open(sys.argv[2],'w'))" \
-    "$TMP/keys.json" "$TMP/key.json"
+"$DETERM_WALLET" account-create-batch --count 1 --json > "$TMP/keys.json" 2>/dev/null
+KPRIV=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
+"$DETERM_WALLET" account-import --priv "$KPRIV" --out "$TMP/key.json" >/dev/null 2>&1
 
 # Fixed 32-byte hex operands for the payloads.
 PUBKEY=$(printf 'a1%.0s' $(seq 1 32))
@@ -83,7 +83,7 @@ if "$DETERM_LIGHT" rotate-audit-key --keyfile "$TMP/key.json" --pubkey "$PUBKEY"
 else pass "rotate-audit-key refuses --pubkey + --clear together (exit 1)"; fi
 
 # 7: a non-audit tx (plain TRANSFER) is not an audit tx -> INVALID.
-ADDR=$($PY -c "import json; print(json.load(open('$TMP/key.json'))['address'])")
+ADDR=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['address'])")
 "$DETERM_LIGHT" sign-tx --keyfile "$TMP/key.json" --type TRANSFER --to "$ADDR" \
      --amount 1 --fee 0 --nonce 0 --out "$TMP/xfer.json" >/dev/null 2>&1
 "$DETERM" verify-audit-tx --file "$TMP/xfer.json" >/dev/null 2>&1

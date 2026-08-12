@@ -2,7 +2,7 @@
 # determ-wallet keyfile-info passive diagnostic CLI test.
 #
 # `keyfile-info` is the S-004 passive complement to `inspect-envelope`:
-# it parses a 2-line encrypted node keyfile (DETERM-NODE-V1 header + a
+# it decodes the binary DNK1 encrypted node keyfile (D2; magic + pubkey + a
 # DWE1/DWE2 envelope blob) and dumps the metadata WITHOUT decrypting (no
 # passphrase, no plaintext recovery). R58: fresh keyfiles are Argon2id
 # (DWE2); the DWE1 (PBKDF2) read path stays covered by the envelope
@@ -116,7 +116,7 @@ echo "=== 3. Happy path: human-readable keyfile-info ==="
 OUT=$("$WALLET" keyfile-info --in "$KEYFILE" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "keyfile-info exit 0"
-assert_contains "$OUT" "header_version:    DETERM-NODE-V1" "reports header_version"
+assert_contains "$OUT" "header_version:    DNK1" "reports header_version"
 assert_contains "$OUT" "pubkey_hex:        $EXPECTED_PUB" "reports correct pubkey hex"
 assert_contains "$OUT" "anon_address:      0x$EXPECTED_PUB" "anon-address = 0x + pubkey"
 # R58: keyfile-create now defaults to the memory-hard Argon2id KDF (DWE2).
@@ -134,7 +134,7 @@ JSON=$("$WALLET" keyfile-info --in "$KEYFILE" --json 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "--json exit 0"
 assert_contains "$JSON" "\"valid\":true" "json valid=true"
-assert_contains "$JSON" "\"header_version\":\"DETERM-NODE-V1\"" "json header_version"
+assert_contains "$JSON" "\"header_version\":\"DNK1\"" "json header_version"
 assert_contains "$JSON" "\"pubkey_hex\":\"$EXPECTED_PUB\"" "json pubkey_hex matches"
 assert_contains "$JSON" "\"anon_address\":\"0x$EXPECTED_PUB\"" "json anon_address matches"
 assert_contains "$JSON" "\"aad_present\":true" "json aad_present=true"
@@ -146,7 +146,7 @@ $PY - <<PY_EOF
 import json, sys
 d = json.loads('''$JSON''')
 assert d["valid"] is True
-assert d["header_version"] == "DETERM-NODE-V1"
+assert d["header_version"] == "DNK1"
 assert d["pubkey_hex"] == "$EXPECTED_PUB"
 assert d["anon_address"] == "0x$EXPECTED_PUB"
 env = d["envelope"]
@@ -180,86 +180,76 @@ echo "=== 5. keyfile-info does NOT require a passphrase ==="
 echo "  PASS: --passphrase-from not required (covered by tests 3-4)"
 pass_count=$((pass_count + 1))
 
-# ── 6. Header tamper: wrong magic prefix → exit 2 ─────────────────────────────
+# ── 6. Wrong magic → exit 2 ───────────────────────────────────────────────────
 echo
-echo "=== 6. Header magic tampered → exit 2 ==="
+echo "=== 6. Wrong magic → exit 2 ==="
 TAMPER_MAGIC="$TMP/tamper_magic.enc"
-# Replace "DETERM-NODE-V1" with "DETERM-NODE-V9" (wrong-magic header).
-sed 's/^DETERM-NODE-V1/DETERM-NODE-V9/' "$KEYFILE" > "$TAMPER_MAGIC"
+$PY -c "
+d = bytearray(open('$KEYFILE','rb').read())
+d[0:4] = b'XNK1'
+open('$TAMPER_MAGIC','wb').write(bytes(d))"
 set +e
 "$WALLET" keyfile-info --in "$TAMPER_MAGIC" >/dev/null 2>&1
 RC=$?
 ERR=$("$WALLET" keyfile-info --in "$TAMPER_MAGIC" 2>&1)
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "2" "exit 2 on tampered header magic"
-assert_contains "$ERR" "DETERM-NODE-V1" "diagnostic mentions expected magic"
+assert_eq "$RC" "2" "exit 2 on wrong magic"
+assert_contains "$ERR" "DNK1" "diagnostic mentions expected magic"
 
-# ── 7. Header pubkey truncated → exit 2 ───────────────────────────────────────
+# ── 7. Header truncated (39 bytes) → exit 2 ───────────────────────────────────
 echo
-echo "=== 7. Header pubkey truncated → exit 2 ==="
+echo "=== 7. Header truncated → exit 2 ==="
 TRUNC_HDR="$TMP/trunc_hdr.enc"
-# Drop the last 8 hex chars of the 64-hex header pubkey.
-HEADER_LINE=$(head -n 1 "$KEYFILE" | tr -d '\r')
-BLOB_LINE=$(sed -n '2p' "$KEYFILE" | tr -d '\r')
-SHORT_HEADER=${HEADER_LINE:0:$((${#HEADER_LINE} - 8))}
-printf '%s\n%s\n' "$SHORT_HEADER" "$BLOB_LINE" > "$TRUNC_HDR"
+head -c 39 "$KEYFILE" > "$TRUNC_HDR"
 set +e
 "$WALLET" keyfile-info --in "$TRUNC_HDR" >/dev/null 2>&1
 RC=$?
-ERR=$("$WALLET" keyfile-info --in "$TRUNC_HDR" 2>&1)
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "2" "exit 2 on truncated header pubkey"
-assert_contains "$ERR" "64 hex chars" "diagnostic mentions 64-hex requirement"
+assert_eq "$RC" "2" "exit 2 on truncated DNK1 header"
 
-# ── 8. Header pubkey non-hex → exit 2 ─────────────────────────────────────────
+# ── 8. env_len lie (past EOF) → exit 2 ────────────────────────────────────────
 echo
-echo "=== 8. Header pubkey non-hex → exit 2 ==="
-NONHEX_HDR="$TMP/nonhex_hdr.enc"
-# Replace the first pubkey char with a non-hex letter ('z').
-BAD_PUB="z${EXPECTED_PUB:1}"
-printf 'DETERM-NODE-V1 %s\n%s\n' "$BAD_PUB" "$BLOB_LINE" > "$NONHEX_HDR"
+echo "=== 8. env_len lie (past EOF) → exit 2 ==="
+NONHEX_HDR="$TMP/envlen_lie.enc"
+$PY -c "
+d = bytearray(open('$KEYFILE','rb').read())
+n = int.from_bytes(d[36:40], 'little') + 1
+d[36:40] = n.to_bytes(4, 'little')
+open('$NONHEX_HDR','wb').write(bytes(d))"
 set +e
 "$WALLET" keyfile-info --in "$NONHEX_HDR" >/dev/null 2>&1
 RC=$?
-ERR=$("$WALLET" keyfile-info --in "$NONHEX_HDR" 2>&1)
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "2" "exit 2 on non-hex header pubkey"
-assert_contains "$ERR" "not valid hex" "diagnostic mentions invalid hex"
+assert_eq "$RC" "2" "exit 2 on env_len past EOF"
 
-# ── 9. Envelope-blob tampered (still parses header but envelope fails) → 2 ────
+# ── 9. Embedded envelope garbage (header intact) → exit 2 ─────────────────────
 echo
-echo "=== 9. Envelope-blob tampered (header intact) → exit 2 ==="
+echo "=== 9. Embedded envelope garbage (header intact) → exit 2 ==="
 BLOB_TAMPER="$TMP/blob_tamper.enc"
-# Replace the envelope blob with junk that still has multiple dots but
-# fails the DWE1 magic check inside envelope::deserialize. Header stays
-# canonical so we exercise the post-header envelope-failure path.
-printf '%s\ndeadbeef.00112233.10270000.000102030405060708090a0b.cafebabe.00112233\n' \
-    "$HEADER_LINE" > "$BLOB_TAMPER"
+$PY -c "
+d = bytearray(open('$KEYFILE','rb').read())
+for i in range(40, len(d)):
+    d[i] = 0x5a
+open('$BLOB_TAMPER','wb').write(bytes(d))"
 set +e
 "$WALLET" keyfile-info --in "$BLOB_TAMPER" >/dev/null 2>&1
 RC=$?
-ERR=$("$WALLET" keyfile-info --in "$BLOB_TAMPER" 2>&1)
 set -e
-ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "2" "exit 2 on tampered envelope blob"
-assert_contains "$ERR" "malformed" "diagnostic mentions malformed"
+assert_eq "$RC" "2" "exit 2 on garbage embedded envelope"
 
-# ── 10. Single-line file (missing envelope blob) → exit 2 ─────────────────────
+# ── 10. Legacy 2-line text keyfile → exit 2 (deleted format) ──────────────────
 echo
-echo "=== 10. Missing envelope-blob line → exit 2 ==="
+echo "=== 10. Legacy 2-line text keyfile → exit 2 ==="
 ONE_LINE="$TMP/one_line.enc"
-printf '%s\n' "$HEADER_LINE" > "$ONE_LINE"
+printf 'DETERM-NODE-V1 %s\ndeadbeef\n' "$EXPECTED_PUB" > "$ONE_LINE"
 set +e
 "$WALLET" keyfile-info --in "$ONE_LINE" >/dev/null 2>&1
 RC=$?
 ERR=$("$WALLET" keyfile-info --in "$ONE_LINE" 2>&1)
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
-assert_eq "$RC" "2" "exit 2 on missing envelope-blob line"
-assert_contains "$ERR" "missing the envelope-blob" "diagnostic mentions missing envelope-blob"
+assert_eq "$RC" "2" "exit 2 on the legacy text form (deleted, D2)"
 
 # ── 11. Empty file → exit 2 (structurally malformed) ──────────────────────────
 echo
@@ -273,7 +263,7 @@ ERR=$("$WALLET" keyfile-info --in "$EMPTY_FILE" 2>&1)
 set -e
 ERR=$(echo "$ERR" | tr -d '\r')
 assert_eq "$RC" "2" "exit 2 on empty file"
-assert_contains "$ERR" "empty" "diagnostic mentions empty"
+assert_contains "$ERR" "DNK1" "diagnostic names the expected DNK1 container"
 
 # ── 12. Missing file → exit 1 (file-system error) ─────────────────────────────
 echo

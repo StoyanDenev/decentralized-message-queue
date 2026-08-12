@@ -71,19 +71,15 @@ assert_contains() {
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
-# Generate two fresh keypairs.
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+# Generate two fresh keypairs (--json stdout VIEW).
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 PRIV_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/keys.json")
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])"     "$TMP/keys.json")
 PUB_A="${ADDR_A#0x}"
 ADDR_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['address'])"     "$TMP/keys.json")
 
-# Plaintext keyfile (canonical wallet shape).
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json"
+# Plaintext keyfile — the canonical binary DAK1 container (D2).
+"$WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" >/dev/null
 
 # Encrypted keyfile (DETERM-NODE-V1) for the passphrase-env assertion. Use
 # the wallet's own keyfile-create primitive — that's the canonical

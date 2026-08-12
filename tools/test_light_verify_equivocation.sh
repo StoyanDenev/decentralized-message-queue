@@ -5,13 +5,17 @@
 # Drives `determ-light verify-equivocation` against a hand-built
 # EquivocationEvent (the FA6 double-sign proof carried by the
 # EQUIVOCATION_EVIDENCE gossip message + the submit_equivocation RPC) and
-# checks that the binary re-runs the daemon's V11 slash gate independently:
-# digest_a != digest_b, sig_a != sig_b, and BOTH Ed25519 signatures verify
-# against the equivocator's registered key.
+# checks that the binary re-runs the daemon's V11 slash gate independently
+# (EQV-height-bind form): kind <= 1, index_a == index_b == block_index,
+# body_root_a != body_root_b, sig_a != sig_b, and BOTH Ed25519 signatures
+# verify against digests DERIVED from the (index, body_root) openings as
+# SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root) (kind 0), against the
+# equivocator's registered key.
 #
 # The signed fixture below is a FIXED, DETERMINISTIC Ed25519 vector (seed =
-# 0x00..0x1f, two sigs over two distinct SHA-256 digests) generated once and
-# baked in — so the test needs no Python crypto backend at runtime and is
+# 0x00..0x1f, two sigs over two composed digests at height 7 — plus one REAL
+# signature composed at height 8 for the height-mismatch leg) generated once
+# and baked in — so the test needs no Python crypto backend at runtime and is
 # reproducible on any host. A real determ-light binary verifies these sigs
 # with the SAME OpenSSL Ed25519 backend the daemon uses (src/crypto/keys.cpp),
 # so a passing PROVEN run is a genuine cross-tool soundness check.
@@ -26,7 +30,10 @@
 #   2. --json carries verdict=EQUIVOCATION-PROVEN + proven=true + both sigs.
 #   3. Key resolved from a --committee {domain,ed_pub}[] file → PROVEN exit 0.
 #   4. WRONG --pubkey (a different key) → NOT-EQUIVOCATION, exit 3.
-#   5. digest_a == digest_b (replay, not equivocation) → NOT-EQUIVOCATION 3.
+#  4b. (EQV-height-bind) index_b=8 with a REAL sig composed at height 8 →
+#      NOT-EQUIVOCATION exit 3 "heights do not match" — the cross-height
+#      forged-slash replay is refused by the offline verifier too.
+#   5. body_root_a == body_root_b (replay, not equivocation) → NOT-EQ 3.
 #   6. sig_a == sig_b (single signature) → NOT-EQUIVOCATION exit 3.
 #   7. Tampered sig_b (one flipped nibble) → NOT-EQUIVOCATION exit 3.
 #  7b. (register T-OE4) sig_a INVALID + sig_b VALID → NOT-EQUIVOCATION exit 3
@@ -68,20 +75,29 @@ assert() {
 PUBKEY="03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 # An UNRELATED key (seed = byte-wise XOR 0xff) for the wrong-key negative.
 PUBKEY2="bafc71bead3ac5e4b63e9c8216ee71a34aaec65722eedbca728b4e9b3ccce396"
-DIGEST_A="d6491aa2e0ed015bf05e5b7c1ba556257e7404618082b8f38cd10f77e3dcde8a"
-SIG_A="330ec28388f5deadeb0bb63916882ceaad07567f5b2431b920f9340d1171446a1880a41c1030dde4e2c92fb1e8574d4b3afacaa9b9ef31debeb39f765c1f060a"
-DIGEST_B="edc5be4175b1412ed36d90e28cbed6f8234483eb590e3898b1049f0f425b01ec"
-SIG_B="a7bfe5d1acda0c295323e423b4a8f8b432258767ff58c5d56f1a3d80f7f3449f1c8de90b69d85547f12b000bbde72092d68d742e6632f61898c9523260412d05"
+# body roots = SHA256("light-verify-equivocation-A"/"-B"); each sig is over
+# the DERIVED digest SHA256("DTM-BLKDIG-v2" || height u64 BE || body_root).
+ROOT_A="03d70ec7e6f3721b9c82c77ea10b47186daa14273b823d417323b9a1e73c5d4e"
+SIG_A="06ba2eeab0eee85183f54127a4d83901f7f3f8ea5be08ffd12aef5b27a486d21db74f72949eeb7dc161687e079b2ff1c89f3d9b9b974f4224d363f65a0d7c102"
+ROOT_B="d3672c9732c2ab1d3e273f5cd639b4177a73b8ad2bb36d0b5f8d8b89b2a681d0"
+SIG_B="828bc27427e5c842e86d633cb7c69439bd15ffacf5517cb583d7b26cffc6c7da1bb673a8cefd2c675abd9254118c9777deaf82afb5362d6621efca68e2213208"
+# A REAL signature by the same key over compose(8, ROOT_B) — a genuinely
+# signed opening at the WRONG height, for the height-mismatch leg.
+SIG_B_H8="4f84d509419d0e7f7b22cd12659cb09db2931cc896eb43bd5721e1879605726038bf3f65624c933f401d87b486fbfacc2da8499ab01c66fc029300cc50046001"
 
-# write_event <out> <digest_a> <sig_a> <digest_b> <sig_b>
+# write_event <out> <root_a> <sig_a> <root_b> <sig_b> [index_b (default 7)]
 write_event() {
+  local ib="${6:-7}"
   cat > "$1" <<EOF
 {
   "equivocator": "validator-7.example",
   "block_index": 7,
-  "digest_a": "$2",
+  "kind": 0,
+  "index_a": 7,
+  "body_root_a": "$2",
   "sig_a": "$3",
-  "digest_b": "$4",
+  "index_b": $ib,
+  "body_root_b": "$4",
   "sig_b": "$5",
   "shard_id": 0,
   "beacon_anchor_height": 0
@@ -97,7 +113,7 @@ run_verify() {  # run_verify <args...>; sets RC + OUT globals
 }
 
 # Canonical genuine double-sign event used by several assertions.
-write_event "$TMP/equiv.json" "$DIGEST_A" "$SIG_A" "$DIGEST_B" "$SIG_B"
+write_event "$TMP/equiv.json" "$ROOT_A" "$SIG_A" "$ROOT_B" "$SIG_B"
 
 echo "=== 1. Genuine double-sign + --pubkey → EQUIVOCATION-PROVEN exit 0 ==="
 run_verify --in "$TMP/equiv.json" --pubkey "$PUBKEY"
@@ -149,20 +165,34 @@ else
 fi
 
 echo
-echo "=== 5. digest_a == digest_b (replay) → NOT-EQUIVOCATION exit 3 ==="
-# Re-sign would be needed for a real same-digest pair; using the same digest
-# with its own sig is enough — V11 rejects on the digest equality first.
-write_event "$TMP/samedig.json" "$DIGEST_A" "$SIG_A" "$DIGEST_A" "$SIG_A"
-run_verify --in "$TMP/samedig.json" --pubkey "$PUBKEY"
-if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "digest_a == digest_b"; then
-  assert "true" "equal digests → NOT-EQUIVOCATION exit 3"
+echo "=== 4b. Cross-height openings (EQV-height-bind) → NOT-EQUIVOCATION exit 3 ==="
+# index_b = 8 with a REAL signature composed at height 8: every other V11
+# clause holds (kind valid, roots distinct, sigs distinct, both sigs verify
+# against their own derived digests) — ONLY the height bind refuses it. This
+# is the exact cross-height forged-slash replay the daemon gate rejects.
+write_event "$TMP/xheight.json" "$ROOT_A" "$SIG_A" "$ROOT_B" "$SIG_B_H8" 8
+run_verify --in "$TMP/xheight.json" --pubkey "$PUBKEY"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "heights do not match"; then
+  assert "true" "cross-height openings → NOT-EQUIVOCATION exit 3 (height bind)"
 else
-  echo "$OUT"; assert "false" "equal digests → exit 3 (rc=$RC)"
+  echo "$OUT"; assert "false" "cross-height openings → exit 3 (rc=$RC)"
+fi
+
+echo
+echo "=== 5. body_root_a == body_root_b (replay) → NOT-EQUIVOCATION exit 3 ==="
+# Re-sign would be needed for a real same-root pair; using the same root
+# with its own sig is enough — V11 rejects on the root equality first.
+write_event "$TMP/samedig.json" "$ROOT_A" "$SIG_A" "$ROOT_A" "$SIG_A"
+run_verify --in "$TMP/samedig.json" --pubkey "$PUBKEY"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "body_root_a == body_root_b"; then
+  assert "true" "equal body roots → NOT-EQUIVOCATION exit 3"
+else
+  echo "$OUT"; assert "false" "equal body roots → exit 3 (rc=$RC)"
 fi
 
 echo
 echo "=== 6. sig_a == sig_b (single signature) → NOT-EQUIVOCATION exit 3 ==="
-write_event "$TMP/samesig.json" "$DIGEST_A" "$SIG_A" "$DIGEST_B" "$SIG_A"
+write_event "$TMP/samesig.json" "$ROOT_A" "$SIG_A" "$ROOT_B" "$SIG_A"
 run_verify --in "$TMP/samesig.json" --pubkey "$PUBKEY"
 if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "sig_a == sig_b"; then
   assert "true" "equal sigs → NOT-EQUIVOCATION exit 3"
@@ -172,10 +202,10 @@ fi
 
 echo
 echo "=== 7. Tampered sig_b (flipped nibble) → NOT-EQUIVOCATION exit 3 ==="
-# Flip the last hex nibble of sig_b: 0x...05 → 0x...04. Distinct from sig_a,
+# Flip the last hex nibble of sig_b: 0x...08 → 0x...04. Distinct from sig_a,
 # so V11's sig-distinctness passes but the Ed25519 verify fails.
 SIG_B_BAD="${SIG_B%?}4"
-write_event "$TMP/tampered.json" "$DIGEST_A" "$SIG_A" "$DIGEST_B" "$SIG_B_BAD"
+write_event "$TMP/tampered.json" "$ROOT_A" "$SIG_A" "$ROOT_B" "$SIG_B_BAD"
 run_verify --in "$TMP/tampered.json" --pubkey "$PUBKEY"
 if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "sig_b does not verify"; then
   assert "true" "tampered sig_b → NOT-EQUIVOCATION exit 3"
@@ -199,11 +229,11 @@ if [ "$RC" = "0" ] && echo "$OUT" | head -1 | grep -q "EQUIVOCATION-PROVEN"; the
 else
   echo "$OUT"; assert "false" "control: genuine double-sign → PROVEN exit 0 (rc=$RC)"
 fi
-# Negative leg: flip sig_a's last nibble (a→b), keep sig_b valid. Still 128-hex
+# Negative leg: flip sig_a's last nibble (2→b), keep sig_b valid. Still 128-hex
 # and distinct from sig_b, so digests_distinct + sigs_distinct pass and clause 3
 # is the first true clause.
 SIG_A_BAD="${SIG_A%?}b"
-write_event "$TMP/tampered_a.json" "$DIGEST_A" "$SIG_A_BAD" "$DIGEST_B" "$SIG_B"
+write_event "$TMP/tampered_a.json" "$ROOT_A" "$SIG_A_BAD" "$ROOT_B" "$SIG_B"
 run_verify --in "$TMP/tampered_a.json" --pubkey "$PUBKEY"
 if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "sig_a does not verify"; then
   assert "true" "tampered sig_a (sig_b valid) → NOT-EQUIVOCATION exit 3"
@@ -226,11 +256,11 @@ else
 fi
 
 echo
-echo "=== 9. Malformed event (short digest hex) → usage error exit 1 ==="
-write_event "$TMP/malformed.json" "deadbeef" "$SIG_A" "$DIGEST_B" "$SIG_B"
+echo "=== 9. Malformed event (short body-root hex) → usage error exit 1 ==="
+write_event "$TMP/malformed.json" "deadbeef" "$SIG_A" "$ROOT_B" "$SIG_B"
 run_verify --in "$TMP/malformed.json" --pubkey "$PUBKEY"
-[ "$RC" = "1" ] && assert "true" "malformed digest hex → exit 1" \
-                || { echo "$OUT"; assert "false" "malformed digest → exit 1 (rc=$RC)"; }
+[ "$RC" = "1" ] && assert "true" "malformed body-root hex → exit 1" \
+                || { echo "$OUT"; assert "false" "malformed body-root → exit 1 (rc=$RC)"; }
 
 echo
 echo "=== 10. Missing --in → usage error exit 1 ==="

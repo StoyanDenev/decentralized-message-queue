@@ -68,17 +68,14 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 # Generate two fresh keypairs (account A signs; B is a recipient).
-"$WALLET" account-create-batch --count 2 --out "$TMP/keys.json" >/dev/null 2>&1
+"$WALLET" account-create-batch --count 2 --json > "$TMP/keys.json" 2>/dev/null
 ADDR_A=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/keys.json")
 ADDR_B=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][1]['address'])" "$TMP/keys.json")
 
 # Plaintext keyfile (canonical wallet shape) for the compose-with-tx-batch-
 # sign assertion.
-$PY -c "
-import json,sys
-d = json.load(open(sys.argv[1]))
-json.dump(d['accounts'][0], open(sys.argv[2],'w'))
-" "$TMP/keys.json" "$TMP/key_a.json"
+KPRIV_A=$($PY -c "import json; print(json.load(open('$TMP/keys.json'))['accounts'][0]['privkey_hex'])")
+"$WALLET" account-import --priv "$KPRIV_A" --out "$TMP/key_a.json" >/dev/null 2>&1
 
 echo "=== Surface 1. Global help mentions batch-nonce-assign ==="
 H=$("$WALLET" help 2>&1 | tr -d '\r')

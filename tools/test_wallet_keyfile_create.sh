@@ -4,8 +4,8 @@
 # `keyfile-create` is the S-004 operator workflow: produce a passphrase-
 # encrypted node_key.json file from a raw Ed25519 private key. The
 # output is a 2-line file:
-#   line 1: "DETERM-NODE-V1 <pubkey_hex>"
-#   line 2: "<DWE1 envelope blob>"
+#   the binary DNK1 container (D2): "DNK1" || pubkey 32B || env_len u32 LE
+#   || DWE2 envelope bytes (plaintext = the raw 32-byte seed)
 # whose decrypted plaintext is the canonical daemon-side node_key.json
 # shape: {"pubkey": "...", "priv_seed": "..."} (matches
 # src/crypto/keys.cpp::load_node_key).
@@ -14,7 +14,7 @@
 #   - Build a fresh keypair via `account-create-batch --count 1 --json`,
 #     extract the privkey hex.
 #   - Generate the encrypted file with --passphrase-from file:...
-#   - Verify file shape (DETERM-NODE-V1 header + valid envelope blob).
+#   - Verify file shape (DNK1 magic + header pubkey + valid envelope).
 #   - Round-trip via `envelope decrypt` to recover {pubkey, priv_seed}
 #     and assert it matches the original key.
 #   - Verify wrong passphrase fails decrypt (AEAD tag failure).
@@ -105,7 +105,7 @@ SUMMARY=$("$WALLET" keyfile-create \
     --out "$OUT_FILE" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "keyfile-create exit 0"
-assert_contains "$SUMMARY" "DETERM-NODE-V1" "summary mentions DETERM-NODE-V1"
+assert_contains "$SUMMARY" "DNK1" "summary mentions DNK1"
 assert_contains "$SUMMARY" "$EXPECTED_PUB" "summary echoes pubkey hex"
 if [ -s "$OUT_FILE" ]; then
     echo "  PASS: output file non-empty"; pass_count=$((pass_count + 1))
@@ -113,37 +113,31 @@ else
     echo "  FAIL: output file missing or empty"; fail_count=$((fail_count + 1))
 fi
 
-# ── 4. Output file shape: line 1 = magic + pubkey; line 2 = envelope blob ─────
+# ── 4. Output file shape: binary DNK1 container (D2) ──────────────────────────
 echo
-echo "=== 4. File shape: DETERM-NODE-V1 header + envelope blob ==="
-HEADER=$(head -n 1 "$OUT_FILE" | tr -d '\r')
-BLOB=$(sed -n '2p' "$OUT_FILE" | tr -d '\r')
-assert_contains "$HEADER" "DETERM-NODE-V1 " "header starts with DETERM-NODE-V1"
-assert_contains "$HEADER" "$EXPECTED_PUB" "header carries pubkey hex"
-# Canonical envelope blob is dot-separated lowercase hex with >= 6 parts.
-N_PARTS=$(echo "$BLOB" | awk -F. '{print NF}')
-if [ "$N_PARTS" -ge 6 ]; then
-    echo "  PASS: envelope blob has $N_PARTS dot-separated parts (>=6)"; pass_count=$((pass_count + 1))
-else
-    echo "  FAIL: envelope blob has only $N_PARTS parts"; fail_count=$((fail_count + 1))
-fi
+echo "=== 4. File shape: DNK1 magic + header pubkey + embedded envelope ==="
+SHAPE=$($PY -c "
+d = open('$OUT_FILE','rb').read()
+ok = (d[:4] == b'DNK1'
+      and d[4:36].hex() == '$EXPECTED_PUB'
+      and int.from_bytes(d[36:40], 'little') == len(d) - 40)
+print('OK' if ok else 'BAD')")
+assert_eq "$SHAPE" "OK" "DNK1 magic, header pubkey, env_len reach EOF exactly"
+# The embedded envelope bytes, as plain hex (the CLI view `envelope decrypt` reads).
+BLOB=$($PY -c "print(open('$OUT_FILE','rb').read()[40:].hex())")
 
-# ── 5. Round-trip via `envelope decrypt`: recover {pubkey, priv_seed} ─────────
+# ── 5. Round-trip via `envelope decrypt`: recover the raw 32-byte seed ────────
 echo
-echo "=== 5. Round-trip: envelope decrypt recovers canonical keyfile JSON ==="
-# AAD = ASCII bytes of pubkey hex (64 chars). hex-encode as 128 chars.
-AAD_HEX=$($PY -c "import sys; print(sys.argv[1].encode().hex())" "$EXPECTED_PUB")
+echo "=== 5. Round-trip: envelope decrypt recovers the raw seed (D2) ==="
+# AAD = the RAW 32-byte pubkey; its hex encoding IS the pubkey hex.
+AAD_HEX="$EXPECTED_PUB"
 DEC_HEX=$("$WALLET" envelope decrypt \
     --envelope "$BLOB" \
     --password "$PASSPHRASE" \
     --aad "$AAD_HEX" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "envelope decrypt succeeds with correct passphrase + AAD"
-DEC_JSON=$($PY -c "import sys; print(bytes.fromhex(sys.argv[1]).decode())" "$DEC_HEX")
-RECOVERED_PUB=$($PY -c "import json,sys; print(json.loads(sys.stdin.read())['pubkey'])" <<< "$DEC_JSON")
-RECOVERED_SEED=$($PY -c "import json,sys; print(json.loads(sys.stdin.read())['priv_seed'])" <<< "$DEC_JSON")
-assert_eq "$RECOVERED_PUB"  "$EXPECTED_PUB" "decrypted pubkey matches"
-assert_eq "$RECOVERED_SEED" "$PRIV_HEX"     "decrypted priv_seed matches"
+assert_eq "$DEC_HEX" "$PRIV_HEX" "decrypted plaintext is the raw 32-byte seed"
 
 # ── 6. Wrong passphrase fails decrypt ─────────────────────────────────────────
 echo
@@ -160,7 +154,7 @@ assert_eq "$RC" "2" "envelope decrypt exit 2 with wrong passphrase"
 # ── 7. AAD tamper fails decrypt (wrong pubkey in AAD) ─────────────────────────
 echo
 echo "=== 7. AAD tamper (different pubkey) fails decrypt ==="
-TAMPER_AAD=$($PY -c "print('a'*128)")
+TAMPER_AAD=$($PY -c "print('a'*64)")
 set +e
 "$WALLET" envelope decrypt \
     --envelope "$BLOB" \
@@ -276,8 +270,8 @@ FULL_PRIV="${PRIV_HEX}${EXPECTED_PUB}"
     --out "$TMP/full.enc" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 with 64-byte form (seed||pubkey)"
-HEADER2=$(head -n 1 "$TMP/full.enc" | tr -d '\r')
-assert_contains "$HEADER2" "$EXPECTED_PUB" "64-byte form derives same pubkey"
+HEADER2=$($PY -c "print(open('$TMP/full.enc','rb').read()[4:36].hex())")
+assert_eq "$HEADER2" "$EXPECTED_PUB" "64-byte form derives same pubkey"
 
 # ── 16. 64-byte form rejected when pubkey tail does not match seed-derived ────
 echo
@@ -383,10 +377,10 @@ KEYFILE_TEST_PW="env-passphrase-correct" "$WALLET" keyfile-create \
     --out "$ENV_OUT" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "0" "exit 0 with env: source"
-HEADER3=$(head -n 1 "$ENV_OUT" | tr -d '\r')
-assert_contains "$HEADER3" "DETERM-NODE-V1" "env: source produces valid header"
+MAGIC3=$($PY -c "print(open('$ENV_OUT','rb').read(4).decode('ascii','replace'))")
+assert_eq "$MAGIC3" "DNK1" "env: source produces a DNK1 container"
 # Round-trip the env-sourced file with the env passphrase to confirm.
-ENV_BLOB=$(sed -n '2p' "$ENV_OUT" | tr -d '\r')
+ENV_BLOB=$($PY -c "print(open('$ENV_OUT','rb').read()[40:].hex())")
 DEC_ENV=$("$WALLET" envelope decrypt \
     --envelope "$ENV_BLOB" \
     --password "env-passphrase-correct" \
@@ -427,8 +421,8 @@ d = json.loads('''$JSON_SUMMARY''')
 required = {"pubkey","out","format","envelope"}
 missing = required - set(d.keys())
 assert not missing, f"missing fields: {missing}"
-assert d["format"] == "DETERM-NODE-V1", f"bad format: {d['format']!r}"
-assert d["envelope"] == "DWE1", f"bad envelope: {d['envelope']!r}"
+assert d["format"] == "DNK1", f"bad format: {d['format']!r}"
+assert d["envelope"] == "DWE2", f"bad envelope: {d['envelope']!r}"
 assert d["pubkey"] == "$EXPECTED_PUB", "pubkey mismatch"
 PY_EOF
 if [ $? = 0 ]; then
@@ -454,23 +448,16 @@ assert_contains "$ERR" "unknown" "diagnostic mentions unknown"
 
 # ── 27. Plaintext inside envelope matches load_node_key schema (S-018 check) ──
 echo
-echo "=== 27. Decrypted plaintext is canonical node_key.json shape ==="
+echo "=== 27. Decrypted plaintext is the raw 32-byte seed (D2) ==="
 $PY - <<PY_EOF
-import json
-plaintext = bytes.fromhex("$DEC_HEX").decode()
-d = json.loads(plaintext)
-required = {"pubkey","priv_seed"}
-missing = required - set(d.keys())
-assert not missing, f"missing fields: {missing}"
-assert isinstance(d["pubkey"], str) and len(d["pubkey"]) == 64
-assert isinstance(d["priv_seed"], str) and len(d["priv_seed"]) == 64
-assert all(c in "0123456789abcdef" for c in d["pubkey"])
-assert all(c in "0123456789abcdef" for c in d["priv_seed"])
+seed = bytes.fromhex("$DEC_HEX")
+assert len(seed) == 32, f"plaintext is {len(seed)} bytes, want the raw 32-byte seed"
+assert seed.hex() == "$PRIV_HEX", "plaintext seed differs from the input seed"
 PY_EOF
 if [ $? = 0 ]; then
-    echo "  PASS: plaintext matches src/crypto/keys.cpp::load_node_key schema"; pass_count=$((pass_count + 1))
+    echo "  PASS: plaintext is the raw 32-byte seed (no inner JSON, D2)"; pass_count=$((pass_count + 1))
 else
-    echo "  FAIL: plaintext schema drift"; fail_count=$((fail_count + 1))
+    echo "  FAIL: plaintext shape drift"; fail_count=$((fail_count + 1))
 fi
 
 # ── 28. Output file is NOT created when validation fails (no leak) ────────────

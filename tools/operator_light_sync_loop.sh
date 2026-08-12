@@ -74,7 +74,7 @@ Required:
 Options:
   --state <path>     Persisted-anchor cache path (passed verbatim to
                      verify-chain --state). Default: the determ-light default
-                     ($DETERM_LIGHT_STATE if set, else ~/.determ-light/state.json).
+                     ($DETERM_LIGHT_STATE if set, else ~/.determ-light/state.bin).
   --cycles <K>       Number of verify cycles to run (positive integer).
                      Default: 3.
   --interval <secs>  Seconds to sleep BETWEEN cycles (non-negative integer).

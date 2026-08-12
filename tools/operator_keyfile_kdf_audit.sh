@@ -10,9 +10,9 @@
 # operator can rotate it before the weak-KDF material lingers on disk.
 #
 # It handles BOTH on-disk shapes the wallet produces:
-#   - NODE keyfile   ("DETERM-NODE-V1 <pubkey>\n<envelope_blob>") — read via
+#   - NODE keyfile   (binary DNK1 container) — read via
 #     `determ-wallet keyfile-info --in <f> --json` (.envelope.{format,kdf}).
-#   - RAW envelope   (dot-separated hex, no header) — read via
+#   - RAW envelope   (hex of the binary DWE container, no header) — read via
 #     `determ-wallet inspect-envelope --in <f> --json` (.{format,kdf}).
 # For each file it tries keyfile-info first; if that fails structurally it
 # tries inspect-envelope; if both fail the file is counted "unparseable"

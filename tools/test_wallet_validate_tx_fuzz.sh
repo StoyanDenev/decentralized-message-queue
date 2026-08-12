@@ -68,7 +68,7 @@ validate() {
 # Python planner (fixed seed) assigns pairs + draws amount/fee/nonce/to-variant
 # spanning the documented edge shapes. The seed makes the whole run reproducible.
 NKEYS=$((ITERS * 2))
-"$W" account-create-batch --count "$NKEYS" --out "$T/keys.json" >/dev/null 2>&1
+"$W" account-create-batch --count "$NKEYS" --json > "$T/keys.json" 2>/dev/null
 if [ ! -s "$T/keys.json" ]; then
   echo "  FAIL: account-create-batch did not produce $NKEYS keys"
   echo "  FAIL: test_wallet_validate_tx_fuzz"; exit 1
@@ -109,11 +109,17 @@ for it in range(iters):
         "dest_addr":   b["address"],
         "to": to_addr, "amount": amount, "fee": fee, "nonce": nonce,
     })
-    json.dump({"address": a["address"], "privkey_hex": a["privkey_hex"]},
-              open(f"{T}/k{it}.json", "w"))
+    with open(f"{T}/privs.txt", "a") as pf:
+        pf.write("%d %s\n" % (it, a["privkey_hex"]))
 json.dump(plan, open(f"{T}/plan.json", "w"))
 print("planned", iters, "random TRANSFERs (edge shapes on it 0..4)")
 PY
+
+# Mint the per-iter binary DAK1 keyfiles (D2) via account-import --out.
+while read -r ki kpriv; do
+  "$W" account-import --priv "$kpriv" --out "$T/k$ki.json" >/dev/null 2>&1 < /dev/null
+done < "$T/privs.txt"
+rm -f "$T/privs.txt"
 
 # ── Sign every planned TRANSFER with the binary under test ───────────────────
 echo "=== signing $ITERS random TRANSFERs via sign-anon-tx ==="

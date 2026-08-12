@@ -93,8 +93,8 @@ assert_not_contains() {
 
 # ── Build a structurally valid 2-of-4 share-set ───────────────────────────
 SECRET="deadbeefcafe0011"
-"$WALLET" shamir-split --secret "$SECRET" --threshold 2 --shares 4 --json \
-    > "$TMP/valid.json"
+"$WALLET" shamir-split --secret "$SECRET" --threshold 2 --shares 4 \
+    --out "$TMP/valid.json" >/dev/null
 if [ ! -s "$TMP/valid.json" ]; then
     echo "  FAIL: shamir-split produced empty output (cannot set up test)"
     exit 1

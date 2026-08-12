@@ -23,7 +23,7 @@
 # throws with a clear field-name diagnostic; wrong-length hex throws
 # too.
 #
-# 39 assertions in five blocks:
+# Assertion blocks (counts grew with EQV-height-bind):
 #
 #   CrossShardReceipt round-trip (10):
 #     1-10. All ten fields preserved through to_json → from_json.
@@ -31,9 +31,9 @@
 #   AbortEvent round-trip (4):
 #     12-15. round, aborting_node, timestamp, event_hash preserved.
 #
-#   EquivocationEvent round-trip (8):
-#     16-23. equivocator, block_index, digest_a/b, sig_a/b, shard_id,
-#       beacon_anchor_height preserved.
+#   EquivocationEvent round-trip (11):
+#     equivocator, block_index, kind, index_a/b, body_root_a/b, sig_a/b,
+#       shard_id, beacon_anchor_height preserved (EQV-height-bind fields).
 #
 #   GenesisAlloc round-trip + R1 backward-compat (7):
 #     24-28. All five fields preserved through round-trip.
@@ -44,10 +44,9 @@
 #       message mentions 'nonce' field name (in-session hardening).
 #     32-33. AbortEvent: throws on missing 'round', error message
 #       mentions 'round' field name.
-#     34-35. EquivocationEvent: throws on missing 'digest_a', error
-#       message mentions 'digest_a'.
-#     36.   EquivocationEvent: throws on wrong-length 'digest_a' hex
-#       (json_require_hex length check).
+#     EquivocationEvent: names each missing NEW field (kind, index_a/b,
+#       body_root_a/b); throws on wrong-length 'body_root_a' hex
+#       (json_require_hex length check); rejects kind > 1 (fail-closed).
 #     37-38. GenesisAlloc: throws on missing 'domain', error message
 #       mentions 'domain'.
 #
