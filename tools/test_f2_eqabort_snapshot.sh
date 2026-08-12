@@ -173,14 +173,17 @@ echo "  donor1 stake post-slash: $DSTAKE (expected 0)"
 echo
 echo "=== 6. Create snapshot from donor1; freeze state_root + head_hash ==="
 $DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -2
+# D2 inc8: the snapshot file is the canonical BINARY container (DSN1);
+# `snapshot inspect --dump` renders its full text VIEW for scripts.
+$DETERM snapshot inspect --in $T/snap.json --dump > $T/snap.view.json 2>/dev/null
 SNAP_HEAD=$(python -c "
 import json
-try: print(json.load(open('$T/snap.json'))['head_hash'])
+try: print(json.load(open('$T/snap.view.json'))['head_hash'])
 except: print('')")
 SNAP_SR=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap.json')); hdrs = s.get('headers', [])
+    s = json.load(open('$T/snap.view.json')); hdrs = s.get('headers', [])
     print(hdrs[-1].get('state_root','') if hdrs else '')
 except: print('')")
 echo "  snapshot head_hash:  ${SNAP_HEAD:0:24}..."

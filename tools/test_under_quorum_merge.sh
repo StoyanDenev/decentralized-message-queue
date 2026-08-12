@@ -237,10 +237,13 @@ fi
 echo
 echo "=== 8. Snapshot + verify merge_state stayed EMPTY (fabricated merge NOT applied) ==="
 $DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -1
+# D2 inc8: the snapshot file is the canonical BINARY container (DSN1);
+# `snapshot inspect --dump` renders its full text VIEW for scripts.
+$DETERM snapshot inspect --in $T/snap.json --dump > $T/snap.view.json 2>/dev/null
 MERGE_COUNT=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap.json'))
+    s = json.load(open('$T/snap.view.json'))
     print(len(s.get('merge_state', [])))
 except Exception:
     print(-1)")

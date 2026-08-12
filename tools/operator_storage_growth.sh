@@ -155,17 +155,38 @@ file_size() {
   printf '%s' "0"
 }
 
-CHAIN_FILE="$DATA_DIR/chain.json"
+# D2 inc8: the at-rest chain is the BINARY STORE — a fixed 44-byte
+# chain.json.manifest.bin plus one chain.json.blocks/<i>.blk record per
+# block. "chain bytes" is the store total; presence keys on the manifest.
+CHAIN_MANIFEST="$DATA_DIR/chain.json.manifest.bin"
+CHAIN_STORE_DIR="$DATA_DIR/chain.json.blocks"
 SNAP_FILE="$DATA_DIR/snapshot.json"
 CONFIG_FILE="$DATA_DIR/config.json"
 KEY_FILE="$DATA_DIR/node_key.json"
 
-CHAIN_PRESENT="false"; [ -f "$CHAIN_FILE" ]  && CHAIN_PRESENT="true"
+CHAIN_PRESENT="false"; [ -f "$CHAIN_MANIFEST" ] && CHAIN_PRESENT="true"
 SNAP_PRESENT="false";  [ -f "$SNAP_FILE" ]   && SNAP_PRESENT="true"
 CONFIG_PRESENT="false";[ -f "$CONFIG_FILE" ] && CONFIG_PRESENT="true"
 KEY_PRESENT="false";   [ -f "$KEY_FILE" ]    && KEY_PRESENT="true"
 
-CHAIN_BYTES=$(file_size "$CHAIN_FILE")
+# du -sk is portable across GNU and BSD coreutils; block-rounded totals
+# are fine for a growth monitor.
+store_bytes() {
+  local total=0 kb
+  if [ -f "$CHAIN_MANIFEST" ]; then
+    kb=$(du -sk -- "$CHAIN_MANIFEST" 2>/dev/null | awk '{print $1}') || kb=0
+    case "$kb" in *[!0-9]*|"") kb=0 ;; esac
+    total=$(( total + kb ))
+  fi
+  if [ -d "$CHAIN_STORE_DIR" ]; then
+    kb=$(du -sk -- "$CHAIN_STORE_DIR" 2>/dev/null | awk '{print $1}') || kb=0
+    case "$kb" in *[!0-9]*|"") kb=0 ;; esac
+    total=$(( total + kb ))
+  fi
+  printf '%s' $(( total * 1024 ))
+}
+
+CHAIN_BYTES=$(store_bytes)
 SNAP_BYTES=$(file_size "$SNAP_FILE")
 CONFIG_BYTES=$(file_size "$CONFIG_FILE")
 KEY_BYTES=$(file_size "$KEY_FILE")
@@ -241,7 +262,7 @@ human_size() {
 if [ "$JSON_OUT" = "1" ]; then
   printf '{"data_dir":"%s","height":%s,' "$DATA_DIR" "$HEAD_H"
   printf '"files":{'
-  printf '"chain.json":{"present":%s,"bytes":%s},'    "$CHAIN_PRESENT"  "$CHAIN_BYTES"
+  printf '"chain_store":{"present":%s,"bytes":%s},'   "$CHAIN_PRESENT"  "$CHAIN_BYTES"
   printf '"snapshot.json":{"present":%s,"bytes":%s},' "$SNAP_PRESENT"   "$SNAP_BYTES"
   printf '"config.json":{"present":%s,"bytes":%s},'   "$CONFIG_PRESENT" "$CONFIG_BYTES"
   printf '"node_key.json":{"present":%s,"bytes":%s}'  "$KEY_PRESENT"    "$KEY_BYTES"
@@ -267,13 +288,13 @@ else
     # near-constant.
     if [ "$CHAIN_PRESENT" = "true" ]; then
       if [ "$HEAD_H" -gt 0 ] && [ "$BPB" -gt 0 ]; then
-        printf "  chain.json:     %s (avg %s/block)\n" \
+        printf "  chain store:    %s (avg %s/block)\n" \
                "$(human_size "$CHAIN_BYTES")" "$(human_size "$BPB")"
       else
-        printf "  chain.json:     %s\n" "$(human_size "$CHAIN_BYTES")"
+        printf "  chain store:    %s\n" "$(human_size "$CHAIN_BYTES")"
       fi
     else
-      echo   "  chain.json:     [absent]"
+      echo   "  chain store:    [absent]"
     fi
     if [ "$SNAP_PRESENT" = "true" ]; then
       printf "  snapshot.json:  %s\n" "$(human_size "$SNAP_BYTES")"
@@ -304,14 +325,14 @@ else
       echo "[ANOMALY] $ANOM_COUNT flag(s): $ANOMALIES"
       case ",$ANOMALIES," in
         *,chain_size_threshold_exceeded,*)
-          printf "  chain_size_threshold_exceeded : chain.json = %s exceeds %s GB threshold\n" \
+          printf "  chain_size_threshold_exceeded : chain store = %s exceeds %s GB threshold\n" \
                  "$(human_size "$CHAIN_BYTES")" "$THRESHOLD_GB"
           ;;
       esac
       case ",$ANOMALIES," in
         *,missing_chain_json,*)
           printf "  missing_chain_json            : %s not present (pre-init / wrong --data-dir / corruption)\n" \
-                 "$CHAIN_FILE"
+                 "$CHAIN_MANIFEST"
           ;;
       esac
     fi

@@ -159,6 +159,14 @@ Usage:
                                               quick-check workflow.
   determ show-block <index>                  Print block at index (full JSON)
   determ chain-summary [--last N]            Compact summary of last N blocks
+  determ chain-export --chain <path>         OFFLINE text VIEW of the binary
+                      [--out FILE]            chain store at <path> (D2: the
+                                              at-rest chain is binary; this is
+                                              the one non-authoritative text
+                                              rendering). Emits the wrapped
+                                              {head_hash, blocks:[...]} shape.
+                                              Decode-only walk + the S-021 head
+                                              gate; no daemon required.
   determ validators [--filter-region R] [--json] [--count]
                                               List the current validator pool;
                                               --filter-region R filters to
@@ -248,12 +256,17 @@ Usage:
                   --shard-count N             Computes which shard the address
                   [--salt-hex HEX] [--json]   routes to via shard_id_for_address.
                                               No RPC; pure local computation.
-  determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
-  determ snapshot inspect --in f [--state-root <hex64>] [--json]
+  determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic).
+                                              With --out the file is the canonical BINARY
+                                              container (DSN1), written node-side atomically;
+                                              without it the JSON text view goes to stdout
+  determ snapshot inspect --in f [--state-root <hex64>] [--json] [--dump]
                                               Validate + summarize a snapshot file (round-trip check);
                                               optional --state-root pins an externally-trusted root for
                                               trustless-fast-sync verification; --json emits
-                                              machine-readable output for scripts
+                                              machine-readable output for scripts; --dump prints the
+                                              FULL text VIEW of the binary snapshot (non-authoritative,
+                                              the snapshot counterpart of `determ chain-export --json`)
   determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
 )" << R"(  determ snapshot diff <fa> <fb> [--json]    Compare two snapshot files. Prints
                                               divergence lines (FIELD: A != B)
@@ -767,6 +780,13 @@ In-process tests (deterministic, no network):
                                               tunable fields (ports / peers /
                                               rate-limits / region / enums)
   determ test-tx-binary-codec                 Transaction binary codec
+  determ test-wire-payload-frames             Wire PAYLOAD frames for the five
+                                              Block-carrying MsgTypes + CONTRIB
+                                              (D2-inc7a/inc7b) — builder-DOM
+                                              equivalence, canonical fixed
+                                              point, gate mirror, hostile
+                                              bytes, count-lie, and the
+                                              SHARD_TIP poison-witness map
   determ test-block-binary-codec              Block binary container (D2-inc5)
                                               (encode_tx_frame / decode_tx_frame
                                               via encode_binary / decode_binary)
@@ -1455,20 +1475,43 @@ Additional in-process tests:
                                               nonce skip, future nonce skip, per-
                                               sender independence, A1 invariance
                                               under repeated replay attempts.
-  determ test-chain-save-load                 Chain::save + Chain::load file
-                                              persistence round-trip — head_hash,
-                                              state_root, account/stake/registry,
-                                              A1 counters preserved; missing-file
-                                              defensive empty Chain.
-  determ test-chain-store                     B1 chain-storage-v1: the O(1)
-                                              runtime save path — append-only
-                                              per-block files + manifest.
-                                              Store/legacy round-trip parity,
-                                              append-only pin, S-021 manifest
-                                              tamper gate, fail-closed missing
-                                              block file, legacy-save manifest
-                                              invalidation (no silent rewind),
-                                              graceful-stop pair equivalence.
+  determ test-genesis-binary-codec            D2 inc8: the canonical binary
+                                              GenesisConfig container (DGC1).
+                                              GB-1 information equivalence with
+                                              the JSON view, GB-2 encode(decode
+                                              (x))==x, GB-3 HASH NEUTRALITY
+                                              (compute_genesis_hash survives the
+                                              container swap), GB-4 exactness
+                                              both directions, GB-5 hostile-byte
+                                              sweep, GB-6 validate() parity +
+                                              canonical-form rules, GB-7 the
+                                              at-rest save/load path.
+  determ test-snapshot-binary-codec           D2 inc8: the canonical binary
+                                              snapshot container (DSN1). SB-1
+                                              equivalence with serialize_state/
+                                              restore_from_snapshot, SB-2 byte
+                                              determinism, SB-3 exactness both
+                                              directions, SB-4 hostile-byte
+                                              sweep, SB-5 the S-033 state_root /
+                                              A1 / head_hash gates preserved on
+                                              the binary path, SB-6 magic +
+                                              version + pre-allocation count
+                                              bound, SB-7 the at-rest path.
+  determ test-chain-save-load                 D2 inc8 binary store save+load
+                                              round-trip — head_hash, state_root,
+                                              account/stake/registry, A1 counters
+                                              preserved; 44-byte manifest; save→
+                                              load→save byte-stability; missing
+                                              store → defensive empty Chain.
+  determ test-chain-store                     D2 inc8: the BINARY-ONLY chain store
+                                              (DBK1 block records + the fixed
+                                              44-byte DMF1 manifest). CS-1..CS-10:
+                                              round-trip, append-only, manifest and
+                                              record tamper, truncation sweep,
+                                              exactness BOTH directions, bad magic,
+                                              graceful stop, and CS-8 — a valid
+                                              legacy chain.json with no manifest
+                                              loads EMPTY (no JSON resurrection).
   determ test-block-validator-basic           BlockValidator consensus-validation
                                               entry via public validate() —
                                               genesis short-circuits OK; bad
@@ -2392,6 +2435,29 @@ static int cmd_show_block(int argc, char** argv) {
 //
 // Optional `--bft`: in BFT mode the required threshold is
 // Q = ceil(2 * |creators| / 3) instead of full K-of-K. Without this
+// D2 inc8 CLI affordance. The AUTHORING form of a genesis config is JSON — a
+// build-time input, which DECISION-LOG D2 explicitly permits ("RPC/CLI/config
+// may keep optional text"). The DEPLOYMENT ARTIFACT the node loads is the
+// canonical binary DGC1 container. This helper accepts EITHER, so:
+//   * `genesis-tool build` can canonicalize a hand-written JSON config, and
+//     re-running it on the canonicalized artifact re-verifies instead of
+//     erroring (idempotent build);
+//   * `verify-genesis` inspects both the source and the shipped artifact.
+// The at-rest CONSENSUS load path — GenesisConfig::load, node startup,
+// determ-light's load_genesis — is binary-ONLY and does no sniffing. Only
+// these three offline authoring/inspection commands are dual-form.
+static determ::chain::GenesisConfig read_genesis_any(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot open genesis config: " + path);
+    std::string bytes((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    if (bytes.size() >= 4 && bytes.compare(0, 4, "DGC1") == 0) {
+        return determ::chain::GenesisConfig::decode(
+            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    }
+    return determ::chain::GenesisConfig::from_json(json::parse(bytes));
+}
+
 // determ verify-genesis --in genesis.json [--json] [--expected-hash HEX]
 //   Standalone genesis.json validator. Loads the file, applies the
 //   same parsing + sane-bounds checks as `determ start`, computes the
@@ -2444,13 +2510,13 @@ static int cmd_verify_genesis(int argc, char** argv) {
     };
 
     try {
-        std::ifstream f(in_path);
-        if (!f) {
+        if (!std::ifstream(in_path)) {
             emit_error("cannot_open", "cannot open " + in_path);
             return 1;
         }
-        json j = json::parse(f);
-        chain::GenesisConfig cfg = chain::GenesisConfig::from_json(j);
+        // D2 inc8: accepts the JSON authoring form OR the canonical binary
+        // DGC1 deployment artifact (read_genesis_any).
+        chain::GenesisConfig cfg = read_genesis_any(in_path);
 
         // compute_genesis_hash (the identity contract). The from_json
         // path above already applied sane-bounds checks for subsidy
@@ -2483,6 +2549,15 @@ static int cmd_verify_genesis(int argc, char** argv) {
                 cfg.genesis_message == chain::DEFAULT_GENESIS_MESSAGE},
             {"genesis_message_bytes", cfg.genesis_message.size()},
             {"committee_region",      cfg.committee_region},
+            // D2 inc8: the genesis FILE is now the canonical binary DGC1
+            // container, so operator tooling can no longer grep fields off
+            // it. These four used to be read straight from the JSON file by
+            // operator_governance_audit.sh / operator_anon_address_usage.sh;
+            // the text VIEW is now the single place they come from.
+            {"governance_mode",       cfg.governance_mode},
+            {"param_keyholders",      cfg.param_keyholders.size()},
+            {"param_threshold",       cfg.param_threshold},
+            {"shard_address_salt",    to_hex(cfg.shard_address_salt)},
         };
 
         // Optional external-pin comparison.
@@ -3204,6 +3279,46 @@ static int cmd_stakes(int argc, char** argv) {
 //   Default output is human-readable; --json emits the raw RPC
 //   response verbatim (the {blocks, height, total_supply, ...}
 //   object including A1 supply counters).
+// determ chain-export --chain <path> [--out FILE]
+//
+// D2 inc8 OFFLINE TEXT VIEW of the binary chain store. The at-rest chain is
+// canonical binary (DBK1 block records + the 44-byte DMF1 manifest); nothing
+// reads text back. DECISION-LOG D2 permits human-readable views off the
+// storage/wire path, and this is that view — the ONE migration target for the
+// operator tools and test scripts that used to parse an at-rest chain.json.
+//
+// Offline: no daemon, no RPC. Safe against a live writer because the manifest
+// is written atomically LAST and names only fully-written block records — the
+// same guarantee Chain::load relies on. Decode-only (no replay), but the S-021
+// head gate still runs, so a tampered store cannot export clean.
+static int cmd_chain_export(int argc, char** argv) {
+    std::string chain_path, out_path;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--chain" && i + 1 < argc) chain_path = argv[++i];
+        else if (a == "--out"   && i + 1 < argc) out_path   = argv[++i];
+        else if (a == "--json")                  { /* the only output form */ }
+    }
+    if (chain_path.empty()) {
+        std::cerr << "Usage: determ chain-export --chain <path> [--out FILE]\n";
+        return 1;
+    }
+    try {
+        json doc = determ::chain::Chain::export_store_json(chain_path);
+        if (out_path.empty()) {
+            std::cout << doc.dump(2) << "\n";
+        } else {
+            std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
+            if (!f) { std::cerr << "Error: cannot write " << out_path << "\n"; return 1; }
+            f << doc.dump(2) << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_chain_summary(int argc, char** argv) {
     uint32_t last_n = 10;
     bool json_out = false;
@@ -4432,6 +4547,20 @@ static int cmd_where_is(int argc, char** argv) {
 //   model: trust the source + post-restore consistency check (replay
 //   the next handful of blocks); v2 adds state roots in the block
 //   format for cryptographic verification.
+// D2 inc8: at-rest snapshots are the canonical binary DSN1 container. This is
+// the single read path every offline snapshot CLI goes through — raw bytes into
+// Chain::decode_state, which runs the head_hash / S-033 state_root gates. The
+// JSON snapshot text is a VIEW rendered back out of the decoded chain
+// (serialize_state), never a thing read from disk.
+static determ::chain::Chain read_snapshot_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open " + path);
+    std::string bytes((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    return determ::chain::Chain::decode_state(
+        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+}
+
 static int cmd_snapshot_create(int argc, char** argv) {
     std::string out_path;
     uint32_t    header_count = 16;
@@ -4442,28 +4571,32 @@ static int cmd_snapshot_create(int argc, char** argv) {
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
-        json params = {{"headers", header_count}};
-        auto result = rpc::rpc_call("127.0.0.1", port, "snapshot", params);
-        std::string text = result.dump(2);
         if (out_path.empty()) {
-            std::cout << text << "\n";
+            // No --out: print the JSON text VIEW to stdout (CLI text is
+            // D2-permitted). Nothing is written at rest.
+            json params = {{"headers", header_count}};
+            auto result = rpc::rpc_call("127.0.0.1", port, "snapshot", params);
+            std::cout << result.dump(2) << "\n";
         } else {
-            std::ofstream f(out_path);
-            if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
-            f << text << "\n";
-            std::cout << "Snapshot written to " << out_path << "\n";
+            // D2 inc8: the snapshot FILE is the canonical binary DSN1
+            // container, written node-side (atomically) by the snapshot_save
+            // RPC so the bytes are never round-tripped through text. The
+            // summary below is read back OUT of the written file, so it
+            // always describes the bytes that actually landed.
+            json params = {{"headers", header_count}, {"path", out_path}};
+            auto saved = rpc::rpc_call("127.0.0.1", port, "snapshot_save", params);
+            chain::Chain c = read_snapshot_file(out_path);
+            std::cout << "Snapshot written to " << out_path
+                      << " (" << saved.value("bytes", uint64_t{0})
+                      << " bytes, DSN1)\n";
             std::cout << "  block_index : "
-                      << result.value("block_index", uint64_t{0}) << "\n";
+                      << (c.empty() ? uint64_t{0} : c.head().index) << "\n";
             std::cout << "  head_hash   : "
-                      << result.value("head_hash", std::string{}) << "\n";
-            std::cout << "  accounts    : "
-                      << result.value("accounts", json::array()).size() << "\n";
-            std::cout << "  stakes      : "
-                      << result.value("stakes", json::array()).size() << "\n";
-            std::cout << "  registrants : "
-                      << result.value("registrants", json::array()).size() << "\n";
-            std::cout << "  headers     : "
-                      << result.value("headers", json::array()).size() << "\n";
+                      << (c.empty() ? std::string{} : to_hex(c.head_hash())) << "\n";
+            std::cout << "  accounts    : " << c.accounts().size()    << "\n";
+            std::cout << "  stakes      : " << c.stakes().size()      << "\n";
+            std::cout << "  registrants : " << c.registrants().size() << "\n";
+            std::cout << "  headers     : " << c.height()             << "\n";
         }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -4537,11 +4670,18 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
             net::Message m = net::Message::deserialize(body.data(), body.size());
             if (m.type != net::MsgType::SNAPSHOT_RESPONSE) continue;
 
-            // Validate by round-trip through restore_from_snapshot.
+            // D2 inc8 TRANSITIONAL BRIDGE. SNAPSHOT_RESPONSE still carries a
+            // length-prefixed JSON payload (that binarization is the separate
+            // wire inc, which will reuse the DSN1 layout). At-rest snapshots
+            // are already binary, so decode the wire JSON and re-encode the
+            // canonical container before writing. Delete this bridge — not the
+            // surrounding fetch — when SNAPSHOT_RESPONSE goes binary.
             chain::Chain c = chain::Chain::restore_from_snapshot(m.payload);
-            std::ofstream f(out_path);
+            const std::vector<uint8_t> dsn1 = c.encode_state(header_count);
+            std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
             if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
-            f << m.payload.dump(2) << "\n";
+            f.write(reinterpret_cast<const char*>(dsn1.data()),
+                    static_cast<std::streamsize>(dsn1.size()));
             std::cout << "Snapshot fetched from " << peer_str << "\n";
             std::cout << "  block_index : " << (c.empty() ? 0 : c.head().index) << "\n";
             std::cout << "  head_hash   : "
@@ -4583,19 +4723,35 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
         if (std::string(argv[i]) == "--in")          in_path = argv[i + 1];
         else if (std::string(argv[i]) == "--state-root") expected_state_root_hex = argv[i + 1];
     }
-    // `--json` is a flag, not a value-pair, so scan all args including
-    // the last position.
+    // `--json` / `--dump` are flags, not value-pairs, so scan all args
+    // including the last position.
+    bool dump_view = false;
     for (int i = 0; i < argc; ++i) {
         if (std::string(argv[i]) == "--json") json_out = true;
+        if (std::string(argv[i]) == "--dump") dump_view = true;
     }
     if (in_path.empty()) {
         std::cerr << "Usage: determ snapshot inspect --in <file> "
-                     "[--state-root <hex64>] [--json]\n";
+                     "[--state-root <hex64>] [--json] [--dump]\n";
         return 1;
     }
+    // D2 inc8: --dump renders the FULL serialize_state text VIEW of a binary
+    // snapshot file. At-rest snapshots are the canonical DSN1 container, so
+    // this is the one place a tool or an operator can read the whole thing as
+    // text — the exact counterpart of `determ chain-export --json` for the
+    // chain store. Non-authoritative: nothing loads this text back.
+    if (dump_view) {
+        try {
+            std::cout << read_snapshot_file(in_path).serialize_state(256).dump(2)
+                      << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
     try {
-        std::ifstream f(in_path);
-        if (!f) {
+        if (!std::ifstream(in_path, std::ios::binary)) {
             if (json_out) {
                 json err = {{"error", "cannot_open"}, {"path", in_path}};
                 std::cout << err.dump() << "\n";
@@ -4604,8 +4760,10 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
             }
             return 1;
         }
-        json snap = json::parse(f);
-        chain::Chain c = chain::Chain::restore_from_snapshot(snap);
+        // D2 inc8: decode the canonical binary container; the JSON below is a
+        // rendered VIEW of the decoded chain, not something read off disk.
+        chain::Chain c = read_snapshot_file(in_path);
+        json snap = c.serialize_state(256);
 
         // Compute the snapshot's restored state_root for display +
         // optional comparison against an externally-trusted root.
@@ -4747,11 +4905,9 @@ static int cmd_snapshot_diff(int argc, char** argv) {
         return 1;
     }
 
+    // D2 inc8: both operands are canonical binary DSN1 files.
     auto load = [&](const std::string& path) {
-        std::ifstream f(path);
-        if (!f) throw std::runtime_error("cannot open " + path);
-        json snap = json::parse(f);
-        return chain::Chain::restore_from_snapshot(snap);
+        return read_snapshot_file(path);
     };
 
     chain::Chain ca, cb;
@@ -4883,23 +5039,17 @@ static int cmd_snapshot_stats(int argc, char** argv) {
         return 1;
     }
 
+    // D2 inc8: decode the canonical binary DSN1 container, then render the
+    // serialize_state VIEW so the field reads below are unchanged. size_bytes
+    // above is the real on-disk size of the binary file.
     json snap;
     try {
-        std::ifstream f(path);
-        snap = json::parse(f);
+        snap = read_snapshot_file(path).serialize_state(256);
     } catch (const std::exception& e) {
         if (json_out) {
-            std::cout << json({{"error", "json_parse"}, {"message", e.what()}}).dump() << "\n";
+            std::cout << json({{"error", "decode_failed"}, {"message", e.what()}}).dump() << "\n";
         } else {
-            std::cerr << "Error: JSON parse failed: " << e.what() << "\n";
-        }
-        return 1;
-    }
-    if (!snap.is_object()) {
-        if (json_out) {
-            std::cout << json({{"error", "not_object"}}).dump() << "\n";
-        } else {
-            std::cerr << "Error: snapshot is not a JSON object\n";
+            std::cerr << "Error: snapshot decode failed: " << e.what() << "\n";
         }
         return 1;
     }
@@ -5189,7 +5339,7 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
         }
     };
     try {
-        auto cfg  = chain::GenesisConfig::load(path);
+        auto cfg  = read_genesis_any(path);
         if (cfg.k_block_sigs == 0 || cfg.k_block_sigs > cfg.m_creators) {
             emit_error("k_block_sigs=" + std::to_string(cfg.k_block_sigs)
                        + " must satisfy 1 <= K <= M="
@@ -5199,6 +5349,15 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
         auto hash = chain::compute_genesis_hash(cfg);
         std::string hex = to_hex(hash);
         const char* mode = (cfg.k_block_sigs == cfg.m_creators) ? "strong" : "weak";
+
+        // D2 inc8: `build` PRODUCES the deployment artifact. The input may be
+        // the hand-written JSON authoring form; the file the node and
+        // determ-light load at <path> is written back as the canonical binary
+        // DGC1 container. The genesis hash is value-derived, so canonicalizing
+        // the container leaves `hex` (already computed above, and pinned in
+        // <path>.hash) byte-identical — gate test-genesis-binary-codec GB-3.
+        // Idempotent: re-running build on the canonical artifact re-verifies.
+        cfg.save(path);
 
         // Build the result struct once; both output modes draw from it.
         json result = {
@@ -5332,7 +5491,7 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
         if (std::string(argv[i]) == "--profile") profile_name = argv[i + 1];
     }
     try {
-        auto base = chain::GenesisConfig::load(path);
+        auto base = read_genesis_any(path);
         if (base.k_block_sigs == 0 || base.k_block_sigs > base.m_creators) {
             std::cerr << "Genesis invalid: k_block_sigs=" << base.k_block_sigs
                       << " must satisfy 1 <= K <= M=" << base.m_creators << "\n";
@@ -6332,6 +6491,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify-block-sigs") return cmd_verify_block_sigs(sub_argc, sub_argv);
     if (cmd == "verify-genesis") return cmd_verify_genesis(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
+    if (cmd == "chain-export")  return cmd_chain_export(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "stakes")        return cmd_stakes(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
@@ -10436,6 +10596,18 @@ int main(int argc, char** argv) {
                 tx.amount = 5; tx.fee = 1; tx.nonce = 3;
                 tx.sig.fill(0x44); tx.hash.fill(0x55);
 
+                // D2-inc7a/inc7b fixtures. A LEAF block (no records, no
+                // witnesses) so the same block is legal in every one of the
+                // five Block-carrying channels including SHARD_TIP.
+                chain::Block blk;
+                blk.index = 5; blk.timestamp = 99;
+                blk.creators = {"n1"};
+                blk.cumulative_rand.fill(0x0C);
+                node::ContribMsg cmsg;
+                cmsg.block_index = 5; cmsg.signer = "n1";
+                cmsg.prev_hash.fill(0x0A); cmsg.dh_input.fill(0x0B);
+                cmsg.ed_sig.fill(0x0D);
+
                 std::vector<LenCase> cases = {
                   {"HELLO",
                    strip_frame(make_hello("n1", 9000, ChainRole::SINGLE, 0, 1)
@@ -10483,10 +10655,44 @@ int main(int argc, char** argv) {
                    strip_frame(make_abort_event(ae, 7, prev).serialize_binary()),
                    "trailing bytes after last claim",
                    "tx frame: truncated lp_str body"},
+                  // D2-inc7a: the five Block-carrying frames. Every one ends
+                  // in the Block container's shard_tip_witnesses count, so a
+                  // trailing byte is caught by the container's exact
+                  // consumption and a dropped byte by that count's bound —
+                  // except CHAIN_RESPONSE, which owns its own frame tail.
+                  {"BLOCK",
+                   strip_frame(make_block(blk).serialize_binary()),
+                   "trailing bytes after last section",
+                   "truncated shard_tip_witnesses"},
+                  {"BEACON_HEADER",
+                   strip_frame(make_beacon_header(blk).serialize_binary()),
+                   "trailing bytes after last section",
+                   "truncated shard_tip_witnesses"},
+                  {"SHARD_TIP",
+                   strip_frame(make_shard_tip(ShardId{2}, blk).serialize_binary()),
+                   "trailing bytes after last section",
+                   "truncated shard_tip_witnesses"},
+                  {"CROSS_SHARD_RECEIPT_BUNDLE",
+                   strip_frame(make_cross_shard_receipt_bundle(ShardId{3}, blk)
+                                   .serialize_binary()),
+                   "trailing bytes after last section",
+                   "truncated shard_tip_witnesses"},
+                  {"CHAIN_RESPONSE",
+                   strip_frame(Message{MsgType::CHAIN_RESPONSE,
+                                       {{"blocks", nlohmann::json::array()},
+                                        {"has_more", false}}}
+                                   .serialize_binary()),
+                   "CHAIN_RESPONSE frame trailing bytes",
+                   "truncated CHAIN_RESPONSE blocks count"},
+                  // D2-inc7b.
+                  {"CONTRIB",
+                   strip_frame(make_contrib(cmsg).serialize_binary()),
+                   "CONTRIB frame trailing bytes",
+                   "truncated CONTRIB ed_sig"},
                 };
-                check(cases.size() == 11,
-                      "exact-length sweep covers all 11 fixed-layout frames "
-                      "(the 19 wire types minus the 8 still on lp-JSON)");
+                check(cases.size() == 17,
+                      "exact-length sweep covers all 17 fixed-layout frames "
+                      "(the 19 wire types minus the 2 still on lp-JSON)");
                 for (auto& c : cases) {
                     // Control: the unmodified body must DECODE. Without this a
                     // builder change that broke the body would make both
@@ -10535,15 +10741,21 @@ int main(int argc, char** argv) {
         }
 
         // 6. encode_binary / decode_binary directly (free-function path).
-        //    These operate on body bytes (no framing).
+        //    These operate on body bytes (no framing). D2-inc7b gave CONTRIB a
+        //    true binary frame, so the fixture is BUILDER-SHAPED — the encoder
+        //    routes through ContribMsg::from_json, which requires the real
+        //    field set, and an invented {"x":1} object no producer emits is
+        //    (correctly) refused at encode time.
         {
-            Message m{MsgType::CONTRIB, {{"x", 1}}};
+            node::ContribMsg c;
+            c.block_index = 42; c.signer = "n1";
+            Message m = make_contrib(c);
             auto bytes = encode_binary(m);
             check(!bytes.empty(),
                   "encode_binary produces non-empty bytes");
             Message back = decode_binary(bytes.data(), bytes.size());
-            check(back.type == MsgType::CONTRIB,
-                  "decode_binary round-trip: type preserved");
+            check(back.type == MsgType::CONTRIB && back.payload == m.payload,
+                  "decode_binary round-trip: type + payload preserved");
         }
 
         // 6b. Reserved envelope byte (offset 3) MUST be zero — the daemon
@@ -10556,7 +10768,9 @@ int main(int argc, char** argv) {
         //     frame validity. Same frame with reserved=0 decodes (control),
         //     flipped byte throws.
         {
-            Message m{MsgType::CONTRIB, {{"x", 1}}};
+            node::ContribMsg c;
+            c.block_index = 42; c.signer = "n1";
+            Message m = make_contrib(c);
             auto bytes = encode_binary(m);
             check(bytes.size() > 4 && bytes[3] == 0x00,
                   "encode_binary zeroes the reserved envelope byte");
@@ -10601,37 +10815,36 @@ int main(int argc, char** argv) {
         //     is decoded. Peer::read_body applies max_message_bytes only AFTER
         //     Message::deserialize returns, so without a pre-decode cap a
         //     hostile peer's frame (up to kMaxFrameBytes = 16 MB) is fully
-        //     decoded — decode_binary reaches nlohmann::json::parse over the
-        //     whole length-prefixed payload — before the type-aware ceiling is
-        //     ever consulted. That makes the framing ceiling an amplification
-        //     vector, which the messages.hpp cap commentary asserts it is not.
+        //     decoded — the payload decoder walks the whole body — before the
+        //     type-aware ceiling is ever consulted. That makes the framing
+        //     ceiling an amplification vector, which the messages.hpp cap
+        //     commentary asserts it is not.
         //
         //     This vector is WELL-FORMED: it decodes cleanly at any size, so a
         //     rejection can only come from the size cap itself (not from a
-        //     parse error). Type CONTRIB caps at 1 MB; the frame is ~1.2 MB.
+        //     parse error) — asserted below rather than assumed. Type CONTRIB
+        //     caps at 1 MB; the frame is ~1.28 MB. D2-inc7b gave CONTRIB a
+        //     true binary frame, so the oversize body is now a VALID frame
+        //     with a very long tx_hashes list rather than a fat JSON blob —
+        //     the same property, expressed in the type's real schema.
         //     Falsify-on-mutant: delete the pre-decode cap in
         //     Message::deserialize and this leg goes RED (deserialize
         //     succeeds and returns CONTRIB) while the well-formed
         //     UNDER-cap round-trips above stay green.
         {
-            const size_t payload_len = 1200000;          // > 1 MB CONTRIB cap
-            std::string pay = "{\"pad\":\"";
-            pay.append(payload_len, 'a');
-            pay += "\"}";
-            std::vector<uint8_t> frame;
-            frame.push_back(0xB1);                                    // magic
-            frame.push_back(0x01);                                    // version
-            frame.push_back(static_cast<uint8_t>(MsgType::CONTRIB));  // type @2
-            frame.push_back(0x00);                                    // reserved
-            uint32_t plen = static_cast<uint32_t>(pay.size());
-            frame.push_back(static_cast<uint8_t>(plen & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
-            frame.insert(frame.end(), pay.begin(), pay.end());
+            node::ContribMsg c;
+            c.block_index = 1; c.signer = "n1";
+            c.tx_hashes.assign(40000, Hash{});           // 40k x 32 B ~ 1.28 MB
+            auto frame = encode_binary(make_contrib(c));
 
             check(frame.size() > max_message_bytes(MsgType::CONTRIB),
                   "WIRE-1 setup: the binary frame exceeds the CONTRIB S-022 cap");
+            bool decodes = true;
+            try { (void)decode_binary(frame.data(), frame.size()); }
+            catch (const std::exception&) { decodes = false; }
+            check(decodes,
+                  "WIRE-1 setup: the oversize frame is WELL-FORMED (decode_binary "
+                  "accepts it) — so only the size cap can be the rejecter");
             bool threw = false;
             try {
                 Message::deserialize(frame.data(), frame.size());
@@ -10642,8 +10855,10 @@ int main(int argc, char** argv) {
         }
 
         // Helper for the WIRE-2 legs below: a binary envelope carrying a
-        // length-prefixed JSON payload (the format the 16 pending types
-        // still use inside the D2 binary-only wire).
+        // length-prefixed JSON payload — after D2-inc7a/inc7b the format is
+        // down to SNAPSHOT_RESPONSE and HEADERS_RESPONSE, the two types
+        // WIRE-2 still protects (they binarize in inc7c, and WIRE-2 retires
+        // with them).
         auto bin_json_frame = [](MsgType t, const std::string& pay) {
             std::vector<uint8_t> f;
             f.push_back(0xB1);
@@ -10659,26 +10874,29 @@ int main(int argc, char** argv) {
             return f;
         };
 
-        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate payload is
-        //     CHAIN_RESPONSE at depth 7: {"blocks":[..]} -> blocks[]
-        //     -> Block -> shard_tip_witnesses[] -> witness Block ->
-        //     creator_tx_lists[] -> inner list. (Block::from_json parses
-        //     witnesses with allow_witnesses=false, so Block nesting cannot
-        //     recurse past that second level.) It must still deserialize —
-        //     otherwise the ceiling is a liveness bug, not a defence.
+        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate payload
+        //     STILL ON THIS PATH is SNAPSHOT_RESPONSE at depth 7:
+        //     {"headers":[..]} -> headers[] -> Block ->
+        //     shard_tip_witnesses[] -> witness Block -> creator_tx_lists[] ->
+        //     inner list. (Block::from_json parses witnesses with
+        //     allow_witnesses=false, so Block nesting cannot recurse past that
+        //     second level.) It must still deserialize — otherwise the ceiling
+        //     is a liveness bug, not a defence. (Pre-inc7a this leg used
+        //     CHAIN_RESPONSE, which now carries a true binary frame; the
+        //     depth-7 shape is identical because both wrap a list of Blocks.)
         {
             std::string pay =
-                "{\"blocks\":[{\"shard_tip_witnesses\":"
+                "{\"headers\":[{\"shard_tip_witnesses\":"
                 "[{\"creator_tx_lists\":[[\"ab\"]]}]}]}";
-            auto b = bin_json_frame(MsgType::CHAIN_RESPONSE, pay);
+            auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
             bool ok = false;
             try {
                 Message m = Message::deserialize(b.data(), b.size());
-                ok = (m.type == MsgType::CHAIN_RESPONSE);
+                ok = (m.type == MsgType::SNAPSHOT_RESPONSE);
             } catch (const std::exception&) { ok = false; }
             check(ok,
                   "WIRE-2 anti-over-tightening: the DEEPEST legitimate payload "
-                  "(CHAIN_RESPONSE, depth 7) still deserializes");
+                  "(SNAPSHOT_RESPONSE, depth 7) still deserializes");
         }
 
         // 8e. WIRE-2 string-state soundness. Structural bytes inside a string
@@ -10692,11 +10910,13 @@ int main(int argc, char** argv) {
             std::string pay = "\"a\\\"";
             pay.append(kMaxJsonDepth * 4, '[');
             pay += "\"";
-            auto b = bin_json_frame(MsgType::CONTRIB, pay);
+            // Carried by HEADERS_RESPONSE — one of the two types still on the
+            // lp-JSON path after D2-inc7b moved CONTRIB to a fixed frame.
+            auto b = bin_json_frame(MsgType::HEADERS_RESPONSE, pay);
             bool ok = false;
             try {
                 Message m = Message::deserialize(b.data(), b.size());
-                ok = (m.type == MsgType::CONTRIB && m.payload.is_string());
+                ok = (m.type == MsgType::HEADERS_RESPONSE && m.payload.is_string());
             } catch (const std::exception&) { ok = false; }
             check(ok,
                   "WIRE-2 soundness: structural bytes inside a string (past an "
@@ -11170,12 +11390,21 @@ int main(int argc, char** argv) {
 
         // ─── CHAIN_RESPONSE (chain-sync response) ───────────────────────────
         // The free-function builders only cover GET_CHAIN; CHAIN_RESPONSE
-        // is assembled directly. Use a minimal valid shape ({"blocks":
-        // [], "from": 0}) — same JSON-fallback path.
+        // is assembled directly by Node::on_get_chain. Mirror THAT shape
+        // ({"blocks": [...], "has_more": bool}) — D2-inc7a gave the type a
+        // true binary frame, and the invented "from" key no producer emits
+        // would have been silently dropped by it.
         {
             Message m{MsgType::CHAIN_RESPONSE,
-                      {{"blocks", json::array()}, {"from", 0}}};
-            run_msgtype(m, "CHAIN_RESPONSE");
+                      {{"blocks", json::array()}, {"has_more", false}}};
+            run_msgtype(m, "CHAIN_RESPONSE (empty)");
+        }
+        {
+            Block b;
+            b.index = 3;
+            Message m{MsgType::CHAIN_RESPONSE,
+                      {{"blocks", json::array({b.to_json()})}, {"has_more", true}}};
+            run_msgtype(m, "CHAIN_RESPONSE (one block, has_more)");
         }
 
         // ─── STATUS_REQUEST / STATUS_RESPONSE ───────────────────────────────
@@ -11251,13 +11480,12 @@ int main(int argc, char** argv) {
         // ─── Truncated payload diagnostics (JSON-payload path) ──────────────
         // Build a valid envelope but truncate inside the JSON payload
         // body. decode_binary should reject (either the length-prefix
-        // bounds check or the inner JSON parser). Uses CONTRIB — a type
-        // that still carries a length-prefixed JSON payload (STATUS_RESPONSE
-        // moved to a fixed frame in D2-inc6a).
+        // bounds check or the inner JSON parser). Uses SNAPSHOT_RESPONSE —
+        // one of the two types that still carry a length-prefixed JSON
+        // payload (STATUS_RESPONSE moved to a fixed frame in D2-inc6a,
+        // CONTRIB in D2-inc7b).
         {
-            node::ContribMsg cm;
-            cm.block_index = 42; cm.signer = "node-1";
-            Message m = make_contrib(cm);
+            Message m = make_snapshot_response({{"version", 1}});
             auto bytes = encode_binary(m);
             // Truncate to header + 6 bytes (less than the JSON payload).
             std::vector<uint8_t> truncated(bytes.begin(),
@@ -12760,7 +12988,7 @@ int main(int argc, char** argv) {
             Chain c = build(4, 4);
             add_block(c, 0x01); add_block(c, 0x02); add_block(c, 0xEE);
             const Hash root = c.compute_state_root();
-            c.save(cp); c.save_incremental(cp);
+            c.save_incremental(cp);
             // Reload with the SAME epoch_blocks so load-replay re-folds identically.
             Chain r = Chain::load(cp, /*subsidy=*/0, /*shard_count=*/4,
                                   Hash{}, /*my_shard=*/0, /*epoch_blocks=*/4);
@@ -13684,7 +13912,7 @@ int main(int argc, char** argv) {
             Chain c = build();
             add_block(c, { mkrec(1, 10, 3, "us-east"), mkrec(2, 20, 1, "") }, 0x01);
             const Hash root = c.compute_state_root();
-            c.save(cp); c.save_incremental(cp);
+            c.save_incremental(cp);
             Chain r = Chain::load(cp, /*subsidy=*/0, /*shard_count=*/1,
                                   Hash{}, /*my_shard=*/0, /*epoch_blocks=*/0);
             check(r.shard_tip_records().size() == 2,
@@ -24080,6 +24308,568 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
+    // D2-inc7a / inc7b — the WIRE PAYLOAD frames for the Block-carrying
+    // message types (BLOCK, BEACON_HEADER, SHARD_TIP,
+    // CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE) and for CONTRIB.
+    //
+    // These six were the last consensus-critical payloads still travelling as
+    // length-prefixed JSON *inside* the binary envelope. All five
+    // Block-carrying types delegate to the ONE canonical Block container
+    // (chain::Block::encode_frame / decode_frame, D2-inc5) — the S-044
+    // shared-codec discipline — and CONTRIB gets an always-present field
+    // layout whose decode returns ContribMsg::to_json(), so the emission
+    // gates keep living at their single owning site (producer.cpp).
+    //
+    // THE THEOREM (PF-1) is the wire-level analogue of the Block container's
+    // BF-1: for every payload DOM P that a BUILDER produces,
+    //
+    //     decode_binary(encode_binary({type, P})).payload  ==  P
+    //
+    // That is what makes the container swap provably behaviour-preserving at
+    // the message layer: GossipNet::handle_message, the dispatcher and every
+    // Node handler read the payload as a DOM, so a decoder that rebuilds the
+    // builder's DOM exactly is invisible to all of them — which is why this
+    // increment edits zero handler code. The oracle (Block::to_json /
+    // ContribMsg::to_json) is NOT deleted by D2, so this gate stays live.
+    //
+    // The one DELIBERATE behaviour change is the allow_witnesses MAP, gated by
+    // PF-6: SHARD_TIP decodes its tip with allow_witnesses=false and every
+    // other Block channel with true. See the leg for the argument.
+    if (cmd == "test-wire-payload-frames") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto checks = [&](bool cond, const std::string& msg) { check(cond, msg.c_str()); };
+
+        // A Block touching every section, so a dropped field cannot hide
+        // behind a default value. `deep` adds the shard-tip material a FOLDED
+        // BEACON block carries (records + a witness); a SHARD_TIP tip must be
+        // a LEAF, so the shard-tip fixtures pass false.
+        auto make_rich_block = [](uint64_t index, bool deep) {
+            Block b;
+            b.index     = index;
+            b.prev_hash.fill(0x11);
+            b.timestamp = -1234567890;            // negative: i64 in a u64 slot
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+                tx.amount = 7; tx.fee = 1; tx.nonce = 2;
+                tx.payload.assign(40, 0xEE);      // > 32: the overflow tail
+                tx.sig.fill(0xA1); tx.hash = tx.compute_hash();
+                b.transactions.push_back(tx);
+            }
+            b.creators = {"n1", "n2"};
+            b.creator_tx_lists = {{Hash{}}, {}};
+            b.creator_tx_lists[0][0].fill(0x21);
+            b.creator_ed_sigs.resize(2);
+            b.creator_ed_sigs[0].fill(0x31); b.creator_ed_sigs[1].fill(0x32);
+            b.creator_dh_inputs.resize(2);
+            b.creator_dh_inputs[0].fill(0x41); b.creator_dh_inputs[1].fill(0x42);
+            b.creator_view_eq_roots.resize(2);      b.creator_view_eq_roots[0].fill(0x51);
+            b.creator_view_abort_roots.resize(2);   b.creator_view_abort_roots[1].fill(0x52);
+            b.creator_view_inbound_roots.resize(2); b.creator_view_inbound_roots[0].fill(0x53);
+            b.creator_view_inbound_lists = {{Hash{}}, {}};
+            b.creator_view_inbound_lists[0][0].fill(0x61);
+            b.creator_view_eq_lists      = {{}, {Hash{}}};
+            b.creator_view_eq_lists[1][0].fill(0x62);
+            b.creator_view_abort_lists   = {{Hash{}}, {}};
+            b.creator_view_abort_lists[0][0].fill(0x63);
+            b.creator_view_shardtip_roots.resize(2);
+            b.creator_view_shardtip_roots[0].fill(0x71);
+            b.creator_view_shardtip_lists = {{Hash{}}, {}};
+            b.creator_view_shardtip_lists[0][0].fill(0x72);
+            b.creator_proposer_times = {100, 200};
+            b.creator_dh_secrets.resize(2);
+            b.creator_dh_secrets[0].fill(0x81); b.creator_dh_secrets[1].fill(0x82);
+            b.tx_root.fill(0x91); b.delay_seed.fill(0x92); b.delay_output.fill(0x93);
+            b.consensus_mode = ConsensusMode::BFT;
+            b.bft_proposer   = "n1";
+            b.creator_block_sigs.resize(2);
+            b.creator_block_sigs[0].fill(0xB3); b.creator_block_sigs[1].fill(0xB4);
+            b.cumulative_rand.fill(0xC1);
+            {
+                AbortEvent ae;
+                ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = -99;
+                ae.event_hash.fill(0xD1);
+                AbortClaim c;
+                c.block_index = index; c.round = 2; c.prev_hash.fill(0xD2);
+                c.missing_creator = "n3"; c.claimer = "n1"; c.ed_sig.fill(0xD3);
+                ae.claims.push_back(c);
+                b.abort_events.push_back(ae);
+            }
+            {
+                EquivocationEvent ev;
+                ev.equivocator = "mallory"; ev.block_index = index; ev.kind = 1;
+                ev.index_a = index; ev.body_root_a.fill(0xE1); ev.sig_a.fill(0xE2);
+                ev.index_b = index; ev.body_root_b.fill(0xE3); ev.sig_b.fill(0xE4);
+                ev.shard_id = 3; ev.beacon_anchor_height = 7;
+                b.equivocation_events.push_back(ev);
+            }
+            {
+                CrossShardReceipt r;
+                r.src_shard = 1; r.dst_shard = 2; r.src_block_index = index;
+                r.src_block_hash.fill(0xF1); r.tx_hash.fill(0xF2);
+                r.from = "alice"; r.to = "bob";
+                r.amount = 5; r.fee = 1; r.nonce = 9;
+                b.cross_shard_receipts.push_back(r);
+                r.src_shard = 2; r.dst_shard = 1;
+                b.inbound_receipts.push_back(r);
+            }
+            {
+                GenesisAlloc a;
+                a.domain = "alice"; a.ed_pub.fill(0x1A);
+                a.balance = 1000; a.stake = 10; a.region = "eu";
+                b.initial_state.push_back(a);
+            }
+            b.state_root.fill(0x2B);
+            b.partner_subset_hash.fill(0x3B);
+            b.signature_form  = 2;
+            b.eligible_count  = 17;
+            b.source_shard_id = 4;
+            if (deep) {
+                ShardTipRecord r;
+                r.source_shard_id = 1; r.height = index - 1;
+                r.eligible_count = 5; r.committee_sig_root.fill(0x4C);
+                r.region = "eu";
+                b.shard_tip_records.push_back(r);
+                Block leaf;
+                leaf.index = index - 1;
+                leaf.prev_hash.fill(0x12);
+                leaf.timestamp = 1000;
+                leaf.creators = {"s1"};
+                leaf.eligible_count  = 5;
+                leaf.source_shard_id = 1;
+                leaf.cumulative_rand.fill(0xC2);
+                b.shard_tip_witnesses.push_back(leaf);
+            }
+            return b;
+        };
+
+        // A ContribMsg with every field set, including all four view lists.
+        auto make_rich_contrib = []() {
+            node::ContribMsg c;
+            c.block_index = 42;
+            c.signer      = "node-1.tld";
+            c.prev_hash.fill(0x10);
+            c.aborts_gen  = 3;
+            c.tx_hashes.resize(2);
+            c.tx_hashes[0].fill(0x21); c.tx_hashes[1].fill(0x22);
+            c.dh_input.fill(0x30);
+            c.view_eq_root.fill(0x41);
+            c.view_abort_root.fill(0x42);
+            c.view_inbound_root.fill(0x43);
+            c.view_eq_list.resize(1);      c.view_eq_list[0].fill(0x51);
+            c.view_abort_list.resize(2);   c.view_abort_list[0].fill(0x52);
+                                           c.view_abort_list[1].fill(0x53);
+            c.view_inbound_list.resize(1); c.view_inbound_list[0].fill(0x54);
+            c.proposer_time = 1700000000;
+            c.view_shardtip_root.fill(0x61);
+            c.view_shardtip_list.resize(1); c.view_shardtip_list[0].fill(0x62);
+            c.ed_sig.fill(0x7F);
+            return c;
+        };
+
+        auto body_of = [](const Message& m) { return encode_binary(m); };
+
+        // ── PF-1. THE THEOREM: the decoded payload IS the builder's DOM.
+        //    Deleting any field write/read, or any DOM key, reddens this.
+        {
+            auto rt = [&](const Message& m, const char* label) {
+                auto bytes = body_of(m);
+                bool ok = false;
+                try {
+                    Message back = decode_binary(bytes.data(), bytes.size());
+                    ok = (back.type == m.type && back.payload == m.payload);
+                } catch (const std::exception& e) {
+                    std::cout << "    threw: [" << e.what() << "]\n";
+                }
+                check(ok, label);
+            };
+            Block deep = make_rich_block(42, /*deep=*/true);
+            Block leaf = make_rich_block(41, /*deep=*/false);
+            rt(make_block(deep),
+               "PF-1 BLOCK: decode(encode(payload)) == the builder DOM "
+               "(every Block section, incl. records + a witness)");
+            rt(make_beacon_header(deep),
+               "PF-1 BEACON_HEADER: decode(encode(payload)) == the builder DOM "
+               "(a FOLDED beacon block, witnesses and all)");
+            rt(make_shard_tip(ShardId{7}, leaf),
+               "PF-1 SHARD_TIP: decode(encode(payload)) == the builder DOM "
+               "({shard_id, tip})");
+            rt(make_cross_shard_receipt_bundle(ShardId{3}, deep),
+               "PF-1 CROSS_SHARD_RECEIPT_BUNDLE: decode(encode(payload)) == "
+               "the builder DOM ({src_shard, src_block})");
+            // CHAIN_RESPONSE has no builder — Node::on_get_chain assembles
+            // {"blocks", "has_more"} inline. Mirror that shape exactly.
+            rt(Message{MsgType::CHAIN_RESPONSE,
+                       {{"blocks", json::array({deep.to_json(), leaf.to_json()})},
+                        {"has_more", true}}},
+               "PF-1 CHAIN_RESPONSE: decode(encode(payload)) == the "
+               "on_get_chain DOM (multi-block list + has_more)");
+            rt(make_contrib(make_rich_contrib()),
+               "PF-1 CONTRIB: decode(encode(payload)) == the builder DOM "
+               "(all four view lists + proposer_time)");
+            // An EMPTY chain response is the "peer has nothing more" reply —
+            // a real and load-bearing shape (it drives start_sync_if_behind).
+            rt(Message{MsgType::CHAIN_RESPONSE,
+                       {{"blocks", json::array()}, {"has_more", false}}},
+               "PF-1 CHAIN_RESPONSE: the EMPTY 'nothing more' reply "
+               "round-trips (blocks=[], has_more=false)");
+        }
+
+        // ── PF-2. Canonical fixed point: re-encoding a decoded frame is
+        //    byte-identical. One encoding per value — the whole point of D2,
+        //    and what makes the CROSS_SHARD_RECEIPT_BUNDLE relay path
+        //    (on_cross_shard_receipt_bundle re-broadcasts the decoded
+        //    Message) reproduce the inbound bytes exactly.
+        {
+            Block deep = make_rich_block(42, true);
+            Block leaf = make_rich_block(41, false);
+            auto fp = [&](const Message& m, const char* label) {
+                auto bytes = body_of(m);
+                bool ok = false;
+                try {
+                    Message back = decode_binary(bytes.data(), bytes.size());
+                    ok = (encode_binary(back) == bytes);
+                } catch (const std::exception&) { ok = false; }
+                check(ok, label);
+            };
+            fp(make_block(deep),          "PF-2 BLOCK: encode(decode(x)) == x byte-for-byte");
+            fp(make_beacon_header(deep),  "PF-2 BEACON_HEADER: encode(decode(x)) == x");
+            fp(make_shard_tip(ShardId{7}, leaf),
+                                          "PF-2 SHARD_TIP: encode(decode(x)) == x");
+            fp(make_cross_shard_receipt_bundle(ShardId{3}, deep),
+                                          "PF-2 CROSS_SHARD_RECEIPT_BUNDLE: encode(decode(x)) == x "
+                                          "(the beacon RELAY re-broadcast is byte-identical)");
+            fp(Message{MsgType::CHAIN_RESPONSE,
+                       {{"blocks", json::array({deep.to_json()})}, {"has_more", false}}},
+                                          "PF-2 CHAIN_RESPONSE: encode(decode(x)) == x");
+            fp(make_contrib(make_rich_contrib()),
+                                          "PF-2 CONTRIB: encode(decode(x)) == x");
+        }
+
+        // ── PF-3. GATE MIRROR. ContribMsg::to_json elides three blocks of
+        //    keys under VALUE-derived gates. The frame is always-present, so
+        //    the decoder MUST rebuild the DOM through to_json() (the one site
+        //    that owns those gates) rather than emitting the keys itself —
+        //    otherwise a default contrib grows nine keys no producer emits and
+        //    the two containers disagree on the same message.
+        {
+            node::ContribMsg c;                       // all-default
+            c.block_index = 1; c.signer = "n1";
+            auto bytes = body_of(make_contrib(c));
+            Message back = decode_binary(bytes.data(), bytes.size());
+            const char* gated[] = {
+                "view_eq_root", "view_abort_root", "view_inbound_root",
+                "view_eq_list", "view_abort_list", "view_inbound_list",
+                "proposer_time", "view_shardtip_root", "view_shardtip_list"};
+            bool none = true;
+            for (auto* k : gated) if (back.payload.contains(k)) { none = false; break; }
+            check(none,
+                  "PF-3a a DEFAULT CONTRIB round-trips WITHOUT resurrecting any "
+                  "of the nine gated keys (always-present must not leak a value)");
+
+            // ...and the gate is VALUE-derived, not presence-derived: a
+            // non-empty view LIST under all-ZERO roots still emits the whole
+            // six-key bundle in BOTH containers. (This is where CONTRIB
+            // differs from the Block frame, whose equivalent gate DISCARDS
+            // the list — BF-10.)
+            node::ContribMsg v;
+            v.block_index = 1; v.signer = "n1";
+            v.view_eq_list.resize(1); v.view_eq_list[0].fill(0x77);
+            auto vb = body_of(make_contrib(v));
+            Message vback = decode_binary(vb.data(), vb.size());
+            bool six = true;
+            for (const char* k : {"view_eq_root", "view_abort_root",
+                                  "view_inbound_root", "view_eq_list",
+                                  "view_abort_list", "view_inbound_list"})
+                if (!vback.payload.contains(k)) six = false;
+            check(six && vback.payload == v.to_json(),
+                  "PF-3b a non-empty view LIST under all-zero roots keeps the "
+                  "six-key bundle in BOTH containers (the gate is value-derived)");
+
+            // The Block frame's OPPOSITE mirror, observed through the wire:
+            // to_json DISCARDS a view list under all-zero roots, so the BLOCK
+            // payload must not carry it either.
+            Block b;
+            b.creators = {"n1"};
+            b.creator_view_eq_lists = {{Hash{}}};
+            b.creator_view_eq_lists[0][0].fill(0x77);
+            auto bb = body_of(make_block(b));
+            Message bback = decode_binary(bb.data(), bb.size());
+            check(!bback.payload.contains("creator_view_eq_lists")
+                      && bback.payload == b.to_json(),
+                  "PF-3c BLOCK: a view list under all-zero roots is dropped on "
+                  "the wire exactly as to_json drops it (BF-10 through the "
+                  "envelope — the frame must not preserve data the JSON path "
+                  "discards, or a relayer could trigger a rejection)");
+        }
+
+        // ── PF-4. ★ HOSTILE BYTES. These decoders sit on the PRE-AUTH wire,
+        //    so "well-formed input round-trips" is not the property that
+        //    matters — "arbitrary attacker bytes cannot steer it into
+        //    undefined behaviour" is. Corrupts counts and length prefixes IN
+        //    PLACE (what desynchronises a parse and walks a decoder off its
+        //    buffer), then throws pure garbage at every type.
+        //
+        //    Contract: EVERY input either decodes or throws std::exception.
+        //    A crash, a hang or an out-of-bounds read kills the run — reaching
+        //    the end of the sweep IS the assertion.
+        {
+            Block leaf = make_rich_block(41, false);
+            node::ContribMsg c = make_rich_contrib();
+            std::vector<Message> corpus = {
+                make_block(leaf),
+                make_beacon_header(leaf),
+                make_shard_tip(ShardId{7}, leaf),
+                make_cross_shard_receipt_bundle(ShardId{3}, leaf),
+                Message{MsgType::CHAIN_RESPONSE,
+                        {{"blocks", json::array({leaf.to_json()})},
+                         {"has_more", false}}},
+                make_contrib(c),
+            };
+            uint64_t rng = 0x9E3779B97F4A7C15ull;      // fixed seed: reproducible
+            auto next = [&]() {
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                return rng;
+            };
+            size_t decoded = 0, threw = 0;
+            auto attempt = [&](const std::vector<uint8_t>& v) {
+                try { (void)decode_binary(v.data(), v.size()); ++decoded; }
+                catch (const std::exception&) { ++threw; }
+            };
+            for (auto& m : corpus) {
+                std::vector<uint8_t> valid = body_of(m);
+                // (a) every single-byte corruption — hits every count field
+                //     and every length prefix.
+                for (size_t i = 4; i < valid.size(); ++i) {
+                    for (uint8_t delta : {uint8_t{0x01}, uint8_t{0xFF}}) {
+                        std::vector<uint8_t> v = valid;
+                        v[i] = static_cast<uint8_t>(v[i] ^ delta);
+                        attempt(v);
+                    }
+                }
+                // (b) 0xFFFF stamps over the header region, where a lied count
+                //     is most likely to desync the parse.
+                for (size_t i = 4; i + 1 < std::min<size_t>(valid.size(), 200); ++i) {
+                    std::vector<uint8_t> v = valid;
+                    v[i] = 0xFF; v[i + 1] = 0xFF;
+                    attempt(v);
+                }
+                // (c) valid frame + adversarial tail (exact consumption under
+                //     a hostile suffix).
+                for (int t = 0; t < 100; ++t) {
+                    std::vector<uint8_t> v = valid;
+                    size_t n = static_cast<size_t>(next() % 48) + 1;
+                    for (size_t k = 0; k < n; ++k)
+                        v.push_back(static_cast<uint8_t>(next() & 0xFF));
+                    attempt(v);
+                }
+                // (d) pure garbage bodies under this type's envelope header.
+                for (int t = 0; t < 400; ++t) {
+                    std::vector<uint8_t> v(valid.begin(), valid.begin() + 4);
+                    size_t n = static_cast<size_t>(next() % 400);
+                    for (size_t k = 0; k < n; ++k)
+                        v.push_back(static_cast<uint8_t>(next() & 0xFF));
+                    attempt(v);
+                }
+            }
+            checks(decoded + threw > 5000,
+                   "PF-4a hostile-input sweep ran across all six payload frames (" +
+                   std::to_string(decoded) + " decoded, " + std::to_string(threw) +
+                   " rejected, " + std::to_string(decoded + threw) + " total)");
+            check(true,
+                  "PF-4b ★ every hostile input either decoded or threw a "
+                  "std::exception — none crashed, hung, or read out of bounds");
+        }
+
+        // ── PF-5. COUNT-LIE. A declared count must be proven against the
+        //    bytes that remain BEFORE any reserve or loop (the WIRE-1 lesson:
+        //    a cap that runs after the work is not a cap). Each arm is paired
+        //    with the control frame it was built from, so it cannot pass
+        //    vacuously on a builder change.
+        {
+            auto expect_reject = [&](const std::vector<uint8_t>& body,
+                                     const char* needle, const char* label) {
+                bool hit = false;
+                try { (void)decode_binary(body.data(), body.size()); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find(needle) != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit, label);
+            };
+            // CHAIN_RESPONSE: [has_more u8][count u16] then N x (u32 + frame).
+            {
+                std::vector<uint8_t> ok = body_of(
+                    Message{MsgType::CHAIN_RESPONSE,
+                            {{"blocks", json::array()}, {"has_more", false}}});
+                bool decodes = true;
+                try { (void)decode_binary(ok.data(), ok.size()); }
+                catch (const std::exception&) { decodes = false; }
+                check(decodes, "PF-5 control: an empty CHAIN_RESPONSE frame decodes");
+                std::vector<uint8_t> evil = ok;
+                evil[5] = 0xFF; evil[6] = 0xFF;              // count = 65535
+                evil.insert(evil.end(), 10, 0x00);           // 10 bytes of body
+                expect_reject(evil, "declares 65535 elements but only",
+                      "PF-5 CHAIN_RESPONSE: a count of 65535 backed by 10 bytes "
+                      "is REJECTED before any reserve");
+            }
+            // CONTRIB: tx_hashes is the first unbounded list in the frame.
+            {
+                node::ContribMsg c;
+                c.block_index = 1; c.signer = "n1";
+                std::vector<uint8_t> ok = body_of(make_contrib(c));
+                bool decodes = true;
+                try { (void)decode_binary(ok.data(), ok.size()); }
+                catch (const std::exception&) { decodes = false; }
+                check(decodes, "PF-5 control: a minimal CONTRIB frame decodes");
+                // header(4) + block_index(8) + lp_str("n1" = 1+2) + prev(32)
+                // + aborts_gen(8) = offset 55 is the tx_hashes count.
+                std::vector<uint8_t> evil(ok.begin(), ok.begin() + 55);
+                evil.push_back(0xFF); evil.push_back(0xFF);
+                evil.insert(evil.end(), 10, 0x00);
+                expect_reject(evil, "declares 65535 elements but only",
+                      "PF-5 CONTRIB: a tx_hashes count of 65535 backed by 10 "
+                      "bytes is REJECTED before any reserve");
+            }
+            // CHAIN_RESPONSE's has_more is a BOOL: exactly two encodings.
+            {
+                std::vector<uint8_t> ok = body_of(
+                    Message{MsgType::CHAIN_RESPONSE,
+                            {{"blocks", json::array()}, {"has_more", true}}});
+                bool decodes = true;
+                try { (void)decode_binary(ok.data(), ok.size()); }
+                catch (const std::exception&) { decodes = false; }
+                check(decodes, "PF-5 control: has_more = 1 decodes");
+                std::vector<uint8_t> evil = ok;
+                evil[4] = 0x02;
+                expect_reject(evil, "has_more must be 0 or 1",
+                      "PF-5 CHAIN_RESPONSE: has_more = 2 is REJECTED (a bool has "
+                      "exactly two canonical encodings)");
+            }
+        }
+
+        // ── PF-6. ★ SHARD_TIP POISON-WITNESS. The one deliberate accept-rule
+        //    change in this increment, and the reason it is safe.
+        //
+        //    Only BEACON producers fold shard_tip_records and attach
+        //    shard_tip_witnesses, so a legitimate SHARD_TIP tip is always a
+        //    LEAF. A tip carrying either would ride into the beacon's witness
+        //    buffer and make the folded beacon block unparseable fleet-wide —
+        //    a beacon-liveness attack. Node::on_shard_tip guard 4b already
+        //    rejects exactly that shape; decoding the tip with
+        //    allow_witnesses=false is therefore strictly accept-NARROWING to a
+        //    set that was already rejected, moved to the pre-auth decode
+        //    boundary so the multi-MB depth-2 parse never happens.
+        //
+        //    The falsify target is the MAP itself: flip SHARD_TIP to
+        //    allow_witnesses=true and the two reject legs go RED, while the
+        //    BEACON_HEADER positive control below stays GREEN — proving this
+        //    is a per-type map and not a blanket reject.
+        {
+            Block leaf = make_rich_block(41, false);
+            Block deep = make_rich_block(42, true);      // records + a witness
+
+            // Hand-assemble [envelope][shard_id u32][Block frame], bypassing
+            // the encoder (which mirrors, and would happily emit this).
+            auto shard_tip_bytes = [&](const Block& tip) {
+                std::vector<uint8_t> f{0xB1, 0x01,
+                    static_cast<uint8_t>(MsgType::SHARD_TIP), 0x00,
+                    0x07, 0x00, 0x00, 0x00};             // shard_id = 7
+                std::vector<uint8_t> bf;
+                tip.encode_frame(bf);
+                f.insert(f.end(), bf.begin(), bf.end());
+                return f;
+            };
+            auto expect_reject = [&](const std::vector<uint8_t>& body,
+                                     const char* needle, const char* label) {
+                bool hit = false;
+                try { (void)decode_binary(body.data(), body.size()); }
+                catch (const std::exception& e) {
+                    hit = std::string(e.what()).find(needle) != std::string::npos;
+                    if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+                }
+                check(hit, label);
+            };
+
+            // Control first: a LEAF tip decodes (so the rejects below are not
+            // "SHARD_TIP rejects everything").
+            {
+                auto ok = shard_tip_bytes(leaf);
+                bool decodes = false;
+                try {
+                    Message m = decode_binary(ok.data(), ok.size());
+                    decodes = (m.type == MsgType::SHARD_TIP
+                               && m.payload["shard_id"] == 7);
+                } catch (const std::exception&) { decodes = false; }
+                check(decodes,
+                      "PF-6 control: a LEAF tip inside SHARD_TIP DECODES "
+                      "(shard_id recovered)");
+            }
+            {
+                Block poisoned = leaf;
+                Block w; w.index = 40;
+                poisoned.shard_tip_witnesses.push_back(w);
+                expect_reject(shard_tip_bytes(poisoned),
+                              "must be a leaf block",
+                      "PF-6a SHARD_TIP: a tip carrying a WITNESS is REJECTED at "
+                      "the decode boundary (POISON-WITNESS fail-closed pre-auth)");
+            }
+            {
+                Block poisoned = leaf;
+                ShardTipRecord r;
+                r.source_shard_id = 1; r.height = 40; r.eligible_count = 5;
+                r.committee_sig_root.fill(0x4C); r.region = "eu";
+                poisoned.shard_tip_records.push_back(r);
+                expect_reject(shard_tip_bytes(poisoned),
+                              "must carry empty shard_tip_records",
+                      "PF-6b SHARD_TIP: a tip carrying folded RECORDS is "
+                      "REJECTED at the decode boundary");
+            }
+            // ★ The positive control that makes PF-6 a MAP and not a blanket
+            //   reject: the SAME non-leaf block travels fine as a
+            //   BEACON_HEADER, which is the channel folded beacon blocks use.
+            {
+                auto bytes = body_of(make_beacon_header(deep));
+                bool decodes = false;
+                try {
+                    Message m = decode_binary(bytes.data(), bytes.size());
+                    decodes = (m.payload == deep.to_json());
+                } catch (const std::exception&) { decodes = false; }
+                check(decodes,
+                      "PF-6c ★ the SAME records+witness block DECODES as a "
+                      "BEACON_HEADER — allow_witnesses is a per-type MAP, not a "
+                      "blanket reject (flipping SHARD_TIP to true reddens PF-6a/b "
+                      "while this stays green)");
+            }
+            // The same shape inside CHAIN_RESPONSE / BLOCK is likewise legal —
+            // those channels sync the beacon's OWN chain.
+            {
+                auto bytes = body_of(
+                    Message{MsgType::CHAIN_RESPONSE,
+                            {{"blocks", json::array({deep.to_json()})},
+                             {"has_more", false}}});
+                bool decodes = false;
+                try { (void)decode_binary(bytes.data(), bytes.size()); decodes = true; }
+                catch (const std::exception&) { decodes = false; }
+                check(decodes,
+                      "PF-6d a folded beacon block inside CHAIN_RESPONSE decodes "
+                      "(chain sync must carry the beacon's own blocks)");
+            }
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": wire-payload-frames "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     // S-035 Option 1 seed: in-process unit test for Chain's append +
     // head + at + head_hash invariants. Chain::append is the
     // public mutation entry point — every block transitions through
@@ -28693,7 +29483,7 @@ int main(int argc, char** argv) {
                     std::chrono::steady_clock::now().time_since_epoch().count())));
             std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
             const std::string cpath = (dir / "chain.json").string();
-            live.save(cpath); live.save_incremental(cpath);
+            live.save_incremental(cpath);
 
             // Correct-K reload: replay re-folds with the floor active, reproduces
             // the lifted committee + root, and block 8's S-033 gate accepts.
@@ -41736,17 +42526,22 @@ int main(int argc, char** argv) {
 
         // === (1) DANGER PROOF: the pre-fix ordering (tail rewrite BEFORE the
         //     manifest) bricks the store. Reconstruct that exact crash window by
-        //     hand — manifest still {h3, head=O} while <2>.json has been rewritten
+        //     hand — manifest still {h3, head=O} while <2>.blk has been rewritten
         //     to the winner — and assert load() fails closed on head_hash mismatch. ===
         {
             auto dir = fresh_dir("danger");
             const std::string path = (dir / "chain.json").string();
             Hash reverted, floor, winner;
             Chain c = build_reorged(path, reverted, floor, winner);
-            const fs::path tail = fs::path(path + ".blocks") / "2.json";
+            const fs::path tail = fs::path(path + ".blocks") / "2.blk";
             {
+                // D2 inc8: the store record is ['D','B','K','1'] + a Block frame.
+                std::vector<uint8_t> fr;
+                c.head().encode_frame(fr);          // c.head() == winner W
                 std::ofstream f(tail, std::ios::binary | std::ios::trunc);
-                f << c.head().to_json().dump(2);   // c.head() == winner W
+                f.write("DBK1", 4);
+                f.write(reinterpret_cast<const char*>(fr.data()),
+                        static_cast<std::streamsize>(fr.size()));
             }
             bool threw = false; std::string what;
             try { Chain::load(path); }
@@ -41760,11 +42555,11 @@ int main(int argc, char** argv) {
 
         // === (2) FIX PROOF: drive the REAL save_incremental after a reorg and
         //     crash it at each atomic file boundary. Post-fix write order is:
-        //       #0 shrink-manifest{h2}  #1 tail <2>.json=W  #2 final manifest{h3,W}
+        //       #0 shrink-manifest{h2}  #1 tail <2>.blk=W  #2 final manifest{h3,W}
         //     Every resulting on-disk state must load a CONSISTENT chain:
         //       crash@0 -> OLD @ h3 (nothing written yet)
-        //       crash@1 -> floor @ h2 (manifest shrunk; stale <2>.json=O ignored)
-        //       crash@2 -> floor @ h2 (manifest still h2; stale <2>.json=W ignored)
+        //       crash@1 -> floor @ h2 (manifest shrunk; stale <2>.blk=O ignored)
+        //       crash@2 -> floor @ h2 (manifest still h2; stale <2>.blk=W ignored)
         //     Never a head_hash-mismatch brick. ===
         struct CrashCase { int after; uint64_t exp_h; int exp_head; const char* desc; };
         // exp_head: 0 = OLD (reverted), 1 = floor (H-1), 2 = winner
@@ -46557,23 +47352,622 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // S-035 Option 1: Chain::save + Chain::load file-persistence
-    // round-trip. The chain.json on-disk format is what every node
-    // restarts from (snapshot-bootstrap is the alternative for new
-    // joiners; existing nodes load + replay chain.json). This test
-    // pins:
-    //   - save writes a non-empty file
-    //   - load(path) reconstructs a Chain whose state matches the
-    //     saved one byte-for-byte (state_root, height, head_hash,
-    //     accounts, stakes, registry, A1 counters, genesis-pinned
-    //     constants when passed through the load() params)
-    //   - Atomic-write semantics: save→load→save→load idempotent
-    //     across multiple cycles
-    //   - load() with non-existent path produces an empty Chain
-    //     (defensive — a fresh node has no chain.json yet)
+    // D2 inc8 — the canonical binary GenesisConfig container (DGC1).
+    //
+    // The genesis config FILE is at-rest storage, so it is binary-only:
+    // GenesisConfig::load/save go through encode/decode, and to_json/from_json
+    // survive purely as the CLI text view + the build-time authoring shape.
+    //
+    // THE LOAD-BEARING THEOREM is GB-3, hash neutrality:
+    //     compute_genesis_hash(decode(encode(c))) == compute_genesis_hash(c)
+    // The genesis hash is value-derived (a SHA256Builder over parsed FIELDS,
+    // never over the file bytes), so swapping the container cannot move a
+    // chain's identity. GB-3 is what makes the swap safe under the
+    // no-migrations constraint — every already-pinned genesis_hash still
+    // matches after the file format changes.
+    //
+    // GB-6 is the other falsifier: decode() must run the SAME validate() that
+    // from_json runs. Dropping that call (or the canonical-form checks) would
+    // let a binary genesis carry states the JSON path rejects — two loaders,
+    // two rule sets, silent divergence.
+    if (cmd == "test-genesis-binary-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // A config exercising EVERY encoded field: governed governance with
+        // keyholders, BEACON role with a shard→region map, CT disabled, FIPS
+        // profile, a custom genesis message, creators with regions, balances,
+        // a non-zero shard salt, and every scalar off its default.
+        auto make_full = []() {
+            GenesisConfig c;
+            c.chain_id                   = "genesis-binary-codec";
+            c.genesis_message            = "custom inscription — D2 inc8";
+            c.m_creators                 = 5;
+            c.k_block_sigs               = 3;
+            c.block_subsidy              = 4242;
+            c.subsidy_pool_initial       = 999999;
+            c.subsidy_mode               = 1;              // LOTTERY
+            c.lottery_jackpot_multiplier = 7;
+            c.zeroth_pool_initial        = 31337;
+            c.bft_enabled                = false;
+            c.bft_escalation_threshold   = 4;
+            c.inclusion_model            = InclusionModel::DOMAIN_INCLUSION;
+            c.min_stake                  = 0;
+            c.confidential_tx_enabled    = false;
+            c.crypto_profile             = CryptoProfile::FIPS;
+            c.suspension_slash           = 77;
+            c.unstake_delay              = 4321;
+            c.merge_threshold_blocks     = 111;
+            c.revert_threshold_blocks    = 222;
+            c.merge_grace_blocks         = 33;
+            c.chain_role                 = ChainRole::BEACON;
+            c.shard_id                   = 0;
+            c.initial_shard_count        = 3;
+            c.epoch_blocks               = 64;
+            for (size_t i = 0; i < c.shard_address_salt.size(); ++i)
+                c.shard_address_salt[i] = uint8_t(0xA0 + i);
+            c.committee_region           = "us-east";
+            c.governance_mode            = 1;              // governed
+            PubKey k1{}, k2{};
+            for (size_t i = 0; i < k1.size(); ++i) { k1[i] = uint8_t(i); k2[i] = uint8_t(0x80 + i); }
+            c.param_keyholders           = {k1, k2};
+            c.param_threshold            = 2;
+            GenesisCreator gc1, gc2;
+            gc1.domain = "alice"; gc1.initial_stake = 500; gc1.region = "us-east";
+            gc2.domain = "bob";   gc2.initial_stake = 900; gc2.region = "eu-west";
+            for (size_t i = 0; i < gc1.ed_pub.size(); ++i) {
+                gc1.ed_pub[i] = uint8_t(0x10 + i);
+                gc2.ed_pub[i] = uint8_t(0x40 + i);
+            }
+            c.initial_creators = {gc1, gc2};
+            GenesisAllocation a1, a2;
+            a1.domain = "alice"; a1.balance = 1000;
+            a2.domain = "treasury"; a2.balance = 5000000;
+            c.initial_balances = {a1, a2};
+            c.shard_regions = {{0, "us-east"}, {1, "eu-west"}, {2, "ap-south"}};
+            return c;
+        };
+
+        const GenesisConfig full = make_full();
+
+        // GB-1. Information equivalence with the JSON container: for a config
+        //       that survives both, decode(encode(c)) carries exactly what
+        //       from_json(to_json(c)) carries. Compared through to_json so the
+        //       comparison covers every serialized field at once.
+        {
+            std::vector<uint8_t> bytes = full.encode();
+            GenesisConfig via_bin  = GenesisConfig::decode(bytes.data(), bytes.size());
+            GenesisConfig via_json = GenesisConfig::from_json(full.to_json());
+            check(via_bin.to_json() == via_json.to_json(),
+                  "GB-1 information equivalence: decode(encode(c)) carries exactly "
+                  "what from_json(to_json(c)) carries (all fields)");
+            check(via_bin.initial_creators.size() == 2
+                  && via_bin.initial_balances.size() == 2
+                  && via_bin.param_keyholders.size() == 2
+                  && via_bin.shard_regions.size() == 3
+                  && via_bin.crypto_profile == CryptoProfile::FIPS
+                  && via_bin.confidential_tx_enabled == false
+                  && via_bin.bft_enabled == false
+                  && via_bin.inclusion_model == InclusionModel::DOMAIN_INCLUSION
+                  && via_bin.shard_address_salt == full.shard_address_salt
+                  && via_bin.genesis_message == full.genesis_message,
+                  "GB-1 spot-check: every container-only field survives the "
+                  "binary round trip");
+        }
+
+        // GB-2. encode(decode(x)) == x byte-for-byte — ONE canonical encoding
+        //       per value, which is the whole point of D2.
+        {
+            std::vector<uint8_t> x = full.encode();
+            std::vector<uint8_t> y = GenesisConfig::decode(x.data(), x.size()).encode();
+            check(x == y && x.size() > 64,
+                  "GB-2 canonical: encode(decode(x)) == x byte-for-byte");
+            check(x.size() >= 4 && x[0]=='D' && x[1]=='G' && x[2]=='C' && x[3]=='1',
+                  "GB-2 canonical: the frame carries the DGC1 magic");
+        }
+
+        // GB-3. HASH NEUTRALITY — the theorem the container swap rests on.
+        {
+            std::vector<uint8_t> bytes = full.encode();
+            GenesisConfig back = GenesisConfig::decode(bytes.data(), bytes.size());
+            check(compute_genesis_hash(back) == compute_genesis_hash(full),
+                  "GB-3 hash neutrality: compute_genesis_hash(decode(encode(c))) "
+                  "== compute_genesis_hash(c) — the container swap cannot move a "
+                  "chain's identity");
+            check(make_genesis_block(back).compute_hash()
+                      == make_genesis_block(full).compute_hash(),
+                  "GB-3 hash neutrality: the derived genesis BLOCK hash is "
+                  "identical too");
+            // And a MINIMAL (all-default) config, which is what nearly every
+            // deployed genesis actually is.
+            GenesisConfig min_cfg;
+            min_cfg.chain_id = "minimal";
+            std::vector<uint8_t> mb = min_cfg.encode();
+            check(compute_genesis_hash(GenesisConfig::decode(mb.data(), mb.size()))
+                      == compute_genesis_hash(min_cfg),
+                  "GB-3 hash neutrality holds for an all-default config too");
+        }
+
+        // GB-4. Exactness BOTH directions: every proper prefix rejected, and
+        //       one trailing byte rejected.
+        {
+            std::vector<uint8_t> x = full.encode();
+            bool all_prefixes_rejected = true;
+            for (size_t n = 0; n < x.size(); ++n) {
+                bool rejected = false;
+                try { (void)GenesisConfig::decode(x.data(), n); }
+                catch (const std::exception&) { rejected = true; }
+                if (!rejected) { all_prefixes_rejected = false; break; }
+            }
+            check(all_prefixes_rejected,
+                  "GB-4 exactness: EVERY proper prefix of a valid frame is rejected");
+            std::vector<uint8_t> plus = x;
+            plus.push_back(0x00);
+            bool tail_rejected = false;
+            std::string what;
+            try { (void)GenesisConfig::decode(plus.data(), plus.size()); }
+            catch (const std::exception& e) { tail_rejected = true; what = e.what(); }
+            check(tail_rejected && what.find("trailing") != std::string::npos,
+                  "GB-4 exactness: one trailing byte is rejected with a "
+                  "'trailing byte(s)' diagnostic");
+        }
+
+        // GB-5. HOSTILE BYTES (BF-12 contract). Every single-byte corruption of
+        //       a valid frame, twice over (^0x01 and ^0xFF). Contract: each
+        //       input either decodes or throws std::exception — never UB, never
+        //       a crash, never a hang. REACHING THE END OF THE SWEEP IS THE
+        //       ASSERTION: an out-of-bounds read on a desynchronised length
+        //       prefix kills the run rather than failing an assert. A flip that
+        //       lands in a VALUE field legitimately decodes to a different
+        //       config — the frame is data, not an authenticated container; the
+        //       genesis_hash pin is what binds identity, and GB-3 proves the
+        //       container cannot move it. Whether re-encoding those survivors
+        //       is canonical is checked too: encode(decode(t)) must equal t, so
+        //       no corrupted input has a SECOND encoding.
+        {
+            std::vector<uint8_t> x = full.encode();
+            size_t threw = 0, decoded = 0;
+            bool noncanonical_survivor = false;
+            for (size_t i = 0; i < x.size(); ++i) {
+                for (uint8_t mask : {uint8_t(0x01), uint8_t(0xFF)}) {
+                    std::vector<uint8_t> t = x;
+                    t[i] = uint8_t(t[i] ^ mask);
+                    if (t == x) continue;
+                    try {
+                        GenesisConfig g = GenesisConfig::decode(t.data(), t.size());
+                        ++decoded;
+                        if (g.encode() != t) noncanonical_survivor = true;
+                    } catch (const std::exception&) { ++threw; }
+                }
+            }
+            check(threw + decoded > 0,
+                  "GB-5 hostile bytes: the single-byte corruption sweep completed "
+                  "with no crash, hang, or out-of-bounds read");
+            check(threw > 0,
+                  "GB-5 hostile bytes: a substantial share of corruptions is "
+                  "REJECTED (structural bytes are not silently tolerated)");
+            check(!noncanonical_survivor,
+                  "GB-5 hostile bytes: every corruption that DOES decode is still "
+                  "canonical — encode(decode(t)) == t, so no input has two encodings");
+        }
+
+        // GB-6. VALIDATION PARITY — decode() runs the SAME validate() as
+        //       from_json, plus the canonical-form checks the binary container
+        //       owns. Each leg mutates ONE thing on an otherwise-valid config
+        //       and re-encodes, so only the named rule can be responsible.
+        {
+            auto rejects = [&](GenesisConfig c, const char* msg,
+                                bool skip_validate_on_encode = false) {
+                (void)skip_validate_on_encode;
+                bool rejected = false;
+                try {
+                    std::vector<uint8_t> b = c.encode();
+                    (void)GenesisConfig::decode(b.data(), b.size());
+                } catch (const std::exception&) { rejected = true; }
+                check(rejected, msg);
+            };
+            { GenesisConfig c = full; c.param_keyholders.clear(); c.param_threshold = 0;
+              // governed + zero keyholders
+              rejects(c, "GB-6 validate: governed with NO param_keyholders rejected"); }
+            { GenesisConfig c = full; c.lottery_jackpot_multiplier = 1;
+              rejects(c, "GB-6 validate: LOTTERY with multiplier < 2 rejected (E3)"); }
+            { GenesisConfig c = full; c.subsidy_mode = 0;
+              c.block_subsidy = 1000000000000000001ull;
+              c.lottery_jackpot_multiplier = 0;
+              rejects(c, "GB-6 validate: block_subsidy > 1e18 rejected (S-007 bounds)"); }
+            { GenesisConfig c = full; c.committee_region = std::string(33, 'a');
+              rejects(c, "GB-6 validate: committee_region > 32 bytes rejected"); }
+            { GenesisConfig c = full; c.committee_region = "US-EAST";
+              rejects(c, "GB-6 canonical: a NON-NORMALIZED (uppercase) region is "
+                         "rejected rather than silently rewritten"); }
+            { GenesisConfig c = full; c.shard_regions = {{2, "ap-south"}, {0, "us-east"}, {1, "eu-west"}};
+              rejects(c, "GB-6 canonical: unsorted beacon_shard_regions rejected "
+                         "(strictly ascending shard_id)"); }
+            { GenesisConfig c = full; c.shard_regions = {{0, "us-east"}, {0, "eu-west"}};
+              rejects(c, "GB-6 canonical: duplicate beacon_shard_regions shard_id rejected"); }
+            { GenesisConfig c = full; c.chain_role = ChainRole::SINGLE;
+              rejects(c, "GB-6 validate: beacon_shard_regions on a non-BEACON chain rejected"); }
+            { GenesisConfig c = full; c.epoch_blocks = 1;
+              rejects(c, "GB-6 validate: beacon_shard_regions with epoch_blocks < 2 rejected"); }
+            { GenesisConfig c = full; c.initial_shard_count = 2;   // shard_id 2 now out of range
+              rejects(c, "GB-6 validate: shard_id >= initial_shard_count rejected"); }
+            // Non-0/1 boolean byte and a bad magic are container-level rules.
+            { std::vector<uint8_t> b = full.encode();
+              b[0] = 'X';
+              bool rejected = false; std::string what;
+              try { (void)GenesisConfig::decode(b.data(), b.size()); }
+              catch (const std::exception& e) { rejected = true; what = e.what(); }
+              check(rejected && what.find("magic") != std::string::npos,
+                    "GB-6 container: a bad magic is rejected with a magic diagnostic"); }
+        }
+
+        // GB-7. File round trip through save/load — the actual at-rest path.
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "determ-test-genesis-dgc1";
+            std::error_code ec; fs::remove_all(base, ec); fs::create_directories(base);
+            const std::string gpath = (base / "genesis.bin").string();
+            full.save(gpath);
+            GenesisConfig back = GenesisConfig::load(gpath);
+            std::ifstream f(gpath, std::ios::binary);
+            std::string on_disk((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+            check(on_disk.size() >= 4 && on_disk.compare(0, 4, "DGC1") == 0,
+                  "GB-7 at rest: save() writes the DGC1 binary container");
+            check(compute_genesis_hash(back) == compute_genesis_hash(full),
+                  "GB-7 at rest: load(save(c)) preserves the genesis hash");
+            // A text file at the genesis path is NOT accepted — binary only,
+            // no format sniffing on the at-rest load path.
+            { std::ofstream w(gpath, std::ios::trunc); w << full.to_json().dump(2); }
+            bool text_rejected = false;
+            try { (void)GenesisConfig::load(gpath); }
+            catch (const std::exception&) { text_rejected = true; }
+            check(text_rejected,
+                  "GB-7 binary-only: a JSON genesis file at the at-rest path is "
+                  "REJECTED (no text fallback on GenesisConfig::load)");
+            fs::remove_all(base, ec);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": genesis-binary-codec "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // D2 inc8 — the canonical binary snapshot container (DSN1).
+    //
+    // At-rest snapshots are binary: the node bootstrap read, `snapshot
+    // create/fetch/inspect/diff/stats`, and the snapshot_save RPC all go
+    // through Chain::encode_state / decode_state. serialize_state /
+    // restore_from_snapshot survive as the RPC text view and as the
+    // still-lp-JSON SNAPSHOT_RESPONSE wire payload until that wire inc lands —
+    // at which point it reuses THESE bytes, so DSN1 is the ONE snapshot layout.
+    //
+    // SB-5 is the falsifier that matters: decode_state must run the SAME
+    // post-load gates as restore_from_snapshot (head_hash claim, S-033
+    // state_root, opt-in A1 revalidate). A binary path that skipped them would
+    // adopt a tampered operator snapshot the JSON path rejects.
+    if (cmd == "test-snapshot-binary-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // A chain touching as many snapshot namespaces as a synthetic fixture
+        // can reach: accounts, stakes, registrants (with regions), abort
+        // records, merge state, shard-tip records, committee checkpoints,
+        // dapp registry, pending param changes, shielded pool, enote
+        // commitments, audit keys/log counts, note keys, applied receipts, A1
+        // counters, and tail headers.
+        auto build = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "snapshot-binary-codec";
+            GenesisCreator alice_c, bob_c;
+            alice_c.domain = "alice"; alice_c.initial_stake = 500; alice_c.region = "us-east";
+            bob_c.domain   = "bob";   bob_c.initial_stake   = 700; bob_c.region   = "eu-west";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]   = uint8_t(0x50 + i);
+            }
+            cfg.initial_creators = {alice_c, bob_c};
+            cfg.committee_region = "us-east";
+            GenesisAllocation a1, a2;
+            a1.domain = "alice"; a1.balance = 100000;
+            a2.domain = "bob";   a2.balance = 50000;
+            cfg.initial_balances = {a1, a2};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(11);
+            c.set_min_stake(250);
+            c.set_suspension_slash(19);
+            c.set_unstake_delay(777);
+            c.set_merge_threshold_blocks(101);
+            c.set_revert_threshold_blocks(202);
+            c.set_merge_grace_blocks(13);
+            c.set_epoch_blocks(8);
+            c.set_k_block_sigs(2);
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0xC0 + i);
+            c.set_shard_routing(4, salt, ShardId{1});
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1234; tx.fee = 3; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            // The tail header must carry a REAL state_root: the S-033 gate on
+            // the restore path is skipped for a zero root (pre-S-033 chains),
+            // and skipping it would silently defang SB-4/SB-5. Producers know
+            // the root only after apply, so mirror that: apply once to learn
+            // it, revert, then re-append the block committing to it.
+            c.append(b);
+            b.state_root = c.compute_state_root();
+            c.revert_head();
+            c.append(b);
+            return c;
+        };
+
+        const Chain fixture = build();
+
+        // SB-1. Equivalence with the JSON snapshot pair on the same chain:
+        //       decode_state(encode_state(c)) restores the same state_root,
+        //       expected_total, head, and per-container contents as
+        //       restore_from_snapshot(serialize_state(c)).
+        {
+            std::vector<uint8_t> bytes = fixture.encode_state(256);
+            Chain bin  = Chain::decode_state(bytes.data(), bytes.size());
+            Chain js   = Chain::restore_from_snapshot(fixture.serialize_state(256));
+            check(bin.compute_state_root() == js.compute_state_root(),
+                  "SB-1 equivalence: binary and JSON restores agree on state_root");
+            check(bin.head_hash() == js.head_hash() && bin.height() == js.height(),
+                  "SB-1 equivalence: binary and JSON restores agree on head + height");
+            check(bin.expected_total() == js.expected_total()
+                  && bin.live_total_supply() == js.live_total_supply(),
+                  "SB-1 equivalence: A1 counters and live supply agree");
+            bool accounts_agree = bin.accounts().size() == js.accounts().size();
+            for (auto& [d, a] : bin.accounts()) {
+                auto it = js.accounts().find(d);
+                if (it == js.accounts().end()
+                    || it->second.balance != a.balance
+                    || it->second.next_nonce != a.next_nonce) {
+                    accounts_agree = false; break;
+                }
+            }
+            check(accounts_agree
+                  && bin.stakes().size() == js.stakes().size()
+                  && bin.registrants().size() == js.registrants().size(),
+                  "SB-1 equivalence: accounts / stakes / registrants agree");
+            check(bin.compute_state_root() == fixture.compute_state_root(),
+                  "SB-1 equivalence: the restored state_root equals the SOURCE "
+                  "chain's (no field dropped in the container)");
+        }
+
+        // SB-2. Byte determinism + canonical form.
+        {
+            std::vector<uint8_t> x = fixture.encode_state(256);
+            std::vector<uint8_t> x2 = fixture.encode_state(256);
+            check(x == x2 && x.size() > 128,
+                  "SB-2 determinism: two encode_state calls are byte-identical");
+            std::vector<uint8_t> y =
+                Chain::decode_state(x.data(), x.size()).encode_state(256);
+            check(x == y,
+                  "SB-2 canonical: encode_state(decode_state(x)) == x byte-for-byte");
+            check(x.size() >= 8 && x[0]=='D' && x[1]=='S' && x[2]=='N' && x[3]=='1'
+                  && x[4] == 1 && x[5] == 0 && x[6] == 0 && x[7] == 0,
+                  "SB-2 canonical: the frame leads with the DSN1 magic + version u32 = 1");
+        }
+
+        // SB-3. Exactness both directions: every proper prefix rejected, one
+        //       trailing byte rejected.
+        {
+            std::vector<uint8_t> x = fixture.encode_state(256);
+            bool all_rejected = true;
+            for (size_t n = 0; n < x.size(); ++n) {
+                bool rejected = false;
+                try { (void)Chain::decode_state(x.data(), n); }
+                catch (const std::exception&) { rejected = true; }
+                if (!rejected) { all_rejected = false; break; }
+            }
+            check(all_rejected,
+                  "SB-3 exactness: EVERY proper prefix of a valid snapshot is rejected");
+            std::vector<uint8_t> plus = x; plus.push_back(0x00);
+            bool tail_rejected = false; std::string what;
+            try { (void)Chain::decode_state(plus.data(), plus.size()); }
+            catch (const std::exception& e) { tail_rejected = true; what = e.what(); }
+            check(tail_rejected && what.find("trailing") != std::string::npos,
+                  "SB-3 exactness: one trailing byte is rejected with a "
+                  "'trailing byte(s)' diagnostic");
+        }
+
+        // SB-4. HOSTILE BYTES: every single-byte corruption of a valid
+        //       snapshot either throws cleanly or decodes to an EQUAL state.
+        //       Reaching the end of the sweep IS the assertion (a crash, hang,
+        //       or out-of-bounds read kills the run).
+        {
+            std::vector<uint8_t> x = fixture.encode_state(256);
+            const Hash ref_root = fixture.compute_state_root();
+            size_t threw = 0, decoded = 0, divergent_root = 0;
+            for (size_t i = 0; i < x.size(); ++i) {
+                for (uint8_t mask : {uint8_t(0x01), uint8_t(0xFF)}) {
+                    std::vector<uint8_t> t = x;
+                    t[i] = uint8_t(t[i] ^ mask);
+                    if (t == x) continue;
+                    try {
+                        Chain g = Chain::decode_state(t.data(), t.size());
+                        ++decoded;
+                        if (g.compute_state_root() != ref_root) ++divergent_root;
+                    } catch (const std::exception&) { ++threw; }
+                }
+            }
+            check(threw + decoded > 0,
+                  "SB-4 hostile bytes: the single-byte corruption sweep completed "
+                  "with no crash, hang, or out-of-bounds read");
+            check(threw > 0,
+                  "SB-4 hostile bytes: a substantial share of corruptions is REJECTED");
+            check(divergent_root == 0,
+                  "SB-4 hostile bytes: no corruption that survives decode produces a "
+                  "state_root DIVERGENT from the head's commitment — the S-033 gate "
+                  "catches every state-covered flip");
+        }
+
+        // SB-5. GATES PRESERVED — the falsifier. Tamper ONE account balance in
+        //       the encoded bytes and fix nothing else: the loaded state no
+        //       longer hashes to the head's declared state_root (S-033), and
+        //       the supply identity no longer closes (A1). Deleting either
+        //       gate call on the binary path makes this leg go green-when-it-
+        //       must-be-red.
+        {
+            std::vector<uint8_t> x = fixture.encode_state(256);
+            // Locate alice's balance: the accounts section stores
+            // {domain lp16 | balance u64 | next_nonce u64}. Find the literal
+            // domain bytes and bump the u64 that follows the length prefix.
+            const std::string needle = "alice";
+            size_t at = std::string::npos;
+            for (size_t i = 0; i + needle.size() + 16 < x.size(); ++i) {
+                if (std::memcmp(x.data() + i, needle.data(), needle.size()) == 0
+                    && i >= 2 && x[i-2] == uint8_t(needle.size()) && x[i-1] == 0) {
+                    at = i + needle.size();
+                    break;
+                }
+            }
+            check(at != std::string::npos,
+                  "SB-5 setup: located an account record inside the DSN1 frame");
+            if (at != std::string::npos) {
+                std::vector<uint8_t> t = x;
+                t[at] = uint8_t(t[at] ^ 0x40);       // move the balance
+                bool rejected = false; std::string what;
+                try { (void)Chain::decode_state(t.data(), t.size(),
+                                                  /*require_supply_invariant=*/true); }
+                catch (const std::exception& e) { rejected = true; what = e.what(); }
+                check(rejected
+                      && (what.find("state_root") != std::string::npos
+                          || what.find("supply-invariant") != std::string::npos),
+                      "SB-5 gates: a tampered account balance is REJECTED by the "
+                      "S-033 state_root / A1 supply-invariant gates");
+                // The same bytes must ALSO be rejected without the opt-in A1
+                // flag, because the state_root gate is unconditional.
+                bool rejected_default = false;
+                try { (void)Chain::decode_state(t.data(), t.size()); }
+                catch (const std::exception&) { rejected_default = true; }
+                check(rejected_default,
+                      "SB-5 gates: the S-033 state_root gate runs unconditionally "
+                      "(rejection does not depend on require_supply_invariant)");
+            }
+            // And the head_hash claim gate: flip one byte of the claimed head
+            // digest (offset 8..39) — nothing else — and the load must reject.
+            {
+                // head_hash claim occupies bytes [16, 48): magic 4 + version 4
+                // + block_index 8.
+                std::vector<uint8_t> t = x;
+                t[16] = uint8_t(t[16] ^ 0x01);
+                bool rejected = false; std::string what;
+                try { (void)Chain::decode_state(t.data(), t.size()); }
+                catch (const std::exception& e) { rejected = true; what = e.what(); }
+                check(rejected && what.find("head_hash") != std::string::npos,
+                      "SB-5 gates: a tampered head_hash claim is REJECTED");
+            }
+        }
+
+        // SB-6. Container-level rejects: bad magic, version != 1, and a count
+        //       claiming more entries than the remaining bytes can hold
+        //       (bounded BEFORE any allocation).
+        {
+            std::vector<uint8_t> x = fixture.encode_state(256);
+            auto reject_with = [&](std::vector<uint8_t> t, const char* frag,
+                                    const char* msg) {
+                bool rejected = false; std::string what;
+                try { (void)Chain::decode_state(t.data(), t.size()); }
+                catch (const std::exception& e) { rejected = true; what = e.what(); }
+                check(rejected && (frag == nullptr
+                                   || what.find(frag) != std::string::npos), msg);
+            };
+            { std::vector<uint8_t> t = x; t[2] = 'X';
+              reject_with(t, "magic", "SB-6 container: a bad magic is rejected"); }
+            { std::vector<uint8_t> t = x; t[4] = 2;
+              reject_with(t, "version", "SB-6 container: version != 1 is rejected"); }
+            {
+                // The accounts count sits right after the fixed scalar header.
+                // Stamp 0xFFFFFFFF over it: the pre-allocation bound must
+                // reject before any reserve.
+                const size_t accounts_count_off = 4 + 4 + 8 + 32
+                                                 + 8 + 8 + 1 + 4
+                                                 + 8 + 1 + 8 + 8
+                                                 + 4 + 4 + 4
+                                                 + 4 + 4 + 4 + 4
+                                                 + 32
+                                                 + 8 + 8 + 8 + 8 + 8 + 8;
+                std::vector<uint8_t> t = x;
+                check(accounts_count_off + 4 <= t.size(),
+                      "SB-6 setup: the accounts count offset is inside the frame");
+                for (int k = 0; k < 4; ++k) t[accounts_count_off + k] = 0xFF;
+                reject_with(t, "exceeds remaining bytes",
+                            "SB-6 container: a count claiming 4 billion entries is "
+                            "rejected by the pre-allocation bound");
+            }
+        }
+
+        // SB-7. File round trip through the at-rest path used by the node
+        //       bootstrap: write bytes, read bytes, decode with the A1 gate on.
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "determ-test-snapshot-dsn1";
+            std::error_code ec; fs::remove_all(base, ec); fs::create_directories(base);
+            const fs::path spath = base / "snapshot.bin";
+            std::vector<uint8_t> bytes = fixture.encode_state(256);
+            { std::ofstream f(spath, std::ios::binary | std::ios::trunc);
+              f.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size())); }
+            std::ifstream in(spath, std::ios::binary);
+            std::string raw((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+            Chain back = Chain::decode_state(
+                reinterpret_cast<const uint8_t*>(raw.data()), raw.size(),
+                /*require_supply_invariant=*/true);
+            check(back.head_hash() == fixture.head_hash()
+                  && back.compute_state_root() == fixture.compute_state_root(),
+                  "SB-7 at rest: a snapshot written and re-read as raw bytes "
+                  "restores identically under the node's A1-revalidate policy");
+            fs::remove_all(base, ec);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-binary-codec "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // D2 inc8 (chain storage binary-only): the at-rest chain is the BINARY
+    // block store — ['D','B','K','1'] + one Block::encode_frame frame per
+    // block in <path>.blocks/<i>.blk, plus the fixed 44-byte DMF1 manifest
+    // at <path>.manifest.bin. Chain::save (the legacy full chain.json
+    // writer) and its read branch are DELETED; save_incremental is the only
+    // writer and the manifest branch is the only reader.
+    //
+    // This gate pins the SAVE→LOAD contract of that single path:
+    //   - save_incremental writes a non-empty store (block files + manifest)
+    //   - load(path) reconstructs a Chain whose state matches the saved one
+    //     (state_root, height, head_hash, accounts, stakes, registry,
+    //     A1 counters)
+    //   - save→load→save→load is idempotent AND byte-stable on disk
+    //     (identical manifest + block-file bytes across cycles)
+    //   - load() with a non-existent path produces an empty Chain
+    //     (a fresh node has no store yet)
     if (cmd == "test-chain-save-load") {
         using namespace determ;
         using namespace determ::chain;
+        namespace fs = std::filesystem;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
@@ -46616,28 +48010,41 @@ int main(int argc, char** argv) {
             return c;
         };
 
-        // Write to a temp file path. tmpnam is deprecated but adequate
-        // for this scope; alternative is to use std::filesystem::temp_directory_path
-        // + a manual unique suffix.
-        std::string path;
-        {
-            namespace fs = std::filesystem;
-            auto tmp = fs::temp_directory_path() / "determ-test-chain-save-load.json";
-            path = tmp.string();
-            std::error_code ec;
-            fs::remove(path, ec);  // ensure clean start
-        }
+        const fs::path base =
+            fs::temp_directory_path() / "determ-test-chain-save-load";
+        std::error_code ec;
+        fs::remove_all(base, ec);
+        fs::create_directories(base);
+        const std::string path     = (base / "chain.json").string();
+        const fs::path    storedir = fs::path(path + ".blocks");
+        const fs::path    manifest = fs::path(path + ".manifest.bin");
+        auto reset = [&]() {
+            fs::remove_all(storedir, ec);
+            fs::remove(manifest, ec);
+            fs::remove(path, ec);
+        };
+        auto slurp = [](const fs::path& p) {
+            std::ifstream f(p, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+        };
 
-        // === Save produces non-empty file ===
+        // === Save produces a non-empty store ===
 
-        // 1. After save, file exists with non-trivial size.
+        // 1. After save_incremental the manifest is EXACTLY 44 bytes and every
+        //    block file is a non-trivial DBK1 record.
         {
+            reset();
             Chain c = build();
-            c.save(path);
-            namespace fs = std::filesystem;
-            std::error_code ec;
-            check(fs::exists(path, ec) && fs::file_size(path, ec) > 32,
-                  "save: file exists with non-trivial size");
+            c.save_incremental(path);
+            check(fs::exists(manifest) && fs::file_size(manifest, ec) == 44,
+                  "save: manifest written and is exactly the fixed 44-byte DMF1 record");
+            check(fs::exists(storedir / "0.blk")
+                  && fs::exists(storedir / "1.blk")
+                  && fs::file_size(storedir / "1.blk", ec) > 32,
+                  "save: one non-trivial .blk record per block");
+            check(slurp(storedir / "0.blk").compare(0, 4, "DBK1") == 0,
+                  "save: block records carry the DBK1 magic");
         }
 
         // === Load reconstructs equivalent state ===
@@ -46645,8 +48052,9 @@ int main(int argc, char** argv) {
         // 2. load(path) returns a Chain whose state_root + head_hash +
         //    height match the saved one.
         {
+            reset();
             Chain c = build();
-            c.save(path);
+            c.save_incremental(path);
 
             // load() requires block_subsidy at load time so apply replay
             // credits creators correctly. We saved with block_subsidy=10.
@@ -46664,8 +48072,9 @@ int main(int argc, char** argv) {
 
         // 3. balance + next_nonce of each domain preserved.
         {
+            reset();
             Chain c = build();
-            c.save(path);
+            c.save_incremental(path);
             Chain r = Chain::load(path, /*block_subsidy=*/10);
 
             check(r.balance("alice") == c.balance("alice"),
@@ -46680,8 +48089,9 @@ int main(int argc, char** argv) {
 
         // 4. stake + registrant entry preserved.
         {
+            reset();
             Chain c = build();
-            c.save(path);
+            c.save_incremental(path);
             Chain r = Chain::load(path, /*block_subsidy=*/10);
 
             check(r.stake("alice") == c.stake("alice"),
@@ -46697,8 +48107,9 @@ int main(int argc, char** argv) {
 
         // 5. All 5 A1 counters round-trip.
         {
+            reset();
             Chain c = build();
-            c.save(path);
+            c.save_incremental(path);
             Chain r = Chain::load(path, /*block_subsidy=*/10);
 
             check(r.genesis_total() == c.genesis_total()
@@ -46711,40 +48122,75 @@ int main(int argc, char** argv) {
                   "A1: invariant holds on reloaded chain");
         }
 
-        // === save → load → save → load idempotent ===
+        // === save → load → save → load idempotent AND byte-stable ===
 
-        // 6. Two consecutive save-load cycles produce identical state.
+        // 6. A second save-load cycle produces identical state, the encoder is
+        //    byte-deterministic across independent builds, and re-encoding a
+        //    DECODED block reproduces the on-disk record byte-for-byte
+        //    (encode(decode(x)) == x — the canonical-container theorem).
         {
+            reset();
             Chain c = build();
-            c.save(path);
+            c.save_incremental(path);
+            const std::string m1  = slurp(manifest);
+            const std::string b01 = slurp(storedir / "0.blk");
+            const std::string b11 = slurp(storedir / "1.blk");
+
             Chain r1 = Chain::load(path, /*block_subsidy=*/10);
-            r1.save(path);
-            Chain r2 = Chain::load(path, /*block_subsidy=*/10);
+
+            // encode(decode(x)) == x, per record.
+            bool records_stable = true;
+            for (uint64_t i = 0; i < r1.height(); ++i) {
+                std::vector<uint8_t> fr;
+                r1.at(i).encode_frame(fr);
+                std::string rec("DBK1");
+                rec.append(reinterpret_cast<const char*>(fr.data()), fr.size());
+                if (rec != slurp(storedir / (std::to_string(i) + ".blk")))
+                    { records_stable = false; break; }
+            }
+            check(records_stable && r1.height() == 2,
+                  "byte-stable: re-encoding a DECODED block reproduces its "
+                  "on-disk record exactly (encode(decode(x)) == x)");
+
+            // A second, independently built chain saved to a second path must
+            // produce byte-identical records + manifest.
+            const std::string path2     = (base / "chain2.json").string();
+            const fs::path    storedir2 = fs::path(path2 + ".blocks");
+            const fs::path    manifest2 = fs::path(path2 + ".manifest.bin");
+            Chain c2 = build();
+            c2.save_incremental(path2);
+            const std::string m2  = slurp(manifest2);
+            const std::string b02 = slurp(storedir2 / "0.blk");
+            const std::string b12 = slurp(storedir2 / "1.blk");
+            Chain r2 = Chain::load(path2, /*block_subsidy=*/10);
 
             check(r1.head_hash() == r2.head_hash(),
                   "save→load idempotent: head_hash stable after second cycle");
             check(r1.compute_state_root() == r2.compute_state_root(),
                   "save→load idempotent: state_root stable");
+            check(m1 == m2 && b01 == b02 && b11 == b12 && m1.size() == 44,
+                  "save→load byte-stable: an independent rebuild writes the "
+                  "IDENTICAL manifest + block-record bytes");
         }
 
-        // === Load missing file → empty chain ===
+        // === Load missing path → empty chain ===
 
-        // 7. Load from non-existent path yields an empty Chain. The
-        //    Node startup path relies on this — first-launch has no
-        //    chain.json on disk yet.
+        // 7. Load from a path with no store yields an empty Chain. The
+        //    Node startup path relies on this — first launch has no store.
         {
-            namespace fs = std::filesystem;
             auto missing = (fs::temp_directory_path()
                              / "determ-test-missing-nonexistent-zzzz.json").string();
-            std::error_code ec; fs::remove(missing, ec);  // ensure gone
+            fs::remove(missing, ec);
+            fs::remove_all(fs::path(missing + ".blocks"), ec);
+            fs::remove(fs::path(missing + ".manifest.bin"), ec);
 
             Chain r = Chain::load(missing);
             check(r.empty(),
-                  "load missing file: returns empty Chain (defensive)");
+                  "load missing store: returns empty Chain (defensive)");
         }
 
         // Cleanup
-        { std::error_code ec; std::filesystem::remove(path, ec); }
+        fs::remove_all(base, ec);
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-save-load "
@@ -46763,18 +48209,22 @@ int main(int argc, char** argv) {
     //   - Empty creators set with non-genesis block: passes both these
     //     gates trivially (subsequent gates may reject)
     //
-    // B1 chain-storage-v1 (pre-launch register, 2026-07-09): the O(1)
-    // RUNTIME save path — save_incremental writes append-only per-block
-    // files (<path>.blocks/<i>.json) + a tiny manifest, instead of
-    // rewriting the whole chain.json under the save worker's shared_lock.
-    // Pins: store round-trip equals the legacy round-trip byte-for-byte
-    // (head/state agreement), APPEND-ONLY (a second incremental save does
-    // not touch already-persisted files), the S-021 head tamper gate on
-    // the manifest, fail-closed on a missing block file, load preference
-    // (manifest wins over a coexisting legacy file), and the stale-
-    // manifest invalidation invariant (legacy save() deletes the manifest
-    // so a legacy-only writer can never leave a store that silently
-    // REWINDS the chain on the next load).
+    // D2 inc8: the BINARY-ONLY chain store (B1 chain-storage-v1 shape, D2
+    // record encoding). The shape is unchanged — append-only one file per
+    // block, tiny manifest written atomically LAST — but every record is now
+    // canonical binary:
+    //
+    //   <path>.blocks/<i>.blk   ['D','B','K','1'] + Block::encode_frame frame
+    //                           extending to EOF (the file size delimits the
+    //                           frame; decode_frame's exact-consumption
+    //                           rejects truncation AND padding)
+    //   <path>.manifest.bin     FIXED 44 bytes: ['D','M','F','1'] |
+    //                           height u64 LE | head_hash 32 raw
+    //
+    // Chain::save (the legacy full chain.json writer) and the legacy read
+    // branch are DELETED — pre-genesis, no migrations, no fallback. CS-8 is
+    // the falsifier for that: a perfectly valid legacy chain.json with no
+    // manifest must load as an EMPTY chain, never be resurrected.
     if (cmd == "test-chain-store") {
         using namespace determ;
         using namespace determ::chain;
@@ -46834,131 +48284,249 @@ int main(int argc, char** argv) {
         fs::create_directories(base);
         const std::string path     = (base / "chain.json").string();
         const fs::path    storedir = fs::path(path + ".blocks");
-        const fs::path    manifest = fs::path(path + ".manifest.json");
-
-        // 1. save_incremental writes one file per block + the manifest;
-        //    the legacy chain.json is NOT written by the incremental path.
-        {
-            Chain c = build();
-            c.save_incremental(path);
-            check(fs::exists(storedir / "0.json") && fs::exists(storedir / "1.json"),
-                  "store: one append-only file per block");
-            check(fs::exists(manifest),
-                  "store: manifest written");
-            check(!fs::exists(path),
-                  "store: legacy chain.json untouched by the incremental path");
-        }
-
-        // 2. Store round-trip: load() prefers the manifest and reproduces
-        //    head_hash + state_root + balances exactly.
-        {
-            Chain c = build();
-            c.save_incremental(path);
-            Chain r = Chain::load(path, /*block_subsidy=*/10);
-            check(r.height() == c.height(),      "store load: height preserved");
-            check(r.head_hash() == c.head_hash(),"store load: head_hash preserved");
-            check(r.compute_state_root() == c.compute_state_root(),
-                  "store load: state_root preserved");
-            check(r.balance("bob") == c.balance("bob"),
-                  "store load: balances preserved");
-        }
-
-        // 3. APPEND-ONLY: after the first save, corrupt 0.json with a
-        //    sentinel; a second incremental save (with new blocks) must
-        //    NOT rewrite it — only the new files + manifest change.
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
-            Chain c = build();
-            c.save_incremental(path);
-            { std::ofstream f(storedir / "0.json", std::ios::trunc); f << "SENTINEL"; }
-            extend(c, 1);
-            c.save_incremental(path);
-            std::ifstream f0(storedir / "0.json");
-            std::string s0((std::istreambuf_iterator<char>(f0)),
-                            std::istreambuf_iterator<char>());
-            check(s0 == "SENTINEL",
-                  "append-only: second incremental save does not rewrite persisted files");
-            check(fs::exists(storedir / "2.json"),
-                  "append-only: the new block DID get its own file");
-        }
-
-        // 4. Manifest head_hash tamper -> load rejects (S-021 gate).
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
-            Chain c = build();
-            c.save_incremental(path);
-            nlohmann::json m = nlohmann::json::parse(std::ifstream(manifest));
-            std::string h = m["head_hash"].get<std::string>();
-            h[0] = (h[0] == 'a') ? 'b' : 'a';
-            m["head_hash"] = h;
-            { std::ofstream f(manifest, std::ios::trunc); f << m.dump(2); }
-            bool rejected = false;
-            try { (void)Chain::load(path, 10); }
-            catch (const std::exception&) { rejected = true; }
-            check(rejected, "tamper: manifest head_hash mismatch REJECTED");
-        }
-
-        // 5. Missing block file -> load rejects, fail-closed (never a
-        //    silent fallback to a possibly-stale legacy file).
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
-            Chain c = build();
-            c.save(path);              // a legacy file ALSO exists...
-            c.save_incremental(path);  // ...and the store on top
-            fs::remove(storedir / "1.json", ec);
-            bool rejected = false;
-            try { (void)Chain::load(path, 10); }
-            catch (const std::exception&) { rejected = true; }
-            check(rejected,
-                  "fail-closed: missing block file rejects (no silent legacy fallback)");
-        }
-
-        // 6. Legacy compatibility: a plain chain.json (no manifest) loads
-        //    exactly as before, and the FIRST incremental save after a
-        //    legacy load persists every block (persisted_count_ reset).
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec);
-            fs::remove(path, ec);
-            Chain c = build();
-            c.save(path);
-            Chain r = Chain::load(path, 10);
-            check(r.head_hash() == c.head_hash(), "legacy: plain chain.json still loads");
-            r.save_incremental(path);
-            check(fs::exists(storedir / "0.json") && fs::exists(storedir / "1.json"),
-                  "legacy: first incremental save after a legacy load writes ALL blocks");
-        }
-
-        // 7. Stale-manifest invalidation: legacy save() DELETES the
-        //    manifest, so a legacy-only writer supersedes the store and
-        //    the next load takes the fresh legacy file — never a rewind
-        //    to the older store.
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec); fs::remove(path, ec);
-            Chain c = build();
-            c.save_incremental(path);          // store at height 2
-            extend(c, 1);
-            c.save(path);                       // legacy-only writer at height 3
-            check(!fs::exists(manifest),
-                  "invalidation: legacy save() removed the stale manifest");
-            Chain r = Chain::load(path, 10);
-            check(r.height() == c.height() && r.head_hash() == c.head_hash(),
-                  "invalidation: load takes the newer legacy file (no rewind)");
-        }
-
-        // 8. Graceful-stop equivalence: the pair (save + save_incremental,
-        //    the Node's stop() order) leaves BOTH stores loading to the
-        //    same chain.
-        {
-            fs::remove_all(storedir, ec); fs::remove(manifest, ec); fs::remove(path, ec);
-            Chain c = build();
-            c.save(path);
-            c.save_incremental(path);
-            Chain via_store = Chain::load(path, 10);       // manifest present -> store
+        const fs::path    manifest = fs::path(path + ".manifest.bin");
+        auto reset = [&]() {
+            fs::remove_all(storedir, ec);
             fs::remove(manifest, ec);
-            Chain via_legacy = Chain::load(path, 10);      // forced legacy
-            check(via_store.head_hash() == via_legacy.head_hash()
-                  && via_store.compute_state_root() == via_legacy.compute_state_root(),
-                  "stop-order pair: store and legacy views load to the identical chain");
+            fs::remove(path, ec);
+        };
+        auto slurp = [](const fs::path& p) {
+            std::ifstream f(p, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+        };
+        auto spew = [](const fs::path& p, const std::string& d) {
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            f.write(d.data(), static_cast<std::streamsize>(d.size()));
+        };
+        auto load_rejects = [&](const char* msg) {
+            bool rejected = false;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception&) { rejected = true; }
+            check(rejected, msg);
+        };
+
+        // CS-1. Round-trip: save_incremental writes one binary record per
+        //       block + the manifest; load reproduces height/head/state
+        //       /balances exactly. Kills any encode/decode field drop.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            check(fs::exists(storedir / "0.blk") && fs::exists(storedir / "1.blk"),
+                  "CS-1 store: one append-only .blk record per block");
+            check(fs::exists(manifest) && fs::file_size(manifest, ec) == 44,
+                  "CS-1 store: manifest written, exactly 44 bytes");
+            check(!fs::exists(path),
+                  "CS-1 store: <path> itself is never written (binary-only store)");
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+            check(r.height() == c.height(),       "CS-1 load: height preserved");
+            check(r.head_hash() == c.head_hash(), "CS-1 load: head_hash preserved");
+            check(r.compute_state_root() == c.compute_state_root(),
+                  "CS-1 load: state_root preserved");
+            check(r.balance("bob") == c.balance("bob"),
+                  "CS-1 load: balances preserved");
+        }
+
+        // CS-2. APPEND-ONLY: after the first save, overwrite 0.blk with a
+        //       sentinel; a second incremental save (with new blocks) must
+        //       NOT rewrite it — only the new files + manifest change.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            spew(storedir / "0.blk", "SENTINEL");
+            extend(c, 1);
+            c.save_incremental(path);
+            check(slurp(storedir / "0.blk") == "SENTINEL",
+                  "CS-2 append-only: second incremental save does not rewrite "
+                  "persisted records");
+            check(fs::exists(storedir / "2.blk"),
+                  "CS-2 append-only: the new block DID get its own record");
+        }
+
+        // CS-3. Manifest head_hash tamper -> load rejects (S-021 gate).
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            std::string m = slurp(manifest);
+            m[12] = static_cast<char>(m[12] ^ 0x01);   // flip one head_hash bit
+            spew(manifest, m);
+            load_rejects("CS-3 tamper: manifest head_hash mismatch REJECTED");
+        }
+
+        // CS-4. Missing block file under the manifest height -> fail-closed.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            fs::remove(storedir / "1.blk", ec);
+            load_rejects("CS-4 fail-closed: missing block record rejects "
+                         "(never a partial chain)");
+        }
+
+        // CS-5. Block-record tamper sweep. Flip EVERY byte of a stored record
+        //       in turn; each flip must either be REJECTED (bad magic / decode
+        //       reject) or leave a chain whose head_hash still equals the
+        //       pristine head. The second arm is the load-bearing one: the
+        //       S-021 head gate covers signing_bytes + creator_block_sigs, so a
+        //       flip inside that coverage changes compute_hash and MUST be
+        //       caught; deleting the gate makes such a flip load a DIFFERENT
+        //       head and reds this leg. Flips that land in non-covered
+        //       signature material decode to an equal head by construction.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            const Hash pristine = c.head_hash();
+            const std::string full = slurp(storedir / "1.blk");
+            size_t rejected_n = 0, accepted_equal_n = 0;
+            bool any_divergence = false;
+            for (size_t i = 0; i < full.size(); ++i) {
+                std::string t = full;
+                t[i] = static_cast<char>(t[i] ^ 0x5A);
+                spew(storedir / "1.blk", t);
+                try {
+                    Chain r = Chain::load(path, 10);
+                    if (r.head_hash() == pristine) ++accepted_equal_n;
+                    else { any_divergence = true; break; }
+                } catch (const std::exception&) { ++rejected_n; }
+            }
+            spew(storedir / "1.blk", full);
+            check(!any_divergence,
+                  "CS-5 tamper sweep: no single-byte flip in a block record ever "
+                  "loads a DIVERGENT head (S-021 head gate + decode reject)");
+            check(rejected_n > 0 && rejected_n + accepted_equal_n == full.size(),
+                  "CS-5 tamper sweep: every byte position accounted for, and a "
+                  "hash-covered flip is REJECTED outright");
+            check(Chain::load(path, 10).head_hash() == pristine,
+                  "CS-5 tamper sweep: the restored record loads the pristine head");
+        }
+
+        // CS-6. Truncation sweep: EVERY proper prefix of a block record is
+        //       rejected (BF-6 pattern) — the file size is the only frame
+        //       delimiter, so a short read must never decode.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            const std::string full = slurp(storedir / "1.blk");
+            bool all_rejected = true;
+            for (size_t n = 0; n < full.size(); ++n) {
+                spew(storedir / "1.blk", full.substr(0, n));
+                bool rejected = false;
+                try { (void)Chain::load(path, 10); }
+                catch (const std::exception&) { rejected = true; }
+                if (!rejected) { all_rejected = false; break; }
+            }
+            spew(storedir / "1.blk", full);
+            check(all_rejected && full.size() > 8,
+                  "CS-6 truncation: every proper prefix of a block record is rejected");
+            Chain ok = Chain::load(path, 10);
+            check(ok.height() == 2,
+                  "CS-6 truncation: the restored full record still loads");
+        }
+
+        // CS-7. EXACTNESS BOTH DIRECTIONS (2803a13): one trailing byte on a
+        //       block record is rejected, and the manifest is rejected at BOTH
+        //       43 and 45 bytes. Kills relaxing `len != 44` to `len >= 44`, or
+        //       a decode that ignores tail bytes.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            const std::string full = slurp(storedir / "1.blk");
+            spew(storedir / "1.blk", full + std::string(1, '\0'));
+            load_rejects("CS-7 exactness: one trailing byte on a block record REJECTED");
+            spew(storedir / "1.blk", full);
+
+            const std::string m = slurp(manifest);
+            spew(manifest, m.substr(0, 43));
+            load_rejects("CS-7 exactness: a 43-byte manifest REJECTED (short)");
+            spew(manifest, m + std::string(1, '\0'));
+            load_rejects("CS-7 exactness: a 45-byte manifest REJECTED (long)");
+            spew(manifest, m);
+            check(Chain::load(path, 10).height() == 2,
+                  "CS-7 exactness: the restored 44-byte manifest still loads");
+        }
+
+        // CS-8. JSON RESURRECTION FALSIFIER. A perfectly valid legacy
+        //       {head_hash, blocks:[...]} chain.json sits at <path> with NO
+        //       manifest. Binary-only means load MUST return an EMPTY chain:
+        //       the text file is inert data, not a fallback. Any mutant that
+        //       re-adds the legacy read path reds exactly here.
+        {
+            reset();
+            Chain c = build();
+            nlohmann::json legacy;
+            legacy["head_hash"] = to_hex(c.head().compute_hash());
+            legacy["blocks"]    = nlohmann::json::array();
+            for (uint64_t i = 0; i < c.height(); ++i)
+                legacy["blocks"].push_back(c.at(i).to_json());
+            spew(path, legacy.dump(2));
+            check(fs::exists(path) && legacy["blocks"].size() == 2,
+                  "CS-8 setup: a VALID legacy wrapped chain.json is on disk");
+            Chain r = Chain::load(path, 10);
+            check(r.empty() && r.height() == 0,
+                  "CS-8 binary-only: a valid legacy chain.json with NO manifest "
+                  "loads as an EMPTY chain (no JSON resurrection)");
+            // ...and a save_incremental on top writes the store beside it,
+            // never at <path>: the text file stays byte-untouched.
+            const std::string before = slurp(path);
+            Chain c2 = build();
+            c2.save_incremental(path);
+            check(slurp(path) == before,
+                  "CS-8 binary-only: save_incremental never writes <path> itself");
+            check(Chain::load(path, 10).head_hash() == c2.head_hash(),
+                  "CS-8 binary-only: once a manifest exists the STORE is the truth");
+        }
+
+        // CS-9. Bad magic in either record type -> reject with a distinct
+        //       diagnostic (a container mix-up must not read as a short frame).
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            std::string m = slurp(manifest);
+            m[3] = '2';                                  // DMF1 -> DMF2
+            spew(manifest, m);
+            bool mrej = false; std::string mwhat;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception& e) { mrej = true; mwhat = e.what(); }
+            check(mrej && mwhat.find("manifest magic") != std::string::npos,
+                  "CS-9 magic: a bad manifest magic REJECTED with its own diagnostic");
+            m[3] = '1';
+            spew(manifest, m);
+
+            std::string b0 = slurp(storedir / "0.blk");
+            b0[0] = 'X';                                 // DBK1 -> XBK1
+            spew(storedir / "0.blk", b0);
+            bool brej = false; std::string bwhat;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception& e) { brej = true; bwhat = e.what(); }
+            check(brej && bwhat.find("block magic") != std::string::npos,
+                  "CS-9 magic: a bad block magic REJECTED with its own diagnostic");
+        }
+
+        // CS-10. Graceful-stop leg: the Node's stop() now writes the store
+        //        ONCE (the dual-write is gone). Saving an already-fully-
+        //        persisted chain is a no-op-equivalent rewrite of the manifest
+        //        and the reload is identical — including after a reorg-free
+        //        extend, which is the normal shutdown shape.
+        {
+            reset();
+            Chain c = build();
+            c.save_incremental(path);
+            extend(c, 1);
+            c.save_incremental(path);        // the save-worker tick
+            c.save_incremental(path);        // the stop() final save
+            Chain r = Chain::load(path, 10);
+            check(r.height() == c.height()
+                  && r.head_hash() == c.head_hash()
+                  && r.compute_state_root() == c.compute_state_root(),
+                  "CS-10 graceful stop: the single store write leaves a chain that "
+                  "reloads identically");
         }
 
         fs::remove_all(base, ec);
@@ -48130,20 +49698,16 @@ int main(int argc, char** argv) {
             };
             const njson wire_clean = mk_block(clean).to_json();
 
+            // D2-inc7a: BLOCK and CHAIN_RESPONSE carry true binary payload
+            // frames, so the envelope is built by the codec itself rather
+            // than hand-rolled as length-prefixed JSON. The leg's claim is
+            // unchanged — the abort-carrying block must be accepted at BOTH
+            // the shallow (BLOCK) and the deep (CHAIN_RESPONSE) wrapper.
             auto envelope = [&](net::MsgType t, const njson& payload) {
-                const std::string s = payload.dump();
-                std::vector<uint8_t> f;
-                f.push_back(0xB1);
-                f.push_back(0x01);
-                f.push_back(static_cast<uint8_t>(t));
-                f.push_back(0x00);
-                uint32_t plen = static_cast<uint32_t>(s.size());
-                f.push_back(static_cast<uint8_t>(plen & 0xFF));
-                f.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
-                f.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
-                f.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
-                f.insert(f.end(), s.begin(), s.end());
-                return f;
+                net::Message m;
+                m.type    = t;
+                m.payload = payload;
+                return net::encode_binary(m);
             };
             auto accepts = [&](const std::vector<uint8_t>& b) {
                 try { (void)net::Message::deserialize(b.data(), b.size()); return true; }
@@ -48157,7 +49721,9 @@ int main(int argc, char** argv) {
             check(wire_clean.at("abort_events").at(0).at("claims").is_string(),
                   "F-10 closure: the container claims value is one hex STRING "
                   "(a claim contributes zero JSON nesting)");
-            njson cr; cr["blocks"] = njson::array({ wire_clean });
+            njson cr;
+            cr["blocks"]   = njson::array({ wire_clean });
+            cr["has_more"] = false;
             check(accepts(envelope(net::MsgType::BLOCK, wire_clean))
                       && accepts(envelope(net::MsgType::CHAIN_RESPONSE, cr)),
                   "F-10 closure: the abort-carrying block is accepted at BOTH "
@@ -53436,73 +55002,72 @@ int main(int argc, char** argv) {
                   "(4) restore_from_snapshot rejects missing version field");
         }
 
-        // ── (5) Chain envelope schema pin (S-021 / chain.cpp::save).
-        //     The wrapped form is {head_hash, blocks} — DELIBERATELY
-        //     NO version field. The schema is identified by shape:
-        //     legacy array-form chain.json is the fallback. Pin "no
-        //     version field" so a future PR that accidentally adds
-        //     one breaks this test rather than the millions of
-        //     pre-versioned chain.json files in the wild.
+        // ── (5) Chain STORE container pin (S-021 / D2 inc8). The
+        //     at-rest chain is binary: a fixed 44-byte DMF1 manifest +
+        //     one DBK1 block record per block. Both are MAGIC-identified,
+        //     deliberately with NO version field — a format change gets a
+        //     new magic (DMF2/DBK2) so an old binary fails closed on the
+        //     magic rather than mis-parsing a version it does not know.
+        //     Also pinned: the deleted legacy chain.json path stays dead.
         {
             namespace fs = std::filesystem;
-            auto tmp = (fs::temp_directory_path()
-                         / "determ-test-protocol-version-pinning-chain.json").string();
-            std::error_code ec; fs::remove(tmp, ec);
+            const auto base = fs::temp_directory_path()
+                            / "determ-test-protocol-version-pinning-chain";
+            std::error_code ec; fs::remove_all(base, ec);
+            fs::create_directories(base);
+            const std::string tmp = (base / "chain.json").string();
+            const fs::path manifest = fs::path(tmp + ".manifest.bin");
+            const fs::path storedir = fs::path(tmp + ".blocks");
 
-            // 5a. Save an empty chain and read raw JSON. The wrapped
-            //     envelope must NOT carry a "version" field — its
-            //     schema is shape-identified.
+            // 5a. An empty chain's manifest is the fixed 44-byte DMF1
+            //     record with a zero height and a zero head_hash.
             Chain c;
-            c.save(tmp);
-            std::ifstream f(tmp);
-            json envelope = json::parse(f);
+            c.save_incremental(tmp);
+            std::ifstream f(manifest, std::ios::binary);
+            std::string mbytes((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
             f.close();
-            check(envelope.is_object(),
-                  "(5) chain.json save() produces wrapped object form (S-021)");
-            check(envelope.contains("head_hash") && envelope.contains("blocks"),
-                  "(5) chain.json envelope has {head_hash, blocks} fields");
-            check(!envelope.contains("version"),
-                  "(5) chain.json envelope has NO version field — schema is "
-                  "shape-identified; a future PR adding one breaks pre-versioned parsers");
+            check(mbytes.size() == 44,
+                  "(5) chain store manifest is EXACTLY 44 bytes (fixed record, "
+                  "no self-describing length)");
+            check(mbytes.compare(0, 4, "DMF1") == 0,
+                  "(5) chain store manifest is magic-identified (DMF1), not "
+                  "version-field-identified");
+            check(mbytes.find_first_not_of('\0', 4) == std::string::npos,
+                  "(5) empty chain: manifest height and head_hash are all-zero");
 
-            // 5b. Legacy array-form chain.json is still accepted as
-            //     fallback. This is the backward-compat contract for
-            //     pre-S-021 on-disk files. Write a bare JSON array
-            //     (no envelope) and confirm load() returns a chain
-            //     (empty, since the array is empty).
-            std::error_code ec2; fs::remove(tmp, ec2);
+            // 5b. A populated store's block records carry the DBK1 magic and
+            //     are followed by a Block frame that extends to EOF.
+            GenesisConfig gcfg;
+            gcfg.chain_id = "protocol-version-pinning-store";
+            Chain c2;
+            c2.append(make_genesis_block(gcfg));
+            c2.save_incremental(tmp);
+            std::ifstream bf(storedir / "0.blk", std::ios::binary);
+            std::string b0((std::istreambuf_iterator<char>(bf)),
+                            std::istreambuf_iterator<char>());
+            bf.close();
+            check(b0.size() > 4 && b0.compare(0, 4, "DBK1") == 0,
+                  "(5) chain store block records are magic-identified (DBK1)");
+            check(Chain::load(tmp).head_hash() == c2.head_hash(),
+                  "(5) the binary store round-trips through load()");
+
+            // 5c. D2 binary-only: a legacy text chain.json at <path> is inert.
+            //     Removing the manifest yields an EMPTY chain, never a
+            //     resurrection of the deleted JSON read path.
             {
                 std::ofstream w(tmp);
                 w << "[]";
             }
-            bool legacy_ok = true;
-            try {
-                Chain r = Chain::load(tmp);
-                if (!r.empty()) legacy_ok = false;
-            } catch (const std::exception&) { legacy_ok = false; }
-            check(legacy_ok,
-                  "(5) chain.json legacy array-form accepted (pre-S-021 backward compat)");
+            fs::remove(manifest, ec);
+            bool empty_not_legacy = false;
+            try { empty_not_legacy = Chain::load(tmp).empty(); }
+            catch (const std::exception&) { empty_not_legacy = false; }
+            check(empty_not_legacy,
+                  "(5) D2 binary-only: text at the chain path is inert — no "
+                  "manifest means an EMPTY chain, not a legacy JSON load");
 
-            // 5c. Object envelope missing 'blocks' field rejected
-            //     with clean diagnostic.
-            {
-                std::ofstream w(tmp);
-                w << "{\"head_hash\":\"\"}";  // missing blocks
-            }
-            bool threw_missing_blocks = false;
-            std::string what_blocks;
-            try { (void)Chain::load(tmp); }
-            catch (const std::exception& e) {
-                threw_missing_blocks = true;
-                what_blocks = e.what();
-            }
-            check(threw_missing_blocks && what_blocks.find("blocks")
-                    != std::string::npos,
-                  "(5) wrapped chain.json missing 'blocks' rejected with "
-                  "field-name diagnostic");
-
-            // Cleanup
-            std::error_code ec3; fs::remove(tmp, ec3);
+            fs::remove_all(base, ec);
         }
 
         // ── (6) Genesis schema pin (chain/genesis.cpp::
@@ -54139,7 +55704,7 @@ int main(int argc, char** argv) {
             std::string path = tmp.string();
             std::error_code ec;
             fs::remove(path, ec);
-            c.save(path);
+            c.save_incremental(path);
 
             // block_subsidy 0 (chain didn't set one; default).
             Chain r = Chain::load(path, /*block_subsidy=*/0);
@@ -54781,7 +56346,7 @@ int main(int argc, char** argv) {
             std::string path = tmp.string();
             std::error_code ec;
             fs::remove(path, ec);
-            c1.save(path);
+            c1.save_incremental(path);
             // block_subsidy 0 (chain default); apply path replays.
             Chain reloaded = Chain::load(path, /*block_subsidy=*/0);
             Hash root_reloaded = reloaded.compute_state_root();
@@ -56398,7 +57963,7 @@ int main(int argc, char** argv) {
             std::string path = tmp.string();
             std::error_code ec;
             fs::remove(path, ec);
-            c1.save(path);
+            c1.save_incremental(path);
             // Pass shard_count=4 so cross-shard apply branches replay.
             Hash salt{};
             Chain reloaded = Chain::load(path, /*block_subsidy=*/0,
@@ -58542,6 +60107,24 @@ int main(int argc, char** argv) {
                             {"event", {{"round", 1}, {"aborting_node", "n2"},
                                        {"timestamp", 1}, {"event_hash", h64},
                                        {"claims", "0000"}}}};
+                // D2-inc7a/inc7b: the Block-carrying types and CONTRIB route
+                // through Block::from_json / ContribMsg::from_json, so they
+                // need the BUILDER shape too (an empty object no longer
+                // encodes — same reason inc6b needed real fields).
+                case MsgType::BLOCK:
+                case MsgType::BEACON_HEADER:
+                    return chain::Block{}.to_json();
+                case MsgType::SHARD_TIP:
+                    return {{"shard_id", 0}, {"tip", chain::Block{}.to_json()}};
+                case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+                    return {{"src_shard", 0},
+                            {"src_block", chain::Block{}.to_json()}};
+                case MsgType::CHAIN_RESPONSE:
+                    return {{"blocks", json::array()}, {"has_more", false}};
+                case MsgType::CONTRIB:
+                    return {{"block_index", 1}, {"signer", "n1"},
+                            {"prev_hash", h64}, {"tx_hashes", json::array()},
+                            {"dh_input", h64}, {"ed_sig", h128}};
                 default:
                     return json::object();
                 }
@@ -58578,16 +60161,28 @@ int main(int argc, char** argv) {
         //     distinct type bytes, so a receiver dispatches correctly even
         //     when payloads collide.
         {
-            Message a; a.type = MsgType::BLOCK;     a.payload = json::object();
-            Message b; b.type = MsgType::SHARD_TIP; b.payload = json::object();
+            // BLOCK and BEACON_HEADER take the SAME payload shape (a bare
+            // Block DOM) and D2-inc7a gives them the SAME payload frame, so
+            // their encoded bodies are byte-identical past offset 2 — the
+            // sharpest possible form of this test: the envelope's type byte
+            // is the ONLY thing distinguishing the two messages. (Pre-inc7a
+            // the pair was BLOCK/SHARD_TIP with empty objects; those no
+            // longer encode, and SHARD_TIP's frame is a different shape.)
+            const json blk = chain::Block{}.to_json();
+            Message a; a.type = MsgType::BLOCK;         a.payload = blk;
+            Message b; b.type = MsgType::BEACON_HEADER; b.payload = blk;
             auto ba = encode_binary(a);
             auto bb = encode_binary(b);
             check(ba.size() >= 4 && bb.size() >= 4 && ba[2] != bb[2],
                   "(14) discriminator: distinct MsgTypes with identical "
                   "payloads still carry distinct type bytes (dispatch keyed "
                   "on the envelope, not the body)");
+            check(ba.size() == bb.size()
+                      && std::equal(ba.begin() + 3, ba.end(), bb.begin() + 3),
+                  "(14) discriminator: the two bodies are byte-identical apart "
+                  "from the type byte — nothing else disambiguates them");
             check(decode_binary(ba.data(), ba.size()).type == MsgType::BLOCK &&
-                  decode_binary(bb.data(), bb.size()).type == MsgType::SHARD_TIP,
+                  decode_binary(bb.data(), bb.size()).type == MsgType::BEACON_HEADER,
                   "(14) discriminator: each decodes back to its own MsgType "
                   "despite the colliding payload");
         }

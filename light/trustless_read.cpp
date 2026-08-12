@@ -25,19 +25,19 @@ namespace determ::light {
 using nlohmann::json;
 
 determ::chain::GenesisConfig load_genesis(const std::string& path) {
-    std::ifstream f(path);
+    // D2 inc8: the genesis config file is at-rest storage and therefore the
+    // canonical binary DGC1 container — the light client decodes exactly the
+    // bytes the daemon wrote. No text fallback, no format sniffing: one
+    // container, one decoder, one rule set (GenesisConfig::validate).
+    std::ifstream f(path, std::ios::binary);
     if (!f) {
         throw std::runtime_error("cannot open --genesis: " + path);
     }
-    json j;
+    std::string bytes((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
     try {
-        f >> j;
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("--genesis is not valid JSON: ")
-                                  + e.what());
-    }
-    try {
-        return determ::chain::GenesisConfig::from_json(j);
+        return determ::chain::GenesisConfig::decode(
+            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("--genesis parse error: ")
                                   + e.what());

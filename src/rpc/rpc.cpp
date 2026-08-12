@@ -248,6 +248,12 @@ json RpcServer::dispatch(const json& req) {
             params.value("event", json::object()));
     if (method == "snapshot")
         return node_.rpc_snapshot(params.value("headers", uint32_t{16}));
+    // D2 inc8: write the canonical binary snapshot (DSN1) node-side. The
+    // `snapshot` method above stays the JSON text VIEW; at-rest snapshot FILES
+    // are produced here so the bytes are never round-tripped through text.
+    if (method == "snapshot_save")
+        return node_.rpc_snapshot_save(params.value("path", std::string{}),
+                                        params.value("headers", uint32_t{16}));
     if (method == "state_root")
         return node_.rpc_state_root();
     if (method == "state_proof")

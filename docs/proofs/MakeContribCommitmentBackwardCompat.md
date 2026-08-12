@@ -11,6 +11,50 @@ The proof is short and structural: the extension is gated on a single all-zero-v
 
 ---
 
+## 0. ⚠ Premise obsolete (2026-08-12) — T-1's byte-identity NO LONGER HOLDS, and no longer needs to
+
+**Read this before T-1.** This document's operational premise was *mixed-version peer compatibility*:
+an F2-aware node had to emit contribs that verify under a pre-F2 verifier and vice versa. That premise
+is **void pre-genesis** — there is no deployed network, no peer to be compatible with, and the
+no-migrations rule applies only from genesis forward.
+
+On 2026-08-12 the commitment became **two-level** (`docs/proofs/DECISION-LOG.md`; `docs/PROTOCOL.md`
+§6.1):
+
+```
+body_root      = make_contrib_body_root(prev_hash, tx_hashes, dh_input, …)     // src/node/producer.cpp:252
+contrib_commit = SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)    // src/node/producer.cpp:332
+```
+
+The leading `block_index` append moved OUT of the preimage and into the outer compose, so that an
+`EquivocationEvent` can carry the 40-byte opening `(block_index, body_root)` and a verifier can
+re-derive the signed digest — the S-052 height binding. Consequently:
+
+- **T-1 (v1 byte-identity) is FALSE as stated.** `mcc_v2(idx, prev, txs, dh, 0, 0, 0)` is now
+  `SHA-256("DTM-CONTRIB-v2" ‖ idx ‖ SHA-256(prev ‖ inner_root ‖ dh))`, which is not `mcc_v1(...)`.
+  Every contrib-commitment VALUE changed. This is a deliberate pre-genesis change with no shims, not a
+  regression. **Corollary T-1.1 (signature compatibility) is likewise retired** — there are no pre-F2
+  signatures to remain valid.
+- **What survives of T-1, restated (T-1′).** The *body* is exactly the legacy preimage **minus** the
+  leading `block_index` append, including the all-zero-views short-circuit verbatim
+  (`src/node/producer.cpp:252` — the `any_view` gate, the `DTM-F2-v1` block, and the `DTM-TS-v1` /
+  `DTM-STV-v1` tails are unchanged). So every structural claim L-1/L-2 makes about *which bytes enter
+  the preimage under which gate* transfers to the body, one hash layer in. The gate register's T-1 pin
+  now pins the **two-level** form (an independent external re-derivation of body + outer tag/BE-index),
+  not the one-level form.
+- **T-2 (domain-separation replay defense) survives and is STRENGTHENED.** The `DTM-F2-v1` /
+  `DTM-TS-v1` / `DTM-STV-v1` separators inside the body are untouched, and a NEW outer separator
+  `"DTM-CONTRIB-v2"` now distinguishes the whole contrib family from the block-digest family
+  (`"DTM-BLKDIG-v2"`). That outer separation is **load-bearing for FA6**: with a shared tag, one honest
+  block signature plus one honest contrib signature at a single height would compose into a valid
+  equivocation proof (`EquivocationSlashing.md` §2.1).
+- **Corollary T-2.1 is unchanged in force** and gains a second leg: a contrib signature can never be
+  replayed as a block signature, by the outer tag.
+
+Everything below is retained as the original argument; read T-1/T-1.1 subject to this section.
+
+---
+
 ## 1. Theorem statements
 
 **Setup.** Let `mcc_v1(idx, prev, txs, dh)` denote the conceptual pre-F2 implementation of the commit primitive: an `SHA256Builder` fed with `block_index || prev_hash || inner_root(txs) || dh_input` followed by `finalize()`. Let `mcc_v2(idx, prev, txs, dh, eq, abort, in)` denote the shipped implementation at `src/node/producer.cpp:219-260`, with the trailing three view-root parameters defaulted to `Hash{}` (32 zero bytes) per the header declaration at `include/determ/node/producer.hpp:134-139`. Let `inner_root(txs) := SHA256(txs[0] || txs[1] || … || txs[n-1])` over the sorted-and-deduped list as documented in `Preliminaries.md` §1.3.

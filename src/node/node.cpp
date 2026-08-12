@@ -591,14 +591,18 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         if (!cfg_.snapshot_path.empty()
             && std::filesystem::exists(cfg_.snapshot_path)) {
             try {
-                std::ifstream sf(cfg_.snapshot_path);
-                nlohmann::json sj = nlohmann::json::parse(sf);
+                // D2 inc8: at-rest snapshots are the canonical binary DSN1
+                // container — raw bytes, no format sniffing, no text fallback.
+                std::ifstream sf(cfg_.snapshot_path, std::ios::binary);
+                std::string sbytes((std::istreambuf_iterator<char>(sf)),
+                                    std::istreambuf_iterator<char>());
                 // SnapshotRestoreGateAudit A1-revalidate: this is the node's
                 // operator-opt-in snapshot adoption — require the A1 unitary-balance
                 // identity so a corrupt/tampered snapshot fails cleanly HERE rather
                 // than wedging the node on its first post-restore block apply.
-                chain_ = chain::Chain::restore_from_snapshot(
-                    sj, /*require_supply_invariant=*/true);
+                chain_ = chain::Chain::decode_state(
+                    reinterpret_cast<const uint8_t*>(sbytes.data()),
+                    sbytes.size(), /*require_supply_invariant=*/true);
                 // restore_from_snapshot reads constants from the
                 // snapshot itself; they should match what genesis
                 // would set, but we do not require gcfg_opt here.
@@ -616,11 +620,8 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                 // is a no-op for genesis-skipped paths since there's
                 // no prior state to overwrite). Note: the snapshot
                 // file remains the canonical state seed; do not
-                // delete it. B1: save() invalidated any manifest from
-                // a previous run (a stale manifest would win over this
-                // fresh chain.json on the next load and REWIND); write
-                // the block store fresh from the restored chain.
-                chain_.save(cfg_.chain_path);
+                // delete it. D2 inc8: the block store is the only
+                // at-rest chain form, so one write does it.
                 chain_.save_incremental(cfg_.chain_path);
                 goto chain_loaded;
             } catch (std::exception& e) {
@@ -864,14 +865,10 @@ void Node::stop() {
         //     loop before processing the flag.
         //  2. An apply landed between the worker's last save and
         //     stop() — no pending flag, but disk is stale.
-        // Both are made-good by writing once more here. B1: write BOTH
-        // stores, in THIS order — the legacy full chain.json first (the
-        // graceful-stop compatibility artifact every offline consumer —
-        // operator tools, determ-light verify-chain-file, test scripts —
-        // parses; O(N) once at shutdown, off the hot path; it also
-        // invalidates any manifest), then save_incremental to re-write a
-        // fresh manifest so the next start loads from the block store.
-        chain_.save(cfg_.chain_path);
+        // Both are made-good by writing once more here. D2 inc8: there is
+        // exactly ONE store now — the binary block store + manifest. The
+        // legacy full chain.json graceful-stop artifact is gone; offline
+        // consumers pull `determ chain-export --json` instead.
         chain_.save_incremental(cfg_.chain_path);
     }
 }
@@ -919,24 +916,12 @@ void Node::save_worker_loop() {
         if (!do_save) continue;
         try {
             std::shared_lock<std::shared_mutex> slk(state_mutex_);
-            // B1 chain-storage-v1, staged migration:
-            //   SHORT chains (height <= kLegacyFullSaveMaxHeight): write
-            //   BOTH — the legacy full chain.json (kept per-tick fresh, so
-            //   the ~19 test/operator scripts that parse chain.json MID-RUN
-            //   or after a hard kill keep working byte-for-byte; the O(N)
-            //   cost is trivial at this scale) and then the block store
-            //   (save() invalidates the manifest, so the incremental write
-            //   must come second to re-manifest).
-            //   LONG chains: store-only — the true O(1) hot path, which is
-            //   exactly where the O(N) rewrite was the register's
-            //   throughput offender. Live reads on long chains use RPC;
-            //   the legacy file is refreshed at graceful stop().
-            if (chain_.height() <= kLegacyFullSaveMaxHeight) {
-                chain_.save(cfg_.chain_path);
-                chain_.save_incremental(cfg_.chain_path);
-            } else {
-                chain_.save_incremental(cfg_.chain_path);
-            }
+            // B1 chain-storage-v1 / D2 inc8: store-only, unconditionally.
+            // The staged "also rewrite the full chain.json below height
+            // 4096" branch is gone with the legacy writer — the O(1)
+            // incremental store is now the single hot path at every height.
+            // Live reads use RPC; offline reads use `determ chain-export`.
+            chain_.save_incremental(cfg_.chain_path);
         } catch (std::exception& e) {
             std::cerr << "[save worker] save failed: " << e.what() << "\n";
             // Don't terminate the loop — transient disk failures
@@ -4589,6 +4574,41 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
 json Node::rpc_snapshot(uint32_t header_count) const {
     std::shared_lock<std::shared_mutex> lk(state_mutex_);
     return chain_.serialize_state(header_count);
+}
+
+// D2 inc8: write the CANONICAL binary snapshot (DSN1) to `path`, node-side.
+// `determ snapshot create` used to dump the JSON rpc_snapshot result to disk;
+// at-rest snapshots are binary now, so the bytes are produced where the chain
+// lives and written atomically (tmp+rename) — a crash mid-write can never
+// leave a half-written snapshot that the next bootstrap would decode-reject.
+// Localhost-only, like every other RPC. rpc_snapshot (the JSON view) is
+// unchanged and still backs operator inspection.
+json Node::rpc_snapshot_save(const std::string& path,
+                              uint32_t header_count) const {
+    std::vector<uint8_t> bytes;
+    {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        bytes = chain_.encode_state(header_count);
+    }
+    namespace fs = std::filesystem;
+    const fs::path target(path);
+    if (!target.parent_path().empty())
+        fs::create_directories(target.parent_path());
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error("snapshot_save: cannot write " + tmp);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        f.flush();
+        if (!f) throw std::runtime_error("snapshot_save: failed to flush " + tmp);
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) throw std::runtime_error("snapshot_save: cannot rename " + tmp
+        + " → " + path + ": " + ec.message());
+    return json{{"status", "ok"}, {"path", path},
+                {"bytes", bytes.size()}, {"format", "DSN1"}};
 }
 
 json Node::rpc_balance(const std::string& domain_in) const {

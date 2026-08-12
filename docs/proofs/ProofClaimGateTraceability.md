@@ -737,6 +737,21 @@ added to an existing subcommand).
 
 ## 3r. MakeContribCommitmentBackwardCompat T-1 CLOSED — v1 pre-image reference (FAST unit)
 
+> **UPDATE 2026-08-12 — the pinned form changed; the gate is re-anchored, still CLOSED.**
+> `make_contrib_commitment` became two-level: `SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖
+> body_root)` over `make_contrib_body_root` (`src/node/producer.cpp:332` / `:252`), which is the legacy
+> preimage **minus** the leading `block_index` append. The 18b leg's old external reference — the
+> one-level v1 4-append pre-image — was therefore legitimately broken by the shipped change (not by a
+> regression), and was **re-anchored to an independent two-level re-derivation**: the leg rebuilds
+> `body_root` with a fresh `SHA256Builder` and then re-applies the outer tag + BE index, so it remains
+> an EXTERNAL byte pin (body + outer tag + endianness), and the positive control (an F2 non-zero-root
+> commit must NOT equal the reference) is retained. The register's surviving mutant
+> (`bool any_view = true`) still reddens it, because `any_view` still gates the `DTM-F2-v1` block inside
+> the body. The `pre-F2 peer byte-compat` MOTIVE is obsolete pre-genesis — see
+> `MakeContribCommitmentBackwardCompat.md` §0 — but the gate's VALUE is unchanged: it is the only
+> external pin on this preimage's byte layout.
+
+
 `make_contrib_commitment` (`src/node/producer.cpp:248`) has a **v1 backward-compat
 short-circuit**: when all three F2 view roots are zero it falls through to the
 pre-F2 commit shape — 4 appends `SHA256( u64(index) ‖ prev ‖ inner_root ‖ dh )`,

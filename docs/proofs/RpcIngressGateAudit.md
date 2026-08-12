@@ -29,22 +29,33 @@ itself. The gaps are on the unauthenticated **gossip** surface or are missing pe
 MOSTLY well-guarded but NOT clean: **7 confirmed accept-widening gaps** in two classes —
 **(A) two rank-1 remote-unauthenticated consensus-integrity holes** on the peer-gossip paths where a
 self-declared-role or zero-consent message is trusted, and **(B) five rank-2 resource / liveness / integrity
-gaps** (one pure-test, four missing-bound) — **4 CLOSED** (#3 MEM-tx-sig-admit §3a, #6
-ING-chain-summary-last_n-uncapped §3b, #7 RPC-readline-unbounded §3c, plus the follow-up-promoted #8
-SNAP-header-count-uncapped §3d) = the **entire autonomous DoS-hardening track**; the 2 remaining ranked rows
-(#4/#5) touch the accept path and are OWNER-GATED. Each is invisible to the current suite (no test drives the
-adversarial input), so each is a clean falsify-on-mutant candidate.
+gaps** (one pure-test, four missing-bound). **Status 2026-08-12: 6 of 7 CLOSED.** Both rank-1 holes are
+closed (§2a → S-052, §2b → S-053; owner-authorized 2026-07-31, landed in `d34c632`, each falsify-on-mutant
+gated), joining the 4 rank-2 closures (#3 MEM-tx-sig-admit §3a, #6 ING-chain-summary-last_n-uncapped §3b, #7
+RPC-readline-unbounded §3c, plus the follow-up-promoted #8 SNAP-header-count-uncapped §3d) = the entire
+autonomous DoS-hardening track. The 2 remaining ranked rows (#4/#5) touch the accept path and are still
+OWNER-GATED. Each was invisible to the then-current suite (no test drove the adversarial input), so each was
+a clean falsify-on-mutant candidate — and each closure carries its executed mutant evidence.
+
+**Two residuals the closures deliberately do NOT cover** (stated here so the closure is not over-read):
+the same-height cross-round equivocation case (§2a), and `cumulative_rand` authenticity on the
+beacon-header path plus the self-declared BEACON role in HELLO that §2b's reachability argument rests on
+(§2b). All three remain owner items.
 
 ---
 
-## 2. OPEN consensus-integrity findings (rank-1) — **OWNER-GATED (fix is a consensus/wire change)**
+## 2. Consensus-integrity findings (rank-1) — **BOTH CLOSED, 2026-08-12**
 
-These require production changes to consensus/slashing behavior. Per the project's consensus-change
-discipline (defer security/consensus design to the owner, as with every prior S-0xx decision), they are
-**NOT** closed autonomously — they are escalated for an owner decision on the fix. The test-only backlog in
-§3 is closed by the falsify-on-mutant method WITHOUT touching consensus code.
+These required production changes to consensus/slashing behavior, so per the project's consensus-change
+discipline they were escalated rather than closed autonomously. **The owner authorized both on 2026-07-31
+and both landed on 2026-08-12** (`docs/proofs/DECISION-LOG.md`, that date; commit `d34c632`) — §2a as
+`docs/SECURITY.md` **S-052**, §2b as **S-053**. Each is now falsify-on-mutant gated. The audit text below is
+retained verbatim as the finding record; the **CLOSURE** block after each states what actually shipped,
+including where the shipped fix departs from the fix direction this audit proposed.
 
-### 2a. EQV-INGRESS-height-unbound-forged-slash — `validator.cpp:378-402` (+ `node.cpp:1902` ingress) — **value_rank 1, HIGHEST severity**
+The test-only backlog in §3 was closed by the falsify-on-mutant method WITHOUT touching consensus code.
+
+### 2a. EQV-INGRESS-height-unbound-forged-slash — ✅ **CLOSED** (S-052) — was value_rank 1, HIGHEST severity
 
 **Property.** The two signed digests in an equivocation proof must be bound to the SAME height (both must be
 `compute_block_digest` of blocks at one `ev.block_index`).
@@ -72,7 +83,35 @@ evidence. Once the struct binds height, pin it via the existing `check_equivocat
 (genuine cross-height pairs → REJECT; honest same-height → ACCEPT; falsify-on-mutant on the height-equality
 assertion).
 
-### 2b. INGRESS-beacon-header-empty-committee-vacuous-kofk — `node.cpp:1973-2007` (`on_beacon_header`) — **value_rank 1**
+**CLOSURE (2026-08-12).** Fixed, but **not by the fix direction above**. Carrying the two conflicting
+headers was rejected on analysis: unbounded evidence size, and `Block ⊃ EquivocationEvent ⊃ Block`
+recursion (crafted evidence nests infinitely; even an "exact header subset" is recursive, because
+`compute_block_digest`'s eq-root appendage reads the block's own `equivocation_events`). What shipped
+instead makes both digest families **two-level and openable**:
+
+```
+block_digest   = SHA256("DTM-BLKDIG-v2"  ‖ index       u64 BE ‖ body_root)
+contrib_commit = SHA256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)
+```
+
+`EquivocationEvent` carries `kind` + a per-side 40-byte opening `{index, body_root}`; `digest_a`/`digest_b`
+are DELETED as derivable. `check_equivocation_events` (`src/node/validator.cpp:380`) rejects `kind > 1`,
+asserts `index_a == index_b == ev.block_index`, and verifies both signatures against the DERIVED digests —
+the audit's `header_a.index == header_b.index == ev.block_index` assertion, obtained at 40 bytes per side
+instead of a whole header, and with no recursion. `Node::on_equivocation_evidence` and
+`rpc_submit_equivocation` mirror the full check set, so **all three ingresses** (block path, gossip,
+RPC) are equally strong. Wire (GENESIS-DEADLINE): EQUIV_REC + EQUIVOCATION_EVIDENCE are fixed 229 B after
+the lp_str, `kMinEquivEvent` 213 → 230, decode fail-closes on `kind > 1`. Gate: the 8-arm EQV block of
+`test-abort-cert-validation` via the `check_equivocation_events_for_test` seam this audit proposed —
+including the cross-height REJECT, an openings-agree-but-≠-`block_index` REJECT that pins the
+`== ev.block_index` leg alone, and a cross-kind REJECT pinning domain separation. Two mutants (delete the
+height assert; weaken it to `index_a == index_b`) each RED on exactly their arm.
+
+**Residual, NOT closed:** same-height cross-round honest double-signing (an abort re-round changes the
+body at one height) still satisfies the predicate. Strictly narrower than the closed hole, still open,
+owner review needed — see `EquivocationSlashing.md` §2 Case (c).
+
+### 2b. INGRESS-beacon-header-empty-committee-vacuous-kofk — ✅ **CLOSED** (S-053) — was value_rank 1
 
 **Property.** A gossiped beacon header must carry a real, non-empty, correctly-derived K-of-K committee
 signature set before it seeds the shard's beacon anchor.
@@ -94,6 +133,31 @@ but it is a **consensus-relevant accept rule on the gossip path**, so it carries
 new byte-neutral `on_beacon_header_for_test` seam + a `test-beacon-header-committee` subcommand
 (empty-committee header → NOT stored; falsify-on-mutant on the empty-check).
 
+**CLOSURE (2026-08-12).** Fixed by the fix direction above, generalized one step: rather than adding the
+two floors inline (which would have left TWO hand-written verifiers of one rule — the divergence bug-class
+that produced this finding), `verify_committee_sigs` was extracted as the ONE committee-signature core
+(`src/node/shardtip_verify.cpp:17`) — non-empty `creators`, size match, membership, signature verify,
+`signed_count >= required_k` — and BOTH `verify_shard_tip_committee_sig_root` and `Node::on_beacon_header`
+(`src/node/node.cpp:1978`) route through it. The beacon path passes `required_k = cfg_.k_block_sigs` and
+retains the caller-side completeness rule `signed_count == creators.size()`. Wholesale reuse of
+`verify_shard_tip_committee_sig_root` was rejected as incorrect for this path: it derives an expected
+committee from `epoch_committee_seed(beacon_rand, shard_id)` over a pinned pool, which a shard cannot
+reproduce for the beacon's own chain — it would false-reject honest headers. Gate:
+`test-beacon-header-committee` via the `on_beacon_header_for_test` seam this audit proposed (empty forge
+REJECTED, under-K forge REJECTED, 3-creator zero-sentinel completeness pin, honest K-of-K ACCEPTED); two
+mutants each RED.
+
+**Scope correction — read this before citing the closure.** The fix does **NOT** authenticate
+`cumulative_rand`, the field this finding names as the attack's payoff. The K-of-K `creator_block_sigs`
+sign `compute_block_digest`, which does not cover `cumulative_rand`/`delay_output`, and this ingest path
+does not run `check_cumulative_rand` (apply-path only). A MITM can still alter `cumulative_rand` on an
+otherwise-valid header without breaking the signatures; for the FIRST header the prev_hash check is
+skipped, so a tampered rand can seed ONE epoch's committee selection before subsequent genuine headers
+fail to chain (a stall, not silent acceptance). This is PRE-EXISTING — the old hand-rolled loop had the
+same gap — and the fix is a strict improvement within its authorized scope. Authenticating
+`cumulative_rand` on this path remains **NOT AUTHORIZED** (owner item, adjacent to the also-unauthorized
+HELLO beacon-role authentication that this finding's *Reachable by* paragraph relies on).
+
 ---
 
 ## 3. The FAST-gateable backlog (rank-2 — a ranked, mostly test-or-small-hardening set)
@@ -103,8 +167,9 @@ the three ranked rows #3 (MEM-tx-sig-admit) §3a, #6 (ING-chain-summary-last_n-u
 (RPC-readline-unbounded) §3c, **plus the follow-up-promoted row #8 (SNAP-header-count-uncapped) §3d** — the
 snapshot-request analog of #6, found during #7's close and clamped the same way. The **only remaining rank-2
 rows, #4 and #5, touch the gossip/sync accept path** → they are OWNER-GATED (a production accept-rule change
-is not shipped autonomously) and are **presented to the owner**, alongside the two rank-1 consensus vulns
-(§2). **No autonomous rank-2 work remains; NEXT (owner) = #4.**
+is not shipped autonomously) and are **presented to the owner**. The two rank-1 consensus vulns they were
+presented alongside (§2) have since been authorized and closed (2026-08-12). **No autonomous rank-2 work
+remains; NEXT (owner) = #4.**
 
 | # | id | file:line | property (accept-widening consequence) | surviving mutation | class | val |
 |---|---|---|---|---|---|---|

@@ -1,10 +1,41 @@
 # S004KeyfileAtRest — passphrase-encrypted node-key file soundness (S-004 closure)
 
-This document proves that Determ's S-004 closure — passphrase-encrypted node-key files at rest, shipped in v2.17 — is sound under the standard concrete-security assumptions for PBKDF2-HMAC-SHA-256 (RFC 8018), AES-256-GCM AEAD (NIST SP 800-38D / RFC 5116), and Ed25519 EUF-CMA (RFC 8032). The scheme — closing the original "plaintext private keys on disk" finding from Audit 3.2 / OV-#04 — wraps the canonical `node_key.json` `{pubkey, priv_seed}` payload in a `DETERM-NODE-V1`-headered file whose second line is a `DWE1` AEAD envelope (`wallet/envelope.hpp`). The wallet binary's `keyfile-create` / `keyfile-decrypt` / `keyfile-info` commands own the encrypt + inspect + decrypt flows; the daemon can load the encrypted form directly at startup via `--keyfile` + the `DETERM_PASSPHRASE` env-var lookup.
+This document proves that Determ's S-004 closure — passphrase-encrypted node-key files at rest, shipped in v2.17 — is sound under the standard concrete-security assumptions for PBKDF2-HMAC-SHA-256 (RFC 8018), AES-256-GCM AEAD (NIST SP 800-38D / RFC 5116), and Ed25519 EUF-CMA (RFC 8032). The scheme — closing the original "plaintext private keys on disk" finding from Audit 3.2 / OV-#04 — wraps the operator's 32-byte Ed25519 seed in an AEAD envelope (`wallet/envelope.hpp`) inside the canonical `DNK1` binary container (§0; before 2026-08-12: a `node_key.json` `{pubkey, priv_seed}` payload inside a `DETERM-NODE-V1`-headered two-line text file). The wallet binary's `keyfile-create` / `keyfile-decrypt` / `keyfile-info` commands own the encrypt + inspect + decrypt flows; the daemon can load the encrypted form directly at startup via `--keyfile` + the `DETERM_PASSPHRASE` env-var lookup.
 
 We prove the PBKDF2 soundness lower bound, the AEAD AAD-binding property (header-substitution defense), confidentiality under three adversary models (A_offline disk-theft, A_online startup-prompt, A_msg pubkey-known), and characterize the operator-passphrase-entropy precondition explicitly. The proof's primary objects are `derive_key` + `encrypt` + `decrypt` in `wallet/envelope.cpp:17-167` plus the `keyfile-create` / `keyfile-decrypt` callers in `wallet/main.cpp:2981-3186` + `wallet/main.cpp:3239-3483`.
 
 **Companion documents:** `WalletRecoveryFlows.md` (T-3 keyfile-decryption soundness — restated and re-derived here from primitives for the S-004 closure perspective; the present proof is the cryptographic-primitive companion to WalletRecoveryFlows.md's operator-flow companion); `WalletRecovery.md` (FA12 T-16 AEAD envelope binding — the underlying primitive proof we cite as a black-box invariant); `S014RateLimiterSoundness.md` (similar finding-register + adversary-model layout used here); `RpcAuthHmacSoundness.md` (S-001 closure) — the daemon-side authentication surface, orthogonal to S-004; `Preliminaries.md` (F0) §2.1 (SHA-256 collision + preimage resistance) + §2.3 (CSPRNG uniformity) for the primitive assumptions A2 + A8 (the v1 hash + RNG axioms) leveraged in §2.
+
+---
+
+## 0. Container change (2026-08-12, D2 step 3) — read before §1
+
+The encrypted node keyfile is now the canonical **binary `DNK1` container**, not a two-line text file,
+and the AEAD plaintext is the **raw 32-byte seed**, not a JSON object. Every theorem below is stated
+over the AEAD + KDF construction and survives verbatim; what changes is the surrounding encoding and
+one application-layer check, both strictly in the defender's favour.
+
+```
+DNK1:  [0..3] "DNK1"  [4..35] pubkey 32 B raw  [36..39] env_len u32 LE  [40..] DWE envelope bytes
+       AAD       = the raw 32-byte header pubkey        (was: utf8 hex of the pubkey)
+       plaintext = the raw 32-byte priv_seed            (was: {"pubkey":…, "priv_seed":…} JSON)
+       decode    = EXACT length, refuse-never-clamp; env_len must reach EOF exactly
+```
+
+| Statement below | Status |
+|---|---|
+| T-1 (PBKDF2 / Argon2id work-factor lower bound) | unchanged — the KDF and its parameters are untouched |
+| T-2 (AEAD AAD-binding, header-substitution defense) | unchanged in force; the bound value is now the raw pubkey rather than its hex string, so there is one canonical encoding and no case/format ambiguity |
+| T-3 / T-4 / T-5 (confidentiality under the three adversary models) | unchanged — they depend on `H_pw`, the KDF, and AEAD, none of which moved |
+| §the two-layer "inner-vs-header pubkey equality" composition | **superseded and strengthened**: the second layer is now `ed25519_pubkey_from_seed(plaintext) == header pubkey` — a DERIVE check. The hand-crafted-envelope case it existed to catch is no longer expressible: an attacker who controls envelope generation cannot state a mismatching inner pubkey, because no inner pubkey is stated. See `docs/SECURITY.md` S-028's wallet-side note. |
+| The `J = {"pubkey":…, "priv_seed":…}` plaintext | retired for `DNK1`. `J` remains the shape of the daemon's own `node_key.json`, which `keyfile-decrypt --out` still writes and `src/crypto/keys.cpp` still reads — the explicitly recorded D2 remainder (`D2-DEFERRED(src)` in code; `docs/proofs/DECISION-LOG.md` 2026-08-12 §3). |
+| `DETERM-ACCOUNT-V1` (the `determ account create --passphrase` file) | still `src/`-owned two-line text; its line 2 changed from dot-separated hex to a single lowercase-hex rendering of the same container bytes. |
+
+Gate: `determ-wallet selftest-keyfile-binary` (19 cases), mutant-verified on the DAK1/DNK1
+derive-equality check and on the DNK1 raw-pubkey AAD binding. Envelope container gate:
+`selftest-envelope-bytes` (21 cases). Line citations to `wallet/main.cpp` below predate the rewrite in
+places; the current command entry points are `keyfile-create` `:3298`, `keyfile-decrypt` `:3520`,
+`keyfile-rotate` `:3778`, `keyfile-recover` `:4529`, `keyfile-info` `:5323`.
 
 ---
 
@@ -282,9 +313,9 @@ if (inner_pubkey_hex != header_pubkey_hex) {
 }
 ```
 
-This is structurally unreachable for any envelope produced by `keyfile-create` (the encryption path at `wallet/main.cpp:3097-3107` writes the same pubkey to both the header line AND the inner JSON, and the AAD-binding ensures any tampering breaks tag-verify before reaching this check). The check exists to detect hand-crafted envelopes that bypass the canonical create path — e.g., an envelope built with a deliberately-mismatched inner JSON and a forged header. Such an envelope would have a valid AAD (matching the forged header) and could decrypt to a meaningful-looking inner JSON, but the post-decrypt pubkey-equality check catches it.
+This is structurally unreachable for any envelope produced by `keyfile-create`, and the AAD-binding ensures any header tampering breaks tag-verify before reaching this check. The check exists to detect hand-crafted envelopes that bypass the canonical create path. **Superseded 2026-08-12 (§0):** the post-decrypt check is now `ed25519_pubkey_from_seed(plaintext) == header pubkey` — a derivation, not a comparison of two stated values. The hand-crafted-mismatch case is no longer expressible, because the plaintext states no pubkey to mismatch with; the only way to satisfy the check is to hold a seed that genuinely derives the header key.
 
-The composition: **(1) AAD-binding prevents header tampering** at the cryptographic layer (L-2); **(2) inner-vs-header pubkey-equality check** catches the residual hand-crafted-envelope case at the application layer. Both layers are required for full defense — an attacker who controls envelope generation could mismatch inner JSON; the AAD-binding alone does not catch this case because the AAD is part of the envelope and the attacker chose it.   □
+The composition: **(1) AAD-binding prevents header tampering** at the cryptographic layer (L-2); **(2) a post-decrypt identity check** catches the residual hand-crafted-envelope case at the application layer. Since 2026-08-12 layer (2) is a *derive-equality* check rather than a stated-value comparison, which closes the case by construction rather than by detection — the attacker who controls envelope generation has nothing to mismatch.   □
 
 ### Lemma L-4 (Constant-time tag-verify behavior under A_online)
 
@@ -497,16 +528,16 @@ This proof was added as part of the analytic-closure sweep for S-004; it does no
 - `wallet/envelope.cpp:19-33` — `derive_key` via OpenSSL `PKCS5_PBKDF2_HMAC` + EVP_sha256.
 - `wallet/envelope.cpp:37-103` — `encrypt` (the AEAD wrap path).
 - `wallet/envelope.cpp:105-167` — `decrypt` (the AEAD unwrap path; AAD-precondition + tag-verify).
-- `wallet/envelope.cpp:127-178` — `serialize` / `deserialize` (the canonical dot-separated hex format).
+- `wallet/envelope.cpp:209` / `:244` — `serialize_bytes` / `deserialize_bytes` (the canonical BINARY container); `:305` / `:309` — `serialize` / `deserialize`, the non-authoritative lowercase-hex CLI view.
 - `wallet/main.cpp:2981-3186` — `cmd_keyfile_create` (operator-side encrypt flow).
 - `wallet/main.cpp:3107` — AAD set to `utf8(pubkey_hex)`.
-- `wallet/main.cpp:3151-3152` — 2-line file format (`DETERM-NODE-V1 <pubkey_hex>` header + envelope blob).
+- `wallet/keyfmt.hpp` — the `DNK1` container (magic ‖ raw pubkey ‖ length-prefixed envelope, exact-length decode); `wallet/main.cpp:3298` `keyfile-create` is its writer.
 - `wallet/main.cpp:3239-3483` — `cmd_keyfile_decrypt` (operator-side decrypt flow).
 - `wallet/main.cpp:3364` — AAD reconstruction from header pubkey at decrypt time.
 - `wallet/main.cpp:3417-3429` — defense-in-depth inner-vs-header pubkey-equality check (L-3).
 - `wallet/main.cpp:4497-4622` — `cmd_keyfile_info` (metadata-only inspection, no passphrase).
 - `src/main.cpp:4416` + `:4526` — `DETERM_PASSPHRASE` env-var fallback for daemon-side + account-decrypt CLI.
-- `src/crypto/keys.cpp:35-58` — canonical plaintext `node_key.json` format (the AEAD-wrapped payload).
+- `src/crypto/keys.cpp:35-58` — the daemon's plaintext `node_key.json` format. Since 2026-08-12 this is NO LONGER the AEAD-wrapped payload (the payload is the raw seed); it survives as the `src/`-owned D2 remainder that `keyfile-decrypt --out` writes.
 - `docs/SECURITY.md` §S-004 — closure-status narrative this proof formalizes.
 - `docs/CLI-REFERENCE.md` `keyfile-create` / `keyfile-decrypt` / `keyfile-info` rows — operator-facing documentation.
 - `docs/proofs/WalletRecoveryFlows.md` — operator-flow-level companion (T-3 keyfile-decryption soundness as restated; T-4 composition idempotence; S-004 + Shamir-recovery composition).

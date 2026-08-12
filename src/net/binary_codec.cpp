@@ -145,28 +145,60 @@
 //                        being last is what makes exact consumption
 //                        decidable)
 //
-// PAYLOAD: ALL OTHER MSGTYPES
-//   For BLOCK, CONTRIB, BEACON_HEADER, SHARD_TIP,
-//   CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE, SNAPSHOT_RESPONSE,
-//   HEADERS_RESPONSE:
+// PAYLOAD: BLOCK-CARRYING FRAMES (D2-inc7a)
+//   Five types carry chain::Blocks, and all five delegate to the ONE
+//   canonical Block container (chain::Block::encode_frame / decode_frame,
+//   D2-inc5) rather than re-deriving a block layout per message type:
 //
-//   v1 falls back to a *length-prefixed JSON payload* inside the binary
-//   envelope:
+//     BLOCK (1) / BEACON_HEADER (12)
+//                      the payload IS the Block frame, nothing else.
+//     SHARD_TIP (13)   [shard_id: u32 LE][Block frame to end-of-body]
+//                        The tip decodes with allow_witnesses=FALSE — a
+//                        legitimate source tip is a LEAF (only BEACON
+//                        producers fold records / attach witnesses), so
+//                        this fail-closes the POISON-WITNESS shape at the
+//                        pre-auth decode boundary. Strictly narrower than
+//                        what Node::on_shard_tip guard 4b already rejects.
+//     CROSS_SHARD_RECEIPT_BUNDLE (14)
+//                      [src_shard: u32 LE][Block frame to end]
+//                        Witnesses ALLOWED (pure mirror — no handler-side
+//                        leaf guard exists for this channel).
+//     CHAIN_RESPONSE (6)
+//                      [has_more: u8 in {0,1}][count: u16 LE]
+//                      [count x [frame_len: u32 LE][Block frame]]
+//
+// PAYLOAD: CONTRIB (4) — D2-inc7b, always-present layout
+//     [block_index u64][signer u8 len + utf8][prev_hash 32][aborts_gen u64]
+//     [tx_hashes: u16 count, count x 32]
+//     [dh_input 32]
+//     [view_eq_root 32][view_abort_root 32][view_inbound_root 32]
+//     [view_eq_list u16 x 32][view_abort_list u16 x 32]
+//     [view_inbound_list u16 x 32]
+//     [proposer_time u64]
+//     [view_shardtip_root 32][view_shardtip_list u16 x 32]
+//     [ed_sig 64]
+//   ContribMsg::to_json gates three blocks, but every gate is VALUE-derived
+//   ("emit iff some field is non-default"), so an always-present frame loses
+//   nothing: decode fills the struct and returns to_json(), which re-applies
+//   the gates at the one site that owns them.
+//
+// PAYLOAD: THE REMAINING TWO MSGTYPES
+//   SNAPSHOT_RESPONSE and HEADERS_RESPONSE still fall back to a
+//   *length-prefixed JSON payload* inside the binary envelope:
 //
 //     offset  size  field
 //     4       4     json_len: u32 LE
 //     8       N     json_bytes (the per-type JSON payload, no envelope)
 //
-//   This is a deliberate scope decision: the plan calls for fixed-layout
-//   encodings of every type, but BLOCK alone has a dozen length-prefixed
-//   nested arrays (creator_tx_lists, creator_ed_sigs, creator_dh_inputs,
-//   creator_dh_secrets, equivocation_events, cross_shard_receipts, ...).
-//   Implementing all of them in one pass is high-blast-radius and is
-//   tracked as follow-up. The wrapper still buys us:
+//   They binarize in D2-inc7c (SNAPSHOT_RESPONSE reuses the DSN1 chain
+//   snapshot layout, so it waits on that container). Until then the wrapper
+//   still buys us:
 //     • Self-describing format byte for clean version detection.
-//     • A stable extension point — future PRs can switch individual
-//       msg_types from "JSON inside binary frame" to true binary
+//     • A stable extension point — the previous increments switched
+//       individual msg_types from "JSON inside binary frame" to true binary
 //       layouts without touching peers, gossip, or the dispatcher.
+//   WIRE-2's structural JSON ceiling (messages.hpp) protects exactly these
+//   two and retires with them.
 //
 // ENDIANNESS
 //   All multi-byte integers in the binary envelope and the transaction
@@ -577,6 +609,281 @@ nlohmann::json decode_abort_event_frame(const uint8_t* data, size_t len) {
     return j;
 }
 
+// ─── Block-carrying payload frames (D2-inc7a) ────────────────────────────────
+//
+// BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE and
+// CHAIN_RESPONSE all carry one or more chain::Blocks. Every one of them
+// delegates to the SHIPPED canonical container chain::Block::encode_frame /
+// decode_frame (D2-inc5) instead of deriving a second block layout — the
+// S-044 one-shared-codec discipline, and the reason inc5 landed first.
+//
+// The Block container's theorem is INFORMATION EQUIVALENCE with the JSON
+// container (BF-1, test-block-binary-codec):
+//
+//     decode_frame(encode_frame(b))  ==json==  from_json(to_json(b))
+//
+// so a decoder that rebuilds the payload DOM the builders produce is
+// behaviour-preserving for every downstream consumer. That is what lets the
+// swap land with ZERO edits to gossip.cpp, the dispatcher and every Node
+// handler: GossipNet::handle_message still sees exactly the DOM
+// make_block / make_beacon_header / make_shard_tip /
+// make_cross_shard_receipt_bundle / Node::on_get_chain built.
+//
+// SIGNATURE-TRANSPARENT: every signature a Block carries binds
+// signing_bytes / compute_block_digest, never a serialization (BF-3), so no
+// verification outcome can change — only the container does.
+//
+// Fail-closed: the count is proven against the bytes that remain BEFORE any
+// reserve, and every frame is consumed EXACTLY.
+
+// Read a u16 count and PROVE the remaining bytes could back it, before any
+// reserve and before the loop (bf_get_count discipline, block.cpp — a cap
+// that runs after the work is not a cap).
+uint16_t wf_get_count(const uint8_t* data, size_t len, size_t& off,
+                      size_t min_elem, const char* what) {
+    if (off + 2 > len)
+        throw std::runtime_error(std::string("binary_codec: truncated ") + what +
+                                 " count");
+    uint16_t n = le_get_u16(data + off);
+    off += 2;
+    if (min_elem != 0 && static_cast<size_t>(n) > (len - off) / min_elem)
+        throw std::runtime_error(
+            std::string("binary_codec: ") + what + " declares " +
+            std::to_string(n) + " elements but only " +
+            std::to_string(len - off) + " bytes remain");
+    return n;
+}
+
+void wf_need(size_t off, size_t need, size_t len, const char* what) {
+    if (off + need > len)
+        throw std::runtime_error(std::string("binary_codec: truncated ") + what);
+}
+
+// Write a u16 count, refusing rather than clamping (the 1a1b98f lesson: a
+// clamped length beside an unclamped body is a second encoding of the value).
+void wf_put_count(std::vector<uint8_t>& out, size_t n, const char* what) {
+    if (n > 0xFFFF)
+        throw std::runtime_error(std::string("binary_codec: ") + what +
+                                 " exceeds the u16 count field (" +
+                                 std::to_string(n) + ")");
+    le_put_u16(out, static_cast<uint16_t>(n));
+}
+
+void wf_put_hash_vec(std::vector<uint8_t>& out, const std::vector<Hash>& v,
+                     const char* what) {
+    wf_put_count(out, v.size(), what);
+    for (auto& h : v) out.insert(out.end(), h.begin(), h.end());
+}
+
+std::vector<Hash> wf_get_hash_vec(const uint8_t* data, size_t len, size_t& off,
+                                  const char* what) {
+    uint16_t n = wf_get_count(data, len, off, 32, what);
+    std::vector<Hash> v;
+    v.reserve(n);
+    for (uint16_t i = 0; i < n; ++i) {
+        Hash h{};
+        std::copy(data + off, data + off + 32, h.begin());
+        off += 32;
+        v.push_back(h);
+    }
+    return v;
+}
+
+void wf_get_hash(const uint8_t* data, size_t len, size_t& off, Hash& dst,
+                 const char* what) {
+    wf_need(off, 32, len, what);
+    std::copy(data + off, data + off + 32, dst.begin());
+    off += 32;
+}
+
+// BLOCK (1) and BEACON_HEADER (12): the payload IS the Block frame, nothing
+// else. Witnesses are ALLOWED — a folded beacon block legitimately carries
+// shard_tip_witnesses, and BEACON_HEADER is precisely the channel that
+// gossips folded beacon blocks (BLOCK carries the beacon's own chain).
+void encode_block_payload_frame(std::vector<uint8_t>& out, const Message& m) {
+    chain::Block::from_json(m.payload).encode_frame(out);
+}
+
+nlohmann::json decode_block_payload_frame(const uint8_t* data, size_t len) {
+    return chain::Block::decode_frame(data, len).to_json();
+}
+
+// SHARD_TIP (13): [shard_id u32][Block frame to end-of-body].
+//
+// The tip decodes with allow_witnesses=FALSE. This is strictly
+// accept-NARROWING to exactly the set Node::on_shard_tip guard 4b already
+// rejects: only BEACON producers fold shard_tip_records and attach
+// shard_tip_witnesses, so a legitimate source tip is always a LEAF. A
+// poisoned tip carrying records/witnesses would ride into the witness buffer
+// and make the folded beacon block unparseable fleet-wide (the
+// POISON-WITNESS beacon-liveness attack). Fail-closing it at the pre-auth
+// DECODE boundary refuses it before a multi-MB depth-2 parse instead of
+// after. Guard 4b stays where it is — it still covers the `_for_test` and
+// direct-call paths.
+void encode_shard_tip_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u32(out, m.payload.value("shard_id", uint32_t{0}));
+    chain::Block::from_json(m.payload.at("tip")).encode_frame(out);
+}
+
+nlohmann::json decode_shard_tip_frame(const uint8_t* data, size_t len) {
+    if (len < 4)
+        throw std::runtime_error("binary_codec: truncated SHARD_TIP frame");
+    uint32_t sid = le_get_u32(data);
+    chain::Block tip =
+        chain::Block::decode_frame(data + 4, len - 4, /*allow_witnesses=*/false);
+    nlohmann::json j;
+    j["shard_id"] = sid;
+    j["tip"]      = tip.to_json();
+    return j;
+}
+
+// CROSS_SHARD_RECEIPT_BUNDLE (14): [src_shard u32][Block frame to end].
+// Witnesses ALLOWED — a pure mirror of the JSON path, because no handler-side
+// leaf guard exists for this channel and narrowing here would be new,
+// ungated accept-rule behaviour. Node::on_cross_shard_receipt_bundle
+// re-broadcasts the decoded Message; BF-2 canonicality makes that re-encode
+// byte-identical to the inbound frame.
+void encode_bundle_frame(std::vector<uint8_t>& out, const Message& m) {
+    le_put_u32(out, m.payload.value("src_shard", uint32_t{0}));
+    chain::Block::from_json(m.payload.at("src_block")).encode_frame(out);
+}
+
+nlohmann::json decode_bundle_frame(const uint8_t* data, size_t len) {
+    if (len < 4)
+        throw std::runtime_error(
+            "binary_codec: truncated CROSS_SHARD_RECEIPT_BUNDLE frame");
+    uint32_t sid = le_get_u32(data);
+    chain::Block b = chain::Block::decode_frame(data + 4, len - 4);
+    nlohmann::json j;
+    j["src_shard"] = sid;
+    j["src_block"] = b.to_json();
+    return j;
+}
+
+// CHAIN_RESPONSE (6): [has_more u8 in {0,1}][count u16][count x
+// [frame_len u32][Block frame]]. Built inline by Node::on_get_chain
+// ({"blocks", "has_more"}) — there is no builder for it in messages.hpp.
+//
+// The count's min-element size is 4 + 297: a u32 length prefix plus the
+// smallest possible Block frame. 297 is kMinBlockFrame, PINNED by BF-0 in
+// test-block-binary-codec (an empty frame is exactly 297 bytes); the literal
+// is repeated rather than exported because block.cpp owns that constant and
+// its gate is what keeps the two in agreement.
+constexpr size_t kMinBlockFrameWire = 297;   // BF-0, src/chain/block.cpp
+
+void encode_chain_response_frame(std::vector<uint8_t>& out, const Message& m) {
+    out.push_back(m.payload.value("has_more", false) ? uint8_t{1} : uint8_t{0});
+    const nlohmann::json empty = nlohmann::json::array();
+    const nlohmann::json& arr =
+        m.payload.contains("blocks") ? m.payload.at("blocks") : empty;
+    if (!arr.is_array())
+        throw std::runtime_error(
+            "binary_codec: CHAIN_RESPONSE field 'blocks' must be a JSON array");
+    wf_put_count(out, arr.size(), "CHAIN_RESPONSE blocks");
+    for (auto& bj : arr) {
+        std::vector<uint8_t> f;
+        chain::Block::from_json(bj).encode_frame(f);
+        if (f.size() > 0xFFFFFFFFu)
+            throw std::runtime_error(
+                "binary_codec: CHAIN_RESPONSE block frame exceeds u32 length");
+        le_put_u32(out, static_cast<uint32_t>(f.size()));
+        out.insert(out.end(), f.begin(), f.end());
+    }
+}
+
+nlohmann::json decode_chain_response_frame(const uint8_t* data, size_t len) {
+    size_t off = 0;
+    wf_need(off, 1, len, "CHAIN_RESPONSE frame");
+    uint8_t hm = data[off++];
+    // Canonical encoding is unique: a bool has exactly two representations.
+    if (hm > 1)
+        throw std::runtime_error(
+            "binary_codec: CHAIN_RESPONSE has_more must be 0 or 1");
+    uint16_t n = wf_get_count(data, len, off, 4 + kMinBlockFrameWire,
+                              "CHAIN_RESPONSE blocks");
+    nlohmann::json blocks = nlohmann::json::array();
+    for (uint16_t i = 0; i < n; ++i) {
+        wf_need(off, 4, len, "CHAIN_RESPONSE block frame length");
+        uint32_t flen = le_get_u32(data + off);
+        off += 4;
+        wf_need(off, flen, len, "CHAIN_RESPONSE block frame body");
+        blocks.push_back(chain::Block::decode_frame(data + off, flen).to_json());
+        off += flen;
+    }
+    if (off != len)
+        throw std::runtime_error("binary_codec: CHAIN_RESPONSE frame trailing bytes");
+    nlohmann::json j;
+    j["blocks"]   = std::move(blocks);
+    j["has_more"] = (hm != 0);
+    return j;
+}
+
+// ─── CONTRIB frame (D2-inc7b) ────────────────────────────────────────────────
+//
+// The Phase-1 commit message. Field order = ContribMsg::to_json's emission
+// order, signature last. The frame is structurally ALWAYS-PRESENT even
+// though to_json gates three blocks (the six-key F2 view bundle, the
+// shard-tip pair, proposer_time), because every one of those gates is
+// VALUE-derived — "emit iff some field is non-default". So the container
+// carries the value and never the gate, and no information is lost: decode
+// fills the struct and returns m.to_json(), which re-applies the gates at
+// the ONE site that owns them (producer.cpp, S-044). A gate mirrored into
+// the codec would be a second copy that could drift.
+//
+// This differs from the Block frame, where two gates DISCARD information and
+// the encoder therefore writes the discarded-equivalent value (block.hpp).
+// ContribMsg has no such gate.
+//
+// Signature-transparent: ed_sig binds make_contrib_commitment's field hash,
+// never the container.
+void encode_contrib_frame(std::vector<uint8_t>& out, const Message& m) {
+    node::ContribMsg c = node::ContribMsg::from_json(m.payload);
+    le_put_u64(out, c.block_index);
+    put_lp_str(out, c.signer);
+    out.insert(out.end(), c.prev_hash.begin(), c.prev_hash.end());
+    le_put_u64(out, c.aborts_gen);
+    wf_put_hash_vec(out, c.tx_hashes, "CONTRIB tx_hashes");
+    out.insert(out.end(), c.dh_input.begin(), c.dh_input.end());
+    out.insert(out.end(), c.view_eq_root.begin(),      c.view_eq_root.end());
+    out.insert(out.end(), c.view_abort_root.begin(),   c.view_abort_root.end());
+    out.insert(out.end(), c.view_inbound_root.begin(), c.view_inbound_root.end());
+    wf_put_hash_vec(out, c.view_eq_list,      "CONTRIB view_eq_list");
+    wf_put_hash_vec(out, c.view_abort_list,   "CONTRIB view_abort_list");
+    wf_put_hash_vec(out, c.view_inbound_list, "CONTRIB view_inbound_list");
+    le_put_u64(out, c.proposer_time);
+    out.insert(out.end(), c.view_shardtip_root.begin(), c.view_shardtip_root.end());
+    wf_put_hash_vec(out, c.view_shardtip_list, "CONTRIB view_shardtip_list");
+    out.insert(out.end(), c.ed_sig.begin(), c.ed_sig.end());
+}
+
+nlohmann::json decode_contrib_frame(const uint8_t* data, size_t len) {
+    node::ContribMsg c;
+    size_t off = 0;
+    wf_need(off, 8, len, "CONTRIB frame");
+    c.block_index = le_get_u64(data); off += 8;
+    c.signer = get_lp_str(data, len, off);
+    wf_get_hash(data, len, off, c.prev_hash, "CONTRIB prev_hash");
+    wf_need(off, 8, len, "CONTRIB aborts_gen");
+    c.aborts_gen = le_get_u64(data + off); off += 8;
+    c.tx_hashes = wf_get_hash_vec(data, len, off, "CONTRIB tx_hashes");
+    wf_get_hash(data, len, off, c.dh_input,          "CONTRIB dh_input");
+    wf_get_hash(data, len, off, c.view_eq_root,      "CONTRIB view_eq_root");
+    wf_get_hash(data, len, off, c.view_abort_root,   "CONTRIB view_abort_root");
+    wf_get_hash(data, len, off, c.view_inbound_root, "CONTRIB view_inbound_root");
+    c.view_eq_list      = wf_get_hash_vec(data, len, off, "CONTRIB view_eq_list");
+    c.view_abort_list   = wf_get_hash_vec(data, len, off, "CONTRIB view_abort_list");
+    c.view_inbound_list = wf_get_hash_vec(data, len, off, "CONTRIB view_inbound_list");
+    wf_need(off, 8, len, "CONTRIB proposer_time");
+    c.proposer_time = le_get_u64(data + off); off += 8;
+    wf_get_hash(data, len, off, c.view_shardtip_root, "CONTRIB view_shardtip_root");
+    c.view_shardtip_list = wf_get_hash_vec(data, len, off, "CONTRIB view_shardtip_list");
+    wf_need(off, 64, len, "CONTRIB ed_sig");
+    std::copy(data + off, data + off + 64, c.ed_sig.begin()); off += 64;
+    if (off != len)
+        throw std::runtime_error("binary_codec: CONTRIB frame trailing bytes");
+    return c.to_json();
+}
+
 // ─── envelope ────────────────────────────────────────────────────────────────
 
 constexpr uint8_t kBinaryMagic   = 0xB1;
@@ -629,6 +936,15 @@ std::vector<uint8_t> encode_binary(const Message& m) {
     case MsgType::EQUIVOCATION_EVIDENCE:
                                     encode_equivocation_frame(out, m);     return out;
     case MsgType::ABORT_EVENT:      encode_abort_event_frame(out, m);      return out;
+    // D2-inc7a: the Block-carrying payloads, all via Block::encode_frame.
+    case MsgType::BLOCK:
+    case MsgType::BEACON_HEADER:    encode_block_payload_frame(out, m);    return out;
+    case MsgType::SHARD_TIP:        encode_shard_tip_frame(out, m);        return out;
+    case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+                                    encode_bundle_frame(out, m);           return out;
+    case MsgType::CHAIN_RESPONSE:   encode_chain_response_frame(out, m);   return out;
+    // D2-inc7b: the Phase-1 commit message.
+    case MsgType::CONTRIB:          encode_contrib_frame(out, m);          return out;
     default: break;
     }
 
@@ -697,6 +1013,21 @@ Message decode_binary(const uint8_t* data, size_t len) {
         m.payload = decode_equivocation_frame(body, body_len);     return m;
     case MsgType::ABORT_EVENT:
         m.payload = decode_abort_event_frame(body, body_len);      return m;
+    // D2-inc7a: Block-carrying payloads. The allow_witnesses MAP lives in the
+    // per-type decoders: SHARD_TIP fail-closes the POISON-WITNESS shape,
+    // every other Block channel mirrors the JSON path (witnesses allowed).
+    case MsgType::BLOCK:
+    case MsgType::BEACON_HEADER:
+        m.payload = decode_block_payload_frame(body, body_len);    return m;
+    case MsgType::SHARD_TIP:
+        m.payload = decode_shard_tip_frame(body, body_len);        return m;
+    case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+        m.payload = decode_bundle_frame(body, body_len);           return m;
+    case MsgType::CHAIN_RESPONSE:
+        m.payload = decode_chain_response_frame(body, body_len);   return m;
+    // D2-inc7b.
+    case MsgType::CONTRIB:
+        m.payload = decode_contrib_frame(body, body_len);          return m;
     default: break;
     }
 

@@ -196,16 +196,18 @@ fi
 
 echo
 echo "=== K-committee verification ==="
-# S-021 wrapped chain.json: {head_hash, blocks}; legacy bare array tolerated.
+# D2 inc8: the at-rest chain is the BINARY store; \`determ chain-export --json\`
+# is the offline text VIEW (wrapped {head_hash, blocks} shape).
 if ! python -c "
-import json, sys
+import json, sys, subprocess
 fails = 0
 try:
-    with open('$T/n1/chain.json') as f: doc = json.load(f)
+    doc = json.loads(subprocess.check_output(
+        ['$DETERM','chain-export','--chain','$T/n1/chain.json']))
 except Exception as e:
-    print(f'  bad: chain.json missing/unreadable: {e}')
+    print(f'  bad: chain store missing/unreadable: {e}')
     sys.exit(1)
-chain = doc['blocks'] if isinstance(doc, dict) else doc
+chain = doc['blocks']
 print(f'  chain length: {len(chain)} blocks')
 sizes = [len(b['creators']) for b in chain[1:]]
 print(f'  block creator-counts (post-genesis): {sizes}')

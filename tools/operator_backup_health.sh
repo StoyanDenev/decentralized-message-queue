@@ -187,11 +187,10 @@ cd "$(dirname "$0")/.."
 export DETERM_BIN
 source tools/common.sh
 
-# Drive size / mtime inspection + chain.json block counting + anomaly
-# evaluation in Python. The chain.json file may be large (multi-MB to
-# multi-GB on a long-running chain), but the only data we care about is
-# the length of the top-level `blocks` array, which json.load handles
-# correctly even at multi-GB sizes (memory is the only constraint).
+# Drive size / mtime inspection + chain block counting + anomaly
+# evaluation in Python. D2 inc8: the block count comes from the 44-byte
+# binary manifest (chain.json.manifest.bin), so this audit is O(1) on
+# disk regardless of chain length.
 #
 # Python emits the script's final exit code (0 on no-CRITICAL or
 # default mode; 2 on --anomalies-only AND >= 1 CRITICAL). Capture rc
@@ -227,42 +226,35 @@ def stat_file(path):
         sys.stderr.write(f"operator_backup_health: stat({path}) failed: {e}\n")
         sys.exit(1)
 
-# Block-count extraction from a chain.json file.
+# Block-count extraction from the D2 inc8 BINARY chain store.
 #
-# Supports both formats (S-021 introduced the wrapped form):
-#   * wrapped: { "head_hash": "<hex>", "blocks": [ ... ] }
-#   * legacy : [ ... ]   (bare array — pre-S-021)
+# The at-rest chain is <chain>.manifest.bin — a FIXED 44-byte record:
+#   [0]  magic 4 = 'DMF1'
+#   [4]  height    u64 LE
+#   [12] head_hash 32 raw bytes
+# The height IS the block count, so the audit no longer has to read (or
+# hold in memory) a multi-GB text file — it reads 44 bytes.
 #
-# Returns the block count as int, or None on missing / malformed file.
-# A malformed file (parse error) is treated as a hard error — emit
-# diagnostic to stderr + exit 1.  Missing file => None (anomaly path
-# will catch this separately).
+# Returns the block count as int, or None on a missing manifest. A
+# malformed manifest is a hard error (stderr + exit 1); the missing case
+# is handled by the anomaly evaluator.
 def count_blocks(path):
     if not os.path.isfile(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        sys.stderr.write(f"operator_backup_health: cannot parse chain.json at {path}: {e}\n")
-        sys.exit(1)
+        with open(path, "rb") as f:
+            data = f.read()
     except OSError as e:
         sys.stderr.write(f"operator_backup_health: cannot read {path}: {e}\n")
         sys.exit(1)
-    if isinstance(data, dict):
-        blocks = data.get("blocks")
-        if isinstance(blocks, list):
-            return len(blocks)
-        # Wrapped form with empty / malformed blocks field.
-        return 0
-    if isinstance(data, list):
-        return len(data)
-    sys.stderr.write(f"operator_backup_health: chain.json at {path} is neither object nor array\n")
-    sys.exit(1)
+    if len(data) != 44 or data[:4] != b"DMF1":
+        sys.stderr.write(f"operator_backup_health: {path} is not a 44-byte DMF1 manifest\n")
+        sys.exit(1)
+    return int.from_bytes(data[4:12], "little")
 
-active_chain_path    = os.path.join(data_dir,   "chain.json")
+active_chain_path    = os.path.join(data_dir,   "chain.json.manifest.bin")
 active_snapshot_path = os.path.join(data_dir,   "snapshot.json")
-backup_chain_path    = os.path.join(backup_dir, "chain.json")
+backup_chain_path    = os.path.join(backup_dir, "chain.json.manifest.bin")
 backup_snapshot_path = os.path.join(backup_dir, "snapshot.json")
 
 # Backup-dir absence is observable but not fatal — we still emit a

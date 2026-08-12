@@ -145,9 +145,11 @@ echo "  creator balances: node1=$B1 node2=$B2 node3=$B3 sum=$TOTAL"
 # block credits 50 to creators (total_distributed = 50, divided 17/17/16);
 # a zero-subsidy block credits nothing if there are no txs.
 JACKPOT_BLOCKS=$(python -c "
-import json
-_cj = json.load(open('$T/n1/chain.json'))
-blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
+import json, subprocess
+# D2 inc8: the at-rest chain is binary; chain-export --json is the text VIEW.
+_cj = json.loads(subprocess.check_output(
+    ['$DETERM','chain-export','--chain','$T/n1/chain.json']))
+blocks = _cj['blocks']
 # Count: each block's subsidy is either 50 or 0 in this test (no fees).
 # Reconstruct by walking and tallying per-creator credits.
 # Heuristic: any height where total cumulative balance jumped by 50 was

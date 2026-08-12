@@ -175,22 +175,25 @@ if [ "$MAX_BLOCK_KB" -lt 1 ]; then echo "operator_chain_storage_profile: --max-b
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-# ── Step 1: stat the file. Absent / unreadable ⇒ clean SKIP (exit 0). ────────
-# Cron-friendly: a node that hasn't written chain.json yet, or a path the
-# operator pointed wrong, should not hard-fail the whole monitoring run.
-if [ ! -e "$CHAIN_FILE" ]; then
+# ── Step 1: stat the STORE. Absent / unreadable ⇒ clean SKIP (exit 0). ──────
+# D2 inc8: --chain-file names the chain PATH; the at-rest data is the binary
+# store beside it (<path>.manifest.bin + <path>.blocks/). Cron-friendly: a
+# node that has not written a store yet, or a path the operator pointed
+# wrong, should not hard-fail the whole monitoring run.
+CHAIN_MANIFEST="$CHAIN_FILE.manifest.bin"
+if [ ! -e "$CHAIN_MANIFEST" ]; then
   if [ "$JSON_OUT" = "1" ]; then
     printf '{"chain_file":"%s","status":"skip","reason":"file_not_found","anomalies":[]}\n' "$CHAIN_FILE"
   else
-    echo "operator_chain_storage_profile: [INFO] chain-file not found: $CHAIN_FILE (SKIP)"
+    echo "operator_chain_storage_profile: [INFO] chain store not found: $CHAIN_MANIFEST (SKIP)"
   fi
   exit 0
 fi
-if [ ! -f "$CHAIN_FILE" ] || [ ! -r "$CHAIN_FILE" ]; then
+if [ ! -f "$CHAIN_MANIFEST" ] || [ ! -r "$CHAIN_MANIFEST" ]; then
   if [ "$JSON_OUT" = "1" ]; then
     printf '{"chain_file":"%s","status":"skip","reason":"not_a_readable_file","anomalies":[]}\n' "$CHAIN_FILE"
   else
-    echo "operator_chain_storage_profile: [INFO] chain-file not a readable regular file: $CHAIN_FILE (SKIP)"
+    echo "operator_chain_storage_profile: [INFO] chain store manifest not a readable regular file: $CHAIN_MANIFEST (SKIP)"
   fi
   exit 0
 fi
@@ -214,45 +217,41 @@ fi
 #
 # We pass tunables as argv so the python stays a static heredoc (no shell
 # interpolation into the program body — avoids quoting hazards).
-PROFILE_JSON=$("$PYEXE" - "$CHAIN_FILE" "$TOP" "$SKEW_FACTOR" "$MAX_BLOCK_KB" <<'PY'
+PROFILE_JSON=$("$PYEXE" - "$CHAIN_FILE" "$TOP" "$SKEW_FACTOR" "$MAX_BLOCK_KB" "$DETERM" <<'PY'
 import json, sys
 
 chain_file   = sys.argv[1]
 top_n        = int(sys.argv[2])
 skew_factor  = int(sys.argv[3])
 max_block_kb = int(sys.argv[4])
+determ_bin   = sys.argv[5]     # D2 inc8: chain-export is the text VIEW
 
 def fail(reason):
     # Structured failure the bash layer maps to exit 1.
     sys.stdout.write(json.dumps({"status": "error", "reason": reason}))
     sys.exit(0)
 
+# D2 inc8: the at-rest chain is the BINARY store (DBK1 records + the
+# 44-byte DMF1 manifest). `determ chain-export --json` is the offline
+# text VIEW — a decode-only walk that still runs the S-021 head gate, so
+# a tampered store fails here instead of profiling clean.
+import subprocess
 try:
-    with open(chain_file, "rb") as fh:
-        raw = fh.read()
+    raw = subprocess.check_output(
+        [determ_bin, "chain-export", "--chain", chain_file])
 except Exception as e:
-    fail("read_failed: %s" % e)
+    fail("chain_export_failed: %s" % e)
 
 try:
     doc = json.loads(raw)
 except Exception as e:
     fail("not_json: %s" % e)
 
-# Accept both on-disk forms (src/chain/chain.cpp::load):
-#   * wrapped object { "head_hash": "<hex>", "blocks": [...] }
-#   * legacy bare array of blocks.
-head_hash = ""
-if isinstance(doc, list):
-    blocks = doc
-    fmt = "legacy-array"
-elif isinstance(doc, dict):
-    if "blocks" not in doc or not isinstance(doc["blocks"], list):
-        fail("wrapped form missing 'blocks' array")
-    blocks = doc["blocks"]
-    head_hash = doc.get("head_hash", "") or ""
-    fmt = "wrapped"
-else:
-    fail("expected JSON array or object")
+if not isinstance(doc, dict) or not isinstance(doc.get("blocks"), list):
+    fail("chain-export did not return the wrapped {head_hash, blocks} shape")
+blocks = doc["blocks"]
+head_hash = doc.get("head_hash", "") or ""
+fmt = "binary-store"
 
 n = len(blocks)
 if n == 0:

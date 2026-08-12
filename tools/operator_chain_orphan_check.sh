@@ -206,12 +206,14 @@ if [ -n "$PORT" ]; then
   fi
 fi
 if [ -n "$CHAIN_FILE" ]; then
-  if [ ! -f "$CHAIN_FILE" ]; then
-    echo "operator_chain_orphan_check: --chain-file not found: $CHAIN_FILE" >&2
+  # D2 inc8: --chain-file names the chain PATH; the at-rest data is the
+  # binary store beside it (<path>.manifest.bin + <path>.blocks/).
+  if [ ! -f "$CHAIN_FILE.manifest.bin" ]; then
+    echo "operator_chain_orphan_check: chain store manifest not found: $CHAIN_FILE.manifest.bin" >&2
     exit 1
   fi
-  if [ ! -r "$CHAIN_FILE" ]; then
-    echo "operator_chain_orphan_check: --chain-file not readable: $CHAIN_FILE" >&2
+  if [ ! -r "$CHAIN_FILE.manifest.bin" ]; then
+    echo "operator_chain_orphan_check: chain store manifest not readable: $CHAIN_FILE.manifest.bin" >&2
     exit 1
   fi
 fi
@@ -480,33 +482,23 @@ if [ -n "$CHAIN_FILE" ]; then
   # blocks array for index gaps / duplicates / head_hash is far more
   # robust than bash scrapers. Python writes anomaly + row TSV to the
   # paths we pass and prints "height total" to stdout for us to capture.
-  PARSED_OUT=$("$PYEXE" - "$CHAIN_FILE" "$ANOMALIES_FILE" "$ROWS_FILE" "${FROM:-}" "${TO:-}" <<'PY'
-import json, sys
+  PARSED_OUT=$("$PYEXE" - "$CHAIN_FILE" "$ANOMALIES_FILE" "$ROWS_FILE" "${FROM:-}" "${TO:-}" "$DETERM" <<'PY'
+import json, subprocess, sys
 
-chain_path, anom_path, rows_path, from_s, to_s = sys.argv[1:6]
+chain_path, anom_path, rows_path, from_s, to_s, determ_bin = sys.argv[1:7]
 
+# D2 inc8: the at-rest chain is the BINARY store; `determ chain-export
+# --json` is the offline text VIEW (decode-only walk + the S-021 head gate).
 try:
-    with open(chain_path, "r", encoding="utf-8") as f:
-        j = json.load(f)
-except FileNotFoundError:
-    sys.stderr.write("chain-file: not found: " + chain_path + "\n"); sys.exit(2)
-except json.JSONDecodeError as e:
-    sys.stderr.write("chain-file: parse error: " + str(e) + "\n"); sys.exit(2)
+    j = json.loads(subprocess.check_output(
+        [determ_bin, "chain-export", "--chain", chain_path]))
 except Exception as e:
-    sys.stderr.write("chain-file: " + str(e) + "\n"); sys.exit(2)
+    sys.stderr.write("chain-file: chain-export failed: " + str(e) + "\n"); sys.exit(2)
 
-# S-021 wrapped form: {"head_hash": "<hex>", "blocks": [...]}
-# Legacy form: bare array of blocks.
-head_hash = ""
-if isinstance(j, list):
-    blocks = j
-elif isinstance(j, dict):
-    if "blocks" not in j or not isinstance(j["blocks"], list):
-        sys.stderr.write("chain-file: wrapped form missing 'blocks' array\n"); sys.exit(2)
-    blocks = j["blocks"]
-    head_hash = j.get("head_hash", "") or ""
-else:
-    sys.stderr.write("chain-file: expected JSON array or object\n"); sys.exit(2)
+if not isinstance(j, dict) or not isinstance(j.get("blocks"), list):
+    sys.stderr.write("chain-file: chain-export did not return {head_hash, blocks}\n"); sys.exit(2)
+blocks = j["blocks"]
+head_hash = j.get("head_hash", "") or ""
 
 if not blocks:
     sys.stderr.write("chain-file: empty blocks array; nothing to audit\n"); sys.exit(2)

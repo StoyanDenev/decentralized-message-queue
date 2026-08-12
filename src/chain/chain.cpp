@@ -18,6 +18,9 @@
 #include <stdexcept>
 #include <set>   // §3.22c CONFIDENTIAL_TRANSFER input/output dedup
 #include <cstdio>
+#include <cstring>     // D2 inc8 binary store: memcmp / memcpy over frame bytes
+#include <algorithm>   // D2 inc8: std::all_of over the manifest head_hash
+#include <iterator>    // D2 inc8: istreambuf_iterator whole-file reads
 #include <atomic>   // A4.5 crash-consistency test seam (g_save_crash_countdown)
 
 namespace determ::chain {
@@ -2743,73 +2746,574 @@ Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invaria
     return c;
 }
 
-// ─── Persistence ─────────────────────────────────────────────────────────────
+// ─── DSN1: the canonical binary snapshot container ───────────────────────────
+// D2 inc8. Field-for-field mirror of serialize_state / restore_from_snapshot
+// above, with the SAME post-load gates (head_hash claim, S-033 state_root, A1
+// revalidate). All integers little-endian; lpN = an N-bit LE length prefix
+// followed by that many bytes. Counts are bounds-checked against the remaining
+// byte budget BEFORE any allocation (bf_* discipline), and decode is
+// EXACT-consumption in both directions.
+//
+//   magic 4 = 'D','S','N','1' | version u32 = 1
+//   block_index u64 | head_hash 32 raw (zero when empty)
+//   block_subsidy u64 | subsidy_pool_initial u64 | subsidy_mode u8
+//   lottery_jackpot_multiplier u32
+//   min_stake u64 | crypto_profile u8 | suspension_slash u64 | unstake_delay u64
+//   merge_threshold_blocks u32 | revert_threshold_blocks u32 | merge_grace_blocks u32
+//   epoch_blocks u32 | k_block_sigs u32 | shard_count u32 | shard_id u32
+//   shard_salt 32 raw
+//   genesis_total u64 | accumulated_subsidy u64 | accumulated_slashed u64
+//   accumulated_inbound u64 | accumulated_outbound u64 | accumulated_shielded u64
+//   accounts / stakes / registrants / applied_inbound_receipts / merge_state /
+//   shard_tip_records / committee_checkpoints / abort_records / dapp_registry /
+//   pending_param_changes / shielded_pool / enote_commitments / audit_keys /
+//   audit_log_counts / note_keys / headers      (each a u32 count + entries)
+//
+// Unlike the JSON view, EVERY field is emitted unconditionally: the JSON
+// conditional-emission tricks exist only to keep pre-existing text goldens
+// byte-identical, and there is no such legacy for the binary container. One
+// fixed layout, one canonical encoding. genesis_total is therefore always
+// present, so the JSON path's back-solve has no binary counterpart.
+//
+// All state containers are std::map / std::set, so iteration order is
+// deterministic and encode is byte-deterministic with no extra sorting.
+namespace {
+constexpr char kSnapMagic[4] = {'D','S','N','1'};
 
-void Chain::save(const std::string& path) const {
-    // Atomic write: serialize to a sibling .tmp file, fsync the file
-    // contents, then rename .tmp → path. Rename is atomic on POSIX
-    // and on Windows for same-volume same-directory targets, so an
-    // OS crash mid-write cannot leave a half-written chain.json that
-    // load() would parse-fail on. Either the old file survives intact
-    // (if rename hadn't happened) or the new file is fully present.
-    //
-    // This matters when Chain::save runs on a separate worker thread
-    // (S-031 / A9 follow-on: async save off the apply hot path). A
-    // crash window between block apply and save completion is benign
-    // — the missing block re-arrives via peer gossip on restart —
-    // but a corrupted chain.json would require manual recovery.
-    fs::create_directories(fs::path(path).parent_path());
-    std::string tmp_path = path + ".tmp";
-    {
-        // S-021: chain.json is now a wrapping object carrying a
-        // `head_hash` field alongside the canonical `blocks` array.
-        // head_hash is hex of the latest block's compute_hash() — which
-        // transitively covers every prior block via the prev_hash chain
-        // + committee signatures. Load-time mismatch indicates on-disk
-        // tampering (or a corrupted write) and is rejected before
-        // replay starts. Legacy array-form chain.json is still accepted
-        // (no-op fallback); the next save() upgrades the format.
-        json blocks_arr = json::array();
-        for (auto& b : blocks_) blocks_arr.push_back(b.to_json());
-        json j;
-        j["head_hash"] = blocks_.empty()
-                          ? std::string{}
-                          : to_hex(blocks_.back().compute_hash());
-        j["blocks"]    = std::move(blocks_arr);
-
-        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!f) throw std::runtime_error("Cannot write chain tmp file: " + tmp_path);
-        f << j.dump(2);
-        f.flush();
-        if (!f) throw std::runtime_error("Failed to flush chain tmp file: " + tmp_path);
-    }
-    // std::filesystem::rename is implemented as ::MoveFileExA on Windows
-    // and ::rename on POSIX — both atomic for same-volume targets. On
-    // Windows, MoveFileExA with MOVEFILE_REPLACE_EXISTING is implicit
-    // when overwriting; std::filesystem handles this transparently.
-    std::error_code ec;
-    fs::rename(tmp_path, path, ec);
-    if (ec) {
-        throw std::runtime_error("Cannot rename chain tmp " + tmp_path
-            + " → " + path + ": " + ec.message());
-    }
-    // B1 chain-storage-v1 invariant: a legacy full save SUPERSEDES the block
-    // store — remove the sibling manifest so load() can never prefer a store
-    // that is now stale relative to this file (a stale-manifest preference
-    // would silently REWIND the chain). Writers that also maintain the store
-    // (the Node) call save_incremental() right after this, which re-writes a
-    // fresh manifest; every other legacy-only writer (CLI fixtures, external
-    // tools) automatically invalidates the store by saving. Orphaned block
-    // files are harmless: load() only reads what a manifest names.
-    std::error_code mec;
-    fs::remove(fs::path(path + ".manifest.json"), mec);   // ok if absent
+void sn_u8 (std::vector<uint8_t>& o, uint8_t v)  { o.push_back(v); }
+void sn_u16(std::vector<uint8_t>& o, uint16_t v) {
+    o.push_back(uint8_t(v & 0xFF)); o.push_back(uint8_t((v >> 8) & 0xFF));
+}
+void sn_u32(std::vector<uint8_t>& o, uint32_t v) {
+    for (int i = 0; i < 4; ++i) o.push_back(uint8_t((v >> (8 * i)) & 0xFF));
+}
+void sn_u64(std::vector<uint8_t>& o, uint64_t v) {
+    for (int i = 0; i < 8; ++i) o.push_back(uint8_t((v >> (8 * i)) & 0xFF));
+}
+void sn_raw(std::vector<uint8_t>& o, const uint8_t* p, size_t n) {
+    o.insert(o.end(), p, p + n);
+}
+void sn_lp16(std::vector<uint8_t>& o, const std::string& s, const char* what) {
+    if (s.size() > 0xFFFF) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " exceeds 65535 bytes");
+    sn_u16(o, uint16_t(s.size()));
+    o.insert(o.end(), s.begin(), s.end());
+}
+void sn_lp8(std::vector<uint8_t>& o, const std::string& s, const char* what) {
+    if (s.size() > 0xFF) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " exceeds 255 bytes");
+    sn_u8(o, uint8_t(s.size()));
+    o.insert(o.end(), s.begin(), s.end());
+}
+void sn_count(std::vector<uint8_t>& o, size_t n, const char* what) {
+    if (n > 0xFFFFFFFFull) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " count exceeds u32");
+    sn_u32(o, uint32_t(n));
+}
+// Encode a hex-keyed 33-byte commitment as raw bytes. One canonical form:
+// a key that is not exactly 66 lowercase hex chars is a corrupt in-memory
+// state and must not be silently re-shaped into the container.
+void sn_comm(std::vector<uint8_t>& o, const std::string& hex_key) {
+    std::vector<uint8_t> raw = from_hex(hex_key);
+    if (raw.size() != 33 || hex_key.size() != 66)
+        throw std::runtime_error(
+            "snapshot encode: commitment key is not 66 hex chars: " + hex_key);
+    sn_raw(o, raw.data(), raw.size());
 }
 
+struct SnRd {
+    const uint8_t* p; size_t n; size_t i{0};
+    void need(size_t k, const char* what) const {
+        if (n - i < k) throw std::runtime_error(
+            std::string("snapshot decode: truncated at ") + what);
+    }
+    uint8_t  u8 (const char* w) { need(1, w); return p[i++]; }
+    uint16_t u16(const char* w) { need(2, w); uint16_t v = uint16_t(p[i]) | uint16_t(uint16_t(p[i+1]) << 8); i += 2; return v; }
+    uint32_t u32(const char* w) { need(4, w); uint32_t v = 0; for (int k = 0; k < 4; ++k) v |= uint32_t(p[i+k]) << (8*k); i += 4; return v; }
+    uint64_t u64(const char* w) { need(8, w); uint64_t v = 0; for (int k = 0; k < 8; ++k) v |= uint64_t(p[i+k]) << (8*k); i += 8; return v; }
+    std::string lp16(const char* w) { uint16_t L = u16(w); need(L, w);
+        std::string s(reinterpret_cast<const char*>(p + i), L); i += L; return s; }
+    std::string lp8 (const char* w) { uint8_t L = u8(w); need(L, w);
+        std::string s(reinterpret_cast<const char*>(p + i), L); i += L; return s; }
+    void raw(uint8_t* out, size_t k, const char* w) { need(k, w);
+        std::memcpy(out, p + i, k); i += k; }
+    std::vector<uint8_t> rawv(size_t k, const char* w) { need(k, w);
+        std::vector<uint8_t> v(p + i, p + i + k); i += k; return v; }
+    // Every count is bounded against the REMAINING bytes using the smallest
+    // possible per-entry size, so a hostile count can never drive an
+    // over-reserve before the first truncation check fires.
+    uint32_t count(const char* w, size_t min_entry_bytes) {
+        uint32_t k = u32(w);
+        if (min_entry_bytes > 0
+            && static_cast<uint64_t>(k) * min_entry_bytes > (n - i))
+            throw std::runtime_error(
+                std::string("snapshot decode: ") + w + " count "
+                + std::to_string(k) + " exceeds remaining bytes");
+        return k;
+    }
+    std::string comm(const char* w) { uint8_t b[33]; raw(b, 33, w);
+        return to_hex(b, 33); }
+};
+} // namespace
+
+std::vector<uint8_t> Chain::encode_state(uint32_t header_count) const {
+    std::vector<uint8_t> o;
+    sn_raw(o, reinterpret_cast<const uint8_t*>(kSnapMagic), 4);
+    sn_u32(o, 1);                                        // version
+    sn_u64(o, blocks_.empty() ? uint64_t{0} : blocks_.back().index);
+    {
+        const Hash h = blocks_.empty() ? Hash{} : blocks_.back().compute_hash();
+        sn_raw(o, h.data(), h.size());
+    }
+    sn_u64(o, block_subsidy_);
+    sn_u64(o, subsidy_pool_initial_);
+    sn_u8 (o, subsidy_mode_);
+    sn_u32(o, lottery_jackpot_multiplier_);
+    sn_u64(o, min_stake_);
+    sn_u8 (o, static_cast<uint8_t>(crypto_profile_));
+    sn_u64(o, suspension_slash_);
+    sn_u64(o, unstake_delay_);
+    sn_u32(o, merge_threshold_blocks_);
+    sn_u32(o, revert_threshold_blocks_);
+    sn_u32(o, merge_grace_blocks_);
+    sn_u32(o, epoch_blocks_);
+    sn_u32(o, k_block_sigs_);
+    sn_u32(o, shard_count_);
+    sn_u32(o, my_shard_id_);
+    sn_raw(o, shard_salt_.data(), shard_salt_.size());
+    sn_u64(o, genesis_total_);
+    sn_u64(o, accumulated_subsidy_);
+    sn_u64(o, accumulated_slashed_);
+    sn_u64(o, accumulated_inbound_);
+    sn_u64(o, accumulated_outbound_);
+    sn_u64(o, accumulated_shielded_);
+
+    sn_count(o, accounts_.size(), "accounts");
+    for (auto& [d, a] : accounts_) {
+        sn_lp16(o, d, "account.domain");
+        sn_u64(o, a.balance);
+        sn_u64(o, a.next_nonce);
+    }
+    sn_count(o, stakes_.size(), "stakes");
+    for (auto& [d, s] : stakes_) {
+        sn_lp16(o, d, "stake.domain");
+        sn_u64(o, s.locked);
+        sn_u64(o, s.unlock_height);
+    }
+    sn_count(o, registrants_.size(), "registrants");
+    for (auto& [d, r] : registrants_) {
+        sn_lp16(o, d, "registrant.domain");
+        sn_raw(o, r.ed_pub.data(), r.ed_pub.size());
+        sn_u64(o, r.registered_at);
+        sn_u64(o, r.active_from);
+        sn_u64(o, r.inactive_from);
+        sn_lp8(o, r.region, "registrant.region");
+    }
+    sn_count(o, applied_inbound_receipts_.size(), "applied_inbound_receipts");
+    for (auto& [src, txh] : applied_inbound_receipts_) {
+        sn_u32(o, src);
+        sn_raw(o, txh.data(), txh.size());
+    }
+    sn_count(o, merge_state_.size(), "merge_state");
+    for (auto& [s, info] : merge_state_) {
+        sn_u32(o, s);
+        sn_u32(o, info.partner_id);
+        sn_lp8(o, info.refugee_region, "merge_state.refugee_region");
+    }
+    sn_count(o, shard_tip_records_.size(), "shard_tip_records");
+    for (auto& [key_pair, rec] : shard_tip_records_) {
+        (void)key_pair;
+        sn_u32(o, rec.source_shard_id);
+        sn_u64(o, rec.height);
+        sn_u32(o, rec.eligible_count);
+        sn_lp8(o, rec.region, "shard_tip_record.region");
+        sn_raw(o, rec.committee_sig_root.data(), rec.committee_sig_root.size());
+    }
+    sn_count(o, committee_checkpoints_.size(), "committee_checkpoints");
+    for (auto& [epoch, cp] : committee_checkpoints_) {
+        sn_u64(o, epoch);
+        sn_raw(o, cp.epoch_rand.data(), cp.epoch_rand.size());
+        sn_count(o, cp.members.size(), "committee_checkpoint.members");
+        for (auto& m : cp.members) {
+            sn_lp16(o, m.domain, "committee_member.domain");
+            sn_raw(o, m.ed_pub.data(), m.ed_pub.size());
+            sn_lp8(o, m.region, "committee_member.region");
+        }
+    }
+    sn_count(o, abort_records_.size(), "abort_records");
+    for (auto& [d, ar] : abort_records_) {
+        sn_lp16(o, d, "abort_record.domain");
+        sn_u64(o, ar.count);
+        sn_u64(o, ar.last_block);
+    }
+    sn_count(o, dapp_registry_.size(), "dapp_registry");
+    for (auto& [d, e] : dapp_registry_) {
+        sn_lp16(o, d, "dapp.domain");
+        sn_raw(o, e.service_pubkey.data(), e.service_pubkey.size());
+        sn_lp16(o, e.endpoint_url, "dapp.endpoint_url");
+        if (e.topics.size() > 0xFFFF)
+            throw std::runtime_error("snapshot encode: dapp.topics exceeds 65535");
+        sn_u16(o, uint16_t(e.topics.size()));
+        for (auto& t : e.topics) sn_lp16(o, t, "dapp.topic");
+        sn_u8(o, e.retention);
+        sn_lp16(o, std::string(e.metadata.begin(), e.metadata.end()),
+                "dapp.metadata");
+        sn_u64(o, e.registered_at);
+        sn_u64(o, e.active_from);
+        sn_u64(o, e.inactive_from);
+    }
+    sn_count(o, pending_param_changes_.size(), "pending_param_changes");
+    for (auto& [eff, entries] : pending_param_changes_) {
+        sn_u64(o, eff);
+        if (entries.size() > 0xFFFF)
+            throw std::runtime_error(
+                "snapshot encode: pending_param_changes bucket exceeds 65535");
+        sn_u16(o, uint16_t(entries.size()));
+        for (auto& [name, value] : entries) {
+            sn_lp16(o, name, "param_change.name");
+            sn_lp16(o, std::string(value.begin(), value.end()),
+                    "param_change.value");
+        }
+    }
+    sn_count(o, shielded_pool_.size(), "shielded_pool");
+    for (auto& [k, h] : shielded_pool_) { sn_comm(o, k); sn_u64(o, h); }
+    sn_count(o, enote_commitments_.size(), "enote_commitments");
+    for (auto& [k, v] : enote_commitments_) {
+        sn_comm(o, k);
+        sn_raw(o, v.data(), v.size());
+    }
+    sn_count(o, audit_keys_.size(), "audit_keys");
+    for (auto& [a, pk] : audit_keys_) {
+        sn_lp16(o, a, "audit_key.addr"); sn_lp16(o, pk, "audit_key.pk");
+    }
+    sn_count(o, audit_log_count_.size(), "audit_log_counts");
+    for (auto& [a, cnt] : audit_log_count_) {
+        sn_lp16(o, a, "audit_log_count.addr"); sn_u64(o, cnt);
+    }
+    sn_count(o, note_keys_.size(), "note_keys");
+    for (auto& [a, pk] : note_keys_) {
+        sn_lp16(o, a, "note_key.addr"); sn_lp16(o, pk, "note_key.pk");
+    }
+
+    // Tail headers, with the SAME 256-page anti-DoS clamp serialize_state
+    // applies (RpcIngressGateAudit §3).
+    constexpr uint32_t kSnapshotHeaderMax = 256;
+    std::vector<size_t> hdr_idx;
+    if (!blocks_.empty() && header_count > 0) {
+        if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
+        size_t total = blocks_.size();
+        size_t start = (total > header_count) ? total - header_count : 0;
+        for (size_t i = start; i < total; ++i) hdr_idx.push_back(i);
+    }
+    sn_count(o, hdr_idx.size(), "headers");
+    for (size_t i : hdr_idx) {
+        std::vector<uint8_t> frame;
+        blocks_[i].encode_frame(frame);
+        sn_count(o, frame.size(), "header.frame_len");
+        sn_raw(o, frame.data(), frame.size());
+    }
+    return o;
+}
+
+Chain Chain::decode_state(const uint8_t* data, size_t len,
+                            bool require_supply_invariant) {
+    if (len < 8 || std::memcmp(data, kSnapMagic, 4) != 0)
+        throw std::runtime_error("snapshot decode: bad magic (expected DSN1)");
+    SnRd r{data, len, 4};
+    const uint32_t version = r.u32("version");
+    if (version != 1)
+        throw std::runtime_error(
+            "unsupported snapshot version: " + std::to_string(version));
+
+    Chain c;
+    const uint64_t block_index_claim = r.u64("block_index");
+    Hash head_hash_claim{};
+    r.raw(head_hash_claim.data(), head_hash_claim.size(), "head_hash");
+    c.block_subsidy_        = r.u64("block_subsidy");
+    c.subsidy_pool_initial_ = r.u64("subsidy_pool_initial");
+    c.subsidy_mode_         = r.u8 ("subsidy_mode");
+    c.lottery_jackpot_multiplier_ = r.u32("lottery_jackpot_multiplier");
+    c.min_stake_            = r.u64("min_stake");
+    {
+        uint8_t cp = r.u8("crypto_profile");
+        if (cp > 1) throw std::runtime_error(
+            "snapshot decode: unknown crypto_profile " + std::to_string(cp));
+        c.crypto_profile_ = static_cast<CryptoProfile>(cp);
+    }
+    c.suspension_slash_        = r.u64("suspension_slash");
+    c.unstake_delay_           = r.u64("unstake_delay");
+    c.merge_threshold_blocks_  = r.u32("merge_threshold_blocks");
+    c.revert_threshold_blocks_ = r.u32("revert_threshold_blocks");
+    c.merge_grace_blocks_      = r.u32("merge_grace_blocks");
+    c.epoch_blocks_            = r.u32("epoch_blocks");
+    c.k_block_sigs_            = r.u32("k_block_sigs");
+    c.shard_count_             = r.u32("shard_count");
+    c.my_shard_id_             = r.u32("shard_id");
+    r.raw(c.shard_salt_.data(), c.shard_salt_.size(), "shard_salt");
+    c.genesis_total_        = r.u64("genesis_total");
+    c.accumulated_subsidy_  = r.u64("accumulated_subsidy");
+    c.accumulated_slashed_  = r.u64("accumulated_slashed");
+    c.accumulated_inbound_  = r.u64("accumulated_inbound");
+    c.accumulated_outbound_ = r.u64("accumulated_outbound");
+    c.accumulated_shielded_ = r.u64("accumulated_shielded");
+
+    {   // accounts: >= 2 (lp16 len) + 16
+        uint32_t n = r.count("accounts", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("account.domain");
+            AccountState s;
+            s.balance    = r.u64("account.balance");
+            s.next_nonce = r.u64("account.next_nonce");
+            c.accounts_[std::move(d)] = s;
+        }
+    }
+    {   uint32_t n = r.count("stakes", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("stake.domain");
+            StakeEntry e;
+            e.locked        = r.u64("stake.locked");
+            e.unlock_height = r.u64("stake.unlock_height");
+            c.stakes_[std::move(d)] = e;
+        }
+    }
+    {   uint32_t n = r.count("registrants", 59);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("registrant.domain");
+            RegistryEntry e;
+            r.raw(e.ed_pub.data(), e.ed_pub.size(), "registrant.ed_pub");
+            e.registered_at = r.u64("registrant.registered_at");
+            e.active_from   = r.u64("registrant.active_from");
+            e.inactive_from = r.u64("registrant.inactive_from");
+            e.region        = r.lp8("registrant.region");
+            c.registrants_[std::move(d)] = std::move(e);
+        }
+    }
+    {   uint32_t n = r.count("applied_inbound_receipts", 36);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardId src = r.u32("applied_receipt.src_shard");
+            Hash txh{};
+            r.raw(txh.data(), txh.size(), "applied_receipt.tx_hash");
+            c.applied_inbound_receipts_.insert({src, txh});
+        }
+    }
+    {   uint32_t n = r.count("merge_state", 9);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardId s = r.u32("merge_state.shard_id");
+            Chain::MergePartnerInfo info;
+            info.partner_id     = r.u32("merge_state.partner_id");
+            info.refugee_region = r.lp8("merge_state.refugee_region");
+            c.merge_state_.insert({s, std::move(info)});
+        }
+    }
+    {   uint32_t n = r.count("shard_tip_records", 49);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardTipRecord rec;
+            rec.source_shard_id = r.u32("shard_tip.source_shard_id");
+            rec.height          = r.u64("shard_tip.height");
+            rec.eligible_count  = r.u32("shard_tip.eligible_count");
+            rec.region          = r.lp8("shard_tip.region");
+            r.raw(rec.committee_sig_root.data(),
+                  rec.committee_sig_root.size(), "shard_tip.committee_sig_root");
+            c.add_shard_tip_record(rec);
+        }
+    }
+    {   uint32_t n = r.count("committee_checkpoints", 44);
+        for (uint32_t i = 0; i < n; ++i) {
+            EpochIndex epoch = r.u64("checkpoint.epoch");
+            Chain::EpochCommitteeCheckpoint ecc;
+            r.raw(ecc.epoch_rand.data(), ecc.epoch_rand.size(),
+                  "checkpoint.epoch_rand");
+            uint32_t mn = r.count("checkpoint.members", 35);
+            for (uint32_t k = 0; k < mn; ++k) {
+                Chain::CommitteeMember cm;
+                cm.domain = r.lp16("committee_member.domain");
+                r.raw(cm.ed_pub.data(), cm.ed_pub.size(),
+                      "committee_member.ed_pub");
+                cm.region = r.lp8("committee_member.region");
+                ecc.members.push_back(std::move(cm));
+            }
+            c.add_committee_checkpoint(epoch, std::move(ecc));
+        }
+    }
+    {   uint32_t n = r.count("abort_records", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("abort_record.domain");
+            Chain::AbortRecord ar;
+            ar.count      = r.u64("abort_record.count");
+            ar.last_block = r.u64("abort_record.last_block");
+            c.abort_records_[std::move(d)] = ar;
+        }
+    }
+    {   uint32_t n = r.count("dapp_registry", 61);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("dapp.domain");
+            DAppEntry e;
+            r.raw(e.service_pubkey.data(), e.service_pubkey.size(),
+                  "dapp.service_pubkey");
+            e.endpoint_url = r.lp16("dapp.endpoint_url");
+            uint16_t tn = r.u16("dapp.topics.count");
+            for (uint16_t t = 0; t < tn; ++t)
+                e.topics.push_back(r.lp16("dapp.topic"));
+            e.retention = r.u8("dapp.retention");
+            { std::string md = r.lp16("dapp.metadata");
+              e.metadata.assign(md.begin(), md.end()); }
+            e.registered_at = r.u64("dapp.registered_at");
+            e.active_from   = r.u64("dapp.active_from");
+            e.inactive_from = r.u64("dapp.inactive_from");
+            c.dapp_registry_[std::move(d)] = std::move(e);
+        }
+    }
+    {   uint32_t n = r.count("pending_param_changes", 10);
+        for (uint32_t i = 0; i < n; ++i) {
+            uint64_t eff = r.u64("param_change.effective_height");
+            uint16_t en  = r.u16("param_change.entries.count");
+            for (uint16_t k = 0; k < en; ++k) {
+                std::string name = r.lp16("param_change.name");
+                std::string val  = r.lp16("param_change.value");
+                c.pending_param_changes_[eff].emplace_back(
+                    std::move(name),
+                    std::vector<uint8_t>(val.begin(), val.end()));
+            }
+        }
+    }
+    {   uint32_t n = r.count("shielded_pool", 41);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string k = r.comm("shielded_pool.commitment");
+            c.shielded_pool_[std::move(k)] = r.u64("shielded_pool.height");
+        }
+    }
+    {   uint32_t n = r.count("enote_commitments", 65);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string k = r.comm("enote.commitment");
+            Hash v{};
+            r.raw(v.data(), v.size(), "enote.value");
+            c.enote_commitments_[std::move(k)] = v;
+        }
+    }
+    {   uint32_t n = r.count("audit_keys", 4);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a  = r.lp16("audit_key.addr");
+            std::string pk = r.lp16("audit_key.pk");
+            c.audit_keys_[std::move(a)] = std::move(pk);
+        }
+    }
+    {   uint32_t n = r.count("audit_log_counts", 10);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a = r.lp16("audit_log_count.addr");
+            c.audit_log_count_[std::move(a)] = r.u64("audit_log_count.n");
+        }
+    }
+    {   uint32_t n = r.count("note_keys", 4);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a  = r.lp16("note_key.addr");
+            std::string pk = r.lp16("note_key.pk");
+            c.note_keys_[std::move(a)] = std::move(pk);
+        }
+    }
+    {   uint32_t n = r.count("headers", 4);
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t flen = r.u32("header.frame_len");
+            r.need(flen, "header.frame");
+            c.blocks_.push_back(Block::decode_frame(data + r.i, flen));
+            r.i += flen;
+        }
+    }
+
+    // EXACT consumption both directions: a trailing byte is as fatal as a
+    // missing one.
+    if (r.i != len)
+        throw std::runtime_error(
+            "snapshot decode: " + std::to_string(len - r.i)
+            + " trailing byte(s) after the DSN1 frame");
+
+    // ── The SAME post-load gates restore_from_snapshot runs ──────────────
+    // (1) head_hash claim. The binary form always carries the field, so the
+    //     "claim absent" branch of the JSON path has no counterpart here: a
+    //     non-empty header list MUST match, and an empty one MUST claim zero.
+    if (!c.blocks_.empty()) {
+        const Hash actual = c.blocks_.back().compute_hash();
+        if (actual != head_hash_claim)
+            throw std::runtime_error(
+                "snapshot head_hash mismatch: actual " + to_hex(actual)
+              + " vs claimed " + to_hex(head_hash_claim));
+        if (c.blocks_.back().index != block_index_claim)
+            throw std::runtime_error(
+                "snapshot block_index mismatch: actual "
+              + std::to_string(c.blocks_.back().index)
+              + " vs claimed " + std::to_string(block_index_claim));
+    } else if (head_hash_claim != Hash{}) {
+        throw std::runtime_error(
+            "snapshot head_hash is set but the snapshot carries no headers");
+    }
+
+    // (2) S-033 state_root self-consistency. Pre-S-033 tails carry a zero
+    //     state_root (the producer wrote nothing) and are skipped, exactly
+    //     as on the JSON path.
+    if (!c.blocks_.empty()) {
+        const Hash claimed = c.blocks_.back().state_root;
+        if (claimed != Hash{}) {
+            const Hash computed = c.compute_state_root();
+            if (computed != claimed) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "snapshot state_root mismatch at head block %llu: "
+                    "head declares %02x%02x%02x%02x... but loaded state "
+                    "computes %02x%02x%02x%02x... — snapshot is "
+                    "inconsistent or tampered (S-033)",
+                    (unsigned long long)c.blocks_.back().index,
+                    claimed[0], claimed[1], claimed[2], claimed[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
+    }
+
+    // (3) SnapshotRestoreGateAudit A1-revalidate (opt-in node-adoption policy).
+    if (require_supply_invariant) {
+        uint64_t expected = c.expected_total();
+        uint64_t live     = c.live_total_supply();
+        if (expected != live) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                "snapshot supply-invariant inconsistent (A1): expected_total=%llu "
+                "!= live_total_supply=%llu — counters/balances do not satisfy the "
+                "unitary-balance identity; snapshot is inconsistent or tampered",
+                (unsigned long long)expected, (unsigned long long)live);
+            throw std::runtime_error(buf);
+        }
+    }
+
+    // A9 Phase 2C: publish the loaded state as the lock-free committed view,
+    // same as restore_from_snapshot.
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts      = c.accounts_;
+    __bundle->stakes        = c.stakes_;
+    __bundle->registrants   = c.registrants_;
+    __bundle->dapp_registry = c.dapp_registry_;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&c.committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    return c;
+}
+
+// ─── Persistence ─────────────────────────────────────────────────────────────
+
 namespace {
-// B1 chain-storage-v1 helpers: atomic small-file write (same tmp+rename
-// discipline as Chain::save) + the store/manifest path derivation. The
-// manifest and per-block files live BESIDE <path>, never AT it, so the
-// legacy chain.json consumers are untouched.
+// B1 chain-storage-v1 helpers: atomic small-file write (tmp+rename
+// discipline) + the store/manifest path derivation. The manifest and
+// per-block files live BESIDE <path>, never AT it.
+//
+// D2 inc8: the store is BINARY-ONLY. <path> itself (the former legacy
+// full chain.json) is neither written nor read by this class any more —
+// the manifest + per-block frames are the ONE at-rest chain
+// representation. Offline text consumers use `determ chain-export --json`,
+// a pull-based non-authoritative VIEW (DECISION-LOG D2).
 // A4.5 crash-consistency TEST SEAM. -1 (default) disables it: production
 // pays only a single relaxed atomic load per file write that is always -1,
 // so the on-disk bytes and behaviour are unchanged. When set >= 0 (only by
@@ -2847,7 +3351,70 @@ void write_file_atomic(const fs::path& target, const std::string& content) {
         + tmp.string() + " → " + target.string() + ": " + ec.message());
 }
 fs::path store_dir_for(const std::string& path)    { return fs::path(path + ".blocks"); }
-fs::path manifest_path_for(const std::string& path){ return fs::path(path + ".manifest.json"); }
+fs::path manifest_path_for(const std::string& path){ return fs::path(path + ".manifest.bin"); }
+fs::path block_path_for(const fs::path& dir, uint64_t i) {
+    return dir / (std::to_string(i) + ".blk");
+}
+
+// ── D2 inc8 store record codecs ──────────────────────────────────────────
+// Manifest 'DMF1' — a FIXED 44-byte record:
+//   [0]  magic 4 = 'D','M','F','1'
+//   [4]  height    u64 LE
+//   [12] head_hash 32 raw bytes (all-zero iff height == 0)
+// Per-block file 'DBK1' — magic 4 then a Block::encode_frame frame that
+// extends to EOF. No length prefix: the file size delimits the frame and
+// decode_frame's exact-consumption rejects both truncation and padding.
+constexpr size_t kManifestBytes = 44;
+constexpr char   kManifestMagic[4] = {'D','M','F','1'};
+constexpr char   kBlockMagic[4]    = {'D','B','K','1'};
+
+std::string encode_manifest(uint64_t height, const Hash& head_hash) {
+    std::string out;
+    out.reserve(kManifestBytes);
+    out.append(kManifestMagic, 4);
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<char>((height >> (8 * i)) & 0xFF));
+    out.append(reinterpret_cast<const char*>(head_hash.data()), head_hash.size());
+    return out;
+}
+
+struct ManifestRec { uint64_t height; Hash head_hash; };
+
+ManifestRec decode_manifest(const std::string& bytes, const std::string& where) {
+    // Exact length BOTH directions (2803a13 discipline): 43 and 45 are both
+    // rejected, so a mutant relaxing this to `>=` or to a prefix read reds.
+    if (bytes.size() != kManifestBytes)
+        throw std::runtime_error(
+            "chain store: manifest must be exactly 44 bytes, got "
+            + std::to_string(bytes.size()) + " in " + where);
+    if (std::memcmp(bytes.data(), kManifestMagic, 4) != 0)
+        throw std::runtime_error(
+            "chain store: bad manifest magic (expected DMF1) in " + where);
+    ManifestRec r{};
+    r.height = 0;
+    for (int i = 0; i < 8; ++i)
+        r.height |= static_cast<uint64_t>(
+            static_cast<uint8_t>(bytes[4 + i])) << (8 * i);
+    std::memcpy(r.head_hash.data(), bytes.data() + 12, 32);
+    const bool zero_hash = std::all_of(r.head_hash.begin(), r.head_hash.end(),
+                                       [](uint8_t b){ return b == 0; });
+    if (r.height == 0 && !zero_hash)
+        throw std::runtime_error(
+            "chain store: manifest height is zero but head_hash is set in " + where);
+    if (r.height != 0 && zero_hash)
+        throw std::runtime_error(
+            "chain store: manifest non-zero height but zero head_hash in " + where);
+    return r;
+}
+
+std::string read_whole_file(const fs::path& p, const std::string& what) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error(what + ": cannot open " + p.string());
+    std::string data((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+    if (f.bad()) throw std::runtime_error(what + ": read error on " + p.string());
+    return data;
+}
 } // namespace
 
 // A4.5 crash-consistency test seam setter (declared in chain.hpp). Not used
@@ -2886,30 +3453,29 @@ void Chain::save_incremental(const std::string& path) const {
     // never reverted under the depth-1 bound), so a crash in any subsequent
     // window reloads a consistent shorter chain and re-syncs the head.
     if (persisted_manifest_height_ > persisted_count_) {
-        json sm;
-        sm["format"]    = "chain-blocks-v1";
-        sm["height"]    = persisted_count_;
-        sm["head_hash"] = persisted_count_ == 0
-                          ? std::string{}
-                          : to_hex(blocks_[persisted_count_ - 1].compute_hash());
-        write_file_atomic(manifest_path_for(path), sm.dump(2));
+        const Hash shrunk_head = persisted_count_ == 0
+                                 ? Hash{}
+                                 : blocks_[persisted_count_ - 1].compute_hash();
+        write_file_atomic(manifest_path_for(path),
+                          encode_manifest(persisted_count_, shrunk_head));
         persisted_manifest_height_ = persisted_count_;
     }
 
     for (size_t i = persisted_count_; i < blocks_.size(); ++i) {
-        write_file_atomic(dir / (std::to_string(i) + ".json"),
-                          blocks_[i].to_json().dump(2));
+        std::vector<uint8_t> frame;
+        blocks_[i].encode_frame(frame);
+        std::string rec;
+        rec.reserve(4 + frame.size());
+        rec.append(kBlockMagic, 4);
+        rec.append(reinterpret_cast<const char*>(frame.data()), frame.size());
+        write_file_atomic(block_path_for(dir, i), rec);
     }
-    json m;
-    m["format"]    = "chain-blocks-v1";
-    m["height"]    = blocks_.size();
-    // Same S-021 gate as the legacy wrapped chain.json: the head digest
+    // Same S-021 gate as before the container swap: the head digest
     // transitively covers every prior block via the prev_hash chain +
     // committee signatures; load() recomputes and rejects a mismatch.
-    m["head_hash"] = blocks_.empty()
-                      ? std::string{}
-                      : to_hex(blocks_.back().compute_hash());
-    write_file_atomic(manifest_path_for(path), m.dump(2));
+    const Hash head = blocks_.empty() ? Hash{} : blocks_.back().compute_hash();
+    write_file_atomic(manifest_path_for(path),
+                      encode_manifest(blocks_.size(), head));
     persisted_count_ = blocks_.size();
     persisted_manifest_height_ = blocks_.size();
 }
@@ -2921,27 +3487,19 @@ Chain Chain::load(const std::string& path,
                     ShardId my_shard_id,
                     uint32_t epoch_blocks,
                     uint32_t k_block_sigs) {
-    // B1 chain-storage-v1: when a manifest exists, the block store is the
-    // RUNTIME truth — it is written on every save tick, while the legacy
-    // chain.json is written only at graceful stop(), so after a crash the
-    // store is strictly newer (never older) than the legacy file. A
-    // present-but-unreadable store is a HARD error, fail-closed (S-021
-    // stance): silently falling back to a possibly-stale chain.json could
-    // rewind the chain below already-gossiped state. Recovery from a
-    // genuinely destroyed store: the operator deletes <path>.manifest.json
-    // to force a legacy load (or resyncs from peers/snapshot).
+    // B1 chain-storage-v1 / D2 inc8: the binary block store is the ONLY
+    // at-rest chain representation. A present-but-unreadable store is a
+    // HARD error, fail-closed (S-021 stance). There is NO text fallback:
+    // <path> itself is never read — a chain.json sitting beside the store
+    // is inert data, and a store-less directory loads as an EMPTY chain
+    // (gate test-chain-store CS-8). Recovery from a genuinely destroyed
+    // store is resync from peers or a snapshot, not a hand-edited file.
     const fs::path mpath = manifest_path_for(path);
     if (fs::exists(mpath)) {
-        std::ifstream mf(mpath);
-        if (!mf) throw std::runtime_error(
-            "chain store: manifest exists but cannot be opened: " + mpath.string());
-        json m = json::parse(mf);
-        if (m.value("format", std::string{}) != "chain-blocks-v1")
-            throw std::runtime_error(
-                "chain store: unknown manifest format '"
-                + m.value("format", std::string{}) + "' in " + mpath.string());
-        const uint64_t height = m.value("height", uint64_t{0});
-        const std::string expected_head_hex = m.value("head_hash", std::string{});
+        const ManifestRec mrec =
+            decode_manifest(read_whole_file(mpath, "chain store: manifest"),
+                            mpath.string());
+        const uint64_t height = mrec.height;
 
         Chain c;
         c.block_subsidy_ = block_subsidy;
@@ -2953,12 +3511,22 @@ Chain Chain::load(const std::string& path,
 
         const fs::path dir = store_dir_for(path);
         for (uint64_t i = 0; i < height; ++i) {
-            const fs::path bpath = dir / (std::to_string(i) + ".json");
-            std::ifstream bf(bpath);
-            if (!bf) throw std::runtime_error(
+            const fs::path bpath = block_path_for(dir, i);
+            if (!fs::exists(bpath)) throw std::runtime_error(
                 "chain store: manifest height " + std::to_string(height)
                 + " but block file missing/unreadable: " + bpath.string());
-            Block b = Block::from_json(json::parse(bf));
+            const std::string data =
+                read_whole_file(bpath, "chain store: block file");
+            if (data.size() < 5 || std::memcmp(data.data(), kBlockMagic, 4) != 0)
+                throw std::runtime_error(
+                    "chain store: bad block magic (expected DBK1) in "
+                    + bpath.string());
+            // decode_frame is EXACT-consumption (BF-12 hostile-bytes gated):
+            // it rejects a truncated frame AND any trailing byte, so the
+            // file size alone delimits the record — no length prefix needed.
+            Block b = Block::decode_frame(
+                reinterpret_cast<const uint8_t*>(data.data()) + 4,
+                data.size() - 4);
             c.apply_transactions(b);
             c.blocks_.push_back(std::move(b));
         }
@@ -2969,90 +3537,88 @@ Chain Chain::load(const std::string& path,
         // shrink-first guard is a no-op until a reorg clamps persisted_count_.
         c.persisted_manifest_height_ = c.blocks_.size();
 
-        // Same S-021 head gate as the legacy path: the recomputed head
-        // digest transitively covers every prior block.
-        if (!expected_head_hex.empty()) {
+        // S-021 head gate, unchanged by the container swap: the recomputed
+        // head digest transitively covers every prior block. decode_manifest
+        // already enforced (height==0) <=> (head_hash all-zero), so a
+        // non-empty height always carries a real digest to compare.
+        if (height != 0) {
             if (c.blocks_.empty())
                 throw std::runtime_error(
                     "chain store: head_hash set but height is zero");
-            const std::string actual = to_hex(c.blocks_.back().compute_hash());
-            if (actual != expected_head_hex)
+            const Hash actual = c.blocks_.back().compute_hash();
+            if (actual != mrec.head_hash)
                 throw std::runtime_error(
                     "chain store: head_hash mismatch (tampering or corruption?); "
-                    "stored=" + expected_head_hex + " computed=" + actual);
-        } else if (height != 0) {
-            throw std::runtime_error(
-                "chain store: non-zero height but empty head_hash");
+                    "stored=" + to_hex(mrec.head_hash)
+                    + " computed=" + to_hex(actual));
         }
         return c;
     }
 
-    std::ifstream f(path);
-    if (!f) {
-        // No on-disk chain: return EMPTY chain so caller (Node) can decide
-        // whether to bootstrap from a GenesisConfig or fall back. Don't
-        // synthesize a legacy zeros-genesis here — that would later collide
-        // with a pinned genesis_hash in the operator config.
-        Chain c;
-        c.block_subsidy_ = block_subsidy;
-        c.shard_count_   = shard_count;
-        c.shard_salt_    = shard_salt;
-        c.my_shard_id_   = my_shard_id;
-        c.epoch_blocks_  = epoch_blocks;  // D3.3b (empty chain: no replay yet)
-        c.k_block_sigs_  = k_block_sigs;  // S-051 (same)
-        return c;
-    }
-    json j = json::parse(f);
+    // No manifest => no store => EMPTY chain, so the caller (Node) can decide
+    // whether to bootstrap from a GenesisConfig or a snapshot. D2 inc8: this
+    // is deliberately NOT a text fallback — a legacy chain.json sitting at
+    // <path> is ignored entirely (gate CS-8). Don't synthesize a legacy
+    // zeros-genesis here either: that would later collide with a pinned
+    // genesis_hash in the operator config.
     Chain c;
-    c.block_subsidy_ = block_subsidy;   // must be set before replay so creators
-                                          // are credited correctly per block
+    c.block_subsidy_ = block_subsidy;
     c.shard_count_   = shard_count;
     c.shard_salt_    = shard_salt;
     c.my_shard_id_   = my_shard_id;
-    c.epoch_blocks_  = epoch_blocks;    // D3.3b: before replay (same reason)
-    c.k_block_sigs_  = k_block_sigs;    // S-051: before replay (floor verdict)
-
-    // S-021: accept both formats:
-    //   * legacy: top-level JSON array of blocks (pre-S-021 chain.json).
-    //   * wrapped: object with { "head_hash": "<hex>", "blocks": [...] }.
-    //     head_hash gates load with O(1) tampering detection — the head's
-    //     compute_hash() is recomputed after replay and compared.
-    std::string expected_head_hex;
-    const json* blocks_ptr = nullptr;
-    if (j.is_array()) {
-        blocks_ptr = &j;
-    } else if (j.is_object()) {
-        expected_head_hex = j.value("head_hash", std::string{});
-        if (!j.contains("blocks") || !j["blocks"].is_array())
-            throw std::runtime_error("chain file: wrapped form missing 'blocks' array");
-        blocks_ptr = &j["blocks"];
-    } else {
-        throw std::runtime_error("chain file: expected JSON array or object");
-    }
-
-    for (auto& bj : *blocks_ptr) {
-        Block b = Block::from_json(bj);
-        c.apply_transactions(b);
-        c.blocks_.push_back(std::move(b));
-    }
-
-    // S-021: verify head_hash matches recomputed head digest. Empty
-    // expected_head_hex means legacy array-form chain.json (no
-    // gate); also empty for a degenerate zero-block chain.
-    if (!expected_head_hex.empty()) {
-        if (c.blocks_.empty()) {
-            throw std::runtime_error(
-                "chain file: head_hash set but blocks list is empty");
-        }
-        std::string actual_head_hex = to_hex(c.blocks_.back().compute_hash());
-        if (actual_head_hex != expected_head_hex) {
-            throw std::runtime_error(
-                "chain file: head_hash mismatch (tampering or corruption?); "
-                "stored=" + expected_head_hex + " computed=" + actual_head_hex);
-        }
-    }
-
+    c.epoch_blocks_  = epoch_blocks;  // D3.3b (empty chain: no replay yet)
+    c.k_block_sigs_  = k_block_sigs;  // S-051 (same)
     return c;
+}
+
+nlohmann::json Chain::export_store_json(const std::string& path) {
+    // D2 inc8 offline VIEW. The at-rest chain is binary-only; this is the ONE
+    // place that renders it as text, and the text is explicitly
+    // non-authoritative (DECISION-LOG D2 permits human-readable views off the
+    // storage/wire path). Shape is the historical wrapped form
+    // {head_hash: "<hex>", blocks: [...]} so offline consumers migrate
+    // mechanically from parsing an at-rest chain.json to piping this command.
+    //
+    // Decode-only: no apply_transactions replay — an export is a view, not a
+    // validator, and replay would need the genesis-pinned constants the
+    // exporter does not have. The S-021 head gate still runs, so a tampered
+    // store cannot be exported as if it were clean.
+    //
+    // Mid-run safety: the manifest is written atomically LAST and names only
+    // fully-written block files — the same guarantee Chain::load relies on.
+    const fs::path mpath = manifest_path_for(path);
+    json out;
+    out["head_hash"] = std::string{};
+    out["blocks"]    = json::array();
+    if (!fs::exists(mpath)) return out;   // no store => empty, mirrors load()
+
+    const ManifestRec mrec =
+        decode_manifest(read_whole_file(mpath, "chain store: manifest"),
+                        mpath.string());
+    const fs::path dir = store_dir_for(path);
+    Hash last_hash{};
+    for (uint64_t i = 0; i < mrec.height; ++i) {
+        const fs::path bpath = block_path_for(dir, i);
+        if (!fs::exists(bpath)) throw std::runtime_error(
+            "chain store: manifest height " + std::to_string(mrec.height)
+            + " but block file missing/unreadable: " + bpath.string());
+        const std::string data = read_whole_file(bpath, "chain store: block file");
+        if (data.size() < 5 || std::memcmp(data.data(), kBlockMagic, 4) != 0)
+            throw std::runtime_error(
+                "chain store: bad block magic (expected DBK1) in " + bpath.string());
+        Block b = Block::decode_frame(
+            reinterpret_cast<const uint8_t*>(data.data()) + 4, data.size() - 4);
+        last_hash = b.compute_hash();
+        out["blocks"].push_back(b.to_json());
+    }
+    if (mrec.height != 0) {
+        if (last_hash != mrec.head_hash)
+            throw std::runtime_error(
+                "chain store: head_hash mismatch (tampering or corruption?); "
+                "stored=" + to_hex(mrec.head_hash) + " computed=" + to_hex(last_hash));
+        out["head_hash"] = to_hex(last_hash);
+    }
+    return out;
 }
 
 } // namespace determ::chain

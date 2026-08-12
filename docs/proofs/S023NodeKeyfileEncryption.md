@@ -6,11 +6,11 @@ The CLI surface in scope:
 
 | CLI | `wallet/main.cpp` location | Purpose |
 |---|---|---|
-| `keyfile-create`  | `:2984-3186` | Encrypt a 32-byte Ed25519 seed into the canonical `DETERM-NODE-V1` 2-line file (initial creation). |
-| `keyfile-decrypt` | `:3242-3483` | Reverse to plaintext `node_key.json` (operator emergency access). |
-| `keyfile-rotate`  | `:3566-4003` | Re-encrypt under a new passphrase (fresh salt + fresh nonce); preserves the Ed25519 keypair (R28A1 surface). |
-| `keyfile-recover` | `:4073-4460` | Compose `envelope::decrypt × N` + `shamir::combine` (FA12 Shamir composition). |
-| `keyfile-info`    | `:5017-5142` | Metadata-only inspection (no passphrase, no decrypt). |
+| `keyfile-create`  | `:3298` | Encrypt a 32-byte Ed25519 seed into the canonical `DNK1` binary container (initial creation). |
+| `keyfile-decrypt` | `:3520` | Reverse to the daemon's plaintext `node_key.json` (operator emergency access). |
+| `keyfile-rotate`  | `:3778` | Re-encrypt under a new passphrase (fresh salt + fresh nonce); preserves the Ed25519 keypair (R28A1 surface). |
+| `keyfile-recover` | `:4529` | Compose `envelope::decrypt × N` + `shamir::combine` (FA12 Shamir composition). |
+| `keyfile-info`    | `:5323` | Metadata-only inspection (no passphrase, no decrypt). |
 
 This document's analytic scope is **§T-4 rotation atomicity** and **§T-5 passphrase rotation safety** — i.e., the cryptographic + filesystem composition that makes `keyfile-rotate` safe under operator failure modes (mid-rotation crash, partial disk write, passphrase compromise) and never writes plaintext to disk during the rotation transition.
 
@@ -18,13 +18,56 @@ This document's analytic scope is **§T-4 rotation atomicity** and **§T-5 passp
 
 ---
 
+## 0. Container change (2026-08-12, D2 step 3) — `DETERM-NODE-V1` → `DNK1`; T-4/T-5 unaffected
+
+The encrypted node keyfile is now a canonical **binary** container, not a two-line ASCII file, and its
+AEAD *plaintext* is the raw seed rather than a JSON object. Layout (`wallet/keyfmt.hpp`; all integers
+little-endian, EXACT-length decode, every bound refuses rather than clamps):
+
+```
+[0..3]  "DNK1"
+[4..35] pubkey  32 bytes raw          ← also the AEAD **AAD**
+[36..39] env_len u32 LE
+[40..]  DWE envelope bytes, exactly env_len, must reach EOF exactly
+```
+
+Three security-relevant deltas, all strengthening:
+
+1. **AAD is the RAW 32-byte pubkey** (previously a hex string). The binding argument is unchanged in
+   force — a tampered header pubkey makes GCM tag verification fail — but the bound value is now the
+   key material itself, in one canonical encoding, so there is no hex-case or formatting ambiguity to
+   reason about. Mutant-verified: deleting the `aad != env.aad` check in `envelope::decrypt` reddens
+   the `N3 DNK1 header-pubkey tamper` leg.
+2. **Plaintext is the RAW 32-byte seed** — no inner JSON. This deletes an entire parser from the
+   post-decryption path: previously, bytes that had just come out of AEAD decryption were fed to a
+   JSON parser. That path was tag-authenticated, so it was not a live vulnerability, but removing it
+   removes the class.
+3. **Decrypt verifies derive-equality** — `ed25519_pubkey_from_seed(plaintext) == header pubkey` —
+   which replaces the older stored-address cross-check (see `docs/SECURITY.md` S-028's wallet-side
+   note). The identity a decrypted keyfile asserts is now *derived*, never *stored*.
+
+**What this does NOT change.** §T-4 (rotation atomicity) and §T-5 (passphrase rotation safety) are
+filesystem-ordering and key-independence arguments over "the encrypted blob"; they are indifferent to
+the blob's internal encoding. `keyfile-rotate` retains the same write-staging-file → fsync → rename
+sequence with the same crash-window analysis (the staging path is now `<out>_tmp.bin`). §A-K1's bound
+is unchanged: it rests on the KDF work factor and AEAD, both untouched. Gate:
+`determ-wallet selftest-keyfile-binary` (19 cases, mutant-verified on the DAK1 derive-equality and the
+DNK1 AAD binding).
+
+**Explicit D2 remainder.** `keyfile-decrypt --out` still writes the daemon's `node_key.json`, and
+`src/crypto/keys.cpp` still reads it: that file is `src/`-owned and stays JSON until the src-side D2
+keyfile increment. It is marked `D2-DEFERRED(src)` in code and recorded in
+`docs/proofs/DECISION-LOG.md` 2026-08-12 §3.
+
+---
+
 ## 1. Threat model
 
-A Determ operator stores the validator's Ed25519 signing key on disk in the `DETERM-NODE-V1` 2-line encrypted-keyfile format. The threat surface during the lifetime of that file includes both at-rest cryptographic attacks (covered exhaustively in S-004) and several **operational** attack scenarios specific to passphrase rotation and inter-host migration. We enumerate four:
+A Determ operator stores the validator's Ed25519 signing key on disk in the `DNK1` binary encrypted-keyfile container (§0; `DETERM-NODE-V1` two-line text before 2026-08-12). The threat surface during the lifetime of that file includes both at-rest cryptographic attacks (covered exhaustively in S-004) and several **operational** attack scenarios specific to passphrase rotation and inter-host migration. We enumerate four:
 
 ### A-K1 — Disk image stolen (cold backup, laptop theft, OS-level UID compromise)
 
-An attacker exfiltrates the encrypted keyfile bytes (`DETERM-NODE-V1 <hex(pk)>` header + `DWE1` envelope blob) but does NOT possess the passphrase `P`. Examples:
+An attacker exfiltrates the encrypted keyfile bytes (the `DNK1` container: magic ‖ raw pubkey ‖ length-prefixed `DWE` envelope — §0) but does NOT possess the passphrase `P`. Examples:
 
 - Operator's laptop is stolen and the disk is forensically imaged.
 - Backup tape / cloud-snapshot leak (e.g., misconfigured S3 bucket).
@@ -58,7 +101,7 @@ An attacker who intercepts the keyfile in transit gets the same bytes as A-K1. *
 The operator runs `keyfile-rotate` to move from passphrase `P1` to `P2`. During the rotation window, three failure modes can leave the operator in a degraded state:
 
 1. **Crash between decrypt-under-P1 and re-encrypt-under-P2.** Process exits before the new encrypted blob is written; the on-disk keyfile is still the P1 envelope (recoverable with `P1`).
-2. **Crash between writing the staging file and renaming it to the final path.** The staging file `<out>_tmp.json` exists with the P2 envelope; the final path still holds the P1 envelope. Either operator-side cleanup runs (next rotation removes the stale tmp), or operator manually finishes the rename.
+2. **Crash between writing the staging file and renaming it to the final path.** The staging file `<out>_tmp.bin` exists with the P2 envelope; the final path still holds the P1 envelope. Either operator-side cleanup runs (next rotation removes the stale tmp), or operator manually finishes the rename.
 3. **Crash AFTER rename but BEFORE the operator deletes the (now-unused) memory of `P1`.** The on-disk keyfile is now the P2 envelope; the operator must remember `P2` to recover. If the operator hasn't yet recorded `P2` in their passphrase manager, this is a lockout.
 
 The attack scenario beyond crashes: an attacker with **temporary** disk-read access during the rotation window — e.g., a backup process snapshotting the directory mid-rotation — captures EITHER the old envelope, the staging tmp file, or both. The cryptographic property required: each envelope (pre-rotation and post-rotation) is individually as strong as a single S-004 envelope, AND the staging tmp file (if it exists at the snapshot moment) is also as strong, AND no path during the rotation ever writes the plaintext seed to disk.
@@ -69,7 +112,7 @@ The attack scenario beyond crashes: an attacker with **temporary** disk-read acc
 
 ### T-1 — At-rest secrecy
 
-For any adversary `A_offline` (in the A-K1 disk-theft model) holding only the encrypted keyfile bytes `E := DETERM-NODE-V1 ‖ hex(pk) ‖ "\n" ‖ envelope::serialize(envelope::encrypt(J, P, aad)) ‖ "\n"`, the probability of recovering the private seed `sk` (the 32-byte preimage of `Ed25519_pubkey`) is bounded by
+For any adversary `A_offline` (in the A-K1 disk-theft model) holding only the encrypted keyfile bytes `E := "DNK1" ‖ pk ‖ u32(len) ‖ envelope::serialize_bytes(envelope::encrypt(sk, P, aad = pk))`, the probability of recovering the private seed `sk` (the 32-byte preimage of `Ed25519_pubkey`) is bounded by
 
 $$
 \Pr\bigl[A_{\text{offline}} \to sk\bigr] \;\leq\; Q \cdot 2^{-(H_{\text{pw}} + \log_2(\text{iter}))} + \varepsilon_{\text{AEAD}}
@@ -124,7 +167,7 @@ There is **NO intermediate observable state** where:
 
 *Reduction.* Inspect `cmd_keyfile_rotate` at `wallet/main.cpp:3566-4003`. The atomic-write protocol (lines 3870-3962) is:
 
-1. **Staging file write** (lines 3878-3919): the new envelope is serialized into a temporary file at `<out>_tmp.json`. The original `--in` file is **not modified** during this step. If the staging-file write fails (disk full, permission error), `secure_zero_all()` runs, the staging file is removed, and the original `--in` is untouched.
+1. **Staging file write** (`wallet/main.cpp:4016-4024` and following): the new `DNK1` container is written to a temporary file at `<out>_tmp.bin`. The original `--in` file is **not modified** during this step. If the staging-file write fails (disk full, permission error), `secure_zero_all()` runs, the staging file is removed, and the original `--in` is untouched.
 
 2. **OS-level commit** (lines 3925-3945): `fsync` (POSIX) or `_commit` (Windows) is called on the staging file's file descriptor to force the OS to commit the bytes to durable storage. This is best-effort: if it fails, the rename still proceeds (the bytes are in the kernel page cache + the rename produces a valid file in the common case).
 
@@ -136,8 +179,8 @@ The **invariant** maintained across the rotation: at every instant, either (PRE)
 
 **Crash analysis.**
 
-- Crash during step 1 (staging write): `<out>_tmp.json` may exist as a partial / empty / torn file. The original `--in` is untouched. Next rotation's `std::filesystem::remove(tmp_path)` at line 3882 cleans up the stale tmp.
-- Crash during step 2 (fsync): `<out>_tmp.json` exists with the full new-envelope bytes. The rename has NOT happened; `--in` is untouched. The operator can manually rename the tmp to the final path (and at that point, `P2` recovers the file).
+- Crash during step 1 (staging write): `<out>_tmp.bin` may exist as a partial / empty / torn file. The original `--in` is untouched. The next rotation's `std::filesystem::remove(tmp_path)` cleans up the stale tmp.
+- Crash during step 2 (fsync): `<out>_tmp.bin` exists with the full new-envelope bytes. The rename has NOT happened; `--in` is untouched. The operator can manually rename the tmp to the final path (and at that point, `P2` recovers the file).
 - Crash during step 3 (rename): atomic by POSIX/Windows semantics — either the rename completed (state POST) or it didn't (state PRE).
 - Crash during step 4 (permissions tighten): the file is committed; permissions may be at the OS default rather than 0600. Operator-side `chmod 600` recovery is trivial.
 
@@ -162,7 +205,7 @@ The file-system writes (steps 1-3 of T-4 atomicity protocol) write only **cipher
 
 - **Decrypt path** (line 3749): `auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);`. The decrypt call returns a `std::optional<std::vector<uint8_t>>` — the plaintext bytes live ONLY in heap memory owned by `pt_opt` (then moved into `pt_bytes` at line 3763). No file write here.
 - **Re-encrypt path** (line 3834): `auto new_env = envelope::encrypt(pt_bytes, new_passphrase, aad);` returns a `DWE1::Envelope` struct containing salt/nonce/ciphertext+tag/aad — all ciphertext-class data. The plaintext `pt_bytes` is not modified by this call.
-- **Staging-file write** (line 3893-3894): `f << "DETERM-NODE-V1 " << header_pubkey_hex << "\n"; f << blob << "\n";`. The `blob` variable is `envelope::serialize(new_env)` — the canonical hex form of the new envelope, NOT the plaintext. The `header_pubkey_hex` is the validator's public key (already public information by definition).
+- **Staging-file write** (`wallet/main.cpp:4016-4024`): the staged bytes are `keyfmt::encode_dnk1(pubkey, envelope::serialize_bytes(new_env))` — the canonical binary container, NOT the plaintext. Its header field is the validator's raw public key (already public information by definition).
 - **secure_zero_all** (lines 3767-3774): wraps three `sodium_memzero` calls. The libsodium primitive uses inline asm + memory barriers to prevent compiler dead-store optimization (per libsodium `sodium/utils.c::sodium_memzero`). On every exit path, these run BEFORE any stdout/stderr summary line, so even a stale-buffer-reuse leak through the I/O system is prevented.
 
 **Failure-mode analysis.**
@@ -292,7 +335,7 @@ This proof **extends** the existing keyfile-encryption proof chain. The composit
 
 ### S-004 (`S004KeyfileAtRest.md`) — single-envelope cryptographic primitive
 
-S-004 proves that a single `DETERM-NODE-V1` encrypted keyfile is sound at the AEAD layer:
+S-004 proves that a single encrypted node keyfile (`DNK1` since 2026-08-12) is sound at the AEAD layer:
 
 - **T-1 (PBKDF2 soundness)**: brute-force lower bound `H_pw + log2(iter)` bits per trial.
 - **T-2 (AEAD AAD-binding)**: header-substitution attacks defeated.
@@ -371,7 +414,7 @@ S-023's specific contribution: closing the **operational** attack surface around
   - `:3767-3774` — `secure_zero_all` lambda definition.
   - `:3834` — `envelope::encrypt` call (under new passphrase, fresh salt + nonce).
   - `:3845-3868` — self-test round-trip (decrypt-under-new + byte-compare).
-  - `:3878-3919` — staging-file write (`<out>_tmp.json`).
+  - `:4016-4024` — staging-file write (`<out>_tmp.bin`) of the `DNK1` container.
   - `:3925-3945` — OS-level commit (`fsync` POSIX / `_commit` Windows).
   - `:3946-3962` — atomic rename (`std::filesystem::rename`).
   - `:3964-3973` — 0600 permissions tightening.

@@ -212,23 +212,28 @@ esac
 FILE_EXISTS=0
 FILE_SIZE_BYTES=0
 FILE_MTIME=0
-if [ -e "$CHAIN_PATH_ABS" ]; then
-  if [ ! -r "$CHAIN_PATH_ABS" ]; then
-    echo "operator_chain_compaction_audit: chain-path exists but is unreadable: $CHAIN_PATH_ABS" >&2
+# D2 inc8: the at-rest chain is the BINARY STORE beside <chain-path> —
+# <chain-path>.manifest.bin (fixed 44 bytes) + <chain-path>.blocks/<i>.blk.
+# "chain size" is therefore the store total, not one file's stat.
+CHAIN_STORE_DIR="$CHAIN_PATH_ABS.blocks"
+CHAIN_MANIFEST="$CHAIN_PATH_ABS.manifest.bin"
+if [ -e "$CHAIN_MANIFEST" ]; then
+  if [ ! -r "$CHAIN_MANIFEST" ]; then
+    echo "operator_chain_compaction_audit: chain store exists but the manifest is unreadable: $CHAIN_MANIFEST" >&2
     exit 1
   fi
-  # GNU stat first, then BSD stat. Failure here means "file is present
-  # but stat surfaced no value" — treat as an invocation failure (the
-  # file is unreadable in some structural way) so the operator gets
-  # told there's a real problem rather than the script silently zeroing.
-  FILE_SIZE_BYTES=$(stat -c %s -- "$CHAIN_PATH_ABS" 2>/dev/null) \
-    || FILE_SIZE_BYTES=$(stat -f %z -- "$CHAIN_PATH_ABS" 2>/dev/null) \
-    || {
-      echo "operator_chain_compaction_audit: stat failed on $CHAIN_PATH_ABS" >&2
-      exit 1
-    }
-  FILE_MTIME=$(stat -c %Y -- "$CHAIN_PATH_ABS" 2>/dev/null) \
-    || FILE_MTIME=$(stat -f %m -- "$CHAIN_PATH_ABS" 2>/dev/null) \
+  # du -sk is portable across GNU and BSD; block-rounded is fine for a
+  # growth/compaction advisory.
+  _mkb=$(du -sk -- "$CHAIN_MANIFEST" 2>/dev/null | awk '{print $1}') || _mkb=0
+  _bkb=0
+  if [ -d "$CHAIN_STORE_DIR" ]; then
+    _bkb=$(du -sk -- "$CHAIN_STORE_DIR" 2>/dev/null | awk '{print $1}') || _bkb=0
+  fi
+  case "$_mkb" in *[!0-9]*|"") _mkb=0 ;; esac
+  case "$_bkb" in *[!0-9]*|"") _bkb=0 ;; esac
+  FILE_SIZE_BYTES=$(( (_mkb + _bkb) * 1024 ))
+  FILE_MTIME=$(stat -c %Y -- "$CHAIN_MANIFEST" 2>/dev/null) \
+    || FILE_MTIME=$(stat -f %m -- "$CHAIN_MANIFEST" 2>/dev/null) \
     || FILE_MTIME=0
   case "$FILE_SIZE_BYTES" in *[!0-9]*|"")
     echo "operator_chain_compaction_audit: stat returned non-numeric size '$FILE_SIZE_BYTES'" >&2
@@ -346,7 +351,7 @@ add_anom() {
 # the file is missing the size comparison is meaningless.
 if [ "$FILE_EXISTS" = "0" ]; then
   add_anom "chain_file_missing" "CRITICAL" \
-    "chain.json not found at expected path: $CHAIN_PATH_ABS"
+    "chain store not found at expected path: $CHAIN_PATH_ABS.manifest.bin"
 fi
 
 # (b) chain_file_critical — CRITICAL.
@@ -453,9 +458,9 @@ fi
 
 echo "=== Chain compaction audit (port $PORT) ==="
 if [ "$ANOM_ONLY" != "1" ]; then
-  echo "chain.json:        $CHAIN_PATH_ABS"
+  echo "chain store:       $CHAIN_PATH_ABS.{manifest.bin,blocks/}"
   if [ "$FILE_EXISTS" = "1" ]; then
-    echo "file size:         $(render_mb $FILE_SIZE_BYTES) ($FILE_SIZE_BYTES bytes)"
+    echo "store size:        $(render_mb $FILE_SIZE_BYTES) ($FILE_SIZE_BYTES bytes)"
     echo "file mtime:        $(render_mtime $FILE_MTIME)"
   else
     echo "file size:         (missing — file not found at expected path)"

@@ -21,20 +21,22 @@ A round-3 adversarial proof-claim audit (`wf_97a30e14`, independently verified) 
 Per `include/determ/chain/block.hpp:256–279`:
 
 ```cpp
-struct EquivocationEvent {
+struct EquivocationEvent {                   // EQV-height-bind form, 2026-08-12
     std::string equivocator;          // domain whose key signed both digests
     uint64_t    block_index{0};       // height at which equivocation occurred
-    Hash        digest_a{};
+    uint8_t     kind{0};              // 0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT; > 1 rejected
+    uint64_t    index_a{0};           // side-a opening: signed height
+    Hash        body_root_a{};        // side-a opening: digest body root
     Signature   sig_a{};
-    Hash        digest_b{};
+    uint64_t    index_b{0};
+    Hash        body_root_b{};
     Signature   sig_b{};
     uint32_t    shard_id{0};
     uint64_t    beacon_anchor_height{0};
-    // ...
 };
 ```
 
-The `equivocator` field names the offending domain. V11 (Preliminaries §5) requires `digest_a ≠ digest_b` and that both signatures verify under the equivocator's registered Ed25519 public key. The cross-chain fields (`shard_id`, `beacon_anchor_height`) are forensic — they route the slash through the beacon in cross-shard mode (FA6 Corollary T-6.1) but do not affect the apply-side mechanics, which key on `ev.equivocator` only.
+The `equivocator` field names the offending domain. V11 (Preliminaries §5) requires `kind ≤ 1`, `index_a = index_b = block_index` (the height assert), `body_root_a ≠ body_root_b`, `sig_a ≠ sig_b`, and that both signatures verify against digests the validator DERIVES as `SHA256(TAG(kind) ‖ index u64 BE ‖ body_root)` — the digests are no longer carried (`digest_a`/`digest_b` were deleted 2026-08-12). **Nothing in this proof reads those fields**, so every theorem below is unaffected; the struct is reproduced here only so the apply-side reader sees the current shape. The cross-chain fields (`shard_id`, `beacon_anchor_height`) are forensic — they route the slash through the beacon in cross-shard mode (FA6 Corollary T-6.1) but do not affect the apply-side mechanics, which key on `ev.equivocator` only.
 
 ### 1.2 The apply branch
 
@@ -271,11 +273,12 @@ The design choice to send the forfeited stake to `accumulated_slashed_` (a count
 
 The apply-side mechanics in this proof fire **conditional on V11 having authorized the slash upstream**. V11 (`check_equivocation_events` at `validator.cpp`) is responsible for:
 
-- Verifying `digest_a ≠ digest_b` (the two-distinct-signatures requirement).
-- Verifying `Verify(pk_equivocator, digest_a, sig_a) == 1` and `Verify(pk_equivocator, digest_b, sig_b) == 1` against the equivocator's REGISTER-bound pubkey.
+- Rejecting `kind > 1`, and asserting `index_a = index_b = ev.block_index` (the height assert — what makes the accused height signature-bound).
+- Verifying `body_root_a ≠ body_root_b` (the two-distinct-commitments requirement).
+- Verifying both signatures against the DERIVED digests `D(kind, index_x, body_root_x)` under the equivocator's REGISTER-bound pubkey.
 - For cross-shard events (`shard_id != 0`), verifying the beacon-anchor-height context (FA6 Corollary T-6.1).
 
-If V11 rejects the block at validate-time, the apply path never runs and the equivocation branch above does not execute. The apply-side mechanics are therefore "trusted" in the operational sense — they assume the equivocation evidence is genuine. FA6 closes the cryptographic gap: an honest validator's signatures cannot be forged, so an honest validator is never falsely accused, so the apply-side mechanics never wrongly destroy honest stake.
+If V11 rejects the block at validate-time, the apply path never runs and the equivocation branch above does not execute. The apply-side mechanics are therefore "trusted" in the operational sense — they assume the equivocation evidence is genuine. FA6 closes the cryptographic gap: an honest validator's signatures cannot be forged and cannot be re-opened at another height, so an honest validator is never falsely accused, so the apply-side mechanics never wrongly destroy honest stake. **Read FA6's boundary with it:** that conclusion holds under the H3 single-round hypothesis — a validator that signed in two rounds at ONE height can still be validly accused (`EquivocationSlashing.md` §2 Case (c), OPEN). Since this proof's mechanics are unconditional on the evidence's genuineness, that residual lands here as destroyed honest stake, which is why it is recorded as an open owner item rather than absorbed.
 
 The apply-side robustness (T-E4 ghost-equivocator handling) is the belt-and-suspenders defense against any path that slips past V11 — e.g., a snapshot replay of a pre-V11 block, a buggy peer producing a block that bypassed its own validator, or a malicious supplier injecting a forged snapshot whose `equivocation_events[]` references a domain that doesn't exist on the receiver's chain. The defensive guards at lines 1346 and 1352 ensure the apply path is **safe** in all these edge cases (no crash, no state corruption), even where it cannot be **soundly punitive** (a forged event against a non-existent domain produces no slash). The combination of V11 cryptographic soundness + apply-side defensive robustness produces the desired property: slashing fires exactly when it should, and no other time.
 

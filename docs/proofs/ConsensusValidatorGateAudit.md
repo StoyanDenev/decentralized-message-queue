@@ -241,9 +241,25 @@ requires BOTH signatures to genuinely verify against the equivocator's committee
 digests:
 
 ```cpp
-if (!verify(*ek, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+Hash digest_a = compose(ev.index_a, ev.body_root_a);   // DERIVED, never carried
+if (!verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
     return {false, "equivocation_event[i] sig_a does not verify against equivocator's key"};
 ```
+
+**UPDATE 2026-08-12 — the gate grew two arms and the digests became derived (S-052).** The audited
+`:394` sig-verify arm survives verbatim in intent, but the surrounding gate was restructured to close
+the rank-1 forged-slash hole this section's `Consequence` paragraph only half-saw. `EquivocationEvent`
+no longer carries `digest_a`/`digest_b`; it carries `kind` plus a per-side opening
+`(index, body_root)`, and the verifier DERIVES each digest under the kind's domain tag before
+verifying. Two arms were added AHEAD of the sig-verify: a `kind > 1` fail-closed reject, and the
+**height assert** `index_a == index_b == block_index`. Without the height assert, sig-verify alone was
+*insufficient*: an attacker needed no forgery at all — replaying one honest validator's GENUINE
+signatures from two DIFFERENT heights satisfied every arm audited above, including this one, and forged
+a full-stake slash. The audit's own framing ("a producer can FORGE a slash … whose `sig_a` was never
+actually signed") assumed forgery was the only route; it was not. Recorded rather than quietly patched,
+per B3. Current gate: `src/node/validator.cpp:380`; the two new arms are pinned by two additional
+mutants in the same fixture (delete the height assert; weaken it to `index_a == index_b`), each RED on
+exactly its own arm.
 
 **Consequence if silently removed:** a producer can FORGE a slash of an **honest** validator — submit
 an `EquivocationEvent` whose `sig_a` was never actually signed by the named equivocator — and the

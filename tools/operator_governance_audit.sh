@@ -198,7 +198,7 @@ trap 'rm -f "$TMP_PENDING"' EXIT
 # decode known u64-LE parameter names, and can compute anomaly groups
 # (same-name-different-value + 10-block activation clusters) without
 # the bash-array gymnastics that would make the script unreadable.
-python - "$JSON_OUT" "$ANOM_ONLY" "$HEAD_H" "$PORT" "$TMP_PENDING" "$GENESIS" <<'PY'
+python - "$JSON_OUT" "$ANOM_ONLY" "$HEAD_H" "$PORT" "$TMP_PENDING" "$GENESIS" "$DETERM" <<'PY'
 import json, sys, os
 
 json_out      = sys.argv[1] == "1"
@@ -207,6 +207,7 @@ head_h        = int(sys.argv[3])
 port          = int(sys.argv[4])
 pending_path  = sys.argv[5]
 genesis_path  = sys.argv[6]
+determ_bin    = sys.argv[7]   # D2 inc8: verify-genesis --json is the text VIEW
 
 # ── Load pending-params RPC array. ────────────────────────────────────────
 try:
@@ -219,38 +220,34 @@ if not isinstance(raw, list):
     sys.stderr.write("operator_governance_audit: pending-params RPC did not return a JSON array\n")
     sys.exit(1)
 
-# ── Parse genesis-on-disk for governance fields (best-effort). ───────────
-# verify-genesis --json does NOT include governance_mode / param_keyholders /
-# param_threshold (see cmd_verify_genesis in src/main.cpp); we parse the
-# genesis file ourselves. Bad JSON / missing keys are FATAL when --genesis
-# was supplied, since the operator explicitly asked for that view.
+# ── Read genesis governance fields via the text VIEW. ────────────────────
+# D2 inc8: the genesis FILE is the canonical binary DGC1 container, so there
+# is nothing to grep off disk. `determ verify-genesis --in <file> --json` is
+# the non-authoritative text view and now carries governance_mode,
+# param_keyholders (count) and param_threshold. A failure is FATAL when
+# --genesis was supplied, since the operator explicitly asked for that view.
 gov_mode  = "unknown"
 N_holders = None
 M_thresh  = None
 if genesis_path:
+    import subprocess
     try:
-        with open(genesis_path, "r", encoding="utf-8") as f:
-            gen = json.load(f)
+        gen = json.loads(subprocess.check_output(
+            [determ_bin, "verify-genesis", "--in", genesis_path, "--json"]))
     except Exception as e:
-        sys.stderr.write(f"operator_governance_audit: cannot parse --genesis {genesis_path}: {e}\n")
+        sys.stderr.write(f"operator_governance_audit: cannot read --genesis {genesis_path}: {e}\n")
         sys.exit(1)
-    if not isinstance(gen, dict):
-        sys.stderr.write(f"operator_governance_audit: --genesis root is not a JSON object: {genesis_path}\n")
+    if not isinstance(gen, dict) or gen.get("status") != "ok":
+        sys.stderr.write(f"operator_governance_audit: genesis validation failed: {genesis_path}\n")
         sys.exit(1)
     gm = gen.get("governance_mode", 0)
-    if isinstance(gm, bool):
-        gm = 1 if gm else 0
     if not isinstance(gm, int) or gm not in (0, 1):
-        sys.stderr.write(f"operator_governance_audit: --genesis governance_mode must be 0|1 (got {gm!r})\n")
+        sys.stderr.write(f"operator_governance_audit: governance_mode must be 0|1 (got {gm!r})\n")
         sys.exit(1)
     gov_mode = "governed" if gm == 1 else "uncontrolled"
-    khs = gen.get("param_keyholders", [])
-    if not isinstance(khs, list):
-        sys.stderr.write("operator_governance_audit: --genesis param_keyholders must be an array\n")
-        sys.exit(1)
-    N_holders = len(khs)
+    N_holders = int(gen.get("param_keyholders", 0) or 0)
     M_thresh  = int(gen.get("param_threshold", 0) or 0)
-    # In governed mode with absent/zero threshold, src/chain/genesis.cpp
+    # In governed mode with absent/zero threshold, GenesisConfig::validate
     # defaults to N-of-N — mirror that semantics here.
     if gov_mode == "governed" and M_thresh == 0:
         M_thresh = N_holders

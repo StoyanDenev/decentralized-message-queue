@@ -14,8 +14,11 @@
 #   1  version = 0x01
 #   2  msg_type (u8)
 #   3  reserved = 0x00
-#   4+ payload — for non-TRANSACTION: [u32 LE json_len][json_bytes];
-#                for TRANSACTION (msg_type 2): 4x256-bit frame + trailer.
+#   4+ payload — per msg_type: the D2 fixed frames (HELLO, TRANSACTION, the
+#                request/status set, the consensus-chatter set, and since
+#                D2-inc7a/inc7b the five Block-carrying types + CONTRIB), or
+#                [u32 LE json_len][json_bytes] for the two types still on the
+#                lp-JSON path (SNAPSHOT_RESPONSE / HEADERS_RESPONSE).
 #
 # Verdict / exit contract:
 #   VALID     → exit 0
@@ -45,6 +48,27 @@
 #  13. --expect-type mismatch → MALFORMED, exit 3.
 #  14. Missing --in → exit 1 (usage, not MALFORMED).
 #  15. Frame shorter than the 4-byte header → MALFORMED, exit 3.
+#  16. D2-inc7a Block-carrying frames: the canonical binary Block container
+#      (chain::Block::encode_frame) assembled HERE from the published section
+#      order — 3 fixed fields, 23 u16 counts, the fixed tail — so an EMPTY
+#      frame is exactly 297 bytes. That number is derived independently and
+#      then checked against the mirror's report, which is a genuine
+#      cross-implementation pin on the daemon's BF-0 constant. BLOCK and
+#      BEACON_HEADER (incl. a folded block with records + a witness) → VALID;
+#      trailing bytes and truncation → MALFORMED.
+#  17. SHARD_TIP POISON-WITNESS: the mirror implements the same
+#      allow_witnesses MAP the daemon does. A tip carrying a witness or folded
+#      records → MALFORMED (only BEACON producers fold; a legitimate tip is a
+#      LEAF, and a poisoned one would make the folded beacon block unparseable
+#      fleet-wide). The SAME block inside CROSS_SHARD_RECEIPT_BUNDLE → VALID,
+#      which is what proves it is a per-type map and not a blanket reject.
+#      Without this leg the two implementations would disagree on frame
+#      validity — the S-043 asymmetry class the reserved-byte audit found.
+#  18. CHAIN_RESPONSE frame: has_more ∈ {0,1} (a bool has exactly two
+#      canonical encodings), the block list, the EMPTY 'nothing more' reply,
+#      a 65535 count-lie rejected before any allocation, trailing bytes.
+#  19. D2-inc7b CONTRIB frame: the always-present layout decoded field by
+#      field, plus trailing-byte / truncation / count-lie rejects.
 #
 # Run from repo root: bash tools/test_light_decode_wire.sh
 set -u
@@ -292,20 +316,27 @@ fi
 
 echo
 echo "=== 8. lp-json declared length != body → MALFORMED exit 3 ==="
-# Carried by CONTRIB (4) — a type that still uses the length-prefixed JSON
-# payload after D2-inc6a moved the request/status types to fixed frames.
+# Carried by HEADERS_RESPONSE (18) — after D2-inc7a/inc7b only it and
+# SNAPSHOT_RESPONSE still use the length-prefixed JSON payload (CONTRIB and
+# the five Block-carrying types moved to true binary frames).
 # JSON is 7 bytes; declare 99.
-craft_lp_json "$TMP/lenmis.bin" 0xB1 0x01 4 0x00 '{"x":1}' 99
+craft_lp_json "$TMP/lenmis.bin" 0xB1 0x01 18 0x00 '{"x":1}' 99
 run_decode "$TMP/lenmis.bin"
 [ "$RC" = "3" ] && assert "true" "json_len mismatch → exit 3" \
                  || { echo "$OUT"; assert "false" "json_len mismatch → exit 3 (rc=$RC)"; }
 
 echo
 echo "=== 9. lp-json payload not valid JSON → MALFORMED exit 3 ==="
-craft_lp_json "$TMP/notjson.bin" 0xB1 0x01 4 0x00 'not-json-at-all'
+craft_lp_json "$TMP/notjson.bin" 0xB1 0x01 18 0x00 'not-json-at-all'
 run_decode "$TMP/notjson.bin"
 [ "$RC" = "3" ] && assert "true" "invalid JSON payload → exit 3" \
                  || { echo "$OUT"; assert "false" "invalid JSON payload → exit 3 (rc=$RC)"; }
+# ...and a WELL-FORMED lp-json payload on that same type still decodes, so
+# the two rejects above cannot pass because the branch rejects everything.
+craft_lp_json "$TMP/lpok.bin" 0xB1 0x01 18 0x00 '{"headers":[],"from":0,"count":0,"height":0}'
+run_decode "$TMP/lpok.bin"
+[ "$RC" = "0" ] && assert "true" "lp-json control: a well-formed HEADERS_RESPONSE payload → VALID" \
+                 || { echo "$OUT"; assert "false" "lp-json control → exit 0 (rc=$RC)"; }
 
 echo
 echo "=== 10. Well-formed TRANSACTION → VALID with decoded scalars ==="
@@ -415,6 +446,291 @@ echo "=== 15. Frame shorter than 4-byte header → MALFORMED exit 3 ==="
 run_decode "$TMP/short.bin"
 [ "$RC" = "3" ] && assert "true" "2-byte frame → MALFORMED exit 3" \
                  || { echo "$OUT"; assert "false" "2-byte frame → exit 3 (rc=$RC)"; }
+
+echo
+echo "=== 16. D2-inc7a Block-carrying payload frames (BLOCK / BEACON_HEADER) ==="
+# craft_block_msg <out> <msgtype> <prefix_u32_or_empty> <witness:0|1>
+#                 <records:0|1> <pad> [<index>]
+# Writes an envelope carrying the canonical binary Block container
+# (chain::Block::encode_frame). The frame is assembled HERE from the published
+# section order — 3 fixed fields, 23 u16 counts, and the fixed tail — so an
+# empty frame is exactly 297 bytes (independently derived; the daemon pins the
+# same number as BF-0). `prefix` writes a u32 LE ahead of the frame (SHARD_TIP's
+# shard_id / the bundle's src_shard).
+craft_block_msg() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+out, mtype, prefix, witness, records, pad = sys.argv[1:7]
+index = int(sys.argv[7]) if len(sys.argv) > 7 else 5
+
+def block_frame(index, witness=False, records=False):
+    b = bytearray()
+    b += struct.pack("<Q", index)          # index
+    b += bytes(32)                         # prev_hash
+    b += struct.pack("<q", 1234)           # timestamp (i64 in a u64 slot)
+    for _ in range(15):                    # transactions .. creator_dh_secrets
+        b += struct.pack("<H", 0)
+    b += bytes(32) * 3                     # tx_root/delay_seed/delay_output
+    b += bytes([0])                        # consensus_mode
+    b += bytes([0])                        # bft_proposer (empty lp string)
+    b += struct.pack("<H", 0)              # creator_block_sigs
+    b += bytes(32)                         # cumulative_rand
+    for _ in range(5):                     # abort/equiv/receipts/initial_state
+        b += struct.pack("<H", 0)
+    b += bytes(32) * 2                     # state_root/partner_subset_hash
+    b += bytes([0])                        # signature_form
+    b += struct.pack("<I", 0)              # eligible_count
+    b += struct.pack("<I", 0)              # source_shard_id
+    if records:
+        rec = struct.pack("<I", 1) + struct.pack("<Q", index - 1) \
+            + struct.pack("<I", 3) + bytes(32) + bytes([2]) + b"eu"
+        b += struct.pack("<H", 1) + bytes([len(rec)]) + rec
+    else:
+        b += struct.pack("<H", 0)          # shard_tip_records
+    if witness:
+        w = block_frame(index - 1)
+        b += struct.pack("<H", 1) + struct.pack("<I", len(w)) + w
+    else:
+        b += struct.pack("<H", 0)          # shard_tip_witnesses
+    return bytes(b)
+
+body = bytearray([0xB1, 0x01, int(mtype), 0x00])
+if prefix != "":
+    body += struct.pack("<I", int(prefix))
+body += block_frame(index, witness == "1", records == "1")
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_block_msg "$TMP/block.bin" 1 "" 0 0 0 7
+run_decode "$TMP/block.bin" --json
+BLK=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'),
+        d.get('block_index'), d.get('block_frame_len')))
+except Exception: print('ERR')
+")
+if [ "$BLK" = "VALID/block_frame/7/297" ]; then
+  assert "true" "BLOCK: the 297-byte empty Block frame → VALID (independently derived minimum matches the daemon's BF-0 pin)"
+else
+  echo "$OUT"; assert "false" "BLOCK frame decode (got $BLK)"
+fi
+craft_block_msg "$TMP/beacon.bin" 12 "" 1 1 0 7
+run_decode "$TMP/beacon.bin" --json
+BEA=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s' % (d.get('verdict'), d.get('block_shard_tip_records'),
+        d.get('block_shard_tip_witnesses')))
+except Exception: print('ERR')
+")
+if [ "$BEA" = "VALID/1/1" ]; then
+  assert "true" "BEACON_HEADER: a FOLDED beacon block (records + one witness) → VALID"
+else
+  echo "$OUT"; assert "false" "BEACON_HEADER folded block (got $BEA)"
+fi
+craft_block_msg "$TMP/block_pad.bin" 1 "" 0 0 3 7
+run_decode "$TMP/block_pad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
+  assert "true" "BLOCK trailing bytes → MALFORMED exit 3 (exact consumption)"
+else
+  echo "$OUT"; assert "false" "BLOCK trailing bytes → exit 3 (rc=$RC)"
+fi
+craft_block_msg "$TMP/block_tr.bin" 1 "" 0 0 0 7
+"$PY" -c "
+d=open('$TMP/block_tr.bin','rb').read()
+open('$TMP/block_tr.bin','wb').write(d[:-1])
+"
+run_decode "$TMP/block_tr.bin"
+[ "$RC" = "3" ] && assert "true" "truncated BLOCK frame → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "truncated BLOCK → exit 3 (rc=$RC)"; }
+
+echo
+echo "=== 17. SHARD_TIP poison-witness: the allow_witnesses MAP ==="
+# A legitimate shard tip is a LEAF — only BEACON producers fold records and
+# attach witnesses. The mirror must fail-close the same shape the daemon does,
+# or the two implementations disagree on frame validity (the S-043 class).
+craft_block_msg "$TMP/tip_ok.bin" 13 7 0 0 0 9
+run_decode "$TMP/tip_ok.bin" --json
+TIP=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'), d.get('shard_id')))
+except Exception: print('ERR')
+")
+if [ "$TIP" = "VALID/shard_tip_frame/7" ]; then
+  assert "true" "SHARD_TIP: a LEAF tip → VALID with shard_id decoded"
+else
+  echo "$OUT"; assert "false" "SHARD_TIP leaf decode (got $TIP)"
+fi
+craft_block_msg "$TMP/tip_w.bin" 13 7 1 0 0 9
+run_decode "$TMP/tip_w.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "leaf block"; then
+  assert "true" "SHARD_TIP carrying a WITNESS → MALFORMED exit 3 (POISON-WITNESS)"
+else
+  echo "$OUT"; assert "false" "SHARD_TIP witness reject (rc=$RC)"
+fi
+craft_block_msg "$TMP/tip_r.bin" 13 7 0 1 0 9
+run_decode "$TMP/tip_r.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "empty shard_tip_records"; then
+  assert "true" "SHARD_TIP carrying folded RECORDS → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "SHARD_TIP records reject (rc=$RC)"
+fi
+# The SAME witness-carrying block is legal as a CROSS_SHARD_RECEIPT_BUNDLE —
+# proving the mirror implements a per-type MAP, not a blanket reject.
+craft_block_msg "$TMP/bundle.bin" 14 3 1 1 0 9
+run_decode "$TMP/bundle.bin" --json
+BUN=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'), d.get('src_shard')))
+except Exception: print('ERR')
+")
+if [ "$BUN" = "VALID/bundle_frame/3" ]; then
+  assert "true" "CROSS_SHARD_RECEIPT_BUNDLE: the SAME records+witness block → VALID (allow_witnesses is a per-type map)"
+else
+  echo "$OUT"; assert "false" "bundle frame decode (got $BUN)"
+fi
+
+echo
+echo "=== 18. CHAIN_RESPONSE frame: has_more, block list, count-lie ==="
+# craft_chain_response <out> <has_more> <nblocks> <count_override_or_empty> <pad>
+craft_chain_response() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+out, has_more, nblocks, override, pad = sys.argv[1:6]
+
+def block_frame(index):
+    b = bytearray()
+    b += struct.pack("<Q", index) + bytes(32) + struct.pack("<q", 1)
+    for _ in range(15): b += struct.pack("<H", 0)
+    b += bytes(32) * 3 + bytes([0]) + bytes([0]) + struct.pack("<H", 0) + bytes(32)
+    for _ in range(5): b += struct.pack("<H", 0)
+    b += bytes(32) * 2 + bytes([0]) + struct.pack("<I", 0) + struct.pack("<I", 0)
+    b += struct.pack("<H", 0) + struct.pack("<H", 0)
+    return bytes(b)
+
+body = bytearray([0xB1, 0x01, 0x06, 0x00])
+body += bytes([int(has_more)])
+n = int(nblocks)
+body += struct.pack("<H", int(override) if override != "" else n)
+for i in range(n):
+    f = block_frame(i)
+    body += struct.pack("<I", len(f)) + f
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_chain_response "$TMP/cr.bin" 1 2 "" 0
+run_decode "$TMP/cr.bin" --json
+CR=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'),
+        d.get('has_more'), d.get('blocks')))
+except Exception: print('ERR')
+")
+if [ "$CR" = "VALID/chain_response_frame/True/2" ]; then
+  assert "true" "CHAIN_RESPONSE: two blocks + has_more=1 → VALID"
+else
+  echo "$OUT"; assert "false" "CHAIN_RESPONSE decode (got $CR)"
+fi
+craft_chain_response "$TMP/cr_empty.bin" 0 0 "" 0
+run_decode "$TMP/cr_empty.bin"
+[ "$RC" = "0" ] && assert "true" "CHAIN_RESPONSE: the EMPTY 'nothing more' reply → VALID" \
+                 || { echo "$OUT"; assert "false" "empty CHAIN_RESPONSE → exit 0 (rc=$RC)"; }
+craft_chain_response "$TMP/cr_hm.bin" 2 0 "" 0
+run_decode "$TMP/cr_hm.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "has_more must be 0 or 1"; then
+  assert "true" "CHAIN_RESPONSE has_more=2 → MALFORMED exit 3 (a bool has two encodings)"
+else
+  echo "$OUT"; assert "false" "CHAIN_RESPONSE has_more=2 reject (rc=$RC)"
+fi
+craft_chain_response "$TMP/cr_lie.bin" 0 1 65535 0
+run_decode "$TMP/cr_lie.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "declares 65535 elements"; then
+  assert "true" "CHAIN_RESPONSE count-lie (65535 declared) → MALFORMED before any allocation"
+else
+  echo "$OUT"; assert "false" "CHAIN_RESPONSE count-lie reject (rc=$RC)"
+fi
+craft_chain_response "$TMP/cr_pad.bin" 0 1 "" 4
+run_decode "$TMP/cr_pad.bin"
+[ "$RC" = "3" ] && assert "true" "CHAIN_RESPONSE trailing bytes → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "CHAIN_RESPONSE trailing → exit 3 (rc=$RC)"; }
+
+echo
+echo "=== 19. D2-inc7b CONTRIB frame ==="
+# craft_contrib <out> <block_index> <signer> <ntx> <proposer_time>
+#               <tx_count_override_or_empty> <pad>
+craft_contrib() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+out, bi, signer, ntx, ptime, override, pad = sys.argv[1:8]
+body = bytearray([0xB1, 0x01, 0x04, 0x00])
+body += struct.pack("<Q", int(bi))
+sb = signer.encode("utf-8")
+body += bytes([len(sb)]) + sb
+body += bytes(32)                              # prev_hash
+body += struct.pack("<Q", 3)                   # aborts_gen
+n = int(ntx)
+body += struct.pack("<H", int(override) if override != "" else n)
+body += bytes(32) * n                          # tx_hashes
+body += bytes(32)                              # dh_input
+body += bytes(32) * 3                          # the three view roots
+body += struct.pack("<H", 0) * 3               # the three view lists
+body += struct.pack("<Q", int(ptime))          # proposer_time
+body += bytes(32)                              # view_shardtip_root
+body += struct.pack("<H", 0)                   # view_shardtip_list
+body += bytes(64)                              # ed_sig
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_contrib "$TMP/contrib.bin" 42 "node-a.tld" 2 1700000000 "" 0
+run_decode "$TMP/contrib.bin" --json
+CON=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'),
+        d.get('block_index'), d.get('signer'), d.get('tx_hashes'),
+        d.get('proposer_time')))
+except Exception: print('ERR')
+")
+if [ "$CON" = "VALID/contrib_frame/42/node-a.tld/2/1700000000" ]; then
+  assert "true" "CONTRIB: the always-present frame → VALID with every scalar decoded"
+else
+  echo "$OUT"; assert "false" "CONTRIB decode (got $CON)"
+fi
+craft_contrib "$TMP/contrib_pad.bin" 42 "n1" 0 0 "" 1
+run_decode "$TMP/contrib_pad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
+  assert "true" "CONTRIB trailing byte → MALFORMED exit 3 (exact consumption)"
+else
+  echo "$OUT"; assert "false" "CONTRIB trailing byte → exit 3 (rc=$RC)"
+fi
+craft_contrib "$TMP/contrib_lie.bin" 42 "n1" 1 0 65535 0
+run_decode "$TMP/contrib_lie.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "declares 65535 elements"; then
+  assert "true" "CONTRIB tx_hashes count-lie → MALFORMED before any allocation"
+else
+  echo "$OUT"; assert "false" "CONTRIB count-lie reject (rc=$RC)"
+fi
+craft_contrib "$TMP/contrib_tr.bin" 42 "n1" 0 0 "" 0
+"$PY" -c "
+d=open('$TMP/contrib_tr.bin','rb').read()
+open('$TMP/contrib_tr.bin','wb').write(d[:-1])
+"
+run_decode "$TMP/contrib_tr.bin"
+[ "$RC" = "3" ] && assert "true" "truncated CONTRIB frame → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "truncated CONTRIB → exit 3 (rc=$RC)"; }
 
 echo
 echo "=== Test summary ==="

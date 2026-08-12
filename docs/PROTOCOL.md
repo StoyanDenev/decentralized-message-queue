@@ -49,6 +49,8 @@ Three additional primitives appear in operator-facing or wallet-side flows but n
 
 These are operationally important but **invisible to consensus** — none of them appear in `signing_bytes()`, `block_digest`, or any validator rule. An implementation that re-implements wallet recovery or DApp encryption against a different curve choice (e.g. P-256 sealed-box) remains consensus-compatible with the reference; only operator-facing tooling needs to match.
 
+**At-rest containers are canonical binary (D2 step 3, 2026-08-12).** The primitives above are unchanged; what they wrap is not. Wallet and light-client artifacts persist as magic-prefixed, explicit-little-endian, length-prefixed containers with EXACT-length decode — `DWE1`/`DWE2` (AEAD envelope, `wallet/envelope.hpp`), `DAK1` (68-byte plaintext keypair), `DAB1` (keypair batch), `DNK1` (encrypted node keyfile: AAD = the raw 32-byte pubkey, plaintext = the raw 32-byte seed), `DSS1` / `DBE1` (Shamir shares / share envelopes, `wallet/keyfmt.hpp`), `DRS1` (recovery setup, §15) and `DLS1` (light anchor cache `state.bin`, `light/persist.hpp`). `DAK1` and `DNK1` **derive** the public key from the seed on decode and require equality — that derive-equality check is what replaced the older stored-address cross-check (S-028). No JSON and no structured text remains on these paths; hex renderings are non-authoritative CLI views. **Remainder (open):** the daemon's `node_key.json` (`src/crypto/keys.cpp`) and the `DETERM-ACCOUNT-V1` encrypted-account header line stay src-owned JSON/text until the src-side D2 storage/keyfile increment.
+
 ## 2. Address format
 
 Two address types coexist:
@@ -213,7 +215,7 @@ consensus_mode (1 byte)
 bft_proposer
 cumulative_rand
 abort_events[i].event_hash for i
-equivocation_events[i].(equivocator, block_index, digest_a, sig_a, digest_b, sig_b, shard_id, beacon_anchor_height) for i
+equivocation_events[i].(equivocator, block_index, kind, index_a, body_root_a, sig_a, index_b, body_root_b, sig_b, shard_id, beacon_anchor_height) for i  // EQV-height-bind field order; same list/order as the EQUIV_REC frame (§4.4)
 cross_shard_receipts[i].(src_shard, dst_shard, src_block_index, src_block_hash, tx_hash, from, to, amount, fee, nonce) for i
 inbound_receipts[i].(src_shard, dst_shard, src_block_index, tx_hash, to, amount) for i  // narrower binding
 initial_state[i].(domain, ed_pub, balance, stake, region) for i  // genesis only; region appended only if non-empty (R1 backward-compat shim)
@@ -254,17 +256,33 @@ SHA-256 of `signing_bytes() || creator_block_sigs[0] || ... || creator_block_sig
 This binds creator signatures into the hash so signature equivocation produces a different block hash.
 
 ### 4.3 `block_digest` (what creators sign in Phase 2)
-SHA-256 over the **v1 core**: `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]`, **then** the v2.7 F2 conditional appendages, in this fixed order (matches `src/node/producer.cpp::compute_block_digest`):
+
+**Two-level and openable (EQV-height-bind, 2026-08-12).** The digest is composed from a height-free *body root* and an outer tag:
+
+```
+body_root    = SHA-256 over the v1 core MINUS index, then the F2 appendages below
+block_digest = SHA-256("DTM-BLKDIG-v2" ‖ index u64 BE ‖ body_root)
+```
+
+`src/node/producer.cpp::compute_block_digest_body` is the body, `::compose_block_digest` the outer compose, and `compute_block_digest(b) = compose_block_digest(b.index, compute_block_digest_body(b))` (`src/node/producer.cpp:968`). The *only* reason the height moved into an outer layer is §6: an `EquivocationEvent` can now carry the 40-byte opening `(index u64, body_root 32)` per signed side, so a verifier re-derives the signed digest and the signed height becomes an asserted, signature-bound quantity instead of an opaque 32-byte blob. Nothing else about the preimage changed — the body is the legacy preimage with the leading `index` append removed.
+
+The outer tag `"DTM-BLKDIG-v2"` **must** differ from `compose_contrib_commitment`'s `"DTM-CONTRIB-v2"` (§6): with a shared tag, one honest block signature plus one honest contrib signature at the *same* height would open to two distinct digests under one key and constitute a forged equivocation proof. Domain separation is a correctness requirement of §6, not hygiene.
+
+**Endianness note.** The digest-preimage integers are **big-endian** (`crypto::SHA256Builder::append(uint64_t)`, §1.1); the `EQUIV_REC` / `EQUIVOCATION_EVIDENCE` *frame* integers carrying the same opening are **little-endian** (the D2 container convention, §4.4/§9). The two differ deliberately — a frame is transport, a preimage is hash input — and both sites carry the note in code.
+
+The body is SHA-256 over the **v1 core minus `index`**: `prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]`, **then** the v2.7 F2 conditional appendages, in this fixed order (matches `src/node/producer.cpp::compute_block_digest_body`):
 
 1. **inbound** — if `inbound_receipts` is non-empty, append `compute_view_root` over the sorted `hash_cross_shard_receipt` keys (commit `a727cb2`).
 2. **equivocation** — if any `creator_view_eq_roots[i]` is non-zero, append `compute_view_root` over the `hash_equivocation_event` keys of `equivocation_events` (commit `48c4b45`).
 3. **abort** — if any `creator_view_abort_roots[i]` is non-zero, append `compute_view_root` over the `hash_abort_event` keys of `abort_events` (commit `48c4b45`).
 
-Each appendage is **skipped when its gate is false**, so a v1 / non-cross-shard / no-evidence block produces a byte-identical pre-F2 digest. The eq/abort gates key on a non-zero per-creator view root (the JSON-stable "this block went through F2 reconciliation" signal) rather than on the events being non-empty, so a non-F2 block whose raw pool happened to be non-empty is NOT bound (binding an un-reconciled pool would reintroduce gossip-async divergence).
+Each appendage is **skipped when its gate is false**, so a v1 / non-cross-shard / no-evidence block produces a byte-identical pre-F2 *body root*. (The pre-2026-08-12 statement — byte-identical pre-F2 *digest* — no longer holds and was never meant to survive genesis: the two-level restructure changed every block-digest and contrib-commitment VALUE. That is a pre-genesis, no-shims change under the no-migrations rule; see `docs/proofs/DECISION-LOG.md` 2026-08-12.) The eq/abort gates key on a non-zero per-creator view root (the JSON-stable "this block went through F2 reconciliation" signal) rather than on the events being non-empty, so a non-F2 block whose raw pool happened to be non-empty is NOT bound (binding an un-reconciled pool would reintroduce gossip-async divergence).
 
-**Excludes** the remaining `Block` fields: `delay_output`, `cumulative_rand`, `creator_dh_secrets`, `cross_shard_receipts`, `initial_state`, `state_root`. The Phase-2-reveal fields (`delay_output`, `creator_dh_secrets`) are excluded so committee members can sign at Phase-2 entry without waiting for K secrets to gather. `cross_shard_receipts` (outbound) is deterministically derived from the committee tx set (already bound via `tx_root`). The three pool-fed dimensions (inbound + equivocation + abort) ARE bound — via the appendages above — because v2.7 F2 reconciles each to a deterministic committee-wide function of the K signed Phase-1 commits *before* digesting (intersection for inbound, union for eq/abort). `partner_subset_hash` is ALSO bound (appended when non-zero, commit `8585a50`) — it is deterministic from the merge state (every committee member at a merged height computes it identically), so it needs no reconciliation; the conditional gate keeps non-merged blocks byte-identical to the v1 digest. `timestamp` is now bound too, **conditionally** — when the block carries `creator_proposer_times` (i.e. it went through median reconciliation), the deterministic lower-median of those K committed times is appended to the digest (commit `f99eeb8`, the §5 mechanism); on a non-reconciled / empty-`creator_proposer_times` block there is no median to bind, so it stays excluded and the digest is byte-identical to the pre-`f99eeb8` form. That leaves **no genuinely-unbound digest field** except the deterministically-derived `cross_shard_receipts` (and the intentional Phase-2-reveal fields + `initial_state` + `state_root`, which is bound via `signing_bytes`). See `docs/proofs/S030-D2-Analysis.md` (S-030 D1/D2; D1 effective-closed via S-033 state_root binding in `signing_bytes`; D2 consensus-layer-closed for all three pool-fed dimensions + `timestamp` via median reconciliation) + `docs/proofs/EqAbortViewDigestExtension.md`.
+**Excludes** the remaining `Block` fields: `delay_output`, `cumulative_rand`, `creator_dh_secrets`, `cross_shard_receipts`, `initial_state`, `state_root`. The Phase-2-reveal fields (`delay_output`, `creator_dh_secrets`) are excluded so committee members can sign at Phase-2 entry without waiting for K secrets to gather. `cross_shard_receipts` (outbound) is deterministically derived from the committee tx set (already bound via `tx_root`). The three pool-fed dimensions (inbound + equivocation + abort) ARE bound — via the appendages above — because v2.7 F2 reconciles each to a deterministic committee-wide function of the K signed Phase-1 commits *before* digesting (intersection for inbound, union for eq/abort). `partner_subset_hash` is ALSO bound (appended when non-zero, commit `8585a50`) — it is deterministic from the merge state (every committee member at a merged height computes it identically), so it needs no reconciliation; the conditional gate keeps non-merged blocks byte-identical to the v1 *body root*. `timestamp` is now bound too, **conditionally** — when the block carries `creator_proposer_times` (i.e. it went through median reconciliation), the deterministic lower-median of those K committed times is appended to the digest (commit `f99eeb8`, the §5 mechanism); on a non-reconciled / empty-`creator_proposer_times` block there is no median to bind, so it stays excluded and the *body root* is byte-identical to the pre-`f99eeb8` form. That leaves **no genuinely-unbound digest field** except the deterministically-derived `cross_shard_receipts` (and the intentional Phase-2-reveal fields + `initial_state` + `state_root`, which is bound via `signing_bytes`). See `docs/proofs/S030-D2-Analysis.md` (S-030 D1/D2; D1 effective-closed via S-033 state_root binding in `signing_bytes`; D2 consensus-layer-closed for all three pool-fed dimensions + `timestamp` via median reconciliation) + `docs/proofs/EqAbortViewDigestExtension.md`.
 
 The final values of every excluded field are bound into the **block hash** via `signing_bytes()` (§4.1), so the block's identity uniquely binds the entire post-apply state even though the Phase-2 digest doesn't.
+
+> **Consequence worth stating for ingest paths.** Because `cumulative_rand` is digest-EXCLUDED, a committee signature over `block_digest` does **not** authenticate it. Any path that accepts a block/header on the strength of committee signatures alone — notably `on_beacon_header` (§7.3) — must not be read as having authenticated that field. The apply path's `check_cumulative_rand` is what binds it, and that gate does not run on the beacon-header ingest path. Recorded honestly rather than glossed; see `docs/SECURITY.md` **S-053**.
 
 ### 4.4 Canonical binary container (D2-inc5)
 
@@ -310,8 +328,13 @@ lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
 
   ABORT_EVENT_REC  [round u8][aborting_node lp_str][timestamp i64-as-u64]
                    [event_hash 32][u32 claims_len][encode_abort_claims blob]
-  EQUIV_REC        [equivocator lp_str][block_index u64][digest_a 32][sig_a 64]
-                   [digest_b 32][sig_b 64][shard_id u32][beacon_anchor_height u64]
+  EQUIV_REC        [equivocator lp_str][block_index u64][kind u8]
+                   [index_a u64][body_root_a 32][sig_a 64]
+                   [index_b u64][body_root_b 32][sig_b 64]
+                   [shard_id u32][beacon_anchor_height u64]
+                   (fixed 229 B after the lp_str; decode fail-closes on
+                    kind > 1 — same layout as the EQUIVOCATION_EVIDENCE
+                    gossip frame, §9.1)
   RECEIPT_REC      [src_shard u32][dst_shard u32][src_block_index u64]
                    [src_block_hash 32][tx_hash 32][from lp_str][to lp_str]
                    [amount u64][fee u64][nonce u64]
@@ -543,35 +566,63 @@ Quorum semantics: the certification threshold is `chain::abort_claim_quorum() = 
 
 ## 6. Equivocation slashing (rev.8 follow-on)
 
-An `EquivocationEvent` is proof that one Ed25519 key signed two different commitments at the same height:
+An `EquivocationEvent` is proof that one Ed25519 key signed two different commitments **at the same height, within one digest family**:
 ```cpp
 struct EquivocationEvent {
     string    equivocator;
-    uint64    block_index;
-    Hash      digest_a, digest_b;     // distinct
-    Signature sig_a, sig_b;           // both verify under equivocator's ed_pub
+    uint64    block_index;            // the height the proof is ABOUT
+    uint8     kind;                   // 0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT; > 1 rejected
+    uint64    index_a;                // side-a opening: the signed height
+    Hash      body_root_a;            // side-a opening: the digest body root
+    Signature sig_a;
+    uint64    index_b;                // side-b opening
+    Hash      body_root_b;
+    Signature sig_b;
     uint32    shard_id;               // detection origin (rev.9 B2c.4)
     uint64    beacon_anchor_height;
 };
 ```
 
-**Validation (V11):** `digest_a != digest_b`, `sig_a != sig_b`, `equivocator` is registered, both sigs verify under the equivocator's registered Ed25519 key.
+The event carries **openings, not digests**. `digest_a` / `digest_b` were deleted (2026-08-12): both are pure functions of the carried fields, derived by the verifier as
+
+```
+kind == 0 → digest = SHA-256("DTM-BLKDIG-v2"  ‖ index u64 BE ‖ body_root)   // §4.3
+kind == 1 → digest = SHA-256("DTM-CONTRIB-v2" ‖ index u64 BE ‖ body_root)   // §6.1
+```
+
+**Validation (V11)** (`src/node/validator.cpp:380 check_equivocation_events`), in order, fail-closed:
+
+1. `kind <= 1` — an unknown digest family has no compose function, so no digest could be derived.
+2. **`index_a == index_b == block_index`** — the height assert. Because step 4 verifies each signature against a digest *derived from these very indices*, this equality is what makes the height signature-bound.
+3. `body_root_a != body_root_b` (at one height under one tag, distinct digests ⟺ distinct body roots) and `sig_a != sig_b`.
+4. `equivocator` resolves to a registered Ed25519 key (frozen-committee-first, present-head fallback), and both signatures verify against the **derived** digests — never against anything carried opaquely.
+
+**Why the height assert is load-bearing.** Before 2026-08-12 the two signed digests were opaque and unbound to any height: replaying one honest validator's ordinary signatures **from two different heights** satisfied every check and forged a full-stake slash, remotely and unauthenticated. An honest key only ever signs composed digests carrying its true height under the correct tag, so presenting one of those signatures under a different `(index, body_root)` opening requires a SHA-256 second-preimage. Carrying the two conflicting *headers* instead (the other candidate fix) was rejected on analysis: unbounded evidence size, and `Block ⊃ EquivocationEvent ⊃ Block` recursion. Proof: `docs/proofs/EquivocationSlashing.md`; decision record: `docs/proofs/DECISION-LOG.md` 2026-08-12.
 
 **Apply:** when `EquivocationEvent` is baked into a finalized block, the equivocator's full staked balance is forfeited (`locked → 0`) and `inactive_from = block.index + 1` (removed from selection on the next registry build).
 
 ### 6.1 Detection sources
 
-The `digest_a` / `digest_b` fields are **digest-agnostic** — V11 only checks "two distinct hashes both signed by the same registered key." Two detection paths feed the same `EquivocationEvent` channel:
+The evidence channel is **kind-discriminated and height-bound**, not digest-agnostic. V11 no longer checks "two distinct hashes both signed by the same registered key"; it checks "two distinct body roots, opened at ONE asserted height under ONE named digest family, both signed by the same registered key." Two detection paths feed the same `EquivocationEvent` channel, distinguished by `kind`:
 
-* **BlockSigMsg-level (rev.8).** The committee member signs `compute_block_digest(b)` of two different block bodies at the same height. Detection: `Node::apply_block_locked` cross-block check when a duplicate-height block arrives with a different `block_hash`. Both `block_digest`s + the matching `creator_block_sigs[i]` entries form the proof.
+* **`kind = 0` — BlockSigMsg-level (rev.8).** The committee member signs `compute_block_digest(b)` (§4.3) of two different block bodies at the same height. Detection: `Node::apply_block_locked` cross-block check when a duplicate-height block arrives with a different `block_hash`. The proof carries `index_x = b.index` and `body_root_x = compute_block_digest_body(...)` for each side plus the matching `creator_block_sigs[i]` entries.
 
-* **ContribMsg same-generation (S-006 closure).** The committee member signs `make_contrib_commitment(block_index, prev_hash, tx_hashes, dh_input)` over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` comparing recomputed commitments when a same-signer duplicate arrives. Both contrib commitments + the matching `ContribMsg.ed_sig` entries form the proof.
+* **`kind = 1` — ContribMsg same-generation (S-006 closure).** The committee member signs the two-level contrib commitment
 
-The two paths use **the same struct + the same validator + the same apply path**. An external implementer building consensus message handling MUST detect both — missing either leaves an equivocation surface unslashable. See `docs/proofs/EquivocationSlashing.md` (FA6) — the soundness proof is digest-agnostic and covers both cases simultaneously.
+  ```
+  contrib_body = SHA-256 over (prev_hash, sorted tx_hashes, dh_input, …)   // make_contrib_body_root
+  contrib_commit = SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ contrib_body)
+  ```
+
+  over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` comparing recomputed commitments when a same-signer duplicate arrives. The proof carries `index_x = block_index` and `body_root_x = make_contrib_body_root(msg)` plus the matching `ContribMsg.ed_sig` entries (`src/node/producer.cpp:332`).
+
+The two paths use **the same struct + the same validator + the same apply path**; only `kind` (and therefore the compose tag) differs. An external implementer building consensus message handling MUST detect both — missing either leaves an equivocation surface unslashable — and MUST NOT accept a proof that mixes them: one honest block signature plus one honest contrib signature at the same height opens to two distinct values, so **the tag domain separation is the only thing standing between an honest validator and a forged slash**. V11's `kind` check and the two distinct outer tags are the mechanism. See `docs/proofs/EquivocationSlashing.md` (FA6) — the soundness proof is now stated per-kind, over the derived digests.
+
+**Residual — narrowed, NOT eliminated (open; needs owner review).** Height binding removes the cross-height forgery, but an honest validator can still legitimately sign two different digests at the *same* height across abort re-rounds (a round-2 committee change changes the body; a fresh `dh_input` per contrib generation changes the contrib body). Such a pair satisfies V11 today. Closing it requires the round / `aborts_gen` to be bound into the openings as well (`TAG ‖ index ‖ gen ‖ body_root`) — a further pre-genesis preimage change. This residual is **pre-existing and strictly narrower than before** (previously ANY two heights sufficed; now only the same height does), is **not** claimed closed anywhere, and has no owner authorization yet.
 
 ### 6.2 External submission
 
-`submit_equivocation` RPC (§10.2) validates the two-sig proof against the equivocator's registered key, gossips via `EQUIVOCATION_EVIDENCE` (MsgType 11) for slashing, returns `{accepted, equivocator, block_index}` or `{accepted: false, reason}`. Anyone observing equivocation can submit — committee membership is not required.
+`submit_equivocation` RPC (§10.2) runs the **same** V11 check set as the validator — `kind <= 1`, the `index_a == index_b == block_index` height assert, distinct body roots, distinct signatures, registered equivocator, and both signatures verified against the DERIVED digests — then gossips via `EQUIVOCATION_EVIDENCE` (MsgType 11) for slashing. Returns `{accepted, equivocator, block_index, kind}` or `{accepted: false, reason}` (`src/node/node.cpp:4562`). Anyone observing equivocation can submit — committee membership is not required; that is exactly why this ingress must not be weaker than the block-path gate.
 
 ## 7. Sharding (rev.9)
 
@@ -592,6 +643,7 @@ shard_id_for_address(addr, S, salt) =
 - **Beacon → Shard (BEACON_HEADER):** beacon nodes broadcast each newly-applied block; shards verify K-of-K against the validator pool they derive from prior verified beacon headers; store in a light header chain.
 - **Shard → Beacon (SHARD_TIP):** shard nodes broadcast newly-applied blocks; beacon validates K-of-K against the shard committee it derives from its own pool + `epoch_committee_seed(beacon_rand, shard_id)`.
 - **Zero-trust:** each side independently re-derives committees and verifies signatures — no implicit trust between chains.
+- **One committee-signature verifier for both directions (2026-08-12).** `verify_committee_sigs` (`src/node/shardtip_verify.cpp:17`) is the single core: **non-empty `creators`**, `creator_block_sigs.size() == creators.size()`, every non-zero signature verifies against that creator's registered Ed25519 key, and `signed_count >= required_k`. Both `verify_shard_tip_committee_sig_root` and `Node::on_beacon_header` (`src/node/node.cpp:1978`) route through it; the beacon path passes `required_k = cfg_.k_block_sigs` and additionally retains the K-of-K completeness rule `signed_count == creators.size()`. Before this, `on_beacon_header` hand-rolled its own loop with **no non-empty and no under-K floor**, so a header carrying an EMPTY `creators` list passed "K-of-K" vacuously. Two verifiers for one rule is the bug class; there is now one. Gate: `determ test-beacon-header-committee`.
 
 ## 8. Cross-shard receipts (B3)
 
@@ -660,7 +712,7 @@ Payload encodings, all fail-closed with exact consumption:
 |---|---|---|
 | `ABORT_CLAIM` | the `chain::encode_abort_claims` blob (§5.4) carrying exactly one claim | 109 B + \|missing_creator\| + \|claimer\| |
 | `BLOCK_SIG` | `[block_index u64 LE][signer_len u8][signer][delay_output 32 B][dh_secret 32 B][ed_sig 64 B]` | 137 B + \|signer\| |
-| `EQUIVOCATION_EVIDENCE` | `[equivocator_len u8][equivocator][block_index u64 LE][digest_a 32 B][sig_a 64 B][digest_b 32 B][sig_b 64 B][shard_id u32 LE][beacon_anchor_height u64 LE]` | 213 B + \|equivocator\| |
+| `EQUIVOCATION_EVIDENCE` | `[equivocator_len u8][equivocator][block_index u64 LE][kind u8][index_a u64 LE][body_root_a 32 B][sig_a 64 B][index_b u64 LE][body_root_b 32 B][sig_b 64 B][shard_id u32 LE][beacon_anchor_height u64 LE]` — fixed **229 B after the lp_str**, exact-length (`src/net/binary_codec.cpp:512`); decode fail-closes on `kind > 1` | 230 B + \|equivocator\| |
 | `ABORT_EVENT` | `[block_index u64 LE][prev_hash 32 B]` then the event: `[round u8][aborting_node_len u8][aborting_node][timestamp i64-as-u64 LE][event_hash 32 B][claims blob]` | 82 B + \|aborting_node\| + claim blob |
 
   **ABORT_CLAIM cannot drift from the block-stored claim.** The frame *is* `encode_abort_claims({claim})` — the same encoder the in-block claim list uses (§5.4). The gossiped claim and the stored claim are therefore the same bytes produced by the same function, so no divergence between the two encodings is representable (the S-044 one-shared-helper discipline). Decode rejects any count other than 1 (`ABORT_CLAIM must carry exactly one claim`), keeping one encoding per claim.
@@ -669,7 +721,7 @@ Payload encodings, all fail-closed with exact consumption:
 
   **`ABORT_EVENT` puts the claim blob last** because `decode_abort_claims` consumes its input exactly; only a terminal blob makes the frame's own exact-consumption check decidable. Same rationale as the transaction frame's optional `pq_auth` tail.
 
-  **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests carried in the message itself (§6.1). No digest, signature or block hash changed when these types left the JSON path.
+  **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests the receiver **derives** from the `(kind, index, body_root)` openings carried in the message (§6.1) — never against a digest the message states. No digest, signature or block hash changed when these types left the JSON path. (The later EQV-height-bind restructure — §4.3/§6, 2026-08-12 — *did* change every block-digest and contrib-commitment value; that is a separate, pre-genesis change to the hash preimages, not to this container.)
 
 * **The remaining eight types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE. These binarize per-type in the remaining D2 increments — the envelope is the stable extension point. The WIRE-2 structural ceiling below stays live until the last of them is gone. The canonical binary `Block` container the five block-carrying types will use (§4.4) is already built, but **no wire path uses it yet** — every `Block` on the wire today is JSON.
 
@@ -758,7 +810,7 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
 | `stake` / `unstake` | `{amount, fee}` | Node-authored stake operations |
 | `register` | `{}` | Submit RegisterTx for the daemon's own domain |
 | **Forensics / governance** | | |
-| `submit_equivocation` | `{event}` | `{accepted, equivocator, block_index}` |
+| `submit_equivocation` | `{event}` | `{accepted, equivocator, block_index, kind}` |
 | **DApp substrate (v2.18 + v2.19)** | | |
 | `dapp_list` | `{prefix?, topic?}` | All registered DApps (active + inactive within grace). Optional `prefix` filters by domain prefix; optional `topic` keeps only DApps whose registered topic list contains a match. |
 | `dapp_info` | `{domain}` | Per-DApp record (`domain`, `service_pubkey`, `endpoint_url`, `topics`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). |
@@ -1216,18 +1268,21 @@ seed → Shamir SSS (T-of-N, GF(2^8)) → per-share AEAD envelope
 
 > *Phase numbers above refer to the wallet's internal phase plan (see `wallet/PHASE6_PORTING_NOTES.md`): Phase 3 = passphrase-direct AEAD; Phase 5 = stub OPAQUE adapter (shipped in v1.x as a development scaffold); Phase 6 = real `libopaque`-vendored adapter (deferred to **v2.14** — gated on the Windows MSVC porting of upstream VLAs); Phase 7 = wallet flow that routes through the adapter (shipped). Both schemes share Phase 7's flow. See `docs/proofs/WalletRecovery.md` §Phase-numbering-note for the full mapping.*
 
-Recovery setup JSON (canonical, persisted to disk):
+Recovery setup — canonical **binary** `DRS1` container, persisted to disk (D2 step 3, 2026-08-12; the JSON document and its dot-hex envelope strings are deleted, pre-genesis, no shims). All integers little-endian; decode requires the EXACT total length; every bound refuses rather than clamps (`wallet/recovery.hpp`):
+
 ```
-{ "version": 1,
-  "scheme": "shamir-aead-passphrase" | "shamir-aead-opaque-<suite>",
-  "threshold": T, "share_count": N, "secret_len": 32,
-  "guardian_x": [<u8>, ...],
-  "envelopes": ["DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>", ...],
-  "opaque_records": ["<hex>", ...],   // only when scheme starts "shamir-aead-opaque-"
-  "pubkey_checksum": "<sha256(ed25519_pubkey(seed))>" }
+[0..3]   "DRS1"
+[4..7]   version      u32 LE  (== 1; the old "scheme" string is implied — the
+                               passphrase scheme is the only one shipped)
+[8]      threshold    u8      (>= 1)
+[9]      share_count  u8      (>= threshold)
+[10..13] secret_len   u32 LE  (1..=4096)
+[14]     checksum_len u8      (0 | 32)
+[..]     pubkey_checksum      checksum_len bytes = SHA-256(ed25519_pubkey(seed))
+share_count × { guardian_x u8 (1..=255, DISTINCT) || env_len u32 LE || DWE envelope bytes }
 ```
 
-Envelope: AES-256-GCM, 12-byte nonce, 16-byte tag, AAD binds `DWR1‖guardian_id‖version`.
+Each embedded envelope is the canonical **`DWE` binary container** (`wallet/envelope.hpp`) — magic `DWE1` (PBKDF2) or `DWE2` (Argon2id), then `[salt_len u8][salt][params][nonce 12][aad_len u16][aad][ct_len u32][ct]`, exact-length on decode, KDF-cost caps enforced **before** any KDF runs. AEAD is AES-256-GCM, 12-byte nonce, 16-byte tag; AAD is the 8-byte tuple `"DWR1" ‖ guardian_id u8 ‖ version u32 LE` (`wallet/recovery.cpp:29`). The legacy **dot-separated** hex text form (`DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>`) is **deleted**; what survives is a non-authoritative plain lowercase-hex CLI view of the same container bytes (`envelope::serialize` / `deserialize`, which reject dots, odd length and non-hex).
 
 OPAQUE adapter (development stub today; **v2.14** ships the real `libopaque`-vendored adapter, gated on the Windows MSVC porting of upstream VLAs — see `wallet/PHASE6_PORTING_NOTES.md`): `register_password(pw, gid) → (record, export_key)`; `authenticate_password(pw, record, gid) → export_key`. The `export_key` becomes the AEAD password for that guardian's envelope. The `is_stub()` flag gates production use until v2.14 lands.
 

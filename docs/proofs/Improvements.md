@@ -1026,4 +1026,82 @@ Three v3 items had blocker-alternative analysis indicating modest spec work coul
 
 ---
 
+---
+
+## 12. Simplification register — build/audit-surface reduction (captured 2026-08-11)
+
+**Why this section exists.** The doctrine rule is "minimalism / smallest green surface", but that rule has only ever been applied to *protocol* surface. A measurement of the tree on 2026-08-11 found the drift is in **build and verification surface** instead: test scaffolding inside the shipped daemon, doc-coherence obligations, and the shell harness. Every item here is **Process**-class — no wire, consensus, storage or keyfile impact, therefore none is gated by no-migrations and none needs to land pre-genesis. They are ordered by (security-surface + cost saved) / risk.
+
+**Why it matters beyond tidiness.** Two of these compound with external cost: a Common Criteria / EUCC evaluation is priced by target-of-evaluation size (§12.1 cuts it by ~55k lines), and every platform port pays the harness tax three times over (§12.3 — the 2026-08-11 macOS port spent most of its effort there, not on C++).
+
+*Measurement basis (2026-08-11, `main` at `aa1702a` + the macOS-port working tree): 148k LOC C/C++ across src/include/light/wallet; 233 docs / 87,849 lines; 703 shell scripts / 168,545 lines.*
+
+### 12.1 Extract the 234 test subcommands out of the shipped daemon — **flagship item**
+
+**Problem.** `src/main.cpp` is 62,745 lines, and **234 of its 288 `cmd ==` handlers are `test-*`/`selftest-*`** (the test region spans lines 6,795–62,426 — roughly 55k lines). That test scaffolding is compiled into the binary an operator runs in production: every gate is a reachable CLI entry point that hand-builds internal structures and parses attacker-adjacent input, and all of it sits inside the target-of-evaluation an external auditor prices. It is also 55k lines the C99/Minix port must carry.
+
+**Change.** Add a `determ-selftest` binary and move the 234 handlers into it, linking the same libraries so the gates test identical code. **The precedent is in-tree:** `determ-cryptotest` was split out for exactly this reason (`MinixTacticalProfile.md` §6 — so `determ` links zero OpenSSL). This is the same move, one scope wider. `wallet/main.cpp` (5) and `light/main.cpp` (10) carry the same smell at negligible scale — fold them in or leave them.
+
+**Saving.** ~55k lines out of the shipped daemon: smaller attack surface, cheaper CC/EUCC evaluation, faster builds, less Minix port surface. No behaviour change; the B3 gate set is untouched.
+
+**Risk — LOW, but not zero.** Mechanical, and `tools/common.sh` already resolves per-binary overrides (`DETERM_BIN` / `DETERM_CRYPTOTEST_BIN` / …), so the harness pattern exists. The real work is the sweep: **224 `tools/*.sh` invoke `$DETERM test-…`/`selftest-…`** and must repoint to `$DETERM_SELFTEST`. Land it as one atomic change with FAST green on both sides, or the gate set silently loses coverage. Prerequisite: land after the D2 migration touches `src/main.cpp`, to avoid a merge war with the active front.
+
+**Effort.** ~1–2 weeks including the harness sweep and a CMake target.
+
+**Related.** `MinixTacticalProfile.md` §6 (the cryptotest precedent); `tools/common.sh`; `CLAUDE.md` PROJECT DOCTRINE (minimalism).
+
+### 12.2 Doc-coherence surface — 182 authoritative docs
+
+**Problem.** 233 markdown files / 87,849 lines, of which `proofs/` alone is 220 files / 77,464 lines. By the convergence rule in `CLAUDE.md`, **a doc with no TIER banner is authoritative and must track shipped code — 182 files qualify** (only 52 carry a FUTURE/NEAR-TERM/PROCESS banner). Every code change therefore pays a coherence toll across a 182-file set, which is the single largest recurring drag on development throughput.
+
+**Change.** Two steps, cheapest first. (a) **Demote proof docs for deleted features** — `LsagRingSignatureSoundness` (98), `RingCTSpendCompositionSoundness` (115), `ClsagRingSignatureSoundness` (110), `FROST_DEVIATION_NOTICE` (124) describe code removed under pre-launch register B2; 447 lines currently counted as obligations against code that does not exist. Add the same PROCESS / ARCHIVE tier banner the rest of the archive set carries. (b) **Execute B3** — the owner decision of 2026-07-09 to consolidate the corpus (everything except README) into one provable design doc is *decided and unexecuted*; it is the structural fix.
+
+**Saving.** (a) is an afternoon and removes 4 false obligations immediately. (b) is the large win: it converts an O(182) coherence check per change into O(1).
+
+**Risk.** (a) none — banner-only, and `tools/test_doc_tier_check.sh` guards the invariant. (b) substantial editorial effort and a real risk of losing rationale in the merge; do it incrementally, as B3 itself specifies (the v2.22 rewrite was increment 1).
+
+**Related.** `PRE-LAUNCH-DECISIONS.md` §B3; `CLAUDE.md` convergence rule; `docs/ROADMAP.md` tiering note.
+
+### 12.3 Shell harness — 703 scripts / 168,545 lines, larger than the codebase
+
+**Problem.** The test harness (168,545 lines of shell) exceeds the entire C/C++ codebase (~148k). 542 `test_*.sh` + 156 `operator_*.sh`, averaging 239 lines each, of which **371 embed Python heredocs** — three languages in the test path, each of which must work on Windows/Git-Bash, Linux and now macOS. This is not theoretical: the 2026-08-11 macOS port spent the majority of its effort on harness portability (GNU-vs-BSD tooling, and 358 scripts invoking bare `python` against a macOS `/usr/bin/python` stub), not on C++.
+
+**Change.** Two moves, both enabled by §12.1. (a) Most of the 542 `test_*.sh` are ~20-line wrappers around a single subcommand; once the gates live in `determ-selftest`, **one generic runner** can replace hundreds of near-identical wrappers. (b) Move fixture generation out of Python heredocs into the selftest binary, which removes Python from the FAST path entirely and with it a whole class of platform breakage.
+
+**Saving.** Large reduction in harness LOC and a permanent cut to the per-platform port tax. Also shortens the FAST cycle (fewer process spawns per gate).
+
+**Risk — MEDIUM, the highest here.** The harness *is* the B3 evidence base; a careless rewrite silently weakens gates. Mitigation: convert in batches, requiring identical pass/fail counts before and after each batch, and never delete a wrapper in the same change that rewrites it.
+
+**Related.** §12.1 (prerequisite); `DECISION-LOG.md` 2026-08-11 macOS port entry (the portability tax, itemised).
+
+### 12.4 Dual JSON parsers — in flight, no action needed
+
+**Problem.** `third_party/nlohmann/json.hpp` (919,975 B) plus a second in-house parser `include/determ/json/json.hpp` (27,852 B): ~950 KB and two implementations of the same thing, breaching zero-heavy-deps and minimalism simultaneously.
+
+**Change.** None required — this is exactly the **D2 migration, already the ACTIVE front**. Recorded here only so the simplification register is complete and nobody opens a duplicate track. Deletion of both parsers is D2 step 4.
+
+**Related.** `DECISION-LOG.md` 2026-07-28 (D2 execution authorised; sequence-before-harden).
+
+### 12.5 Crypto profiles without a named consumer
+
+**Problem.** Seven deployment profiles (`tactical`, `cluster`, `tactical_civilian`, `cluster_civilian`, `web`, `regional`, `global`) drive **293 profile-conditional branches** across `src`/`light`/`wallet`/`include`. Profile count multiplies the verification matrix, since features interact with it (confidential transactions are MODERN-only, so CT × profile is a real combinatorial surface). `tactical_civilian` and `cluster_civilian` were added mid-review (C99-11, 2026-05-24) for *hypothetical* commercial low-latency deployments — no named consumer exists today, which is precisely the "speculative surface" the doctrine forbids.
+
+**Change.** Ship only profiles with a named consumer; defer the two civilian variants until one appears.
+
+**Why this is safe under no-migrations.** Profile selection is a per-deployment genesis config, not a wire or consensus format — a later deployment simply picks a profile at *its own* genesis. Adding a profile later is therefore **Additive**, not a migration. (Confirm against `params.hpp` before acting: the claim holds only while no profile value is embedded in authenticated bytes.)
+
+**Saving.** Removes two axes from every profile-sensitive verification argument and from the CT × profile matrix when CT lands.
+
+**Risk — LOW, conditional on the check above.**
+
+**Related.** `DECISION-LOG.md` 2026-05-24 (C99-11 mid-review revise, which added them); `include/determ/chain/params.hpp`.
+
+### 12.6 Explicitly NOT candidates
+
+Recorded so future triage does not relitigate them: the **B3 proof apparatus** (it is the product's central claim), **from-scratch C99 crypto** (it *is* the supply-chain audit-surface reduction — replacing it with a dependency would enlarge the very surface these items shrink), and **no-migrations** (load-bearing for the formal-verification target). Simplification pressure applies to build and verification scaffolding, never to the proof obligations themselves.
+
+*Authority: measured and drafted by Claude Fable at the owner's direction, 2026-08-11. No item here is executed; each needs owner scheduling. §12.1 is the recommended first move.*
+
+---
+
 *End of improvements queue. Append new entries as future deliberations produce additional deferred items. When triaging future v3-candidate Breaking items, apply the §11 test: does this motivate v3 by itself?*

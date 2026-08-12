@@ -181,9 +181,9 @@ fi
 WIN_BLOCKS=$(( TO - FROM + 1 ))
 
 # ── Step 2: optional genesis extract for shard routing ───────────────────────
-# Mirrors operator_shard_diagnostic.sh's two-step extract: verify-genesis
-# for shard_count, raw-file read for shard_address_salt (salt isn't echoed
-# by verify-genesis by design). Skipped silently when --genesis absent.
+# D2 inc8: one step — `verify-genesis --json` carries both
+# initial_shard_count and shard_address_salt now that the genesis file
+# itself is the binary DGC1 container. Skipped silently when --genesis absent.
 SHARD_COUNT=0
 SALT_HEX=""
 if [ -n "$GENESIS_PATH" ]; then
@@ -199,7 +199,9 @@ if [ -n "$GENESIS_PATH" ]; then
       exit 1
     fi
     SHARD_COUNT=$(printf '%s' "$GV_OUT" | jq -r '.initial_shard_count // 0')
-    SALT_HEX=$(jq -r '.shard_address_salt // ""' "$GENESIS_PATH" 2>/dev/null)
+    # D2 inc8: the genesis FILE is binary (DGC1) — the salt now comes from
+    # the verify-genesis text VIEW, not a grep of the file.
+    SALT_HEX=$(printf '%s' "$GV_OUT" | jq -r '.shard_address_salt // ""')
   else
     GV_STATUS=$(printf '%s' "$GV_OUT" | grep -o '"status":"[^"]*"' | head -1 | sed 's/.*:"\([^"]*\)".*/\1/')
     if [ "$GV_STATUS" != "ok" ]; then
@@ -207,7 +209,7 @@ if [ -n "$GENESIS_PATH" ]; then
       exit 1
     fi
     SHARD_COUNT=$(printf '%s' "$GV_OUT" | grep -o '"initial_shard_count":[^,}]*' | head -1 | sed 's/.*: *//; s/[",]//g; s/^ *//; s/ *$//')
-    SALT_HEX=$(grep -oE '"shard_address_salt"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENESIS_PATH" | head -1 | sed 's/.*"\([0-9a-fA-F]*\)"[[:space:]]*$/\1/')
+    SALT_HEX=$(printf '%s' "$GV_OUT" | grep -o '"shard_address_salt":"[^"]*"' | head -1 | sed 's/.*:"\([0-9a-fA-F]*\)".*/\1/')
   fi
   case "$SHARD_COUNT" in *[!0-9]*|"")
     echo "operator_anon_address_usage: cannot parse initial_shard_count (got '$SHARD_COUNT')" >&2

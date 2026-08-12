@@ -8849,6 +8849,224 @@ void decode_wire_tx(const uint8_t* body, size_t blen, json& report) {
     report["hash"]        = hash_hex;
 }
 
+// ─── Block-frame structural walker (D2-inc5 container, D2-inc7a payloads) ────
+//
+// A STRUCTURAL, bounds-only re-implementation of chain::Block::encode_frame's
+// layout, written from the published section order in src/chain/block.cpp —
+// deliberately NOT sharing code with the daemon, so a passing run is a genuine
+// cross-implementation conformance check on the container that BLOCK,
+// BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE and CHAIN_RESPONSE all
+// carry.
+//
+// It validates only what a second implementation can validate without the
+// chain layer: fixed field widths, u16 counts BACKED by the bytes that remain
+// (checked before any loop), length-prefix consistency, section ORDER, the
+// witness leaf/depth rule, and exact consumption. No semantic checks —
+// signatures, hashes and state are the daemon's business.
+//
+// Nested transaction frames and ShardTipRecord blobs are length-delimited, so
+// they are skipped by their prefix rather than re-parsed here (decode-wire
+// already owns an independent TRANSACTION walker for the top-level type).
+[[noreturn]] void bfw_bad(const std::string& who, const std::string& what) {
+    throw WireMalformed(who + " block frame: " + what);
+}
+
+void bfw_need(size_t off, size_t n, size_t len, const std::string& who,
+              const char* what) {
+    if (n > len || off > len - n)
+        bfw_bad(who, std::string("truncated ") + what);
+}
+
+void bfw_skip(const uint8_t*, size_t len, size_t& off, size_t n,
+              const std::string& who, const char* what) {
+    bfw_need(off, n, len, who, what);
+    off += n;
+}
+
+// Read a u16 count and PROVE the remaining bytes could back it, BEFORE the
+// loop — mirrors bf_get_count's Layer-1 cap.
+uint16_t bfw_count(const uint8_t* p, size_t len, size_t& off, size_t min_elem,
+                   const std::string& who, const char* what) {
+    bfw_need(off, 2, len, who, what);
+    uint16_t n = wire_le_u16(p + off);
+    off += 2;
+    if (min_elem != 0 && static_cast<size_t>(n) > (len - off) / min_elem)
+        bfw_bad(who, std::string(what) + " declares " + std::to_string(n) +
+                     " elements but only " + std::to_string(len - off) +
+                     " bytes remain");
+    return n;
+}
+
+void bfw_lp(const uint8_t* p, size_t len, size_t& off, const std::string& who,
+            const char* what) {
+    bfw_need(off, 1, len, who, what);
+    uint8_t n = p[off++];
+    bfw_need(off, n, len, who, what);
+    off += n;
+}
+
+void bfw_hash_vec(const uint8_t* p, size_t len, size_t& off,
+                  const std::string& who, const char* what) {
+    uint16_t n = bfw_count(p, len, off, 32, who, what);
+    bfw_skip(p, len, off, static_cast<size_t>(n) * 32, who, what);
+}
+
+// [u16 outer][outer x [u16 inner][inner x 32]] — the inner count's own two
+// bytes are the outer element minimum.
+void bfw_hash_lists(const uint8_t* p, size_t len, size_t& off,
+                    const std::string& who, const char* what) {
+    uint16_t n = bfw_count(p, len, off, 2, who, what);
+    for (uint16_t i = 0; i < n; ++i) {
+        uint16_t m = bfw_count(p, len, off, 32, who, what);
+        bfw_skip(p, len, off, static_cast<size_t>(m) * 32, who, what);
+    }
+}
+
+void bfw_receipts(const uint8_t* p, size_t len, size_t& off,
+                  const std::string& who, const char* what) {
+    // [u32 src][u32 dst][u64 idx][32][32][lp from][lp to][u64][u64][u64]
+    uint16_t n = bfw_count(p, len, off, 4 + 4 + 8 + 32 + 32 + 1 + 1 + 8 + 8 + 8,
+                           who, what);
+    for (uint16_t i = 0; i < n; ++i) {
+        bfw_skip(p, len, off, 4 + 4 + 8 + 32 + 32, who, what);
+        bfw_lp(p, len, off, who, what);
+        bfw_lp(p, len, off, who, what);
+        bfw_skip(p, len, off, 8 + 8 + 8, who, what);
+    }
+}
+
+// The smallest possible frame: every fixed field at its width plus the 23
+// two-byte counts, all empty (independently derived here: 251 + 46).
+constexpr size_t kWireMinBlockFrame = 297;
+
+// Walk one Block frame occupying [off, off+len) of `p`. `allow_witnesses`
+// false = the LEAF rule a shard-tip witness (and a SHARD_TIP tip) must obey:
+// no folded records, no nested witnesses. Bounds decode depth at 2.
+void bfw_walk(const uint8_t* p, size_t len, size_t& off, bool allow_witnesses,
+              const std::string& who, json* report) {
+    const size_t start = off;
+    bfw_need(off, 8 + 32 + 8, len, who, "index/prev_hash/timestamp");
+    uint64_t index = wire_le_u64(p + off); off += 8;
+    off += 32;
+    uint64_t ts = wire_le_u64(p + off); off += 8;
+
+    {   // transactions: [u32 frame_len][frame]; a tx frame is >= 131 bytes
+        uint16_t n = bfw_count(p, len, off, 4 + 131, who, "transactions");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_need(off, 4, len, who, "transaction frame length");
+            uint32_t flen = wire_le_u32(p + off); off += 4;
+            bfw_skip(p, len, off, flen, who, "transaction frame body");
+        }
+        if (report) (*report)["block_transactions"] = n;
+    }
+    {   // creators: u8-length-prefixed strings
+        uint16_t n = bfw_count(p, len, off, 1, who, "creators");
+        for (uint16_t i = 0; i < n; ++i) bfw_lp(p, len, off, who, "creators");
+        if (report) (*report)["block_creators"] = n;
+    }
+    bfw_hash_lists(p, len, off, who, "creator_tx_lists");
+    {   // creator_ed_sigs: u16 x 64
+        uint16_t n = bfw_count(p, len, off, 64, who, "creator_ed_sigs");
+        bfw_skip(p, len, off, static_cast<size_t>(n) * 64, who, "creator_ed_sigs");
+    }
+    bfw_hash_vec(p, len, off, who, "creator_dh_inputs");
+    bfw_hash_vec(p, len, off, who, "creator_view_eq_roots");
+    bfw_hash_vec(p, len, off, who, "creator_view_abort_roots");
+    bfw_hash_vec(p, len, off, who, "creator_view_inbound_roots");
+    bfw_hash_lists(p, len, off, who, "creator_view_inbound_lists");
+    bfw_hash_lists(p, len, off, who, "creator_view_eq_lists");
+    bfw_hash_lists(p, len, off, who, "creator_view_abort_lists");
+    bfw_hash_vec(p, len, off, who, "creator_view_shardtip_roots");
+    bfw_hash_lists(p, len, off, who, "creator_view_shardtip_lists");
+    {   // creator_proposer_times: u16 x 8
+        uint16_t n = bfw_count(p, len, off, 8, who, "creator_proposer_times");
+        bfw_skip(p, len, off, static_cast<size_t>(n) * 8, who, "creator_proposer_times");
+    }
+    bfw_hash_vec(p, len, off, who, "creator_dh_secrets");
+    bfw_skip(p, len, off, 32 + 32 + 32, who, "tx_root/delay_seed/delay_output");
+    bfw_skip(p, len, off, 1, who, "consensus_mode");
+    bfw_lp(p, len, off, who, "bft_proposer");
+    {   // creator_block_sigs: u16 x 64
+        uint16_t n = bfw_count(p, len, off, 64, who, "creator_block_sigs");
+        bfw_skip(p, len, off, static_cast<size_t>(n) * 64, who, "creator_block_sigs");
+    }
+    bfw_skip(p, len, off, 32, who, "cumulative_rand");
+    {   // abort_events: [u8 round][lp node][u64 ts][32 hash][u32 blob_len][blob]
+        uint16_t n = bfw_count(p, len, off, 1 + 1 + 8 + 32 + 4, who, "abort_events");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_skip(p, len, off, 1, who, "abort_events.round");
+            bfw_lp(p, len, off, who, "abort_events.aborting_node");
+            bfw_skip(p, len, off, 8 + 32, who, "abort_events.timestamp/event_hash");
+            bfw_need(off, 4, len, who, "abort_events claims length");
+            uint32_t blen = wire_le_u32(p + off); off += 4;
+            bfw_skip(p, len, off, blen, who, "abort_events claims blob");
+        }
+    }
+    {   // equivocation_events
+        uint16_t n = bfw_count(p, len, off,
+                               1 + 8 + 1 + (8 + 32 + 64) * 2 + 4 + 8, who,
+                               "equivocation_events");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_lp(p, len, off, who, "equivocation_events.equivocator");
+            bfw_skip(p, len, off, 8 + 1 + (8 + 32 + 64) * 2 + 4 + 8, who,
+                     "equivocation_events fields");
+        }
+    }
+    bfw_receipts(p, len, off, who, "cross_shard_receipts");
+    bfw_receipts(p, len, off, who, "inbound_receipts");
+    {   // initial_state: [lp domain][32 ed_pub][u64][u64][lp region]
+        uint16_t n = bfw_count(p, len, off, 1 + 32 + 8 + 8 + 1, who, "initial_state");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_lp(p, len, off, who, "initial_state.domain");
+            bfw_skip(p, len, off, 32 + 8 + 8, who, "initial_state fields");
+            bfw_lp(p, len, off, who, "initial_state.region");
+        }
+    }
+    bfw_skip(p, len, off, 32 + 32, who, "state_root/partner_subset_hash");
+    bfw_skip(p, len, off, 1, who, "signature_form");
+    bfw_skip(p, len, off, 4 + 4, who, "eligible_count/source_shard_id");
+    {   // shard_tip_records: [u8 rlen][record]
+        uint16_t n = bfw_count(p, len, off, 1 + 49, who, "shard_tip_records");
+        // A witness — and a SHARD_TIP tip — is a LEAF: it carries no folded
+        // records. Checked BEFORE the records are walked, exactly as the
+        // daemon's decoder does it.
+        if (!allow_witnesses && n != 0)
+            bfw_bad(who, "shard_tip_witnesses: a witness must carry empty "
+                         "shard_tip_records");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_need(off, 1, len, who, "shard_tip_records length");
+            uint8_t rlen = p[off++];
+            bfw_skip(p, len, off, rlen, who, "shard_tip_records body");
+        }
+        if (report) (*report)["block_shard_tip_records"] = n;
+    }
+    {   // shard_tip_witnesses: [u32 frame_len][frame], each a LEAF
+        uint16_t n = bfw_count(p, len, off, 4 + kWireMinBlockFrame, who,
+                               "shard_tip_witnesses");
+        if (!allow_witnesses && n != 0)
+            bfw_bad(who, "shard_tip_witnesses: a witness must be a leaf block "
+                         "(no nested witnesses)");
+        for (uint16_t i = 0; i < n; ++i) {
+            bfw_need(off, 4, len, who, "shard_tip_witnesses frame length");
+            uint32_t flen = wire_le_u32(p + off); off += 4;
+            bfw_need(off, flen, len, who, "shard_tip_witnesses frame body");
+            size_t woff = off;
+            bfw_walk(p, off + flen, woff, /*allow_witnesses=*/false, who, nullptr);
+            if (woff != off + flen)
+                bfw_bad(who, "shard_tip_witnesses frame has " +
+                             std::to_string(off + flen - woff) +
+                             " unconsumed byte(s)");
+            off += flen;
+        }
+        if (report) (*report)["block_shard_tip_witnesses"] = n;
+    }
+    if (report) {
+        (*report)["block_index"]      = index;
+        (*report)["block_timestamp"]  = ts;
+        (*report)["block_frame_len"]  = off - start;
+    }
+}
+
 } // namespace
 
 int cmd_decode_wire(int argc, char** argv) {
@@ -9077,9 +9295,117 @@ int cmd_decode_wire(int argc, char** argv) {
                     throw WireMalformed(std::string(tname) + " has " +
                                         std::to_string(body_len - off) +
                                         " trailing byte(s)");
+            } else if (msg_type == 1  /* BLOCK                      */ ||
+                       msg_type == 12 /* BEACON_HEADER              */ ||
+                       msg_type == 13 /* SHARD_TIP                  */ ||
+                       msg_type == 14 /* CROSS_SHARD_RECEIPT_BUNDLE */ ||
+                       msg_type == 6  /* CHAIN_RESPONSE             */) {
+                // D2-inc7a Block-carrying payload frames — re-implemented
+                // independently from the published layout, consumed exactly.
+                //
+                // The allow_witnesses MAP is mirrored here too, or the two
+                // implementations would disagree on frame validity (the
+                // S-043-class asymmetry the reserved-byte audit found):
+                // SHARD_TIP's tip must be a LEAF (no folded records, no
+                // witnesses) because only BEACON producers fold; every other
+                // Block channel legitimately carries a folded beacon block.
+                size_t off = 0;
+                if (msg_type == 13 || msg_type == 14) {
+                    if (body_len < 4)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated shard_id prefix");
+                    report[msg_type == 13 ? "shard_id" : "src_shard"] =
+                        wire_le_u32(body);
+                    off = 4;
+                }
+                if (msg_type == 6) {
+                    report["payload_kind"] = "chain_response_frame";
+                    if (body_len < 1)
+                        throw WireMalformed("CHAIN_RESPONSE truncated has_more");
+                    uint8_t hm = body[off++];
+                    if (hm > 1)
+                        throw WireMalformed("CHAIN_RESPONSE has_more must be 0 "
+                                            "or 1, got " + std::to_string(hm));
+                    report["has_more"] = (hm != 0);
+                    uint16_t n = bfw_count(body, body_len, off,
+                                           4 + kWireMinBlockFrame,
+                                           tname, "blocks");
+                    report["blocks"] = n;
+                    for (uint16_t i = 0; i < n; ++i) {
+                        if (off + 4 > body_len)
+                            throw WireMalformed("CHAIN_RESPONSE truncated block "
+                                                "frame length");
+                        uint32_t flen = wire_le_u32(body + off); off += 4;
+                        if (flen > body_len || off > body_len - flen)
+                            throw WireMalformed("CHAIN_RESPONSE truncated block "
+                                                "frame body");
+                        size_t boff = off;
+                        bfw_walk(body, off + flen, boff,
+                                 /*allow_witnesses=*/true, tname, nullptr);
+                        if (boff != off + flen)
+                            throw WireMalformed("CHAIN_RESPONSE block frame has "
+                                                "unconsumed bytes");
+                        off += flen;
+                    }
+                } else {
+                    report["payload_kind"] = (msg_type == 13) ? "shard_tip_frame"
+                                           : (msg_type == 14) ? "bundle_frame"
+                                                              : "block_frame";
+                    bfw_walk(body, body_len, off,
+                             /*allow_witnesses=*/msg_type != 13, tname, &report);
+                }
+                if (off != body_len)
+                    throw WireMalformed(std::string(tname) + " has " +
+                                        std::to_string(body_len - off) +
+                                        " trailing byte(s) after the frame");
+            } else if (msg_type == 4 /* CONTRIB */) {
+                // D2-inc7b CONTRIB frame — ALWAYS-PRESENT layout (every
+                // to_json emit gate is value-derived, so the container carries
+                // the value and never the gate).
+                report["payload_kind"] = "contrib_frame";
+                size_t off = 0;
+                auto take = [&](size_t n, const char* what) {
+                    if (n > body_len || off > body_len - n)
+                        throw WireMalformed(std::string(tname) +
+                                            " truncated at " + what);
+                    size_t at = off; off += n; return at;
+                };
+                auto take_hashes = [&](const char* what) {
+                    uint16_t n = bfw_count(body, body_len, off, 32, tname, what);
+                    take(static_cast<size_t>(n) * 32, what);
+                    return n;
+                };
+                report["block_index"] = wire_le_u64(body + take(8, "block_index"));
+                {
+                    if (off + 1 > body_len)
+                        throw WireMalformed("CONTRIB truncated signer length");
+                    uint8_t n = body[off++];
+                    size_t at = take(n, "signer body");
+                    report["signer"] =
+                        std::string(reinterpret_cast<const char*>(body + at), n);
+                }
+                take(32, "prev_hash");
+                report["aborts_gen"] = wire_le_u64(body + take(8, "aborts_gen"));
+                report["tx_hashes"]  = take_hashes("tx_hashes");
+                take(32 + 32 + 32 + 32, "dh_input + the three view roots");
+                take_hashes("view_eq_list");
+                take_hashes("view_abort_list");
+                take_hashes("view_inbound_list");
+                report["proposer_time"] = wire_le_u64(body + take(8, "proposer_time"));
+                take(32, "view_shardtip_root");
+                take_hashes("view_shardtip_list");
+                take(64, "ed_sig");
+                if (off != body_len)
+                    throw WireMalformed(std::string(tname) + " has " +
+                                        std::to_string(body_len - off) +
+                                        " trailing byte(s)");
             } else {
                 // [u32 LE json_len][json_bytes] — declared length must
                 // match the remaining body EXACTLY and parse as JSON.
+                // After D2-inc7a/inc7b this is SNAPSHOT_RESPONSE and
+                // HEADERS_RESPONSE only; both binarize in inc7c, at which
+                // point this branch (and every JSON parse on the wire path)
+                // is deleted.
                 report["payload_kind"] = "lp_json";
                 if (body_len < 4)
                     throw WireMalformed(std::string(tname) +
@@ -9168,14 +9494,24 @@ int cmd_decode_wire(int argc, char** argv) {
                           << "  to:        " << report["to"].get<std::string>() << "\n"
                           << "  hash:      " << report["hash"].get<std::string>() << "\n";
             } else if (kind == "hello_frame" || kind == "req_frame"
-                       || kind == "chatter_frame") {
+                       || kind == "chatter_frame" || kind == "block_frame"
+                       || kind == "shard_tip_frame" || kind == "bundle_frame"
+                       || kind == "chain_response_frame"
+                       || kind == "contrib_frame") {
                 std::cout << "  payload:   " << kind << "\n";
                 // Emit whichever decoded scalars this frame carries.
                 for (const char* k : {"domain", "port", "role", "shard_id",
                                       "wire_version", "from", "count",
                                       "height", "genesis", "headers",
                                       "block_index", "signer", "aborting_node",
-                                      "equivocator", "claims"}) {
+                                      "equivocator", "claims", "src_shard",
+                                      "has_more", "blocks", "aborts_gen",
+                                      "tx_hashes", "proposer_time",
+                                      "block_timestamp", "block_creators",
+                                      "block_transactions",
+                                      "block_shard_tip_records",
+                                      "block_shard_tip_witnesses",
+                                      "block_frame_len"}) {
                     if (!report.contains(k)) continue;
                     std::cout << "  " << k << ": ";
                     if (report[k].is_string())

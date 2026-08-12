@@ -294,8 +294,28 @@ struct GenesisConfig {
     std::vector<GenesisCreator>     initial_creators;
     std::vector<GenesisAllocation>  initial_balances;
 
+    // Text VIEW only (D2): the CLI's --json output and the build-time input
+    // shape `genesis-tool build <config.json>` consumes. Nothing at rest.
     nlohmann::json       to_json() const;
     static GenesisConfig from_json(const nlohmann::json& j);
+
+    // D2 inc8: the ONE rule set. Every semantic constraint (S-007 sane bounds,
+    // LOTTERY multiplier, governance coupling, beacon_shard_regions
+    // constraints) plus the normalizations (region canonicalization,
+    // shard_regions ordering, governed param_threshold N-of-N default) live
+    // here, so from_json and decode() enforce identical semantics. Idempotent.
+    void                 validate();
+
+    // D2 inc8: the canonical binary container ('DGC1'). The genesis config
+    // FILE is at-rest storage, so load/save are binary-only — no text
+    // fallback, no format sniffing. decode is bounds-checked, EXACT-
+    // consumption, rejects non-canonical regions / non-0-1 booleans /
+    // unsorted-or-duplicate beacon_shard_regions, and ends with validate().
+    // Hash-neutral by construction: compute_genesis_hash mixes field VALUES,
+    // so decode(encode(c)) hashes identically to c (gate GB-3).
+    std::vector<uint8_t> encode() const;
+    static GenesisConfig decode(const uint8_t* data, size_t len);
+
     static GenesisConfig load(const std::string& path);
     void                 save(const std::string& path) const;
 };

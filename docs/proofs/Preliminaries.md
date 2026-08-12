@@ -201,7 +201,7 @@ The number of nonzero signatures must be `≥ k` (MD; no sentinels permitted) or
 
 **V10 — Abort certificates.** Each `ae ∈ B.abort_events` carries `K-1` distinct, valid `AbortClaimMsg` signatures from members of the at-event committee against the aborting node.
 
-**V11 — Equivocation events.** Each `ev ∈ B.equivocation_events` carries two distinct signatures `(sig_a, sig_b)` over distinct digests `(digest_a, digest_b)` by the equivocator's registered Ed25519 key, both verifying.
+**V11 — Equivocation events** (restated 2026-08-12, EQV-height-bind). Each `ev ∈ B.equivocation_events` carries `kind ∈ {0, 1}` (0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT) and, per side, an **opening** `(index, body_root)` plus a signature. The signed digests are not carried; the validator DERIVES them as `D(kind, i, r) = SHA256(TAG(kind) ‖ i u64 BE ‖ r)` with `TAG(0) = "DTM-BLKDIG-v2"`, `TAG(1) = "DTM-CONTRIB-v2"`. Validity requires: `kind ≤ 1`; **`index_a = index_b = ev.block_index`** (the height assert — this is what makes the height signature-bound); `body_root_a ≠ body_root_b`; `sig_a ≠ sig_b`; the equivocator resolves to a registered Ed25519 key; and both signatures verify against the **derived** digests. Enforced by `BlockValidator::check_equivocation_events` (`src/node/validator.cpp:380`). Used in FA6 / FA-Apply-10. The pre-2026-08-12 form (two opaque digests, no index relation) was the S-052 forged-slash hole.
 
 **V12 — Cross-shard receipts, source side** (shards only). `B.cross_shard_receipts` matches the cross-shard subset of `B.transactions` one-for-one with field-wise equality, including `(src_shard, dst_shard, tx_hash, from, to, amount, fee, nonce)`. Enforced by `BlockValidator::check_cross_shard_receipts` (`src/node/validator.cpp`). Used in FA7 L-7.1.
 

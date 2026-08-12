@@ -120,11 +120,14 @@ echo "  donor chain height: $DONOR_H"
 echo
 echo "=== 4. Create snapshot from donor1 ==="
 $DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1
-SNAP_H=$(python -c "import json; print(json.load(open('$T/snap.json'))['block_index'])")
-SNAP_HEAD=$(python -c "import json; print(json.load(open('$T/snap.json'))['head_hash'])")
-SNAP_ACCTS=$(python -c "import json; print(len(json.load(open('$T/snap.json'))['accounts']))")
-SNAP_STAKES=$(python -c "import json; print(len(json.load(open('$T/snap.json'))['stakes']))")
-SNAP_REGS=$(python -c "import json; print(len(json.load(open('$T/snap.json'))['registrants']))")
+# D2 inc8: the snapshot file is the canonical BINARY container (DSN1).
+# `snapshot inspect --dump` renders its full text VIEW for scripts.
+$DETERM snapshot inspect --in $T/snap.json --dump > $T/snap.view.json 2>/dev/null
+SNAP_H=$(python -c "import json; print(json.load(open('$T/snap.view.json'))['block_index'])")
+SNAP_HEAD=$(python -c "import json; print(json.load(open('$T/snap.view.json'))['head_hash'])")
+SNAP_ACCTS=$(python -c "import json; print(len(json.load(open('$T/snap.view.json'))['accounts']))")
+SNAP_STAKES=$(python -c "import json; print(len(json.load(open('$T/snap.view.json'))['stakes']))")
+SNAP_REGS=$(python -c "import json; print(len(json.load(open('$T/snap.view.json'))['registrants']))")
 echo "  snapshot block_index: $SNAP_H"
 echo "  snapshot head_hash:   ${SNAP_HEAD:0:24}..."
 echo "  snapshot accounts:    $SNAP_ACCTS"

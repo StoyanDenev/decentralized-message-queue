@@ -39,7 +39,7 @@ For each of the four D2-inc6b consensus-chatter types (`e845b44`) `π` is likewi
 | `BLOCK_SIG` (3) | `(block_index: u64, signer: string, delay_output: 32 B, dh_secret: 32 B, ed_sig: 64 B)` | 137 + \|signer\| |
 | `ABORT_CLAIM` (9) | `(block_index: u64, round: u8, prev_hash: 32 B, ed_sig: 64 B, missing_creator: string, claimer: string)` | 109 + \|missing_creator\| + \|claimer\| |
 | `ABORT_EVENT` (10) | `(block_index: u64, prev_hash: 32 B, event: (round: u8, aborting_node: string, timestamp: i64, event_hash: 32 B, claims: AbortClaim[]))` | 82 + \|aborting_node\| + \|claims blob\| |
-| `EQUIVOCATION_EVIDENCE` (11) | `(equivocator: string, block_index: u64, digest_a: 32 B, sig_a: 64 B, digest_b: 32 B, sig_b: 64 B, shard_id: u32, beacon_anchor_height: u64)` | 213 + \|equivocator\| |
+| `EQUIVOCATION_EVIDENCE` (11) | `(equivocator: string, block_index: u64, kind: u8, index_a: u64, body_root_a: 32 B, sig_a: 64 B, index_b: u64, body_root_b: 32 B, sig_b: 64 B, shard_id: u32, beacon_anchor_height: u64)` — EQV-height-bind, 2026-08-12; fixed **229 B after the lp_str**, exact-length checked, decode fail-closes on `kind > 1` | 230 + \|equivocator\| |
 
 Encoder side `binary_codec.cpp:441-557`; builders `messages.hpp:328-330, 334-336, 337-347, 348-350`; layout comment `binary_codec.cpp:115-140`. For every remaining type — the **8** that still carry a length-prefixed JSON payload inside the envelope (`BLOCK`, `CONTRIB`, `CHAIN_RESPONSE`, `BEACON_HEADER`, `SHARD_TIP`, `CROSS_SHARD_RECEIPT_BUNDLE`, `SNAPSHOT_RESPONSE`, `HEADERS_RESPONSE`) — `π` is the full `payload` JSON value.
 
@@ -393,7 +393,7 @@ Each of the four encoders writes exactly the fields its decoder reads, at the sa
 |---|---|---|
 | `ABORT_CLAIM` | `chain::encode_abort_claims({claim})` (443) | `chain::decode_abort_claims`, then `size() == 1` (448-452) |
 | `BLOCK_SIG` | `le_u64(block_index)`, `lp_str(signer)`, `delay_output`, `dh_secret`, `ed_sig` (458-467) | same five, same order (474-480) |
-| `EQUIVOCATION_EVIDENCE` | `lp_str(equivocator)`, `le_u64(block_index)`, `digest_a`, `sig_a`, `digest_b`, `sig_b`, `le_u32(shard_id)`, `le_u64(beacon_anchor_height)` (486-493) | same eight, same order (499-508) |
+| `EQUIVOCATION_EVIDENCE` | `lp_str(equivocator)`, `le_u64(block_index)`, `u8(kind)`, `le_u64(index_a)`, `body_root_a`, `sig_a`, `le_u64(index_b)`, `body_root_b`, `sig_b`, `le_u32(shard_id)`, `le_u64(beacon_anchor_height)` (`src/net/binary_codec.cpp:492`) | same eleven, same order (`:507`), with `off + 229 == len` and `kind <= 1` enforced before use |
 | `ABORT_EVENT` | `le_u64(block_index)`, `prev_hash`, `round`, `lp_str(aborting_node)`, `le_u64(timestamp)`, `event_hash`, claims blob (515-529) | same seven, same order (535-550) |
 
 Three boundary details make the agreement total rather than approximate:

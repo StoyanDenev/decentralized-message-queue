@@ -94,6 +94,18 @@ Hash make_contrib_commitment(
 
 Single Ed25519 sig over the extended commitment binds member to all three views at once. Replay-defense via existing `(block_index, prev_hash)` binding — a commit can't be replayed across heights or chain branches.
 
+> **Update 2026-08-12 (EQV-height-bind, shipped).** Both this commitment and `compute_block_digest`
+> became **two-level**. The preimage above is now the *body*, computed by `make_contrib_body_root`
+> **minus** the leading `block_index` append; the commitment is
+> `SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)`, and the block digest is
+> `SHA-256("DTM-BLKDIG-v2" ‖ index u64 BE ‖ body_root)` (`src/node/producer.cpp:332` / `:968`;
+> `docs/PROTOCOL.md` §4.3). The `(block_index, prev_hash)` replay-defense argument is unchanged —
+> `block_index` simply moved one layer out, where it can be *opened* by an `EquivocationEvent` so the
+> signed height is verifier-checkable. The two outer tags MUST differ (a shared tag would make an
+> honest block signature + an honest contrib signature at one height a valid equivocation proof), and
+> `hash_equivocation_event`'s own domain tag moved `"DTM-F2-EQ-v1"` → `"DTM-F2-EQ-v2"` because the
+> record it hashes changed shape. All commitment VALUES changed — pre-genesis, free, no shims.
+
 **Rationale.** Single sig is cheaper than three. Combined hash structure with separate fields preserves per-field auditability (you can verify each member's view of equivocation_events independently). No additional commit-message structure complexity.
 
 ### Q5: Phase-2 signature semantics under union rule

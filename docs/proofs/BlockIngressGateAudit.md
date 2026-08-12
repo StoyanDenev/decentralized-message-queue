@@ -91,7 +91,7 @@ not change honest detection behavior.
 `apply_block_locked`, the `on_contrib` S-006 detect), and `rpc_submit_equivocation` inspected the
 pool with the same key for its response. But **`EquivocationEvent.block_index` is bound by neither of
 the two signatures** — only the two raw 32-byte digests are signed — so a single *valid* double-sign
-`(digest_a, sig_a, digest_b, sig_b)` re-passes both `crypto::verify` calls when re-gossiped/
+`(kind, index_a, body_root_a, sig_a, index_b, body_root_b, sig_b)` re-passes both `crypto::verify` calls against the DERIVED digests, plus the `kind` gate and the height assert, when re-gossiped/
 re-submitted with `block_index = 0, 1, 2, … 2⁶⁴-1`, each counting as a fresh `(equivocator,
 block_index)` entry → **unbounded pool growth from ONE proof** (a node-local memory-exhaustion DoS).
 This is DISTINCT from the owner-gated `EQV-height-unbound-forged-slash` consensus vuln

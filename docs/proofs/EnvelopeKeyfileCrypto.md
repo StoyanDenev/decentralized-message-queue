@@ -17,7 +17,7 @@ Where `S004KeyfileAtRest.md` and this document touch the same fact (e.g. the PBK
 
 **In scope.** The `wallet/envelope.cpp` / `wallet/envelope.hpp` passphrase-encryption envelope as a cryptographic primitive for protecting secret byte-strings at rest:
 
-- The envelope wire layout (`[salt | nonce | ciphertext+tag]` plus the stored `pbkdf2_iters` and `aad` fields) and its canonical dot-separated hex serialization.
+- The envelope wire layout (`[salt | nonce | ciphertext+tag]` plus the stored KDF params and `aad` fields) and its canonical BINARY serialization (§the serialization subsection; the pre-2026-08-12 dot-separated hex form is deleted).
 - The key-derivation function (`derive_key_pbkdf2` via `determ_pbkdf2_hmac_sha256` for the `DWE1` leg; `derive_key_argon2` via `determ_argon2id` for the `DWE2` leg) — part of the libsodium-/OpenSSL-free `determ::c99` crypto stack (the `1c` swap of 2026-07-03, `wallet/envelope.cpp:4-5` header note).
 - The AEAD construction (`encrypt` / `decrypt` via `determ_aes256_gcm_encrypt` / `determ_aes256_gcm_decrypt`), including the fail-closed-on-tag-mismatch decryption contract.
 - The four soundness properties KE-1 (confidentiality under CCA), KE-2 (integrity under CCA-modification), KE-3 (salt-uniqueness independence), KE-4 (passphrase-strength dominance).
@@ -35,7 +35,7 @@ Where `S004KeyfileAtRest.md` and this document touch the same fact (e.g. the PBK
 
 ## 2. Threat model
 
-The envelope primitive defends a secret byte-string `m` (a 32-byte Ed25519 seed, a Shamir share `y`-coordinate, a small JSON keyfile object, etc.) held encrypted at rest. Two adversaries are in scope.
+The envelope primitive defends a secret byte-string `m` (a 32-byte Ed25519 seed, a Shamir share `y`-coordinate, a cold-sign payload, etc.) held encrypted at rest. Since 2026-08-12 the node-keyfile caller encrypts the **raw 32-byte seed** rather than a JSON object — see `S023NodeKeyfileEncryption.md` §0. Two adversaries are in scope.
 
 ### 2.1 `A_disk` — at-rest ciphertext exposure
 
@@ -76,7 +76,7 @@ All constants below are read directly from the implementation and are load-beari
 | `DEFAULT_PBKDF2_ITERS` | **600,000** iterations | `wallet/envelope.hpp:56` |
 | `DEFAULT_SALT_LEN` | 16 bytes | `wallet/envelope.hpp:70` |
 
-The `DWE1` / `DWE2` magic is the format/version tag, not a cryptographic domain separator fed into the AEAD; it gates `deserialize` (`wallet/envelope.cpp:243`, which accepts exactly `MAGIC1_LE` or `MAGIC2_LE`) and identifies the wire format to inspection tools. The cryptographic domain-separation / context-binding role is played by the caller-supplied `aad` field (§3.4).
+The `DWE1` / `DWE2` magic is the format/version tag, not a cryptographic domain separator fed into the AEAD; it gates `deserialize_bytes` (`wallet/envelope.cpp:244`, which accepts exactly `MAGIC1_LE` or `MAGIC2_LE`) and identifies the wire format to inspection tools. The cryptographic domain-separation / context-binding role is played by the caller-supplied `aad` field (§3.4).
 
 ### 3.2 Envelope layout
 
@@ -96,13 +96,35 @@ Envelope {
 
 The cryptographic payload is the conceptual tuple `[salt | nonce | ciphertext | tag]`, with the 16-byte tag occupying the final `TAG_LEN` bytes of the `ciphertext` vector (written at encrypt time by `determ_aes256_gcm_encrypt`, which fills `ct-body || 16-byte tag` in one call — `seal`, `wallet/envelope.cpp:64-73`). The stored cost parameters and `aad` are kept so that decryption is self-describing — the verifier needs no out-of-band parameters beyond the passphrase.
 
-The canonical serialization (`serialize`, `wallet/envelope.cpp:208-228`) is six dot-separated lowercase-hex fields:
+**Canonical serialization is BINARY since 2026-08-12 (D2 step 3).** `serialize_bytes`
+(`wallet/envelope.cpp:209`) emits the canonical container and `deserialize_bytes` (`:244`) is the only
+parser; the dot-separated hex form described in earlier revisions of this section is **deleted**
+(pre-genesis, no shims). `serialize` (`:305`) / `deserialize` (`:309`) survive only as a
+non-authoritative CLI VIEW: plain lowercase hex of the same bytes, rejecting dots, odd length and
+non-hex. Layout (all integers little-endian; `wallet/envelope.hpp`):
 
 ```
-<magic_4B> . <salt_16B> . <params_var> . <nonce_12B> . <aad_var> . <ciphertext+tag_var>
+[0..3] magic "DWE1" | "DWE2"
+[4]    salt_len u8   (8..=64; writers emit 16)
+[5..]  salt          salt_len bytes
+params DWE1: pbkdf2_iters u32          DWE2: t_cost u32 | m_cost_kib u32 | lanes u32
+nonce  12 bytes
+aad_len u16 (0..=MAX_AAD_LEN=256)  ‖ aad
+ct_len  u32 (16..=MAX_CT_LEN=1 MiB) ‖ ct   (body ‖ 16-byte GCM tag)
 ```
 
-where the `params` slot is the 4-byte `pbkdf2_iters` for `DWE1` and the 12-byte `t | m | p` triple for `DWE2` (the magic disambiguates which). `deserialize` (`wallet/envelope.cpp:230-274`) splits on `.`, requires exactly six parts (`:238`), checks the magic is `MAGIC1_LE` or `MAGIC2_LE` (`:243`), requires `salt.size() >= 8` (`:247`), validates the KDF-specific params slot (`:250-263`), requires `nonce.size() == NONCE_LEN` (`:266`), and requires `ciphertext.size() >= TAG_LEN` (`:269`). A blob failing any check yields `std::nullopt` — malformed envelopes never reach the AEAD path.
+`deserialize_bytes` bounds-checks every read before performing it (refuse, never clamp), enforces the
+KDF-cost caps **before any KDF runs** (the R58/1736ba8 unbounded-work DoS fix, preserved verbatim
+through the rewrite), and requires **EXACT** total consumption — a valid container followed by one
+trailing byte is rejected, so there is exactly one encoding of a given envelope. A blob failing any
+check yields `std::nullopt` — malformed envelopes never reach the AEAD path.
+
+**Why the theorems below are untouched.** KE-1..KE-4 are stated over the `Envelope` *object* and the
+AEAD/KDF construction, not over its serialization. The rewrite changed how the object is rendered to
+bytes, not what is encrypted, under which key, with which AAD, or with which parameters. The one
+security-relevant strengthening is structural rather than cryptographic: exact-length decode removes
+the parser ambiguity a text format admits. Gate: `determ-wallet selftest-envelope-bytes` (21 cases,
+mutant-verified on the `off != len` check).
 
 ### 3.3 Key derivation
 
@@ -220,7 +242,7 @@ $$
 
 where `H = E_K(0^128)` is the GHASH subkey, `J_0` is the pre-counter block derived from the nonce, and GHASH is a polynomial-evaluation MAC over `GF(2^128)` (NIST SP 800-38D §6.4-§7.1). By the KE-1 premise `A` lacks `Key`, hence lacks both `H` and the mask `E_K(J_0)`. L-3 then bounds each forgery class:
 
-- **Ciphertext-body or AAD modification.** Changes the GHASH input polynomial; producing the *same* tag requires a root collision at the secret point `H`, probability `≤ (L+1)/2^128`. For the small payloads here (a 32-byte seed, a sub-kilobyte keyfile JSON — `L` on the order of 1-64 blocks), this is `≤ 2^-122`, dominated by the `2^-128` headline.
+- **Ciphertext-body or AAD modification.** Changes the GHASH input polynomial; producing the *same* tag requires a root collision at the secret point `H`, probability `≤ (L+1)/2^128`. For the small payloads here (a 32-byte seed, a Shamir share, a sub-kilobyte cold-sign payload — `L` on the order of 1-64 blocks), this is `≤ 2^-122`, dominated by the `2^-128` headline.
 - **Nonce modification.** Changes `J_0`, hence `E_K(J_0)`, hence the tag mask, by a pseudorandom amount — again a `2^-128` guess.
 - **Direct tag modification.** A direct `2^-128` guess of the 128-bit value.
 
@@ -326,12 +348,13 @@ These are acknowledged limitations of the envelope primitive. None invalidates K
 
 | Surface | Location | Role |
 |---|---|---|
-| Envelope struct + API + constants | `wallet/envelope.hpp:1-111` | `Envelope` fields + `Kdf` selector; `encrypt`/`encrypt_pbkdf2`/`encrypt_argon2id`/`decrypt`/`serialize`/`deserialize` signatures; `DEFAULT_PBKDF2_ITERS = 600,000` (`:56`); `DEFAULT_ARGON2_*` (`:64-66`); `DEFAULT_SALT_LEN = 16` (`:70`) |
+| Envelope struct + API + constants | `wallet/envelope.hpp:1-111` | `Envelope` fields + `Kdf` selector; `encrypt`/`encrypt_pbkdf2`/`encrypt_argon2id`/`decrypt`/`serialize_bytes`/`deserialize_bytes` (canonical) + `serialize`/`deserialize` (hex view) signatures; `DEFAULT_PBKDF2_ITERS = 600,000` (`:56`); `DEFAULT_ARGON2_*` (`:64-66`); `DEFAULT_SALT_LEN = 16` (`:70`) |
 | Cryptographic constants | `wallet/envelope.cpp:25-29` | `MAGIC1_LE = 0x31455744` ("DWE1") / `MAGIC2_LE = 0x32455744` ("DWE2"); `NONCE_LEN = 12`; `TAG_LEN = 16`; `KEY_LEN = 32` |
 | Key derivation | `wallet/envelope.cpp:33-60` | `derive_key_pbkdf2` via `determ_pbkdf2_hmac_sha256` (`:37-39`); `derive_key_argon2` via `determ_argon2id` (`:50-56`), 32-byte output (KE-1, KE-4) |
 | AEAD encrypt | `wallet/envelope.cpp:64-131` | salt/nonce from `determ_rng_bytes` (`fill_salt_nonce` `:80-81`); `seal` → `determ_aes256_gcm_encrypt` binds AAD + appends tag (`:68-73`); derived key wiped (`:74`) (KE-2, KE-3) |
 | AEAD decrypt (fail-closed) | `wallet/envelope.cpp:133-167` | structural pre-checks (`:137-138`); AAD precondition (`:141`); per-KDF param gates (`:146`, `:150`); tag-verify + CT compare in `determ_aes256_gcm_decrypt` (`:158-163`; `src/crypto/aes/aes_gcm.c:165`); `nullopt` on failure (`:165`) (KE-1, KE-2) |
-| Canonical serialization | `wallet/envelope.cpp:208-274` | `<magic>.<salt>.<params>.<nonce>.<aad>.<ct>`; `deserialize` magic + size gates (`:238-269`) |
+| Canonical serialization (BINARY) | `wallet/envelope.cpp:209` (`serialize_bytes`) / `:244` (`deserialize_bytes`) | magic ‖ salt_len ‖ salt ‖ params ‖ nonce ‖ aad_len ‖ aad ‖ ct_len ‖ ct, exact-length decode, KDF-cost caps before any KDF |
+| Hex CLI view (non-authoritative) | `wallet/envelope.cpp:305` (`serialize`) / `:309` (`deserialize`) | plain lowercase hex of the container bytes; dots / odd length / non-hex rejected |
 | Raw envelope CLI | `wallet/main.cpp:1009` / `:1046` | `cmd_envelope_encrypt` / `cmd_envelope_decrypt` — exercises the primitive directly with caller-chosen `--plaintext`/`--password`/`--aad`/`--iters` |
 | Envelope inspection CLI | `wallet/main.cpp:1112` | `cmd_inspect_envelope` — metadata-only (`format`, `salt_len`, KDF params, `nonce`, `aad`) without passphrase |
 | Node-keyfile create caller | `wallet/main.cpp:3527` | `keyfile-create` (`cmd_keyfile_create`): `DETERM-NODE-V1 <pubkey>` header + envelope; pubkey-as-AAD (application layer — see `S004KeyfileAtRest.md`) |

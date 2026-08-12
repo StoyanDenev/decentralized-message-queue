@@ -103,7 +103,7 @@ Already present and verified:
   inbound (line 454). `validate_view_reconciliation` (`producer.cpp:458-496`) already
   validates all three (V21-V26).
 - **Canonical event hashers exist.** `hash_equivocation_event`
-  (`src/node/producer.cpp:356-372`, domain `DTM-F2-EQ-v1`) and `hash_abort_event`
+  (`src/node/producer.cpp:403`, domain `DTM-F2-EQ-v2` since 2026-08-12 — the tag was bumped when the `EquivocationEvent` record changed shape to carry `kind` + per-side `(index, body_root)` openings) and `hash_abort_event`
   (`src/node/producer.cpp:437-457`, domain `DTM-F2-ABORT-v2` — bumped from `v1`
   by D2-inc3 `c8a63d2` when the claim list became typed and its digest preimage
   became the canonical binary `chain::encode_abort_claims`) hash all

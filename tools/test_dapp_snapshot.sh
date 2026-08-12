@@ -180,6 +180,9 @@ except: print('')" 2>/dev/null || echo "")
 echo
 echo "=== 6. Create snapshot from donor1 (freezes state_root + head_hash) ==="
 $DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -2
+# D2 inc8: the snapshot file is the canonical BINARY container (DSN1);
+# `snapshot inspect --dump` renders its full text VIEW for scripts.
+$DETERM snapshot inspect --in $T/snap.json --dump > $T/snap.view.json 2>/dev/null
 
 # Read state_root + head_hash + block_index FROM THE SNAPSHOT FILE
 # rather than via a live RPC. The donor chain keeps advancing in the
@@ -189,17 +192,17 @@ $DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -2
 # donor's later state.
 SNAP_BLOCK_IDX=$(python -c "
 import json
-try: print(json.load(open('$T/snap.json'))['block_index'])
+try: print(json.load(open('$T/snap.view.json'))['block_index'])
 except: print(0)")
 SNAP_HEAD=$(python -c "
 import json
-try: print(json.load(open('$T/snap.json'))['head_hash'])
+try: print(json.load(open('$T/snap.view.json'))['head_hash'])
 except: print('')")
 # state_root lives in the snapshot's tail-header chain (last entry).
 SNAP_SR=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap.json'))
+    s = json.load(open('$T/snap.view.json'))
     hdrs = s.get('headers', [])
     if hdrs:
         last = hdrs[-1]
@@ -224,7 +227,7 @@ echo "  snapshot state_root:  ${SNAP_SR:0:24}..."
 SNAP_DAPP_COUNT=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap.json'))
+    s = json.load(open('$T/snap.view.json'))
     da = s.get('dapp_registry', None)
     if da is None:
         print('MISSING')
@@ -241,7 +244,7 @@ echo "  snapshot dapp_registry count: $SNAP_DAPP_COUNT"
 SNAP_DAPP_ENDPOINT=$(python -c "
 import json
 try:
-    s = json.load(open('$T/snap.json'))
+    s = json.load(open('$T/snap.view.json'))
     da = s.get('dapp_registry', [])
     if da:
         print(da[0].get('endpoint_url',''))

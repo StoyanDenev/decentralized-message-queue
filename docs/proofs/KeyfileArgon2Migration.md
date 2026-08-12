@@ -46,7 +46,20 @@ One new consideration enters scope, and is explicitly **left out of the defended
 | `DEFAULT_ARGON2_LANES` | 1 | `wallet/envelope.hpp:66` |
 | `DEFAULT_SALT_LEN` | 16 bytes (**unchanged**) | `wallet/envelope.hpp:70` |
 
-Both layouts serialize as **6 dot-separated hex parts** — `magic . salt . params . nonce . aad . ciphertext` (`serialize`, `wallet/envelope.cpp:208-228`). The **only** structural difference is the `params` slot:
+Both layouts serialize into the same canonical **binary** container — `magic ‖ salt_len ‖ salt ‖ params ‖ nonce ‖ aad_len ‖ aad ‖ ct_len ‖ ct`, all integers little-endian, EXACT-length decode (`serialize_bytes` / `deserialize_bytes`, `wallet/envelope.cpp:209` / `:244`). The **only** structural difference is the `params` slot:
+
+> **Serialization changed 2026-08-12 (D2 step 3), KM-1..KM-5 did not.** Before that date both layouts
+> rendered as 6 dot-separated hex parts. Every claim in this document is about the magic-selected KDF
+> branch and its parameter validation, not about how the fields are framed: the same magic, the same
+> `params` slot semantics, the same guards, the same `std::nullopt` failure mode. Field-position
+> citations below (`:238` parts-count, `:241` magic width, `:247` salt, `:251`/`:259` params, `:266`
+> nonce, `:269` ct) refer to the pre-rewrite `deserialize`; the equivalent guards now live in
+> `deserialize_bytes` (`wallet/envelope.cpp:244`), which additionally enforces exact total length and
+> the KDF-cost caps **before any KDF runs**. The parts-count check has no successor — a binary
+> container has no delimiter to miscount — and the `from_hex`-throw edge moved to the hex CLI view
+> (`deserialize`, `:309`). `selftest-envelope-param-reject` keeps its falsify property on the binary
+> blobs; `selftest-envelope-bytes` (21 cases) adds the container's own truncation / trailing-byte /
+> hostile-bounds sweep.
 
 - `DWE1`: `params` = 4 bytes (`pbkdf2_iters` u32 LE) — `wallet/envelope.cpp:217-218`.
 - `DWE2`: `params` = 12 bytes (`argon2_t | argon2_m_kib | argon2_p`, each u32 LE) — `wallet/envelope.cpp:211-216`.
@@ -152,7 +165,7 @@ R58 hardens the at-rest KDF; it does **not** claim, and this proof does **not** 
 | `encrypt` default = Argon2id | `wallet/envelope.cpp:126-131` | R58 default flip |
 | Encrypt-side param guard | `wallet/envelope.cpp:92-93` | `t==0 ∥ p==0 ∥ m<8·p` → throw |
 | Serialize (params-slot width) | `wallet/envelope.cpp:208-228` | 12-byte DWE2 / 4-byte DWE1 params |
-| Deserialize (magic-select + validate) | `wallet/envelope.cpp:230-274` | KM-3 + KM-4 read-path gates |
+| Deserialize (magic-select + validate) | `wallet/envelope.cpp:244` (`deserialize_bytes`, canonical binary) | KM-3 + KM-4 read-path gates |
 | Decrypt (KDF auto-detect + validate) | `wallet/envelope.cpp:133-167` | `env.kdf` route + Argon2 param check + fail-closed |
 | `inspect-envelope` KDF-aware report | `wallet/main.cpp:1112-1210` (JSON body `:1168-1197`) | `format`/`kdf`/`argon2_t_cost`/`argon2_m_cost_kib`/`argon2_lanes` |
 | `keyfile-info` KDF-aware report | `wallet/main.cpp:5930-6068` (envelope block `:6035-6059`) | same metadata, node keyfile, no decrypt |

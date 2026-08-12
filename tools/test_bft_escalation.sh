@@ -40,10 +40,13 @@ except: print('-')"
 count_bft_blocks() {
   local n=$1
   python -c "
-import json
+import json, subprocess
 try:
-  _cj = json.load(open('$T/n$n/chain.json'))
-  blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
+  # D2 inc8: the at-rest chain is binary; \`determ chain-export --json\` is the
+  # offline text VIEW that replaced parsing chain.json directly.
+  _cj = json.loads(subprocess.check_output(
+      ['$DETERM','chain-export','--chain','$T/n$n/chain.json']))
+  blocks = _cj['blocks']
   bft = sum(1 for b in blocks if b.get('consensus_mode',0) == 1)
   md  = sum(1 for b in blocks if b.get('consensus_mode',0) == 0)
   print(f'{md} {bft}')
@@ -55,10 +58,11 @@ except Exception as e:
 last_bft_proposer() {
   local n=$1
   python -c "
-import json
+import json, subprocess
 try:
-  _cj = json.load(open('$T/n$n/chain.json'))
-  blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
+  _cj = json.loads(subprocess.check_output(
+      ['$DETERM','chain-export','--chain','$T/n$n/chain.json']))
+  blocks = _cj['blocks']
   bft = [b for b in blocks if b.get('consensus_mode',0) == 1]
   if bft: print(bft[-1].get('bft_proposer','?'))
   else: print('(none)')

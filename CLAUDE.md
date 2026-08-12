@@ -57,8 +57,20 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      HEADERS_RESPONSE) — WIRE-2 stays until those binarize per-type. Next is
      inc5 (Block frame), the keystone: BLOCK/BEACON_HEADER/SHARD_TIP/
      CROSS_SHARD_RECEIPT_BUNDLE/CHAIN_RESPONSE all carry a Block, and chain
-     storage (inc8) has a TOTAL hard dependency on it. Storage/genesis/keyfiles
-     not started.
+     storage (inc8) has a TOTAL hard dependency on it.
+     PROGRESS 2026-08-12 (d34c632): inc5 (the canonical binary Block container)
+     LANDED at d33d410+76d7ea4. WALLET/LIGHT KEYFILES ARE DONE — D2 step 3
+     shipped seven at-rest containers (DWE bytes, DAK1, DAB1, DNK1, DSS1, DBE1,
+     DRS1) + DLS1 for the light anchor cache; the dot-hex envelope, the
+     JSON-interior node keyfile and the JSON light state are deleted; DAK1/DNK1
+     derive-equality replaces the S-028 address cross-check; ZERO src/ edits.
+     REMAINDER (explicit, still open): node_key.json (src/crypto/keys.cpp) and
+     DETERM-ACCOUNT-V1 stay src-owned JSON/text until the src-side increment
+     (marked D2-DEFERRED(src) in code); the light export-headers archive waits
+     on the binary header frame. IN FLIGHT THIS SESSION: inc7a/7b (the per-type
+     wire payload frames for the 8 remaining JSON-payload types) and inc8
+     (chain storage/genesis). Storage/genesis were not started before this
+     session.
   2. Delete third_party/nlohmann/json.hpp AND include/determ/json/json.hpp;
      regenerate test vectors as binary. RPC/CLI/config may keep optional text.
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.
@@ -71,16 +83,41 @@ PRE-GENESIS BACKLOG (must land before mainnet) — DApp substrate Q2/Q3/Q4 code
 (DECISION-LOG 2026-07-28): governed payload cap; enforce topic routing; accept_anon.
 Also: macOS/Darwin support — LANDED (DECISION-LOG 2026-08-11, both entries): RNG
 __APPLE__ getentropy branch, kqueue reactor backend, script portability; first
-native Darwin/arm64 build green, FAST 294/0, byte-freeze pins matched, no goldens
-regenerated. Tail: full run_all on Darwin (pip3 pynacl), macOS CI runner, APFS.
+native Darwin/arm64 build green, byte-freeze pins matched, no goldens regenerated
+(FAST was 294/0 at that commit; 299/0 as of d34c632). Tail: full run_all on Darwin
+(pip3 pynacl — three EQV cluster scripts now carry a pynacl fallback and run here),
+macOS CI runner, APFS.
 
-AUTHORIZED (owner 2026-07-31), security-critical pre-genesis — run in parallel with
-D2 (disjoint files): close the two rank-1 consensus holes (DECISION-LOG 2026-07-31).
-  - Hole 1 forged-slash (validator.cpp:378): bind equivocation evidence to same height —
-    carry the conflicting headers; assert header_a.index==header_b.index==ev.block_index
-    (wire-format change; gate via check_equivocation_events_for_test).
-  - Hole 2 empty-committee beacon (node.cpp:1973): route on_beacon_header through the
-    verify_shard_tip_committee_sig_root verifier (non-empty + required_k floor; kills the
-    divergence class; gate via on_beacon_header_for_test).
-  Both falsify-on-mutant; both pre-genesis; both EXEMPT from the JSON hardening freeze.
+BOTH RANK-1 CONSENSUS HOLES ARE CLOSED (authorized owner 2026-07-31; LANDED d34c632,
+DECISION-LOG 2026-08-12). Do not re-open them; harden forward from here.
+  - Hole 1 forged-slash -> docs/SECURITY.md S-052. Closed by HEIGHT BINDING, not by
+    carrying headers (rejected on analysis: unbounded size + Block>EquivocationEvent>Block
+    recursion). Both digest families are now two-level and openable:
+      block_digest   = SHA256("DTM-BLKDIG-v2"  || index       u64BE || body_root)
+      contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64BE || body_root)
+    EquivocationEvent carries kind + per-side {index, body_root, sig}; digest_a/digest_b
+    DELETED; verifier rejects kind>1, asserts index_a==index_b==block_index, verifies
+    against DERIVED digests. Wire (GENESIS-DEADLINE): EQUIV_REC + EQUIVOCATION_EVIDENCE
+    fixed 229 B after the lp_str, kMinEquivEvent 230, decode fail-closes on kind>1.
+    Gate: the 8-arm EQV block of test-abort-cert-validation.
+    RESIDUAL, OPEN, NOT authorized: same-height cross-round honest double-signing still
+    satisfies V11 (an abort re-round changes the body at one height). Closing it needs
+    the round/aborts_gen bound into the openings. Recorded in EquivocationSlashing.md
+    §2 Case (c) + PROTOCOL.md §6.1 — do NOT treat it as closed.
+  - Hole 2 empty-committee beacon -> docs/SECURITY.md S-053. Closed by extracting
+    verify_committee_sigs as the ONE committee-signature core (non-empty + size match +
+    membership + verify + signed_count >= required_k); both verify_shard_tip_committee_
+    sig_root and on_beacon_header route through it. Gate: test-beacon-header-committee.
+    SCOPE, stated honestly: this does NOT authenticate cumulative_rand (outside
+    compute_block_digest; check_cumulative_rand is apply-path only) — PRE-EXISTING, still
+    NOT authorized, adjacent to the also-unauthorized HELLO beacon-role authentication.
+
+ALSO LANDED d34c632: S-050 straggler recovery (owner-authorized in-session 2026-08-12).
+An idle non-committee follower arms no round timer, so the S-050 stall valve never fired
+for it and one missed block stranded it permanently. apply_block_locked now treats
+b.index > height() as proof a peer minted past our head and arms the existing tolerance-0
+catch-up, GUARDED to fire once per stall episode. Gate: test-straggler-resync.
+FAST is now 299/0 on Darwin/arm64 (294 baseline + 5 new gates: test-beacon-header-
+committee, test-straggler-resync, selftest-envelope-bytes, selftest-keyfile-binary,
+selftest-backup-binary).
 NOT authorized (separate future item): authenticate the self-declared BEACON role in HELLO.

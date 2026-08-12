@@ -460,16 +460,6 @@ public:
     static constexpr uint64_t HEARTBEAT_MAX_BLOCKS          = 10000;
     static constexpr int      SUBSCRIBER_IDLE_HEARTBEAT_SECS = 30;
 
-    // B1 chain-storage-v1 staged migration (node-local, NOT consensus):
-    // up to this height the save worker ALSO rewrites the legacy full
-    // chain.json every tick — kept per-tick fresh for the test/operator
-    // scripts that parse it mid-run or after a hard kill; O(N) is trivial
-    // at this scale. Beyond it the hot path is store-only (true O(1) per
-    // save — the register's throughput win, exactly where long-chain O(N)
-    // rewrites hurt); live reads on long chains use RPC, and the legacy
-    // file is refreshed at graceful stop().
-    static constexpr uint64_t kLegacyFullSaveMaxHeight      = 4096;
-
     // Rev. 4: accept a fully-signed Transaction JSON (built externally, e.g.
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
     // Used for anonymous-account TRANSFERs that aren't authored by this node.
@@ -525,6 +515,11 @@ public:
     // registrants, dedup, genesis-pinned constants, tail headers).
     // Operators host the result for fast bootstrap of new nodes.
     nlohmann::json rpc_snapshot(uint32_t header_count = 16) const;
+    // D2 inc8: write the canonical binary snapshot (DSN1) to `path` node-side,
+    // atomically. `determ snapshot create` calls this instead of dumping the
+    // JSON rpc_snapshot result to disk, because at-rest snapshots are binary.
+    nlohmann::json rpc_snapshot_save(const std::string& path,
+                                      uint32_t header_count = 16) const;
 
 private:
     void on_block(const chain::Block& b);

@@ -603,30 +603,30 @@ public:
     // return the canonical tip (the better block at the diverging height).
     static const Block& resolve_fork(const Block& a, const Block& b);
 
-    void        save(const std::string& path) const;
-
     // B1 (pre-launch register, 2026-07-09): chain-storage-v1 — the O(1)
-    // RUNTIME save path. Where save() rewrites the whole chain.json on every
-    // call (O(N) serialize+write under the save worker's shared_lock — the
-    // register's global-mutex/throughput offender), save_incremental()
-    // writes ONLY the blocks appended since the last incremental save, one
+    // RUNTIME save path, and since D2 inc8 the ONLY chain writer. It writes
+    // ONLY the blocks appended since the last incremental save, one
     // append-only file per block:
     //
-    //   <path>.blocks/<index>.json     one block, atomic tmp+rename, never
+    //   <path>.blocks/<index>.blk      ['D','B','K','1'] + one
+    //                                  Block::encode_frame frame extending
+    //                                  to EOF; atomic tmp+rename, never
     //                                  rewritten once written
-    //   <path>.manifest.json           tiny {format,height,head_hash},
+    //   <path>.manifest.bin            FIXED 44 bytes:
+    //                                  ['D','M','F','1'] | height u64 LE |
+    //                                  head_hash 32 raw (zero iff height 0);
     //                                  atomic tmp+rename, written LAST so a
     //                                  crash mid-save leaves the previous
     //                                  consistent manifest (blocks beyond
     //                                  the manifest height are ignored/
     //                                  overwritten on the next save)
     //
-    // <path> itself (the legacy full chain.json) is NOT written here — the
-    // Node writes it once at graceful stop() so every offline consumer
-    // (operator tools, determ-light verify-chain-file, test scripts that
-    // parse chain.json) keeps working unchanged. head_hash carries the same
-    // S-021 tamper gate as the legacy format: load recomputes the head
-    // digest after replay and rejects a mismatch.
+    // D2 inc8: <path> itself is neither written nor read — the legacy full
+    // chain.json writer (Chain::save) and its read branch are DELETED, so
+    // the binary store is the one at-rest representation. Offline text
+    // consumers use `determ chain-export --json`, a pull-based
+    // non-authoritative VIEW. head_hash carries the same S-021 tamper gate:
+    // load recomputes the head digest after replay and rejects a mismatch.
     //
     // Reorg hook (A4/S-048): DONE (A4.2 + A4.5). revert_head() clamps
     // persisted_count_ down to blocks_.size(), so the next save_incremental
@@ -639,6 +639,16 @@ public:
     // between the block rewrite and the final manifest can never brick the
     // store on a head_hash mismatch. The store is otherwise append-only.
     void        save_incremental(const std::string& path) const;
+
+    // D2 inc8 offline VIEW: render the binary store at <path> as the
+    // historical wrapped text shape {head_hash: "<hex>", blocks: [...]}.
+    // NON-AUTHORITATIVE — nothing loads it back; it exists so offline text
+    // consumers (operator tools, test scripts) have one migration target
+    // (`determ chain-export --json`) now that the at-rest chain is binary.
+    // Decode-only walk (no apply_transactions replay), but the S-021 head
+    // gate still runs. No manifest => {"", []}, mirroring load()'s
+    // empty-chain result.
+    static nlohmann::json export_store_json(const std::string& path);
 
     // rev.9 B6.basic: serialize the chain's CURRENT STATE (accounts,
     // stakes, registrants, dedup set) plus the last `header_count`
@@ -673,6 +683,22 @@ public:
     // serialize synthetic (non-A1-consistent) fixtures.
     static Chain restore_from_snapshot(const nlohmann::json& snapshot,
                                        bool require_supply_invariant = false);
+
+    // D2 inc8: the CANONICAL binary snapshot container ('DSN1'). Field-for-
+    // field mirror of serialize_state / restore_from_snapshot, with the same
+    // post-load gates (head_hash claim, S-033 state_root self-consistency, and
+    // the opt-in A1 unitary-balance revalidate). All at-rest snapshot files are
+    // this form — the JSON pair above survives only as the RPC text view and
+    // as the still-lp-JSON SNAPSHOT_RESPONSE wire payload until that wire inc
+    // lands, at which point it reuses THESE bytes (one snapshot layout).
+    //
+    // Unlike the JSON view every field is emitted unconditionally, so
+    // genesis_total is always present and the JSON path's back-solve has no
+    // binary counterpart. decode_state is bounds-checked (counts validated
+    // against remaining bytes before allocation) and EXACT-consumption.
+    std::vector<uint8_t> encode_state(uint32_t header_count = 16) const;
+    static Chain decode_state(const uint8_t* data, size_t len,
+                              bool require_supply_invariant = false);
     // block_subsidy must be passed at load time so replay credits creators
     // correctly. Caller (Node) loads it from GenesisConfig before this call.
     // rev.9 B3: shard routing params must also be passed so apply-side

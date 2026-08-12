@@ -1,10 +1,41 @@
 # S-006 — ContribMsg same-generation equivocation detection
 
-This document formalizes the S-006 closure shipped in `src/node/node.cpp::on_contrib` (the receive path) and the structural argument that the closure adds a second equivocation-detection surface — at the Phase-1 commit layer — without introducing a new wire format, new validator predicate, or new apply-side branch. The detection mechanism reuses the `EquivocationEvent` struct (FA6, `EquivocationSlashing.md`), the V11 validator predicate (`check_equivocation_events`), and the apply-side dual-mechanism slashing branch (FA-Apply-10, `EquivocationSlashingApply.md`) — substituting two `make_contrib_commitment` hashes for the two `compute_block_digest` hashes that V11's pre-S-006 form exercised. The substitution is sound because V11 is digest-agnostic: it verifies "two distinct hashes both signed by the same registered Ed25519 key at the same `block_index`," and is indifferent to whether those hashes are block digests or contrib commitments.
+This document formalizes the S-006 closure shipped in `src/node/node.cpp::on_contrib` (the receive path) and the structural argument that the closure adds a second equivocation-detection surface — at the Phase-1 commit layer — without introducing a new wire format, new validator predicate, or new apply-side branch. The detection mechanism reuses the `EquivocationEvent` struct (FA6, `EquivocationSlashing.md`), the V11 validator predicate (`check_equivocation_events`), and the apply-side dual-mechanism slashing branch (FA-Apply-10, `EquivocationSlashingApply.md`) — substituting two `make_contrib_commitment` hashes for the two `compute_block_digest` hashes that V11's pre-S-006 form exercised. The substitution is sound because V11 accepts BOTH digest families through one predicate — since 2026-08-12 by an explicit `kind` discriminator rather than by digest-agnosticism (see the UPDATE box below).
 
 The proof is short and structural. The pre-S-006 surface had a known gap: a Byzantine producer could send two distinct `ContribMsg` to two peers at Phase 1, both signed under their key, both at the same `(block_index, prev_hash, aborts_gen)`, with different `tx_hashes` or `dh_input` — and the gap would not be detected until (and unless) the producer subsequently signed two distinct `BlockSigMsg` at Phase 2. Honest peers each accepted the first `ContribMsg` they saw and silently dropped duplicates; the second contrib's signature evidence vanished. S-006 closes this by detecting the duplicate at receive time, constructing an `EquivocationEvent` whose two halves are the recomputed contrib commitments, and routing the event through the existing `pending_equivocation_evidence_` pool. The result is: every same-generation `ContribMsg` equivocation produces an `EquivocationEvent` in some honest peer's pool, which gossips, which gets baked into the next block, which slashes the equivocator per FA-Apply-10.
 
 **Companion documents:** `Preliminaries.md` (F0) for notation and V11; `EquivocationSlashing.md` (FA6) for slashing soundness (T-6: honest validators never falsely slashed under EUF-CMA); `EquivocationSlashingApply.md` (FA-Apply-10) for the apply-side mechanics (T-E1 through T-E7); `MakeContribCommitmentBackwardCompat.md` for the v1/F2 commit primitive's domain-separation argument; `SECURITY.md` §S-006 for the audit-side closure record.
+
+
+---
+
+**UPDATE 2026-08-12 — the EQV-height-bind restructure (S-052).** This document's load-bearing premise
+was "V11 is **digest-agnostic**". It no longer is, and the change strengthens rather than weakens the
+S-006 reuse argument. `EquivocationEvent` now carries `kind` (0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT) plus a
+per-side opening `(index, body_root)`; `digest_a`/`digest_b` are deleted and derived instead:
+
+```
+commit(cm)  =  SHA256("DTM-CONTRIB-v2" ‖ cm.block_index u64 BE ‖ body(cm))
+body(cm)    =  make_contrib_body_root(cm)          // the legacy commit preimage minus the leading index
+```
+
+Three consequences for this proof:
+
+1. **Everything below stated over `commit(cm)` still holds verbatim** — `commit` is still a single
+   deterministic function of the `ContribMsg`, and `commit(cm_1) ≠ commit(cm_2) ⟺ body(cm_1) ≠ body(cm_2)`
+   for two contribs at one `block_index` (the outer compose adds only the shared tag and index). Every
+   distinctness / injectivity argument transfers by that equivalence. The commitment VALUES changed
+   (pre-genesis, free); the structure of the argument did not.
+2. **The "digest-agnostic" phrasing is retired.** V11 discriminates the family explicitly. This matters:
+   under a SHARED tag, one honest block signature plus one honest contrib signature at one height would be
+   a valid V11 event — a *new* forgery introduced by the very reuse this document argues for. The two
+   distinct outer tags are therefore a **precondition of T-3**, not a stylistic choice.
+3. **The event now binds height cryptographically.** T-1's construction sets
+   `index_a = index_b = block_index`, which V11 asserts before verifying; see `EquivocationSlashing.md`
+   §2 Case (b) for what that closes and §2 Case (c) for the same-height cross-round residual it does not.
+
+Implementation: `src/node/node.cpp:3004` (the `kind = KIND_CONTRIB_COMMIT` assembly),
+`src/node/producer.cpp:332` (`compose_contrib_commitment`) / `:252` (`make_contrib_body_root`).
 
 ---
 
@@ -18,8 +49,10 @@ Let `commit(msg) := make_contrib_commitment(msg.block_index, msg.prev_hash, msg.
 
 - `ev.equivocator = d`
 - `ev.block_index = cm_1.block_index = cm_2.block_index`
-- `ev.digest_a = commit(cm_1)` and `ev.sig_a = cm_1.ed_sig`
-- `ev.digest_b = commit(cm_2)` and `ev.sig_b = cm_2.ed_sig`
+- `ev.kind = KIND_CONTRIB_COMMIT (1)`
+- `ev.index_a = cm_1.block_index`, `ev.body_root_a = body(cm_1)`, `ev.sig_a = cm_1.ed_sig`
+- `ev.index_b = cm_2.block_index`, `ev.body_root_b = body(cm_2)`, `ev.sig_b = cm_2.ed_sig`
+  (so `index_a = index_b = ev.block_index` holds by construction — the T-1 hypothesis already fixes both messages at one `block_index`)
 - `ev.shard_id = cfg_.shard_id`
 - `ev.beacon_anchor_height = beacon_headers_.back().index` (or `0` if absent)
 
@@ -27,7 +60,7 @@ and routes the event through `pending_equivocation_evidence_` and a gossip broad
 
 **Theorem T-2 (Different-generation drop, no false positive).** For every pair of `ContribMsg` `(cm_1, cm_2)` with `cm_1.signer == cm_2.signer == d` and `cm_1.aborts_gen ≠ cm_2.aborts_gen` (e.g., one before an abort-quorum, one after), the receive path does NOT construct an `EquivocationEvent`. The generation gate at `node.cpp:2068` (`if (msg.aborts_gen != current_aborts_.size()) return;`) drops the cross-generation message before the duplicate-detection branch is reached. An honest signer who legitimately retries at a higher `aborts_gen` is therefore not falsely accused.
 
-**Theorem T-3 (Composition with FA6 + FA-Apply-10).** The `EquivocationEvent` constructed in T-1 satisfies V11's predicate (`check_equivocation_events` at `validator.cpp:307`): `digest_a ≠ digest_b`, `sig_a ≠ sig_b`, the equivocator is registered, both signatures verify under the equivocator's registered Ed25519 public key, and the cross-shard `shard_id` / `beacon_anchor_height` fields are correctly populated. As a consequence, the event composes with FA6 T-6 (slashing soundness: an honest validator is never named as the equivocator) and FA-Apply-10 T-E1 (full stake forfeiture on apply). No new wire format, validator predicate, or apply-side branch is introduced.
+**Theorem T-3 (Composition with FA6 + FA-Apply-10).** The `EquivocationEvent` constructed in T-1 satisfies V11's predicate (`check_equivocation_events`, `src/node/validator.cpp:380`): `kind = 1 ≤ 1`; `index_a = index_b = ev.block_index` (the height assert — satisfied by construction, since T-1's hypothesis fixes both contribs at one `block_index`); `body_root_a ≠ body_root_b`; `sig_a ≠ sig_b`; the equivocator is registered; both signatures verify against the digests V11 DERIVES as `SHA256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)`, which is exactly `commit(cm_i)` by definition of the two-level commitment; and the cross-shard `shard_id` / `beacon_anchor_height` fields are correctly populated. As a consequence, the event composes with FA6 T-6 (slashing soundness: an honest validator is never named as the equivocator) and FA-Apply-10 T-E1 (full stake forfeiture on apply). No new wire format, validator predicate, or apply-side branch is introduced.
 
 **Theorem T-4 (Two-sig proof soundness).** Both `sig_a := cm_1.ed_sig` and `sig_b := cm_2.ed_sig` are valid Ed25519 signatures by `d`'s registered key over the byte-distinct commits `commit(cm_1)` and `commit(cm_2)`. The pre-construction sig-verification step at `on_contrib` line 2089 (for `cm_2`, the incoming message) and the symmetric line that admitted `cm_1` on its earlier arrival ensure both signatures pass `crypto::verify(pubkey, commit, sig)`. The downstream V11 check, run when the event is baked into a block, re-verifies both signatures independently against `registry.find(d).pubkey`. The two-sig soundness reduces exactly to FA6 T-6: an honest `d` cannot produce two valid signatures over two distinct commits except with probability `≤ 2⁻¹²⁸` per attempt (EUF-CMA, Preliminaries §2.2).
 
@@ -53,9 +86,9 @@ Three structural facts make the reuse-of-existing-channel design clean:
 
 - **The generation gate at `node.cpp:2068` already restricts `pending_contribs_` to current-gen-only.** A duplicate in `pending_contribs_[signer]` is necessarily same-generation (the cross-gen alternative is filtered before reaching the dedup branch). Therefore "same signer + duplicate in map + different commit hash" reduces to "same signer + same generation + different commit hash" — which is exactly Phase-1 equivocation under H2 (Preliminaries §4).
 
-- **V11's predicate is digest-agnostic.** `BlockValidator::check_equivocation_events` at `validator.cpp:307–322` checks `digest_a ≠ digest_b`, `sig_a ≠ sig_b`, the equivocator is registered, both signatures verify under `registry.find(ev.equivocator).pubkey`. It does not introspect what the digests are over — block bodies or contrib commitments are equally valid digest-types. The S-006 event slots in cleanly without a new validator predicate or a new event subtype.
+- **V11's predicate carries BOTH families through one gate** — since 2026-08-12 by an explicit `kind` discriminator (`src/node/validator.cpp:380`) rather than by being agnostic. It checks `kind ≤ 1`, the height assert, `body_root_a ≠ body_root_b`, `sig_a ≠ sig_b`, registry membership, and both signatures against digests DERIVED under the kind's domain tag. It still does not introspect what the *body* is over — the S-006 event slots in with `kind = 1` and no new validator predicate or event subtype. What changed is that the reuse is now **explicit and typed** instead of implicit; that is what forbids pairing a block signature with a contrib signature (see the UPDATE box).
 
-- **The apply-side branch is digest-agnostic too.** FA-Apply-10 T-E1 through T-E7 are stated entirely on `ev.equivocator` and don't read `ev.digest_a` / `ev.digest_b` (the validator did that upstream). The slash fires identically whether the upstream V11 was satisfied by block-digest equivocation or contrib-commit equivocation. No new apply branch is introduced.
+- **The apply-side branch is family-agnostic.** FA-Apply-10 T-E1 through T-E7 are stated entirely on `ev.equivocator` and read none of `ev.kind` / the openings (the validator did that upstream). The slash fires identically whether the upstream V11 was satisfied by block-digest equivocation or contrib-commit equivocation. No new apply branch is introduced.
 
 The closure is therefore additive at one site (`Node::on_contrib`) and uses zero new types, predicates, or apply paths. The price: ~55 LOC at the receive site + ~3 LOC of field/clear cleanup (the unused `contrib_equivocations_` field was deleted per `SECURITY.md` §S-006).
 
@@ -91,9 +124,12 @@ if (existing != pending_contribs_.end()) {
         chain::EquivocationEvent ev;
         ev.equivocator          = msg.signer;
         ev.block_index          = msg.block_index;
-        ev.digest_a             = existing_commit;
+        ev.kind                 = chain::EquivocationEvent::KIND_CONTRIB_COMMIT;
+        ev.index_a              = existing->second.block_index;
+        ev.body_root_a          = existing_body;   // make_contrib_body_root(existing)
         ev.sig_a                = existing->second.ed_sig;
-        ev.digest_b             = commit;
+        ev.index_b              = msg.block_index;
+        ev.body_root_b          = new_body;        // make_contrib_body_root(msg)
         ev.sig_b                = msg.ed_sig;
         ev.shard_id             = cfg_.shard_id;
         ev.beacon_anchor_height = beacon_headers_.empty()
@@ -163,7 +199,7 @@ Fix `(cm_1, cm_2)` as in the hypothesis: same signer `d`, same generation, disti
 - (g) Constructs the event at lines 2136–2145 with the field assignments listed in the theorem statement.
 - (h) Runs the pool-dedup scan at lines 2147–2153. If no prior event with `(d, cm_2.block_index)` is in the pool, the new event is appended and gossiped (lines 2154–2160).
 
-**Case B: `cm_2` arrives first, then `cm_1`.** Symmetric — the roles of `existing` and `msg` swap. The event has `digest_a = commit(cm_2)`, `sig_a = cm_2.ed_sig`, `digest_b = commit(cm_1)`, `sig_b = cm_1.ed_sig`. By V11 the order doesn't matter (it checks `digest_a ≠ digest_b` and verifies both sigs; the labels `_a` / `_b` are positional, not semantic).
+**Case B: `cm_2` arrives first, then `cm_1`.** Symmetric — the roles of `existing` and `msg` swap. The event has `body_root_a = body(cm_2)`, `sig_a = cm_2.ed_sig`, `body_root_b = body(cm_1)`, `sig_b = cm_1.ed_sig`. By V11 the order doesn't matter (it checks `digest_a ≠ digest_b` and verifies both sigs; the labels `_a` / `_b` are positional, not semantic).
 
 **Both cases:** The event satisfies all field-assignment claims in T-1. ∎
 
@@ -187,10 +223,10 @@ In all three orderings, the construction at lines 2136–2145 is not reached. Th
 
 We show the constructed `EquivocationEvent` from T-1 satisfies V11's predicate. By inspection of `BlockValidator::check_equivocation_events` at `validator.cpp:307–322`:
 
-- `ev.digest_a == commit(cm_1)`, `ev.digest_b == commit(cm_2)`, and by hypothesis `commit(cm_1) ≠ commit(cm_2)` (the precondition of T-1). So `digest_a != digest_b` — first V11 clause satisfied.
+- `ev.body_root_a == body(cm_1)`, `ev.body_root_b == body(cm_2)`, and by hypothesis `commit(cm_1) ≠ commit(cm_2)`, which at one `block_index` is equivalent to `body(cm_1) ≠ body(cm_2)` (the precondition of T-1). So `body_root_a != body_root_b` — that V11 clause satisfied.
 - `ev.sig_a == cm_1.ed_sig`, `ev.sig_b == cm_2.ed_sig`. Distinct Ed25519 signatures over distinct messages by the same key are with overwhelming probability distinct as 64-byte byte-strings (RFC 8032: signatures include a deterministic per-message nonce derived from the SHA-512 of `prefix || message`, so distinct messages produce distinct nonces and hence distinct signatures with negligible collision probability). `sig_a != sig_b` — second V11 clause satisfied.
 - `ev.equivocator = msg.signer`, which passed the registry lookup at `on_contrib` line 2076. So `registry.find(ev.equivocator)` returns a valid entry — third V11 clause satisfied.
-- The V11 sig-verifies `Verify(pk_d, ev.digest_a, ev.sig_a)` and `Verify(pk_d, ev.digest_b, ev.sig_b)` both pass: the corresponding pre-construction checks ran at `on_contrib` line 2089 for `cm_2` and at the analogous line on `cm_1`'s earlier arrival. (Note that V11 re-runs the verifies independently at validate-time, so the construction-time verifies are belt-and-suspenders — a propagated event survives even if the receiver who constructed it acted in bad faith on the pre-checks, because V11 will catch a fabricated sig at block-validate.) Fourth and fifth V11 clauses satisfied.
+- The V11 sig-verifies `Verify(pk_d, D(1, ev.index_a, ev.body_root_a), ev.sig_a)` and `Verify(pk_d, D(1, ev.index_b, ev.body_root_b), ev.sig_b)` — where the derived digests are exactly `commit(cm_1)` and `commit(cm_2)` — both pass: the corresponding pre-construction checks ran at `on_contrib` line 2089 for `cm_2` and at the analogous line on `cm_1`'s earlier arrival. (Note that V11 re-runs the verifies independently at validate-time, so the construction-time verifies are belt-and-suspenders — a propagated event survives even if the receiver who constructed it acted in bad faith on the pre-checks, because V11 will catch a fabricated sig at block-validate.) Fourth and fifth V11 clauses satisfied.
 - Cross-shard `shard_id` and `beacon_anchor_height` are populated per the assignment at lines 2143–2145. V11's cross-shard handling at `validator.cpp` continues to behave per FA6 T-6.1.
 
 Therefore the event survives V11, gets baked into a finalized block per `Producer::build_body`, and is consumed by the apply path at `chain.cpp:1344–1356`. FA-Apply-10 T-E1 fires (`stakes_[d].locked := 0` + `block_slashed += L`). FA-Apply-10 T-E2 fires (`registrants_[d].inactive_from := b.index + 1`). FA-Apply-10 T-E5 holds (A1 invariance: `Δlive_total_supply = −L = Δexpected_total`). ∎
@@ -254,7 +290,7 @@ A signer who aborts and retries at a higher `aborts_gen` legitimately sends a di
 
 ### 6.3 Pool-dedup coarseness
 
-The pool-dedup at lines 2147–2153 keys on `(equivocator, block_index)` only — not on the specific commits `(digest_a, digest_b)`. Two distinct equivocations against the same `d` at the same `h` (e.g., `(cm_A, cm_B)` and `(cm_A, cm_C)` with distinct C ≠ B) would produce events with the same `(equivocator, block_index)` but distinct digest pairs; only the first survives in the pool. This is intentional: the slash is full-stake-forfeit (T-E1), so the second incident contributes nothing additional. Multiple same-`(d, h)` events would also fail T-E3 idempotence at apply (both slashing the same `locked` value, with the second contributing zero). The coarse key avoids storing redundant evidence.
+The pool-dedup keys on the equivocator identity only — not on the specific openings `(body_root_a, body_root_b)`. Two distinct equivocations against the same `d` at the same `h` (e.g., `(cm_A, cm_B)` and `(cm_A, cm_C)` with distinct C ≠ B) would produce events with the same `(equivocator, block_index)` but distinct digest pairs; only the first survives in the pool. This is intentional: the slash is full-stake-forfeit (T-E1), so the second incident contributes nothing additional. Multiple same-`(d, h)` events would also fail T-E3 idempotence at apply (both slashing the same `locked` value, with the second contributing zero). The coarse key avoids storing redundant evidence.
 
 The downside: forensic auditing across multiple distinct same-`(d, h)` incidents would only see one event in the chain history. The cross-shard forensic fields (`shard_id`, `beacon_anchor_height`) help disambiguate cross-shard observations, but within a single shard the first-observed evidence is the canonical record. This is acceptable for the soundness goal (slashing fires correctly); a forensics audit can independently re-derive the evidence from gossip logs if needed.
 
@@ -309,7 +345,7 @@ The closure is **localized** in the sense of Track A (~55 LOC at a single site +
 - `include/determ/chain/block.hpp::EquivocationEvent` (lines 256–279) — the event struct, unchanged from rev.8.
 - `src/node/validator.cpp::check_equivocation_events` (lines 307–322 approximate) — V11's two-sig + distinct-digest check.
 - `src/chain/chain.cpp::apply_transactions` equivocation branch (lines 1344–1356) — the apply-side dual mechanism per FA-Apply-10.
-- `src/node/producer.cpp::make_contrib_commitment` (lines 219–260) — the commit primitive feeding both `digest_a` and `digest_b` of an S-006 event.
+- `src/node/producer.cpp:252 make_contrib_body_root` + `:332 compose_contrib_commitment` — the two-level commit primitive feeding both openings of an S-006 event.
 - `src/node/producer.cpp::build_body` (line 452 approximate) — the bake site that consumes `pending_equivocation_evidence_` into `b.equivocation_events`.
 - `include/determ/node/producer.hpp::ContribMsg` (lines 36–62 approximate) — the wire struct including the F2 view-root fields.
 - `docs/proofs/Preliminaries.md` (F0) — notation, V11, H2 (S-006 closure clause: at most one `make_contrib_commitment` per `(height, aborts_gen)`).

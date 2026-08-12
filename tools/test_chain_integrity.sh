@@ -89,58 +89,59 @@ echo "  height: $H"
   || assert false "chain didn't advance past 5 (h=$H)"
 
 echo
-echo "=== 3. Stop node + inspect chain.json shape ==="
+echo "=== 3. Stop node + inspect the BINARY chain store ==="
 kill ${NODE_PIDS[0]} 2>/dev/null
 sleep 2
 kill -9 ${NODE_PIDS[0]} 2>/dev/null
 NODE_PIDS[0]=
 
+# D2 inc8: the at-rest chain is the binary store — a fixed 44-byte DMF1
+# manifest at <chain>.manifest.bin plus one DBK1 record per block under
+# <chain>.blocks/. `determ chain-export --json` is the offline text VIEW.
 HEAD_HASH=$(python -c "
-import json
+import json, subprocess
 try:
-    j = json.load(open('$T/n1/chain.json'))
-    if isinstance(j, dict) and 'head_hash' in j and 'blocks' in j:
-        print(j['head_hash'])
-    else:
-        print('LEGACY')
+    j = json.loads(subprocess.check_output(
+        ['$DETERM','chain-export','--chain','$T/n1/chain.json']))
+    print(j['head_hash'] if j['head_hash'] else 'EMPTY')
 except Exception as e:
     print('ERROR:' + str(e))
 ")
-echo "  chain.json head_hash: $HEAD_HASH"
-if [ "$HEAD_HASH" != "LEGACY" ] && [ "${HEAD_HASH:0:6}" != "ERROR:" ] && [ -n "$HEAD_HASH" ]; then
-  assert true "chain.json wrapped form has head_hash (${HEAD_HASH:0:16}...)"
+echo "  store head_hash: $HEAD_HASH"
+if [ "$HEAD_HASH" != "EMPTY" ] && [ "${HEAD_HASH:0:6}" != "ERROR:" ] && [ -n "$HEAD_HASH" ]; then
+  assert true "chain-export renders the store head_hash (${HEAD_HASH:0:16}...)"
 else
-  assert false "chain.json not in expected wrapped form (got: $HEAD_HASH)"
+  assert false "chain store not readable via chain-export (got: $HEAD_HASH)"
+fi
+if [ -f "$T/n1/chain.json.manifest.bin" ] \
+   && [ "$(wc -c < "$T/n1/chain.json.manifest.bin" | tr -d ' ')" = "44" ]; then
+  assert true "store manifest is the fixed 44-byte DMF1 record"
+else
+  assert false "store manifest missing or not 44 bytes"
 fi
 
 echo
-echo "=== 4. Snapshot original chain.json ==="
-cp $T/n1/chain.json $T/n1/chain.json.orig
+echo "=== 4. Snapshot the original store ==="
+cp $T/n1/chain.json.manifest.bin $T/n1/manifest.orig
+cp -R $T/n1/chain.json.blocks $T/n1/blocks.orig
 
 echo
-echo "=== 5. Tamper: flip one hex nibble of the LAST block's first creator_block_sig ==="
-# Tail block's compute_hash() covers creator_block_sigs[]. Mutate the
-# first signature — it's always present after K-of-K assembly and
-# always part of the hash, so this is a reliable head_hash-changing
-# mutation regardless of whether state_root happens to be non-zero.
+echo "=== 5. Tamper: flip one byte of the manifest's stored head_hash ==="
+# The manifest's head_hash transitively covers every block via the
+# prev_hash chain + committee signatures (S-021). Flipping one byte of it
+# is the canonical on-disk tampering the load gate must catch.
 python -c "
-import json
-j = json.load(open('$T/n1/chain.json'))
-tail = j['blocks'][-1]
-sigs = tail['creator_block_sigs']
-assert sigs, 'no creator_block_sigs to tamper with'
-sig = sigs[0]
-def flip(c):
-    if c == 'f': return '0'
-    if c == '9': return 'a'
-    return chr(ord(c) + 1)
-sigs[0] = sig[:-1] + flip(sig[-1])
-print('mutated creator_block_sigs[0][-1]:', sig[-8:], '->', sigs[0][-8:])
-json.dump(j, open('$T/n1/chain.json','w'))
+import sys
+p = '$T/n1/chain.json.manifest.bin'
+b = bytearray(open(p,'rb').read())
+assert len(b) == 44, f'manifest is {len(b)} bytes, expected 44'
+b[43] ^= 0x01           # last byte of the 32-byte head_hash
+open(p,'wb').write(bytes(b))
+print('flipped manifest head_hash byte 31')
 "
 
 echo
-echo "=== 6. Restart node — must refuse to load tampered chain ==="
+echo "=== 6. Restart node — must refuse to load the tampered store ==="
 $DETERM start --config $T/n1/config.json > $T/n1/log_after 2>&1 &
 NODE_PIDS[0]=$!
 sleep 3
@@ -151,13 +152,13 @@ if kill -0 ${NODE_PIDS[0]} 2>/dev/null; then
   kill ${NODE_PIDS[0]} 2>/dev/null
   sleep 1
   kill -9 ${NODE_PIDS[0]} 2>/dev/null
-  assert false "node started despite tampered chain.json (S-021 detection failed)"
+  assert false "node started despite a tampered chain store (S-021 detection failed)"
 else
   # Process exited. Check log for the diagnostic.
   if grep -q "head_hash mismatch" $T/n1/log_after; then
-    assert true "load rejected tampered chain.json with head_hash mismatch"
+    assert true "load rejected the tampered store with head_hash mismatch"
   elif grep -qE "(tampering|corruption)" $T/n1/log_after; then
-    assert true "load rejected tampered chain.json (tampering/corruption diagnostic)"
+    assert true "load rejected the tampered store (tampering/corruption diagnostic)"
   else
     assert false "node exited but log doesn't show head_hash mismatch diagnostic"
     echo "  log tail:"
@@ -167,8 +168,10 @@ fi
 NODE_PIDS[0]=
 
 echo
-echo "=== 7. Restore original; load must succeed ==="
-cp $T/n1/chain.json.orig $T/n1/chain.json
+echo "=== 7. Restore original store; load must succeed ==="
+cp $T/n1/manifest.orig $T/n1/chain.json.manifest.bin
+rm -rf $T/n1/chain.json.blocks
+cp -R $T/n1/blocks.orig $T/n1/chain.json.blocks
 $DETERM start --config $T/n1/config.json > $T/n1/log_final 2>&1 &
 NODE_PIDS[0]=$!
 sleep 3
@@ -188,7 +191,7 @@ echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
-  echo "  PASS: S-021 chain.json head_hash tampering detection"; exit 0
+  echo "  PASS: S-021 chain-store head_hash tampering detection"; exit 0
 else
   echo "  FAIL: test_chain_integrity"; exit 1
 fi
