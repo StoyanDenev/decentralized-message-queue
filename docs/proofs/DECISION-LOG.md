@@ -2020,3 +2020,21 @@ Also confirmed: the block family takes its round identity from a **peer's contri
 **Tree state:** reverted to de223ab; `ci_local` green. Harness + fix preserved as session artifacts. **Hole 1b remains OPEN and a GENESIS BLOCKER.**
 
 **Authority:** review findings recorded by Claude Fable, 2026-08-12. Escalated to Stoyan Denev: the adoption-scoping design, and whether to invest in linking `determ-dsf` against production consensus code so invariant testing is real rather than modelled.
+
+## 2026-08-12 (final+6) — AUTHORIZED (5th design): same-height duplicates are NEVER slashable — exclusion only; round_seq for precision, fresh-random per process; ratchet = E2E gate + mandatory review
+
+**Decision (owner, 2026-08-12).**
+
+**1. Mechanism — NEVER SLASH, EXCLUDE INSTEAD.** A same-height duplicate signature carries **no stake consequence of any kind**. The full-forfeiture + deregistration branch (`src/chain/chain.cpp:1815-1826`) is removed for equivocation evidence and replaced by exclusion from creator selection. This is chosen over the per-signer-seq slashing design because it makes the catastrophic outcome **structurally unreachable**: no implementation defect in the round identity — no reset, no restart regression, no replay, no verifier bug — can cost an honest validator its stake, because that path no longer exists. Four designs have now failed on exactly that hazard; removing the consequence removes the class.
+
+**2. `round_seq` is retained, but ONLY for precision, not safety.** A per-signer monotonic counter, **seeded fresh-random per process** and incremented on every `start_contrib_phase` entry, signed into `make_contrib_body_root` and carried per side in the evidence. Its sole job is to distinguish *same-round duplicate* (exclude) from *honest re-round* (no action). Because it is no longer safety-critical, a bug in it costs at most a round of selection.
+   - **No persistence, no fsync, no `round_seq.bin`.** A fresh random 64-bit start per process means a restart cannot reuse an identity (~2^-64), which removes the non-atomic-write defect, the lagging-async-save regression, and the reserve/adoption off-by-one that killed attempt 4.
+   - **No ADOPT-UPWARD.** `round_seq` is compared ONLY within one signer's own pair, never across signers, so global agreement was never required. Admission keeps using the abort tail exactly as today. The entire attack surface that killed attempt 4 — an unattributable, unbounded-rate round-reset primitive open to any registered domain — does not exist in this design.
+
+**3. Ratchet — E2E gate + mandatory review.** The end-to-end reproduction stays in-tree because it executes real production code and asserts at the VERIFIER; adversarial review becomes mandatory for any change touching the round identity, the evidence predicate, or the apply path. The structural guard and the unlinked DSF model are NOT relied upon — both were empirically defeated (see the entry above). Linking `determ-dsf` against production consensus code is deferred, not adopted.
+
+**CONSEQUENCE THE OWNER MUST REVIEW (flagged, not overridden).** Removing stake forfeiture for equivocation removes the economic deterrent at this layer entirely, and the accountable-safety argument in `docs/proofs/BFTSafety.md` (assumption **B2** and Corollary **T-5.1**, slash-and-recover) is stated in terms of slashing. Those claims must be re-derived or re-scoped against this rule — a prior review already flagged them as silently voided by a weaker version of this change. `SECURITY.md` S-011's mitigation likewise cites slashing. The abort-driven `SUSPENSION_SLASH` path is a separate mechanism and is unaffected. **This must be settled before genesis; it is not settled here.**
+
+**Also mandatory in the implementation** (each is a confirmed defect from a prior attempt): the exclusion must land on a predicate the **S-051 eligibility floor cannot lift**, or the penalty is identically zero in the default K-of-K deployment; the exclusion window must be **offence-anchored** so re-baking evidence cannot slide or escalate it; and the BFT block family must either be covered or scoped out explicitly.
+
+**Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction). Supersedes the round_seq-as-slashing-identity design of the entry above.
