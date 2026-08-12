@@ -1842,3 +1842,21 @@ DAK1 carries only an anon identity, so without this flag the previously-shipped 
 **Consistency.** Provable security / B3: the review is the reason this entry exists — a green gate proved the wrong property, and the correct response is to retract the claim, not to keep the comfortable one. No-migrations: everything here is pre-genesis and therefore still changeable, which is precisely why the round-counter decision must be made now.
 
 **Authority:** adversarial-review finding recorded by Claude Fable, 2026-08-12; the round-counter design and the two Q1 residuals are escalated to Stoyan Denev and are NOT decided here.
+
+## 2026-08-12 (later still) — Hole 1b closure design AUTHORIZED: gossiped round-reset marker; test-first; no interim softener
+
+**Decision (owner, 2026-08-12), on the genesis blocker recorded in the entry above.**
+
+**1. Mechanism — a GOSSIPED ROUND-RESET MARKER (not a local counter).** The round identity must satisfy two properties at once, and only a shared value does: (a) it must genuinely change on EVERY re-entry to `start_contrib_phase`, and (b) all nodes must converge on it, or two nodes that re-round at different times could never co-sign again — a permanent liveness break. A per-signer LOCAL monotonic counter satisfies (a) and fails (b), and was rejected for exactly that reason.
+
+The S-050 stall valve and the S-048 depth-1 reorg will emit a **gossiped, adopted round-reset marker**, carried by the same machinery abort events already use (bounded, deterministic, gossiped, adopted, bound into the block). With it, the round generation really does increment on every re-entry, which fixes the hazard at its ROOT rather than at the verifier: `on_contrib` admits on `msg.aborts_gen != current_aborts_.size()`, so a peer receiving a re-round contrib will now **reject it at admission** instead of admitting it into the same generation, seeing a "duplicate signer", and assembling honest-validator slashing evidence. Nodes reconverge once the marker propagates.
+
+Consequence: the ALREADY-COMMITTED v3 `gen` mechanism becomes CORRECT — this is a producer-side fix, not another evidence-format revision. Whether the v3 tags and the 246/245-byte frames can therefore stay final is to be confirmed by the implementation; they remain PROVISIONAL until it lands.
+
+**2. Interim posture — DOCUMENTED, NO CODE CHANGE.** Nothing is launched, so no stake is at risk today. The hazard is recorded here, the code comments state the scope truthfully, and `determ-light verify-equivocation`'s PROVEN verdict already tells operators to corroborate before acting on a slash. A temporary softener would be shipped only to be reverted; fixing once, correctly, is cleaner.
+
+**3. Sequencing — HOLE 1b FIRST, ALONE, TEST-FIRST.** Not bundled with the other beacon-path blockers (the un-checked committee derivation at header ingest; the still-unauthorized HELLO beacon-role authentication), despite the shared ingest surface: Hole 1b is the only blocker where an honest participant loses funds, and an isolated increment keeps the falsification unambiguous.
+
+**Test-first is mandatory and is the point.** A reproduction gate that drives the valve path with an EMPTY abort tail and asserts an honest validator is NOT slashed MUST be written first and MUST FAIL at HEAD (a1a0cf1). That failure is the anchor: this session's central lesson is that a green, mutant-verified gate can prove the wrong property, so the fix is only credible if the gate demonstrably captures the real hazard BEFORE the fix exists. If the hazard cannot be reproduced as described, that is itself a finding to be reported — not worked around.
+
+**Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction).
