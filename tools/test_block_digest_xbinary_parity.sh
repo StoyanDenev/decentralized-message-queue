@@ -49,7 +49,7 @@
 # ------------
 # We isolate each function's body by NAME anchor (drift-robust; no line nums).
 # EQV-height-bind: the digest is a TWO-LEVEL hash — an outer compose
-# SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root) over a BODY function
+# SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE || body_root) over a BODY function
 # that binds everything else. The windows anchor on the BODY functions (the
 # leading index append moved up into the compose, which is pinned separately
 # by the tag-agreement check below):
@@ -84,7 +84,7 @@
 #       CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT \
 #       PARTNER_SUBSET TIMESTAMP
 #   * EQV-height-bind tag agreement: the outer compose of BOTH files must
-#     carry the byte-identical "DTM-BLKDIG-v2" domain tag.
+#     carry the byte-identical "DTM-BLKDIG-v3" domain tag.
 #   * light seq EXACTLY EQUAL to the producer seq (full F-7 parity — every
 #     field, same order, including all three F2 roots).
 #   * LOAD-BEARING cross-site check: the LIVE producer seq == the LIVE light
@@ -807,33 +807,34 @@ if [ -f "$LIGHT_FILE" ]; then
   fi
 fi
 
-# ── EQV-height-bind: outer-compose tag agreement ────────────────────────────────
+# ── EQV-height-bind + EQV-gen-bind: outer-compose tag agreement ────────────────
 # The two-level digest split moved the leading index append into an outer
-# compose: digest = SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root).
-# The BODY windows above no longer see the tag or the index, so pin the tag
-# HERE: it must appear inside the compose function of BOTH files (a copy that
-# changed / dropped its tag would diverge every committee-signed digest).
+# compose: digest = SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE
+# || body_root). The BODY windows above no longer see the tag, the index or the
+# gen, so pin the tag HERE: it must appear inside the compose function of BOTH
+# files (a copy that changed / dropped its tag would diverge every
+# committee-signed digest).
 compose_has_tag() {
   local file="$1" fn="$2"
   awk -v fn="$fn" '
     BEGIN { inreg = 0; found = 0 }
     !inreg && $0 ~ ("^Hash +" fn "\\(") { inreg = 1; next }
     inreg {
-      if ($0 ~ /DTM-BLKDIG-v2/) found = 1
+      if ($0 ~ /DTM-BLKDIG-v3/) found = 1
       if ($0 ~ /\.finalize\(\)/) exit
     }
     END { print found }
   ' "$file"
 }
 if [ "$(compose_has_tag "$PROD_FILE" compose_block_digest)" = "1" ]; then
-  ok "compose tag: producer.cpp::compose_block_digest carries DTM-BLKDIG-v2"
+  ok "compose tag: producer.cpp::compose_block_digest carries DTM-BLKDIG-v3"
 else
-  bad "compose tag: producer.cpp::compose_block_digest is missing DTM-BLKDIG-v2 (tag drift)"
+  bad "compose tag: producer.cpp::compose_block_digest is missing DTM-BLKDIG-v3 (tag drift)"
 fi
 if [ "$(compose_has_tag "$LIGHT_FILE" light_compose_block_digest)" = "1" ]; then
-  ok "compose tag: light/verify.cpp::light_compose_block_digest carries DTM-BLKDIG-v2"
+  ok "compose tag: light/verify.cpp::light_compose_block_digest carries DTM-BLKDIG-v3"
 else
-  bad "compose tag: light/verify.cpp::light_compose_block_digest is missing DTM-BLKDIG-v2 (tag drift)"
+  bad "compose tag: light/verify.cpp::light_compose_block_digest is missing DTM-BLKDIG-v3 (tag drift)"
 fi
 
 # ── F2 sub-hasher source-parity (ADC-3 + siblings) ──────────────────────────────
@@ -845,7 +846,7 @@ fi
 # reorder/add/drop/recast in either copy (which would drift the committee-signed
 # view root for cross-shard/reconciled blocks with no runtime red) is RED here.
 check_subhasher hash_abort_event         DTM-F2-ABORT-v2    # register ADC-3 (D2-inc3: binary claims)
-check_subhasher hash_equivocation_event  DTM-F2-EQ-v2       # same class (F2 equivocation view; EQV-height-bind v2)
+check_subhasher hash_equivocation_event  DTM-F2-EQ-v3       # same class (F2 equivocation view; EQV-gen-bind v3)
 check_subhasher hash_cross_shard_receipt DTM-F2-RCPT-v1     # same class (F2 inbound-receipt view)
 
 echo ""

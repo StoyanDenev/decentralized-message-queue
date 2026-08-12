@@ -163,7 +163,18 @@ struct BlockSigMsg {
 // hashes for legacy peers, callers MUST NOT include the view-root args
 // (they're trailing default-zero); the implementation has an explicit
 // short-circuit when all three roots are zero (= v1 path).
-Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
+//
+// EQV-gen-bind (DECISION-LOG 2026-08-12, Q2): `aborts_gen` — the sender's
+// ContribMsg::aborts_gen, i.e. the abort generation of the round this commit
+// belongs to — is a REQUIRED, non-defaulted second argument. It is composed
+// into the outer digest (not the body), so an EquivocationEvent can carry it
+// as part of each side's opening and the verifier can assert both signatures
+// came from the SAME round. Non-defaulted deliberately: a trailing default
+// would let a recompute silently omit it (the S-043 root cause), and unlike
+// the view roots there is no "zero means legacy" shape to preserve — gen 0 is
+// the ordinary first round.
+Hash make_contrib_commitment(uint64_t block_index, uint64_t aborts_gen,
+                              const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
                               const Hash& dh_input,
                               const Hash& view_eq_root = Hash{},
@@ -197,14 +208,30 @@ Hash make_contrib_commitment(const ContribMsg& m);
 //
 // Both digest families that feed the equivocation-evidence channel are
 // restructured into an OPENABLE two-level form so an EquivocationEvent can
-// carry, per side, the fixed-size opening {index u64, body_root Hash} and the
-// verifier can RECOMPUTE each signed digest and assert both signatures were
-// made at the SAME height (index_a == index_b == ev.block_index). Without
-// this, replaying one honest validator's signatures from two DIFFERENT
-// heights forged a full-stake slash (DECISION-LOG 2026-07-31, Hole 1).
+// carry, per side, the fixed-size opening {index u64, gen u64, body_root Hash}
+// and the verifier can RECOMPUTE each signed digest and assert both signatures
+// were made at the SAME height (index_a == index_b == ev.block_index) and in
+// the SAME round (gen_a == gen_b). Without the height bind, replaying one
+// honest validator's signatures from two DIFFERENT heights forged a full-stake
+// slash (DECISION-LOG 2026-07-31, Hole 1); without the gen bind, an honest
+// validator's two signatures from two abort RE-ROUNDS at ONE height did the
+// same (DECISION-LOG 2026-08-12, Q2 / Hole 1b).
 //
-//   block_digest   = SHA256("DTM-BLKDIG-v2"  || index       u64 BE || body_root)
-//   contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64 BE || body_root)
+//   block_digest   = SHA256("DTM-BLKDIG-v3"  || index       u64 BE
+//                                            || gen         u64 BE || body_root)
+//   contrib_commit = SHA256("DTM-CONTRIB-v3" || block_index u64 BE
+//                                            || gen         u64 BE || body_root)
+//
+// The tags are v3, not v2: the preimage SHAPE changed (a u64 inserted between
+// the index and the body root), so reusing the v2 tags for a different
+// structure would break the "one tag, one preimage shape" domain-separation
+// discipline.
+//
+// `gen` — the round generation at this height. Block side: the block's own
+// abort_events.size() (already what check_creator_selection chains into the
+// committee rand, so it IS the round identity, and a pure function of the
+// Block every co-signer digests — no gossip-async divergence). Contrib side:
+// ContribMsg::aborts_gen, the value on_contrib already gates admission on.
 //
 // The two outer tags MUST differ (domain separation): with a shared tag, one
 // honest block-sig plus one honest contrib-sig at the same height would
@@ -217,8 +244,9 @@ Hash make_contrib_commitment(const ContribMsg& m);
 // that verifies under a DIFFERENT (index, body_root) opening of the same
 // digest is a SHA-256 preimage break.
 
-// Outer compose for the Phase-2 block digest family (kind 0).
-Hash compose_block_digest(uint64_t index, const Hash& body_root);
+// Outer compose for the Phase-2 block digest family (kind 0). `gen` is the
+// block's abort generation (Block::abort_events.size()).
+Hash compose_block_digest(uint64_t index, uint64_t gen, const Hash& body_root);
 
 // The block-digest body: the exact legacy compute_block_digest preimage MINUS
 // the leading index append (which moved to the outer compose level). Mirrored
@@ -226,11 +254,14 @@ Hash compose_block_digest(uint64_t index, const Hash& body_root);
 // by tools/test_block_digest_xbinary_parity.sh).
 Hash compute_block_digest_body(const chain::Block& b);
 
-// Outer compose for the Phase-1 contrib-commitment family (kind 1).
-Hash compose_contrib_commitment(uint64_t block_index, const Hash& body_root);
+// Outer compose for the Phase-1 contrib-commitment family (kind 1). `gen` is
+// the sender's ContribMsg::aborts_gen.
+Hash compose_contrib_commitment(uint64_t block_index, uint64_t gen,
+                                const Hash& body_root);
 
 // The contrib-commitment body: the exact legacy make_contrib_commitment
-// preimage MINUS the leading block_index append. Same trailing default-zero
+// preimage MINUS the leading block_index append (and MINUS the aborts_gen,
+// which lives at the outer compose level). Same trailing default-zero
 // args (and the same all-zero ⇒ v1-shape short-circuit) as the field-form
 // make_contrib_commitment above.
 Hash make_contrib_body_root(const Hash& prev_hash,
@@ -461,9 +492,9 @@ Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
 
 // Phase 2 sig domain: hash that each creator_block_sigs[i] covers. Includes
 // every consensus-critical field of the block so equivocation on any of them
-// produces an unverifiable sig. EQV-height-bind: two-level —
-// compose_block_digest(b.index, compute_block_digest_body(b)); see the
-// compose declarations above.
+// produces an unverifiable sig. EQV-height-bind + EQV-gen-bind: two-level —
+// compose_block_digest(b.index, b.abort_events.size(),
+// compute_block_digest_body(b)); see the compose declarations above.
 Hash compute_block_digest(const chain::Block& b);
 
 // rev.9 S-009: post-Phase-2 randomness output. delay_output is computed

@@ -741,10 +741,11 @@ void print_usage() {
         "      double-sign proof carried by the EQUIVOCATION_EVIDENCE gossip\n"
         "      message + the submit_equivocation RPC). Re-runs the daemon's V11\n"
         "      slash gate (BlockValidator::check_equivocation_events)\n"
-        "      INDEPENDENTLY (EQV-height-bind form): kind <= 1, index_a ==\n"
-        "      index_b == block_index, body_root_a != body_root_b, sig_a !=\n"
+        "      INDEPENDENTLY (EQV-height-bind + EQV-gen-bind form): kind <= 1,\n"
+        "      index_a == index_b == block_index, gen_a == gen_b,\n"
+        "      body_root_a != body_root_b, sig_a !=\n"
         "      sig_b, and BOTH Ed25519 signatures verify against digests\n"
-        "      DERIVED from the (index, body_root) openings under the kind's\n"
+        "      DERIVED from the (index, gen, body_root) openings under the kind's\n"
         "      domain tag, against the equivocator's registered key. Supply\n"
         "      that key directly with --pubkey, or resolve it from a {domain,\n"
         "      ed_pub}[] committee/genesis-committee file via --committee +\n"
@@ -7540,26 +7541,36 @@ int cmd_verify_account(int argc, char** argv) {
 // message + the submit_equivocation RPC) and the equivocator's registered
 // Ed25519 public key, it INDEPENDENTLY re-runs the V11 check the daemon's
 // BlockValidator::check_equivocation_events applies before a slash is
-// finalized (EQV-height-bind form — the event carries per-side OPENINGS
-// (index, body_root), and each signed digest is DERIVED as
-// SHA256(TAG || index u64 BE || body_root) with TAG = "DTM-BLKDIG-v2" for
-// kind 0 / "DTM-CONTRIB-v2" for kind 1):
+// finalized (EQV-height-bind + EQV-gen-bind form — the event carries per-side
+// OPENINGS (index, gen, body_root), and each signed digest is DERIVED as
+// SHA256(TAG || index u64 BE || gen u64 BE || body_root) with
+// TAG = "DTM-BLKDIG-v3" for kind 0 / "DTM-CONTRIB-v3" for kind 1):
 //
 //   1. kind <= 1               (known digest family)
 //   2. index_a == index_b == block_index   (the height bind)
+//  2b. gen_a == gen_b          (the round bind — one abort generation)
 //   3. body_root_a != body_root_b (two DISTINCT signed values — not a replay)
 //   4. sig_a      != sig_b      (two distinct signatures)
-//   5. Verify(pk, derive(index_a, body_root_a), sig_a) == 1
-//   6. Verify(pk, derive(index_b, body_root_b), sig_b) == 1
+//   5. Verify(pk, derive(index_a, gen_a, body_root_a), sig_a) == 1
+//   6. Verify(pk, derive(index_b, gen_b, body_root_b), sig_b) == 1
 //
 // All passing is cryptographic proof the holder of `pk` signed two
-// conflicting digests of ONE family at the SAME block_index: a deliberate
-// double-sign that forfeits the equivocator's full stake on apply.
-// FA6 (EquivocationSlashing.md) proves this has no false positives under
-// Ed25519 EUF-CMA: an honest validator can NEVER be named here, because
-// reproducing it would require forging a signature by an honest key (and,
-// post height-bind, replaying honest signatures from two DIFFERENT heights
-// no longer qualifies — the openings pin each signature to its height).
+// conflicting digests of ONE family at the SAME block_index with the SAME
+// carried `gen`. Under Ed25519 EUF-CMA that cannot be fabricated for a key
+// you do not hold, and post height-bind a replay of honest signatures from
+// two DIFFERENT heights no longer qualifies (the openings pin each signature
+// to its height).
+//
+// It is NOT, however, proof of a DELIBERATE double-sign, and a PROVEN verdict
+// here must not be read as "this validator is dishonest". `gen` is a COUNT
+// (abort-tail size), not a round identity: the S-050 stall valve and the
+// S-048 depth-1 reorg both re-round at one height WITHOUT changing it, and an
+// honest signer's two signatures from such a re-round satisfy every clause
+// above. FA6 (EquivocationSlashing.md) is therefore NOT a no-false-positive
+// result in that case — its Case (c) residual is open, and closing it needs a
+// real per-height round counter (owner decision, DECISION-LOG). Operators:
+// treat PROVEN as "two same-height same-gen signatures exist", and corroborate
+// before acting on a slash.
 //
 // The public key is supplied directly via --pubkey <64-hex> (the
 // equivocator's registered ed_pub) OR resolved from a committee/genesis
@@ -7573,7 +7584,8 @@ int cmd_verify_account(int argc, char** argv) {
 //   EQUIVOCATION-PROVEN → exit 0 (all V11 conditions hold; a slash
 //                         against this signer is cryptographically justified)
 //   NOT-EQUIVOCATION    → exit 3 (a V11 condition fails: unknown kind,
-//                         mismatched heights, equal body roots, equal sigs,
+//                         mismatched heights, mismatched round generations,
+//                         equal body roots, equal sigs,
 //                         or either sig does not verify against its DERIVED
 //                         digest — the evidence does NOT prove a double-sign;
 //                         fail-closed, never a false PROVEN)
@@ -7648,19 +7660,21 @@ int cmd_verify_equivocation(int argc, char** argv) {
             pk = it->second;
         }
 
-        // V11, re-run independently of the daemon (EQV-height-bind form).
-        // Each clause that fails collapses the verdict to NOT-EQUIVOCATION
-        // with a precise reason — the evidence is structurally well-formed
-        // but does not prove a double-sign, so we fail closed rather than
-        // emit a false PROVEN. The two signed digests are DERIVED from the
-        // carried (index, body_root) openings via an inline compose (the
-        // offline mirror of producer.cpp::compose_block_digest /
+        // V11, re-run independently of the daemon (EQV-height-bind +
+        // EQV-gen-bind form). Each clause that fails collapses the verdict to
+        // NOT-EQUIVOCATION with a precise reason — the evidence is structurally
+        // well-formed but does not prove a double-sign, so we fail closed
+        // rather than emit a false PROVEN. The two signed digests are DERIVED
+        // from the carried (index, gen, body_root) openings via an inline
+        // compose (the offline mirror of producer.cpp::compose_block_digest /
         // compose_contrib_commitment — tag strings byte-identical).
-        auto derive_digest = [&](uint64_t index, const Hash& body_root) {
+        auto derive_digest = [&](uint64_t index, uint64_t gen,
+                                 const Hash& body_root) {
             determ::crypto::SHA256Builder h;
-            h.append(std::string(ev.kind == 0 ? "DTM-BLKDIG-v2"
-                                              : "DTM-CONTRIB-v2"));
+            h.append(std::string(ev.kind == 0 ? "DTM-BLKDIG-v3"
+                                              : "DTM-CONTRIB-v3"));
             h.append(index);
+            h.append(gen);
             h.append(body_root);
             return h.finalize();
         };
@@ -7669,12 +7683,16 @@ int cmd_verify_equivocation(int argc, char** argv) {
         bool kind_known       = (ev.kind <= 1);
         bool heights_match    = (ev.index_a == ev.block_index
                                  && ev.index_b == ev.block_index);
+        // EQV-gen-bind: both sides must be from the SAME abort generation —
+        // an honest signer's two same-height signatures from two re-rounds are
+        // not a double-sign.
+        bool gens_match       = (ev.gen_a == ev.gen_b);
         bool roots_distinct   = (ev.body_root_a != ev.body_root_b);
         bool sigs_distinct    = (ev.sig_a != ev.sig_b);
         Hash digest_a{}, digest_b{};
         if (kind_known) {
-            digest_a = derive_digest(ev.index_a, ev.body_root_a);
-            digest_b = derive_digest(ev.index_b, ev.body_root_b);
+            digest_a = derive_digest(ev.index_a, ev.gen_a, ev.body_root_a);
+            digest_b = derive_digest(ev.index_b, ev.gen_b, ev.body_root_b);
         }
         bool sig_a_ok = kind_known && roots_distinct && determ::crypto::verify(
             pk, digest_a.data(), digest_a.size(), ev.sig_a);
@@ -7687,6 +7705,10 @@ int cmd_verify_equivocation(int argc, char** argv) {
         } else if (!heights_match) {
             verdict = EquivVerdict::NOT_EQUIVOCATION;
             reason  = "index_a/index_b/block_index heights do not match";
+        } else if (!gens_match) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "gen_a != gen_b (two different abort rounds at one "
+                      "height, not a double-sign)";
         } else if (!roots_distinct) {
             verdict = EquivVerdict::NOT_EQUIVOCATION;
             reason  = "body_root_a == body_root_b (replay, not equivocation)";
@@ -7711,8 +7733,10 @@ int cmd_verify_equivocation(int argc, char** argv) {
                 {"kind",         ev.kind},
                 {"pubkey",       to_hex(pk)},
                 {"index_a",      ev.index_a},
+                {"gen_a",        ev.gen_a},
                 {"body_root_a",  to_hex(ev.body_root_a)},
                 {"index_b",      ev.index_b},
+                {"gen_b",        ev.gen_b},
                 {"body_root_b",  to_hex(ev.body_root_b)},
                 {"derived_digest_a", to_hex(digest_a)},
                 {"derived_digest_b", to_hex(digest_b)},
@@ -7735,10 +7759,12 @@ int cmd_verify_equivocation(int argc, char** argv) {
                       << "\n"
                       << "  pubkey:       " << to_hex(pk) << "\n"
                       << "  side a:       index=" << ev.index_a
+                      << " gen=" << ev.gen_a
                       << " body_root=" << to_hex(ev.body_root_a) << "\n"
                       << "    derived digest: " << to_hex(digest_a)
                       << "  (sig " << (sig_a_ok ? "VALID" : "INVALID") << ")\n"
                       << "  side b:       index=" << ev.index_b
+                      << " gen=" << ev.gen_b
                       << " body_root=" << to_hex(ev.body_root_b) << "\n"
                       << "    derived digest: " << to_hex(digest_b)
                       << "  (sig " << (sig_b_ok ? "VALID" : "INVALID") << ")\n";

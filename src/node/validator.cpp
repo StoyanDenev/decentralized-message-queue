@@ -207,7 +207,17 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
         // production block). Absent (non-beacon block, size 0) -> zero root -> the
         // make_contrib_commitment shard-tip short-circuit reproduces the byte-
         // identical commitment. Tampering the root then fails this sig check.
-        Hash commit = make_contrib_commitment(b.index, b.prev_hash, list,
+        // EQV-gen-bind: the creators' Phase-1 commitments now compose the
+        // ROUND GENERATION as well. Every contrib admitted into a round passed
+        // Node::on_contrib's `msg.aborts_gen == current_aborts_.size()` gate,
+        // so all K creators signed the assembler's generation — and the block
+        // carries that same abort list (check_creator_selection above already
+        // requires b.abort_events to chain to the committee rand the creators
+        // used, so its SIZE is exactly the round's generation). Reading it off
+        // the block therefore adds no new rejection class.
+        const uint64_t round_gen = static_cast<uint64_t>(b.abort_events.size());
+        Hash commit = make_contrib_commitment(b.index, round_gen,
+                                                b.prev_hash, list,
                                                 b.creator_dh_inputs[i],
                                                 vr_at(b.creator_view_eq_roots, i),
                                                 vr_at(b.creator_view_abort_roots, i),
@@ -363,20 +373,52 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 }
 
 // Each EquivocationEvent must contain two signatures by the same registered
-// key over two DIFFERENT digests of the SAME kind at the SAME height.
+// key over two DIFFERENT digests of the SAME kind at the SAME height AND in
+// the SAME round.
 // EQV-height-bind (DECISION-LOG 2026-07-31, Hole 1): both digest families
 // are openable two-level hashes, and the event carries the per-side
-// openings (index, body_root) instead of the opaque digests — so this gate
-// RECOMPUTES each signed digest via the kind's compose function, verifies
+// openings (index, gen, body_root) instead of the opaque digests — so this
+// gate RECOMPUTES each signed digest via the kind's compose function, verifies
 // the signatures against the DERIVED digests, and asserts
 // index_a == index_b == ev.block_index. The height is thereby transitively
 // signature-bound: an honest key only ever signs composed digests carrying
 // its true height under the correct tag, so presenting a signature under a
-// different (index, body_root) opening of the same digest is a SHA-256
+// different (index, gen, body_root) opening of the same digest is a SHA-256
 // preimage break. Replaying one honest validator's signatures from two
-// DIFFERENT heights therefore no longer forges a slash. If valid, this is
-// unambiguous proof of equivocation: the equivocator's full stake is
-// forfeited at apply time (chain.cpp::apply_transactions).
+// DIFFERENT heights therefore no longer forges a slash.
+// EQV-gen-bind (DECISION-LOG 2026-08-12, Q2 / Hole 1b): the height bind alone
+// left the last forged-slash route open — an honest validator legitimately
+// signs two DIFFERENT digests at ONE height across abort re-rounds (the
+// committee is reselected after an exclusion and each start_contrib_phase
+// generation draws a fresh dh_input). The round generation is now composed
+// into both digest families and carried per side, and this gate additionally
+// asserts gen_a == gen_b.
+//
+// SCOPE — HOLE 1b IS **NOT** CLOSED BY THIS GATE (B3: do not over-read it).
+// `gen` is a COUNT (current_aborts_.size() / b.abort_events.size()), not a
+// round IDENTITY, and two distinct rounds at one height can carry the SAME
+// count. Two confirmed paths re-round without changing it:
+//   * the S-050 stall valve (node.cpp maybe_stall_reset_locked) — with an
+//     EMPTY abort tail the tail is trivially "immobile", the valve clears +
+//     reset_round()s + re-enters start_contrib_phase with a FRESH dh_input,
+//     and gen stays 0 on both sides; and
+//   * the S-048 depth-1 reorg, which re-rounds at the same height with gen
+//     reset to 0.
+// In either case an honest validator's two same-height, same-gen signatures
+// are still packageable as "equivocation" and still forfeit its FULL stake —
+// no attacker signature required. A non-committee follower never runs the
+// valve at all (it arms no round timer, per the S-050 straggler entry), so in
+// any M > K deployment some peer holds the stale first contrib indefinitely.
+// What this gate DOES close: a genuine abort re-round, where the count really
+// did change. Closing the rest needs a per-height round counter that strictly
+// increments on EVERY start_contrib_phase entry, signed into ContribMsg and
+// recoverable from the Block — an owner design decision recorded in the
+// DECISION-LOG; it MUST land before genesis, since this evidence format
+// freezes there.
+//
+// If valid, the evidence is treated as proof of equivocation and the
+// equivocator's full stake is forfeited at apply time
+// (chain.cpp::apply_transactions).
 BlockValidator::Result BlockValidator::check_equivocation_events(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     // D3.3b-read: resolve the equivocator's key frozen-first with present-head
@@ -401,8 +443,24 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] height mismatch: index_a/index_b must equal block_index (EQV-height-bind)"};
 
-        // (3) Same-height digests differ iff the body roots differ (the outer
-        // compose adds only the shared tag + index).
+        // (2b) THE ROUND ASSERT (hole-1b closure) — both signed openings must
+        // carry the SAME abort generation. An honest validator signs a new
+        // digest every re-round at one height (new committee, fresh dh_input),
+        // so a cross-round pair is NOT a double-sign; only a same-round pair
+        // is. Signature verification below runs against digests derived from
+        // these very gens, so this equality is what makes the round
+        // signature-bound. NOTE: there is deliberately no
+        // `gen == <something on the block>` leg — the event's own block_index
+        // is a height on THIS chain, but the equivocated round's generation is
+        // not recoverable from the containing block, and inventing a carried
+        // "claimed gen" field would add unsigned surface with nothing to check
+        // it against. Equality of the two SIGNED gens is the whole property.
+        if (ev.gen_a != ev.gen_b)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] round mismatch: gen_a != gen_b (EQV-gen-bind)"};
+
+        // (3) Same-height same-gen digests differ iff the body roots differ
+        // (the outer compose adds only the shared tag + index + gen).
         if (ev.body_root_a == ev.body_root_b)
             return {false, "equivocation_event[" + std::to_string(i)
                          + "] body_root_a == body_root_b (not equivocation)"};
@@ -418,13 +476,13 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
         // (4) Derive each signed digest from its opening under the kind's
         // domain tag, then verify the signature against the DERIVED value —
         // never against anything carried opaquely in the event.
-        auto compose = [&](uint64_t index, const Hash& body_root) {
+        auto compose = [&](uint64_t index, uint64_t gen, const Hash& body_root) {
             return ev.kind == chain::EquivocationEvent::KIND_BLOCK_DIGEST
-                       ? compose_block_digest(index, body_root)
-                       : compose_contrib_commitment(index, body_root);
+                       ? compose_block_digest(index, gen, body_root)
+                       : compose_contrib_commitment(index, gen, body_root);
         };
-        Hash digest_a = compose(ev.index_a, ev.body_root_a);
-        Hash digest_b = compose(ev.index_b, ev.body_root_b);
+        Hash digest_a = compose(ev.index_a, ev.gen_a, ev.body_root_a);
+        Hash digest_b = compose(ev.index_b, ev.gen_b, ev.body_root_b);
 
         if (!verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
             return {false, "equivocation_event[" + std::to_string(i)
@@ -442,14 +500,20 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
 //   commit_i = SHA256(secret_i || pubkey_i)
 // is signed in Phase 1 (by creator_ed_sigs[i]), so any post-Phase-1
 // substitution of secret_i would fail this check.
-BlockValidator::Result BlockValidator::check_creator_dh_secrets(
-    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
+BlockValidator::Result BlockValidator::check_creator_dh_secrets_with(
+    const Block& b, const CreatorKeyResolver& resolve_key) const {
     if (b.creator_dh_secrets.size() != b.creators.size())
         return {false, "creator_dh_secrets size != creators size"};
-    // D3.3b-read: creator key from the frozen committee (EXTENDED).
-    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+    // Q1: the creator_dh_inputs arity guard. On the validate() path this is
+    // unreachable — check_creator_tx_commitments enforces the same equality two
+    // gates earlier — so apply-path behaviour is byte-identical. The Q1
+    // beacon-header ingest path calls this core WITHOUT that predecessor gate,
+    // where the indexed read below would otherwise be out of bounds on a
+    // hostile header. Fail-closed, not UB.
+    if (b.creator_dh_inputs.size() != b.creators.size())
+        return {false, "creator_dh_inputs size != creators size"};
     for (size_t i = 0; i < b.creators.size(); ++i) {
-        auto pk = resolve_committee_member_pubkey(chain, registry, epoch, b.creators[i]);
+        auto pk = resolve_key(b.creators[i]);
         if (!pk) return {false, "creator not found: " + b.creators[i]};
         Hash expected = SHA256Builder{}
             .append(b.creator_dh_secrets[i])
@@ -460,6 +524,16 @@ BlockValidator::Result BlockValidator::check_creator_dh_secrets(
                          + "] does not match commit"};
     }
     return {true, ""};
+}
+
+BlockValidator::Result BlockValidator::check_creator_dh_secrets(
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
+    // D3.3b-read: creator key from the frozen committee (EXTENDED).
+    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+    return check_creator_dh_secrets_with(
+        b, [&](const std::string& domain) -> std::optional<PubKey> {
+            return resolve_committee_member_pubkey(chain, registry, epoch, domain);
+        });
 }
 
 BlockValidator::Result BlockValidator::check_delay(const Block& b) const {
@@ -560,16 +634,42 @@ BlockValidator::Result BlockValidator::check_block_sigs(
     return {true, ""};
 }
 
-BlockValidator::Result BlockValidator::check_cumulative_rand(
-    const Block& b, const Chain& chain) const {
-    Hash prev_rand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
-    Hash expected  = SHA256Builder{}
+BlockValidator::Result BlockValidator::check_cumulative_rand_from(
+    const Block& b, const Hash& prev_rand) const {
+    Hash expected = SHA256Builder{}
         .append(prev_rand)
         .append(b.delay_output)
         .finalize();
     if (expected != b.cumulative_rand)
         return {false, "cumulative_rand incorrect"};
     return {true, ""};
+}
+
+BlockValidator::Result BlockValidator::check_cumulative_rand(
+    const Block& b, const Chain& chain) const {
+    return check_cumulative_rand_from(
+        b, chain.empty() ? Hash{} : chain.head().cumulative_rand);
+}
+
+// Q1 (DECISION-LOG 2026-08-12) — the beacon-header ingest binding. See the
+// full soundness argument on the declaration in validator.hpp; this body is
+// deliberately three delegations and nothing else, so the beacon-header path
+// and the apply path can never derive a different verdict from a different
+// implementation of the same rule.
+BlockValidator::Result BlockValidator::check_header_rand_binding(
+    const Block& b, const std::optional<Hash>& prev_rand,
+    const CreatorKeyResolver& resolve_key) const {
+    // (1) creator_dh_secrets are commit-reveal-bound to the digest-covered
+    //     creator_dh_inputs. Load-bearing: without it delay_output is grindable.
+    if (auto r = check_creator_dh_secrets_with(b, resolve_key); !r.ok) return r;
+    // (2) delay_seed re-derived from digest-covered fields, delay_output from
+    //     delay_seed + the now-pinned secrets.
+    if (auto r = check_delay(b);                                !r.ok) return r;
+    // (3) cumulative_rand == SHA256(prev_rand || delay_output). Skipped ONLY
+    //     for the first tracked header, whose predecessor rand is unknowable
+    //     here (FIRST-HEADER RULE, validator.hpp).
+    if (!prev_rand) return {true, ""};
+    return check_cumulative_rand_from(b, *prev_rand);
 }
 
 BlockValidator::Result BlockValidator::check_transactions(

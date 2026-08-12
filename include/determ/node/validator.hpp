@@ -183,6 +183,80 @@ public:
         return check_cumulative_rand(b, chain);
     }
 
+    // ── Q1 (DECISION-LOG 2026-08-12) — the beacon-header ingest binding ─────
+    // PRODUCTION seam (not a *_for_test forwarder): Node::on_beacon_header
+    // authenticates a gossiped beacon header with K-of-K signatures over
+    // compute_block_digest. That digest covers index, prev_hash, tx_root,
+    // delay_seed, creators and creator_dh_inputs — but NOT creator_dh_secrets,
+    // delay_output or cumulative_rand. Without the gates below a MITM can
+    // rewrite cumulative_rand on an otherwise-valid header without breaking a
+    // single signature, seeding the shard's epoch-committee selection
+    // (Node::current_epoch_rand / the external epoch-rand provider) with a
+    // value of its choosing.
+    //
+    // This runs the SAME apply-path gates that already bind the field — no new
+    // verifier logic (the divergence bug-class), no wire change, no digest
+    // change. The binding chain, each link verified in code:
+    //   1. check_creator_dh_secrets_with:
+    //        SHA256(creator_dh_secrets[i] ‖ pk_i) == creator_dh_inputs[i]
+    //      creator_dh_inputs IS digest-covered ⇒ the secrets are pinned by the
+    //      signatures (preimage resistance). This link is LOAD-BEARING: the
+    //      secrets themselves are NOT digest-covered, so without it an
+    //      attacker grinds them to move delay_output and then re-derives a
+    //      matching cumulative_rand — the fix would only appear to bind.
+    //   2. check_delay:
+    //        delay_seed   == compute_delay_seed(index, prev_hash, tx_root,
+    //                                           creator_dh_inputs)   [all
+    //                        four digest-covered — plus delay_seed itself is]
+    //        delay_output == compute_block_rand(delay_seed,
+    //                                           creator_dh_secrets)
+    //      ⇒ delay_output is pinned.
+    //   3. check_cumulative_rand_from:
+    //        cumulative_rand == SHA256(prev_rand ‖ delay_output)
+    //      ⇒ with (1) and (2), cumulative_rand is pinned.
+    //
+    // `prev_rand` is the PREDECESSOR header's cumulative_rand. On the
+    // beacon-header path that is beacon_headers_.back().cumulative_rand — NOT
+    // chain.head() (the shard's own chain is a different chain, so the
+    // chain-reading check_cumulative_rand overload is the wrong tool here).
+    //
+    // FIRST-HEADER RULE — std::nullopt means "no tracked predecessor". The
+    // first tracked header is beacon block INDEX 1, whose predecessor is the
+    // BEACON GENESIS block; a shard neither holds nor pins it (beacon-genesis
+    // pinning is the named B2c.5 follow-on), and its cumulative_rand is a
+    // genesis-config-derived hash, NOT zero — so substituting Hash{} would
+    // reject every honest bootstrap. Links (1) and (2) therefore still run
+    // (delay_output stays pinned to the K-of-K-signed digest) and ONLY link
+    // (3) is skipped. RESIDUAL, documented not closed: on that one header
+    // cumulative_rand itself remains attacker-choosable. A tamper by a pure
+    // RELAY is self-limiting — compute_hash covers cumulative_rand and the
+    // next genuine header's prev_hash IS digest-signed, so header 2 fails to
+    // chain (bias one epoch, then stall).
+    //
+    // BUT do NOT read that as "no silent long-run control": this ingress
+    // never checks that b.creators IS the beacon's derived committee (it only
+    // checks they are registered and signed — see on_beacon_header), so ANY
+    // k_block_sigs eligible domains can mint an internally-consistent header
+    // STREAM and drive the rand chain indefinitely, with every check here
+    // passing. That is a separate open hole on this path, adjacent to the
+    // still-unauthorized HELLO beacon-role authentication.
+    // The first-header residual itself does NOT strictly require the B2c.5
+    // beacon-genesis pin: a successor-confirmation rule at the two
+    // consumption sites (do not let an unconfirmed first header seed epoch
+    // rand until a chaining successor arrives) closes it in-tree. Both are
+    // owner decisions, recorded in the DECISION-LOG.
+    //
+    // `resolve_key` supplies creators[i]'s Ed25519 key. The caller MUST pass
+    // the SAME key source it verified the block signatures against (on the
+    // beacon-header path: the member_pub map handed to verify_committee_sigs),
+    // so key resolution here can never diverge from the signature check and
+    // false-reject an honest header.
+    using CreatorKeyResolver =
+        std::function<std::optional<PubKey>(const std::string& domain)>;
+    Result check_header_rand_binding(const chain::Block& b,
+                                     const std::optional<Hash>& prev_rand,
+                                     const CreatorKeyResolver& resolve_key) const;
+
     // VAL-timestamp test seam (ConsensusValidatorGateAudit, VAL-timestamp-30s-window):
     // run the wall-clock timestamp check in isolation — same 1-arg const-forwarder
     // as check_delay_for_test. check_timestamp reads ONLY b + clock_ (injected via
@@ -263,6 +337,13 @@ private:
                                         const chain::Chain& chain) const;
     Result check_creator_dh_secrets(const chain::Block& b, const NodeRegistry& registry,
                                     const chain::Chain& chain) const;
+    // Q1 seam: the commit-reveal CORE with an explicit creator-key resolver.
+    // check_creator_dh_secrets is a thin wrapper that resolves keys through the
+    // frozen-committee path (chain + present-head registry); the beacon-header
+    // ingest path resolves through the map it verified the sigs against. ONE
+    // implementation of the commit-reveal rule, two key sources.
+    Result check_creator_dh_secrets_with(const chain::Block& b,
+                                         const CreatorKeyResolver& resolve_key) const;
     Result check_delay(const chain::Block& b) const;
     Result check_block_sigs(const chain::Block& b, const NodeRegistry& registry,
                              const chain::Chain& chain) const;
@@ -321,6 +402,12 @@ private:
                                     const chain::Chain& chain,
                                     const NodeRegistry& registry) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
+    // Q1 seam: the cumulative_rand CORE with an explicit predecessor rand.
+    // check_cumulative_rand is a thin wrapper that sources it from the chain
+    // head; the beacon-header ingest path sources it from the previous tracked
+    // beacon header. ONE implementation of the chaining rule, two rand sources.
+    Result check_cumulative_rand_from(const chain::Block& b,
+                                      const Hash& prev_rand) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;
     Result check_timestamp(const chain::Block& b) const;

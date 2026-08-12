@@ -144,27 +144,33 @@ priv_seed = bytes.fromhex(nk["priv_seed"])
 pubkey    = bytes.fromhex(nk["pubkey"])
 sign = _signer(priv_seed)
 
-# EQV-height-bind: the evidence carries per-side OPENINGS (index, body_root)
-# of two-level digests; the verifier derives each signed digest as
-#   SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root)      (kind 0)
-# and asserts index_a == index_b == block_index. Synthesize two distinct
-# body roots at ONE height (1 — safely past; the chain has progressed
-# beyond it), compose, and sign the DERIVED digests.
+# EQV-height-bind + EQV-gen-bind: the evidence carries per-side OPENINGS
+# (index, gen, body_root) of two-level digests; the verifier derives each
+# signed digest as
+#   SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE || body_root)  (kind 0)
+# and asserts index_a == index_b == block_index AND gen_a == gen_b.
+# Synthesize two distinct body roots at ONE height (1 — safely past; the chain
+# has progressed beyond it) in ONE round generation, compose, and sign the
+# DERIVED digests.
 body_root_a = hashlib.sha256(b"forensic-evidence-A").digest()
 body_root_b = hashlib.sha256(b"forensic-evidence-B").digest()
-def compose(index, root):
-    return hashlib.sha256(b"DTM-BLKDIG-v2" + index.to_bytes(8, "big") + root).digest()
-sig_a = sign(compose(1, body_root_a))
-sig_b = sign(compose(1, body_root_b))
+GEN = 0
+def compose(index, gen, root):
+    return hashlib.sha256(b"DTM-BLKDIG-v3" + index.to_bytes(8, "big")
+                          + gen.to_bytes(8, "big") + root).digest()
+sig_a = sign(compose(1, GEN, body_root_a))
+sig_b = sign(compose(1, GEN, body_root_b))
 
 ev = {
     "equivocator": "node1",
     "block_index": 1,
     "kind": 0,
     "index_a": 1,
+    "gen_a": GEN,
     "body_root_a": body_root_a.hex(),
     "sig_a":       sig_a.hex(),
     "index_b": 1,
+    "gen_b": GEN,
     "body_root_b": body_root_b.hex(),
     "sig_b":       sig_b.hex(),
     "shard_id": 0,

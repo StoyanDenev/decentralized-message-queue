@@ -74,15 +74,18 @@ Hash hash_equivocation_event(const determ::chain::EquivocationEvent& e) {
     SHA256Builder b;
     // EQV-height-bind mirror of producer.cpp::hash_equivocation_event:
     // tag v1 → v2 with the struct change (digest_a/digest_b deleted; kind +
-    // the two (index, body_root, sig) openings bound instead).
-    b.append(std::string("DTM-F2-EQ-v2"));
+    // the two (index, body_root, sig) openings bound instead), then v2 → v3
+    // with EQV-gen-bind (the openings gain gen_a/gen_b).
+    b.append(std::string("DTM-F2-EQ-v3"));
     b.append(e.equivocator);
     b.append(e.block_index);
     b.append(e.kind);
     b.append(e.index_a);
+    b.append(e.gen_a);
     b.append(e.body_root_a);
     b.append(e.sig_a.data(), e.sig_a.size());
     b.append(e.index_b);
+    b.append(e.gen_b);
     b.append(e.body_root_b);
     b.append(e.sig_b.data(), e.sig_b.size());
     b.append(static_cast<uint64_t>(e.shard_id));
@@ -142,11 +145,11 @@ Hash compute_view_root(const std::vector<Hash>& items) {
 // (transactions / cross_shard_receipts / initial_state / state_root are not in
 // the digest at all.) If the upstream byte-order or field set ever changes,
 // mirror it here.
-// EQV-height-bind: two-level split mirroring producer.cpp —
+// EQV-height-bind + EQV-gen-bind: two-level split mirroring producer.cpp —
 //   light_compute_block_digest_body = legacy preimage minus the leading
 //   index append; light_compose_block_digest = the outer
-//   SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root). The tag string
-//   must stay byte-identical to producer.cpp::compose_block_digest's
+//   SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE || body_root). The
+//   tag string must stay byte-identical to producer.cpp::compose_block_digest's
 //   (pinned by tools/test_block_digest_xbinary_parity.sh).
 Hash light_compute_block_digest_body(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
@@ -252,16 +255,25 @@ Hash light_compute_block_digest_body(const determ::chain::Block& b) {
 }
 
 // Outer compose — the light mirror of producer.cpp::compose_block_digest.
-Hash light_compose_block_digest(uint64_t index, const Hash& body_root) {
+Hash light_compose_block_digest(uint64_t index, uint64_t gen,
+                                const Hash& body_root) {
     determ::crypto::SHA256Builder h;
-    h.append(std::string("DTM-BLKDIG-v2"));
+    h.append(std::string("DTM-BLKDIG-v3"));
     h.append(index);
+    h.append(gen);
     h.append(body_root);
     return h.finalize();
 }
 
+// EQV-gen-bind: gen == the block's own abort_events.size(), mirroring
+// producer.cpp::compute_block_digest. abort_events SURVIVES the rpc_headers
+// strip (only transactions / cross_shard_receipts / inbound_receipts /
+// initial_state are erased), so a header-only light client binds the same
+// generation the committee signed.
 Hash light_compute_block_digest(const determ::chain::Block& b) {
-    return light_compose_block_digest(b.index, light_compute_block_digest_body(b));
+    return light_compose_block_digest(
+        b.index, static_cast<uint64_t>(b.abort_events.size()),
+        light_compute_block_digest_body(b));
 }
 
 nlohmann::json pad_stripped_header(nlohmann::json h) {

@@ -431,20 +431,41 @@ struct AbortEvent {
 //   1 = CONTRIB_COMMIT Phase-1 contrib double-sign (S-006) — two conflicting
 //                      make_contrib_commitment values (Node::on_contrib).
 //
-// EQV-height-bind (DECISION-LOG 2026-07-31, Hole 1): both digest families
-// are OPENABLE two-level hashes —
-//   digest = SHA256(TAG || index u64 BE || body_root),
-//   TAG = "DTM-BLKDIG-v2" (kind 0) / "DTM-CONTRIB-v2" (kind 1)
+// EQV-height-bind (DECISION-LOG 2026-07-31, Hole 1) + EQV-gen-bind
+// (DECISION-LOG 2026-08-12, Q2 / Hole 1b): both digest families are OPENABLE
+// two-level hashes —
+//   digest = SHA256(TAG || index u64 BE || gen u64 BE || body_root),
+//   TAG = "DTM-BLKDIG-v3" (kind 0) / "DTM-CONTRIB-v3" (kind 1)
 // — and the event carries, per side, the fixed-size opening
-// {index, body_root} plus the signature, NOT the opaque digest (the digests
-// are pure functions of the carried fields, so storing them would be
+// {index, gen, body_root} plus the signature, NOT the opaque digest (the
+// digests are pure functions of the carried fields, so storing them would be
 // redundant surface). The verifier RECOMPUTES each digest from its opening,
 // verifies the signature against the derived digest, and asserts
-// index_a == index_b == block_index — so the height is transitively
-// signature-bound and replaying one honest validator's signatures from two
-// DIFFERENT heights can no longer forge a slash. The validator also rejects
-// kind > 1, body_root_a == body_root_b (no equivocation), sig_a == sig_b,
-// an unregistered equivocator, and either signature failing to verify.
+// index_a == index_b == block_index AND gen_a == gen_b — so BOTH the height
+// and the round generation are transitively signature-bound.
+//
+// `gen` is the ROUND GENERATION at this height — the abort generation that
+// selected the round's committee:
+//   kind 0 (BLOCK_DIGEST)   gen = Block::abort_events.size(). That vector is
+//                           already what BlockValidator::check_creator_selection
+//                           chains into the committee rand, so it IS the block's
+//                           round identity; it is a pure function of the Block
+//                           every co-signer digests, so no gossip-async
+//                           divergence is introduced (S-030-D2 §3.2).
+//   kind 1 (CONTRIB_COMMIT) gen = ContribMsg::aborts_gen, the field
+//                           Node::on_contrib already gates admission on
+//                           (msg.aborts_gen == current_aborts_.size()), now made
+//                           signature-bound rather than merely carried.
+//
+// Why (Hole 1b): the height bind alone still let an HONEST validator's two
+// same-height signatures from DIFFERENT abort re-rounds be packaged as
+// "equivocation" — after an abort the committee changes and every
+// start_contrib_phase generation draws a fresh dh_input, so an honest signer
+// legitimately signs two different digests at one height. Binding gen and
+// asserting gen_a == gen_b confines the proof to ONE round, which is the only
+// place a genuine double-sign can occur. The validator also rejects kind > 1,
+// body_root_a == body_root_b (no equivocation), sig_a == sig_b, an
+// unregistered equivocator, and either signature failing to verify.
 struct EquivocationEvent {
     static constexpr uint8_t KIND_BLOCK_DIGEST   = 0;
     static constexpr uint8_t KIND_CONTRIB_COMMIT = 1;
@@ -453,9 +474,11 @@ struct EquivocationEvent {
     uint64_t    block_index{0};       // height at which equivocation occurred
     uint8_t     kind{0};              // digest family (0/1 above); fail-closed on >1
     uint64_t    index_a{0};           // side-a opening: signed height
+    uint64_t    gen_a{0};             // side-a opening: signed round generation
     Hash        body_root_a{};        // side-a opening: digest body root
     Signature   sig_a{};
     uint64_t    index_b{0};           // side-b opening: signed height
+    uint64_t    gen_b{0};             // side-b opening: signed round generation
     Hash        body_root_b{};        // side-b opening: digest body root
     Signature   sig_b{};
 

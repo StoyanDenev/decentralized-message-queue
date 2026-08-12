@@ -245,10 +245,11 @@ BlockSigMsg BlockSigMsg::from_json(const json& j) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// EQV-height-bind: the contrib-commitment BODY — the exact legacy commitment
-// preimage minus the leading block_index append, which moved up into
-// compose_contrib_commitment so the (block_index, body_root) opening can be
-// carried in an EquivocationEvent and the signed height re-derived.
+// EQV-height-bind + EQV-gen-bind: the contrib-commitment BODY — the exact
+// legacy commitment preimage minus the leading block_index append, which moved
+// up into compose_contrib_commitment (alongside the round generation) so the
+// (block_index, gen, body_root) opening can be carried in an EquivocationEvent
+// and the signed height + round re-derived.
 Hash make_contrib_body_root(const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
                               const Hash& dh_input,
@@ -324,20 +325,35 @@ Hash make_contrib_body_root(const ContribMsg& m) {
                                    m.proposer_time, m.view_shardtip_root);
 }
 
-// EQV-height-bind: outer compose of the Phase-1 contrib commitment.
-//   contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64 BE || body_root)
+// EQV-height-bind + EQV-gen-bind: outer compose of the Phase-1 contrib
+// commitment.
+//   contrib_commit = SHA256("DTM-CONTRIB-v3" || block_index u64 BE
+//                                            || gen         u64 BE || body_root)
 // The tag MUST differ from compose_block_digest's — a shared tag would let one
 // honest block-sig + one honest contrib-sig at the same height compose into a
-// same-height "equivocation" forgery (cross-family confusion).
-Hash compose_contrib_commitment(uint64_t block_index, const Hash& body_root) {
+// same-height "equivocation" forgery (cross-family confusion). v2 -> v3 with
+// the gen insert: the preimage SHAPE changed, so the old tag must not be reused
+// for a different structure.
+//
+// `gen` is the sender's ContribMsg::aborts_gen — the abort generation of the
+// round this commit belongs to. on_contrib already GATES admission on it
+// (msg.aborts_gen == current_aborts_.size()); composing it makes it
+// signature-bound, so an EquivocationEvent can open it and the verifier can
+// assert both sides came from the SAME round. Without it, an honest member's
+// two commits from two abort RE-ROUNDS at one height (each round draws a fresh
+// dh_input, so the body roots differ) package into a forged slash.
+Hash compose_contrib_commitment(uint64_t block_index, uint64_t gen,
+                                const Hash& body_root) {
     SHA256Builder b;
-    b.append(std::string("DTM-CONTRIB-v2"));
+    b.append(std::string("DTM-CONTRIB-v3"));
     b.append(block_index);
+    b.append(gen);
     b.append(body_root);
     return b.finalize();
 }
 
-Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
+Hash make_contrib_commitment(uint64_t block_index, uint64_t aborts_gen,
+                              const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
                               const Hash& dh_input,
                               const Hash& view_eq_root,
@@ -346,7 +362,7 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               uint64_t proposer_time,
                               const Hash& view_shardtip_root) {
     return compose_contrib_commitment(
-        block_index,
+        block_index, aborts_gen,
         make_contrib_body_root(prev_hash, sorted_tx_hashes, dh_input,
                                view_eq_root, view_abort_root,
                                view_inbound_root, proposer_time,
@@ -358,7 +374,8 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
 // silently omit one via a trailing default-zero arg (the S-043 root cause).
 // Byte-identical to the field-form call with these same fields.
 Hash make_contrib_commitment(const ContribMsg& m) {
-    return make_contrib_commitment(m.block_index, m.prev_hash, m.tx_hashes,
+    return make_contrib_commitment(m.block_index, m.aborts_gen, m.prev_hash,
+                                    m.tx_hashes,
                                     m.dh_input, m.view_eq_root,
                                     m.view_abort_root, m.view_inbound_root,
                                     m.proposer_time, m.view_shardtip_root);
@@ -400,14 +417,18 @@ Hash hash_equivocation_event(const chain::EquivocationEvent& e) {
     // EQV-height-bind: tag bumped v1 → v2 with the struct change (the
     // hash_abort_event D2-inc3 precedent) — digest_a/digest_b are gone;
     // kind + the two (index, body_root, sig) openings are bound instead.
-    b.append(std::string("DTM-F2-EQ-v2"));
+    // EQV-gen-bind: v2 → v3 as the openings gain gen_a/gen_b (same rule —
+    // the struct changed, so the domain tag moves with it).
+    b.append(std::string("DTM-F2-EQ-v3"));
     b.append(e.equivocator);
     b.append(e.block_index);
     b.append(e.kind);
     b.append(e.index_a);
+    b.append(e.gen_a);
     b.append(e.body_root_a);
     b.append(e.sig_a.data(), e.sig_a.size());
     b.append(e.index_b);
+    b.append(e.gen_b);
     b.append(e.body_root_b);
     b.append(e.sig_b.data(), e.sig_b.size());
     // Forensic-trace fields (shard_id, beacon_anchor_height): included
@@ -457,18 +478,29 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
     if (sidx >= stored.creator_block_sigs.size()
         || bidx >= b.creator_block_sigs.size()) return std::nullopt;
 
-    // EQV-height-bind: carry the OPENINGS (index, body_root) of the two signed
-    // digests, not the opaque digests — the verifier recomputes each digest via
-    // compose_block_digest and asserts both signatures bind THIS height. Both
-    // blocks sit at the same height here (stored is chain.at(b.index)), so
-    // index_a == index_b == block_index by construction.
+    // EQV-height-bind + EQV-gen-bind: carry the OPENINGS (index, gen, body_root)
+    // of the two signed digests, not the opaque digests — the verifier
+    // recomputes each digest via compose_block_digest and asserts both
+    // signatures bind THIS height and the SAME round. Both blocks sit at the
+    // same height here (stored is chain.at(b.index)), so
+    // index_a == index_b == block_index by construction; the round generation
+    // is each block's own abort_events.size() (compute_block_digest's gen).
+    uint64_t gen_a = static_cast<uint64_t>(stored.abort_events.size());
+    uint64_t gen_b = static_cast<uint64_t>(b.abort_events.size());
+    // EQV-gen-bind (Hole 1b): two blocks at one height from DIFFERENT abort
+    // re-rounds are NOT equivocation — after an abort the committee is
+    // reselected and every honest member legitimately signs the new round's
+    // block. Refuse to assemble here rather than pool + gossip evidence the
+    // validator gate would reject anyway (fail-closed, same predicate).
+    if (gen_a != gen_b) return std::nullopt;
     Hash root_a = compute_block_digest_body(stored);
     Hash root_b = compute_block_digest_body(b);
     Signature sig_a = stored.creator_block_sigs[sidx];
     Signature sig_b = b.creator_block_sigs[bidx];
     // A genuine double-sign needs two DIFFERENT digests carrying two DIFFERENT
-    // signatures by the same proposer key. Same-height digests differ iff the
-    // body roots differ (the outer compose only adds the shared index).
+    // signatures by the same proposer key. Same-height same-gen digests differ
+    // iff the body roots differ (the outer compose only adds the shared tag,
+    // index and gen).
     if (root_a == root_b || sig_a == sig_b) return std::nullopt;
 
     chain::EquivocationEvent ev;
@@ -476,9 +508,11 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
     ev.block_index = b.index;
     ev.kind        = chain::EquivocationEvent::KIND_BLOCK_DIGEST;
     ev.index_a     = b.index;
+    ev.gen_a       = gen_a;
     ev.body_root_a = root_a;
     ev.sig_a       = sig_a;
     ev.index_b     = b.index;
+    ev.gen_b       = gen_b;
     ev.body_root_b = root_b;
     ev.sig_b       = sig_b;
     // rev.9 B2c.4 cross-chain provenance: SHARD-role detections record the
@@ -813,10 +847,11 @@ size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
 // reconciles at Phase 1→2 transition; canonical reconciliation feeds
 // the digest) is the correct fix. Tracked as a v2 work item; not in
 // this v1.x release.
-// EQV-height-bind: the block-digest BODY — the exact legacy digest preimage
-// minus the leading index append, which moved up into compose_block_digest so
-// the (index, body_root) opening can be carried in an EquivocationEvent and
-// the signed height re-derived by the verifier.
+// EQV-height-bind + EQV-gen-bind: the block-digest BODY — the exact legacy
+// digest preimage minus the leading index append, which moved up into
+// compose_block_digest (alongside the round generation) so the
+// (index, gen, body_root) opening can be carried in an EquivocationEvent and
+// the signed height + round re-derived by the verifier.
 Hash compute_block_digest_body(const Block& b) {
     SHA256Builder h;
     h.append(b.prev_hash);
@@ -960,21 +995,34 @@ Hash compute_block_digest_body(const Block& b) {
     return h.finalize();
 }
 
-// EQV-height-bind: outer compose of the Phase-2 block digest.
-//   block_digest = SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root)
-// Tag domain-separated from compose_contrib_commitment's DTM-CONTRIB-v2
+// EQV-height-bind + EQV-gen-bind: outer compose of the Phase-2 block digest.
+//   block_digest = SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE
+//                                         || body_root)
+// Tag domain-separated from compose_contrib_commitment's DTM-CONTRIB-v3
 // (see that function's comment). Light mirror: light/verify.cpp — the tag
 // string must stay byte-identical in both (parity-guarded).
-Hash compose_block_digest(uint64_t index, const Hash& body_root) {
+Hash compose_block_digest(uint64_t index, uint64_t gen, const Hash& body_root) {
     SHA256Builder h;
-    h.append(std::string("DTM-BLKDIG-v2"));
+    h.append(std::string("DTM-BLKDIG-v3"));
     h.append(index);
+    h.append(gen);
     h.append(body_root);
     return h.finalize();
 }
 
+// EQV-gen-bind: the block's round generation is its OWN abort_events.size().
+// That vector is exactly what BlockValidator::check_creator_selection chains
+// into the committee rand (and whose aborting_nodes it excludes from the pool),
+// so it IS this block's round identity: an abort re-round at the same height
+// carries strictly more abort events and therefore a different gen. It is a
+// pure function of the Block every co-signer digests, so binding it introduces
+// no gossip-async divergence (S-030-D2 §3.2) — and members that disagree on the
+// abort COUNT cannot exchange contribs at all (on_contrib's aborts_gen gate),
+// so honest co-signers of one block always agree on it.
 Hash compute_block_digest(const Block& b) {
-    return compose_block_digest(b.index, compute_block_digest_body(b));
+    return compose_block_digest(b.index,
+                                static_cast<uint64_t>(b.abort_events.size()),
+                                compute_block_digest_body(b));
 }
 
 // rev.9 S-009: post-Phase-2 randomness output. Computed once K secrets
@@ -1049,8 +1097,10 @@ ContribMsg make_contrib(const NodeKey& key,
         m.view_shardtip_root = compute_view_root(m.view_shardtip_list);
     }
 
+    // EQV-gen-bind: the sender's own aborts_gen is composed into the signed
+    // commitment (m.aborts_gen == the `aborts_gen` argument, set above).
     Hash commit = make_contrib_commitment(
-        block_index, prev_hash, m.tx_hashes, dh_input,
+        block_index, m.aborts_gen, prev_hash, m.tx_hashes, dh_input,
         m.view_eq_root, m.view_abort_root, m.view_inbound_root,
         m.proposer_time, m.view_shardtip_root);
     m.ed_sig = sign(key, commit.data(), commit.size());

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # determ-wallet verify-equivocation — OFFLINE FA6 equivocation-evidence
-# verifier (the EquivocationEvent two-sig proof, EQV-height-bind form).
+# verifier (the EquivocationEvent two-sig proof, EQV-height-bind +
+# EQV-gen-bind form).
 #
 # An EquivocationEvent records that ONE registered Ed25519 key double-signed
-# at ONE height — the unambiguous proof the chain slashes the equivocator's
-# full stake on. The event carries per-side OPENINGS (index, body_root) of
-# two-level digests; each signed digest is DERIVED as
-#   SHA256(TAG || index u64 BE || body_root),
-#   TAG = "DTM-BLKDIG-v2" (kind 0) / "DTM-CONTRIB-v2" (kind 1).
+# at ONE height IN ONE ROUND — the unambiguous proof the chain slashes the
+# equivocator's full stake on. The event carries per-side OPENINGS
+# (index, gen, body_root) of two-level digests; each signed digest is DERIVED
+# as
+#   SHA256(TAG || index u64 BE || gen u64 BE || body_root),
+#   TAG = "DTM-BLKDIG-v3" (kind 0) / "DTM-CONTRIB-v3" (kind 1).
 # This command reproduces src/node/validator.cpp::check_equivocation_events
 # byte-for-byte:
 #   (1) kind <= 1
 #   (2) index_a == index_b == block_index   (the height bind)
+#  (2b) gen_a == gen_b                      (the round bind)
 #   (3) body_root_a != body_root_b
 #   (4) sig_a != sig_b
 #   (5) sig_a verifies over the DERIVED digest_a against --pubkey
@@ -33,6 +36,10 @@
 #  5b.  (EQV-height-bind) --index-b 8 with a REAL sig composed at height 8 →
 #       NOT PROVEN, exit 2, heights_match=false — the cross-height forged-
 #       slash replay is refused offline too.
+#  5c.  (EQV-gen-bind) --gen-b 1 with a REAL sig composed at generation 1,
+#       SAME height → NOT PROVEN, exit 2, gens_match=false — an HONEST
+#       validator's two same-height signatures from two abort RE-ROUNDS are
+#       refused offline too (the Hole-1b forged-slash route).
 #   6.  Same body root twice (same signed opening) → NOT PROVEN, exit 2,
 #       distinct_body_roots=false (the "signer signed the same thing twice"
 #       non-equivocation case the validator explicitly rejects).
@@ -89,31 +96,35 @@ command -v python >/dev/null 2>&1 || PY=python3
 # ── Fixed deterministic Ed25519 fixture (seed = 0x00..0x1f) ──────────────────
 # PUB_A = the equivocator's key; PUB_B = an unrelated key (seed XOR 0xff) for
 # the wrong-key negative. Body roots = SHA256 of fixed strings; every sig is
-# over the DERIVED digest SHA256("DTM-BLKDIG-v2" || height u64 BE || root).
+# over the DERIVED digest
+#   SHA256("DTM-BLKDIG-v3" || height u64 BE || gen u64 BE || root).
 PUB_A="03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 PUB_B="bafc71bead3ac5e4b63e9c8216ee71a34aaec65722eedbca728b4e9b3ccce396"
 # Height-7 pair (roots = SHA256("light-verify-equivocation-A"/"-B")).
 ROOT_A="03d70ec7e6f3721b9c82c77ea10b47186daa14273b823d417323b9a1e73c5d4e"
-SIG_A="06ba2eeab0eee85183f54127a4d83901f7f3f8ea5be08ffd12aef5b27a486d21db74f72949eeb7dc161687e079b2ff1c89f3d9b9b974f4224d363f65a0d7c102"
+SIG_A="20446cf81027e288286ce1c16b8ad5abcddbd3f3af53705f57799e172a5421f0c46af7bfa3310e9f781ab2fc53b7529f3b23e4026c90f61f860746fd3afb1902"
 ROOT_B="d3672c9732c2ab1d3e273f5cd639b4177a73b8ad2bb36d0b5f8d8b89b2a681d0"
-SIG_B="828bc27427e5c842e86d633cb7c69439bd15ffacf5517cb583d7b26cffc6c7da1bb673a8cefd2c675abd9254118c9777deaf82afb5362d6621efca68e2213208"
-# A REAL signature over compose(8, ROOT_B) — genuinely signed at the WRONG
+SIG_B="1914e5fba7dffdec58e4cd4c81ddbebc627963687815fbd0ecbe4b429c6460eec93aa78fc545bc93c9947ab39ffc156d764cc6839d500fe5ff8902349a8b0e0e"
+# A REAL signature over compose(8, 0, ROOT_B) — genuinely signed at the WRONG
 # height, for the height-mismatch leg (5b).
-SIG_B_H8="4f84d509419d0e7f7b22cd12659cb09db2931cc896eb43bd5721e1879605726038bf3f65624c933f401d87b486fbfacc2da8499ab01c66fc029300cc50046001"
+SIG_B_H8="b33dd1919f82beef87550251e299350d438a0b5d6b54ab9525f1b733eedcef2548c79eff62112b30a7ee6e2f42fc42c8c5d045f309ac576b56861d20527a130d"
+# A REAL signature over compose(7, 1, ROOT_B) — genuinely signed in the NEXT
+# abort generation at the SAME height, for the re-round leg (5c).
+SIG_B_G1="bb1ba81fb197319ba829ef8ed54cb4c990272fc3566ed06ad22dce3de49fc63956d7aedf03e80a501ced9072435a28298556a6a51c76f2d79fba60e68c95bf0e"
 # Height-9 pair (roots = SHA256("wallet-verify-equivocation-C"/"-D")) for the
 # --index leg.
 ROOT_C="52ac0d208caf36efa2a4299e7fd2495b5fb2b9869391968c303b73748f7f9953"
-SIG_C="2962382d7e2207d12d5096be3d7e06d32a4625ce492db84253a780f6b1971a020356f674e559c47ac620880dc5b851b9050550b8b72ac05080ccf2ae92af1807"
+SIG_C="d87cce531cef3913c897821df421e4f63051500dee89aaf0c0e06e5340e702ae05bfcc5e2f7a15bd310956fbe829579a9408848418065b91561d69e0c3cdd30e"
 ROOT_D="73d7fee2b1af598e52924b941ebd3dcc69abaf17cc37841c317993f4130e425d"
-SIG_D="09b8cb97167b1fb6630fdd4d05c888f692605d8f034bbdc09bb0e0d06a51cd29b934976163745f4b8bedc10b75d71805837d7eea147c0ad1259509e830b2de05"
+SIG_D="797d8a66e9bd2ad7c3fa46ab282b8e7fe418378e3f43c93b165d790452195010c8c284b8255ca27f8af1a801ec54b032e80e4e2c574d859710e7987cadf2850b"
 
 # verify_inline <root_a> <sig_a> <root_b> <sig_b> [extra args...]
 verify_inline() {
   local ra="$1" sa="$2" rb="$3" sb="$4"; shift 4
   "$WALLET" verify-equivocation --pubkey "$PUB_A" \
       --kind 0 --block-index 7 \
-      --index-a 7 --body-root-a "$ra" --sig-a "$sa" \
-      --index-b 7 --body-root-b "$rb" --sig-b "$sb" "$@" 2>&1 | tr -d '\r'
+      --index-a 7 --gen-a 0 --body-root-a "$ra" --sig-a "$sa" \
+      --index-b 7 --gen-b 0 --body-root-b "$rb" --sig-b "$sb" "$@" 2>&1 | tr -d '\r'
 }
 
 echo "=== 1. Help mentions verify-equivocation + the height-bound rule ==="
@@ -121,6 +132,7 @@ H=$("$WALLET" help 2>&1 | tr -d '\r')
 assert_contains "$H" "verify-equivocation"               "help lists verify-equivocation"
 assert_contains "$H" "body_root_a!=body_root_b"          "help states the distinct-root condition"
 assert_contains "$H" "index_a==index_b==block_index"     "help states the height-bind condition"
+assert_contains "$H" "gen_a==gen_b"                      "help states the round-bind condition"
 assert_contains "$H" "check_equivocation_events"         "help cites the validator gate it mirrors"
 
 echo
@@ -138,15 +150,17 @@ assert_eq "$RC" "0" "json mode exits 0 on PROVEN"
 $PY - <<PY_EOF
 import json, sys
 r = json.loads('''$JOUT''')
-needed = ['proven','kind_known','heights_match','distinct_body_roots',
+needed = ['proven','kind_known','heights_match','gens_match',
+          'distinct_body_roots',
           'distinct_sigs','sig_a_valid','sig_b_valid','pubkey_hex','kind',
-          'block_index','index_a','body_root_a_hex','index_b',
+          'block_index','index_a','gen_a','body_root_a_hex','index_b','gen_b',
           'body_root_b_hex','derived_digest_a_hex','derived_digest_b_hex']
 for k in needed:
     assert k in r, 'missing key: ' + k
 assert r['proven'] is True, 'proven should be True'
 assert r['kind_known'] is True
 assert r['heights_match'] is True
+assert r['gens_match'] is True
 assert r['distinct_body_roots'] is True
 assert r['distinct_sigs'] is True
 assert r['sig_a_valid'] is True
@@ -155,7 +169,7 @@ assert r['pubkey_hex'].lower() == '$PUB_A'.lower(), 'pubkey echo mismatch'
 print('JSON_OK')
 PY_EOF
 JSON_OK=$([ $? -eq 0 ] && echo true || echo false)
-assert_eq "$JSON_OK" "true" "json carries {proven,kind_known,heights_match,distinct_body_roots,distinct_sigs,sig_*_valid,pubkey_hex,kind,block_index,index_*,body_root_*_hex,derived_digest_*_hex}"
+assert_eq "$JSON_OK" "true" "json carries {proven,kind_known,heights_match,gens_match,distinct_body_roots,distinct_sigs,sig_*_valid,pubkey_hex,kind,block_index,index_*,gen_*,body_root_*_hex,derived_digest_*_hex}"
 
 echo
 echo "=== 4. Tamper sig_a → NOT PROVEN, exit 2, sig_a_valid=false ==="
@@ -184,8 +198,8 @@ echo
 echo "=== 5. Wrong --pubkey → NOT PROVEN, exit 2 (both sigs fail) ==="
 JOUT=$("$WALLET" verify-equivocation --pubkey "$PUB_B" \
         --kind 0 --block-index 7 \
-        --index-a 7 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
-        --index-b 7 --body-root-b "$ROOT_B" --sig-b "$SIG_B" --json 2>&1 | tr -d '\r')
+        --index-a 7 --gen-a 0 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
+        --index-b 7 --gen-b 0 --body-root-b "$ROOT_B" --sig-b "$SIG_B" --json 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "2" "wrong pubkey exits 2"
 $PY - <<PY_EOF
@@ -207,8 +221,8 @@ echo "=== 5b. Cross-height openings (EQV-height-bind) → NOT PROVEN, exit 2 ===
 # replay the daemon gate rejects.
 JOUT=$("$WALLET" verify-equivocation --pubkey "$PUB_A" \
         --kind 0 --block-index 7 \
-        --index-a 7 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
-        --index-b 8 --body-root-b "$ROOT_B" --sig-b "$SIG_B_H8" --json 2>&1 | tr -d '\r')
+        --index-a 7 --gen-a 0 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
+        --index-b 8 --gen-b 0 --body-root-b "$ROOT_B" --sig-b "$SIG_B_H8" --json 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "2" "cross-height openings exit 2 (auth-style alert)"
 $PY - <<PY_EOF
@@ -226,6 +240,36 @@ print('XH_OK')
 PY_EOF
 XH_OK=$([ $? -eq 0 ] && echo true || echo false)
 assert_eq "$XH_OK" "true" "cross-height: heights_match=false is the sole failing condition (no forged slash)"
+
+echo
+echo "=== 5c. Cross-round openings (EQV-gen-bind) → NOT PROVEN, exit 2 ==="
+# --gen-b 1 with a REAL signature composed at generation 1, SAME height 7:
+# kind valid, ALL heights equal, roots distinct, sigs distinct, BOTH sigs
+# verify against their own derived digests — ONLY gens_match refuses it. This
+# is what an HONEST validator emits across an abort re-round, so accepting it
+# would slash an honest node (DECISION-LOG 2026-08-12 Q2 / Hole 1b).
+JOUT=$("$WALLET" verify-equivocation --pubkey "$PUB_A" \
+        --kind 0 --block-index 7 \
+        --index-a 7 --gen-a 0 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
+        --index-b 7 --gen-b 1 --body-root-b "$ROOT_B" --sig-b "$SIG_B_G1" --json 2>&1 | tr -d '\r')
+RC=$?
+assert_eq "$RC" "2" "cross-round openings exit 2 (auth-style alert)"
+$PY - <<PY_EOF
+import json
+r = json.loads('''$JOUT''')
+assert r['proven']     is False, 'proven must be False'
+assert r['gens_match'] is False, 'gens_match must be False'
+# Every OTHER condition holds — the round bind is the unique refusal.
+assert r['kind_known']          is True
+assert r['heights_match']       is True
+assert r['distinct_body_roots'] is True
+assert r['distinct_sigs']       is True
+assert r['sig_a_valid']         is True, 'sig_a genuinely verifies at gen 0'
+assert r['sig_b_valid']         is True, 'sig_b genuinely verifies at gen 1'
+print('XR_OK')
+PY_EOF
+XR_OK=$([ $? -eq 0 ] && echo true || echo false)
+assert_eq "$XR_OK" "true" "cross-round: gens_match=false is the sole failing condition (no forged slash)"
 
 echo
 echo "=== 6. Same body root twice (same signed opening) → NOT PROVEN ==="
@@ -273,9 +317,11 @@ print(json.dumps({
   "block_index": 7,
   "kind": 0,
   "index_a": 7,
+  "gen_a": 0,
   "body_root_a": "$ROOT_A",
   "sig_a":       "$SIG_A",
   "index_b": 7,
+  "gen_b": 0,
   "body_root_b": "$ROOT_B",
   "sig_b":       "$SIG_B",
   "shard_id": 0,
@@ -305,8 +351,8 @@ print(json.dumps({
   "transactions": [],
   "equivocation_events": [
     {"equivocator":"node-evil","block_index":7,"kind":0,
-     "index_a":7,"body_root_a":"$ROOT_A","sig_a":"$SIG_A",
-     "index_b":7,"body_root_b":"$ROOT_B","sig_b":"$SIG_B"}
+     "index_a":7,"gen_a":0,"body_root_a":"$ROOT_A","sig_a":"$SIG_A",
+     "index_b":7,"gen_b":0,"body_root_b":"$ROOT_B","sig_b":"$SIG_B"}
   ]
 }))
 PY_EOF
@@ -323,11 +369,11 @@ print(json.dumps({
   "index": 9,
   "equivocation_events": [
     {"equivocator":"node-evil","block_index":7,"kind":0,
-     "index_a":7,"body_root_a":"$ROOT_A","sig_a":"$SIG_A",
-     "index_b":7,"body_root_b":"$ROOT_B","sig_b":"$SIG_B"},
+     "index_a":7,"gen_a":0,"body_root_a":"$ROOT_A","sig_a":"$SIG_A",
+     "index_b":7,"gen_b":0,"body_root_b":"$ROOT_B","sig_b":"$SIG_B"},
     {"equivocator":"node-evil2","block_index":9,"kind":0,
-     "index_a":9,"body_root_a":"$ROOT_C","sig_a":"$SIG_C",
-     "index_b":9,"body_root_b":"$ROOT_D","sig_b":"$SIG_D"}
+     "index_a":9,"gen_a":0,"body_root_a":"$ROOT_C","sig_a":"$SIG_C",
+     "index_b":9,"gen_b":0,"body_root_b":"$ROOT_D","sig_b":"$SIG_D"}
   ]
 }))
 PY_EOF
@@ -354,8 +400,8 @@ echo
 echo "=== 12. Missing --pubkey → exit 1 ==="
 "$WALLET" verify-equivocation \
         --kind 0 --block-index 7 \
-        --index-a 7 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
-        --index-b 7 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
+        --index-a 7 --gen-a 0 --body-root-a "$ROOT_A" --sig-a "$SIG_A" \
+        --index-b 7 --gen-b 0 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "1" "missing --pubkey returns 1 (key is always operator-supplied)"
 
@@ -370,8 +416,8 @@ echo
 echo "=== 14. Wrong-length --sig-a → exit 1 (args, not auth) ==="
 "$WALLET" verify-equivocation --pubkey "$PUB_A" \
         --kind 0 --block-index 7 \
-        --index-a 7 --body-root-a "$ROOT_A" --sig-a "abcd" \
-        --index-b 7 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
+        --index-a 7 --gen-a 0 --body-root-a "$ROOT_A" --sig-a "abcd" \
+        --index-b 7 --gen-b 0 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "1" "short --sig-a returns 1, not 2"
 
@@ -380,8 +426,8 @@ echo "=== 15. Non-hex --body-root-a → exit 1 ==="
 NONHEX=$($PY -c "print('z' * 64)")
 "$WALLET" verify-equivocation --pubkey "$PUB_A" \
         --kind 0 --block-index 7 \
-        --index-a 7 --body-root-a "$NONHEX" --sig-a "$SIG_A" \
-        --index-b 7 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
+        --index-a 7 --gen-a 0 --body-root-a "$NONHEX" --sig-a "$SIG_A" \
+        --index-b 7 --gen-b 0 --body-root-b "$ROOT_B" --sig-b "$SIG_B" >/dev/null 2>&1
 RC=$?
 assert_eq "$RC" "1" "non-hex --body-root-a returns 1"
 

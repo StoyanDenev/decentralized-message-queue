@@ -7445,13 +7445,17 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 //
 // The conditions mirror validator.cpp::check_equivocation_events exactly
 // (a real EquivocationEvent must satisfy ALL of them; failing any means
-// the evidence does NOT prove equivocation). EQV-height-bind: the event
-// carries per-side OPENINGS (index, body_root) of the two signed digests,
-// and each digest is DERIVED as SHA256(TAG || index u64 BE || body_root)
-// with TAG = "DTM-BLKDIG-v2" (kind 0) / "DTM-CONTRIB-v2" (kind 1):
+// the evidence does NOT prove equivocation). EQV-height-bind + EQV-gen-bind:
+// the event carries per-side OPENINGS (index, gen, body_root) of the two
+// signed digests, and each digest is DERIVED as
+// SHA256(TAG || index u64 BE || gen u64 BE || body_root)
+// with TAG = "DTM-BLKDIG-v3" (kind 0) / "DTM-CONTRIB-v3" (kind 1):
 //   (1) kind <= 1                 — known digest family
 //   (2) index_a == index_b == block_index — the height bind (stops a
 //       forged slash assembled from two DIFFERENT-height honest sigs)
+//  (2b) gen_a == gen_b            — the round bind (stops a forged slash
+//       assembled from an honest signer's two same-height sigs across
+//       abort RE-ROUNDS, where the committee and dh_input both change)
 //   (3) body_root_a != body_root_b — same opening is not a conflict
 //   (4) sig_a    != sig_b         — same signature is not two messages
 //   (5) sig_a verifies over the DERIVED digest_a against the key
@@ -7469,15 +7473,16 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 //                       1=CONTRIB_COMMIT).
 //   --block-index <N>   Inline form: the event's claimed height.
 //   --index-a <N>       Inline form: side-a signed height (opening).
+//   --gen-a   <N>       Inline form: side-a signed round generation.
 //   --body-root-a <hex64> Inline form: side-a digest body root.
 //   --sig-a   <hex128>  Inline form: Ed25519 sig over the derived digest a.
-//   --index-b <N> --body-root-b <hex64> --sig-b <hex128>
+//   --index-b <N> --gen-b <N> --body-root-b <hex64> --sig-b <hex128>
 //                       Inline form: side b, symmetric.
 //   --event   <file>    Alternative to the inline args: an
 //                       EquivocationEvent JSON (EquivocationEvent::
 //                       to_json shape — equivocator/block_index/kind/
-//                       index_a/body_root_a/sig_a/index_b/body_root_b/
-//                       sig_b) OR a Block JSON whose
+//                       index_a/gen_a/body_root_a/sig_a/index_b/gen_b/
+//                       body_root_b/sig_b) OR a Block JSON whose
 //                       equivocation_events[0] is used. --pubkey is still
 //                       REQUIRED (the event JSON names the equivocator
 //                       domain but NOT its key; the key comes from the
@@ -7486,17 +7491,18 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 //                       equivocation_events[N] (default 0).
 //   --json              One-line JSON.
 //
-// Output fields (JSON): proven, kind_known, heights_match,
+// Output fields (JSON): proven, kind_known, heights_match, gens_match,
 //   distinct_body_roots, distinct_sigs, sig_a_valid, sig_b_valid,
-//   pubkey_hex, kind, block_index, index_a, body_root_a_hex, index_b,
-//   body_root_b_hex, derived_digest_a_hex, derived_digest_b_hex
+//   pubkey_hex, kind, block_index, index_a, gen_a, body_root_a_hex, index_b,
+//   gen_b, body_root_b_hex, derived_digest_a_hex, derived_digest_b_hex
 //   [, equivocator when sourced from --event].
 //
 // Exit codes:
 //   0  PROVEN — valid equivocation evidence (all conditions hold)
 //   2  NOT PROVEN — structurally fine but the evidence does not prove
 //      equivocation (auth-style alert: unknown kind, mismatched heights,
-//      a sig failed, or the two roots/sigs are identical). Distinct from
+//      mismatched round generations, a sig failed, or the two roots/sigs
+//      are identical). Distinct from
 //      arg errors so monitors can branch on "evidence rejected" vs
 //      "tooling broke."
 //   1  args / parse / IO error
@@ -7504,15 +7510,17 @@ int cmd_verify_equivocation(int argc, char** argv) {
     std::string pubkey_hex, body_root_a_hex, sig_a_hex, body_root_b_hex, sig_b_hex;
     std::string event_path;
     uint64_t kind_val = 0, block_index_val = 0, index_a_val = 0, index_b_val = 0;
+    uint64_t gen_a_val = 0, gen_b_val = 0;
     bool have_kind = false, have_block_index = false,
-         have_index_a = false, have_index_b = false;
+         have_index_a = false, have_index_b = false,
+         have_gen_a = false, have_gen_b = false;
     int  ev_index = 0;
     bool json_out = false;
     const char* usage =
         "Usage: determ-wallet verify-equivocation --pubkey <hex64>\n"
         "         (--kind <0|1> --block-index <N>\n"
-        "          --index-a <N> --body-root-a <hex64> --sig-a <hex128>\n"
-        "          --index-b <N> --body-root-b <hex64> --sig-b <hex128>\n"
+        "          --index-a <N> --gen-a <N> --body-root-a <hex64> --sig-a <hex128>\n"
+        "          --index-b <N> --gen-b <N> --body-root-b <hex64> --sig-b <hex128>\n"
         "          | --event <file> [--index <N>]) [--json]\n";
     auto parse_u64 = [](const char* label, const char* s, uint64_t& out) {
         try {
@@ -7542,11 +7550,19 @@ int cmd_verify_equivocation(int argc, char** argv) {
             if (!parse_u64("--index-a", argv[++i], index_a_val)) return 1;
             have_index_a = true;
         }
+        else if (a == "--gen-a"       && i + 1 < argc) {
+            if (!parse_u64("--gen-a", argv[++i], gen_a_val)) return 1;
+            have_gen_a = true;
+        }
         else if (a == "--body-root-a" && i + 1 < argc) body_root_a_hex = argv[++i];
         else if (a == "--sig-a"       && i + 1 < argc) sig_a_hex       = argv[++i];
         else if (a == "--index-b"     && i + 1 < argc) {
             if (!parse_u64("--index-b", argv[++i], index_b_val)) return 1;
             have_index_b = true;
+        }
+        else if (a == "--gen-b"       && i + 1 < argc) {
+            if (!parse_u64("--gen-b", argv[++i], gen_b_val)) return 1;
+            have_gen_b = true;
         }
         else if (a == "--body-root-b" && i + 1 < argc) body_root_b_hex = argv[++i];
         else if (a == "--sig-b"       && i + 1 < argc) sig_b_hex       = argv[++i];
@@ -7579,14 +7595,15 @@ int cmd_verify_equivocation(int argc, char** argv) {
         std::cerr << usage
                   << "\n"
                      "  OFFLINE FA6 equivocation-evidence verifier (EQV-height-bind\n"
-                     "  form). Confirms ONE registered key signed TWO distinct\n"
-                     "  digests of one family at the SAME height — the two-sig\n"
-                     "  proof the chain slashes on. Reproduces validator.cpp::\n"
-                     "  check_equivocation_events: kind <= 1, index_a == index_b ==\n"
-                     "  block_index, body_root_a != body_root_b, sig_a != sig_b,\n"
-                     "  and BOTH sigs verify against --pubkey over digests DERIVED\n"
-                     "  from the (index, body_root) openings. No daemon, no chain\n"
-                     "  link. Exit 0 PROVEN, 2 NOT PROVEN, 1 args/parse/IO.\n";
+                     "  + EQV-gen-bind form). Confirms ONE registered key signed TWO\n"
+                     "  distinct digests of one family at the SAME height in the SAME\n"
+                     "  round — the two-sig proof the chain slashes on. Reproduces\n"
+                     "  validator.cpp::check_equivocation_events: kind <= 1, index_a ==\n"
+                     "  index_b == block_index, gen_a == gen_b, body_root_a !=\n"
+                     "  body_root_b, sig_a != sig_b, and BOTH sigs verify against\n"
+                     "  --pubkey over digests DERIVED from the (index, gen, body_root)\n"
+                     "  openings. No daemon, no chain link. Exit 0 PROVEN, 2 NOT\n"
+                     "  PROVEN, 1 args/parse/IO.\n";
         return 1;
     }
 
@@ -7600,11 +7617,12 @@ int cmd_verify_equivocation(int argc, char** argv) {
     if (!event_path.empty()) {
         if (!body_root_a_hex.empty() || !sig_a_hex.empty()
             || !body_root_b_hex.empty() || !sig_b_hex.empty()
-            || have_kind || have_block_index || have_index_a || have_index_b) {
+            || have_kind || have_block_index || have_index_a || have_index_b
+            || have_gen_a || have_gen_b) {
             std::cerr << "verify-equivocation: --event is mutually exclusive "
                          "with the inline evidence args (--kind/--block-index/"
-                         "--index-a/--body-root-a/--sig-a/--index-b/"
-                         "--body-root-b/--sig-b)\n";
+                         "--index-a/--gen-a/--body-root-a/--sig-a/--index-b/"
+                         "--gen-b/--body-root-b/--sig-b)\n";
             return 1;
         }
         nlohmann::json ej;
@@ -7642,24 +7660,28 @@ int cmd_verify_equivocation(int argc, char** argv) {
         if (!src.is_object()
             || !src.contains("kind")        || !src.contains("block_index")
             || !src.contains("index_a")     || !src.contains("index_b")
+            || !src.contains("gen_a")       || !src.contains("gen_b")
             || !src.contains("body_root_a") || !src.contains("sig_a")
             || !src.contains("body_root_b") || !src.contains("sig_b")) {
             std::cerr << "verify-equivocation: --event JSON is not an "
                          "EquivocationEvent (needs kind/block_index/index_a/"
-                         "body_root_a/sig_a/index_b/body_root_b/sig_b) nor a "
-                         "Block with equivocation_events\n";
+                         "gen_a/body_root_a/sig_a/index_b/gen_b/body_root_b/"
+                         "sig_b) nor a Block with equivocation_events\n";
             return 1;
         }
         try {
             kind_val        = src.at("kind").get<uint64_t>();
             block_index_val = src.at("block_index").get<uint64_t>();
             index_a_val     = src.at("index_a").get<uint64_t>();
+            gen_a_val       = src.at("gen_a").get<uint64_t>();
             body_root_a_hex = src.at("body_root_a").get<std::string>();
             sig_a_hex       = src.at("sig_a").get<std::string>();
             index_b_val     = src.at("index_b").get<uint64_t>();
+            gen_b_val       = src.at("gen_b").get<uint64_t>();
             body_root_b_hex = src.at("body_root_b").get<std::string>();
             sig_b_hex       = src.at("sig_b").get<std::string>();
             have_kind = have_block_index = have_index_a = have_index_b = true;
+            have_gen_a = have_gen_b = true;
         } catch (std::exception& e) {
             std::cerr << "verify-equivocation: --event field type error: "
                       << e.what() << "\n";
@@ -7672,11 +7694,12 @@ int cmd_verify_equivocation(int argc, char** argv) {
     // Every evidence field must now be present (whether inline or from
     // --event).
     if (!have_kind || !have_block_index || !have_index_a || !have_index_b
+        || !have_gen_a || !have_gen_b
         || body_root_a_hex.empty() || sig_a_hex.empty()
         || body_root_b_hex.empty() || sig_b_hex.empty()) {
         std::cerr << "verify-equivocation: need all of --kind/--block-index/"
-                     "--index-a/--body-root-a/--sig-a/--index-b/"
-                     "--body-root-b/--sig-b (or supply --event)\n";
+                     "--index-a/--gen-a/--body-root-a/--sig-a/--index-b/"
+                     "--gen-b/--body-root-b/--sig-b (or supply --event)\n";
         return 1;
     }
 
@@ -7719,13 +7742,18 @@ int cmd_verify_equivocation(int argc, char** argv) {
         return 1;
     }
 
-    // ── The FA6 proof, EQV-height-bind form (validator.cpp parity) ────────
+    // ── The FA6 proof, EQV-height-bind + EQV-gen-bind form (validator.cpp
+    // parity) ─────────────────────────────────────────────────────────────
     // (1) known digest family; (2) THE HEIGHT ASSERT — both signed openings
     // carry the event's claimed height (what stops a forged slash assembled
-    // from two different-height honest signatures).
+    // from two different-height honest signatures); (2b) THE ROUND ASSERT —
+    // both signed openings carry the same abort generation (what stops a
+    // forged slash assembled from an honest signer's two same-height
+    // signatures across abort re-rounds).
     bool kind_known    = (kind_val <= 1);
     bool heights_match = (index_a_val == block_index_val
                           && index_b_val == block_index_val);
+    bool gens_match    = (gen_a_val == gen_b_val);
 
     // (3) + (4): the two body roots and the two sigs must differ. A repeated
     // root or a repeated sig is NOT equivocation (a signer may sign the
@@ -7734,14 +7762,17 @@ int cmd_verify_equivocation(int argc, char** argv) {
     bool distinct_sigs       = (sg_a != sg_b);
 
     // Derive each signed digest from its opening:
-    //   SHA256(TAG || index u64 BE || body_root), TAG per kind — the
-    //   offline mirror of producer.cpp::compose_block_digest /
+    //   SHA256(TAG || index u64 BE || gen u64 BE || body_root), TAG per kind —
+    //   the offline mirror of producer.cpp::compose_block_digest /
     //   compose_contrib_commitment (tag strings byte-identical).
-    auto derive_digest = [&](uint64_t index, const std::vector<uint8_t>& root) {
-        const char* tag = (kind_val == 0) ? "DTM-BLKDIG-v2" : "DTM-CONTRIB-v2";
+    auto derive_digest = [&](uint64_t index, uint64_t gen,
+                             const std::vector<uint8_t>& root) {
+        const char* tag = (kind_val == 0) ? "DTM-BLKDIG-v3" : "DTM-CONTRIB-v3";
         std::vector<uint8_t> pre(tag, tag + std::strlen(tag));
         for (int i = 7; i >= 0; --i)
             pre.push_back(static_cast<uint8_t>((index >> (8 * i)) & 0xff));
+        for (int i = 7; i >= 0; --i)
+            pre.push_back(static_cast<uint8_t>((gen >> (8 * i)) & 0xff));
         pre.insert(pre.end(), root.begin(), root.end());
         std::vector<uint8_t> out(32);
         determ_sha256(pre.data(), pre.size(), out.data());
@@ -7749,8 +7780,8 @@ int cmd_verify_equivocation(int argc, char** argv) {
     };
     std::vector<uint8_t> dig_a(32, 0), dig_b(32, 0);
     if (kind_known) {
-        dig_a = derive_digest(index_a_val, root_a);
-        dig_b = derive_digest(index_b_val, root_b);
+        dig_a = derive_digest(index_a_val, gen_a_val, root_a);
+        dig_b = derive_digest(index_b_val, gen_b_val, root_b);
     }
 
     // (5) + (6): each sig must verify over its OWN DERIVED digest against
@@ -7762,7 +7793,7 @@ int cmd_verify_equivocation(int argc, char** argv) {
                             sg_b.data(), dig_b.data(), dig_b.size(),
                             pk.data()) == 0);
 
-    bool proven = kind_known && heights_match
+    bool proven = kind_known && heights_match && gens_match
                && distinct_body_roots && distinct_sigs
                && sig_a_valid && sig_b_valid;
 
@@ -7771,6 +7802,7 @@ int cmd_verify_equivocation(int argc, char** argv) {
         r["proven"]              = proven;
         r["kind_known"]          = kind_known;
         r["heights_match"]       = heights_match;
+        r["gens_match"]          = gens_match;
         r["distinct_body_roots"] = distinct_body_roots;
         r["distinct_sigs"]       = distinct_sigs;
         r["sig_a_valid"]         = sig_a_valid;
@@ -7779,8 +7811,10 @@ int cmd_verify_equivocation(int argc, char** argv) {
         r["kind"]                = kind_val;
         r["block_index"]         = block_index_val;
         r["index_a"]             = index_a_val;
+        r["gen_a"]               = gen_a_val;
         r["body_root_a_hex"]     = body_root_a_hex;
         r["index_b"]             = index_b_val;
+        r["gen_b"]               = gen_b_val;
         r["body_root_b_hex"]     = body_root_b_hex;
         r["derived_digest_a_hex"] = to_hex(dig_a);
         r["derived_digest_b_hex"] = to_hex(dig_b);
@@ -7798,15 +7832,19 @@ int cmd_verify_equivocation(int argc, char** argv) {
                   << "\n";
         std::cout << "  block_index:         " << block_index_val << "\n";
         std::cout << "  index_a:             " << index_a_val << "\n";
+        std::cout << "  gen_a:               " << gen_a_val << "\n";
         std::cout << "  body_root_a:         " << body_root_a_hex << "\n";
         std::cout << "  derived_digest_a:    " << to_hex(dig_a) << "\n";
         std::cout << "  index_b:             " << index_b_val << "\n";
+        std::cout << "  gen_b:               " << gen_b_val << "\n";
         std::cout << "  body_root_b:         " << body_root_b_hex << "\n";
         std::cout << "  derived_digest_b:    " << to_hex(dig_b) << "\n";
         std::cout << "  kind_known:          "
                   << (kind_known ? "true" : "false") << "\n";
         std::cout << "  heights_match:       "
                   << (heights_match ? "true" : "false") << "\n";
+        std::cout << "  gens_match:          "
+                  << (gens_match ? "true" : "false") << "\n";
         std::cout << "  distinct_body_roots: "
                   << (distinct_body_roots ? "true" : "false") << "\n";
         std::cout << "  distinct_sigs:       "
@@ -24464,21 +24502,24 @@ void print_usage() {
         "                       --index-b <N> --body-root-b <hex64> --sig-b <hex128>\n"
         "                       | --event <file> [--index <N>]) [--json]\n"
         "                                             OFFLINE FA6 equivocation-evidence verifier\n"
-        "                                             (EQV-height-bind form). Confirms the\n"
+        "                                             (EQV-height-bind + EQV-gen-bind form).\n"
+        "                                             Confirms the\n"
         "                                             EquivocationEvent two-sig proof: that ONE\n"
         "                                             registered key (--pubkey, pinned from the\n"
         "                                             beacon-anchored registry) signed TWO distinct\n"
-        "                                             digests of one family at the SAME height —\n"
+        "                                             digests of one family at the SAME height in\n"
+        "                                             the SAME round —\n"
         "                                             the unambiguous proof the chain slashes the\n"
         "                                             equivocator's full stake on. Reproduces\n"
         "                                             validator.cpp check_equivocation_events byte-\n"
         "                                             for-byte: PROVEN requires kind<=1,\n"
-        "                                             index_a==index_b==block_index,\n"
+        "                                             index_a==index_b==block_index, gen_a==gen_b,\n"
         "                                             body_root_a!=body_root_b, sig_a!=sig_b, AND\n"
         "                                             both sigs verify against --pubkey over\n"
-        "                                             digests DERIVED from the (index, body_root)\n"
-        "                                             openings: SHA256(TAG||index_be||body_root),\n"
-        "                                             TAG=DTM-BLKDIG-v2 (kind 0) / DTM-CONTRIB-v2\n"
+        "                                             digests DERIVED from the (index, gen,\n"
+        "                                             body_root) openings:\n"
+        "                                             SHA256(TAG||index_be||gen_be||body_root),\n"
+        "                                             TAG=DTM-BLKDIG-v3 (kind 0) / DTM-CONTRIB-v3\n"
         "                                             (kind 1). Forensic counterpart to committee-\n"
         "                                             signature-verify (which checks K-of-K sigs\n"
         "                                             over ONE digest; this checks ONE key over TWO\n"

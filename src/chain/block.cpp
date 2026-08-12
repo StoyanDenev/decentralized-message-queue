@@ -443,9 +443,11 @@ json EquivocationEvent::to_json() const {
     j["block_index"]          = block_index;
     j["kind"]                 = kind;
     j["index_a"]              = index_a;
+    j["gen_a"]                = gen_a;
     j["body_root_a"]          = to_hex(body_root_a);
     j["sig_a"]                = to_hex(sig_a);
     j["index_b"]              = index_b;
+    j["gen_b"]                = gen_b;
     j["body_root_b"]          = to_hex(body_root_b);
     j["sig_b"]                = to_hex(sig_b);
     j["shard_id"]             = shard_id;
@@ -458,8 +460,9 @@ EquivocationEvent EquivocationEvent::from_json(const json& j) {
     // (External submission via submit_equivocation RPC is the primary
     // attack surface — a clear error makes the forensic tool's job
     // easier when an operator types a bad hash.) Every consensus field is
-    // REQUIRED (EQV-height-bind: kind + the two (index, body_root) openings
-    // are what the verifier derives the signed digests from).
+    // REQUIRED (EQV-height-bind + EQV-gen-bind: kind + the two
+    // (index, gen, body_root) openings are what the verifier derives the
+    // signed digests from).
     EquivocationEvent e;
     e.equivocator          = json_require<std::string>(j, "equivocator");
     e.block_index          = json_require<uint64_t>(j, "block_index");
@@ -469,9 +472,11 @@ EquivocationEvent EquivocationEvent::from_json(const json& j) {
             "EquivocationEvent.kind > 1 (expected 0=BLOCK_DIGEST or 1=CONTRIB_COMMIT)");
     e.kind                 = static_cast<uint8_t>(kind_wide);
     e.index_a              = json_require<uint64_t>(j, "index_a");
+    e.gen_a                = json_require<uint64_t>(j, "gen_a");
     e.body_root_a          = from_hex_arr<32>(json_require_hex(j, "body_root_a", 64));
     e.sig_a                = from_hex_arr<64>(json_require_hex(j, "sig_a", 128));
     e.index_b              = json_require<uint64_t>(j, "index_b");
+    e.gen_b                = json_require<uint64_t>(j, "gen_b");
     e.body_root_b          = from_hex_arr<32>(json_require_hex(j, "body_root_b", 64));
     e.sig_b                = from_hex_arr<64>(json_require_hex(j, "sig_b", 128));
     e.shard_id             = j.value("shard_id",             uint32_t{0});
@@ -663,15 +668,17 @@ std::vector<uint8_t> Block::signing_bytes() const {
     // Bind equivocation events into the block hash so any tampering
     // with evidence (changing equivocator, sigs, openings) changes the
     // block hash and breaks consensus on it. Same field list/order as
-    // the EQUIV_REC frame (EQV-height-bind).
+    // the EQUIV_REC frame (EQV-height-bind + EQV-gen-bind).
     for (auto& ev : equivocation_events) {
         b.append(ev.equivocator);
         b.append(ev.block_index);
         b.append(ev.kind);
         b.append(ev.index_a);
+        b.append(ev.gen_a);
         b.append(ev.body_root_a);
         b.append(ev.sig_a.data(), ev.sig_a.size());
         b.append(ev.index_b);
+        b.append(ev.gen_b);
         b.append(ev.body_root_b);
         b.append(ev.sig_b.data(), ev.sig_b.size());
         b.append(static_cast<uint64_t>(ev.shard_id));
@@ -1265,12 +1272,12 @@ Block Block::from_json(const json& j, bool allow_witnesses) {
 //   ABORT_EVENT_REC  [round u8][aborting_node lp_str][timestamp i64-as-u64]
 //                    [event_hash 32][u32 claims_len][encode_abort_claims bytes]
 //   EQUIV_REC        [equivocator lp_str][block_index u64][kind u8]
-//                    [index_a u64][body_root_a 32][sig_a 64]
-//                    [index_b u64][body_root_b 32][sig_b 64]
+//                    [index_a u64][gen_a u64][body_root_a 32][sig_a 64]
+//                    [index_b u64][gen_b u64][body_root_b 32][sig_b 64]
 //                    [shard_id u32][beacon_anchor_height u64]
-//                    (EQV-height-bind: decode fail-closes on kind > 1, the
-//                    MergeEvent::decode precedent; layout identical to the
-//                    EQUIVOCATION_EVIDENCE gossip frame)
+//                    (EQV-height-bind + EQV-gen-bind: decode fail-closes on
+//                    kind > 1, the MergeEvent::decode precedent; layout
+//                    identical to the EQUIVOCATION_EVIDENCE gossip frame)
 //   RECEIPT_REC      [src_shard u32][dst_shard u32][src_block_index u64]
 //                    [src_block_hash 32][tx_hash 32][from lp_str][to lp_str]
 //                    [amount u64][fee u64][nonce u64]
@@ -1291,7 +1298,7 @@ constexpr size_t kMinHash           = 32;
 constexpr size_t kMinSig            = 64;
 constexpr size_t kMinU64            = 8;
 constexpr size_t kMinAbortEvent     = 1 + 1 + 8 + 32 + 4;      // + claims blob
-constexpr size_t kMinEquivEvent     = 1 + 8 + 1 + (8 + 32 + 64) * 2 + 4 + 8; // = 230
+constexpr size_t kMinEquivEvent     = 1 + 8 + 1 + (8 + 8 + 32 + 64) * 2 + 4 + 8; // = 246
 constexpr size_t kMinReceipt        = 4 + 4 + 8 + 32 + 32 + 1 + 1 + 8 + 8 + 8;
 constexpr size_t kMinAlloc          = 1 + 32 + 8 + 8 + 1;
 constexpr size_t kMinShardTipRecord = 1 + 49;                  // u8 len + minimum record
@@ -1570,9 +1577,11 @@ void Block::encode_frame(std::vector<uint8_t>& out) const {
         bf_put_u64(out, ev.block_index);
         out.push_back(ev.kind);
         bf_put_u64(out, ev.index_a);
+        bf_put_u64(out, ev.gen_a);
         bf_put_bytes(out, ev.body_root_a.data(), 32);
         bf_put_bytes(out, ev.sig_a.data(), 64);
         bf_put_u64(out, ev.index_b);
+        bf_put_u64(out, ev.gen_b);
         bf_put_bytes(out, ev.body_root_b.data(), 32);
         bf_put_bytes(out, ev.sig_b.data(), 64);
         bf_put_u32(out, ev.shard_id);
@@ -1715,9 +1724,11 @@ Block Block::decode_frame(const uint8_t* data, size_t len, bool allow_witnesses)
                 bf_throw("equivocation_events.kind > 1 "
                          "(expected 0=BLOCK_DIGEST or 1=CONTRIB_COMMIT)");
             ev.index_a = bf_get_u64(data, len, off, "equivocation_events.index_a");
+            ev.gen_a   = bf_get_u64(data, len, off, "equivocation_events.gen_a");
             bf_get_bytes(data, len, off, ev.body_root_a.data(), 32, "equivocation_events.body_root_a");
             bf_get_bytes(data, len, off, ev.sig_a.data(), 64, "equivocation_events.sig_a");
             ev.index_b = bf_get_u64(data, len, off, "equivocation_events.index_b");
+            ev.gen_b   = bf_get_u64(data, len, off, "equivocation_events.gen_b");
             bf_get_bytes(data, len, off, ev.body_root_b.data(), 32, "equivocation_events.body_root_b");
             bf_get_bytes(data, len, off, ev.sig_b.data(), 64, "equivocation_events.sig_b");
             ev.shard_id = bf_get_u32(data, len, off, "equivocation_events.shard_id");

@@ -9860,17 +9860,43 @@ int main(int argc, char** argv) {
                   "compute_block_digest: cumulative_rand EXCLUDED");
         }
 
-        // 15. abort_events excluded on the NON-F2 path (zero abort view
-        //     roots = v1 sentinel). On an F2 block the abort set IS bound —
-        //     see assertion 25.
+        // 15. abort_events CONTENT excluded on the NON-F2 path (zero abort
+        //     view roots = v1 sentinel). On an F2 block the abort set IS
+        //     bound — see assertion 25.
+        //     EQV-gen-bind (DECISION-LOG 2026-08-12, Q2): the abort COUNT is
+        //     now bound UNCONDITIONALLY as the round generation
+        //     (compose_block_digest's `gen`), so this arm mutates the content
+        //     of an EXISTING event rather than adding one — that is what
+        //     isolates "content excluded" from "count bound" (15b).
         {
-            Block b = baseline;
+            Block with_abort = baseline;
             AbortEvent ae;
             ae.round = 1;
             ae.event_hash = patterned_hash(0xE4);
-            b.abort_events.push_back(ae);
-            check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: abort_events EXCLUDED on non-F2 path (zero view roots)");
+            with_abort.abort_events.push_back(ae);
+            Hash dig_one_abort = compute_block_digest(with_abort);
+
+            Block b = with_abort;
+            b.abort_events[0].event_hash = patterned_hash(0xE5);
+            b.abort_events[0].aborting_node = "someone.tld";
+            check(compute_block_digest(b) == dig_one_abort,
+                  "compute_block_digest: abort_events CONTENT excluded on non-F2 path (zero view roots)");
+
+            // 15b. …but the abort COUNT is BOUND — it is the round generation
+            //      the K-of-K signature attests to. Two blocks at one height
+            //      from different abort re-rounds therefore carry different
+            //      digests, which is what makes an honest cross-round pair
+            //      distinguishable from a same-round double-sign
+            //      (EQV-gen-bind, the Hole-1b closure).
+            check(dig_one_abort != dig_baseline,
+                  "compute_block_digest: abort COUNT is BOUND as the round generation (EQV-gen-bind)");
+            Block b2 = with_abort;
+            AbortEvent ae2;
+            ae2.round = 2;
+            ae2.event_hash = patterned_hash(0xE6);
+            b2.abort_events.push_back(ae2);
+            check(compute_block_digest(b2) != dig_one_abort,
+                  "compute_block_digest: each additional abort round changes the digest (EQV-gen-bind)");
         }
 
         // 16. equivocation_events excluded on the NON-F2 path (zero eq view
@@ -11694,9 +11720,11 @@ int main(int argc, char** argv) {
             ev.block_index = 42;
             ev.kind        = 1;
             ev.index_a     = 42;
+            ev.gen_a       = 4;
             ev.body_root_a = patterned_hash(0xD0);
             ev.sig_a    = patterned_sig(0xD1);
             ev.index_b     = 42;
+            ev.gen_b       = 4;
             ev.body_root_b = patterned_hash(0xD2);
             ev.sig_b    = patterned_sig(0xD3);
             ev.shard_id = 3;
@@ -11713,6 +11741,10 @@ int main(int argc, char** argv) {
                   "EquivocationEvent round-trip: kind preserved");
             check(back.index_a == ev.index_a,
                   "EquivocationEvent round-trip: index_a preserved");
+            check(back.gen_a == ev.gen_a,
+                  "EquivocationEvent round-trip: gen_a preserved");
+            check(back.gen_b == ev.gen_b,
+                  "EquivocationEvent round-trip: gen_b preserved");
             check(back.body_root_a == ev.body_root_a,
                   "EquivocationEvent round-trip: body_root_a preserved");
             check(back.sig_a == ev.sig_a,
@@ -11796,8 +11828,9 @@ int main(int argc, char** argv) {
         }
 
         // EquivocationEvent: every consensus field (equivocator, block_index,
-        // kind, index_a/b, body_root_a/b, sig_a/b) is S-018 required —
-        // EQV-height-bind derives the signed digests from these very fields,
+        // kind, index_a/b, gen_a/b, body_root_a/b, sig_a/b) is S-018 required —
+        // EQV-height-bind + EQV-gen-bind derive the signed digests from these
+        // very fields,
         // so none may default. One missing-field probe per NEW field name,
         // plus the hex-length and kind-range rejects.
         {
@@ -11806,9 +11839,11 @@ int main(int argc, char** argv) {
                 {"block_index", 42},
                 {"kind", 0},
                 {"index_a", 42},
+                {"gen_a", 4},
                 {"body_root_a", to_hex(patterned_hash(0xD0))},
                 {"sig_a", to_hex(patterned_sig(0xD1))},
                 {"index_b", 42},
+                {"gen_b", 4},
                 {"body_root_b", to_hex(patterned_hash(0xD2))},
                 {"sig_b", to_hex(patterned_sig(0xD3))}
             };
@@ -11825,8 +11860,10 @@ int main(int argc, char** argv) {
             };
             probe_missing("kind");
             probe_missing("index_a");
+            probe_missing("gen_a");
             probe_missing("body_root_a");
             probe_missing("index_b");
+            probe_missing("gen_b");
             probe_missing("body_root_b");
 
             // Wrong-length hex for body_root_a (S-018 hex length check —
@@ -14264,25 +14301,25 @@ int main(int argc, char** argv) {
             patterned_hash(0x20), patterned_hash(0x21)};
         Hash DH = patterned_hash(0x30);
 
-        Hash commit_base = make_contrib_commitment(42, PREV, TXH, DH);
+        Hash commit_base = make_contrib_commitment(42, 0, PREV, TXH, DH);
 
         // 1. Determinism.
         {
-            Hash again = make_contrib_commitment(42, PREV, TXH, DH);
+            Hash again = make_contrib_commitment(42, 0, PREV, TXH, DH);
             check(again == commit_base,
                   "make_contrib_commitment deterministic");
         }
 
         // 2. block_index sensitivity.
         {
-            Hash diff = make_contrib_commitment(43, PREV, TXH, DH);
+            Hash diff = make_contrib_commitment(43, 0, PREV, TXH, DH);
             check(diff != commit_base,
                   "make_contrib_commitment: block_index sensitivity");
         }
 
         // 3. prev_hash sensitivity.
         {
-            Hash diff = make_contrib_commitment(42, patterned_hash(0xFE), TXH, DH);
+            Hash diff = make_contrib_commitment(42, 0, patterned_hash(0xFE), TXH, DH);
             check(diff != commit_base,
                   "make_contrib_commitment: prev_hash sensitivity");
         }
@@ -14291,7 +14328,7 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> TXH2 = TXH;
             TXH2[0] = patterned_hash(0xFD);
-            Hash diff = make_contrib_commitment(42, PREV, TXH2, DH);
+            Hash diff = make_contrib_commitment(42, 0, PREV, TXH2, DH);
             check(diff != commit_base,
                   "make_contrib_commitment: tx_hashes value sensitivity");
         }
@@ -14303,14 +14340,14 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> TXH2 = TXH;
             std::swap(TXH2[0], TXH2[1]);
-            Hash diff = make_contrib_commitment(42, PREV, TXH2, DH);
+            Hash diff = make_contrib_commitment(42, 0, PREV, TXH2, DH);
             check(diff != commit_base,
                   "make_contrib_commitment: tx_hashes ORDER sensitivity");
         }
 
         // 6. dh_input sensitivity.
         {
-            Hash diff = make_contrib_commitment(42, PREV, TXH, patterned_hash(0xFC));
+            Hash diff = make_contrib_commitment(42, 0, PREV, TXH, patterned_hash(0xFC));
             check(diff != commit_base,
                   "make_contrib_commitment: dh_input sensitivity");
         }
@@ -14359,7 +14396,7 @@ int main(int argc, char** argv) {
         //     collision).
         {
             // Use the same block_index + prev_hash for both.
-            Hash contrib = make_contrib_commitment(42, PREV, {}, Hash{});
+            Hash contrib = make_contrib_commitment(42, 0, PREV, {}, Hash{});
             Hash abort   = make_abort_claim_message(42, 1, PREV, "");
             check(contrib != abort,
                   "make_contrib_commitment vs make_abort_claim_message domain-separated");
@@ -14451,7 +14488,7 @@ int main(int argc, char** argv) {
         {
             NodeKey k = generate_node_key();
             ContribMsg m = make_contrib(k, "alice", 42, PREV, 0, TXH, DH);
-            Hash commit = make_contrib_commitment(42, PREV, TXH, DH);
+            Hash commit = make_contrib_commitment(42, 0, PREV, TXH, DH);
             bool ok = verify(k.pub, commit.data(), commit.size(), m.ed_sig);
             check(ok, "make_contrib produces sig that verifies under signer's pubkey");
         }
@@ -20051,9 +20088,9 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> tx = {patterned_hash(0x01), patterned_hash(0x02)};
             Hash dh = patterned_hash(0x03);
-            Hash v1_explicit = make_contrib_commitment(100, patterned_hash(0xAA), tx, dh);
+            Hash v1_explicit = make_contrib_commitment(100, 0, patterned_hash(0xAA), tx, dh);
             Hash v1_zero_view = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh, Hash{}, Hash{}, Hash{});
+                100, 0, patterned_hash(0xAA), tx, dh, Hash{}, Hash{}, Hash{});
             check(v1_explicit == v1_zero_view,
                   "make_contrib_commitment: all-zero views == v1 short-circuit");
         }
@@ -20062,7 +20099,8 @@ int main(int argc, char** argv) {
         //      EQV-height-bind) The zero-view commit must be BYTE-IDENTICAL to
         //      an INDEPENDENT re-derivation of the TWO-LEVEL pre-image:
         //        body   = SHA256( prev || inner_root || dh )       (no F2 tag)
-        //        commit = SHA256( "DTM-CONTRIB-v2" || u64BE(index) || body )
+        //        commit = SHA256( "DTM-CONTRIB-v3" || u64BE(index)
+        //                          || u64BE(gen) || body )
         //      Assertions 18 + 19 only compare F2-path hashes to EACH OTHER
         //      (18 = two zero-view calls; 19 = two non-zero-root calls differing
         //      by the root value), so both stay green if the v1 short-circuit is
@@ -20070,8 +20108,11 @@ int main(int argc, char** argv) {
         //      drifts. This pins the actual bytes against an external reference:
         //      the zero-view BODY must reproduce the pre-F2 3-append form (no
         //      DTM-F2-v1 tag), and the outer compose must bind exactly
-        //      TAG || index u64 BE || body — the opening the EquivocationEvent
-        //      verifier recomputes.
+        //      TAG || index u64 BE || gen u64 BE || body — the opening the
+        //      EquivocationEvent verifier recomputes. The reference uses a
+        //      NON-ZERO gen (7) so the gen append is genuinely pinned: a mutant
+        //      that drops it from compose_contrib_commitment no longer
+        //      reproduces these bytes.
         {
             std::vector<Hash> tx = {patterned_hash(0x01), patterned_hash(0x02)};
             Hash prev = patterned_hash(0xAA);
@@ -20087,20 +20128,33 @@ int main(int argc, char** argv) {
             body_b.append(dh);
             Hash body_ref = body_b.finalize();
             determ::crypto::SHA256Builder outer;
-            outer.append(std::string("DTM-CONTRIB-v2"));
+            outer.append(std::string("DTM-CONTRIB-v3"));
             outer.append((uint64_t)100);   // SHA256Builder u64 = big-endian
+            outer.append((uint64_t)7);     // EQV-gen-bind: the round generation
             outer.append(body_ref);
             Hash ref = outer.finalize();
-            Hash v1_zero_view = make_contrib_commitment(100, prev, tx, dh, Hash{}, Hash{}, Hash{});
+            Hash v1_zero_view = make_contrib_commitment(100, 7, prev, tx, dh, Hash{}, Hash{}, Hash{});
             check(v1_zero_view == ref,
                   "make_contrib_commitment: zero-view commit == independent two-level pre-image "
-                  "(no DTM-F2-v1 tag in the body; outer = DTM-CONTRIB-v2 || index BE || body; "
+                  "(no DTM-F2-v1 tag in the body; outer = DTM-CONTRIB-v3 || index BE "
+                  "|| gen BE || body; "
                   "register MakeContribCommitmentBackwardCompat T-1)");
             // Positive control: an F2 (non-zero eq_root) commit does NOT equal the
             // reference (the tag + roots are bound into the body). Stays green
             // under honest AND mutated code, so the negative leg above cannot
             // pass vacuously.
-            Hash f2 = make_contrib_commitment(100, prev, tx, dh, patterned_hash(0xEE), Hash{}, Hash{});
+            Hash f2 = make_contrib_commitment(100, 7, prev, tx, dh, patterned_hash(0xEE), Hash{}, Hash{});
+            // EQV-gen-bind leg: the SAME body at a DIFFERENT generation is a
+            // different commitment — this is the property that makes an honest
+            // cross-re-round pair distinguishable from a same-round double-sign.
+            // Compared against v1_zero_view (the gen-7 call), NOT against `ref`:
+            // a compose that IGNORES gen still differs from the gen-bearing
+            // reference, so only this same-function comparison is RED under a
+            // dropped-gen mutant.
+            Hash gen_moved = make_contrib_commitment(100, 8, prev, tx, dh, Hash{}, Hash{}, Hash{});
+            check(gen_moved != v1_zero_view,
+                  "make_contrib_commitment: aborts_gen binds the commitment "
+                  "(same body at gen 8 != gen 7; EQV-gen-bind)");
             check(f2 != ref,
                   "make_contrib_commitment: F2 (non-zero view) commit != independent two-level "
                   "pre-image (positive control)");
@@ -20110,15 +20164,15 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> tx = {patterned_hash(0x01)};
             Hash dh = patterned_hash(0x03);
-            Hash v1 = make_contrib_commitment(100, patterned_hash(0xAA), tx, dh);
+            Hash v1 = make_contrib_commitment(100, 0, patterned_hash(0xAA), tx, dh);
             Hash with_eq = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh,
+                100, 0, patterned_hash(0xAA), tx, dh,
                 patterned_hash(0xEE), Hash{}, Hash{});
             Hash with_ab = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh,
+                100, 0, patterned_hash(0xAA), tx, dh,
                 Hash{}, patterned_hash(0xAB), Hash{});
             Hash with_in = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh,
+                100, 0, patterned_hash(0xAA), tx, dh,
                 Hash{}, Hash{}, patterned_hash(0xCC));
             check(v1 != with_eq,
                   "make_contrib_commitment: eq_root binds the hash");
@@ -20135,10 +20189,10 @@ int main(int argc, char** argv) {
             std::vector<Hash> tx = {patterned_hash(0x01)};
             Hash dh = patterned_hash(0x03);
             Hash a = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh,
+                100, 0, patterned_hash(0xAA), tx, dh,
                 patterned_hash(0xEE), patterned_hash(0xAB), patterned_hash(0xCC));
             Hash b = make_contrib_commitment(
-                100, patterned_hash(0xAA), tx, dh,
+                100, 0, patterned_hash(0xAA), tx, dh,
                 patterned_hash(0xEE), patterned_hash(0xAB), patterned_hash(0xCC));
             check(a == b,
                   "make_contrib_commitment: F2 path deterministic");
@@ -20471,7 +20525,7 @@ int main(int argc, char** argv) {
                   "make_contrib (empty F2 args): view lists all empty");
 
             // Sig verifies under the v1 commit shape.
-            Hash v1_commit = make_contrib_commitment(100, prev, tx, dh);
+            Hash v1_commit = make_contrib_commitment(100, 0, prev, tx, dh);
             check(determ::crypto::verify(key.pub, v1_commit.data(),
                                           v1_commit.size(), m.ed_sig),
                   "make_contrib (empty F2 args): sig verifies under v1 commit");
@@ -20507,7 +20561,7 @@ int main(int argc, char** argv) {
 
             // Sig verifies under the F2-shape commit (DTM-F2-v1 domain
             // separator + view roots bound).
-            Hash f2_commit = make_contrib_commitment(101, prev, tx, dh,
+            Hash f2_commit = make_contrib_commitment(101, 0, prev, tx, dh,
                                                        m.view_eq_root,
                                                        m.view_abort_root,
                                                        m.view_inbound_root);
@@ -20517,7 +20571,7 @@ int main(int argc, char** argv) {
 
             // Cross-shape negative: sig must NOT verify under v1 commit
             // (the F2 commit shape includes DTM-F2-v1 + view roots).
-            Hash v1_commit = make_contrib_commitment(101, prev, tx, dh);
+            Hash v1_commit = make_contrib_commitment(101, 0, prev, tx, dh);
             check(!determ::crypto::verify(key.pub, v1_commit.data(),
                                            v1_commit.size(), m.ed_sig),
                   "make_contrib (F2 args): v1 commit shape REJECTS F2 sig");
@@ -20561,7 +20615,8 @@ int main(int argc, char** argv) {
 
             // Receive-path: re-derive each commit from its msg's view roots.
             auto recv_commit = [](const ContribMsg& m) {
-                return make_contrib_commitment(m.block_index, m.prev_hash,
+                return make_contrib_commitment(m.block_index, m.aborts_gen,
+                                                 m.prev_hash,
                                                  m.tx_hashes, m.dh_input,
                                                  m.view_eq_root,
                                                  m.view_abort_root,
@@ -20643,6 +20698,14 @@ int main(int argc, char** argv) {
             auto e4i = base; e4i.index_a = 101;
             check(hash_equivocation_event(e4i) != base_hash,
                   "hash_equivocation_event: index_a field binds");
+
+            auto e4g = base; e4g.gen_a = 1;
+            check(hash_equivocation_event(e4g) != base_hash,
+                  "hash_equivocation_event: gen_a field binds (EQV-gen-bind)");
+
+            auto e4gb = base; e4gb.gen_b = 1;
+            check(hash_equivocation_event(e4gb) != base_hash,
+                  "hash_equivocation_event: gen_b field binds (EQV-gen-bind)");
 
             auto e5 = base; e5.sig_a[0] ^= 0xFF;
             check(hash_equivocation_event(e5) != base_hash,
@@ -20770,7 +20833,7 @@ int main(int argc, char** argv) {
                   "end-to-end: view_inbound_root matches list");
 
             Hash recv_commit = make_contrib_commitment(
-                m.block_index, m.prev_hash, m.tx_hashes, m.dh_input,
+                m.block_index, 0, m.prev_hash, m.tx_hashes, m.dh_input,
                 m.view_eq_root, m.view_abort_root, m.view_inbound_root);
             check(determ::crypto::verify(key.pub, recv_commit.data(),
                                           recv_commit.size(), m.ed_sig),
@@ -20815,12 +20878,12 @@ int main(int argc, char** argv) {
         const std::vector<Hash> baseline_tx = {baseline_h0, baseline_h1};
         const Hash     baseline_dh        = patterned_hash(0x20);
         const Hash commit_0 = make_contrib_commitment(
-            baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+            baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh);
 
         // 1. Determinism: same inputs → same commit (recomputed).
         {
             Hash repeat = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh);
             check(repeat == commit_0,
                   "v1 commit deterministic (same inputs → same hash)");
         }
@@ -20828,7 +20891,7 @@ int main(int argc, char** argv) {
         // 2. Different block_index → different commit.
         {
             Hash c = make_contrib_commitment(
-                baseline_idx + 1, baseline_prev, baseline_tx, baseline_dh);
+                baseline_idx + 1, 0, baseline_prev, baseline_tx, baseline_dh);
             check(c != commit_0,
                   "block_index 42→43 changes commit");
         }
@@ -20838,7 +20901,7 @@ int main(int argc, char** argv) {
             Hash flipped = baseline_prev;
             flipped[0] ^= 0x01;  // single-bit flip on byte 0
             Hash c = make_contrib_commitment(
-                baseline_idx, flipped, baseline_tx, baseline_dh);
+                baseline_idx, 0, flipped, baseline_tx, baseline_dh);
             check(c != commit_0,
                   "prev_hash single-byte flip changes commit");
         }
@@ -20848,7 +20911,7 @@ int main(int argc, char** argv) {
             std::vector<Hash> tx3 = baseline_tx;
             tx3.push_back(patterned_hash(0x60));
             Hash c = make_contrib_commitment(
-                baseline_idx, baseline_prev, tx3, baseline_dh);
+                baseline_idx, 0, baseline_prev, tx3, baseline_dh);
             check(c != commit_0,
                   "tx_hashes: append third hash changes commit");
         }
@@ -20857,7 +20920,7 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> tx1 = {baseline_h0};
             Hash c = make_contrib_commitment(
-                baseline_idx, baseline_prev, tx1, baseline_dh);
+                baseline_idx, 0, baseline_prev, tx1, baseline_dh);
             check(c != commit_0,
                   "tx_hashes: remove a hash changes commit");
         }
@@ -20873,7 +20936,7 @@ int main(int argc, char** argv) {
             std::vector<Hash> reversed = {baseline_h1, baseline_h0};
             std::sort(reversed.begin(), reversed.end());
             Hash c = make_contrib_commitment(
-                baseline_idx, baseline_prev, reversed, baseline_dh);
+                baseline_idx, 0, baseline_prev, reversed, baseline_dh);
             check(c == commit_0,
                   "tx_hashes: canonically-sorted reversed input == baseline");
         }
@@ -20885,7 +20948,7 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> permuted = {baseline_h1, baseline_h0};
             Hash c = make_contrib_commitment(
-                baseline_idx, baseline_prev, permuted, baseline_dh);
+                baseline_idx, 0, baseline_prev, permuted, baseline_dh);
             check(c != commit_0,
                   "tx_hashes: unsorted permutation changes commit "
                   "(make_contrib_commitment is order-sensitive)");
@@ -20896,7 +20959,7 @@ int main(int argc, char** argv) {
             Hash flipped = baseline_dh;
             flipped[31] ^= 0x80;  // single-bit flip on the LAST byte
             Hash c = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, flipped);
+                baseline_idx, 0, baseline_prev, baseline_tx, flipped);
             check(c != commit_0,
                   "dh_input single-byte flip changes commit");
         }
@@ -20904,14 +20967,14 @@ int main(int argc, char** argv) {
         // 6. Non-zero view_eq_root → enters DTM-F2-v1 path → different
         //    from baseline v1 commit.
         const Hash commit_eq_only = make_contrib_commitment(
-            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
             patterned_hash(0xE0), Hash{}, Hash{});
         check(commit_eq_only != commit_0,
               "view_eq_root only: F2 path != v1 baseline");
 
         // 7. Non-zero view_abort_root only → different from v1 and from (6).
         const Hash commit_abort_only = make_contrib_commitment(
-            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
             Hash{}, patterned_hash(0xA0), Hash{});
         check(commit_abort_only != commit_0,
               "view_abort_root only: F2 path != v1 baseline");
@@ -20922,7 +20985,7 @@ int main(int argc, char** argv) {
         // 8. Non-zero view_inbound_root only → different from v1 and from
         //    (6) and (7).
         const Hash commit_inbound_only = make_contrib_commitment(
-            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
             Hash{}, Hash{}, patterned_hash(0xC0));
         check(commit_inbound_only != commit_0,
               "view_inbound_root only: F2 path != v1 baseline");
@@ -20935,7 +20998,7 @@ int main(int argc, char** argv) {
         //    single-root forms (each root contributes independently to
         //    the final hash).
         const Hash commit_all_three = make_contrib_commitment(
-            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
             patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
         check(commit_all_three != commit_eq_only,
               "all-three roots != eq_only (abort+inbound contribute)");
@@ -20950,7 +21013,7 @@ int main(int argc, char** argv) {
             Hash flipped_prev = baseline_prev;
             flipped_prev[15] ^= 0x10;
             Hash c = make_contrib_commitment(
-                baseline_idx, flipped_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, flipped_prev, baseline_tx, baseline_dh,
                 patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
             check(c != commit_all_three,
                   "F2-active: changing prev_hash still changes commit");
@@ -20960,7 +21023,7 @@ int main(int argc, char** argv) {
         //     idx still binds.
         {
             Hash c = make_contrib_commitment(
-                baseline_idx + 1, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx + 1, 0, baseline_prev, baseline_tx, baseline_dh,
                 patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
             check(c != commit_all_three,
                   "F2-active: changing block_index still changes commit");
@@ -20973,13 +21036,13 @@ int main(int argc, char** argv) {
         {
             Hash X = patterned_hash(0x77);
             Hash c_eq = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 X, Hash{}, Hash{});
             Hash c_ab = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 Hash{}, X, Hash{});
             Hash c_in = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 Hash{}, Hash{}, X);
             check(c_eq != c_ab,
                   "same-value X: eq-slot != abort-slot");
@@ -20993,10 +21056,10 @@ int main(int argc, char** argv) {
         //     when re-computed. Determinism on the F2 path.
         {
             Hash a = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
             Hash b = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
             check(a == b,
                   "F2-active path deterministic (re-compute byte-identical)");
@@ -21008,7 +21071,7 @@ int main(int argc, char** argv) {
         //     Determinism on the v1 short-circuit path.
         {
             Hash repeat = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh);
             check(repeat == commit_0,
                   "v1 path deterministic (re-compute byte-identical)");
         }
@@ -21018,7 +21081,7 @@ int main(int argc, char** argv) {
         //     pre-F2 peers). This is a POSITIVE assertion of collision.
         {
             Hash f2_zero = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                baseline_idx, 0, baseline_prev, baseline_tx, baseline_dh,
                 Hash{}, Hash{}, Hash{});
             check(f2_zero == commit_0,
                   "v1 commit == F2-with-all-zero-roots (v1 short-circuit "
@@ -21033,9 +21096,9 @@ int main(int argc, char** argv) {
         {
             std::vector<Hash> empty_tx;
             Hash c1 = make_contrib_commitment(
-                baseline_idx, baseline_prev, empty_tx, baseline_dh);
+                baseline_idx, 0, baseline_prev, empty_tx, baseline_dh);
             Hash c2 = make_contrib_commitment(
-                baseline_idx, baseline_prev, empty_tx, baseline_dh);
+                baseline_idx, 0, baseline_prev, empty_tx, baseline_dh);
             check(c1 == c2,
                   "empty tx_hashes: deterministic commit");
             check(c1 != commit_0,
@@ -21047,9 +21110,9 @@ int main(int argc, char** argv) {
         //     domain.
         {
             Hash c1 = make_contrib_commitment(
-                0, baseline_prev, baseline_tx, baseline_dh);
+                0, 0, baseline_prev, baseline_tx, baseline_dh);
             Hash c2 = make_contrib_commitment(
-                0, baseline_prev, baseline_tx, baseline_dh);
+                0, 0, baseline_prev, baseline_tx, baseline_dh);
             check(c1 == c2,
                   "block_index=0 deterministic");
             check(c1 != commit_0,
@@ -21063,9 +21126,9 @@ int main(int argc, char** argv) {
         {
             const uint64_t big = 0xFFFFFFFFFFFFFFFEull;
             Hash c_big   = make_contrib_commitment(
-                big,     baseline_prev, baseline_tx, baseline_dh);
+                big, 0,     baseline_prev, baseline_tx, baseline_dh);
             Hash c_max   = make_contrib_commitment(
-                big + 1, baseline_prev, baseline_tx, baseline_dh);
+                big + 1, 0, baseline_prev, baseline_tx, baseline_dh);
             check(c_big != c_max,
                   "block_index near-max: adjacent values yield distinct commits");
             check(c_big != commit_0,
@@ -21077,7 +21140,7 @@ int main(int argc, char** argv) {
         //     is distinct from any patterned value.
         {
             Hash c_zero_prev = make_contrib_commitment(
-                baseline_idx, Hash{}, baseline_tx, baseline_dh);
+                baseline_idx, 0, Hash{}, baseline_tx, baseline_dh);
             check(c_zero_prev != commit_0,
                   "zero prev_hash distinct from patterned prev_hash");
         }
@@ -21087,7 +21150,7 @@ int main(int argc, char** argv) {
         //     dh_input.
         {
             Hash c_zero_dh = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, Hash{});
+                baseline_idx, 0, baseline_prev, baseline_tx, Hash{});
             check(c_zero_dh != commit_0,
                   "zero dh_input distinct from patterned dh_input");
         }
@@ -21102,11 +21165,11 @@ int main(int argc, char** argv) {
             Hash flipped_dh = baseline_dh;
             flipped_dh[31] ^= 0x80;
             Hash c_prev = make_contrib_commitment(
-                baseline_idx, flipped_prev, baseline_tx, baseline_dh);
+                baseline_idx, 0, flipped_prev, baseline_tx, baseline_dh);
             Hash c_dh = make_contrib_commitment(
-                baseline_idx, baseline_prev, baseline_tx, flipped_dh);
+                baseline_idx, 0, baseline_prev, baseline_tx, flipped_dh);
             Hash c_both = make_contrib_commitment(
-                baseline_idx, flipped_prev, baseline_tx, flipped_dh);
+                baseline_idx, 0, flipped_prev, baseline_tx, flipped_dh);
             check(c_both != c_prev,
                   "two-field perturbation != prev-only perturbation");
             check(c_both != c_dh,
@@ -26554,7 +26617,7 @@ int main(int argc, char** argv) {
 
         // === Collect commitment outputs ===
 
-        Hash contrib_commit = make_contrib_commitment(IDX, prev, {}, Hash{});
+        Hash contrib_commit = make_contrib_commitment(IDX, 0, prev, {}, Hash{});
         Hash abort_msg_r1   = make_abort_claim_message(IDX, 1, prev, "dan");
         Hash abort_msg_r2   = make_abort_claim_message(IDX, 2, prev, "dan");
         Hash delay_seed     = compute_delay_seed(IDX, prev, tx_root, dh_inputs);
@@ -26691,8 +26754,8 @@ int main(int argc, char** argv) {
         //     Cross-checks that the domain-separation comes from
         //     distinct hash inputs, not from any internal state.
         {
-            Hash a = make_contrib_commitment(IDX, prev, {}, Hash{});
-            Hash b_ = make_contrib_commitment(IDX, prev, {}, Hash{});
+            Hash a = make_contrib_commitment(IDX, 0, prev, {}, Hash{});
+            Hash b_ = make_contrib_commitment(IDX, 0, prev, {}, Hash{});
             check(a == b_,
                   "sanity: same input → same output (determinism, not non-collision)");
         }
@@ -35067,7 +35130,8 @@ int main(int argc, char** argv) {
                 c.creator_proposer_times[0] += delta;
                 c.timestamp = c.creator_proposer_times[0];   // median of K=1
                 Hash commit = node::make_contrib_commitment(
-                    c.index, c.prev_hash, c.creator_tx_lists[0], c.creator_dh_inputs[0],
+                    c.index, static_cast<uint64_t>(c.abort_events.size()),
+                    c.prev_hash, c.creator_tx_lists[0], c.creator_dh_inputs[0],
                     vr(c.creator_view_eq_roots,0), vr(c.creator_view_abort_roots,0),
                     vr(c.creator_view_inbound_roots,0), c.creator_proposer_times[0]);
                 c.creator_ed_sigs[0] = crypto::sign(keyP, commit.data(), commit.size());
@@ -35893,9 +35957,14 @@ int main(int argc, char** argv) {
                 b.creator_tx_lists.push_back({});
             }
             for (size_t i = 0; i < b.creators.size(); ++i) {
-                Hash commit = make_contrib_commitment(b.index, b.prev_hash,
-                                                      b.creator_tx_lists[i],
-                                                      b.creator_dh_inputs[i]);
+                // EQV-gen-bind: the validator recomputes each creator's
+                // Phase-1 commit with the block's OWN round generation
+                // (b.abort_events.size()), so the fixture must sign the same.
+                Hash commit = make_contrib_commitment(
+                    b.index, static_cast<uint64_t>(b.abort_events.size()),
+                    b.prev_hash,
+                    b.creator_tx_lists[i],
+                    b.creator_dh_inputs[i]);
                 b.creator_ed_sigs.push_back(
                     sign(key_of(b.creators[i]), commit.data(), commit.size()));
             }
@@ -36030,16 +36099,20 @@ int main(int argc, char** argv) {
                   "TXROOT-union-bind: a header tx_root that mismatches the committed lists is rejected at :226");
         }
 
-        // --- EQV-sig-verify-forged-slash + EQV-height-bind (validator.cpp
-        //     check_equivocation_events) ---------------------------------------
+        // --- EQV-sig-verify-forged-slash + EQV-height-bind + EQV-gen-bind
+        //     (validator.cpp check_equivocation_events) ---------------------
         // The gate slashes an equivocator only on GENUINE evidence of a
-        // double-sign AT ONE HEIGHT. EQV-height-bind (DECISION-LOG 2026-07-31,
-        // Hole 1): the event carries per-side OPENINGS (index, body_root); the
-        // gate derives digest_x = compose_<kind>(index_x, body_root_x), verifies
-        // each sig against the DERIVED digest, and asserts index_a == index_b ==
-        // block_index. Without the height assert, one honest validator's two
-        // NORMAL block signatures from two DIFFERENT heights package into a
-        // full-stake slash. Driven in ISOLATION via the
+        // double-sign AT ONE HEIGHT IN ONE ROUND. EQV-height-bind (DECISION-LOG
+        // 2026-07-31, Hole 1) + EQV-gen-bind (DECISION-LOG 2026-08-12, Q2 /
+        // Hole 1b): the event carries per-side OPENINGS (index, gen, body_root);
+        // the gate derives digest_x = compose_<kind>(index_x, gen_x,
+        // body_root_x), verifies each sig against the DERIVED digest, and
+        // asserts index_a == index_b == block_index AND gen_a == gen_b. Without
+        // the height assert, one honest validator's two NORMAL block signatures
+        // from two DIFFERENT heights package into a full-stake slash; without
+        // the round assert, its two signatures from two abort RE-ROUNDS at ONE
+        // height do the same (an honest re-round legitimately signs a new
+        // digest — new committee, fresh dh_input). Driven in ISOLATION via the
         // check_equivocation_events_for_test const-forwarder seam (arg order
         // b, registry, chain), exactly as the DECISION-LOG directs.
         {
@@ -36050,17 +36123,17 @@ int main(int argc, char** argv) {
             // digests DERIVED from the given per-side openings — so the ONLY
             // arm a given case can trip is the one its parameters violate.
             auto mk_ev = [&](uint8_t kind, uint64_t block_index,
-                             uint64_t ia, const Hash& ra,
-                             uint64_t ib, const Hash& rb) {
+                             uint64_t ia, uint64_t ga, const Hash& ra,
+                             uint64_t ib, uint64_t gb, const Hash& rb) {
                 EquivocationEvent e;
                 e.equivocator = "n0"; e.block_index = block_index; e.kind = kind;
-                e.index_a = ia; e.body_root_a = ra;
-                e.index_b = ib; e.body_root_b = rb;
-                auto compose = [&](uint64_t ix, const Hash& r) {
-                    return kind == 0 ? compose_block_digest(ix, r)
-                                     : compose_contrib_commitment(ix, r);
+                e.index_a = ia; e.gen_a = ga; e.body_root_a = ra;
+                e.index_b = ib; e.gen_b = gb; e.body_root_b = rb;
+                auto compose = [&](uint64_t ix, uint64_t g, const Hash& r) {
+                    return kind == 0 ? compose_block_digest(ix, g, r)
+                                     : compose_contrib_commitment(ix, g, r);
                 };
-                Hash da = compose(ia, ra), db = compose(ib, rb);
+                Hash da = compose(ia, ga, ra), db = compose(ib, gb, rb);
                 e.sig_a = sign(key_of("n0"), da.data(), da.size());
                 e.sig_b = sign(key_of("n0"), db.data(), db.size());
                 return e;
@@ -36075,7 +36148,7 @@ int main(int argc, char** argv) {
             //    distinct, both sigs verify against their derived digests), so
             //    every RED below is caused by its named violation, not plumbing.
             {
-                auto r = run(mk_ev(0, 1, 1, rA, 1, rB));
+                auto r = run(mk_ev(0, 1, 1, 0, rA, 1, 0, rB));
                 if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
                 check(r.ok,
                       "EQV control: a genuine same-height double-sign (opening format) is ACCEPTED");
@@ -36091,7 +36164,7 @@ int main(int argc, char** argv) {
             //     from two different-height honest signatures) is ACCEPTED ->
             //     the specific-string assertion flips RED.
             {
-                auto r = run(mk_ev(0, 1, 1, rA, 2, rB));
+                auto r = run(mk_ev(0, 1, 1, 0, rA, 2, 0, rB));
                 check(!r.ok && r.error.find("height mismatch: index_a/index_b must equal block_index") != std::string::npos,
                       "EQV-height-bind: two different-height honest sigs are REJECTED (no forged slash)");
             }
@@ -36100,9 +36173,50 @@ int main(int argc, char** argv) {
             //     event's claimed height (1). A mutant weakening the assert to
             //     `index_a == index_b` alone ACCEPTS this -> RED.
             {
-                auto r = run(mk_ev(0, 1, 2, rA, 2, rB));
+                auto r = run(mk_ev(0, 1, 2, 0, rA, 2, 0, rB));
                 check(!r.ok && r.error.find("height mismatch: index_a/index_b must equal block_index") != std::string::npos,
                       "EQV-height-bind: openings agreeing with each other but not block_index are REJECTED");
+            }
+
+            // 2c. THE HOLE-1b FALSIFIER — an honest RE-ROUND pair REJECTED.
+            //     Both sides are REAL n0 signatures at the SAME height 1; they
+            //     differ only in the ROUND GENERATION (gen 0 = the first round,
+            //     gen 1 = the round after one abort). That is exactly what an
+            //     HONEST validator produces when a round aborts and it re-signs
+            //     the reselected committee's block — the committee changes and
+            //     every start_contrib_phase generation draws a fresh dh_input,
+            //     so the two body roots genuinely differ. Every other arm
+            //     passes (kind valid, all three heights equal, roots distinct,
+            //     sigs distinct, BOTH sigs verify against their own derived
+            //     digests) — the gen assert is the UNIQUE rejecting arm.
+            //     MUTANT: delete/short-circuit the gen_a == gen_b assert in
+            //     check_equivocation_events -> this forged slash (assembled
+            //     from two honest same-height cross-round signatures) is
+            //     ACCEPTED -> the specific-string assertion flips RED.
+            {
+                auto r = run(mk_ev(0, 1, 1, 0, rA, 1, 1, rB));
+                check(!r.ok && r.error.find("round mismatch: gen_a != gen_b") != std::string::npos,
+                      "EQV-gen-bind: an honest re-round pair (same height, different gen) is REJECTED "
+                      "(no forged slash)");
+            }
+            // 2d. ACCEPTANCE PRESERVED at a NON-ZERO shared generation: a
+            //     genuine same-height SAME-gen double-sign in round 3 is still
+            //     ACCEPTED. Without this leg a mutant that hard-rejects every
+            //     non-zero gen (or ignores gen entirely and only ever composes
+            //     0) would stay green on 2c alone.
+            {
+                auto r = run(mk_ev(0, 1, 1, 3, rA, 1, 3, rB));
+                if (!r.ok) std::cout << "    got: [" << r.error << "]\n";
+                check(r.ok,
+                      "EQV-gen-bind control: a genuine same-height SAME-gen (3) double-sign is ACCEPTED");
+            }
+            // 2e. The contrib family (kind 1) takes the SAME round bind — this
+            //     is the family where re-rounds are most concrete (each round's
+            //     ContribMsg carries its own aborts_gen).
+            {
+                auto r = run(mk_ev(1, 1, 1, 0, rA, 1, 1, rB));
+                check(!r.ok && r.error.find("round mismatch: gen_a != gen_b") != std::string::npos,
+                      "EQV-gen-bind: an honest re-round CONTRIB pair is REJECTED too (kind 1)");
             }
 
             // 3. DERIVATION arm — flip body_root_a on the honest pair: the
@@ -36110,7 +36224,7 @@ int main(int argc, char** argv) {
             //    are verified against digests derived from the carried openings,
             //    never against anything carried opaquely in the event.
             {
-                auto e = mk_ev(0, 1, 1, rA, 1, rB);
+                auto e = mk_ev(0, 1, 1, 0, rA, 1, 0, rB);
                 e.body_root_a[0] ^= 0x01;
                 auto r = run(e);
                 check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
@@ -36119,7 +36233,7 @@ int main(int argc, char** argv) {
 
             // 4. KIND arm — an unknown digest family fail-closes.
             {
-                auto e = mk_ev(0, 1, 1, rA, 1, rB);
+                auto e = mk_ev(0, 1, 1, 0, rA, 1, 0, rB);
                 e.kind = 2;
                 auto r = run(e);
                 check(!r.ok && r.error.find("unknown kind") != std::string::npos,
@@ -36131,7 +36245,7 @@ int main(int argc, char** argv) {
             //    relabeled kind=0 derive under the block tag and fail — the
             //    two digest families cannot be confused into a forged pair.
             {
-                auto e1 = mk_ev(1, 1, 1, rA, 1, rB);
+                auto e1 = mk_ev(1, 1, 1, 0, rA, 1, 0, rB);
                 auto r1 = run(e1);
                 if (!r1.ok) std::cout << "    got: [" << r1.error << "]\n";
                 check(r1.ok,
@@ -36147,7 +36261,7 @@ int main(int argc, char** argv) {
             //    so the sig_a verify is the UNIQUE failing arm; under a mutant
             //    that short-circuits it, the forged slash is ACCEPTED -> RED.
             {
-                auto forged = mk_ev(0, 1, 1, rA, 1, rB);
+                auto forged = mk_ev(0, 1, 1, 0, rA, 1, 0, rB);
                 forged.sig_a[0] ^= 0xFF;
                 auto r = run(forged);
                 check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
@@ -45824,10 +45938,10 @@ int main(int argc, char** argv) {
 
         // === make_contrib_commitment proposer_time gate ===
         std::vector<Hash> txs; Hash prev{}, dh{};
-        Hash c_v1  = make_contrib_commitment(5, prev, txs, dh);
-        Hash c_pt0 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 0);
-        Hash c_pt1 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 1000);
-        Hash c_pt2 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 2000);
+        Hash c_v1  = make_contrib_commitment(5, 0, prev, txs, dh);
+        Hash c_pt0 = make_contrib_commitment(5, 0, prev, txs, dh, Hash{}, Hash{}, Hash{}, 0);
+        Hash c_pt1 = make_contrib_commitment(5, 0, prev, txs, dh, Hash{}, Hash{}, Hash{}, 1000);
+        Hash c_pt2 = make_contrib_commitment(5, 0, prev, txs, dh, Hash{}, Hash{}, Hash{}, 2000);
         check(c_v1 == c_pt0,
               "commitment: proposer_time=0 keeps byte-identical v1 commitment");
         check(c_pt1 != c_v1,
@@ -46722,6 +46836,21 @@ int main(int argc, char** argv) {
         // (a) re-admit the vacuous loop (bypass verify_committee_sigs) -> the
         // EMPTY-COMMITTEE assert flips RED; (b) delete the signed_count <
         // required_k arm in the helper -> the UNDER-K assert flips RED.
+        //
+        // Q1 (DECISION-LOG 2026-08-12) extends this gate to cumulative_rand
+        // authentication. The K-of-K sigs cover compute_block_digest, which
+        // excludes cumulative_rand, delay_output AND creator_dh_secrets, so a
+        // MITM could rewrite the header's randomness — the value that feeds
+        // shard epoch-committee selection — without breaking a signature.
+        // Step 5 of on_beacon_header now runs the shared validator seam
+        // check_header_rand_binding (commit-reveal on the secrets ->
+        // delay_seed/delay_output -> cumulative_rand vs the PREVIOUS TRACKED
+        // HEADER's rand). Falsify-on-mutant: (c) delete step 5 -> the three
+        // Q1 tamper arms flip RED (both positives stay GREEN); (d) drop only
+        // the check_creator_dh_secrets_with link inside the seam -> ONLY the
+        // rand-grind arm flips RED, proving that link is load-bearing (the
+        // secrets are not digest-covered, so without it delay_output — and
+        // hence cumulative_rand — is grindable).
         using namespace determ;
         using namespace determ::net;
         namespace fs = std::filesystem;
@@ -46755,24 +46884,45 @@ int main(int argc, char** argv) {
         g.initial_balances.push_back(ab);
         const std::string gpath = (dir / "genesis.json").string();
         g.save(gpath);
-        node::Config cfg;
-        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
-        cfg.listen_port = 7683; cfg.key_path = (dir / "node0.key").string();
-        cfg.chain_path = (dir / "node0" / "chain.json").string();
-        cfg.genesis_path = gpath; cfg.m_creators = 2; cfg.k_block_sigs = 2;
-        cfg.chain_role = ChainRole::SHARD; cfg.shard_id = 0;
-        cfg.initial_shard_count = 2; cfg.log_quiet = true;
-        fs::create_directories(cfg.data_dir);
-        crypto::save_node_key(k0, cfg.key_path);
         VirtualNetwork vnet;
-        auto loop = std::make_unique<VirtualEventLoop>();
-        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
-        node::Node n(cfg, determ::time::RealClock::instance(),
-                     loop.get(), transport.get());
-
-        auto headers = [&]() {
-            return n.rpc_status()["beacon_headers"].get<size_t>();
+        // MUTANT-ATTRIBUTION: each arm GROUP gets its OWN SHARD node. The
+        // observable (rpc_status()["beacon_headers"]) is a counter over
+        // STRICTLY CONTIGUOUS state, so a mutant that wrongly ACCEPTS a forged
+        // header does not just redden that arm — it shifts the expected index
+        // and the prev_hash anchor for every later arm, cascading false REDs
+        // and (worse) masking a later falsifier behind an accidental PASS.
+        // Independent nodes keep every arm attributable to the ONE gate it
+        // targets. Group A drives the FIRST-header arms (beacon_headers_
+        // empty); group B drives the CHAINED h=2 arms.
+        std::vector<std::unique_ptr<VirtualEventLoop>> loops;
+        std::vector<std::unique_ptr<VirtualTransport>> transports;
+        std::vector<std::unique_ptr<node::Node>>       nodes;
+        auto make_node = [&](const std::string& sub, uint16_t port) -> node::Node& {
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / sub).string();
+            cfg.listen_port = port; cfg.key_path = (dir / (sub + ".key")).string();
+            cfg.chain_path = (dir / sub / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = 2; cfg.k_block_sigs = 2;
+            cfg.chain_role = ChainRole::SHARD; cfg.shard_id = 0;
+            cfg.initial_shard_count = 2; cfg.log_quiet = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(k0, cfg.key_path);
+            loops.push_back(std::make_unique<VirtualEventLoop>());
+            transports.push_back(
+                std::make_unique<VirtualTransport>(*loops.back(), vnet));
+            nodes.push_back(std::make_unique<node::Node>(
+                cfg, determ::time::RealClock::instance(),
+                loops.back().get(), transports.back().get()));
+            return *nodes.back();
         };
+        node::Node& n  = make_node("node0",  7683);   // group A: first-header arms
+        node::Node& nb = make_node("node0b", 7684);   // group B: chained h=2 arms
+
+        auto headers_of = [](node::Node& x) {
+            return x.rpc_status()["beacon_headers"].get<size_t>();
+        };
+        auto headers  = [&]() { return headers_of(n);  };
+        auto headersB = [&]() { return headers_of(nb); };
         // Forged-header builder: index 1 (expected first index; prev_hash check
         // is skipped while beacon_headers_ is empty), consensus_mode left at the
         // default MUTUAL_DISTRUST, cumulative_rand filled with 0xEE — the
@@ -46788,6 +46938,55 @@ int main(int argc, char** argv) {
             b.creators = std::move(creators);
             b.creator_block_sigs.assign(b.creators.size(), Signature{});
             return b;
+        };
+
+        // Q1 (DECISION-LOG 2026-08-12) fixtures. HONEST full-K header, built the
+        // way a real beacon producer builds one, so the commit-reveal chain the
+        // Q1 binding re-derives actually holds:
+        //   creator_dh_inputs[i] = SHA256(creator_dh_secrets[i] || pk_i)
+        //   delay_seed           = compute_delay_seed(index, prev_hash, tx_root,
+        //                                             creator_dh_inputs)
+        //   delay_output         = compute_block_rand(delay_seed, secrets)
+        //   cumulative_rand      = SHA256(prev_rand || delay_output)
+        // `prev` is the predecessor header (nullptr = the FIRST header, index 1,
+        // where on_beacon_header skips the prev_hash chain check AND — per the
+        // FIRST-HEADER RULE — the cumulative_rand link, because a shard does not
+        // pin the beacon genesis block; `salt` just varies the secrets per
+        // header. Signing is deliberately LAST: compute_block_digest binds
+        // creators/delay_seed/creator_dh_inputs but NOT creator_block_sigs.
+        const crypto::NodeKey* kk[2] = {&k0, &k1};
+        auto make_honest = [&](uint64_t index, const chain::Block* prev,
+                               uint8_t salt) {
+            chain::Block b;
+            b.index = index;
+            if (prev) b.prev_hash = prev->compute_hash();
+            b.creators = {"node0", "node1"};
+            b.creator_dh_secrets.assign(2, Hash{});
+            b.creator_dh_secrets[0].fill(uint8_t(0x11 + salt));
+            b.creator_dh_secrets[1].fill(uint8_t(0x77 + salt));
+            b.creator_dh_inputs.clear();
+            for (int i = 0; i < 2; ++i)
+                b.creator_dh_inputs.push_back(
+                    crypto::SHA256Builder{}
+                        .append(b.creator_dh_secrets[i])
+                        .append(kk[i]->pub.data(), kk[i]->pub.size())
+                        .finalize());
+            b.delay_seed = determ::node::compute_delay_seed(
+                b.index, b.prev_hash, b.tx_root, b.creator_dh_inputs);
+            b.delay_output = determ::node::compute_block_rand(
+                b.delay_seed, b.creator_dh_secrets);
+            Hash prev_rand = prev ? prev->cumulative_rand : Hash{};
+            b.cumulative_rand = crypto::SHA256Builder{}
+                                    .append(prev_rand)
+                                    .append(b.delay_output)
+                                    .finalize();
+            b.creator_block_sigs.assign(2, Signature{});
+            return b;
+        };
+        auto sign_kk = [&](chain::Block& b) {
+            Hash d = determ::node::compute_block_digest(b);
+            b.creator_block_sigs[0] = crypto::sign(k0, d.data(), d.size());
+            b.creator_block_sigs[1] = crypto::sign(k1, d.data(), d.size());
         };
 
         check(headers() == 0, "setup: SHARD node, beacon_headers == 0");
@@ -46835,18 +47034,118 @@ int main(int argc, char** argv) {
                   "(signed_count == creators.size() retained)");
         }
 
-        // POSITIVE CONTROL (last — all negatives left beacon_headers_ at 0, so
-        // the expected-index precondition never drifted): honest full K-of-K.
-        // Proves the negatives fail for the asserted reasons, not fixture
-        // breakage.
+        // ── Q1 (DECISION-LOG 2026-08-12): cumulative_rand authentication ────
+        // Every arm below carries UNBROKEN K-of-K signatures — that is the
+        // point. compute_block_digest excludes cumulative_rand, delay_output
+        // and creator_dh_secrets, so each tamper leaves the digest (and hence
+        // the two Ed25519 signatures) byte-identical and valid. Only the Q1
+        // binding can reject them.
+
+        // ── GROUP A (node n, beacon_headers_ still empty): FIRST-header arms.
+        // This is the attacker's best entry point — index 1 skips BOTH the
+        // prev_hash chain check and (per the FIRST-HEADER RULE) the
+        // cumulative_rand link, so the two commit-reveal links are all that
+        // stand between a MITM and a chosen epoch-selection rand.
+        //
+        // Arm order is load-bearing for mutant attribution: the DELAY-OUTPUT
+        // forge runs FIRST so that the mutant which drops only the
+        // check_creator_dh_secrets_with link still sees this arm REJECTED (it
+        // dies in check_delay) and therefore reddens ONLY the rand-grind arm
+        // that follows.
+
+        // FIRST-HEADER DELAY-OUTPUT FORGE — pins the delay_seed/delay_output
+        // link alone: secrets and inputs stay mutually consistent, only
+        // delay_output is rewritten (and cumulative_rand re-derived to match),
+        // so ONLY check_delay's compute_block_rand recomputation rejects.
         {
-            chain::Block b = make_header({"node0", "node1"});
-            Hash d = determ::node::compute_block_digest(b);
-            b.creator_block_sigs[0] = crypto::sign(k0, d.data(), d.size());
-            b.creator_block_sigs[1] = crypto::sign(k1, d.data(), d.size());
+            chain::Block b = make_honest(1, nullptr, 1);
+            sign_kk(b);
+            b.delay_output.fill(0x5A);
+            b.cumulative_rand = crypto::SHA256Builder{}
+                                    .append(Hash{})
+                                    .append(b.delay_output)
+                                    .finalize();
+            n.on_beacon_header_for_test(b);
+            check(headers() == 0,
+                  "FIRST header: forged delay_output is REJECTED "
+                  "(commit-reveal recomputation; sigs still valid)");
+        }
+
+        // FIRST-HEADER RAND-GRIND FORGE — the arm that pins the LOAD-BEARING
+        // commit-reveal link. The tamper is the ONLY route an attacker has left
+        // once delay_output is recomputed: substitute a creator_dh_secret (NOT
+        // digest-covered) and re-derive delay_output + cumulative_rand
+        // consistently, moving the epoch-selection rand while check_delay's own
+        // recomputation still succeeds. creator_dh_inputs is left untouched
+        // (it IS digest-covered), so the commit-reveal check is the only gate
+        // that can catch this. Dropping check_creator_dh_secrets_with from
+        // check_header_rand_binding accepts it -> RED.
+        {
+            chain::Block b = make_honest(1, nullptr, 0);
+            sign_kk(b);                       // sign the HONEST body first
+            b.creator_dh_secrets[0].fill(0xA5);   // not digest-covered
+            b.delay_output = determ::node::compute_block_rand(
+                b.delay_seed, b.creator_dh_secrets);
+            b.cumulative_rand = crypto::SHA256Builder{}
+                                    .append(Hash{})
+                                    .append(b.delay_output)
+                                    .finalize();
+            n.on_beacon_header_for_test(b);
+            check(headers() == 0,
+                  "FIRST header: ground cumulative_rand via a substituted "
+                  "creator_dh_secret is REJECTED (commit-reveal binding; sigs "
+                  "still valid)");
+        }
+
+        // POSITIVE CONTROL #1 (all of group A's negatives left beacon_headers_
+        // at 0, so the expected-index precondition never drifted): an HONEST
+        // first header is ACCEPTED — acceptance unchanged, and the negatives
+        // above fail for the asserted reasons, not fixture breakage.
+        {
+            chain::Block b = make_honest(1, nullptr, 2);
+            sign_kk(b);
             n.on_beacon_header_for_test(b);
             check(headers() == 1,
-                  "honest full K-of-K beacon header is ACCEPTED (acceptance unchanged)");
+                  "honest full K-of-K FIRST beacon header is ACCEPTED "
+                  "(acceptance unchanged)");
+        }
+
+        // ── GROUP B (node nb, a FRESH shard node): the CHAINED arms, where a
+        // tracked predecessor exists and the cumulative_rand link is live.
+        chain::Block h1 = make_honest(1, nullptr, 2);
+        sign_kk(h1);
+        nb.on_beacon_header_for_test(h1);
+        check(headersB() == 1,
+              "group B setup: honest first header tracked (predecessor rand "
+              "now available)");
+
+        // TAMPERED-RAND FORGE at h=2 — THE HEADLINE FALSIFIER. Header 2 is
+        // honest in every SIGNED respect (prev_hash chains to h1, K-of-K
+        // valid, commit-reveal intact) and ONLY cumulative_rand is flipped —
+        // compute_block_digest excludes it, so both signatures still verify.
+        // Before Q1 this was ACCEPTED and seeded shard committee selection;
+        // now check_cumulative_rand_from rejects it. Deleting step 5 of
+        // on_beacon_header accepts it -> count 2 -> RED.
+        {
+            chain::Block b = make_honest(2, &h1, 3);
+            sign_kk(b);
+            b.cumulative_rand.fill(0xEE);   // attacker-chosen epoch rand
+            nb.on_beacon_header_for_test(b);
+            check(headersB() == 1,
+                  "TAMPERED cumulative_rand at h=2 is REJECTED "
+                  "(K-of-K sigs untouched and still valid)");
+        }
+
+        // POSITIVE CONTROL #2 — the same honest h=2 header, untampered, is
+        // ACCEPTED: the chained cumulative_rand link admits the genuine value
+        // (the fix rejects the tamper, not the chaining itself).
+        {
+            chain::Block b = make_honest(2, &h1, 3);
+            sign_kk(b);
+            nb.on_beacon_header_for_test(b);
+            check(headersB() == 2,
+                  "honest chained beacon header at h=2 is ACCEPTED "
+                  "(cumulative_rand link admits the genuine value)");
         }
 
         fs::remove_all(dir, fec);
@@ -53696,10 +53995,10 @@ int main(int argc, char** argv) {
         // 6. Missing field on EquivocationEvent — should name 'sig_b'.
         expect_throw_with("EquivocationEvent missing 'sig_b'", [] {
             json j = {{"equivocator", "node1"}, {"block_index", 5},
-                      {"kind", 0}, {"index_a", 5},
+                      {"kind", 0}, {"index_a", 5}, {"gen_a", 0},
                       {"body_root_a", std::string(64, '0')},
                       {"sig_a",    std::string(128, '0')},
-                      {"index_b", 5},
+                      {"index_b", 5}, {"gen_b", 0},
                       {"body_root_b", std::string(64, '1')}};
             EquivocationEvent::from_json(j);
         }, {"S-018", "missing", "'sig_b'"});
@@ -57291,7 +57590,7 @@ int main(int argc, char** argv) {
 
         // ── 2. Receiver formula (on_contrib's recompute) verifies ──────────
         Hash commit = make_contrib_commitment(
-            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.block_index, 0, r.prev_hash, r.tx_hashes, r.dh_input,
             r.view_eq_root, r.view_abort_root, r.view_inbound_root,
             r.proposer_time);
         check(crypto::verify(key.pub, commit.data(), commit.size(), r.ed_sig),
@@ -57303,7 +57602,7 @@ int main(int argc, char** argv) {
         //       assertion 2 above fails; this leg documents the asymmetry
         //       that made the bug total (sender bound, receiver didn't). ──
         Hash stale = make_contrib_commitment(
-            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.block_index, 0, r.prev_hash, r.tx_hashes, r.dh_input,
             r.view_eq_root, r.view_abort_root, r.view_inbound_root);
         check(!crypto::verify(key.pub, stale.data(), stale.size(), r.ed_sig),
               "pre-fix 7-arg recompute REJECTED (f99eeb8 on_contrib regression class)");
@@ -57312,7 +57611,7 @@ int main(int argc, char** argv) {
         ContribMsg t = r;
         t.proposer_time += 1;
         Hash tc = make_contrib_commitment(
-            t.block_index, t.prev_hash, t.tx_hashes, t.dh_input,
+            t.block_index, 0, t.prev_hash, t.tx_hashes, t.dh_input,
             t.view_eq_root, t.view_abort_root, t.view_inbound_root,
             t.proposer_time);
         check(!crypto::verify(key.pub, tc.data(), tc.size(), t.ed_sig),
@@ -57327,7 +57626,7 @@ int main(int argc, char** argv) {
               "zero proposer_time omitted from the JSON wire (v1 shape)");
         ContribMsg zr = ContribMsg::from_json(zj);
         Hash zc = make_contrib_commitment(
-            zr.block_index, zr.prev_hash, zr.tx_hashes, zr.dh_input,
+            zr.block_index, 0, zr.prev_hash, zr.tx_hashes, zr.dh_input,
             zr.view_eq_root, zr.view_abort_root, zr.view_inbound_root);
         check(crypto::verify(key.pub, zc.data(), zc.size(), zr.ed_sig),
               "legacy zero-time contrib verifies via the v1 short-circuit");
@@ -57339,13 +57638,13 @@ int main(int argc, char** argv) {
         nlohmann::json fj = f.to_json();
         ContribMsg fr = ContribMsg::from_json(fj);
         Hash fc = make_contrib_commitment(
-            fr.block_index, fr.prev_hash, fr.tx_hashes, fr.dh_input,
+            fr.block_index, 0, fr.prev_hash, fr.tx_hashes, fr.dh_input,
             fr.view_eq_root, fr.view_abort_root, fr.view_inbound_root,
             fr.proposer_time);
         check(crypto::verify(key.pub, fc.data(), fc.size(), fr.ed_sig),
               "F2-view + TS contrib verifies via the receiver formula");
         Hash fNoTs = make_contrib_commitment(
-            fr.block_index, fr.prev_hash, fr.tx_hashes, fr.dh_input,
+            fr.block_index, 0, fr.prev_hash, fr.tx_hashes, fr.dh_input,
             fr.view_eq_root, fr.view_abort_root, fr.view_inbound_root);
         check(!crypto::verify(key.pub, fNoTs.data(), fNoTs.size(), fr.ed_sig),
               "F2-view contrib WITHOUT the TS re-bind rejected");
@@ -57376,7 +57675,7 @@ int main(int argc, char** argv) {
         // 7d. THE REGRESSION CLASS: an 8-arg recompute (TS but no shard-tip)
         //     must REJECT — proves the DTM-STV-v1 tail is load-bearing.
         Hash sNoStv = make_contrib_commitment(
-            sr.block_index, sr.prev_hash, sr.tx_hashes, sr.dh_input,
+            sr.block_index, 0, sr.prev_hash, sr.tx_hashes, sr.dh_input,
             sr.view_eq_root, sr.view_abort_root, sr.view_inbound_root,
             sr.proposer_time);
         check(!crypto::verify(key.pub, sNoStv.data(), sNoStv.size(), sr.ed_sig),
@@ -57392,7 +57691,7 @@ int main(int argc, char** argv) {
         //     DTM-STV-v1 append). r is the section-1 v1+TS contrib (no shard-tip).
         Hash rMsg = make_contrib_commitment(r);
         Hash r8   = make_contrib_commitment(
-            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.block_index, 0, r.prev_hash, r.tx_hashes, r.dh_input,
             r.view_eq_root, r.view_abort_root, r.view_inbound_root,
             r.proposer_time);
         check(rMsg == r8,
@@ -60099,8 +60398,10 @@ int main(int argc, char** argv) {
                 case MsgType::EQUIVOCATION_EVIDENCE:
                     return {{"equivocator", "m"}, {"block_index", 1},
                             {"kind", 0},
-                            {"index_a", 1}, {"body_root_a", h64}, {"sig_a", h128},
-                            {"index_b", 1}, {"body_root_b", h64}, {"sig_b", h128},
+                            {"index_a", 1}, {"gen_a", 0},
+                            {"body_root_a", h64}, {"sig_a", h128},
+                            {"index_b", 1}, {"gen_b", 0},
+                            {"body_root_b", h64}, {"sig_b", h128},
                             {"shard_id", 0}, {"beacon_anchor_height", 0}};
                 case MsgType::ABORT_EVENT:
                     return {{"block_index", 1}, {"prev_hash", h64},
@@ -63501,14 +63802,15 @@ int main(int argc, char** argv) {
     // pre-validated events with fake digests and default sigs).
     //
     // An EquivocationEvent is trustless proof that one Ed25519 key signed
-    // two DIFFERENT digests of ONE family at the SAME height.
-    // EQV-height-bind: the event carries per-side OPENINGS (index, body_root)
-    // and each signed digest is DERIVED via compose_block_digest /
-    // compose_contrib_commitment (kind 0 / 1). The verifier
-    // (src/node/validator.cpp::check_equivocation_events) accepts the
+    // two DIFFERENT digests of ONE family at the SAME height IN THE SAME ROUND.
+    // EQV-height-bind + EQV-gen-bind: the event carries per-side OPENINGS
+    // (index, gen, body_root) and each signed digest is DERIVED via
+    // compose_block_digest / compose_contrib_commitment (kind 0 / 1). The
+    // verifier (src/node/validator.cpp::check_equivocation_events) accepts the
     // evidence iff ALL hold:
     //   (k) kind <= 1              (known digest family),
     //   (h) index_a == index_b == block_index   (the height bind),
+    //   (g) gen_a == gen_b         (the round bind — one abort generation),
     //   (a) body_root_a != body_root_b (otherwise no contradiction),
     //   (b) sig_a    != sig_b      (otherwise same signature, no double-sign),
     //   (c) verify(key, derive(a), sig_a) AND verify(key, derive(b), sig_b)
@@ -63540,15 +63842,16 @@ int main(int argc, char** argv) {
             if (ev.kind > 1) return false;                  // (k)
             if (ev.index_a != ev.block_index
                 || ev.index_b != ev.block_index) return false;  // (h)
+            if (ev.gen_a != ev.gen_b)             return false; // (g)
             if (ev.body_root_a == ev.body_root_b) return false; // (a)
             if (ev.sig_a == ev.sig_b)             return false; // (b)
-            auto derive = [&](uint64_t idx, const Hash& root) {
+            auto derive = [&](uint64_t idx, uint64_t gen, const Hash& root) {
                 return ev.kind == 0
-                    ? node::compose_block_digest(idx, root)
-                    : node::compose_contrib_commitment(idx, root);
+                    ? node::compose_block_digest(idx, gen, root)
+                    : node::compose_contrib_commitment(idx, gen, root);
             };
-            Hash da = derive(ev.index_a, ev.body_root_a);
-            Hash db = derive(ev.index_b, ev.body_root_b);
+            Hash da = derive(ev.index_a, ev.gen_a, ev.body_root_a);
+            Hash db = derive(ev.index_b, ev.gen_b, ev.body_root_b);
             if (!verify(key, da.data(), da.size(), ev.sig_a))
                 return false;                               // (c) first
             if (!verify(key, db.data(), db.size(), ev.sig_b))
@@ -63573,20 +63876,25 @@ int main(int argc, char** argv) {
         Hash rB = patterned(0xB0);
 
         // Build a genuine, well-formed equivocation proof: both sigs over
-        // the DERIVED digests compose_block_digest(7, root) — kind 0, all
-        // three heights equal (the height-bound sound shape).
+        // the DERIVED digests compose_block_digest(7, GEN, root) — kind 0, all
+        // three heights equal and both gens equal (the height- and round-bound
+        // sound shape). GEN is deliberately NON-ZERO so the gen append is
+        // exercised, not defaulted away.
+        const uint64_t GEN = 2;
         auto make_genuine = [&]() {
             EquivocationEvent ev;
             ev.equivocator = "alice.tld";
             ev.block_index = 7;
             ev.kind        = 0;
             ev.index_a     = 7;
+            ev.gen_a       = GEN;
             ev.body_root_a = rA;
-            Hash da = node::compose_block_digest(7, rA);
+            Hash da = node::compose_block_digest(7, GEN, rA);
             ev.sig_a    = sign(culprit, da.data(), da.size());
             ev.index_b     = 7;
+            ev.gen_b       = GEN;
             ev.body_root_b = rB;
-            Hash db = node::compose_block_digest(7, rB);
+            Hash db = node::compose_block_digest(7, GEN, rB);
             ev.sig_b    = sign(culprit, db.data(), db.size());
             ev.shard_id = 0;
             ev.beacon_anchor_height = 0;
@@ -63611,7 +63919,7 @@ int main(int argc, char** argv) {
         {
             EquivocationEvent ev = make_genuine();
             ev.body_root_b = ev.body_root_a;
-            Hash db = node::compose_block_digest(ev.index_b, ev.body_root_b);
+            Hash db = node::compose_block_digest(ev.index_b, ev.gen_b, ev.body_root_b);
             ev.sig_b    = sign(culprit, db.data(), db.size());
             check(!verify_evidence(ev, culprit.pub),
                   "equal body roots: same message signed twice → REJECT (no contradiction)");
@@ -63671,7 +63979,7 @@ int main(int argc, char** argv) {
         {
             NodeKey innocent = generate_node_key();
             EquivocationEvent ev = make_genuine();
-            Hash da = node::compose_block_digest(ev.index_a, ev.body_root_a);
+            Hash da = node::compose_block_digest(ev.index_a, ev.gen_a, ev.body_root_a);
             ev.sig_a = sign(innocent, da.data(), da.size());
             check(!verify_evidence(ev, culprit.pub),
                   "split keys: sig_a under a different key → REJECT under culprit");
@@ -63688,17 +63996,29 @@ int main(int argc, char** argv) {
         {
             EquivocationEvent ev = make_genuine();
             ev.index_b = 8;
-            Hash db = node::compose_block_digest(8, ev.body_root_b);
+            Hash db = node::compose_block_digest(8, ev.gen_b, ev.body_root_b);
             ev.sig_b = sign(culprit, db.data(), db.size());
             check(!verify_evidence(ev, culprit.pub),
                   "cross-height: honest sigs from two heights → REJECT (height bind)");
+        }
+        // 7b-gen. THE HOLE-1b FALSIFIER: sig_b is a REAL culprit signature over
+        //     compose(7, GEN+1, rB) and gen_b honestly says GEN+1 — an honest
+        //     re-round at the SAME height. Every other clause holds; ONLY the
+        //     round bind refuses it.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.gen_b = GEN + 1;
+            Hash db = node::compose_block_digest(ev.index_b, ev.gen_b, ev.body_root_b);
+            ev.sig_b = sign(culprit, db.data(), db.size());
+            check(!verify_evidence(ev, culprit.pub),
+                  "cross-round: honest sigs from two abort re-rounds at one height → REJECT (round bind)");
         }
         // 7c. The == block_index leg: both openings at height 8, event claims 7.
         {
             EquivocationEvent ev = make_genuine();
             ev.index_a = 8; ev.index_b = 8;
-            Hash da = node::compose_block_digest(8, ev.body_root_a);
-            Hash db = node::compose_block_digest(8, ev.body_root_b);
+            Hash da = node::compose_block_digest(8, ev.gen_a, ev.body_root_a);
+            Hash db = node::compose_block_digest(8, ev.gen_b, ev.body_root_b);
             ev.sig_a = sign(culprit, da.data(), da.size());
             ev.sig_b = sign(culprit, db.data(), db.size());
             check(!verify_evidence(ev, culprit.pub),
@@ -63711,11 +64031,11 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = "alice.tld";
             ev.block_index = 7; ev.kind = 1;
-            ev.index_a = 7; ev.body_root_a = rA;
-            Hash ca = node::compose_contrib_commitment(7, rA);
+            ev.index_a = 7; ev.gen_a = GEN; ev.body_root_a = rA;
+            Hash ca = node::compose_contrib_commitment(7, GEN, rA);
             ev.sig_a = sign(culprit, ca.data(), ca.size());
-            ev.index_b = 7; ev.body_root_b = rB;
-            Hash cb = node::compose_contrib_commitment(7, rB);
+            ev.index_b = 7; ev.gen_b = GEN; ev.body_root_b = rB;
+            Hash cb = node::compose_contrib_commitment(7, GEN, rB);
             ev.sig_b = sign(culprit, cb.data(), cb.size());
             check(verify_evidence(ev, culprit.pub),
                   "contrib kind: a kind=1 pair composed under the contrib tag → ACCEPT");
@@ -63744,6 +64064,8 @@ int main(int argc, char** argv) {
                   && back.block_index == ev.block_index
                   && back.kind == ev.kind
                   && back.index_a == ev.index_a
+                  && back.gen_a == ev.gen_a
+                  && back.gen_b == ev.gen_b
                   && back.body_root_a == ev.body_root_a && back.sig_a == ev.sig_a
                   && back.index_b == ev.index_b
                   && back.body_root_b == ev.body_root_b && back.sig_b == ev.sig_b,
@@ -63851,8 +64173,29 @@ int main(int argc, char** argv) {
             check(ev && ev->equivocator == "alice" && ev->block_index == 5,
                   "genuine: equivocator + height bound correctly");
             check(ev && ev->kind == 0 && ev->index_a == 5 && ev->index_b == 5
+                      && ev->gen_a == ev->gen_b
                       && ev->body_root_a != ev->body_root_b && !(ev->sig_a == ev->sig_b),
-                  "genuine: kind + same-height openings + distinct roots/sigs captured");
+                  "genuine: kind + same-height same-gen openings + distinct roots/sigs captured");
+        }
+
+        // === EQV-gen-bind: a CROSS-ROUND pair at one height is NOT evidence ===
+        // The incoming block carries one more AbortEvent than the stored one —
+        // i.e. it is the re-round block after an abort. An honest proposer signs
+        // BOTH (the aborted round's and the reselected round's), so this pair
+        // must NOT assemble into slashing evidence. detect_equivocation refuses
+        // it on gen_a != gen_b, the same predicate check_equivocation_events
+        // applies downstream (fail-closed at the assembler, so a node never
+        // pools or gossips evidence the validator would reject).
+        {
+            Block reround = mkblk(0x02, "alice", {"alice"}, {psig(0x22)});
+            AbortEvent ae;
+            ae.round = 1; ae.aborting_node = "bob";
+            ae.timestamp = 0; ae.event_hash = phash(0x90);
+            reround.abort_events.push_back(ae);
+            auto ev = node::detect_equivocation(stored, reround, false, 0, 0);
+            check(!ev.has_value(),
+                  "cross-round (re-round block at one height) → nullopt, no forged evidence "
+                  "(EQV-gen-bind)");
         }
 
         // === THE GUARD: size-short creator_block_sigs must NOT be indexed ===

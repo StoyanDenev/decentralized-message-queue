@@ -14,16 +14,18 @@
 # This mirrors the OFFLINE-CHECKABLE subset of the node's apply-time
 # admission gate, src/node/validator.cpp::check_equivocation_events
 # (EQV-height-bind form — the event carries per-side OPENINGS
-# (index, body_root); each signed digest is DERIVED as
-# SHA256(TAG || index u64 BE || body_root)). That gate enforces, per event:
+# (index, gen, body_root); each signed digest is DERIVED as
+# SHA256(TAG || index u64 BE || gen u64 BE || body_root)). That gate enforces,
+# per event:
 #
 #     (k) kind <= 1                   else "unknown kind"
 #     (h) index_a == index_b == block_index   else "height mismatch"
+#     (g) gen_a == gen_b                      else "round mismatch"
 #     (a) body_root_a != body_root_b  else "not equivocation"
 #     (b) sig_a    != sig_b           else "same signature"
 #     (c) equivocator IN registry     else "equivocator not in registry"
-#     (d) ed25519_verify(pub, derive(index_a, body_root_a), sig_a)  else reject
-#     (e) ed25519_verify(pub, derive(index_b, body_root_b), sig_b)  else reject
+#     (d) ed25519_verify(pub, derive(index_a, gen_a, body_root_a), sig_a)
+#     (e) ed25519_verify(pub, derive(index_b, gen_b, body_root_b), sig_b)
 #
 # (k), (h), (a) and (b) are pure structural predicates an operator can re-check
 # from observable RPC data without any crypto. (c) maps to whether the
@@ -84,15 +86,15 @@
 #                                          initial_state (node.cpp:2652-
 #                                          2655), so equivocation_events
 #                                          (kind + the two (index,
-#                                          body_root, sig) openings)
+#                                          gen, body_root, sig) openings)
 #                                          are RETAINED on each header.
 #   * `determ validators --json`           domain -> ed_pub map
 #                                          (node.cpp:2805-2820) for the
 #                                          R1 key-resolvability check.
 #
 # EquivocationEvent JSON field names (block.cpp to_json):
-#   equivocator, block_index, kind, index_a, body_root_a, sig_a,
-#   index_b, body_root_b, sig_b, shard_id, beacon_anchor_height.
+#   equivocator, block_index, kind, index_a, gen_a, body_root_a, sig_a,
+#   index_b, gen_b, body_root_b, sig_b, shard_id, beacon_anchor_height.
 # Hex lengths the node enforces on parse:
 #   body_root_* = 64 hex chars (32 bytes), sig_* = 128 hex chars (64
 #   bytes); kind <= 1.
@@ -135,6 +137,8 @@ apply-time gate src/node/validator.cpp::check_equivocation_events:
   I2 sig_a    == sig_b      -> same signature (degenerate proof)
   I3 bad hex/kind           -> body_root_* != 64 or sig_* != 128 hex
                                chars, or kind > 1
+  I5 round mismatch         -> gen_a != gen_b (an honest abort re-round pair,
+                               not a double-sign; EQV-gen-bind)
   I4 height mismatch        -> index_a/index_b != block_index (the
                                EQV-height-bind assert)
 
@@ -325,7 +329,7 @@ def is_hex(s, n):
     return isinstance(s, str) and len(s) == n and all(c in HEX for c in s)
 
 events = []
-n_i1 = n_i2 = n_i3 = n_i4 = n_r1 = 0
+n_i1 = n_i2 = n_i3 = n_i4 = n_i5 = n_r1 = 0
 
 for h in headers:
     if not isinstance(h, dict):
@@ -342,6 +346,7 @@ for h in headers:
         dsign_h  = ev.get("block_index")          # height of the double-sign
         kind     = ev.get("kind")
         ia = ev.get("index_a"); ib = ev.get("index_b")
+        ga = ev.get("gen_a");   gb = ev.get("gen_b")
         da = ev.get("body_root_a"); sa = ev.get("sig_a")
         db = ev.get("body_root_b"); sb = ev.get("sig_b")
 
@@ -372,6 +377,14 @@ for h in headers:
                 and ia == dsign_h and ib == dsign_h):
             viol.append("I4")
             n_i4 += 1
+        # I5: the EQV-gen-bind assert — both signed openings must carry the
+        # SAME abort generation (gen_a == gen_b). A cross-generation pair is
+        # an HONEST validator's two same-height signatures across an abort
+        # re-round, not a double-sign; the node rejects it, so a baked event
+        # violating this is an anomaly worth surfacing.
+        if not (isinstance(ga, int) and isinstance(gb, int) and ga == gb):
+            viol.append("I5")
+            n_i5 += 1
 
         # R1: verification-key resolvability (maps to validator.cpp:334
         # "equivocator not in registry"). NOT an anomaly — a slashed
@@ -390,7 +403,9 @@ for h in headers:
             "shard_id":               ev.get("shard_id", 0),
             "kind":                   kind,
             "index_a":                ia,
+            "gen_a":                  ga,
             "index_b":                ib,
+            "gen_b":                  gb,
             "body_root_a_prefix":     (da[:16] if isinstance(da, str) else None),
             "body_root_b_prefix":     (db[:16] if isinstance(db, str) else None),
             "hex_ok":                 hex_ok,
@@ -409,12 +424,14 @@ if n_i1: anomalies.append("I1")
 if n_i2: anomalies.append("I2")
 if n_i3: anomalies.append("I3")
 if n_i4: anomalies.append("I4")
+if n_i5: anomalies.append("I5")
 
 summary = {
     "n_events":               total,
     "n_violating_events":     violating,
     "n_key_unresolvable":     n_r1,
-    "violation_counts":       {"I1": n_i1, "I2": n_i2, "I3": n_i3, "I4": n_i4},
+    "violation_counts":       {"I1": n_i1, "I2": n_i2, "I3": n_i3,
+                               "I4": n_i4, "I5": n_i5},
 }
 
 if json_out:
@@ -465,8 +482,9 @@ else:
 print("  ---")
 print("  events: %d   structurally-violating: %d   key-unresolvable (R1): %d"
       % (total, violating, n_r1))
-print("  violation breakdown: I1(root==)=%d  I2(sig==)=%d  I3(bad-hex/kind)=%d  I4(height)=%d"
-      % (n_i1, n_i2, n_i3, n_i4))
+print("  violation breakdown: I1(root==)=%d  I2(sig==)=%d  I3(bad-hex/kind)=%d  "
+      "I4(height)=%d  I5(round)=%d"
+      % (n_i1, n_i2, n_i3, n_i4, n_i5))
 if n_r1:
     print("  note: R1 key-unresolvable is expected for already-slashed "
           "(deactivated) equivocators; not an anomaly.")

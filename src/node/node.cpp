@@ -1901,12 +1901,14 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
 void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
-    // EQV-height-bind: same check set as the validator gate
+    // EQV-height-bind + EQV-gen-bind: same check set as the validator gate
     // (BlockValidator::check_equivocation_events) — unknown kind, the height
-    // assert, degenerate openings/sigs, then both signatures verified against
-    // digests DERIVED from the carried (index, body_root) openings.
+    // assert, the round assert, degenerate openings/sigs, then both signatures
+    // verified against digests DERIVED from the carried (index, gen,
+    // body_root) openings.
     if (ev.kind > 1) return;
     if (ev.index_a != ev.block_index || ev.index_b != ev.block_index) return;
+    if (ev.gen_a != ev.gen_b)             return;
     if (ev.body_root_a == ev.body_root_b) return;
     if (ev.sig_a == ev.sig_b)             return;
 
@@ -1916,13 +1918,13 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
                                               current_epoch_index(), ev.equivocator);
     if (!ek) return;
 
-    auto compose = [&](uint64_t index, const Hash& body_root) {
+    auto compose = [&](uint64_t index, uint64_t gen, const Hash& body_root) {
         return ev.kind == chain::EquivocationEvent::KIND_BLOCK_DIGEST
-                   ? compose_block_digest(index, body_root)
-                   : compose_contrib_commitment(index, body_root);
+                   ? compose_block_digest(index, gen, body_root)
+                   : compose_contrib_commitment(index, gen, body_root);
     };
-    Hash digest_a = compose(ev.index_a, ev.body_root_a);
-    Hash digest_b = compose(ev.index_b, ev.body_root_b);
+    Hash digest_a = compose(ev.index_a, ev.gen_a, ev.body_root_a);
+    Hash digest_b = compose(ev.index_b, ev.gen_b, ev.body_root_b);
     if (!crypto::verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
         return;
     if (!crypto::verify(*ek, digest_b.data(), digest_b.size(), ev.sig_b))
@@ -1958,6 +1960,15 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
 //      since shard genesis shares initial_creators with beacon (via
 //      genesis-tool build-sharded). This is correct at genesis time;
 //      tracking pool deltas from beacon REGISTER/STAKE txs is B2c.2-full.
+//   5. cumulative_rand authentication (DECISION-LOG 2026-08-12 Q1). The step-4
+//      signatures cover compute_block_digest, which EXCLUDES cumulative_rand,
+//      delay_output and creator_dh_secrets — so K-of-K alone left the header's
+//      randomness (the very value this path feeds into shard committee
+//      selection) rewritable by a MITM. The shared validator seam
+//      check_header_rand_binding re-runs the three apply-path gates that bind
+//      it: commit-reveal on creator_dh_secrets, delay_seed/delay_output
+//      re-derivation, and cumulative_rand == SHA256(prev_rand || delay_output)
+//      against the PREVIOUS TRACKED HEADER's rand. No wire or digest change.
 //
 // SINGLE / BEACON roles ignore this message.
 void Node::on_beacon_header(const chain::Block& b) {
@@ -1997,18 +2008,10 @@ void Node::on_beacon_header(const chain::Block& b) {
     //    passes the K-of-K checks vacuously.
     //
     //    SCOPE (B3 — do not over-read this fix): the K-of-K creator_block_sigs
-    //    sign compute_block_digest, which does NOT cover b.cumulative_rand or
-    //    b.delay_output (those are bound into signing_bytes/compute_hash but
-    //    not the signature digest), and this ingest path does NOT run
-    //    check_cumulative_rand (that gate fires only on the apply path,
-    //    validator.cpp:52). So a MITM can still alter cumulative_rand on an
-    //    otherwise-valid header without breaking the sigs; for the first header
-    //    the prev_hash chain check above is also skipped, so a tampered rand
-    //    can seed ONE epoch's committee selection (node.cpp external
-    //    epoch-rand provider) — subsequent genuine headers then fail to chain
-    //    (a stall, not silent acceptance). Authenticating cumulative_rand on
-    //    the beacon-header path is the deeper item the DECISION-LOG 2026-07-31
-    //    entry flags as NOT authorized / separate owner decision.
+    //    sign compute_block_digest, which does NOT cover b.cumulative_rand,
+    //    b.delay_output or b.creator_dh_secrets (those are bound into
+    //    signing_bytes/compute_hash but not the signature digest). Step 5
+    //    below closes that — this step alone does not.
     auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
     std::map<std::string, PubKey> member_pub;
     for (auto& nd : reg.sorted_nodes()) member_pub[nd.domain] = nd.pubkey;
@@ -2026,6 +2029,47 @@ void Node::on_beacon_header(const chain::Block& b) {
         std::cerr << "[node] beacon header at h=" << b.index
                   << ": incomplete K-of-K (signed=" << *signed_count
                   << ", required=" << b.creators.size() << ")\n";
+        return;
+    }
+
+    // 5. Q1 (DECISION-LOG 2026-08-12) — authenticate cumulative_rand, the
+    //    field this whole ingest path exists to deliver (it feeds
+    //    current_epoch_rand / the validator's external epoch-rand provider,
+    //    i.e. shard committee selection). Step 4's signatures do NOT cover it,
+    //    so a MITM could previously rewrite it on an otherwise-valid header
+    //    without breaking a single signature.
+    //
+    //    No new verifier logic and no wire/digest change: the ONE shared
+    //    validator seam re-runs the same three apply-path gates that bind the
+    //    field (commit-reveal on creator_dh_secrets -> delay_seed/delay_output
+    //    -> cumulative_rand). The full soundness argument, and the FIRST-HEADER
+    //    RULE for the std::nullopt case, live on
+    //    BlockValidator::check_header_rand_binding in validator.hpp.
+    //
+    //    prev_rand is the PREVIOUS TRACKED BEACON HEADER's cumulative_rand —
+    //    NOT chain_.head() (that is this shard's own, unrelated chain).
+    //    beacon_headers_ is strictly contiguous from index 1 and b.index was
+    //    pinned to back().index + 1 in step 1, so back() IS b's predecessor.
+    //    Empty => b is the first header (index 1), whose predecessor is the
+    //    beacon genesis block this shard does not pin (B2c.5): the seam then
+    //    runs the two chain-independent links and skips only the last.
+    //
+    //    The key resolver is the SAME member_pub map step 4 verified the
+    //    signatures against, so this check cannot resolve a different key than
+    //    the signature check did and false-reject an honest header.
+    std::optional<Hash> prev_rand;
+    if (!beacon_headers_.empty())
+        prev_rand = beacon_headers_.back().cumulative_rand;
+    if (auto r = validator_.check_header_rand_binding(
+            b, prev_rand,
+            [&member_pub](const std::string& domain) -> std::optional<PubKey> {
+                auto it = member_pub.find(domain);
+                if (it == member_pub.end()) return std::nullopt;
+                return it->second;
+            });
+        !r.ok) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << " rejected: " << r.error << " (randomness binding)\n";
         return;
     }
 
@@ -2388,10 +2432,11 @@ void Node::apply_block_locked(const chain::Block& b) {
         // incoming block's hash differs from the block we already have at
         // b.index, AND it carries a non-empty bft_proposer (BFT-mode
         // block), that proposer signed two different digests for the
-        // same height — equivocation. Extract proof: the (index, body_root)
-        // opening + sig of side a from the stored block, side b from the
-        // incoming block, both by the same proposer key (EQV-height-bind,
-        // kind=BLOCK_DIGEST). Push to evidence pool, gossip.
+        // same height IN THE SAME ROUND — equivocation. Extract proof: the
+        // (index, gen, body_root) opening + sig of side a from the stored
+        // block, side b from the incoming block, both by the same proposer key
+        // (EQV-height-bind + EQV-gen-bind, kind=BLOCK_DIGEST). A cross-round
+        // pair at one height is refused inside detect_equivocation. Push to evidence pool, gossip.
         // rev.8 equivocation detection + evidence assembly. The pure,
         // SIZE-GUARDED assembly is factored into node::detect_equivocation
         // (BlockIngress EQV-assemble-OOB): this duplicate/old-height branch
@@ -2966,10 +3011,16 @@ void Node::on_contrib(const ContribMsg& msg) {
     // used by BlockSigMsg-level equivocation. EQV-height-bind: the channel
     // is kind-DISCRIMINATED, not digest-agnostic — this family is
     // kind=CONTRIB_COMMIT, so the validator recomputes each side via
-    // compose_contrib_commitment(index, body_root) under the
-    // DTM-CONTRIB-v2 tag and asserts both signed heights equal
-    // ev.block_index (cross-family and cross-height confusion both
-    // fail-closed).
+    // compose_contrib_commitment(index, gen, body_root) under the
+    // DTM-CONTRIB-v3 tag and asserts both signed heights equal
+    // ev.block_index and both signed gens are equal (cross-family,
+    // cross-height and cross-round confusion all fail-closed).
+    //
+    // EQV-gen-bind note: both messages reached this point through the
+    // aborts_gen gate above, so existing->second.aborts_gen == msg.aborts_gen
+    // == current_aborts_.size() by construction. The evidence records each
+    // side's OWN signed gen rather than one shared value, so the recorded
+    // openings are exactly what the equivocator signed.
     //
     // After detection, drop the duplicate from pending_contribs_ entry
     // anyway — we keep the earlier-arrived view as the canonical contrib
@@ -2977,10 +3028,11 @@ void Node::on_contrib(const ContribMsg& msg) {
     // separately at the next produced block.
     auto existing = pending_contribs_.find(msg.signer);
     if (existing != pending_contribs_.end()) {
-        // EQV-height-bind: the evidence carries the OPENINGS of the two
-        // signed commitments — per side (block_index, contrib body root) —
-        // not the opaque digests. The verifier recomputes each commitment
-        // via compose_contrib_commitment(index, body_root), so sig_a/sig_b
+        // EQV-height-bind + EQV-gen-bind: the evidence carries the OPENINGS
+        // of the two signed commitments — per side (block_index, aborts_gen,
+        // contrib body root) — not the opaque digests. The verifier
+        // recomputes each commitment via
+        // compose_contrib_commitment(index, gen, body_root), so sig_a/sig_b
         // verify downstream only against the FULL commitment the equivocator
         // actually signed (F2 view roots + DTM-TS-v1 tail included in the
         // body root, via the S-043 message-form recompute).
@@ -2997,19 +3049,23 @@ void Node::on_contrib(const ContribMsg& msg) {
         // EVIDENCE below keeps the full signed openings so the recorded sigs
         // still verify against the equivocator's key.
         Hash existing_core = make_contrib_commitment(
-            existing->second.block_index, existing->second.prev_hash,
+            existing->second.block_index, existing->second.aborts_gen,
+            existing->second.prev_hash,
             existing->second.tx_hashes,   existing->second.dh_input);
         Hash new_core = make_contrib_commitment(
-            msg.block_index, msg.prev_hash, msg.tx_hashes, msg.dh_input);
+            msg.block_index, msg.aborts_gen,
+            msg.prev_hash, msg.tx_hashes, msg.dh_input);
         if (existing_core != new_core) {
             chain::EquivocationEvent ev;
             ev.equivocator          = msg.signer;
             ev.block_index          = msg.block_index;
             ev.kind                 = chain::EquivocationEvent::KIND_CONTRIB_COMMIT;
             ev.index_a              = existing->second.block_index;
+            ev.gen_a                = existing->second.aborts_gen;
             ev.body_root_a          = existing_body;
             ev.sig_a                = existing->second.ed_sig;
             ev.index_b              = msg.block_index;
+            ev.gen_b                = msg.aborts_gen;
             ev.body_root_b          = new_body;
             ev.sig_b                = msg.ed_sig;
             ev.shard_id             = cfg_.shard_id;
@@ -4545,6 +4601,7 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
     // (EQV-height-bind check set, mirroring the validator gate):
     //   - rejects kind > 1
     //   - rejects index_a/index_b != block_index (the height assert)
+    //   - rejects gen_a != gen_b (the round assert)
     //   - rejects body_root_a == body_root_b
     //   - rejects sig_a == sig_b
     //   - rejects unregistered equivocator

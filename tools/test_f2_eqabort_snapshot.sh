@@ -131,13 +131,16 @@ except ModuleNotFoundError:
         return lambda m: k.sign(m).signature
 with open("$T/donor1/node_key.json") as f: nk = json.load(f)
 sign = _signer(bytes.fromhex(nk["priv_seed"]))
-# EQV-height-bind: carry the (index, body_root) openings; sign the DERIVED
-# digests SHA256("DTM-BLKDIG-v2" || index u64 BE || body_root) (kind 0).
+# EQV-height-bind + EQV-gen-bind: carry the (index, gen, body_root) openings;
+# sign the DERIVED digests
+#   SHA256("DTM-BLKDIG-v3" || index u64 BE || gen u64 BE || body_root) (kind 0).
+# Both sides share ONE generation (gen 0) — a cross-gen pair is an honest
+# re-round, not equivocation, and the verifier rejects it.
 ra = hashlib.sha256(b"snap-eqabort-A").digest(); rb = hashlib.sha256(b"snap-eqabort-B").digest()
-def compose(i, r): return hashlib.sha256(b"DTM-BLKDIG-v2" + i.to_bytes(8, "big") + r).digest()
+def compose(i, g, r): return hashlib.sha256(b"DTM-BLKDIG-v3" + i.to_bytes(8, "big") + g.to_bytes(8, "big") + r).digest()
 ev = {"equivocator":"donor1","block_index":1,"kind":0,
-      "index_a":1,"body_root_a":ra.hex(),"sig_a":sign(compose(1, ra)).hex(),
-      "index_b":1,"body_root_b":rb.hex(),"sig_b":sign(compose(1, rb)).hex(),
+      "index_a":1,"gen_a":0,"body_root_a":ra.hex(),"sig_a":sign(compose(1, 0, ra)).hex(),
+      "index_b":1,"gen_b":0,"body_root_b":rb.hex(),"sig_b":sign(compose(1, 0, rb)).hex(),
       "shard_id":0,"beacon_anchor_height":0}
 json.dump(ev, open("$T/ev.json","w"))
 print("  synthesized equivocation for donor1")

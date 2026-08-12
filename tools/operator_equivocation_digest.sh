@@ -188,8 +188,10 @@ EVENTS_JSON=$(printf '%s' "$RANGE_JSON" | jq -c '
         beacon_anchor_height:   (.beacon_anchor_height // 0),
         kind:                   (.kind // 0),
         index_a:                .index_a,
+        gen_a:                  .gen_a,
         body_root_a:            .body_root_a,
         index_b:                .index_b,
+        gen_b:                  .gen_b,
         body_root_b:            .body_root_b,
         slashed_amount:         (.slashed_amount // 0)
       }
