@@ -2038,3 +2038,37 @@ Also confirmed: the block family takes its round identity from a **peer's contri
 **Also mandatory in the implementation** (each is a confirmed defect from a prior attempt): the exclusion must land on a predicate the **S-051 eligibility floor cannot lift**, or the penalty is identically zero in the default K-of-K deployment; the exclusion window must be **offence-anchored** so re-baking evidence cannot slide or escalate it; and the BFT block family must either be covered or scoped out explicitly.
 
 **Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction). Supersedes the round_seq-as-slashing-identity design of the entry above.
+
+## 2026-08-12 (final+7) — 5th design FAILED. The structural result: **at K == M there is no safe automated consequence for a same-height duplicate.**
+
+**15 findings confirmed on independent re-derivation, 2 false alarms. Nothing committed; tree reverted to 4e7814c, `ci_local` green.** The E2E reproduction was re-landed and confirmed RED at HEAD first (V11 itself printing `ACCEPTED`, stake `1000 -> 0` through the real apply path), so the harness discipline held; it is the implementation and, more importantly, the *direction* that failed.
+
+### The structural result — this is the finding that matters
+
+**Exclusion is a permanent, unrecoverable halt in the default K == M configuration**, and this was measured, not argued: a reviewer compiled `eligibility_floor.hpp` standalone (3 registrants, `min_stake` 1000, k=3, one domain excluded at height 100 for `EQUIVOCATION_EXCLUSION_BLOCKS = 10'000`) and got `lifted=0, pool=2` at indices 101 / 150 / 10100, recovering to `pool=3` only at 10101. Pool 2 < K = 3 halts creator selection — and because the expiry is **block-indexed** while the halt prevents blocks from being produced, height never advances and the window is never reached. The halt is self-sustaining, exactly like the epoch-advance trap recorded earlier.
+
+This is not an implementation slip. **At K == M the committee IS the entire validator set, so removing any member makes a committee unformable.** The S-051 eligibility floor exists precisely to prevent that — which is why the previous attempt's penalty was measured as identically zero. So an exclusion is either *liftable* (no effect, attempt 4's outcome) or *non-liftable* (permanent halt, this attempt's outcome). **There is no third option at K == M.**
+
+Combined with what was already proved, the space is now closed:
+- **Cannot slash** — the predicate is unsound; a correct run produces it (four designs failed on this).
+- **Cannot exclude at K == M** — liftable means no effect, non-liftable means permanent halt (measured above).
+- **Cannot reliably detect** — the impossibility theorem: a splitter's openings are bit-identical to an honest node's.
+- **Any self-declared round identity is evadable.** Confirmed here concretely: `round_seq` is sender-chosen and ungated at admission (`on_contrib` gates only on `block_index`, `prev_hash`, `aborts_gen`, key, sig), and there is exactly ONE production construction site for kind-1 evidence — so an adversary simply signs two different `round_seq` values and is never detected, **while honest collisions still fire**. The precision term protects no one against an attacker and can only harm honest nodes. (This is the impossibility theorem showing up again, not a new defect.)
+
+**Therefore: at K == M the only sound response to a same-height duplicate is NO AUTOMATED CONSEQUENCE — detect, log, gossip for operator attention, and take no consensus action.** For K < M exclusion is viable, because spare eligible validators exist to reach K. Any future design must be configuration-aware or must simply do nothing.
+
+### Defects that came from the orchestrator's own design suggestions (recorded so they are not repeated)
+
+1. **The "higher `round_seq` supersedes" tie-break has no phase guard.** Three reviewers found it independently: `node.cpp:3111` mutates a stored creator contrib with no check on `phase_`, so it can overwrite committed round state mid-Phase-2 and cause an invalid block to be gossiped.
+2. **"Fresh-random per process" reasoned about the wrong relation.** The argument was collision probability (~2^-64), but the comparison at `node.cpp:3111-3115` is **ordered**, with a silent drop on the lower branch. A restart therefore produces a *lower* `round_seq` with probability ~1/2, and the node's contrib is silently discarded by peers.
+3. RNG-failure fallback made `round_seq` deterministic, reintroducing the honest-restart collision the random seed was meant to remove.
+
+### Other confirmed defects (for whoever attempts this next)
+
+kind-0 (BFT block family) still excludes an honest validator with no attacker present, and under non-liftability that becomes a 10'000-block shard halt; nothing bounds `ev.block_index`, so a member can self-exclude permanently; the exclusion is domain-keyed with stake intact, so it is evadable by re-registration; the light client's `b:` leaf recompute omits the new field and reports an honest daemon as TAMPERED; the DSN1 snapshot record layout changed without a version bump, turning a fail-closed check into a silent misparse; and on EXTENDED chains the frozen committee pin gives the exclusion zero effect for the remainder of the epoch, while the comment justifying it is now false.
+
+### Status
+
+**Hole 1b remains OPEN and a GENESIS BLOCKER after five designs.** What is now settled is the *shape* of any admissible answer, which is more than any of the five attempts delivered: the predicate cannot be made sound by construction, the consequence cannot be made safe at K == M, and the honest landing point is a configuration-aware rule whose K == M branch is "no automated action". The end-to-end reproduction (real production code, asserted at the verifier) and mandatory adversarial review remain the only two mechanisms that have ever caught a defect here.
+
+**Authority:** review findings recorded by Claude Fable, 2026-08-12. Escalated to Stoyan Denev: whether to adopt the configuration-aware rule (K < M excludes, K == M takes no automated action), and the still-open consequence that removing forfeiture voids `BFTSafety.md` B2 / T-5.1 and `SECURITY.md` S-011 as written.
