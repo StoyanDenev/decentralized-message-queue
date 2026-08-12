@@ -1914,3 +1914,23 @@ The failure is not merely implementational. A round-reset marker that any single
 **Hole 1b remains OPEN and a GENESIS BLOCKER.** No code was written for C; the tree is unchanged.
 
 **Authority:** analysis recorded by Claude Fable, 2026-08-12, under the owner's prove-before-implement directive. The A-vs-B round-boundary choice and Option D's penalty magnitude are escalated to Stoyan Denev.
+
+## 2026-08-12 (final+2) — Owner decisions: Option D = bounded SUSPENSION; round boundary = Option B (proof-carrying), design-and-prove before implementing
+
+**Decision (owner, 2026-08-12), following the Option-C refutation above.**
+
+**D — the penalty bound is a SUSPENSION DURATION.** Same-height duplicate-signature evidence that a correct run CAN produce no longer triggers full-stake forfeiture + deregistration (`src/chain/chain.cpp:1815-1826`: `block_slashed += locked; locked = 0;` then `inactive_from = b.index + 1`). It instead suspends the domain from creator selection for a bounded number of blocks. Total forfeiture is RESERVED for what a correct run provably cannot produce.
+
+Implementation direction: **reuse the existing exponential suspension mechanism, do not invent new consensus state.** `include/determ/chain/params.hpp:35-37` already defines `BASE_SUSPENSION_BLOCKS = 10`, `MAX_SUSPENSION_BLOCKS = 10'000`, `MAX_ABORT_EXPONENT = 10` (suspend for `BASE * 2^(count-1)`, capped), and its header comment records the load-bearing reason it lives at chain scope: BOTH the node-side selection filter (`NodeRegistry::build_from_chain`) and the chain-layer frozen committee checkpoint (`Chain::freeze_epoch_committee`, D3.3b) must read ONE authoritative definition, because a divergence between the live filter and a frozen checkpoint is a **state_root fork**. Any D implementation must respect that single-definition property.
+
+Rationale for suspension over a partial-forfeiture cap or ejection-only: it "covers the non-unauthorized profiles" — an honest validator caught by a residual (the phase-2 valve path, restart before an fsync lands, the BFT block family) loses availability and selection weight for a bounded window and recovers, while a repeat offender's exponential curve escalates toward the existing cap. Deterrence is preserved without an unbounded downside on a pair a correct run can still produce.
+
+**B — the round boundary is PROOF-CARRYING, chosen for cryptographic soundness** over A (quorumed). A was rejected because a quorum is unsatisfiable in exactly the crash-stop cases the S-050 valve exists to escape (at K=2, `abort_claim_quorum(2) = max(2,1) = 2` is unsatisfiable by construction, S-044), so it would reintroduce the wedge it is meant to resolve.
+
+**B must be DESIGNED AND PROVEN BEFORE ANY CODE IS WRITTEN**, on the same discipline that just refuted Option C before it could ship. It must satisfy every requirement now on record: signature-bound into the contrib commitment itself (the verifier can assert "same round" ONLY from the two signed openings — `src/node/validator.cpp:449-458`); **monotonic per `(height, prev_hash)` and never regressing** (today's `gen` regresses on every valve fire — that IS the bug); persisted (restart is the only key regression); order-independent; magnitude-bounded; coherent with S-048; and bound so a genuine equivocator cannot mint a boundary to launder a double-sign.
+
+**The open design question B must answer honestly:** a stall cannot be *proven* in an asynchronous system, so "proof-carrying" cannot mean "proof that a timeout occurred". A candidate shape to evaluate (NOT a conclusion): make rounds a **hash chain** — round *n+1*'s commitment binds `H(this signer's round-n contrib)`, so two signatures sharing a predecessor are the same round (equivocation) while a chain relationship is an honest re-round, and the identity is monotonic by construction. The laundering question must be settled explicitly: an equivocator can always *claim* a re-round by chaining, so the design must state precisely what an attacker gains or fails to gain by doing so, and whether superseded-by-chain is a sufficient safety property under K-of-K mutual distrust.
+
+**Sequencing:** D is implementable now and is mandatory regardless of B's outcome. B produces a design + proof first; implementation only follows a clean verdict.
+
+**Authority:** Stoyan Denev (owner directive, 2026-08-12; recorded by Claude Fable at his direction).
