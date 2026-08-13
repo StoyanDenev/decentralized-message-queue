@@ -3110,3 +3110,155 @@ trigger than it is and are independent of this ordering.
 intact; ci_local unaffected (source byte-identical to 3dbe5f2).**
 
 **Authority:** review findings recorded by Claude Opus 5, 2026-08-13.
+
+---
+
+## 2026-08-13 — NO-ECONOMICS / TACTICAL PROFILE EXPOSURE: none of the four CRITICALs improves, TWO NEW CRITICALs found, and one of them defeats every deployment shape
+
+**Status:** READ-ONLY analysis at 7570989. Nothing implemented. Three adversarial verdicts
+refuted three load-bearing premises, INCLUDING two stated by Claude earlier in-session.
+
+### `PROFILE_TACTICAL` EXISTS — and is not a no-economics deployment
+
+`params.hpp:259-262`: `{20, 20, 10, M=3, K=3, ChainRole::SHARD, ShardingMode::EXTENDED,
+CryptoProfile::FIPS}`. `TimingProfile` carries timers, M, K, role, sharding mode and crypto
+posture — **no min_stake, no subsidy, no fee policy**. `determ init --profile tactical`
+writes the node config and NEVER touches genesis. (`tactical_civilian` / `cluster_civilian`
+remain confirmed non-existent, per directive 4.) The shipped `tools/test_tactical.sh` is a
+fully economic chain: stake 1000 each, `block_subsidy: 10`.
+
+**A no-economics deployment is a GENESIS SHAPE, and there are TWO.**
+
+### ► REFUTED: "no economics forces min_stake = 0, so spam gets cheaper" (Claude's stated prior)
+
+**`min_stake` is not a price — it is the membership predicate** (`eligibility_floor.hpp:85`,
+mirrored at `:116`, consumed by `registry.cpp:53` and `chain.cpp:817-825`). Selection is
+uniform over the eligible pool with NO stake weight (`node.cpp:1039`). `validate()` imposes
+no coupling between `inclusion_model`, `min_stake` and `initial_stake`
+(`genesis.cpp:131-312`).
+
+  * **SHAPE A (open set):** `min_stake = 0`. **No Sybil bound at all.**
+  * **SHAPE B (closed set, RECOMMENDED):** `min_stake = 1000` (the DEFAULT),
+    `initial_stake = 1000` each, `initial_balances = []`, subsidy/pools/lottery all 0.
+    Genesis installs locked stake directly with `unlock_height = UINT64_MAX`
+    (`chain.cpp:932-933`), and it then becomes a **conserved, non-mintable,
+    non-transferable PERMISSION BIT**: creator credit is skipped since
+    `total_distributed == 0` (`chain.cpp:1757`, `:1861`); `charge_fee` forces 0 on a zero
+    balance (`:958`); `STAKE` needs `balance >= amount+fee` against a permanently-0 supply
+    (`:1330`); `UNSTAKE` is 1-for-1 conserving and barred by `unlock_height` (`:1348-1359`).
+    **Sybil bound = floor(sum(initial_stake) / min_stake), permanent, purely mechanical,
+    zero economic content.**
+
+`inclusion_model` is INERT — its only non-serialization consumer is a startup log line
+(`node.cpp:209` -> `:668`) and it is ABSENT from `compute_genesis_hash` (`genesis.cpp:908-920`).
+Do not use it as deployment identity.
+
+**Honest gap in SHAPE B:** the conservation proof holds for single-chain / CURRENT
+topologies. `PROFILE_TACTICAL` mandates SHARD + EXTENDED, forcing `initial_shard_count >= 3`
+(`node.cpp:365-371`), and per-shard supply is NOT conserved — the cross-shard inbound credit
+mints on the destination shard. Highest-value follow-up in this analysis.
+
+### NONE of the four CRITICAL halts improves
+
+They were never economically deterred — each is a validator shape-rule that ingress does not
+mirror and `build_body` does not enforce, reachable from an offline keypair with zero
+balance, stake, registration and fee. K1 / K2 / K4 / the no-eviction root: **UNCHANGED**.
+K3: **WORSE under SHAPE A, unreachable under SHAPE B** (no outsider can enter `registry_`,
+`eligibility_floor.hpp:85`, and no stake can be bought).
+
+### ► REFUTED: "zero fees kill every eviction path" — the asymmetry runs the OTHER way
+
+`mempool_admit_check` does no funding check, so unfunded `fee > 0` submissions can raise the
+pool floor and evict a `fee = 0` poison tx (`node.cpp:2886-2897`) — degraded recovery, not
+absorbing. And on a zero-balance chain **the ATTACKER is the constrained party**:
+`build_body` requires `sb >= amount + fee` with `sb = 0` (`producer.cpp:1328-1329`), so K1's
+and K2's poison txs MUST carry `fee = 0`, pinning them at the eviction minimum. A funded
+attacker on a token chain faces no such constraint. Against the max-fee shape
+(`amount=1, fee=UINT64_MAX`) neither world has an escape — differential zero, not negative.
+
+### NEW CRITICAL 1 — REGISTER is an UNAUTHENTICATED KEY-ROTATION PRIMITIVE (defeats every shape)
+
+The validator derives the verifying key from the transaction's **own payload**
+(`validator.cpp:793`) and the switch arm is bare — `case TxType::REGISTER: break;`
+(`:844-845`) — while the adjacent `case TxType::DEREGISTER:` DOES require
+`registry.find(tx.from)` (`:846-848`). Apply overwrites unconditionally
+(`chain.cpp:1267`) and never touches `stakes_[tx.from].locked` (`:1269-1273`).
+
+**One fee-0 signed transaction, using the victim's PUBLIC next-nonce, rewrites any
+registrant's `ed_pub` — and the attacker INHERITS the victim's locked stake and its
+eligibility.** This works at `min_stake = 10^18` on a fully funded chain. It bypasses SHAPE
+B's conservation bound entirely, refutes `SECURITY.md:600` ("the cartel cannot permanently
+remove them without continuing to expend stake"), and undermines the attribution property
+S-054 exists to preserve. **No S-item exists; `ROTATE_KEY` is listed as v2.26 not-started.**
+
+### NEW CRITICAL 2 — a LEGITIMATE operator key rotation is a permanent halt at |pool| == K, p = 9/10
+
+Re-`REGISTER` (the shipped rotation path) sets
+`e.active_from = height + derive_registration_delay(...)` (`chain.cpp:1263`), delay uniform
+on **[1,10]** (`registration_delay.hpp:36`). The registry is rebuilt at
+`at_index = height() = b.index + 1` (`node.cpp:2532`), and `domain_eligible` rejects while
+`active_from > at_index` (`eligibility_floor.hpp:83`). **The rotating domain is eligible only
+when delay == 1.** For delay in [2,10] the pool drops to K-1, `check_if_selected` returns
+(`node.cpp:1024`), no round starts, the index never reaches `active_from` — **deadlock**.
+Triggered by CORRECT OPERATOR BEHAVIOUR, no adversary, no economic content. The shipped
+re-REGISTER selftest exercises a 1-creator chain only. M = K = 3 IS the tactical shape.
+
+### The equivocation DEREGISTRATION arm is a permanent halt at |pool| == K
+
+Forfeiture (`chain.cpp:1819-1820`) is a no-op at `locked == 0`, but deregistration
+(`:1825`) is unconditional and **S-051 cannot lift `inactive_from`** — the candidate loop
+`continue`s on the identical predicate (`eligibility_floor.hpp:115`) and lifts suspensions
+only. Pool drops to K-1 => no round => no abort => `total_aborts` stays 0 => BFT escalation
+never fires (`node.cpp:1017-1023`). The documented remedy (a fresh REGISTER) needs a block
+that can never be produced. Note the in-code justification is also false: `chain.cpp:1811`
+says "must register a fresh domain", but `:1267` writes over the SAME domain string.
+
+### ► REFUTED: "no token value reduces the slashing consequence to deregistration alone"
+
+That holds only when `locked == 0`, which is a GENESIS QUANTITY CHOICE, not a consequence of
+the token being worthless. Under SHAPE B `locked == 1000` and the equivocation apply mutates
+THREE state_root leaves: `s:<equivocator>` (`chain.cpp:327-333`), the UNCONDITIONAL
+`c:accumulated_slashed` const-leaf (`:499`, fed at `:1866`), and `r:<equivocator>`
+(`:334-343`). Forfeiting a valueless token is not a deterrent but IS a live consensus-state
+mutation.
+
+**The ORDERING RESULT (7570989) still binds in BOTH shapes**, for reasons independent of
+economics: `chain_.revert_head()` (`node.cpp:2691`) -> `chain_.append(incoming)` (`:2711`)
+is UNGUARDED, only the validate-failure branch restores (`:2704`), and a stripped block
+re-derives the same digest, passes K-of-K, then throws S-033 on the stale leaf.
+
+### WHAT GOES SILENTLY VACUOUS (no flag, no gate, no assertion fires)
+
+S-010 Sybil (both stated options are economic; **restored mechanically ONLY under SHAPE B**);
+S-011 M-1 cartel (all three legs zero — but the **suspension exclusion window survives at
+zero stake** (`chain.cpp:1789-1791`) and is renewable at zero cost, and at K=M=3 the cartel
+can escalate to a two-member zero-honest BFT committee); S-006 (detection survives, the
+closure does not); S-013 layer 3 (the 2K memory BOUND survives, `node.cpp:3111-3121`; the
+deterrent does not); S-029 Level-3 (already recorded as failing — free `compute_hash`
+grinding of the `resolve_fork` tiebreak, which is C0's third blocking finding);
+**BFTSafety T-5.1 is VOID and `:184` INVERTS — you get exactly classical BFT with no
+recovery**; Safety.md clause 2 (FA6) has no replacement, though clause 1's pigeonhole
+survives; S-008's fee-priority policy inverts. S010S011SybilEconomics.md explicitly excludes
+the coercion/ideological adversary from scope — i.e. EXACTLY the tactical adversary.
+
+### `Chain::load` — hits the tactical profile for a NON-economic reason
+
+Every un-threaded parameter's genesis default equals its `Chain` in-class default, so a
+defaults-only genesis replays correctly. The failure tracks NON-DEFAULT choices — and
+**`crypto_profile = FIPS`, which `tactical` and `cluster` MANDATE (`params.hpp:261`, `:210`),
+is one** (`chain.cpp:489`, set at `node.cpp:568`). The tactical profile is unrestartable
+independent of economics.
+
+### Sequence for a no-economics deployment
+
+1. NEW CRITICAL 1 (REGISTER authentication) — worst finding on the record; affects EVERY
+   deployment, funded or not, and has no S-item.
+2. NEW CRITICAL 2 (rotation deadlock) + the deregistration-at-|pool|==K deadlock — same
+   root: an eligibility drop below K is unrecoverable because recovery requires a block.
+3. The four sweep CRITICALs (K1-K4 + the no-eviction root) — unchanged by this profile.
+4. `Chain::load` parameter threading — required before ANY tactical deployment restarts.
+5. Choose SHAPE B explicitly and record it; SHAPE A has no Sybil bound.
+6. Re-derive the vacuous S-items honestly for a no-economics posture.
+7. Close or scope the per-shard supply-conservation gap under SHARD+EXTENDED.
+
+**Authority:** read-only analysis by Claude Opus 5, 2026-08-13. Nothing implemented.
