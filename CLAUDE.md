@@ -195,9 +195,23 @@ proved the predicate unsound and unfixable: no predicate over two signed opening
 sound and complete under asynchrony (a splitter's openings are bit-identical to an honest
 node's — only DELIVERY differs), and at K == M no exclusion is safe either (M-of-M
 selection is the identity on the SET, so rotation evicts no one, and a non-liftable
-exclusion is a self-sustaining permanent halt). The SOUND SUCCESSOR is FINALIZATION-LEVEL
-slashing — two conflicting blocks that EACH gathered K signatures at one height, which a
-correct run provably cannot produce. It is recorded as the replacement and is NOT built.
+exclusion is a self-sustaining permanent halt).
+  THE CHANGE IS A RELOCATION, NOT A REMOVAL (owner correction 2026-08-13). Slashing moves
+  OUT OF L1 INTO L2. L1 keeps DETECTION and the on-chain EVIDENCE RECORD but attaches no
+  consensus consequence; the economic consequence is applied at the DApp/L2 layer, which
+  may use inputs L1 provably cannot (off-chain corroboration, elapsed time, arbitration,
+  dispute/appeal) and whose verdict is therefore not required to be sound-and-complete as
+  a consensus rule. This is why the impossibility results above are not fatal: they bound
+  what a CONSENSUS predicate can decide, not what an L2 policy can.
+  CONSEQUENCE FOR THE EVIDENCE RECORD: it is NOT merely diagnostic — it is the INPUT to
+  L2. It must therefore be reliable, capped and queryable, which makes the per-block cap +
+  in-block duplicate rejection (see below) a correctness requirement of the L2 design, not
+  just a DoS fix.
+  OPEN ARCHITECTURAL QUESTION (owner): what does L2 slash? Either (a) L1 exposes a
+  DApp-callable stake primitive — but then the L2 verdict re-enters consensus and the
+  soundness problem returns; or (b) validators post a SEPARATE L2 bond and L1 stake is
+  never slashable — fully clean, opt-in, and consistent with K-of-K mutual distrust; or
+  (c) L2 consequence is exclusion/reputation at the service layer only. NOT DECIDED.
   NOT LANDED — the code change was written, FAILED adversarial review (22 findings
   confirmed, 1 false alarm) and was REVERTED. The core removal is sound (A1 neutral,
   snapshot round-trips, no state_root leaf changes shape), but landing it additionally

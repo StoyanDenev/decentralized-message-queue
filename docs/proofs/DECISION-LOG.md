@@ -2238,3 +2238,28 @@ This is a documentation-authority change only. No decision is reopened, reversed
 **Landing checklist for the next attempt** (the change itself is ~10 lines; the surrounding work is the cost): the two deleted effects; a per-block cap + in-block duplicate rejection on `equivocation_events`; S-006 re-derived or re-opened; an honest S-011 residual covering BFT escalation, the permanent `min_stake` drain, and DOMAIN_INCLUSION; the machine-readable `verify-equivocation` contract; and the ~16 no-TIER proof docs plus QUICKSTART / CLI-REFERENCE / WHITEPAPER / S-029 / S-013 / D3.3b.
 
 **Authority:** review findings recorded by Claude Fable, 2026-08-13. The slashing decision itself stands (owner, this session); only its implementation is deferred.
+
+## 2026-08-13 (correction) — the slashing change is a RELOCATION to L2, not a removal
+
+**Owner correction.** The two entries above characterise the slashing change as *removing* the consequence, with "finalization-level L1 slashing" named as the sound successor. **That is a misrecording by the recorder, not the owner's decision.** The decision is that **slashing moves OUT OF L1 INTO L2.**
+
+**What this does and does not change.**
+
+*Unchanged — the L1 code delta.* L1 still deletes the two effects in `apply_transactions` (`block_slashed += locked; locked = 0;` and `inactive_from = b.index + 1`). Every accounting result verified for that change stands: A1 is neutral by construction, no state_root leaf changes shape, and a chain carrying an equivocation event round-trips byte-identically through both `serialize_state`/`restore_from_snapshot` and DSN1 `encode_state`/`decode_state`.
+
+*Changed — what L1 keeps, and why.* The on-chain evidence record is **NOT merely diagnostic**. It is the **INPUT to the L2 slashing mechanism**. That upgrades the per-block cap and in-block duplicate rejection from a DoS fix to a **correctness requirement of the L2 design**: an L2 policy reading an unbounded, re-includable evidence stream cannot compute a stable verdict.
+
+*Changed — why the impossibility results are not fatal.* They bound what a **consensus predicate** can decide from two signed openings under asynchrony. They do not bound an **L2 policy**, which may use inputs L1 provably cannot: off-chain corroboration, elapsed wall-clock time, human arbitration, and dispute/appeal. An L2 verdict is not required to be sound-and-complete as a consensus rule, because it is not one. This is the reason the relocation works where six in-consensus designs failed.
+
+*Changed — the S-011 / BFTSafety re-derivation.* The prior framing asked whether the S-010 stake floor alone suffices with slashing gone. Under relocation the correct question is different: **does the L2 mechanism restore the economic bound, and under what assumptions?** The three errors found in the drafted residual still stand as errors (BFT escalation can seat a zero-honest committee at K == M; abort-driven drain below `min_stake` is permanent and S-051 does not lift it; DOMAIN_INCLUSION zeroes both legs), but they must be re-derived against the L2 design, not against a no-slashing world.
+
+**OPEN, and it is the design's crux — what does L2 slash?** Validator stake is L1 state (`stakes_.locked`). Three shapes, not decided here:
+- **(a) L1 exposes a DApp-callable stake primitive.** Direct, but the L2 verdict then re-enters consensus state — and everything this session proved about unsound predicates entering the apply path applies again.
+- **(b) An L2-native bond.** Validators post a separate bond to an L2 staking/insurance DApp; L1 stake is never slashable. Fully clean, opt-in, and consistent with K-of-K mutual distrust — L1 has no slashing surface at all.
+- **(c) Service-layer consequence only.** Exclusion/reputation at the L2 service boundary, no asset movement.
+
+**(b) is the only shape that keeps the impossibility results out of consensus permanently**; (a) reimports them. This must be settled before the L1 change lands, because it determines whether L1 needs to expose anything at all — and under no-migrations, exposing a stake primitive is a genesis-frozen decision.
+
+**Status.** The L1 code change remains NOT LANDED (failed review, 22 findings — see the addendum above; the landing checklist there is still accurate, with the cap/duplicate-rejection item promoted from DoS fix to L2 correctness requirement). `CLAUDE.md` CURRENT FRONT corrected in the same commit.
+
+**Authority:** owner correction, 2026-08-13; recorded by Claude Fable at his direction.
