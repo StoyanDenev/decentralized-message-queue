@@ -2263,3 +2263,28 @@ This is a documentation-authority change only. No decision is reopened, reversed
 **Status.** The L1 code change remains NOT LANDED (failed review, 22 findings — see the addendum above; the landing checklist there is still accurate, with the cap/duplicate-rejection item promoted from DoS fix to L2 correctness requirement). `CLAUDE.md` CURRENT FRONT corrected in the same commit.
 
 **Authority:** owner correction, 2026-08-13; recorded by Claude Fable at his direction.
+
+## 2026-08-13 — AUTHORIZED FOR DESIGN (no code): abort-certificate LOCK RULE + deferred slashing in L1, with M > K as a genesis invariant
+
+**Owner decision.** Slashing stays in **L1** (superseding the L2 relocation recorded above, which was itself a correction to a mis-recorded "removal"). It becomes sound by adding the mechanism the protocol lacks: a **lock rule**, with the verdict **deferred by N blocks**.
+
+**The rule.** A validator that has signed a block at height H may sign a *different* block at H only if the new block carries an **AbortEvent terminating the prior round**. Justification is therefore quorum-signed and unforgeable, and it reuses machinery that already exists — `abort_events` ride in the block, are gossiped and adopted, and are already validated by `check_abort_events`. No new wire artifact.
+
+**The slashable predicate becomes sound.** With the lock in place, "signed two conflicting blocks at one height **without exhibiting justification**" is something a correct run provably cannot produce — which is the standard total forfeiture has needed since the beginning. This is what six in-consensus designs were missing: they all tried to make an *instantaneous* predicate over two signed openings sound, which is impossible under asynchrony (a splitter's openings are bit-identical to an honest node's — only DELIVERY differs). A lock rule changes what an honest node is *permitted to produce*, so the pair stops being ambiguous.
+
+**Why deferral is part of it.** The verdict is passed N blocks later, when the chain's own history shows whether a competing complete block exists. The impossibility theorem bounds a predicate over two openings *at the instant of detection*; N blocks of subsequent history is strictly more information, so the theorem does not apply to the deferred predicate.
+
+**Genesis invariant: M > K.** Every lock rule creates a liveness risk — once a member has signed it cannot re-sign, so the committee cannot re-form with it. Spare capacity converts that halt into automatic recovery.
+
+**KNOWN GAP, recorded before design begins: M > K does NOT rescue K = 2.** `abort_claim_quorum(K) = max(2, K−1)` (`include/determ/chain/params.hpp:156`) and claimers are drawn from the COMMITTEE (`on_abort_claim` requires `in_creators(msg.missing_creator)` and `claimer != missing_creator`), not from the pool. At K = 2 exactly one eligible claimer exists, so the quorum is unsatisfiable **whatever M is** — S-044 made that choice deliberately, preferring "a crash-stop halt-by-single-death" over cascade. A validator locked at K = 2 could therefore never obtain a certificate. **The combination is viable from K ≥ 3; K = 2 must either be excluded by the genesis invariant (M > K AND K ≥ 3) or accept halt-on-partial-signing.**
+
+**Design questions that must be answered BEFORE any code** (six implementations failed; only the design-first passes produced durable results):
+1. **Is "locked" consensus-visible?** Committee derivation must be identical on every node. A validator's signature on block A is visible only to peers that received A, so "who is locked" is a per-node view unless it is derived from committed state. If the re-round committee must exclude locked members, the exclusion input must be in the block — otherwise nodes derive different committees, which is a fork.
+2. **Does M > K actually let the committee re-form without the locked member?** The selection seed is `epoch_committee_seed(epoch_rand, shard_id)` mixed with `current_aborts_` hashes; with no abort the seed is unchanged and the SAME committee re-derives even when M > K. So re-formation depends on the abort tail growing — which is the same artifact the lock requires. Confirm this is not circular.
+3. **Does the lock actually close the S-048 abort-vs-finalize race?** That race currently produces two K-signed same-height blocks *honestly* (`Chain::resolve_fork` exists because of it). If the lock does not prevent it, the deferred predicate is still unsound.
+4. **N, two-sided.** Long enough for a competing complete block to surface; strictly shorter than the unbonding window, with stake locked throughout, or the offender withdraws before the verdict (`UNSTAKE_DELAY = 1000`; `unlock_height = inactive_from + unstake_delay_`, `chain.cpp:1313`).
+5. **Lock-liveness.** A locked validator that cannot obtain justification is stuck — the classic tension every BFT protocol must resolve explicitly.
+
+**Consistency.** No-migrations (lock rule, deferred verdict and the M > K invariant are all consensus/genesis surface — pre-genesis or never); provable security (the predicate becomes one a correct run cannot satisfy, rather than one that merely looks suspicious); minimalism (reuses `abort_events`, adds no wire artifact).
+
+**Authority:** Stoyan Denev (owner directive, 2026-08-13; recorded by Claude Fable at his direction). Design + adversarial review authorized; implementation is NOT.
