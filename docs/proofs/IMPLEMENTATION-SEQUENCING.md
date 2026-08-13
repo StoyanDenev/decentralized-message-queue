@@ -2,6 +2,16 @@
 
 # Implementation sequencing — bundled-release plan
 
+> **⚠ SUPERSEDED FOR SEQUENCING — 2026-08-13 (owner; `DECISION-LOG.md` 2026-08-13, directive 2).**
+> Do NOT select work from this document's bundle ordering. The bundle map and Bundle 1-5
+> sequence below predate the D2 JSON→binary migration being authorized and promoted to
+> ACTIVE front (`DECISION-LOG.md`, both 2026-07-28 entries), so they do not carry the
+> actual active front at all. **The operational source for what to work on next is
+> `CLAUDE.md` CURRENT FRONT**; `DECISION-LOG.md` is the authority on any conflict. The
+> per-bundle *decisions* and their rationale below remain the standing record — only the
+> ORDERING is superseded. Same treatment applied to `PRE-LAUNCH-DECISIONS.md` and
+> `V1.1-PLAN.md`.
+
 **Status:** planning artifact. Resolves the execution sequence for the 41 design decisions + 4 spec amendments resolved during pre-implementation review week (May 2026). Approach C (bundled releases): each bundle ships as a discrete release; related decisions land together rather than incrementally.
 
 **LAUNCH MODEL REFRAMED 2026-06-06:** No test/main net before v1.1. **v1.0 is an internal pre-launch development designation (no public release); v1.1 IS the launch event (mainnet).** All bundles in this plan (substrate Bundles 1-5) PLUS all V1.1-PLAN.md bundles (DSSO-DApp, zk-VM substrate, sketch-v2.x, killer-DApp catalog, Additive chain features) ship together at v1.1 mainnet genesis. The no-migrations constraint applies from v1.1 launch onward; pre-v1.1 development can have breaking changes freely.

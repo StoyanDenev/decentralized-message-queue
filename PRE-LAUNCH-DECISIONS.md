@@ -1,5 +1,23 @@
 # v1.1 Pre-Launch Decision Register
 
+> # ⚠ SUPERSEDED FOR SEQUENCING — 2026-08-13
+>
+> **Do NOT select work from this document's ordering.** The execution plan at the end
+> (9 build items + 3 verification items) was closed 2026-07-09, three weeks *before* the
+> D2 JSON→binary migration was authorized and promoted to ACTIVE front
+> (`docs/proofs/DECISION-LOG.md`, both 2026-07-28 entries). As a result this list omits
+> D2 — the actual active front — entirely, while still carrying items that have since
+> shipped (B2 purge; B1's storage half, absorbed by D2 inc8 `8a106aa`).
+>
+> - **The operational source for what to work on next is `CLAUDE.md` CURRENT FRONT.**
+> - **The per-item DECISIONS below are NOT superseded.** Every "Decision (owner,
+>   2026-07-09)" line — A1–A8, B1–B4, C2, D1–D4, and the §E scope addition — remains the
+>   standing record of what was decided and why.
+> - `docs/proofs/DECISION-LOG.md` wins on any conflict (project doctrine), and the
+>   directive that produced this banner is its 2026-08-13 entry.
+>
+> Only the ORDERING is superseded. No decision here is reopened, reversed, or rescoped.
+
 > Working decision-support doc (not canonical). One row per open item across all four categories,
 > each with what it is, why it matters, the real options, a recommendation, and a blank for your call.
 > Source of truth for the underlying facts: `docs/SECURITY.md`, `docs/proofs/DECISION-LOG.md`,
@@ -107,6 +125,10 @@ Several items below already have a spec-recommended answer — for those the rea
 **Options.** (a) **Do it pre-launch** (~1–2 days). (b) Defer post-launch (safe — it's not consensus).
 **Recommendation.** (a). Cheap, and it's your clearest simpler-*and*-more-reliable win.
 **Decision (owner, 2026-07-09).** (a): do it pre-launch. `save()` O(1), global-mutex offender removed before the beta loads it, blocks prunable. The D4 single-soak beta then exercises the real storage layer.
+**Status + reprioritization (owner, 2026-08-13; `DECISION-LOG.md` 2026-08-13, directive 1).** B1 is CLOSED as a standalone item — split by half:
+- **(a) per-block append-only files: DONE**, absorbed by D2 inc8 (`8a106aa`). The store is `<path>.blocks/<index>.blk`, each a `DBK1`-tagged canonical `Block` frame, plus a fixed 44-byte `DMF1` manifest written atomically last (`src/chain/chain.cpp:3385-3387`, `:3401`, `Chain::save_incremental` at `:3430`). `Chain::save` and the entire legacy `chain.json` read path are DELETED (gate `test-chain-store` CS-8). The stated payoff — save O(new blocks), global-mutex offender gone, blocks prunable — is delivered.
+- **(b) incrementally-updated state: NOT started.** There is no state file; `Chain::load` (`src/chain/chain.cpp:3483`) still replays `apply_transactions` over every block file, so *load* remains O(N).
+**Directive:** (b) folds into the **next `src/chain/chain.cpp` storage pass** and is scheduled with it, not ahead of it. It is now cheaper than when scoped — inc8 already built the container it needs (`Chain::encode_state` / `Chain::decode_state`, the `DSN1` record at `src/chain/chain.cpp:2859` / `:3018`). Rationale: this generalizes sequence-before-harden from "do not harden doomed code" to **"do not rewrite the same file twice."** Concretely it prevents a thread reading only this list from reopening B1 and rebuilding the storage inc8 had already landed, in the file the D2 front was actively rewriting.
 
 ### B2. Purge unwired crypto (FROST + RingCT)
 **What it is.** FROST and the RingCT ring-signature primitives sit in-tree with **no consensus consumer**. Under no-migrations, every retained primitive is permanent audit surface.
@@ -128,6 +150,7 @@ Several items below already have a spec-recommended answer — for those the rea
 **Options.** (a) **Pre-genesis audit** of every reserved discriminator — keep only those with a plausible future. (b) Keep all reserved (max optionality, more permanent surface).
 **Recommendation.** (a). A short housekeeping pass with outsized permanence.
 **Decision (owner, 2026-07-09).** (a): pre-genesis audit of every reserved discriminator; keep only slots with a plausible, NAMED future use, one-line rationale per keep/drop in the schema doc.
+**Reprioritization (owner, 2026-08-13; `DECISION-LOG.md` 2026-08-13, directive 3) — the audit stands, its DROP EXECUTION moves to the LAST pre-genesis act.** The audit is written: `docs/proofs/ReservedDiscriminatorAudit.md`, 22 rows, **14 KEEP / 8 DROP / 0 unresolved**, with a §7 integrator execution order. Of the eight DROPs, **G-1 was EXECUTED 2026-07-09** (byte-invariant, ridden on the B2 purge, goldens confirmed); **drops 2-8 are unexecuted** — all spec/plan edits, none touching serialization shape, three already carrying the audit's own ⚠ owner-confirm flag. Drops 2-8 stay unexecuted until the final pre-genesis act, when scope is maximally known. Reasoning — the trade is asymmetric under no-migrations: every slot **KEPT** preserves a post-genesis additive path (not hypothetical — `DECISION-LOG.md` 2026-07-23 records v2.15 multi-sig shipping as Option A with **Option B, on-chain M-of-N account policy, reserved as a §7.5 discriminator slot in this very audit** so on-chain enforcement can ship additively later without a wire break), while every slot **DROPPED** forecloses one PERMANENTLY. Executing DROPs early trades permanent future optionality for a small, temporary surface reduction, at the moment when least is known about which slots the remaining scope will want. Deferring costs a little carried complexity for a few weeks; executing early costs an option forever. **KEEP verdicts need no execution and are unaffected.** This defers execution only — not the audit, not the recorded verdicts.
 
 ---
 
@@ -141,6 +164,7 @@ Several items below already have a spec-recommended answer — for those the rea
 **Options.** (a) **Run the full adversarial-schedule sweep before mainnet.** (b) Run a bounded subset, lean on beta for the rest. (c) Defer to beta.
 **Recommendation.** (a). Cheapest pre-mainnet reliability insurance you have now.
 **Decision (owner, 2026-07-09).** (a): run the FULL adversarial-schedule sweep before mainnet declaration. Composes with A4 (the deterministic S-048 repro validates the reorg fix) and feeds the D4 feature-complete definition. Prerequisite: the remaining deterministic-scheduler increments (DeterministicSchedulerDesign.md 2-5, incl. the now-relevant Node no-self-thread mode).
+**Prerequisite DISCHARGED — C2 is UNBLOCKED (verified 2026-08-13; `DECISION-LOG.md` 2026-08-13, correction (ii)).** The prerequisite line above is obsolete: `docs/proofs/DeterministicSchedulerDesign.md` states **"increments 1-11 SHIPPED"**, and the specific increments it names are all done — increment 2 (virtual-time timer source), increment 3 (`Node::start_external()`, the no-self-thread mode), increment 4 (`net::GlobalScheduler`), and **increment 5, which IS the adversarial-schedule harness, shipped as `test-fa-adversarial-deterministic`** — along with 6-11 (crash/rejoin, frame duplication, per-step FA checkers, fault-delivery witnesses, per-link latency/reorder, cross-toolchain signature diff). The remaining C2 work is **running the full sweep** — breadth of seeds and scenarios against the shipped harness — not building scheduler increments. Stronger than "the increments can run in parallel": there is nothing left to parallelize.
 
 ### C3. Storage refactor → see **B1** (also removes a global-mutex reliability offender).
 
@@ -181,6 +205,8 @@ Several items below already have a spec-recommended answer — for those the rea
 ## Register CLOSED — 2026-07-09 (all 17 items decided by owner)
 
 ### The decided execution plan
+
+> **⚠ ORDERING SUPERSEDED 2026-08-13 — do not select work from this sequence.** See the banner at the top of this file. The operational source is `CLAUDE.md` CURRENT FRONT; the authority is `docs/proofs/DECISION-LOG.md` 2026-08-13. This list predates the D2 authorization (2026-07-28), so **D2 — the actual active front — does not appear in it at all**. Verified per-item notes as of 2026-08-13 (only the four this directive touched — the rest carry no status claim here; check `DECISION-LOG.md` and `docs/SECURITY.md` for theirs): **1. B2 purge — DONE** (FROST + RingCT/LSAG/CLSAG removed from the tree 2026-07-09). **2. B3 spec rewrite — increment 1 SHIPPED** (`docs/proofs/v2.22-PRIVACY-SPEC.md` header: "Status: REWRITTEN 2026-07-09 … as increment 1"; the wider corpus consolidation is decided and unexecuted — `Improvements.md` §12.2). **3. B4 reserved-bit audit — audit written; DROP EXECUTION deferred to the LAST pre-genesis act (§B4 above).** **4. B1 storage — half (a) absorbed by D2 inc8 `8a106aa`; half (b) folded into the next `chain.cpp` storage pass (§B1 above); do NOT open B1 as separate work.** Verification items: **C2 is UNBLOCKED, its prerequisite discharged (§C2 above).** The per-item decisions below remain the standing record.
 
 **Beta model (D4):** ONE clean soak at full feature-complete — so everything below is on the critical path to beta start.
 

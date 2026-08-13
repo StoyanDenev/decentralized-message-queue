@@ -11,6 +11,14 @@
 > `tools/test_doc_tier_check.sh`; physical relocation (its Phase 3) was not adopted. The
 > proposal doc was deleted 2026-07-09 (doc-consolidation inc.2 — git history is the archive).
 > Design deliberation trail: `proofs/DECISION-LOG.md` and `proofs/Improvements.md`.
+>
+> **Sequencing note (2026-08-13).** This index says what EXISTS and at what tier; it does not
+> say what to work on next. **The operational source for work selection is `CLAUDE.md`
+> CURRENT FRONT**, with `proofs/DECISION-LOG.md` as the authority on any conflict. The three
+> planning artifacts — `../PRE-LAUNCH-DECISIONS.md`, `proofs/IMPLEMENTATION-SEQUENCING.md`,
+> `proofs/V1.1-PLAN.md` — are **superseded for sequencing** (their orderings predate the D2
+> active front); their per-item decisions remain the standing record. See
+> `proofs/DECISION-LOG.md` 2026-08-13.
 
 ---
 
