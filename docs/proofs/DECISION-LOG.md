@@ -2473,3 +2473,32 @@ This is a live, remote, unauthenticated, absorbing halt. It was found by design 
 **Status: C0 must be triaged as a security item on its own merits, ahead of and independent of the slashing work.** It is present at HEAD today.
 
 **Authority:** design analysis + adversarial review recorded by Claude Fable, 2026-08-13. No code written.
+
+## 2026-08-13 — canonicalization REFUTED as a standalone C0 fix. C0 is a SET-AGREEMENT bug, not a record-normalization bug. Demotion is the answer.
+
+**Verdict: FATAL on the sufficiency lens.** Canonicalization closes exactly the two divergence causes the C0 entry enumerated — the `(a,b)` slot ordering and the observer-local forensic fields — and **nothing more**, because those are the only per-observer inputs to the RECORD. C0's root cause is one level up: `b.equivocation_events` is `pool ∩ union` (`producer.cpp:1226-1232`), a function of the assembler's **local pool** — an asynchronously-populated, adversary-shaped set that no per-record normalization makes common across nodes.
+
+### R1 — the killer, and it is canonicalization-proof
+
+Detection pairs the FIRST-admitted contrib with a later one (`node.cpp:3026-3031`, `:3053-3072`) and dedup is equivocator-only (`producer.hpp:391-393`), so the first pair is frozen and every later pair is dropped (`node.cpp:3075`). Equivocator E signs THREE valid contribs X, Y, Z at one `(block_index, prev_hash, aborts_gen)` — all clear every admission gate. E delivers X→A then Y→A, and Y→B then Z→B. **A freezes canonical(X,Y); B freezes canonical(Y,Z)** — different body_roots, different sigs, therefore different canonical records. Canonical ordering and field deletion change nothing. Each drops the other on equivocator-only dedup; A commits view `{h(XY)}`, B `{h(YZ)}`; each materializes only its own; digests differ; every BlockSig is rejected; the round aborts; S-050 clears `current_aborts_` but not the pool, which is erased ONLY on a block apply carrying that equivocator. **At K == M the halt is permanent. Cost: three contribs.**
+
+### Three further divergence sources, independent of records
+
+**R2 — pool membership with NO repair path.** The union filter deliberately materializes only `pool ∩ union` and the validator deliberately accepts a strict subset (`validator.cpp:1705-1711`, whose own comment concedes "the union can hold several witnesses… that no single assembler can fully materialize"), so it never rejects — it silently diverges the digest. And recovery does not exist: the detector broadcasts ONCE (`node.cpp:2458`, `:3076`), `on_equivocation_evidence` adopts WITHOUT re-broadcasting (`node.cpp:1921-1943`), `GossipNet::broadcast` is one-hop best-effort with exceptions swallowed (`gossip.cpp:332-337`), and nothing re-requests evidence. **A single dropped frame is a permanent asymmetric digest.**
+**R3 — timing.** All three `build_body` sites read the pool live; an adversary introducing one fresh variant per round drives R1 repeatedly and pools never coincide at digest time.
+**R4 — the 64-cap.** `F2_VIEW_LIST_CAP` truncates the COMMITTED VIEW to the 64 lowest hashes (`node.cpp:1117-1120`) while the MATERIALIZED set is uncapped, so past 64 distinct equivocators different members name different 64-subsets by construction.
+
+### Two corrections that matter regardless of which fix lands
+
+1. **"Carry the forensic fields outside the hashed identity" is STRICTLY WORSE THAN USELESS.** Dedup and the union filter would treat A's `(anchor=17)` and B's `(anchor=12)` as the same element, `check_eqabort_reconciliation` passes both, **the digests MATCH so K-of-K verifies on BOTH**, and you get two fully valid same-height blocks with different block hashes handed to `resolve_fork`'s smallest-hash tiebreak — the malleability wedge, reachable with **no strip at all**. The fields must be DELETED from the struct (or forced constant at every ingest AND rejected non-zero at validate), never merely dropped from the hash.
+2. **`build_body` pushes in POOL INSERTION ORDER with no sort** (`producer.cpp:1231` over the `std::vector` pool). Two nodes with byte-identical, identical-CONTENT pools still emit different block bytes. **A canonical list sort is required regardless of which design lands.**
+
+Also recorded: in MUTUAL_DISTRUST `kind` is always 1 — `detect_equivocation` requires a non-empty `bft_proposer` on BOTH blocks (`producer.cpp:459-460`) and `current_proposer_domain()` returns "" outside BFT (`node.cpp:1345-1346`), so the kind-0 family cannot fire in MD. Under BFT it becomes an additional divergence axis.
+
+### Conclusion
+
+Canonicalization is a genuine improvement — it removes the two-contrib order split, the anchor split, and the same-height-twins malleability wedge — but it is **necessary-at-best and not sufficient**. Any design that keeps `pending_equivocation_evidence_` as an input to `build_body` asks nodes to agree on the membership of a locally-observed set **without first agreeing on it**. The set must become a deterministic function of data every assembler already holds — the K signed contribs plus the chain — which is exactly the routing `shard_tip_records` already uses (`producer.cpp:1449-1470`). **That is payload demotion (DECISION-LOG 84c1447, VIABLE-WITH-CONDITIONS), and it is now the recommended fix for C0.**
+
+*Process note: the synthesis agent died on an API error mid-response, so no formal spec was produced; the three lens analyses are unambiguous and are the record. A spec pass should precede implementation.*
+
+**Authority:** design analysis recorded by Claude Fable, 2026-08-13. No code written.
