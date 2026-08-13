@@ -2321,3 +2321,35 @@ That is a bootstrapping impossibility, not a missing mechanism. Any justificatio
 **Hole 1b remains OPEN after seven designs.** What is now settled is stronger than any single fix: the failure is not a missing mechanism but a bootstrapping impossibility — a stalled round cannot canonicalize a record of itself, and every justification-, identity-, or exclusion-based rule needs precisely that record. The honest position is that **no automated consequence at the pre-finalization layer is achievable**, and the sound options remaining are the ones outside consensus: an L2/economic layer with inputs L1 provably lacks, or no consequence at all.
 
 **Authority:** design analysis recorded by Claude Fable, 2026-08-13. No implementation was performed.
+
+## 2026-08-13 — slashing-removal change set, attempt 2: FAILED review (20 findings, 1 CRITICAL). Reverted. The cap is the new blocker.
+
+**20 findings confirmed on independent re-derivation, ZERO false alarms.** Nothing committed; tree at 0ce12c8, `ci_local` green. This is the second attempt at the same change set and it failed on **different** defects than the first — the first lacked a cap, S-006 and 16 docs; this one has the cap and broke on it.
+
+**The core removal remains sound** and is now doubly verified: A1 neutral by construction (both sides of the identity moved together, so leaving stake in `stakes_.locked` and adding nothing to `block_slashed` preserves `expected_total == live_total_supply`); no state_root leaf changes shape; byte-identical `state_root` round-trip through BOTH `serialize_state`/`restore_from_snapshot` and DSN1 `encode_state`/`decode_state`; `accumulated_slashed_` monotone, fed by the abort `SUSPENSION_SLASH` alone, proven non-vacuous by a positive control (one Phase-1 abort still moves stake 1000→990). The reproduction gate design also holds: 29 enforced arms including **W6** (the peer's pool DOES still name the honest validator — so H3 cannot pass by the hazard vanishing), with H1/H1v/H2 preserved as reported-not-counted.
+
+### CRITICAL — the cap introduces a consensus halt
+
+**EQV-BOUND truncation is ORDER-SENSITIVE while the block digest binds the evidence set ORDER-INSENSITIVELY.** Two committee members whose pools enumerate the same over-cap evidence set in different orders truncate to *different* 16-element subsets, produce *different* digests, and cannot reach K. The chain halts. A cap that drops elements must therefore impose a **total order before truncation** (and that order must itself be a pure function of the block's bytes), or it must not drop elements at all. This is the same class — a value that must be identical across nodes but is derived per-node — that killed the marker, `round_seq` and time-bucket designs.
+
+### HIGH — the machine-contract "fix" made things worse
+
+Changing `verify-equivocation`'s exit codes to **2 = proven / 0 = not-proven** *inverts* the legacy convention: a pre-existing `if verify; then punish; fi` now punishes on evidence that **FAILED** verification. A contract change intended to prevent unjust punishment created a path to punish on a *negative* result. Any future change here must keep 0 = success-of-the-check and signal the verdict out-of-band, or must break loudly rather than invert.
+
+### HIGH — the age window creates a censorship vector
+
+Pool dedup is one-record-per-equivocator (`same_equivocation_identity`). With an inclusion age window, a record that ages out becomes **permanently un-includable yet permanently resident**, occupying that equivocator's only slot and censoring all future evidence about that node. `rpc_submit_equivocation` also answers `accepted:true` and broadcasts records that can never be included. Any age bound needs a matching pool-eviction rule.
+
+### HIGH — doc convergence still incomplete, second time
+
+Five un-bannered authoritative proofs still assert the deleted consequence; `Safety.md` keeps "every fork-creator gets slashed" plus a "materially stronger than BFT" claim that `BFTSafety.md` **withdrew in the same change set**; `BFTProposerElectionSoundness` PE-4.1 still asserts FA6 slashing and its newly-written PE-3 cost claim **contradicts this change's own S-011 correction**; `BFTSafety`'s new "T-5 UNAFFECTED, verifiable by inspection" inspects only B2 and misses that **H2 is falsified by shipped honest behaviour**; `CLI-REFERENCE.md` still publishes the OLD tokens and INVERTED exit codes **in rows this change already edited**; `PROTOCOL.md` now self-contradicts on the EQUIVOCATION_EVIDENCE frame size (245/246 vs 229/230). Also: S-011 correction (ii) understates the permanent-eviction trigger **by 100×** — it is ONE Phase-1 abort, not ~100.
+
+### Operational findings worth keeping
+
+**Root cause of the three "faked" mutant results this session, now identified**: a stale `build/determ` SHADOWS `build-linux/determ` because `tools/common.sh` prefers `build/` first, so any bare `bash tools/test_*.sh` silently tests the old binary. `ci_local.sh` is immune (it exports `DETERM_BIN`), which is why every ci_local-verified green held. **Delete the stale `build/` tree** — the 2026-08-11 machine-move ledger already prescribes exactly this. Separately: three docs were silently rewritten CRLF→LF, adding ~6000 lines of churn that HID the CLI-REFERENCE misses from review.
+
+### Landing checklist (third attempt)
+
+The ~10-line removal is not the cost. Required alongside it: a cap with a **total order before truncation** (or no truncation); an age bound **with pool eviction**; an exit-code contract that does **not** invert legacy semantics; and the doc set — five proofs, `Safety.md`, `BFTProposerElectionSoundness`, `S013PerSignerCap` T-4, `ProofClaimGateTraceability`, `CLI-REFERENCE.md`, `PROTOCOL.md` frame sizes — converged **without** CRLF rewrites masking the diff. Track the new gate file in git; an untracked FAST gate is lost on a clean checkout.
+
+**Authority:** review findings recorded by Claude Fable, 2026-08-13. The slashing decision stands; only its implementation is deferred, twice.
