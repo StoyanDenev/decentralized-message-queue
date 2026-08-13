@@ -2443,3 +2443,33 @@ The ~10-line removal has now been verified sound THREE times (A1 neutral by cons
 **Gate requirement, mandatory:** a DIGEST-AGREEMENT arm — two nodes with DIFFERENT pools must produce/accept the SAME block. That is the exact property all three cap attempts violated and no gate ever asserted.
 
 **Authority:** Stoyan Denev (owner directive, 2026-08-13; recorded by Claude Fable at his direction). Design + adversarial review authorized; implementation is NOT.
+
+## 2026-08-13 — CRITICAL, LIVE AT HEAD: the F2 equivocation view is a remotely-triggerable PERMANENT CHAIN HALT. Payload demotion is VIABLE-WITH-CONDITIONS and is the fix.
+
+**The design pass authorized above returned VIABLE_WITH_CONDITIONS — and found, in passing, a rank-1 liveness hole that exists in SHIPPED CODE RIGHT NOW, independent of every slashing decision. Demotion is a BUG FIX, not a refactor.**
+
+### C0 — absorbing consensus halt, triggerable at will by one Byzantine peer
+
+Every committee member calls `build_body` with **its own** `pending_equivocation_evidence_` pool (`src/node/node.cpp:1377` sign path, `:1498` finalize, `:3165` peer-sig verify), and in MUTUAL_DISTRUST there is **no designated finalizer** (`node.cpp:1449` restricts that to BFT). Pool records for one equivocator are **per-node and permanently divergent**: `hash_equivocation_event` binds the `(a,b)` opening ORDER and the observer-local `beacon_anchor_height` (set at `node.cpp:3071-3073`, `:2453`), while pool dedup is **equivocator-ONLY** (`include/determ/node/producer.hpp:391-393`). So each node keeps its own first-detected variant and DROPS the peer's (`node.cpp:1937`, `:2457`, `:3075`).
+
+**Breaking sequence.** An equivocator sends contrib X to A then Y, and Y to B then X. A records `(a=X,b=Y)`; B records `(a=Y,b=X)`. Both gossip; both reject the other as a duplicate. In the next round A's digest appends `compute_view_root({h(e_A)})` and B's appends `compute_view_root({h(e_B)})` — **the digests differ**, every `BlockSig` is rejected (`node.cpp:3176-3180`), the round aborts, and the S-050 valve clears `current_aborts_` but **NOT** `pending_equivocation_evidence_` (`node.cpp:1638-1648`). The next round diverges identically. The pool is cleared only when a block containing a record for that equivocator applies (`node.cpp:2546-2555`) — exactly what can no longer happen. **Under the default K == M the halt is PERMANENT.** Cost to the attacker: two contribs.
+
+This is a live, remote, unauthenticated, absorbing halt. It was found by design analysis; no gate in the suite asserts anything that would catch it.
+
+### Two of my own stated premises were WRONG — corrected
+
+1. **"The digest stays byte-identical for evidence-free blocks" is FALSE.** The gate is conditional on **F2 view presence**, not evidence presence. `make_contrib` sets all three view roots together when ANY list is non-empty (`producer.cpp:1082-1089`), and `compute_view_root({})` is `SHA256("")` — **non-zero** (`producer.cpp:585-590`). So on any block carrying an abort or an inbound receipt but no evidence, the gate at `producer.cpp:896` FIRES. Byte-identity holds only when all three views are empty; **every re-round block and every EXTENDED inbound block changes digest under demotion.**
+2. **"Stripping is harmless" is FALSE at HEAD.** The consequence is still live and `state_root` is NOT digest-bound, so a relayer strips the list, recomputes `state_root`, and the K-of-K sigs still verify — the eq digest binding is the ONLY thing preventing it. After the removal a strip cannot diverge state, but `signing_bytes` still binds the events (`block.cpp:672-686`), yielding two same-height K-of-K-valid instances resolved by `resolve_fork`'s smallest-block-hash tiebreak (`chain.cpp:2105-2109`) — and per the standing doctrine bullet the hash is malleable, so a member signing last can GRIND its stripped variant to the smaller hash and win deterministically. Adversary gain: **at-will suppression of the forensic record.**
+
+### The design's four conditions
+
+- **C1** — DELETE the eq arm of `check_eqabort_reconciliation` (`validator.cpp:1756-1762`) in the SAME commit that stops populating the eq root. Otherwise a zero root takes the v1-sentinel `continue`, the union set stays empty, and **no block carrying evidence is ever acceptable again.**
+- **C2** — KEEP a digest binding, only RE-GATE it: `any_nonzero(creator_view_eq_roots)` → `!b.equivocation_events.empty()`. That is a pure function of the block's own bytes — the shape the generalisation requires — and it preserves S-030-D2 for the eq dimension. Mirror byte-for-byte in `light/verify.cpp:186-191` and the six copies in `tools/test_block_digest_xbinary_parity.sh`.
+- **C3 — the correction to the owner's framing.** "Producer proposes" has **no producer** in MUTUAL_DISTRUST. Source the payload from ONE **signed** contrib — e.g. `creators[0]`'s list — exactly as `shard_tip_records` is derived purely from signed contribs (`producer.cpp:1449-1470`). Passing `pending_equivocation_evidence_` into `build_body` IS the C0 defect and must not survive.
+- **C4** — domain-separate the conditional digest appends, or record the residual: once the eq gate is content-driven it shares inbound's style, so two blocks differing in WHICH conditional field is present can occupy the same preimage position.
+
+**Verified NOT readers of the eq view** (so demotion is contained): committee derivation reads `abort_events` only (`node.cpp:998`, `:1032-1036`; `validator.cpp:139`, `:148-151`), `cumulative_rand`, apply (`chain.cpp:1815` reads `b.equivocation_events`, never the view), and `wallet/*`. Three `validate_*` helpers have ZERO production callers. The **abort view is NOT demotable and is untouched.**
+
+**Status: C0 must be triaged as a security item on its own merits, ahead of and independent of the slashing work.** It is present at HEAD today.
+
+**Authority:** design analysis + adversarial review recorded by Claude Fable, 2026-08-13. No code written.
