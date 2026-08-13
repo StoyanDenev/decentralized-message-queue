@@ -2813,3 +2813,202 @@ KEEP-or-DROP verdict the audit does not contain — deleting without reserving f
 re-adding an uplink PERMANENTLY under no-migrations.
 
 **Authority:** design-stage evaluation by Claude Opus 5, 2026-08-13. Nothing implemented.
+
+---
+
+## 2026-08-13 — UNMITIGATED-ISSUES SWEEP: 22 confirmed defects, FOUR CRITICAL LIVE HALTS, none previously on the record
+
+**Status:** READ-ONLY sweep at e7c6fc2. Nothing implemented. Six lenses (consensus
+accept-rules/apply path, hostile-bytes decode, vendored crypto, storage/restart/sync,
+remote-reachable resource exhaustion, no-TIER doc truth), every finding independently
+adversarially verified. **22 CONFIRMED, 3 false alarms, 2 duplicates** — the
+known-issue list (C0, R-1..R-3, the five claim re-derivations, the D2 remainder, the
+cross-shard receipt hole, etc.) was excluded up front, so every row below is NEW.
+
+### THE HEADLINE: three of the four criticals are ONE STRUCTURAL DEFECT
+
+**A transaction the block validator REJECTS can enter the mempool, be selected into a
+contrib, and be included by `build_body` — and there is NO eviction path for a
+queued-but-block-invalid tx.** `apply_block_locked` prints `[node] invalid block:` and
+RETURNS (`node.cpp:2500-2508`), so `chain_.append` and `post_append_bookkeeping_locked` —
+the ONLY mempool-eviction site — never run. Height never advances, the sender's
+`next_nonce` never moves, and the next round rebuilds a byte-identical invalid body.
+`try_finalize_round` broadcasts it anyway (`node.cpp:1529`) so every peer runs the same
+rejection. **Deterministic, absorbing, fleet-wide halt, unrecoverable without restarting
+every node with a wiped mempool — which the attacker re-poisons immediately.**
+
+The authors identified this exact class and closed exactly one instance of it: the
+MERGE_EVENT stall guard at `node.cpp:2810-2822`, whose own comment reads "the producer
+keeps re-including a queued-but-block-invalid tx and the chain STALLS". Every other
+validator shape-rule was left unmirrored. Three separate exploits of the one gap:
+TRANSFER_PAYLOAD_MAX, the unsigned `pq_auth` blob, and the S-049 amount+fee overflow guard.
+
+**This means the fix is structural, not three patches.** Per doctrine (assert at the layer
+where the rule lives) the rule belongs in the producer + an eviction path, not only mirrored
+at ingress — a mempool mirror alone leaves the union-sourced path open, since `build_body`
+resolves the COMMITTEE union and can therefore include a tx that never passed THIS node's
+ingress.
+
+### A SECOND CONVERGENT ROOT: the chain cannot restart with a non-default genesis
+
+Two independent lenses found it: `Chain::load` replays every block with DEFAULT consensus
+parameters (`chain.cpp:3505` / `:3530`), so any genesis with a non-default `min_stake`,
+`suspension_slash`, `unstake_delay`, merge thresholds, `crypto_profile` or subsidy mode
+throws S-033 on FIRST RESTART and the node never starts again. Pre-genesis this is free to
+fix; it is also a strong argument that no non-default genesis has ever been restart-tested.
+
+### DIRECTLY RELEVANT TO INCREMENT 0 (the in-flight C0 fix)
+
+`docs/SECURITY.md:284` asserts S-030 D1 closed because "a single canonical block per height
+is enforced at apply". **That is false**: the apply-time `state_root` gate is a
+SELF-CONSISTENCY check that cannot arbitrate between two same-digest bodies, and it is
+disarmed outright by a zero `state_root`. Increment 0 demotes the eq set out of the digest,
+which is precisely what makes two same-digest bodies constructible. **This is corroborating
+evidence that increment 0's fork wedge is REAL and that the apply layer will not catch it.**
+Increment 0 must not land until its fork-wedge check answers this.
+
+### FULL CONFIRMED LIST
+
+
+**[CRITICAL] Mempool ingress does not mirror the block validator's TRANSFER payload cap — one anonymous 0-value tx permanently halts the chain**  
+`src/node/node.cpp:2839` (lens: wire-decode)
+
+> `Node::mempool_admit_check` bounds `tx.payload` only at `chain::TX_FRAME_PAYLOAD_MAX` = 65535 (`include/determ/chain/block.hpp:315`), while `BlockValidator::validate` rejects the WHOLE BLOCK when a TRANSFER carries `payload.size() > TRANSFER_PAYLOAD_MAX` = 128 (`src/node/validator.cpp:840-842`, `include/determ/chain/params.hpp:72`). No other ingress site enforces 128 — grep for TRANSFER_PAYLOAD_MAX outside tests hits only validator.cpp:840. Attack, no HELLO, no stake, no registration, no funds: generate an Ed25519 keypair offline; its anon address is just "0x"+hex(pub) (`include/determ/types.hpp:115,143`). Gossip one TRANSACTION frame: type=TRANSFER, from=that anon address, to=anything, amount=0, fee=0, nonce=0, payload=200 random bytes, valid Ed25519 sig over signing_bytes. (1) `Node::on_tx` (node.cpp:2901): `tx.nonce(0) < chain_.next_nonce(unknown)=0` is false, so no stale drop (`src/c
+
+
+**[CRITICAL] tx.pq_auth is unsigned and unbounded on every non-PQ tx type — 5 gossiped txs make every produced block exceed its own 4 MB wire cap**  
+`src/chain/block.cpp:262` (lens: wire-decode)
+
+> `Transaction::decode_frame`'s pq_auth section accepts any length that consumes the frame exactly (block.cpp:254-264), so pq_auth is bounded only by the enclosing per-type cap: ~1 MB inside a TRANSACTION envelope, ~4 MB inside a BLOCK. It is NOT covered by `Transaction::signing_bytes()` (block.cpp:20-32 — type‖from‖to‖amount‖fee‖nonce‖payload only) and therefore not by `tx.hash` (block.cpp:34-37). `verify_tx_signature_locked` verifies only the Ed25519 sig for any type != PQ_TRANSFER (node.cpp:2761-2778). Nothing requires pq_auth to be EMPTY on a non-PQ top-level tx — the only such check is on COMPOSABLE_BATCH inners (`src/node/validator.cpp:1323-1327`, `src/chain/chain.cpp:1461-1463`) — and nothing bounds its size: `mempool_admit_check` (node.cpp:2839) bounds `tx.payload` only, `MEMPOOL_MAX_TXS = 10000` (node.hpp:691) counts TXS not BYTES, and there is no block-size cap anywhere in consen
+
+
+**[CRITICAL] enter_block_sig_phase cancels the Phase-1 timer BEFORE the all-K-contribs check — one non-committee contrib wedges every committee member permanently**  
+`src/node/node.cpp:1203` (lens: liveness-dos)
+
+> Committee sigma={A,B,C} (K=3) plus a fourth REGISTERED but unselected validator D. Node::on_contrib deliberately admits any signer resolvable in the registry, not just sigma members (node.cpp:2960-2963 resolve_committee_member_pubkey + the explicit comment at :2946-2952), so D's single well-formed ContribMsg for (block_index=height(), prev_hash=head, aborts_gen=current_aborts_.size()) is inserted at node.cpp:3086. On A the map goes {A} -> {A,D} -> {A,D,B}: size()==|sigma|==3, so the eager trigger at node.cpp:3088-3090 fires; enter_block_sig_phase() executes contrib_timer_.cancel() at :1203 and THEN returns at :1209 because pending_contribs_.find("C") fails. Nothing re-arms the timer: the only two arm sites are start_contrib_phase (:1181) and handle_contrib_timeout (:1681), and handle_contrib_timeout is exactly the callback just cancelled (LoopTimer::cancel suppresses the expiry, loop_tim
+
+
+**[CRITICAL] build_body has no S-049 amount+fee overflow guard, so an unfunded wrapping tx is included and then rejected by every validator — permanent halt**  
+`src/node/producer.cpp:1328` (lens: liveness-dos)
+
+> An attacker generates an Ed25519 keypair and uses the self-certifying anon address 0x<pubkey> (include/determ/types.hpp:115 and :144 — no registration, stake, or balance required) to gossip one TRANSFER with nonce=0, amount=1, fee=UINT64_MAX, correctly signed. Node::on_tx admits it: verify_tx_signature_locked passes (node.cpp:2769 parses the pubkey out of the address) and mempool_admit_check (node.cpp:2805-2878) contains no amount+fee overflow check. At the next round start_contrib_phase snapshots EVERY mempool hash unfiltered (node.cpp:1069-1071), so the hash enters the committee tx_root. In build_body, 'uint64_t cost = tx.amount + tx.fee' (producer.cpp:1328) wraps to exactly 0, the filter 'if (sb < cost) continue;' at :1329 evaluates 0 < 0 = false, and the tx is pushed into b.transactions at producer.cpp:1423 despite a zero-balance sender. try_finalize_round calls apply_block_locked(bo
+
+
+**[HIGH] Chain::load replays the whole chain with DEFAULT consensus parameters — any genesis with a non-default min_stake / suspension_slash / unstake_delay / merge thresholds / crypto_profile / subsidy_mode is permanently unrestartable**  
+`src/chain/chain.cpp:3505` (lens: consensus-accept)
+
+> Chain::load seeds the replay Chain with only six fields (chain.cpp:3505-3510: block_subsidy_, shard_count_, shard_salt_, my_shard_id_, epoch_blocks_, k_block_sigs_) and then calls c.apply_transactions(b) for every stored block at :3530. min_stake_, suspension_slash_, unstake_delay_, merge_threshold_blocks_, revert_threshold_blocks_, merge_grace_blocks_, crypto_profile_, subsidy_pool_initial_, subsidy_mode_ and lottery_jackpot_multiplier_ keep their in-class defaults (chain.hpp:856-880). Node sets the first seven only AFTER load returns (node.cpp:567-577) and never sets subsidy_pool_initial_/subsidy_mode_/lottery_jackpot_multiplier_ on the load path at all (they are set only inside the `if (chain_.empty())` genesis-bootstrap branch, node.cpp:643-645). Every one of these is an unconditional state_root leaf (chain.cpp:472-483, k:min_stake at :476, k:suspension_slash :477, k:unstake_delay :4
+
+
+**[HIGH] AbortEvent.event_hash is never verified anywhere, yet it is the sole entropy mixed into post-abort committee reselection — the next committee is grindable at one SHA-256 per trial**  
+`src/node/validator.cpp:369` (lens: consensus-accept)
+
+> check_abort_certs (validator.cpp:242-373) verifies the claim quorum but never recomputes ae.event_hash (nor ae.timestamp) against crypto::compute_abort_hash / chain_abort_hash — those helpers exist only in src/crypto/random.cpp:102,112 and are called only by the honest formation path at node.cpp:1805-1807. Node::on_abort_event (node.cpp:1843-1895) likewise validates only the claims. The signed AbortClaim covers just (block_index, round, prev_hash, missing_creator) — make_abort_claim_message at validator.cpp:361 and node.cpp:1881 — so ONE claim quorum is portable to ANY 32-byte event_hash. That value is then folded straight into the committee seed: node.cpp:1035 and validator.cpp:150 / :369 all compute rand = SHA256(rand || ae.event_hash), and crypto::select_m_creators(rand, avail, m) (random.cpp:70-100) derives the entire creator set and its order from that rand alone. Concrete attack: c
+
+
+**[HIGH] Node::on_abort_event dedups on event_hash only, so a replayed AbortEvent with a mutated event_hash is adopted a second time against the same node — wedging the height for every honest peer**  
+`src/node/node.cpp:1852` (lens: consensus-accept)
+
+> on_abort_event's only duplicate guard is `for (auto& existing : current_aborts_) if (existing.event_hash == ev.event_hash) return;` (node.cpp:1852-1854) — there is no (round, aborting_node) key. Since event_hash is unbound to the claims (make_abort_claim_message at node.cpp:1881 covers only block_index/round/prev_hash/missing_creator) and unverified, any peer can capture a legitimately-gossiped AbortEvent, flip one byte of event_hash (or its unchecked timestamp), and re-broadcast — ABORT_EVENT is accepted from any peer (gossip.cpp:119). A node that already adopted the original misses the dedup, re-validates the same genuine claim signatures against its post-reselection committee, and pushes a SECOND AbortEvent naming the SAME aborting_node into current_aborts_ (node.cpp:1889). Concrete failure at M=4/K=3: committee {A,B,C}, C dies, A and B each sign a claim, the abort against C forms and
+
+
+**[HIGH] docs/SECURITY.md asserts S-030 D1 is closed because "single canonical block per height is enforced at apply" — the apply-time state_root gate is a self-consistency check that can never arbitrate between two same-digest bodies, and it is disarmed outright by a zero state_root**  
+`docs/SECURITY.md:284` (lens: consensus-accept)
+
+> SECURITY.md:284 (no-TIER, the authoritative S-item ledger) claims that divergent b.transactions gives a divergent state_root and that "the validator's apply-time compute_state_root() != b.state_root check in chain.cpp::apply_transactions loud-fails on the inconsistent node... Single canonical block per height is enforced at apply." The code does not do this. (1) The gate at chain.cpp:1956-1971 compares the node's recompute against the SAME BLOCK's declared state_root. apply is deterministic over b.transactions, so any honestly-assembled block reproduces its own declared root on every node — the check passes by construction regardless of which subset of the tx_root union the assembler materialized. It never compares against another node's state or against any committee-signed value, so it cannot select a canonical block. (2) The gate is entirely skipped when b.state_root == 0 (chain.cpp:1
+
+
+**[HIGH] BEACON cross-shard bundle relay re-broadcasts to all peers including the sender, with no dedup, TTL or hop limit — two peered beacons loop forever**  
+`src/node/node.cpp:2329` (lens: wire-decode)
+
+> `Node::on_cross_shard_receipt_bundle` (node.cpp:2320-2331) is, for ChainRole::BEACON, exactly `gossip_.broadcast(relay); return;` — executed BEFORE any check, with no seen-set, no hop count and no TTL field in the message. Its own comment claims "re-broadcast to peers other than the sender", which the code cannot do: the handler receives only the `net::Message` (node.hpp:583-585) and never a Peer handle, and `GossipNet::broadcast` (src/net/gossip.cpp:~318-325) iterates `peers_` with no exclusion. `peer_message_allowed` admits CROSS_SHARD_RECEIPT_BUNDLE from any peer whose declared role is BEACON or SHARD (gossip.cpp:122-127) — self-declared in HELLO, so trivially available to any remote socket. On a beacon chain with >=2 BEACON-role nodes peered for their own K-of-K consensus via `bootstrap_peers` (node.hpp:78, "intra-chain only"), a single injected bundle is permanent: beacon A relays i
+
+
+**[HIGH] Chain::load replays every block with DEFAULT economic parameters — first restart of any chain with a non-default genesis param throws S-033 and the node never starts again**  
+`src/chain/chain.cpp:3530` (lens: storage-restart)
+
+> `Chain::load` constructs a fresh `Chain c` (chain.cpp:3504) and sets exactly six fields before replay: block_subsidy_, shard_count_, shard_salt_, my_shard_id_, epoch_blocks_, k_block_sigs_ (chain.cpp:3505-3510). It then replays every block via `c.apply_transactions(b)` (chain.cpp:3530). Eight further parameters are consumed BY apply_transactions and are NOT threaded: `min_stake_` (freeze_epoch_committee, chain.cpp:818/822), `unstake_delay_` (DEREGISTER sets `unlock_height = inactive_from + unstake_delay_`, chain.cpp:1313), `suspension_slash_` (abort slash deduct, chain.cpp:1795), `subsidy_mode_`/`lottery_jackpot_multiplier_`/`subsidy_pool_initial_` (the per-block payout, chain.cpp:1722-1743), `crypto_profile_` (enote_commitments_ gating, chain.cpp:1158), and the merge thresholds. All of them are ALSO unconditional `k:` state-root leaves (chain.cpp:472-489). Node::start sets them only AFT
+
+
+**[HIGH] Snapshot bootstrap truncates blocks_ to at most `header_count` tail headers, so chain_.height() becomes 16 instead of the real height — the node can never apply another block, and its next restart throws**  
+`src/node/node.cpp:603` (lens: storage-restart)
+
+> `Chain::height()` is `blocks_.size()` (include/determ/chain/chain.hpp:92), but `encode_state` writes only the LAST `header_count` blocks (chain.cpp:3002-3007), default 16 (chain.hpp:699, rpc.cpp:250-256), hard-capped at 256 (chain.cpp:3000). `decode_state` pushes exactly those frames into `blocks_` with no padding (chain.cpp:3213-3219), and its post-load gates only check `blocks_.back()` (head_hash, block_index, state_root, A1 — chain.cpp:3233-3284), so the truncation is invisible. Node::start adopts that chain wholesale at node.cpp:603. Concrete failure: donor at height 5000 runs `snapshot create` (default 16 headers); a receiver configured with `snapshot_path` starts. It logs `restored from snapshot ... block_index=4999` (node.cpp:611), but `chain_.height()` is 16 while `chain_.head().index` is 4999. (a) LIVE: the next network block arrives at index 5000; `apply_block_locked` takes `if
+
+
+**[HIGH] Unfunded max-fee transactions permanently seal the mempool — the declared fee is never checked against any balance**  
+`src/node/node.cpp:2868` (lens: liveness-dos)
+
+> An attacker mints 100 self-certifying anon addresses (include/determ/types.hpp:115/144 — free, no chain state) and gossips 100 TRANSFERs from each (nonces 0..99) with amount=0 and fee=UINT64_MAX, every one correctly signed. Each passes verify_tx_signature_locked and mempool_admit_check: the per-sender quota is MEMPOOL_MAX_PER_SENDER=100 (node.hpp:436) and there is no balance or funding check anywhere in the admission path, so tx_store_ fills to MEMPOOL_MAX_TXS=10000. From that moment every honest transaction, gossip (node.cpp:2911) or RPC, reaches node.cpp:2862-2874 where min_fee scans to UINT64_MAX and 'tx.fee <= min_fee' is TRUE for every representable u64 fee — admission is rejected unconditionally and forever. The garbage never drains: build_body skips each entry because sb(0) < cost(UINT64_MAX) at producer.cpp:1329, so they are never applied, their nonces never advance and the stale
+
+
+**[HIGH] Every non-progressing CHAIN_RESPONSE re-broadcasts GET_CHAIN to all peers — self-amplifying sync storm with no backoff**  
+`src/node/node.cpp:3270` (lens: liveness-dos)
+
+> A node that believes it is behind enters start_sync_if_behind (node.cpp:3306-3341), which sets sync_peer_ = nullptr at :3338 so request_next_chunk BROADCASTS GET_CHAIN to all P peers (node.cpp:3355-3361). Because 'from = height()-1' (:3355), a peer at the SAME height replies with exactly one already-held block; on_chain_response routes it into the same-height branch, and maybe_reorg_to_locked drops it as a byte-identical duplicate at node.cpp:2653. 'progressed' is therefore false, and control falls to the else branch at node.cpp:3269-3271, which calls start_sync_if_behind AGAIN — still behind, so it broadcasts a fresh GET_CHAIN to all P peers. An empty reply takes the identical path at node.cpp:3232-3236. There is no backoff, no in-flight request bound and no dedup, so each received response produces P new requests: one initial request becomes P, then P^2, until the mesh saturates. Every
+
+
+**[HIGH] PROTOCOL.md/WHITEPAPER/SECURITY.md specify the block-digest and contrib-commitment preimage as "DTM-BLKDIG-v2 ‖ index ‖ body_root" — shipped code is "DTM-BLKDIG-v3 ‖ index ‖ gen ‖ body_root"**  
+`docs/PROTOCOL.md:264` (lens: doc-truth)
+
+> PROTOCOL.md:264 states `block_digest = SHA-256("DTM-BLKDIG-v2" ‖ index u64 BE ‖ body_root)` and :267 states `compute_block_digest(b) = compose_block_digest(b.index, compute_block_digest_body(b))` (two arguments). Shipped code at src/node/producer.cpp:1004-1012 is `compose_block_digest(uint64_t index, uint64_t gen, const Hash& body_root)` appending the literal `"DTM-BLKDIG-v3"`, then `index`, then `gen`, then `body_root`; src/node/producer.cpp:1021-1026 calls it as `compose_block_digest(b.index, b.abort_events.size(), compute_block_digest_body(b))`. The contrib family is identically v3 (src/main.cpp:20131, src/node/node.cpp:3015, light/verify.cpp:261, light/main.cpp:7674). The doc's own framing ("a level sufficient for an external implementer to build a compatible client", PROTOCOL.md:3) makes this load-bearing: an implementer built to the spec computes a digest that differs on every bloc
+
+
+**[MEDIUM] CONFIDENTIAL_TRANSFER proof randomness is derived only from (nonce_seed, tx_nonce), not from the statement — rebuilding a transfer at the same nonce discloses the amounts**  
+`light/ct_tx.cpp:245` (lens: crypto)
+
+> build_confidential_transfer_tx derives EVERY Bulletproof blinder from eff_seed = nonce_seed || u64_be(tx_nonce) alone: alpha (:247), rho (:248), tau1 (:249), tau2 (:250), sL/sR (:253-254), and the balance Schnorr nonce k (:277). None of the note commitments, C_in/C_out, fee, or E enter the derivation. Contrast ct_payload in the SAME file (:126-130), which correctly binds r and E (and ctx for UNSHIELD) into k. Concrete failure: a user rebuilds a pending transfer at the SAME account nonce with the same --nonce-seed but different outputs (the ordinary replace-a-pending-tx / fee-bump flow; the CLI takes --nonce and --nonce-seed as separate explicit arguments, and the guard at :202 only rejects seeds < 32 bytes). Both proofs then carry the same alpha and rho but different Fiat-Shamir challenges (V differs, so y/z/x differ per atr_challenge, rangeproof.c:597-604). The published field mu = alph
+
+
+**[MEDIUM] docs/proofs/ChainStorageV1.md (no TIER, marked SHIPPED) documents a chain store format and an operator recovery step that D2 inc8 deleted — following its recovery instruction silently discards the node's entire local chain**  
+`docs/proofs/ChainStorageV1.md:19` (lens: storage-restart)
+
+> ChainStorageV1.md carries no TIER marker and is labelled 'Status: SHIPPED'. It documents the at-rest store as `<chain_path>.blocks/<i>.json` (line 19) and `<chain_path>.manifest.json` holding `{format:"chain-blocks-v1", height, head_hash}` (line 21). The shipped code writes `<chain_path>.blocks/<i>.blk` — a `DBK1` magic followed by a `Block::encode_frame` frame — and `<chain_path>.manifest.bin`, a FIXED 44-byte `DMF1` record with no `format` field at all (src/chain/chain.cpp:3353-3379). The doc further describes a legacy `chain.json` fallback, `Chain::save()` invalidating the manifest (line 42), and a dual-write below height 4096 (line 57); `Chain::save` no longer exists, the dual-write branch was removed (src/node/node.cpp:919-923), and chain.cpp:3490-3496 states there is NO text fallback. The operationally harmful line is line 40: 'Operator recovery: delete `<chain_path>.manifest.json`
+
+
+**[MEDIUM] Per-peer egress queue is unbounded with no drop policy, and S031ConcurrencyComposition.md F-3 asserts a defence that does not exist in the code**  
+`src/net/peer.cpp:122` (lens: liveness-dos)
+
+> GossipNet::accept_loop (src/net/gossip.cpp:46-57) accepts every inbound connection unconditionally and attach() (:83) pushes the Peer into peers_ BEFORE any HELLO, so every accepted socket receives every gossip broadcast. Peer::send appends to write_queue_ — a std::deque<std::vector<uint8_t>> with no cap (include/determ/net/peer.hpp:57) — and do_write (src/net/peer.cpp:126-148) invokes on_close_ only when a write returns an error, never on backlog. An attacker opens N TCP connections and simply stops reading (or drains one byte per second): every socket stays healthy at TCP level while the node queues every BLOCK / CONTRIB / BLOCK_SIG / ABORT broadcast into N unbounded deques, with a single BLOCK message permitted up to 4 MB (include/determ/net/messages.hpp:159). Memory grows as N x gossip-byte-rate until OOM, and each broadcast is O(N) under peers_mutex_. Neither guard reaches it: the S
+
+
+**[MEDIUM] CLI-REFERENCE.md documents `determ-wallet verify-equivocation` without the --gen-a/--gen-b arguments the shipped tool requires, and states a V11 predicate missing the gen clause**  
+`docs/CLI-REFERENCE.md:638` (lens: doc-truth)
+
+> docs/CLI-REFERENCE.md:638 documents the invocation as `determ-wallet verify-equivocation --pubkey <hex64> (--kind <0|1> --block-index <N> --index-a <N> --body-root-a <hex64> --sig-a <hex128> --index-b <N> --body-root-b <hex64> --sig-b <hex128> | --event <file> …)` and states `PROVEN ⟺ kind <= 1 ∧ index_a == index_b == block_index ∧ body_root_a != body_root_b ∧ sig_a != sig_b ∧ both sigs verify over their own DERIVED digest SHA-256(TAG(kind) ‖ index u64 BE ‖ body_root) — TAG(0) = "DTM-BLKDIG-v2", TAG(1) = "DTM-CONTRIB-v2"`. The shipped tool requires two more arguments and one more clause: wallet/main.cpp:7522 prints the usage `--index-a <N> --gen-a <N> --body-root-a <hex64> --sig-a <hex128>`, wallet/main.cpp:7553-7555 parses `--gen-a`, wallet/main.cpp:7452 uses `TAG = "DTM-BLKDIG-v3"` / `"DTM-CONTRIB-v3"` with `gen` in the preimage, wallet/main.cpp:7456 adds clause `(2b) gen_a == gen_b`, 
+
+
+**[MEDIUM] PROTOCOL.md §4.4/§9.1/§9.2 assert every Block on the wire is JSON and that Block::encode_frame has no call site — six message types have shipped as binary frames since inc7a/7b**  
+`docs/PROTOCOL.md:289` (lens: doc-truth)
+
+> PROTOCOL.md:289 states `Block::encode_frame`/`decode_frame` "ship **alongside** `to_json`/`from_json` and **no call site uses them yet** … Nothing in this section describes bytes currently on the wire or on disk; the wire still carries those five as length-prefixed JSON inside the binary envelope". PROTOCOL.md:726 states "**The remaining eight types** — `[u32 LE json_len][json_bytes]` … BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE … **no wire path uses it yet** — every `Block` on the wire today is JSON", and PROTOCOL.md:736 states "Eleven of the nineteen types travel as fixed binary frames". The §9.2 table rows still read `Block` JSON for ID 1/12/13/14, `ContribMsg` JSON for ID 4, and `{blocks, has_more}` for ID 6. Shipped: src/net/binary_codec.cpp:945-953 dispatches BLOCK and BEACON_HEADER to `encode_block_payl
+
+
+**[MEDIUM] RoundStallValveSoundness.md Claim C-2 asserts the S-050 valve cannot fabricate equivocation evidence — false on an empty abort tail, and the code it relies on says so**  
+`docs/proofs/RoundStallValveSoundness.md:53` (lens: doc-truth)
+
+> Claim C-2 (docs/proofs/RoundStallValveSoundness.md:53) concludes "A valve-induced re-sign therefore cannot fabricate equivocation evidence against the reset node", justified by "the reset cleared `current_aborts_`, so the fresh contrib carries `aborts_gen = 0` while peers still in the forked round hold `aborts_gen = |their tail| ≠ 0`" — the argument silently requires a non-empty abort tail. The valve does not require one: src/node/node.cpp:1615-1651 (`maybe_stall_reset_locked`) fires on the soft/hard wall-clock windows alone; with an empty tail `current_aborts_.size() != stall_abort_count_` is never true (both 0), so the soft-restart branch at :1629-1634 never defers, and after `kRoundStallMinTicks = 3` plus the 5 s soft window it calls `current_aborts_.clear()` (a no-op), `reset_round()` and `check_if_selected()` — re-entering `start_contrib_phase` at the SAME height with a FRESH `dh_in
+
+
+**[MEDIUM] PROTOCOL.md §4.3's "fixed order" digest-body enumeration omits four of the eight conditional appendages shipped in compute_block_digest_body**  
+`docs/PROTOCOL.md:273` (lens: doc-truth)
+
+> PROTOCOL.md:273 introduces the body preimage as "the v1 core minus `index` … **then** the v2.7 F2 conditional appendages, in this fixed order (matches `src/node/producer.cpp::compute_block_digest_body`)" and enumerates exactly three (inbound, equivocation, abort), adding `partner_subset_hash` and `timestamp` in the prose at :281. Shipped `compute_block_digest_body` (src/node/producer.cpp:855-1002) appends eight conditional groups in order: inbound view root (:876-882), eq view root (:899-904), abort view root (:905-910), `partner_subset_hash` when non-zero (:924-926), `timestamp` when `creator_proposer_times` is non-empty (:942-944), `signature_form` when non-zero as a u8 (:953-955), `eligible_count` and `source_shard_id` as two u64s when `eligible_count != 0` (:983-986), and a view root over `shard_tip_records` when non-empty (:995-1001). None of `signature_form`, `eligible_count`, `sou
+
+
+**[LOW] Chain::load bypasses Chain::append's prev_hash linkage check, so the S-021 'transitively covers every prior block' closure claimed in docs/SECURITY.md does not hold for the shipped loader**  
+`src/chain/chain.cpp:3531` (lens: storage-restart)
+
+> `Chain::append` enforces the chain link — `if (!blocks_.empty() && b.prev_hash != head_hash()) throw` (include/determ/chain/chain.hpp:57-58). `Chain::load` does not call append: it calls `c.apply_transactions(b)` and then `c.blocks_.push_back(std::move(b))` directly (chain.cpp:3530-3531), so no block's `prev_hash` is ever compared against the recomputed hash of its predecessor, and the loop index `i` is never compared against the decoded `b.index`. The only cryptographic gate is the head-hash compare (chain.cpp:3544-3554), which covers the head block's own bytes — including its stored `prev_hash` FIELD, but not the actual content of block N-2. Concrete failure: an attacker or bit-rot alters a MID-chain block file, e.g. rewrites `<path>.blocks/2.blk` changing only `timestamp`, or stripping/replacing `creator_block_sigs`, or rewriting `prev_hash`. None of those fields is read by `apply_tra
+
+
+### Sequencing
+
+The four criticals are LIVE HALTS reachable by an unauthenticated remote peer for a few
+hundred bytes, and are CHEAPER to trigger than C0. They are also independent of the D2
+migration and of the sharding decision — none sits on deletable surface. They outrank the
+remaining D2 work. Each lands as its own increment with its own adversarial review; the
+three-exploit structural defect lands as ONE core fix plus separate riders, per the
+smallest-increment rule.
+
+**Authority:** read-only sweep by Claude Opus 5, 2026-08-13. Nothing implemented.
