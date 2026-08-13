@@ -935,7 +935,9 @@ Genesis is block 0 with `initial_state` carrying creator/account allocations. It
 
   // Consensus
   "m_creators":    3,           // committee size K (genesis-pinned)
-  "k_block_sigs":  3,           // Phase-2 threshold; default = m_creators
+  "k_block_sigs":  3,           // Phase-2 threshold; default = m_creators.
+                                 // SAFE BAND (enforced): M/2 < K <= M —
+                                 // see "Quorum intersection" below
   "bft_enabled":   true,
   "bft_escalation_threshold": 1,
 
@@ -986,6 +988,47 @@ Genesis is block 0 with `initial_state` carrying creator/account allocations. It
   ]
 }
 ```
+
+**Quorum intersection — the K/M safe band.** `k_block_sigs` and `m_creators`
+are not independently tunable. The enforced band is
+
+```
+    M/2 < K <= M          i.e.   1 <= K <= M   AND   2K > M
+```
+
+and a genesis outside it is **rejected at load**, on both the JSON authoring
+view and the canonical DGC1 binary container (`GenesisConfig::validate()`,
+`src/chain/genesis.cpp` — the single rule set both `from_json` and `decode`
+run). Diagnostic names the rule: `violates QUORUM INTERSECTION (2*K must
+exceed M)`.
+
+The **lower** bound is a safety rule, not a tuning preference. A block
+finalizes on K signatures from the M-member committee. If `2K <= M`, that
+committee contains two **disjoint** K-subsets. Each subset can sign a
+different block at the same height, each independently reaches the threshold,
+and **both finalize — with no member ever signing twice.** The resulting fork
+is therefore not merely unpunished, it is **unattributable**: no
+double-signature exists anywhere in the system, so no evidence object can be
+built and no equivocation predicate, however designed, can name a culprit.
+Nobody is even accusable. Two K-subsets of an M-set intersect **iff** `2K > M`,
+so above the floor two conflicting finalized blocks *imply* that some member
+signed both — every fork has a name. That implication is what the whole
+attribution story rests on, and the floor is the only thing that supplies it.
+
+`K == M` is the **default** (`k_block_sigs` defaults to `m_creators`) and stays
+legal: unanimity satisfies intersection trivially (`2M > M`). It is the strong
+mutual-distrust / unanimity posture, with **zero liveness margin** — one dead
+committee member stops block production, which is an operator's deliberate
+choice, not a safety violation. `K = M-1` (`M >= 3`) is the usual production
+posture: intersection holds and one straggler is tolerated (see `web`,
+`regional`, `global` in §12.4).
+
+The boundary is exact at `2K > M`, not `>=`: `M=6, K=3` is **rejected** —
+equality is not intersection, since a 6-member committee splits cleanly into
+two disjoint 3-subsets. `M=5, K=3` is accepted. Gate:
+`determ test-genesis-binary-codec` leg GB-8 (16 assertions: under-band
+rejection with the named diagnostic, the exact boundary in both directions,
+`K == M` acceptance, every shipped profile, and 64-bit evaluation of `2*K`).
 
 ### 12.2 Genesis hash
 
@@ -1059,6 +1102,8 @@ Plus six CI/dev variants that hold round timers at `5 / 5 / 3` (`TEST_*_MS` in `
 | `tactical_test` | 3 / 3 | SHARD / EXTENDED | **FIPS** |
 
 Profile is a config-layer concept; the fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` / `m_creators` / `k_block_sigs` / `chain_role` / `sharding_mode` / `crypto_profile`. Operators can also write these fields directly in genesis without `--profile`, but the recommended pattern is profile selection — getting timing/role/sharding/crypto bundled coherently prevents misconfiguration.
+
+Every shipped profile, production and test, sits inside the §12.1 quorum-intersection band `M/2 < K <= M`: `3/3` and `4/3` and `5/4` and `7/5` all satisfy `2K > M`. That is checked as a gate arm, not an observation — a profile edit that drops K to the disjoint-quorum side (say `web` back to `4/2`) fails `determ test-genesis-binary-codec` GB-8 before it can reach an operator. Writing `m_creators` / `k_block_sigs` by hand instead of via `--profile` does not escape the rule: it is enforced in `GenesisConfig::validate()` on every load path.
 
 **Profile-selection guide for common use cases:**
 

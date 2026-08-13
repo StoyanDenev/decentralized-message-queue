@@ -47905,6 +47905,98 @@ int main(int argc, char** argv) {
                     "GB-6 container: a bad magic is rejected with a magic diagnostic"); }
         }
 
+        // GB-8. QUORUM INTERSECTION — the K/M safe band M/2 < K <= M.
+        //
+        //       A block finalizes on K of the M committee members. At 2K <= M
+        //       the committee holds two DISJOINT K-subsets; each can sign a
+        //       different block at the same height, each reaches the
+        //       threshold, and both finalize with NO member signing twice.
+        //       That fork is not merely unpunished, it is UNATTRIBUTABLE — no
+        //       double-signature exists for any evidence rule to find. Two
+        //       K-subsets of M intersect iff 2K > M, so above the floor two
+        //       conflicting finalized blocks IMPLY a double-signer.
+        //
+        //       The rule lives in GenesisConfig::validate(), so BOTH load
+        //       paths must enforce it identically (the D2-inc8 parity
+        //       contract): a config that loads binary but not JSON is exactly
+        //       the divergence inc8 exists to prevent. Every leg below is run
+        //       twice — once through encode/decode, once through
+        //       to_json/from_json — and the verdicts must agree.
+        {
+            struct BandVerdict { bool bin_ok; bool json_ok; std::string what; };
+            auto band = [&](uint32_t M, uint32_t K) {
+                GenesisConfig c = full;
+                c.m_creators = M; c.k_block_sigs = K;
+                BandVerdict v{true, true, std::string()};
+                try { std::vector<uint8_t> b = c.encode();
+                      (void)GenesisConfig::decode(b.data(), b.size()); }
+                catch (const std::exception& e) { v.bin_ok = false; v.what = e.what(); }
+                try { (void)GenesisConfig::from_json(c.to_json()); }
+                catch (const std::exception&) { v.json_ok = false; }
+                return v;
+            };
+            auto accepts = [&](uint32_t M, uint32_t K, const char* msg) {
+                BandVerdict v = band(M, K);
+                check(v.bin_ok && v.json_ok, msg);
+            };
+            auto rejects_band = [&](uint32_t M, uint32_t K, const char* msg) {
+                BandVerdict v = band(M, K);
+                // Rejected on BOTH paths, and the diagnostic must name the
+                // rule an operator has to reason about — not a bare "invalid".
+                check(!v.bin_ok && !v.json_ok
+                      && v.what.find("QUORUM INTERSECTION") != std::string::npos,
+                      msg);
+            };
+
+            // Under-band: two disjoint quorums exist. The hole.
+            rejects_band(4, 2, "GB-8 intersection: M=4 K=2 REJECTED — two "
+                               "disjoint 2-subsets of 4 can finalize "
+                               "conflicting blocks with no double-signing");
+            rejects_band(5, 2, "GB-8 intersection: M=5 K=2 REJECTED (2K=4 < M=5)");
+            rejects_band(9, 4, "GB-8 intersection: M=9 K=4 REJECTED (2K=8 < M=9)");
+
+            // The boundary is EXACT at 2K > M, not >=.
+            accepts     (5, 3, "GB-8 boundary: M=5 K=3 ACCEPTED (2K=6 > M=5)");
+            rejects_band(6, 3, "GB-8 boundary: M=6 K=3 REJECTED (2K=6 == M=6 — "
+                               "equality is NOT intersection; two disjoint "
+                               "3-subsets of 6 exist)");
+            accepts     (7, 4, "GB-8 boundary: M=7 K=4 ACCEPTED (2K=8 > M=7)");
+
+            // K == M is the DEFAULT and stays legal: unanimity satisfies
+            // intersection trivially (2M > M). Zero liveness margin is an
+            // operator's choice, not a safety violation.
+            accepts(3, 3, "GB-8 K==M: M=3 K=3 ACCEPTED (unanimity — legal, "
+                          "zero liveness margin, NOT rejected)");
+            accepts(1, 1, "GB-8 K==M: M=1 K=1 ACCEPTED (degenerate single-"
+                          "creator chain)");
+
+            // The shipped init profiles must all sit inside the band. `web`
+            // (M=4 K=3) is what `determ init` writes by default.
+            accepts(PROFILE_WEB.m_creators, PROFILE_WEB.k_block_sigs,
+                    "GB-8 profiles: PROFILE_WEB (M=4 K=3) ACCEPTED");
+            accepts(PROFILE_CLUSTER.m_creators, PROFILE_CLUSTER.k_block_sigs,
+                    "GB-8 profiles: PROFILE_CLUSTER (M=3 K=3) ACCEPTED");
+            accepts(PROFILE_REGIONAL.m_creators, PROFILE_REGIONAL.k_block_sigs,
+                    "GB-8 profiles: PROFILE_REGIONAL (M=5 K=4) ACCEPTED");
+            accepts(PROFILE_GLOBAL.m_creators, PROFILE_GLOBAL.k_block_sigs,
+                    "GB-8 profiles: PROFILE_GLOBAL (M=7 K=5) ACCEPTED");
+            accepts(PROFILE_TACTICAL.m_creators, PROFILE_TACTICAL.k_block_sigs,
+                    "GB-8 profiles: PROFILE_TACTICAL (M=3 K=3) ACCEPTED");
+
+            // K=0 is under-band for every M >= 0 (0 > M is never true), so the
+            // intersection rule subsumes the "no zero threshold" case.
+            rejects_band(3, 0, "GB-8 degenerate: K=0 REJECTED (a zero "
+                               "threshold finalizes on no signatures at all)");
+            rejects_band(0, 0, "GB-8 degenerate: M=0 K=0 REJECTED");
+
+            // 2*K must be computed in 64 bits. K = 2^31 wraps to 0 in uint32,
+            // which would flip this ACCEPT into a spurious REJECT.
+            accepts(3, uint32_t{0x80000000},
+                    "GB-8 no-wrap: K=2^31 with M=3 ACCEPTED (2*K is evaluated "
+                    "in 64 bits — a uint32 multiply would wrap to 0 and "
+                    "reject)");
+        }
+
         // GB-7. File round trip through save/load — the actual at-rest path.
         {
             namespace fs = std::filesystem;

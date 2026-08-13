@@ -99,7 +99,14 @@ struct GenesisConfig {
     // Rev. 3 dual-mode: K = M = strong BFT (full unanimity); K < M = weak
     // BFT (Phase 2 K-of-M threshold). Phase 1 unanimity unchanged across
     // modes — censorship resistance is identical.
-    // Constraint: 1 <= k_block_sigs <= m_creators. Default = m_creators (strong).
+    // Constraint (the SAFE BAND): m_creators/2 < k_block_sigs <= m_creators,
+    // i.e. 1 <= K <= M AND 2K > M. The lower bound is QUORUM INTERSECTION and
+    // it is a safety rule, not a tuning knob: at 2K <= M two disjoint K-subsets
+    // of one committee can each finalize a conflicting block at one height
+    // with NO member double-signing, making the fork UNATTRIBUTABLE. Enforced
+    // in GenesisConfig::validate() (src/chain/genesis.cpp) — both the JSON and
+    // the DGC1 binary load paths. K == M is legal (unanimity; zero liveness
+    // margin). Default = m_creators (strong).
     uint32_t                        k_block_sigs{3};
     // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
     // from the original Determ spec). Genesis-pinned. 0 = no subsidy (fees only).

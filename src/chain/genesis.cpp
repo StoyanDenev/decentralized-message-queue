@@ -131,6 +131,41 @@ json GenesisConfig::to_json() const {
 void GenesisConfig::validate() {
     GenesisConfig& c = *this;
 
+    // QUORUM INTERSECTION — the K/M safe band. Checked FIRST: it is the only
+    // genesis rule whose violation is a consensus SAFETY hole rather than a
+    // configuration mistake.
+    //
+    // A block finalizes on K signatures out of the M-member committee. If
+    // 2K <= M, one committee contains two DISJOINT K-subsets. Each can sign a
+    // DIFFERENT block at the SAME height, each reaches the threshold, and both
+    // finalize — with NO member ever signing twice. The fork is then not merely
+    // unpunished, it is UNATTRIBUTABLE: no double-signature exists anywhere, so
+    // no evidence can name a culprit and no equivocation predicate (however
+    // designed) can fire. Any two K-subsets of M overlap iff 2K > M, so above
+    // the band's floor two conflicting finalized blocks IMPLY some member
+    // signed both — the fork always has a name.
+    //
+    // Safe band: M/2 < K <= M. K == M is legal (unanimity / maximal mutual
+    // distrust) and satisfies intersection trivially (2M > M); it simply has
+    // zero liveness margin — one dead member stops block production. The
+    // upper bound 1 <= K <= M is enforced at the boot/tool sites
+    // (src/node/node.cpp, src/main.cpp genesis-tool).
+    //
+    // 64-bit promotion is load-bearing: 2 * uint32_t wraps in uint32_t, so a
+    // near-UINT32_MAX K would wrap to 2K-2^32 and be rejected as under-band.
+    if (static_cast<uint64_t>(c.k_block_sigs) * 2ull
+            <= static_cast<uint64_t>(c.m_creators)) {
+        throw std::runtime_error(
+            "genesis: k_block_sigs=" + std::to_string(c.k_block_sigs)
+            + " with m_creators=" + std::to_string(c.m_creators)
+            + " violates QUORUM INTERSECTION (2*K must exceed M). At 2K <= M "
+              "two DISJOINT K-subsets of one committee can each reach the "
+              "signature threshold and finalize CONFLICTING blocks at one "
+              "height with NO member double-signing, so the fork is not "
+              "merely unpunished but UNATTRIBUTABLE. Safe band: M/2 < K <= M "
+              "(K == M is legal — unanimity, zero liveness margin).");
+    }
+
     if (c.genesis_message.size() > GENESIS_MESSAGE_MAX_BYTES) {
         throw std::runtime_error(
             "genesis: genesis_message exceeds "
