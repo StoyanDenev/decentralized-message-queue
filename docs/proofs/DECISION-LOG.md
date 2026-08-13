@@ -2502,3 +2502,31 @@ Canonicalization is a genuine improvement — it removes the two-contrib order s
 *Process note: the synthesis agent died on an API error mid-response, so no formal spec was produced; the three lens analyses are unambiguous and are the record. A spec pass should precede implementation.*
 
 **Authority:** design analysis recorded by Claude Fable, 2026-08-13. No code written.
+
+## 2026-08-13 — C0 fix attempt (union→intersection): FAILED review (10 findings, 5 false alarms). Reverted. It trades a halt for silent suppression, and does not close C0.
+
+**Build-proof protocol worked** — six documented cycles with before/after binary hashes, the revert reproducing an earlier hash byte-for-byte. No false result this time. The defects are real, not artefacts.
+
+### What the attempt got right, and it is genuinely valuable
+
+**Step 0 answered the shape question correctly and corrected my framing.** `ContribMsg` carries HASHES only (`producer.hpp:52`, `view_eq_list`, capped 64) — no `EquivocationEvent` anywhere in the struct, the JSON, or the CONTRIB frame. And **`shard_tip_records` does not carry records either**: it carries full-content hashes and materializes from the local store restricted to `reconcile_INTERSECTION`. **The intersection is the whole mechanism** — every element is in every member's signed view, hence in the assembler's own signed view, hence in its own local store. The local store is a *lookup table for an already-agreed set, never a filter on it*. That is exactly the owner's invariant, and the eq dimension was the one place using `reconcile_UNION`, where the pool IS a filter — `pool ∩ union` being a proper per-node subset is C0.
+
+So the literal "creators[0]'s list" I proposed was **strictly worse** and correctly not implemented: it needs every other assembler to materialize events from hashes it may never have received, re-creating C0 in a new guise; making it sound requires putting structs on the wire at **+14,656 B per contrib per member**.
+
+**Also established:** the canonical sort is spec conformance, not invention — `F2-SPEC.md:116` already specified "sorted canonically" and the code never did it. `hash_equivocation_event` is a **total** order (SHA-256 over every field); `(equivocator, block_index, body_root_a)` is not.
+
+### Why it cannot land
+
+1. **C0 IS NOT CLOSED — the rule is producer-side only.** The verifier still accepts subset-of-union (`validator.cpp:1705-1711`), so any assembler that does not run the new logic still emits a divergent set and every honest node accepts it. The new gate asserts a **producer-side proxy** — precisely the "assert at the layer where the rule lives" failure that refuted Option C, now recorded in doctrine and violated anyway.
+2. **The canonical sort has no verifier rule either**, so the two-same-height-blocks-behind-one-valid-digest wedge the comment claims to close remains open.
+3. **The equivocator can now suppress its own evidence permanently at zero cost.** Intersection over observer-dependent identities (the hash binds `beacon_anchor_height` and the arrival-order `(a,b)` slots) means a splitter simply ensures no two observers hold the byte-identical record — the intersection is then empty and evidence NEVER reaches the chain. The halt becomes silent suppression: better than a halt, but it voids the economic bound the authoritative docs still assert.
+4. **The pre-activation `else` branch is unmitigated C0**, including a state/slashing fork, while the new comment calls it merely "byte-identical to v1".
+5. **It is a genesis-frozen consensus accept-rule change presented as safe because the wire delta is zero.** Zero wire delta does not make an accept-rule change unfrozen; it was neither labelled nor sequenced as one.
+
+### The standing lesson, now twice-confirmed
+
+A fix applied only in the assembler cannot close a divergence the verifier still admits. **Any C0 fix must change what the VERIFIER accepts** — intersection-sourcing enforced as a validation rule, not merely as producer behaviour — and must state its completeness cost, because unanimity-gating and suppression-resistance are in direct tension.
+
+**Tree reverted; ci_local green. C0 remains OPEN and is still a live remotely-triggerable permanent halt at HEAD.**
+
+**Authority:** review findings recorded by Claude Fable, 2026-08-13.
