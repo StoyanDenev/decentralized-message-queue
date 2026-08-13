@@ -2353,3 +2353,77 @@ Five un-bannered authoritative proofs still assert the deleted consequence; `Saf
 The ~10-line removal is not the cost. Required alongside it: a cap with a **total order before truncation** (or no truncation); an age bound **with pool eviction**; an exit-code contract that does **not** invert legacy semantics; and the doc set — five proofs, `Safety.md`, `BFTProposerElectionSoundness`, `S013PerSignerCap` T-4, `ProofClaimGateTraceability`, `CLI-REFERENCE.md`, `PROTOCOL.md` frame sizes — converged **without** CRLF rewrites masking the diff. Track the new gate file in git; an untracked FAST gate is lost on a clean checkout.
 
 **Authority:** review findings recorded by Claude Fable, 2026-08-13. The slashing decision stands; only its implementation is deferred, twice.
+
+## 2026-08-13 — DOCTRINE: green gates are necessary and NOT sufficient on consensus surface; adversarial review of the diff becomes mandatory. Derived from nine measured failures.
+
+**This is a process control derived from measured outcomes, not a retrospective.** `CLAUDE.md` PROJECT DOCTRINE is amended in the same change with two new standing bullets ("Green is not proof" and "Never seed anything security-relevant from a block hash"). No technical decision is reopened, reversed or superseded; the B3 rule that new behaviour ships with a falsify-on-mutant gate is unchanged and now carries an explicit sufficiency qualifier.
+
+### The measurement
+
+Nine consensus designs were attempted across 2026-08-12/13 against Hole 1b and its successor decision. Every one was wrong. Six were carried to a green tree before the defect was found; three were refuted on paper before any code existed.
+
+| # | Design | Reached | Adversarial review |
+|---|---|---|---|
+| 1 | gossiped round-reset marker (`final`) | implemented, reverted | 15 confirmed / 2 false |
+| 2 | Option C — reuse the unrevealed round secret (`final+1`) | REFUTED at design stage, no code | 4 lenses: FAILS ×3 |
+| 3 | Option D — bounded suspension (`final+3`) | implemented; **own gate 34/34, six mutants verified RED, FAST 303/0** | 14 confirmed / 2 false |
+| — | Option B — hash-chain round identity (`final+3`) | designed, VIABLE-WITH-CONDITIONS, then withdrawn as unnecessary | R7 proved UNACHIEVABLE |
+| 4 | first-class `round_seq` (`final+5`) | implemented **with a purpose-built anti-regression ratchet** | 17 confirmed / 1 false |
+| 5 | exclusion-only, never slash duplicates (`final+7`) | implemented, reverted | 15 confirmed / 2 false |
+| 6 | time-bucketed committee selection (`final+9`) | REFUTED at design stage, no code | 21 confirmed / 3 false |
+| 7 | abort-certificate lock rule (2026-08-13) | REFUTED at design stage, no code | bootstrapping impossibility |
+| 8 | slashing relocation, attempt 1 (2026-08-13 addendum) | implemented, reverted | 22 confirmed / 1 false |
+| 9 | slashing relocation, attempt 2 (2026-08-13) | implemented, reverted | 20 confirmed / 1 CRITICAL, 0 false |
+
+**Totals: 124 confirmed findings against 11 false alarms.** The mutant-verified gates shipped alongside those changes found **none** of the 124. Exactly two mechanisms ever caught a real defect in this session: an **end-to-end reproduction that executes production code and asserts at the verifier**, and **adversarial review of the diff**.
+
+### The seven rules, and the specific failure each one is derived from
+
+1. **A falsify-on-mutant gate proves the code enforces what the gate ASSERTS; it cannot prove the assertion is the property you NEED.** Option D's gate was 34/34 with six mutants confirmed RED while the feature's penalty was identically zero in the default K-of-K deployment and unbounded for honest nodes. The gate was not weak — it was aimed at the wrong proposition, and no amount of mutant strength corrects that.
+2. **Adversarial review of the DIFF, before commit, independent of gate colour**, for any change to consensus accept-rules, the apply path, wire formats, committee derivation, or the slashing/evidence path. Evidence: the table above. A purpose-built ratchet does not discharge this — `round_seq` shipped a structural guard specifically built to make regression impossible, and the reviewer defeated it with a **one-line edit** (`round_seq_ = static_cast<uint64_t>(current_aborts_.size());`, the literal HEAD defect restored inside the function the guard reads) while the guard printed PASS, selftest 8/8. A textual guard over source cannot enforce a semantic invariant, and an unlinked model (`determ-dsf` links zero production code) tests the model, not the system.
+3. **Assert at the layer where the rule LIVES.** Option C was refuted on exactly this: the slashing predicate is `body_root_a != body_root_b` in the VERIFIER (`validator.cpp` V11 clause set + the `node.cpp` adoption gate); the core-only comparison at `node.cpp:3043-3058` is a producer-side courtesy in ONE in-tree assembler, and under K-of-K mutual distrust an assembler keying off the real rule is inside the threat model by definition. A gate built on the proxy goes green while the bug is live.
+4. **Design-and-prove BEFORE implementation when the design is uncertain.** Designs 2, 6 and 7 were refuted at design stage and cost a fraction of the six that were implemented first — and design 6's refutation additionally produced the block-hash malleability result, which is worth more than the design it killed.
+5. **Land consensus changes as the smallest increment that keeps the tree green and truthful.** The ~10-line slashing core removal was verified sound BOTH times (A1 neutral by construction, no state_root leaf shape change, byte-identical round-trip through both snapshot containers, non-vacuity positive control). It was sunk by its riders: attempt 1 by S-006, a wrong S-011 residual and ~16 stale proof docs; attempt 2 by an order-sensitive cap (CRITICAL: a consensus halt), an exit-code inversion and, again, doc convergence. Bundling made a verified change unshippable twice.
+6. **Verify with `tools/ci_local.sh`, never a bare `tools/run_all.sh` or bare `tools/test_*.sh`, and confirm the build succeeded before trusting any mutant.** Only `ci_local` exports `DETERM_BIN` / `DETERM_WALLET_BIN` / `DETERM_LIGHT_BIN` / `DETERM_DSF_BIN`; a bare run resolves a binary by `tools/common.sh` search order and every DSF gate SKIPs when `DETERM_DSF_BIN` is unset. Three "faked" mutant results this session were a stale `build/` tree shadowing `build-linux/` — that tree is now deleted, but the invariant that produced the false greens (an unexported binary path, or a mutant "dying" against a binary whose build actually failed) is structural and the discipline stands.
+7. **Never seed anything security-relevant from a block hash.** `Block::compute_hash()` (`src/chain/block.cpp:817-826`) hashes `signing_bytes()` and then **appends `creator_block_sigs`**, while Ed25519 verification (`src/crypto/ed25519/ed25519.c:321-348`) checks only pk-y canonicality, `S < L` and the group equation — RFC 8032's deterministic nonce is a signer-side convention no verifier can check. A member that broadcasts its `BlockSigMsg` last can therefore enumerate unboundedly many *valid* signatures over the SAME `compute_block_digest` at ~one sign per trial and publish the hash that seats its preferred committee, with no abort, no equivocation and nothing any existing gate records. The architecture is currently correct ONLY because committee selection and the subsidy lottery route through `cumulative_rand`'s commit-reveal, whose every input is digest-covered or commit-pinned. This bullet exists so no future design reverses that without re-deriving it (source: `final+9`, §3).
+
+### What this costs and what it does not change
+
+The rule adds a mandatory pre-commit step to a bounded surface (accept-rules, apply path, wire formats, committee derivation, slashing/evidence). It does **not** apply to test-only, tooling, doc or non-consensus code, and it does not relax B3: a consensus change still needs its falsify-on-mutant gate, it now additionally needs a review that asks whether the gate asserts the right thing. The measured cost of *not* having the rule is nine reverted designs; the measured yield of review is 124 confirmed defects at an 11/135 false-alarm rate.
+
+**Authority:** recorded by Claude Fable, 2026-08-13, at the direction of the session orchestrator. Docs-only change (`CLAUDE.md` + this entry); no code was touched and no build was run. Flagged for owner review because it imposes a mandatory pre-commit step on consensus work — the owner may narrow the surface it applies to, but the evidence for the rule is the table above.
+
+## 2026-08-13 — slashing removal, attempt 3: FAILED (16 findings, 1 CRITICAL). Reverted. THE CAP IS THE BLOCKER, NOT THE REMOVAL.
+
+**Doctrine landed (see the CLAUDE.md change in this commit); the code did not.** 16 findings confirmed, 1 false alarm. Three attempts, three different cap designs, **three consensus halts of the same class**.
+
+### The pattern, now unmistakable
+
+| attempt | where the bound was applied | how it halted |
+|---|---|---|
+| 2 | truncate the block's event list at 16 | truncation ORDER-SENSITIVE; digest binds the set order-INsensitively → members split the digest |
+| 3 | bound the **pool** at 64 (reject, never truncate) | pools diverge per node → different evidence SETS in the block → digest splits → K-of-K never forms |
+
+**The generalisation: any per-node bound on a collection the block digest binds COLLECTIVELY will split the digest.** Rejecting instead of truncating does not help, because the divergence moves upstream into which events a node holds at all. A bound is only safe if it is a pure function of the block's own bytes, applied identically by every validator — never a function of local pool state.
+
+### And the cap does not even solve its own problem
+
+EQV-CAP bounds per-block **width**, not **perpetuity**. The same `EquivocationEvent` remains re-includable in every block forever — the exact issue the cap was added for. Three authoritative texts in the change asserted the opposite.
+
+### What the attempt did establish (keep — this is real progress)
+
+**The re-inclusion question is settled empirically**, by an in-process probe linked against the real objects, and attempt 2's premise was HALF WRONG: `resolve_committee_member_pubkey` (`src/node/committee_pool.cpp:43`) consults the frozen `cc:[E]` committee FIRST and only then the present-head registry, which filters on `domain_eligible`. So deregistration **did** limit cross-block re-inclusion on the default unpinned path (and in STAKE_INCLUSION the stake-zeroing limited it independently — deregistration was never the *only* limiter), but **on a pinned committee epoch re-inclusion was ALWAYS possible**, because the frozen member list is a snapshot deregistration never touches. Post-removal the record resolves in every configuration. So a bound IS needed for EXTENDED-sharded chains — it just cannot be the kind attempted three times.
+
+### Other confirmed defects
+
+Gate arm C3 asserted a proposition that is FALSE, and it was the change's central safety claim. A full pool silently suppressed both pooling AND gossip of newly detected evidence — censoring the mechanism's only surviving output — with no eviction rule, so free-to-produce sybil evidence censors evidence about the attacker. **A persisted chain that already applied an EquivocationEvent fails to LOAD after the change.** Doc convergence fell short for the third consecutive time (README, WHITEPAPER and ~20 no-TIER proofs still publish forfeiture as shipped). Both new banners self-contradicted — declaring V11 and pooling UNCHANGED, then describing two new V11 reject rules and a new pool bound. The new FAST gate file was untracked while `run_all.sh` already referenced it, so a clean checkout runs one gate fewer.
+
+### Third instance of the stale-artifact class
+
+The implementer's first mutant pass produced a FALSE result: `shutil.copyfile` preserved the source mtime, `make` skipped the rebuild, and the "clean" run silently tested unmutated code. Caught by an independent probe, not by the gate. After the stale `build/` tree and the `--skip-build` reverts, this is the third distinct way the same failure appeared. **A mutant result is trustworthy only if you prove the translation unit recompiled** — now doctrine.
+
+### Where this leaves it
+
+The ~10-line removal has now been verified sound THREE times (A1 neutral by construction, no state_root leaf shape change, byte-identical round-trip through both snapshot containers, positive control non-vacuous). It has never been the problem. The blocker is bounding the evidence path, and the next attempt must start from the generalisation above: **a bound that is a pure function of the block's bytes, or no bound at all** — and if no safe bound exists, the honest options are to drop the evidence path from blocks entirely (gossip-only, no consensus surface) or to accept unbounded re-inclusion on pinned epochs and say so.
+
+**Authority:** review findings recorded by Claude Fable, 2026-08-13.

@@ -7,6 +7,53 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
 - Provable security (B3): every claim is proof-backed, nothing aspirational.
   New behavior ships with a falsify-on-mutant gate. Do not add unproven or
   speculative surface.
+- Green is not proof (B3 corollary; measured 2026-08-12/13, DECISION-LOG). A
+  falsify-on-mutant gate proves the code enforces what the gate ASSERTS. It
+  cannot prove the assertion is the property you NEED. Nine consensus designs in
+  one session reached green — Option D's gate was 34/34 with six mutants
+  confirmed RED and FAST 303/0 — and all nine were wrong. For consensus work a
+  green gate is NECESSARY AND NOT SUFFICIENT. Standing rules:
+    * ADVERSARIAL REVIEW OF THE DIFF, BEFORE COMMIT, INDEPENDENT OF GATE COLOUR,
+      on any change to consensus accept-rules, the apply path, wire formats,
+      committee derivation, or the slashing/evidence path. Across those nine,
+      review returned 124 confirmed defects against 11 false alarms; the
+      mutant-verified gates shipped with the changes found none of them. A
+      purpose-built ratchet is not a substitute — round_seq shipped one and a
+      reviewer defeated it with a ONE-LINE edit while it stayed green.
+    * ASSERT AT THE LAYER WHERE THE RULE LIVES. A gate built on a producer-side
+      proxy goes green while the bug is live; that is exactly how Option C was
+      refuted. The slashing predicate is body_root_a != body_root_b in the
+      VERIFIER (validator.cpp V11 + the node.cpp adoption gate); the core
+      comparison in the in-tree assembler is a courtesy, not the rule.
+    * DESIGN-AND-PROVE BEFORE IMPLEMENTING when the design is uncertain. The
+      time-bucket and lock-rule designs were REFUTED at design stage for a
+      fraction of the cost of the ones implemented first.
+    * SMALLEST INCREMENT THAT KEEPS THE TREE GREEN AND TRUTHFUL. Both slashing
+      attempts failed by BUNDLING: the ~10-line core removal was verified sound
+      BOTH times and was sunk by a per-block cap, an exit-code change and doc
+      convergence that each failed independently. Land the verified core alone;
+      every rider is its own increment with its own review.
+    * VERIFY WITH tools/ci_local.sh — never a bare tools/run_all.sh or bare
+      tools/test_*.sh. Only ci_local exports DETERM_BIN / DETERM_WALLET_BIN /
+      DETERM_LIGHT_BIN / DETERM_DSF_BIN; a bare run resolves the binary by
+      tools/common.sh search order (three "faked" mutant results this session
+      were a stale tree shadowing build-linux — that tree is deleted, the
+      discipline stands) and SKIPs every DSF gate when DETERM_DSF_BIN is unset.
+      CONFIRM THE BUILD SUCCEEDED before trusting any mutant result: a failed
+      build leaves the previous binary in place, so the mutant "dies" against
+      unmutated code.
+- Never seed anything security-relevant from a block hash. Block::compute_hash
+  (src/chain/block.cpp) hashes signing_bytes() and then APPENDS
+  creator_block_sigs, and Ed25519 verification checks only pk-y canonicality,
+  S < L and the group equation — RFC 8032's deterministic nonce is a signer-side
+  convention NO verifier can check. So a member broadcasting its BlockSigMsg
+  last can enumerate unboundedly many VALID signatures over the SAME
+  compute_block_digest, each yielding a different block hash, and publish the
+  one that seats the committee it wants: the hash is MALLEABLE under a fixed
+  digest, at ~one Ed25519 sign per trial. This is harmless today ONLY because
+  committee selection and the subsidy lottery route through cumulative_rand's
+  commit-reveal, every input of which is digest-covered or commit-pinned. Keep
+  it that way (DECISION-LOG 2026-08-12 "final+9").
 - No migrations, ever (owner constraint). Pre-genesis changes are free;
   post-genesis consensus + state format is frozen. Upgrades are additive only.
 - From-scratch C99 crypto, zero heavy deps: no libsodium / OpenSSL in the
