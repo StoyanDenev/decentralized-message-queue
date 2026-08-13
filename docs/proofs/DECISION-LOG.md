@@ -3012,3 +3012,101 @@ three-exploit structural defect lands as ONE core fix plus separate riders, per 
 smallest-increment rule.
 
 **Authority:** read-only sweep by Claude Opus 5, 2026-08-13. Nothing implemented.
+
+---
+
+## 2026-08-13 — C0 increment 0 (digest demotion) REFUTED: the safety argument depended on a premise that IS NOT AT HEAD
+
+**Status:** REVERTED before commit. **23 confirmed findings (1 CRITICAL, 3 HIGH) against 2
+false alarms.** The gate was green, 21 arms, both mutants build-proofed RED. Green is not
+proof — eleventh confirmation this session. Diff preserved at
+`scratchpad/increment0-digest-demotion.patch` (909 lines); it contains the first live
+reproduction of C0 and should be salvaged, not rewritten, when the ordering below is fixed.
+
+### WHAT THE ATTEMPT GOT RIGHT — keep these results
+
+* **C0 REPRODUCED LIVE, for the first time.** The new gate at HEAD goes RED with
+  `invalid BlockSig` from every peer -> phase-2 timeout -> abort quorum -> halt, on 3 nodes,
+  K = M = 3, `ChainRole::SINGLE`, `shard_count == 1`. C0 is no longer an argument; it is a
+  reproducible test. Build-proofed: `a68ead88` -> `bffac8ff` (RED), fix `bffac8ff` ->
+  `f2d499f6` (green), M1 restore-eq-append RED, revert reproduced `42285cf6` byte-for-byte.
+* **The fork-wedge question is ANSWERED, and the answer is benign.** In MUTUAL_DISTRUST
+  every committee member assembles and broadcasts its own body (`node.cpp:1433`, `:1519-29`)
+  — multi-assembler, not single-proposer — and `b.equivocation_events` IS inside
+  `Block::signing_bytes()` (`block.cpp:669-686`), so two co-signers do produce two blocks
+  behind one digest. That is handled by a PRE-EXISTING mechanism: **A4 / S-048 depth-1
+  same-height fork resolution**, `maybe_reorg_to_locked` (`node.cpp:2645`) ->
+  `Chain::resolve_fork` (`chain.cpp:2089`), a pure symmetric TOTAL order (non-zero-sig count
+  desc -> `abort_events.size()` asc -> smallest `compute_hash()`) whose own comment names
+  "honest mempool divergence per S-030". `b.transactions` already lives in exactly this
+  class today. Verified empirically, not just argued.
+* **No v1/v2 shape change.** `compute_block_digest_body` is straight-line with independent
+  conditional appends; deleting the eq leg leaves the abort leg's trigger, position and tail
+  byte-unchanged.
+
+### THE REFUTATION — the stated cost was FALSE, and I stated it
+
+The increment's justifying comment read: *"a finalizer can strip evidence after the
+committee signs. Under the L2 relocation of slashing that is a FORENSICS loss, not an L1
+safety loss."* **The L2 relocation is NOT at HEAD.** It was written, failed adversarial
+review (22 findings, 1 critical) and was REVERTED; `chain.cpp:1815-1827` still forfeits the
+equivocator's ENTIRE locked stake and sets `inactive_from`. Stripping is therefore a **live
+consensus-state mutation performed by an unauthenticated relayer**, not a forensics loss.
+
+**This error originated in the design memo and was repeated to the owner.** It is the same
+class as every previous failure: a safety argument resting on a state of the tree that does
+not exist.
+
+**CRITICAL (reproduced end-to-end on a live 3-node cluster + a fresh follower, and falsified
+against the pre-diff control).** A stripped block that does NOT recompute `state_root`
+drives `revert_head()` and then an unguarded `append()` that THROWS — the head is silently
+lost (`node.cpp:2711`). Zero state, one message, no grinding: any peer that has merely SEEN
+a block carrying evidence deletes `b.equivocation_events` and rebroadcasts.
+
+**HIGH — post-signature strip keeps K-of-K validity.** With the digest blind to the eq set,
+`B' = B` minus the evidence re-derives the SAME digest, so `check_block_sigs` passes
+unchanged. Evidence becomes permanently suppressible by any unauthenticated peer.
+
+**HIGH — the accused equivocator suppresses its own evidence DETERMINISTICALLY.** Not a
+race. E is still a committee member at the height its evidence lands (deregistration is
+`index+1`, `chain.cpp:1826`). E assembles a body with `equivocation_events = {}` — trivially
+a subset of the union, so `check_eqabort_reconciliation` passes — sharing the digest with
+the honest siblings, so the same K-of-K signatures verify. E then wins the `resolve_fork`
+tiebreak by GRINDING `compute_hash()`, which is malleable under a fixed digest (the standing
+CLAUDE.md constraint: `compute_hash` appends `creator_block_sigs` and Ed25519's nonce is
+signer-side, so ~one sign per trial).
+
+**HIGH — four authoritative closures silently reopened**: S-011, S-013, S-029 Level-3
+(broken FIRST-ORDER, independent of the evasion argument — `S029ForkChoiceSoundness.md:325-331`)
+and BFTSafety B2 / T-5.1. Only S-030-D2 was flagged.
+
+**HIGH — `SECURITY.md:1012`** credits `determ test-block-digest` with "F2 POSITIVE BINDING
+(strip/add detected)" while the diff INVERTED that gate's assertions 22 and 23. Plus ~12
+further no-TIER doc and in-code-comment contradictions, four of them inside the edited
+function itself.
+
+### THE ORDERING RESULT — this is the durable finding
+
+**Digest demotion is sound only AFTER the pre-finalization slashing consequence is removed.**
+While `chain.cpp:1815-1827` still forfeits stake, "outside the digest" means "strippable by
+anyone, and evadable at will by the accused" — a live L1 safety loss. Once slashing carries
+no L1 consequence, the identical change costs only a strippable forensic record, exactly as
+the memo claimed.
+
+**Therefore the correct sequence is the reverse of what was attempted:**
+  1. Land the L2 relocation (the ~10-line core removal, verified sound THREE times, with its
+     required riders each as its own increment: the per-block cap + in-block duplicate
+     rejection, the S-006 re-derivation, an honest S-011 residual, and the ~16-20 no-TIER
+     doc corrections).
+  2. THEN demote the eq set out of the digest, reusing the preserved patch and its gate.
+  3. THEN the one-line evidence rebroadcast at `node.cpp:1939`.
+Attempting them in the other order makes step 2 a live consensus vulnerability.
+
+**C0 remains OPEN** and is still a live remotely-triggerable permanent halt at HEAD — but it
+is now REPRODUCIBLE, and the four CRITICAL live halts recorded at 3dbe5f2 are cheaper to
+trigger than it is and are independent of this ordering.
+
+**Tree reverted (6 tracked files restored, 1 new script removed); 4 pre-existing stashes
+intact; ci_local unaffected (source byte-identical to 3dbe5f2).**
+
+**Authority:** review findings recorded by Claude Opus 5, 2026-08-13.
