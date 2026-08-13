@@ -2530,3 +2530,121 @@ A fix applied only in the assembler cannot close a divergence the verifier still
 **Tree reverted; ci_local green. C0 remains OPEN and is still a live remotely-triggerable permanent halt at HEAD.**
 
 **Authority:** review findings recorded by Claude Fable, 2026-08-13.
+
+---
+
+## 2026-08-13 — C0 fix attempt 2 (VERIFIER-enforced intersection) REFUTED: exact set-equality is a NEW permanent halt, and unanimity is vetoable by one member
+
+**Status:** REVERTED before commit. Adversarial review of the uncommitted diff returned
+**7 confirmed defects (1 critical, 2 high, 2 medium, 2 low) against 2 false alarms.**
+The gate was green. Green is not proof — tenth confirmation this session.
+
+The diff did exactly what the previous refutation demanded: it moved the rule into
+`BlockValidator::check_eqabort_reconciliation` (a `validate()` gate, not producer
+behaviour), enforced the canonical sort as a validation rule, deleted the pre-activation
+`else` branch, labelled itself genesis-frozen, and stated the completeness cost. The
+implementation was faithful. **The specification was wrong.**
+
+### CRITICAL — exact set-equality manufactures an inescapable permanent halt
+
+`validate()` runs `check_equivocation_events` at `validator.cpp:49`, **before**
+`check_eqabort_reconciliation` at `:56`. The earlier gate rejects the WHOLE block with
+`"equivocator not in registry"` when `resolve_committee_member_pubkey` returns nullopt
+(`validator.cpp:471-474`); `NodeRegistry::build_from_chain` (`registry.cpp:64-70`) omits
+any domain failing `chain::domain_eligible`, i.e. deregistered (`inactive_from`), below
+`min_stake` after UNSTAKE, not yet active, or suspended
+(`eligibility_floor.hpp:83-86`). On a single-shard chain there is no frozen checkpoint,
+so only the present head applies (`committee_pool.cpp:52-54`).
+
+Meanwhile the intersection names that event **permanently**: `f2_eq_view` is built from
+`pending_equivocation_evidence_` (`node.cpp:1117-1119`) with **no registry filter**, and
+the pool's only prune site is the post-apply one. So once the equivocator leaves the
+registry, `INTERSECTION_EXACT` **compels** the producer to include an event that the
+earlier gate **compels** the validator to reject. Every candidate block at that height
+fails validation, forever. Not a divergence — an absorbing halt reachable by an
+equivocator simply unstaking.
+
+**The general form, which is the transferable result:** a rule of the form
+"the body field MUST equal a deterministic function of the committed views" is unsound
+whenever an EARLIER validation gate can independently reject an element that function
+names. Mandatory inclusion plus independent per-element rejectability equals a wedge.
+`shard_tip_records` escapes this only because no earlier gate rejects a block for an
+inadmissible record. **Check for an earlier per-element admissibility gate before
+mirroring the intersection template onto any new dimension.**
+
+### HIGH — unanimity is vetoable by one member, at zero cost, and canonicalization does NOT repair it
+
+`reconcile_intersection` (`producer.cpp:605-622`) returns `{}` the moment ANY member's
+list is empty. Nothing constrains view-list CONTENT: `validate_contrib_view_roots`
+(`producer.cpp:640-706`) checks only the 64-cap (V21) and `compute_view_root(list) ==
+root` (V22). A member commits `view_eq_list = {}` with the matching non-zero
+empty-SHA256 root and passes. **Any single committee member therefore vetoes ALL
+equivocation evidence, undetectably.**
+
+This kills the sequencing plan the attempt was built on. Canonicalization (normalizing
+`beacon_anchor_height` / `shard_id` / the arrival-order `(a,b)` slots out of
+`hash_equivocation_event`) was nominated as the follow-up increment that would restore
+completeness. It cannot: canonicalization makes honest observers AGREE on a record's
+identity, but the veto is a member committing an EMPTY list, which is unaffected by how
+records are named. **Intersection + canonicalization is not a completeness repair.**
+
+### MEDIUM — ordinary packet loss empties the intersection, with no adversary
+
+The regression was framed as an equivocator capability. Default network behaviour
+suffices: the detector broadcasts ONCE (`node.cpp:2458`, `:3076`),
+`on_equivocation_evidence` adopts WITHOUT re-broadcasting (`node.cpp:1901-1942`, per the
+code's own comment at `:4620-4622`), `GossipNet::broadcast` is one-hop best-effort with
+exceptions swallowed (`gossip.cpp:331-337`), and nothing re-requests. **One dropped frame
+to one of K members empties the intersection permanently.** This is R2 from the
+canonicalization refutation, now load-bearing.
+
+### MEDIUM — pre-activation evidence becomes unrecordable
+
+Deleting the `else` branch closed the state fork but overshot: `node.cpp:1102` gates the
+whole F2 view block on `block_index >= f2_active_from_height()`, so pre-activation every
+view list is empty, the intersection is `{}`, and the height-gate-free verifier rule
+REJECTS any pre-activation block carrying evidence. At HEAD such evidence did land. On
+any chain with `v2_7_f2_active_from_height > 0` this is a strict regression.
+
+### LOW — the header contract still teaches the deleted rule
+
+`producer.hpp:450` (`// union over contribs`) and `:461` (`V25: block.equivocation_events
+== reconcile_union`) still state the union rule in the validator's own V-numbering;
+`node.cpp:1110-1116` (the site that CONSTRUCTS `f2_eq_view`) and `producer.cpp:592-594`
+(`reconcile_union`'s header) likewise. Same class as the ~20 no-TIER proof docs.
+
+### Where this leaves C0
+
+**C0 remains OPEN — a live, remotely-triggerable, unauthenticated permanent halt at
+HEAD.** Two routes are now refuted, and the refutations are complementary rather than
+incremental:
+
+* **UNION** (HEAD, and the pre-activation branch): the assembler's local pool filters an
+  agreed set, so sets diverge per-node ⇒ digest divergence ⇒ halt at K == M.
+* **INTERSECTION-EXACT** (this attempt): agreement is restored, but completeness collapses
+  to zero under a one-member veto or a single dropped frame, AND mandatory inclusion
+  collides with the earlier admissibility gate to produce a second, worse halt.
+
+The tension is now precisely located. Any successor must satisfy three constraints
+simultaneously, and the third is the one both attempts missed:
+1. the accepted set is a function of DIGEST-COVERED inputs only (kills union);
+2. no single member can empty it (kills intersection);
+3. **every element the rule COMPELS must be independently admissible at every earlier
+   validation gate, at every future height** (kills intersection-exact).
+
+Constraint 3 is satisfiable by construction only if the rule permits OMISSION of an
+inadmissible element — i.e. the rule must be a predicate the producer can satisfy in more
+than one way, which reintroduces (1). **Whether the three are jointly satisfiable is
+itself the open question and should be settled at DESIGN stage, per doctrine, before any
+further implementation.** Do not open attempt 3 as an implementation.
+
+Note also that C0's severity is bounded by what it protects: with pre-finalization
+slashing carrying no consensus consequence (owner decision, this date), the equivocation
+evidence path buys forensics for L2, not L1 safety. A design that trades the halt for a
+weaker-but-live evidence record is on the table; a design that trades it for a second halt
+is not.
+
+**Tree reverted (6 tracked files restored, 1 new script removed); 4 pre-existing stashes
+intact.**
+
+**Authority:** review findings recorded by Claude Fable, 2026-08-13.
