@@ -2648,3 +2648,168 @@ is not.
 intact.**
 
 **Authority:** review findings recorded by Claude Fable, 2026-08-13.
+
+---
+
+## 2026-08-13 — Decentralized sharding (owner proposal P1-P4 + R1/R2) EVALUATED AT DESIGN STAGE: does NOT close C0; R2 REFUTED; but it surfaced a live unauthenticated value path and the actual C0 fix
+
+**Status:** DESIGN-STAGE ONLY. No file edited, nothing implemented. 4 adversarial verdicts:
+**3 REFUTED, 1 SURVIVES_WITH_CONDITIONS.**
+
+**The proposal.** P1 parallel independent chains sharing only the PROTOCOL (no beacon, no
+uplink); P2 a tx/message recorded only if ALL co-creators received it; P3/R1 clients submit
+to a chosen replication factor R of N chains, duplication as the availability mechanism;
+P4 smart clients; R2 every node can READ all chains, so registration may live on only one.
+
+### VERDICT: it does not close C0
+
+C0 is a property of how K co-signers assemble ONE body under ONE exact digest inside ONE
+round on ONE chain. Every gate on the path is height-only, never shard-conditioned
+(`node.cpp:1102`, `producer.cpp:1226`, `validator.cpp:1713`; `f2_active_from_height`
+defaults to 0, `genesis.hpp:251`; producer.cpp's only `shard_count()` use is :1340, on the
+cross-shard path). **The proposal lands ON the halting configuration** (`shard_count == 1`,
+`ChainRole::SINGLE`), not away from it. C0 is class B, sharding-INDEPENDENT.
+
+### R2 (self-authenticating evidence) — REFUTED, and it is dangerous
+
+1. **Forged slash.** Carrying a pubkey while retaining the attacker-chosen `equivocator`
+   name is unsound: the apply path forfeits stake and deregisters by that UNAUTHENTICATED
+   NAME STRING (`chain.cpp:1811-1827`). Any remote socket slashes any validator for the
+   cost of one keygen — `peer_message_allowed` admits EQUIVOCATION_EVIDENCE from any peer
+   regardless of role (`gossip.cpp:117-121`).
+2. **C0 escalation.** The registry gate at `node.cpp:1917-1919` is the ONLY bound on an
+   uncapped pool (`node.hpp:785`). Deleting it turns C0 from insider-only into a free,
+   unlimited-identity, anonymous-remote attack.
+3. **The registry check is NOT a forfeiture vestige.** Even deleting the name entirely, the
+   read MOVES to the apply path — `registrants_` is keyed by domain with no pubkey index
+   (`chain.hpp:764`) — i.e. to the STRICTER layer, where `state_root` mismatch throws
+   (`chain.cpp:1957-1971`).
+
+### R2's "read all chains" is jointly unsatisfiable with P1 — REFUTED
+
+**NINE of `validate()`'s gates consume the NodeRegistry** (`validator.cpp:44,45,46,47,48,
+49,51,53,58`), and that registry is ALWAYS `build_from_chain` on the LOCAL chain
+(`node.cpp:698, 2500, 2532, 2697`), reading `registrants/stake/abort_records/min_stake/
+k_block_sigs` (`registry.cpp:47-80`). **Registration read by consensus is not a client
+capability.** R2 therefore places a cross-chain read inside consensus: a state transition
+on chain X (dave's REGISTER reaching `active_from`, or a `suspension_active` flip — not
+even a transaction) permanently halts chain Y with ZERO Byzantine participants. R2 survives
+only downgraded to false: registration PER-CHAIN, cross-chain reads confined to clients/L2.
+
+### R1 flood-at-R — REFUTED on state integrity
+
+`Transaction::signing_bytes()` (`block.cpp:20-32`) is
+`type ‖ from\0 ‖ to\0 ‖ amount ‖ fee ‖ nonce ‖ payload` — **no chain_id, no genesis hash,
+no shard_id**. `chain_id` reaches only `compute_genesis_hash`. One signed TRANSFER at R=3
+applies three times against three balances; A1 and `state_root` green on all three. Worse,
+**before any transaction**: `genesis-tool build-sharded` copies the config wholesale
+(`main.cpp:5673`) and installs `initial_balances` with no rho filter (`genesis.cpp:759-770`),
+so genesis mints N copies of every balance and of `zeroth_pool_initial`.
+
+**The value/non-value split does not exist.** All 18 `TxType` values debit the sender,
+including the three whose comments say "no value moves" (`chain.cpp:1191, :1209, :1226`).
+REGISTER — the archetypal record R2 wants written once — is among the most value-bearing.
+`DAPP_CALL` carries `tx.amount` AND needs a chain-local registry read (`validator.cpp:1199`).
+**R1's availability model also fails for pure records:** a nonce mismatch rejects the whole
+block (`validator.cpp:824-828`) and `build_body` skips a future nonce forever
+(`producer.cpp:1322`), so one drop desynchronises that sender's stream permanently and the
+R copies are R DISTINCT objects — cross-chain dedup on tx hash is impossible.
+
+### The honest scaling answer
+
+If every node reads all chains, storage and validation are N x regardless of R — that is
+REPLICATION, not sharding, and buys ZERO throughput. Throughput requires nodes NOT to
+validate foreign chains; light-verifying a foreign chain means checking its K-of-K against
+ITS registry, obtained from that chain, which must be light-verified — the recursion whose
+termination is exactly what a beacon provides. **Choose: no throughput win, or the uplink.**
+
+### What the evaluation DID establish — three of these are actionable now
+
+* **NEW SECURITY FINDING, live at HEAD.** `Node::on_cross_shard_receipt_bundle`
+  (`node.cpp:2320-2365`) performs **no verify, no digest check, no registry lookup**;
+  `src_block_hash` is never populated in production (`producer.cpp:1342-1346`);
+  `check_inbound_receipts` checks shape/dedup/intersection only (`validator.cpp:1567-1642`).
+  The destination credit (`chain.cpp:1832-1852`) is authorized by K-of-K agreement on
+  **gossiped, unverified transit data**. `CrossShardReceipts.md:79-88` (L-7.4, **no TIER
+  marker**) asserts the opposite. Needs an S-item and a doc correction regardless of any
+  architecture decision.
+* **A SECOND live halt vector.** `external_epoch_rand_` (`node.cpp:384-393`) reads
+  `beacon_headers_` — a bare in-memory vector (`node.hpp:792`), never persisted,
+  gap-intolerant (`node.cpp:1979-1983`), with no `BEACON_HEADER_REQUEST`
+  (`node.cpp:1946-1948`) and a silent per-node local fallback (`validator.cpp:1516-1520`) —
+  and feeds `check_creator_selection`, `check_abort_certs`, `check_block_sigs`. Different
+  buffer depth => different committee => permanent halt at K == M. Dissolved by
+  `ChainRole::SINGLE` today at zero cost.
+* **A live C0 TRIGGER that is free to delete.** `ev.beacon_anchor_height` and `ev.shard_id`
+  are written, hashed (`producer.cpp:434-436`) and **compared by nothing**. On a SHARD chain
+  two HONEST observers of the same equivocation compute different event hashes purely from
+  header-arrival skew — zero adversarial ordering. The in-code claim "each observation point
+  will fill these consistently" is FALSE on a SHARD chain; `validator.cpp:1706-1712` concedes
+  this as the reason the accept rule had to be SUBSET.
+* **P1 has a hidden regression that COUPLES it to the refuted redesign.**
+  `committee_pin_active` requires `shard_count() > 1` (`committee_pool.cpp:7-11`), so under
+  P1 it is permanently false, killing the frozen-first leg of
+  `resolve_committee_member_pubkey` — making the attempt-2 halt at `validator.cpp:471-474`
+  STRICTLY MORE reachable. P1 therefore needs the evidence redesign, which is refuted. That
+  is a bundle; doctrine forbids it.
+* **CORRECTION to a claim made in-session.** `b.transactions` does NOT use
+  `reconcile_intersection` — it is UNION plus a local `tx_store` filter
+  (`producer.cpp:1280-1289`), the same shape as C0, and is simply NOT digest-bound (only
+  `tx_root` is, `producer.cpp:858`). `compute_tx_root_intersection` was deleted as unused
+  (`producer.cpp:773-781`). Only `inbound_receipts` (:1434-1447) and `shard_tip_records`
+  (:1462-1494) use intersection. This correction is load-bearing: it is what makes
+  Increment 0 below obviously right.
+
+### THE ACTUAL C0 FIX — increment 0, ~6 lines, no wire change, no genesis change
+
+**Demote the equivocation set OUT OF THE BLOCK DIGEST**: delete the
+`any_nonzero(b.creator_view_eq_roots)` append at `producer.cpp:896-901`. The eq dimension
+then becomes structurally identical to `transactions` — locally materialized, NOT
+digest-covered, carried in the finalized block, validated SUBSET-of-union
+(`validator.cpp:1749-1752`), applied from the RECEIVED set so `state_root` converges.
+**Co-signers with different pools compute the SAME digest; the divergence has nowhere to
+land.** This is exactly the payload demotion already authorized FOR DESIGN at 5b2d7fe /
+84c1447.
+
+Cost, stated: a single finalizer can strip evidence (the binding existed to stop a relayer
+stripping an inbound receipt, `producer.cpp:865-874`). Under the L2 relocation that is a
+FORENSICS loss, not an L1 safety loss — and the identical gap is already accepted for
+`b.transactions`. Weigh a strippable forensic record against a live, remotely-triggerable,
+absorbing halt.
+
+**Do NOT bundle the abort dimension.** `abort_events` feed committee re-derivation
+(`validator.cpp:138-160`) and the round `gen`; demoting it is a different design with a
+different proof obligation.
+
+**The gate does not exist today** and is the arm named at 5b2d7fe: 3 nodes, SINGLE/NONE,
+K=M=3, two conflicting ContribMsgs from one member delivered in OPPOSITE orders to the two
+honest peers, assert a block lands at h+1.
+
+**And the evidence-completeness fix that nine designs hunted is ONE LINE:** a rebroadcast at
+`node.cpp:1939`. `on_equivocation_evidence` adopts without re-broadcasting, gossip is
+one-hop with no relay and no re-request (`gossip.cpp:335, :343`). No architecture required.
+
+### Sequencing, if P1 is pursued on its own merits
+
+`inc7c` -> P1 -> D2 step 1b -> step 2. Deleting MsgTypes 12/13/14 today reclaims nothing:
+`binary_codec.cpp:975` casts the type byte with no range validation and `default: break`
+falls through to the lp-JSON path, so an unknown type is fully `json::parse`d under a 1 MB
+cap. P1 before 1b avoids re-extracting ~7,800 lines across 34 gate handlers.
+**Wasted-work warning (sequence-before-harden):** `a1a0cf1` (Q1 beacon-header rand binding)
+and the S-053 closure in `d34c632` (`verify_committee_sigs`) sit ENTIRELY on surface P1
+deletes. That argues for deciding P1 now rather than after more hardening lands there.
+**Dominant cost is re-pinning, not code:** eight state leaves are emitted unconditionally
+(`chain.cpp:479-483, :491-495, :500-501`) so `state_root` changes from genesis on every
+chain (137 gate scripts reference `state_root`, 61 reference leaf counts), and four genesis
+mixes are unconditional (`genesis.cpp:808-809, :916, :920`) so every genesis hash changes —
+leaving `chain_id` the SOLE sibling-chain distinguisher, a new load-bearing operator
+constraint and exactly the failure S-039 exists to prevent.
+
+**B4 interaction — a FOURTH DECISION CLOCK row.** `ReservedDiscriminatorAudit.md` preamble
+decision (d) ("launch posture is EXTENDED sharding") is the entire named future for G-3
+`TxType::REGION_CHANGE = 5` and G-4 `Block::partner_subset_hash`; under P1 the audit's own
+razor flips both KEEP -> DROP (14/8 becomes 12/10). MsgTypes 12/13/14 need an explicit
+KEEP-or-DROP verdict the audit does not contain — deleting without reserving forecloses
+re-adding an uplink PERMANENTLY under no-migrations.
+
+**Authority:** design-stage evaluation by Claude Opus 5, 2026-08-13. Nothing implemented.
