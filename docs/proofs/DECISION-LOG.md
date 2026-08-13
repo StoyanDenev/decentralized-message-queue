@@ -2288,3 +2288,36 @@ This is a documentation-authority change only. No decision is reopened, reversed
 **Consistency.** No-migrations (lock rule, deferred verdict and the M > K invariant are all consensus/genesis surface — pre-genesis or never); provable security (the predicate becomes one a correct run cannot satisfy, rather than one that merely looks suspicious); minimalism (reuses `abort_events`, adds no wire artifact).
 
 **Authority:** Stoyan Denev (owner directive, 2026-08-13; recorded by Claude Fable at his direction). Design + adversarial review authorized; implementation is NOT.
+
+## 2026-08-13 — abort-certificate lock rule REFUTED at design stage. The bootstrapping impossibility, stated. No code written.
+
+**All four lenses FATAL; synthesis NOT VIABLE; 16 findings confirmed (7 false alarms). Nothing implemented.** This is the seventh design against Hole 1b, and the first to produce a statement general enough to close the family.
+
+### The constraint that kills it — and every design like it
+
+> **The round identity can only be canonicalized by a block, and no block can be produced while the identity is in dispute.**
+
+That is a bootstrapping impossibility, not a missing mechanism. Any justification-based rule needs the chain to record *that a re-round occurred*; the chain records a re-round only *when the re-round won*. A stalled round cannot produce a canonical record of itself, and a stalled round is exactly the case at issue.
+
+### Three independent failures, each sufficient
+
+**(a) The justifying artifact is deterministically DISCARDED.** `Chain::resolve_fork` breaks a signature-count tie by preferring **fewer** `abort_events` (`chain.cpp:2101-2102`). In MUTUAL_DISTRUST every complete block carries exactly K non-zero sigs, so two complete same-height MD blocks **always** tie on count — and the **low-gen block always wins, deterministically, on every node**. `revert_head` discards the loser. AbortEvents are strictly height-scoped (claims require `m_.block_index == b.index` and `m_.prev_hash == chain.head_hash()`, `validator.cpp:262/345/347`) and `current_aborts_` clears on apply (`node.cpp:2533`), so they can never be carried forward. In exactly the S-048 scenario the lock exists to legitimize, the AbortEvent that constitutes the justification is **provably absent from the canonical chain forever**.
+
+**(b) `gen` is signer-chosen off-chain, so "justified" is a free acquittal.** `compose_block_digest`/`compose_contrib_commitment` take `gen` as a bare `u64` (`producer.cpp:1004-1011`, `:344-353`). An equivocator's second signature need not correspond to any accepted block, so it signs side A at `gen g` and side B at `gen g+1`. A judge reading "higher gen ⇒ justified" collapses to the already-shipped `gen_a == gen_b` assertion (`validator.cpp:458-460`) and yields **zero new convictions** — the 5th design's "any self-declared identity is evadable" result, re-derived on current code.
+
+**(c) Anchoring, the only repair for (b), makes acquittal LIVENESS-CONTINGENT.** Requiring the higher-gen opening to anchor (`body_root == compute_block_digest_body(blocks_[H])` and `gen == blocks_[H].abort_events.size()`) convicts the honest S-048 validator outright under (a). Inverting the tiebreak to prefer *more* aborts fixes that one case but not the general one: when the abort re-round **stalls and never mints** — the reachable case, which is why the S-050 valve exists — the canonical block at H is the gen-0 block and the honest validator's gen-1 signature anchors to nothing. Its non-slashability then depends on **whether its re-round happened to win the race — network luck, not correctness.** That destroys the exact property the authorization demanded.
+
+**And the lock forbids the valve.** Its justification clause is structurally unreachable on both documented same-gen re-round paths (the valve clears `current_aborts_` and re-enters with a fresh secret; the S-048 reorg re-rounds at gen 0), turning a reproduced clean-network livelock into an **absorbing permanent halt**. The per-height release budget is finite (M − ⌈2K/3⌉) while demand is unbounded.
+
+### POSITIVES worth preserving for any future attempt
+
+1. **A lock needs NO new committee-derivation input.** A locked member is simply *silent*, and silence is already handled: the abort path raises a claim, the quorum forms, and every node re-derives the same re-round committee excluding it (`validator.cpp:139/148-151`, `node.cpp:999/1034-1041`). Any future lock should be kept **strictly signing-side** — feeding "who is locked" into derivation WOULD fork, since it is a delivery-dependent per-node view.
+2. **A deferred judge must live in `Chain::apply_transactions`, never in `BlockValidator`.** `Chain::load` (`chain.cpp:3483-3536`) replays via `apply_transactions` and **never calls `BlockValidator::validate`**, so any validator-side verdict is skipped on replay and the forfeiture becomes a **state_root divergence between a replaying node and a live node**. This holds for ANY future slashing design.
+3. **N ≥ 2 makes the judge's read of `blocks_[H]` stable** (past the depth-1 reorg window).
+4. **`resolve_fork`'s tiebreak is load-bearing well beyond slashing**: in MD it *always* resolves to the lower-gen block. Worth knowing independently.
+
+### Status
+
+**Hole 1b remains OPEN after seven designs.** What is now settled is stronger than any single fix: the failure is not a missing mechanism but a bootstrapping impossibility — a stalled round cannot canonicalize a record of itself, and every justification-, identity-, or exclusion-based rule needs precisely that record. The honest position is that **no automated consequence at the pre-finalization layer is achievable**, and the sound options remaining are the ones outside consensus: an L2/economic layer with inputs L1 provably lacks, or no consequence at all.
+
+**Authority:** design analysis recorded by Claude Fable, 2026-08-13. No implementation was performed.
