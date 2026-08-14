@@ -3262,3 +3262,133 @@ independent of economics.
 7. Close or scope the per-shard supply-conservation gap under SHARD+EXTENDED.
 
 **Authority:** read-only analysis by Claude Opus 5, 2026-08-13. Nothing implemented.
+
+---
+
+## 2026-08-13 — REGISTER unauthenticated overwrite OPENED: severity corrected UPWARD, a fifth CRITICAL found in the same function, 3 of 4 fix designs REFUTED
+
+**Status:** DESIGN-STAGE, read-only at ddf93eb. Nothing implemented. The accept-rule change
+is GENESIS-DEADLINE — pre-genesis or never. The producer/ingress/eviction work is not.
+
+### The defect is REAL — all four links re-derived, and it is WIDER than reported
+
+`validator.cpp:793` derives the verifying key from the transaction's OWN payload; the arm at
+`:844-845` is bare while the ADJACENT `case TxType::DEREGISTER:` requires
+`registry.find(tx.from)` (`:846-848`); apply overwrites unconditionally
+(`chain.cpp:1260-1267`) and never touches `locked` (`:1269-1273`). **`Chain::registrants()`
+is a public const accessor (`chain.hpp:522`) and `check_transactions` already holds `chain`
+(`validator.cpp:675-676`) — the information needed to close this was available at the layer
+where the rule lives and was not used.**
+
+**Correction 1 — one tx rewrites the ENTIRE registry record**, not just `ed_pub`:
+`registered_at`, `active_from` (re-randomised), **`inactive_from = UINT64_MAX` — which
+CANCELS a pending DEREGISTER and an equivocation deregistration (`chain.cpp:1825`)**,
+`region`, and `stakes_[d].unlock_height = UINT64_MAX` (rearming an unstake clock to never).
+`locked`, balance, `dapp_registry_`, `audit_keys_`, `note_keys_` are all domain-keyed and
+inherited.
+
+**Correction 2 — the worst outcome is a PERMANENT HALT, not theft.** `committee_pin_active`
+requires `shard_count() > 1` (`committee_pool.cpp:7`), so on every SINGLE-shard chain (the
+default) ALL domain->key resolution is present-head. Three consequences, ascending:
+  1. **Committee eviction at will** — the re-randomised `active_from` (uniform [1,10]) against
+     a registry rebuilt at `at_index = b.index+1` (`node.cpp:2532`) and
+     `eligibility_floor.hpp:83`. Repeatable, free.
+  2. **FORGED EQUIVOCATION — this reopens S-052.** `check_equivocation_events` verifies both
+     openings against `resolve_committee_member_pubkey` at `validator.cpp:471` (present-head).
+     After the overwrite the attacker signs two conflicting openings with its OWN key and
+     names the victim; apply then zeroes `locked` (`chain.cpp:1819-1820`) and sets
+     `inactive_from` (`:1825`). The height-binding closure at `validator.cpp:441-460` is
+     sound and untouched — it binds the HEIGHT and ASSUMES the key belongs to the accused.
+  3. **Permanent halt.** Overwrite every pool member. `eligibility_floor_lifted` `continue`s
+     on the identical `active_from > at_index` predicate (`eligibility_floor.hpp:114`) — S-051
+     lifts suspensions, never activation delays. Pool drops below K, `check_if_selected`
+     returns (`node.cpp:1024`), no round starts, `current_aborts_` was cleared (`node.cpp:2533`)
+     so BFT escalation never fires (`node.cpp:1017-1022`), `at_index` never advances, so
+     `active_from > at_index` holds FOREVER. Survival probability 10^-M on the shipped K == M
+     profiles.
+
+**Cost:** fee 0 (`charge_fee` at `chain.cpp:957-966`; producer filter `sb < tx.fee` is
+`0 < 0`), no registration, no stake, no balance, **no HELLO** (`gossip.cpp:170` consults
+`peer_message_allowed` only `if (peer->hello_received())`), from any TCP socket. The victim's
+nonce is public and is **0 for every genesis creator** (genesis installs registrants directly
+at `chain.cpp:928/932-933` and returns at `:947` before the tx loop).
+
+### CORRECTION 4 — A FIFTH CRITICAL, in the same function, not previously on the record
+
+The validator rejects a REGISTER payload on FIVE geometry rules — size > 65
+(`validator.cpp:755`), size == 33 (`:758`), `region_len` mismatch (`:764`), bad charset
+(`:770-782`), non-empty region under `ShardingMode::NONE` (`:787-791`). **None is mirrored at
+ingress or in the producer.** One gossiped, correctly-signed, fee-0 REGISTER from an
+unregistered non-anon domain with a 200-byte payload is ADMITTED (`mempool_admit_check` bounds
+only `TX_FRAME_PAYLOAD_MAX`, `node.cpp:2839`), INCLUDED (`producer.cpp:1321`, `:1358-1361`),
+then makes the block INVALID — and `apply_block_locked` returns at `node.cpp:2502-2505` before
+the only eviction site. **Deterministic, remote, anonymous, absorbing, fleet-wide permanent
+halt, live at HEAD.** This is the 3dbe5f2 no-eviction class on this tx type; it is the single
+biggest constraint on the fix and is why three of four designs were refuted.
+
+### THE OPTIONS — 3 of 4 REFUTED
+
+* **A. MINIMAL VERIFIER RULE — SURVIVES_WITH_CONDITIONS. RECOMMENDED.** If a registrant
+  record exists for `tx.from`, require `tx.payload[0..32) == incumbent ed_pub`; first
+  registration keeps today's self-authenticating behaviour. No wire frame, no TxType
+  discriminator (slot 18 stays free; B4's G-3 `REGION_CHANGE = 5` KEEP untouched), no genesis
+  field, no `r:` leaf shape, no `RegistryEntry` field, zero edits to `src/chain/chain.cpp`,
+  zero to `light/`. The reviewer could not break the RULE — only its mirror layer, twice.
+* **B. DUAL SIGNATURE — REFUTED.** The accept-rule is sound but it manufactures a NEW
+  permanent halt: the ingress predicate FLIPS AFTER ADMISSION and the mempool has no eviction
+  path for a tx that is block-invalid at a live nonce.
+* **C. DEDICATED `ROTATE_KEY` TX TYPE — REFUTED.** Closes the hole at the right layer but
+  manufactures THREE new permanent halts, one remote/anonymous/zero-cost/deterministic — and
+  its own gate is structurally blind to all three. Also leaves the equivocation self-escape
+  open (its own F-3).
+* **A'. ROTATION-LIVENESS ARTIFACT — REFUTED.** The |pool|==K activation-delay deadlock it
+  targets is REAL and re-derived end to end, but the design's enforcement claim is FALSE and
+  is exactly the Option-C pattern it claims to avoid: **`state_root` is NOT a verifier rule**
+  (zero hits in `validator.cpp`), is gated on `b.state_root != zero` (`chain.cpp:1948`), and
+  is EXCLUDED from `compute_block_digest` — so the K committee signatures do not cover it and
+  any relayer can zero it.
+
+### THE RECOMMENDED PREDICATE (Option A, conditions folded into the core)
+
+    R_b(d) = payload[0..32) of the most recent REGISTER for d ACCEPTED EARLIER IN b, if any
+           = chain.registrants().at(d).ed_pub, otherwise if present
+           = undefined, otherwise
+    ACCEPT: for every REGISTER in b, R_b(tx.from) defined => tx.payload[0..32) == R_b(tx.from)
+
+**Deliberately the RAW `chain.registrants()` map, NOT the `NodeRegistry` the validator is
+handed.** `build_from_chain` (`registry.cpp:26-84`) drops every domain failing
+`domain_eligible` — pending-activation, deregistered, suspended, under-min_stake — so a rule
+phrased against the ELIGIBLE pool would leave precisely the weakest domains freely rebindable.
+
+Five assertion sites, all core: (1) the rule at `validator.cpp:793` + a loop-scoped in-block
+overlay populated at `:844`; (2) **anti-halt** producer skip at `producer.cpp:1358-1361`
+(build_body assembles from the committee union and can hold a tx this node's ingress never
+saw; skipping is legal); (3) ingress `mempool_admit_check`; (4) **`rpc_register`
+(`node.cpp:4981-5000`) must run the predicate and return an RPC error** — it writes
+`tx_store_` without `mempool_admit_check`, so without this the documented operator command
+self-inserts a permanently unincludable fee-0 tx that locks the domain's `(from, nonce)` slot
+forever; (5) **eviction** — gate the reorg re-insert (`node.cpp:2718-2726`) and extend the M11
+sweep (`:2515-2531`).
+
+### WHAT OPTION A DOES NOT FIX (stated, not buried)
+
+The rotation deadlock (`chain.cpp:1263` untouched); the five geometry halts above;
+**total key loss becomes TERMINAL for the domain** — `locked`, balance, DApp ownership and the
+registry slot unreachable forever (KR-12 defers recovery to v2.14/v2.15/DSSO, none shipped);
+compromised-but-retained keys cannot be rotated in place, leaving DEREGISTER, which at
+|pool| == K halts with probability 1 (worse than HEAD's 9/10 for that one scenario); domain
+squatting (first registration must stay self-authenticating); low-order registered keys
+(`ed25519.c:321-331` has no small-order rejection, so an identity-point `ed_pub` admits one
+`(R,S)` verifying every message — anyone can then resubmit `payload == incumbent` and
+re-randomise `active_from`, rewrite `region`, clear `inactive_from`, rearm `unlock_height`);
+`Chain::load` does not re-verify (`chain.cpp:3530` replays through apply only); the light
+client does not enforce it; and the `DEREGISTER` asymmetry (`validator.cpp:847` uses the
+eligible pool, ingress the raw map) is another live instance of the halt class.
+
+### OWNER DECISION REQUIRED
+
+Option A makes **key loss terminal**. In a permissioned deployment among known parties that
+may be correct — no recovery path is also no backdoor. If field key-loss recovery is required,
+it needs an explicit mechanism, and none is shipped. This is genesis-deadline.
+
+**Authority:** design-stage analysis by Claude Opus 5, 2026-08-13. Nothing implemented.
