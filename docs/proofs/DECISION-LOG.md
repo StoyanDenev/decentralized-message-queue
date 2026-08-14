@@ -3392,3 +3392,117 @@ may be correct — no recovery path is also no backdoor. If field key-loss recov
 it needs an explicit mechanism, and none is shipped. This is genesis-deadline.
 
 **Authority:** design-stage analysis by Claude Opus 5, 2026-08-13. Nothing implemented.
+
+---
+
+## 2026-08-14 — REGISTER key binding: revocability is ADDABLE LATER; RESERVE NOTHING; recommend V-REG-1 create-only
+
+**Status:** DESIGN-STAGE, read-only at 5e4afec. Nothing implemented.
+**Supersedes** the prior entry's framing that a recovery key must be committed at first
+registration. That expectation was WRONG and is corrected here.
+
+### Password-derived keys do not touch the consensus defect
+
+`validator.cpp:793` copies the verifying key out of the transaction's OWN payload and
+`:819-821` verifies against it; `case TxType::REGISTER: break;` (`:844-845`) reads no
+incumbent. The attacker binds their own freshly-generated key — how the VICTIM's key was
+produced is not an input to `verify()`. Same class as the project's existing block-hash
+doctrine: RFC 8032's deterministic nonce "is a signer-side convention NO verifier can check."
+Derivation is a signer-side convention. **It cannot be a consensus property.**
+Measured: `grep -riE "argon2|pbkdf2|scrypt|passphrase|password"` over `src/node/` + `src/chain/`
+returns **0 lines**. `REGISTER_PAYLOAD_MAX_SIZE = 65` (`params.hpp:60-62`) is fully consumed
+by pubkey + region_len + region.
+
+**What the tree already has, and it is the right shape:** every signing key is RANDOM;
+password KDFs protect keys AT REST only. `generate_node_key` (`keys.cpp:32-40`) draws 32
+bytes from the OS CSPRNG, fatal on entropy failure. The wallet's DWE2 envelope wraps random
+keys with **Argon2id (t=3, m=64 MiB, p=1) + AES-256-GCM and a fresh random 16-byte salt** —
+`src/crypto/argon2/argon2id.c` is ALREADY VENDORED. There is no `key = KDF(password)`
+anywhere, for any key.
+
+Costs of the derived shape, beyond offline grindability (`ed_pub` is published by the
+protocol — `r:` leaf `chain.cpp:334-343`, RPC, every block, every snapshot, and under
+no-migrations it is on-chain FOREVER, so the grinding target OUTLIVES rotation): it voids
+HSM residency, split custody and coercion resistance by construction, collapses passphrase
+leak and file theft into ONE event, and destroys the only immediate revocation primitive in
+the system — **destroying the ciphertext**. You cannot destroy a memorized string.
+`docs/V2-DESIGN.md:991` already records the adverse finding for this shape, accepted there
+only because a T-of-N Shamir threshold carries the security; a consensus identity key has no
+such threshold.
+
+**PIN-as-on-chain-authorization is likewise unavailable:** a consensus verifier cannot
+rate-limit, and any public commitment to a 13-27-bit secret is offline-broken. A PIN is sound
+only as a LOCAL unlock factor over a random recovery key (the DWE2 shape above).
+
+### ► CORRECTION: revocability IS addable later, and RESERVING ANYTHING IS A NET FORECLOSURE
+
+The circularity objection was wrong. **First registration is self-authenticating and always
+will be** (`validator.cpp:793` — there is nothing else to authenticate against). Once the
+accept rule makes authority a chain from that root, a recovery key published at block 50,000
+BY THE INCUMBENT IDENTITY KEY is exactly as authenticated as one published at block 1. The
+tree already ships two auxiliary-key mechanisms authorized this way: `ROTATE_AUDIT_KEY = 15`
+and `REGISTER_NOTE_KEY = 17`, both routing through `validator.cpp:813-817`.
+
+**Commit-at-registration is strictly LESS capable where it matters most:** it cannot reach the
+genesis creator set at all. Genesis registrants never send a REGISTER (`chain.cpp:919-936`
+installs directly, `:947` returns before the tx loop) and `GenesisAlloc` (`block.hpp:622-633`)
+carries NO signature field — so a genesis-committed recovery key would be UNAUTHENTICATED and,
+under an immutability rule, permanently unfixable, for exactly the K-of-K launch quorum whose
+key loss halts the chain.
+
+| Vehicle | Status |
+|---|---|
+| **New TxType >= 18** | **FREE** — `block.cpp:229` casts a bare u8, `validator.cpp:1488-1495` `default:` fail-closes; max shipped is 17; B4's DROP list has NO TxType rows (its only TxType row, G-3 `REGION_CHANGE = 5`, is KEEP) |
+| **New state namespace `rk:`** | **FREE, state-root-invariant** — the `ak:` (`chain.cpp:531-539`) / `nk:` (`:548-556`) precedent emits leaves ONLY while set; an empty map emits zero leaves |
+| **A `RegistryEntry` field** | **GENESIS-FROZEN — do not plan on one.** `chain.cpp:334-343` hashes `ed_pub‖registered_at‖active_from‖inactive_from‖region` into every `r:` leaf |
+| **A GenesisConfig activation-height reservation** | **REJECT — the reservation IS the foreclosure.** Activation heights are not on the PARAM_CHANGE whitelist (`validator.cpp:919-923`), so it is an unchangeable guess |
+
+### RECOMMENDATION — V-REG-1: `REGISTER` is CREATE-ONLY. Reserve nothing.
+
+Reject any REGISTER for a domain already present in the RAW `chain.registrants()` map (not
+`NodeRegistry`, which drops exactly the weakest domains). Preferred over the earlier
+`payload == incumbent` rule: it closes that rule's residual, has the same two-file blast
+radius, and its predicate is a map lookup rather than a signature verify — so a mempool
+eviction pass is ~10^4 lookups, not ~10^4 Ed25519 verifies, which is the exact cost that
+refuted the recovery-key design. It does not touch the genesis hash.
+
+Revocability then lands later as `ROTATE_IDENTITY_KEY` on a free slot + an `rk:` leaf,
+rotating `ed_pub` ONLY — touching neither `active_from` nor eligibility, so it avoids the 9/10
+`|pool| == K` activation deadlock (`chain.cpp:1263`) BY CONSTRUCTION. That is the owner's
+stated intent, implemented as its own properly-authorized transaction instead of overloaded
+onto REGISTER. **Put it on the DECISION CLOCK, not the genesis deadline.**
+
+**Closes on the record:** S-052 forged slashing via the key binding — with rebinding
+impossible, an attacker cannot make `resolve_committee_member_pubkey` (`validator.cpp:471`)
+resolve a victim's domain to a key they control. The height-binding closure at `:441-460`
+remains sound and untouched.
+
+### HARD PREREQUISITE for "later" to be safe — and a NEW live defect
+
+**`build_body` has NO `default:` arm** (`grep -c "default:" src/node/producer.cpp` = 0) and
+`nn++; b.transactions.push_back(tx);` (`producer.cpp:1422-1423`) runs unconditionally after
+the switch. **An unknown TxType is therefore INCLUDED with no fee debit**, the block is
+rejected at `validator.cpp:1488`, and the no-eviction class makes it an absorbing halt. This
+must be closed BEFORE any new TxType ships — and it is a live instance of the 3dbe5f2 class
+today, reachable by any peer sending an unknown discriminator.
+
+### FURTHER NEW FINDINGS
+
+* **D-2, a 2-second permanent halt at PROFILE_TACTICAL.** At `|pool| == K` under
+  STAKE_INCLUSION the eligibility floor re-admits a dead member every height, guaranteeing one
+  abort per height; at `SUSPENSION_SLASH = 10` against `MIN_STAKE = 1000` that is a
+  **permanent halt in exactly 100 blocks** — ~2 s at PROFILE_TACTICAL's timings.
+* **`save_node_key` (`keys.cpp:42-50`) writes PLAINTEXT JSON** — `f << j.dump(2)` to a bare
+  `std::ofstream`, no encryption, no KDF, and **no chmod/permissions call on that path**. The
+  wallet has DWE2; the node key does not.
+* **Small-order registered `ed_pub`:** `determ_ed25519_verify` (`ed25519.c:321-331`) has no
+  torsion check, so an identity-point key admits one `(R,S)` verifying every message — making
+  the possession proof at `:793`/`:819-821` vacuous AND, under create-only, PERMANENT. Argues
+  for a verifier-side torsion check as a companion increment.
+* `Chain::load` replays through apply with no validator (`chain.cpp:3530`); the light client is
+  not an independent verifier of this rule; `Transaction::signing_bytes()` binds no chain_id so
+  cross-deployment replay is live; `sharding_mode` is node-local, not genesis-pinned.
+
+**Authority:** design-stage analysis by Claude Opus 5, 2026-08-14. Nothing implemented.
+One refute agent failed on schema retries (no-rotation lens); its design is recorded but
+un-refuted.
