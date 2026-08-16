@@ -3506,3 +3506,109 @@ today, reachable by any peer sending an unknown discriminator.
 **Authority:** design-stage analysis by Claude Opus 5, 2026-08-14. Nothing implemented.
 One refute agent failed on schema retries (no-rotation lens); its design is recorded but
 un-refuted.
+
+---
+
+## 2026-08-14 — EVICTION-ROOT attempt 1 REFUTED: the eviction predicate was a SHAPE SUBSET, so it added zero coverage — and it opened a remote unauthenticated mempool wipe
+
+**Status:** REVERTED before commit. **16 confirmed findings (3 CRITICAL) against 1 false
+alarm.** The gate was green: 70 assertions, 8 build-proofed mutants, final binary
+byte-identical to baseline, ci_local 303/0. **Green is not proof — twelfth confirmation this
+session.** Patch preserved at `scratchpad/eviction-root-attempt1.patch` (1469 lines); the
+shape-predicate extraction and gate scaffolding are reusable, the eviction design is not.
+
+### WHAT WORKED — keep the method
+
+Three agents edited three DISJOINT files concurrently under a spec-fixed contract
+(`validator.cpp`+`.hpp` / `producer.cpp` / `node.cpp`), with no builds during the parallel
+phase. **They compiled together on the FIRST build with ZERO signature reconciliation.**
+Strict file ownership + a serialized interface spec is a sound zero-merge-cost pattern and
+should be reused. Each half was shown independently load-bearing by targeted mutants (M2
+producer-skip, M3 ingress-mirror, M4 eviction each reddened only their own arms).
+
+### CRITICAL 1 — the eviction root was NOT closed; the predicate is co-extensive with the mirror
+
+`evict_block_invalid_locked` drops a tx only when `tx_shape_reject_reason(tx, policy)` is
+non-empty (`node.cpp:2673`) — **exactly the set the ingress mirror already refuses and
+build_body already skips.** It therefore adds ZERO coverage over the mirror, and the
+structural root ("there is NO eviction path for a queued-but-block-invalid tx") is UNTOUCHED
+for every validator per-tx rule OUTSIDE the shape predicate. The increment's own claim, "the
+eviction root itself — CLOSED", is false.
+
+**Live 2-tx fee-0 permissionless fleet halt that survives the fix intact:** an attacker
+self-signs a REGISTER for any unused domain (fee 0; the pubkey comes from the tx's own
+payload, `validator.cpp:969-975`, so no prior registry entry is needed). `build_body` includes
+it at `sb >= fee = 0`; apply sets `active_from = height + delay >= height+1`, stake 0, nonce 1.
+The attacker then gossips a fee-0 TRANSFER from that now-REGISTERED-but-INELIGIBLE sender —
+rejected by a validator rule outside the shape predicate (`validator.cpp:989`), unmirrored at
+ingress, un-skipped by the producer, and un-evicted. Absorbing.
+
+Same shape, second instance: **PARAM_CHANGE on the DEFAULT chain.** `governance_mode` defaults
+to 0, and `check_transactions` rejects EVERY PARAM_CHANGE on such a chain
+(`validator.cpp:1058-1061`). Nothing mirrors it — and `build_body`'s NEW `default:` arm
+*deliberately includes* it.
+
+### CRITICAL 2 — the fix OPENS a remote unauthenticated mempool wipe (reproduced at runtime)
+
+`evict_block_invalid_locked` erases mempool entries keyed on `tx.hash` **taken verbatim off
+the wire from a block that FAILED validation**. `Transaction::decode_frame` does a raw
+`memcpy` of the hash (`block.cpp:249`) and the block ingress path NEVER recomputes it (only
+the RPC path does, `node.cpp:4628-4633`). So any peer gossips an invalid block whose
+transactions carry victims' hashes and wipes those entries from every node's mempool.
+Reproduced with a PoC binary, then removed.
+
+Compounding it: the `(from, nonce)` index is erased with a key INDEPENDENT of the hash just
+erased (`node.cpp:2677`) — three separately attacker-chosen fields of one unauthenticated
+struct — orphaning live mempool entries and burning a victim's per-sender quota. The guarding
+comment ("only touch the index if we actually held this hash") does not establish what it
+claims.
+
+### CRITICAL 3 — the gate's central arms never construct the halt state
+
+ARM 6 is a BYTE-FOR-BYTE repeat of ARM 5's reject reason. Measured at the baseline binary,
+both print `[node] invalid block: prev_hash mismatch`: each builds a `Block` with a
+default-constructed `prev_hash`, so **the validator short-circuits on the HEADER before ever
+reaching `check_transactions`.** "Eviction is independent of the reject reason" is therefore
+untested, and **no arm ever constructs the actual absorbing state the increment exists to
+close.** 70 assertions and 8 mutants did not catch this, because the mutants tested the code
+that was written rather than the property that was needed.
+
+### THE DESIGN LESSON — this is the durable result
+
+**An eviction predicate that is a SUBSET of the validator's verdict cannot close the eviction
+root, by construction.** The root is "a tx the VALIDATOR rejects is never evicted"; a mirror
+of some rules evicts only what those rules cover, and every unmirrored rule remains an
+absorbing halt. Mirroring more rules does not converge either — the reviewer showed the
+"cannot be mirrored" justification at `validator.cpp:895-904` is itself false for several
+rules (SHIELD/UNSHIELD `payload.size() != 98`, `amount < fee`, the PARAM_CHANGE
+payload-truncation family, COMPOSABLE_BATCH emptiness are pure functions of `tx` alone), so the
+partition was drawn on a criterion that does not hold.
+
+**The successor design must evict on the VALIDATOR'S OWN VERDICT, not a proxy:** when a block
+fails, re-run the per-tx accept check locally against the local chain view and evict exactly
+what it rejects — and key the erase on a LOCALLY RECOMPUTED `tx.compute_hash()`, never the
+wire hash. That is one predicate, no partition to drift, no unmirrored residue, and no
+attacker-controlled erase key. Its cost (an O(|b.transactions|) pass on a reject path, under
+`state_mutex_`) was measured this round and judged immaterial.
+
+Secondary, and required regardless: **`Transaction::hash` must be recomputed on the block
+ingress path.** Trusting a wire-supplied hash is the enabling primitive for CRITICAL 2 and is
+a defect in its own right.
+
+### OTHER CONFIRMED (carry forward)
+
+`TxShapePolicy` is called "genesis-pinned" but `sharding_mode` is NODE-LOCAL config
+(`node.cpp:102`; GenesisConfig has no such field) — so the producer skip is keyed on
+node-local state, meaning a single misconfigured finalizer silently CENSORS REGISTER-with-region
+fleet-wide where HEAD produced a loud halt. **A producer skip must be a pure function of
+digest-covered state — this is the C0 failure shape.** Also: the unknown-TxType fail-close now
+has TWO independent definitions that mask each other's removal, with no `-Wswitch`/`-Werror` in
+CMakeLists.txt (matters directly for V-REG-1 and any new TxType); `rpc_register` returns
+`{"status":"rejected"}` while `cmd_register` still exits 0; `S008BoundedMempool.md:365`'s L-3
+index-consistency induction is falsified by three new mutation paths;
+`RpcIngressGateAudit.md` gains no row.
+
+**Tree reverted (8 tracked files restored, 1 new script removed); 4 pre-existing stashes intact;
+source byte-identical to 1c0a61d.**
+
+**Authority:** review findings recorded by Claude Opus 5, 2026-08-14.
