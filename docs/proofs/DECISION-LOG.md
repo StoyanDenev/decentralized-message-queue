@@ -3741,3 +3741,81 @@ adversarially shrunk; cheapest, highest severity, and it refutes or confirms thi
 precondition for every empirical claim the method wants to make.
 
 **Authority:** adjudication by Claude Opus 5, 2026-08-14. Nothing implemented.
+
+---
+
+## 2026-08-14 — "NO CRYPTOCURRENCY" SCOPE REDUCTION (message queue + DLT + DApp hosting only): 3 dissolve, 6 shrink, 33 survive, 13 WORSEN
+
+**Status:** READ-ONLY at ddfe877. Nothing implemented. 3 of 4 evaluate lenses died on
+ECONNRESET, so the DEFECT TABLE (which completed and was adversarially verified) is sound while
+the replacements / deletion-cost / does-it-help analysis is INCOMPLETE. Re-run those before
+acting on any deletion estimate.
+
+### HEADLINE
+
+**56 rows: 3 DISSOLVE, 6 SHRINK, 33 SURVIVE UNCHANGED, 13 WORSEN** (+1 shape-dependent).
+**Not one of the eight live remote-halt CRITICALs dissolves** — every one is a shape rule, an
+accept rule or round bookkeeping with zero value input, and four get strictly worse. The
+reduction is a **product decision with a modest, real, narrow security benefit**, and only if
+executed as **pre-genesis DELETION of the `amount`/`fee` fields, not zeroing**.
+
+### THE SEPARABILITY QUESTION — REFUTED
+
+"Locked stake is a conserved, non-transferable permission quota" does NOT hold: **two live
+destruction sites** (`chain.cpp:1795-1797` slash, `:1819-1820` forfeit) against **zero reachable
+post-genesis creation sites**, and the genesis lock is **liftable by its own holder** —
+`DEREGISTER` rewrites `unlock_height = inactive_from + unstake_delay_` (`chain.cpp:1313`).
+The mechanical Sybil bound therefore does NOT survive by relabelling. Dropping the currency
+removes the only membership bound, which interacts directly with A6 below.
+
+### WHAT WORSENS (the important half)
+
+* **A5 REGISTER unauthenticated overwrite — WORSE.** Under the reduction it becomes the ONLY
+  route into a genesis slot.
+* **A6 `2K > N` — WORSE.** The pool has no cardinality bound (`registry.cpp:47-49`) and the band
+  is enforced over `m_creators`, which `producer.cpp:1254` discards as `(void)m_pool_size;`.
+  Removing the stake gate on registration makes the pool grow faster.
+* **A3 `build_body` has no `default:` arm — WORSE.** Deleting the nine value arms leaves
+  DAPP_CALL / DAPP_REGISTER unfiltered.
+* Plus ten more, incl. the A1 supply re-check reading zero after snapshot truncation.
+
+### FOUR ADVERSARIAL REVERSALS — over-claiming dissolution was the predicted failure mode and it happened
+
+1. **D4 "DAPP_CALL silent message loss dissolves" — WITHDRAWN, premise false at HEAD.** Delivery
+   never consults the apply result; both paths scan the block and filter on three fields only
+   (`node.cpp:4079-4086`, `:4367-4373`), so an apply-skipped DAPP_CALL IS delivered.
+   **REPLACED BY A NEW CRITICAL, live at HEAD and previously unrecorded:**
+   `make_dapp_call_frame` (`node.cpp:4051-4063`) and `rpc_dapp_messages` (`:4094-4096`) stamp
+   `{"amount"}` and `{"fee"}` into every delivered frame; the validator does NO funding check and
+   `build_body` has no DAPP_CALL arm. **A zero-balance sender makes the delivery layer report a
+   payment of arbitrary size that the chain never made.** This one the reduction genuinely does
+   dissolve.
+2. **D1 cross-shard credit — RECLASSIFIED SHRUNK.** At `r.amount == 0` the credit dies but two
+   permanent consensus-visible mutations from unauthenticated remote data remain:
+   `accounts_[r.to].balance` (`chain.cpp:1837`) is `std::map::operator[]` and **INSERTS an
+   attacker-chosen account**, emitting an `a:` state-root leaf; and `applied_inbound_receipts_`
+   (`:1843`) emits an `i:` leaf also serialized into DSN1 snapshots. Neither map has a removal
+   path; `MAX_PENDING_INBOUND_RECEIPTS` bounds only the node-local buffer.
+3. **B1 max-fee mempool seal — RECLASSIFIED SURVIVES UNCHANGED, and it is FEE-INDEPENDENT.**
+   `build_body` skips any nonce != next_nonce (`producer.cpp:1321-1322`) and the M11 sweep drops
+   only nonces BELOW next_nonce (`node.cpp:2523-2525`). **Nothing bounds a FUTURE nonce** —
+   `on_tx` (`:2905`) and `rpc_submit_tx` (`:4548`) test only for stale, and
+   `mempool_admit_check` has no nonce test at all. 100 anon addresses x 100 txs at nonces 1..100
+   = **10,000 permanently unincludable, permanently unsweepable entries at zero fee.**
+4. **A2 eviction root — REVERSED to SURVIVES UNCHANGED.** The claim that losing the fee valve
+   worsens it is wrong: `mempool_make_room_for` evicts the fee MINIMUM (`node.cpp:2886-2892`)
+   while the worst poison (S-049 `amount=1, fee=UINT64_MAX`) sits at the MAXIMUM. The valve never
+   covered it. What the reduction actually kills is replace-by-fee (`node.cpp:2923`), which cures
+   a buggy client and never an adversary.
+
+### VERDICT
+
+The reduction deletes an unauthenticated cross-shard MINT, a false-payment report in the
+delivery layer, and one absorbing remote halt. It does NOT touch C0, the eviction root, REGISTER,
+the escalation-arming root, the `2K > N` fork, `enter_block_sig_phase`, or the geometry-rule
+mirror gap — and it removes the only Sybil bound while making the two identity/pool defects
+worse. **It is worth doing on product grounds and must not be sold as a security remedy.** If
+taken, the Sybil replacement must land BEFORE or WITH it, not after.
+
+**Authority:** read-only analysis by Claude Opus 5, 2026-08-14. Nothing implemented.
+Deletion-cost and replacement analysis INCOMPLETE (3 lenses lost to network errors).
