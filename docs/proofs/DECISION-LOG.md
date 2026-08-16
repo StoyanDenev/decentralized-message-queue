@@ -3819,3 +3819,78 @@ taken, the Sybil replacement must land BEFORE or WITH it, not after.
 
 **Authority:** read-only analysis by Claude Opus 5, 2026-08-14. Nothing implemented.
 Deletion-cost and replacement analysis INCOMPLETE (3 lenses lost to network errors).
+
+---
+
+## 2026-08-14 — NO-CRYPTOCURRENCY REDUCTION, COMPLETE RUN: supersedes 8b86d39. 6 dissolve / 4 shrink / 38 survive / 11 worsen. Three prior conclusions REVERSED
+
+**Status:** READ-ONLY at 8b86d39 (source byte-identical to ddfe877). Nothing implemented. The
+three lenses lost to ECONNRESET were re-run; this entry SUPERSEDES the partial one at 8b86d39,
+whose defect counts and Sybil/fee conclusions were wrong.
+
+### ► REVERSED 1 — the currency performs NO post-genesis Sybil work; the validator set is ALREADY CLOSED at genesis
+
+A domain with `locked < min_stake` fails `eligibility_floor.hpp:85`, is therefore absent from
+`NodeRegistry` (`registry.cpp:53,67`), and is therefore rejected at `validator.cpp:815`
+("tx sender not in registry") **before its own STAKE transaction can reach `chain.cpp:1333`**.
+Anon senders are whitelisted away from STAKE (`validator.cpp:804-811`), and no third party can
+fund it — STAKE credits `stakes_[tx.from]` only. **The reduction is NEUTRAL on Sybil. The claim
+at 8b86d39 that it "removes the only Sybil bound" is withdrawn.**
+
+### ► REVERSED 2 — removing `fee` DESTROYS the worst mempool DoS in the tree
+
+The fee market is equally the ATTACKER's weapon. `mempool_make_room_for` evicts the MINIMUM
+(`node.cpp:2883-2893`), so a remote unfunded `amount=0, fee=UINT64_MAX` TRANSFER walks the entire
+honest pool out one entry per insert; `mempool_admit_check`'s `if (tx.fee <= min_fee)`
+(`node.cpp:2868`) is then true for **every representable u64** — permanent, total, remote,
+zero-cost censorship, never drained (`producer.cpp:1329` skips it forever; the only eviction site
+is past the validator's early return at `node.cpp:2503-2505`). **Under field DELETION this shape
+cannot be expressed.** Permanent-seal routes 2 -> 1 (future-nonce, B2, survives).
+
+### ► REVERSED 3 — the quota's load-bearing role is QUORUM-INTERSECTION SAFETY, not Sybil
+
+The `2K > M` band is checked against `c.m_creators` (`genesis.cpp:157-159`), which is runtime-inert
+(`producer.cpp:1254` is `(void)m_pool_size;`). The runtime committee is drawn from
+`avail_domains.size()` (`node.cpp:1039`) and the ONLY bound on that pool is
+`eligibility_floor.hpp:85`. There is no registrant cap anywhere. **Therefore executing the
+reduction as `min_stake = 0` makes `2K <= N` reachable and opens the unattributable fork
+`genesis.cpp:138-152` exists to prevent.** Execution shape is load-bearing: do NOT zero min_stake.
+
+### COUNTS (superseding 3/6/33/13)
+
+**6 DISSOLVE · 4 SHRINK · 38 SURVIVE UNCHANGED · 11 WORSEN** (+2 shape-dependent), 61 rows.
+Corrections within the table: **A2 eviction root WORSENED -> SURVIVES** (the fee valve is
+attacker-disarmable for free, so it never covered the worst poison); **A5 REGISTER WORSENED ->
+SURVIVES** (per REVERSAL 1).
+
+**No live remote-triggerable halt dissolves.** C0, the eviction root, REGISTER, the geometry-rule
+mirror gap, the escalation-arming root and its deadlock family, `enter_block_sig_phase`,
+`AbortEvent` grinding, `resolve_fork` grinding, PARAM_CHANGE-at-governance_mode-0, the DEREGISTER
+asymmetry and the 2-tx self-REGISTER halt all survive untouched.
+
+### THE ACTUAL ARGUMENT FOR DOING IT
+
+Not security. **25-56% of the permanently GENESIS-FROZEN commitment surface is value/CT-derived**,
+and under no-migrations that optionality is available NOW OR NEVER. The reduction shrinks the
+irreversible decision set — which is precisely what the achievability adjudication (ddfe877)
+identified as the binding constraint, since every undiscovered defect in frozen surface is
+permanent.
+
+### THE EXECUTION CONDITION — this governs everything
+
+**It only pays if `amount` and `fee` are DELETED from `Transaction` pre-genesis. ZEROING THEM AT
+GENESIS BUYS ALMOST NOTHING** — three of the six dissolutions stay fully live, because those
+defects are arithmetic over two attacker-chosen u64s regardless of whether the fields mean
+anything. And do not execute it as `min_stake = 0` (REVERSAL 3).
+
+### STILL TRUE FROM THE PARTIAL RUN
+
+The NEW CRITICAL stands: both delivery paths iterate `b.transactions` and never consult the apply
+result (`node.cpp:4076-4086`, `:4368-4374`), so a DAPP_CALL that apply discards
+(`chain.cpp:1682`) IS still delivered — stamped with `amount`/`fee` (`node.cpp:4051-4062`) the
+chain never moved, with no funding check anywhere. The reduction dissolves it.
+B2 (future-nonce permanent seal) remains fee-independent and SURVIVES: `on_tx` drops only stale
+nonces (`node.cpp:2905`), the M11 sweep only stale (`:2521-2528`), and `admit_check` has no nonce
+test at all.
+
+**Authority:** read-only analysis by Claude Opus 5, 2026-08-14, complete run. Nothing implemented.
