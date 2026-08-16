@@ -3612,3 +3612,132 @@ index-consistency induction is falsified by three new mutation paths;
 source byte-identical to 1c0a61d.**
 
 **Authority:** review findings recorded by Claude Opus 5, 2026-08-14.
+
+---
+
+## 2026-08-14 — ADJUDICATION: "the full design is unachievable" — REFUTED as stated; ACHIEVABLE only if the LAUNCH CLAUSE bends. Plus a NEW genesis-deadline safety defect (2K > M is enforced over a variable no accept rule reads)
+
+**Status:** READ-ONLY adjudication at 07d41ed. Nothing implemented. Four agents (two
+prosecution, one defence, one evidence-only), then adversarial cross-refutation of all four
+DERIVATIONS. **All four arguments built on `K == M` were refuted, from four directions.**
+
+### VERDICT
+
+**Achievable — but only if C14/D4's launch clause bends: "feature-complete, then one freeze"
+with NO WRITTEN STOPPING RULE.** No conjunct of C1-C13 is proved impossible. What is not
+achievable is a defensible freeze judged by an instrument that reads zero.
+
+### THE `K == M` QUESTION IS MALFORMED — `m_creators` IS RUNTIME-INERT
+
+**M is read NOWHERE on the consensus path.** `validator_.set_m_pool` writes `m_pool_`
+(`validator.hpp:423`) which is read nowhere in `src/` or `include/`; `m_pool_size` reaches
+`build_body` and hits a literal `(void)m_pool_size;` (`producer.cpp:1254`). **Zero occurrences
+of `m_creators` in `src/node/validator.cpp` or `src/chain/chain.cpp`.** The committee is
+`k_use = cfg_.k_block_sigs` (`node.cpp:992/1015/1039`); the validator admits only
+`m == k_full` or `m == k_bft` (`validator.cpp:122-134`). M survives only in the `2K > M` band
+check, serialization, the genesis-hash mix, an RPC preview and a display string.
+
+Consequences:
+* **"K == M" and "K < M" are not runtime modes** — they relate two genesis integers, one of
+  which the accept path never reads. The operative quantity is **`|eligible pool| − K`, a
+  DEPLOYMENT property.** Every prior statement of the form "at K == M, select_m_creators is the
+  identity, so rotation evicts no one" is stated over the WRONG VARIABLE and should read
+  `|eligible pool| == K` — including DECISION-LOG 2026-08-12 "final+7".
+* **`f = 0` is FALSE.** At `|pool| == K == 3`, one crash IS tolerated: `k_bft = 2`, theta = 1
+  default, abort quorum `max(2, K-1) = 2`, escalation fires (`node.cpp:1017-1023`), a 2-of-2
+  BFT block finalizes. `K == M` is explicitly legal-with-zero-liveness-margin
+  (`genesis.cpp:148-150`); PROFILE_WEB 4/3, REGIONAL 5/4, GLOBAL 7/5 all ship.
+* **The `|pool| == K` deadlock family is INCIDENTAL, one root, one line.** Escalation arms on
+  `total_aborts = current_aborts_.size()` (`node.cpp:1013`) and `current_aborts_.clear()` runs
+  on every apply (`node.cpp:2533`), so any pool shortfall PREDATING the height cannot arm
+  escalation. **K/M-independent** — at GLOBAL 7/5 with three non-abort drops it is absorbing at
+  MD margin 2. Three deadlocks (rotation p=9/10, equivocation-deregistration, stake drain) are
+  three predicates hitting ONE arming defect.
+* **CORRECTION to D-2, wrong by two orders of magnitude and WORSE than recorded.**
+  `deduct = min(suspension_slash, locked) = min(10,1000)` (`chain.cpp:1795-1797`) leaves
+  `locked = 990`, and the predicate is `stake_of < min_stake` (`eligibility_floor.hpp:85`), not
+  `locked == 0`. Both live 3-node gates provision `--stake 1000` against default
+  `min_stake{1000}`. **Ejection is at the FIRST abort, not the 100th.** The `params.hpp:78-79`
+  comment is wrong and the taxonomy inherited the error.
+
+### NEW GENESIS-DEADLINE SAFETY DEFECT — S-054 guards the wrong variable
+
+S-054's own rationale (`genesis.cpp:136-146`) states the threat as "K signatures out of the
+M-member committee ... two DISJOINT K-subsets". **No M-member committee is ever formed.** The
+band `2K > M` is enforced over a variable no accept rule reads. The invariant that actually
+governs attributability is **`2K > N(h)` where `N(h) = |eligible pool|` — unbounded, uncapped,
+unchecked, unlogged, ungated** (`select_committee_pool` -> `eligible_in_region("")` -> whole
+`nodes_`, `registry.cpp:88-90`; `build_from_chain` has no cardinality bound, `:64-80`; there is
+no `max_creators` and REGISTER enforces no cap). **PROFILE_WEB 4/3 breaks at 6 registrants;
+GLOBAL 7/5 at 10.** With the S-048 abort-vs-finalize race (two same-height blocks each
+validated against their OWN `abort_events`, `validator.cpp:137-151`), two disjoint committees
+can each finalize **with no member signing twice — an unattributable fork**, which SECURITY.md
+identifies as exactly "what remains" once L1 slashing is withdrawn.
+
+Fixing it changes committee derivation in `node.cpp:998-1039` AND `validator.cpp:137-152` — a
+consensus accept rule, **frozen at genesis**. A FIFTH genesis-deadline item, absent from every
+enumeration on the record. **Missed by all twelve adversarial passes AND by GB-8's 16
+mutant-verified assertions — because GB-8 asserts at the CONFIG-LOAD layer while the rule lives
+in `check_creator_selection`.** That is the R3 doctrine violation ("assert at the layer where
+the rule lives") that refuted Option C, reproduced verbatim.
+
+### THE CAP ARGUMENT — factual premise VERIFIED, force INVERTED
+
+Of 23 live halts: **PARTITION-INDUCED = 0.** (3 of the 4 SPECIFIED partition halts are the
+designed CP behaviour.) The owner's factual premise is correct and independently verified three
+times; it argues AGAINST his conclusion, because CAP explains none of the live defects.
+
+### THE PROCESS ARGUMENT — REFUTED on a population error
+
+197 confirmed findings across 12 passes, but **exactly ONE pass (22 findings) examined the
+SHIPPED tree**; one examined a design doc; the other ten (~154) examined **candidate diffs ALL
+REVERTED BEFORE COMMIT**. `git diff --stat 0ce12c8..HEAD` = two doc files, **zero source
+lines**. The non-convergence regression (+0.39 findings/review, t = 0.92) is over defect density
+in freshly-authored, never-shipped consensus candidates. The "rate spike with no code change" is
+self-refuting: there was no code change BECAUSE the designs were reverted. The prosecution's own
+brief concedes non-convergence is not provable at conventional significance.
+
+### WHAT SURVIVES, AND IT IS WORSE THAN EITHER SIDE ARGUED
+
+**The mandated gate is blind.** `tools/ci_local.sh:259` is `FAST=1 QUIET=1 bash
+tools/run_all.sh` plus offline doc guards, and the FAST `ONLY_PATTERN` (`run_all.sh:108`)
+**exercises no multi-node configuration at all** — the cluster gates and the 47 model-checked
+TLA specs are outside it. The authoritative ledger prints `Open: 0/0/0/0/0` against >= 12 live
+remote-triggerable halts. And the beta's own criterion — "bug-discovery rate -> 0"
+(`PRE-LAUNCH-DECISIONS.md:197`) — is undefined and, on this instrumentation, unmeasurable.
+
+### PROVEN IMPOSSIBLE (2, both already re-specified, both re-specifications unrefuted)
+
+1. A sound-and-complete consensus predicate over two signed openings under asynchrony ->
+   slashing relocates to L2; only "what does L2 slash?" remains open, and option (b) (separate
+   L2 bond, L1 stake never slashable) is the only one that does not re-enter consensus.
+2. Safe automated exclusion at `|eligible pool| == K` -> maintain pool margin; already
+   supported by shipped code.
+
+**Everything else is unfinished work.** Two OPEN DESIGN RISKS to close at design stage first:
+(a) **F-c soundness** — arming escalation on a pool shortfall at height start rather than on
+`current_aborts_` is the designed fix (`AbortCascadeLiveness.md:258`), but an adversary who can
+SHRINK the pool — and the REGISTER overwrite is exactly such a primitive — could force
+`ceil(2K/3)` BFT at will, converting a liveness halt into a **safety downgrade**. Three of four
+passes named this the most likely way the verdict flips. (b) Binding `b.transactions` into the
+digest may transplant C0 onto the tx set; if that reconciliation cannot be made to work,
+censorship resistance is lost PERMANENTLY at genesis.
+
+### THE RELAXATIONS, AND THE ORDER
+
+Relax: the genesis shape (`M > K and K >= 3`) plus an enforced pool bound (`2K > N`, or cap N)
+— censorship resistance becomes `(f/N)^K`, a quantitative weakening of a bound the docs already
+state probabilistically; `initial_stake >> min_stake` or DOMAIN_INCLUSION — removes the stake
+fuse at zero cost to any stated property; **and the launch clause — a written, measurable
+genesis go/no-go predicate measured over a beta that exercises the frozen surface** (a testnet
+carries a different `chain_id` and genesis hash, so it is NOT a migration). Hold everything
+else: R27 no-migrations, R31 vendored C99 (met — zero OpenSSL linked), R11/R12 re-derived over
+N, R15, R16, R21-R23, R25, R28/R29, R33.
+
+**Order:** (1) design-gate F-c and the `2K > N` bound TOGETHER — both touch committee
+derivation, both genesis-deadline, and F-c's soundness turns on whether the pool can be
+adversarially shrunk; cheapest, highest severity, and it refutes or confirms this verdict.
+(2) Put the cluster gates and the TLA models into `ci_local` — a scripting change, and the
+precondition for every empirical claim the method wants to make.
+
+**Authority:** adjudication by Claude Opus 5, 2026-08-14. Nothing implemented.
