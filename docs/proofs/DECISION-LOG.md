@@ -3894,3 +3894,72 @@ nonces (`node.cpp:2905`), the M11 sweep only stale (`:2521-2528`), and `admit_ch
 test at all.
 
 **Authority:** read-only analysis by Claude Opus 5, 2026-08-14, complete run. Nothing implemented.
+
+---
+
+## 2026-08-14 — SELECTIVE DISCLOSURE (user-controlled viewing keys): owner states the standing NO-SYSTEMIC-BACKDOOR position. Mechanism ALREADY DESIGNED, half ALREADY SHIPPED — do not build it twice
+
+**Owner statement, recorded as the standing constraint:** the protocol rejects a systemic
+backdoor entirely. Absolute privacy by default; users hold a SPEND key (authorize state
+transitions) and a separate VIEW key (decrypt their own transaction graph). An investigated user
+may VOLUNTARILY hand the view key to an auditor to prove innocence. If bad actors refuse,
+authorities use traditional off-chain investigative methods. The protocol stays mathematically
+pure. **No key escrow, no protocol-level disclosure compulsion, no third-party master key —
+ever.** This is a HARD CONSTRAINT, not a design goal.
+
+### ALREADY SHIPPED (A2, 2026-07-09, commit 268cfaa) — do not re-specify
+
+`docs/proofs/AuditLayerSoundness.md` (Status: SHIPPED), gated by `determ test-audit-keys`
+(35 assertions, in FAST via `tools/test_audit_keys.sh`):
+* **`ROTATE_AUDIT_KEY = 15`** (`block.hpp:226`) — set / rotate / clear an account's standing
+  audit pubkey; payload 32 opaque bytes; state leaf `"ak:"+addr` = `SHA256(pk_bytes)`, emitted
+  only while set (`chain.cpp:430-438`).
+* **`LOG_AUDIT_ACCESS = 16`** (`block.hpp:237`) — the on-chain record OF A VIEW-KEY DISCLOSURE:
+  payload `epoch_u64_BE(8) ‖ auditor_pk(32) ‖ context_hash(32)`, exactly 72 bytes;
+  **`AUDIT_EPOCH_ALL = UINT64_MAX`** is the full-history sentinel (`block.hpp:245`). The tx IS
+  the record; state tracks only a per-account count on `"al:"+addr`. A standing `ak:` key is NOT
+  required — ad-hoc disclosure is supported.
+Both are FEE-ONLY, owner-bound, fail-closed, additive and atomic.
+
+### DESIGNED, NOT SHIPPED (v2.22 / v2.24, TIER: FUTURE, `docs/V2-DESIGN.md`)
+
+* Per-epoch view-key derivation: `vk_epoch_n = HKDF(view_master_sk, "VK" ‖ chain_id ‖
+  account_addr ‖ epoch_n)` (`V2-DESIGN.md:1433`).
+* Per-tx ephemeral-DH amount handshake: `aek = HKDF-SHA-256(ss, "AMT" ‖ epoch_n ‖ tx_hash)`.
+* `audit_decrypt_tx(tx_hash, vk_epoch_n)` on an isolated audit-mode RPC socket
+  (`Config::audit_mode`, `V2-DESIGN.md:1525`). The server holds NO auditor secrets.
+
+### THE EPOCH GRANULARITY IS WHAT MAKES THE PFS CLAIM TRUE — state it precisely
+
+A SINGLE STATIC view key that decrypts all history is the OPPOSITE of forward secrecy: disclosing
+it once discloses everything, past and future, irrevocably. The shipped design is already
+stronger than the owner's statement: keys are PER-EPOCH, so a disclosure is a BOUNDED WINDOW, and
+`AUDIT_EPOCH_ALL` is an explicit, separately-recorded opt-out of that bound. **PFS is preserved
+for epochs not disclosed — it is not preserved within a disclosed epoch, and it is fully waived
+by `AUDIT_EPOCH_ALL`.** Any doc asserting unqualified PFS alongside view-key disclosure is wrong.
+
+### THREE HAZARDS THIS POSITION INHERITS
+
+1. **v2.22 BEFORE v2.24 makes the compliance posture go BACKWARDS — the project's own design doc
+   says so** (`V2-DESIGN.md:1433`): once amounts become Pedersen commitments the auditor cannot
+   read TRANSFER amounts at all, and without the per-epoch derivation + amount handshake the
+   v2.22 chain is **more opaque than v1.x**. Sequencing is load-bearing: v2.22 and v2.24 ship
+   together or the disclosure story regresses.
+2. **DIRECT CONFLICT with the no-cryptocurrency reduction (0fe6eda).** View keys decrypt a
+   TRANSACTION GRAPH; the reduction deletes the CT/shielded surface that graph lives in, and that
+   surface is a large share of the value/CT-derived genesis-frozen commitment the reduction was
+   argued to reclaim. **These two directives are not jointly executable as stated.** If the
+   no-currency reduction proceeds, "selective disclosure" must be re-scoped to MQ/DApp encrypted
+   PAYLOADS (`EncryptedNoteDeliveryDesign.md`, `REGISTER_NOTE_KEY = 17`) rather than to amounts —
+   a different design with a different threat model. **OWNER DECISION REQUIRED; genesis-deadline
+   on both sides.**
+3. **A live CONFIRMED defect undermines the privacy-by-default premise:** CT proof randomness is
+   derived only from `(nonce_seed, tx_nonce)` and NOT from the statement (`light/ct_tx.cpp:245`),
+   so rebuilding a transfer at the same nonce DISCLOSES THE AMOUNTS. Privacy-by-default is not
+   currently true on that path.
+
+**Nothing implemented this turn. No parallel doc spawned** (doctrine: extend, do not spawn) — the
+mechanism's authoritative homes remain `AuditLayerSoundness.md` (shipped) and `V2-DESIGN.md`
+(TIER: FUTURE); this entry records the OWNER RATIONALE, which neither carried.
+
+**Authority:** owner statement 2026-08-14, recorded by Claude Opus 5.
