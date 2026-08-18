@@ -3921,7 +3921,7 @@ ever.** This is a HARD CONSTRAINT, not a design goal.
   required — ad-hoc disclosure is supported.
 Both are FEE-ONLY, owner-bound, fail-closed, additive and atomic.
 
-### DESIGNED, NOT SHIPPED (v2.22 / v2.24, TIER: FUTURE, `docs/V2-DESIGN.md`)
+### DESIGNED, NOT SHIPPED (v2.22 / v2.24, tier FUTURE, `docs/V2-DESIGN.md`)
 
 * Per-epoch view-key derivation: `vk_epoch_n = HKDF(view_master_sk, "VK" ‖ chain_id ‖
   account_addr ‖ epoch_n)` (`V2-DESIGN.md:1433`).
@@ -3960,6 +3960,6 @@ by `AUDIT_EPOCH_ALL`.** Any doc asserting unqualified PFS alongside view-key dis
 
 **Nothing implemented this turn. No parallel doc spawned** (doctrine: extend, do not spawn) — the
 mechanism's authoritative homes remain `AuditLayerSoundness.md` (shipped) and `V2-DESIGN.md`
-(TIER: FUTURE); this entry records the OWNER RATIONALE, which neither carried.
+(tier FUTURE); this entry records the OWNER RATIONALE, which neither carried.
 
 **Authority:** owner statement 2026-08-14, recorded by Claude Opus 5.
