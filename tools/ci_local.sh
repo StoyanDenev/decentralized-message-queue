@@ -270,7 +270,8 @@ for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
          test_light_state_root_binding_guard \
          test_light_resume_monotonicity_guard \
          test_light_keybind_surface \
-         test_security_ledger_coherence; do
+         test_security_ledger_coherence \
+         test_producer_admit_wiring_guard; do
   if [ -f "tools/$g.sh" ]; then
     if bash "tools/$g.sh" >/dev/null 2>&1; then
       echo "  PASS: $g"

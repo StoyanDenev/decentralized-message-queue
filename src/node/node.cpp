@@ -1382,7 +1382,8 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
-                                         round_shard_tip_candidates_, round_shard_tip_witnesses_);
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                         tx_admit_locked());
 
     // v2.1 / S-033 activation: populate state_root from the post-apply
     // state. Dry-run apply on a Chain copy to compute the commitment
@@ -1499,7 +1500,8 @@ void Node::try_finalize_round() {
                                     inbound_snapshot,
                                     ordered_secrets,
                                     current_source_eligible_count(),
-                                    round_shard_tip_candidates_, round_shard_tip_witnesses_);
+                                    round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                    tx_admit_locked());
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     // S-038 closure: populate body.state_root with the post-apply state
@@ -2778,6 +2780,18 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     return verify(pk, sb.data(), sb.size(), tx.sig);
 }
 
+TxAdmit Node::tx_admit_locked() const {
+    // Same height + same registry view as apply_block_locked will use for the
+    // block build_body is about to assemble (b.index = height(); registry =
+    // build_from_chain(chain_, b.index)).
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = std::make_shared<const NodeRegistry>(
+        NodeRegistry::build_from_chain(chain_, at));
+    return [this, at, reg](const chain::Transaction& tx, uint64_t expected_nonce) {
+        return validator_.check_transaction(tx, at, chain_, *reg, expected_nonce).ok;
+    };
+}
+
 // S-008 helpers (mempool admission policy).
 //
 // mempool_count_from: count tx_by_account_nonce_ entries whose key.first
@@ -3171,7 +3185,8 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          inbound_snapshot,
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
-                                         round_shard_tip_candidates_, round_shard_tip_witnesses_);
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                         tx_admit_locked());
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {

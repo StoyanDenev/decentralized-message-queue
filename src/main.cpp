@@ -971,6 +971,12 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-producer-admit                  S-056/S-059/S-061/S-062 gate — build_body
+                                              asks the verifier's check_transaction
+                                              (TxAdmit) before including a tx: over-cap
+                                              payload / wrapping amount+fee / malformed
+                                              REGISTER / unknown TxType are EXCLUDED
+                                              (controls: included without the predicate)
   determ test-sr5-misroute-receipt            SR-5 NEGATIVE gate — a cross-shard
                                               receipt with dst_shard != ρ(to) is
                                               REJECTED by check_cross_shard_receipts
@@ -13183,6 +13189,166 @@ int main(int argc, char** argv) {
                            : "  PASS: test-al3-unknown-tx-type\n");
         return fail ? 1 : 0;
     }
+    if (cmd == "test-producer-admit") {
+        // 2026-09-14 — SECURITY.md S-056 / S-059 / S-061 / S-062, the "producer
+        // includes what the verifier rejects" halt class. build_body mirrored none
+        // of check_transactions' per-tx rules, so a transaction every node rejects
+        // was included, the self-assembled block was rejected everywhere, nothing
+        // evicted it (apply_block_locked returns before the only eviction site)
+        // and it was re-selected every round. The fix: check_transactions' loop
+        // body is now BlockValidator::check_transaction — the ONE per-tx rule set
+        // — and build_body asks it (TxAdmit, wired by Node::tx_admit_locked)
+        // before including a candidate. This gate drives build_body directly
+        // with that predicate. Both-legs design: every "excluded" arm has a
+        // control showing the SAME tx is included when no predicate is given, so
+        // the exclusion is the predicate's verdict and not a fixture artifact
+        // (an unfunded sender, a bad nonce), plus an equivalence arm pinning the
+        // per-tx predicate to the block-level check_transactions verdict.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        // One sender per fixture: build_body admits at most one tx per (from,
+        // nonce), so sharing a sender would let the ORDER of hashes, not the
+        // predicate, decide which one lands.
+        crypto::NodeKey alice = mk_key(0x40);   // genesis creator (registered)
+        crypto::NodeKey carol = mk_key(0x50);   // genesis creator (registered)
+        crypto::NodeKey anonf = mk_key(0x70);   // funded anonymous account
+        crypto::NodeKey anong = mk_key(0x80);   // second funded anonymous account
+        crypto::NodeKey anonu = mk_key(0x90);   // UNFUNDED anonymous account
+        const std::string anon_funded   = make_anon_address(anonf.pub);
+        const std::string anon_funded2  = make_anon_address(anong.pub);
+        const std::string anon_unfunded = make_anon_address(anonu.pub);
+
+        GenesisConfig cfg;
+        cfg.chain_id = "producer-admit";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = alice.pub; c0.initial_stake = 1000;
+        GenesisCreator c1; c1.domain = "carol"; c1.ed_pub = carol.pub; c1.initial_stake = 1000;
+        cfg.initial_creators = { c0, c1 };
+        GenesisAllocation ga; ga.domain = "alice";      ga.balance = 1000;
+        GenesisAllocation gb; gb.domain = anon_funded;  gb.balance = 1000;
+        GenesisAllocation gc; gc.domain = anon_funded2; gc.balance = 1000;
+        cfg.initial_balances = { ga, gb, gc };
+        Chain chain; chain.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        BlockValidator v;
+        const uint64_t at = chain.height();   // the index build_body assigns
+
+        auto sign = [](Transaction& tx, const crypto::NodeKey& k) {
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(k, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+        };
+        auto mk = [&](TxType t, const std::string& from, const crypto::NodeKey& k,
+                      uint64_t amount, uint64_t fee, uint64_t nonce,
+                      std::vector<uint8_t> payload) {
+            Transaction tx; tx.type = t; tx.from = from; tx.to = "bob";
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce; tx.payload = std::move(payload);
+            sign(tx, k); return tx;
+        };
+        // The verifier's predicate, exactly as Node::tx_admit_locked wires it.
+        TxAdmit admit = [&](const Transaction& tx, uint64_t nonce) {
+            return v.check_transaction(tx, at, chain, reg, nonce).ok;
+        };
+        // The pre-fix assembler: admit everything (the controls).
+        TxAdmit pass_all = [](const Transaction&, uint64_t) { return true; };
+        // build_body over a store holding exactly `txs`, one K=1 committee
+        // ("alice") whose Phase-1 list names every hash.
+        auto build = [&](const std::vector<Transaction>& txs, const TxAdmit& a) {
+            std::map<Hash, Transaction> store;
+            ContribMsg cm; cm.block_index = at; cm.signer = "alice";
+            for (auto& t : txs) { store[t.hash] = t; cm.tx_hashes.push_back(t.hash); }
+            std::sort(cm.tx_hashes.begin(), cm.tx_hashes.end());
+            return build_body(store, chain, {}, {"alice"}, {cm}, Hash{}, 1,
+                              ConsensusMode::MUTUAL_DISTRUST, "", {}, {}, {}, 0, {}, {}, a);
+        };
+        auto has = [](const Block& b, const Transaction& t) {
+            for (auto& x : b.transactions) if (x.hash == t.hash) return true;
+            return false;
+        };
+        // The verifier's own verdict on a body's transactions (check_transactions
+        // reads only b.transactions + b.index — no committee machinery needed).
+        auto verifier_accepts = [&](const Block& b) {
+            return v.check_transactions_for_test(b, chain, reg).ok;
+        };
+
+        // Fixtures — one per recorded halt, plus a valid control.
+        Transaction ok_tx    = mk(TxType::TRANSFER, anon_funded, anonf, 1, 0, 0, {});
+        Transaction big_pay  = mk(TxType::TRANSFER, anon_funded2, anong, 1, 0, 0,
+                                  std::vector<uint8_t>(TRANSFER_PAYLOAD_MAX + 72, 0xAB)); // S-056
+        Transaction overflow = mk(TxType::TRANSFER, anon_unfunded, anonu, 1, UINT64_MAX, 0, {}); // S-059
+        std::vector<uint8_t> bad_reg(carol.pub.begin(), carol.pub.end());
+        bad_reg.push_back(200);                                   // region_len 200 > 32
+        bad_reg.insert(bad_reg.end(), 7, 'x');
+        Transaction bad_register = mk(TxType::REGISTER, "carol", carol, 0, 0, 0, bad_reg); // S-061
+        Transaction unknown_ty   = mk(static_cast<TxType>(99), "alice", alice, 1, 0, 0, {}); // S-062
+
+        // CONTROLS: the pre-fix assembler (admit everything) includes every one
+        // of them (the fixture reaches the switch: funded / wrapping / fee-0 /
+        // fall-through) — and the verifier REJECTS the body it built: the halt.
+        {
+            Block s0 = build({ok_tx, big_pay, overflow, bad_register, unknown_ty}, pass_all);
+            check(has(s0, ok_tx),        "control: a valid anon TRANSFER is included by the admit-everything assembler");
+            check(has(s0, big_pay),      "control (S-056): the over-cap TRANSFER payload is included by the admit-everything assembler — the hole");
+            check(has(s0, overflow),     "control (S-059): amount+fee wrapping to 0 is included from an UNFUNDED sender by the admit-everything assembler — the hole");
+            check(has(s0, bad_register), "control (S-061): a malformed REGISTER (region_len 200) is included by the admit-everything assembler — the hole");
+            check(has(s0, unknown_ty),   "control (S-062): an unknown TxType (99) falls through build_body's switch in the admit-everything assembler — the hole");
+            check(!verifier_accepts(s0), "control: the verifier REJECTS that body (every node would; nothing evicts) — the halt this gate closes");
+        }
+        // WITH the verifier's predicate: exactly the valid transaction survives,
+        // and the verifier accepts the body.
+        {
+            Block s1 = build({ok_tx, big_pay, overflow, bad_register, unknown_ty}, admit);
+            check(has(s1, ok_tx),         "admit: the valid anon TRANSFER is still included (no over-rejection)");
+            check(!has(s1, big_pay),      "admit (S-056): the over-cap TRANSFER payload is EXCLUDED by the verifier's TRANSFER_PAYLOAD_MAX rule");
+            check(!has(s1, overflow),     "admit (S-059): the wrapping amount+fee is EXCLUDED by the verifier's S-049 guard");
+            check(!has(s1, bad_register), "admit (S-061): the malformed REGISTER is EXCLUDED by the verifier's REGISTER geometry rules");
+            check(!has(s1, unknown_ty),   "admit (S-062): the unknown TxType is EXCLUDED by the verifier's fail-closed default");
+            check(s1.transactions.size() == 1, "admit: nothing else was included");
+            check(verifier_accepts(s1),   "admit: the verifier ACCEPTS the body the predicate-driven assembler built");
+        }
+        // Fail-safe: an EMPTY predicate admits nothing (a caller that forgets
+        // it builds an empty body, never an unvetted one).
+        {
+            Block s3 = build({ok_tx}, TxAdmit{});
+            check(s3.transactions.empty(), "fail-safe: an empty predicate admits nothing");
+        }
+        // Nonce simulation: the predicate is asked with the producer's running
+        // nonce, so a valid second tx from the same sender is admitted too.
+        {
+            Transaction a0 = mk(TxType::TRANSFER, "alice", alice, 1, 0, 0, {});
+            Transaction a1 = mk(TxType::TRANSFER, "alice", alice, 1, 0, 1, {});
+            Block s2 = build({a1, a0}, admit);
+            check(has(s2, a0) && has(s2, a1),
+                  "admit: two consecutive-nonce txs from one sender are both included (predicate sees the simulated nonce)");
+        }
+        // ONE definition site: for every fixture the per-tx predicate agrees with
+        // the block-level check_transactions verdict on a single-tx block.
+        {
+            int agree = 0;
+            for (const Transaction& t : {ok_tx, big_pay, overflow, bad_register, unknown_ty}) {
+                Block b; b.index = at; b.transactions = { t };
+                bool blk = v.check_transactions_for_test(b, chain, reg).ok;
+                bool one = v.check_transaction(t, at, chain, reg, 0).ok;
+                if (blk == one) ++agree;
+            }
+            check(agree == 5, "equivalence: check_transaction agrees with check_transactions on all 5 fixtures");
+        }
+
+        std::cout << (fail ? "  FAIL: test-producer-admit\n"
+                           : "  PASS: test-producer-admit\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-sr5-misroute-receipt") {
         // SR-5 (ShardRoutingSoundness, Theorem SR-5 — misroute detection): a block
         // claiming a cross-shard receipt whose dst_shard != ρ_{S,salt}(to) is
@@ -13647,7 +13813,8 @@ int main(int argc, char** argv) {
             std::vector<std::string> doms = {"n1", "n2", "n3"};
             return node::build_body(store, chain, {}, doms, contribs, Hash{}, 3,
                                      ConsensusMode::MUTUAL_DISTRUST, "", {}, {}, {},
-                                     0, candidates, wits);
+                                     0, candidates, wits,
+                                     /*admit=*/[](const Transaction&, uint64_t) { return true; });
         };
         auto do_build = [&](const std::vector<node::ContribMsg>& contribs,
                             const std::vector<ShardTipRecord>& candidates) {

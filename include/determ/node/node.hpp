@@ -542,6 +542,12 @@ private:
     //
     // Caller must hold state_mutex_.
     bool verify_tx_signature_locked(const chain::Transaction& tx) const;
+    // The producer-side admission predicate handed to build_body: the
+    // verifier's own BlockValidator::check_transaction, evaluated against the
+    // head state and the registry the tentative block will be validated
+    // against (S-056/S-059/S-061/S-062 — the assembler must never include a
+    // transaction every node would reject). Caller must hold state_mutex_.
+    TxAdmit tx_admit_locked() const;
     void on_contrib(const ContribMsg& msg);
     void on_block_sig(const BlockSigMsg& msg);
     // Called by start_delay_compute when replaying buffered sigs; assumes

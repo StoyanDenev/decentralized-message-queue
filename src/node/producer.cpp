@@ -1141,7 +1141,8 @@ Block build_body(
     const std::vector<Hash>&              ordered_secrets,
     uint32_t                              eligible_count,
     const std::vector<chain::ShardTipRecord>& shard_tip_candidates,
-    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses) {
+    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses,
+    const TxAdmit&                        admit) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
@@ -1320,6 +1321,11 @@ Block build_body(
     for (auto& tx : ordered) {
         uint64_t& nn = get_nonce(tx.from);
         if (tx.nonce != nn) continue;
+        // The verifier's per-tx rules (S-056/S-059/S-061/S-062): never include
+        // what every node would reject — a rejected self-assembled block
+        // evicts nothing, so the offending tx would be re-selected forever.
+        // An EMPTY predicate admits nothing (fail-safe).
+        if (!admit || !admit(tx, nn)) continue;
 
         uint64_t& sb = get_bal(tx.from);
         switch (tx.type) {

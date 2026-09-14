@@ -412,6 +412,20 @@ private:
                                const NodeRegistry& registry) const;
     Result check_timestamp(const chain::Block& b) const;
 
+public:
+    // The verifier's per-transaction accept rules — the ONE definition site
+    // (check_transactions walks a block through it in order). Public so the
+    // producer asks the same predicate before a transaction enters a block
+    // (Node::tx_admit_locked -> build_body): the assembler must never include
+    // what the verifier rejects, because a rejected self-assembled block
+    // evicts nothing and the chain halts (SECURITY.md S-056/S-059/S-061/S-062).
+    // `expected_nonce` is the caller's simulated next nonce for tx.from; the
+    // caller advances it on success. Verifies the transaction signature.
+    Result check_transaction(const chain::Transaction& tx, uint64_t block_index,
+                             const chain::Chain& chain, const NodeRegistry& registry,
+                             uint64_t expected_nonce) const;
+private:
+
     // Resolve the rand source at `epoch_start_height` for committee
     // selection. Consults the external provider first; on miss, falls
     // back to chain.at(epoch_start - 1).cumulative_rand or chain.head()

@@ -5,6 +5,7 @@
 #include <determ/chain/chain.hpp>
 #include <determ/crypto/keys.hpp>
 #include <determ/types.hpp>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -16,6 +17,11 @@ namespace determ::node {
 // Each committee member broadcasts their proposed tx_hashes plus a fresh
 // dh_input (32 random bytes), Ed25519-signed. The union of K tx_hashes lists
 // is the canonical tx set; the K dh_inputs combine into the delay-hash seed.
+// Producer-side admission predicate: (tx, expected_nonce) -> may the assembler
+// include this transaction at the next block? Wired to the verifier's
+// BlockValidator::check_transaction by Node::tx_admit_locked.
+using TxAdmit = std::function<bool(const chain::Transaction&, uint64_t expected_nonce)>;
+
 struct ContribMsg {
     uint64_t           block_index{0};
     std::string        signer;
@@ -627,6 +633,18 @@ chain::Block build_body(
     // cannot fire in practice: record + witness are buffered atomically in
     // on_shard_tip). Empty by default → any legacy caller folding records without
     // witnesses folds NOTHING (fail-safe, not fail-open).
-    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses = {});
+    const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses = {},
+    // 2026-09-14 (SECURITY.md S-056/S-059/S-061/S-062): the verifier's own
+    // per-transaction accept rules, asked for every candidate BEFORE it is
+    // included (Node passes BlockValidator::check_transaction against the head
+    // state the block will be validated against). build_body previously
+    // mirrored none of those rules, so a transaction the verifier rejects was
+    // included, every node rejected the self-assembled block, nothing evicted
+    // the transaction and the chain halted. Fail-SAFE like the witnesses
+    // above: the default / an empty predicate admits NOTHING (a caller that
+    // forgets it builds an empty body, never an unvetted one — visible in any
+    // test with transactions). Node passes tx_admit_locked() at all three
+    // call sites (pinned by tools/test_producer_admit_wiring_guard.sh).
+    const TxAdmit&                            admit = {});
 
 } // namespace determ::node

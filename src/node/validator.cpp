@@ -675,15 +675,34 @@ BlockValidator::Result BlockValidator::check_header_rand_binding(
 BlockValidator::Result BlockValidator::check_transactions(
     const Block& b, const Chain& chain, const NodeRegistry& registry) const {
 
+    // Walk the block in order through the ONE per-transaction rule set
+    // (check_transaction below), simulating each sender's next nonce.
     std::map<std::string, uint64_t> next_nonce;
-    auto chain_next = [&](const std::string& from) -> uint64_t& {
-        auto it = next_nonce.find(from);
-        if (it == next_nonce.end())
-            it = next_nonce.emplace(from, chain.next_nonce(from)).first;
-        return it->second;
-    };
-
     for (auto& tx : b.transactions) {
+        auto it = next_nonce.find(tx.from);
+        if (it == next_nonce.end())
+            it = next_nonce.emplace(tx.from, chain.next_nonce(tx.from)).first;
+        if (auto r = check_transaction(tx, b.index, chain, registry, it->second); !r.ok)
+            return r;
+        it->second++;
+    }
+    return {true, ""};
+}
+
+// The verifier's per-transaction accept rules — the single definition site.
+// Moved VERBATIM out of the check_transactions loop (2026-09-14; the only
+// edits are `b.index` -> `block_index` and the nonce comparison against the
+// caller-supplied `expected_nonce`, which the caller advances on success).
+// Exposed so the producer (build_body, via Node::tx_admit_locked) asks the
+// SAME predicate before a transaction enters a block: previously build_body
+// mirrored none of these rules, so a transaction the verifier rejects was
+// included, the self-assembled block was rejected by every node, nothing
+// evicted the transaction, and the chain halted (SECURITY.md S-056 / S-059 /
+// S-061 / S-062). The rule still lives here, in the verifier.
+BlockValidator::Result BlockValidator::check_transaction(
+    const Transaction& tx, uint64_t block_index, const Chain& chain,
+    const NodeRegistry& registry, uint64_t expected_nonce) const {
+    {
         // Two-tier identity (rev. 4):
         //   - Anonymous accounts (from = "0x" + 64 hex): pubkey is the address
         //     itself. Restricted to TRANSFER (cannot register / stake / etc).
@@ -821,12 +840,10 @@ BlockValidator::Result BlockValidator::check_transactions(
             return {false, "tx signature invalid from: " + tx.from};
         }  // end non-PQ (Ed25519) signature path (§3.21)
 
-        uint64_t& n = chain_next(tx.from);
-        if (tx.nonce != n)
+        if (tx.nonce != expected_nonce)
             return {false, "nonce mismatch from " + tx.from
-                         + ": expected " + std::to_string(n)
+                         + ": expected " + std::to_string(expected_nonce)
                          + " got " + std::to_string(tx.nonce)};
-        n++;
 
         switch (tx.type) {
         case TxType::PQ_TRANSFER:   // §3.21: same nonce/payload limits as TRANSFER
@@ -862,10 +879,10 @@ BlockValidator::Result BlockValidator::check_transactions(
             // honest users never lose a fee to a too-early include.
             if (tx.type == TxType::UNSTAKE) {
                 uint64_t unlock = chain.stake_unlock_height(tx.from);
-                if (b.index < unlock) {
+                if (block_index < unlock) {
                     return {false,
                             "UNSTAKE before unlock_height: from=" + tx.from
-                          + " block_height=" + std::to_string(b.index)
+                          + " block_height=" + std::to_string(block_index)
                           + " unlock_height=" + std::to_string(unlock)};
                 }
             }
@@ -1024,11 +1041,11 @@ BlockValidator::Result BlockValidator::check_transactions(
             // R4 Phase 6: bounds checks. Read thresholds from Chain.
             uint64_t grace     = chain.merge_grace_blocks();
             uint64_t threshold = chain.merge_threshold_blocks();
-            if (ev->effective_height < b.index + grace) {
+            if (ev->effective_height < block_index + grace) {
                 return {false, "MERGE_EVENT effective_height "
                              + std::to_string(ev->effective_height)
                              + " is too soon (need >= "
-                             + std::to_string(b.index + grace) + ")"};
+                             + std::to_string(block_index + grace) + ")"};
             }
             if (ev->event_type == MergeEvent::BEGIN) {
                 // D3.6 / S-036 historical-witness admission gate (BEACON-only,
@@ -1042,11 +1059,11 @@ BlockValidator::Result BlockValidator::check_transactions(
                 // (>= 2K). Contiguity is automatic: iterating every integer height
                 // with absent->reject == "contiguous sub-2K coverage".
                 //
-                // This SUPERSEDES the old `evidence_window_start` vs `b.index`
+                // This SUPERSEDES the old `evidence_window_start` vs `block_index`
                 // arithmetic bound: that compared the SOURCE-height window against
                 // the BEACON (containing-block) height and — since shards outrun
                 // the beacon — false-rejected legitimate windows. The witness loop
-                // is the precise, source-axis check; b.index is no longer used.
+                // is the precise, source-axis check; block_index is no longer used.
                 if (threshold == 0) {
                     return {false, "MERGE_EVENT BEGIN: merge_threshold_blocks==0 "
                                    "(a zero-block window proves no distress)"};
@@ -1202,8 +1219,8 @@ BlockValidator::Result BlockValidator::check_transactions(
                              + tx.to};
             }
             // Block-relative active check: validator runs on the
-            // soon-to-be-applied block; b.index is the would-be height.
-            if (d_opt->inactive_from <= b.index) {
+            // soon-to-be-applied block; block_index is the would-be height.
+            if (d_opt->inactive_from <= block_index) {
                 return {false, "DAPP_CALL recipient DApp is deactivated: "
                              + tx.to};
             }
