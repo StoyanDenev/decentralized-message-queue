@@ -148,20 +148,23 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      (= step 4 of the five-step D2 authorization, DECISION-LOG 2026-07-28.)
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.
 
-LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16; ledger
-rows docs/SECURITY.md S-055..S-064). Nine OPEN Criticals and one High were recorded in
-the log after this section was last written and are now carried in the ledger:
-S-055 C0 F2 equivocation-view digest halt; S-056/S-059/S-061/S-062 the producer
-includes what the verifier rejects (TRANSFER payload cap, amount+fee overflow,
-REGISTER geometry, unknown TxType) and an invalid self-assembled block evicts
-nothing — remote, anonymous, zero-cost absorbing halts; S-057 unsigned unbounded
-pq_auth -> unrelayable blocks; S-058 a non-member contrib cancels the Phase-1 timer;
-S-060 REGISTER identity takeover (any key overwrites any validator's registry record;
-REOPENS S-052); S-063 DAPP_CALL frames report payments never made; S-064 cross-shard
-bundles unauthenticated (multi-shard only). Their ORDER against the D2 front is owner
-decision O-3 below — until it is taken ACTIVE FRONT stays D2 as written, but no thread
-may treat the ledger as clean. The node-local root shared by S-056/S-058/S-059/S-061/
-S-062 needs no consensus change; S-055/S-057/S-060 do (owner-gated, DECISION CLOCK).
+LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16 and
+2026-09-14; ledger rows docs/SECURITY.md S-055..S-067). Recorded in the log after this
+section was last written and carried in the ledger. STILL OPEN: S-055 C0 F2
+equivocation-view digest halt; S-057 unsigned unbounded pq_auth -> unrelayable blocks;
+S-058 a non-member contrib cancels the Phase-1 timer; S-060 REGISTER identity takeover
+(any key overwrites any validator's registry record; REOPENS S-052); S-063 DAPP_CALL
+frames report payments never made; S-064 cross-shard bundles unauthenticated
+(multi-shard only); S-065 CT proof verification (~2.2 s per bundle) under the
+consensus lock; S-067 UNSTAKE is unincludable (stake unrecoverable through consensus).
+CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
+producer now asks the verifier (BlockValidator::check_transaction is the ONE per-tx
+rule set; build_body admits only what it accepts; a resident rejected tx is evicted
+on the first build at each head) — and S-066 (gossip trusted the unsigned wire hash).
+Their ORDER against the D2 front is owner decision O-3 below — until it is taken
+ACTIVE FRONT stays D2 as written, but no thread may treat the ledger as clean.
+S-058 is node-local; S-055/S-057/S-060/S-065/S-067 need owner decisions (DECISION
+CLOCK R-5, R-7, R-8, R-10, R-11).
 
 FOLDED IN (DECISION-LOG 2026-08-13, directive 1): pre-launch item B1 is closed as a
 standalone item. Its (a) half — per-block append-only files replacing monolithic
@@ -357,6 +360,18 @@ surface the row to the owner before calling the milestone complete.
        increments. DECIDE BY: O-1.
   R-9  B4 interaction: MsgTypes 12/13/14 KEEP-or-DROP flips the audit's 14/8 to 12/10
        under the P1 sharding posture (DECISION-LOG e7c6fc2). DECIDE BY: B4 DROP execution.
+  R-10 S-065: CT proof verification (~2.2 s per aggregated range proof, measured
+       2026-09-14) runs under the exclusive consensus lock at validation and at the
+       first build of each head; and anonymous CT ingress is blocked only by the S-002
+       mirror's anon->TRANSFER-only rule, which is NOT the verifier's rule (the
+       documented light-client shield flow from an anonymous key is rejected at
+       ingress). Design: verification off the lock (or a CT budget) + settle the anon
+       CT ingress rule. DECIDE BY: before any CT deployment; node-local except the
+       ingress rule's consistency with the verifier.
+  R-11 S-067: no UNSTAKE is includable (unlock only after DEREGISTER, by which time the
+       domain is ineligible and the verifier rejects its every tx) — staked funds are
+       unrecoverable through consensus. Accept-rule change (an inactive registrant may
+       UNSTAKE). DECIDE BY: before genesis; frozen accept rule.
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
   No decision is not a neutral state.
 

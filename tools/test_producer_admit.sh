@@ -32,9 +32,13 @@
 # outside this gate's reach and is pinned by
 # tools/test_producer_admit_wiring_guard.sh (a ci_local doc/source guard).
 #
-# RESIDUAL (recorded, not closed here): the rejected transaction stays in the
-# mempool and is re-checked (signature / proof verification) on every rebuild
-# until evicted; the ingress mirror + eviction is the next increment.
+# RESIDUAL of this increment: the rejected transaction stayed in the mempool
+# and every resident transaction was re-checked (signature / proof
+# verification) on every rebuild — closed by the second increment
+# (tools/test_mempool_admit_eviction.sh: build-time rejection evicts, verdicts
+# memoized per head). NOT closed by either: the cost of the FIRST verification
+# of a resident transaction (an invalid-proof CT tx costs ~2 s under the
+# consensus lock) — SECURITY.md S-065.
 #
 # In-process (no cluster), so it runs in the FAST suite.
 # Run from repo root: bash tools/test_producer_admit.sh

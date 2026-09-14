@@ -472,6 +472,15 @@ public:
     // rpc_submit_tx throw. Byte-neutral non-const const-forwarder (on_tx mutates
     // tx_store_); same seam pattern as the validator *_for_test seams.
     void on_tx_for_test(const chain::Transaction& tx) { on_tx(tx); }
+    // 2026-09-14 seams: the producer-side admission predicate (tx_admit_locked)
+    // and its verification counter, so `determ test-mempool-admit-eviction`
+    // can drive the build-time eviction + the per-head memo without running
+    // a round. Same seam pattern as on_tx_for_test.
+    TxAdmit tx_admit_for_test() {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        return tx_admit_locked();
+    }
+    uint64_t admit_verifications_for_test() const { return admit_verifications_; }
     // MEM-inbound-receipt-pool cap test seam (BlockIngress): drive the SHARD-side
     // cross-shard receipt-bundle ingress in isolation so the falsifier can flood
     // distinct tx_hashes and assert pending_inbound_receipts_ caps at
@@ -546,8 +555,16 @@ private:
     // verifier's own BlockValidator::check_transaction, evaluated against the
     // head state and the registry the tentative block will be validated
     // against (S-056/S-059/S-061/S-062 — the assembler must never include a
-    // transaction every node would reject). Caller must hold state_mutex_.
-    TxAdmit tx_admit_locked() const;
+    // transaction every node would reject). 2026-09-14, second increment:
+    // a transaction it rejects is EVICTED (evict_tx_locked) — it cannot be
+    // included until state changes, keeping it would cost a full re-check per
+    // rebuild and would block the sender's later nonces — and verdicts are
+    // MEMOIZED per head (admit_memo_): check_transaction is deterministic over
+    // (tx, head state), so each resident tx is verified at most once per head
+    // instead of once per rebuild ((K+1)+ times a round). Caller must hold
+    // state_mutex_.
+    TxAdmit tx_admit_locked();
+    void    evict_tx_locked(const chain::Transaction& tx, const std::string& why);
     void on_contrib(const ContribMsg& msg);
     void on_block_sig(const BlockSigMsg& msg);
     // Called by start_delay_compute when replaying buffered sigs; assumes
@@ -698,6 +715,11 @@ private:
     static constexpr size_t MEMPOOL_MAX_PER_SENDER  = 100;
     std::map<Hash, chain::Transaction>                       tx_store_;
     std::map<std::pair<std::string, uint64_t>, Hash>         tx_by_account_nonce_;
+    // Per-head memo of tx_admit_locked verdicts, keyed by (tx hash, expected
+    // nonce); dropped whenever the head hash changes (append or reorg).
+    std::map<std::pair<Hash, uint64_t>, bool>                admit_memo_;
+    Hash                                                     admit_memo_head_{};
+    uint64_t                                                 admit_verifications_{0};
 
     // S-008: count txs in the mempool from a given sender. Iterates
     // tx_by_account_nonce_ in lexicographic order; std::map's ordered

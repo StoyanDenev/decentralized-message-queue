@@ -2780,16 +2780,44 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     return verify(pk, sb.data(), sb.size(), tx.sig);
 }
 
-TxAdmit Node::tx_admit_locked() const {
+TxAdmit Node::tx_admit_locked() {
     // Same height + same registry view as apply_block_locked will use for the
     // block build_body is about to assemble (b.index = height(); registry =
     // build_from_chain(chain_, b.index)).
     const uint64_t at = chain_.empty() ? 1 : chain_.height();
     auto reg = std::make_shared<const NodeRegistry>(
         NodeRegistry::build_from_chain(chain_, at));
+    // The memo is valid for one head: every input of check_transaction other
+    // than the tx itself is a function of the head (chain state, registry,
+    // genesis config), so a new head hash — append OR reorg — drops it.
+    const Hash head = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (head != admit_memo_head_) { admit_memo_.clear(); admit_memo_head_ = head; }
     return [this, at, reg](const chain::Transaction& tx, uint64_t expected_nonce) {
-        return validator_.check_transaction(tx, at, chain_, *reg, expected_nonce).ok;
+        const auto key = std::make_pair(tx.hash, expected_nonce);
+        if (auto m = admit_memo_.find(key); m != admit_memo_.end()) return m->second;
+        auto r = validator_.check_transaction(tx, at, chain_, *reg, expected_nonce);
+        ++admit_verifications_;
+        admit_memo_.emplace(key, r.ok);
+        if (!r.ok) evict_tx_locked(tx, r.error);
+        return r.ok;
     };
+}
+
+// A transaction the verifier rejects at the head cannot be included until
+// state changes. Keeping it would cost a full re-check per head (and, before
+// the memo, per rebuild) and would block the sender's later nonces; the
+// wallet resubmits when it becomes valid. Safe inside build_body: the
+// assembler iterates its own copies (`ordered`) taken before the admission
+// loop and never reads tx_store again, and every call site holds
+// state_mutex_ exclusively.
+void Node::evict_tx_locked(const chain::Transaction& tx, const std::string& why) {
+    tx_store_.erase(tx.hash);
+    auto idx = tx_by_account_nonce_.find({tx.from, tx.nonce});
+    if (idx != tx_by_account_nonce_.end() && idx->second == tx.hash)
+        tx_by_account_nonce_.erase(idx);
+    if (!cfg_.log_quiet)
+        std::cerr << "[node] mempool: evicted " << to_hex(tx.hash).substr(0, 16)
+                  << " from " << tx.from << " (" << why << ")\n";
 }
 
 // S-008 helpers (mempool admission policy).
@@ -2914,6 +2942,16 @@ bool Node::mempool_make_room_for(const chain::Transaction& tx) {
 
 void Node::on_tx(const chain::Transaction& tx) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // The wire `hash` field is UNSIGNED (Transaction::signing_bytes omits
+    // it) and, until 2026-09-14, the gossip path stored the tx under it
+    // verbatim while only rpc_submit_tx recomputed it. tx_store_, the
+    // (from, nonce) index, the Phase-1 hash lists and the admission memo are
+    // all keyed by it, so a peer could (a) overwrite any resident tx by
+    // claiming its hash and (b) poison a memoized verdict by RBF-swapping a
+    // valid tx for an invalid one under the same claimed hash — the S-056
+    // halt class through the mempool key. Same rule as rpc_submit_tx.
+    if (tx.hash != tx.compute_hash()) return;
 
     // Drop stale-nonce txs immediately.
     if (tx.nonce < chain_.next_nonce(tx.from)) return;

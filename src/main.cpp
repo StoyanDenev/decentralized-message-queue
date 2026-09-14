@@ -971,6 +971,10 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-mempool-admit-eviction          S-056/S-059/S-061/S-062 gate (2nd increment)
+                                              — a tx the producer-side predicate rejects
+                                              is EVICTED (store + (from,nonce) index) and
+                                              verdicts are memoized per head
   determ test-producer-admit                  S-056/S-059/S-061/S-062 gate — build_body
                                               asks the verifier's check_transaction
                                               (TxAdmit) before including a tx: over-cap
@@ -46883,6 +46887,156 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-rpc-tx-sig-admit\n"
                            : "  PASS: test-rpc-tx-sig-admit\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-mempool-admit-eviction") {
+        // 2026-09-14 — SECURITY.md S-056 / S-059 / S-061 / S-062, second
+        // increment: the producer-side admission predicate (Node::tx_admit_locked
+        // -> BlockValidator::check_transaction, wired into build_body by the first
+        // increment) now EVICTS a transaction it rejects and MEMOIZES its verdicts
+        // per head. Without eviction a rejected tx stayed resident, was re-checked
+        // on every rebuild and blocked its sender's later nonces; without the memo
+        // every resident tx was re-verified (signature, proofs) on each of the
+        // (K+1)+ rebuilds a round. In-process M=K=1 node harness (mirrors
+        // test-rpc-tx-sig-admit); the predicate is driven through the
+        // tx_admit_for_test seam so no round is needed; rpc_status()["mempool_size"]
+        // and admit_verifications_for_test() are the observables.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+        crypto::NodeKey key;
+        for (int i = 0; i < 32; ++i) key.priv_seed[i] = uint8_t(0x50 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        fs::path dir = fs::temp_directory_path() / "determ-mem-admit-evict";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir);
+        chain::GenesisConfig g;
+        g.chain_id = "mem-admit-evict"; g.m_creators = 1; g.k_block_sigs = 1;
+        g.epoch_blocks = 1;
+        chain::GenesisCreator gc;
+        gc.domain = "node0"; gc.ed_pub = key.pub; gc.initial_stake = 1000;
+        g.initial_creators.push_back(gc);
+        chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+        g.initial_balances.push_back(ab);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+        cfg.listen_port = 7673; cfg.key_path = (dir / "node0.key").string();
+        cfg.chain_path = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+        cfg.log_quiet = true;
+        fs::create_directories(cfg.data_dir);
+        crypto::save_node_key(key, cfg.key_path);
+        VirtualNetwork vnet;
+        auto loop = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        node::Node n(cfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+
+        auto signed_tx = [&](uint64_t nonce) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::TRANSFER; tx.from = "node0"; tx.to = "bob";
+            tx.amount = 10; tx.fee = 0; tx.nonce = nonce;
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        auto mempool = [&]() { return n.rpc_status()["mempool_size"].get<size_t>(); };
+
+        // The gossip path must key the mempool (and the memo) by the tx's
+        // CONTENT hash: a wire `hash` field that does not match the bytes is
+        // dropped (rpc_submit_tx already recomputed it; on_tx did not).
+        {
+            chain::Transaction forged = signed_tx(0);
+            forged.hash[0] ^= 0x01;                 // claim a different hash
+            n.on_tx_for_test(forged);
+            check(mempool() == 0, "ingress: a gossiped tx whose wire hash field mismatches its content is DROPPED");
+        }
+        auto signed_tx_fee = [&](uint64_t nonce, uint64_t fee) {
+            chain::Transaction tx = signed_tx(nonce);
+            tx.fee = fee;
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        // Memo poisoning: DIFFERENT bytes claiming a resident tx's hash must not
+        // enter the store (a memoized `true` for that hash would otherwise be
+        // re-read for the swapped bytes). Observable: a fee-3 RPC replacement
+        // is QUEUED afterwards — so the resident tx is still the fee-0 original,
+        // not the fee-5 impostor (which would have won replace-by-fee).
+        {
+            chain::Transaction p0 = signed_tx(0);            // fee 0
+            n.on_tx_for_test(p0);
+            check(mempool() == 1, "poison setup: a fee-0 tx is resident");
+            chain::Transaction impostor = signed_tx_fee(0, 5);
+            impostor.hash = p0.hash;                          // claims p0's hash
+            n.on_tx_for_test(impostor);
+            bool queued = false;
+            try { queued = n.rpc_submit_tx(signed_tx_fee(0, 3).to_json())
+                                .value("status", std::string{}) == "queued"; }
+            catch (const std::exception&) { queued = false; }
+            check(mempool() == 1 && queued,
+                  "memo cannot be poisoned: the impostor bytes under a claimed resident hash were DROPPED (the fee-0 original stayed and a fee-3 RPC replacement is queued)");
+            node::TxAdmit cleanup = n.tx_admit_for_test();
+            (void)cleanup(signed_tx_fee(0, 3), 5);            // evict the fee-3 resident
+            check(mempool() == 0, "poison teardown: the fee-3 resident was evicted through the seam");
+        }
+        chain::Transaction t0 = signed_tx(0);
+        n.on_tx_for_test(t0);
+        check(mempool() == 1, "setup: a valid tx is resident (admitted via on_tx)");
+
+        node::TxAdmit admit = n.tx_admit_for_test();
+        const uint64_t v0 = n.admit_verifications_for_test();
+        check(admit(t0, 0) && mempool() == 1,
+              "predicate: ACCEPTS the resident tx at its nonce and keeps it resident");
+        check(n.admit_verifications_for_test() == v0 + 1,
+              "memo: the first verdict at this head ran the verifier once");
+        check(admit(t0, 0) && n.admit_verifications_for_test() == v0 + 1,
+              "memo: the same (tx, nonce) at the same head is answered from the memo — no second verification");
+        check(!admit(t0, 5) && mempool() == 0,
+              "eviction: a tx the predicate REJECTS (asked at a nonce the verifier refuses) is EVICTED");
+        check(n.admit_verifications_for_test() == v0 + 2,
+              "memo: a different expected nonce is a different key — verified once more");
+
+        // The (from, nonce) index entry went with it: the sender's per-sender
+        // quota is not leaked. MEMPOOL_MAX_PER_SENDER future-nonce txs are all
+        // admitted after the eviction (a dangling index entry would count as
+        // one and reject the last).
+        constexpr size_t kPerSender = 100;   // == Node::MEMPOOL_MAX_PER_SENDER (private)
+        size_t admitted = 0;
+        for (uint64_t k = 0; k < kPerSender; ++k) {
+            size_t before = mempool();
+            n.on_tx_for_test(signed_tx(1 + k));
+            if (mempool() == before + 1) ++admitted;
+        }
+        check(admitted == kPerSender,
+              "eviction: the evicted tx's (from, nonce) index entry was released — the per-sender quota is intact");
+
+        // A NEW head drops the memo: a fresh predicate re-verifies.
+        {
+            const uint64_t v1 = n.admit_verifications_for_test();
+            node::TxAdmit admit2 = n.tx_admit_for_test();   // same head: memo kept
+            (void)admit2(signed_tx(1), 1);
+            check(n.admit_verifications_for_test() == v1 + 1,
+                  "memo: a not-yet-seen tx at the same head is verified");
+            n.tx_admit_for_test();                            // same head again
+            (void)admit2(signed_tx(1), 1);
+            check(n.admit_verifications_for_test() == v1 + 1,
+                  "memo: re-creating the predicate at the SAME head keeps the memo (hit, no verification)");
+        }
+        fs::remove_all(dir, fec);
+
+        std::cout << (fail ? "  FAIL: test-mempool-admit-eviction\n"
+                           : "  PASS: test-mempool-admit-eviction\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-inbound-receipt-cap") {
