@@ -35,6 +35,11 @@ public:
         current_ = 0;
     }
 
+    // True between arm() and cancel() (a fired timer keeps its id until the
+    // next arm/cancel, so this reads "not cancelled", which is what the
+    // round-state probes need). Test observability (S-058 gate).
+    bool armed() const { return current_ != 0; }
+
 private:
     EventLoop& loop_;
     uint64_t   current_ = 0;

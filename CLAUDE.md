@@ -152,7 +152,7 @@ LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16 and
 2026-09-14; ledger rows docs/SECURITY.md S-055..S-067). Recorded in the log after this
 section was last written and carried in the ledger. STILL OPEN: S-055 C0 F2
 equivocation-view digest halt; S-057 unsigned unbounded pq_auth -> unrelayable blocks;
-S-058 a non-member contrib cancels the Phase-1 timer; S-060 REGISTER identity takeover
+S-060 REGISTER identity takeover
 (any key overwrites any validator's registry record; REOPENS S-052); S-063 DAPP_CALL
 frames report payments never made; S-064 cross-shard bundles unauthenticated
 (multi-shard only); S-065 CT proof verification (~2.2 s per bundle) under the
@@ -160,11 +160,12 @@ consensus lock; S-067 UNSTAKE is unincludable (stake unrecoverable through conse
 CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
 producer now asks the verifier (BlockValidator::check_transaction is the ONE per-tx
 rule set; build_body admits only what it accepts; a resident rejected tx is evicted
-on the first build at each head) — and S-066 (gossip trusted the unsigned wire hash).
-Their ORDER against the D2 front is owner decision O-3 below — until it is taken
-ACTIVE FRONT stays D2 as written, but no thread may treat the ledger as clean.
-S-058 is node-local; S-055/S-057/S-060/S-065/S-067 need owner decisions (DECISION
-CLOCK R-5, R-7, R-8, R-10, R-11).
+on the first build at each head) — S-058 (the Phase-2 trigger is committee
+completeness, not map size; the Phase-1 timer is released only once complete) and
+S-066 (gossip trusted the unsigned wire hash). Their ORDER against the D2 front is
+owner decision O-3 below — until it is taken ACTIVE FRONT stays D2 as written, but
+no thread may treat the ledger as clean. S-055/S-057/S-060/S-065/S-067 need owner
+decisions (DECISION CLOCK R-5, R-7, R-8, R-10, R-11).
 
 FOLDED IN (DECISION-LOG 2026-08-13, directive 1): pre-launch item B1 is closed as a
 standalone item. Its (a) half — per-block append-only files replacing monolithic

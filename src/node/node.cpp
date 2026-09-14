@@ -1183,7 +1183,9 @@ void Node::start_contrib_phase() {
         handle_contrib_timeout();
     });
 
-    if (pending_contribs_.size() == current_creator_domains_.size())
+    // Pre-phase arrivals may already complete the committee (S-058: the same
+    // completeness predicate as on_contrib, never the map's size).
+    if (committee_contribs_complete_locked())
         enter_block_sig_phase();
 }
 
@@ -1200,7 +1202,6 @@ void Node::start_contrib_phase() {
 // would otherwise recurse without bound.
 void Node::enter_block_sig_phase() {
     if (phase_ != ConsensusPhase::CONTRIB) return;
-    contrib_timer_.cancel();
 
     std::vector<std::vector<Hash>> ordered_lists;
     std::vector<Hash>              ordered_dh_inputs;
@@ -1210,6 +1211,13 @@ void Node::enter_block_sig_phase() {
         ordered_lists.push_back(it->second.tx_hashes);
         ordered_dh_inputs.push_back(it->second.dh_input);
     }
+    // Only now — with every committee member's contrib in hand — is the
+    // Phase-1 timer released. S-058 (2026-09-14): it used to be cancelled
+    // BEFORE the completeness loop, so a call with a member still missing
+    // returned with the round's only recovery timer dead — a permanent wedge
+    // of every committee member reachable by one contrib from a registered
+    // NON-member (on_contrib admits any registry signer and counted it).
+    contrib_timer_.cancel();
     current_tx_root_    = compute_tx_root(ordered_lists);
     current_delay_seed_ = compute_delay_seed(chain_.height(),
         chain_.empty() ? Hash{} : chain_.head_hash(),
@@ -3137,9 +3145,19 @@ void Node::on_contrib(const ContribMsg& msg) {
 
     pending_contribs_[msg.signer] = msg;
 
-    if (phase_ == ConsensusPhase::CONTRIB &&
-        pending_contribs_.size() == current_creator_domains_.size())
+    // Trigger on COMMITTEE completeness, not on the map's size: on_contrib
+    // deliberately admits any registry signer (a contrib can precede this
+    // node's committee computation), so a registered non-member's contrib
+    // made the size match with a member still missing (S-058) — and, with
+    // it present, the size could never match again once the member arrived.
+    if (phase_ == ConsensusPhase::CONTRIB && committee_contribs_complete_locked())
         enter_block_sig_phase();
+}
+
+bool Node::committee_contribs_complete_locked() const {
+    for (auto& d : current_creator_domains_)
+        if (pending_contribs_.find(d) == pending_contribs_.end()) return false;
+    return !current_creator_domains_.empty();
 }
 
 void Node::on_block_sig(const BlockSigMsg& msg) {

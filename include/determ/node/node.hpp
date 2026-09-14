@@ -481,6 +481,26 @@ public:
         return tx_admit_locked();
     }
     uint64_t admit_verifications_for_test() const { return admit_verifications_; }
+    // 2026-09-14 seams for `determ test-contrib-trigger-membership` (S-058):
+    // inject a gossiped contrib and probe the round state.
+    void on_contrib_for_test(const ContribMsg& m) { on_contrib(m); }
+    // Direct call of the transition with whatever is pending — pins that an
+    // incomplete committee leaves the Phase-1 timer armed (S-058 ordering).
+    void enter_block_sig_phase_for_test() {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        enter_block_sig_phase();
+    }
+    struct RoundProbe {
+        uint8_t                  phase;             // ConsensusPhase
+        std::vector<std::string> creators;          // current committee
+        bool                     contrib_timer_armed;
+        size_t                   pending_contribs;
+    };
+    RoundProbe round_probe_for_test() const {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        return {static_cast<uint8_t>(phase_), current_creator_domains_,
+                contrib_timer_.armed(), pending_contribs_.size()};
+    }
     // MEM-inbound-receipt-pool cap test seam (BlockIngress): drive the SHARD-side
     // cross-shard receipt-bundle ingress in isolation so the falsifier can flood
     // distinct tx_hashes and assert pending_inbound_receipts_ caps at
@@ -566,6 +586,10 @@ private:
     TxAdmit tx_admit_locked();
     void    evict_tx_locked(const chain::Transaction& tx, const std::string& why);
     void on_contrib(const ContribMsg& msg);
+    // Every current committee member's Phase-1 contrib is in pending_contribs_
+    // (S-058: the transition trigger — never the map's size, which counts
+    // registered non-members too). Caller must hold state_mutex_.
+    bool committee_contribs_complete_locked() const;
     void on_block_sig(const BlockSigMsg& msg);
     // Called by start_delay_compute when replaying buffered sigs; assumes
     // state_mutex_ is already held by the caller.

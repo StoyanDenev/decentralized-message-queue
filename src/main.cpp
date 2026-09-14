@@ -971,6 +971,11 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-contrib-trigger-membership      S-058 gate — a registered NON-member's
+                                              contrib neither triggers Phase 2 nor
+                                              kills the Phase-1 timer; the last
+                                              member's contrib does (completeness,
+                                              not map size)
   determ test-mempool-admit-eviction          S-056/S-059/S-061/S-062 gate (2nd increment)
                                               — a tx the producer-side predicate rejects
                                               is EVICTED (store + (from,nonce) index) and
@@ -47037,6 +47042,211 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-mempool-admit-eviction\n"
                            : "  PASS: test-mempool-admit-eviction\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-contrib-trigger-membership") {
+        // 2026-09-14 — SECURITY.md S-058 (DECISION-LOG 2026-08-13 3dbe5f2 K3).
+        // on_contrib deliberately admits a contrib from ANY registry signer (it
+        // may precede this node's committee computation) but triggered the
+        // Phase-1 -> Phase-2 transition on the MAP SIZE reaching K; and
+        // enter_block_sig_phase cancelled the Phase-1 timer BEFORE checking that
+        // every committee member's contrib was present. One contrib from a
+        // registered NON-member therefore (a) made the size match with a member
+        // still missing -> the timer was cancelled and the call returned: no
+        // timeout, no abort claim, the round wedged; and (b) afterwards the size
+        // could never equal K again, so the missing member's later contrib could
+        // not trigger the transition either. Fix: trigger on committee
+        // COMPLETENESS, and release the timer only after the completeness loop.
+        // Harness: one node (node0) under a virtual-time loop with a 4-creator
+        // genesis (M=4, K=3); logical time is advanced once so the startup grace
+        // fires and node0 enters CONTRIB as a committee member; contribs are then
+        // injected through on_contrib_for_test and the round state read through
+        // round_probe_for_test.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+        constexpr int kM = 4, kK = 3;
+        std::vector<crypto::NodeKey> keys(kM);
+        std::vector<std::string>     doms;
+        for (int i = 0; i < kM; ++i) {
+            for (int j = 0; j < 32; ++j) keys[i].priv_seed[j] = uint8_t(0x60 + 16 * i + j);
+            determ_ed25519_pubkey_from_seed(keys[i].priv_seed.data(), keys[i].pub.data());
+            doms.push_back("node" + std::to_string(i));
+        }
+        auto key_of = [&](const std::string& d) -> const crypto::NodeKey& {
+            for (int i = 0; i < kM; ++i) if (doms[i] == d) return keys[i];
+            return keys[0];
+        };
+
+        // Bring up node0 on a genesis whose height-1 committee contains node0;
+        // the committee is a deterministic function of the genesis (chain_id
+        // varies the seed), so scan suffixes until node0 is selected.
+        fs::path dir = fs::temp_directory_path() / "determ-contrib-trigger";
+        std::unique_ptr<VirtualEventLoop>  loop;
+        std::unique_ptr<VirtualTransport>  transport;
+        std::unique_ptr<VirtualNetwork>    vnet;
+        std::unique_ptr<node::Node>        n;
+        determ::time::VirtualClock         vclock(1'700'000'000);
+        std::string chosen;
+        for (int attempt = 0; attempt < 32 && !n; ++attempt) {
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            chain::GenesisConfig g;
+            g.chain_id = "contrib-trigger-" + std::to_string(attempt);
+            g.m_creators = kM; g.k_block_sigs = kK; g.epoch_blocks = 1;
+            for (int i = 0; i < kM; ++i) {
+                chain::GenesisCreator gc; gc.domain = doms[i]; gc.ed_pub = keys[i].pub;
+                gc.initial_stake = 1000; g.initial_creators.push_back(gc);
+                chain::GenesisAllocation ab; ab.domain = doms[i]; ab.balance = 100000;
+                g.initial_balances.push_back(ab);
+            }
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+            cfg.listen_port = 7674; cfg.key_path = (dir / "node0.key").string();
+            cfg.chain_path = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = kM; cfg.k_block_sigs = kK;
+            cfg.log_quiet = true;
+            crypto::save_node_key(keys[0], cfg.key_path);
+            vnet      = std::make_unique<VirtualNetwork>();
+            loop      = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            transport = std::make_unique<VirtualTransport>(*loop, *vnet);
+            auto cand = std::make_unique<node::Node>(cfg, vclock, loop.get(), transport.get());
+            cand->start_external();
+            loop->run_until_idle();
+            loop->advance_to_next_timer();   // the 1500 ms startup grace -> IN_SYNC -> check_if_selected
+            loop->run_until_idle();
+            auto p = cand->round_probe_for_test();
+            const bool member = std::find(p.creators.begin(), p.creators.end(), "node0") != p.creators.end();
+            if (p.phase == 1 /*CONTRIB*/ && member && p.creators.size() == kK) {
+                n = std::move(cand); chosen = g.chain_id;
+            } else {
+                cand->stop(); cand.reset(); transport.reset(); loop.reset(); vnet.reset();
+            }
+        }
+        check(n != nullptr, "setup: node0 is a height-1 committee member in CONTRIB (genesis found by scan)");
+        if (!n) { fs::remove_all(dir, fec); std::cout << "  FAIL: test-contrib-trigger-membership\n"; return 1; }
+
+        auto probe = [&] { return n->round_probe_for_test(); };
+        auto p0 = probe();
+        std::vector<std::string> others;
+        std::string non_member;
+        for (auto& d : doms) {
+            if (d == "node0") continue;
+            if (std::find(p0.creators.begin(), p0.creators.end(), d) != p0.creators.end()) others.push_back(d);
+            else non_member = d;
+        }
+        check(others.size() == 2 && !non_member.empty(),
+              "setup: two other committee members and one registered NON-member identified");
+        check(p0.contrib_timer_armed && p0.pending_contribs == 1,
+              "setup: Phase-1 timer armed, node0's own contrib is the only one pending");
+
+        const Hash prev = n->rpc_status()["head_hash"].is_string()
+            ? from_hex_arr<32>(n->rpc_status()["head_hash"].get<std::string>()) : Hash{};
+        auto contrib_from = [&](const std::string& d, uint8_t fill) {
+            Hash dh{}; for (auto& b : dh) b = fill;
+            return node::make_contrib(key_of(d), d, /*block_index=*/1, prev, /*aborts_gen=*/0,
+                                      /*tx_snapshot=*/{}, dh);
+        };
+
+        // The attack: one member's contrib + the NON-member's contrib -> the
+        // pending map has K entries with a committee member still missing.
+        n->on_contrib_for_test(contrib_from(others[0], 0xA1));
+        n->on_contrib_for_test(contrib_from(non_member, 0xB2));
+        loop->run_until_idle();
+        auto p1 = probe();
+        check(p1.pending_contribs == kK,
+              "attack: K contribs are pending (node0 + one member + the non-member) with one member missing");
+        check(p1.phase == 1 /*CONTRIB*/,
+              "S-058: the round stays in CONTRIB — a non-member's contrib does not trigger the transition");
+        check(p1.contrib_timer_armed,
+              "S-058: the Phase-1 timer is STILL ARMED (was: cancelled before the completeness check — a permanent wedge)");
+        // Ordering inside the transition itself: even a DIRECT call with a
+        // member missing must leave the timer armed (the cancel sits after the
+        // completeness loop).
+        n->enter_block_sig_phase_for_test();
+        loop->run_until_idle();
+        auto p1b = probe();
+        check(p1b.phase == 1 && p1b.contrib_timer_armed,
+              "S-058: a direct transition call with a member missing returns with the Phase-1 timer STILL ARMED");
+
+        // Recovery: the missing member's contrib arrives -> completeness ->
+        // Phase 2, regardless of the extra (non-member) entry.
+        n->on_contrib_for_test(contrib_from(others[1], 0xC3));
+        loop->run_until_idle();
+        auto p2 = probe();
+        check(p2.phase == 2 /*BLOCK_SIG*/,
+              "S-058: the last member's contrib triggers Phase 2 although the map holds K+1 entries (completeness, not size)");
+        check(!p2.contrib_timer_armed,
+              "S-058: the Phase-1 timer is released once the committee is complete");
+
+        n->stop(); n.reset(); transport.reset(); loop.reset(); vnet.reset();
+
+        // The PRE-PHASE site (start_contrib_phase): the same genesis brought up
+        // again, this time with the non-member's AND both members' contribs
+        // buffered BEFORE the startup grace fires (on_contrib keeps pre-phase
+        // arrivals). With the old size trigger the map holds K+1 at phase start,
+        // `size == K` never fires, and the round waits for a timeout that then
+        // returns on "nothing missing" — the second wedge route. With the
+        // completeness predicate the round goes straight to Phase 2.
+        {
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            chain::GenesisConfig g;
+            g.chain_id = chosen;
+            g.m_creators = kM; g.k_block_sigs = kK; g.epoch_blocks = 1;
+            for (int i = 0; i < kM; ++i) {
+                chain::GenesisCreator gc; gc.domain = doms[i]; gc.ed_pub = keys[i].pub;
+                gc.initial_stake = 1000; g.initial_creators.push_back(gc);
+                chain::GenesisAllocation ab; ab.domain = doms[i]; ab.balance = 100000;
+                g.initial_balances.push_back(ab);
+            }
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+            cfg.listen_port = 7675; cfg.key_path = (dir / "node0.key").string();
+            cfg.chain_path = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = kM; cfg.k_block_sigs = kK;
+            cfg.log_quiet = true;
+            crypto::save_node_key(keys[0], cfg.key_path);
+            vnet      = std::make_unique<VirtualNetwork>();
+            loop      = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            transport = std::make_unique<VirtualTransport>(*loop, *vnet);
+            n = std::make_unique<node::Node>(cfg, vclock, loop.get(), transport.get());
+            n->start_external();
+            loop->run_until_idle();                      // grace timer armed, phase IDLE
+            const Hash prev2 = n->rpc_status()["head_hash"].is_string()
+                ? from_hex_arr<32>(n->rpc_status()["head_hash"].get<std::string>()) : Hash{};
+            auto pre = [&](const std::string& d, uint8_t fill) {
+                Hash dh{}; for (auto& b : dh) b = fill;
+                return node::make_contrib(key_of(d), d, 1, prev2, 0, {}, dh);
+            };
+            n->on_contrib_for_test(pre(non_member, 0xD4));
+            n->on_contrib_for_test(pre(others[0],  0xE5));
+            n->on_contrib_for_test(pre(others[1],  0xF6));
+            auto q0 = n->round_probe_for_test();
+            check(q0.phase == 0 /*IDLE*/ && q0.pending_contribs == 3,
+                  "pre-phase: three contribs (both members + the non-member) buffered before the round starts");
+            loop->advance_to_next_timer();               // grace -> IN_SYNC -> start_contrib_phase
+            loop->run_until_idle();
+            auto q1 = n->round_probe_for_test();
+            check(q1.phase == 2 /*BLOCK_SIG*/ && !q1.contrib_timer_armed,
+                  "S-058 (pre-phase site): with K members + a non-member already buffered, phase start goes straight to Phase 2 (completeness, not size)");
+            n->stop(); n.reset(); transport.reset(); loop.reset(); vnet.reset();
+        }
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-contrib-trigger-membership\n"
+                           : "  PASS: test-contrib-trigger-membership\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-inbound-receipt-cap") {
