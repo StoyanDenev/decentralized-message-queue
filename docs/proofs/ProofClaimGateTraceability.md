@@ -738,7 +738,7 @@ added to an existing subcommand).
 ## 3r. MakeContribCommitmentBackwardCompat T-1 CLOSED — v1 pre-image reference (FAST unit)
 
 > **UPDATE 2026-08-12 — the pinned form changed; the gate is re-anchored, still CLOSED.**
-> `make_contrib_commitment` became two-level: `SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖
+> `make_contrib_commitment` became two-level: `SHA-256("DTM-CONTRIB-v3" ‖ block_index u64 BE ‖ gen u64 BE ‖
 > body_root)` over `make_contrib_body_root` (`src/node/producer.cpp:332` / `:252`), which is the legacy
 > preimage **minus** the leading `block_index` append. The 18b leg's old external reference — the
 > one-level v1 4-append pre-image — was therefore legitimately broken by the shipped change (not by a

@@ -22,7 +22,7 @@ The signed digests are **not carried** — they are DERIVED by the verifier from
 
 ```
 D(kind, i, r)  =  SHA-256(TAG(kind) ‖ i u64 BE ‖ r)
-TAG(0) = "DTM-BLKDIG-v2"      TAG(1) = "DTM-CONTRIB-v2"
+TAG(0) = "DTM-BLKDIG-v3"      TAG(1) = "DTM-CONTRIB-v3"      (shipped: D = SHA-256(TAG ‖ i ‖ gen ‖ r); tags corrected 2026-09-14)
 ```
 
 Block validity V11 (Preliminaries §5) requires all of:
@@ -88,9 +88,9 @@ This residual is:
 
 - **pre-existing and strictly narrower** than before the fix (previously ANY two heights sufficed; now only the same height does, which requires the adversary to catch an actual abort re-round in which the victim was re-selected);
 - **not closed**, and **not claimed closed** anywhere in this corpus;
-- closable by binding the round / `aborts_gen` into the opening — `D = SHA-256(TAG ‖ i ‖ gen ‖ r)` — a further pre-genesis preimage change with the same "every digest value changes" consequence.
+- the round / `aborts_gen` IS bound into the opening at HEAD — `D = SHA-256(TAG ‖ i ‖ gen ‖ r)` (v3 tags; `src/node/producer.cpp` `compose_block_digest` / `compose_contrib_commitment`) and the verifier asserts `gen_a == gen_b` (`src/node/validator.cpp`, "(2b) THE ROUND ASSERT") — so a cross-round pair no longer satisfies V11.
 
-**Status: OPEN — needs owner review.** No owner authorization exists for the `gen`-binding change, so no proof in this corpus may assume it. Recorded here and in `docs/PROTOCOL.md` §6.1 rather than asserted away, which is the mistake Case (b) documents.
+**Status 2026-09-14: OPEN — the gen binding is SHIPPED and EVADABLE.** `gen` is signer-chosen off-chain, so a deliberate splitter signs side B at `gen + 1` and is acquitted, while an honest node's two openings are bit-identical to a splitter's (only delivery differs) — DECISION-LOG 2026-08-13 `b5838fb` and the six 2026-08-12 designs "final".."final+9": no predicate over two signed openings is both sound and complete under asynchrony. The consequence is being relocated out of consensus (CLAUDE.md SLASHING block; owner item O-1) and the forfeiture code is still live at HEAD until that lands. No proof in this corpus may assume Case (c) closed; do not re-propose a two-opening predicate.
 
 **Combining cases**: a finalized `EquivocationEvent` falsely accusing honest `v_i` requires either:
 
@@ -102,7 +102,7 @@ Therefore, for any honest `v_i` satisfying H3, `Pr[v_i is slashed] ≤ 2⁻¹²�
 
 ### 2.1 Domain separation is load-bearing, not hygiene
 
-The two outer tags `TAG(0) = "DTM-BLKDIG-v2"` and `TAG(1) = "DTM-CONTRIB-v2"` **must differ**. Suppose they did not. At one height `h` an honest committee member produces both a block signature over `D(h, r_blk)` and a contrib signature over `D(h, r_ctb)`, with `r_blk ≠ r_ctb` (different preimages entirely). Under a shared tag those are two distinct digests at one height signed by one key — a *complete* V11-valid event assembled entirely from honest behavior. Domain separation is therefore a **correctness requirement of this theorem**, not a stylistic convention: it is what makes "two distinct body roots at one height under one tag" mean "the signer committed to two conflicting things of the same kind".
+The two outer tags `TAG(0) = "DTM-BLKDIG-v3"` and `TAG(1) = "DTM-CONTRIB-v3"` **must differ**. Suppose they did not. At one height `h` an honest committee member produces both a block signature over `D(h, r_blk)` and a contrib signature over `D(h, r_ctb)`, with `r_blk ≠ r_ctb` (different preimages entirely). Under a shared tag those are two distinct digests at one height signed by one key — a *complete* V11-valid event assembled entirely from honest behavior. Domain separation is therefore a **correctness requirement of this theorem**, not a stylistic convention: it is what makes "two distinct body roots at one height under one tag" mean "the signer committed to two conflicting things of the same kind".
 
 Gate: the `test-abort-cert-validation` EQV block carries a `kind = 1` accept control and a cross-kind reject (contrib-signed signatures presented as `kind = 0` are REJECTED), pinning this leg specifically.
 
@@ -167,7 +167,7 @@ In the post-quantum era under Grover, the bound degrades to roughly `Q · 2⁻�
 | V11 validation (kind gate, height assert, derived-digest verify) | `src/node/validator.cpp:380 check_equivocation_events` |
 | Digest compose — `D(0, ·, ·)` / body | `src/node/producer.cpp:968 compose_block_digest` / `:820 compute_block_digest_body` |
 | Digest compose — `D(1, ·, ·)` / body | `src/node/producer.cpp:332 compose_contrib_commitment` / `:252 make_contrib_body_root` |
-| Wire (GENESIS-DEADLINE) | `src/chain/block.cpp:1294` (`kMinEquivEvent` = 230) + `src/net/binary_codec.cpp:512` (fixed 229 B after the lp_str) |
+| Wire (GENESIS-DEADLINE) | `src/chain/block.cpp:1301` (`kMinEquivEvent` = 246) + `src/net/binary_codec.cpp:547` (fixed 245 B after the lp_str; gen-bound layout) |
 | Gate (falsify-on-mutant, 8 arms) | the EQV block of `determ test-abort-cert-validation`, driven via `check_equivocation_events_for_test` |
 | Apply slash (zero stake + deregister) | `src/chain/chain.cpp::apply_transactions` (EquivocationEvent branch) |
 | Equivocation detection — BlockSigMsg-level (rev.8) | `src/node/node.cpp::apply_block_locked` (cross-block check when a duplicate-height block arrives with a different `block_hash`) |

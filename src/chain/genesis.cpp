@@ -131,24 +131,26 @@ json GenesisConfig::to_json() const {
 void GenesisConfig::validate() {
     GenesisConfig& c = *this;
 
-    // QUORUM INTERSECTION — the K/M safe band. Checked FIRST: it is the only
+    // QUORUM INTERSECTION — the K/M genesis band. Checked FIRST: it is the only
     // genesis rule whose violation is a consensus SAFETY hole rather than a
     // configuration mistake.
     //
-    // A block finalizes on K signatures out of the M-member committee. If
-    // 2K <= M, one committee contains two DISJOINT K-subsets. Each can sign a
-    // DIFFERENT block at the SAME height, each reaches the threshold, and both
-    // finalize — with NO member ever signing twice. The fork is then not merely
-    // unpunished, it is UNATTRIBUTABLE: no double-signature exists anywhere, so
-    // no evidence can name a culprit and no equivocation predicate (however
-    // designed) can fire. Any two K-subsets of M overlap iff 2K > M, so above
-    // the band's floor two conflicting finalized blocks IMPLY some member
-    // signed both — the fork always has a name.
+    // If two K-committees at one height can be DISJOINT, each can sign a
+    // DIFFERENT block, each reaches the threshold, and both finalize with NO
+    // member ever signing twice — a fork that is UNATTRIBUTABLE. Two K-subsets
+    // of an N-set overlap iff 2K > N. SCOPE (DECISION-LOG 2026-08-14 ddfe877;
+    // SECURITY.md S-054 is PARTIAL): this check is over m_creators, which no
+    // accept rule reads. At runtime the committee is drawn from the ELIGIBLE
+    // POOL N(h) (validator.cpp check_creator_selection: registry minus the
+    // block's own aborters), and REGISTER leaves N uncapped, so this band
+    // delivers intersection only while N(h) <= M. It is a necessary genesis
+    // condition; the runtime bound 2K > N(h) is OPEN (DECISION CLOCK R-4).
     //
-    // Safe band: M/2 < K <= M. K == M is legal (unanimity / maximal mutual
-    // distrust) and satisfies intersection trivially (2M > M); it simply has
-    // zero liveness margin — one dead member stops block production. The
-    // upper bound 1 <= K <= M is enforced at the boot/tool sites
+    // Band: M/2 < K <= M. K == M is legal (unanimity / maximal mutual
+    // distrust) and satisfies intersection trivially (2M > M); it has zero
+    // MUTUAL-DISTRUST margin (one dead member stops MD production; with
+    // bft_enabled, abort-quorum escalation to ceil(2K/3) can still tolerate a
+    // crash). The upper bound 1 <= K <= M is enforced at the boot/tool sites
     // (src/node/node.cpp, src/main.cpp genesis-tool).
     //
     // 64-bit promotion is load-bearing: 2 * uint32_t wraps in uint32_t, so a

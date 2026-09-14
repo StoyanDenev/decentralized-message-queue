@@ -23,7 +23,7 @@ On 2026-08-12 the commitment became **two-level** (`docs/proofs/DECISION-LOG.md`
 
 ```
 body_root      = make_contrib_body_root(prev_hash, tx_hashes, dh_input, …)     // src/node/producer.cpp:252
-contrib_commit = SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)    // src/node/producer.cpp:332
+contrib_commit = SHA-256("DTM-CONTRIB-v3" ‖ block_index u64 BE ‖ gen u64 BE ‖ body_root)   // src/node/producer.cpp compose_contrib_commitment (gen-bound; restated 2026-09-14)
 ```
 
 The leading `block_index` append moved OUT of the preimage and into the outer compose, so that an
@@ -31,7 +31,7 @@ The leading `block_index` append moved OUT of the preimage and into the outer co
 re-derive the signed digest — the S-052 height binding. Consequently:
 
 - **T-1 (v1 byte-identity) is FALSE as stated.** `mcc_v2(idx, prev, txs, dh, 0, 0, 0)` is now
-  `SHA-256("DTM-CONTRIB-v2" ‖ idx ‖ SHA-256(prev ‖ inner_root ‖ dh))`, which is not `mcc_v1(...)`.
+  `SHA-256("DTM-CONTRIB-v3" ‖ idx ‖ gen ‖ SHA-256(prev ‖ inner_root ‖ dh))`, which is not `mcc_v1(...)`.
   Every contrib-commitment VALUE changed. This is a deliberate pre-genesis change with no shims, not a
   regression. **Corollary T-1.1 (signature compatibility) is likewise retired** — there are no pre-F2
   signatures to remain valid.
@@ -44,8 +44,8 @@ re-derive the signed digest — the S-052 height binding. Consequently:
   not the one-level form.
 - **T-2 (domain-separation replay defense) survives and is STRENGTHENED.** The `DTM-F2-v1` /
   `DTM-TS-v1` / `DTM-STV-v1` separators inside the body are untouched, and a NEW outer separator
-  `"DTM-CONTRIB-v2"` now distinguishes the whole contrib family from the block-digest family
-  (`"DTM-BLKDIG-v2"`). That outer separation is **load-bearing for FA6**: with a shared tag, one honest
+  `"DTM-CONTRIB-v2"` (now `"DTM-CONTRIB-v3"`, gen-bound) distinguishes the whole contrib family from the block-digest family
+  (`"DTM-BLKDIG-v2"`, now `"DTM-BLKDIG-v3"`). That outer separation is **load-bearing for FA6**: with a shared tag, one honest
   block signature plus one honest contrib signature at a single height would compose into a valid
   equivocation proof (`EquivocationSlashing.md` §2.1).
 - **Corollary T-2.1 is unchanged in force** and gains a second leg: a contrib signature can never be

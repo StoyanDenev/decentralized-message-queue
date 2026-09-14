@@ -78,6 +78,8 @@ In any block `b` on shard `src` accepted by the full validator pipeline, for eac
 
 A `CrossShardReceipt` on dst is only credited if it appears in `b.inbound_receipts` on a *finalized* dst block. The producer-side pipeline (`producer.cpp::build_body` inbound-receipts admission + `node.cpp::on_cross_shard_receipt_bundle`) only enqueues receipts whose source block carries `K` valid Ed25519 signatures from the source's committee at `src_block_index`.
 
+> **⚠ 2026-09-14 — L-7.4 is NOT what the code does (SECURITY.md S-064; DECISION-LOG 2026-08-13 `e7c6fc2`).** `Node::on_cross_shard_receipt_bundle` (`src/node/node.cpp`) performs no committee-signature verification, digest check or registry lookup on the source block; the code comments say so ("this pool is UNAUTHENTICATED transit data (B3.4 defers source-side verification)"). The proof below states the INTENDED B3.4 behaviour and must not be cited as shipped until that verification lands. EXTENDED / multi-shard posture only.
+
 **Proof.** The receipt bundle gossip path (`net/gossip.cpp::on_cross_shard_receipt_bundle`) hands the source block to `Node::on_cross_shard_receipt_bundle`, which verifies the K-of-K committee signatures against the beacon-anchored pool view for `src_shard`. Only then is the receipt added to `pending_inbound_receipts_`. Producing a fake K-of-K signed source block requires either:
 
 - Forging at least one honest signature (A1/EUF-CMA), probability `≤ 2⁻¹²⁸`, OR

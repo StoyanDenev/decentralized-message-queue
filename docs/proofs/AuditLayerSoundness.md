@@ -13,14 +13,14 @@ are that layer's `view_master_pk` / epoch keys.
 
 Two fee-only transaction types ([include/determ/chain/block.hpp](../../include/determ/chain/block.hpp)):
 
-- **`ROTATE_AUDIT_KEY = 15`** (block.hpp:226) — set (payload = opaque 32 bytes,
-  `AUDIT_KEY_PAYLOAD_SIZE`, block.hpp:241), rotate, or clear (payload empty)
+- **`ROTATE_AUDIT_KEY = 15`** (block.hpp:237) — set (payload = opaque 32 bytes,
+  `AUDIT_KEY_PAYLOAD_SIZE`, block.hpp:270), rotate, or clear (payload empty)
   the account's standing audit pubkey. State: the `"ak:" + addr` leaf, value
-  `SHA256(pk_bytes)`, emitted only while a key is set (chain.cpp:430-438).
-- **`LOG_AUDIT_ACCESS = 16`** (block.hpp:237) — on-chain record of a view-key
+  `SHA256(pk_bytes)`, emitted only while a key is set (chain.cpp:531-539).
+- **`LOG_AUDIT_ACCESS = 16`** (block.hpp:248) — on-chain record of a view-key
   disclosure: payload = `epoch_u64_BE(8) ‖ auditor_pk(32) ‖ context_hash(32)`,
-  exactly 72 bytes (`AUDIT_LOG_PAYLOAD_SIZE`, block.hpp:242);
-  `AUDIT_EPOCH_ALL = UINT64_MAX` (block.hpp:245) is the full-history sentinel.
+  exactly 72 bytes (`AUDIT_LOG_PAYLOAD_SIZE`, block.hpp:271);
+  `AUDIT_EPOCH_ALL = UINT64_MAX` (block.hpp:278) is the full-history sentinel.
   The tx in chain history IS the record; state tracks only the per-account
   count on the `"al:" + addr` leaf, value `SHA256(count_LE)`, emitted only
   when > 0 (chain.cpp:439-445). A standing `ak:` key is NOT required — ad-hoc

@@ -114,7 +114,7 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 - Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped (no error, but the tx is not retried — the producer would need to wait for the gap-filling tx to land first, then re-submit).
 - For `TRANSFER`: requires `account.balance >= amount + fee`. Sender debited `amount + fee`; receiver credited `amount`. Fee accumulates to creators (subsidy pool path; see economics).
 - **Cross-shard variant:** if `shard_id_for_address(to) != my_shard`, sender is debited but `to` is **not** credited locally. A `CrossShardReceipt` is emitted instead (see §8). The fee still accrues to the source shard's creators; the credit waits on receipt admission at the destination.
-- For `REGISTER`: requires `balance >= fee`. Charges `fee`; inserts/updates `registrants_[tx.from]` with the payload's `ed_pub` + `region` (R1) + `registered_at = height`. New entries get `active_from = height + derive_delay(b.cumulative_rand, tx.hash)` (anti-grind randomized activation window — see S-010); re-registrations preserve `active_from` and refresh only the pubkey/region. `inactive_from = UINT64_MAX` (active). E1 NEF fires once on first-time registration of `tx.from`.
+- For `REGISTER`: requires `balance >= fee`. Charges `fee`; inserts/updates `registrants_[tx.from]` with the payload's `ed_pub` + `region` (R1) + `registered_at = height`. New entries get `active_from = height + derive_delay(b.cumulative_rand, tx.hash)` (anti-grind randomized activation window — see S-010); **Correction 2026-09-14:** re-registrations do NOT preserve `active_from` — apply builds a fresh entry on every REGISTER (`src/chain/chain.cpp` REGISTER arm: `active_from = height + derive_registration_delay(...)`, `inactive_from = UINT64_MAX`, `unlock_height = UINT64_MAX`), and nothing binds the sender to the incumbent key (SECURITY.md S-060; create-only REGISTER pending, DECISION CLOCK R-5). `inactive_from = UINT64_MAX` (active). E1 NEF fires once on first-time registration of `tx.from`.
 - For `DEREGISTER`: charges `fee` (no payload). Computes `inactive_from = height + derive_delay(b.cumulative_rand, tx.hash)` — same randomized delay window as REGISTER's `active_from` (S-024: bounds the grind to a 1–10-block window; formally accepted in v1.x). Sets the registry entry's `inactive_from` to that value. If the domain has a stake, the stake's `unlock_height = inactive_from + unstake_delay_` so the staked balance unlocks `unstake_delay_` blocks after deactivation completes. Nonce consumed regardless of stake / registry state.
 - For `STAKE`: requires `balance >= amount + fee`. Sender debited `amount + fee`; `stakes_[tx.from].locked` grows by `amount`. The `unlock_height` is set to `UINT64_MAX` (still staked). Suspended validators (`inactive_from <= height`, or pending suspension from FA6 slash) skip committee selection regardless of stake.
 - For `UNSTAKE` (S-017 closure): validator + producer + chain layer all enforce `b.index >= chain.stake_unlock_height(tx.from)`. Pre-fix the chain layer was the only gate (with fee refund on too-early); post-fix the validator rejects too-early UNSTAKE at the block-validation layer, the producer skips it during `build_body` assembly, and the chain layer keeps the fee-refund as belt-and-suspenders. Successful UNSTAKE: `stakes_[tx.from].locked -= amount`, sender balance credited by `amount`; the stake entry stays even at `locked == 0` (the entry is treated as "no stake" by the registry-build path).
@@ -261,12 +261,12 @@ This binds creator signatures into the hash so signature equivocation produces a
 
 ```
 body_root    = SHA-256 over the v1 core MINUS index, then the F2 appendages below
-block_digest = SHA-256("DTM-BLKDIG-v2" ‖ index u64 BE ‖ body_root)
+block_digest = SHA-256("DTM-BLKDIG-v3" ‖ index u64 BE ‖ gen u64 BE ‖ body_root)   // gen = the round generation (aborts_gen) the signer signed at; shipped bytes, src/node/producer.cpp compose_block_digest
 ```
 
 `src/node/producer.cpp::compute_block_digest_body` is the body, `::compose_block_digest` the outer compose, and `compute_block_digest(b) = compose_block_digest(b.index, compute_block_digest_body(b))` (`src/node/producer.cpp:968`). The *only* reason the height moved into an outer layer is §6: an `EquivocationEvent` can now carry the 40-byte opening `(index u64, body_root 32)` per signed side, so a verifier re-derives the signed digest and the signed height becomes an asserted, signature-bound quantity instead of an opaque 32-byte blob. Nothing else about the preimage changed — the body is the legacy preimage with the leading `index` append removed.
 
-The outer tag `"DTM-BLKDIG-v2"` **must** differ from `compose_contrib_commitment`'s `"DTM-CONTRIB-v2"` (§6): with a shared tag, one honest block signature plus one honest contrib signature at the *same* height would open to two distinct digests under one key and constitute a forged equivocation proof. Domain separation is a correctness requirement of §6, not hygiene.
+The outer tag `"DTM-BLKDIG-v3"` **must** differ from `compose_contrib_commitment`'s `"DTM-CONTRIB-v3"` (§6): with a shared tag, one honest block signature plus one honest contrib signature at the *same* height would open to two distinct digests under one key and constitute a forged equivocation proof. Domain separation is a correctness requirement of §6, not hygiene.
 
 **Endianness note.** The digest-preimage integers are **big-endian** (`crypto::SHA256Builder::append(uint64_t)`, §1.1); the `EQUIV_REC` / `EQUIVOCATION_EVIDENCE` *frame* integers carrying the same opening are **little-endian** (the D2 container convention, §4.4/§9). The two differ deliberately — a frame is transport, a preimage is hash input — and both sites carry the note in code.
 
@@ -286,7 +286,7 @@ The final values of every excluded field are bound into the **block hash** via `
 
 ### 4.4 Canonical binary container (D2-inc5)
 
-`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. They ship **alongside** `to_json` / `from_json` and **no call site uses them yet**: the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) and chain storage switch over in later D2 increments. Nothing in this section describes bytes currently on the wire or on disk; the wire still carries those five as length-prefixed JSON inside the binary envelope (§9.1).
+`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. **As of D2 inc7a/7b + inc8 (commit 8a106aa, 2026-08-12) they ARE the bytes on the wire and on disk:** the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) delegate to `Block::encode_frame`, and chain storage is `<path>.blocks/<i>.blk` DBK1 frames under a fixed 44-byte DMF1 manifest (`Chain::save` and the legacy `chain.json` read path are deleted). `to_json` / `from_json` remain as the non-authoritative human-readable view and for the two payloads not yet binarized (SNAPSHOT_RESPONSE, HEADERS_RESPONSE — §9.1). (Wording corrected 2026-09-14; it described the pre-inc7 state.)
 
 **The theorem is information equivalence with the JSON container, not field-for-field round-trip:**
 
@@ -329,10 +329,10 @@ lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
   ABORT_EVENT_REC  [round u8][aborting_node lp_str][timestamp i64-as-u64]
                    [event_hash 32][u32 claims_len][encode_abort_claims blob]
   EQUIV_REC        [equivocator lp_str][block_index u64][kind u8]
-                   [index_a u64][body_root_a 32][sig_a 64]
-                   [index_b u64][body_root_b 32][sig_b 64]
+                   [index_a u64][gen_a u64][body_root_a 32][sig_a 64]
+                   [index_b u64][gen_b u64][body_root_b 32][sig_b 64]
                    [shard_id u32][beacon_anchor_height u64]
-                   (fixed 229 B after the lp_str; decode fail-closes on
+                   (fixed 245 B after the lp_str; decode fail-closes on
                     kind > 1 — same layout as the EQUIVOCATION_EVIDENCE
                     gossip frame, §9.1)
   RECEIPT_REC      [src_shard u32][dst_shard u32][src_block_index u64]
@@ -573,9 +573,11 @@ struct EquivocationEvent {
     uint64    block_index;            // the height the proof is ABOUT
     uint8     kind;                   // 0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT; > 1 rejected
     uint64    index_a;                // side-a opening: the signed height
+    uint64    gen_a;                  // side-a opening: the signed round generation
     Hash      body_root_a;            // side-a opening: the digest body root
     Signature sig_a;
     uint64    index_b;                // side-b opening
+    uint64    gen_b;                  // side-b opening: must equal gen_a (EQV-gen-bind)
     Hash      body_root_b;
     Signature sig_b;
     uint32    shard_id;               // detection origin (rev.9 B2c.4)
@@ -586,8 +588,8 @@ struct EquivocationEvent {
 The event carries **openings, not digests**. `digest_a` / `digest_b` were deleted (2026-08-12): both are pure functions of the carried fields, derived by the verifier as
 
 ```
-kind == 0 → digest = SHA-256("DTM-BLKDIG-v2"  ‖ index u64 BE ‖ body_root)   // §4.3
-kind == 1 → digest = SHA-256("DTM-CONTRIB-v2" ‖ index u64 BE ‖ body_root)   // §6.1
+kind == 0 → digest = SHA-256("DTM-BLKDIG-v3"  ‖ index u64 BE ‖ gen u64 BE ‖ body_root)   // §4.3
+kind == 1 → digest = SHA-256("DTM-CONTRIB-v3" ‖ index u64 BE ‖ gen u64 BE ‖ body_root)   // §6.1
 ```
 
 **Validation (V11)** (`src/node/validator.cpp:380 check_equivocation_events`), in order, fail-closed:
@@ -611,14 +613,14 @@ The evidence channel is **kind-discriminated and height-bound**, not digest-agno
 
   ```
   contrib_body = SHA-256 over (prev_hash, sorted tx_hashes, dh_input, …)   // make_contrib_body_root
-  contrib_commit = SHA-256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ contrib_body)
+  contrib_commit = SHA-256("DTM-CONTRIB-v3" ‖ block_index u64 BE ‖ gen u64 BE ‖ contrib_body)
   ```
 
   over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` comparing recomputed commitments when a same-signer duplicate arrives. The proof carries `index_x = block_index` and `body_root_x = make_contrib_body_root(msg)` plus the matching `ContribMsg.ed_sig` entries (`src/node/producer.cpp:332`).
 
 The two paths use **the same struct + the same validator + the same apply path**; only `kind` (and therefore the compose tag) differs. An external implementer building consensus message handling MUST detect both — missing either leaves an equivocation surface unslashable — and MUST NOT accept a proof that mixes them: one honest block signature plus one honest contrib signature at the same height opens to two distinct values, so **the tag domain separation is the only thing standing between an honest validator and a forged slash**. V11's `kind` check and the two distinct outer tags are the mechanism. See `docs/proofs/EquivocationSlashing.md` (FA6) — the soundness proof is now stated per-kind, over the derived digests.
 
-**Residual — narrowed, NOT eliminated (open; needs owner review).** Height binding removes the cross-height forgery, but an honest validator can still legitimately sign two different digests at the *same* height across abort re-rounds (a round-2 committee change changes the body; a fresh `dh_input` per contrib generation changes the contrib body). Such a pair satisfies V11 today. Closing it requires the round / `aborts_gen` to be bound into the openings as well (`TAG ‖ index ‖ gen ‖ body_root`) — a further pre-genesis preimage change. This residual is **pre-existing and strictly narrower than before** (previously ANY two heights sufficed; now only the same height does), is **not** claimed closed anywhere, and has no owner authorization yet.
+**Residual — narrowed, NOT eliminated (open; needs owner review).** Height binding removes the cross-height forgery, but an honest validator can still legitimately sign two different digests at the *same* height across abort re-rounds (a round-2 committee change changes the body; a fresh `dh_input` per contrib generation changes the contrib body). **Status 2026-09-14:** the round IS bound — the shipped digests are `TAG ‖ index ‖ gen ‖ body_root` (v3 tags above) and the verifier asserts `gen_a == gen_b` (`src/node/validator.cpp`, "(2b) THE ROUND ASSERT"), so a cross-round pair no longer satisfies V11. The binding is nevertheless **evadable**: `gen` is signer-chosen off-chain, so a deliberate splitter signs side B at `gen + 1` and is acquitted, while an honest node's two openings are bit-identical to a splitter's — only delivery differs (DECISION-LOG 2026-08-13 `b5838fb`; the six 2026-08-12 designs). No predicate over two signed openings is both sound and complete under asynchrony; the consequence is being relocated out of consensus (CLAUDE.md SLASHING block, owner item O-1), and the forfeiture code is still live at HEAD until that lands. This residual is **open**; do not re-propose a two-opening predicate.
 
 ### 6.2 External submission
 
@@ -712,7 +714,7 @@ Payload encodings, all fail-closed with exact consumption:
 |---|---|---|
 | `ABORT_CLAIM` | the `chain::encode_abort_claims` blob (§5.4) carrying exactly one claim | 109 B + \|missing_creator\| + \|claimer\| |
 | `BLOCK_SIG` | `[block_index u64 LE][signer_len u8][signer][delay_output 32 B][dh_secret 32 B][ed_sig 64 B]` | 137 B + \|signer\| |
-| `EQUIVOCATION_EVIDENCE` | `[equivocator_len u8][equivocator][block_index u64 LE][kind u8][index_a u64 LE][body_root_a 32 B][sig_a 64 B][index_b u64 LE][body_root_b 32 B][sig_b 64 B][shard_id u32 LE][beacon_anchor_height u64 LE]` — fixed **229 B after the lp_str**, exact-length (`src/net/binary_codec.cpp:512`); decode fail-closes on `kind > 1` | 230 B + \|equivocator\| |
+| `EQUIVOCATION_EVIDENCE` | `[equivocator_len u8][equivocator][block_index u64 LE][kind u8][index_a u64 LE][gen_a u64 LE][body_root_a 32 B][sig_a 64 B][index_b u64 LE][gen_b u64 LE][body_root_b 32 B][sig_b 64 B][shard_id u32 LE][beacon_anchor_height u64 LE]` — fixed **245 B after the lp_str**, exact-length (`src/net/binary_codec.cpp:526`); decode fail-closes on `kind > 1` | 230 B + \|equivocator\| |
 | `ABORT_EVENT` | `[block_index u64 LE][prev_hash 32 B]` then the event: `[round u8][aborting_node_len u8][aborting_node][timestamp i64-as-u64 LE][event_hash 32 B][claims blob]` | 82 B + \|aborting_node\| + claim blob |
 
   **ABORT_CLAIM cannot drift from the block-stored claim.** The frame *is* `encode_abort_claims({claim})` — the same encoder the in-block claim list uses (§5.4). The gossiped claim and the stored claim are therefore the same bytes produced by the same function, so no divergence between the two encodings is representable (the S-044 one-shared-helper discipline). Decode rejects any count other than 1 (`ABORT_CLAIM must carry exactly one claim`), keeping one encoding per claim.
@@ -723,7 +725,7 @@ Payload encodings, all fail-closed with exact consumption:
 
   **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests the receiver **derives** from the `(kind, index, body_root)` openings carried in the message (§6.1) — never against a digest the message states. No digest, signature or block hash changed when these types left the JSON path. (The later EQV-height-bind restructure — §4.3/§6, 2026-08-12 — *did* change every block-digest and contrib-commitment value; that is a separate, pre-genesis change to the hash preimages, not to this container.)
 
-* **The remaining eight types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE, HEADERS_RESPONSE. These binarize per-type in the remaining D2 increments — the envelope is the stable extension point. The WIRE-2 structural ceiling below stays live until the last of them is gone. The canonical binary `Block` container the five block-carrying types will use (§4.4) is already built, but **no wire path uses it yet** — every `Block` on the wire today is JSON.
+* **The remaining two types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): SNAPSHOT_RESPONSE and HEADERS_RESPONSE (D2 inc7c, open). BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP and CROSS_SHARD_RECEIPT_BUNDLE are true binary frames since inc7a/7b (commit 8a106aa), all delegating to `Block::encode_frame` (§4.4). The WIRE-2 structural ceiling below stays live until the last two are gone. (Wording corrected 2026-09-14; it described the pre-inc7 state.)
 
 **Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
@@ -1002,24 +1004,31 @@ view and the canonical DGC1 binary container (`GenesisConfig::validate()`,
 run). Diagnostic names the rule: `violates QUORUM INTERSECTION (2*K must
 exceed M)`.
 
-The **lower** bound is a safety rule, not a tuning preference. A block
-finalizes on K signatures from the M-member committee. If `2K <= M`, that
-committee contains two **disjoint** K-subsets. Each subset can sign a
-different block at the same height, each independently reaches the threshold,
-and **both finalize — with no member ever signing twice.** The resulting fork
-is therefore not merely unpunished, it is **unattributable**: no
-double-signature exists anywhere in the system, so no evidence object can be
-built and no equivocation predicate, however designed, can name a culprit.
-Nobody is even accusable. Two K-subsets of an M-set intersect **iff** `2K > M`,
-so above the floor two conflicting finalized blocks *imply* that some member
-signed both — every fork has a name. That implication is what the whole
-attribution story rests on, and the floor is the only thing that supplies it.
+The **lower** bound is a safety rule, not a tuning preference — but it is a
+**necessary condition at genesis, not the runtime invariant** (DECISION-LOG
+2026-08-14 `ddfe877`; SECURITY.md S-054 is PARTIAL). At runtime no accept rule
+reads `m_creators`: a block's K-member committee is drawn by
+`check_creator_selection` from the **eligible pool** `N(h)` (the registry minus
+the block's own aborters), and REGISTER leaves that pool uncapped. The quantity
+that decides whether two same-height committees must overlap is therefore
+`N(h)`, not `M`. If `2K <= N(h)`, two **disjoint** K-committees exist; under
+the abort-vs-finalize race each is valid against its own `abort_events`, each
+reaches the threshold, and **both finalize — with no member ever signing
+twice**: a fork that is not merely unpunished but **unattributable**. Two
+K-subsets of an N-set intersect **iff** `2K > N`, so above that floor two
+conflicting finalized blocks *imply* a double-signer — every fork has a name.
+The shipped band `2K > M` delivers this only while `N(h) <= M`, i.e. only
+while the registry never grows past the genesis creator count. The runtime
+bound (`2K > N(h)` asserted where the committee is derived, or a genesis-pinned
+pool cap) is OPEN — DECISION CLOCK R-4, genesis-frozen.
 
 `K == M` is the **default** (`k_block_sigs` defaults to `m_creators`) and stays
 legal: unanimity satisfies intersection trivially (`2M > M`). It is the strong
-mutual-distrust / unanimity posture, with **zero liveness margin** — one dead
-committee member stops block production, which is an operator's deliberate
-choice, not a safety violation. `K = M-1` (`M >= 3`) is the usual production
+mutual-distrust / unanimity posture, with **zero mutual-distrust margin** — one
+dead committee member stops MD block production; with `bft_enabled` the abort
+quorum plus escalation to a `ceil(2K/3)` committee tolerates one crash at
+`|pool| == K == 3` (DECISION-LOG 2026-08-14 `ddfe877`: "`f = 0` is FALSE"). An
+operator's deliberate choice, not a safety violation. `K = M-1` (`M >= 3`) is the usual production
 posture: intersection holds and one straggler is tolerated (see `web`,
 `regional`, `global` in §12.4).
 

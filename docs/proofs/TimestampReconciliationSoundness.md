@@ -103,7 +103,7 @@ Therefore, except with negligible probability, every `t_i` the validator feeds i
 
 **Update 2026-08-12 (EQV-height-bind — this proof is unaffected in substance).** `compute_block_digest`
 and `make_contrib_commitment` became **two-level**: a height-free body root plus an outer compose
-`SHA-256(TAG ‖ index u64 BE ‖ body_root)` with `TAG ∈ {"DTM-BLKDIG-v2", "DTM-CONTRIB-v2"}`
+`SHA-256(TAG ‖ index u64 BE ‖ gen u64 BE ‖ body_root)` with `TAG ∈ {"DTM-BLKDIG-v3", "DTM-CONTRIB-v3"}` (shipped bytes; corrected 2026-09-14)
 (`src/node/producer.cpp:968` / `:332`; `docs/PROTOCOL.md` §4.3). Every claim in T-3/T-4 that reasons
 "altering field X changes the digest" transfers verbatim: X is appended inside the BODY, a changed body
 changes `body_root`, and a changed `body_root` changes the outer SHA-256 unless the adversary finds a

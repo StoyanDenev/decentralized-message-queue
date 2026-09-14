@@ -183,6 +183,8 @@ BFT-mode blocks are safe under `f_h < |K_h|/3` within the committee. The trade v
 
 When the bound is violated, slashing recovery (T-5.1) repairs the damage by removing the equivocators. This is materially stronger than classical BFT failure modes (where exceeding f<N/3 simply breaks safety with no recovery).
 
+> **⚠ 2026-09-14 — T-5.1 is under re-derivation; do not cite it.** The owner decided on 2026-08-13 that the pre-finalization equivocation consequence carries no L1 consequence (relocation to L2; DECISION-LOG 2026-08-13, CLAUDE.md SLASHING block) and the log records T-5.1 as VOID with this paragraph inverting once that lands (`ddf93eb`). The forfeiture code is still live at HEAD (`src/chain/chain.cpp:1819-1825`) because the change failed review and was reverted, so the paragraph matches shipped bytes today — but the argument may no longer be relied on by any other proof until the re-derivation lands.
+
 The proof complements FA1 (MD-mode unconditional) and FA4 (liveness via escalation) to give Determ's full safety/liveness story:
 
 - MD: unconditional safety, conditional liveness.

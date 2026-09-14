@@ -521,7 +521,7 @@ This is not a correctness violation — saved state is always consistent with so
 
 Future work: one-file-per-block storage (per `SECURITY.md` §S-031 Option 5) makes save O(1) per block; the worker can never fall behind. Strict perf improvement, not a correctness fix.
 
-### F-3: gossip queue could grow unbounded if peer is slow (defense: per-peer drop policy)
+### F-3: gossip queue could grow unbounded if peer is slow (defense: per-peer drop policy) — ⚠ 2026-09-14: NO such drop policy exists at HEAD (`Peer::write_queue_` is an uncapped deque, `include/determ/net/peer.hpp`; `do_write` closes only on write error) — DECISION-LOG 2026-08-13 `3dbe5f2` [MEDIUM]; this finding is OPEN, not defended
 
 `gossip_.broadcast(msg)` posts the message to every peer's send queue. If a peer's TCP write is slow (kernel buffer full, network congestion), the per-peer queue grows. Unbounded growth under sustained gossip load → memory pressure on the node.
 

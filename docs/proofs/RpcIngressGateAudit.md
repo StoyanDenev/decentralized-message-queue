@@ -90,8 +90,8 @@ recursion (crafted evidence nests infinitely; even an "exact header subset" is r
 instead makes both digest families **two-level and openable**:
 
 ```
-block_digest   = SHA256("DTM-BLKDIG-v2"  ‖ index       u64 BE ‖ body_root)
-contrib_commit = SHA256("DTM-CONTRIB-v2" ‖ block_index u64 BE ‖ body_root)
+block_digest   = SHA256("DTM-BLKDIG-v3"  ‖ index       u64 BE ‖ gen u64 BE ‖ body_root)   // shipped bytes (corrected 2026-09-14)
+contrib_commit = SHA256("DTM-CONTRIB-v3" ‖ block_index u64 BE ‖ gen u64 BE ‖ body_root)
 ```
 
 `EquivocationEvent` carries `kind` + a per-side 40-byte opening `{index, body_root}`; `digest_a`/`digest_b`
@@ -100,7 +100,7 @@ asserts `index_a == index_b == ev.block_index`, and verifies both signatures aga
 the audit's `header_a.index == header_b.index == ev.block_index` assertion, obtained at 40 bytes per side
 instead of a whole header, and with no recursion. `Node::on_equivocation_evidence` and
 `rpc_submit_equivocation` mirror the full check set, so **all three ingresses** (block path, gossip,
-RPC) are equally strong. Wire (GENESIS-DEADLINE): EQUIV_REC + EQUIVOCATION_EVIDENCE are fixed 229 B after
+RPC) are equally strong. Wire (GENESIS-DEADLINE): EQUIV_REC + EQUIVOCATION_EVIDENCE are fixed 245 B (gen-bound layout; 229 B before the gen fields) after
 the lp_str, `kMinEquivEvent` 213 → 230, decode fail-closes on `kind > 1`. Gate: the 8-arm EQV block of
 `test-abort-cert-validation` via the `check_equivocation_events_for_test` seam this audit proposed —
 including the cross-height REJECT, an openings-agree-but-≠-`block_index` REJECT that pins the

@@ -138,6 +138,8 @@ The "unconditional" claim is therefore: **fork-freedom holds under any honest-fr
 
 This is materially stronger than BFT protocols' `f < N/3` safety claim, which fails completely above the threshold (no slashing reorganization).
 
+> **⚠ 2026-09-14 — the FA6 slashing leg above is under re-derivation; do not cite it.** Owner decision 2026-08-13 relocates the pre-finalization consequence out of L1 (DECISION-LOG 2026-08-13; CLAUDE.md SLASHING block); the forfeiture code is still live at HEAD (`src/chain/chain.cpp:1819-1825`) because the change was reverted after failing review. Until the re-derivation lands, "fork-freedom from ≥ 1 honest member" stands on clause 2's detectability, not on the economic consequence.
+
 ### 5.2 Concrete-security bound
 
 The reduction loses a SHA-256 collision-finding probability (≤ `2⁻¹²⁸`) at L-1.2 and an Ed25519 forgery probability (≤ `2⁻¹²⁸`) at L-1.3. Under standard concrete-security accounting, the safety claim holds with probability `1 - O(2⁻¹²⁸)` per height for an adversary running in polynomial time.

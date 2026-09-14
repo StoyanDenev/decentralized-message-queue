@@ -74,8 +74,10 @@ inline constexpr size_t TRANSFER_PAYLOAD_MAX = 128;
 // rev.8 economic disincentive on abort suspension. Deducted from the
 // validator's stake at the moment an AbortEvent for this domain is baked
 // into a finalized block. Required for BFT-mode safety claims (BFT
-// safety conditional on f<N/3 + slashing). 100 suspensions exits a
-// minimally-staked validator (10 * 100 = 1000 = MIN_STAKE).
+// safety conditional on f<N/3 + slashing). ONE suspension exits a validator
+// staked exactly at MIN_STAKE: the eligibility predicate is stake < min_stake
+// (eligibility_floor.hpp) and the deduction leaves 990 < 1000 — the earlier
+// "100 suspensions" reading was wrong (DECISION-LOG 2026-08-14 ddfe877).
 inline constexpr uint64_t SUSPENSION_SLASH = 10;
 
 // ─── L4 (Consensus) timing profiles ─────────────────────────────────────────

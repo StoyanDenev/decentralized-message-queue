@@ -98,7 +98,7 @@ Determ gives up `f < N/3` Byzantine *liveness* tolerance — a single silent com
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
-- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), gets slashed (equivocation → forfeit), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
+- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — the pre-finalization forfeiture is being relocated out of L1, DECISION-LOG 2026-08-13; the forfeiture code is still live at HEAD until that lands), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
 
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
@@ -564,12 +564,12 @@ All messages are length-prefixed:
 [4 bytes BE length][envelope payload]
 ```
 
-Two codecs are supported per-pair via the A3 / S8 wire-version negotiation (PROTOCOL.md §16.1):
+One codec is shipped — the p2p envelope is binary-only (D2, DECISION-LOG 2026-07-28; corrected here 2026-09-14, the text below described the pre-D2 state):
 
-* `kWireVersionLegacy = 0` — JSON envelope `{type: u8, payload: ...}`, default.
-* `kWireVersionBinary = 1` — compact binary envelope (see `src/net/binary_codec.cpp` for layout).
+* every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy JSON envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
+* HELLO still carries a `wire_version` advertisement — with a single shipped version it decides nothing; it is the additive post-genesis upgrade hatch.
 
-HELLO advertises each side's `wire_version`; both sides negotiate down to `min(local, remote)` and use the negotiated codec for subsequent messages. HELLO itself is always JSON (it carries the version advertisement). Binary codec gracefully falls back to JSON serialization for any message type it can't encode.
+Per-type payloads inside the envelope are fixed binary frames for 17 of the 19 message types; SNAPSHOT_RESPONSE and HEADERS_RESPONSE still carry a length-prefixed JSON payload until D2 inc7c lands (PROTOCOL.md §9.1). Binary codec gracefully falls back to JSON serialization for any message type it can't encode.
 
 S-022 per-message-type body caps apply at deserialize time regardless of codec: 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. The 16 MB framing-layer ceiling (`kMaxFrameBytes`) is enforced at read time before the per-type check.
 
@@ -681,7 +681,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under `EXTENDED` sharding a region losing connectivity to the rest of the world stalls cross-shard receipts; in-shard production continues.
 
-**Binary wire codec — shipped (A3 / S8).** Two codecs co-exist per-pair: JSON-over-TCP (legacy, the default), and a compact binary envelope (`src/net/binary_codec.cpp`). HELLO advertises each side's `wire_version`; pairs negotiate to `min(local, remote)`. Pre-A3 peers stay on JSON automatically. PROTOCOL.md §16.1 has the version-negotiation details.
+**Binary wire codec — shipped and mandatory (A3 / S8, then D2).** The `0xB1` binary envelope (`src/net/binary_codec.cpp`) is the only codec on the wire; the legacy JSON envelope and the HELLO codec negotiation were deleted pre-genesis (DECISION-LOG 2026-07-28, commit ce31c6f). HELLO keeps a `wire_version` advertisement as the additive post-genesis upgrade hatch. PROTOCOL.md §9.1 has the per-type frame layouts. (Corrected 2026-09-14.)
 
 **Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.json [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.json --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block JSON minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.json [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a JSON array of `{domain, ed_pub}` (same shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
 
@@ -691,7 +691,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 The disincentive depends on the chain's governance model (§5.1):
 
-- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration.
+- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration at HEAD — a consequence the owner has decided to relocate out of consensus (DECISION-LOG 2026-08-13; not yet landed, see CLAUDE.md SLASHING block).
 - **`DOMAIN_INCLUSION`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation deregisters the validator from the chain — they lose all future block rewards and must register a new domain to participate again.
 
 Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:

@@ -33,7 +33,7 @@ per-side **opening** `(index u64, body_root 32 B)`, and the digest is DERIVED:
 
 ```
 D(kind, i, r) = SHA-256(TAG(kind) ‖ i u64 BE ‖ r)
-TAG(0) = "DTM-BLKDIG-v2"   (block digest)      TAG(1) = "DTM-CONTRIB-v2"   (contrib commitment)
+TAG(0) = "DTM-BLKDIG-v3"   (block digest)      TAG(1) = "DTM-CONTRIB-v3"   (contrib commitment)   — shipped preimage is TAG ‖ index ‖ gen ‖ body_root (corrected 2026-09-14)
 ```
 
 V11 — on-chain and in this verifier — rejects `kind > 1`, asserts `index_a == index_b == block_index`,
@@ -164,9 +164,9 @@ rather than a whole `ContribMsg` or `Block` header, which is also what makes the
 non-recursive (see `RpcIngressGateAudit.md` §2a CLOSURE for why carrying headers was rejected).
 
 The Phase-1 / Phase-2 distinction that motivated the two-mode design is now carried explicitly by
-`kind`: `kind = 0` composes under `"DTM-BLKDIG-v2"` (the Phase-2 block digest, whose body is
+`kind`: `kind = 0` composes under `"DTM-BLKDIG-v3"` (the Phase-2 block digest, whose body is
 `compute_block_digest_body`, mirrored byte-for-byte by `light/verify.cpp::light_compute_block_digest_body`),
-`kind = 1` under `"DTM-CONTRIB-v2"` (the Phase-1 contrib commitment, body `make_contrib_body_root`). The
+`kind = 1` under `"DTM-CONTRIB-v3"` (the Phase-1 contrib commitment, body `make_contrib_body_root`). The
 tags MUST differ — otherwise an honest block signature and an honest contrib signature at one height
 would adjudicate as equivocation (`EquivocationSlashing.md` §2.1).
 

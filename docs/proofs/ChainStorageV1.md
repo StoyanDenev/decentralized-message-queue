@@ -22,6 +22,8 @@ appended since the last incremental save:
                                   head_hash}, atomic, written LAST
 ```
 
+> **⚠ 2026-09-14 — file formats SUPERSEDED by D2 inc8 (commit 8a106aa, 2026-08-12).** The shipped store is binary-only: `<chain_path>.blocks/<i>.blk` (magic `DBK1` + a `Block::encode_frame` frame) under `<chain_path>.manifest.bin` (a fixed 44-byte `DMF1` record, written atomically last) — `src/chain/chain.cpp` (`manifest_path_for`, `DMF1`/`DBK1` comments). `Chain::save` and the legacy `chain.json` read path are DELETED (a `chain.json` with no manifest loads as an EMPTY chain, gate CS-8). The append-only / manifest-last discipline argued below is unchanged; the JSON names and the "legacy load" recovery step are historical.
+
 `head_hash` carries the same S-021 tamper gate as the legacy wrapped
 `chain.json`: [`Chain::load`](../../src/chain/chain.cpp) replays the store's
 blocks and rejects if the recomputed head digest mismatches. Because the

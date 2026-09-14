@@ -10,8 +10,9 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
 - Green is not proof (B3 corollary; measured 2026-08-12/13, DECISION-LOG). A
   falsify-on-mutant gate proves the code enforces what the gate ASSERTS. It
   cannot prove the assertion is the property you NEED. Nine consensus designs in
-  one session reached green — Option D's gate was 34/34 with six mutants
-  confirmed RED and FAST 303/0 — and all nine were wrong. For consensus work a
+  one session were wrong; six of them were carried to a green tree — Option D's
+  gate was 34/34 with six mutants confirmed RED and FAST 303/0 — and three were
+  refuted on paper (DECISION-LOG 2026-08-13, doctrine entry). For consensus work a
   green gate is NECESSARY AND NOT SUFFICIENT. Standing rules:
     * ADVERSARIAL REVIEW OF THE DIFF, BEFORE COMMIT, INDEPENDENT OF GATE COLOUR,
       on any change to consensus accept-rules, the apply path, wire formats,
@@ -28,8 +29,8 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
     * DESIGN-AND-PROVE BEFORE IMPLEMENTING when the design is uncertain. The
       time-bucket and lock-rule designs were REFUTED at design stage for a
       fraction of the cost of the ones implemented first.
-    * SMALLEST INCREMENT THAT KEEPS THE TREE GREEN AND TRUTHFUL. Both slashing
-      attempts failed by BUNDLING: the ~10-line core removal was verified sound
+    * SMALLEST INCREMENT THAT KEEPS THE TREE GREEN AND TRUTHFUL. All three slashing
+      attempts failed and were reverted; the first two by BUNDLING: the ~10-line core removal was verified sound
       BOTH times and was sunk by a per-block cap, an exit-code change and doc
       convergence that each failed independently. Land the verified core alone;
       every rider is its own increment with its own review.
@@ -83,6 +84,11 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
     * LICENSING.md .............. licensing authority
   docs/proofs/DECISION-LOG.md is the decisions + rationale authority (wins on any
   decision conflict; append-only). Any unavoidable new doc carries its TIER on line 1.
+- No systemic backdoor (owner HARD CONSTRAINT, DECISION-LOG 2026-08-18 6265d34):
+  "No key escrow, no protocol-level disclosure compulsion, no third-party master
+  key — ever." Selective disclosure exists only as the holder's voluntary,
+  per-view-key act in the designed v2.22/v2.24 mechanism. Any doc asserting
+  unqualified PFS alongside view-key disclosure is wrong (same entry).
 
 ## CURRENT FRONT — read before selecting any work (owner directive 2026-07-28)
 ACTIVE FRONT = execute the D2 JSON->binary migration NOW (DECISION-LOG 2026-07-28).
@@ -142,6 +148,21 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      (= step 4 of the five-step D2 authorization, DECISION-LOG 2026-07-28.)
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.
 
+LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16; ledger
+rows docs/SECURITY.md S-055..S-064). Nine OPEN Criticals and one High were recorded in
+the log after this section was last written and are now carried in the ledger:
+S-055 C0 F2 equivocation-view digest halt; S-056/S-059/S-061/S-062 the producer
+includes what the verifier rejects (TRANSFER payload cap, amount+fee overflow,
+REGISTER geometry, unknown TxType) and an invalid self-assembled block evicts
+nothing — remote, anonymous, zero-cost absorbing halts; S-057 unsigned unbounded
+pq_auth -> unrelayable blocks; S-058 a non-member contrib cancels the Phase-1 timer;
+S-060 REGISTER identity takeover (any key overwrites any validator's registry record;
+REOPENS S-052); S-063 DAPP_CALL frames report payments never made; S-064 cross-shard
+bundles unauthenticated (multi-shard only). Their ORDER against the D2 front is owner
+decision O-3 below — until it is taken ACTIVE FRONT stays D2 as written, but no thread
+may treat the ledger as clean. The node-local root shared by S-056/S-058/S-059/S-061/
+S-062 needs no consensus change; S-055/S-057/S-060 do (owner-gated, DECISION CLOCK).
+
 FOLDED IN (DECISION-LOG 2026-08-13, directive 1): pre-launch item B1 is closed as a
 standalone item. Its (a) half — per-block append-only files replacing monolithic
 chain.json — was ABSORBED by inc8 above. Its (b) half — an incrementally-persisted
@@ -168,9 +189,9 @@ PRE-GENESIS BACKLOG (must land before mainnet) — DApp substrate Q2/Q3/Q4 code
 Also: decide the final CryptoProfile enum value set (currently {MODERN=0, FIPS=1},
 include/determ/chain/params.hpp:122-125). It is GENESIS-FROZEN and invisible to work
 selection until now: crypto_profile is mixed into the genesis hash when non-default
-(src/chain/genesis.cpp:837-839, reaching compute_genesis_hash at :891-894), written as
-a u8 by the DGC1 encoder (:497), and FAIL-CLOSED on decode — an unknown value is
-rejected outright (:571-574). Cross-ref Improvements.md §12.5 (whose named subjects
+(src/chain/genesis.cpp:872-875, reaching compute_genesis_hash at :926), written as
+a u8 by the DGC1 encoder (:532), and FAIL-CLOSED on decode — an unknown value is
+rejected outright (:606-609). Cross-ref Improvements.md §12.5 (whose named subjects
 tactical_civilian / cluster_civilian are TIMING presets that were never implemented —
 zero occurrences in src/ include/ light/ wallet/; see DECISION-LOG 2026-08-13
 directive 4 for the correction).
@@ -193,27 +214,37 @@ native Darwin/arm64 build green, byte-freeze pins matched, no goldens regenerate
 (pip3 pynacl — three EQV cluster scripts now carry a pynacl fallback and run here),
 macOS CI runner, APFS.
 
-BOTH RANK-1 CONSENSUS HOLES ARE CLOSED (authorized owner 2026-07-31; LANDED d34c632,
-DECISION-LOG 2026-08-12). Do not re-open them; harden forward from here.
+BOTH RANK-1 CONSENSUS HOLES WERE CLOSED (authorized owner 2026-07-31; LANDED d34c632,
+DECISION-LOG 2026-08-12). UPDATE 2026-09-14: Hole 1's closure (S-052) is REOPENED on a
+different leg — the height binding stands, but S-060 (REGISTER identity takeover,
+DECISION-LOG 2026-08-14 5e4afec) lets any key replace the accused key in the registry
+that the verifier resolves against (validator.cpp:471). Hole 2 (S-053) stands. Do not
+re-open the closed legs; harden forward from here.
   - Hole 1 forged-slash -> docs/SECURITY.md S-052. Closed by HEIGHT BINDING, not by
     carrying headers (rejected on analysis: unbounded size + Block>EquivocationEvent>Block
     recursion). Both digest families are now two-level and openable:
-      block_digest   = SHA256("DTM-BLKDIG-v2"  || index       u64BE || body_root)
-      contrib_commit = SHA256("DTM-CONTRIB-v2" || block_index u64BE || body_root)
-    EquivocationEvent carries kind + per-side {index, body_root, sig}; digest_a/digest_b
-    DELETED; verifier rejects kind>1, asserts index_a==index_b==block_index, verifies
-    against DERIVED digests. Wire (GENESIS-DEADLINE): EQUIV_REC + EQUIVOCATION_EVIDENCE
-    fixed 229 B after the lp_str, kMinEquivEvent 230, decode fail-closes on kind>1.
+      block_digest   = SHA256("DTM-BLKDIG-v3"  || index       || gen || body_root)
+      contrib_commit = SHA256("DTM-CONTRIB-v3" || block_index || gen || body_root)
+    (as SHIPPED: src/node/producer.cpp compose_block_digest / compose_contrib_commitment;
+    the v2 tags without gen that this block and several docs carried were never the
+    shipped bytes — corrected 2026-09-14). EquivocationEvent carries kind + per-side
+    {index, gen, body_root, sig}; digest_a/digest_b DELETED; verifier rejects kind>1,
+    asserts index_a==index_b==block_index AND gen_a==gen_b (validator.cpp:441-460),
+    verifies against DERIVED digests. Wire (GENESIS-DEADLINE): EQUIV_REC +
+    EQUIVOCATION_EVIDENCE fixed 245 B after the lp_str (binary_codec.cpp:547), decode
+    fail-closes on kind>1.
     Gate: the 8-arm EQV block of test-abort-cert-validation.
-    RESIDUAL, OPEN, NOT authorized: same-height cross-round honest double-signing still
-    satisfies V11 (an abort re-round changes the body at one height). Closing it needs
-    the round/aborts_gen bound into the openings. Recorded in EquivocationSlashing.md
-    §2 Case (c) + PROTOCOL.md §6.1 — do NOT treat it as closed.
-    SUPERSEDED IN PART 2026-08-13: that "bound the round into the openings" route is what
-    the six failed designs tried; it is REFUTED, not merely unimplemented (DECISION-LOG
-    2026-08-12 "final".."final+9"). Do not re-propose it. The residual's HARM is now gone
-    (the pre-finalization layer carries no consequence — see the SLASHING block below);
-    what remains open is the sound successor. Tracked as R-1 on the DECISION CLOCK.
+    RESIDUAL, OPEN, NOT authorized: same-height cross-round honest double-signing.
+    The gen binding IS SHIPPED (v3 digests above; the gen_a==gen_b assert), so a
+    cross-round pair is no longer a recognized double-sign — but the binding is
+    EVADABLE: gen is signer-chosen off-chain, so a splitter signs side B at gen+1 and
+    is acquitted, while an honest node's openings are bit-identical to a splitter's
+    (DECISION-LOG 2026-08-13 b5838fb; the six 2026-08-12 designs "final".."final+9").
+    Recorded in EquivocationSlashing.md §2 Case (c) + PROTOCOL.md §6.1 — do NOT treat
+    it as closed and do NOT re-propose a predicate over two signed openings. The
+    residual's HARM will be gone once the L2 relocation lands; AT HEAD THE FORFEITURE
+    IS LIVE (chain.cpp:1819-1825) — the relocation FAILED review and was REVERTED (see
+    NOT LANDED below). What remains open is the sound successor. Tracked as R-1.
   - Hole 2 empty-committee beacon -> docs/SECURITY.md S-053. Closed by extracting
     verify_committee_sigs as the ONE committee-signature core (non-empty + size match +
     membership + verify + signed_count >= required_k); both verify_shard_tip_committee_
@@ -240,10 +271,17 @@ finalization is logged and gossiped for operator attention and takes NO consensu
 "final", "final+1", "final+3", "final+5", "final+7", "final+9") and together
 proved the predicate unsound and unfixable: no predicate over two signed openings is both
 sound and complete under asynchrony (a splitter's openings are bit-identical to an honest
-node's — only DELIVERY differs), and at K == M no exclusion is safe either (M-of-M
-selection is the identity on the SET, so rotation evicts no one, and a non-liftable
-exclusion is a self-sustaining permanent halt).
-  THE CHANGE IS A RELOCATION, NOT A REMOVAL (owner correction 2026-08-13). Slashing moves
+node's — only DELIVERY differs), and at |eligible pool| == K no exclusion is safe
+either (K-of-K selection is the identity on the SET, so rotation evicts no one, and a
+non-liftable exclusion is a self-sustaining permanent halt). Stated over the POOL, not
+m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
+  THE CHANGE IS A RELOCATION, NOT A REMOVAL (owner correction 2026-08-13). SUPERSESSION
+  UNRESOLVED (audit 2026-09-14): the owner entry that FOLLOWED this correction the same
+  day (DECISION-LOG 5082737) moved slashing back INTO L1 with a lock rule + an M > K
+  genesis invariant; that design was REFUTED at design stage hours later (b5838fb:
+  "the sound options remaining are an L2/economic layer ... or no consequence at all")
+  and no owner entry since restates the position. This block is therefore the last
+  UNREFUTED owner position, not a settled decision — owner item O-1 below. Slashing moves
   OUT OF L1 INTO L2. L1 keeps DETECTION and the on-chain EVIDENCE RECORD but attaches no
   consensus consequence; the economic consequence is applied at the DApp/L2 layer, which
   may use inputs L1 provably cannot (off-chain corroboration, elapsed time, arbitration,
@@ -267,7 +305,7 @@ exclusion is a self-sustaining permanent halt).
   re-includable forever — a NEW DoS vector the removal creates); S-006's status re-derived
   (its entire closure was "route detection into the slashing apply path", so it is
   silently reopened); an HONEST S-011 residual (the drafted one was wrong in three places
-  — BFT escalation can seat a zero-honest committee at K == M, abort-driven stake drain
+  — BFT escalation can seat a zero-honest committee at |pool| == K, abort-driven stake drain
   below min_stake IS permanent and S-051 does not lift it, and DOMAIN_INCLUSION zeroes
   BOTH legs); and ~16 authoritative no-TIER proof docs still asserting the deleted
   forfeiture as shipped. Full finding list: DECISION-LOG 2026-08-13.
@@ -278,15 +316,16 @@ exclusion is a self-sustaining permanent halt).
   and, newly, against S-029's Level-3 block_hash-grinding closure and S-013's economic
   leg. Until the re-derivation lands, do NOT cite the old bound.
 
-DECISION CLOCK — three UNAUTHORIZED consensus/wire residuals (DECISION-LOG 2026-08-13,
-directive 5). All three are pre-genesis or never. They are correctly marked NOT
+DECISION CLOCK — UNAUTHORIZED consensus/wire residuals (DECISION-LOG 2026-08-13,
+directive 5; rows R-4..R-9 added 2026-09-14 from the log entries that asked for them). All three are pre-genesis or never. They are correctly marked NOT
 authorized, but an unauthorized item does not self-surface and THE DECISION HAS A
 DEADLINE even when the work does not. A thread reaching one of these milestones must
 surface the row to the owner before calling the milestone complete.
   R-1  Hole-1 residual: same-height CROSS-ROUND double-signing satisfies V11
        (EquivocationSlashing.md §2 Case (c) + PROTOCOL.md §6.1).
-       DECIDE BY: the finalization-layer slashing design gate, itself due before B4's
-       DROP execution (the last pre-genesis act).
+       DECIDE BY: the owner's restatement of the slashing position (O-1 below; the
+       "finalization-layer design gate" this row named was itself a mis-recording per
+       DECISION-LOG f310086), due before B4's DROP execution (the last pre-genesis act).
   R-2  cumulative_rand is NOT authenticated on the beacon-header path (outside
        compute_block_digest; check_cumulative_rand is apply-path only).
        DECIDE BY: D3 / S-036 closure (on-chain SHARD_TIP, v2.11) — same code path, and
@@ -294,5 +333,44 @@ surface the row to the owner before calling the milestone complete.
   R-3  The self-declared BEACON role in HELLO is unauthenticated.
        DECIDE BY: D2 completion, the parser-deletion step — HELLO is wire surface and D2
        is its last wholesale rewrite.
+  R-4  The committee-derivation safety bound 2K > N(h) over the ELIGIBLE POOL (S-054 is
+       partial: the shipped band guards m_creators, which no accept rule reads; with
+       N >= 2K two racing same-height committees finalize conflicting blocks with no
+       double-signer — DECISION-LOG 2026-08-14 ddfe877). Two shapes: a genesis-pinned
+       pool cap, or the verifier refusing a committee drawn from a pool larger than
+       2K-1 (halt, not fork). Design together with F-c (AbortCascadeLiveness.md §4.3),
+       whose soundness turns on whether the pool can be adversarially shrunk.
+       DECIDE BY: before genesis; frozen accept rule.
+  R-5  Create-only REGISTER (V-REG-1, DECISION-LOG 1c0a61d) to close S-060 — makes a lost
+       key terminal for that domain until a rotation tx exists (5e4afec "OWNER DECISION
+       REQUIRED"); the three alternatives were refuted in 5e4afec.
+       DECIDE BY: now — S-060 is the worst finding on the record; accept-rule change.
+  R-6  ROTATE_IDENTITY_KEY / revocability: addable post-genesis without reserving anything
+       (1c0a61d), so the only question is whether it ships BEFORE genesis alongside R-5.
+       DECIDE BY: R-5 landing.
+  R-7  S-057: a rule that non-PQ transaction types carry empty pq_auth, and/or a
+       consensus block-byte cap matching the 4 MB wire cap (a valid block must never be
+       unrelayable). New accept rules. DECIDE BY: before genesis.
+  R-8  S-055 C0: evidence-payload demotion (design AUTHORIZED, DECISION-LOG 5b2d7fe) is
+       sound only once the evidence carries no L1 consequence (7570989) — gated on O-1;
+       lands with the per-block cap + in-block duplicate rejection as their own
+       increments. DECIDE BY: O-1.
+  R-9  B4 interaction: MsgTypes 12/13/14 KEEP-or-DROP flips the audit's 14/8 to 12/10
+       under the P1 sharding posture (DECISION-LOG e7c6fc2). DECIDE BY: B4 DROP execution.
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
   No decision is not a neutral state.
+
+OWNER DECISIONS PENDING, non-consensus (audit 2026-09-14) — none of these is a code
+change; each is one log entry:
+  O-1  The standing slashing position after b5838fb: L2 relocation (option (b), a
+       separate L2 bond with L1 stake never slashable, is the only one of (a)/(b)/(c)
+       that does not re-enter consensus), or no consequence at all. Gates R-1, R-8 and
+       the S-011/S-013/S-029/BFTSafety T-5.1 re-derivations.
+  O-2  Ratify or narrow the 2026-08-13 "green is not proof" doctrine (352fc52 was
+       recorded "at the direction of the session orchestrator ... flagged for owner
+       review"; it is applied as binding above).
+  O-3  Order the LIVE CRITICALS (S-055..S-063, SECURITY.md) against the D2 front. The log
+       recommends the halts first (84c1447, 3dbe5f2, ddf93eb); ACTIVE FRONT still says D2.
+  O-4  The no-cryptocurrency scope reduction (evaluated 0fe6eda, superseding 8b86d39) and
+       its DIRECT CONFLICT with the no-backdoor constraint (6265d34 hazard 2): adopt,
+       reject, or scope.
