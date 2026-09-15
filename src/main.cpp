@@ -12558,6 +12558,44 @@ int main(int argc, char** argv) {
             auto r = run(bb);
             check(r.ok, "genuine: real frozen-committee-signed record+witness ACCEPTED");
         }
+
+        // === 1b. S-074: the witness's abort events must carry their CANONICAL
+        // identity (the rule the source shard's validators enforce), so a
+        // K-colluding source committee cannot present a chosen hash that seats
+        // a committee of its choosing at the beacon while its own chain rejects
+        // the block. Both tips below are K-of-K-signed by the committee their
+        // own event hash derives; only the canonical one is accepted.
+        {
+            auto tip_with_abort = [&](const Hash* chosen) {
+                Block t;
+                t.index = 5; t.timestamp = 4242;
+                t.eligible_count = 1; t.source_shard_id = SID;
+                t.consensus_mode = ConsensusMode::MUTUAL_DISTRUST;
+                AbortEvent ae; ae.round = 1; ae.aborting_node = "carol"; ae.timestamp = 0;
+                Hash seed = crypto::epoch_committee_seed(chain.committee_checkpoints().at(1).epoch_rand, SID);
+                ae.event_hash = chosen ? *chosen : canonical_abort_event_hash(ae, nullptr, seed, t.index);
+                t.abort_events = { ae };
+                std::vector<std::string> avail;
+                for (auto& d : POOL) if (d != "carol") avail.push_back(d);
+                Hash rand = crypto::SHA256Builder{}.append(seed).append(ae.event_hash).finalize();
+                for (auto i2 : crypto::select_m_creators(rand, avail.size(), K)) t.creators.push_back(avail[i2]);
+                Hash digest = node::compute_block_digest(t);
+                for (auto& dom : t.creators)
+                    t.creator_block_sigs.push_back(crypto::sign(keys[dom], digest.data(), digest.size()));
+                return t;
+            };
+            Block tip_ok = tip_with_abort(nullptr);
+            Block bb_ok; bb_ok.index = 100;
+            bb_ok.shard_tip_records = { make_rec(tip_ok, "") }; bb_ok.shard_tip_witnesses = { tip_ok };
+            check(run(bb_ok).ok, "S-074 control: a witness carrying a CANONICAL abort event, signed by the committee it derives, is ACCEPTED");
+            Hash chosen{}; for (auto& x : chosen) x = 0x77;
+            Block tip_bad = tip_with_abort(&chosen);
+            Block bb_bad; bb_bad.index = 100;
+            bb_bad.shard_tip_records = { make_rec(tip_bad, "") }; bb_bad.shard_tip_witnesses = { tip_bad };
+            auto r = run(bb_bad);
+            check(!r.ok && r.error.find("verification failed") != std::string::npos,
+                  "S-074: a witness whose abort event carries a CHOSEN event_hash is REJECTED even though its K-of-K signatures verify against the committee that hash derives");
+        }
         // === 2. NO witness (a pre-e7 Byzantine fold) → REJECTED ===
         {
             Block b2 = bb; b2.shard_tip_witnesses.clear();

@@ -124,6 +124,21 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
     }
 
     Hash rand = crypto::epoch_committee_seed(beacon_rand, shard_id);
+    // S-074: the tip's abort events must carry their CANONICAL identity —
+    // the same rule the source shard's validators enforce — so a K-colluding
+    // source committee cannot present a chosen hash that seats a committee of
+    // its choosing here while its own chain rejects the block. Re-derived from
+    // the committee seed and the tip height; no parent tip is needed.
+    for (size_t i = 0; i < tip.abort_events.size(); ++i) {
+        const auto& ae = tip.abort_events[i];
+        const chain::AbortEvent* prev = (i == 0) ? nullptr : &tip.abort_events[i - 1];
+        if (ae.event_hash != chain::canonical_abort_event_hash(ae, prev, rand, tip.index)) {
+            std::cerr << "[node] shard tip: abort_event[" << i
+                      << "] event_hash not canonical (S-074): shard=" << shard_id
+                      << " block=" << tip.index << "\n";
+            return std::nullopt;
+        }
+    }
     for (auto& ae : tip.abort_events) {
         rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
     }

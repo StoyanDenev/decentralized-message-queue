@@ -3897,6 +3897,17 @@ int cmd_verify_shardtip_records(int argc, char** argv) {
                                "expected_k");
 
             Hash rand = crypto::epoch_committee_seed(ck.epoch_rand, rec.source_shard_id);
+            // S-074: every abort event must carry its CANONICAL identity (the
+            // rule the source shard's validators and the beacon enforce), so a
+            // chosen hash cannot seat a committee of the witness author's
+            // choosing; re-derived from the committee seed + witness height.
+            for (size_t j = 0; j < w.abort_events.size(); ++j) {
+                const auto& ae = w.abort_events[j];
+                const determ::chain::AbortEvent* prev = (j == 0) ? nullptr : &w.abort_events[j - 1];
+                if (ae.event_hash != determ::chain::canonical_abort_event_hash(ae, prev, rand, w.index))
+                    return fail(3, "record[" + std::to_string(i) + "]: witness abort_event["
+                                 + std::to_string(j) + "] event_hash not canonical (S-074)");
+            }
             for (auto& ae : w.abort_events)
                 rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
             auto indices = crypto::select_m_creators(rand, avail.size(), expected_k);
