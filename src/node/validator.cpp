@@ -12,6 +12,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/keys.hpp>
+#include <determ/crypto/ed25519/ed25519_group.h>   // S-068: small-order REGISTER key rejection
 #include <algorithm>
 #include <chrono>
 #include <map>
@@ -884,6 +885,17 @@ BlockValidator::Result BlockValidator::check_transaction(
                              + "-byte cap (got " + std::to_string(tx.payload.size()) + " bytes)"};
             break;
         case TxType::REGISTER:
+            // S-068 (companion to V-REG-1): the Ed25519 verifier never rejects a
+            // small-order public key; under the neutral element a single (R, S)
+            // verifies EVERY message, under the other seven torsion points forging
+            // any chosen message costs a few hash trials — so the REGISTER's proof
+            // of possession would be vacuous and, with create-only, the resulting
+            // identity permanently forgeable by anyone. Checked AFTER the signature
+            // so an unauthenticated REGISTER pays only the verification it already
+            // paid; the payload is >= 32 bytes here (REGISTER arm above).
+            if (determ_ed25519_point_has_small_order(tx.payload.data()) != 0)
+                return {false, "REGISTER pubkey is a small-order curve point "
+                               "(vacuous proof of possession, S-068): " + tx.from};
             break;
         case TxType::DEREGISTER:
             if (!registry.find(tx.from))

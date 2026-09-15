@@ -158,7 +158,8 @@ under the consensus lock; S-067 UNSTAKE is unincludable (stake unrecoverable thr
 consensus).
 CLOSED 2026-09-15 (owner-authorized accept-rule change, DECISION-LOG 2026-09-15): S-060
 REGISTER identity takeover — REGISTER is CREATE-ONLY (V-REG-1: rejected for any domain in
-the raw registrants map, and unless nonce == 0); with it the reopened leg of S-052.
+the raw registrants map, and unless nonce == 0); with it the reopened leg of S-052 and
+the companion S-068 (a small-order REGISTER key is rejected, after the signature).
 Decided consequences: a domain name is single-use, a lost key is terminal, key rotation
 is a separate incumbent-signed transaction (R-6, open).
 CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
@@ -353,8 +354,9 @@ surface the row to the owner before calling the milestone complete.
   R-5  DECIDED + LANDED 2026-09-15 (owner): create-only REGISTER (V-REG-1) closes S-060;
        key loss is terminal for the domain; DEREGISTER is terminal too (no re-entry under
        the same name — balance, stake and DApp ownership stay with the domain, S-067).
-       The small-order-key companion is S-068 (its own increment). Gate:
-       test-register-create-only. Kept here as the record.
+       The small-order-key companion S-068 landed the same day (a REGISTER payload key
+       must decode to a large-order point). Gates: test-register-create-only,
+       test-register-small-order-key. Kept here as the record.
   R-6  ROTATE_IDENTITY_KEY / revocability: a new TxType is free at the wire and state
        layer (1c0a61d), but old validators fail closed on unknown types, so first use
        needs every validator upgraded — a coordination requirement, not a migration.

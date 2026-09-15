@@ -56,6 +56,11 @@ int  determ_ed25519_point_add(uint8_t out[32], const uint8_t p[32], const uint8_
  * 1 iff canonical, else 0: a scalar s < L, or a point encoding with y < q. */
 int  determ_ed25519_sc_is_canonical(const uint8_t s[32]);
 int  determ_ed25519_point_is_canonical(const uint8_t p[32]);
+/* 1 iff p decodes to a small-order (8-torsion) point — [8]P = O — 0 iff it
+ * decodes to a large-order point, -1 iff it does not decode. The verifier does
+ * not reject such keys (RFC 8032 does not require it); a REGISTER must
+ * (SECURITY.md S-068: under a small-order key one (R, S) verifies everything). */
+int  determ_ed25519_point_has_small_order(const uint8_t p[32]);
 
 #ifdef __cplusplus
 } /* extern "C" */

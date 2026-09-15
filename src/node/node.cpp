@@ -12,6 +12,7 @@
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/rng/rng.h>
+#include <determ/crypto/ed25519/ed25519_group.h>   // S-068: small-order REGISTER key mirror
 #include <set>
 #include <filesystem>
 #include <fstream>
@@ -2792,7 +2793,11 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
         pk = it->second.ed_pub;
     }
     auto sb = tx.signing_bytes();
-    return verify(pk, sb.data(), sb.size(), tx.sig);
+    if (!verify(pk, sb.data(), sb.size(), tx.sig)) return false;
+    // S-068 mirror (after the signature, like the verifier): a REGISTER whose
+    // payload key is small-order never becomes resident either.
+    return tx.type != TxType::REGISTER
+        || determ_ed25519_point_has_small_order(pk.data()) == 0;
 }
 
 TxAdmit Node::tx_admit_locked() {

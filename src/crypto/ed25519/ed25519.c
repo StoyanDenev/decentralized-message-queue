@@ -248,7 +248,12 @@ static int sc_lt_L(const u8 s[32]) {
  * Branch is on PUBLIC key bytes, so it is not a constant-time concern. NOTE:
  * this is STRICTER than OpenSSL's lenient ref10 decoder, which accepts the 19
  * non-canonical y in {q..q+18}; we follow RFC 8032 to keep "one point = one
- * encoding" for any consensus / anon-address derivation over the raw bytes. */
+ * encoding" for any consensus / anon-address derivation over the raw bytes.
+ * Known exception (recorded with S-068): the sign bit is not checked against
+ * x = 0 (RFC 8032 §5.1.3 step 4), so the neutral element and the order-2
+ * point each decode from two encodings (01 00..00 / 01 00..80, ec ff..7f /
+ * ec ff..ff); both are 8-torsion and rejected wherever the small-order check
+ * applies. */
 static int point_y_is_canonical(const u8 p[32]) {
     gf y; u8 rt[32], d = 0; int i;
     unpack25519(y, p);            /* y = low 255 bits of p */
@@ -445,6 +450,25 @@ int determ_ed25519_point_add(u8 out[32], const u8 a[32], const u8 b[32]) {
  * higher layers apply the same anti-
  * malleability gate the Ed25519 verifier uses on signature scalars. */
 int determ_ed25519_sc_is_canonical(const u8 s[32]) { return sc_lt_L(s); }
+
+/* Small-order (torsion) check: 1 iff p decodes to a point of the 8-torsion
+ * subgroup ([8]P is the neutral element), 0 iff it decodes to a point of large
+ * order, -1 iff it does not decode. RFC 8032 verification never rejects these
+ * points; under the neutral element a single (R, S) pair verifies every
+ * message (A = O: [S]B = R + [k]O for S = 0, R = O) and under the other seven
+ * a forgery for any chosen message costs a few hash trials ([k]A takes at
+ * most 8 values), so a REGISTER whose payload key is small-order carries a
+ * vacuous proof of possession — anyone can sign as that domain forever
+ * (SECURITY.md S-068). Three in-place doublings (add reads both operands
+ * before it writes), then the neutral element is read off the extended
+ * coordinates (X = 0 and Y = Z) — no inversion, no 256-bit ladder: the cost
+ * is one point decode, a small fraction of a signature verification. */
+int determ_ed25519_point_has_small_order(const u8 p[32]) {
+    gf P[4];
+    if (point_unpack(P, p)) return -1;
+    add(P, P); add(P, P); add(P, P);
+    return (!neq25519(P[0], gf0) && !neq25519(P[1], P[2])) ? 1 : 0;
+}
 
 /* 1 iff the 32-byte point encoding p has a canonical y < q (RFC 8032 §5.1.3),
  * else 0 — the "one point = one encoding" gate used by the Ed25519 verifier. */

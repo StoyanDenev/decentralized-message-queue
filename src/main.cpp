@@ -971,6 +971,10 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-register-small-order-key        S-068 gate — a REGISTER whose payload key
+                                              is a small-order (8-torsion) point is REJECTED
+                                              by the verifier and the ingress mirror;
+                                              demonstrates the (R = O, S = 0) forgery first
   determ test-register-create-only            V-REG-1 / S-060 gate — REGISTER is
                                               create-only: a registered, deregistered
                                               or incumbent domain cannot be re-REGISTERed
@@ -47462,6 +47466,191 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-register-create-only\n"
                            : "  PASS: test-register-create-only\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-register-small-order-key") {
+        // S-068 (companion to V-REG-1; recorded DECISION-LOG 2026-08-14 1c0a61d).
+        // determ_ed25519_verify enforces y-canonicality and S < L but no torsion
+        // check, so a small-order public key (the 8-torsion subgroup) is
+        // forgeable: under the neutral element (R = O, S = 0) verifies EVERY
+        // message ([S]B = R + [k]A holds for any k), and under the other seven
+        // points the same pair verifies whenever [k]A = O, i.e. one message in
+        // at most eight. A REGISTER whose payload key is such a point therefore
+        // carries a vacuous proof of possession and, under create-only, a
+        // permanently forgeable identity. Now the verifier's REGISTER case (and
+        // the ingress mirror) rejects any payload key with [8]P == O, after the
+        // signature so an unauthenticated REGISTER pays nothing extra.
+        // Both-legs design: the forgery is DEMONSTRATED first (a verifying
+        // (R = O, S = 0) REGISTER is found for every listed encoding within a
+        // few name trials), each candidate's order is re-derived by the library
+        // (a wrong constant fails the precondition instead of passing silently),
+        // a normal key stays accepted, every forged REGISTER is rejected by the
+        // verifier with the S-068 reason, and the ingress mirror drops it.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey alice = mk_key(0x40);
+        crypto::NodeKey fresh = mk_key(0x64);
+        GenesisConfig cfg;
+        cfg.chain_id = "register-small-order";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = alice.pub; c0.initial_stake = 1000;
+        cfg.initial_creators = { c0 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 1000;
+        cfg.initial_balances = { ga };
+        Chain chain; chain.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        BlockValidator v;
+        const uint64_t at = chain.height();
+
+        // The 8-torsion subgroup: the eight canonical encodings (libsodium's
+        // blacklist + the neutral element and the order-2 point) and the two
+        // sign-bit variants this decoder also accepts for the x = 0 points.
+        const char* kSmallOrder[10] = {
+            "0100000000000000000000000000000000000000000000000000000000000000", // O (order 1)
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // y = -1 (order 2)
+            "0000000000000000000000000000000000000000000000000000000000000000", // y = 0 (order 4)
+            "0000000000000000000000000000000000000000000000000000000000000080", // y = 0, other x (order 4)
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", // order 8
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", // order 8
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", // order 8
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", // order 8
+            "0100000000000000000000000000000000000000000000000000000000000080", // O again (sign bit set)
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // y = -1 again (sign bit set)
+        };
+        // Precondition — the library agrees every listed encoding is small-order
+        // (and a normal key is not): the constants are checked, not trusted.
+        {
+            int agreed = 0;
+            for (auto hex : kSmallOrder) {
+                auto p = from_hex_arr<32>(hex);
+                if (determ_ed25519_point_has_small_order(p.data()) == 1) ++agreed;
+            }
+            check(agreed == 10, "precondition: the library derives [8]P == O for all 10 listed encodings");
+            check(determ_ed25519_point_has_small_order(fresh.pub.data()) == 0,
+                  "precondition: a normal public key is large-order");
+        }
+        auto reg_tx = [&](const std::string& domain, const PubKey& payload_key,
+                          const Signature& sig) {
+            Transaction tx; tx.type = TxType::REGISTER; tx.from = domain; tx.to = "";
+            tx.amount = 0; tx.fee = 0; tx.nonce = 0;
+            tx.payload.assign(payload_key.begin(), payload_key.end());
+            tx.sig = sig; tx.hash = tx.compute_hash();
+            return tx;
+        };
+        Signature vacuous{};                      // 64 zero bytes...
+        vacuous[0] = 0x01;                        // ...R = O (01 00..00), S = 0
+        // DEMONSTRATION — for every listed key, a REGISTER carrying (R = O, S = 0)
+        // that the raw verifier ACCEPTS is found by varying the domain name: the
+        // pair verifies whenever [k]A = O, so at most a few trials (one, under O).
+        std::vector<Transaction> forged;
+        int worst_trials = 0;
+        for (size_t i = 0; i < 10; ++i) {
+            PubKey pk = from_hex_arr<32>(kSmallOrder[i]);
+            for (int t = 0; t < 4096; ++t) {
+                Transaction tx = reg_tx("victim" + std::to_string(i) + "-" + std::to_string(t), pk, vacuous);
+                auto sb = tx.signing_bytes();
+                if (crypto::verify(pk, sb.data(), sb.size(), vacuous)) {
+                    forged.push_back(tx); worst_trials = std::max(worst_trials, t + 1); break;
+                }
+            }
+        }
+        std::cout << "  (forgery found for " << forged.size() << "/10 keys; worst case "
+                  << worst_trials << " name trials)\n";
+        check(forged.size() == 10 && worst_trials <= 64,
+              "demonstration: for every listed key the raw verifier ACCEPTS a (R = O, S = 0) REGISTER found within a few name trials (vacuous proof of possession)");
+        // CONTROL — a fresh domain with a normal key (properly signed) is accepted.
+        {
+            Transaction tx; tx.type = TxType::REGISTER; tx.from = "newdom"; tx.to = "";
+            tx.amount = 0; tx.fee = 0; tx.nonce = 0;
+            tx.payload.assign(fresh.pub.begin(), fresh.pub.end());
+            auto sb = tx.signing_bytes(); tx.sig = crypto::sign(fresh, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            check(v.check_transaction(tx, at, chain, reg, 0).ok,
+                  "control: a fresh-domain REGISTER with a normal key is ACCEPTED");
+        }
+        // The rule — every forged REGISTER (signature VERIFIES) is rejected by
+        // the verifier for the small-order reason.
+        {
+            int rejected = 0;
+            for (auto& tx : forged) {
+                auto r = v.check_transaction(tx, at, chain, reg, 0);
+                if (!r.ok && r.error.find("S-068") != std::string::npos) ++rejected;
+            }
+            check(rejected == 10 && forged.size() == 10,
+                  "S-068: every forged small-order REGISTER (all 10 encodings) is REJECTED by the verifier");
+        }
+        // Undecodable key — y = 2 has no x on the curve ((y²-1)/(d·y²+1) is a
+        // quadratic non-residue mod p): the helper reports -1 and the REGISTER
+        // is rejected (no signature can verify under a key that does not decode).
+        {
+            PubKey junk{}; junk[0] = 0x02;
+            check(determ_ed25519_point_has_small_order(junk.data()) == -1,
+                  "precondition: the encoding y = 2 does not decode to a curve point");
+            check(!v.check_transaction(reg_tx("junkdom", junk, vacuous), at, chain, reg, 0).ok,
+                  "an undecodable-key REGISTER is REJECTED by the verifier");
+        }
+        // Ingress mirror (node-local): the forged neutral-element REGISTER is
+        // dropped at gossip ingress and rejected at RPC submit, so it cannot
+        // squat a (from, nonce) slot and per-sender quota until a build evicts
+        // it; a fresh normal-key REGISTER is still admitted.
+        {
+            using namespace determ::net;
+            namespace fs = std::filesystem;
+            std::error_code fec;
+            fs::path dir = fs::temp_directory_path() / "determ-register-small-order-key";
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            GenesisConfig g; g.chain_id = "register-small-order-mirror";
+            g.m_creators = 1; g.k_block_sigs = 1; g.epoch_blocks = 1;
+            GenesisCreator gc; gc.domain = "node0"; gc.ed_pub = alice.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config ncfg;
+            ncfg.domain = "node0"; ncfg.data_dir = (dir / "node0").string();
+            ncfg.listen_port = 7677; ncfg.key_path = (dir / "node0.key").string();
+            ncfg.chain_path = (dir / "node0" / "chain.json").string();
+            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.log_quiet = true;
+            crypto::save_node_key(alice, ncfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node n(ncfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+            if (!forged.empty()) {
+                n.on_tx_for_test(forged[0]);
+                check(n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: the forged neutral-element REGISTER is DROPPED at gossip ingress");
+                bool rpc_rejected = false;
+                try { n.rpc_submit_tx(forged[0].to_json()); } catch (const std::exception&) { rpc_rejected = true; }
+                check(rpc_rejected && n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: the same REGISTER is REJECTED at RPC submit");
+            }
+            Transaction ok; ok.type = TxType::REGISTER; ok.from = "newdom"; ok.to = "";
+            ok.amount = 0; ok.fee = 0; ok.nonce = 0;
+            ok.payload.assign(fresh.pub.begin(), fresh.pub.end());
+            auto sb = ok.signing_bytes(); ok.sig = crypto::sign(fresh, sb.data(), sb.size());
+            ok.hash = ok.compute_hash();
+            n.on_tx_for_test(ok);
+            check(n.rpc_status()["mempool_size"].get<size_t>() == 1,
+                  "ingress mirror control: a fresh-domain REGISTER with a normal key is ADMITTED at gossip ingress");
+            fs::remove_all(dir, fec);
+        }
+        std::cout << (fail ? "  FAIL: test-register-small-order-key\n"
+                           : "  PASS: test-register-small-order-key\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-inbound-receipt-cap") {
