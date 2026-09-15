@@ -1728,9 +1728,10 @@ void Chain::apply_transactions(const Block& b) {
     if (subsidy_mode_ == 1 && lottery_jackpot_multiplier_ >= 2) {
         // Read 8 bytes of cumulative_rand as the lottery seed. The
         // commit-reveal protocol guarantees no committee member could
-        // have predicted cumulative_rand at Phase-1 decision time, so
-        // selective-abort against a jackpot is information-theoretically
-        // defeated for the same reason regular `R` is.
+        // have predicted cumulative_rand at Phase-1 decision time. The
+        // LAST Phase-2 revealer does see it before revealing and can
+        // reject the sample by withholding (a Phase-2 abort costs only its
+        // seat at this height — S-077); it cannot choose the replacement.
         uint64_t lottery = 0;
         for (int i = 0; i < 8; ++i) {
             lottery = (lottery << 8) | b.cumulative_rand[i];

@@ -424,6 +424,20 @@ surface the row to the owner before calling the milestone complete.
        cap, gate NEF on a stake/balance floor, or set zeroth_pool_initial = 0 at
        genesis (E1 off). DECIDE BY: before genesis (a genesis with a funded pool and the
        shipped rule is a giveaway).
+  R-15 S-076: two silent committee members halt the height permanently at every K (the
+       abort quorum max(2, K-1) is unreachable with K-2 live claimers; the valve re-derives
+       the same committee). This — not the committee-selection cadence — is the
+       availability lever (design analysis 2026-09-15: per-block selection buys a few
+       blocks of delay against a blind two-node flood and nothing against a targeted
+       one). Options: a lower claim quorum, or claims from non-committee pool members
+       when N(h) > K (accept rules; the S-044 cascade/attribution trade-off), or accept
+       the crash-stop bound and say so. The time-bucket / round-marker family is
+       REFUTED — do not revive. DECIDE BY: before genesis; frozen accept rule.
+  R-16 S-077: the last Phase-2 revealer can reject one cumulative_rand sample per height
+       at zero cost (Phase-2 aborts neither slash nor suspend). Rejection sampling, not
+       choice (S-074 removed the assembler's choice). Either a cost for Phase-2 silence
+       (revisits the S-044-era "no punishment for Phase-2 timing skew") or accept and
+       document. DECIDE BY: before genesis if a cost is wanted (apply-path rule).
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
   No decision is not a neutral state.
 
@@ -441,3 +455,9 @@ change; each is one log entry:
   O-4  The no-cryptocurrency scope reduction (evaluated 0fe6eda, superseding 8b86d39) and
        its DIRECT CONFLICT with the no-backdoor constraint (6265d34 hazard 2): adopt,
        reject, or scope.
+  O-5  epoch_blocks: the committee-selection cadence is genesis-frozen. A per-block
+       cadence (E = 1) on SINGLE / cluster deployments buys the targeting window and
+       reward fairness, not availability; a DYNAMIC cadence computed from network state
+       cannot improve availability either (no committed input moves while a height is
+       stalled) and degenerates to the constant 1 wherever it matters (design analysis
+       2026-09-15 §13). Pick E at genesis; nothing to build.

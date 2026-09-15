@@ -1036,7 +1036,12 @@ quorum plus escalation to a `ceil(2K/3)` committee tolerates one crash at
 `|pool| == K == 3` (DECISION-LOG 2026-08-14 `ddfe877`: "`f = 0` is FALSE"). An
 operator's deliberate choice, not a safety violation. `K = M-1` (`M >= 3`) is the usual production
 posture: intersection holds and one straggler is tolerated (see `web`,
-`regional`, `global` in §12.4).
+`regional`, `global` in §12.4). The bound is exact and independent of the
+committee-selection cadence: with **two** committee members silent in one
+round no abort can form against either (claims come only from committee
+members; the quorum is `max(2, K−1)`), escalation cannot arm, and the S-050
+valve re-derives the same committee — the height halts until one of them
+returns (SECURITY.md S-076).
 
 The boundary is exact at `2K > M`, not `>=`: `M=6, K=3` is **rejected** —
 equality is not intersection, since a 6-member committee splits cleanly into

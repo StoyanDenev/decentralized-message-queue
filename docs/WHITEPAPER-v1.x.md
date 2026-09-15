@@ -84,7 +84,7 @@ Applications choose which blocks they trust by reading the `consensus_mode` tag 
 
 ### 3.1 Per-height protocol overview
 
-Each block is produced in two phases by a K-member committee selected deterministically from the validator pool via the previous block's `cumulative_rand` plus an epoch-relative seed:
+Each block is produced in two phases by a K-member committee selected deterministically from the validator pool via the epoch seed — `epoch_committee_seed(cumulative_rand at the epoch's anchor block, shard_id)`, fixed for `epoch_blocks` heights (`epoch_blocks = 1` makes it the previous block's `cumulative_rand`) — mixed with this height's abort events:
 
 **Phase 1 (Contrib).** Each committee member `i` independently:
 1. Selects a transaction list `tx_list_i` from its local mempool.
