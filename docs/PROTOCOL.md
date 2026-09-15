@@ -1235,6 +1235,7 @@ Validator constraints:
 3. Inner txs MUST NOT themselves be `COMPOSABLE_BATCH` (flat, no recursion; v2.4 restricts inners to `TRANSFER`).
 4. Inner txs MUST have `fee == 0` (outer batch pays the chain fee).
 5. Inner frames MUST NOT carry a `pq_auth` section (PQ inners are not in the v2.4 whitelist; the accept rule closes the unsigned-stuffing channel).
+6. No inner tx may originate from the Zeroth pool (`inner.from != ZEROTH_ADDRESS`, E1 asserted at the inner layer, 2026-09-15 — S-071: the pool's all-zero key is a small-order point under which signatures are forgeable, so the guard is what makes the pool a pseudo-account). Apply mirrors the rule inside `atomic_scope`.
 
 Apply semantics:
 - Outer batch consumes submitter's `next_nonce` (one slot).

@@ -332,7 +332,9 @@ Expected per-block value equals FLAT subsidy — total issuance schedule unchang
 
 ### 8.5 Negative entry fee from Zeroth pool (E1) — lottery distribution
 
-A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS` — no key can sign over the all-zero pubkey, so the pool is provably unsynthesizable. A genesis with `zeroth_pool_initial = 0` disables E1 entirely.
+> **Status 2026-09-15 — the lottery below is DESIGN, NOT SHIPPED.** The shipped rule (`src/chain/chain.cpp`, REGISTER apply) is the earlier geometric one: every first-time REGISTER receives `pool / 2`, unconditionally — no lottery, no per-block cap, and none of the `nef_grant` / `nef_probability_denom` / `nef_max_wins_per_block` genesis fields exists. The Sybil-boundedness property below therefore does NOT hold for the shipped code: a fee-0 REGISTER needs no balance and no stake, so ~log2(pool) fresh names drain the pool at zero cost (SECURITY.md S-073, DECISION CLOCK R-14 — owner decision: ship the lottery + cap, or gate NEF on a stake/balance floor).
+
+A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS`, and since 2026-09-15 any COMPOSABLE_BATCH inner transfer from it (S-071). That explicit guard is what makes the pool a pseudo-account: the all-zero pubkey is a small-order point under which signatures are forgeable, not an unsignable one (S-068). A genesis with `zeroth_pool_initial = 0` disables E1 entirely.
 
 On each REGISTER apply for a new domain (every REGISTER is a first-time registration since V-REG-1, 2026-09-15 — re-registration is rejected by the verifier), a per-registrant lottery seeded by `block.cumulative_rand` decides whether the registrant wins a fixed grant from the pool. An optional per-block win cap bounds worst-case drain rate:
 

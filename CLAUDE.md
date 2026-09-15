@@ -149,7 +149,7 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
   3. Gate the BINARY replacements falsify-on-mutant — not the deleted JSON paths.
 
 LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16 and
-2026-09-14; ledger rows docs/SECURITY.md S-055..S-067). Recorded in the log after this
+2026-09-14; ledger rows docs/SECURITY.md S-055..S-073). Recorded in the log after this
 section was last written and carried in the ledger. STILL OPEN: S-055 C0 F2
 equivocation-view digest halt; S-057 unsigned unbounded pq_auth -> unrelayable blocks;
 S-063 DAPP_CALL frames report payments never made; S-064 cross-shard bundles
@@ -162,6 +162,12 @@ the raw registrants map, and unless nonce == 0); with it the reopened leg of S-0
 the companion S-068 (a small-order REGISTER key is rejected, after the signature).
 Decided consequences: a domain name is single-use, a lost key is terminal, key rotation
 is a separate incumbent-signed transaction (R-6, open).
+CLOSED 2026-09-15 (found and fixed the same day by the S-068 review): S-071 Zeroth pool
+drain — the pool's all-zero anon key is a SMALL-ORDER point (forgeable, not unsignable)
+and a COMPOSABLE_BATCH inner TRANSFER from it bypassed the outer-only E1 guard; E1 is
+now asserted on every inner tx (verifier) and mirrored at apply. The economic route
+stays OPEN: the shipped NEF hands pool/2 to EVERY fee-0 fresh REGISTER (the whitepaper's
+lottery + cap was never shipped) — S-073, R-14.
 CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
 producer now asks the verifier (BlockValidator::check_transaction is the ONE per-tx
 rule set; build_body admits only what it accepts; a resident rejected tx is evicted
@@ -392,6 +398,24 @@ surface the row to the owner before calling the milestone complete.
        misleading) or STAKE from a registered-but-unstaked domain must be accepted (an
        accept-rule change). With V-REG-1 + terminal DEREGISTER the set can only shrink.
        DECIDE BY: before genesis; frozen accept rule.
+  R-13 S-072: the nine unguarded small-order anonymous addresses (an anon address is its
+       own key; the all-zero one is the E1 pool, closed by S-071) are anyone-can-ACT
+       identities: every tx type an anonymous sender may submit (TRANSFER, SHIELD,
+       UNSHIELD, CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS,
+       REGISTER_NOTE_KEY) verifies under a forged signature there. Nobody but the
+       sender to such an address loses — footgun, not theft. Either reject EVERY tx whose
+       anonymous sender key is small-order (the anon arm, one rule — burn semantics,
+       an accept rule) or document them as anyone-can-act. DECIDE BY: before genesis.
+  R-14 S-073: the shipped NEF grants pool/2 to every first-time REGISTER, unconditionally
+       — no lottery, no per-block cap, no balance or stake floor (a fee-0 REGISTER needs
+       none), so ~log2(pool) fresh names empty the Zeroth pool at zero cost. Under
+       DOMAIN_INCLUSION the grants are spendable (theft of protocol funds); under
+       STAKE_INCLUSION they are stranded (S-069). The whitepaper §8.5 lottery + cap
+       (nef_grant / nef_probability_denom / nef_max_wins_per_block) was never shipped;
+       EconomicSoundness.md already flags the rewrite. Owner decision: ship the lottery +
+       cap, gate NEF on a stake/balance floor, or set zeroth_pool_initial = 0 at
+       genesis (E1 off). DECIDE BY: before genesis (a genesis with a funded pool and the
+       shipped rule is a giveaway).
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
   No decision is not a neutral state.
 

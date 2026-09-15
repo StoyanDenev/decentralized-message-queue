@@ -24,7 +24,7 @@ uint64_t accumulated_subsidy_{0};            // A1 monotone counter (chain.hpp:6
 
 The four front fields are genesis-pinned (loaded from `GenesisConfig` at chain bootstrap, see `chain.cpp:1999–2007`) and are immutable once set (no PARAM_CHANGE entry maps to `block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, or `lottery_jackpot_multiplier` in the A5 whitelist per `Governance.md` FA10). The fifth field `accumulated_subsidy_` is the running A1 counter mutated by every successful subsidy-distribution event. Together they form the complete subsidy substrate; no other chain field participates.
 
-The companion `ZEROTH_ADDRESS` constant (`include/determ/chain/params.hpp:31`) is the canonical anon-style address `0x0000…0000`, encoding an all-zero pubkey (a low-order curve25519 point) with no usable Ed25519 private key. The genesis `zeroth_pool_initial` field (`include/determ/chain/genesis.hpp:137`) seeds `accounts_[ZEROTH_ADDRESS].balance` at index-0 apply; that balance is then drained per first-time REGISTER per E1.
+The companion `ZEROTH_ADDRESS` constant (`include/determ/chain/params.hpp:31`) is the canonical anon-style address `0x0000…0000`, encoding an all-zero pubkey — a small-order curve25519 point under which Ed25519 signatures are forgeable — the validator's E1 guard, outer and COMPOSABLE_BATCH-inner, is what makes it a pseudo-account (corrected 2026-09-15, SECURITY.md S-071). The genesis `zeroth_pool_initial` field (`include/determ/chain/genesis.hpp:137`) seeds `accounts_[ZEROTH_ADDRESS].balance` at index-0 apply; that balance is then drained per first-time REGISTER per E1.
 
 ### 1.2 The per-block mint pipeline
 

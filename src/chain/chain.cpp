@@ -1280,9 +1280,10 @@ void Chain::apply_transactions(const Block& b) {
             // a non-zero balance, half of it is transferred to the new
             // registrant. Geometric exhaustion: pool halves per first-time
             // REGISTER, asymptotes to 0. Pool-empty case (balance==0 ⇒
-            // nef==0) is a silent no-op. The pool address is canonical and
-            // not synthesizable, so no key can ever drain it via TRANSFER —
-            // only this REGISTER hook touches it. A1 invariant trivially
+            // nef==0) is a silent no-op. The pool's all-zero key is a
+            // SMALL-ORDER point (forgeable, S-068); only the validator's E1
+            // guard — outer tx and COMPOSABLE_BATCH inner (S-071) — keeps
+            // any other path from debiting it. A1 invariant trivially
             // holds: nef is balance transfer (pool -> new domain), not
             // a mint or burn.
             if (first_time_register) {
@@ -1466,6 +1467,8 @@ void Chain::apply_transactions(const Block& b) {
                     if (!inner.pq_auth.empty()) return false;
                     // No cross-shard inner txs in v2.4
                     if (c.is_cross_shard(inner.to)) return false;
+                    // E1 (S-071): the Zeroth pool never spends (validator/apply symmetry)
+                    if (inner.from == ZEROTH_ADDRESS) return false;
                     // Inner sender's nonce must match its current chain nonce
                     AccountState& isender = c.accounts_[inner.from];
                     if (inner.nonce != isender.next_nonce) return false;

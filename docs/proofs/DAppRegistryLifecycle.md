@@ -230,7 +230,7 @@ The Negative Entry Fee (NEF) is the E1 economic mechanism at `chain.cpp:823–83
 
 **Why the separation matters.** The NEF mechanism's economic invariant (FA11 EconomicSoundness T-13: NEF is supply-neutral, geometric exhaustion of the Zeroth pool, A1 trivially preserved) depends on a one-shot-per-Determ-identity firing. If DAPP_REGISTER also drained NEF, every operator could create N DApps from the same Determ identity to drain the pool N times. The current keying — NEF on REGISTER's `first_time_register == registrants_.find(tx.from) == end()` — guarantees one drain per Determ identity. DAPP_REGISTER's separation from this mechanism preserves the FA11 invariant.
 
-The chain-wide NEF-pool invariants (geometric exhaustion, A1 supply-neutrality, the "Zeroth address is canonical and not synthesizable" property) are covered by `EconomicSoundness.md` (FA11) T-13. The present proof's contribution is the apply-side observation that DAPP_REGISTER does not participate in the NEF channel — it is purely a fee-only-debit channel as enumerated in I-5 of `AccountStateInvariants.md`.
+The chain-wide NEF-pool invariants (geometric exhaustion, A1 supply-neutrality, the "Zeroth address is canonical and guarded" property — its key is small-order and forgeable, the E1 guard is what makes it a pseudo-account, S-071 2026-09-15) are covered by `EconomicSoundness.md` (FA11) T-13. The present proof's contribution is the apply-side observation that DAPP_REGISTER does not participate in the NEF channel — it is purely a fee-only-debit channel as enumerated in I-5 of `AccountStateInvariants.md`.
 
 ---
 

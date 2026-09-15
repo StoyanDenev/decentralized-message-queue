@@ -2772,6 +2772,9 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     if (tx.type == TxType::PQ_TRANSFER) return verify_pq_transaction(tx);
     PubKey pk{};
     const bool from_anon = is_anon_address(tx.from);
+    // E1 mirror (S-071): the pool's all-zero key is small-order, so a forged
+    // signature under it would otherwise make such a tx mempool-resident.
+    if (tx.from == ZEROTH_ADDRESS) return false;
     if (tx.type == TxType::REGISTER) {
         if (from_anon) return false;
         if (tx.payload.size() < 32) return false;

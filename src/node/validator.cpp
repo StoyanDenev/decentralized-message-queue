@@ -713,9 +713,11 @@ BlockValidator::Result BlockValidator::check_transaction(
         const bool from_anon = is_anon_address(tx.from);
 
         // E1: explicit guard against any tx claiming `from` is the Zeroth
-        // pool. The all-zero anon address encodes a low-order curve point
-        // with no usable private key — signature verification should
-        // fail anyway, but this fail-fast check is cheaper and unambiguous.
+        // pool. The all-zero anon address encodes a SMALL-ORDER curve point,
+        // under which signatures are forgeable ((R = O, S = 0) verifies one
+        // message in four — S-068/S-071), so this guard is the only thing
+        // that makes the pool a pseudo-account; it is asserted again on the
+        // COMPOSABLE_BATCH inner path below.
         if (tx.from == ZEROTH_ADDRESS)
             return {false, "Zeroth pool is a pseudo-account; no tx may "
                           "originate from " + std::string(ZEROTH_ADDRESS)};
@@ -1379,6 +1381,15 @@ BlockValidator::Result BlockValidator::check_transaction(
                                  + std::to_string(ii)
                                  + "] carries pq_auth (PQ inner txs not in "
                                    "the v2.4 whitelist)"};
+                }
+                // E1 at the inner layer (S-071): the pool's all-zero key is
+                // small-order, so an inner TRANSFER from it would verify with
+                // a forged signature and apply would debit the pool.
+                if (it.from == ZEROTH_ADDRESS) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] originates from the Zeroth pool "
+                                   "pseudo-account (E1)"};
                 }
                 // Inner-tx signature verification: derive the inner.from's
                 // pubkey (parse_anon_pubkey for bearer / registry.find for

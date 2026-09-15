@@ -975,6 +975,10 @@ Additional in-process tests:
                                               is a small-order (8-torsion) point is REJECTED
                                               by the verifier and the ingress mirror;
                                               demonstrates the (R = O, S = 0) forgery first
+  determ test-zeroth-pool-inner-batch         S-071 gate — a COMPOSABLE_BATCH inner
+                                              TRANSFER from the Zeroth pool is REJECTED
+                                              (verifier) and never applied; demonstrates
+                                              the forged signature under the all-zero key
   determ test-register-create-only            V-REG-1 / S-060 gate — REGISTER is
                                               create-only: a registered, deregistered
                                               or incumbent domain cannot be re-REGISTERed
@@ -25892,8 +25896,9 @@ int main(int argc, char** argv) {
     //   * REGISTER_REGION_MAX = 32 — rev.9 R1 region tag cap.
     //   * REGISTER_PAYLOAD_MIN_SIZE / _MAX_SIZE — validator bounds.
     //   * TRANSFER_PAYLOAD_MAX = 128 — operator-visible memo cap.
-    //   * ZEROTH_ADDRESS — E1 NEF pool's pseudo-account (low-order
-    //     curve25519 point; signature production infeasible).
+    //   * ZEROTH_ADDRESS — E1 NEF pool's pseudo-account (a small-order
+    //     curve25519 point, so signatures under it are forgeable; the
+    //     validator's E1 guard is what makes it a pseudo-account — S-071).
     //
     // A silent change to any of these would shift consensus
     // behavior across every chain that doesn't override them via
@@ -44800,7 +44805,8 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: E1 Negative Entry Fee mechanism. ZEROTH_ADDRESS is
-    // a canonical pseudo-account (all-zero pubkey, no usable private key)
+    // a canonical pseudo-account (all-zero pubkey — a small-order point,
+    // forgeable; the validator's E1 guard makes it a pseudo-account, S-071)
     // seeded at genesis via GenesisConfig.zeroth_pool_initial. On every
     // FIRST-TIME REGISTER, the apply layer transfers half the current
     // pool balance to the new registrant — re-registrations (key rotation
@@ -47651,6 +47657,160 @@ int main(int argc, char** argv) {
         }
         std::cout << (fail ? "  FAIL: test-register-small-order-key\n"
                            : "  PASS: test-register-small-order-key\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-zeroth-pool-inner-batch") {
+        // S-071 (found by the S-068 review, 2026-09-15). The Zeroth pool (E1) is
+        // an ordinary accounts_ entry at the all-zero anon address, and an anon
+        // address IS its Ed25519 key (parse_anon_pubkey). The all-zero key is a
+        // small-order point (order 4), so a signature under it is forgeable:
+        // (R = O, S = 0) verifies whenever [k]A = O — one message in four. The
+        // outer-tx guard (`tx.from == ZEROTH_ADDRESS`) never sees a
+        // COMPOSABLE_BATCH inner TRANSFER, and apply debits accounts_[inner.from]
+        // — so anyone could sweep the pool for the price of an outer fee.
+        // Now the E1 rule is asserted at the inner layer too (verifier), with
+        // the apply loop mirroring it (belt-and-suspenders, like its other
+        // inner checks). The gate DEMONSTRATES the forgery first, then pins
+        // both layers and keeps an ordinary batch accepted.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey alice = mk_key(0x40);
+        GenesisConfig cfg;
+        cfg.chain_id = "zeroth-pool-inner-batch";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = alice.pub; c0.initial_stake = 1000;
+        cfg.initial_creators = { c0 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 100000;
+        cfg.initial_balances = { ga };
+        cfg.zeroth_pool_initial = 5000;
+        Chain chain; chain.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        BlockValidator v;
+        const uint64_t at = chain.height();
+        const uint64_t pool0 = chain.balance(ZEROTH_ADDRESS);
+        check(pool0 == 5000, "precondition: the Zeroth pool holds its genesis seed at the all-zero anon address");
+        PubKey zero_key = parse_anon_pubkey(ZEROTH_ADDRESS);
+        check(determ_ed25519_point_has_small_order(zero_key.data()) == 1,
+              "precondition: the pool's key (all-zero) decodes to a small-order point");
+
+        // DEMONSTRATION — an inner TRANSFER from the pool whose (R = O, S = 0)
+        // signature VERIFIES, found by varying the amount: no private key involved.
+        Signature vacuous{}; vacuous[0] = 0x01;
+        auto mk_inner = [&](uint64_t amount) {
+            Transaction t; t.type = TxType::TRANSFER; t.from = ZEROTH_ADDRESS; t.to = "alice";
+            t.amount = amount; t.fee = 0; t.nonce = chain.next_nonce(ZEROTH_ADDRESS);
+            t.sig = vacuous; t.hash = t.compute_hash();
+            return t;
+        };
+        std::optional<Transaction> forged; int trials = 0;
+        for (uint64_t a = 4000; a > 3000 && !forged; --a) {
+            ++trials;
+            Transaction t = mk_inner(a);
+            auto sb = t.signing_bytes();
+            if (crypto::verify(zero_key, sb.data(), sb.size(), vacuous)) forged = t;
+        }
+        std::cout << "  (forgery found after " << trials << " amount trials)\n";
+        check(forged.has_value() && trials <= 64,
+              "demonstration: an inner TRANSFER from the Zeroth pool whose (R = O, S = 0) signature VERIFIES is found within a few trials");
+        if (!forged) forged = mk_inner(4000);   // keep the remaining arms meaningful
+
+        auto outer_batch = [&](const std::vector<Transaction>& inner) {
+            Transaction o; o.type = TxType::COMPOSABLE_BATCH; o.from = "alice"; o.to = "";
+            o.amount = 0; o.fee = 0; o.nonce = chain.next_nonce("alice");
+            o.payload = encode_batch_payload(inner);
+            auto sb = o.signing_bytes(); o.sig = crypto::sign(alice, sb.data(), sb.size());
+            o.hash = o.compute_hash();
+            return o;
+        };
+        // The rule — the verifier rejects the batch for the E1 reason.
+        {
+            auto r = v.check_transaction(outer_batch({*forged}), at, chain, reg, chain.next_nonce("alice"));
+            check(!r.ok && r.error.find("inner[0] originates from the Zeroth pool") != std::string::npos,
+                  "S-071: a COMPOSABLE_BATCH whose inner TRANSFER originates from the Zeroth pool is REJECTED by the verifier");
+        }
+        // Control — an ordinary batch (inner TRANSFER from the registered outer
+        // sender, properly signed) is still accepted.
+        {
+            Transaction t; t.type = TxType::TRANSFER; t.from = "alice"; t.to = "alice";
+            t.amount = 1; t.fee = 0; t.nonce = chain.next_nonce("alice") + 1;
+            auto sb = t.signing_bytes(); t.sig = crypto::sign(alice, sb.data(), sb.size());
+            t.hash = t.compute_hash();
+            auto r = v.check_transaction(outer_batch({t}), at, chain, reg, chain.next_nonce("alice"));
+            check(r.ok, "control: an ordinary COMPOSABLE_BATCH is ACCEPTED by the verifier");
+        }
+        // Apply layer (belt-and-suspenders) — a block carrying the forged batch
+        // leaves the pool untouched (the apply path is reached here directly,
+        // bypassing the verifier, as a buggy producer would).
+        {
+            Block b; b.index = at; b.prev_hash = chain.head().compute_hash();
+            b.creators = {"alice"}; b.transactions = { outer_batch({*forged}) };
+            chain.append(b);
+            // The batch WAS processed (outer nonce consumed) and rolled back
+            // (no inner credit) — so the unchanged pool is not a vacuous verdict.
+            check(chain.next_nonce("alice") == 1 && chain.balance("alice") == 100000,
+                  "S-071 apply: the outer batch was processed (nonce consumed) and its inner transfer rolled back");
+            check(chain.balance(ZEROTH_ADDRESS) == pool0,
+                  "S-071 apply: the Zeroth pool balance is UNCHANGED after a block carrying the forged batch");
+        }
+        // Ingress mirror (node-local): an OUTER tx from the pool with a forged
+        // signature is dropped at gossip ingress (it verified under the
+        // all-zero key before the mirror gained the E1 check).
+        {
+            using namespace determ::net;
+            namespace fs = std::filesystem;
+            std::error_code fec;
+            fs::path dir = fs::temp_directory_path() / "determ-zeroth-pool-inner-batch";
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            GenesisConfig g; g.chain_id = "zeroth-pool-mirror";
+            g.m_creators = 1; g.k_block_sigs = 1; g.epoch_blocks = 1;
+            GenesisCreator gc; gc.domain = "node0"; gc.ed_pub = alice.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+            g.zeroth_pool_initial = 5000;
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config ncfg;
+            ncfg.domain = "node0"; ncfg.data_dir = (dir / "node0").string();
+            ncfg.listen_port = 7678; ncfg.key_path = (dir / "node0.key").string();
+            ncfg.chain_path = (dir / "node0" / "chain.json").string();
+            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.log_quiet = true;
+            crypto::save_node_key(alice, ncfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node n(ncfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+            std::optional<Transaction> outer_forged;
+            for (uint64_t a = 4000; a > 3000 && !outer_forged; --a) {
+                Transaction t; t.type = TxType::TRANSFER; t.from = ZEROTH_ADDRESS; t.to = "node0";
+                t.amount = a; t.fee = 0; t.nonce = 0; t.sig = vacuous; t.hash = t.compute_hash();
+                auto sb = t.signing_bytes();
+                if (crypto::verify(zero_key, sb.data(), sb.size(), vacuous)) outer_forged = t;
+            }
+            check(outer_forged.has_value(),
+                  "demonstration: an OUTER TRANSFER from the Zeroth pool whose forged signature VERIFIES is found within a few trials");
+            if (outer_forged) {
+                n.on_tx_for_test(*outer_forged);
+                check(n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: the forged pool TRANSFER is DROPPED at gossip ingress (E1 mirrored)");
+            }
+            fs::remove_all(dir, fec);
+        }
+        std::cout << (fail ? "  FAIL: test-zeroth-pool-inner-batch\n"
+                           : "  PASS: test-zeroth-pool-inner-batch\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-inbound-receipt-cap") {

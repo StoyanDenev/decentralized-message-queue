@@ -37,11 +37,11 @@ inline constexpr uint64_t MAX_SUSPENSION_BLOCKS  = 10'000;
 inline constexpr uint64_t MAX_ABORT_EXPONENT     = 10;   // 2^10 = 1024
 
 // E1: Zeroth pool pseudo-account address. Anon-style format (0x + 64 hex
-// chars), but encodes an all-zero pubkey — a low-order point on
-// curve25519 that has no usable Ed25519 private key. Any tx claiming
-// `from == ZEROTH_ADDRESS` must produce a valid Ed25519 sig over an
-// all-zero pubkey, which is computationally infeasible; the validator
-// rejects such txs as an explicit guard regardless.
+// chars), but encodes an all-zero pubkey — a SMALL-ORDER point (order 4),
+// under which Ed25519 signatures are forgeable: (R = O, S = 0) verifies one
+// message in four (S-068/S-071). The validator's explicit E1 guard — on the
+// outer tx and on every COMPOSABLE_BATCH inner tx — is therefore the ONLY
+// thing that makes the pool a pseudo-account.
 inline constexpr const char* ZEROTH_ADDRESS =
     "0x0000000000000000000000000000000000000000000000000000000000000000";
 

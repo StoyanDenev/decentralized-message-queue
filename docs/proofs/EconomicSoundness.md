@@ -51,7 +51,7 @@ accounts[ZEROTH_ADDRESS].balance       -= nef;
 accounts[tx.from].balance              += nef;
 ```
 
-The Zeroth pool address is the canonical `0x00…0` and has no usable private key (validator rejects any tx with `from == ZEROTH_ADDRESS`). Pool seeding happens at genesis via `zeroth_pool_initial`, which is included in `genesis_total_` at index-0 apply.
+The Zeroth pool address is the canonical `0x00…0`; its all-zero pubkey is a small-order curve25519 point under which Ed25519 signatures are forgeable — the validator's E1 guard, outer and COMPOSABLE_BATCH-inner, is what makes it a pseudo-account (corrected 2026-09-15, SECURITY.md S-071). Pool seeding happens at genesis via `zeroth_pool_initial`, which is included in `genesis_total_` at index-0 apply.
 
 ### E3 lottery + E4 finite pool
 
