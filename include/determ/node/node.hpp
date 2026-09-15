@@ -484,6 +484,11 @@ public:
     // 2026-09-14 seams for `determ test-contrib-trigger-membership` (S-058):
     // inject a gossiped contrib and probe the round state.
     void on_contrib_for_test(const ContribMsg& m) { on_contrib(m); }
+    // 2026-09-15 seams for `determ test-abort-event-canonical` (S-074): drive
+    // the abort-claim assembly and the abort-event adoption paths directly.
+    void on_abort_claim_for_test(const AbortClaimMsg& m) { on_abort_claim(m); }
+    void on_abort_event_for_test(uint64_t block_index, const Hash& prev_hash,
+                                 const chain::AbortEvent& ev) { on_abort_event(block_index, prev_hash, ev); }
     // Direct call of the transition with whatever is pending — pins that an
     // incomplete committee leaves the Phase-1 timer armed (S-058 ordering).
     void enter_block_sig_phase_for_test() {
@@ -495,11 +500,15 @@ public:
         std::vector<std::string> creators;          // current committee
         bool                     contrib_timer_armed;
         size_t                   pending_contribs;
+        std::vector<Hash>        abort_hashes;      // this height's abort tail (S-074)
+        std::vector<int64_t>     abort_timestamps;  // ... and each event's timestamp
     };
     RoundProbe round_probe_for_test() const {
         std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        std::vector<Hash> tail; std::vector<int64_t> ts;
+        for (auto& ae : current_aborts_) { tail.push_back(ae.event_hash); ts.push_back(ae.timestamp); }
         return {static_cast<uint8_t>(phase_), current_creator_domains_,
-                contrib_timer_.armed(), pending_contribs_.size()};
+                contrib_timer_.armed(), pending_contribs_.size(), tail, ts};
     }
     // MEM-inbound-receipt-pool cap test seam (BlockIngress): drive the SHARD-side
     // cross-shard receipt-bundle ingress in isolation so the falsifier can flood

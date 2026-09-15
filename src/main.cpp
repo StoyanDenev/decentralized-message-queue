@@ -971,6 +971,10 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-abort-event-canonical           S-074 gate — an AbortEvent's identity is
+                                              canonical (parent-block timestamp; hash
+                                              re-derived from parent + tail): adoption
+                                              drops variants, assembly emits the canonical
   determ test-register-small-order-key        S-068 gate — a REGISTER whose payload key
                                               is a small-order (8-torsion) point is REJECTED
                                               by the verifier and the ingress mirror;
@@ -36136,7 +36140,13 @@ int main(int argc, char** argv) {
             b.consensus_mode = mode;
             AbortEvent ae;
             ae.round = round; ae.aborting_node = aborting;
-            ae.timestamp = 0;  ae.event_hash = evh; ae.claims = claims;
+            // S-074: the event identity is canonical (timestamp = parent
+            // block's, hash re-derived from the parent + tail); a non-zero
+            // `evh` overrides it so an arm can present a chosen hash.
+            ae.timestamp = c.head().timestamp; ae.claims = claims;
+            ae.event_hash = (evh == Hash{})
+                ? chain::canonical_abort_event_hash(ae, nullptr, prev_rand, b.index)
+                : evh;
             b.abort_events.push_back(ae);
             std::vector<std::string> avail;
             for (auto& d : pool_doms) if (d != aborting) avail.push_back(d);
@@ -36208,7 +36218,8 @@ int main(int argc, char** argv) {
                 "claim prev_hash mismatch", "claim missing_creator mismatch",
                 "claimer == missing", "claimer not in at-event set",
                 "duplicate claimer in cert", "claimer not found in registry",
-                "claim sig invalid from"
+                "claim sig invalid from",
+                "timestamp != parent block timestamp (S-074)", "event_hash not canonical (S-074)"
             };
             for (auto* p : pats) if (e.find(p) != std::string::npos) return true;
             return false;
@@ -36216,7 +36227,7 @@ int main(int argc, char** argv) {
 
         const std::string aborting = at_event[0];
         const std::vector<std::string> claimers = {at_event[1], at_event[2]};
-        Hash evh{}; for (size_t j = 0; j < 32; ++j) evh[j] = uint8_t(0x77);
+        const Hash evh{};   // zero = canonical identity (S-074); see build_block
 
         // --- BASELINE: a well-formed certificate must clear V10 -------------
         {
@@ -36226,6 +36237,74 @@ int main(int argc, char** argv) {
                 std::cout << "    baseline unexpectedly hit V10: " << r.error << "\n";
             check(!abort_cert_err(r.error),
                   "BASELINE: valid abort certificate clears check_abort_certs");
+        }
+
+        // --- S-074: the event identity is CANONICAL, not the assembler's ------
+        // The value folded into the post-abort committee re-selection must be
+        // one every node derives from the parent block and the tail; a chosen
+        // hash (which would seat a committee of the assembler's choosing) or a
+        // chosen timestamp is rejected.
+        {
+            Hash chosen{}; for (size_t j = 0; j < 32; ++j) chosen[j] = uint8_t(0x77);
+            Block b = build_block(aborting, chosen, mk_claims(claimers, aborting, 1), 1);
+            auto r = bv.validate(b, c, reg);
+            bool hit = !r.ok && r.error.find("event_hash not canonical (S-074)") != std::string::npos;
+            if (!hit) std::cout << "    got: [" << r.error << "]\n";
+            check(hit, "S-074: an abort event carrying a CHOSEN event_hash is REJECTED (not canonical)");
+        }
+        {
+            Block b = build_block(aborting, evh, mk_claims(claimers, aborting, 1), 1);
+            b.abort_events[0].timestamp = c.head().timestamp + 1;   // hash still canonical for ts 0
+            auto r = bv.validate(b, c, reg);
+            bool hit = !r.ok && r.error.find("timestamp != parent block timestamp (S-074)") != std::string::npos;
+            if (!hit) std::cout << "    got: [" << r.error << "]\n";
+            check(hit, "S-074: an abort event whose timestamp is not the parent block's is REJECTED");
+        }
+        // Chained: the second event of a height must hash on the FIRST
+        // (chain_abort_hash), not as another first event. Two exclusions leave
+        // avail = 2 < K, so the block is BFT with the ceil(2K/3) = 2 committee.
+        {
+            const size_t k_bft = bft_committee_size(K);
+            auto two_event_block = [&](bool chain_second) {
+                Block b; b.index = 1; b.prev_hash = prev_hash; b.consensus_mode = ConsensusMode::BFT;
+                AbortEvent e1; e1.round = 1; e1.aborting_node = at_event[0];
+                e1.timestamp = c.head().timestamp; e1.claims = mk_claims({at_event[1], at_event[2]}, at_event[0], 1);
+                e1.event_hash = chain::canonical_abort_event_hash(e1, nullptr, prev_rand, b.index);
+                AbortEvent e2; e2.round = 1; e2.aborting_node = at_event[1];
+                e2.timestamp = c.head().timestamp; e2.claims = mk_claims({at_event[2], outsider}, at_event[1], 1);
+                e2.event_hash = chain::canonical_abort_event_hash(e2, chain_second ? &e1 : nullptr,
+                                                                  prev_rand, b.index);
+                b.abort_events = { e1, e2 };
+                std::vector<std::string> avail;
+                for (auto& d : pool_doms) if (d != at_event[0] && d != at_event[1]) avail.push_back(d);
+                Hash rand = prev_rand;
+                for (auto& e : b.abort_events) rand = SHA256Builder{}.append(rand).append(e.event_hash).finalize();
+                for (auto i : select_m_creators(rand, avail.size(), k_bft)) b.creators.push_back(avail[i]);
+                for (size_t i = 0; i < b.creators.size(); ++i) {
+                    const NodeKey& k = key_of(b.creators[i]);
+                    Hash secret{}; for (size_t j = 0; j < 32; ++j) secret[j] = uint8_t(0xD0 + i * 8 + j);
+                    b.creator_dh_secrets.push_back(secret);
+                    b.creator_dh_inputs.push_back(SHA256Builder{}.append(secret).append(k.pub.data(), k.pub.size()).finalize());
+                    b.creator_tx_lists.push_back({});
+                }
+                for (size_t i = 0; i < b.creators.size(); ++i) {
+                    Hash commit = make_contrib_commitment(b.index, uint64_t(b.abort_events.size()), b.prev_hash,
+                                                          b.creator_tx_lists[i], b.creator_dh_inputs[i]);
+                    b.creator_ed_sigs.push_back(sign(key_of(b.creators[i]), commit.data(), commit.size()));
+                }
+                b.tx_root      = compute_tx_root(b.creator_tx_lists);
+                b.delay_seed   = compute_delay_seed(b.index, b.prev_hash, b.tx_root, b.creator_dh_inputs);
+                b.delay_output = compute_block_rand(b.delay_seed, b.creator_dh_secrets);
+                return b;
+            };
+            auto r_ok = bv.validate(two_event_block(true), c, reg);
+            if (abort_cert_err(r_ok.error)) std::cout << "    got: [" << r_ok.error << "]\n";
+            check(!abort_cert_err(r_ok.error),
+                  "S-074 chained control: two canonical chained events clear check_abort_certs");
+            auto r_bad = bv.validate(two_event_block(false), c, reg);
+            bool hit = !r_bad.ok && r_bad.error.find("abort_event[1] event_hash not canonical (S-074)") != std::string::npos;
+            if (!hit) std::cout << "    got: [" << r_bad.error << "]\n";
+            check(hit, "S-074 chained: a second event hashed as a FIRST event (not on the tail) is REJECTED");
         }
 
         // --- DHS-commit-reveal-bind (validator.cpp:423) ---------------------
@@ -47065,6 +47144,252 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-mempool-admit-eviction\n"
                            : "  PASS: test-mempool-admit-eviction\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-abort-event-canonical") {
+        // 2026-09-15 — SECURITY.md S-074. The hash folded into the post-abort
+        // committee re-selection (rand = SHA256(rand || event_hash)) was
+        // whatever the ASSEMBLING node put in the AbortEvent: nothing
+        // recomputed it, its timestamp was the assembler's wall clock, and any
+        // in-sync peer holding the K-1 public claims could assemble. Whoever
+        // assembled therefore chose the re-round committee, and two honest
+        // survivors assembling the same abort in different seconds produced two
+        // different events (the C1 abort-tail fork behind the S-050 livelock).
+        // Now the identity is CANONICAL — timestamp = the parent block's,
+        // event_hash = SHA256("DTM-ABORT-ID-v1" || kind || committee seed + height
+        // (or prev hash when chained) || round || node) — enforced by the validator
+        // (test-abort-cert-validation, S-074 arms), by the assembler and by the
+        // gossip adoption path (this gate), which additionally requires the
+        // accused to be in the CURRENT committee (a replay of an excluded
+        // member's public claims would otherwise yield a tail no block can carry).
+        // Harness: the S-058 single-node virtual-time harness, widened to M=5,
+        // K=3 (the largest pool inside the 2K > M genesis band) so the post-abort
+        // draw (3 of 4) is NOT degenerate — a chosen hash demonstrably seats a
+        // different committee.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+        constexpr int kM = 5, kK = 3;
+        std::vector<crypto::NodeKey> keys(kM);
+        std::vector<std::string>     doms;
+        for (int i = 0; i < kM; ++i) {
+            for (int j = 0; j < 32; ++j) keys[i].priv_seed[j] = uint8_t(0x60 + 16 * i + j);
+            determ_ed25519_pubkey_from_seed(keys[i].priv_seed.data(), keys[i].pub.data());
+            doms.push_back("node" + std::to_string(i));
+        }
+        auto key_of = [&](const std::string& d) -> const crypto::NodeKey& {
+            for (int i = 0; i < kM; ++i) if (doms[i] == d) return keys[i];
+            return keys[0];
+        };
+        struct Rig {
+            std::unique_ptr<VirtualNetwork>   vnet;
+            std::unique_ptr<VirtualEventLoop> loop;
+            std::unique_ptr<VirtualTransport> transport;
+            std::unique_ptr<node::Node>       n;
+            std::string chain_id;
+            chain::Block genesis;
+        };
+        determ::time::VirtualClock vclock(1'700'000'000);   // != the genesis timestamp (0)
+        // Bring node0 up on a genesis whose height-1 committee contains it
+        // (want_member) or does not (!want_member); scan chain_id suffixes.
+        auto bring_up = [&](const std::string& dirname, uint16_t port, bool want_member) {
+            Rig r;
+            fs::path dir = fs::temp_directory_path() / dirname;
+            for (int attempt = 0; attempt < 64 && !r.n; ++attempt) {
+                fs::remove_all(dir, fec);
+                fs::create_directories(dir / "node0");
+                chain::GenesisConfig g;
+                g.chain_id = "abort-canonical-" + std::to_string(attempt);
+                g.m_creators = kM; g.k_block_sigs = kK; g.epoch_blocks = 1;
+                for (int i = 0; i < kM; ++i) {
+                    chain::GenesisCreator gc; gc.domain = doms[i]; gc.ed_pub = keys[i].pub;
+                    gc.initial_stake = 1000; g.initial_creators.push_back(gc);
+                    chain::GenesisAllocation ab; ab.domain = doms[i]; ab.balance = 100000;
+                    g.initial_balances.push_back(ab);
+                }
+                const std::string gpath = (dir / "genesis.json").string();
+                g.save(gpath);
+                node::Config cfg;
+                cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+                cfg.listen_port = port; cfg.key_path = (dir / "node0.key").string();
+                cfg.chain_path = (dir / "node0" / "chain.json").string();
+                cfg.genesis_path = gpath; cfg.m_creators = kM; cfg.k_block_sigs = kK;
+                cfg.log_quiet = true;
+                crypto::save_node_key(keys[0], cfg.key_path);
+                r.vnet      = std::make_unique<VirtualNetwork>();
+                r.loop      = std::make_unique<VirtualEventLoop>();
+                r.loop->enable_virtual_time();
+                r.transport = std::make_unique<VirtualTransport>(*r.loop, *r.vnet);
+                auto cand = std::make_unique<node::Node>(cfg, vclock, r.loop.get(), r.transport.get());
+                cand->start_external();
+                r.loop->run_until_idle();
+                r.loop->advance_to_next_timer();   // startup grace -> IN_SYNC -> check_if_selected
+                r.loop->run_until_idle();
+                auto p = cand->round_probe_for_test();
+                const bool member = std::find(p.creators.begin(), p.creators.end(), "node0") != p.creators.end();
+                const bool ok = want_member ? (p.phase == 1 && member && p.creators.size() == kK)
+                                            : (!member && p.creators.size() == kK);
+                if (ok) {
+                    r.n = std::move(cand); r.chain_id = g.chain_id;
+                    r.genesis = chain::make_genesis_block(g);
+                } else {
+                    cand->stop(); cand.reset(); r.transport.reset(); r.loop.reset(); r.vnet.reset();
+                }
+            }
+            return r;
+        };
+        auto probe = [&](Rig& r) { return r.n->round_probe_for_test(); };
+        // The explicit formula, re-derived here independently of the helper so
+        // that a change to chain::canonical_abort_event_hash is caught. The
+        // committee seed at height 1 with epoch_blocks = 1 is
+        // epoch_committee_seed(genesis.cumulative_rand, shard 0).
+        auto seed_of = [&](const chain::Block& genesis) {
+            return crypto::epoch_committee_seed(genesis.cumulative_rand, 0);
+        };
+        auto formula = [&](const chain::AbortEvent& ev, const Hash* prev_hash_or_null, const Hash& seed) {
+            crypto::SHA256Builder h;
+            h.append(std::string("DTM-ABORT-ID-v1"));
+            if (prev_hash_or_null) h.append(uint8_t(1)).append(*prev_hash_or_null);
+            else                   h.append(uint8_t(0)).append(seed).append(uint64_t(1));
+            return h.append(ev.round).append(ev.aborting_node).finalize();
+        };
+        auto claim = [&](const std::string& claimer, const std::string& missing, const Hash& prev) {
+            auto m = node::make_abort_claim(key_of(claimer), claimer, /*block_index=*/1, /*round=*/1, prev, missing);
+            chain::AbortClaim ac;
+            ac.block_index = m.block_index; ac.round = m.round; ac.prev_hash = m.prev_hash;
+            ac.missing_creator = m.missing_creator; ac.claimer = m.claimer; ac.ed_sig = m.ed_sig;
+            return std::pair<node::AbortClaimMsg, chain::AbortClaim>{m, ac};
+        };
+        auto event_against = [&](const chain::Block& parent, const Hash& prev,
+                                 const std::string& missing, const std::vector<std::string>& claimers,
+                                 const chain::AbortEvent* prev_ev) {
+            chain::AbortEvent ev; ev.round = 1; ev.aborting_node = missing;
+            ev.timestamp = parent.timestamp;
+            for (auto& c : claimers) ev.claims.push_back(claim(c, missing, prev).second);
+            ev.event_hash = chain::canonical_abort_event_hash(ev, prev_ev, seed_of(parent), 1);
+            return ev;
+        };
+        // What the committee re-derivation does with a given first-event hash
+        // (epoch_blocks = 1 at height 1: seed = genesis cumulative_rand).
+        auto committee_after = [&](const chain::Block& parent, const Hash& event_hash,
+                                   const std::string& excluded) {
+            std::vector<std::string> avail;
+            for (auto& d : doms) if (d != excluded) avail.push_back(d);   // doms are sorted (node0..node4)
+            Hash rand = crypto::epoch_committee_seed(parent.cumulative_rand, 0);
+            rand = crypto::SHA256Builder{}.append(rand).append(event_hash).finalize();
+            std::vector<std::string> out;
+            for (auto i : crypto::select_m_creators(rand, avail.size(), kK)) out.push_back(avail[i]);
+            return out;
+        };
+
+        // ── ADOPTION (on_abort_event) on a committee-member node ─────────────
+        Rig A = bring_up("determ-abort-canonical-a", 7679, /*want_member=*/true);
+        check(A.n != nullptr, "setup A: node0 is a height-1 committee member (M=5, K=3; genesis found by scan)");
+        if (!A.n) { std::cout << "  FAIL: test-abort-event-canonical\n"; return 1; }
+        auto p0 = probe(A);
+        std::vector<std::string> others;
+        for (auto& d : p0.creators) if (d != "node0") others.push_back(d);
+        check(others.size() == 2, "setup A: two other committee members identified");
+        const Hash prevA = from_hex_arr<32>(A.n->rpc_status()["head_hash"].get<std::string>());
+        check(A.genesis.compute_hash() == prevA && A.genesis.timestamp == 0,
+              "setup A: the head is the genesis block (timestamp 0; the harness clock is 1.7e9)");
+        {
+            chain::AbortEvent e1 = event_against(A.genesis, prevA, others[0], {"node0", others[1]}, nullptr);
+            check(e1.event_hash == formula(e1, nullptr, seed_of(A.genesis)),
+                  "formula: a first event hashes SHA256('DTM-ABORT-ID-v1' || 0 || committee_seed || block_index || round || node)");
+            // A chosen hash that would seat a DIFFERENT committee than the canonical one.
+            chain::AbortEvent chosen = e1;
+            const auto canon_cmte = committee_after(A.genesis, e1.event_hash, others[0]);
+            std::vector<std::string> chosen_cmte;
+            for (uint8_t fill = 0x11; fill != 0; fill = uint8_t(fill + 0x22)) {
+                for (size_t j = 0; j < 32; ++j) chosen.event_hash[j] = fill;
+                chosen_cmte = committee_after(A.genesis, chosen.event_hash, others[0]);
+                if (chosen_cmte != canon_cmte) break;
+            }
+            check(chosen_cmte != canon_cmte,
+                  "premise: with 3 of 4 drawn after the exclusion, a chosen event_hash seats a DIFFERENT committee than the canonical one");
+            A.n->on_abort_event_for_test(1, prevA, chosen);
+            A.loop->run_until_idle();
+            check(probe(A).abort_hashes.empty(),
+                  "adoption: an event with a CHOSEN event_hash (valid claims) is DROPPED");
+            chain::AbortEvent late = e1;
+            late.timestamp = A.genesis.timestamp + 1;   // hash unchanged (the timestamp is not an input)
+            A.n->on_abort_event_for_test(1, prevA, late);
+            A.loop->run_until_idle();
+            check(probe(A).abort_hashes.empty(),
+                  "adoption: an event whose timestamp is not the parent block's is DROPPED");
+            A.n->on_abort_event_for_test(1, prevA, e1);
+            A.loop->run_until_idle();
+            auto p1 = probe(A);
+            check(p1.abort_hashes.size() == 1 && p1.abort_hashes[0] == e1.event_hash,
+                  "adoption: the CANONICAL event is adopted");
+            check(p1.creators == canon_cmte,
+                  "adoption: the re-derived committee is the one the canonical hash seats (not the chosen one)");
+
+            // Replay against the already-excluded member: canonical chained hash,
+            // the same public claims — dropped, because the accused is no longer
+            // in the current committee (a tail no block could carry otherwise).
+            chain::AbortEvent replay = event_against(A.genesis, prevA, others[0], {"node0", others[1]}, &e1);
+            A.n->on_abort_event_for_test(1, prevA, replay);
+            A.loop->run_until_idle();
+            check(probe(A).abort_hashes.size() == 1,
+                  "adoption: a canonical chained REPLAY against the already-excluded member is DROPPED (accused not in the current committee)");
+
+            // Chained second event: accused and claimers from the RE-DERIVED committee.
+            std::string accused2 = p1.creators[0];
+            std::vector<std::string> claimers2 = {p1.creators[1], p1.creators[2]};
+            chain::AbortEvent e2_as_first = event_against(A.genesis, prevA, accused2, claimers2, nullptr);
+            A.n->on_abort_event_for_test(1, prevA, e2_as_first);
+            A.loop->run_until_idle();
+            check(probe(A).abort_hashes.size() == 1,
+                  "adoption: a second event hashed as a FIRST event (not chained on the tail) is DROPPED");
+            chain::AbortEvent e2 = event_against(A.genesis, prevA, accused2, claimers2, &e1);
+            check(e2.event_hash == formula(e2, &e1.event_hash, seed_of(A.genesis)),
+                  "formula: a chained event hashes SHA256('DTM-ABORT-ID-v1' || 1 || prev.event_hash || round || node)");
+            A.n->on_abort_event_for_test(1, prevA, e2);
+            A.loop->run_until_idle();
+            auto p2 = probe(A);
+            check(p2.abort_hashes.size() == 2 && p2.abort_hashes[1] == e2.event_hash,
+                  "adoption: the CANONICAL chained event is adopted");
+        }
+
+        // ── ASSEMBLY (on_abort_claim) on a NON-member node ───────────────────
+        // Assembly is deliberately not gated on the receiver's own seat (any
+        // in-sync node may assemble); what the rule guarantees is that whoever
+        // assembles emits EXACTLY the canonical event — parent-block timestamp,
+        // canonical hash — never one of its own choosing.
+        {
+            Rig B = bring_up("determ-abort-canonical-b", 7680, /*want_member=*/false);
+            check(B.n != nullptr, "setup B: node0 is NOT a height-1 committee member (genesis found by scan)");
+            if (B.n) {
+                auto pb0 = probe(B);
+                const Hash prevB = from_hex_arr<32>(B.n->rpc_status()["head_hash"].get<std::string>());
+                const std::string victim = pb0.creators[0];
+                const chain::AbortEvent expect = event_against(B.genesis, prevB, victim,
+                                                               {pb0.creators[1], pb0.creators[2]}, nullptr);
+                B.n->on_abort_claim_for_test(claim(pb0.creators[1], victim, prevB).first);
+                B.n->on_abort_claim_for_test(claim(pb0.creators[2], victim, prevB).first);
+                B.loop->run_until_idle();
+                auto pb = probe(B);
+                check(pb.abort_hashes.size() == 1 && pb.abort_hashes[0] == expect.event_hash
+                          && pb.abort_timestamps.size() == 1 && pb.abort_timestamps[0] == B.genesis.timestamp,
+                      "assembly: a NON-member holding the K-1 public claims assembles exactly the CANONICAL event (parent timestamp, not its clock)");
+                check(pb.creators == committee_after(B.genesis, expect.event_hash, victim),
+                      "assembly: the assembler's re-derived committee is the canonical one");
+                B.n->stop();
+            }
+        }
+        A.n->stop();
+        fs::remove_all(fs::temp_directory_path() / "determ-abort-canonical-a", fec);
+        fs::remove_all(fs::temp_directory_path() / "determ-abort-canonical-b", fec);
+        std::cout << (fail ? "  FAIL: test-abort-event-canonical\n"
+                           : "  PASS: test-abort-event-canonical\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-contrib-trigger-membership") {

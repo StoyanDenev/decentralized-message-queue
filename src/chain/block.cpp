@@ -375,6 +375,25 @@ std::vector<uint8_t> encode_abort_claims(const std::vector<AbortClaim>& claims) 
     return out;
 }
 
+Hash canonical_abort_event_hash(const AbortEvent& ae, const AbortEvent* prev,
+                                const Hash& committee_seed, uint64_t block_index) {
+    // Inputs are the committed decision only — WHICH member was excluded, in
+    // WHICH round, at WHICH height and tail position — seeded by the committee
+    // seed of the height (itself a function of committed commit-reveal rand).
+    // The event's timestamp is deliberately NOT an input: the parent committee
+    // chooses the block timestamp inside the ±30 s window (lower median of its
+    // proposer_times), which would be a free ~60-way re-draw of the post-abort
+    // committee.
+    crypto::SHA256Builder h;
+    h.append(std::string("DTM-ABORT-ID-v1"));
+    if (prev) {
+        h.append(static_cast<uint8_t>(1)).append(prev->event_hash);
+    } else {
+        h.append(static_cast<uint8_t>(0)).append(committee_seed).append(block_index);
+    }
+    return h.append(ae.round).append(ae.aborting_node).finalize();
+}
+
 std::vector<AbortClaim> decode_abort_claims(const std::vector<uint8_t>& bytes) {
     if (bytes.size() < 2)
         throw std::runtime_error("abort claims: truncated count header");

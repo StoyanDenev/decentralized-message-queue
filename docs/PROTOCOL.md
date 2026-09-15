@@ -537,8 +537,12 @@ abort_claim_message = SHA256(block_index (u64)
 struct AbortEvent {
     uint8            round;           // 1 or 2 (matches the underlying claims)
     string           aborting_node;   // = missing_creator from the claims
-    int64            timestamp;       // first quorum claim's timestamp
-    Hash             event_hash;      // SHA256(round || aborting_node || timestamp || prev_random_state)
+    int64            timestamp;       // = the PARENT block's timestamp (canonical, S-074 2026-09-15)
+    Hash             event_hash;      // canonical (S-074) — kind 0, first at the height:
+                                      //   SHA256("DTM-ABORT-ID-v1" || 0 || committee_seed || block_index u64 || round u8 || aborting_node)
+                                      // kind 1, chained: SHA256("DTM-ABORT-ID-v1" || 1 || prev.event_hash || round || aborting_node)
+                                      // committee_seed = epoch_committee_seed(epoch_rand, shard_id) (§5.2); the timestamp is NOT an input;
+                                      // recomputed by check_abort_certs and by gossip adoption; anything else is rejected
     AbortClaim[]     claims;          // the max(2,K-1) signed claims that quorumed (TYPED)
 };
 
@@ -562,7 +566,7 @@ count × [block_index: u64 LE][round: u8][prev_hash: 32 B][ed_sig: 64 B]
 
 These bytes are **both** the `hash_abort_event` digest preimage (domain `DTM-F2-ABORT-v2`; mirrored byte-for-byte in the light client) and — hex-wrapped — the block-container `claims` value, so the stored value and the hashed bytes cannot drift. Decoding is fail-closed with exact consumption. Typing the list is what makes the digest bind only semantic content: unknown members, alternate integer encodings, hex case and injected nesting are unrepresentable rather than filtered.
 
-`event_hash` mixes into the next round's randomness (§5.2 committee selection's `rand = SHA256(prev_rand ‖ abort_event.event_hash)`), so different abort sequences yield different committee re-selections — this is what defeats the "cartel keeps picking the same victim" pattern (S-011 closure depends on the rotation here being unpredictable to the cartel).
+`event_hash` mixes into the next round's randomness (§5.2 committee selection's `rand = SHA256(prev_rand ‖ abort_event.event_hash)`), so different abort sequences yield different committee re-selections — this is what defeats the "cartel keeps picking the same victim" pattern (S-011 closure depends on the rotation here being unpredictable to the cartel). **Canonical identity (S-074, 2026-09-15).** The value is a pure function of the committed decision — `timestamp` MUST equal the parent block's timestamp and `event_hash` MUST equal `chain::canonical_abort_event_hash` (the formula in the struct above, seeded by the same §5.2 committee seed every verifier — validator, beacon, light auditor — already holds, plus the height; the timestamp is deliberately not an input, because the parent committee chooses the block timestamp inside the ±30 s window and it would otherwise be a free ~60-way re-draw) — and `check_abort_certs` recomputes both before folding the hash, as does `on_abort_event` before adopting (which also requires the accused to be in the current committee, so a replay of an excluded member's public claims is not adoptable). No assembler therefore chooses the post-abort committee, and every survivor of an aborted round assembles the byte-identical event. What a participant can still choose is bounded and visible: which silent member is accused (the victim, when several are quorum-ready), and the round (1 or 2) — two draws, not `2^256`.
 
 Quorum semantics: the certification threshold is `chain::abort_claim_quorum() = max(2, K − 1)` matching claims (where `K = m_creators`, the committee size; for K≥3 this is `K − 1`, one short of unanimity since the aborting node won't sign a claim against themselves). The `max(2, …)` floor (S-044 FIX 1) makes the quorum **unsatisfiable at K=2** — no single-claim abort event forms, so the K=2 wedge-by-cascade degrades to a crash-stop 2-of-2. The same helper is enforced at formation (`node.cpp::on_abort_claim`), gossip adoption (`node.cpp::on_abort_event`), and validation (`validator.cpp::check_abort_certs`). Below quorum, a single claim is informational only and does not advance the round.
 

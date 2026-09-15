@@ -168,6 +168,12 @@ and a COMPOSABLE_BATCH inner TRANSFER from it bypassed the outer-only E1 guard; 
 now asserted on every inner tx (verifier) and mirrored at apply. The economic route
 stays OPEN: the shipped NEF hands pool/2 to EVERY fee-0 fresh REGISTER (the whitepaper's
 lottery + cap was never shipped) — S-073, R-14.
+CLOSED 2026-09-15 (owner: "address them"; found by the per-block-committee design pass):
+S-074 the abort event's identity was the assembler's choice — no verifier recomputed
+`event_hash`, its timestamp was a wall clock, and any in-sync peer could assemble, so
+any peer chose the post-abort committee; now canonical (parent-block timestamp; hash
+re-derived from parent + tail) and enforced at check_abort_certs, on_abort_event and
+on_abort_claim. Gates: test-abort-cert-validation (S-074 arms), test-abort-event-canonical.
 CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
 producer now asks the verifier (BlockValidator::check_transaction is the ONE per-tx
 rule set; build_body admits only what it accepts; a resident rejected tx is evicted

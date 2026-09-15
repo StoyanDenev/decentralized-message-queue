@@ -365,6 +365,19 @@ BlockValidator::Result BlockValidator::check_abort_certs(
                 return {false, "claim sig invalid from " + m_.claimer};
         }
 
+        // S-074: the event's identity is CANONICAL — its timestamp is the
+        // parent block's and its hash is a pure function of this height's
+        // committee seed and the preceding event — so the value folded into
+        // the re-selection below is one every verifier derives, not one the
+        // assembler chose.
+        if (ae.timestamp != chain.head().timestamp)
+            return {false, "abort_event[" + std::to_string(i)
+                         + "] timestamp != parent block timestamp (S-074)"};
+        const AbortEvent* prev_ev = (i == 0) ? nullptr : &b.abort_events[i - 1];
+        if (ae.event_hash != canonical_abort_event_hash(ae, prev_ev, prev_rand, b.index))
+            return {false, "abort_event[" + std::to_string(i)
+                         + "] event_hash not canonical (S-074)"};
+
         // advance: exclude aborting_node from pool, mix abort hash into rand.
         excluded.insert(ae.aborting_node);
         rand = SHA256Builder{}.append(rand).append(ae.event_hash).finalize();

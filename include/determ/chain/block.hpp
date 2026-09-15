@@ -417,6 +417,24 @@ struct AbortEvent {
     static AbortEvent from_json(const nlohmann::json& j);
 };
 
+// S-074: the CANONICAL identity of an abort event — a pure function of the
+// committee seed every verifier already holds (epoch_committee_seed(epoch_rand,
+// shard_id): the validator's prev_rand, the beacon's and the light auditor's
+// beacon_rand-derived seed), the height, and the preceding event in the
+// height's tail (chained). Every consumer that folds `event_hash` into
+// committee re-selection recomputes it (validator check_abort_certs, gossip
+// adoption, the beacon's shard-tip verification, the light auditor), so no
+// assembler chooses the post-abort committee and every survivor of an aborted
+// round assembles the byte-identical event.
+//   kind 0 (first at the height): SHA256("DTM-ABORT-ID-v1" || 0 || committee_seed || block_index u64 || round u8 || aborting_node)
+//   kind 1 (chained):             SHA256("DTM-ABORT-ID-v1" || 1 || prev->event_hash               || round u8 || aborting_node)
+// The event's timestamp is NOT an input (the parent committee can choose the
+// block timestamp within the ±30 s window); the shard's own validators fix it
+// to the parent block's timestamp so every assembler emits byte-identical
+// event bytes (the F2 abort view hashes them).
+Hash canonical_abort_event_hash(const AbortEvent& ae, const AbortEvent* prev,
+                                const Hash& committee_seed, uint64_t block_index);
+
 // rev.8 follow-on: full equivocation slashing. An EquivocationEvent is
 // proof that `equivocator` double-signed at ONE height with the same
 // Ed25519 key. When baked into a finalized block, the equivocator's full

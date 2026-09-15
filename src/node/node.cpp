@@ -1809,19 +1809,20 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
     if (bucket.size() < needed) return;
 
-    // Build the AbortEvent with the claim quorum.
-    int64_t ts   = clock_.unix_seconds();
-    Hash    rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
-    Hash    ah   = current_aborts_.empty()
-                 ? crypto::compute_abort_hash(msg.round, msg.missing_creator, ts, rand)
-                 : crypto::chain_abort_hash(current_aborts_.back().event_hash,
-                                              msg.round, msg.missing_creator, ts);
-
+    // Build the AbortEvent with the claim quorum. S-074: its identity is
+    // CANONICAL — timestamp = the parent block's (chain time, not this
+    // node's clock) and event_hash = canonical_abort_event_hash — so every
+    // survivor assembles the byte-identical event and no assembler chooses
+    // the post-abort committee; the validator and the adoption path
+    // recompute and reject anything else.
+    if (chain_.empty()) return;
     chain::AbortEvent ev;
     ev.round         = msg.round;
     ev.aborting_node = msg.missing_creator;
-    ev.timestamp     = ts;
-    ev.event_hash    = ah;
+    ev.timestamp     = chain_.head().timestamp;
+    ev.event_hash    = chain::canonical_abort_event_hash(
+        ev, current_aborts_.empty() ? nullptr : &current_aborts_.back(),
+        crypto::epoch_committee_seed(current_epoch_rand(), cfg_.shard_id), chain_.height());
     // D2-inc3: typed claim list (bucket is keyed by claimer, so the order
     // is deterministic — std::map iteration).
     for (auto& [_, c] : bucket) {
@@ -1855,14 +1856,41 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
                             const chain::AbortEvent& ev) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
+    if (chain_.empty()) return;              // no height 0 round exists (S-074 reads the head)
     if (block_index != chain_.height()) return;
-    Hash my_prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    Hash my_prev = chain_.head_hash();
     if (prev_hash != my_prev) return;
 
     // Already adopted? Idempotent: ignore duplicates.
     for (auto& existing : current_aborts_) {
         if (existing.event_hash == ev.event_hash) return;
     }
+
+    // S-074: adopt only the CANONICAL next event of this height's tail (the
+    // same rule the validator enforces) — a variant with a chosen hash or
+    // timestamp would seat a committee of the sender's choosing and split
+    // the tail across adopters. Checked BEFORE the claim signatures so a
+    // re-sent variant costs one hash, not max(2, K-1) verifications under
+    // the lock. A chained event whose predecessor we have not adopted yet
+    // mismatches here and arrives again, in chain order, through the S-047
+    // relay (which runs on committee members with an armed round timer).
+    if (ev.timestamp != chain_.head().timestamp
+        || ev.event_hash != chain::canonical_abort_event_hash(
+               ev, current_aborts_.empty() ? nullptr : &current_aborts_.back(),
+               crypto::epoch_committee_seed(current_epoch_rand(), cfg_.shard_id),
+               chain_.height())) {
+        std::cerr << "[node] dropped non-canonical abort event against "
+                  << ev.aborting_node << " (S-074)\n";
+        return;
+    }
+    // The accused must be in the CURRENT (re-derived) committee — the rule
+    // check_abort_certs applies ("aborting_node not in selected set") and
+    // on_abort_claim applies to claims. Without it a replay of an already-
+    // excluded member's public claims, chained canonically, is adoptable and
+    // yields a tail no block can carry (S-074 review). An empty committee
+    // (not yet in sync) adopts nothing.
+    if (std::find(current_creator_domains_.begin(), current_creator_domains_.end(),
+                  ev.aborting_node) == current_creator_domains_.end()) return;
 
     // Validate the K-1 claim quorum carried inline. We can do this
     // independently of whether we ever heard the individual AbortClaimMsgs
