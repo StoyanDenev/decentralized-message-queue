@@ -293,7 +293,7 @@ The choice between modes is operational: which Sybil-resistance medium and disin
 
 ### 5.2 Registration
 
-A node joins the eligible pool by broadcasting a REGISTER transaction whose payload is its 32-byte Ed25519 public key. The transaction is itself signed with the corresponding private key, proving possession.
+A node registers by broadcasting a REGISTER transaction whose payload is its 32-byte Ed25519 public key (create-only since V-REG-1, 2026-09-15: one REGISTER per domain name, ever). Under `STAKE_INCLUSION` (the default) registration alone does not make it eligible, and no transaction from an unstaked domain is currently includable — see SECURITY.md S-069 (owner decision pending). The transaction is itself signed with the corresponding private key, proving possession.
 
 Registration takes effect after a randomized 1–10 block delay derived from `(tx.hash || cumulative_rand)`. This prevents a registrant from timing entry to guarantee selection in a chosen round.
 
@@ -319,7 +319,7 @@ A domain that **equivocates** is permanently removed from the registry — `inac
 1. **BlockSigMsg-level (rev.8)**: the validator signs `compute_block_digest(b)` for two different block bodies at the same height. Detection in `Node::apply_block_locked`.
 2. **ContribMsg same-generation (S-006 closure)**: the validator signs `make_contrib_commitment(...)` for two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection in `Node::on_contrib`.
 
-Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to slash all equivocation surfaces. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_INCLUSION` mode a new domain). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
+Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to slash all equivocation surfaces. Re-entry requires a fresh REGISTER under a NEW domain name (since V-REG-1 a domain name is single-use; the old domain's balance and stake stay with it — SECURITY.md S-067). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
 
 ---
 

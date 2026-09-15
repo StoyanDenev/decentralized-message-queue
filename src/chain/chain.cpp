@@ -1252,8 +1252,11 @@ void Chain::apply_transactions(const Block& b) {
             // E1: detect first-time registration BEFORE we touch
             // registrants_[tx.from] (operator[] would create an entry,
             // making it indistinguishable from a re-registration). NEF
-            // fires only when this is genuinely new — re-registrations
-            // (e.g., key rotation, region update) do not drain the pool.
+            // fires only when this is genuinely new. Since V-REG-1
+            // (2026-09-15) the verifier rejects any REGISTER for a domain
+            // already in this map, so the re-registration branch below is
+            // unreachable through consensus and retained as belt-and-
+            // suspenders only (apply is not the rule; the verifier is).
             const bool first_time_register =
                 (registrants_.find(tx.from) == registrants_.end());
 

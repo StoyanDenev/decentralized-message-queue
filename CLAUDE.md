@@ -152,11 +152,15 @@ LIVE CRITICALS ON THE RECORD (audit 2026-09-14; DECISION-LOG 2026-08-13..16 and
 2026-09-14; ledger rows docs/SECURITY.md S-055..S-067). Recorded in the log after this
 section was last written and carried in the ledger. STILL OPEN: S-055 C0 F2
 equivocation-view digest halt; S-057 unsigned unbounded pq_auth -> unrelayable blocks;
-S-060 REGISTER identity takeover
-(any key overwrites any validator's registry record; REOPENS S-052); S-063 DAPP_CALL
-frames report payments never made; S-064 cross-shard bundles unauthenticated
-(multi-shard only); S-065 CT proof verification (~2.2 s per bundle) under the
-consensus lock; S-067 UNSTAKE is unincludable (stake unrecoverable through consensus).
+S-063 DAPP_CALL frames report payments never made; S-064 cross-shard bundles
+unauthenticated (multi-shard only); S-065 CT proof verification (~2.2 s per bundle)
+under the consensus lock; S-067 UNSTAKE is unincludable (stake unrecoverable through
+consensus).
+CLOSED 2026-09-15 (owner-authorized accept-rule change, DECISION-LOG 2026-09-15): S-060
+REGISTER identity takeover — REGISTER is CREATE-ONLY (V-REG-1: rejected for any domain in
+the raw registrants map, and unless nonce == 0); with it the reopened leg of S-052.
+Decided consequences: a domain name is single-use, a lost key is terminal, key rotation
+is a separate incumbent-signed transaction (R-6, open).
 CLOSED 2026-09-14 (node-local, no consensus change): S-056/S-059/S-061/S-062 — the
 producer now asks the verifier (BlockValidator::check_transaction is the ONE per-tx
 rule set; build_body admits only what it accepts; a resident rejected tx is evicted
@@ -164,8 +168,8 @@ on the first build at each head) — S-058 (the Phase-2 trigger is committee
 completeness, not map size; the Phase-1 timer is released only once complete) and
 S-066 (gossip trusted the unsigned wire hash). Their ORDER against the D2 front is
 owner decision O-3 below — until it is taken ACTIVE FRONT stays D2 as written, but
-no thread may treat the ledger as clean. S-055/S-057/S-060/S-065/S-067 need owner
-decisions (DECISION CLOCK R-5, R-7, R-8, R-10, R-11).
+no thread may treat the ledger as clean. S-055/S-057/S-065/S-067 need owner
+decisions (DECISION CLOCK R-7, R-8, R-10, R-11).
 
 FOLDED IN (DECISION-LOG 2026-08-13, directive 1): pre-launch item B1 is closed as a
 standalone item. Its (a) half — per-block append-only files replacing monolithic
@@ -218,12 +222,13 @@ native Darwin/arm64 build green, byte-freeze pins matched, no goldens regenerate
 (pip3 pynacl — three EQV cluster scripts now carry a pynacl fallback and run here),
 macOS CI runner, APFS.
 
-BOTH RANK-1 CONSENSUS HOLES WERE CLOSED (authorized owner 2026-07-31; LANDED d34c632,
-DECISION-LOG 2026-08-12). UPDATE 2026-09-14: Hole 1's closure (S-052) is REOPENED on a
-different leg — the height binding stands, but S-060 (REGISTER identity takeover,
-DECISION-LOG 2026-08-14 5e4afec) lets any key replace the accused key in the registry
-that the verifier resolves against (validator.cpp:471). Hole 2 (S-053) stands. Do not
-re-open the closed legs; harden forward from here.
+BOTH RANK-1 CONSENSUS HOLES ARE CLOSED (authorized owner 2026-07-31; LANDED d34c632,
+DECISION-LOG 2026-08-12). Hole 1's closure (S-052) was REOPENED on a different leg on
+2026-08-14 — S-060, the REGISTER identity takeover (any key could replace the accused
+key in the registry the verifier resolves against, validator.cpp:471) — and RE-CLOSED
+2026-09-15 by the owner-authorized V-REG-1: REGISTER is create-only (raw registrants
+map, nonce 0), so no key can be rebound (DECISION-LOG 2026-09-15). Hole 2 (S-053)
+stands. Do not re-open the closed legs; harden forward from here.
   - Hole 1 forged-slash -> docs/SECURITY.md S-052. Closed by HEIGHT BINDING, not by
     carrying headers (rejected on analysis: unbounded size + Block>EquivocationEvent>Block
     recursion). Both digest families are now two-level and openable:
@@ -345,13 +350,16 @@ surface the row to the owner before calling the milestone complete.
        2K-1 (halt, not fork). Design together with F-c (AbortCascadeLiveness.md §4.3),
        whose soundness turns on whether the pool can be adversarially shrunk.
        DECIDE BY: before genesis; frozen accept rule.
-  R-5  Create-only REGISTER (V-REG-1, DECISION-LOG 1c0a61d) to close S-060 — makes a lost
-       key terminal for that domain until a rotation tx exists (5e4afec "OWNER DECISION
-       REQUIRED"); the three alternatives were refuted in 5e4afec.
-       DECIDE BY: now — S-060 is the worst finding on the record; accept-rule change.
-  R-6  ROTATE_IDENTITY_KEY / revocability: addable post-genesis without reserving anything
-       (1c0a61d), so the only question is whether it ships BEFORE genesis alongside R-5.
-       DECIDE BY: R-5 landing.
+  R-5  DECIDED + LANDED 2026-09-15 (owner): create-only REGISTER (V-REG-1) closes S-060;
+       key loss is terminal for the domain; DEREGISTER is terminal too (no re-entry under
+       the same name — balance, stake and DApp ownership stay with the domain, S-067).
+       The small-order-key companion is S-068 (its own increment). Gate:
+       test-register-create-only. Kept here as the record.
+  R-6  ROTATE_IDENTITY_KEY / revocability: a new TxType is free at the wire and state
+       layer (1c0a61d), but old validators fail closed on unknown types, so first use
+       needs every validator upgraded — a coordination requirement, not a migration.
+       The open question is whether it ships BEFORE genesis. DECIDE BY: before genesis if
+       validators must be able to rotate before an upgrade window exists.
   R-7  S-057: a rule that non-PQ transaction types carry empty pq_auth, and/or a
        consensus block-byte cap matching the 4 MB wire cap (a valid block must never be
        unrelayable). New accept rules. DECIDE BY: before genesis.
@@ -373,6 +381,15 @@ surface the row to the owner before calling the milestone complete.
        domain is ineligible and the verifier rejects its every tx) — staked funds are
        unrecoverable through consensus. Accept-rule change (an inactive registrant may
        UNSTAKE). DECIDE BY: before genesis; frozen accept rule.
+  R-12 S-069: under STAKE_INCLUSION (the default) no domain can JOIN after genesis — a
+       fresh registrant holds 0 stake, is therefore absent from the eligible registry,
+       and the verifier rejects its STAKE ("tx sender not in registry") before the stake
+       can be established (DECISION-LOG 0fe6eda REVERSED 1 states it as a fact; README
+       §"joins the eligible pool" claims the opposite). Either the validator set is
+       closed at genesis BY DESIGN (then say so and the REGISTER/STAKE tooling is
+       misleading) or STAKE from a registered-but-unstaked domain must be accepted (an
+       accept-rule change). With V-REG-1 + terminal DEREGISTER the set can only shrink.
+       DECIDE BY: before genesis; frozen accept rule.
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
   No decision is not a neutral state.
 

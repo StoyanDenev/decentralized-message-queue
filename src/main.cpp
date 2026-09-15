@@ -971,6 +971,12 @@ Additional in-process tests:
                                               and is fail-closed at check_transactions'
                                               default: (control: a known type is not);
                                               via the check_transactions_for_test seam
+  determ test-register-create-only            V-REG-1 / S-060 gate — REGISTER is
+                                              create-only: a registered, deregistered
+                                              or incumbent domain cannot be re-REGISTERed
+                                              (raw registrants map), nonce must be 0
+                                              (one per domain per block); rpc_register
+                                              refuses for a registered node
   determ test-contrib-trigger-membership      S-058 gate — a registered NON-member's
                                               contrib neither triggers Phase 2 nor
                                               kills the Phase-1 timer; the last
@@ -13232,6 +13238,8 @@ int main(int argc, char** argv) {
         // predicate, decide which one lands.
         crypto::NodeKey alice = mk_key(0x40);   // genesis creator (registered)
         crypto::NodeKey carol = mk_key(0x50);   // genesis creator (registered)
+        crypto::NodeKey gina  = mk_key(0x58);   // FRESH domain (the REGISTER-geometry fixture: V-REG-1
+                                                // rejects a registered domain's REGISTER before geometry)
         crypto::NodeKey anonf = mk_key(0x70);   // funded anonymous account
         crypto::NodeKey anong = mk_key(0x80);   // second funded anonymous account
         crypto::NodeKey anonu = mk_key(0x90);   // UNFUNDED anonymous account
@@ -13296,10 +13304,10 @@ int main(int argc, char** argv) {
         Transaction big_pay  = mk(TxType::TRANSFER, anon_funded2, anong, 1, 0, 0,
                                   std::vector<uint8_t>(TRANSFER_PAYLOAD_MAX + 72, 0xAB)); // S-056
         Transaction overflow = mk(TxType::TRANSFER, anon_unfunded, anonu, 1, UINT64_MAX, 0, {}); // S-059
-        std::vector<uint8_t> bad_reg(carol.pub.begin(), carol.pub.end());
+        std::vector<uint8_t> bad_reg(gina.pub.begin(), gina.pub.end());
         bad_reg.push_back(200);                                   // region_len 200 > 32
         bad_reg.insert(bad_reg.end(), 7, 'x');
-        Transaction bad_register = mk(TxType::REGISTER, "carol", carol, 0, 0, 0, bad_reg); // S-061
+        Transaction bad_register = mk(TxType::REGISTER, "gina", gina, 0, 0, 0, bad_reg); // S-061 (fresh domain)
         Transaction unknown_ty   = mk(static_cast<TxType>(99), "alice", alice, 1, 0, 0, {}); // S-062
 
         // CONTROLS: the pre-fix assembler (admit everything) includes every one
@@ -13322,6 +13330,11 @@ int main(int argc, char** argv) {
             check(!has(s1, big_pay),      "admit (S-056): the over-cap TRANSFER payload is EXCLUDED by the verifier's TRANSFER_PAYLOAD_MAX rule");
             check(!has(s1, overflow),     "admit (S-059): the wrapping amount+fee is EXCLUDED by the verifier's S-049 guard");
             check(!has(s1, bad_register), "admit (S-061): the malformed REGISTER is EXCLUDED by the verifier's REGISTER geometry rules");
+            {   // ...and it is the GEOMETRY rule that rejects it (a fresh domain: V-REG-1 does not apply)
+                auto r = v.check_transaction(bad_register, at, chain, reg, 0);
+                check(!r.ok && r.error.find("region length") != std::string::npos,
+                      "admit (S-061): the fixture is rejected by the region-length geometry rule itself, not by create-only");
+            }
             check(!has(s1, unknown_ty),   "admit (S-062): the unknown TxType is EXCLUDED by the verifier's fail-closed default");
             check(s1.transactions.size() == 1, "admit: nothing else was included");
             check(verifier_accepts(s1),   "admit: the verifier ACCEPTS the body the predicate-driven assembler built");
@@ -47247,6 +47260,208 @@ int main(int argc, char** argv) {
         fs::remove_all(dir, fec);
         std::cout << (fail ? "  FAIL: test-contrib-trigger-membership\n"
                            : "  PASS: test-contrib-trigger-membership\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-register-create-only") {
+        // V-REG-1 (owner-authorized 2026-09-15; SECURITY.md S-060; DECISION-LOG
+        // 2026-08-14 5e4afec / 1c0a61d). A REGISTER is verified against the key
+        // in its OWN payload and apply overwrote the whole registry record, so
+        // any key could rebind any domain — evict it from the committee (9/10
+        // halt at |pool| == K), sign as it, forge its equivocation forfeiture
+        // (the reopened S-052). Now check_transaction rejects a REGISTER whose
+        // domain is already in the RAW registrants map (active, pending,
+        // suspended or deregistered) and one whose nonce is not 0 (a fresh
+        // domain's first tx is nonce 0 by construction, which makes "one
+        // REGISTER per domain per block" a per-tx rule); rpc_register refuses
+        // to queue one for an already-registered node. Both-legs design: a
+        // fresh-domain REGISTER (the control) is still accepted.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey alice    = mk_key(0x40);   // genesis creator
+        crypto::NodeKey dave     = mk_key(0x48);   // registered then DEREGISTERED
+        crypto::NodeKey attacker = mk_key(0x70);
+        crypto::NodeKey carol    = mk_key(0x60);   // fresh domain (control)
+
+        GenesisConfig cfg;
+        cfg.chain_id = "register-create-only";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = alice.pub; c0.initial_stake = 1000;
+        GenesisCreator c1; c1.domain = "dave";  c1.ed_pub = dave.pub;  c1.initial_stake = 1000;
+        cfg.initial_creators = { c0, c1 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 1000;
+        GenesisAllocation gd; gd.domain = "dave";  gd.balance = 1000;
+        cfg.initial_balances = { ga, gd };
+        Chain chain; chain.append(make_genesis_block(cfg));
+
+        // dave DEREGISTERs at height 1 (apply layer; validation is not the
+        // subject here) — after this he is INACTIVE and absent from the eligible
+        // registry but still present in the raw registrants map.
+        {
+            Transaction d; d.type = TxType::DEREGISTER; d.from = "dave"; d.to = "";
+            d.amount = 0; d.fee = 0; d.nonce = 0;
+            auto sb = d.signing_bytes(); d.sig = crypto::sign(dave, sb.data(), sb.size());
+            d.hash = d.compute_hash();
+            Block b1; b1.index = 1; b1.prev_hash = chain.head().compute_hash();
+            b1.creators = {"alice"}; b1.transactions = { d };
+            chain.append(b1);
+            // The deregistration takes effect after a randomized 1..10-block
+            // delay; append empty blocks past it so dave is INACTIVE at the head.
+            for (uint64_t i = 0; i < 11; ++i) {
+                Block e; e.index = chain.height(); e.prev_hash = chain.head().compute_hash();
+                e.creators = {"alice"};
+                chain.append(e);
+            }
+        }
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        check(chain.registrants().count("dave") == 1 && !reg.find("dave"),
+              "setup: dave is deregistered — in the raw registrants map, not in the eligible registry");
+        BlockValidator v;
+        const uint64_t at = chain.height();
+
+        // A REGISTER for `domain` carrying `key`'s pubkey in the payload, signed
+        // by `key` (a REGISTER is self-authenticating by design).
+        auto reg_tx = [&](const std::string& domain, const crypto::NodeKey& key, uint64_t nonce) {
+            Transaction tx; tx.type = TxType::REGISTER; tx.from = domain; tx.to = "";
+            tx.amount = 0; tx.fee = 0; tx.nonce = nonce;
+            tx.payload.assign(key.pub.begin(), key.pub.end());
+            auto sb = tx.signing_bytes(); tx.sig = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        auto verdict = [&](const Transaction& tx) {
+            return v.check_transaction(tx, at, chain, reg, tx.nonce);
+        };
+        auto rejects_with = [&](const Transaction& tx, const char* needle) {
+            auto r = verdict(tx);
+            return !r.ok && r.error.find(needle) != std::string::npos;
+        };
+
+        // CONTROL — a fresh domain registers (self-authenticating, nonce 0).
+        check(verdict(reg_tx("carol", carol, 0)).ok,
+              "control: a REGISTER for a FRESH domain (carol, nonce 0) is ACCEPTED");
+
+        // S-060 — the takeover: attacker's key, victim's domain, victim's nonce.
+        check(rejects_with(reg_tx("alice", attacker, 0), "create-only"),
+              "S-060: a REGISTER for a REGISTERED domain (alice) by another key is REJECTED — create-only");
+        // Even the incumbent cannot re-register: rotation is a separate tx.
+        check(rejects_with(reg_tx("alice", alice, 0), "create-only"),
+              "create-only: the incumbent's own re-REGISTER is REJECTED too (rotation is a separate, incumbent-signed tx)");
+        // The RAW map, not the eligible registry: a deregistered domain stays
+        // protected (a rule over the eligible pool would leave it rebindable).
+        check(rejects_with(reg_tx("dave", attacker, 1), "create-only"),
+              "raw map: a REGISTER for a DEREGISTERED domain (dave) is REJECTED — the eligible registry would have let it through");
+        // Nonce rule: a fresh domain's REGISTER must be its first tx.
+        check(rejects_with(reg_tx("erin", attacker, 1), "nonce 0"),
+              "nonce rule: a fresh-domain REGISTER at nonce 1 is REJECTED (the first tx of an unregistered domain is nonce 0)");
+
+        // One REGISTER per domain per BLOCK, as a consequence of the nonce rule:
+        // a block that creates frank twice (nonce 0 by carol's key... by any key,
+        // then nonce 1 by the attacker's) is rejected by check_transactions.
+        {
+            Block b; b.index = at;
+            b.transactions = { reg_tx("frank", carol, 0), reg_tx("frank", attacker, 1) };
+            auto r = v.check_transactions_for_test(b, chain, reg);
+            check(!r.ok && r.error.find("nonce 0") != std::string::npos,
+                  "one per block: a second REGISTER for the same new domain in one block (nonce 1) is REJECTED");
+            Block b1; b1.index = at; b1.transactions = { reg_tx("frank", carol, 0) };
+            check(v.check_transactions_for_test(b1, chain, reg).ok,
+                  "one per block: the single REGISTER is ACCEPTED (control)");
+        }
+
+        // rpc_register: an already-registered node's operator command is
+        // refused instead of queuing a tx that can never be included.
+        {
+            using namespace determ::net;
+            namespace fs = std::filesystem;
+            std::error_code fec;
+            fs::path dir = fs::temp_directory_path() / "determ-register-create-only";
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            GenesisConfig g; g.chain_id = "register-create-only-rpc";
+            g.m_creators = 1; g.k_block_sigs = 1; g.epoch_blocks = 1;
+            GenesisCreator gc; gc.domain = "node0"; gc.ed_pub = alice.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config ncfg;
+            ncfg.domain = "node0"; ncfg.data_dir = (dir / "node0").string();
+            ncfg.listen_port = 7676; ncfg.key_path = (dir / "node0.key").string();
+            ncfg.chain_path = (dir / "node0" / "chain.json").string();
+            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.log_quiet = true;
+            crypto::save_node_key(alice, ncfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node n(ncfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+            bool refused = false;
+            try { n.rpc_register(); }
+            catch (const std::exception& e) {
+                refused = std::string(e.what()).find("already registered") != std::string::npos;
+            }
+            check(refused && n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                  "rpc_register: an already-registered node's REGISTER is REFUSED with an RPC error and nothing is queued");
+
+            // Ingress mirror (node-local): a takeover REGISTER for the registered
+            // node0 is dropped at gossip ingress and rejected at RPC submit, so it
+            // cannot squat node0's (from, nonce) slot or quota until a build evicts it.
+            {
+                Transaction takeover = reg_tx("node0", attacker, 0);
+                n.on_tx_for_test(takeover);
+                check(n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: a takeover REGISTER for a registered domain is DROPPED at gossip ingress");
+                bool rpc_rejected = false;
+                try { n.rpc_submit_tx(takeover.to_json()); } catch (const std::exception&) { rpc_rejected = true; }
+                check(rpc_rejected && n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: the same REGISTER is REJECTED at RPC submit");
+                Transaction late = reg_tx("newname", attacker, 3);   // fresh domain, wrong nonce
+                n.on_tx_for_test(late);
+                check(n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                      "ingress mirror: a fresh-domain REGISTER with nonce != 0 is DROPPED at gossip ingress");
+            }
+
+            // Positive control: a node whose domain is NOT registered can still
+            // register itself through the same RPC (nonce 0, queued).
+            {
+                fs::path dir2 = fs::temp_directory_path() / "determ-register-create-only-newcomer";
+                fs::remove_all(dir2, fec);
+                fs::create_directories(dir2 / "newcomer");
+                node::Config c2;
+                c2.domain = "newcomer"; c2.data_dir = (dir2 / "newcomer").string();
+                c2.listen_port = 7677; c2.key_path = (dir2 / "newcomer.key").string();
+                c2.chain_path = (dir2 / "newcomer" / "chain.json").string();
+                c2.genesis_path = gpath; c2.m_creators = 1; c2.k_block_sigs = 1;
+                c2.log_quiet = true;
+                crypto::save_node_key(carol, c2.key_path);
+                VirtualNetwork vnet2;
+                auto loop2 = std::make_unique<VirtualEventLoop>();
+                auto transport2 = std::make_unique<VirtualTransport>(*loop2, vnet2);
+                node::Node n2(c2, determ::time::RealClock::instance(), loop2.get(), transport2.get());
+                bool queued = false;
+                try { queued = n2.rpc_register().value("status", std::string{}) == "queued"; }
+                catch (const std::exception&) { queued = false; }
+                check(queued && n2.rpc_status()["mempool_size"].get<size_t>() == 1,
+                      "rpc_register control: an UNREGISTERED node's REGISTER is QUEUED (nonce 0) — the guard does not over-refuse");
+                fs::remove_all(dir2, fec);
+            }
+            fs::remove_all(dir, fec);
+        }
+
+        std::cout << (fail ? "  FAIL: test-register-create-only\n"
+                           : "  PASS: test-register-create-only\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-inbound-receipt-cap") {

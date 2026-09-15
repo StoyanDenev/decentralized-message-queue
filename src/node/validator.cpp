@@ -760,6 +760,31 @@ BlockValidator::Result BlockValidator::check_transaction(
         if (tx.type == TxType::REGISTER) {
             if (from_anon)
                 return {false, "REGISTER from anonymous account is not allowed"};
+            // V-REG-1 — REGISTER is CREATE-ONLY (owner-authorized 2026-09-15;
+            // SECURITY.md S-060, DECISION-LOG 2026-08-14 1c0a61d). A REGISTER
+            // is verified against the key in its OWN payload, so without this
+            // rule any key could rebind any domain — evicting it from the
+            // committee (a 9/10 halt at |pool| == K), signing as it, and
+            // forging its equivocation forfeiture (the reopened S-052). The
+            // RAW registrants map is consulted, never the eligible registry:
+            // active, pending-activation, suspended and deregistered domains
+            // are all protected (the eligible registry omits exactly the
+            // weakest). A domain name is therefore single-use; key rotation
+            // is a separate, incumbent-signed transaction (DECISION CLOCK
+            // R-6), never a second REGISTER; a lost key is terminal.
+            if (chain.registrants().count(tx.from))
+                return {false, "REGISTER for an already-registered domain "
+                               "(create-only, V-REG-1): " + tx.from};
+            // An unregistered domain can sign nothing but its REGISTER, so its
+            // first transaction is nonce 0 by construction. Requiring it here
+            // makes "at most ONE REGISTER per domain per BLOCK" a per-tx rule
+            // (a second one in the same block would carry nonce 1) — the same
+            // predicate the producer asks, so no block-level overlay and no
+            // producer-side mirror are needed.
+            if (tx.nonce != 0)
+                return {false, "REGISTER must be the domain's first transaction "
+                               "(nonce 0, got " + std::to_string(tx.nonce) + "): "
+                               + tx.from};
             // rev.9 R1 wire format:
             //   [pubkey: 32B][region_len: u8][region: utf8 bytes]
             // Legacy 32-B pubkey-only payload is accepted (region absent

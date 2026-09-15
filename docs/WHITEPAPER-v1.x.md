@@ -334,7 +334,7 @@ Expected per-block value equals FLAT subsidy — total issuance schedule unchang
 
 A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS` — no key can sign over the all-zero pubkey, so the pool is provably unsynthesizable. A genesis with `zeroth_pool_initial = 0` disables E1 entirely.
 
-On each **first-time** REGISTER apply for a new domain (not re-registrations / key rotations), a per-registrant lottery seeded by `block.cumulative_rand` decides whether the registrant wins a fixed grant from the pool. An optional per-block win cap bounds worst-case drain rate:
+On each REGISTER apply for a new domain (every REGISTER is a first-time registration since V-REG-1, 2026-09-15 — re-registration is rejected by the verifier), a per-registrant lottery seeded by `block.cumulative_rand` decides whether the registrant wins a fixed grant from the pool. An optional per-block win cap bounds worst-case drain rate:
 
 ```
 if first_time_register:
@@ -350,7 +350,7 @@ if first_time_register:
     # else: no-op (REGISTER itself still applies normally)
 ```
 
-`block_nef_wins` is a transient per-block counter — initialized to 0 at the start of each block apply, never persisted in state, never appears in snapshots or state_root. Re-registrations of an existing domain (key rotation, region update) do **not** draw the lottery — the apply path checks `registrants_.find(tx.from) == registrants_.end()` first, mirroring the pre-lottery behavior. Pool-empty and cap-hit cases are silent no-ops; no separate disable flag is needed beyond `zeroth_pool_initial = 0`.
+`block_nef_wins` is a transient per-block counter — initialized to 0 at the start of each block apply, never persisted in state, never appears in snapshots or state_root. (Re-registrations are unreachable since V-REG-1.) Re-registrations of an existing domain (key rotation, region update) do **not** draw the lottery — the apply path checks `registrants_.find(tx.from) == registrants_.end()` first, mirroring the pre-lottery behavior. Pool-empty and cap-hit cases are silent no-ops; no separate disable flag is needed beyond `zeroth_pool_initial = 0`.
 
 Genesis fields:
 

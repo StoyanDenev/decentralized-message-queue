@@ -2774,6 +2774,13 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     if (tx.type == TxType::REGISTER) {
         if (from_anon) return false;
         if (tx.payload.size() < 32) return false;
+        // V-REG-1 mirror (node-local): a REGISTER the verifier will reject —
+        // an already-registered domain, or nonce != 0 — must not become
+        // resident either, or a zero-cost REGISTER(victim, n, fee=MAX) squats
+        // the victim's (from, nonce) slot and per-sender quota until a
+        // building node evicts it (mempool-layer censorship of the victim's
+        // own transactions). Cheap: one map lookup before the signature.
+        if (chain_.registrants().count(tx.from) || tx.nonce != 0) return false;
         std::copy_n(tx.payload.begin(), 32, pk.begin());
     } else if (from_anon) {
         if (tx.type != TxType::TRANSFER) return false;
@@ -5039,6 +5046,14 @@ json Node::rpc_cc_checkpoint(uint64_t epoch) const {
 
 json Node::rpc_register() {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // V-REG-1: REGISTER is create-only (the verifier rejects a REGISTER for a
+    // registered domain), so the operator command must not queue one that can
+    // never be included. Surface it as an RPC error instead.
+    if (chain_.registrants().count(cfg_.domain))
+        throw std::runtime_error(
+            "REGISTER refused: domain '" + cfg_.domain + "' is already registered "
+            "(REGISTER is create-only, V-REG-1; key rotation is a separate transaction)");
 
     // Payload (rev.9 R1): [pubkey: 32B][region_len: u8][region: utf8].
     // When cfg_.region is empty we emit only the 32-byte pubkey
