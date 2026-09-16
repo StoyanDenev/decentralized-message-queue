@@ -86,7 +86,7 @@ The "honest minority" tolerance most BFT protocols celebrate (`f < N/3`) is **st
 
 The mutual-distrust model rests on:
 
-1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and economically costly (suspension + slashing).
+1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and costly (suspension from committee selection for an exponentially growing window; the round-1 stake deduction was retired 2026-09-16, D13).
 
 2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The K-way unanimous collusion required to censor is fragile because each colluder has standing incentive to defect.
 
@@ -284,7 +284,7 @@ Determ supports two genesis-pinned validator-inclusion policies. Both deliver **
 
 | Mode | `min_stake` | Sybil cost | Disincentive on misbehavior |
 |---|---|---|---|
-| **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Abort suspension deduction (equivocation carries no L1 stake consequence — D4, 2026-09-16) |
+| **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Abort suspension only (the round-1 stake deduction was retired — D13, 2026-09-16; equivocation carries no L1 stake consequence — D4, 2026-09-16) |
 | **`DOMAIN_INCLUSION`** | 0 | Domain registration | Abort suspension only (equivocation carries no L1 registry consequence — D4) |
 
 **Why the decentralization claim is mode-invariant:** Determ's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
@@ -486,7 +486,7 @@ An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an a
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
-**Slashing**: BFT-mode safety depends on `f_h < k_bft/3` (standard BFT 1/3 bound applied to the BFT-shrunk committee) plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DTM) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
+**Suspension**: BFT-mode safety depends on `f_h < k_bft/3` (standard BFT 1/3 bound applied to the BFT-shrunk committee). An `AbortEvent` for round 1 baked into a finalized block records a suspension against the named validator (the S-032 `abort_records` cache: exponential-backoff exclusion from committee selection); it moves no stake — the former `SUSPENSION_SLASH` deduction was retired 2026-09-16 (owner decision D13; the parameter remains as an inert genesis-covered field). Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
 
 **Opt out**: setting `bft_enabled = false` at genesis disables escalation — the chain halts on a persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
 
@@ -592,7 +592,7 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 | `block_subsidy` | 10 (atomic, by genesis convention) | Genesis-pinned, page reward. No code-level default — operator sets it in `GenesisConfig`; `tools/test_*.sh` use 10 |
 | `bft_enabled` | true | Genesis-pinned. Enables per-height BFT escalation (§10.4) |
 | `bft_escalation_threshold` | 5 | Genesis-pinned. Total aborts at same height before escalation |
-| `SUSPENSION_SLASH` | 10 (atomic) | Stake deducted on each round-1 abort suspension |
+| `SUSPENSION_SLASH` | 10 (atomic) | Inert since 2026-09-16 (D13): no stake is deducted on an abort; kept as a genesis-hash-covered field |
 | `tx_commit_ms` | 200 | Phase 1 timer |
 | `block_sig_ms` | 200 | Phase 2 timer |
 | `abort_claim_ms` | 100 | Abort claim collection window |
@@ -691,8 +691,8 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 The disincentive depends on the chain's governance model (§5.1):
 
-- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation carries **no** L1 consequence since 2026-09-16 (O-1 step 3a; DECISION-LOG D4) — the `EquivocationEvent` is an evidence record for the L2 policy.
-- **`DOMAIN_INCLUSION`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation carries no L1 consequence here either (D4) — the record is the L2 policy's input.
+- **`STAKE_INCLUSION`** chains: a Phase-1 abort records a suspension and deducts nothing (the `SUSPENSION_SLASH` deduction was retired 2026-09-16, D13). Equivocation carries **no** L1 consequence since 2026-09-16 (O-1 step 3a; DECISION-LOG D4) — the `EquivocationEvent` is an evidence record for the L2 policy.
+- **`DOMAIN_INCLUSION`** chains: a Phase-1 abort likewise records a suspension only. Equivocation carries no L1 consequence here either (D4) — the record is the L2 policy's input.
 
 Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:
 

@@ -1,5 +1,7 @@
 # CommitteeSelectionAbortDeterminismSoundness — abort-driven committee re-selection is deterministic across honest nodes
 
+> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+
 This document proves that Determ's **committee re-selection under round aborts** is a deterministic function of the *shared abort history*: any two honest nodes that observe the same ordered list of `AbortEvent`s at a given height re-derive a **byte-identical** committee. Consequently a Byzantine actor who grinds aborts can change *which* committee is selected, but cannot make honest nodes *disagree* on the committee — abort-grinding moves the committee identically for everyone, it does not fork the selection.
 
 The load-bearing surface is the abort-seed-mixing loop at the producer (`src/node/node.cpp:796-808`) and its byte-for-byte mirror at the validator (`src/node/validator.cpp:122-133`, with the per-event reconstruction in `check_abort_certs` at `src/node/validator.cpp:238-310`). The mixing recurrence is

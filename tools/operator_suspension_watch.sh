@@ -26,12 +26,13 @@
 # giving operators a forecast the daemon computes but never exposes directly.
 #
 # WHY THIS IS NOT A DUPLICATE OF ITS SIBLINGS:
-#   operator_slashing_ledger.sh   Cumulative `accumulated_slashed` counter +
-#                                 A1 reconciliation + per-domain abort/equiv
-#                                 EVENT tallies. It reports WHO was slashed
-#                                 and HOW MUCH — it does NOT compute the
-#                                 forward-looking suspension WINDOW or say who
-#                                 is currently committee-ineligible.
+#   operator_slashing_ledger.sh   The (frozen, historical) `accumulated_slashed`
+#                                 counter + A1 reconciliation + per-domain
+#                                 abort/equiv EVENT tallies (records — no
+#                                 event deducts stake since D13 / D4). It does
+#                                 NOT compute the forward-looking suspension
+#                                 WINDOW or say who is currently
+#                                 committee-ineligible.
 #   operator_equivocation_digest.sh   Per-OFFENDER FA6 equivocation EVENT
 #                                 digest over a block window. Equivocation
 #                                 evidence records (no L1 consequence — D4)

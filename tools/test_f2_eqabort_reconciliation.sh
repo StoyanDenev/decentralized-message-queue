@@ -166,8 +166,9 @@ done
 echo
 echo "=== 7. Poll up to 60s for the equivocation to be baked into a block under F2 ==="
 # D4 (2026-09-16): the baked EquivocationEvent is an evidence record with no L1
-# consequence — node1's stake must stay at its genesis value (1000; an abort
-# deduction against node1 in the window would move it and fail the check).
+# consequence — node1's stake must stay at its genesis value (1000). A round-1
+# abort against node1 in the window moves no stake either (D13, 2026-09-16: an
+# abort only records the suspension), so the equality is exact.
 STAKE_POST="-"; HEIGHT_POST="$HEIGHT"; EQUIV_BLOCK=""
 for attempt in $(seq 1 120); do
   sleep 0.5

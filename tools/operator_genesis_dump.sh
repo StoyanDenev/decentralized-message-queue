@@ -30,7 +30,7 @@
 #      a glance.
 #   3. Security review — `--security-posture` summarizes the security-
 #      relevant choices (BFT escalation, governance mode + N/M,
-#      committee_region pin, suspension_slash configured) with simple
+#      committee_region pin; suspension_slash reported as inert) with simple
 #      check marks / warnings so an auditor can sign off quickly.
 #   4. Incident response — when a chain mis-launches, dump the genesis
 #      to confirm which fields actually shipped.
@@ -394,17 +394,14 @@ if mode == "security-posture":
                 "severity": "INFO",
                 "message": "committee_region empty (global pool — fine for SINGLE/BEACON)"})
 
-    # Slashing config.
-    if suspension_slash > 0:
-        checks.append({
-            "name": "suspension_slash",
-            "severity": "OK",
-            "message": f"suspension_slash configured ({suspension_slash} per abort)"})
-    else:
-        checks.append({
-            "name": "suspension_slash",
-            "severity": "WARN",
-            "message": "suspension_slash = 0 — no economic disincentive for silent committee members"})
+    # suspension_slash: an INERT genesis parameter since 2026-09-16 (D13):
+    # a round-1 abort records the suspension and deducts nothing, at any
+    # value. Reported for completeness (it is genesis-hash-covered when
+    # non-default), never a posture finding.
+    checks.append({
+        "name": "suspension_slash",
+        "severity": "INFO",
+        "message": f"suspension_slash = {suspension_slash} (inert since D13 2026-09-16: an abort records a suspension and deducts nothing)"})
 
     # Inclusion model + min_stake coherence.
     if inclusion_int == 0:

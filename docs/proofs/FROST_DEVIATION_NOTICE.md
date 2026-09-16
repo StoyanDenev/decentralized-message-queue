@@ -1,5 +1,7 @@
 # NOTICE — FROST is a Claude-introduced design deviation, not part of Stoyan Denev's original Determ design
 
+> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+
 **Status:** PROVENANCE RECORD. Load-bearing for any future proposal to re-introduce FROST or threshold-signature primitives into Determ's chain-consensus path.
 
 **Date issued:** 2026-06-07

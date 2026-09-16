@@ -146,7 +146,9 @@ UnstakeComplete(d) ==
 
 \* Slash `amount` from domain d's stake. Decreases stake.locked,
 \* increments global `slashed`. Does NOT touch balance.
-\* Models the stake-debit apply path (the abort suspension deduction; equivocation debits nothing — D4, 2026-09-16).
+\* Models the generic stake-debit shape. No shipped apply path drives it since
+\* 2026-09-16: the abort suspension deduction was retired (D13) and equivocation
+\* debits nothing (D4); accumulated_slashed is a frozen historical counter.
 Slash(d, amount) ==
     /\ d \in Domains
     /\ amount \in 1..MaxBalance

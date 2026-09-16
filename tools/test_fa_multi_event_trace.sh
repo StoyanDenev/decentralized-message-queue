@@ -13,13 +13,13 @@
 # EquivocationEvent and/or a Phase-1 AbortEvent — all injected via the REAL
 # Chain::append apply path — and asserts after every block, JOINTLY:
 #   - A1: expected_total == live_total_supply;
-#   - accumulated_slashed EXACT running total of the abort SUSPENSION_SLASH
-#     deductions, monotone; an EquivocationEvent moves NOTHING (D4,
-#     2026-09-16) — stake, counter and registry stay where the abort
-#     deductions alone put them;
+#   - accumulated_slashed frozen at 0 and every validator stake at its
+#     genesis value: a Phase-1 AbortEvent RECORDS the suspension and moves
+#     no stake (D13, 2026-09-16) and an EquivocationEvent moves NOTHING
+#     (D4, 2026-09-16); the registry stays untouched by evidence;
+#   - abort_records (count + last_block) match a shadow model per domain;
 #   - sender balances + nonces match a shadow model updated per the real
 #     apply rules (fees route to the block creator); nonces monotone;
-#   - validator stakes match the shadow, never negative/underflowed;
 #   - non-vacuous (every event kind occurred; >=1 block carried >=2 kinds
 #     simultaneously); negative control (an event-free block moves nothing);
 #   - determinism (same seed -> identical final state root).

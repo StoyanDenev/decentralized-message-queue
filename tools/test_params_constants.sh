@@ -14,7 +14,7 @@
 #   Stake-economy defaults (3):
 #     - MIN_STAKE = 1000
 #     - UNSTAKE_DELAY = 1000 blocks
-#     - SUSPENSION_SLASH = 10 (rev.8 disincentive)
+#     - SUSPENSION_SLASH = 10 (genesis-covered default; inert since D13)
 #
 #   REGISTER payload geometry (6):
 #     - REGISTER_PAYLOAD_PUBKEY_SIZE = 32 (Ed25519 pubkey)
@@ -35,9 +35,9 @@
 #     - passes is_anon_address (wire-format compatible)
 #
 #   Cross-arithmetic invariants (2):
-#     - SUSPENSION_SLASH × 100 == MIN_STAKE (BFT-safety economic
-#       accounting: 100 baked aborts zero a minimally-staked
-#       validator)
+#     - SUSPENSION_SLASH × 100 == MIN_STAKE (the historical rev.8
+#       sizing of the two genesis-covered defaults, pinned against
+#       silent drift; it sizes nothing since D13 retired the deduction)
 #     - UNSTAKE_DELAY >= 1 block (sane lower bound — instant
 #       unstake would defeat the suspension-window invariant)
 #

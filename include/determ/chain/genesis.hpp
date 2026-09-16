@@ -21,7 +21,8 @@ namespace determ::chain {
 //
 //   STAKE_INCLUSION  — admission via locking min_stake. Sybil cost =
 //                      capital lock-up. Disincentive on misbehavior =
-//                      the abort suspension deduction (equivocation
+//                      the abort suspension only (the round-1 stake
+//                      deduction was retired 2026-09-16 — D13; equivocation
 //                      carries no L1 stake consequence — D4).
 //
 //   DOMAIN_INCLUSION — admission via registering with a domain name
@@ -206,6 +207,11 @@ struct GenesisConfig {
     // genesis files omit these and pick up the defaults silently;
     // genesis-hash mix only includes them when they differ from the
     // default so existing chain identities remain stable.
+    // suspension_slash is INERT since 2026-09-16 (D13): the round-1 abort
+    // stake deduction it sized is retired and no apply path reads it. It
+    // stays because it is genesis-hash-covered (when non-default), a `k:`
+    // state-root leaf, a snapshot field and a PARAM_CHANGE key; removing it
+    // is a genesis-schema change for a later increment.
     uint64_t                        suspension_slash{10};
     uint64_t                        unstake_delay{1000};
 

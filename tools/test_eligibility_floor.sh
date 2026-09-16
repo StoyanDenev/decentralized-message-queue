@@ -17,10 +17,11 @@
 #
 # ~20 assertions in nine blocks:
 #
-#   Fixture sanity (5):
+#   Fixture sanity (6):
 #     - abort accumulators planted via REAL round-1 AbortEvent apply
-#       (dA{2,10}, dB{1,12}, dC{1,11}, dP{1,12}); dP slashed below
-#       min_stake
+#       (dA{2,10}, dB{1,12}, dC{1,11}, dP{1,12}); no stake moves (D13):
+#       dP is provisioned at 995 < min_stake from genesis, dA/dB/dC stay
+#       at 2000
 #
 #   Suspension-formula regression (5):
 #     - exact window boundaries for count=1 and count=2 (len = BASE<<exp),

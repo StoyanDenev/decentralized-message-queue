@@ -898,10 +898,11 @@ Additional in-process tests:
                                               light-client) — proof+verify,
                                               tampering rejection, non-
                                               membership nullopt, determinism
-  determ test-abort-event-apply               AbortEvent apply — Phase-1
-                                              SUSPENSION_SLASH stake
-                                              deduction, S-032 abort_records
-                                              cache, A1 accumulated_slashed
+  determ test-abort-event-apply               AbortEvent apply — D13 gate: a
+                                              round-1 abort RECORDS the
+                                              suspension (S-032 cache) and
+                                              moves no stake; at-floor domain
+                                              stays eligible; twin leaves; A1
   determ test-equivocation-apply              EquivocationEvent apply — an
                                               evidence record with NO L1
                                               consequence (D4): stake,
@@ -1157,11 +1158,10 @@ Additional in-process tests:
                                               of F-1/FA4; determ-dsf untouched)
   determ test-fa-abort-trace                  FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
-                                              Phase-1 AbortEvents — exact
-                                              min(SUSPENSION_SLASH,stake)
-                                              deducts w/ floor-at-0,
-                                              abort_records cache, A1/
-                                              monotone/determinism (inc-2)
+                                              AbortEvents — stakes constant
+                                              (D13), abort_records cache
+                                              exact, non-b: leaves == abort-
+                                              free twin, A1, determinism
   determ test-fa-cross-shard-trace            FA harness (real engine): seeded
                                               two-chain cross-shard receipt
                                               TRACE — exactly-once credit
@@ -1173,9 +1173,10 @@ Additional in-process tests:
   determ test-fa-multi-event-trace            FA harness (real engine): seeded
                                               MIXED multi-event trace — random
                                               TRANSFER/equivocation/abort per
-                                              block; A1 + exact slash total +
-                                              shadow balances/nonces/stakes
-                                              jointly (FA-Apply-15 F-1 slice)
+                                              block; A1 + no stake movement
+                                              (D13/D4) + abort records + shadow
+                                              balances/nonces jointly (FA-
+                                              Apply-15 F-1 slice)
   determ test-fa-merge-trace                  FA harness (real engine): seeded
                                               multi-block adversarial TRACE of
                                               the R7 MERGE_EVENT merge-map
@@ -1261,8 +1262,8 @@ Additional in-process tests:
                                               credit + A1 accumulated_outbound
   determ test-supply-lifecycle                A1 invariant across mixed-tx
                                               lifecycle (subsidy mint, TRANSFER,
-                                              STAKE, slash, DEREGISTER, UNSTAKE)
-                                              + identity formula
+                                              STAKE, abort record, DEREGISTER,
+                                              UNSTAKE) + identity formula
   determ test-supply-invariant-fuzz           A1 unitary-supply identity stress —
                                               deterministic counter-seeded random
                                               TRANSFER/STAKE/UNSTAKE blocks + fees
@@ -1315,8 +1316,8 @@ Additional in-process tests:
                                               drop diverges the root
   determ test-stake-accounting                Full stake-state-machine
                                               invariants — STAKE / UNSTAKE /
-                                              DEREGISTER / slash interaction
-                                              + A1 conservation across lifecycle
+                                              DEREGISTER / abort-record
+                                              interaction + A1 conservation
   determ test-unstake-eligibility             Trustless UNSTAKE-eligibility
                                               reader — s: leaf Merkle-verify +
                                               cleartext reconstruction +
@@ -4065,7 +4066,9 @@ static int cmd_check_fork(int argc, char** argv) {
 //     genesis_total:        N
 //     +accumulated_subsidy: N    (E1/E3/E4 mint history)
 //     +accumulated_inbound: N    (cross-shard credits received)
-//     -accumulated_slashed: N    (abort suspension deductions)
+//     -accumulated_slashed: N    (frozen historical counter: the abort
+//                                   deduction was retired — D13; equivocation
+//                                   deducts nothing — D4)
 //     -accumulated_outbound: N   (cross-shard credits sent)
 //     expected_total:       N    (= genesis + subsidy + inbound
 //                                   - slashed - outbound)
@@ -25977,12 +25980,14 @@ int main(int argc, char** argv) {
         check(UNSTAKE_DELAY == 1000,
               "UNSTAKE_DELAY == 1000 blocks (documented default)");
 
-        // 3. SUSPENSION_SLASH = 10. Deducted from validator's stake
-        //    on each baked AbortEvent. At MIN_STAKE=1000, 100
-        //    suspensions exits a minimally-staked validator (the
-        //    BFT-safety economic-disincentive accounting).
+        // 3. SUSPENSION_SLASH = 10. INERT since D13 (2026-09-16): the
+        //    per-abort stake deduction it sized is retired; the constant
+        //    stays as the genesis-hash-covered default of the
+        //    GenesisConfig::suspension_slash field (a `k:` leaf, snapshot
+        //    field and PARAM_CHANGE key) until a genesis-schema increment
+        //    removes it.
         check(SUSPENSION_SLASH == 10,
-              "SUSPENSION_SLASH == 10 (rev.8 disincentive default)");
+              "SUSPENSION_SLASH == 10 (genesis-covered default; inert since D13)");
 
         // === REGISTER payload geometry ===
 
@@ -26051,12 +26056,13 @@ int main(int argc, char** argv) {
 
         // === Cross-arithmetic invariants ===
 
-        // 13. SUSPENSION_SLASH × 100 == MIN_STAKE. The economic
-        //     accounting: 100 baked aborts on a minimally-staked
-        //     validator zeros their stake → ejection. This ratio
-        //     is the BFT-safety economic-disincentive sizing.
+        // 13. SUSPENSION_SLASH × 100 == MIN_STAKE. The historical rev.8
+        //     sizing of the two defaults; pinned so the genesis-covered
+        //     values do not drift silently. It sizes nothing any more:
+        //     the deduction is retired (D13) and, while it was live, ONE
+        //     abort — not 100 — ejected a floor-staked validator (S-087).
         check(SUSPENSION_SLASH * 100 == MIN_STAKE,
-              "SUSPENSION_SLASH × 100 == MIN_STAKE (BFT-safety accounting)");
+              "SUSPENSION_SLASH × 100 == MIN_STAKE (historical sizing; inert since D13)");
 
         // 14. UNSTAKE_DELAY >= 1 block (sane lower bound — instant
         //     unstake would defeat the suspension-window invariant).
@@ -29279,13 +29285,24 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // S-035 Option 1: apply-side handling of AbortEvent (Phase-1
-    // suspension slashing). Each `round=1` AbortEvent baked into a
-    // finalized block deducts SUSPENSION_SLASH from the aborted
-    // domain's staked balance (bounded by available stake — no negative
-    // balances) and increments abort_records[domain] (the S-032 cache).
-    // Phase-2 (round=2) timing-skew aborts on healthy creators are
-    // economically free — they don't punish honest absence.
+    // D13 (owner decision 2026-09-16, O-1b; DECISION-LOG 2026-09-16 "OWNER
+    // DECISIONS" §C): a round-1 (Phase-1) AbortEvent baked into a finalized
+    // block RECORDS the suspension and moves NO stake. The former
+    // min(SUSPENSION_SLASH, locked) deduction is retired: against the default
+    // min_stake = 1000 one abort dropped a floor-staked validator to 990,
+    // below the eligibility floor, and S-051 lifts suspensions, never floor
+    // breaches (SECURITY.md S-087). This gate asserts, at the apply layer
+    // where the rule lives: the record lands (positive control — the
+    // assertion is not vacuous), stake / balance / registry / the A1
+    // counters / live supply do not move, A1 holds, round != 1 records
+    // nothing, repeats only increment, a domain staked EXACTLY at min_stake
+    // is eligible again after its suspension window through the REAL
+    // eligibility path (NodeRegistry::build_from_chain), the whole
+    // committed state is identical to an abort-free twin EXCEPT for the
+    // `b:` abort-record leaf (leaf-level comparison through state_proof —
+    // state_root equality is NOT expected, the record is committed), and
+    // determinism. Phase-2 (round=2) timing-skew aborts on healthy creators
+    // are neither recorded nor suspended.
     if (cmd == "test-abort-event-apply") {
         using namespace determ;
         using namespace determ::chain;
@@ -29295,9 +29312,8 @@ int main(int argc, char** argv) {
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
 
-        // Shared GenesisConfig: alice has stake=500. We deduct
-        // SUSPENSION_SLASH (default 10) when an AbortEvent with
-        // aborting_node="alice" lands.
+        // Shared GenesisConfig: alice is a registered creator with stake=500
+        // and balance 1000.
         GenesisConfig cfg;
         cfg.chain_id = "abort-event-apply-test";
         GenesisCreator alice_c;
@@ -29310,161 +29326,253 @@ int main(int argc, char** argv) {
         alice_bal.domain = "alice"; alice_bal.balance = 1000;
         cfg.initial_balances = {alice_bal};
 
-        // === Phase-1 abort: stake deducted ===
-
-        // 1. Phase-1 AbortEvent with stake-bearing target: stake reduced.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-            check(c.stake("alice") == 500,
-                  "baseline: alice stake == 500");
-
+        auto make_abort = [](const std::string& target, uint8_t round, uint8_t tag) {
             AbortEvent ae;
-            ae.round = 1;
-            ae.aborting_node = "alice";
+            ae.round = round;
+            ae.aborting_node = target;
             ae.timestamp = 0;
             ae.event_hash = Hash{};
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.abort_events.push_back(ae);
-            c.append(b1);
-
-            check(c.stake("alice") == 490,
-                  "Phase-1 abort: alice stake 500 - SUSPENSION_SLASH(10) = 490");
-        }
-
-        // 2. abort_records cache populated for aborted domain.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-
-            AbortEvent ae;
-            ae.round = 1;
-            ae.aborting_node = "alice";
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.abort_events.push_back(ae);
-            c.append(b1);
-
-            auto& records = c.abort_records();
-            auto it = records.find("alice");
-            check(it != records.end() && it->second.count == 1,
-                  "abort_records: alice count incremented to 1");
-            check(it != records.end() && it->second.last_block == 1,
-                  "abort_records: alice last_block == 1");
-        }
-
-        // === Phase-2 abort: NO slashing ===
-
-        // 3. Phase-2 AbortEvent (round=2): stake unchanged, no records.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-
-            AbortEvent ae;
-            ae.round = 2;
-            ae.aborting_node = "alice";
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.abort_events.push_back(ae);
-            c.append(b1);
-
-            check(c.stake("alice") == 500,
-                  "Phase-2 abort: stake unchanged (timing-skew not slashed)");
-            check(c.abort_records().find("alice") == c.abort_records().end(),
-                  "Phase-2 abort: abort_records NOT incremented");
-        }
-
-        // === Aborted-without-stake: domain not in stakes_ ===
-
-        // 4. AbortEvent with non-stake-bearing target: no crash, no
-        //    deduction, abort_records still incremented (DOMAIN_INCLUSION
-        //    mode tracks aborts even without stake).
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-
-            AbortEvent ae;
-            ae.round = 1;
-            ae.aborting_node = "bogus_no_stake";
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.abort_events.push_back(ae);
-            c.append(b1);
-
-            check(c.stake("bogus_no_stake") == 0,
-                  "no-stake abort: no stake change (sender has none)");
-            check(c.abort_records().find("bogus_no_stake") != c.abort_records().end(),
-                  "no-stake abort: records incremented (S-032 cache contract)");
-        }
-
-        // === Stake exhaustion: deduct bounded by available stake ===
-
-        // 5. Multiple Phase-1 aborts: SUSPENSION_SLASH stops at 0
-        //    (no negative balance). 51 aborts on stake=500 + slash=10
-        //    fully drains stake but doesn't go negative.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-
-            for (uint64_t h = 1; h <= 51; ++h) {
-                AbortEvent ae;
-                ae.round = 1;
-                ae.aborting_node = "alice";
-                ae.event_hash = Hash{};
-                ae.event_hash[0] = uint8_t(h);  // distinct per block
-
-                Block b;
-                b.index = h;
-                b.prev_hash = c.head().compute_hash();
-                b.creators = {"alice"};
-                b.abort_events.push_back(ae);
-                c.append(b);
+            ae.event_hash[0] = tag;   // distinct per event
+            return ae;
+        };
+        // Next block on `c` (index = height), optionally carrying events.
+        auto next_block = [](const Chain& c, const std::vector<AbortEvent>& evs) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.abort_events = evs;
+            return b;
+        };
+        // Apply with the A1 throw surfaced as a FAIL line (mutant M2 — a
+        // deduction without the block_slashed credit — dies here).
+        auto append_ok = [&](Chain& c, const Block& b, const char* what) {
+            try { c.append(b); return true; }
+            catch (const std::exception& e) {
+                std::cout << "  FAIL: " << what << " — apply threw: " << e.what() << "\n";
+                fail++; return false;
             }
-            // After 51 aborts × 10 slash = 510 > 500: stake floors at 0.
-            check(c.stake("alice") == 0,
-                  "exhausted stake: 51 aborts drains stake to 0 (no negative)");
-            check(c.abort_records().at("alice").count == 51,
-                  "exhausted stake: abort_records.count == 51 (cache still tracks)");
-        }
+        };
+        // Leaf key helper: "<ns>:" + suffix (build_state_leaves encoding).
+        auto leaf_key = [](const std::string& ns, const std::string& suffix) {
+            std::vector<uint8_t> key(ns.begin(), ns.end());
+            key.insert(key.end(), suffix.begin(), suffix.end());
+            return key;
+        };
+        auto same_leaf = [&](const Chain& x, const Chain& y,
+                             const std::string& ns, const std::string& suffix) {
+            auto px = x.state_proof(leaf_key(ns, suffix));
+            auto py = y.state_proof(leaf_key(ns, suffix));
+            return px.has_value() && py.has_value() && px->value_hash == py->value_hash;
+        };
 
-        // === A1 invariant holds across slashing ===
-
-        // 6. accumulated_slashed counter tracks deductions; A1 holds.
+        // Non-vacuity control: the retired parameter is NON-ZERO, so "nothing
+        // moves" below is the retirement, not a zero-configured deduction.
         {
             Chain c;
             c.append(make_genesis_block(cfg));
-            uint64_t baseline = c.live_total_supply();
+            check(c.suspension_slash() == 10,
+                  "control: suspension_slash is non-zero (genesis default 10) and inert");
+        }
 
-            AbortEvent ae;
-            ae.round = 1;
-            ae.aborting_node = "alice";
+        // === 1. Round-1 abort against a staked, registered domain ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            const uint64_t supply0 = c.live_total_supply();   // 1000 bal + 500 stake
+            auto reg0 = c.registrant("alice");
+            check(c.stake("alice") == 500 && reg0.has_value(),
+                  "baseline: alice stake == 500 and registered");
 
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.abort_events.push_back(ae);
-            c.append(b1);
+            if (append_ok(c, next_block(c, {make_abort("alice", 1, 1)}),
+                          "round-1 abort against alice")) {
+                check(c.stake("alice") == 500,
+                      "D13: alice stake UNCHANGED (500) after a round-1 abort");
+                check(c.balance("alice") == 1000,
+                      "D13: alice balance unchanged (1000)");
+                check(c.accumulated_slashed() == 0,
+                      "D13: accumulated_slashed stays 0 (nothing deducted)");
+                check(c.live_total_supply() == supply0,
+                      "D13: live supply unchanged");
+                check(c.expected_total() == c.live_total_supply(),
+                      "A1 invariant: expected == live after the abort");
+                auto it = c.abort_records().find("alice");
+                check(it != c.abort_records().end() && it->second.count == 1
+                      && it->second.last_block == 1,
+                      "positive control: abort_records[alice] == {count 1, last_block 1}");
+                auto reg1 = c.registrant("alice");
+                check(reg1.has_value() && reg0.has_value()
+                      && reg1->inactive_from == UINT64_MAX
+                      && reg1->active_from == reg0->active_from
+                      && reg1->registered_at == reg0->registered_at,
+                      "registry: alice entry untouched (active_from, inactive_from sentinel)");
+                check(c.head().abort_events.size() == 1
+                      && c.head().abort_events[0].aborting_node == "alice",
+                      "positive control: the AbortEvent IS in the appended block");
+            }
+        }
 
-            check(c.accumulated_slashed() == 10,
-                  "A1: accumulated_slashed bumped by SUSPENSION_SLASH=10");
-            check(c.live_total_supply() == baseline - 10,
-                  "A1: live supply decreased by exactly the slash");
-            check(c.expected_total() == c.live_total_supply(),
-                  "A1 invariant: expected == live after slash");
+        // === 2. round != 1: no record, nothing moves ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            const uint64_t supply0 = c.live_total_supply();
+            if (append_ok(c, next_block(c, {make_abort("alice", 2, 2)}), "round-2 abort")) {
+                check(c.abort_records().find("alice") == c.abort_records().end(),
+                      "round-2 abort: NOT recorded (timing-skew aborts are not suspended)");
+                check(c.stake("alice") == 500 && c.accumulated_slashed() == 0
+                      && c.live_total_supply() == supply0,
+                      "round-2 abort: stake, counter and supply unchanged");
+            }
+        }
+
+        // === 3. Repeated round-1 aborts: count increments, stake constant ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            bool constant = true;
+            for (uint64_t h = 1; h <= 51; ++h) {
+                if (!append_ok(c, next_block(c, {make_abort("alice", 1, uint8_t(h))}),
+                               "repeated abort")) { constant = false; break; }
+                if (c.stake("alice") != 500 || c.accumulated_slashed() != 0
+                    || c.expected_total() != c.live_total_supply()) constant = false;
+            }
+            check(constant,
+                  "repeats: stake == 500, accumulated_slashed == 0 and A1 after EVERY of 51 aborts");
+            auto it = c.abort_records().find("alice");
+            check(it != c.abort_records().end() && it->second.count == 51
+                  && it->second.last_block == 51,
+                  "repeats: abort_records[alice] == {count 51, last_block 51}");
+        }
+
+        // === 4. Domain without a stake entry: the record still lands ===
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            if (append_ok(c, next_block(c, {make_abort("bogus_no_stake", 1, 3)}),
+                          "abort against a stake-free domain")) {
+                check(c.height() == 2 && c.stake("bogus_no_stake") == 0,
+                      "no-stake abort: apply succeeds, no stake entry invented");
+                auto it = c.abort_records().find("bogus_no_stake");
+                check(it != c.abort_records().end() && it->second.count == 1,
+                      "no-stake abort: recorded (S-032 cache contract is stake-independent)");
+                check(c.stake("alice") == 500,
+                      "no-stake abort: alice (a different domain) unaffected");
+            }
+        }
+
+        // === 5. The S-087 hazard: a domain staked EXACTLY at min_stake stays
+        //        eligible after an abort, through the REAL eligibility path ===
+        {
+            GenesisConfig fcfg;
+            fcfg.chain_id = "abort-event-apply-floor";
+            auto mk = [](const std::string& d, uint64_t stake, uint8_t tag) {
+                GenesisCreator g;
+                g.domain = d;
+                for (size_t i = 0; i < g.ed_pub.size(); ++i)
+                    g.ed_pub[i] = uint8_t(tag + i);
+                g.initial_stake = stake;
+                return g;
+            };
+            fcfg.initial_creators = {mk("alice", 2000, 0x10),
+                                     mk("floor", 1000, 0x20),
+                                     mk("rich",  1500, 0x30)};
+            Chain c;
+            c.append(make_genesis_block(fcfg));
+            const uint64_t floor_stake = c.min_stake();
+            check(floor_stake == 1000 && c.stake("floor") == floor_stake
+                  && c.stake("rich") == 1500,
+                  "floor fixture: floor staked EXACTLY at min_stake (1000), rich at 1500");
+            check(c.k_block_sigs() == 0,
+                  "floor fixture: no K pin — the S-051 floor lift is disabled, so exclusion "
+                  "below is the suspension alone");
+            auto in_registry = [&](uint64_t at, const std::string& d) {
+                return node::NodeRegistry::build_from_chain(c, at).contains(d);
+            };
+            check(in_registry(1, "floor") && in_registry(1, "rich"),
+                  "floor fixture: both eligible before the abort");
+
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.abort_events = {make_abort("floor", 1, 4), make_abort("rich", 1, 5)};
+            if (append_ok(c, b, "round-1 aborts against floor and rich")) {
+                check(c.stake("floor") == floor_stake && c.stake("rich") == 1500,
+                      "D13: floor (== min_stake) and rich (> min_stake) stakes unchanged");
+                // Window: count 1 -> len = BASE_SUSPENSION_BLOCKS (10); suspended
+                // iff at_index <= last_block + 10 = 11.
+                check(!in_registry(5, "floor") && !in_registry(5, "rich")
+                      && in_registry(5, "alice"),
+                      "positive control: the record SUSPENDS floor and rich inside the "
+                      "window (at 5); alice stays");
+                check(in_registry(12, "floor") && in_registry(12, "rich"),
+                      "S-087 closed: floor (staked exactly at min_stake) and rich are "
+                      "ELIGIBLE again once the window expires (at 12)");
+                check(!suspension_active(c.abort_records(), "floor", 12)
+                      && suspension_active(c.abort_records(), "floor", 11),
+                      "shared formula: floor's window is exactly (1, 11]");
+            }
+        }
+
+        // === 6. Neutrality vs an abort-free twin, EXCEPT the `b:` leaf ===
+        // The fixture populates exactly the a:/s:/r: (alice), k: (13 genesis
+        // constants) and k:c: (5 A1 counters) namespaces — plus b:alice on the
+        // aborted chain — so comparing those leaves compares EVERY non-b:
+        // leaf of the committed state (build_state_leaves is private; the
+        // leaves are read through state_proof, one key at a time).
+        {
+            Chain with;    with.append(make_genesis_block(cfg));
+            Chain twin;    twin.append(make_genesis_block(cfg));
+            bool applied = append_ok(with, next_block(with, {make_abort("alice", 1, 6)}),
+                                     "twin: aborted chain")
+                        && append_ok(twin, next_block(twin, {}), "twin: abort-free chain");
+
+            check(applied && same_leaf(with, twin, "s:", "alice")
+                  && same_leaf(with, twin, "a:", "alice")
+                  && same_leaf(with, twin, "r:", "alice"),
+                  "twin: s:/a:/r: leaves of alice byte-identical to the abort-free twin");
+            check(same_leaf(with, twin, "k:", "c:accumulated_slashed")
+                  && same_leaf(with, twin, "k:", "c:genesis_total")
+                  && same_leaf(with, twin, "k:", "c:accumulated_subsidy")
+                  && same_leaf(with, twin, "k:", "c:accumulated_inbound")
+                  && same_leaf(with, twin, "k:", "c:accumulated_outbound"),
+                  "twin: the five A1 counter leaves byte-identical to the twin");
+            bool consts_equal = true;
+            for (const char* k : {"block_subsidy", "subsidy_pool_initial", "subsidy_mode",
+                                  "lottery_jackpot_multiplier", "min_stake",
+                                  "suspension_slash", "unstake_delay",
+                                  "merge_threshold_blocks", "revert_threshold_blocks",
+                                  "merge_grace_blocks", "shard_count", "my_shard_id",
+                                  "shard_salt"})
+                consts_equal = consts_equal && same_leaf(with, twin, "k:", k);
+            check(consts_equal,
+                  "twin: the 13 k: genesis-constant leaves byte-identical to the twin "
+                  "(every non-b: leaf the fixture populates is now compared)");
+            check(with.state_proof(leaf_key("b:", "alice")).has_value()
+                  && !twin.state_proof(leaf_key("b:", "alice")).has_value(),
+                  "positive control: the b:alice leaf exists ONLY on the aborted chain");
+            check(with.compute_state_root() != twin.compute_state_root(),
+                  "positive control: the record is COMMITTED (state_root differs by the b: leaf)");
+            check(with.head().compute_hash() != twin.head().compute_hash(),
+                  "positive control: the record changes the block");
+        }
+
+        // === 7. Determinism: two chains apply the same abort → same state ===
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Block b1 = next_block(c1, {make_abort("alice", 1, 7)});
+            Block b2 = b1;   // byte-identical genesis ⇒ prev_hash matches
+            bool applied = append_ok(c1, b1, "determinism chain 1")
+                        && append_ok(c2, b2, "determinism chain 2");
+            auto r1 = c1.abort_records().find("alice");
+            auto r2 = c2.abort_records().find("alice");
+            check(applied && c1.compute_state_root() == c2.compute_state_root()
+                  && r1 != c1.abort_records().end() && r2 != c2.abort_records().end()
+                  && r1->second.count == r2->second.count
+                  && c1.stake("alice") == c2.stake("alice"),
+                  "determinism: two chains apply the same abort → same state root and record");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
@@ -29498,10 +29606,12 @@ int main(int argc, char** argv) {
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
 
-        // Fixture: 6 genesis creators. dA..dE hold stake 2000 (safely above
-        // min_stake 1000 after slashing); dP holds 1005 so ONE slash of 10
-        // drops it below the stake floor — a suspended-but-NOT-base-eligible
-        // domain the floor must never lift.
+        // Fixture: 6 genesis creators. dA..dE hold stake 2000; dP holds 995,
+        // below the stake floor (min_stake 1000) from genesis — a suspended-
+        // but-NOT-base-eligible domain the floor must never lift. (Until D13,
+        // 2026-09-16, dP started at 1005 and ONE abort deduction of 10 pushed
+        // it under the floor; an abort moves no stake now, so the fixture
+        // provisions the under-floor stake directly.)
         GenesisConfig cfg;
         cfg.chain_id = "eligibility-floor-test";
         auto mk = [](const std::string& d, uint64_t stake, uint8_t tag) {
@@ -29514,7 +29624,7 @@ int main(int argc, char** argv) {
         };
         cfg.initial_creators = {mk("dA", 2000, 0x10), mk("dB", 2000, 0x20),
                                 mk("dC", 2000, 0x30), mk("dD", 2000, 0x40),
-                                mk("dE", 2000, 0x50), mk("dP", 1005, 0x60)};
+                                mk("dE", 2000, 0x50), mk("dP", 995, 0x60)};
 
         Chain c;
         c.append(make_genesis_block(cfg));
@@ -29525,6 +29635,7 @@ int main(int argc, char** argv) {
         //   dB {count 1, last 12} → suspended through 22
         //   dC {count 1, last 11} → suspended through 21
         //   dP {count 1, last 12} → suspended through 22, stake 995 < 1000
+        //   (D13: the aborts move NO stake — dA..dE stay at 2000, dP at 995)
         auto abort_of = [](const std::string& d, uint8_t h) {
             AbortEvent ae;
             ae.round = 1;
@@ -29560,7 +29671,9 @@ int main(int argc, char** argv) {
             check(ar.at("dP").count == 1 && ar.at("dP").last_block == 12,
                   "fixture: dP {count 1, last 12}");
             check(c.stake("dP") == 995,
-                  "fixture: dP slashed to 995 (below min_stake 1000)");
+                  "fixture: dP at 995 (below min_stake 1000) — unchanged by its abort (D13)");
+            check(c.stake("dA") == 2000 && c.stake("dB") == 2000 && c.stake("dC") == 2000,
+                  "fixture: dA/dB/dC stakes unchanged by their aborts (D13: record only)");
         }
 
         // === Suspension-formula regression (shared helper, exact windows) ===
@@ -30318,23 +30431,27 @@ int main(int argc, char** argv) {
                   << kBlocks << " blocks; no state moved)\n";
         return fail == 0 ? 0 : 1;
     }
-    // Increment 2 — abort-event SUSPENSION slashing (S-032 family): over a
-    // randomized multi-block trace of Phase-1 AbortEvents against a
-    // K-validator committee (a FORCED repeat-target schedule that drains one
-    // small-stake validator through full -> partial -> zero deducts, random
-    // Phase-1 targets, and scheduled Phase-2 no-ops), the apply path must
-    // (a) deduct EXACTLY min(SUSPENSION_SLASH, stake) from a Phase-1 target's
-    // stake (floor at 0, never negative, entry never erased),
-    // (b) bump accumulated_slashed by exactly the deduct (partial and zero
-    // deducts included) and keep it monotone non-decreasing,
-    // (c) keep the S-032 abort_records cache EXACT per domain (count
-    // increments + last_block updates on every Phase-1 abort — even for
-    // drained stake; Phase-2 rounds are NEVER recorded),
-    // (d) keep A1 (expected_total == live_total_supply) after every block.
-    // Non-vacuous (fresh + repeat targets, real stake movement, >=1 PARTIAL
-    // deduct, >=1 floored ZERO deduct, real Phase-2 no-ops) with a negative
-    // control (event-free block moves nothing) and a same-seed determinism
-    // check. See docs/proofs/RealEngineFAHarness.md.
+    // Increment 2 — abort-event SUSPENSION RECORD (S-032 family; D13,
+    // 2026-09-16): over a randomized multi-block trace of AbortEvents against
+    // a K-validator committee (a FORCED repeat-target schedule against one
+    // small-stake validator, random Phase-1 targets, and scheduled Phase-2
+    // no-ops), the apply path must
+    // (a) keep EVERY validator's stake at its genesis value and
+    //     accumulated_slashed at 0 — a round-1 abort moves NO stake (the
+    //     former min(SUSPENSION_SLASH, stake) deduction is retired: D13),
+    // (b) keep the S-032 abort_records cache EXACT per domain (count
+    //     increments + last_block updates on every Phase-1 abort; Phase-2
+    //     rounds are NEVER recorded),
+    // (c) keep A1 (expected_total == live_total_supply) after every block,
+    // (d) keep every NON-`b:` leaf of the committed state byte-identical to
+    //     an abort-free twin chain (s:/a:/r: of every domain + the five A1
+    //     counters, compared through state_proof) — state_root equality is
+    //     NOT expected: the `b:` record leaf IS committed, and the positive
+    //     control asserts it is present on the aborted chain only.
+    // Non-vacuous (fresh + repeat targets, the small-stake validator hit
+    // repeatedly, real Phase-2 no-ops, a non-zero inert suspension_slash)
+    // with a negative control (event-free block keeps the twin equality)
+    // and a same-seed determinism check. See docs/proofs/RealEngineFAHarness.md.
     if (cmd == "test-fa-abort-trace") {
         using namespace determ;
         using namespace determ::chain;
@@ -30355,13 +30472,11 @@ int main(int argc, char** argv) {
             return z ^ (z >> 31);
         };
 
-        // Genesis: a never-slashed block author + K validators that are the
-        // abort targets. v0 gets a deliberately SMALL, non-multiple-of-slash
-        // stake (25) so the forced repeat schedule drives it through a
-        // PARTIAL deduct (25 -> 15 -> 5 -> 0: third hit deducts 5 < SLASH)
-        // and then floored ZERO deducts, structurally — independent of the
-        // random targets. v1..v5 are large + distinct (can't drain in 48
-        // blocks: 48 x 10 = 480 < 1100).
+        // Genesis: a never-aborted block author + K validators that are the
+        // abort targets. v0 gets a deliberately SMALL stake (25 < the inert
+        // suspension_slash x the forced hits) so the forced repeat schedule
+        // would have drained it under the retired deduction — the trace
+        // proves it stays at 25. v1..v5 are large + distinct.
         const int K = 6;
         GenesisConfig cfg;
         cfg.chain_id = "fa-abort-trace";
@@ -30386,29 +30501,63 @@ int main(int argc, char** argv) {
 
         Chain c;
         c.append(make_genesis_block(cfg));
-        c.set_block_subsidy(0);   // isolate slashing: no minting this trace
-        const uint64_t SLASH = c.suspension_slash();
-        check(SLASH == 10, "baseline: genesis-default SUSPENSION_SLASH == 10");
+        c.set_block_subsidy(0);   // isolate the abort path: no minting this trace
+        Chain twin;               // the same blocks WITHOUT the events (D13 neutrality)
+        twin.append(make_genesis_block(cfg));
+        twin.set_block_subsidy(0);
+        check(c.suspension_slash() == 10,
+              "control: suspension_slash is non-zero (10) and inert — the deduction is "
+              "retired, not zeroed");
         check(c.expected_total() == c.live_total_supply(),
               "A1: invariant holds at genesis baseline");
 
-        // Mirror model of the REAL apply semantics (chain.cpp suspension
-        // block): per Phase-1 event, count++/last_block=index, then
-        // deduct = min(SLASH, stake); Phase-2 (round != 1) does NOTHING.
-        std::vector<uint64_t> exp_stake = stake0;
+        // Leaf-level twin comparison helpers (build_state_leaves encoding:
+        // "<ns>:" + suffix; counters are "k:" + "c:<name>").
+        auto leaf_key = [](const std::string& ns, const std::string& suffix) {
+            std::vector<uint8_t> key(ns.begin(), ns.end());
+            key.insert(key.end(), suffix.begin(), suffix.end());
+            return key;
+        };
+        auto same_leaf = [&](const std::string& ns, const std::string& suffix) {
+            auto px = c.state_proof(leaf_key(ns, suffix));
+            auto py = twin.state_proof(leaf_key(ns, suffix));
+            return px.has_value() && py.has_value() && px->value_hash == py->value_hash;
+        };
+        // The fixture populates exactly a:/s:/r: (author + K validators), the
+        // 13 k: genesis constants and the 5 k:c: counters — plus b: on the
+        // aborted chain — so this compares EVERY non-b: leaf of the state.
+        auto non_b_leaves_equal = [&]() {
+            bool ok = same_leaf("s:", "author") && same_leaf("a:", "author")
+                   && same_leaf("r:", "author");
+            for (int i = 0; i < K; ++i)
+                ok = ok && same_leaf("s:", vs[size_t(i)]) && same_leaf("a:", vs[size_t(i)])
+                        && same_leaf("r:", vs[size_t(i)]);
+            for (const char* ctr : {"c:genesis_total", "c:accumulated_subsidy",
+                                    "c:accumulated_slashed", "c:accumulated_inbound",
+                                    "c:accumulated_outbound",
+                                    "block_subsidy", "subsidy_pool_initial", "subsidy_mode",
+                                    "lottery_jackpot_multiplier", "min_stake",
+                                    "suspension_slash", "unstake_delay",
+                                    "merge_threshold_blocks", "revert_threshold_blocks",
+                                    "merge_grace_blocks", "shard_count", "my_shard_id",
+                                    "shard_salt"})
+                ok = ok && same_leaf("k:", ctr);
+            return ok;
+        };
+
+        // Mirror model of the REAL apply semantics (chain.cpp abort block):
+        // per Phase-1 event, count++ / last_block = index — and NOTHING else;
+        // Phase-2 (round != 1) does NOTHING.
         std::vector<uint64_t> exp_count(size_t(K), 0);
         std::vector<uint64_t> exp_last(size_t(K), 0);
-        uint64_t exp_slashed  = 0;
-        uint64_t prev_slashed = c.accumulated_slashed();
-        int fresh_targets = 0, repeat_targets = 0, moved_stake = 0,
-            partial_deducts = 0, zero_deducts = 0, phase2_noops = 0;
+        int fresh_targets = 0, repeat_targets = 0, v0_hits = 0, phase2_noops = 0;
         bool trace_ok = true;
 
         const int kBlocks = 48;
         for (int blk = 0; blk < kBlocks && trace_ok; ++blk) {
             // Deterministic adversarial schedule (mirrored in final_root):
-            //   blk % 8 == 0 -> FORCED repeat target v0, Phase-1 (drains
-            //                   25 -> 0: full, partial, then zero deducts);
+            //   blk % 8 == 0 -> FORCED repeat target v0, Phase-1 (would have
+            //                   drained 25 -> 0 under the retired deduction);
             //   blk % 5 == 3 -> Phase-2 (round=2) no-op vs random target;
             //   otherwise    -> Phase-1 vs random target.
             int j = 0; uint8_t ev_round = 1;
@@ -30429,6 +30578,8 @@ int main(int argc, char** argv) {
             ae.timestamp     = static_cast<int64_t>(b.index);
             for (size_t t = 0; t < ae.event_hash.size(); ++t)
                 ae.event_hash[t] = uint8_t(next_rand() & 0xff);   // distinct per block
+            Block bt = b;                       // the twin block: no event
+            bt.prev_hash = twin.head().compute_hash();
             b.abort_events.push_back(ae);
 
             // Advance the mirror model (matches chain.cpp exactly).
@@ -30436,30 +30587,27 @@ int main(int argc, char** argv) {
                 bool is_fresh = (exp_count[size_t(j)] == 0);
                 exp_count[size_t(j)]++;
                 exp_last[size_t(j)] = b.index;
-                uint64_t deduct = std::min<uint64_t>(SLASH, exp_stake[size_t(j)]);
-                exp_stake[size_t(j)] -= deduct;
-                exp_slashed          += deduct;
                 if (is_fresh) ++fresh_targets; else ++repeat_targets;
-                if (deduct > 0)                 ++moved_stake;
-                if (deduct > 0 && deduct < SLASH) ++partial_deducts;
-                if (deduct == 0)                ++zero_deducts;
+                if (j == 0) ++v0_hits;
             } else {
                 ++phase2_noops;
             }
 
             try {
                 c.append(b);
+                twin.append(bt);
             } catch (const std::exception& e) {
                 check(false, "apply threw at block " + std::to_string(b.index)
                       + ": " + e.what());
                 trace_ok = false; break;
             }
 
-            // EXACT per-validator stake + abort_records cache vs the model
-            // (whole committee, every block — catches cross-domain bleed).
+            // EXACT per-validator stake (== genesis) + abort_records cache vs
+            // the model (whole committee, every block — catches cross-domain
+            // bleed).
             for (int i = 0; i < K && trace_ok; ++i) {
-                if (c.stake(vs[size_t(i)]) != exp_stake[size_t(i)]) {
-                    check(false, vs[size_t(i)] + " stake != model at block "
+                if (c.stake(vs[size_t(i)]) != stake0[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " stake moved on an abort at block "
                           + std::to_string(b.index));
                     trace_ok = false;
                 }
@@ -30480,55 +30628,68 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // EXACT running slashed total, monotonicity, A1 — every block.
-            if (c.accumulated_slashed() != exp_slashed) {
-                check(false, "accumulated_slashed != exact running total at block "
-                      + std::to_string(b.index));
-                trace_ok = false;
-            }
-            if (c.accumulated_slashed() < prev_slashed) {
-                check(false, "accumulated_slashed decreased (non-monotone)");
+            // accumulated_slashed frozen at 0, A1, twin neutrality of every
+            // non-`b:` leaf, and the positive controls — every block.
+            if (c.accumulated_slashed() != 0) {
+                check(false, "accumulated_slashed moved at block " + std::to_string(b.index));
                 trace_ok = false;
             }
             if (c.expected_total() != c.live_total_supply()) {
                 check(false, "A1 violated at block " + std::to_string(b.index));
                 trace_ok = false;
             }
-            prev_slashed = c.accumulated_slashed();
+            if (!non_b_leaves_equal()) {
+                check(false, "a non-b: leaf diverged from the abort-free twin at block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
+            const bool b_leaf_with = c.state_proof(leaf_key("b:", vs[size_t(j)])).has_value();
+            const bool b_leaf_twin = twin.state_proof(leaf_key("b:", vs[size_t(j)])).has_value();
+            if (b_leaf_twin || b_leaf_with != (exp_count[size_t(j)] > 0)) {
+                check(false, "b: leaf presence wrong at block " + std::to_string(b.index)
+                      + " (expected on the aborted chain iff recorded, never on the twin)");
+                trace_ok = false;
+            }
+            // Positive control on the block itself (the two chains' prev_hash
+            // already differ from block 2 on, so a hash comparison would be
+            // vacuous there): the aborted head carries exactly this event and
+            // the twin head carries none.
+            if (c.head().abort_events.size() != 1
+                || c.head().abort_events[0].aborting_node != vs[size_t(j)]
+                || c.head().abort_events[0].round != ev_round
+                || !twin.head().abort_events.empty()) {
+                check(false, "positive control failed: the event is not in block "
+                      + std::to_string(b.index) + " (or leaked into the twin)");
+                trace_ok = false;
+            }
         }
 
         check(trace_ok,
               "trace ran to completion with all per-block invariants holding");
 
-        // Exact total, independently recomputed: Σ over the committee of
-        // (genesis stake - final stake) must equal both the model's running
-        // total and the chain's counter (no unaccounted stake movement).
-        uint64_t manual = 0;
+        // Exact: every validator's stake is its genesis value; the counter is 0.
+        bool all_at_genesis = true;
         for (int i = 0; i < K; ++i)
-            manual += stake0[size_t(i)] - exp_stake[size_t(i)];
-        check(c.accumulated_slashed() == exp_slashed && exp_slashed == manual,
-              "exact: accumulated_slashed == Σ (genesis - final) committee stake");
+            all_at_genesis = all_at_genesis && c.stake(vs[size_t(i)]) == stake0[size_t(i)];
+        check(all_at_genesis && c.accumulated_slashed() == 0,
+              "exact: every stake at its genesis value, accumulated_slashed == 0");
+        check(c.stake(vs[0]) == 25 && v0_hits >= 3
+              && c.abort_records().at(vs[0]).count == exp_count[0],
+              "exact: v0 (stake 25) hit >= 3 times keeps 25 — the retired deduction would "
+              "have drained it to 0");
 
-        // Non-vacuity: every adversarial arm actually fired. fresh/repeat/
-        // moved/partial/zero are STRUCTURALLY guaranteed by the forced-v0
-        // schedule (hits at blocks 0,8,16,24,32,40 drain 25 -> 15 -> 5 -> 0);
-        // Phase-2 no-ops by the blk%5==3 schedule.
+        // Non-vacuity: every adversarial arm actually fired. fresh/repeat are
+        // STRUCTURALLY guaranteed by the forced-v0 schedule (hits at blocks
+        // 0,8,16,24,32,40); Phase-2 no-ops by the blk%5==3 schedule.
         check(fresh_targets >= 1, "non-vacuous: at least one FRESH target");
         check(repeat_targets >= 1, "non-vacuous: at least one REPEAT target");
-        check(moved_stake >= 1,
-              "non-vacuous: at least one slash actually moved stake");
-        check(partial_deducts >= 1,
-              "non-vacuous: >=1 PARTIAL deduct (stake < SUSPENSION_SLASH at hit)");
-        check(zero_deducts >= 1,
-              "non-vacuous: >=1 floored ZERO deduct (records still increment)");
         check(phase2_noops >= 1,
               "non-vacuous: >=1 Phase-2 no-op exercised");
 
-        // Negative control: an event-free block must NOT move any tracked
-        // quantity (stake, accumulated_slashed, abort_records) and A1 holds.
+        // Negative control: an event-free block moves no tracked quantity,
+        // keeps the twin's non-b: leaves equal and A1 holds (the neutrality
+        // assertion is not satisfied by a chain that never moves).
         {
-            const uint64_t before_slashed = c.accumulated_slashed();
-            const uint64_t v0_before      = c.stake(vs[0]);
             uint64_t before_counts = 0;
             for (const auto& kv : c.abort_records())
                 before_counts += kv.second.count;
@@ -30537,14 +30698,16 @@ int main(int argc, char** argv) {
             b.prev_hash = c.head().compute_hash();
             b.timestamp = static_cast<int64_t>(c.height());
             b.creators  = {"author"};
+            Block bt = b; bt.prev_hash = twin.head().compute_hash();
             c.append(b);
+            twin.append(bt);
             uint64_t after_counts = 0;
             for (const auto& kv : c.abort_records())
                 after_counts += kv.second.count;
-            check(c.accumulated_slashed() == before_slashed
-                  && c.stake(vs[0]) == v0_before
-                  && after_counts == before_counts,
-                  "negative control: event-free block moves no tracked quantity");
+            check(after_counts == before_counts && c.accumulated_slashed() == 0
+                  && non_b_leaves_equal(),
+                  "negative control: event-free block moves no record and keeps the twin "
+                  "equality");
             check(c.expected_total() == c.live_total_supply(),
                   "A1 holds after the negative-control block");
         }
@@ -30594,11 +30757,9 @@ int main(int argc, char** argv) {
                   << ": fa-abort-trace "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << " (" << fresh_targets << " fresh + " << repeat_targets
-                  << " repeat Phase-1 targets, " << moved_stake
-                  << " stake-moving, " << partial_deducts << " partial, "
-                  << zero_deducts << " floored-zero deducts, "
+                  << " repeat Phase-1 targets, " << v0_hits << " forced v0 hits, "
                   << phase2_noops << " Phase-2 no-ops over "
-                  << kBlocks << " blocks)\n";
+                  << kBlocks << " blocks; no stake moved)\n";
         return fail == 0 ? 0 : 1;
     }
     // ── FA harness (real-engine, self-contained path) ────────────────────────
@@ -31035,12 +31196,13 @@ int main(int argc, char** argv) {
     // each block carries 0-2 TRANSFER txs and/or an EquivocationEvent and/or
     // a Phase-1 AbortEvent (composition drawn from the PRNG). A SHADOW MODEL
     // updated per the REAL apply rules (chain.cpp: tx loop -> fee
-    // distribution to creators -> abort SUSPENSION_SLASH; an
-    // EquivocationEvent moves NOTHING — D4, 2026-09-16) must match the live
-    // chain after EVERY block, JOINTLY: A1 (expected_total ==
-    // live_total_supply), accumulated_slashed EXACT (abort deductions only),
-    // sender balances + nonce monotonicity, stakes never underflowed, creator
-    // fee routing, registry untouched by evidence.
+    // distribution to creators -> abort_records count++/last_block; an
+    // AbortEvent moves NO stake — D13, 2026-09-16 — and an EquivocationEvent
+    // moves NOTHING — D4, 2026-09-16) must match the live chain after EVERY
+    // block, JOINTLY: A1 (expected_total == live_total_supply),
+    // accumulated_slashed frozen at 0, every validator stake at its genesis
+    // value, abort_records EXACT per domain, sender balances + nonce
+    // monotonicity, creator fee routing, registry untouched by evidence.
     // Non-vacuous (every event kind occurred AND >=1 block carried >=2 kinds
     // simultaneously) with a negative control (an event-free block moves
     // nothing) and a same-seed determinism check.
@@ -31099,21 +31261,21 @@ int main(int argc, char** argv) {
         Chain c;
         c.append(make_genesis_block(cfg));
         c.set_block_subsidy(0);   // no minting: fee routing accounted exactly
-        const uint64_t SUSP = c.suspension_slash();
         check(c.expected_total() == c.live_total_supply(),
               "A1: invariant holds at genesis baseline");
-        check(SUSP >= 1 && SUSP < 1000,
-              "sanity: suspension_slash in (0, min validator stake) — abort "
-              "slash is partial, so abort+equiv composition is meaningful");
+        check(c.suspension_slash() == 10,
+              "control: suspension_slash is non-zero (10) and inert — aborts move no "
+              "stake because the deduction is retired (D13), not zero-configured");
 
         // Shadow model — updated per the REAL apply rules read from chain.cpp.
-        std::vector<uint64_t> vstake = stake0;               // shadow stakes
+        // Stakes are NOT shadowed: no event in this trace moves stake (D13 +
+        // D4), so every validator stake must equal its genesis value.
+        std::vector<uint64_t> acount(size_t(K), 0);          // shadow abort_records.count
+        std::vector<uint64_t> alast(size_t(K), 0);           // shadow abort_records.last_block
         std::vector<char>     equiv_seen(size_t(K), 0);
         std::vector<uint64_t> ubal(size_t(SN), 10000);       // shadow sender balances
         std::vector<uint64_t> unonce(size_t(SN), 0);         // shadow sender nonces
         uint64_t author_bal   = 500;                         // shadow creator balance
-        uint64_t exp_slashed  = 0;
-        uint64_t prev_slashed = c.accumulated_slashed();
         int transfers_applied = 0, equiv_total = 0, equiv_fresh = 0,
             equiv_dup = 0, abort_total = 0, multi_kind_blocks = 0;
         bool trace_ok = true;
@@ -31178,8 +31340,8 @@ int main(int argc, char** argv) {
                 ++kinds;
             }
 
-            // 3) Phase-1 AbortEvent (round=1 -> SUSPENSION_SLASH, bounded
-            //    by the available stake).
+            // 3) Phase-1 AbortEvent (round=1 -> abort_records count++ /
+            //    last_block = index; NO stake moves — D13).
             bool has_abort = (next_rand() % 3 == 0);
             int ja = -1;
             if (has_abort) {
@@ -31198,16 +31360,16 @@ int main(int argc, char** argv) {
             // Shadow apply — SAME ORDER as chain.cpp apply_transactions:
             // txs (mirrored inline above) -> fee/subsidy distribution
             // (subsidy 0, sole creator gets all fees, no dust) ->
-            // abort_events (min(SUSP, locked) deduction) ->
-            // equivocation_events: NO shadow update — the record moves no
-            // stake, no counter, no registry (same-actor abort+evidence
-            // composition is therefore exactly the abort deduction alone).
+            // abort_events (count++ / last_block = index; no stake, no
+            // counter — D13) -> equivocation_events: NO shadow update — the
+            // record moves no stake, no counter, no registry (same-actor
+            // abort+evidence composition is therefore exactly the abort
+            // RECORD alone).
             author_bal += fees_this_block;
             if (has_abort) {
                 ++abort_total;
-                uint64_t deduct = std::min<uint64_t>(SUSP, vstake[size_t(ja)]);
-                vstake[size_t(ja)] -= deduct;
-                exp_slashed       += deduct;
+                acount[size_t(ja)]++;
+                alast[size_t(ja)] = b.index;
             }
             if (has_equiv) {
                 ++equiv_total;
@@ -31228,16 +31390,11 @@ int main(int argc, char** argv) {
                 check(false, "A1 violated at block " + std::to_string(b.index));
                 trace_ok = false;
             }
-            if (c.accumulated_slashed() != exp_slashed) {
-                check(false, "accumulated_slashed != shadow running total "
-                      "(abort deductions only) at block " + std::to_string(b.index));
+            if (c.accumulated_slashed() != 0) {
+                check(false, "accumulated_slashed moved (frozen at 0: D13 + D4) at block "
+                      + std::to_string(b.index));
                 trace_ok = false;
             }
-            if (c.accumulated_slashed() < prev_slashed) {
-                check(false, "accumulated_slashed decreased (non-monotone)");
-                trace_ok = false;
-            }
-            prev_slashed = c.accumulated_slashed();
             for (int i = 0; i < SN && trace_ok; ++i) {
                 if (c.balance(us[size_t(i)]) != ubal[size_t(i)]) {
                     check(false, us[size_t(i)] + " balance != shadow at block "
@@ -31251,14 +31408,23 @@ int main(int argc, char** argv) {
                 }
             }
             for (int i = 0; i < K && trace_ok; ++i) {
-                if (c.stake(vs[size_t(i)]) != vstake[size_t(i)]) {
-                    check(false, vs[size_t(i)] + " stake != shadow at block "
-                          + std::to_string(b.index));
+                if (c.stake(vs[size_t(i)]) != stake0[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " stake != genesis value (no event "
+                          "moves stake: D13 + D4) at block " + std::to_string(b.index));
                     trace_ok = false;
                 }
-                if (c.stake(vs[size_t(i)]) > stake0[size_t(i)]) {
-                    check(false, vs[size_t(i)] + " stake ABOVE genesis value "
-                          "(underflow wrap)");
+                auto it = c.abort_records().find(vs[size_t(i)]);
+                if (acount[size_t(i)] == 0) {
+                    if (it != c.abort_records().end()) {
+                        check(false, vs[size_t(i)] + " has an abort_record before any "
+                              "Phase-1 abort at block " + std::to_string(b.index));
+                        trace_ok = false;
+                    }
+                } else if (it == c.abort_records().end()
+                           || it->second.count != acount[size_t(i)]
+                           || it->second.last_block != alast[size_t(i)]) {
+                    check(false, vs[size_t(i)] + " abort_record (count,last_block) != "
+                          "shadow at block " + std::to_string(b.index));
                     trace_ok = false;
                 }
             }
@@ -31280,17 +31446,15 @@ int main(int argc, char** argv) {
         check(trace_ok,
               "trace ran to completion with all per-block invariants holding jointly");
 
-        // Exact slash total, recomputed INDEPENDENTLY of the running shadow:
-        // stakes in this trace are only ever reduced by the abort deduction
-        // (no STAKE/UNSTAKE/DEREGISTER txs by construction; evidence moves
-        // nothing), so every validator's deficit vs genesis must sum to the
-        // counter exactly.
+        // Exact, recomputed INDEPENDENTLY of the running shadow: no event in
+        // this trace moves stake (no STAKE/UNSTAKE/DEREGISTER txs by
+        // construction; aborts record only, evidence moves nothing), so every
+        // validator's deficit vs genesis is 0 and so is the counter.
         uint64_t deficit = 0;
         for (int i = 0; i < K; ++i)
             deficit += stake0[size_t(i)] - c.stake(vs[size_t(i)]);
-        check(c.accumulated_slashed() == deficit,
-              "exact: accumulated_slashed == sum of validator stake deficits "
-              "(abort deductions only, no double-count)");
+        check(deficit == 0 && c.accumulated_slashed() == 0,
+              "exact: zero validator stake deficit vs genesis and accumulated_slashed == 0");
 
         // Non-vacuity: every event KIND occurred, and composition was real.
         check(transfers_applied >= 1,
@@ -31298,7 +31462,7 @@ int main(int argc, char** argv) {
         check(equiv_total >= 1 && equiv_fresh >= 1 && equiv_dup >= 1,
               "non-vacuous: equivocation evidence baked (first-seen AND repeat)");
         check(abort_total >= 1,
-              "non-vacuous: at least one Phase-1 abort (suspension slash)");
+              "non-vacuous: at least one Phase-1 abort (suspension record)");
         check(multi_kind_blocks >= 1,
               "non-vacuous: at least one block carried >=2 event kinds simultaneously");
 
@@ -36523,7 +36687,8 @@ int main(int argc, char** argv) {
         //
         // BlockValidator::check_abort_certs is the last line of defense against a
         // FORGED ABORT CERTIFICATE, whose consequence is consensus-level FALSE
-        // SUSPENSION-SLASHING of an honest validator. Before this test it had NO
+        // SUSPENSION of an honest validator (its committee-selection window; the
+        // round-1 stake deduction was retired — D13). Before this test it had NO
         // negative coverage at all: of 31 `abort_events.push_back` sites in this
         // file, none had a validate() call within +/-40 lines; of 68
         // BlockValidator sites, none touched abort_events. The two witnesses the
@@ -39156,8 +39321,8 @@ int main(int argc, char** argv) {
     // mixed-tx lifecycle. The individual apply-path tests verify the
     // invariant after each operation type in isolation; this test
     // exercises a realistic interleaving: genesis → empty → TRANSFER
-    // → STAKE → DEREGISTER → unlock-wait → UNSTAKE → subsidy → slash
-    // → cross-shard outbound → inbound receipt.
+    // → STAKE → Phase-1 abort (a suspension RECORD; moves no stake — D13)
+    // → DEREGISTER → unlock-wait → UNSTAKE.
     if (cmd == "test-supply-lifecycle") {
         using namespace determ;
         using namespace determ::chain;
@@ -39250,22 +39415,27 @@ int main(int argc, char** argv) {
                   "A1: invariant after STAKE (value moves balance↔stake)");
         }
 
-        // === Step 4: slash via Phase-1 abort (supply decreases) ===
+        // === Step 4: Phase-1 abort (a suspension RECORD; supply unchanged
+        //     except the subsidy — D13 retired the deduction) ===
         {
             AbortEvent ae;
             ae.round = 1;
             ae.aborting_node = "alice";
             uint64_t before = c.live_total_supply();
+            uint64_t stake_before = c.stake("alice");
             Block b;
             b.index = c.height();
             b.prev_hash = c.head().compute_hash();
             b.creators = {"alice"};
             b.abort_events.push_back(ae);
             c.append(b);
-            check(c.live_total_supply() == before - c.suspension_slash() + 50,
-                  "step 4: slash deducts SUSPENSION_SLASH (subsidy still adds 50)");
+            check(c.live_total_supply() == before + 50 && c.stake("alice") == stake_before,
+                  "step 4: the abort moves no stake — only the subsidy (+50) enters supply");
+            check(c.abort_records().count("alice") == 1
+                  && c.abort_records().at("alice").count == 1,
+                  "step 4: the abort IS recorded (abort_records[alice].count == 1)");
             check(c.expected_total() == c.live_total_supply(),
-                  "A1: invariant after slash + subsidy");
+                  "A1: invariant after abort + subsidy");
         }
 
         // === Step 5: DEREGISTER + UNSTAKE ===
@@ -39299,10 +39469,10 @@ int main(int argc, char** argv) {
         check(c.expected_total() == c.live_total_supply(),
               "A1: invariant after advance-to-unlock loop");
 
-        // UNSTAKE 200 (alice's stake: 500 + 50 - slash = 540 → withdrawable).
+        // UNSTAKE 200 (alice's stake: 500 + 50 = 550 → withdrawable).
         {
-            // Update unsubsidy delay's tx by giving alice's locked = >200.
-            // After STAKE in step 3 alice locked = 550; slash deducted 10 → 540.
+            // After STAKE in step 3 alice locked = 550; the abort in step 4
+            // deducted nothing (D13), so 550 it stays.
             Transaction tx;
             tx.type = TxType::UNSTAKE;
             tx.from = "alice"; tx.fee = 1; tx.nonce = 3;
@@ -39320,13 +39490,14 @@ int main(int argc, char** argv) {
         // === Final A1 check ===
         // expected_total should equal live_total_supply at every step.
         // accumulated_subsidy_ accounts for the mint history;
-        // accumulated_slashed_ for the slash; the rest (no cross-shard) zero.
+        // accumulated_slashed_ stays 0 (the abort recorded, deducted nothing);
+        // the rest (no cross-shard) zero.
         check(c.expected_total() == c.live_total_supply(),
               "A1: invariant after full mixed lifecycle");
         check(c.accumulated_subsidy() > 0,
               "lifecycle: subsidy mint accumulated > 0");
-        check(c.accumulated_slashed() == c.suspension_slash(),
-              "lifecycle: slash counted exactly once");
+        check(c.accumulated_slashed() == 0,
+              "lifecycle: accumulated_slashed == 0 (the abort recorded, deducted nothing — D13)");
         check(c.accumulated_inbound() == 0 && c.accumulated_outbound() == 0,
               "lifecycle: no cross-shard traffic this test");
 
@@ -41616,10 +41787,11 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: comprehensive stake-state-machine invariants.
-    // STAKE / UNSTAKE / DEREGISTER / slash interact non-trivially
-    // around the unlock_height sentinel + locked balance. This test
-    // exercises the full state machine in a structured way that the
-    // per-tx-apply tests don't compose.
+    // STAKE / UNSTAKE / DEREGISTER / abort-record interact non-trivially
+    // around the unlock_height sentinel + locked balance (an abort moves
+    // no stake since D13, 2026-09-16 — it only records the suspension).
+    // This test exercises the full state machine in a structured way that
+    // the per-tx-apply tests don't compose.
     if (cmd == "test-stake-accounting") {
         using namespace determ;
         using namespace determ::chain;
@@ -41691,9 +41863,9 @@ int main(int argc, char** argv) {
                   "STAKE: unlock_height unchanged (sentinel)");
         }
 
-        // === Slash reduces locked, preserves unlock_height ===
+        // === Abort records the suspension; locked + unlock_height untouched ===
 
-        // 3. AbortEvent slash deducts SUSPENSION_SLASH from locked.
+        // 3. AbortEvent (round 1) records the suspension and moves no stake (D13).
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -41706,10 +41878,13 @@ int main(int argc, char** argv) {
             b.abort_events.push_back(ae);
             c.append(b);
 
-            check(c.stake("alice") == 500 - 10,  // SUSPENSION_SLASH = 10
-                  "slash: locked 500 - SUSPENSION_SLASH(10) = 490");
+            check(c.stake("alice") == 500,
+                  "abort: locked unchanged (500) — no deduction (D13)");
+            check(c.abort_records().count("alice") == 1
+                  && c.abort_records().at("alice").count == 1,
+                  "abort: the suspension IS recorded (abort_records[alice].count == 1)");
             check(c.stake_unlock_height("alice") == UINT64_MAX,
-                  "slash: unlock_height unchanged");
+                  "abort: unlock_height unchanged");
         }
 
         // === DEREGISTER sets unlock_height ===
@@ -41796,7 +41971,7 @@ int main(int argc, char** argv) {
         // === Value conservation across the stake state machine ===
 
         // 7. A1 invariant: locked + balance is conserved through
-        //    STAKE → UNSTAKE round-trip (modulo slash + subsidy).
+        //    STAKE → UNSTAKE round-trip (modulo subsidy).
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -45092,7 +45267,7 @@ int main(int argc, char** argv) {
     // S-035 Option 1: multi-event-type composition in a single block.
     // Each event type is tested in isolation:
     //   - test-chain-apply-block: TRANSFER + STAKE + UNSTAKE + DEREGISTER
-    //   - test-abort-event-apply: AbortEvent → suspension slash
+    //   - test-abort-event-apply: AbortEvent → suspension record, no stake (D13)
     //   - test-equivocation-apply: EquivocationEvent → evidence record, no state (D4)
     //   - test-subsidy-distribution: subsidy mint per creator
     //   - test-cross-shard-receipt-apply / outbound-apply: receipts
@@ -45100,7 +45275,7 @@ int main(int argc, char** argv) {
     //
     // This test exercises the COMPOSITION: a single block carrying
     //   - TRANSFER tx (balance shift)
-    //   - AbortEvent (Phase-1 slash on suspender)
+    //   - AbortEvent (Phase-1: a suspension RECORD; moves no stake — D13)
     //   - EquivocationEvent (an evidence record; moves nothing — D4)
     //   - subsidy mint (per non-empty creators set)
     //   - inbound receipt (cross-shard credit)
@@ -45192,7 +45367,7 @@ int main(int argc, char** argv) {
             tx.from = "alice"; tx.to = "dan";
             tx.amount = 100; tx.fee = 1; tx.nonce = 0;
 
-            // AbortEvent: Phase-1 abort by bob (round=1 → SUSPENSION_SLASH)
+            // AbortEvent: Phase-1 abort by bob (round=1 → abort record; no stake)
             AbortEvent ae;
             ae.round = 1;
             ae.aborting_node = "bob";
@@ -45227,9 +45402,14 @@ int main(int argc, char** argv) {
             check(c.next_nonce("alice") == 1,
                   "compose: alice nonce 0 → 1 (TRANSFER applied)");
 
-            // AbortEvent effect: bob's stake decreased by SUSPENSION_SLASH
-            check(c.stake("bob") == 400 - c.suspension_slash(),
-                  "compose: bob slashed (AbortEvent applied)");
+            // AbortEvent effect: bob's suspension is RECORDED; his stake is
+            // untouched (D13 — the deduction is retired).
+            check(c.stake("bob") == 400,
+                  "compose: bob stake unchanged (400) — the abort moves no stake (D13)");
+            check(c.abort_records().count("bob") == 1
+                  && c.abort_records().at("bob").count == 1
+                  && c.abort_records().at("bob").last_block == 1,
+                  "compose: bob's abort IS recorded (abort_records {1, block 1})");
 
             // EquivocationEvent effect: NONE — carol's stake and registry
             // entry are untouched, alongside the other four effects (D4).
@@ -45254,10 +45434,10 @@ int main(int argc, char** argv) {
                   "compose: A1 invariant holds across all 5 event types");
 
             // Final supply accounting:
-            //   delta = +subsidy(30) +inbound(25) -slashed(SUSP)   (no forfeit)
-            uint64_t SUSP = c.suspension_slash();
-            check(c.live_total_supply() == supply_before + 30 + 25 - SUSP,
-                  "compose: live supply moved by expected delta (abort deduction only)");
+            //   delta = +subsidy(30) +inbound(25)   (no deduction, no forfeit)
+            check(c.live_total_supply() == supply_before + 30 + 25
+                  && c.accumulated_slashed() == 0,
+                  "compose: live supply moved by +subsidy +inbound only; accumulated_slashed == 0");
         }
 
         // === Order independence for disjoint actors ===
@@ -45306,8 +45486,9 @@ int main(int argc, char** argv) {
         // === Same actor multi-event in single block ===
 
         // 3. Same actor (bob) takes BOTH abort + equivocation in same block.
-        //    The abort deducts SUSPENSION_SLASH; the evidence record adds
-        //    nothing on top (D4) — the composition is the abort alone.
+        //    The abort records the suspension and moves no stake (D13); the
+        //    evidence record adds nothing on top (D4) — the composition is
+        //    the abort RECORD alone.
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -45323,14 +45504,17 @@ int main(int argc, char** argv) {
             b.equivocation_events.push_back(ev);
             c.append(b);
 
-            // Abort deducts SUSP from 400; the evidence record moves nothing.
-            check(c.stake("bob") == bob_stake_before - c.suspension_slash(),
-                  "same-actor: bob stake = 400 - SUSPENSION_SLASH (abort only)");
+            // Neither event moves stake; the abort record is the only effect.
+            check(c.stake("bob") == bob_stake_before && bob_stake_before == 400,
+                  "same-actor: bob stake unchanged (400) — abort record + evidence move nothing");
             auto rb = c.registrant("bob");
             check(rb.has_value() && rb->inactive_from == UINT64_MAX,
                   "same-actor: bob registry unchanged (no equivocation arm)");
-            check(c.accumulated_slashed() == c.suspension_slash(),
-                  "same-actor: total slashed = SUSPENSION_SLASH only");
+            check(c.accumulated_slashed() == 0
+                  && c.abort_records().count("bob") == 1
+                  && c.abort_records().at("bob").count == 1,
+                  "same-actor: accumulated_slashed == 0; the abort record (count 1) is the "
+                  "whole composition");
             check(c.expected_total() == c.live_total_supply(),
                   "A1: invariant holds under same-actor abort+equiv");
         }
@@ -54328,7 +54512,8 @@ int main(int argc, char** argv) {
         // is, summed over all shards:
         //   live_total_supply (= balances + staked)
         //     + accumulated_outbound (value in flight off this shard)
-        //     + accumulated_slashed  (value burned by abort suspension deductions)
+        //     + accumulated_slashed  (frozen historical counter — the abort
+        //         deduction was retired, D13; equivocation deducts nothing, D4)
         //     - accumulated_inbound  (value credited from another shard;
         //         it is already counted in this shard's live balances, so
         //         to avoid double-counting against the genesis baseline we

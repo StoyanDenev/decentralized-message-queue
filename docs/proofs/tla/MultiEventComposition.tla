@@ -1,4 +1,7 @@
 --------------------------- MODULE MultiEventComposition ---------------------------
+\* STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032)
+\* and deducts NOTHING; T-A1 and every statement below that rests on the deduction
+\* are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").
 \* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
 \* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
 \* registry deactivation this model treats as shipped apply-path behaviour were

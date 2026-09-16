@@ -71,13 +71,18 @@ inline constexpr size_t REGISTER_PAYLOAD_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE;
 // on the wire. Cap is enforced by the validator.
 inline constexpr size_t TRANSFER_PAYLOAD_MAX = 128;
 
-// rev.8 economic disincentive on abort suspension. Deducted from the
-// validator's stake at the moment an AbortEvent for this domain is baked
-// into a finalized block. Required for BFT-mode safety claims (BFT
-// safety conditional on f<N/3 + slashing). ONE suspension exits a validator
-// staked exactly at MIN_STAKE: the eligibility predicate is stake < min_stake
-// (eligibility_floor.hpp) and the deduction leaves 990 < 1000 — the earlier
-// "100 suspensions" reading was wrong (DECISION-LOG 2026-08-14 ddfe877).
+// HISTORICAL (retired 2026-09-16, owner decision D13 — DECISION-LOG
+// 2026-09-16 "OWNER DECISIONS" §C): the rev.8 per-abort stake deduction.
+// No apply path reads this constant any more — a round-1 AbortEvent only
+// records the suspension (the S-032 abort_records cache; chain.cpp
+// apply_transactions). It is kept because GenesisConfig::suspension_slash
+// is genesis-hash-covered (when non-default), a `k:` state-root leaf, a
+// snapshot field and a PARAM_CHANGE whitelist key; removing it is a
+// genesis-schema change for a later increment. The hazard it caused is
+// closed by the retirement (SECURITY.md S-087): the eligibility predicate
+// is stake < min_stake (eligibility_floor.hpp), so ONE deduction left a
+// validator staked exactly at MIN_STAKE at 990 < 1000 and S-051 lifts
+// suspensions, never floor breaches (DECISION-LOG 2026-08-14 ddfe877).
 inline constexpr uint64_t SUSPENSION_SLASH = 10;
 
 // ─── L4 (Consensus) timing profiles ─────────────────────────────────────────

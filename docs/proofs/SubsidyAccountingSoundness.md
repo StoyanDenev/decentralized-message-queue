@@ -1,5 +1,7 @@
 # FA-Apply-18 — Subsidy + fee accounting soundness (SB-1..SB-3: determinism + A1 preservation)
 
+> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+
 This document is the **accounting-soundness capstone** for Determ's block-reward pipeline. Where `SubsidyDistribution.md` (FA-Apply-7) formalizes the subsidy state machine and `FeeAccounting.md` (FA-Apply-6) formalizes the per-tx fee flow, this proof composes their results into three end-to-end soundness theorems that an auditor needs to answer one question: *given only the genesis-pinned reward parameters and the chain's block sequence, is the per-block credit to the K-of-K committee a deterministic, supply-conserving function — identical on every honest node, with no path that mints, burns, or mis-routes value?*
 
 The three theorems are:

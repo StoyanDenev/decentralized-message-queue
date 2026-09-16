@@ -13,13 +13,15 @@
 #     finalized block is an evidence record; apply deducts NOTHING for it
 #     (no forfeiture, no deactivation). Equivocation rows below count
 #     RECORDS, not penalties.
-#   * AbortEventApply.md (FA-Apply-11) — a Phase-1 AbortEvent applies a
-#     PROPORTIONAL SUSPENSION_SLASH to the aborting node (economic
-#     disincentive; the validator survives — recoverable).
-#   * StakeForfeitureCascade.md — the stake-unlock cascade the abort
-#     deduction feeds; the deducted stake leaves `live_total_supply`
-#     and is accumulated into `accumulated_slashed`, preserving the A1
-#     identity:  live_total_supply + accumulated_slashed
+#   * AbortEventApply.md (FA-Apply-11; T-A1 HISTORICAL since
+#     2026-09-16 — DECISION-LOG D13): a Phase-1 AbortEvent RECORDS the
+#     suspension (the S-032 abort_records cache) and deducts NOTHING;
+#     the former proportional SUSPENSION_SLASH is retired. Abort rows
+#     below count RECORDS, not penalties.
+#   * StakeForfeitureCascade.md — the stake-debit accounting shape:
+#     `accumulated_slashed` is now a FROZEN historical counter (no apply
+#     path credits it), and the A1 identity it sits in still holds:
+#                live_total_supply + accumulated_slashed
 #                  = genesis_total + accumulated_subsidy
 #                    + accumulated_inbound - accumulated_outbound.
 #
@@ -83,11 +85,14 @@ usage() {
 Usage: operator_slashing_ledger.sh --rpc-port N
                                    [--with-events --from H --to H] [--json]
 
-Audits the chain's slashing ledger: cumulative accumulated_slashed total,
-the A1 unitary-supply identity check, and (with --with-events) per-domain
-slash events for the equivocation (FA-Apply-10) and abort (FA-Apply-11)
-apply paths. Default mode also includes the per-domain Phase-1 abort tally
-from the S-032 abort_records cache (one extra cheap RPC, no block scan).
+Audits the chain's slashing ledger: the accumulated_slashed counter (a
+frozen historical total — no event deducts stake since 2026-09-16: the
+abort deduction is retired, D13, and equivocation carries no L1
+consequence, D4), the A1 unitary-supply identity check, and (with
+--with-events) per-domain equivocation (FA-Apply-10) and abort
+(FA-Apply-11) RECORDS. Default mode also includes the per-domain Phase-1
+abort tally from the S-032 abort_records cache (one extra cheap RPC, no
+block scan).
 
 Required:
   --rpc-port N    RPC port to query
@@ -422,7 +427,7 @@ if json_out:
 
 # ── Human render ──────────────────────────────────────────────────────────────
 print(f"Slashing ledger (port {port}):")
-print(f"  accumulated_slashed:  {acc_slashed}   <-- cumulative abort suspension deductions (equivocation deducts nothing — D4)")
+print(f"  accumulated_slashed:  {acc_slashed}   <-- frozen historical counter (abort deduction retired — D13; equivocation deducts nothing — D4)")
 print(f"  ---")
 print(f"  genesis_total:        {genesis_total}")
 print(f"  +accumulated_subsidy: {acc_subsidy}")
@@ -468,7 +473,7 @@ if with_events:
         print(f"    Equivocation (FA-Apply-10): none in window")
     ab_rows = abort_evt_rows_sorted()
     if ab_rows:
-        print(f"    Abort (FA-Apply-11, proportional suspension slash — recoverable):")
+        print(f"    Abort (FA-Apply-11, suspension records — no stake deduction, D13):")
         print(f"      {'aborter':<28}{'events':<8}last_block")
         for r in ab_rows:
             lb = r["last_containing_block"]
@@ -477,10 +482,9 @@ if with_events:
         print(f"      (total abort events: {abort_event_total} across {len(ab_rows)} aborter(s))")
     else:
         print(f"    Abort (FA-Apply-11): none in window")
-    print(f"  note: per-event deducted amounts are not stamped on the event payloads")
-    print(f"        (equivocation deducts nothing; abort applies a proportional")
-    print(f"        SUSPENSION_SLASH) — the authoritative cumulative figure is")
-    print(f"        accumulated_slashed above.")
+    print(f"  note: neither event kind deducts stake (abort deduction retired — D13;")
+    print(f"        equivocation deducts nothing — D4); accumulated_slashed above is")
+    print(f"        a frozen historical counter.")
 
 sys.exit(exit_code)
 PY

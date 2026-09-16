@@ -1,5 +1,7 @@
 # Proof-claim → gate traceability — the verified/aspirational boundary
 
+> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+
 **Status: AUDIT SHIPPED (register of gaps; remediation increments owner-gated).**
 This document records a systematic answer to one question the SBOM round taught
 us to ask of every claim in this repo:

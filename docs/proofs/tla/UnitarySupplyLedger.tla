@@ -73,9 +73,10 @@ The apply-layer actions modeled, each touching exactly one accumulator
   * SlashStake(d, amt): debits locked stake + bumps accumulated_slashed
     by the SAME amount. Net delta: -amt to LiveSupply, +amt to the
     subtracted accumulated_slashed term => -amt to expected_total.
-    Preserved. Models the abort suspension deduction — the only stake
-    debit since D4, 2026-09-16 (equivocation debits nothing; the
-    EquivocationApply model is historical, AbortApply is current).
+    Preserved. A generic stake-debit shape: since 2026-09-16 no shipped
+    apply path drives it (the abort suspension deduction was retired,
+    D13, and equivocation debits nothing, D4; the EquivocationApply and
+    AbortApply T-A1 models are historical).
   * InboundReceipt(d, amt): credits balance + bumps accumulated_inbound
     by the SAME amount. Net delta: +amt to LiveSupply, +amt to
     accumulated_inbound => +amt to expected_total. Preserved. Models

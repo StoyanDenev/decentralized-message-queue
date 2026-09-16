@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # S-035 Option 1 seed — comprehensive stake-state-machine invariants.
-# STAKE / UNSTAKE / DEREGISTER / slash interact non-trivially around
+# STAKE / UNSTAKE / DEREGISTER / abort-record interact non-trivially around
 # the `unlock_height` sentinel (UINT64_MAX = never unlockable) +
 # `locked` balance. This test exercises the full state machine in a
 # structured way that the per-tx-apply tests don't compose:
 #
 #   Genesis:       locked = initial_stake,   unlock_height = UINT64_MAX
 #   STAKE:         locked += amount,         unlock_height unchanged
-#   slash:         locked -= SUSPENSION_SLASH (bounded), unlock unchanged
+#   abort (r1):    locked unchanged (D13 — record only), unlock unchanged
 #   DEREGISTER:    locked unchanged,         unlock_height = inactive_from + unstake_delay
 #   UNSTAKE pre:   locked unchanged,         balance unchanged (fee refunded)
 #   UNSTAKE post:  locked -= amount,         balance += amount
@@ -21,7 +21,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== stake state-machine invariants (STAKE/UNSTAKE/DEREGISTER/slash interaction) ==="
+echo "=== stake state-machine invariants (STAKE/UNSTAKE/DEREGISTER/abort-record interaction) ==="
 OUT=$($DETERM test-stake-accounting 2>&1)
 echo "$OUT"
 

@@ -96,8 +96,9 @@ for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PA
 selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
 (1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone —
 LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup -> abort-deduction
-retirement -> re-derivations; S-102 ADJUDICATED + CLOSED 2026-09-16: reachable at HEAD by a
-zero-key state_root relabel, the reorg made atomic — test-node-reorg-guard); (4) the joint design gate R-4 + F-c + R-15
+retirement — LANDED 2026-09-16, D13, S-087 closed -> re-derivations; S-102 ADJUDICATED +
+CLOSED 2026-09-16: reachable at HEAD by a zero-key state_root relabel, the reorg made
+atomic — test-node-reorg-guard); (4) the joint design gate R-4 + F-c + R-15
 (+R-16); (5) the V-REG-1 companions (join
 rule, exit rule, rotation, small-order rule); (6) pq_auth rule + block-byte cap + chain
 identity in signing_bytes (the last transaction-frame changes); (7) R-8 C0 demotion -> S-089
@@ -334,9 +335,11 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   RESOLVED 2026-09-16 (O-1, DECISION-LOG 2026-09-16 D4): option (b) — L2 relocation with a
   SEPARATE L2 bond; L1 stake is never slashable for equivocation; L1 keeps detection + a
   capped, deduplicated evidence record as the L2 input; the L2 bond/arbitration policy is
-  v1.1 DApp scope (D22). Also decided (O-1b, D13): the ROUND-1 ABORT STAKE DEDUCTION IS
-  RETIRED — aborts suspend only; and a Phase-2 withholder is suspended, no deduction (R-16,
-  D12). The lock-rule entry (5082737) stands refuted (b5838fb). Slashing moves
+  v1.1 DApp scope (D22). Also decided (O-1b, D13) AND LANDED 2026-09-16: the ROUND-1 ABORT
+  STAKE DEDUCTION IS RETIRED — aborts suspend only (the apply loop records the S-032
+  suspension and moves no stake; gate `determ test-abort-event-apply`, mutants M1-M10 RED;
+  S-087 closed; suspension_slash stays an inert genesis-covered parameter); and a Phase-2
+  withholder is suspended, no deduction (R-16, D12). The lock-rule entry (5082737) stands refuted (b5838fb). Slashing moves
   OUT OF L1 INTO L2. L1 keeps DETECTION and the on-chain EVIDENCE RECORD but attaches no
   consensus consequence; the economic consequence is applied at the DApp/L2 layer, which
   may use inputs L1 provably cannot (off-chain corroboration, elapsed time, arbitration,
@@ -359,11 +362,13 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   3b a per-block CAP + in-block duplicate rejection on equivocation_events (2 Ed25519
   verifies each and deregistration was the only limiter, so the same event is now
   re-includable — the DoS vector the removal creates; a bound that is a pure function of
-  the block's bytes, or none — DECISION-LOG 2026-08-13); D13 abort-deduction retirement;
+  the block's bytes, or none — DECISION-LOG 2026-08-13); [D13 abort-deduction retirement —
+  LANDED 2026-09-16, DECISION-LOG entry "D13 LANDED"; T-A1 of AbortEventApply.md is historical];
   3c S-006's status re-derived (its closure was "route detection into the slashing apply
   path"); an HONEST S-011 residual (the drafted one was wrong in three places — BFT
-  escalation can seat a zero-honest committee at |pool| == K, abort-driven stake drain
-  below min_stake IS permanent and S-051 does not lift it); the S-013 / S-029 Level-3 /
+  escalation can seat a zero-honest committee at |pool| == K, and — until D13 landed —
+  abort-driven stake drain below min_stake WAS permanent and S-051 did not lift it; that
+  drain no longer exists, the restatement is on the floor + suspension window); the S-013 / S-029 Level-3 /
   BFTSafety T-5.1 re-derivations; S-095; and the 51 untiered docs that stated the removed
   consequence as shipped — each now carries a uniform "STATUS 2026-09-16" banner (list in
   the log entry) until its re-derivation replaces it. Full 2026-08-13 finding list:
@@ -500,7 +505,7 @@ must not widen or narrow the disposition without a new owner entry.
 OWNER DECISIONS — ALL DECIDED 2026-09-16 (DECISION-LOG 2026-09-16); the problem statements
 are kept as the record:
   O-1  DECIDED: option (b) — L2 relocation with a separate L2 bond; L1 stake never slashable;
-       plus O-1b: the round-1 abort deduction retired (D4, D13).
+       plus O-1b: the round-1 abort deduction retired (D4, D13; D13 LANDED 2026-09-16).
        The standing slashing position after b5838fb: L2 relocation (option (b), a
        separate L2 bond with L1 stake never slashable, is the only one of (a)/(b)/(c)
        that does not re-enter consensus), or no consequence at all. Gates R-1, R-8 and
@@ -530,13 +535,15 @@ review, THEN implementation; each its own increment; numeric caps proposed by th
 measured evidence and approved by the owner at review (D24):
   G1  R-4 + F-c + R-15 (+R-16): the pool bound 2K > N(h) at two layers; the certified
       formation-failure re-draw (>= ceil(2K/3) pool signatures, seed fold, attested-silent
-      exclusion); Phase-2 and round-1 aborts suspend only. Closes S-054, S-076, S-077, S-086, S-087.
+      exclusion); Phase-2 and round-1 aborts suspend only. Closes S-054, S-076, S-077, S-086
+      (S-087 already closed 2026-09-16 by D13 — the round-1 deduction is retired).
   G2  The V-REG-1 companions: D6 join rule (S-069), D7 exit rule (S-067), D15 rotation (R-6),
       D10 small-order anonymous senders (S-072).
   G3  D9 + D23: empty pq_auth on non-PQ types, the block-byte cap, chain identity in
       signing_bytes (S-057, S-103); S-101 presented with it for approval.
   G4  The O-1 chain: forfeiture removal (LANDED 2026-09-16, export 0016), evidence cap +
-      in-block dedup, abort-deduction retirement, re-derivations; then R-8 (S-055), S-089, S-090.
+      in-block dedup, abort-deduction retirement (LANDED 2026-09-16, D13; S-087 closed),
+      re-derivations; then R-8 (S-055), S-089, S-090.
   G5  D14: CT verification off the lock, cache, per-block CT cap, anon-CT ingress (S-065, S-083).
   G6  The EXTENDED closure set (D16): S-093, S-094, R-3, S-064/B3.4, S-088, S-036, S-081, S-096;
       D19b-ii sharding_mode genesis pin lands with the first genesis-hash-changing increment here.

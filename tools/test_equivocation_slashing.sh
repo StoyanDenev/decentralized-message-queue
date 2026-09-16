@@ -242,9 +242,10 @@ print('y' if b.get('equivocation_events') else 'n')" 2>/dev/null)
 done
 STAKE_POST=$($DETERM stake_info node1 --rpc-port 8771 2>/dev/null \
               | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
-# The only L1 stake movement that CAN happen to node1 in the window is a
-# Phase-1 abort deduction (SUSPENSION_SLASH per round-1 AbortEvent against it);
-# count those so the equality below is exact, not a flake.
+# NO L1 stake movement can happen to node1 in the window: the evidence
+# record moves nothing (D4) and a round-1 AbortEvent against it only records
+# the suspension (D13, 2026-09-16 — the deduction is retired). Count the
+# aborts anyway as a diagnostic, so an unexpected stake change is attributable.
 ABORTS_N1=0
 for ((i = HEIGHT_PRE; i < HEIGHT_POST; i++)); do
   N=$($DETERM show-block $i --rpc-port 8771 2>/dev/null \
@@ -253,13 +254,10 @@ b = json.load(sys.stdin)
 print(sum(1 for a in (b.get('abort_events') or []) if a.get('aborting_node') == 'node1' and a.get('round') == 1))" 2>/dev/null)
   ABORTS_N1=$((ABORTS_N1 + ${N:-0}))
 done
-# suspension_slash from the genesis file this run built ($T/gen.json omits it,
-# so the GenesisConfig default 10 applies).
-SUSP=$(python -c "import json; print(json.load(open('$T/gen.json')).get('suspension_slash', 10))")
 case "$STAKE_PRE" in
   ''|*[!0-9]*) echo "  bad: node1 stake pre-submission unreadable ('$STAKE_PRE')"; STAKE_PRE=0 ;;
 esac
-EXPECTED_STAKE=$((STAKE_PRE - ABORTS_N1 * SUSP))
+EXPECTED_STAKE=$STAKE_PRE
 # The block after the evidence block must still list node1 as a creator (it
 # was neither deregistered nor made ineligible).
 POST_CREATORS="-"
@@ -287,7 +285,7 @@ grep -E "equivocation|adopted|accepted block|epoch" $T/n1/log 2>/dev/null \
 echo
 echo "=== 10. Verify ==="
 echo "  chain height post: $HEIGHT_POST"
-echo "  node1 stake post-evidence: $STAKE_POST (expected $EXPECTED_STAKE: pre $STAKE_PRE minus $ABORTS_N1 abort deduction(s); the evidence itself moves nothing)"
+echo "  node1 stake post-evidence: $STAKE_POST (expected $EXPECTED_STAKE == pre-submission value; $ABORTS_N1 round-1 abort(s) against node1 in the window recorded a suspension and deducted nothing — D13; the evidence itself moves nothing — D4)"
 echo "  node1 registry post-evidence: $REG_POST (expected active)"
 echo "  creators of block #$((${EQUIV_BLOCK:-0} + 1)): $POST_CREATORS (must include node1)"
 

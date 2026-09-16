@@ -2617,7 +2617,7 @@ int cmd_stake_trustless(int argc, char** argv) {
 // under the single-daemon (H-neg) honesty premise (NegativeVerdictSoundness.md
 // NV-2/NV-3; tagged `negative_footing=daemon_asserted` in --json). The
 // trust-minimized complement to operator_slashing_ledger.sh for auditing
-// committee-instability / suspension slashing. `--wait` (default 0) forwards to
+// committee-instability / abort suspensions. `--wait` (default 0) forwards to
 // the head-anchored binding exactly as on the other readers.
 int cmd_verify_abort_record(int argc, char** argv) {
     uint16_t port = 0;

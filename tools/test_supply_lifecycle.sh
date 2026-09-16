@@ -13,7 +13,7 @@
 #   block 3: STAKE 50 + subsidy 50
 #            (value moves balance ↔ stake; subsidy +50) →
 #   block 4: Phase-1 AbortEvent (alice) + subsidy 50
-#            (slash -SUSPENSION_SLASH, mint +50) →
+#            (a suspension RECORD — no stake moves, D13; mint +50) →
 #   block 5: DEREGISTER (sets unlock_height = height + delay) →
 #   block N..: empty blocks advancing past unlock_height →
 #   block X: UNSTAKE 200 (stake → balance, no net change).

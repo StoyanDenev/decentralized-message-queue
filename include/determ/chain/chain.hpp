@@ -329,6 +329,9 @@ public:
     // A5 Phase 3: promoted from static constants in params.hpp so the
     // governance whitelist can mutate them at run-time. Default values
     // match the pre-A5 constants: SUSPENSION_SLASH=10, UNSTAKE_DELAY=1000.
+    // suspension_slash is INERT since 2026-09-16 (D13): no apply path
+    // reads it; it stays a genesis-hash-covered `k:` leaf / snapshot /
+    // PARAM_CHANGE field until a genesis-schema increment removes it.
     uint64_t suspension_slash() const { return suspension_slash_; }
     void     set_suspension_slash(uint64_t s) { suspension_slash_ = s; }
     uint64_t unstake_delay()    const { return unstake_delay_; }
@@ -535,8 +538,11 @@ public:
     //
     //   expected = genesis_total
     //            + accumulated_subsidy   (block_subsidy minted per block)
-    //            - accumulated_slashed   (abort suspension deduction; equivocation
-    //                                       carries no stake consequence — D4)
+    //            - accumulated_slashed   (FROZEN historical counter: the abort
+    //                                       suspension deduction was retired 2026-09-16
+    //                                       (D13) and equivocation carries no stake
+    //                                       consequence (D4); no apply path credits it
+    //                                       any more, it keeps its leaf shape)
     //            + accumulated_inbound   (cross-shard receipts credited here)
     //            - accumulated_outbound  (cross-shard transfers debited here,
     //                                       credit delivered on dst shard)
@@ -982,9 +988,10 @@ private:
     //
     // Containers that benefit from lazy:
     //   - stakes (Phase 2B): TRANSFER-only blocks skip; only REGISTER/
-    //     STAKE/UNSTAKE/DEREGISTER/abort-deduction paths touch
+    //     STAKE/UNSTAKE/DEREGISTER paths touch (an abort moves no stake
+    //     since D13)
     //   - registrants (Phase 2B): only REGISTER/DEREGISTER
-    //   - abort_records (Phase 2A): only Phase-1 slashing path
+    //   - abort_records (Phase 2A): only the Phase-1 abort record path
     //   - merge_state (Phase 2A): only MERGE_EVENT apply
     //   - applied_inbound_receipts (Phase 2A): only cross-shard inbound
     //

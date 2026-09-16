@@ -4,8 +4,9 @@
 #   * the BFT-escalation arm of check_block_sigs (9th)    — T-1, T-2, PE-4
 #
 # check_abort_certs is the last line of defense against a FORGED ABORT
-# CERTIFICATE, whose consequence is consensus-level FALSE SUSPENSION-SLASHING of
-# an honest validator. The docs/proofs/ProofClaimGateTraceability.md audit found
+# CERTIFICATE, whose consequence is consensus-level FALSE SUSPENSION of an honest
+# validator (its committee-selection window; the round-1 stake deduction was
+# retired — D13). The docs/proofs/ProofClaimGateTraceability.md audit found
 # it had NO negative coverage whatsoever (T-C1/T-C3/T-C4/T-C5, the top-ranked
 # HIGH): of 31 `abort_events.push_back` sites in src/main.cpp none had a
 # validate() within +/-40 lines, and the two witnesses the proof doc named

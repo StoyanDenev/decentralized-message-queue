@@ -3,7 +3,8 @@
 # consensus-level events that a running determ daemon can attribute to
 # a specific validator address:
 #
-#   1. AbortEvents          (round-1 aborts; SUSPENSION_SLASH penalty)
+#   1. AbortEvents          (round-1 aborts; suspension record only — the
+#                            stake deduction was retired, D13 2026-09-16)
 #   2. EquivocationEvents   (FA6 double-sign evidence records; no L1 consequence — D4)
 #   3. MERGE_EVENT txs      (R7 under-quorum merges; BEGIN/END pairs;
 #                            "terminator" = the apply-time `from` address

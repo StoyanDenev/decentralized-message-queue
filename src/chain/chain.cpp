@@ -952,7 +952,9 @@ void Chain::apply_transactions(const Block& b) {
     // A1: per-block running deltas for the unitary-balance counters.
     uint64_t block_outbound = 0;   // cross-shard TRANSFER amount that left this shard
     uint64_t block_inbound  = 0;   // cross-shard receipt amount credited here
-    uint64_t block_slashed  = 0;   // abort suspension deduction only (D4: no equivocation forfeit)
+    uint64_t block_slashed  = 0;   // frozen at 0: no apply path credits it since D13 (abort
+                                   // deduction retired) and D4 (no equivocation forfeit);
+                                   // kept so accumulated_slashed_ keeps its A1 ledger shape
 
     auto charge_fee = [&](AccountState& acct, uint64_t fee) {
         if (acct.balance < fee) return false;
@@ -1782,27 +1784,33 @@ void Chain::apply_transactions(const Block& b) {
         }
     }
 
-    // rev.8 suspension slashing. Each Phase-1 (round=1) AbortEvent baked
-    // into this block deducts SUSPENSION_SLASH from the aborted domain's
-    // staked balance. Bounded by the available stake (no negative
-    // balances). Only Phase-1 aborts count, mirroring registry.cpp's
-    // suspension policy: Phase-2 timing-skew aborts on healthy creators
-    // are not economically punished. Required for BFT-mode safety.
+    // b.abort_events: a Phase-1 (round=1) AbortEvent baked into this block
+    // RECORDS the suspension and moves NO stake. The record is the S-032
+    // abort_records_ cache (count + last_block) that NodeRegistry::
+    // build_from_chain and Chain::freeze_epoch_committee read through
+    // eligibility_floor.hpp to compute the suspension window. Only
+    // Phase-1 aborts are recorded, mirroring registry.cpp's suspension
+    // policy: Phase-2 timing-skew aborts on healthy creators are neither
+    // recorded nor suspended.
+    //   The former min(suspension_slash_, locked) stake deduction was
+    // RETIRED 2026-09-16 (owner decision D13, DECISION-LOG 2026-09-16
+    // "OWNER DECISIONS" §C): against the default min_stake = 1000 ONE abort
+    // left a floor-staked validator at 990 < min_stake, and S-051 lifts
+    // suspensions, never floor breaches — a liveness defect (SECURITY.md
+    // S-087). The deduction fell on the accused, not the claimants, and
+    // had no role in the S-011 bound. suspension_slash_ stays as an INERT
+    // parameter (genesis-hash-covered field, `k:` state-root leaf, snapshot
+    // field, PARAM_CHANGE key; removing it is a genesis-schema change for a
+    // later increment); block_slashed / accumulated_slashed_ keep their
+    // shape and simply never grow. Gate: `determ test-abort-event-apply`
+    // (the record lands, nothing moves, a domain staked exactly at
+    // min_stake is eligible again after its window, A1).
     for (auto& ae : b.abort_events) {
         if (ae.round != 1) continue;
-        // S-032 cache: increment the abort accumulator for this domain.
-        // build_from_chain reads this cache instead of walking history.
         __ensure_abort_records();
         auto& ar = abort_records_[ae.aborting_node];
         ar.count++;
         ar.last_block = b.index;
-        // Original suspension-slash stake deduction.
-        auto sit = stakes_.find(ae.aborting_node);
-        if (sit == stakes_.end()) continue;
-        uint64_t deduct = std::min<uint64_t>(suspension_slash_, sit->second.locked);
-        __ensure_stakes();
-        sit->second.locked -= deduct;
-        block_slashed     += deduct;   // A1
     }
 
     // b.equivocation_events: an EquivocationEvent is an on-chain EVIDENCE

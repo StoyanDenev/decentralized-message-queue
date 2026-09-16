@@ -1,5 +1,7 @@
 # FA3 — Selective-abort defense (commit-reveal hybrid)
 
+> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+
 This document proves the security property that defines Determ's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**
 
 The defense replaces the iterated-SHA-256 "delay function" approach that Determ used in earlier revisions (closed by S-009; see `docs/SECURITY.md` §M-F). The new defense is **information-theoretic under preimage resistance**, not time-bound. ASIC speedup, quantum compute, and arbitrary parallelism are irrelevant to the security argument.

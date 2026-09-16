@@ -49,7 +49,7 @@ A validator is a participant registered on-chain via a REGISTER transaction carr
 - An optional 32-byte UTF-8 region tag (in lowercase ASCII with charset `[a-z0-9-_]`), used only under EXTENDED sharding.
 - Stake (under STAKE_INCLUSION) or a domain registration (under DOMAIN_INCLUSION).
 
-Both inclusion models share the same Sybil-resistance + disincentive structure: under STAKE_INCLUSION, sybil cost is capital lock-up and the L1 disincentive is the abort suspension deduction; under DOMAIN_INCLUSION, sybil cost is domain registration and the L1 disincentive is the abort suspension. Equivocation carries no L1 consequence since 2026-09-16 (DECISION-LOG D4): its evidence record feeds an L2 bond policy (D22). The protocol treats both models identically for consensus purposes.
+Both inclusion models share the same Sybil-resistance + disincentive structure: under STAKE_INCLUSION, sybil cost is capital lock-up and the L1 disincentive is the abort suspension (the round-1 stake deduction was retired 2026-09-16, DECISION-LOG D13); under DOMAIN_INCLUSION, sybil cost is domain registration and the L1 disincentive is the abort suspension. Equivocation carries no L1 consequence since 2026-09-16 (DECISION-LOG D4): its evidence record feeds an L2 bond policy (D22). The protocol treats both models identically for consensus purposes.
 
 ### 2.2 Adversary model
 
@@ -539,7 +539,7 @@ These are intentional non-goals, not roadmap items.
 - v2.6 Gossip out of state-lock — ✅ shipped.
 - A3/v2.X Binary message codec — ✅ shipped and, since the D2 pre-genesis envelope strip, the ONLY wire format (`src/net/binary_codec.cpp`; the legacy JSON envelope and the per-pair negotiation are deleted; HELLO's `wire_version` field survives as the additive post-genesis upgrade advertisement).
 - v2.7 F2 view reconciliation (full S-030 D2 closure) — ⏳ spec'd in `docs/proofs/F2-SPEC.md`, ~3-4 days.
-- v2.10 Threshold randomness aggregation — ⏸️ **block-beacon application DE-SCOPED**: the project retains the v1 MPDH commit-reveal block beacon. Per `docs/proofs/FROST_DEVIATION_NOTICE.md` §9, FROST is not a bias-resistance upgrade over the FA3 commit-reveal guarantee and — unlike threshold-BLS — is not unbiasable-by-construction, so it does not justify the threshold-ceremony complexity for the block beacon. Residual selective-abort stays handled under MPDH by re-roll + suspension slashing. FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **threshold-OPAQUE** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`), not FROST. (Authority: Stoyan Denev, `docs/proofs/FROST_DEVIATION_NOTICE.md`; DECISION-LOG 2026-07-15.)
+- v2.10 Threshold randomness aggregation — ⏸️ **block-beacon application DE-SCOPED**: the project retains the v1 MPDH commit-reveal block beacon. Per `docs/proofs/FROST_DEVIATION_NOTICE.md` §9, FROST is not a bias-resistance upgrade over the FA3 commit-reveal guarantee and — unlike threshold-BLS — is not unbiasable-by-construction, so it does not justify the threshold-ceremony complexity for the block beacon. Residual selective-abort stays handled under MPDH by re-roll + suspension (the round-1 stake deduction was retired 2026-09-16, D13). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **threshold-OPAQUE** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`), not FROST. (Authority: Stoyan Denev, `docs/proofs/FROST_DEVIATION_NOTICE.md`; DECISION-LOG 2026-07-15.)
 - Stake-weighted creator selection — design item, parallel-representation analysis required first.
 - v2.8 Post-quantum signature migration (Dilithium / Falcon) — ⏳ not started.
 - v2.14 OPAQUE wallet recovery (real `libopaque`) — ⏳ not started; gated on the MSVC porting of upstream VLAs.
@@ -632,7 +632,7 @@ GenesisConfig {
   governance_mode: u8                  // 0 = uncontrolled, 1 = governed
   param_keyholders: [PubKey ...]       // founder set (governed mode)
   param_threshold: u32                 // signature count (default N-of-N)
-  suspension_slash: u64                // economic disincentive per abort
+  suspension_slash: u64                // inert since 2026-09-16 (D13): no abort deducts stake; genesis-covered field kept
   unstake_delay: u64                   // blocks past inactive_from
   merge_threshold_blocks: u32          // R4 trigger window
   revert_threshold_blocks: u32         // R4 hysteresis on revert

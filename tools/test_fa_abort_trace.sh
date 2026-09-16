@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FA harness (real-engine, self-contained path) — increment 2: abort-event
-# SUSPENSION slashing (the S-032/SUSPENSION_SLASH family) over a multi-block
-# randomized-Byzantine TRACE.
+# SUSPENSION RECORD (the S-032 family; D13, 2026-09-16 — the round-1 stake
+# deduction is retired) over a multi-block randomized-Byzantine TRACE.
 #
 # Per the owner decision (2026-07-07), determ-dsf stays a self-contained TOY
 # framework; the F-1/FA4 gap (multi-block randomized-Byzantine CONSENSUS
@@ -9,20 +9,23 @@
 # in the determ binary — which already links the real Chain/apply path.
 #
 # `determ test-fa-abort-trace` drives a seeded (SplitMix64), reproducible
-# 48-block trace that injects AbortEvents (a forced repeat-target schedule that
-# drains one small-stake validator, random Phase-1 targets, and scheduled
-# Phase-2 no-ops) via the REAL Chain::append apply path, and asserts after
-# every block:
-#   - EXACT stake accounting: each Phase-1 abort deducts exactly
-#     min(SUSPENSION_SLASH, stake) — full, PARTIAL, and floored-at-0 ZERO
-#     deducts all exercised (never negative);
-#   - accumulated_slashed == exact running total, monotone non-decreasing;
+# 48-block trace that injects AbortEvents (a forced repeat-target schedule
+# against one small-stake validator, random Phase-1 targets, and scheduled
+# Phase-2 no-ops) via the REAL Chain::append apply path, alongside an
+# abort-free TWIN chain, and asserts after every block:
+#   - every validator's stake equals its genesis value and
+#     accumulated_slashed stays 0 (a round-1 abort moves NO stake — D13);
 #   - S-032 abort_records cache exact per domain (count increments +
 #     last_block updates; Phase-2 rounds NEVER recorded);
 #   - A1: expected_total == live_total_supply after every block;
-#   - non-vacuous (fresh + repeat targets, real stake movement, >=1 partial
-#     and >=1 zero deduct, real Phase-2 no-ops);
-#   - negative control (an event-free block moves nothing);
+#   - every NON-`b:` leaf (s:/a:/r: of every domain + the five A1 counters,
+#     via state_proof value hashes) byte-identical to the twin; the `b:`
+#     record leaf present on the aborted chain only (positive control — the
+#     record IS committed, so state_root equality is NOT expected); the
+#     block hash differs from the twin's (the event is in the block);
+#   - non-vacuous (fresh + repeat targets, the 25-stake validator hit >= 3
+#     times keeps 25, real Phase-2 no-ops, a non-zero inert suspension_slash);
+#   - negative control (an event-free block keeps the twin equality);
 #   - determinism (same seed -> identical final state root).
 #
 # Fully in-process, <1s, no network. See docs/proofs/RealEngineFAHarness.md.
@@ -31,7 +34,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== FA harness inc-2: abort-event suspension-slash multi-block trace (real engine) ==="
+echo "=== FA harness inc-2: abort-event suspension-record multi-block trace (real engine, D13) ==="
 OUT=$($DETERM test-fa-abort-trace 2>&1)
 echo "$OUT"
 
