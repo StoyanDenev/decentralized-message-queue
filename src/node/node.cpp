@@ -2724,7 +2724,8 @@ void Node::maybe_reorg_to_locked(const chain::Block& incoming) {
 
     // ── The reorg (revert → validate → append winner | restore old head) ────
     // Copy the head BEFORE the revert: the reference dies on pop_back, and a
-    // validation failure must be able to restore it verbatim.
+    // validation failure OR an apply failure must be able to restore it
+    // verbatim.
     chain::Block old_head = cur;
     chain_.revert_head();   // state is now exactly H-1
 
@@ -2746,7 +2747,47 @@ void Node::maybe_reorg_to_locked(const chain::Block& incoming) {
         return;
     }
 
-    chain_.append(incoming);
+    // S-102 (adjudicated + closed 2026-09-16): validate() is NOT the last
+    // gate. apply_transactions can still refuse a block that validated — the
+    // S-033 state_root check (state_root is outside compute_block_digest AND
+    // outside every validator rule, so a relayer with NO committee key can
+    // relabel a signed block with a wrong non-zero root, keep its K-of-K
+    // signatures byte-for-byte and win the resolve_fork tie-break by grinding
+    // that free field for the smaller hash), the S-007 credit-overflow throws
+    // and the A1 supply assertion. apply itself is atomic (A9: the chain is
+    // exactly H-1 again after the throw) but the head is already popped, so
+    // an escaping throw left the node at H-1 with its head silently lost
+    // (caught only by the gossip dispatcher). Catch EVERY throw here and
+    // restore the old head exactly as the validate-failure branch does: the
+    // H-1 state is byte-identical to the one old_head was applied to
+    // (BoundedReorgSoundness REORG-2), apply is deterministic, and
+    // revert_head's pop_back left blocks_ with capacity for the re-append, so
+    // the restore cannot fail half-way — every intermediate state is a
+    // consistent chain (H-1 or H). The on-disk store is untouched by the
+    // failed attempt (nothing is saved on this path) and the persisted_count_
+    // clamp only makes the next save rewrite the tail file with the same
+    // bytes. No accept-rule change: the sibling is refused either way; only
+    // the node's own head is no longer collateral. Gate: test-node-reorg-guard.
+    // (An explicit flag, not the message: an exception whose what() is empty
+    // must still count as a failure.)
+    bool        apply_failed = false;
+    std::string apply_error;
+    try {
+        chain_.append(incoming);
+    } catch (const std::exception& e) {
+        apply_failed = true;
+        apply_error  = e.what();
+    } catch (...) {
+        apply_failed = true;
+        apply_error  = "non-standard exception";
+    }
+    if (apply_failed) {
+        chain_.append(old_head);
+        std::cerr << "[node] S-048 reorg REJECTED at h=" << incoming.index
+                  << " (competitor validated but its apply threw: "
+                  << apply_error << ") — head restored (S-102)\n";
+        return;
+    }
 
     // Return the reverted head's txs to the mempool: any tx NOT in the new
     // head would otherwise be silently lost. Inserted through the maps

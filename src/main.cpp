@@ -1105,6 +1105,17 @@ Additional in-process tests:
                                               (WINNER/REPLAY/LOSER/INVALID +
                                               A4.4 SYNC rejoiner via CHAIN_
                                               RESPONSE); deterministic byte-replay
+  determ test-node-reorg-guard                S-102: the depth-1 reorg is ATOMIC
+                                              over an apply throw. A relayer's
+                                              sibling (the head with ONLY
+                                              state_root rewritten — same K-of-K
+                                              sigs, wins resolve_fork) validates
+                                              at H-1 and its apply throws S-033;
+                                              the follower's head, height,
+                                              state_root and on-disk block store
+                                              stay unchanged and a later block
+                                              still appends; a correct sibling
+                                              still reorgs (positive control)
   determ test-fa-liveness-virtual             FA4 liveness, real engine, in
                                               process: 5 real Nodes over an
                                               injected VirtualTransport (one
@@ -35481,6 +35492,454 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": node-reorg-s048 "
                   << (fail == 0 ? "all assertions (A4.2-A4.4)" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-102 (adjudicated + closed 2026-09-16): the depth-1 reorg is ATOMIC
+    // over an apply throw. maybe_reorg_to_locked runs revert_head() →
+    // validate → append(incoming); validate() never reads state_root and
+    // compute_block_digest never covers it, so a RELAYER with no committee key
+    // can take the produced head, rewrite ONLY state_root to a wrong non-zero
+    // value, keep every signature byte-for-byte, and (grinding that free field
+    // for the smaller block hash) win resolve_fork. The sibling passes
+    // validate() at H-1 and its apply throws the S-033 mismatch AFTER the head
+    // was popped — at HEAD before this gate the throw escaped to the gossip
+    // dispatcher and the node silently lost its head (height H-1, its txs
+    // gone from the mempool, the on-disk chain shrunk at the next save).
+    //
+    // Arms (a real follower Node over VirtualTransport, restarted from its own
+    // block store between phases so the persisted store is observable):
+    //   W. Chain-layer WITNESS of the adjudication: the relabelled sibling
+    //      passes BlockValidator::validate against H-1 and Chain::append
+    //      throws "state_root mismatch" — the exact reachable throw.
+    //   G. THE GUARD: after the sibling, height / head hash / state_root are
+    //      unchanged, the guard's logged reason names the apply throw, the
+    //      block store on disk is byte-identical to before the attempt, and
+    //      a later valid block (the producer's block 2) still appends.
+    //   P. POSITIVE CONTROL: a correctly-rooted, validly re-signed sibling
+    //      still reorgs over the same restarted-store path, and the store is
+    //      rewritten to the winner (persisted_count_ clamp) — a restart loads it.
+    // Mutants (all RED): M1 remove the restore (= the pre-fix code);
+    // M2 drop revert_head's persisted_count_ clamp (head adopted, store not);
+    // M3 swallow the throw and keep the half-applied state; M4 restore on
+    // one exception type only (std::logic_error).
+    if (cmd == "test-node-reorg-guard") {
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool c, const char* m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        constexpr int64_t kT0 = 1700000000;
+        std::error_code fec;
+        const Hash kZero{};
+
+        // Same deterministic fixture as test-node-reorg-s048 (fixed Ed25519
+        // seeds + SeededRng), run one block further so a "later valid block"
+        // exists.
+        auto det_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (int i = 0; i < 32; ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey keyP = det_key(0xA0);   // producer / creator
+        crypto::NodeKey keyF = det_key(0x40);   // follower (non-creator)
+        auto make_gcfg = [&]() {
+            chain::GenesisConfig g;
+            g.chain_id      = "reorg-s102";
+            g.m_creators    = 1;
+            g.k_block_sigs  = 1;
+            g.epoch_blocks  = 1;
+            g.block_subsidy = 10;
+            chain::GenesisCreator gc;
+            gc.domain = "prod"; gc.ed_pub = keyP.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            return g;
+        };
+        auto write_genesis = [&](const fs::path& dir) -> std::string {
+            const std::string gp = (dir / "genesis.json").string();
+            make_gcfg().save(gp);
+            return gp;
+        };
+        auto uniq = [&](const std::string& tag) {
+            return fs::temp_directory_path() /
+                ("determ-reorg-guard-" + tag + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+        };
+
+        // Produce blocks 1 and 2 deterministically (SeededRng).
+        auto produce_blocks = [&](uint64_t seed) -> std::vector<chain::Block> {
+            fs::path dir = uniq("prod");
+            fs::remove_all(dir, fec); fs::create_directories(dir);
+            const std::string gp = write_genesis(dir);
+            node::Config cfg;
+            cfg.domain="prod"; cfg.data_dir=(dir/"prod").string();
+            cfg.listen_port=7663; cfg.key_path=(dir/"prod.key").string();
+            cfg.chain_path=(dir/"prod"/"chain.json").string(); cfg.genesis_path=gp;
+            cfg.m_creators=1; cfg.k_block_sigs=1; cfg.log_quiet=true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(keyP, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            auto tr = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vc(kT0);
+            crypto::SeededRng rng(seed);
+            auto node = std::make_unique<node::Node>(cfg, vc, loop.get(), tr.get(), rng);
+            node->start_external();
+            auto height = [&] { return node->rpc_status()["height"].get<uint64_t>(); };
+            int guard = 0;
+            while (height() < 3 && guard++ < 4000000) {
+                if (loop->run_ready(64) == 0 && !loop->advance_to_next_timer()) break;
+            }
+            std::vector<chain::Block> out;
+            if (height() >= 3) {
+                out.push_back(chain::Block::from_json(node->rpc_block(1)));
+                out.push_back(chain::Block::from_json(node->rpc_block(2)));
+            }
+            node->stop(); node.reset(); tr.reset(); loop.reset();
+            fs::remove_all(dir, fec);
+            return out;
+        };
+
+        // THE RELAYER'S SIBLING: `base` with ONLY state_root rewritten to a
+        // wrong non-zero value; every signature untouched (no key needed).
+        // Grind the free field until resolve_fork prefers the sibling (the
+        // smallest-hash tie-break — sig count and abort count are equal).
+        auto relabel = [&](const chain::Block& base, bool& ok) -> chain::Block {
+            ok = false; chain::Block out;
+            for (uint32_t salt = 1; salt <= 4096 && !ok; ++salt) {
+                chain::Block c = base;
+                crypto::SHA256Builder hb;
+                hb.append(base.state_root);
+                hb.append(static_cast<uint64_t>(salt));
+                c.state_root = hb.finalize();
+                if (c.state_root == base.state_root || c.state_root == kZero) continue;
+                const chain::Block& w = chain::Chain::resolve_fork(base, c);
+                if (&w == &c) { out = c; ok = true; }
+            }
+            return out;
+        };
+
+        // The positive control's sibling: the test-node-reorg-s048 craft — a
+        // validly RE-SIGNED same-height competitor (bumped committed
+        // proposer_time, rebuilt Phase-1 commit sig + block-digest sig) whose
+        // post-apply state (hence state_root) equals the base's.
+        auto craft_winner = [&](const chain::Block& base, bool& ok) -> chain::Block {
+            ok = false; chain::Block out;
+            auto vr = [](const std::vector<Hash>& v, size_t i) {
+                return i < v.size() ? v[i] : Hash{};
+            };
+            for (uint64_t delta = 1; delta <= 30 && !ok; ++delta) {
+                chain::Block c = base;
+                c.creator_proposer_times[0] += delta;
+                c.timestamp = c.creator_proposer_times[0];   // median of K=1
+                Hash commit = node::make_contrib_commitment(
+                    c.index, static_cast<uint64_t>(c.abort_events.size()),
+                    c.prev_hash, c.creator_tx_lists[0], c.creator_dh_inputs[0],
+                    vr(c.creator_view_eq_roots,0), vr(c.creator_view_abort_roots,0),
+                    vr(c.creator_view_inbound_roots,0), c.creator_proposer_times[0]);
+                c.creator_ed_sigs[0] = crypto::sign(keyP, commit.data(), commit.size());
+                Hash digest = node::compute_block_digest(c);
+                c.creator_block_sigs[0] = crypto::sign(keyP, digest.data(), digest.size());
+                const chain::Block& w = chain::Chain::resolve_fork(base, c);
+                if (&w == &c) { out = c; ok = true; }
+            }
+            return out;
+        };
+
+        // A follower phase: construct a Node on `dir` (a FRESH bootstrap the
+        // first time, a RESTART from its own block store afterwards), record
+        // (height, head hash, state_root) at start and after each delivered
+        // block (plus the node's stderr during that delivery), then stop() —
+        // the final synchronous save_incremental — so the store on disk is
+        // exactly what a restart would load.
+        struct Obs { uint64_t height = 0; Hash head{}; std::string root; std::string log; };
+        auto run_phase = [&](const fs::path& dir,
+                             const std::vector<chain::Block>& steps,
+                             bool& constructed) -> std::vector<Obs> {
+            std::vector<Obs> obs;
+            constructed = false;
+            const std::string gp = (dir / "genesis.json").string();
+            if (!fs::exists(gp)) write_genesis(dir);
+            node::Config cfg;
+            cfg.domain="follower"; cfg.data_dir=(dir/"foll").string();
+            cfg.listen_port=7664; cfg.key_path=(dir/"foll.key").string();
+            cfg.chain_path=(dir/"foll"/"chain.json").string(); cfg.genesis_path=gp;
+            cfg.m_creators=1; cfg.k_block_sigs=1; cfg.log_quiet=true;
+            fs::create_directories(cfg.data_dir);
+            if (!fs::exists(cfg.key_path)) crypto::save_node_key(keyF, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            loop->enable_virtual_time();
+            auto tr = std::make_unique<VirtualTransport>(*loop, vnet);
+            determ::time::VirtualClock vc(kT0);
+            std::unique_ptr<node::Node> node;
+            try {
+                node = std::make_unique<node::Node>(cfg, vc, loop.get(), tr.get());
+            } catch (const std::exception& e) {
+                std::cout << "    (node construction threw: " << e.what() << ")\n";
+                return obs;
+            }
+            constructed = true;
+            node->start_external();
+            auto height = [&] { return node->rpc_status()["height"].get<uint64_t>(); };
+            auto peers  = [&] { return node->rpc_status()["peer_count"].get<uint64_t>(); };
+            auto drain  = [&] { int g=0; while (loop->run_ready(64) > 0 && g++ < 200000) {} };
+            auto observe = [&]() {
+                Obs o; o.height = height();
+                o.head = chain::Block::from_json(node->rpc_block(o.height - 1)).compute_hash();
+                o.root = node->rpc_state_root()["state_root"].get<std::string>();
+                return o;
+            };
+            obs.push_back(observe());
+
+            VirtualTransport pt(*loop, vnet);
+            GossipNet peer(pt);
+            peer.set_log_quiet(true);
+            peer.set_hello("prod", 1);
+            peer.connect("127.0.0.1", cfg.listen_port);
+            { int g=0; while (peers() < 1 && g++ < 200000) {
+                if (loop->run_ready(64) == 0 && !loop->advance_to_next_timer()) break; } }
+
+            for (const auto& b : steps) {
+                std::ostringstream captured;
+                std::streambuf* old = std::cerr.rdbuf(captured.rdbuf());
+                peer.broadcast(net::make_block(b));
+                drain();
+                std::cerr.rdbuf(old);
+                Obs o = observe();
+                o.log = captured.str();
+                obs.push_back(o);
+            }
+            node->stop(); node.reset(); tr.reset(); loop.reset();
+            return obs;
+        };
+        // The follower's block store on disk: manifest + every block file.
+        auto store_bytes = [&](const fs::path& dir) {
+            std::map<std::string, std::string> out;
+            const std::string cp = (dir / "foll" / "chain.json").string();
+            auto slurp = [](const fs::path& p) {
+                std::ifstream f(p, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+            };
+            const fs::path mp(cp + ".manifest.bin");
+            if (fs::exists(mp)) out["manifest"] = slurp(mp);
+            const fs::path bd(cp + ".blocks");
+            if (fs::exists(bd))
+                for (auto& e : fs::directory_iterator(bd))
+                    out[e.path().filename().string()] = slurp(e.path());
+            return out;
+        };
+        auto frame_rec = [](const chain::Block& b) {
+            std::vector<uint8_t> frame;
+            b.encode_frame(frame);
+            std::string rec("DBK1", 4);
+            rec.append(reinterpret_cast<const char*>(frame.data()), frame.size());
+            return rec;
+        };
+
+        // ── Fixture ────────────────────────────────────────────────────────
+        std::vector<chain::Block> blocks = produce_blocks(42);
+        check(blocks.size() == 2 && blocks[1].prev_hash == blocks[0].compute_hash(),
+              "fixture: the deterministic producer minted blocks 1 and 2 (2 extends 1)");
+        if (blocks.size() != 2) {
+            std::cout << "\n  FAIL: node-reorg-guard fixture did not produce two blocks\n";
+            return 1;
+        }
+        const chain::Block& b1 = blocks[0];
+        const chain::Block& b2 = blocks[1];
+        check(b1.state_root != kZero,
+              "fixture: the producer declares a NON-ZERO state_root (S-038), so the "
+              "S-033 apply gate is armed for any sibling that carries a wrong one");
+        bool ok_r = false;
+        chain::Block sib = relabel(b1, ok_r);
+        check(ok_r, "RELAYER sibling: block 1 with ONLY state_root rewritten (wrong, "
+                    "non-zero) wins resolve_fork by grinding the free field");
+        check(ok_r && sib.creator_block_sigs == b1.creator_block_sigs
+                   && sib.creator_ed_sigs == b1.creator_ed_sigs
+                   && node::compute_block_digest(sib) == node::compute_block_digest(b1),
+              "…it carries block 1's K-of-K signatures byte-for-byte over the SAME "
+              "committee digest — no committee key was used (state_root is outside "
+              "compute_block_digest)");
+        check(ok_r && sib.compute_hash() != b1.compute_hash()
+                   && sib.prev_hash == b1.prev_hash,
+              "…and is a same-parent FORK, not a duplicate (state_root is inside "
+              "signing_bytes when non-zero, so the block hash differs)");
+
+        // ── W. Chain-layer witness: validate() accepts, append() throws ─────
+        {
+            chain::GenesisConfig g = make_gcfg();
+            chain::Chain c(chain::make_genesis_block(g));
+            c.set_block_subsidy(g.block_subsidy);
+            c.set_min_stake(g.min_stake);
+            c.set_k_block_sigs(g.k_block_sigs);
+            c.set_f2_active_from_height(g.v2_7_f2_active_from_height);
+            determ::time::VirtualClock vc(kT0);
+            node::BlockValidator v;
+            v.set_k_block_sigs(g.k_block_sigs);
+            v.set_m_pool(g.m_creators);
+            v.set_epoch_blocks(g.epoch_blocks);
+            v.set_clock(vc);
+            auto reg = node::NodeRegistry::build_from_chain(c, sib.index);
+            auto vr = v.validate(sib, c, reg);
+            if (!vr.ok) std::cout << "    validate(sibling) said: " << vr.error << "\n";
+            check(vr.ok, "WITNESS (a): BlockValidator::validate ACCEPTS the relabelled "
+                         "sibling against the H-1 state — no validator rule reads state_root");
+            std::string why;
+            try { c.append(sib); } catch (const std::exception& e) { why = e.what(); }
+            check(why.find("state_root mismatch") != std::string::npos
+                      && why.find("S-033") != std::string::npos,
+                  "WITNESS (a): Chain::append of that validated sibling THROWS the "
+                  "S-033 state_root mismatch — the reachable apply throw");
+            check(c.height() == 1 && c.compute_state_root() != kZero,
+                  "WITNESS: apply is atomic on its own (A9) — the chain is still exactly "
+                  "at H-1 after the throw; the loss at HEAD was the popped head, not state");
+            std::string why2;
+            try { c.append(b1); } catch (const std::exception& e) { why2 = e.what(); }
+            check(why2.empty() && c.height() == 2,
+                  "WITNESS: the genuine block 1 still applies on that same H-1 state "
+                  "(deterministic re-apply — the restore primitive the guard relies on)");
+        }
+
+        // ── G. The guard, end to end over a persisted follower ──────────────
+        fs::path dirG = uniq("guard");
+        fs::remove_all(dirG, fec); fs::create_directories(dirG);
+        bool ctorA = false, ctorB = false, ctorC = false;
+        auto phA = run_phase(dirG, {b1}, ctorA);
+        check(ctorA && phA.size() == 2 && phA[1].height == 2
+                  && phA[1].head == b1.compute_hash(),
+              "G0: the follower accepts block 1 over the real gossip path and persists "
+              "it (stop = final synchronous save_incremental)");
+        auto storeA = store_bytes(dirG);
+        check(storeA.count("manifest") == 1 && storeA.count("1.blk") == 1
+                  && storeA["1.blk"] == frame_rec(b1),
+              "G0: the on-disk store names block 1 (manifest + 1.blk == encode_frame(b1))");
+
+        auto phB = run_phase(dirG, {sib, b2}, ctorB);
+        check(ctorB && phB.size() == 3 && phB[0].height == 2
+                  && phB[0].head == b1.compute_hash() && phB[0].root == phA[1].root,
+              "G1: restarted from its own store, the follower is back at block 1 with "
+              "the same state_root (Chain::load replay; the head is revertible again)");
+        if (ctorB && phB.size() == 3) {
+            // Evidence lines for the record (the M1 danger proof prints the
+            // lost head here: height 1, the genesis hash, no verdict line).
+            std::cout << "    after the sibling: height=" << phB[1].height
+                      << " head=" << to_hex(phB[1].head).substr(0, 16)
+                      << (phB[1].head == b1.compute_hash() ? " (block 1)"
+                                                            : " (NOT block 1)")
+                      << " state_root " << (phB[1].root == phB[0].root
+                                            ? "unchanged" : "CHANGED") << "\n";
+            auto pos = phB[1].log.find("[node] S-048 reorg");
+            if (pos == std::string::npos) pos = phB[1].log.find("[gossip] dispatch error");
+            if (pos != std::string::npos) {
+                auto end = phB[1].log.find('\n', pos);
+                std::cout << "    node said: "
+                          << phB[1].log.substr(pos, end == std::string::npos
+                                                        ? std::string::npos
+                                                        : end - pos) << "\n";
+            } else {
+                std::cout << "    node said: (no reorg verdict line)\n";
+            }
+        }
+        const bool g_unchanged = ctorB && phB.size() == 3
+            && phB[1].height == 2
+            && phB[1].head == b1.compute_hash()
+            && phB[1].root == phB[0].root;
+        check(g_unchanged,
+              "G2 THE GUARD: after the relabelled sibling, height (2), head hash "
+              "(block 1) and state_root are all UNCHANGED — the attempt was atomic");
+        check(ctorB && phB.size() == 3
+                  && phB[1].log.find("competitor validated but its apply threw") != std::string::npos
+                  && phB[1].log.find("state_root mismatch") != std::string::npos
+                  && phB[1].log.find("head restored") != std::string::npos,
+              "G2: the reorg attempt was REJECTED with the logged reason naming the "
+              "apply throw (S-033 state_root mismatch) and the restore — it reached "
+              "the revert→append window and was not stopped by validate()");
+        check(ctorB && phB.size() == 3 && phB[1].head != sib.compute_hash(),
+              "G2: the sibling was NOT adopted (no reorg to a block whose apply threw)");
+        check(ctorB && phB.size() == 3 && phB[2].height == 3
+                  && phB[2].head == b2.compute_hash(),
+              "G3: a later valid block (the producer's block 2, which extends block 1) "
+              "still appends on top of the restored head");
+        auto storeB = store_bytes(dirG);
+        // The store after phase B must be the phase-A store plus exactly block 2:
+        // manifest {3, hash(b2)}, 0/1.blk byte-identical, 2.blk == frame(b2).
+        check(storeB.count("1.blk") == 1 && storeB["1.blk"] == storeA["1.blk"]
+                  && storeB.count("0.blk") == 1 && storeB["0.blk"] == storeA["0.blk"]
+                  && storeB.count("2.blk") == 1 && storeB["2.blk"] == frame_rec(b2)
+                  && storeB.size() == storeA.size() + 1,
+              "G3: the block store on disk carries blocks 0/1 byte-identical to before "
+              "the attempt plus block 2 — the rejected attempt left no trace");
+        // A second, tighter store assertion: attempt WITHOUT a later block —
+        // the store after (restart, sibling, stop) must be byte-identical to
+        // the store before it.
+        fs::path dirS = uniq("store");
+        fs::remove_all(dirS, fec); fs::create_directories(dirS);
+        bool ctorS1 = false, ctorS2 = false;
+        auto phS1 = run_phase(dirS, {b1}, ctorS1);
+        auto storeS1 = store_bytes(dirS);
+        auto phS2 = run_phase(dirS, {sib}, ctorS2);
+        auto storeS2 = store_bytes(dirS);
+        check(ctorS1 && ctorS2 && phS1.size() == 2 && phS2.size() == 2
+                  && phS2[1].height == 2 && phS2[1].head == b1.compute_hash(),
+              "G4: (restart, sibling, stop) on a second follower — head unchanged");
+        check(ctorS1 && ctorS2 && !storeS1.empty() && storeS1 == storeS2,
+              "G4: the block store on disk (manifest + every block file) is "
+              "BYTE-IDENTICAL before and after the rejected attempt");
+        bool ctorS3 = false;
+        auto phS3 = run_phase(dirS, {}, ctorS3);
+        check(ctorS3 && phS3.size() == 1 && phS3[0].height == 2
+                  && phS3[0].head == b1.compute_hash(),
+              "G4: that store still restarts onto block 1");
+        fs::remove_all(dirS, fec);
+
+        auto phC = run_phase(dirG, {}, ctorC);
+        check(ctorC && phC.size() == 1 && phC[0].height == 3
+                  && phC[0].head == b2.compute_hash(),
+              "G5: the phase-B store restarts onto block 2 (restart-consistent)");
+        fs::remove_all(dirG, fec);
+
+        // ── P. Positive control: a correct sibling still reorgs ─────────────
+        bool ok_w = false;
+        chain::Block win = craft_winner(b1, ok_w);
+        check(ok_w && win.state_root == b1.state_root,
+              "P0: crafted a validly re-signed same-height competitor that wins "
+              "resolve_fork and declares the CORRECT state_root (same post-state)");
+        fs::path dirP = uniq("positive");
+        fs::remove_all(dirP, fec); fs::create_directories(dirP);
+        bool ctorP1 = false, ctorP2 = false, ctorP3 = false;
+        auto phP1 = run_phase(dirP, {b1}, ctorP1);
+        auto phP2 = run_phase(dirP, {win}, ctorP2);
+        check(ctorP1 && ctorP2 && phP1.size() == 2 && phP2.size() == 2
+                  && phP2[0].head == b1.compute_hash()
+                  && phP2[1].height == 2 && phP2[1].head == win.compute_hash()
+                  && phP2[1].root == phP2[0].root,
+              "P1 POSITIVE CONTROL: over the same restarted-store path the correct "
+              "sibling IS adopted (S-048 REORG, height 2, same state_root)");
+        check(ctorP2 && phP2.size() == 2
+                  && phP2[1].log.find("S-048 REORG at h=1") != std::string::npos
+                  && phP2[1].log.find("apply threw") == std::string::npos,
+              "P1: the reorg log line fired and the guard did not");
+        auto storeP = store_bytes(dirP);
+        check(storeP.count("1.blk") == 1 && storeP["1.blk"] == frame_rec(win),
+              "P2: the block store on disk was rewritten to the winner (1.blk == "
+              "encode_frame(winner) — the persisted_count_ clamp made the save "
+              "rewrite the tail file)");
+        auto phP3 = run_phase(dirP, {}, ctorP3);
+        check(ctorP3 && phP3.size() == 1 && phP3[0].height == 2
+                  && phP3[0].head == win.compute_hash(),
+              "P3: that store restarts onto the winner (manifest and tail file agree)");
+        fs::remove_all(dirP, fec);
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": node-reorg-guard "
+                  << (fail == 0 ? "all assertions (S-102)" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

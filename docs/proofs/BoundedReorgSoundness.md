@@ -163,8 +163,9 @@ end-to-end, `:27164-27175`). Live: `test-fa-liveness-virtual` 10/10 with
 ## REORG-4 — FAIL-CLOSED: an invalid structural winner never displaces a valid head
 
 **Claim.** A competitor that wins `resolve_fork` on its *claimed* signature set
-but fails validation is rejected after the revert, and the old head is restored
-verbatim; the chain is never left at H-1 by the reorg's designed paths.
+but fails validation — or validates and then has its apply throw (S-102) — is
+rejected after the revert, and the old head is restored verbatim; the chain is
+never left at H-1 by the reorg path.
 
 **Argument.** The tie-break input is unauthenticated at gate time (non-zero sig
 *slots* are counted, not verified — `src/chain/chain.cpp:1812-1818`), which is
@@ -180,10 +181,25 @@ DEREGISTER effects of the reverted head are correctly absent). On `!res.ok`,
 re-append reproduces the original post-state and cannot fail; net effect is no
 change, and the re-apply re-retains a fresh `prev_head_snapshot_`
 (`src/chain/chain.cpp:1743`), so a later legitimate reorg remains possible. On
-`res.ok`, `chain_.append(incoming)` installs the winner (`:2216`); either
-branch ends with an appended head at H. Reverted-head transactions absent from
-the winner return to the mempool with a stale-nonce guard (`:2223-2231`) so no
-once-admitted honest tx is silently lost.
+`res.ok`, `chain_.append(incoming)` installs the winner (`:2216`). **S-102
+(adjudicated + closed 2026-09-16):** `validate` is not the last gate —
+`apply_transactions` can still refuse a validated block, and one such refusal
+is reachable by an unauthenticated relayer: `state_root` is outside
+`compute_block_digest` (`src/node/producer.cpp::compute_block_digest_body`) and
+no `BlockValidator` rule reads it, so the head with ONLY `state_root` rewritten
+to a wrong non-zero value keeps its K-of-K signatures, wins the smallest-hash
+tie-break after ~2 grinds of the free field, validates at H-1 and throws the
+S-033 mismatch (`src/chain/chain.cpp::apply_transactions`) after the head was
+popped. `apply` is atomic on its own (A9 restores the H-1 state), so the loss
+was exactly the popped head. The append is therefore wrapped: on ANY throw
+(`std::exception` and `...`) the node re-appends `old_head` — the same
+deterministic restore as the validate-failure branch (the H-1 state is
+byte-identical by REORG-2, `old_head` applied from it once, and `revert_head`'s
+`pop_back` left `blocks_` with capacity for the re-append, so no step can fail
+half-way) — logs the apply error and returns. Every branch ends with an
+appended head at H. Reverted-head transactions absent from the winner return
+to the mempool with a stale-nonce guard (`:2223-2231`) so no once-admitted
+honest tx is silently lost.
 
 **Excluded failure.** A Byzantine peer forcing an honest node onto a garbage
 block (or onto *nothing*) by stuffing sig slots — "never revert on an
@@ -194,7 +210,15 @@ the structural tie-break but carries a corrupted Phase-1 commit sig is rejected
 after the revert and the old head is restored verbatim
 (`src/main.cpp:27186-27194`); `test-chain-revert-head` "after revert, a
 DIFFERENT block applies cleanly at the head height" pins the
-apply-after-revert half (`:33078-33083`).
+apply-after-revert half (`:33078-33083`). `test-node-reorg-guard` (S-102) pins
+the apply-throw branch: a Chain-layer witness (`validate` accepts the
+relabelled sibling, `append` throws `state_root mismatch (S-033)`), then a
+persisted follower whose height / head / `state_root` / on-disk block store
+are unchanged after the sibling and which still appends the next block, plus
+a positive control (a correctly-rooted re-signed sibling still reorgs and the
+store's tail file is rewritten to it). Mutants: no restore (the pre-fix code),
+a swallowed throw, a `std::logic_error`-only catch → the guard arms RED; no
+`persisted_count_` clamp → the positive-control store arms RED.
 
 ## REORG-5 — BYTE-NEUTRALITY: normal operation is a strict no-op
 
@@ -367,12 +391,19 @@ with A4 compiled in (FAST 216/0).
   adopting a winner does not suppress evidence against an equivocating
   proposer; slashing is orthogonal to fork choice. The `resolve_fork` ranking
   itself is the S-029 rule and is unchanged by A4.
-- **Validator/apply divergence class.** REORG-4's "never left at H-1" covers
-  the designed reject path (`validate` returns `!ok`). A hypothetical *throw*
-  from inside the winner's apply after a successful validate (a
-  validator-vs-apply divergence bug, the S-049/AL-3 class) would propagate and
-  leave the node at H-1 until the S-047 retry re-offers a block — the same
-  exposure class as the normal accept path, not one the reorg adds.
+- **Validator/apply divergence class — CLOSED for the reorg path (S-102,
+  2026-09-16).** This bullet used to call a throw from inside the winner's
+  apply after a successful validate "hypothetical" and "the same exposure
+  class as the normal accept path". Both halves were wrong: the throw is
+  reachable by an unauthenticated relayer through the `state_root` relabel
+  (REORG-4), and on the normal accept path a throwing apply leaves the head in
+  place (A9 restores state, `blocks_` is untouched) whereas on the reorg path
+  the head was already popped — the reorg DID add the exposure. The append is
+  now guarded (REORG-4): any throw restores the old head. What remains true:
+  a validated block whose apply throws is still not adopted, on either path.
+  Cost note: each rejected relabel costs the victim one revert + validate +
+  failed apply + re-apply — the same bounded, fail-closed CPU-griefing class
+  as the garbage-signature bullet above, now with one extra apply.
 - **Observable, by design:** streaming subscribers see height H fan out twice
   on a reorg — once per head content (`src/node/node.cpp:2236-2242`). Inherent
   to any reorg; consumers must key on block hash, not height.

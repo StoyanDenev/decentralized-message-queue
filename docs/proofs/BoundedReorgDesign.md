@@ -105,6 +105,15 @@ review** of each consensus-touching increment before commit.
 - **Validate-before-switch.** The replacement head must pass `validator_.validate`
   against `H-1` state BEFORE the revert commits — never revert on an unvalidated
   competitor (a Byzantine peer could otherwise force a revert to nothing).
+- **Atomic switch (S-102, closed 2026-09-16).** `validate` is not the last gate:
+  `apply_transactions` can still refuse a validated competitor (the S-033
+  `state_root` check — the field is outside the committee digest and outside
+  every validator rule, so a relayer can relabel a signed head and win the
+  tie-break; the S-007 overflow throws; A1). The attempt must end on the winner
+  or exactly on the old head, never at `H-1`: `maybe_reorg_to_locked` catches
+  every apply throw and re-appends the retained `old_head` (the same
+  deterministic restore as the validate-failure branch). Gate
+  `test-node-reorg-guard`; soundness `BoundedReorgSoundness.md` REORG-4.
 - **Deterministic winner.** The switch criterion is `resolve_fork` VERBATIM, so all
   honest peers converge identically; no local tie-break, no timing dependence.
 - **Atomic view publication.** The revert republishes `committed_state_view_` in one

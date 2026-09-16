@@ -96,7 +96,8 @@ for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PA
 selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
 (1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone —
 LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup -> abort-deduction
-retirement -> re-derivations; adjudicate S-102); (4) the joint design gate R-4 + F-c + R-15
+retirement -> re-derivations; S-102 ADJUDICATED + CLOSED 2026-09-16: reachable at HEAD by a
+zero-key state_root relabel, the reorg made atomic — test-node-reorg-guard); (4) the joint design gate R-4 + F-c + R-15
 (+R-16); (5) the V-REG-1 companions (join
 rule, exit rule, rotation, small-order rule); (6) pq_auth rule + block-byte cap + chain
 identity in signing_bytes (the last transaction-frame changes); (7) R-8 C0 demotion -> S-089
@@ -541,5 +542,13 @@ measured evidence and approved by the owner at review (D24):
       D19b-ii sharding_mode genesis pin lands with the first genesis-hash-changing increment here.
 NODE-/CLIENT-LOCAL BACKLOG (D19a, no accept-rule change; each its own gate + review), by
 severity: S-078, S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
-S-091 (with the D2 src-side keyfile increment), S-063 (delivery layer, D18a). S-102 is
-ADJUDICATED in step 3 before R-8 lands.
+S-091 (with the D2 src-side keyfile increment), S-063 (delivery layer, D18a). S-102 was
+ADJUDICATED + CLOSED 2026-09-16 (step 3, before R-8): reachable at HEAD by a relayer's zero-key
+state_root relabel of the head (outside the digest and every validator rule); the depth-1 reorg
+is now atomic over an apply throw (node.cpp maybe_reorg_to_locked; gate test-node-reorg-guard,
+M1-M4 RED). Open observations from the adjudication (argued from code, NOT closed, need their
+own accept-rule increments): a ZERO-root twin of the head shares the digest, skips the S-033
+apply gate and is ADOPTED when it wins the tie-break; and `initial_state` on a non-genesis block
+is in signing_bytes, outside the digest, ignored by apply and unchecked by the validator — a
+free hash-grinding field, so any clean same-digest twin can be made to win and the block hash
+is relayer-malleable, not only signer-malleable (DECISION-LOG 2026-09-16 S-102 entry).
