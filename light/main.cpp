@@ -84,6 +84,7 @@
 #include "verify_selection.hpp"
 #include "verify_ct.hpp"
 #include "persist.hpp"
+#include "outbox_cli.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -440,6 +441,33 @@ void print_usage() {
         "      --wait blocks up to s seconds for the head's successor block so the\n"
         "      embedded nonce read's S-042 successor binding can complete (the read\n"
         "      anchors at the head; default 0 fails closed there, as on the readers).\n"
+        "  outbox enqueue --outbox <dir> --genesis <file> --keyfile <path> --to <addr>\n"
+        "                 --amount <N> --fee <N> [--payload-hex <hex>] [--nonce <N>]\n"
+        "                 [--rpc-port <N>] [--idempotency-key <k>] [--max-messages <N>] [--json]\n"
+        "      Sign a TRANSFER once and store the signed bytes DURABLY (fsync + atomic\n"
+        "      publish) in a per-(sender, chain) outbox before printing 'queued locally'.\n"
+        "      Never stores a key. Nonce = --nonce, else max(verified next_nonce, local slots).\n"
+        "  outbox submit --outbox <dir> --genesis <file> --rpc-port <N> [--now] [--json]\n"
+        "      Re-send every due slot's SAME bytes (bounded backoff). A daemon 'queued' is\n"
+        "      SUBMITTED, a lost reply is UNKNOWN — neither is finality.\n"
+        "  outbox reconcile --outbox <dir> --genesis <file> --rpc-port <N> [--resume]\n"
+        "                   [--state <path>] [--wait <s>] [--json]\n"
+        "      Committee-verify inclusion + the successor binding (FINALIZED) and the\n"
+        "      sender's nonce (APPLIED vs SKIPPED); detects orphaned inclusions, consumed\n"
+        "      nonces, gaps and stuck slots. Exit 3 when a leg is UNVERIFIABLE.\n"
+        "  outbox status --outbox <dir> [--json]     (lock-free; exit 3 if a slot is CORRUPT)\n"
+        "  outbox replace --outbox <dir> --genesis <file> --keyfile <path> --nonce <N>\n"
+        "                 --fee <N> [--to <addr>] [--amount <N>] [--payload-hex <hex>]\n"
+        "      Fee bump (same message, same msg_id) or re-issue (new message) at the same\n"
+        "      nonce; every earlier alternate stays watched — the ledger applies at most one.\n"
+        "  outbox prune --outbox <dir> [--older-than <s>] [--include-unlocated] [--json]\n"
+        "      Remove only PROVEN-consumed slots older than s (default 7 days), bumping the\n"
+        "      nonce floor first. Never removes a queued/pending/skipped slot.\n"
+        "  outbox recover --outbox <dir>\n"
+        "      Rebuild a corrupt status section (bytes intact → UNKNOWN) or an unreadable\n"
+        "      outbox.meta; quarantine unreadable records (the nonce stays reserved).\n"
+        "      Exit codes: 0 ok, 1 error, 3 corrupt/unverifiable, 4 full, 5 locked,\n"
+        "      6 wrong chain/sender, 7 daemon config, 8 idempotency key already held.\n"
         "\n"
         "Monitoring:\n"
         "  watch-head --rpc-port <N> --genesis <file> [--count <N>] [--interval <s>]\n"
@@ -10935,6 +10963,10 @@ int main(int argc, char** argv) {
         if (cmd == "build-ct-transfer")     return cmd_build_ct_transfer(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
+        if (cmd == "outbox")                return cmd_outbox(sub_argc, sub_argv);
+        if (cmd == "selftest-outbox-record")   return cmd_selftest_outbox_record(sub_argc, sub_argv);
+        if (cmd == "selftest-outbox-classify") return cmd_selftest_outbox_classify(sub_argc, sub_argv);
+        if (cmd == "selftest-outbox-core")     return cmd_selftest_outbox_core(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);

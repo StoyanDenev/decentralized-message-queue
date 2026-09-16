@@ -82,7 +82,10 @@ public:
     // fast path; any other host takes the getaddrinfo branch. Enables
     // cross-HOST multi-peer cross-check without touching the loopback path.
     RpcClient(std::string host, uint16_t port);
-    ~RpcClient();
+    // Virtual so an in-process fixture daemon can stand in for the socket
+    // (the outbox selftests drive the REAL submit/reconcile cores over a
+    // committee-signed fixture chain, light/outbox_selftest.cpp).
+    virtual ~RpcClient();
 
     RpcClient(const RpcClient&) = delete;
     RpcClient& operator=(const RpcClient&) = delete;
@@ -101,8 +104,14 @@ public:
     // std::runtime_error on transport / parse / RPC-error. The
     // exception text names the failing method so callers can surface
     // it directly.
-    nlohmann::json call(const std::string& method,
-                        const nlohmann::json& params);
+    virtual nlohmann::json call(const std::string& method,
+                                const nlohmann::json& params);
+
+    // Bound every send/recv on the open socket (SO_SNDTIMEO / SO_RCVTIMEO).
+    // Default: none (the pre-existing behaviour). A timed-out call throws
+    // "… timed out …" so the outbox records the outcome as UNKNOWN instead
+    // of hanging under its directory lock. Returns false if setsockopt fails.
+    bool set_timeout_ms(uint32_t ms);
 
     // Human-readable diagnostic for the last open() failure.
     const std::string& last_error() const { return last_error_; }

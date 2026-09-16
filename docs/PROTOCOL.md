@@ -164,6 +164,29 @@ Legacy REGISTER payloads (32 bytes exactly, just the pubkey) are wire-compatible
 
 The region is mirrored from the REGISTER tx into the registry. `eligible_in_region(R)` (§5.2) reads it during committee selection.
 
+### 3.6 What each submission observable proves (sender side)
+
+The transaction format carries no expiry and no chain identifier (§3, §3.1): replay protection is the
+sequential `(from, nonce)` alone, so the SAME signed bytes are valid until the nonce is consumed and on any
+chain where `(from, nonce)` matches. Five observables exist between "signed" and "acted on", and they are not
+interchangeable:
+
+| Observable | What it proves | What it does NOT prove |
+|---|---|---|
+| Durable in a local outbox (`determ-light outbox enqueue`) | The signed bytes survive a client crash / power loss on that device (fsync + atomic publish, DurableOutboxSoundness.md OB-1). | Anything about the network. One copy, one device. |
+| `submit_tx` → `{"status":"queued"}` (or "incumbent tx at (from, nonce) has equal-or-higher fee") | A daemon held the bytes in its mempool at that instant. | Inclusion. The mempool has no TTL but drops txs on fee eviction and on build-time verifier rejection, silently (§10.2; `Node::tx_admit_locked`). `submit_tx` does not run the verifier's per-tx rules. |
+| A lost reply / timeout | Nothing. The bytes may or may not be held. | Rejection. Re-sending identical bytes is idempotent (`tx_store_` is keyed by the recomputed hash). |
+| Inclusion in block h (`tx` RPC, `determ-light verify-tx-inclusion`) | Membership in the committee-signed tx set of a block at h (the block's own K-of-K/BFT signatures). | Finality (block h may be the reorg-able head, §5.4 / S-048) and **application**: apply skips an underfunded tx without advancing the nonce (§3.3; `chain.cpp` TRANSFER/DAPP_CALL `continue`), and the same hash may then be included again later. Delivery to DApps (`dapp_messages`, `dapp_subscribe`) scans the block body only (S-063). |
+| Finality (committee-signed successor whose `prev_hash` binds the recomputed hash of block h — the S-042 rule) + the sender's `next_nonce` proven `> nonce` at an index ≥ h | The nonce was consumed by exactly one of the sender's transactions at that nonce; for TRANSFER that is the full debit/credit (the only nonce-advancing path). | WHICH of several alternates landed — that attribution rests on the daemon's per-hash `tx` hints (the outbox keeps every alternate, asks about each, attributes only once every hint verified, and never re-labels an inclusion it has already proven SKIPPED; a daemon that withholds a hint can therefore delay the attribution, never shift it to a proven skip nor change the fact); a DAPP_CALL may have consumed its nonce as a fee-only no-op if its recipient's registry entry changed in the same block. |
+
+`determ-light outbox` exposes exactly these distinctions as states — QUEUED, SUBMITTED, UNKNOWN, INCLUDED,
+FINALIZED (apply APPLIED / SKIPPED), CONSUMED (nonce spent, no canonical inclusion located yet — re-examined on
+every pass, never re-sent) — and re-sends only the stored bytes (never a re-signed message) until the nonce is
+provably consumed. Consumers must therefore deduplicate
+by `tx_hash` persistently (one hash can be included twice), commit the dedup marker atomically with the
+business effect, treat a frame's `amount`/`fee` as unverified (S-063) and a head-block frame as not yet
+canonical. Full contract: `docs/proofs/DurableOutboxSoundness.md`.
+
 ## 4. Block format
 
 ```cpp

@@ -360,6 +360,9 @@ add_executable(determ-light
   light/verify_selection.cpp # D.5 inc.5: selection-verifier core (first-open-wins + ordering + draw)
   light/verify_ct.cpp        # A3: client-side CT range/balance verification
   light/persist.cpp
+  light/outbox.cpp           # durable sender outbox (DOX1 records, durable writes, submit/reconcile cores)
+  light/outbox_cli.cpp       # `determ-light outbox <verb>`
+  light/outbox_selftest.cpp  # selftest-outbox-{record,classify,core} (in-process fixture daemon)
   # Reused from src/ (explicit list — no glob):
   src/crypto/merkle.cpp
   src/crypto/keys.cpp

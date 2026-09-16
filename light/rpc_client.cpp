@@ -214,6 +214,21 @@ void RpcClient::close() {
     inbuf_.clear();
 }
 
+bool RpcClient::set_timeout_ms(uint32_t ms) {
+    if (sock_ == kInvalidSock) return false;
+#ifdef _WIN32
+    DWORD t = ms;
+    return setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&t), sizeof t) == 0
+        && setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&t), sizeof t) == 0;
+#else
+    struct timeval tv{};
+    tv.tv_sec  = static_cast<time_t>(ms / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((ms % 1000) * 1000);
+    return setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) == 0
+        && setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) == 0;
+#endif
+}
+
 nlohmann::json RpcClient::call(const std::string& method,
                                 const nlohmann::json& params) {
     if (sock_ == kInvalidSock) {
@@ -225,8 +240,13 @@ nlohmann::json RpcClient::call(const std::string& method,
     }
     auto line = read_line(sock_, inbuf_);
     if (!line) {
+        // With a timeout set (set_timeout_ms) a stalled daemon surfaces here
+        // as well; name it so the caller can classify the reply as LOST. The
+        // stream is no longer in sync (a late reply would be read as the answer
+        // to the NEXT request), so the socket is closed: a caller must reopen.
+        close();
         throw std::runtime_error("no response for " + method
-                                 + " (daemon closed connection?)");
+                                 + " (daemon closed connection or timed out)");
     }
     nlohmann::json resp;
     try {
