@@ -90,8 +90,24 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   per-view-key act in the designed v2.22/v2.24 mechanism. Any doc asserting
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
-## CURRENT FRONT — read before selecting any work (owner directive 2026-07-28)
-ACTIVE FRONT = execute the D2 JSON->binary migration NOW (DECISION-LOG 2026-07-28).
+## CURRENT FRONT — read before selecting any work (owner directives 2026-07-28 and 2026-09-16)
+ACTIVE FRONT (owner, DECISION-LOG 2026-09-16 D1 — supersedes the 2026-07-28 "D2 now" line
+for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PARALLEL. Work is
+selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
+(1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone ->
+evidence cap + in-block dedup -> abort-deduction retirement -> re-derivations; adjudicate
+S-102); (4) the joint design gate R-4 + F-c + R-15 (+R-16); (5) the V-REG-1 companions (join
+rule, exit rule, rotation, small-order rule); (6) pq_auth rule + block-byte cap + chain
+identity in signing_bytes (the last transaction-frame changes); (7) R-8 C0 demotion -> S-089
+-> S-090 rebroadcast; (8) CT verification off the lock; (9) the EXTENDED closure set;
+(10) D2 inc7c in PARALLEL from step 3, D2 step 1b + step 4 AFTER step 9; (11) the
+node-/client-local backlog interleaved by severity from step 3 (S-078 first); (12) cluster
+gates + TLA into ci_local, the C2 sweep; (13) B4 DROP execution last; launch predicate.
+Every consensus/apply/wire/genesis increment: design-and-prove -> independent adversarial
+review -> falsify-on-mutant gate at the layer where the rule lives -> ci_local -> review of
+the diff; smallest increment; no bundling. The D2 record below is kept as history and as
+the definition of the D2 remainder.
+D2 (DECISION-LOG 2026-07-28) — what it was and what remains:
 Rationale: D.5 reference RP + RP SDK are built (inc.6b + sdk/rp), G5/G6 shipped —
 and the pool has been hardening JSON-envelope code that D2 deletes (e.g. round-12
 net perf on the JSON envelope). Per sequence-before-harden, migrate first.
@@ -181,10 +197,14 @@ producer now asks the verifier (BlockValidator::check_transaction is the ONE per
 rule set; build_body admits only what it accepts; a resident rejected tx is evicted
 on the first build at each head) — S-058 (the Phase-2 trigger is committee
 completeness, not map size; the Phase-1 timer is released only once complete) and
-S-066 (gossip trusted the unsigned wire hash). Their ORDER against the D2 front is
-owner decision O-3 below — until it is taken ACTIVE FRONT stays D2 as written, but
-no thread may treat the ledger as clean. S-055/S-057/S-065/S-067 need owner
-decisions (DECISION CLOCK R-7, R-8, R-10, R-11).
+S-066 (gossip trusted the unsigned wire hash).
+DECIDED 2026-09-16 (DECISION-LOG 2026-09-16): the order is O-3 = safety first (ACTIVE FRONT
+above); S-055 closes through steps 3->7 (the O-1 chain, then R-8); S-057 through step 6
+(R-7 both rules); S-063 is confirmed Critical and closes at the delivery layer in step 11;
+S-064 in step 9 (the EXTENDED set); S-065 in step 8 (R-10); S-067 in step 5 (R-11). Twenty-six
+further open rows S-078..S-103 were carried from the log into the ledger the same day, each
+with its disposition. Nothing is closed by decision: a row moves only when its increment
+lands, is gated and reviewed. The ledger is NOT clean until then.
 
 FOLDED IN (DECISION-LOG 2026-08-13, directive 1): pre-launch item B1 is closed as a
 standalone item. Its (a) half — per-block append-only files replacing monolithic
@@ -209,17 +229,26 @@ standing record and are unaffected. DECISION-LOG.md wins over all of them.
 
 PRE-GENESIS BACKLOG (must land before mainnet) — DApp substrate Q2/Q3/Q4 code
 (DECISION-LOG 2026-07-28): governed payload cap; enforce topic routing; accept_anon.
-Also: decide the final CryptoProfile enum value set (currently {MODERN=0, FIPS=1},
-include/determ/chain/params.hpp:122-125). It is GENESIS-FROZEN and invisible to work
-selection until now: crypto_profile is mixed into the genesis hash when non-default
+Also: the CryptoProfile enum value set is DECIDED 2026-09-16 (D18c): {MODERN=0, FIPS=1} is
+the frozen set; nothing to build. Record of why it mattered (params.hpp:122-125): crypto_profile is mixed into the genesis hash when non-default
 (src/chain/genesis.cpp:872-875, reaching compute_genesis_hash at :926), written as
 a u8 by the DGC1 encoder (:532), and FAIL-CLOSED on decode — an unknown value is
 rejected outright (:606-609). Cross-ref Improvements.md §12.5 (whose named subjects
 tactical_civilian / cluster_civilian are TIMING presets that were never implemented —
 zero occurrences in src/ include/ light/ wallet/; see DECISION-LOG 2026-08-13
 directive 4 for the correction).
+Also, DECIDED 2026-09-16 (genesis-level constants and schema, DECISION-LOG 2026-09-16 §B):
+launch configuration = the shipped presets GLOBAL beacon 7/5 + WEB shards 4/3 (D2c);
+epoch_blocks = 100 on beacon and shards (D2d); zeroth_pool_initial = 0 (D8, NEF a no-op);
+inclusion_model DELETED — STAKE_INCLUSION is the only model, min_stake >= 1 validated at
+genesis (D21); sharding_mode becomes a genesis field mixed into the genesis hash (D19b-ii);
+signing_bytes() binds the chain identity (genesis hash || shard id) for every tx type (D23,
+R-17); a tactical/cluster chain is in scope as SHAPE B only (D19c); the launch clause is a
+WRITTEN go/no-go predicate judged over a beta on the frozen surface, drafted for approval in
+Step 6, with the cluster gates + TLA models added to ci_local as its instrument (D2b).
 Also: B4 reserved-discriminator audit (docs/proofs/ReservedDiscriminatorAudit.md, 14 KEEP
-/ 8 DROP; drop 1 of 8 executed 2026-07-09, drops 2-8 unexecuted) — the audit stands, but
+/ 8 DROP; drop 1 of 8 executed 2026-07-09, drops 2-8 unexecuted; R-9 MsgTypes 12/13/14
+recorded KEEP 2026-09-16) — the audit stands, but
 EXECUTION of drops 2-8 is deferred to the LAST pre-genesis act (DECISION-LOG 2026-08-13,
 directive 3): every slot KEPT preserves a post-genesis additive path (that is exactly how v2.15
 Option-B on-chain multisig stays shippable later), every slot DROPPED forecloses one
@@ -300,12 +329,12 @@ either (K-of-K selection is the identity on the SET, so rotation evicts no one, 
 non-liftable exclusion is a self-sustaining permanent halt). Stated over the POOL, not
 m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   THE CHANGE IS A RELOCATION, NOT A REMOVAL (owner correction 2026-08-13). SUPERSESSION
-  UNRESOLVED (audit 2026-09-14): the owner entry that FOLLOWED this correction the same
-  day (DECISION-LOG 5082737) moved slashing back INTO L1 with a lock rule + an M > K
-  genesis invariant; that design was REFUTED at design stage hours later (b5838fb:
-  "the sound options remaining are an L2/economic layer ... or no consequence at all")
-  and no owner entry since restates the position. This block is therefore the last
-  UNREFUTED owner position, not a settled decision — owner item O-1 below. Slashing moves
+  RESOLVED 2026-09-16 (O-1, DECISION-LOG 2026-09-16 D4): option (b) — L2 relocation with a
+  SEPARATE L2 bond; L1 stake is never slashable for equivocation; L1 keeps detection + a
+  capped, deduplicated evidence record as the L2 input; the L2 bond/arbitration policy is
+  v1.1 DApp scope (D22). Also decided (O-1b, D13): the ROUND-1 ABORT STAKE DEDUCTION IS
+  RETIRED — aborts suspend only; and a Phase-2 withholder is suspended, no deduction (R-16,
+  D12). The lock-rule entry (5082737) stands refuted (b5838fb). Slashing moves
   OUT OF L1 INTO L2. L1 keeps DETECTION and the on-chain EVIDENCE RECORD but attaches no
   consensus consequence; the economic consequence is applied at the DApp/L2 layer, which
   may use inputs L1 provably cannot (off-chain corroboration, elapsed time, arbitration,
@@ -316,12 +345,10 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   L2. It must therefore be reliable, capped and queryable, which makes the per-block cap +
   in-block duplicate rejection (see below) a correctness requirement of the L2 design, not
   just a DoS fix.
-  OPEN ARCHITECTURAL QUESTION (owner): what does L2 slash? Either (a) L1 exposes a
-  DApp-callable stake primitive — but then the L2 verdict re-enters consensus and the
-  soundness problem returns; or (b) validators post a SEPARATE L2 bond and L1 stake is
-  never slashable — fully clean, opt-in, and consistent with K-of-K mutual distrust; or
-  (c) L2 consequence is exclusion/reputation at the service layer only. NOT DECIDED.
-  NOT LANDED — the code change was written, FAILED adversarial review (22 findings
+  WHAT L2 SLASHES — DECIDED 2026-09-16: (b), validators post a SEPARATE L2 bond and L1 stake
+  is never slashable (the only variant that does not re-enter consensus). (a) and (c) are
+  not pursued.
+  NOT LANDED YET (sequence step 3) — the code change was written, FAILED adversarial review (22 findings
   confirmed, 1 false alarm) and was REVERTED. The core removal is sound (A1 neutral,
   snapshot round-trips, no state_root leaf changes shape), but landing it additionally
   requires: a per-block CAP + in-block duplicate rejection on equivocation_events (2
@@ -340,24 +367,30 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   and, newly, against S-029's Level-3 block_hash-grinding closure and S-013's economic
   leg. Until the re-derivation lands, do NOT cite the old bound.
 
-DECISION CLOCK — UNAUTHORIZED consensus/wire residuals (DECISION-LOG 2026-08-13,
-directive 5; rows R-4..R-9 added 2026-09-14 from the log entries that asked for them). All three are pre-genesis or never. They are correctly marked NOT
-authorized, but an unauthorized item does not self-surface and THE DECISION HAS A
-DEADLINE even when the work does not. A thread reaching one of these milestones must
-surface the row to the owner before calling the milestone complete.
-  R-1  Hole-1 residual: same-height CROSS-ROUND double-signing satisfies V11
+DECISION CLOCK — consensus/wire residuals (DECISION-LOG 2026-08-13, directive 5; rows
+R-4..R-9 added 2026-09-14; R-10..R-16 added 2026-09-15; R-17 added 2026-09-16). ALL ROWS
+WERE DECIDED BY THE OWNER ON 2026-09-16 (DECISION-LOG 2026-09-16); each row below keeps its
+problem statement as the record and carries its DISPOSITION. A disposition is a decision,
+not a closure: the rule lands only through the sequence in ACTIVE FRONT, with its own
+design gate, adversarial review and falsify-on-mutant gate. A thread implementing a row
+must not widen or narrow the disposition without a new owner entry.
+  R-1  [DECIDED 2026-09-16, D4: no L1 verdict over two signed openings — a same-height pair, cross-round or not, is L2 EVIDENCE requiring corroboration.]
+       Hole-1 residual: same-height CROSS-ROUND double-signing satisfies V11
        (EquivocationSlashing.md §2 Case (c) + PROTOCOL.md §6.1).
        DECIDE BY: the owner's restatement of the slashing position (O-1 below; the
        "finalization-layer design gate" this row named was itself a mis-recording per
        DECISION-LOG f310086), due before B4's DROP execution (the last pre-genesis act).
-  R-2  cumulative_rand is NOT authenticated on the beacon-header path (outside
+  R-2  [DECIDED 2026-09-16, D16: the FIELD binding landed with Q1 (check_header_rand_binding); the two residuals — creators not checked against the derived committee (S-093) and the unconfirmed first header (S-094) — are AUTHORIZED design gates.]
+       cumulative_rand is NOT authenticated on the beacon-header path (outside
        compute_block_digest; check_cumulative_rand is apply-path only).
        DECIDE BY: D3 / S-036 closure (on-chain SHARD_TIP, v2.11) — same code path, and
        the launch posture is EXTENDED.
-  R-3  The self-declared BEACON role in HELLO is unauthenticated.
+  R-3  [DECIDED 2026-09-16, D16: AUTHORIZED design gate — the BEACON role is authenticated (bound to a genesis-pinned or registry-derived beacon set; HELLO signed).]
+       The self-declared BEACON role in HELLO is unauthenticated.
        DECIDE BY: D2 completion, the parser-deletion step — HELLO is wire surface and D2
        is its last wholesale rewrite.
-  R-4  The committee-derivation safety bound 2K > N(h) over the ELIGIBLE POOL (S-054 is
+  R-4  [DECIDED 2026-09-16, D5a: cap at REGISTER/eligibility + assertion at selection, per shard; genesis check 2K > |initial creators|; joint design gate with F-c and R-15 AUTHORIZED (D5b/D11).]
+       The committee-derivation safety bound 2K > N(h) over the ELIGIBLE POOL (S-054 is
        partial: the shipped band guards m_creators, which no accept rule reads; with
        N >= 2K two racing same-height committees finalize conflicting blocks with no
        double-signer — DECISION-LOG 2026-08-14 ddfe877). Two shapes: a genesis-pinned
@@ -371,21 +404,26 @@ surface the row to the owner before calling the milestone complete.
        The small-order-key companion S-068 landed the same day (a REGISTER payload key
        must decode to a large-order point). Gates: test-register-create-only,
        test-register-small-order-key. Kept here as the record.
-  R-6  ROTATE_IDENTITY_KEY / revocability: a new TxType is free at the wire and state
+  R-6  [DECIDED 2026-09-16, D15: ships BEFORE genesis — free TxType, rk: leaf, incumbent-signed, ed_pub only; KR-10 unification additive later.]
+       ROTATE_IDENTITY_KEY / revocability: a new TxType is free at the wire and state
        layer (1c0a61d), but old validators fail closed on unknown types, so first use
        needs every validator upgraded — a coordination requirement, not a migration.
        The open question is whether it ships BEFORE genesis. DECIDE BY: before genesis if
        validators must be able to rotate before an upgrade window exists.
-  R-7  S-057: a rule that non-PQ transaction types carry empty pq_auth, and/or a
+  R-7  [DECIDED 2026-09-16, D9: BOTH rules — empty pq_auth on non-PQ types (PQ exact size) AND a consensus block-byte cap matching the wire limit; lands with R-17 as the last frame changes.]
+       S-057: a rule that non-PQ transaction types carry empty pq_auth, and/or a
        consensus block-byte cap matching the 4 MB wire cap (a valid block must never be
        unrelayable). New accept rules. DECIDE BY: before genesis.
-  R-8  S-055 C0: evidence-payload demotion (design AUTHORIZED, DECISION-LOG 5b2d7fe) is
+  R-8  [DECIDED 2026-09-16, D4: proceeds after the O-1 chain (sequence step 7), then S-089, then the S-090 rebroadcast.]
+       S-055 C0: evidence-payload demotion (design AUTHORIZED, DECISION-LOG 5b2d7fe) is
        sound only once the evidence carries no L1 consequence (7570989) — gated on O-1;
        lands with the per-block cap + in-block duplicate rejection as their own
        increments. DECIDE BY: O-1.
-  R-9  B4 interaction: MsgTypes 12/13/14 KEEP-or-DROP flips the audit's 14/8 to 12/10
+  R-9  [DECIDED 2026-09-16, D20a: KEEP, recorded in ReservedDiscriminatorAudit.md; DROP execution of the other verdicts stays the last pre-genesis act.]
+       B4 interaction: MsgTypes 12/13/14 KEEP-or-DROP flips the audit's 14/8 to 12/10
        under the P1 sharding posture (DECISION-LOG e7c6fc2). DECIDE BY: B4 DROP execution.
-  R-10 S-065: CT proof verification (~2.2 s per aggregated range proof, measured
+  R-10 [DECIDED 2026-09-16, D14: verification OFF the consensus lock + a recomputed-hash verdict cache + a consensus per-block CT cap + a node-local quota; anonymous CT ALLOWED at ingress to match the verifier; cap value proposed by the gate (D24).]
+       S-065: CT proof verification (~2.2 s per aggregated range proof, measured
        2026-09-14) runs under the exclusive consensus lock at validation and at the
        first build of each head; and anonymous CT ingress is blocked only by the S-002
        mirror's anon->TRANSFER-only rule, which is NOT the verifier's rule (the
@@ -393,11 +431,13 @@ surface the row to the owner before calling the milestone complete.
        ingress). Design: verification off the lock (or a CT budget) + settle the anon
        CT ingress rule. DECIDE BY: before any CT deployment; node-local except the
        ingress rule's consistency with the verifier.
-  R-11 S-067: no UNSTAKE is includable (unlock only after DEREGISTER, by which time the
+  R-11 [DECIDED 2026-09-16, D7: UNSTAKE after DEREGISTER at block_index >= unlock_height via a sender-rule exception scoped to UNSTAKE.]
+       S-067: no UNSTAKE is includable (unlock only after DEREGISTER, by which time the
        domain is ineligible and the verifier rejects its every tx) — staked funds are
        unrecoverable through consensus. Accept-rule change (an inactive registrant may
        UNSTAKE). DECIDE BY: before genesis; frozen accept rule.
-  R-12 S-069: under STAKE_INCLUSION (the default) no domain can JOIN after genesis — a
+  R-12 [DECIDED 2026-09-16, D6: OPEN SET — STAKE (and its funding TRANSFER) accepted from a registered-but-unstaked domain; eligibility at the next epoch once stake >= min_stake; the R-4 cap enforced at that point.]
+       S-069: under STAKE_INCLUSION (the default) no domain can JOIN after genesis — a
        fresh registrant holds 0 stake, is therefore absent from the eligible registry,
        and the verifier rejects its STAKE ("tx sender not in registry") before the stake
        can be established (DECISION-LOG 0fe6eda REVERSED 1 states it as a fact; README
@@ -406,7 +446,8 @@ surface the row to the owner before calling the milestone complete.
        misleading) or STAKE from a registered-but-unstaked domain must be accepted (an
        accept-rule change). With V-REG-1 + terminal DEREGISTER the set can only shrink.
        DECIDE BY: before genesis; frozen accept rule.
-  R-13 S-072: the nine unguarded small-order anonymous addresses (an anon address is its
+  R-13 [DECIDED 2026-09-16, D10: REJECT at the verifier (after the signature), mirrored at ingress — burn semantics; wallet warns on send.]
+       S-072: the nine unguarded small-order anonymous addresses (an anon address is its
        own key; the all-zero one is the E1 pool, closed by S-071) are anyone-can-ACT
        identities: every tx type an anonymous sender may submit (TRANSFER, SHIELD,
        UNSHIELD, CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS,
@@ -414,7 +455,8 @@ surface the row to the owner before calling the milestone complete.
        sender to such an address loses — footgun, not theft. Either reject EVERY tx whose
        anonymous sender key is small-order (the anon arm, one rule — burn semantics,
        an accept rule) or document them as anyone-can-act. DECIDE BY: before genesis.
-  R-14 S-073: the shipped NEF grants pool/2 to every first-time REGISTER, unconditionally
+  R-14 [DECIDED 2026-09-16, D8: zeroth_pool_initial = 0 at genesis; NEF a no-op; §8.5 stays design-not-shipped.]
+       S-073: the shipped NEF grants pool/2 to every first-time REGISTER, unconditionally
        — no lottery, no per-block cap, no balance or stake floor (a fee-0 REGISTER needs
        none), so ~log2(pool) fresh names empty the Zeroth pool at zero cost. Under
        DOMAIN_INCLUSION the grants are spendable (theft of protocol funds); under
@@ -424,7 +466,8 @@ surface the row to the owner before calling the milestone complete.
        cap, gate NEF on a stake/balance floor, or set zeroth_pool_initial = 0 at
        genesis (E1 off). DECIDE BY: before genesis (a genesis with a funded pool and the
        shipped rule is a giveaway).
-  R-15 S-076: two silent committee members halt the height permanently at every K (the
+  R-15 [DECIDED 2026-09-16, D11: DESIGN, not accept — tolerate up to floor(K/3) silent members; beyond that a CERTIFIED formation failure (>= ceil(2K/3) eligible-pool signatures, committed on chain, folded into the seed) re-draws the committee at the same height; no halt; in the R-4 + F-c design gate.]
+       S-076: two silent committee members halt the height permanently at every K (the
        abort quorum max(2, K-1) is unreachable with K-2 live claimers; the valve re-derives
        the same committee). This — not the committee-selection cadence — is the
        availability lever (design analysis 2026-09-15: per-block selection buys a few
@@ -433,31 +476,64 @@ surface the row to the owner before calling the milestone complete.
        when N(h) > K (accept rules; the S-044 cascade/attribution trade-off), or accept
        the crash-stop bound and say so. The time-bucket / round-marker family is
        REFUTED — do not revive. DECIDE BY: before genesis; frozen accept rule.
-  R-16 S-077: the last Phase-2 revealer can reject one cumulative_rand sample per height
+  R-16 [DECIDED 2026-09-16, D12: the withholder is SUSPENDED for the existing window, no deduction.]
+       S-077: the last Phase-2 revealer can reject one cumulative_rand sample per height
        at zero cost (Phase-2 aborts neither slash nor suspend). Rejection sampling, not
        choice (S-074 removed the assembler's choice). Either a cost for Phase-2 silence
        (revisits the S-044-era "no punishment for Phase-2 timing skew") or accept and
        document. DECIDE BY: before genesis if a cost is wanted (apply-path rule).
+  R-17 [DECIDED 2026-09-16, D23] signing_bytes() binds NO chain identity and no expiry
+       (src/chain/block.cpp:20-32): a transaction is valid on any chain where (from, nonce)
+       matches — testnet-to-mainnet and cross-shard replay (S-103). Decision: bind the
+       GENESIS HASH || SHARD ID for every tx type; no expiry field (a released tx still cannot
+       be cancelled; the outbox's replace is the recourse). Lands with R-7 (step 6).
   IF UNDECIDED AT GENESIS the default becomes "never", PERMANENTLY, under no-migrations.
-  No decision is not a neutral state.
+  No decision is not a neutral state. As of 2026-09-16 no row is undecided.
 
-OWNER DECISIONS PENDING, non-consensus (audit 2026-09-14) — none of these is a code
-change; each is one log entry:
-  O-1  The standing slashing position after b5838fb: L2 relocation (option (b), a
+OWNER DECISIONS — ALL DECIDED 2026-09-16 (DECISION-LOG 2026-09-16); the problem statements
+are kept as the record:
+  O-1  DECIDED: option (b) — L2 relocation with a separate L2 bond; L1 stake never slashable;
+       plus O-1b: the round-1 abort deduction retired (D4, D13).
+       The standing slashing position after b5838fb: L2 relocation (option (b), a
        separate L2 bond with L1 stake never slashable, is the only one of (a)/(b)/(c)
        that does not re-enter consensus), or no consequence at all. Gates R-1, R-8 and
        the S-011/S-013/S-029/BFTSafety T-5.1 re-derivations.
-  O-2  Ratify or narrow the 2026-08-13 "green is not proof" doctrine (352fc52 was
+  O-2  DECIDED: RATIFIED as binding (D18b).
+       Ratify or narrow the 2026-08-13 "green is not proof" doctrine (352fc52 was
        recorded "at the direction of the session orchestrator ... flagged for owner
        review"; it is applied as binding above).
-  O-3  Order the LIVE CRITICALS (S-055..S-063, SECURITY.md) against the D2 front. The log
+  O-3  DECIDED: safety first, D2 wire remainder in parallel (D1; ACTIVE FRONT above).
+       Order the LIVE CRITICALS (S-055..S-063, SECURITY.md) against the D2 front. The log
        recommends the halts first (84c1447, 3dbe5f2, ddf93eb); ACTIVE FRONT still says D2.
-  O-4  The no-cryptocurrency scope reduction (evaluated 0fe6eda, superseding 8b86d39) and
+  O-4  DECIDED: REJECTED — value, fees, stake economics and CT stay as designed (D3);
+       v2.22 + v2.24 ship together; S-083 closes before CT is enabled anywhere.
+       The no-cryptocurrency scope reduction (evaluated 0fe6eda, superseding 8b86d39) and
        its DIRECT CONFLICT with the no-backdoor constraint (6265d34 hazard 2): adopt,
        reject, or scope.
-  O-5  epoch_blocks: the committee-selection cadence is genesis-frozen. A per-block
+  O-5  DECIDED: E >= 2 on beacon and shards; E = 100 (D17, D2d); no witness-path change.
+       epoch_blocks: the committee-selection cadence is genesis-frozen. A per-block
        cadence (E = 1) on SINGLE / cluster deployments buys the targeting window and
        reward fairness, not availability; a DYNAMIC cadence computed from network state
        cannot improve availability either (no committed input moves while a height is
        stalled) and degenerates to the constant 1 wherever it matters (design analysis
        2026-09-15 §13). Pick E at genesis; nothing to build.
+
+AUTHORIZED DESIGN GATES (DECISION-LOG 2026-09-16) — design-and-prove, independent adversarial
+review, THEN implementation; each its own increment; numeric caps proposed by the gate with
+measured evidence and approved by the owner at review (D24):
+  G1  R-4 + F-c + R-15 (+R-16): the pool bound 2K > N(h) at two layers; the certified
+      formation-failure re-draw (>= ceil(2K/3) pool signatures, seed fold, attested-silent
+      exclusion); Phase-2 and round-1 aborts suspend only. Closes S-054, S-076, S-077, S-086, S-087.
+  G2  The V-REG-1 companions: D6 join rule (S-069), D7 exit rule (S-067), D15 rotation (R-6),
+      D10 small-order anonymous senders (S-072).
+  G3  D9 + D23: empty pq_auth on non-PQ types, the block-byte cap, chain identity in
+      signing_bytes (S-057, S-103); S-101 presented with it for approval.
+  G4  The O-1 chain: forfeiture removal, evidence cap + in-block dedup, abort-deduction
+      retirement, re-derivations; then R-8 (S-055), S-089, S-090.
+  G5  D14: CT verification off the lock, cache, per-block CT cap, anon-CT ingress (S-065, S-083).
+  G6  The EXTENDED closure set (D16): S-093, S-094, R-3, S-064/B3.4, S-088, S-036, S-081, S-096;
+      D19b-ii sharding_mode genesis pin lands with the first genesis-hash-changing increment here.
+NODE-/CLIENT-LOCAL BACKLOG (D19a, no accept-rule change; each its own gate + review), by
+severity: S-078, S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
+S-091 (with the D2 src-side keyfile increment), S-063 (delivery layer, D18a). S-102 is
+ADJUDICATED in step 3 before R-8 lands.
