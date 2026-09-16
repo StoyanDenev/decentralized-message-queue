@@ -95,7 +95,7 @@ struct Transaction {
                               //   §13 for PARAM_CHANGE, §14 for MERGE_EVENT,
                               //   §14.5 for COMPOSABLE_BATCH / DAPP_REGISTER / DAPP_CALL)
     Signature sig;            // Ed25519 over signing_bytes()
-    Hash      hash;           // = compute_hash() = SHA256(signing_bytes() || sig)
+    Hash      hash;           // = compute_hash() = SHA256(signing_bytes()) — content-derived; sig NOT included
 };
 ```
 
@@ -108,7 +108,7 @@ type (1 byte) || from || to || amount (u64) || fee (u64) || nonce (u64) || paylo
 The signature `sig` is `Ed25519_sign(priv_seed, signing_bytes())`.
 
 ### 3.2 `compute_hash()`
-SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
+SHA-256 of `signing_bytes()` alone (`src/chain/block.cpp:34-37`). The signature is NOT part of the hash: the hash is a content identity — the same `(type, from, to, amount, fee, nonce, payload)` always hashes the same, whichever valid signature carries it. Nodes recompute it on every ingress (`submit_tx`, gossip `on_tx`) and reject a mismatch, so the wire `hash` field is never trusted. (Corrected 2026-09-16 — earlier revisions of this section said `|| sig`.)
 
 ### 3.3 Apply rules
 - Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped (no error, but the tx is not retried — the producer would need to wait for the gap-filling tx to land first, then re-submit).
@@ -127,7 +127,7 @@ S-028 case-normalization rules apply at the RPC ingress layer (see §10.2 `submi
 
 **Protocol guarantees (integrity only):**
 - The payload bytes are part of `signing_bytes()` (§3.1) and are therefore covered by the sender's Ed25519 signature.
-- The tx hash binds the payload (`compute_hash()` is taken over `signing_bytes() || sig`), so the block hash transitively binds it.
+- The tx hash binds the payload (`compute_hash()` is taken over `signing_bytes()`, which includes the payload), so the block hash transitively binds it.
 - The chain stores the payload verbatim in the tx record; it is retrievable via `show-tx`.
 - The payload does not affect balances, fees, nonces, or the supply invariant (§A1). It is opaque to the apply path.
 
