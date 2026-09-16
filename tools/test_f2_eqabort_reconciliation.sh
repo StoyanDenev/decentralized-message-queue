@@ -164,18 +164,28 @@ print('  submit(port $port):', buf.decode().strip())
 done
 
 echo
-echo "=== 7. Poll up to 60s for the equivocation to be baked + slashed under F2 ==="
-STAKE_POST="-"; HEIGHT_POST="$HEIGHT"
+echo "=== 7. Poll up to 60s for the equivocation to be baked into a block under F2 ==="
+# D4 (2026-09-16): the baked EquivocationEvent is an evidence record with no L1
+# consequence — node1's stake must stay at its genesis value (1000; an abort
+# deduction against node1 in the window would move it and fail the check).
+STAKE_POST="-"; HEIGHT_POST="$HEIGHT"; EQUIV_BLOCK=""
 for attempt in $(seq 1 120); do
   sleep 0.5
-  STAKE_POST=$($DETERM stake_info node1 --rpc-port 8771 2>/dev/null \
-                | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))" 2>/dev/null)
   HEIGHT_POST=$($DETERM status --rpc-port 8771 2>/dev/null \
                  | python -c "import sys,json; print(json.load(sys.stdin).get('height','?'))" 2>/dev/null)
-  if [ "$STAKE_POST" = "0" ]; then echo "  slashed after attempt $attempt (height=$HEIGHT_POST)"; break; fi
+  for ((i = HEIGHT; i < HEIGHT_POST; i++)); do
+    HAS=$($DETERM show-block $i --rpc-port 8771 2>/dev/null \
+           | python -c "import sys,json
+try: print('y' if json.load(sys.stdin).get('equivocation_events') else 'n')
+except: print('n')" 2>/dev/null)
+    if [ "$HAS" = "y" ]; then EQUIV_BLOCK=$i; break; fi
+  done
+  if [ -n "$EQUIV_BLOCK" ]; then echo "  evidence baked in block #$EQUIV_BLOCK after attempt $attempt (height=$HEIGHT_POST)"; break; fi
 done
-echo "  node1 stake post: $STAKE_POST (expected 0)"
-[ "$STAKE_POST" = "0" ] || { echo "  FAIL: equivocation not slashed under F2 (stake=$STAKE_POST)"; PASS=false; }
+STAKE_POST=$($DETERM stake_info node1 --rpc-port 8771 2>/dev/null \
+              | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))" 2>/dev/null)
+echo "  node1 stake post: $STAKE_POST (expected 1000 — unchanged, D4)"
+[ "$STAKE_POST" = "1000" ] || { echo "  FAIL: node1 stake moved on equivocation evidence under F2 (stake=$STAKE_POST; D4 forbids any L1 consequence)"; PASS=false; }
 
 echo
 echo "=== 8. (A) Assert NO node ever rejected a block with 'invalid block: F2:' ==="
@@ -190,14 +200,6 @@ fi
 
 echo
 echo "=== 9. (B) Assert the equivocation landed in a block ==="
-EQUIV_BLOCK=""
-for ((i = HEIGHT; i <= HEIGHT_POST; i++)); do
-  HAS=$($DETERM show-block $i --rpc-port 8771 2>/dev/null \
-         | python -c "import sys,json
-try: print('y' if json.load(sys.stdin).get('equivocation_events') else 'n')
-except: print('n')" 2>/dev/null)
-  if [ "$HAS" = "y" ]; then EQUIV_BLOCK=$i; break; fi
-done
 if [ -n "$EQUIV_BLOCK" ]; then
   echo "  block #$EQUIV_BLOCK carries equivocation_events (reconciled + digest-bound)"
 else
@@ -210,7 +212,7 @@ if $PASS; then
   # Detail lines ABOVE the terminal marker; explicit exit 0 so the marker is
   # the final output line (run_all.sh greps the last 10 lines for ^\s*PASS:).
   echo "  ok: plain F2 blocks (zero-root views) accepted (no stall)"
-  echo "  ok: equivocation reconciled into block #$EQUIV_BLOCK + slashed"
+  echo "  ok: equivocation reconciled into block #$EQUIV_BLOCK as an evidence record (stake unchanged, D4)"
   echo "  ok: zero 'invalid block: F2:' rejections across the committee"
   echo "  PASS: test_f2_eqabort_reconciliation"
   exit 0

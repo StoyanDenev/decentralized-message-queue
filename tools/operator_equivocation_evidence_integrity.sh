@@ -4,12 +4,13 @@
 # blocks, plus verification-key resolvability for each equivocator.
 #
 # THE OPERATOR QUESTION
-#   "Every EquivocationEvent that landed on this chain forfeited a
-#    validator's ENTIRE stake. Is each of those on-chain slashing
-#    proofs STRUCTURALLY WELL-FORMED — two DIFFERENT digests, two
-#    DIFFERENT signatures, all hex fields the right length — and can I
-#    still resolve the equivocator's Ed25519 verification key to
-#    re-check the proof myself?"
+#   "Every EquivocationEvent that landed on this chain is an on-chain
+#    double-sign evidence record (no L1 stake or registry consequence
+#    since 2026-09-16, DECISION-LOG D4 — the record feeds the L2 policy).
+#    Is each of those proofs STRUCTURALLY WELL-FORMED — two DIFFERENT
+#    digests, two DIFFERENT signatures, all hex fields the right length —
+#    and can I still resolve the equivocator's Ed25519 verification key
+#    to re-check the proof myself?"
 #
 # This mirrors the OFFLINE-CHECKABLE subset of the node's apply-time
 # admission gate, src/node/validator.cpp::check_equivocation_events
@@ -386,11 +387,11 @@ for h in headers:
             viol.append("I5")
             n_i5 += 1
 
-        # R1: verification-key resolvability (maps to validator.cpp:334
-        # "equivocator not in registry"). NOT an anomaly — a slashed
-        # equivocator is deactivated (chain.cpp full-stake forfeit +
-        # registry deactivation), so a historical event legitimately
-        # outlives the registry entry that once carried its key.
+        # R1: verification-key resolvability (maps to validator.cpp
+        # "equivocator not in registry"). NOT an anomaly — the record
+        # carries no consequence (D4), but the equivocator may since have
+        # DEREGISTERed, so a historical event can legitimately outlive the
+        # registry entry that once carried its key.
         key_present = offender in keymap and keymap.get(offender)
         if not key_present:
             n_r1 += 1

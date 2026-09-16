@@ -435,12 +435,11 @@ struct AbortEvent {
 Hash canonical_abort_event_hash(const AbortEvent& ae, const AbortEvent* prev,
                                 const Hash& committee_seed, uint64_t block_index);
 
-// rev.8 follow-on: full equivocation slashing. An EquivocationEvent is
-// proof that `equivocator` double-signed at ONE height with the same
-// Ed25519 key. When baked into a finalized block, the equivocator's full
-// staked balance is forfeited on apply (much harsher than the
-// SUSPENSION_SLASH economic disincentive — equivocation is a deliberate
-// double-sign attack, not just absence).
+// rev.8 follow-on: equivocation EVIDENCE. An EquivocationEvent is proof
+// that `equivocator` double-signed at ONE height with the same Ed25519
+// key. Baked into a finalized block it is an on-chain evidence record for
+// the L2 policy and carries NO L1 consequence — apply touches neither
+// stake nor registry (owner decision 2026-09-16, DECISION-LOG D4).
 //
 // TWO detection families feed this one event channel, discriminated by
 // `kind`:

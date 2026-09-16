@@ -13,13 +13,14 @@
 #   1. 3-node donor chain (M=K=3, F2 active from genesis) advances.
 #   2. A synthesized equivocation is submitted to all donors -> baked into a block
 #      (the block carries reconciled equivocation_events + the per-creator eq view
-#      lists) -> apply slashes the equivocator's stake to 0.
+#      lists) -> apply records NOTHING from it (D4, 2026-09-16: an evidence
+#      record with no L1 consequence — donor1 keeps its stake).
 #   3. Snapshot donor1; freeze its state_root + head_hash from the snapshot file.
 #   4. Stop donors; boot a bare receiver (snapshot_path only, no genesis, no peers).
 #   5. Assert the receiver boots with NO "state_root mismatch" (the S-033 gate
-#      passes -> the eq-bearing tail blocks + slashed state restored coherently),
-#      its state_root EXACTLY matches the snapshot's, and the slash (stake 0)
-#      survived the restore.
+#      passes -> the eq-bearing tail blocks + state restored coherently), its
+#      state_root EXACTLY matches the snapshot's, and the unchanged stake
+#      (donor1 = 1000) survived the restore.
 #
 # Run from repo root: bash tools/test_f2_eqabort_snapshot.sh
 
@@ -161,17 +162,30 @@ print('  submit(port $port):', buf.decode().strip())
 done
 
 echo
-echo "=== 5. Wait for the equivocation to be baked + slashed (donor1 stake -> 0) ==="
-DSTAKE="-"
+echo "=== 5. Wait for the equivocation to be baked into a block (D4: stake stays 1000) ==="
+EQUIV_BLOCK=""
 for _ in $(seq 1 120); do
   sleep 0.5
-  DSTAKE=$($DETERM stake_info donor1 --rpc-port 8771 2>/dev/null \
-            | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))" 2>/dev/null)
-  if [ "$DSTAKE" = "0" ]; then break; fi
+  DH2=$($DETERM status --rpc-port 8771 2>/dev/null \
+         | python -c "import sys,json
+try: print(json.load(sys.stdin).get('height',0))
+except: print(0)")
+  for ((i = DH; i < DH2; i++)); do
+    HAS=$($DETERM show-block $i --rpc-port 8771 2>/dev/null \
+           | python -c "import sys,json
+try: print('y' if json.load(sys.stdin).get('equivocation_events') else 'n')
+except: print('n')" 2>/dev/null)
+    if [ "$HAS" = "y" ]; then EQUIV_BLOCK=$i; break; fi
+  done
+  if [ -n "$EQUIV_BLOCK" ]; then break; fi
 done
-echo "  donor1 stake post-slash: $DSTAKE (expected 0)"
-[ "$DSTAKE" = "0" ] && assert true "donor: F2 equivocation reconciled + slashed (stake 0)" \
-  || assert false "donor: equivocation not slashed under F2 (stake=$DSTAKE)"
+DSTAKE=$($DETERM stake_info donor1 --rpc-port 8771 2>/dev/null \
+          | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))" 2>/dev/null)
+echo "  evidence block: #${EQUIV_BLOCK:-none}; donor1 stake post-evidence: $DSTAKE (expected 1000 — unchanged)"
+[ -n "$EQUIV_BLOCK" ] && assert true "donor: F2 equivocation reconciled into block #$EQUIV_BLOCK" \
+  || assert false "donor: no block carries the equivocation event under F2"
+[ "$DSTAKE" = "1000" ] && assert true "donor: stake unchanged by the evidence record (D4)" \
+  || assert false "donor: stake moved on equivocation evidence (stake=$DSTAKE; D4 forbids any L1 consequence)"
 
 echo
 echo "=== 6. Create snapshot from donor1; freeze state_root + head_hash ==="
@@ -258,17 +272,17 @@ echo "  receiver head_hash:  ${RECV_HEAD:0:24}..."
   && assert true "receiver head_hash matches snapshot (eq-bearing tail block round-tripped)" \
   || assert false "receiver head_hash mismatch (recv=${RECV_HEAD:0:24}, snap=${SNAP_HEAD:0:24})"
 [ -n "$RECV_SR" ] && [ "$RECV_SR" = "$SNAP_SR" ] \
-  && assert true "receiver state_root EXACTLY matches snapshot (S-033 gate over the post-slash state)" \
+  && assert true "receiver state_root EXACTLY matches snapshot (S-033 gate over the post-evidence state)" \
   || assert false "receiver state_root mismatch (recv=${RECV_SR:0:24}, snap=${SNAP_SR:0:24})"
 
 echo
-echo "=== 10. Verify the slash survived the restore (donor1 stake == 0 on receiver) ==="
+echo "=== 10. Verify the post-evidence state survived the restore (donor1 stake == 1000 on receiver) ==="
 RECV_STAKE=$($DETERM stake_info donor1 --rpc-port 8799 2>/dev/null \
               | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))" 2>/dev/null || echo "-")
-echo "  receiver: donor1 stake = $RECV_STAKE (expected 0)"
-[ "$RECV_STAKE" = "0" ] \
-  && assert true "receiver: slashed stake (donor1=0) survived snapshot restore" \
-  || assert false "receiver: donor1 stake '$RECV_STAKE' (expected 0) — eq evidence did not restore coherently"
+echo "  receiver: donor1 stake = $RECV_STAKE (expected 1000 — unchanged, D4)"
+[ "$RECV_STAKE" = "1000" ] && [ "$RECV_STAKE" = "$DSTAKE" ] \
+  && assert true "receiver: unchanged stake (donor1=1000) survived snapshot restore" \
+  || assert false "receiver: donor1 stake '$RECV_STAKE' (expected 1000) — eq-bearing tail did not restore coherently"
 
 echo
 echo "=== Test summary ==="

@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
-# S-035 Option 1 seed — multi-equivocation edge cases beyond
-# test-equivocation-apply.
+# Multi-equivocation edge cases beyond test-equivocation-apply, under the
+# 2026-09-16 rule (DECISION-LOG D4): an EquivocationEvent moves NO L1 state.
 #
 # Covers:
-#   - Two distinct equivocators in same block (both forfeit, both
-#     deregistered; A1 counts each forfeit)
-#   - Same equivocator twice in same block (first forfeits stake;
-#     second no-op on stake — stake already 0; accumulated_slashed
-#     only counts the first forfeit)
-#   - Equivocator with NO stake (DOMAIN_INCLUSION mode or post-UNSTAKE):
-#     no forfeit possible, but registry IS deactivated (the
-#     deregistration mechanism, not the stake mechanism, removes them)
-#   - Pre-deactivated equivocator: inactive_from OVERRIDDEN to
-#     b.index+1 (more recent override wins, prevents re-registration
-#     during grace window via attack)
-#   - Determinism: two chains see same multi-equivocation → same root
+#   - Two distinct equivocators in the same block (neither stake nor
+#     registry entry moves; accumulated_slashed stays 0)
+#   - Same equivocator twice in the same block (two records; nothing moves)
+#   - Equivocator with NO stake, at a ZERO stake floor (registry entry NOT
+#     deactivated; a consequence keyed on min_stake == 0 — mutant M8 — goes RED)
+#   - Equivocator inside its DEREGISTER unlock window: the DEREGISTER's
+#     inactive_from is NOT overridden and the pending-unlock stake is NOT
+#     touched — the inverted "anti-dodge" scenario; mutant M6 (a consequence
+#     that fires only inside the window) goes RED here and nowhere else
+#   - Determinism: two chains see the same multi-equivocation → same root
 #
-# ~14 assertions across five scenarios.
+# ~16 assertions across five scenarios.
 #
 # Run from repo root: bash tools/test_equivocation_multi.sh
 set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== multi-equivocation edge cases (dual mechanism: forfeit + deregister) ==="
+echo "=== multi-equivocation edge cases (D4: evidence records move no L1 state) ==="
 OUT=$($DETERM test-equivocation-multi 2>&1)
 echo "$OUT"
 

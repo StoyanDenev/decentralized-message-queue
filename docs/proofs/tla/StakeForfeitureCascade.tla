@@ -1,4 +1,11 @@
 --------------------------- MODULE StakeForfeitureCascade ---------------------------
+\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
+\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
+\* registry deactivation this model treats as shipped apply-path behaviour were
+\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
+\* evidence record only. This model is pending re-derivation in step 3c of the
+\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
+\* the authority.
 (*
 FB21 — TLA+ specification of the STAKE-forfeiture CASCADE state machine.
 Where FB8 (StakeLifecycle) isolates the happy-path lifecycle

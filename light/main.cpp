@@ -768,7 +768,7 @@ void print_usage() {
         "      OFFLINE re-verification of an EquivocationEvent (the FA6\n"
         "      double-sign proof carried by the EQUIVOCATION_EVIDENCE gossip\n"
         "      message + the submit_equivocation RPC). Re-runs the daemon's V11\n"
-        "      slash gate (BlockValidator::check_equivocation_events)\n"
+        "      evidence gate (BlockValidator::check_equivocation_events)\n"
         "      INDEPENDENTLY (EQV-height-bind + EQV-gen-bind form): kind <= 1,\n"
         "      index_a == index_b == block_index, gen_a == gen_b,\n"
         "      body_root_a != body_root_b, sig_a !=\n"
@@ -780,7 +780,8 @@ void print_usage() {
         "      the event's own `equivocator` domain (the key MUST come from a\n"
         "      source YOU trust, never from the event). All conditions holding\n"
         "      is cryptographic proof the signer double-signed at one height —\n"
-        "      EQUIVOCATION-PROVEN (exit 0), a slash is justified. Any\n"
+        "      EQUIVOCATION-PROVEN (exit 0): the record is valid L2-policy\n"
+        "      input (L1 applies NO stake or registry consequence — D4). Any\n"
         "      condition failing (unknown kind, mismatched heights, equal\n"
         "      roots, equal sigs, or a sig that does not verify) is\n"
         "      NOT-EQUIVOCATION (exit 3): the evidence does NOT prove a\n"
@@ -7579,8 +7580,8 @@ int cmd_verify_account(int argc, char** argv) {
 // EquivocationEvent::to_json / carried by the EQUIVOCATION_EVIDENCE gossip
 // message + the submit_equivocation RPC) and the equivocator's registered
 // Ed25519 public key, it INDEPENDENTLY re-runs the V11 check the daemon's
-// BlockValidator::check_equivocation_events applies before a slash is
-// finalized (EQV-height-bind + EQV-gen-bind form — the event carries per-side
+// BlockValidator::check_equivocation_events applies before the record is
+// baked (EQV-height-bind + EQV-gen-bind form — the event carries per-side
 // OPENINGS (index, gen, body_root), and each signed digest is DERIVED as
 // SHA256(TAG || index u64 BE || gen u64 BE || body_root) with
 // TAG = "DTM-BLKDIG-v3" for kind 0 / "DTM-CONTRIB-v3" for kind 1):
@@ -7609,7 +7610,8 @@ int cmd_verify_account(int argc, char** argv) {
 // result in that case — its Case (c) residual is open, and closing it needs a
 // real per-height round counter (owner decision, DECISION-LOG). Operators:
 // treat PROVEN as "two same-height same-gen signatures exist", and corroborate
-// before acting on a slash.
+// before acting on it (L1 itself applies no consequence — D4, 2026-09-16; the
+// record is input to the L2 policy).
 //
 // The public key is supplied directly via --pubkey <64-hex> (the
 // equivocator's registered ed_pub) OR resolved from a committee/genesis
@@ -7620,8 +7622,8 @@ int cmd_verify_account(int argc, char** argv) {
 // carries the key.
 //
 // Verdict discipline mirrors verify-tx-inclusion / decode-wire:
-//   EQUIVOCATION-PROVEN → exit 0 (all V11 conditions hold; a slash
-//                         against this signer is cryptographically justified)
+//   EQUIVOCATION-PROVEN → exit 0 (all V11 conditions hold; the record is a
+//                         cryptographically valid double-sign proof)
 //   NOT-EQUIVOCATION    → exit 3 (a V11 condition fails: unknown kind,
 //                         mismatched heights, mismatched round generations,
 //                         equal body roots, equal sigs,
@@ -7632,7 +7634,7 @@ int cmd_verify_account(int argc, char** argv) {
 //
 // This is the read-side counterpart to the daemon's detection +
 // apply path: an auditor, governance script, or counter-party can verify a
-// circulating EquivocationEvent BEFORE trusting that a slash was warranted,
+// circulating EquivocationEvent BEFORE trusting that it proves a double-sign,
 // without running a full node.
 enum class EquivVerdict { PROVEN, NOT_EQUIVOCATION };
 
@@ -7816,8 +7818,8 @@ int cmd_verify_equivocation(int argc, char** argv) {
                 std::cout << "  reason:       " << reason << "\n";
         }
 
-        // EQUIVOCATION-PROVEN → exit 0 (a slash here is cryptographically
-        // justified). NOT-EQUIVOCATION → exit 3 (sound refusal to assert a
+        // EQUIVOCATION-PROVEN → exit 0 (a cryptographically valid double-sign
+        // proof). NOT-EQUIVOCATION → exit 3 (sound refusal to assert a
         // double-sign; fail-closed). A throw above (bad hex / missing field /
         // I/O) lands in the catch as exit 1.
         return proven ? 0 : 3;

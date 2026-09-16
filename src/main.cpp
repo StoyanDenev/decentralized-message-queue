@@ -902,10 +902,10 @@ Additional in-process tests:
                                               SUSPENSION_SLASH stake
                                               deduction, S-032 abort_records
                                               cache, A1 accumulated_slashed
-  determ test-equivocation-apply              EquivocationEvent apply — FA6
-                                              full stake forfeit +
-                                              deregistration (inactive_from)
-                                              + A1 invariant
+  determ test-equivocation-apply              EquivocationEvent apply — an
+                                              evidence record with NO L1
+                                              consequence (D4): stake,
+                                              registry, state_root untouched
   determ test-eligibility-floor               S-051 Option-B eligibility
                                               floor — fill-to-K ascending
                                               lift order, dormancy, k=0
@@ -1139,11 +1139,11 @@ Additional in-process tests:
                                               equals the injected virtual time —
                                               and tracks it when advanced
   determ test-fa-equivocation-trace           FA harness (real engine): seeded
-                                              multi-block Byzantine TRACE of
-                                              equivocation slashing —
-                                              slash-once/idempotence/A1/
-                                              determinism (closes a slice of
-                                              F-1/FA4; determ-dsf untouched)
+                                              multi-block TRACE of equivocation
+                                              EVIDENCE — no state moves (D4),
+                                              state_root == event-free twin,
+                                              A1, determinism (closes a slice
+                                              of F-1/FA4; determ-dsf untouched)
   determ test-fa-abort-trace                  FA harness (real engine): seeded
                                               multi-block Byzantine TRACE of
                                               Phase-1 AbortEvents — exact
@@ -4054,7 +4054,7 @@ static int cmd_check_fork(int argc, char** argv) {
 //     genesis_total:        N
 //     +accumulated_subsidy: N    (E1/E3/E4 mint history)
 //     +accumulated_inbound: N    (cross-shard credits received)
-//     -accumulated_slashed: N    (suspension + equivocation forfeits)
+//     -accumulated_slashed: N    (abort suspension deductions)
 //     -accumulated_outbound: N   (cross-shard credits sent)
 //     expected_total:       N    (= genesis + subsidy + inbound
 //                                   - slashed - outbound)
@@ -29939,16 +29939,16 @@ int main(int argc, char** argv) {
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // S-035 Option 1: apply-side handling of EquivocationEvent (FA6
-    // full equivocation slashing + deregistration). Each event baked
-    // into a finalized block (validator already verified the two-sig
-    // proof) (a) forfeits the equivocator's ENTIRE staked balance and
-    // (b) marks their registry entry inactive_from = b.index + 1.
-    //
-    // The dual mechanism unifies STAKE_INCLUSION and DOMAIN_INCLUSION:
-    //   - STAKE_INCLUSION: stake → 0 makes them ineligible.
-    //   - DOMAIN_INCLUSION: stake is already 0, so the deregistration
-    //                       is what actually removes them.
+    // D4 (owner decision 2026-09-16, O-1 option (b)): an EquivocationEvent
+    // baked into a finalized block is an on-chain EVIDENCE RECORD with NO L1
+    // consequence. This gate asserts, at the apply layer where the rule
+    // lives, that apply reads NOTHING from the event: stake, registry,
+    // accumulated_slashed, live supply and the ENTIRE committed state
+    // (state_root + abort_records) are identical to the same block without
+    // the event — while the record itself persists in the block (positive
+    // control). The former branch (full forfeit + inactive_from = b.index+1)
+    // cost an honest validator its stake on a valve/re-round same-height pair
+    // (log 2026-08-12) and made the R-8 digest demotion unsound (7570989).
     if (cmd == "test-equivocation-apply") {
         using namespace determ;
         using namespace determ::chain;
@@ -29970,7 +29970,9 @@ int main(int argc, char** argv) {
         alice_bal.domain = "alice"; alice_bal.balance = 1000;
         cfg.initial_balances = {alice_bal};
 
-        // Helper: build a minimal valid EquivocationEvent for `target`.
+        // Helper: build a minimal EquivocationEvent for `target`. sig_a /
+        // sig_b stay default: apply never re-verifies (the validator's job —
+        // this gate tests apply semantics only).
         auto make_ev = [](const std::string& target) {
             EquivocationEvent ev;
             ev.equivocator = target;
@@ -29981,123 +29983,96 @@ int main(int argc, char** argv) {
                 ev.body_root_a[i] = uint8_t(0xAA);
             for (size_t i = 0; i < ev.body_root_b.size(); ++i)
                 ev.body_root_b[i] = uint8_t(0xBB);
-            // sig_a + sig_b default-constructed; apply doesn't re-verify
-            // (validator's job — we test apply semantics only).
             return ev;
         };
+        // Helper: block 1 on `c`, optionally carrying one event.
+        auto block1 = [&](const Chain& c, bool with_event, const std::string& target) {
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            if (with_event) b.equivocation_events.push_back(make_ev(target));
+            return b;
+        };
 
-        // === Full stake forfeiture ===
-
-        // 1. Apply EquivocationEvent → equivocator's entire stake → 0.
+        // === 1. No stake, registry or supply consequence ===
         {
             Chain c;
             c.append(make_genesis_block(cfg));
-            check(c.stake("alice") == 500,
-                  "baseline: alice stake == 500");
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.equivocation_events.push_back(make_ev("alice"));
-            c.append(b1);
-
-            check(c.stake("alice") == 0,
-                  "equivocation: alice stake → 0 (full forfeit)");
-        }
-
-        // === Registry deactivation ===
-
-        // 2. Apply EquivocationEvent → registry inactive_from = b.index+1.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-            auto reg_before = c.registrant("alice");
-            check(reg_before.has_value()
-                  && reg_before->inactive_from == UINT64_MAX,
+            const uint64_t supply0 = c.live_total_supply();   // 1000 bal + 500 stake
+            check(c.stake("alice") == 500, "baseline: alice stake == 500");
+            auto reg0 = c.registrant("alice");
+            check(reg0.has_value() && reg0->inactive_from == UINT64_MAX,
                   "baseline: alice registry active (inactive_from sentinel)");
 
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.equivocation_events.push_back(make_ev("alice"));
-            c.append(b1);
+            c.append(block1(c, true, "alice"));
 
-            auto reg_after = c.registrant("alice");
-            check(reg_after.has_value()
-                  && reg_after->inactive_from == 2,  // b.index+1 == 1+1
-                  "equivocation: registry inactive_from == b.index+1 (== 2)");
+            check(c.stake("alice") == 500,
+                  "D4: alice stake UNCHANGED (500) after an EquivocationEvent");
+            auto reg1 = c.registrant("alice");
+            check(reg1.has_value() && reg1->inactive_from == UINT64_MAX,
+                  "D4: alice registry UNCHANGED (still the inactive_from sentinel)");
+            check(c.accumulated_slashed() == 0,
+                  "D4: accumulated_slashed stays 0 (nothing forfeited)");
+            check(c.live_total_supply() == supply0,
+                  "D4: live supply unchanged");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after the event");
         }
 
-        // === Non-existent equivocator: no crash ===
+        // === 2. Neutrality: the whole committed state is what it would be
+        //        WITHOUT the event; the record itself persists (positive
+        //        control — the assertion is not vacuous) ===
+        {
+            Chain with;    with.append(make_genesis_block(cfg));
+            Chain without; without.append(make_genesis_block(cfg));
+            with.append(block1(with, true, "alice"));
+            without.append(block1(without, false, "alice"));
 
-        // 3. EquivocationEvent for a domain with no stake/registry: apply
-        //    is silent (no entries to mutate). Defense-in-depth: validator
-        //    rejects such events before reaching apply, but the apply path
-        //    must be robust to replay of pre-validated chains.
+            check(with.compute_state_root() == without.compute_state_root(),
+                  "neutrality: state_root(with event) == state_root(without event)");
+            auto same_abort_records = [](const Chain& x, const Chain& y) {
+                const auto& a = x.abort_records(); const auto& b = y.abort_records();
+                if (a.size() != b.size()) return false;
+                for (auto& [dom, ra] : a) {
+                    auto it = b.find(dom);
+                    if (it == b.end() || it->second.count != ra.count
+                        || it->second.last_block != ra.last_block) return false;
+                }
+                return true;
+            };
+            check(same_abort_records(with, without),
+                  "neutrality: abort_records identical (no suspension side-channel)");
+            check(with.head().equivocation_events.size() == 1
+                  && with.head().equivocation_events[0].equivocator == "alice",
+                  "positive control: the event IS in the appended block");
+            check(with.head().compute_hash() != without.head().compute_hash(),
+                  "positive control: the record changes the block, not the state");
+        }
+
+        // === 3. Non-existent equivocator: apply is robust (replay of a
+        //        pre-validated chain) ===
         {
             Chain c;
             c.append(make_genesis_block(cfg));
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.equivocation_events.push_back(make_ev("ghost_no_state"));
-            c.append(b1);
-
+            c.append(block1(c, true, "ghost_no_state"));
             check(c.height() == 2,
                   "ghost equivocator: apply succeeds, height advances");
             check(c.stake("alice") == 500,
                   "ghost equivocator: alice (different domain) unaffected");
         }
 
-        // === A1 invariant holds across full forfeit ===
-
-        // 4. accumulated_slashed counter += full stake; A1 invariant.
-        {
-            Chain c;
-            c.append(make_genesis_block(cfg));
-            uint64_t baseline = c.live_total_supply();  // 1500 = 1000 bal + 500 stake
-
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.equivocation_events.push_back(make_ev("alice"));
-            c.append(b1);
-
-            check(c.accumulated_slashed() == 500,
-                  "A1: accumulated_slashed bumped by full alice stake (500)");
-            check(c.live_total_supply() == baseline - 500,
-                  "A1: live supply decreased by exactly the forfeit");
-            check(c.expected_total() == c.live_total_supply(),
-                  "A1 invariant: expected == live after equivocation forfeit");
-        }
-
-        // === Idempotency: re-applying same equivocation on a fresh chain
-        //     produces the same outcome (apply is deterministic) ===
-
-        // 5. Two chains see same equivocation → same state.
+        // === 4. Determinism: two chains apply the same event → same state ===
         {
             Chain c1; c1.append(make_genesis_block(cfg));
             Chain c2; c2.append(make_genesis_block(cfg));
-            Block b1;
-            b1.index = 1;
-            b1.prev_hash = c1.head().compute_hash();
-            b1.creators = {"alice"};
-            b1.equivocation_events.push_back(make_ev("alice"));
-
+            Block b1 = block1(c1, true, "alice");
+            Block b2 = b1;   // byte-identical genesis ⇒ prev_hash matches
             c1.append(b1);
-            // c2: rebuild same Block (prev_hash matches because both
-            // chains have byte-identical genesis).
-            Block b2 = b1;
             c2.append(b2);
-
             check(c1.stake("alice") == c2.stake("alice")
                   && c1.compute_state_root() == c2.compute_state_root(),
-                  "determinism: two chains apply same equivocation → same state");
+                  "determinism: two chains apply the same event → same state");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
@@ -30116,15 +30091,16 @@ int main(int argc, char** argv) {
     // Chain::append apply path and asserts trace-level invariants after every
     // block. See docs/proofs/RealEngineFAHarness.md.
     //
-    // Increment 1 — equivocation SLASHING: over a randomized trace of
-    // EquivocationEvents (a mix of FRESH targets and DUPLICATE re-submissions),
-    // the apply path must (a) zero a fresh equivocator's stake + deactivate its
-    // registry + bump accumulated_slashed by exactly its stake, (b) be
-    // IDEMPOTENT on duplicates (no double-slash), (c) keep A1
-    // (expected_total == live_total_supply) after every block, (d) keep
-    // accumulated_slashed monotone non-decreasing. Non-vacuous (asserts real
-    // slashes + real duplicates occurred) with a negative control (an
-    // event-free block moves nothing) and a same-seed determinism check.
+    // Increment 1 — equivocation EVIDENCE NEUTRALITY (D4, 2026-09-16): over a
+    // randomized trace of EquivocationEvents (a mix of FIRST-seen targets and
+    // REPEAT submissions against the same validator), the apply path must
+    // (a) leave every validator's stake and registry entry exactly at genesis,
+    // (b) leave accumulated_slashed at 0, (c) keep A1 (expected_total ==
+    // live_total_supply) after every block, (d) keep the whole committed
+    // state_root equal to that of an event-free twin chain. Non-vacuous
+    // (asserts real first-seen + repeat events were baked) with a negative
+    // control (the twin chain differs in block HASH, so the record is really
+    // there) and a same-seed determinism check.
     if (cmd == "test-fa-equivocation-trace") {
         using namespace determ;
         using namespace determ::chain;
@@ -30172,14 +30148,15 @@ int main(int argc, char** argv) {
 
         Chain c;
         c.append(make_genesis_block(cfg));
-        c.set_block_subsidy(0);   // isolate slashing: no minting this trace
+        c.set_block_subsidy(0);   // isolate the event path: no minting this trace
+        Chain twin;               // same blocks WITHOUT the events (D4 neutrality)
+        twin.append(make_genesis_block(cfg));
+        twin.set_block_subsidy(0);
         check(c.expected_total() == c.live_total_supply(),
               "A1: invariant holds at genesis baseline");
 
-        std::vector<char> seen(size_t(K), 0);     // which validators are slashed
-        uint64_t expected_slashed_total = 0;
-        uint64_t prev_slashed = c.accumulated_slashed();
-        int fresh_slashes = 0, duplicate_attempts = 0;
+        std::vector<char> seen(size_t(K), 0);     // which validators were targeted
+        int first_seen = 0, repeat_events = 0;
         bool trace_ok = true;
 
         const int kBlocks = 48;
@@ -30197,92 +30174,87 @@ int main(int argc, char** argv) {
             EquivocationEvent ev;
             ev.equivocator = vs[size_t(j)];
             ev.block_index = b.index;
-            ev.kind = 0;
+            ev.kind = uint8_t(next_rand() & 1);   // both families: block digest / contrib commit
             ev.index_a = b.index; ev.index_b = b.index;
             for (size_t t = 0; t < ev.body_root_a.size(); ++t)
                 ev.body_root_a[t] = uint8_t(next_rand() & 0xff);
             for (size_t t = 0; t < ev.body_root_b.size(); ++t)
                 ev.body_root_b[t] = uint8_t(next_rand() & 0xff);
+            Block bt = b;                       // the twin block: no event
+            bt.prev_hash = twin.head().compute_hash();
             b.equivocation_events.push_back(ev);
 
-            const uint64_t before_slashed = c.accumulated_slashed();
             try {
                 c.append(b);
+                twin.append(bt);
             } catch (const std::exception& e) {
                 check(false, "apply threw at block " + std::to_string(b.index)
                       + ": " + e.what());
                 trace_ok = false; break;
             }
 
-            if (is_fresh) {
-                ++fresh_slashes;
-                expected_slashed_total += stake0[size_t(j)];
-                seen[size_t(j)] = 1;
-                if (c.stake(vs[size_t(j)]) != 0) {
-                    check(false, vs[size_t(j)] + " stake not zeroed on fresh slash");
-                    trace_ok = false;
-                }
-                if (c.accumulated_slashed() != expected_slashed_total) {
-                    check(false, "accumulated_slashed != running total on fresh slash");
-                    trace_ok = false;
-                }
-                auto reg = c.registrant(vs[size_t(j)]);
-                if (!(reg.has_value() && reg->inactive_from != UINT64_MAX)) {
-                    check(false, vs[size_t(j)] + " registry not deactivated on slash");
-                    trace_ok = false;
-                }
-            } else {
-                ++duplicate_attempts;
-                // IDEMPOTENCE: no double-slash — stake stays 0, counter frozen.
-                if (c.stake(vs[size_t(j)]) != 0) {
-                    check(false, vs[size_t(j)] + " stake changed on duplicate evidence");
-                    trace_ok = false;
-                }
-                if (c.accumulated_slashed() != before_slashed) {
-                    check(false, "DOUBLE-SLASH: accumulated_slashed grew on duplicate evidence");
-                    trace_ok = false;
-                }
-            }
+            if (is_fresh) { ++first_seen; seen[size_t(j)] = 1; }
+            else          { ++repeat_events; }
 
-            // Per-block invariants over the REAL committed state.
+            // Per-block invariants over the REAL committed state: the event
+            // moved NOTHING, first-seen or repeat alike.
+            if (c.stake(vs[size_t(j)]) != stake0[size_t(j)]) {
+                check(false, vs[size_t(j)] + " stake moved on equivocation evidence");
+                trace_ok = false;
+            }
+            auto reg = c.registrant(vs[size_t(j)]);
+            if (!(reg.has_value() && reg->inactive_from == UINT64_MAX)) {
+                check(false, vs[size_t(j)] + " registry moved on equivocation evidence");
+                trace_ok = false;
+            }
+            if (c.accumulated_slashed() != 0) {
+                check(false, "accumulated_slashed moved on equivocation evidence");
+                trace_ok = false;
+            }
             if (c.expected_total() != c.live_total_supply()) {
                 check(false, "A1 violated at block " + std::to_string(b.index));
                 trace_ok = false;
             }
-            if (c.accumulated_slashed() < prev_slashed) {
-                check(false, "accumulated_slashed decreased (non-monotone)");
+            if (c.compute_state_root() != twin.compute_state_root()) {
+                check(false, "state_root diverged from the event-free twin at block "
+                      + std::to_string(b.index));
                 trace_ok = false;
             }
-            prev_slashed = c.accumulated_slashed();
+            if (c.head().compute_hash() == twin.head().compute_hash()) {
+                check(false, "positive control failed: the record is not in block "
+                      + std::to_string(b.index));
+                trace_ok = false;
+            }
         }
 
         check(trace_ok,
               "trace ran to completion with all per-block invariants holding");
 
-        // Exact total: Σ over DISTINCT slashed validators of their pre-slash stake.
-        uint64_t manual = 0;
-        for (int i = 0; i < K; ++i) if (seen[size_t(i)]) manual += stake0[size_t(i)];
-        check(c.accumulated_slashed() == expected_slashed_total
-              && expected_slashed_total == manual,
-              "exact: accumulated_slashed == Σ distinct-slashed stakes (no double-count)");
+        // Exact: every validator's stake is its genesis value.
+        bool all_at_genesis = true;
+        for (int i = 0; i < K; ++i)
+            all_at_genesis = all_at_genesis && c.stake(vs[size_t(i)]) == stake0[size_t(i)];
+        check(all_at_genesis && c.accumulated_slashed() == 0,
+              "exact: every stake at its genesis value, accumulated_slashed == 0");
 
-        // Non-vacuity: the trace actually slashed AND actually retried duplicates.
-        check(fresh_slashes >= 1, "non-vacuous: at least one fresh slash occurred");
-        check(duplicate_attempts >= 1,
-              "non-vacuous: at least one duplicate (idempotence actually exercised)");
+        // Non-vacuity: the trace baked first-seen AND repeat evidence.
+        check(first_seen >= 1, "non-vacuous: at least one first-seen event was baked");
+        check(repeat_events >= 1,
+              "non-vacuous: at least one repeat event against the same validator");
 
-        // Negative control: an event-free block must NOT move the slashed counter
-        // (the monotone invariant is not trivially always-increasing).
+        // Negative control: an event-free block keeps the twin equality (the
+        // neutrality assertion is not satisfied by a chain that never moves).
         {
-            const uint64_t before = c.accumulated_slashed();
             Block b;
             b.index     = c.height();
             b.prev_hash = c.head().compute_hash();
             b.timestamp = static_cast<int64_t>(c.height());
             b.creators  = {"author"};
+            Block bt = b; bt.prev_hash = twin.head().compute_hash();
             c.append(b);
-            check(c.accumulated_slashed() == before,
-                  "negative control: event-free block leaves accumulated_slashed unchanged");
+            twin.append(bt);
+            check(c.compute_state_root() == twin.compute_state_root(),
+                  "negative control: event-free block keeps the twin state equal");
             check(c.expected_total() == c.live_total_supply(),
                   "A1 holds after the negative-control block");
         }
@@ -30313,7 +30285,7 @@ int main(int argc, char** argv) {
                 EquivocationEvent ev;
                 ev.equivocator = vs[size_t(j)];
                 ev.block_index = b.index;
-                ev.kind = 0;
+                ev.kind = uint8_t(rnd() & 1);
                 ev.index_a = b.index; ev.index_b = b.index;
                 for (size_t t = 0; t < ev.body_root_a.size(); ++t)
                     ev.body_root_a[t] = uint8_t(rnd() & 0xff);
@@ -30330,9 +30302,9 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fa-equivocation-trace "
                   << (fail == 0 ? "all assertions" : "had failures")
-                  << " (" << fresh_slashes << " fresh slashes, "
-                  << duplicate_attempts << " idempotent duplicates over "
-                  << kBlocks << " blocks)\n";
+                  << " (" << first_seen << " first-seen, "
+                  << repeat_events << " repeat events over "
+                  << kBlocks << " blocks; no state moved)\n";
         return fail == 0 ? 0 : 1;
     }
     // Increment 2 — abort-event SUSPENSION slashing (S-032 family): over a
@@ -31052,11 +31024,12 @@ int main(int argc, char** argv) {
     // each block carries 0-2 TRANSFER txs and/or an EquivocationEvent and/or
     // a Phase-1 AbortEvent (composition drawn from the PRNG). A SHADOW MODEL
     // updated per the REAL apply rules (chain.cpp: tx loop -> fee
-    // distribution to creators -> abort SUSPENSION_SLASH -> equivocation
-    // full forfeit of the REMAINING stake) must match the live chain after
-    // EVERY block, JOINTLY: A1 (expected_total == live_total_supply),
-    // accumulated_slashed EXACT across BOTH slash kinds, sender balances +
-    // nonce monotonicity, stakes never underflowed, creator fee routing.
+    // distribution to creators -> abort SUSPENSION_SLASH; an
+    // EquivocationEvent moves NOTHING — D4, 2026-09-16) must match the live
+    // chain after EVERY block, JOINTLY: A1 (expected_total ==
+    // live_total_supply), accumulated_slashed EXACT (abort deductions only),
+    // sender balances + nonce monotonicity, stakes never underflowed, creator
+    // fee routing, registry untouched by evidence.
     // Non-vacuous (every event kind occurred AND >=1 block carried >=2 kinds
     // simultaneously) with a negative control (an event-free block moves
     // nothing) and a same-seed determinism check.
@@ -31176,7 +31149,7 @@ int main(int argc, char** argv) {
             if (applied_now > 0) ++kinds;
             transfers_applied += applied_now;
 
-            // 2) EquivocationEvent (full forfeit of the REMAINING stake).
+            // 2) EquivocationEvent (an evidence record; moves nothing — D4).
             bool has_equiv = (next_rand() % 3 == 0);
             int jq = -1;
             if (has_equiv) {
@@ -31184,7 +31157,7 @@ int main(int argc, char** argv) {
                 EquivocationEvent ev;
                 ev.equivocator = vs[size_t(jq)];
                 ev.block_index = b.index;
-                ev.kind = 0;
+                ev.kind = uint8_t(next_rand() & 1);   // both evidence families
                 ev.index_a = b.index; ev.index_b = b.index;
                 for (size_t t = 0; t < ev.body_root_a.size(); ++t)
                     ev.body_root_a[t] = uint8_t(next_rand() & 0xff);
@@ -31215,8 +31188,9 @@ int main(int argc, char** argv) {
             // txs (mirrored inline above) -> fee/subsidy distribution
             // (subsidy 0, sole creator gets all fees, no dust) ->
             // abort_events (min(SUSP, locked) deduction) ->
-            // equivocation_events (forfeit whatever stake REMAINS after
-            // the abort deduction — same-actor composition is exact).
+            // equivocation_events: NO shadow update — the record moves no
+            // stake, no counter, no registry (same-actor abort+evidence
+            // composition is therefore exactly the abort deduction alone).
             author_bal += fees_this_block;
             if (has_abort) {
                 ++abort_total;
@@ -31228,8 +31202,6 @@ int main(int argc, char** argv) {
                 ++equiv_total;
                 if (!equiv_seen[size_t(jq)]) { ++equiv_fresh; equiv_seen[size_t(jq)] = 1; }
                 else ++equiv_dup;
-                exp_slashed        += vstake[size_t(jq)];   // full forfeit
-                vstake[size_t(jq)]  = 0;
             }
 
             try {
@@ -31247,7 +31219,7 @@ int main(int argc, char** argv) {
             }
             if (c.accumulated_slashed() != exp_slashed) {
                 check(false, "accumulated_slashed != shadow running total "
-                      "(both slash kinds) at block " + std::to_string(b.index));
+                      "(abort deductions only) at block " + std::to_string(b.index));
                 trace_ok = false;
             }
             if (c.accumulated_slashed() < prev_slashed) {
@@ -31286,9 +31258,9 @@ int main(int argc, char** argv) {
             }
             if (trace_ok && has_equiv) {
                 auto reg = c.registrant(vs[size_t(jq)]);
-                if (!(reg.has_value() && reg->inactive_from != UINT64_MAX)) {
-                    check(false, vs[size_t(jq)] + " registry not deactivated "
-                          "on equivocation");
+                if (!(reg.has_value() && reg->inactive_from == UINT64_MAX)) {
+                    check(false, vs[size_t(jq)] + " registry moved on "
+                          "equivocation evidence (D4: no consequence)");
                     trace_ok = false;
                 }
             }
@@ -31298,21 +31270,22 @@ int main(int argc, char** argv) {
               "trace ran to completion with all per-block invariants holding jointly");
 
         // Exact slash total, recomputed INDEPENDENTLY of the running shadow:
-        // stakes in this trace are only ever reduced by the two slash kinds
-        // (no STAKE/UNSTAKE/DEREGISTER txs by construction), so every
-        // validator's deficit vs genesis must sum to the counter exactly.
+        // stakes in this trace are only ever reduced by the abort deduction
+        // (no STAKE/UNSTAKE/DEREGISTER txs by construction; evidence moves
+        // nothing), so every validator's deficit vs genesis must sum to the
+        // counter exactly.
         uint64_t deficit = 0;
         for (int i = 0; i < K; ++i)
             deficit += stake0[size_t(i)] - c.stake(vs[size_t(i)]);
         check(c.accumulated_slashed() == deficit,
               "exact: accumulated_slashed == sum of validator stake deficits "
-              "(both slash kinds, no double-count)");
+              "(abort deductions only, no double-count)");
 
         // Non-vacuity: every event KIND occurred, and composition was real.
         check(transfers_applied >= 1,
               "non-vacuous: at least one TRANSFER applied");
-        check(equiv_total >= 1 && equiv_fresh >= 1,
-              "non-vacuous: at least one equivocation (incl. a fresh full forfeit)");
+        check(equiv_total >= 1 && equiv_fresh >= 1 && equiv_dup >= 1,
+              "non-vacuous: equivocation evidence baked (first-seen AND repeat)");
         check(abort_total >= 1,
               "non-vacuous: at least one Phase-1 abort (suspension slash)");
         check(multi_kind_blocks >= 1,
@@ -31398,7 +31371,7 @@ int main(int argc, char** argv) {
                     EquivocationEvent ev;
                     ev.equivocator = vs[size_t(jq)];
                     ev.block_index = b.index;
-                    ev.kind = 0;
+                    ev.kind = uint8_t(rnd() & 1);
                     ev.index_a = b.index; ev.index_b = b.index;
                     for (size_t t = 0; t < ev.body_root_a.size(); ++t)
                         ev.body_root_a[t] = uint8_t(rnd() & 0xff);
@@ -42180,10 +42153,12 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // S-035 Option 1: multi-equivocation edge cases beyond
-    // test-equivocation-apply. Covers: multiple events in same block,
-    // same equivocator twice, equivocator with no stake (DOMAIN_INCLUSION
-    // mode), and equivocator who was already deregistered.
+    // Multi-equivocation edge cases beyond test-equivocation-apply, under
+    // D4 (2026-09-16: an EquivocationEvent moves NO L1 state). Covers:
+    // multiple events in the same block, the same equivocator twice, an
+    // equivocator with no stake, and an equivocator inside its DEREGISTER
+    // unlock window (the former "anti-dodge" scenario, inverted: the record
+    // must NOT touch the pending-unlock stake or override inactive_from).
     if (cmd == "test-equivocation-multi") {
         using namespace determ;
         using namespace determ::chain;
@@ -42224,8 +42199,8 @@ int main(int argc, char** argv) {
 
         // === Two distinct equivocators in same block ===
 
-        // 1. Alice + bob both equivocate in the same block. Both have
-        //    their full stake forfeited; both registry entries deactivated.
+        // 1. Alice + bob both equivocate in the same block. Neither stake
+        //    nor either registry entry moves.
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -42237,23 +42212,24 @@ int main(int argc, char** argv) {
             b.equivocation_events.push_back(make_ev("bob",   0));
             c.append(b);
 
-            check(c.stake("alice") == 0,
-                  "multi-equivocate: alice stake → 0");
-            check(c.stake("bob") == 0,
-                  "multi-equivocate: bob stake → 0");
+            check(c.stake("alice") == 500,
+                  "multi-equivocate: alice stake unchanged (500)");
+            check(c.stake("bob") == 300,
+                  "multi-equivocate: bob stake unchanged (300)");
             auto ra = c.registrant("alice");
             auto rb = c.registrant("bob");
-            check(ra.has_value() && ra->inactive_from == 2,
-                  "multi-equivocate: alice inactive_from = b.index+1 = 2");
-            check(rb.has_value() && rb->inactive_from == 2,
-                  "multi-equivocate: bob inactive_from = b.index+1 = 2");
+            check(ra.has_value() && ra->inactive_from == UINT64_MAX,
+                  "multi-equivocate: alice registry unchanged (sentinel)");
+            check(rb.has_value() && rb->inactive_from == UINT64_MAX,
+                  "multi-equivocate: bob registry unchanged (sentinel)");
+            check(c.accumulated_slashed() == 0,
+                  "multi-equivocate: accumulated_slashed stays 0");
         }
 
         // === Same equivocator twice in same block ===
 
-        // 2. Same domain equivocates twice in the same block — only
-        //    forfeits stake once (already zeroed; second event no-op
-        //    on stake). Registry entry remains deactivated.
+        // 2. Same domain equivocates twice in the same block — two records,
+        //    still nothing moves.
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -42265,25 +42241,25 @@ int main(int argc, char** argv) {
             b.equivocation_events.push_back(make_ev("alice", 5));  // diff block_index
             c.append(b);
 
-            check(c.stake("alice") == 0,
-                  "double-equivocate: alice stake → 0 (first event drains; second no-op)");
-            check(c.accumulated_slashed() == 500,
-                  "double-equivocate: accumulated_slashed = 500 (only first counts)");
+            check(c.stake("alice") == 500,
+                  "double-equivocate: alice stake unchanged (500)");
+            check(c.accumulated_slashed() == 0,
+                  "double-equivocate: accumulated_slashed stays 0");
         }
 
-        // === Equivocator with no stake (DOMAIN_INCLUSION mode) ===
+        // === Equivocator with no stake ===
 
-        // 3. Equivocator who has registry but stake = 0 (DOMAIN_INCLUSION
-        //    mode or post-UNSTAKE). The deregistration is what matters;
-        //    no stake to forfeit but inactive_from is set.
+        // 3. Equivocator who has a registry entry but stake = 0. The record
+        //    lands; the registry entry is untouched (formerly deregistered).
         {
             // Set up: zero-stake creator-like fixture.
             GenesisConfig zcfg = cfg;
             zcfg.initial_creators[0].initial_stake = 0;  // alice no stake
             Chain c;
             c.append(make_genesis_block(zcfg));
+            c.set_min_stake(0);   // a consequence keyed on the stake floor must not hide here
             check(c.stake("alice") == 0,
-                  "DOMAIN_INCLUSION baseline: alice has 0 stake");
+                  "no-stake baseline: alice has 0 stake");
 
             Block b;
             b.index = 1; b.prev_hash = c.head().compute_hash();
@@ -42292,18 +42268,20 @@ int main(int argc, char** argv) {
             c.append(b);
 
             check(c.stake("alice") == 0,
-                  "no-stake equivocate: alice stake stays 0 (nothing to forfeit)");
+                  "no-stake equivocate: alice stake stays 0");
             auto ra = c.registrant("alice");
-            check(ra.has_value() && ra->inactive_from == 2,
-                  "no-stake equivocate: alice STILL deregistered (inactive_from set)");
+            check(ra.has_value() && ra->inactive_from == UINT64_MAX,
+                  "no-stake equivocate: alice registry unchanged (NOT deregistered)");
             check(c.accumulated_slashed() == 0,
-                  "no-stake equivocate: accumulated_slashed stays 0 (no value forfeited)");
+                  "no-stake equivocate: accumulated_slashed stays 0");
         }
 
-        // === Equivocator with registry but registrant was already deactivated ===
+        // === Equivocator inside its DEREGISTER unlock window ===
 
-        // 4. Pre-deactivated equivocator: inactive_from update OVERRIDES
-        //    the existing future value with the new b.index+1.
+        // 4. DEREGISTERed equivocator: the record must NOT override the
+        //    DEREGISTER's inactive_from and must NOT touch the pending-unlock
+        //    stake (a consequence hiding behind the unlock window would be a
+        //    consequence — D4 forbids any).
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -42326,7 +42304,7 @@ int main(int argc, char** argv) {
             check(inactive_before > 1,
                   "pre-deactivate setup: inactive_from set to future value");
 
-            // Block 2: equivocate alice — should override inactive_from.
+            // Block 2: equivocate alice — must NOT touch inactive_from (D4).
             Block b2;
             b2.index = 2; b2.prev_hash = c.head().compute_hash();
             b2.creators = {"alice"};
@@ -42334,31 +42312,16 @@ int main(int argc, char** argv) {
             c.append(b2);
 
             auto reg_after = c.registrant("alice");
-            check(reg_after.has_value() && reg_after->inactive_from == 3,
-                  "pre-deactivate equivocate: inactive_from OVERRIDDEN to b.index+1 = 3");
-
-            // FA-Apply-16 anti-dodge (StakeForfeitureCascade T-C1): the whole
-            // unstake_delay slashing-window design rests on a DEREGISTERed
-            // (staked-pending-unlock) equivocator STILL forfeiting its entire
-            // locked stake — the equivocation branch (chain.cpp) reads only
-            // stakes_[d].locked, NEVER stakes_[d].unlock_height, so slashing is
-            // unlock_height-insensitive. Here alice DEREGISTERed at block 1
-            // (unlock_height > 2) then equivocated at block 2 (2 < unlock_height),
-            // i.e. the exact pending-unlock window. Before this, scenario 4
-            // asserted ONLY the registry override (inactive_from==3); a surgical
-            // mutant that made the forfeit unlock_height-sensitive (skip the slash
-            // when b.index < unlock_height, leaving registry deactivation intact)
-            // dodged forfeiture yet passed every scenario — the anti-dodge
-            // property was unproven-by-gate. alice's genesis stake (500) is still
-            // fully locked after DEREGISTER (DEREGISTER moves inactive_from, not
-            // locked), so the equivocation must zero it and fold 500 into
-            // accumulated_slashed.
-            check(c.stake("alice") == 0,
-                  "pre-deactivate equivocate: pending-unlock stake FORFEITED "
-                  "(anti-dodge — slash ignores unlock_height)");
-            check(c.accumulated_slashed() == 500,
-                  "pre-deactivate equivocate: forfeited 500 folds into "
-                  "accumulated_slashed");
+            check(reg_after.has_value() && reg_after->inactive_from == inactive_before,
+                  "deregistered equivocate: inactive_from keeps the DEREGISTER value "
+                  "(not overridden to b.index+1)");
+            // alice's genesis stake (500) is still fully locked after DEREGISTER
+            // (DEREGISTER moves inactive_from, not locked) and block 2 is inside
+            // the unlock window: the record must leave it exactly there.
+            check(c.stake("alice") == 500,
+                  "deregistered equivocate: pending-unlock stake untouched (500)");
+            check(c.accumulated_slashed() == 0,
+                  "deregistered equivocate: accumulated_slashed stays 0");
         }
 
         // === Determinism: replay produces same state ===
@@ -44671,7 +44634,7 @@ int main(int argc, char** argv) {
     // Each event type is tested in isolation:
     //   - test-chain-apply-block: TRANSFER + STAKE + UNSTAKE + DEREGISTER
     //   - test-abort-event-apply: AbortEvent → suspension slash
-    //   - test-equivocation-apply: EquivocationEvent → forfeit + deregister
+    //   - test-equivocation-apply: EquivocationEvent → evidence record, no state (D4)
     //   - test-subsidy-distribution: subsidy mint per creator
     //   - test-cross-shard-receipt-apply / outbound-apply: receipts
     //   - test-merge-event-apply: MERGE_BEGIN/END
@@ -44679,7 +44642,7 @@ int main(int argc, char** argv) {
     // This test exercises the COMPOSITION: a single block carrying
     //   - TRANSFER tx (balance shift)
     //   - AbortEvent (Phase-1 slash on suspender)
-    //   - EquivocationEvent (forfeit + deregister on equivocator)
+    //   - EquivocationEvent (an evidence record; moves nothing — D4)
     //   - subsidy mint (per non-empty creators set)
     //   - inbound receipt (cross-shard credit)
     //
@@ -44775,7 +44738,7 @@ int main(int argc, char** argv) {
             ae.round = 1;
             ae.aborting_node = "bob";
 
-            // EquivocationEvent: carol equivocates (forfeit full stake)
+            // EquivocationEvent: carol equivocates (a record; moves nothing)
             auto ev = make_equivocation_ev("carol", 0);
 
             // Inbound receipt: dan credited 25 from remote shard
@@ -44809,14 +44772,15 @@ int main(int argc, char** argv) {
             check(c.stake("bob") == 400 - c.suspension_slash(),
                   "compose: bob slashed (AbortEvent applied)");
 
-            // EquivocationEvent effect: carol's stake → 0, deregistered
-            check(c.stake("carol") == 0,
-                  "compose: carol stake forfeited (EquivocationEvent applied)");
-            check(carol_stake_before == 300,
-                  "compose sanity: carol had 300 stake at genesis");
+            // EquivocationEvent effect: NONE — carol's stake and registry
+            // entry are untouched, alongside the other four effects (D4).
+            check(c.stake("carol") == carol_stake_before && carol_stake_before == 300,
+                  "compose: carol stake unchanged (300) — the record moves nothing");
             auto rcarol = c.registrant("carol");
-            check(rcarol.has_value() && rcarol->inactive_from == 2,
-                  "compose: carol deregistered (FA6 dual mechanism)");
+            check(rcarol.has_value() && rcarol->inactive_from == UINT64_MAX,
+                  "compose: carol registry unchanged (sentinel)");
+            check(c.head().equivocation_events.size() == 1,
+                  "compose: the equivocation record IS in the block");
 
             // Subsidy mint: accumulated_subsidy += 30
             check(c.accumulated_subsidy() == 30,
@@ -44831,11 +44795,10 @@ int main(int argc, char** argv) {
                   "compose: A1 invariant holds across all 5 event types");
 
             // Final supply accounting:
-            //   delta = +subsidy(30) +inbound(25) -slashed(SUSP + 300)
-            //         = +55 - SUSP - 300
+            //   delta = +subsidy(30) +inbound(25) -slashed(SUSP)   (no forfeit)
             uint64_t SUSP = c.suspension_slash();
-            check(c.live_total_supply() == supply_before + 30 + 25 - SUSP - 300,
-                  "compose: live supply moved by expected delta");
+            check(c.live_total_supply() == supply_before + 30 + 25 - SUSP,
+                  "compose: live supply moved by expected delta (abort deduction only)");
         }
 
         // === Order independence for disjoint actors ===
@@ -44884,9 +44847,8 @@ int main(int argc, char** argv) {
         // === Same actor multi-event in single block ===
 
         // 3. Same actor (bob) takes BOTH abort + equivocation in same block.
-        //    Abort fires first (deducts SUSPENSION_SLASH); equivocation
-        //    fires second (forfeits remaining stake to 0). Both effects
-        //    must compose correctly.
+        //    The abort deducts SUSPENSION_SLASH; the evidence record adds
+        //    nothing on top (D4) — the composition is the abort alone.
         {
             Chain c;
             c.append(make_genesis_block(cfg));
@@ -44902,16 +44864,14 @@ int main(int argc, char** argv) {
             b.equivocation_events.push_back(ev);
             c.append(b);
 
-            // Abort deducts SUSP from 400; equivocation drains to 0.
-            check(c.stake("bob") == 0,
-                  "same-actor: bob stake drained to 0 (abort then equiv)");
+            // Abort deducts SUSP from 400; the evidence record moves nothing.
+            check(c.stake("bob") == bob_stake_before - c.suspension_slash(),
+                  "same-actor: bob stake = 400 - SUSPENSION_SLASH (abort only)");
             auto rb = c.registrant("bob");
-            check(rb.has_value() && rb->inactive_from == 2,
-                  "same-actor: bob deregistered (equivocation arm)");
-            // accumulated_slashed = SUSPENSION_SLASH + (400 - SUSPENSION_SLASH)
-            //                     = 400 (all of bob's stake)
-            check(c.accumulated_slashed() == bob_stake_before,
-                  "same-actor: total slashed = bob's full stake (400)");
+            check(rb.has_value() && rb->inactive_from == UINT64_MAX,
+                  "same-actor: bob registry unchanged (no equivocation arm)");
+            check(c.accumulated_slashed() == c.suspension_slash(),
+                  "same-actor: total slashed = SUSPENSION_SLASH only");
             check(c.expected_total() == c.live_total_supply(),
                   "A1: invariant holds under same-actor abort+equiv");
         }
@@ -53909,7 +53869,7 @@ int main(int argc, char** argv) {
         // is, summed over all shards:
         //   live_total_supply (= balances + staked)
         //     + accumulated_outbound (value in flight off this shard)
-        //     + accumulated_slashed  (value burned by forfeiture)
+        //     + accumulated_slashed  (value burned by abort suspension deductions)
         //     - accumulated_inbound  (value credited from another shard;
         //         it is already counted in this shard's live balances, so
         //         to avoid double-counting against the genesis baseline we
@@ -65868,12 +65828,14 @@ int main(int argc, char** argv) {
               "replay with a different block_index is deduped (amplification defeated)");
         check(node::pending_equivocation_contains(pool, mkev("alice", 999999, 0x01)),
               "replay with a far block_index is deduped");
-        // Same equivocator, entirely different proof bytes -> still deduped (an
-        // equivocator is fully slashed on the first proof).
+        // Same equivocator, entirely different proof bytes -> still deduped (the
+        // pool keys on the equivocator alone; whether distinct proofs against
+        // one validator should each be retained as L2 input is step 3b's
+        // question — D4 made the record consequence-free).
         check(node::pending_equivocation_contains(pool, mkev("alice", 2, 0x55)),
               "same equivocator, different proof bytes -> still deduped");
         // NOT over-broad: a DIFFERENT equivocator is NOT deduped, so distinct
-        // equivocators each still get their own pool entry (slashing coverage).
+        // equivocators each still get their own pool entry (evidence coverage).
         check(!node::pending_equivocation_contains(pool, mkev("bob", 1, 0x01)),
               "a different equivocator is NOT deduped (distinct equivocators pooled)");
         // The identity predicate directly ignores block_index and keys on the

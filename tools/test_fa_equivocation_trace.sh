@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # FA harness (real-engine, self-contained path) — increment 1: equivocation
-# SLASHING over a multi-block randomized-Byzantine TRACE.
+# EVIDENCE NEUTRALITY over a multi-block randomized TRACE (D4, 2026-09-16: an
+# EquivocationEvent baked into a block moves NO L1 state).
 #
 # Per the owner decision (2026-07-07), determ-dsf stays a self-contained TOY
 # framework; the F-1/FA4 gap (multi-block randomized-Byzantine CONSENSUS
@@ -10,17 +11,17 @@
 # the ECONOMIC A1 trace).
 #
 # `determ test-fa-equivocation-trace` drives a seeded (SplitMix64), reproducible
-# 48-block trace that injects EquivocationEvents (a mix of FRESH targets and
-# DUPLICATE re-submissions) via the REAL Chain::append apply path, and asserts
+# 48-block trace that injects EquivocationEvents (first-seen targets and REPEAT
+# submissions, both event kinds) via the REAL Chain::append apply path, next to
+# an event-free TWIN chain fed the same blocks minus the events, and asserts
 # after every block:
-#   - fresh slash: equivocator's stake -> 0, registry deactivated,
-#     accumulated_slashed bumped by exactly its stake;
-#   - DUPLICATE: idempotent (no double-slash — stake stays 0, counter frozen);
-#   - A1: expected_total == live_total_supply after every block;
-#   - accumulated_slashed monotone non-decreasing;
-#   - exact: accumulated_slashed == Σ distinct-slashed stakes (no double-count);
-#   - non-vacuous (real slashes AND real duplicates occurred);
-#   - negative control (an event-free block moves nothing);
+#   - every validator's stake and registry entry exactly at genesis;
+#   - accumulated_slashed == 0;
+#   - A1: expected_total == live_total_supply;
+#   - state_root == the twin's (no consequence of ANY kind);
+#   - block hash != the twin's (positive control: the record really is there);
+#   - non-vacuous (first-seen AND repeat events were baked);
+#   - negative control (an event-free block keeps the twin equality);
 #   - determinism (same seed -> identical final state root).
 #
 # Fully in-process, <1s, no network. See docs/proofs/RealEngineFAHarness.md.
@@ -29,7 +30,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== FA harness inc-1: equivocation-slashing multi-block trace (real engine) ==="
+echo "=== FA harness inc-1: equivocation-evidence neutrality trace (real engine, D4) ==="
 OUT=$($DETERM test-fa-equivocation-trace 2>&1)
 echo "$OUT"
 

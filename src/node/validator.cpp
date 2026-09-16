@@ -419,8 +419,9 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 //   * the S-048 depth-1 reorg, which re-rounds at the same height with gen
 //     reset to 0.
 // In either case an honest validator's two same-height, same-gen signatures
-// are still packageable as "equivocation" and still forfeit its FULL stake —
-// no attacker signature required. A non-committee follower never runs the
+// are still packageable as "equivocation" — no attacker signature required
+// (the stake consequence that made this a loss was removed 2026-09-16, D4).
+// A non-committee follower never runs the
 // valve at all (it arms no round timer, per the S-050 straggler entry), so in
 // any M > K deployment some peer holds the stale first contrib indefinitely.
 // What this gate DOES close: a genuine abort re-round, where the count really
@@ -430,15 +431,15 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 // DECISION-LOG; it MUST land before genesis, since this evidence format
 // freezes there.
 //
-// If valid, the evidence is treated as proof of equivocation and the
-// equivocator's full stake is forfeited at apply time
-// (chain.cpp::apply_transactions).
+// If valid, the evidence is baked into the block as an on-chain record;
+// apply reads nothing from it (no stake or registry consequence — D4,
+// chain.cpp::apply_transactions).
 BlockValidator::Result BlockValidator::check_equivocation_events(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     // D3.3b-read: resolve the equivocator's key frozen-first with present-head
     // fallback — a frozen committee member equivocating this epoch resolves from
-    // the checkpoint, and a non-committee / cross-epoch slashing target still
-    // resolves present-head (the fallback keeps it slashable).
+    // the checkpoint, and a non-committee / cross-epoch equivocator still
+    // resolves present-head (the fallback keeps its evidence verifiable).
     EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
         const auto& ev = b.equivocation_events[i];

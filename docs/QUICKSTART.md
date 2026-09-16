@@ -1,6 +1,6 @@
 # Determ Quickstart
 
-A 5-minute walkthrough of the full Determ v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation slashing are exercised by the regression tests in `tools/`.
+A 5-minute walkthrough of the full Determ v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation evidence are exercised by the regression tests in `tools/`.
 
 ## 1. Build
 
@@ -240,7 +240,7 @@ print(s.recv(4096).decode().strip())
 "
 ```
 
-The next finalized block bakes the evidence; on apply, the equivocator's stake is fully forfeited and they're deregistered from the validator pool.
+The next finalized block bakes the evidence as an on-chain `EquivocationEvent` record. Since 2026-09-16 (DECISION-LOG D4) the record carries **no L1 consequence** — the equivocator keeps its stake and its registry entry; the record is input to the L2 policy. Inspect it with `determ show-block <index>` or `tools/operator_equivocation_digest.sh`.
 
 ## 10. Governance: change a chain-wide parameter (A5)
 

@@ -1,61 +1,52 @@
 #!/usr/bin/env bash
-# S-035 Option 1 seed — in-process unit test for the apply-side
-# handling of EquivocationEvent (FA6 full equivocation slashing +
-# deregistration per rev.8 follow-on).
+# In-process gate for the apply-side handling of EquivocationEvent under the
+# owner decision of 2026-09-16 (DECISION-LOG D4, O-1 option (b)): an
+# EquivocationEvent baked into a finalized block is an on-chain EVIDENCE
+# RECORD with NO L1 consequence. `Chain::apply_transactions` reads nothing
+# from it — no stake forfeiture, no registry deactivation, no counter.
 #
-# Each EquivocationEvent baked into a finalized block (validator
-# already verified the two-sig proof against the equivocator's
-# registered Ed25519 key):
-#   (a) Forfeits the equivocator's ENTIRE staked balance — the primary
-#       economic disincentive in STAKE_INCLUSION mode. Much harsher
-#       than SUSPENSION_SLASH because equivocation is a deliberate
-#       double-sign attack, not just absence.
-#   (b) Marks the equivocator's registry entry inactive_from =
-#       b.index + 1, removing them from committee selection regardless
-#       of stake. This is what actually removes them in
-#       DOMAIN_INCLUSION mode (where stake is already 0).
-#   (c) Bumps accumulated_slashed_ by the full forfeit amount (A1).
+# Why the rule exists (log 2026-08-12 / 2026-08-13): the former full-forfeit
+# + deregister branch cost an HONEST validator its whole stake on a valve /
+# re-round same-height pair with no attacker signature, and made the R-8
+# digest demotion unsound (ordering result 7570989).
 #
-# The dual mechanism (stake forfeit + deregistration) unifies the
-# two inclusion modes — neither mode leaves the equivocator able to
-# rejoin without registering a fresh domain.
+# Network-level closed loop via tools/test_equivocation_slashing.sh; this
+# in-process gate pins the apply semantics in <1s, at the layer where the
+# rule lives. Mutants M1-M8 (audit record 2026-09-16) each go RED across the
+# five apply-side gates: restoring `locked = 0` (A1 throws), the forfeit, the
+# deregistration, the whole loop, a NEW consequence (abort_records++), a
+# consequence hidden inside the DEREGISTER unlock window and one keyed on a
+# zero stake floor (both caught by test-equivocation-multi), and one keyed on
+# the contrib evidence family (caught by the two traces, which draw both kinds).
 #
-# Network-level integration via tools/test_equivocation_slashing.sh;
-# this in-process test pins the apply semantics in <1s.
+# Implementation note: every block sets `b.creators = {"alice"}` so fees
+# route back and A1 stays balanced. The two sigs in the EquivocationEvent
+# are default-constructed — apply doesn't re-verify (validator's job).
 #
-# Implementation note: every block sets `b.creators = {"alice"}` so
-# fees route back and A1 stays balanced (the standard apply-test
-# gotcha). The two sigs in the EquivocationEvent are default-
-# constructed — apply doesn't re-verify (validator's job); this test
-# focuses purely on apply-path semantics.
+# 14 assertions in four scenarios:
 #
-# ~10 assertions in five blocks:
+#   No consequence (5 + baseline 2):
+#     - stake unchanged; registry inactive_from sentinel unchanged
+#     - accumulated_slashed stays 0; live supply unchanged; A1 holds
 #
-#   Full stake forfeiture (1):
-#     - stake → 0 after equivocation
-#
-#   Registry deactivation (2):
-#     - baseline: inactive_from sentinel UINT64_MAX
-#     - post-apply: inactive_from == b.index + 1
+#   Neutrality + positive control (4):
+#     - state_root(with event) == state_root(without event)
+#     - abort_records identical
+#     - the event IS in the appended block; the block hash differs from
+#       the event-free block (the record persists — the check is not vacuous)
 #
 #   Robustness on ghost equivocator (2):
-#     - apply succeeds (no crash on missing stake/registry)
-#     - other domains unaffected
-#
-#   A1 supply invariant (3):
-#     - accumulated_slashed bumped by exactly the full stake
-#     - live supply decreases by exactly the forfeit
-#     - expected == live after forfeit
+#     - apply succeeds (no crash on missing stake/registry); others unaffected
 #
 #   Determinism (1):
-#     - two chains see same equivocation → same state_root
+#     - two chains apply the same event → same state
 #
 # Run from repo root: bash tools/test_equivocation_apply.sh
 set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== EquivocationEvent apply (FA6 full forfeit + deregistration, A1) ==="
+echo "=== EquivocationEvent apply (D4: evidence record, no L1 consequence; neutrality + A1) ==="
 OUT=$($DETERM test-equivocation-apply 2>&1)
 echo "$OUT"
 

@@ -4,7 +4,7 @@
 # a specific validator address:
 #
 #   1. AbortEvents          (round-1 aborts; SUSPENSION_SLASH penalty)
-#   2. EquivocationEvents   (FA6 double-sign; full-stake forfeiture)
+#   2. EquivocationEvents   (FA6 double-sign evidence records; no L1 consequence — D4)
 #   3. MERGE_EVENT txs      (R7 under-quorum merges; BEGIN/END pairs;
 #                            "terminator" = the apply-time `from` address
 #                            on the tx, i.e. the validator that submitted

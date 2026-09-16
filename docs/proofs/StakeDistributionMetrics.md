@@ -1,5 +1,7 @@
 # Stake-Distribution Metrics — Nakamoto + Gini correctness (SD-1..SD-4)
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 Arithmetic-correctness and interpretation proof for the decentralization metrics
 computed by `tools/operator_stake_distribution.sh`. This is **not** a cryptographic
 proof: the script reads a validator→stake mapping over read-only RPC and reduces it

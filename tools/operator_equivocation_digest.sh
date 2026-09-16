@@ -5,11 +5,12 @@
 # FA6 equivocation slashing: when a validator signs two conflicting
 # BlockSigMsgs at the same height (same Ed25519 key, two different
 # block digests), any node can submit the two-signature proof. Once
-# baked into a finalized block as an `EquivocationEvent`, the offender
-# forfeits their ENTIRE locked stake and their registry entry is
-# deactivated (much harsher than the SUSPENSION_SLASH penalty applied
-# for round-1 aborts). This script gives operators a forensic digest:
-# "what equivocation events landed on this chain and who paid?"
+# baked into a finalized block as an `EquivocationEvent`, the proof is an
+# on-chain EVIDENCE RECORD for the L2 policy and carries NO L1 consequence
+# (owner decision 2026-09-16, DECISION-LOG D4: no stake forfeiture, no
+# registry deactivation — apply reads nothing from it). This script gives
+# operators a forensic digest: "what equivocation events landed on this
+# chain and against whom?"
 #
 # Read-only RPC; safe against any running daemon. Daemon must already
 # be listening on --rpc-port. Requires `jq` for JSON traversal of the
@@ -43,10 +44,9 @@
 #                             by_offender:{...}, range:{from,to}}}
 #
 # Caveat on `slashed_amount`:
-#   The on-chain `EquivocationEvent` does not carry the slashed amount
-#   (the validator forfeits ENTIRE locked stake at apply time; the
-#   per-event amount is folded into `accumulated_slashed` but not
-#   stamped onto the event payload). This script surfaces whatever
+#   The on-chain `EquivocationEvent` does not carry a slashed amount and
+#   since 2026-09-16 (D4) apply deducts nothing for it — the field, when
+#   present on a payload, is forward-compat only. This script surfaces whatever
 #   `slashed_amount` field is present on the event payload (forward-
 #   compat with a future EquivocationEvent schema bump); when absent
 #   it reports 0. For an authoritative cumulative figure, cross-check

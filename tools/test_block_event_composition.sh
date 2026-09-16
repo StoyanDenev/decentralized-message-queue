@@ -4,7 +4,7 @@
 # Each event type has isolated apply tests:
 #   - test-chain-apply-block: TRANSFER / STAKE / UNSTAKE / DEREGISTER
 #   - test-abort-event-apply: AbortEvent → suspension slash
-#   - test-equivocation-apply: EquivocationEvent → forfeit + deregister
+#   - test-equivocation-apply: EquivocationEvent → evidence record, no state (D4)
 #   - test-subsidy-distribution: per-creator subsidy mint
 #   - test-cross-shard-receipt-apply / outbound-apply: receipts
 #   - test-merge-event-apply: MERGE_BEGIN/END
@@ -12,7 +12,7 @@
 # This test exercises the COMPOSITION — a single block carrying
 #   - TRANSFER tx (balance shift)
 #   - AbortEvent (Phase-1 slash on suspender)
-#   - EquivocationEvent (forfeit + deregister on equivocator)
+#   - EquivocationEvent (an evidence record; moves nothing — D4 2026-09-16)
 #   - subsidy mint (per non-empty creators set)
 #   - inbound receipt (cross-shard credit)
 # applied simultaneously, and verifies that:

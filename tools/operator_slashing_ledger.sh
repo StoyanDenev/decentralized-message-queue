@@ -8,15 +8,16 @@
 #   still hold, and — when asked — WHICH domains were slashed and how?"
 #
 # This is the operational view of three apply-path proofs:
-#   * EquivocationSlashingApply.md (FA-Apply-10) — an EquivocationEvent
-#     baked into a finalized block forfeits the equivocator's ENTIRE
-#     locked stake and DEACTIVATES the registry entry (terminal,
-#     non-recoverable double-sign penalty).
+#   * EquivocationSlashingApply.md (FA-Apply-10, HISTORICAL since
+#     2026-09-16 — DECISION-LOG D4): an EquivocationEvent baked into a
+#     finalized block is an evidence record; apply deducts NOTHING for it
+#     (no forfeiture, no deactivation). Equivocation rows below count
+#     RECORDS, not penalties.
 #   * AbortEventApply.md (FA-Apply-11) — a Phase-1 AbortEvent applies a
 #     PROPORTIONAL SUSPENSION_SLASH to the aborting node (economic
 #     disincentive; the validator survives — recoverable).
-#   * StakeForfeitureCascade.md — the stake-unlock cascade that both
-#     penalties feed; the forfeited stake leaves `live_total_supply`
+#   * StakeForfeitureCascade.md — the stake-unlock cascade the abort
+#     deduction feeds; the deducted stake leaves `live_total_supply`
 #     and is accumulated into `accumulated_slashed`, preserving the A1
 #     identity:  live_total_supply + accumulated_slashed
 #                  = genesis_total + accumulated_subsidy
@@ -421,7 +422,7 @@ if json_out:
 
 # ── Human render ──────────────────────────────────────────────────────────────
 print(f"Slashing ledger (port {port}):")
-print(f"  accumulated_slashed:  {acc_slashed}   <-- cumulative stake forfeited (equivocation + abort)")
+print(f"  accumulated_slashed:  {acc_slashed}   <-- cumulative abort suspension deductions (equivocation deducts nothing — D4)")
 print(f"  ---")
 print(f"  genesis_total:        {genesis_total}")
 print(f"  +accumulated_subsidy: {acc_subsidy}")
@@ -456,7 +457,7 @@ if with_events:
     print(f"  Slash events in window [{from_s}..{to_s}] ({scanned_blocks} blocks scanned):")
     eq_rows = equiv_rows_sorted()
     if eq_rows:
-        print(f"    Equivocation (FA-Apply-10, terminal — full stake forfeit + deactivation):")
+        print(f"    Equivocation (evidence records — no L1 stake or registry consequence, D4):")
         print(f"      {'offender':<28}{'events':<8}last_block")
         for r in eq_rows:
             lb = r["last_containing_block"]
@@ -476,8 +477,8 @@ if with_events:
         print(f"      (total abort events: {abort_event_total} across {len(ab_rows)} aborter(s))")
     else:
         print(f"    Abort (FA-Apply-11): none in window")
-    print(f"  note: per-event slashed amounts are not stamped on the event payloads")
-    print(f"        (equivocation forfeits ENTIRE stake; abort applies a proportional")
+    print(f"  note: per-event deducted amounts are not stamped on the event payloads")
+    print(f"        (equivocation deducts nothing; abort applies a proportional")
     print(f"        SUSPENSION_SLASH) — the authoritative cumulative figure is")
     print(f"        accumulated_slashed above.")
 

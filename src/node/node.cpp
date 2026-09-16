@@ -1952,7 +1952,7 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     if (ev.sig_a == ev.sig_b)             return;
 
     // D3.3b-read STEP 3: frozen-first, present-head fallback (a non-committee /
-    // cross-epoch equivocator still resolves present-head and stays slashable).
+    // cross-epoch equivocator still resolves present-head, so its evidence verifies).
     auto ek = resolve_committee_member_pubkey(chain_, registry_,
                                               current_epoch_index(), ev.equivocator);
     if (!ek) return;
@@ -1974,7 +1974,7 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
     // double-sign cannot be replayed with varying block_index into unbounded
     // pool entries. See node::same_equivocation_identity.
     if (pending_equivocation_contains(pending_equivocation_evidence_, ev))
-        return; // dup — this equivocator is already pooled (will be slashed)
+        return; // dup — this equivocator is already pooled (will be recorded)
     pending_equivocation_evidence_.push_back(ev);
     std::cout << "[node] adopted gossiped equivocation evidence: equivocator="
               << ev.equivocator << " at h=" << ev.block_index << "\n";
@@ -2578,10 +2578,9 @@ void Node::post_append_bookkeeping_locked(const chain::Block& b) {
     round_stall_ticks_ = 0;
     stalled_resync_    = false;
 
-    // Drop equivocation evidence that was just baked into this block
-    // (slashing already applied to the equivocator's stake in
-    // apply_transactions). Match by equivocator since once they're
-    // slashed to 0 stake they're suspended from selection anyway.
+    // Drop equivocation evidence that was just baked into this block —
+    // the record is on chain (apply reads nothing from it, D4). Matched
+    // by equivocator, the same identity the pending dedup uses.
     for (auto& ev : b.equivocation_events) {
         pending_equivocation_evidence_.erase(
             std::remove_if(pending_equivocation_evidence_.begin(),
@@ -3127,8 +3126,8 @@ void Node::on_contrib(const ContribMsg& msg) {
     //
     // After detection, drop the duplicate from pending_contribs_ entry
     // anyway — we keep the earlier-arrived view as the canonical contrib
-    // for this signer this round. The evidence handles the slashing
-    // separately at the next produced block.
+    // for this signer this round. The evidence is recorded separately at
+    // the next produced block (no L1 consequence — D4).
     auto existing = pending_contribs_.find(msg.signer);
     if (existing != pending_contribs_.end()) {
         // EQV-height-bind + EQV-gen-bind: the evidence carries the OPENINGS
@@ -4726,12 +4725,12 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
 
     // Re-grab to inspect post-handler state for the response. Idempotent on the
     // equivocator (same identity the handler dedups on): a valid submission for
-    // an already-pooled equivocator reports accepted=true (it WILL be slashed),
+    // an already-pooled equivocator reports accepted=true (it WILL be recorded),
     // an invalid one leaves the equivocator absent → accepted=false.
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
     bool present = pending_equivocation_contains(pending_equivocation_evidence_, ev);
     if (present) {
-        // Gossip so peers can also slash. The handler doesn't broadcast
+        // Gossip so peers can also record it. The handler doesn't broadcast
         // (it processes inbound), so we do it here on the submission path.
         gossip_.broadcast(net::make_equivocation_evidence(ev));
         return {{"accepted", true}, {"equivocator", ev.equivocator},

@@ -108,7 +108,8 @@ CreditInbound, one shard's balance + acc_inbound under the dedup guard):
     aggregate: +amt to live, -amt via the -acc_subsidy term => zero.
     Included so the aggregate identity is exercised in its GENERAL form
     (Form B), not only the subsidy-free Form A regime D1's test runs in.
-  * SlashStake(s, d, amt) — per-shard forfeiture (chain.cpp:1395). Debit
+  * SlashStake(s, d, amt) — per-shard stake debit (the abort suspension
+    deduction; equivocation debits nothing since D4, 2026-09-16). Debit
     shard s's locked stake + bump s.acc_slashed. Net: -amt to live, +amt
     via the +acc_slashed term on the aggregate's LHS => zero (the burned
     value is re-counted as sequestered, recovering the genesis baseline).
@@ -497,7 +498,7 @@ MintSubsidy(s, cre, amt) ==
     /\ UNCHANGED <<inflight, applied>>
     /\ steps' = steps + 1
 
-\* SlashStake(s, d, amt): per-shard forfeiture (chain.cpp:1395 + FA5/FA6).
+\* SlashStake(s, d, amt): per-shard stake debit (abort suspension deduction; FA5).
 \* Debit shard s's locked stake for account d + bump s.acc_slashed by the
 \* same amt. Net: -amt to live, +amt via the +acc_slashed term on the
 \* aggregate's LHS => zero (burned value re-counted as sequestered).

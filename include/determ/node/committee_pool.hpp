@@ -20,7 +20,7 @@
 // the frozen CommitteeMember.ed_pub set — so a member that deregisters / unstakes
 // / abort-suspends MID-EPOCH stays a valid committee member until the next epoch
 // boundary (the retroactive-reconstructibility property the S-036 closure needs;
-// safety-critical equivocation is still detected + slashed immediately, and
+// safety-critical equivocation is still detected + recorded immediately, and
 // per-round abort exclusion + BFT escalation still guarantee progress — see
 // §9.4). Epoch 0, a pruned epoch, or a SINGLE chain fall back to the present-head
 // registry, byte-identical to pre-D3.3b behavior.
@@ -52,7 +52,7 @@ std::vector<NodeEntry> select_committee_pool(const chain::Chain& chain,
 // pinned path, a domain present in the frozen set resolves to its frozen ed_pub
 // (so a mid-epoch-drifted member still verifies on the key it was selected with);
 // a domain ABSENT from the frozen set falls back to the present-head registry
-// (so a non-committee equivocator is still slashable). Off the pinned path:
+// (so a non-committee equivocator's evidence still verifies). Off the pinned path:
 // present-head only. nullopt = unknown at both.
 std::optional<PubKey> resolve_committee_member_pubkey(const chain::Chain& chain,
                                                       const NodeRegistry& present_head,

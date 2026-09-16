@@ -94,9 +94,10 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
 ACTIVE FRONT (owner, DECISION-LOG 2026-09-16 D1 — supersedes the 2026-07-28 "D2 now" line
 for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PARALLEL. Work is
 selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
-(1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone ->
-evidence cap + in-block dedup -> abort-deduction retirement -> re-derivations; adjudicate
-S-102); (4) the joint design gate R-4 + F-c + R-15 (+R-16); (5) the V-REG-1 companions (join
+(1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone —
+LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup -> abort-deduction
+retirement -> re-derivations; adjudicate S-102); (4) the joint design gate R-4 + F-c + R-15
+(+R-16); (5) the V-REG-1 companions (join
 rule, exit rule, rotation, small-order rule); (6) pq_auth rule + block-byte cap + chain
 identity in signing_bytes (the last transaction-frame changes); (7) R-8 C0 demotion -> S-089
 -> S-090 rebroadcast; (8) CT verification off the lock; (9) the EXTENDED closure set;
@@ -295,9 +296,9 @@ stands. Do not re-open the closed legs; harden forward from here.
     (DECISION-LOG 2026-08-13 b5838fb; the six 2026-08-12 designs "final".."final+9").
     Recorded in EquivocationSlashing.md §2 Case (c) + PROTOCOL.md §6.1 — do NOT treat
     it as closed and do NOT re-propose a predicate over two signed openings. The
-    residual's HARM will be gone once the L2 relocation lands; AT HEAD THE FORFEITURE
-    IS LIVE (chain.cpp:1819-1825) — the relocation FAILED review and was REVERTED (see
-    NOT LANDED below). What remains open is the sound successor. Tracked as R-1.
+    residual's HARM is gone: the forfeiture + deregistration were REMOVED 2026-09-16
+    (O-1 step 3a, export 0016 — see STEP 3a LANDED in the SLASHING block below). What
+    remains open is the sound successor. Tracked as R-1.
   - Hole 2 empty-committee beacon -> docs/SECURITY.md S-053. Closed by extracting
     verify_committee_sigs as the ONE committee-signature core (non-empty + size match +
     membership + verify + signed_count >= required_k); both verify_shard_tip_committee_
@@ -348,24 +349,29 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   WHAT L2 SLASHES — DECIDED 2026-09-16: (b), validators post a SEPARATE L2 bond and L1 stake
   is never slashable (the only variant that does not re-enter consensus). (a) and (c) are
   not pursued.
-  NOT LANDED YET (sequence step 3) — the code change was written, FAILED adversarial review (22 findings
-  confirmed, 1 false alarm) and was REVERTED. The core removal is sound (A1 neutral,
-  snapshot round-trips, no state_root leaf changes shape), but landing it additionally
-  requires: a per-block CAP + in-block duplicate rejection on equivocation_events (2
-  Ed25519 verifies each and deregistration was the only limiter, so the same event becomes
-  re-includable forever — a NEW DoS vector the removal creates); S-006's status re-derived
-  (its entire closure was "route detection into the slashing apply path", so it is
-  silently reopened); an HONEST S-011 residual (the drafted one was wrong in three places
-  — BFT escalation can seat a zero-honest committee at |pool| == K, abort-driven stake drain
-  below min_stake IS permanent and S-051 does not lift it, and DOMAIN_INCLUSION zeroes
-  BOTH legs); and ~16 authoritative no-TIER proof docs still asserting the deleted
-  forfeiture as shipped. Full finding list: DECISION-LOG 2026-08-13.
-  THIS REOPENS S-011 WHEN IT LANDS. docs/SECURITY.md states S-011's mitigation as the
-  S-010 stake floor PLUS the FA6 equivocation-slashing economic bound; once the
-  pre-finalization consequence is removed, the slashing half no longer holds as written.
-  Same flag stands against BFTSafety.md B2 / T-5.1 (DECISION-LOG 2026-08-12 "final+6")
-  and, newly, against S-029's Level-3 block_hash-grinding closure and S-013's economic
-  leg. Until the re-derivation lands, do NOT cite the old bound.
+  STEP 3a LANDED 2026-09-16 (export 0016; DECISION-LOG 2026-09-16 "O-1 step 3a"): the
+  forfeiture + deregistration loop is GONE from Chain::apply_transactions — an
+  EquivocationEvent moves NO L1 state (gate `determ test-equivocation-apply`: neutrality
+  against an event-free twin, A1, positive control; mutants M1-M8 RED). Earlier attempts
+  FAILED adversarial review because of their RIDERS, never the removal; this time the
+  removal landed ALONE. STILL TO LAND, each its own increment, in this order:
+  3b a per-block CAP + in-block duplicate rejection on equivocation_events (2 Ed25519
+  verifies each and deregistration was the only limiter, so the same event is now
+  re-includable — the DoS vector the removal creates; a bound that is a pure function of
+  the block's bytes, or none — DECISION-LOG 2026-08-13); D13 abort-deduction retirement;
+  3c S-006's status re-derived (its closure was "route detection into the slashing apply
+  path"); an HONEST S-011 residual (the drafted one was wrong in three places — BFT
+  escalation can seat a zero-honest committee at |pool| == K, abort-driven stake drain
+  below min_stake IS permanent and S-051 does not lift it); the S-013 / S-029 Level-3 /
+  BFTSafety T-5.1 re-derivations; S-095; and the 51 untiered docs that stated the removed
+  consequence as shipped — each now carries a uniform "STATUS 2026-09-16" banner (list in
+  the log entry) until its re-derivation replaces it. Full 2026-08-13 finding list:
+  DECISION-LOG 2026-08-13.
+  S-011 IS REOPENED IN SUBSTANCE (ledger marker updated 2026-09-16): docs/SECURITY.md
+  states S-011's mitigation as the S-010 stake floor PLUS the FA6 equivocation-slashing
+  economic bound; the slashing half no longer holds. Same flag stands against BFTSafety.md
+  B2 / T-5.1 (DECISION-LOG 2026-08-12 "final+6"), S-029's Level-3 block_hash-grinding
+  closure and S-013's economic leg. Until the re-derivation lands, do NOT cite the old bound.
 
 DECISION CLOCK — consensus/wire residuals (DECISION-LOG 2026-08-13, directive 5; rows
 R-4..R-9 added 2026-09-14; R-10..R-16 added 2026-09-15; R-17 added 2026-09-16). ALL ROWS
@@ -528,8 +534,8 @@ measured evidence and approved by the owner at review (D24):
       D10 small-order anonymous senders (S-072).
   G3  D9 + D23: empty pq_auth on non-PQ types, the block-byte cap, chain identity in
       signing_bytes (S-057, S-103); S-101 presented with it for approval.
-  G4  The O-1 chain: forfeiture removal, evidence cap + in-block dedup, abort-deduction
-      retirement, re-derivations; then R-8 (S-055), S-089, S-090.
+  G4  The O-1 chain: forfeiture removal (LANDED 2026-09-16, export 0016), evidence cap +
+      in-block dedup, abort-deduction retirement, re-derivations; then R-8 (S-055), S-089, S-090.
   G5  D14: CT verification off the lock, cache, per-block CT cap, anon-CT ingress (S-065, S-083).
   G6  The EXTENDED closure set (D16): S-093, S-094, R-3, S-064/B3.4, S-088, S-036, S-081, S-096;
       D19b-ii sharding_mode genesis pin lands with the first genesis-hash-changing increment here.

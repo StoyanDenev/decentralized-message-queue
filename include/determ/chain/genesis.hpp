@@ -21,8 +21,8 @@ namespace determ::chain {
 //
 //   STAKE_INCLUSION  — admission via locking min_stake. Sybil cost =
 //                      capital lock-up. Disincentive on misbehavior =
-//                      stake forfeit (suspension slash + equivocation
-//                      forfeit).
+//                      the abort suspension deduction (equivocation
+//                      carries no L1 stake consequence — D4).
 //
 //   DOMAIN_INCLUSION — admission via registering with a domain name
 //                      (e.g., a DNS name like validator1.example.com).
@@ -170,7 +170,7 @@ struct GenesisConfig {
     // Rev. 8 follow-on: validator inclusion policy. Default is
     // STAKE_INCLUSION (preserves rev.7/8 stake-based behavior).
     // DOMAIN_INCLUSION chains pin min_stake = 0 (no stake gate);
-    // equivocation still deregisters the validator regardless of mode.
+    // equivocation carries no L1 consequence in either mode (D4).
     InclusionModel                  inclusion_model{InclusionModel::STAKE_INCLUSION};
     // Min stake threshold for validator eligibility. Default 1000 for
     // STAKE_INCLUSION; DOMAIN_INCLUSION chains pin this to 0.

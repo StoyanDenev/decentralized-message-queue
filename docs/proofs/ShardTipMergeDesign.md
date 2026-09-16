@@ -1,5 +1,7 @@
 # On-chain SHARD_TIP records — closing S-036 (D3 / v2.11)
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 **Status: MECHANISM DECIDED (§9) — implementing. D3.1 + D3.2 + D3.3a SHIPPED; D3.3b next (the `sharding_mode==EXTENDED`-gated selection pin + epoch-rotation fold-in). See §9.2 for the feasibility-verdict corrections (gate on `sharding_mode==EXTENDED` not role; the pin READS the `cc:` checkpoint, not `build_from_chain(anchor)`; the leaf prefix is `cc:` not `c:`).** Owner
 forks F-1…F-4 were decided (see §5); the mandated adversarial design-review (§8)
 found the F-4 trust model unsound (a validator cannot re-derive a source committee

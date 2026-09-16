@@ -1,5 +1,7 @@
 # FA5 — BFT-mode conditional safety
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the conditions that have always governed BFT-style protocols: Byzantine fraction less than `|K_h|/3` within the committee, plus equivocation slashing as economic backing.
 
 Unlike MD-mode safety (FA1 T-1, unconditional given ≥1 honest in committee), BFT-mode safety is **conditional**. The trade is documented in `docs/PROTOCOL.md` §10.4 and observed per-block via the `consensus_mode` tag.

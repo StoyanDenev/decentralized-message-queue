@@ -30,8 +30,8 @@ enum class MsgType : uint8_t {
     ABORT_EVENT      = 10,
     // rev.8 follow-on: a node that detects equivocation (a BFT proposer
     // signed two different block_digests at the same height) gossips the
-    // assembled EquivocationEvent so peers can slash the equivocator on
-    // the next finalized block. Evidence is verifiable independently:
+    // assembled EquivocationEvent so peers can bake the record into the
+    // next finalized block (no L1 consequence — D4). Evidence is verifiable independently:
     // both Ed25519 sigs over distinct digests by the same registered key.
     EQUIVOCATION_EVIDENCE = 11,
     // rev.9 B2c.1: beacon nodes broadcast their newly-applied blocks to

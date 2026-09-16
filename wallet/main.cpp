@@ -7429,17 +7429,18 @@ int cmd_tx_sign_verify(int argc, char** argv) {
 // An EquivocationEvent (include/determ/chain/block.hpp) records that a
 // single registered signer produced TWO Ed25519 signatures over TWO
 // distinct 32-byte digests at the SAME height — unambiguous proof the
-// signer equivocated. The chain slashes the equivocator's entire stake
-// and deregisters them when such an event is baked into a block; the
-// validator gate (src/node/validator.cpp::check_equivocation_events)
-// already verified the proof before inclusion.
+// signer equivocated. The chain bakes the event into a block as an
+// evidence record with no L1 consequence (D4, 2026-09-16 — no stake or
+// registry change; the record feeds the L2 policy); the validator gate
+// (src/node/validator.cpp::check_equivocation_events) already verified
+// the proof before inclusion.
 //
 // This command reproduces that gate's two-sig check byte-for-byte so
 // anyone holding the raw evidence — pulled from a block's
 // equivocation_events[], the EQUIVOCATION_EVIDENCE gossip message, or
 // the `b:` abort/equivocation state-proof namespace — can INDEPENDENTLY
-// confirm the slashing was justified BEFORE trusting the chain to have
-// applied it. It is the forensic counterpart to committee-signature-
+// confirm the record proves a double-sign BEFORE relying on it. It is
+// the forensic counterpart to committee-signature-
 // verify: that command verifies a block's K-of-K sigs against ONE
 // digest; this one verifies that ONE key signed TWO conflicting digests.
 //
@@ -7597,7 +7598,7 @@ int cmd_verify_equivocation(int argc, char** argv) {
                      "  OFFLINE FA6 equivocation-evidence verifier (EQV-height-bind\n"
                      "  + EQV-gen-bind form). Confirms ONE registered key signed TWO\n"
                      "  distinct digests of one family at the SAME height in the SAME\n"
-                     "  round — the two-sig proof the chain slashes on. Reproduces\n"
+                     "  round — the two-sig proof the chain records (D4). Reproduces\n"
                      "  validator.cpp::check_equivocation_events: kind <= 1, index_a ==\n"
                      "  index_b == block_index, gen_a == gen_b, body_root_a !=\n"
                      "  body_root_b, sig_a != sig_b, and BOTH sigs verify against\n"
@@ -24524,7 +24525,7 @@ void print_usage() {
         "                                             signature-verify (which checks K-of-K sigs\n"
         "                                             over ONE digest; this checks ONE key over TWO\n"
         "                                             digests) — lets anyone independently confirm\n"
-        "                                             a slashing was justified. Supply the evidence\n"
+        "                                             a double-sign record. Supply the evidence\n"
         "                                             fields inline OR pass --event with an\n"
         "                                             EquivocationEvent JSON (or a Block whose\n"
         "                                             equivocation_events[N] is checked); --pubkey\n"

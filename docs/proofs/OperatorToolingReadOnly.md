@@ -1,5 +1,7 @@
 # Operator Tooling Read-Only — `operator_*.sh` diagnostic-family meta-proof
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 **Status:** Survey + argument. Round R40 (agent E7).
 **Scope:** the `tools/operator_*.sh` diagnostic-script family.
 **Companion to:** `RpcInputValidationDefense.md`, `S001RpcAuthSoundness.md`,

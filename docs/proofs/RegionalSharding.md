@@ -1,5 +1,7 @@
 # FA8 — Regional sharding corollary
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 This document proves that **regional sharding** (EXTENDED mode with `committee_region` pinning per shard) preserves all per-property guarantees of FA1 (Safety), FA4 (Liveness), FA6 (Equivocation Slashing), and FA7 (Cross-shard receipts) without modification to their cryptographic or quorum arguments.
 
 Regional sharding is a deployment optimization: each shard's committee is drawn only from validators whose `region` tag matches the shard's `committee_region`. This narrows the latency envelope within a committee (intra-region RTTs), allowing faster block times per shard without sacrificing global decentralization. The question the proof answers: **does this filter break any prior soundness or liveness theorem?** Answer: no, provided the pinned pool retains enough honest validators.

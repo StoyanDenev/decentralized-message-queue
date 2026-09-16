@@ -1,5 +1,7 @@
 # F2ApplyComposition — v2.7 F2 view reconciliation + FA-Apply-1..16 composition + state_root binding
 
+> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+
 > **⚠ Implementation status (corrected 2026-06-05).** The S-033 `state_root`
 > apply gate + S-038 producer wiring this proof composes against ARE shipped
 > (verified: `src/chain/chain.cpp` populates and checks `body.state_root`, and

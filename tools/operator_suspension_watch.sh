@@ -34,9 +34,9 @@
 #                                 is currently committee-ineligible.
 #   operator_equivocation_digest.sh   Per-OFFENDER FA6 equivocation EVENT
 #                                 digest over a block window. Equivocation
-#                                 (terminal full-stake forfeit) only; nothing
-#                                 about the recoverable abort-suspension
-#                                 backoff window.
+#                                 evidence records (no L1 consequence — D4)
+#                                 only; nothing about the recoverable
+#                                 abort-suspension backoff window.
 #   operator_escalation_consistency.sh   Per-block BFT-escalation LEGALITY
 #                                 audit. Orthogonal: it checks consensus_mode
 #                                 invariants, not registry suspension state.

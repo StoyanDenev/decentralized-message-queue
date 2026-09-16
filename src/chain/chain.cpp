@@ -952,7 +952,7 @@ void Chain::apply_transactions(const Block& b) {
     // A1: per-block running deltas for the unitary-balance counters.
     uint64_t block_outbound = 0;   // cross-shard TRANSFER amount that left this shard
     uint64_t block_inbound  = 0;   // cross-shard receipt amount credited here
-    uint64_t block_slashed  = 0;   // suspension + equivocation forfeit
+    uint64_t block_slashed  = 0;   // abort suspension deduction only (D4: no equivocation forfeit)
 
     auto charge_fee = [&](AccountState& acct, uint64_t fee) {
         if (acct.balance < fee) return false;
@@ -1805,33 +1805,16 @@ void Chain::apply_transactions(const Block& b) {
         block_slashed     += deduct;   // A1
     }
 
-    // rev.8 follow-on: full equivocation slashing + deregistration. Each
-    // EquivocationEvent baked into this block (validator already verified
-    // the two-sig proof) (a) forfeits the equivocator's ENTIRE staked
-    // balance — primary disincentive in STAKE_INCLUSION mode — and
-    // (b) marks the equivocator's registry entry inactive_from = next
-    // block, removing them from selection regardless of stake.
-    //
-    // The dual mechanism unifies STAKE_INCLUSION and DOMAIN_INCLUSION:
-    //   - STAKE_INCLUSION:  stake → 0 makes them ineligible; deregistration
-    //                       is redundant but harmless.
-    //   - DOMAIN_INCLUSION: stake is already 0 (no stake), so the
-    //                       deregistration is what actually removes them.
-    //                       Equivocator must register a fresh domain to
-    //                       participate again.
-    for (auto& ev : b.equivocation_events) {
-        auto sit = stakes_.find(ev.equivocator);
-        if (sit != stakes_.end()) {
-            __ensure_stakes();
-            block_slashed     += sit->second.locked;  // A1: full forfeit
-            sit->second.locked = 0;
-        }
-        auto rit = registrants_.find(ev.equivocator);
-        if (rit != registrants_.end()) {
-            __ensure_registrants();
-            rit->second.inactive_from = b.index + 1;
-        }
-    }
+    // b.equivocation_events: an EquivocationEvent is an on-chain EVIDENCE
+    // RECORD (verified by the validator, V11) and carries NO L1 consequence
+    // — apply reads nothing from it: no stake forfeiture, no registry
+    // deactivation, no abort-record increment. Owner decision 2026-09-16
+    // (DECISION-LOG D4, O-1 option (b)): L1 stake is never slashable for
+    // equivocation; the record is the input to the L2 policy (D22). The
+    // former full-forfeit + deregister branch cost an HONEST validator its
+    // stake on a valve/re-round same-height pair (log 2026-08-12) and made
+    // the R-8 digest demotion unsound (ordering result 7570989). Gate:
+    // `determ test-equivocation-apply` (neutrality, A1, positive control).
 
     // rev.9 B3.4: deliver inbound cross-shard receipts. Each entry
     // credits `to` with `amount` (sender debit + fee already happened

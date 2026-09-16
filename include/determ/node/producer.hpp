@@ -379,12 +379,12 @@ std::optional<chain::EquivocationEvent> detect_equivocation(
     uint64_t beacon_anchor_height);
 
 // BlockIngress MEM-equiv-evidence-blockindex-amplification: the pool-identity
-// used to dedup pending equivocation evidence. An equivocator is fully slashed
-// (full-stake forfeit + deregister, chain.cpp apply) on the FIRST valid proof
-// REGARDLESS of block_index, and the credited-evidence prune erases by
-// equivocator alone — so pending_equivocation_evidence_ holds at most one
-// meaningful record per equivocator. Historically block_index was bound by
-// NEITHER of the two signatures, so keying dedup on it let ONE valid
+// used to dedup pending equivocation evidence. The pool keys on the
+// equivocator alone and the credited-evidence prune erases by equivocator
+// alone once ANY valid proof against it is baked (apply records nothing from
+// it — D4). Whether distinct proofs against one validator should each be
+// retained as L2 input is the step 3b cap/dedup question, not settled here.
+// Historically block_index was bound by NEITHER of the two signatures, so keying dedup on it let ONE valid
 // double-sign replay with block_index = 0,1,2,… into unbounded pool entries
 // (a node-local memory-exhaustion DoS). EQV-height-bind has since made
 // block_index signature-bound (the verifier recomputes each signed digest
@@ -587,7 +587,7 @@ BlockSigMsg make_block_sig(const crypto::NodeKey& key,
 //
 // `equivocation_events` (rev.8 follow-on) bakes any equivocation evidence the
 // node has assembled into this block. The validator verifies the two-sig
-// proof; on apply, each equivocator's stake is fully forfeited.
+// proof; apply records nothing from it (an evidence record, D4).
 chain::Block build_body(
     const std::map<Hash, chain::Transaction>& tx_store,
     const chain::Chain&                       chain,

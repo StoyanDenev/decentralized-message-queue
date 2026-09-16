@@ -535,7 +535,8 @@ public:
     //
     //   expected = genesis_total
     //            + accumulated_subsidy   (block_subsidy minted per block)
-    //            - accumulated_slashed   (suspension + equivocation forfeit)
+    //            - accumulated_slashed   (abort suspension deduction; equivocation
+    //                                       carries no stake consequence — D4)
     //            + accumulated_inbound   (cross-shard receipts credited here)
     //            - accumulated_outbound  (cross-shard transfers debited here,
     //                                       credit delivered on dst shard)
@@ -981,8 +982,8 @@ private:
     //
     // Containers that benefit from lazy:
     //   - stakes (Phase 2B): TRANSFER-only blocks skip; only REGISTER/
-    //     STAKE/UNSTAKE/DEREGISTER/slashing/equivocation paths touch
-    //   - registrants (Phase 2B): only REGISTER/DEREGISTER/equivocate
+    //     STAKE/UNSTAKE/DEREGISTER/abort-deduction paths touch
+    //   - registrants (Phase 2B): only REGISTER/DEREGISTER
     //   - abort_records (Phase 2A): only Phase-1 slashing path
     //   - merge_state (Phase 2A): only MERGE_EVENT apply
     //   - applied_inbound_receipts (Phase 2A): only cross-shard inbound

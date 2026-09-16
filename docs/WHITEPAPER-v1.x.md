@@ -49,7 +49,7 @@ A validator is a participant registered on-chain via a REGISTER transaction carr
 - An optional 32-byte UTF-8 region tag (in lowercase ASCII with charset `[a-z0-9-_]`), used only under EXTENDED sharding.
 - Stake (under STAKE_INCLUSION) or a domain registration (under DOMAIN_INCLUSION).
 
-Both inclusion models share the same Sybil-resistance + disincentive structure: under STAKE_INCLUSION, sybil cost is capital lock-up and disincentive is stake forfeiture; under DOMAIN_INCLUSION, sybil cost is domain registration and disincentive is deregistration. The protocol treats both identically for consensus purposes.
+Both inclusion models share the same Sybil-resistance + disincentive structure: under STAKE_INCLUSION, sybil cost is capital lock-up and the L1 disincentive is the abort suspension deduction; under DOMAIN_INCLUSION, sybil cost is domain registration and the L1 disincentive is the abort suspension. Equivocation carries no L1 consequence since 2026-09-16 (DECISION-LOG D4): its evidence record feeds an L2 bond policy (D22). The protocol treats both models identically for consensus purposes.
 
 ### 2.2 Adversary model
 
@@ -64,7 +64,7 @@ We consider three composable adversary capabilities:
 ### 2.3 Safety claims under the adversary model
 
 - **Unconditional safety** (MD-mode blocks): Determ's K-of-K committee structure means a single non-Byzantine member of any committee suffices to prevent forks at that height. This is structurally weaker than BFT's "f < N/3" assumption — it requires only `1 ≤ |V \ F|`, not `|V \ F| > 2N/3`.
-- **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a BFT consensus mode in which the committee shrinks to `k_bft = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉` suffices. Safety is now conditional on `f_h < k_bft/3` for that single block, plus economic slashing recovery for any equivocator (full stake forfeiture + deregistration).
+- **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a BFT consensus mode in which the committee shrinks to `k_bft = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉` suffices. Safety is now conditional on `f_h < k_bft/3` for that single block, plus the on-chain equivocation evidence record (no L1 consequence since 2026-09-16, DECISION-LOG D4 — the accountable-safety corollary T-5.1 is re-derived in step 3c; see `docs/proofs/BFTSafety.md`).
 - **Censorship resistance**: an honest validator anywhere in the K committee proposes its transaction list in phase 1; the canonical block's transaction set is the union of all K lists. Censorship requires unanimous collusion of all K members at every block where the targeted transaction is pending — `(f/|V|)^K` capture probability per epoch boundary.
 
 The trade-offs:
@@ -137,7 +137,7 @@ When all four hold, the round runs in BFT mode with two-level shrinkage:
 
 S-044/S-045 (SECURITY.md §3) — the escalation-reachability and abort-cascade limitations — are mitigated. The genesis-default `bft_escalation_threshold` is now 1, so θ=1 is reached by the first abort event (which always forms) and the escalation counter can never freeze below the threshold, while gate 1 (available pool < `K`) still bars premature escalation when MD margin exists. The abort-claim quorum is now `max(2, K−1)` via `chain::abort_claim_quorum()`; this floor is a no-op for K≥3 and at K=2 makes the single-claim quorum unsatisfiable, so the K=2 wedge-by-cascade degrades to a crash-stop 2-of-2 rather than a permanent cascade. The formal reachability derivation is `docs/proofs/AbortCascadeLiveness.md` (FB67).
 
-BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), plus economic slashing recovery for any equivocator — **the slashing leg is under re-derivation** (owner decision 2026-08-13 relocates the pre-finalization consequence out of L1; not yet landed; do not rely on T-5.1 — CLAUDE.md SLASHING block). See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
+BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), with **no slashing leg** — the pre-finalization consequence was removed from L1 on 2026-09-16 (owner decision D4, O-1 step 3a); the accountable-safety corollary T-5.1 is re-derived in step 3c and must not be relied on until then (CLAUDE.md SLASHING block). See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
 
 ### 3.4 Equivocation slashing
 
@@ -150,12 +150,11 @@ The two outer tags MUST differ. With a shared tag, one honest block signature pl
 
 Either detection path produces an `EquivocationEvent` containing the two signatures + their openings (the digests are derived, never carried); when baked into a finalized block, the event triggers:
 
-- **STAKE_INCLUSION chains:** full stake forfeiture (zeroes `stakes_[X].locked`) plus registry deregistration — live at HEAD; relocation out of L1 decided 2026-08-13, not landed (see CLAUDE.md).
-- **DOMAIN_INCLUSION chains:** registry deregistration (the stake is already 0).
+- **no L1 consequence** (both inclusion models): apply reads nothing from the event — no stake forfeiture, no registry deregistration (owner decision 2026-09-16, DECISION-LOG D4 / O-1 option (b); landed as O-1 step 3a). The former full-forfeit + deregister branch is removed; the on-chain record is the input to the L2 bond policy (D22).
 
-The slashing pipeline: detection → gossip via `EQUIVOCATION_EVIDENCE` (message type 11) → pool in `pending_equivocation_evidence_` → producer includes in `block.equivocation_events` → validator verifies V11 → apply commits the slash.
+The evidence pipeline: detection → gossip via `EQUIVOCATION_EVIDENCE` (message type 11) → pool in `pending_equivocation_evidence_` → producer includes in `block.equivocation_events` → validator verifies V11 → apply commits the record (and nothing else).
 
-Slashing soundness: an honest validator that participates in at most one round per height is never slashed for equivocation. By Ed25519 EUF-CMA, forging a signature under an honest key is `≤ 2⁻¹²⁸` per attempt; by SHA-256 second-preimage resistance, re-presenting an honest signature under a *different* height's opening is likewise `≤ 2⁻¹²⁸`. The `kind` discriminator carries both detection paths under one bound. See `docs/proofs/EquivocationSlashing.md` (FA6).
+Evidence soundness (formerly "slashing soundness"; the L1 consequence is gone, the verifier claim is unchanged): an honest validator that participates in at most one round per height is never PROVEN to have equivocated. By Ed25519 EUF-CMA, forging a signature under an honest key is `≤ 2⁻¹²⁸` per attempt; by SHA-256 second-preimage resistance, re-presenting an honest signature under a *different* height's opening is likewise `≤ 2⁻¹²⁸`. The `kind` discriminator carries both detection paths under one bound. See `docs/proofs/EquivocationSlashing.md` (FA6).
 
 **Two things stated plainly, because they were not always.** (i) Before 2026-08-12 the height was **not** bound: the event carried two opaque digests, and an attacker who harvested one honest validator's ordinary signatures from two *different* heights — both public, both on the wire — could forge a full-stake slash remotely and unauthenticated. That was a rank-1 vulnerability (`docs/SECURITY.md` S-052), closed by the two-level openable digest above. (ii) A residual remains **open**: an honest validator legitimately signs two different bodies at the *same* height across abort re-rounds, and V11 accepts that pair. It is strictly narrower than the closed hole and is recorded, not argued away; closing it requires binding the round generation into the opening (owner decision pending).
 

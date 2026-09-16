@@ -98,7 +98,7 @@ Determ gives up `f < N/3` Byzantine *liveness* tolerance — a single silent com
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
-- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — the pre-finalization forfeiture is being relocated out of L1, DECISION-LOG 2026-08-13; the forfeiture code is still live at HEAD until that lands), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
+- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — an on-chain record with no L1 consequence since 2026-09-16, DECISION-LOG D4; the L2 policy consumes it), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
 
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
@@ -284,8 +284,8 @@ Determ supports two genesis-pinned validator-inclusion policies. Both deliver **
 
 | Mode | `min_stake` | Sybil cost | Disincentive on misbehavior |
 |---|---|---|---|
-| **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Stake forfeit (suspension slash + equivocation forfeit) |
-| **`DOMAIN_INCLUSION`** | 0 | Domain registration | Deregistration (lose all future block rewards; re-entry costs a fresh registration) |
+| **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Abort suspension deduction (equivocation carries no L1 stake consequence — D4, 2026-09-16) |
+| **`DOMAIN_INCLUSION`** | 0 | Domain registration | Abort suspension only (equivocation carries no L1 registry consequence — D4) |
 
 **Why the decentralization claim is mode-invariant:** Determ's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
 
@@ -314,12 +314,12 @@ BASE = 10, MAX = 10000
 
 Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees.
 
-A domain that **equivocates** is permanently removed from the registry — `inactive_from` is set to the next block. The protocol detects two equivocation surfaces (both digest-agnostic — the validator's V11 only checks "two distinct hashes signed by the same registered key"):
+A domain that **equivocates** has the double-sign proof recorded on chain as an `EquivocationEvent` — an evidence record for the L2 policy that carries **no L1 consequence** (owner decision 2026-09-16, DECISION-LOG D4: no stake forfeiture, no registry deactivation). The protocol detects two equivocation surfaces (both digest-agnostic — the validator's V11 only checks "two distinct hashes signed by the same registered key"):
 
 1. **BlockSigMsg-level (rev.8)**: the validator signs `compute_block_digest(b)` for two different block bodies at the same height. Detection in `Node::apply_block_locked`.
 2. **ContribMsg same-generation (S-006 closure)**: the validator signs `make_contrib_commitment(...)` for two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection in `Node::on_contrib`.
 
-Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to slash all equivocation surfaces. Re-entry requires a fresh REGISTER under a NEW domain name (since V-REG-1 a domain name is single-use; the old domain's balance and stake stay with it — SECURITY.md S-067). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
+Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to record all equivocation surfaces. The record is capped and deduplicated per block in a following increment (step 3b) and consumed by the L2 bond policy (D22).
 
 ---
 
@@ -691,8 +691,8 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 The disincentive depends on the chain's governance model (§5.1):
 
-- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration at HEAD — a consequence the owner has decided to relocate out of consensus (DECISION-LOG 2026-08-13; not yet landed, see CLAUDE.md SLASHING block).
-- **`DOMAIN_INCLUSION`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation deregisters the validator from the chain — they lose all future block rewards and must register a new domain to participate again.
+- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation carries **no** L1 consequence since 2026-09-16 (O-1 step 3a; DECISION-LOG D4) — the `EquivocationEvent` is an evidence record for the L2 policy.
+- **`DOMAIN_INCLUSION`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation carries no L1 consequence here either (D4) — the record is the L2 policy's input.
 
 Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:
 
@@ -703,10 +703,10 @@ The full pipeline:
 3. **Pool** (`Node::pending_equivocation_evidence_`): each node maintains a pool of unbaked evidence. Peers receiving gossiped evidence validate the two-sig proof against the equivocator's registered key before adding.
 4. **Production** (`build_body`): producers include the evidence pool in `block.equivocation_events` when building the next block.
 5. **Validator** (`check_equivocation_events`): rejects malformed events (digests equal, sigs equal, equivocator not in registry, sigs don't verify against the registered key).
-6. **Slashing** (`apply_transactions`): each `EquivocationEvent` zeroes the equivocator's `stakes_[X].locked`. Validator's stake-below-MIN_STAKE filter then removes them from selection on the next registry build.
+6. **Apply** (`apply_transactions`): each `EquivocationEvent` is committed as an on-chain record and nothing else — no stake, registry or counter movement (D4, 2026-09-16; `determ test-equivocation-apply`).
 7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool (no double-baking).
 
-BFT-mode safety claims (conditional on `f_h < k_bft/3` within the BFT committee plus economic disincentive) are now economically meaningful end-to-end.
+BFT-mode safety claims are conditional on `f_h < k_bft/3` within the BFT committee; the accountable-safety corollary that rested on slashing (T-5.1) is re-derived in step 3c (`docs/proofs/BFTSafety.md`).
 
 ---
 

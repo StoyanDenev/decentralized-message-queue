@@ -13,8 +13,10 @@
 # EquivocationEvent and/or a Phase-1 AbortEvent — all injected via the REAL
 # Chain::append apply path — and asserts after every block, JOINTLY:
 #   - A1: expected_total == live_total_supply;
-#   - accumulated_slashed EXACT running total across BOTH slash kinds
-#     (equivocation full forfeit + abort SUSPENSION_SLASH), monotone;
+#   - accumulated_slashed EXACT running total of the abort SUSPENSION_SLASH
+#     deductions, monotone; an EquivocationEvent moves NOTHING (D4,
+#     2026-09-16) — stake, counter and registry stay where the abort
+#     deductions alone put them;
 #   - sender balances + nonces match a shadow model updated per the real
 #     apply rules (fees route to the block creator); nonces monotone;
 #   - validator stakes match the shadow, never negative/underflowed;

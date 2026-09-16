@@ -5,7 +5,7 @@
 # Drives `determ-light verify-equivocation` against a hand-built
 # EquivocationEvent (the FA6 double-sign proof carried by the
 # EQUIVOCATION_EVIDENCE gossip message + the submit_equivocation RPC) and
-# checks that the binary re-runs the daemon's V11 slash gate independently
+# checks that the binary re-runs the daemon's V11 evidence gate independently
 # (EQV-height-bind + EQV-gen-bind form): kind <= 1, index_a == index_b ==
 # block_index, gen_a == gen_b, body_root_a != body_root_b, sig_a != sig_b, and
 # BOTH Ed25519 signatures verify against digests DERIVED from the
