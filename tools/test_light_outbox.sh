@@ -13,9 +13,13 @@
 #      (DETERM_LIGHT_OUTBOX_CRASH_POINT): "queued locally" is printed ONLY after
 #      the record is published; before that no record exists and nothing is
 #      acknowledged; a crash during a state UPDATE leaves the old record intact.
-#   C. the syscall ORDER on Linux (strace, when available): fsync(tmp) precedes
-#      the publish (link/rename), the directory fsync precedes the acknowledgement
-#      write — the power-loss half of the guarantee, observed from outside.
+#   C. the syscall ORDER on Linux (strace, when available): an fsync precedes
+#      the publish (link, or rename on a filesystem without hard links; linkat/
+#      renameat where the kernel has no 2-argument form) and another precedes
+#      the acknowledgement write — the power-loss half of the guarantee,
+#      observed from outside. The leg reads the ORDER, not the descriptors: it
+#      does not check that the first fsync is the record's and the second the
+#      directory's.
 #   D. corruption: a flipped status byte → CORRUPT-STATUS (bytes intact, `recover`
 #      rebuilds as UNKNOWN); a flipped immutable byte → CORRUPT (quarantined, nonce
 #      stays reserved); `status` exits 3 while any slot is corrupt; an unreadable
@@ -42,7 +46,8 @@
 #   M6  APPLIED on inclusion, no nonce proof   → A core 3 (SKIPPED leg)
 #   M7  cap checked after the write            → E (file count)
 #   M8  prune removes a non-terminal slot      → H
-#   M9  durable write without fsync            → C (strace order; Linux)
+#   M9  durable write without the file fsync  → C (strace order; Linux, any arch)
+#   M9b the directory fsync removed           → C (the post-publish window)
 #   M10 a skip counted per reconcile pass      → A core 3b (once per inclusion)
 #   M11 submit run continues after a lost reply → A core 2b (stream desync)
 #   M12 unverifiable probe not blocking        → A core 5c (never a terminal verdict)
@@ -138,24 +143,83 @@ ALTS=$("$L" outbox status --outbox "$OB" --json | $PY -c "import json,sys; d=jso
 assert "$([ "$RC" = "97" ] && [ "$ALTS" = "1" ] && ! echo "$OUT" | grep -q recorded && echo true || echo false)" "crash during a state update leaves the old record intact (alternates=$ALTS)"
 
 echo
-echo "=== C. syscall order (Linux strace): fsync(tmp) < publish < fsync(dir) < ack ==="
-if command -v strace >/dev/null 2>&1 && [ "$(uname -s)" = "Linux" ] && strace -o /dev/null true >/dev/null 2>&1; then
+echo "=== C. syscall order (Linux strace): fsync < publish < fsync < ack ==="
+# The publish is ::link (durable_write_new), with ::rename as the fallback on a
+# filesystem without hard links. On x86-64 those are the 2-argument `link` /
+# `rename` syscalls; an architecture whose kernel has neither (aarch64, riscv64)
+# issues `linkat` / `renameat` instead, and LoongArch, on the newest asm-generic
+# ABI, has only `renameat2`. BOTH spellings must therefore be traced AND matched
+# or this leg is blind to the very syscall it exists to observe. It was, and it
+# went RED on the first aarch64 run (2026-09-17).
+TRACE_SET=fsync,fdatasync,rename,renameat,renameat2,link,linkat,write,openat
+SKIP_C=""
+if ! command -v strace >/dev/null 2>&1; then SKIP_C="strace is not installed"
+elif [ "$(uname -s)" != "Linux" ]; then SKIP_C="this is not Linux and strace is Linux-only"
+elif ! strace -o /dev/null true >/dev/null 2>&1; then SKIP_C="ptrace is not permitted here"
+elif ! strace -e trace="$TRACE_SET" -o /dev/null true >/dev/null 2>&1; then
+  # An strace that does not know a name in the set exits 1 WITHOUT creating its
+  # -o file, so the SET must be probed too, not just the binary: assuming it
+  # would turn a platform that should run the leg into a hard RED. `renameat2`
+  # is the newest name here and the only one a pre-4.10 strace lacks, and the
+  # code under test never issues it on an architecture this project builds for,
+  # so degrade to the set without it rather than lose the leg on that box.
+  TRACE_SET=fsync,fdatasync,rename,renameat,link,linkat,write,openat
+  strace -e trace="$TRACE_SET" -o /dev/null true >/dev/null 2>&1 \
+    || SKIP_C="this strace rejects a syscall name the leg needs"
+fi
+if [ -z "$SKIP_C" ]; then
   OB="$T/ob_strace"; TR="$T/strace.txt"
   enq "$OB" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --nonce 0 >/dev/null 2>&1   # meta already pinned
-  strace -f -e trace=fsync,fdatasync,rename,link,write,openat -o "$TR" "$L" outbox enqueue --outbox "$OB" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --nonce 1 >/dev/null 2>&1
+  strace -e trace="$TRACE_SET" -o "$TR" "$L" outbox enqueue --outbox "$OB" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --nonce 1 >/dev/null 2>&1
+  if [ ! -s "$TR" ]; then
+    assert false "strace produced no trace for the enqueue (the syscall order cannot be judged)"
+  else
   ORDER=$($PY - "$TR" <<'EOF'
 import re, sys
+# A publish that RETURNED 0. The create-new path tries ::link and falls back to
+# ::rename, and a libc may try renameat2(..., RENAME_NOREPLACE) before either: a
+# FAILED attempt ("= -1 EEXIST") is not the publish and must not open the window.
+# Requiring the return also means an strace line split as "<unfinished ...>" is
+# not matched and the leg goes RED rather than guessing. With one tracee (no -f)
+# that needs a signal delivered inside a local-filesystem link/rename, which this
+# fixture never produces; a loud RED is the right answer if it ever does.
+PUB = re.compile(r'\b(?:link|rename)(?:at2?)?\((?:AT_FDCWD, )?'
+                 r'"[^"]*00000000000000000001\.msg\.[0-9]+\.tmp", '
+                 r'(?:AT_FDCWD, )?"[^"]*00000000000000000001\.msg"[^"]*\)\s*=\s*0\b')
+ACK = re.compile(r'write\(1, "queued locally')
+TMP = re.compile(r'openat\((?:AT_FDCWD, )?"[^"]*00000000000000000001\.msg\.[0-9]+\.tmp"')
+FS  = re.compile(r'\bf(?:data)?sync\(')
+def anchors(ls):
+    return (next((i for i, l in enumerate(ls) if PUB.search(l)), None),
+            next((i for i, l in enumerate(ls) if ACK.search(l)), None),
+            next((i for i, l in enumerate(ls) if TMP.search(l)), None),
+            [i for i, l in enumerate(ls) if FS.search(l)])
+def verdict(ls):
+    pub, ack, tmp, fs = anchors(ls)
+    return "ok" if (pub is not None and ack is not None and tmp is not None
+                    and any(tmp < i < pub for i in fs) and any(pub < i < ack for i in fs)) else "bad"
+def without_fsyncs_between(ls, lo, hi):
+    if lo is None or hi is None:
+        return ls
+    return [l for i, l in enumerate(ls) if not (FS.search(l) and lo < i < hi)]
 lines = open(sys.argv[1]).read().splitlines()
-pub = next((i for i, l in enumerate(lines) if re.search(r'(link|rename)\(".*00000000000000000001\.msg\.[0-9]+\.tmp", ".*00000000000000000001\.msg"\)', l)), None)
-ack = next((i for i, l in enumerate(lines) if re.search(r'write\(1, "queued locally', l)), None)
-open_tmp = next((i for i, l in enumerate(lines) if re.search(r'openat\(.*00000000000000000001\.msg\.[0-9]+\.tmp"', l)), None)
-fs = [i for i, l in enumerate(lines) if re.search(r'\bf(data)?sync\(', l)]
-print("ok" if (pub is not None and ack is not None and open_tmp is not None and any(open_tmp < i < pub for i in fs) and any(pub < i < ack for i in fs)) else "bad")
+pub, ack, tmp, _ = anchors(lines)
+print(verdict(lines))                                     # 1 the trace as recorded
+print(verdict(without_fsyncs_between(lines, tmp, pub)))   # 2 only the pre-publish fsyncs removed
+print(verdict(without_fsyncs_between(lines, pub, ack)))   # 3 only the pre-ack fsyncs removed
 EOF
 )
-  assert "$([ "$ORDER" = "ok" ] && echo true || echo false)" "strace: an fsync sits between the temp write and the publish, and another between the publish and the ack"
+  assert "$([ "$(echo "$ORDER" | sed -n 1p)" = "ok" ] && echo true || echo false)" "strace: an fsync sits between the temp write and the publish, and another between the publish and the ack"
+  # 2 and 3 are self-checks on the PARSER, not statements about the product: each
+  # removes the fsyncs of ONE window and leaves the other window's in place, so a
+  # verdict that stopped testing that conjunct would answer ok and go RED here.
+  # (Stripping EVERY fsync would be a tautology: the same predicate filters the
+  # input and then finds nothing, so the answer is "bad" for any input at all.)
+  assert "$([ "$(echo "$ORDER" | sed -n 2p)" = "bad" ] && echo true || echo false)" "strace: dropping only the pre-publish fsyncs turns the same parse RED (that window is load-bearing)"
+  assert "$([ "$(echo "$ORDER" | sed -n 3p)" = "bad" ] && echo true || echo false)" "strace: dropping only the pre-ack fsyncs turns the same parse RED (that window is load-bearing)"
+  fi
 else
-  echo "  SKIP: strace not available or ptrace not permitted (the syscall-order leg runs on Linux only; the crash-point leg above still gates the ack ordering)"
+  echo "  SKIP: section C ($SKIP_C); the syscall-order leg runs on Linux only, and the crash-point leg above still gates the ack ordering"
 fi
 
 echo
