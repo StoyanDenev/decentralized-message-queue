@@ -6,6 +6,24 @@ per-sender quota + fee-priority eviction) with the FA-Apply-3 nonce
 gate, the FB23 FrostVerify abstract-sig precondition, and the RBF
 (replace-by-fee) tie-break that S-008 inherited from `Node::on_tx`.
 
+NOTE 2026-09-16 (S-079, docs/SECURITY.md): the shipped admission gate
+gained an AFFORDABILITY clause this model predates — a tx is admitted
+only if its sender's balance at the head covers its transparent debit
+plus the debits of its other resident txs (Node::mempool_tx_cost /
+mempool_committed_from), and at the cap an UNAFFORDABLE resident is
+evicted FIRST, at any incoming fee (Node::mempool_scan_locked), with
+the fee floor taken over affordable residents only.
+WHAT THIS COSTS THIS MODEL, stated plainly and NOT re-derived here:
+clause 4 below (global cap + eviction) and with it
+INV_RejectionLogCorrectness (§7) describe the shipped code only under
+the added hypothesis "every resident is affordable at the head" — the
+shipped `cap_full` rejection compares against the AFFORDABLE minimum
+and does not fire at all while an unaffordable resident is present.
+INV_MempoolBounded, INV_NoStaleAdmission, INV_NoDuplicateAccountNonce,
+INV_SigValidityNecessary and INV_NonceMonotonic are untouched. The
+falsifier for the shipped rule is
+`determ test-mempool-admit-affordability`.
+
 NOTE: no model-check this session — caller will TLC-validate. This
 module is syntactically self-contained and ready for `tlc -config
 MempoolAdmission.cfg MempoolAdmission.tla` once a companion `.cfg`

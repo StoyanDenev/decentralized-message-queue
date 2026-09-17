@@ -561,3 +561,7 @@ apply gate and is ADOPTED when it wins the tie-break; and `initial_state` on a n
 is in signing_bytes, outside the digest, ignored by apply and unchecked by the validator — a
 free hash-grinding field, so any clean same-digest twin can be made to win and the block hash
 is relayer-malleable, not only signer-malleable (DECISION-LOG 2026-09-16 S-102 entry).
+LANDED 2026-09-16: S-079 (with S-070, the same defect's REGISTER shape) — mempool admission is
+affordability- and quota-gated at the head (`Node::mempool_admit_check` / `mempool_make_room_for` /
+the `tx_admit_locked` predicate; the verifier and apply untouched); gate
+`determ test-mempool-admit-affordability`, mutants M1-M6 RED; DECISION-LOG 2026-09-16 entry.

@@ -2895,19 +2895,38 @@ TxAdmit Node::tx_admit_locked() {
     if (head != admit_memo_head_) { admit_memo_.clear(); admit_memo_head_ = head; }
     return [this, at, reg](const chain::Transaction& tx, uint64_t expected_nonce) {
         const auto key = std::make_pair(tx.hash, expected_nonce);
-        if (auto m = admit_memo_.find(key); m != admit_memo_.end()) return m->second;
-        auto r = validator_.check_transaction(tx, at, chain_, *reg, expected_nonce);
-        ++admit_verifications_;
-        admit_memo_.emplace(key, r.ok);
-        if (!r.ok) evict_tx_locked(tx, r.error);
-        return r.ok;
+        bool ok;
+        if (auto m = admit_memo_.find(key); m != admit_memo_.end()) {
+            ok = m->second;
+        } else {
+            auto r = validator_.check_transaction(tx, at, chain_, *reg, expected_nonce);
+            ++admit_verifications_;
+            admit_memo_.emplace(key, r.ok);
+            if (!r.ok) evict_tx_locked(tx, r.error);
+            ok = r.ok;
+        }
+        if (!ok) return false;
+        // S-079: the verifier has no balance rule, and build_body's own
+        // provisional-balance skip evicts nothing — so a resident the head
+        // can no longer fund (its sender's balance moved under it) would be
+        // re-selected every round, occupying its slot and quota for ever.
+        // Re-check affordability at the head (the sender's lower-nonce
+        // residents spend first) and evict on failure, like a verifier
+        // rejection. NOT memoized: the verdict depends on the pool (which
+        // lower nonces are resident), not only on the head.
+        if (!mempool_affordable_at_build_locked(tx)) {
+            evict_tx_locked(tx, "unaffordable at this head (S-079)");
+            return false;
+        }
+        return true;
     };
 }
 
-// A transaction the verifier rejects at the head cannot be included until
-// state changes. Keeping it would cost a full re-check per head (and, before
-// the memo, per rebuild) and would block the sender's later nonces; the
-// wallet resubmits when it becomes valid. Safe inside build_body: the
+// A transaction the verifier rejects at the head — or one the head cannot
+// fund (S-079) — cannot be included until state changes. Keeping it would
+// cost a full re-check per head (and, before the memo, per rebuild) and
+// would block the sender's later nonces; the wallet resubmits when it
+// becomes valid. Safe inside build_body: the
 // assembler iterates its own copies (`ordered`) taken before the admission
 // loop and never reads tx_store again, and every call site holds
 // state_mutex_ exclusively.
@@ -2937,14 +2956,174 @@ size_t Node::mempool_count_from(const std::string& sender) const {
     return count;
 }
 
+// S-079 helpers (mempool affordability policy, 2026-09-16). SECURITY.md S-079:
+// nothing in admission asked whether the sender could PAY, the cap evicted
+// the minimum fee, and the producer skipped an unaffordable transaction
+// without evicting it — so 100 self-certifying anonymous senders x 100
+// `amount = 0, fee = UINT64_MAX` transfers (S-049-clean: 0 + MAX does not
+// wrap) filled MEMPOOL_MAX_TXS with entries no block would ever apply, and
+// `tx.fee <= min_fee` then rejected every representable fee for ever: a
+// remote, zero-cost, permanent seal. The S-070 name-squatting REGISTER is the
+// same defect with `fee` in place of `amount + fee`. Node-local policy: the
+// verifier and the apply path are untouched.
+
+static inline bool add_u64_or_false(uint64_t a, uint64_t b, uint64_t* out) {
+    if (a > UINT64_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
+// mempool_tx_cost: the TRANSPARENT debit Chain::apply_transactions charges
+// tx.from when the transaction applies, per type:
+//   amount + fee ....... TRANSFER, PQ_TRANSFER (the TRANSFER arm), SHIELD,
+//                        DAPP_CALL (the well-formed arm);
+//   staked + fee ....... STAKE (the amount rides in the 8-byte payload);
+//   fee ................ every `charge_fee` type (REGISTER, DEREGISTER,
+//                        UNSTAKE — the refund is a failure path — PARAM_CHANGE,
+//                        MERGE_EVENT, COMPOSABLE_BATCH — inner transfers debit
+//                        their OWN senders, best-effort, the outer applies on
+//                        its fee alone — DAPP_REGISTER, the A2 audit types,
+//                        REGISTER_NOTE_KEY) and, for symmetry with "evicted
+//                        at build", REGION_CHANGE / an unknown type;
+//   0 .................. UNSHIELD, CONFIDENTIAL_TRANSFER: the note(s) fund
+//                        amount and fee, hidden from the transparent balance;
+//                        the verifier proves that at build (and evicts on
+//                        failure). Affordability is vacuous for them — a
+//                        zero-cost confidential junk flood is bounded by the
+//                        quota and cleared by every build, and its
+//                        verification cost is S-065 / D14, not this rule.
+// A sum that overflows can never be charged (apply skips it): UINT64_MAX.
+uint64_t Node::mempool_tx_cost(const chain::Transaction& tx) {
+    using chain::TxType;
+    uint64_t cost = 0;
+    switch (tx.type) {
+    case TxType::TRANSFER:
+    case TxType::PQ_TRANSFER:
+    case TxType::SHIELD:
+    case TxType::DAPP_CALL:
+        return add_u64_or_false(tx.amount, tx.fee, &cost) ? cost : UINT64_MAX;
+    case TxType::STAKE: {
+        if (tx.payload.size() != 8) return tx.fee;   // the verifier rejects the shape at build
+        uint64_t staked = 0;
+        for (int i = 0; i < 8; ++i) staked |= uint64_t(tx.payload[i]) << (8 * i);
+        return add_u64_or_false(staked, tx.fee, &cost) ? cost : UINT64_MAX;
+    }
+    case TxType::UNSHIELD:
+    case TxType::CONFIDENTIAL_TRANSFER:
+        return 0;
+    case TxType::REGISTER:
+    case TxType::DEREGISTER:
+    case TxType::UNSTAKE:
+    case TxType::REGION_CHANGE:
+    case TxType::PARAM_CHANGE:
+    case TxType::MERGE_EVENT:
+    case TxType::COMPOSABLE_BATCH:
+    case TxType::DAPP_REGISTER:
+    case TxType::ROTATE_AUDIT_KEY:
+    case TxType::LOG_AUDIT_ACCESS:
+    case TxType::REGISTER_NOTE_KEY:
+        return tx.fee;
+    }
+    return tx.fee;   // an enumerator-less value: verifier-rejected, evicted at build
+}
+
+// mempool_committed_from: the debits the sender's OTHER resident txs will
+// charge — every entry of `sender` except the one at `excl_nonce` (a
+// replacement displaces its same-nonce incumbent, so that one is not
+// counted). Bounded by MEMPOOL_MAX_PER_SENDER lookups. An overflowing sum
+// is reported as UINT64_MAX (no balance covers it).
+uint64_t Node::mempool_committed_from(const std::string& sender, uint64_t excl_nonce) const {
+    uint64_t sum = 0;
+    for (auto it = tx_by_account_nonce_.lower_bound({sender, 0});
+         it != tx_by_account_nonce_.end() && it->first.first == sender; ++it) {
+        if (it->first.second == excl_nonce) continue;
+        auto t = tx_store_.find(it->second);
+        if (t == tx_store_.end()) continue;   // the two maps move in lockstep; defensive
+        if (!add_u64_or_false(sum, mempool_tx_cost(t->second), &sum)) return UINT64_MAX;
+    }
+    return sum;
+}
+
+// mempool_scan_locked: one pass over tx_by_account_nonce_ — sorted by
+// (from, nonce), so each sender's entries arrive in the order the block
+// applies them — accumulating the running debit per sender against its
+// balance at the head. The first entry whose running sum exceeds the
+// balance, and every later nonce of that sender, is UNAFFORDABLE: nothing
+// this node builds at this head can include it. Reports the first such
+// entry (the eviction victim of choice) and the minimum fee among the
+// affordable entries (the admission floor), tie-broken by the smallest
+// hash like the pre-S-079 scan. O(N log N) and run only at the cap, the
+// same order as the shipped min-fee scan it replaces.
+Node::MempoolScan Node::mempool_scan_locked() const {
+    MempoolScan s;
+    bool        have_sender = false;
+    std::string sender;
+    uint64_t    balance = 0, running = 0;
+    bool        overrun = false;
+    for (const auto& [key, h] : tx_by_account_nonce_) {
+        auto t = tx_store_.find(h);
+        if (t == tx_store_.end()) continue;
+        if (!have_sender || key.first != sender) {
+            have_sender = true;
+            sender  = key.first;
+            balance = chain_.balance(sender);
+            running = 0;
+            overrun = false;
+        }
+        bool affordable = false;
+        if (!overrun) {
+            uint64_t next = 0;
+            if (add_u64_or_false(running, mempool_tx_cost(t->second), &next) && next <= balance) {
+                running    = next;
+                affordable = true;
+            } else {
+                overrun = true;   // this nonce and every later one of this sender
+            }
+        }
+        if (!affordable) {
+            if (!s.has_unaffordable) { s.has_unaffordable = true; s.unaffordable = h; }
+            continue;
+        }
+        const uint64_t fee = t->second.fee;
+        if (!s.has_affordable || fee < s.min_fee || (fee == s.min_fee && h < s.min_fee_hash)) {
+            s.has_affordable = true;
+            s.min_fee        = fee;
+            s.min_fee_hash   = h;
+        }
+    }
+    return s;
+}
+
+// mempool_affordable_at_build_locked: build_body walks a sender's residents
+// in nonce order, so when it asks about `tx` every lower nonce of that
+// sender is already in the block being assembled; what is left of the head
+// balance after those debits must cover tx's own. (Higher nonces come
+// later and do not constrain it.) In-block CREDITS are deliberately not
+// counted — the ingress rule counts none either, so the two agree.
+bool Node::mempool_affordable_at_build_locked(const chain::Transaction& tx) const {
+    uint64_t lower = 0;
+    for (auto it = tx_by_account_nonce_.lower_bound({tx.from, 0});
+         it != tx_by_account_nonce_.end() && it->first.first == tx.from
+             && it->first.second < tx.nonce; ++it) {
+        auto t = tx_store_.find(it->second);
+        if (t == tx_store_.end()) continue;
+        if (!add_u64_or_false(lower, mempool_tx_cost(t->second), &lower)) return false;
+    }
+    uint64_t need = 0;
+    return add_u64_or_false(lower, mempool_tx_cost(tx), &need)
+        && need <= chain_.balance(tx.from);
+}
+
 // mempool_admit_check: shared S-008 admission gate. Returns "" on accept,
 // non-empty error string on reject. Called by both on_tx (gossip path) and
 // rpc_submit_tx (RPC path) so the policy is the same regardless of channel.
 //
 // Order of checks:
-//   1. Per-sender quota (cheapest, bounded scan).
-//   2. Global cap + eviction feasibility (most expensive; only run if
-//      sender-quota passes).
+//   1. Affordability at the head, with the sender's other resident txs
+//      (S-079; bounded by the per-sender quota).
+//   2. Per-sender quota (cheap, bounded scan).
+//   3. Global cap + eviction feasibility (most expensive; only run if
+//      the first two pass).
 std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
     // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event whose historical
     // distress witness (the `t:` records) is BEACON && EXTENDED state — the block
@@ -2984,6 +3163,29 @@ std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
              + std::to_string(chain::TX_FRAME_PAYLOAD_MAX) + " bytes)";
     }
 
+    // S-079: the sender must be able to fund this tx AND its other resident
+    // txs out of its balance at the head — the whole pending set must fit,
+    // in any order (costs are non-negative, so every nonce-ordered prefix
+    // fits too). No credit optimism: a pending transfer TO the sender counts
+    // only once it lands (the client resubmits then — a definitive rejection
+    // here beats a `queued` that the producer would skip for ever). By
+    // balance, not by registration: an anonymous address has no registry
+    // entry but a balance if funded, and a fresh domain's REGISTER pays its
+    // fee from whatever was sent to that name (S-070). The same-nonce
+    // incumbent is excluded — a replacement displaces it.
+    {
+        const uint64_t cost      = mempool_tx_cost(tx);
+        const uint64_t committed = mempool_committed_from(tx.from, tx.nonce);
+        const uint64_t balance   = chain_.balance(tx.from);
+        uint64_t need = 0;
+        if (!add_u64_or_false(cost, committed, &need) || need > balance) {
+            return "mempool: unaffordable (S-079): " + tx.from + " holds "
+                 + std::to_string(balance) + " at the head; this tx costs "
+                 + std::to_string(cost) + " and its other pending txs commit "
+                 + std::to_string(committed);
+        }
+    }
+
     // Check if this tx would REPLACE an existing one at (from, nonce).
     // A replace doesn't add to the mempool count — same slot, same sender.
     auto existing_it = tx_by_account_nonce_.find({tx.from, tx.nonce});
@@ -2997,44 +3199,48 @@ std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
                  + std::to_string(MEMPOOL_MAX_PER_SENDER)
                  + " txs from " + tx.from + ")";
         }
-        // Global cap. Eviction is feasible only if tx.fee > current
-        // mempool minimum. Don't enforce at admission — the eviction
-        // step happens INSIDE the insert path (mempool_make_room_for).
-        // Here we just check that admission is even possible: if cap
-        // is hit AND tx.fee <= mempool min, reject early.
+        // Global cap. Eviction is feasible if some resident is unaffordable
+        // at the head (S-079: it goes first, whatever the incoming fee) or
+        // if tx.fee > the AFFORDABLE minimum — an unaffordable UINT64_MAX
+        // fee never raises the floor. Don't enforce at admission — the
+        // eviction step happens INSIDE the insert path
+        // (mempool_make_room_for). Here we just check that admission is
+        // even possible: if cap is hit, nothing is unaffordable AND
+        // tx.fee <= affordable min, reject early.
         if (tx_store_.size() >= MEMPOOL_MAX_TXS) {
-            // Scan for current minimum fee.
-            uint64_t min_fee = UINT64_MAX;
-            for (auto& [_, t] : tx_store_) {
-                if (t.fee < min_fee) min_fee = t.fee;
-            }
-            if (tx.fee <= min_fee) {
+            const MempoolScan s = mempool_scan_locked();
+            if (!s.has_unaffordable && tx.fee <= s.min_fee) {
                 return "mempool: full ("
                      + std::to_string(MEMPOOL_MAX_TXS)
                      + " txs); incoming fee " + std::to_string(tx.fee)
-                     + " <= mempool minimum " + std::to_string(min_fee);
+                     + " <= mempool minimum " + std::to_string(s.min_fee);
             }
         }
     }
     return "";
 }
 
-// mempool_make_room_for: evict the lowest-fee tx if mempool is at cap.
-// Returns true if room is available (no cap hit, or eviction happened);
-// false if cap hit AND incoming tx's fee isn't high enough to displace
-// anything. Caller rejects the tx if this returns false.
+// mempool_make_room_for: make room if mempool is at cap — evict an
+// UNAFFORDABLE resident if there is one (S-079: never keep an entry no
+// block can apply over one that pays), else the lowest-fee affordable tx
+// if the incoming fee is strictly higher. Returns true if room is available
+// (no cap hit, or eviction happened); false if cap hit AND incoming tx's
+// fee isn't high enough to displace anything. Caller rejects the tx if
+// this returns false.
 bool Node::mempool_make_room_for(const chain::Transaction& tx) {
     if (tx_store_.size() < MEMPOOL_MAX_TXS) return true;
-    // Find lowest-fee tx. Tie-broken by hash (deterministic across nodes).
-    auto min_it = tx_store_.end();
-    for (auto it = tx_store_.begin(); it != tx_store_.end(); ++it) {
-        if (min_it == tx_store_.end() || it->second.fee < min_it->second.fee) {
-            min_it = it;
-        }
+    const MempoolScan s = mempool_scan_locked();
+    Hash victim{};
+    if (s.has_unaffordable) {
+        victim = s.unaffordable;                       // first, at any fee
+    } else if (s.has_affordable && tx.fee > s.min_fee) {
+        victim = s.min_fee_hash;                       // fee priority (tie: smallest hash)
+    } else {
+        return false;                                  // can't displace
     }
-    if (min_it == tx_store_.end()) return true; // shouldn't reach (size>=cap)
-    if (tx.fee <= min_it->second.fee) return false; // can't displace
-    // Evict the minimum.
+    auto min_it = tx_store_.find(victim);
+    if (min_it == tx_store_.end()) return false;       // unreachable: the scan read tx_store_
+    // Evict the victim.
     auto evicted_key = std::make_pair(min_it->second.from, min_it->second.nonce);
     tx_store_.erase(min_it);
     tx_by_account_nonce_.erase(evicted_key);
@@ -3062,11 +3268,26 @@ void Node::on_tx(const chain::Transaction& tx) {
     // otherwise consume mempool slots and amplify to other peers.
     if (!verify_tx_signature_locked(tx)) return;
 
-    // S-008: enforce mempool size cap + per-sender quota. Silent drop
-    // on the gossip path (a flood from N senders gets rate-limited
-    // without amplifying the attacker's traffic; the rejected tx
-    // doesn't propagate further).
-    if (!mempool_admit_check(tx).empty()) return;
+    admit_tx_locked(tx);
+}
+
+// The S-008 / S-079 admission policy + replace-by-fee + insert — everything
+// on_tx does AFTER its authenticity gates (content hash, stale nonce, the
+// S-002 signature). Factored out of on_tx verbatim (2026-09-16) so
+// `determ test-mempool-admit-affordability` can drive the policy at the
+// real cap through admit_tx_for_test without an Ed25519 verification per
+// flood entry: the policy is a function of (from, nonce, type, amount, fee)
+// and the pool, never of the signature — and an anonymous sender's
+// signature is valid by construction (the address IS the key), so the
+// S-002 gate passes the attack shape anyway (S-002 has its own falsifier,
+// test-rpc-tx-sig-admit). Caller holds state_mutex_ exclusively. Returns
+// true iff the tx is resident afterwards.
+bool Node::admit_tx_locked(const chain::Transaction& tx) {
+    // S-008 / S-079: enforce affordability at the head, the mempool size
+    // cap + the per-sender quota. Silent drop on the gossip path (a flood
+    // from N senders gets rate-limited without amplifying the attacker's
+    // traffic; the rejected tx doesn't propagate further).
+    if (!mempool_admit_check(tx).empty()) return false;
 
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
@@ -3074,18 +3295,20 @@ void Node::on_tx(const chain::Transaction& tx) {
         // Replace-by-fee: keep the higher-fee version.
         auto existing = tx_store_.find(idx->second);
         if (existing != tx_store_.end() && existing->second.fee >= tx.fee) {
-            return; // incumbent wins (ties favor incumbent — no resource churn)
+            return false; // incumbent wins (ties favor incumbent — no resource churn)
         }
         if (existing != tx_store_.end()) tx_store_.erase(existing);
     } else {
         // Fresh slot — check eviction feasibility for the global cap.
         // mempool_admit_check already verified eviction is possible
-        // (tx.fee > current min), but the actual eviction happens here
-        // atomically with the insert.
-        if (!mempool_make_room_for(tx)) return;
+        // (an unaffordable resident exists, or tx.fee > the affordable
+        // min), but the actual eviction happens here atomically with the
+        // insert.
+        if (!mempool_make_room_for(tx)) return false;
     }
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[key] = tx.hash;
+    return true;
 }
 
 void Node::on_contrib(const ContribMsg& msg) {
@@ -4721,10 +4944,12 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error(
             "submitted tx signature verification failed (from " + tx.from + ")");
 
-    // S-008: enforce mempool admission policy. RPC path surfaces the
-    // rejection reason to the client (vs gossip's silent drop) so the
-    // submitter can decide whether to retry with a higher fee or
-    // back off.
+    // S-008 / S-079: enforce mempool admission policy (affordability at the
+    // head with the sender's pending txs, quota, cap). RPC path surfaces
+    // the rejection reason to the client (vs gossip's silent drop) so the
+    // submitter can decide whether to retry with a higher fee, top up, or
+    // back off — a definitive rejection here, not a `queued` the producer
+    // would skip for ever.
     if (auto err = mempool_admit_check(tx); !err.empty()) {
         throw std::runtime_error(err);
     }

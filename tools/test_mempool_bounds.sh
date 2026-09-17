@@ -140,10 +140,11 @@ echo "=== 5. Submit a tx from a DIFFERENT sender — should admit (per-sender qu
 $DETERM account create --out $T/anon2.json 2>&1 | tail -1
 B_PRIV=$(python -c "import json; print(json.load(open('$T/anon2.json'))['privkey'])")
 B_ADDR=$(python -c "import json; print(json.load(open('$T/anon2.json'))['address'])")
-# B has zero balance from genesis, so the TRANSFER will be admitted to
-# mempool (validator's mempool-admit only checks sig + nonce + quota; the
-# balance-check is at apply time, which is irrelevant here — we just want
-# to verify admission isn't blocked by A's quota).
+# B has zero balance from genesis. Since S-079 (2026-09-16) admission is
+# affordability-gated at the head, so this MUST stay an amount-0, fee-0
+# transfer: it costs 0, which a zero balance covers — we just want to
+# verify admission isn't blocked by A's quota (a funded amount or fee from
+# B would now be rejected as "mempool: unaffordable (S-079)").
 RESP=$($DETERM send_anon "test_b" 0 "$B_PRIV" --rpc-port 8794 --nonce 0 2>&1 | tail -3 || true)
 if echo "$RESP" | grep -q '"status": "queued"'; then
   assert true "tx from different sender admitted (independent quota)"

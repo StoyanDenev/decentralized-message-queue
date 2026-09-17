@@ -481,6 +481,27 @@ public:
         return tx_admit_locked();
     }
     uint64_t admit_verifications_for_test() const { return admit_verifications_; }
+    // 2026-09-16 seams for `determ test-mempool-admit-affordability` (S-079):
+    // (a) a read-only residency probe, so the eviction-order arms can say
+    //     WHICH entry left the pool (rpc_status()["mempool_size"] only counts);
+    bool mempool_contains_for_test(const Hash& h) const {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        return tx_store_.count(h) != 0;
+    }
+    // (b) the admission policy + insert for a tx whose signature the harness
+    //     did not make real: on_tx's content-hash and stale-nonce gates, then
+    //     admit_tx_locked (the S-008/S-079 policy, replace-by-fee, cap
+    //     eviction, insert — on_tx's own tail). Skips ONLY the S-002 signature
+    //     gate, which is a function of nothing the policy reads and has its own
+    //     falsifier (test-rpc-tx-sig-admit); a 10000-entry flood at the real
+    //     cap would otherwise cost 40 s of Ed25519 per run. Returns true iff
+    //     the tx is resident afterwards. Never reachable from RPC or gossip.
+    bool admit_tx_for_test(const chain::Transaction& tx) {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        if (tx.hash != tx.compute_hash()) return false;
+        if (tx.nonce < chain_.next_nonce(tx.from)) return false;
+        return admit_tx_locked(tx);
+    }
     // 2026-09-14 seams for `determ test-contrib-trigger-membership` (S-058):
     // inject a gossiped contrib and probe the round state.
     void on_contrib_for_test(const ContribMsg& m) { on_contrib(m); }
@@ -567,6 +588,10 @@ public:
 private:
     void on_block(const chain::Block& b);
     void on_tx(const chain::Transaction& tx);
+    // on_tx's tail after the authenticity gates: the S-008/S-079 admission
+    // policy, replace-by-fee, cap eviction and the insert (definition
+    // comment in node.cpp). Caller holds state_mutex_ exclusively.
+    bool admit_tx_locked(const chain::Transaction& tx);
 
     // S-002 mitigation: verify a transaction's Ed25519 signature at
     // mempool-admission time so forged-sig floods are rejected before
@@ -740,12 +765,26 @@ private:
     // pipelined-nonce txs. Both checks are enforced in on_tx (gossip-
     // admission) and rpc_submit_tx (RPC admission).
     //
-    // Eviction policy on global-cap overflow: lowest-fee tx in the
-    // mempool is evicted, IF the incoming tx's fee is strictly higher.
-    // This is "fee-priority mempool" — under sustained spam, the chain
-    // economically prices out the spammer (they must pay the marginal
-    // fee to evict). Per-sender quota overflow always rejects (no
-    // eviction across senders for fairness).
+    // S-079 (2026-09-16): admission is also AFFORDABILITY-gated. A tx enters
+    // only if its sender can pay its transparent debit (mempool_tx_cost —
+    // what Chain::apply_transactions charges: amount + fee for value-moving
+    // types, the fee for the rest, 0 for the note-funded confidential types)
+    // PLUS the debits of its other resident txs, out of the balance at the
+    // head. Without it, free-to-mint anonymous senders parked 10000
+    // `amount = 0, fee = UINT64_MAX` transfers nobody could ever include,
+    // and the fee floor below then rejected every representable fee forever.
+    //
+    // Eviction policy on global-cap overflow: an UNAFFORDABLE resident (one
+    // the head state can no longer fund — re-checked in nonce order per
+    // sender, since lower nonces spend first) goes first, at any incoming
+    // fee; otherwise the lowest-fee tx in the mempool is evicted IF the
+    // incoming tx's fee is strictly higher, and that floor is computed over
+    // AFFORDABLE residents only. This is "fee-priority mempool" — under
+    // sustained spam, the chain economically prices out the spammer (they
+    // must pay the marginal fee to evict). Per-sender quota overflow always
+    // rejects (no eviction across senders for fairness). The build-time
+    // predicate (tx_admit_locked) evicts a resident it finds unaffordable at
+    // the head, the same way it evicts a verifier rejection.
     //
     // Suggested defaults: 10,000 total mempool slots; 100 per sender.
     // Tunable via genesis-pinned config in v2.X follow-on if needed.
@@ -774,12 +813,35 @@ private:
     // this — admission gates apply only to authenticated txs (else
     // an unauth flood would consume admission-evaluation budget).
     std::string mempool_admit_check(const chain::Transaction& tx) const;
-    // S-008: evict the lowest-fee tx if the new one has strictly
-    // higher fee than the current minimum. Returns true if eviction
+    // S-008 / S-079: make room at the cap. Evicts an unaffordable resident
+    // if there is one, else the lowest-fee tx if the new one has strictly
+    // higher fee than the affordable minimum. Returns true if eviction
     // happened OR if no eviction was needed (cap not exceeded).
     // Returns false if cap is hit AND the new tx's fee isn't high
     // enough to displace anything — caller should reject the tx.
     bool mempool_make_room_for(const chain::Transaction& tx);
+    // S-079 helpers (definitions carry the rationale; node.cpp):
+    // the transparent debit apply charges the sender for `tx`
+    // (UINT64_MAX when the sum overflows — apply can never charge it);
+    static uint64_t mempool_tx_cost(const chain::Transaction& tx);
+    // the sender's resident debits, excluding the entry at `excl_nonce`
+    // (the same-nonce incumbent a replacement displaces); bounded by the
+    // per-sender quota;
+    uint64_t mempool_committed_from(const std::string& sender, uint64_t excl_nonce) const;
+    // one pass over the pool against the current head: the first
+    // unaffordable resident (per sender in nonce order, running sum vs
+    // balance) and the minimum fee among the affordable ones;
+    struct MempoolScan {
+        bool     has_unaffordable{false};
+        Hash     unaffordable{};
+        bool     has_affordable{false};
+        uint64_t min_fee{UINT64_MAX};
+        Hash     min_fee_hash{};
+    };
+    MempoolScan mempool_scan_locked() const;
+    // build-time re-check: the head balance minus the sender's LOWER-nonce
+    // residents (the block applies those first) covers `tx`'s debit.
+    bool mempool_affordable_at_build_locked(const chain::Transaction& tx) const;
 
     // §minix net::EventLoop/Transport seam — the daemon networks through
     // the ABSTRACT interfaces; the concrete backends are either owned

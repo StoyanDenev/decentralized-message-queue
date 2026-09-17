@@ -21,10 +21,15 @@ stale nonce, verifies the signature, applies mempool policy and replace-by-fee; 
 → "incumbent tx at (from, nonce) has equal-or-higher fee" (`src/node/node.cpp:4606-4709`); it does **not** run
 the verifier's per-tx rules (those run at build, `node.cpp:2848-2872`, and evict silently). (The node runs `mempool_admit_check`
 BEFORE the incumbent check, `node.cpp:4680-4690`, so identical bytes re-sent into a full mempool or past a
-per-sender quota read as a retryable rejection, not "incumbent" — the slot stays sendable either way.) F4 the
+per-sender quota read as a retryable rejection, not "incumbent" — the slot stays sendable either way. Since
+S-079, 2026-09-16, that policy also rejects — definitively, "mempool: unaffordable (S-079)" — a transaction the
+sender cannot fund at the daemon's head together with its other pending ones, so such bytes are never `queued`;
+and a pending transaction a LATER head leaves unfundable is evicted at the next build, like a verifier
+rejection.) F4 the
 mempool has no TTL (`node.hpp:725-775`). F5 the verifier enforces `tx.nonce == expected` and no balance rule for
 TRANSFER/DAPP_CALL (`validator.cpp:884-887`); the producer debits TRANSFER provisionally (`producer.cpp:1333-
-1336`) and has no DAPP_CALL arm. F6 apply skips an underfunded tx without advancing the nonce (`chain.cpp:987,
+1336`) and has no DAPP_CALL arm, and its admission predicate evicts what the head cannot fund (S-079,
+`Node::tx_admit_locked`). F6 apply skips an underfunded tx without advancing the nonce (`chain.cpp:987,
 1688`), so one hash can be included twice. F7 delivery scans the block body only (`node.cpp:4183-4227,
 4452-4501`). F8 `tx` returns the LATEST inclusion or null (`node.cpp:3795-3821`); no RPC exposes an apply result.
 F9 `verify_tx_inclusion` proves membership by the block's own committee sigs (`light/verify_tx_inclusion.cpp:56-

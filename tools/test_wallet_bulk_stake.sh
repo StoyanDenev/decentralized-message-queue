@@ -372,13 +372,18 @@ echo "=== 9. --continue-on-error with one bad row ==="
 # pre-checks balance at submit_tx — but it does not (chain.cpp::case
 # STAKE just charges + continues if balance is enough at APPLY time).
 # Actually node.cpp::rpc_stake DOES pre-check; but rpc_submit_tx
-# doesn't. So an amount > balance would land in mempool then fail at
-# apply. We need a SYNCHRONOUS submit_tx error.
+# didn't. So an amount > balance would land in mempool then fail at
+# apply. We need a SYNCHRONOUS submit_tx error. (Since S-079, 2026-09-16,
+# rpc_submit_tx DOES reject it synchronously — "mempool: unaffordable
+# (S-079)", the staked amount + fee against the head balance with the
+# sender's other pending txs — so that route exists now; this test keeps
+# the nonce-replay route it was written with.)
 #
 # Synchronous reject options:
 #   - Stale nonce (rejected with "stale nonce")
 #   - Bad signature (we sign correctly — can't trigger)
 #   - Mempool full (hard to trigger here)
+#   - Unaffordable at the head (S-079; see above)
 #
 # Use stale-nonce on the middle row by submitting two batches with
 # overlapping nonces. First we do a small 3-row run with --starting-

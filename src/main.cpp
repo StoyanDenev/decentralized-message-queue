@@ -999,6 +999,13 @@ Additional in-process tests:
                                               — a tx the producer-side predicate rejects
                                               is EVICTED (store + (from,nonce) index) and
                                               verdicts are memoized per head
+  determ test-mempool-admit-affordability     S-079 (+ S-070) gate — mempool admission is
+                                              affordability-gated at the head with the
+                                              sender's pending txs; the quota holds; an
+                                              unaffordable resident is evicted first at
+                                              the cap, never raises the fee floor and is
+                                              evicted at build; the 100x100 fee=MAX flood
+                                              seals nothing
   determ test-producer-admit                  S-056/S-059/S-061/S-062 gate — build_body
                                               asks the verifier's check_transaction
                                               (TxAdmit) before including a tx: over-cap
@@ -47795,6 +47802,394 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-mempool-admit-eviction\n"
                            : "  PASS: test-mempool-admit-eviction\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-mempool-admit-affordability") {
+        // 2026-09-16 — SECURITY.md S-079 (D19a backlog item 2), with S-070 as its
+        // REGISTER-shaped instance. Nothing in mempool admission asked whether
+        // the sender could PAY; mempool_make_room_for evicted the MINIMUM fee;
+        // the producer skipped an unaffordable tx WITHOUT evicting it (the
+        // 2026-09-14 build-time eviction fires only on verifier rejections, and
+        // the verifier has no balance rule). So 100 free-to-mint anonymous
+        // senders x 100 `amount = 0, fee = UINT64_MAX` TRANSFERs — validly
+        // signed, S-049-clean (0 + MAX does not wrap), within the quota — filled
+        // MEMPOOL_MAX_TXS with entries no block would ever apply, and
+        // `tx.fee <= min_fee` then rejected every representable fee for ever: a
+        // remote, zero-cost, PERMANENT seal. Now (node-local; the verifier and
+        // apply are untouched):
+        //   I1 ingress admits a tx only if the sender's balance at the head
+        //      covers its debit PLUS its other resident txs (running commitment);
+        //   I2 the per-sender quota (S-008) stays;
+        //   I3 at the cap an unaffordable resident is evicted first, at any fee;
+        //   I4 the build-time predicate evicts a resident the head can no longer
+        //      fund (the lower nonces spend first);
+        //   I5 the fee floor is derived from AFFORDABLE residents only.
+        // Deterministic in-process fixture (fixed seeds, VirtualClock, a
+        // virtual-time VirtualEventLoop, SeededRng — the test-node-reorg-s048
+        // producer shape). Observables: rpc_status()["mempool_size"], the
+        // rpc_submit_tx reply / throw, mempool_contains_for_test (residency),
+        // tx_admit_for_test (the build-time predicate) and the block a REAL round
+        // produces (rpc_block). An unaffordable resident is manufactured the way
+        // production makes one: a block built elsewhere (node P1) spends the
+        // sender's balance through an alternate at the same nonce, and the node
+        // under test applies it through apply_block_for_test.
+        //
+        // Scale: the two 10000-entry legs (the flood; the fillers that bring the
+        // pool to the real cap) go through admit_tx_for_test — on_tx's own tail
+        // (hash + stale-nonce gates, then admit_tx_locked) minus the S-002
+        // signature check, which reads nothing the policy reads and has its own
+        // falsifier (test-rpc-tx-sig-admit); an anonymous sender's signature is
+        // valid by construction anyway (the address IS the key). Every tx that
+        // reaches an RPC arm or a block carries a real signature. Real Ed25519
+        // per entry would cost ~40 s per leg here.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        constexpr int64_t kT0        = 1700000000;
+        constexpr size_t  kCap       = 10000;   // == Node::MEMPOOL_MAX_TXS (private)
+        constexpr size_t  kPerSender = 100;     // == Node::MEMPOOL_MAX_PER_SENDER (private)
+        constexpr int     kSenders   = 100;     // flood senders / filler senders
+        std::error_code fec;
+
+        // Deterministic keys: seed = SHA256("s079-key-" || tag).
+        auto det_key = [](const std::string& tag) {
+            crypto::NodeKey k;
+            k.priv_seed = crypto::SHA256Builder{}.append(std::string("s079-key-") + tag).finalize();
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const crypto::NodeKey keyP  = det_key("prod");     // the M=K=1 creator
+        const crypto::NodeKey keyQ  = det_key("quota");    // funded anon: the quota arm
+        const crypto::NodeKey keyR  = det_key("honest");   // funded anon: the honest client
+        const crypto::NodeKey keyC  = det_key("commit");   // anon with balance 100: the commitment arm
+        const crypto::NodeKey keyD1 = det_key("drain1");   // anon with balance 100, drained by block 1
+        const crypto::NodeKey keyD2 = det_key("drain2");   // ditto
+        const crypto::NodeKey keyG  = det_key("gina");     // an UNFUNDED fresh domain (S-070)
+        std::vector<crypto::NodeKey> flood, filler;
+        for (int i = 0; i < kSenders; ++i) {
+            flood.push_back(det_key("flood" + std::to_string(i)));     // UNFUNDED, self-certifying
+            filler.push_back(det_key("filler" + std::to_string(i)));   // funded
+        }
+        const std::string Q  = make_anon_address(keyQ.pub),  R  = make_anon_address(keyR.pub);
+        const std::string C  = make_anon_address(keyC.pub);
+        const std::string D1 = make_anon_address(keyD1.pub), D2 = make_anon_address(keyD2.pub);
+
+        auto write_genesis = [&](const fs::path& dir) -> std::string {
+            chain::GenesisConfig g;
+            g.chain_id = "s079-affordability"; g.m_creators = 1; g.k_block_sigs = 1;
+            g.epoch_blocks = 1; g.block_subsidy = 10;
+            chain::GenesisCreator gc; gc.domain = "prod"; gc.ed_pub = keyP.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            auto alloc = [&](const std::string& d, uint64_t b) {
+                chain::GenesisAllocation a; a.domain = d; a.balance = b; g.initial_balances.push_back(a);
+            };
+            alloc("prod", 1000000); alloc(Q, 1000000); alloc(R, 1000);
+            alloc(C, 100); alloc(D1, 100); alloc(D2, 100);
+            for (auto& k : filler) alloc(make_anon_address(k.pub), 100000);
+            // the 100 flood senders and "gina" get NOTHING
+            const std::string gp = (dir / "genesis.json").string();
+            g.save(gp);
+            return gp;
+        };
+        // One in-process node = its own vnet + virtual-time loop + transport +
+        // VirtualClock(kT0) + SeededRng; members declared in construction order so
+        // the Node (last) dies first.
+        struct Harness {
+            fs::path                          dir;
+            VirtualNetwork                    vnet;
+            std::unique_ptr<VirtualEventLoop> loop;
+            std::unique_ptr<VirtualTransport> tr;
+            determ::time::VirtualClock        clock{kT0};
+            crypto::SeededRng                 rng{42};
+            std::unique_ptr<node::Node>       node;
+            ~Harness() {
+                if (node) { node->stop(); node.reset(); }
+                tr.reset(); loop.reset();
+                std::error_code ec; fs::remove_all(dir, ec);
+            }
+        };
+        int seq = 0;
+        auto make_node = [&](const std::string& tag) {
+            auto h = std::make_unique<Harness>();
+            h->dir = fs::temp_directory_path() /
+                ("determ-s079-" + tag + "-" + std::to_string(seq++) + "-" +
+                 std::to_string(static_cast<unsigned long long>(
+                     std::chrono::steady_clock::now().time_since_epoch().count())));
+            fs::remove_all(h->dir, fec); fs::create_directories(h->dir / "prod");
+            const std::string gp = write_genesis(h->dir);
+            node::Config cfg;
+            cfg.domain = "prod"; cfg.data_dir = (h->dir / "prod").string();
+            cfg.listen_port = 7681; cfg.key_path = (h->dir / "prod.key").string();
+            cfg.chain_path = (h->dir / "prod" / "chain.json").string(); cfg.genesis_path = gp;
+            cfg.m_creators = 1; cfg.k_block_sigs = 1; cfg.log_quiet = true;
+            crypto::save_node_key(keyP, cfg.key_path);
+            h->loop = std::make_unique<VirtualEventLoop>();
+            h->loop->enable_virtual_time();
+            h->tr   = std::make_unique<VirtualTransport>(*h->loop, h->vnet);
+            h->node = std::make_unique<node::Node>(cfg, h->clock, h->loop.get(), h->tr.get(), h->rng);
+            return h;
+        };
+        auto height = [](Harness& h) { return h.node->rpc_status()["height"].get<uint64_t>(); };
+        // Run the real engine (start_external + stepping the virtual loop) until
+        // the chain reaches `target` blocks.
+        auto produce_until = [&](Harness& h, uint64_t target) {
+            h.node->start_external();
+            int guard = 0;
+            while (height(h) < target && guard++ < 2000000) {
+                if (h.loop->run_ready(64) == 0 && !h.loop->advance_to_next_timer()) break;
+            }
+            return height(h) >= target;
+        };
+        auto block_at = [&](Harness& h, uint64_t index) -> std::optional<chain::Block> {
+            nlohmann::json j = h.node->rpc_block(index);
+            if (j.is_null()) return std::nullopt;
+            return chain::Block::from_json(j);
+        };
+        auto in_block = [](const chain::Block& b, const Hash& h) {
+            for (auto& t : b.transactions) if (t.hash == h) return true;
+            return false;
+        };
+
+        auto sign = [](chain::Transaction& tx, const crypto::NodeKey& k) {
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(k, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+        };
+        auto transfer = [&](const crypto::NodeKey& k, uint64_t nonce, uint64_t amount, uint64_t fee) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::TRANSFER; tx.from = make_anon_address(k.pub); tx.to = "bob";
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            sign(tx, k);
+            return tx;
+        };
+        // The bulk legs: content-hashed, NOT signed (admit_tx_for_test, see above).
+        auto transfer_unsigned = [&](const crypto::NodeKey& k, uint64_t nonce, uint64_t amount, uint64_t fee) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::TRANSFER; tx.from = make_anon_address(k.pub); tx.to = "bob";
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        auto register_tx = [&](const std::string& domain, const crypto::NodeKey& k, uint64_t fee) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::REGISTER; tx.from = domain; tx.to = "";
+            tx.amount = 0; tx.fee = fee; tx.nonce = 0;
+            tx.payload.assign(k.pub.begin(), k.pub.end());
+            sign(tx, k);
+            return tx;
+        };
+        // "" = queued; otherwise the RPC rejection reason.
+        auto submit = [&](Harness& h, const chain::Transaction& tx) -> std::string {
+            try {
+                auto r = h.node->rpc_submit_tx(tx.to_json());
+                return r.value("status", std::string{}) == "queued" ? "" : "not queued";
+            } catch (const std::exception& e) { return e.what(); }
+        };
+        auto mempool  = [](Harness& h) { return h.node->rpc_status()["mempool_size"].get<size_t>(); };
+        auto resident = [](Harness& h, const Hash& x) { return h.node->mempool_contains_for_test(x); };
+        auto has = [](const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; };
+
+        // ── Node A: ingress at genesis, then a real round ─────────────────────
+        {
+            auto A = make_node("a");
+            check(height(*A) == 1 && mempool(*A) == 0, "setup: node A at genesis (height 1), mempool empty");
+
+            // (1) THE SEAL — I1 (M1). 100 unfunded anon senders x 100 TRANSFER{0, MAX}.
+            std::vector<Hash> flood_hashes; flood_hashes.reserve(kCap);
+            size_t flood_admitted = 0;
+            for (auto& k : flood)
+                for (uint64_t n = 0; n < kPerSender; ++n) {
+                    chain::Transaction tx = transfer_unsigned(k, n, 0, UINT64_MAX);
+                    flood_hashes.push_back(tx.hash);
+                    if (A->node->admit_tx_for_test(tx)) ++flood_admitted;
+                }
+            check(flood_hashes.size() == kCap && flood_admitted == 0 && mempool(*A) == 0,
+                  "I1 (the seal): 100 unfunded anon senders x 100 TRANSFER{amount 0, fee UINT64_MAX} — 10000 S-049-clean, in-quota txs — are ALL refused by the admission policy (mempool_size 0): the pool is never filled");
+            {
+                chain::Transaction one = transfer(flood[0], 0, 0, UINT64_MAX);   // really signed
+                A->node->on_tx_for_test(one);
+                check(mempool(*A) == 0,
+                      "I1: a really-signed flood tx is DROPPED at gossip ingress (the full on_tx path)");
+                std::string why = submit(*A, one);
+                check(has(why, "unaffordable") && mempool(*A) == 0,
+                      "I1: the same tx at RPC submit is REJECTED definitively with the funding reason (no `queued` the producer would skip for ever): " + why);
+            }
+            // S-070: the REGISTER-shaped instance — a zero-balance fresh domain's
+            // REGISTER(name, 0, fee = MAX) squatted (name, 0) in every pool it reached.
+            {
+                chain::Transaction squat = register_tx("gina", keyG, UINT64_MAX);
+                A->node->on_tx_for_test(squat);
+                check(mempool(*A) == 0,
+                      "S-070: REGISTER(gina, nonce 0, fee UINT64_MAX) from the unfunded fresh domain is DROPPED at gossip ingress — no free name squat");
+                std::string why = submit(*A, squat);
+                check(has(why, "unaffordable") && mempool(*A) == 0,
+                      "S-070: the same REGISTER is REJECTED at RPC submit with the funding reason");
+                chain::Transaction free_reg = register_tx("gina", keyG, 0);
+                check(submit(*A, free_reg).empty() && mempool(*A) == 1,
+                      "S-070 control: the fee-0 REGISTER for the same fresh domain (cost 0 <= balance 0) is queued — affordability is by balance, not registration");
+            }
+            // The floor is untouched: an affordable fee-0 transfer is queued.
+            chain::Transaction h0 = transfer(keyR, 0, 1, 0);
+            check(submit(*A, h0).empty() && mempool(*A) == 2,
+                  "I5: after the flood an affordable fee-0 transfer from a funded sender is QUEUED — the fee floor was never raised");
+
+            // (2) QUOTA — I2 (M3).
+            {
+                size_t admitted = 0;
+                for (uint64_t n = 0; n < kPerSender; ++n)
+                    if (submit(*A, transfer(keyQ, n, 1, 0)).empty()) ++admitted;
+                check(admitted == kPerSender && mempool(*A) == 2 + kPerSender,
+                      "I2: a funded sender's 100 pipelined-nonce transfers are all queued");
+                std::string why = submit(*A, transfer(keyQ, kPerSender, 1, 0));
+                check(has(why, "per-sender quota") && mempool(*A) == 2 + kPerSender,
+                      "I2: the 101st pending tx from that sender is REJECTED (per-sender quota): " + why);
+                check(submit(*A, transfer(keyR, 1, 1, 0)).empty() && mempool(*A) == 3 + kPerSender,
+                      "I2: another sender's tx is admitted while the first is at its quota");
+            }
+
+            // (3) RUNNING COMMITMENT — I1 (M2). C holds exactly 100.
+            chain::Transaction c0 = transfer(keyC, 0, 60, 0);
+            chain::Transaction c1_over = transfer(keyC, 1, 60, 0);
+            chain::Transaction c1 = transfer(keyC, 1, 40, 0);
+            chain::Transaction c0_over = transfer(keyC, 0, 70, 1);
+            chain::Transaction c0_fit  = transfer(keyC, 0, 55, 1);
+            {
+                check(submit(*A, c0).empty(), "I1 (commitment): C (balance 100) parks a 60 at nonce 0");
+                std::string why = submit(*A, c1_over);
+                check(has(why, "unaffordable") && !resident(*A, c1_over.hash),
+                      "I1 (commitment): a second 60 at nonce 1 is REJECTED — 60 + 60 > 100 with the pending one counted: " + why);
+                check(submit(*A, c1).empty() && resident(*A, c1.hash),
+                      "I1 (commitment): a 40 at nonce 1 is queued (60 + 40 <= 100)");
+                why = submit(*A, c0_over);
+                check(has(why, "unaffordable") && resident(*A, c0.hash) && !resident(*A, c0_over.hash),
+                      "I1 (commitment, replace): replacing nonce 0 by 70+1 is REJECTED — 71 + the pending 40 > 100 (the incumbent it displaces is not counted): " + why);
+                check(submit(*A, c0_fit).empty() && resident(*A, c0_fit.hash) && !resident(*A, c0.hash),
+                      "I1 (commitment, replace): replacing nonce 0 by 55+1 is queued (56 + 40 <= 100) and displaces the incumbent");
+            }
+            const size_t resident_before_round = mempool(*A);
+
+            // A REAL round: the producer includes exactly the affordable residents.
+            {
+                const bool got = produce_until(*A, 2);
+                check(got, "producer: node A finalized block 1 on the virtual clock");
+                auto b1 = got ? block_at(*A, 1) : std::nullopt;
+                bool flood_in_block = false;
+                if (b1) for (auto& fh : flood_hashes) if (in_block(*b1, fh)) { flood_in_block = true; break; }
+                check(b1 && in_block(*b1, h0.hash) && in_block(*b1, c0_fit.hash) && in_block(*b1, c1.hash)
+                          && !flood_in_block,
+                      "producer: block 1 INCLUDES the honest fee-0 transfer and C's two fitted txs, and none of the 10000 flood hashes");
+                check(b1 && b1->transactions.size() == resident_before_round && mempool(*A) == 0,
+                      "producer: every resident (all affordable) was included and the pool is empty afterwards");
+            }
+        }
+
+        // ── Node P1 builds block 1 with the two nonce-0 alternates that drain D1/D2 ──
+        // (cost 90 each) — the head change that turns a resident admitted at
+        // balance 100 into one the head can no longer fund.
+        chain::Transaction d1_alt = transfer(keyD1, 0, 89, 1);
+        chain::Transaction d2_alt = transfer(keyD2, 0, 89, 1);
+        std::optional<chain::Block> drain_block;
+        {
+            auto P1 = make_node("p1");
+            check(submit(*P1, d1_alt).empty() && submit(*P1, d2_alt).empty(),
+                  "setup: P1 queues the two draining alternates (cost 90 of 100 each)");
+            const bool got = produce_until(*P1, 2);
+            drain_block = got ? block_at(*P1, 1) : std::nullopt;
+            check(drain_block && in_block(*drain_block, d1_alt.hash) && in_block(*drain_block, d2_alt.hash),
+                  "setup: P1's block 1 carries both alternates");
+        }
+
+        // ── Node P2: build-time eviction — I4 (M6) ────────────────────────────
+        // d1 (nonce 1, cost 80) is admitted at balance 100; block 1 lands from
+        // elsewhere and leaves D1 with 10; the predicate must evict d1.
+        chain::Transaction d1 = transfer(keyD1, 1, 70, 10);
+        chain::Transaction d2 = transfer(keyD2, 1, 70, 10);
+        if (drain_block) {
+            auto P2 = make_node("p2");
+            chain::Transaction h2 = transfer(keyR, 0, 1, 0);
+            check(submit(*P2, d1).empty() && submit(*P2, h2).empty() && mempool(*P2) == 2,
+                  "setup: P2 holds d1 (D1, nonce 1, cost 80 of balance 100) and an honest transfer");
+            P2->node->apply_block_for_test(*drain_block);
+            check(height(*P2) == 2 && resident(*P2, d1.hash) && resident(*P2, h2.hash),
+                  "setup: block 1 applied through the normal path — D1 now holds 10; d1 (cost 80, nonce 1 = current) stays resident until a build judges it");
+            node::TxAdmit admit = P2->node->tx_admit_for_test();
+            check(!admit(d1, 1) && !resident(*P2, d1.hash) && mempool(*P2) == 1,
+                  "I4: the build-time predicate answers FALSE for a resident the head can no longer fund and EVICTS it (store + index)");
+            check(admit(h2, 0) && resident(*P2, h2.hash),
+                  "I4 control: the affordable resident is accepted and stays");
+            const bool got = produce_until(*P2, 3);
+            auto b2 = got ? block_at(*P2, 2) : std::nullopt;
+            check(b2 && in_block(*b2, h2.hash) && !in_block(*b2, d1.hash) && mempool(*P2) == 0,
+                  "I4: the block the producer builds next carries the honest transfer and not the evicted one; the pool is empty");
+        } else {
+            check(false, "I4 arms skipped: no drain block");
+        }
+
+        // ── Node E: eviction order + the floor at the cap — I3/I5 (M4/M5) ──────
+        if (drain_block) {
+            auto E = make_node("e");
+            check(submit(*E, d1).empty() && submit(*E, d2).empty(),
+                  "setup: E holds d1 and d2 (cost 80 of balance 100 each, fee 10)");
+            E->node->apply_block_for_test(*drain_block);
+            check(height(*E) == 2 && resident(*E, d1.hash) && resident(*E, d2.hash),
+                  "setup: block 1 applied — both are now unaffordable residents (balance 10 each)");
+            // Fill to the cap with AFFORDABLE fee-5 entries (9998 of them).
+            std::vector<Hash> filler_hashes; filler_hashes.reserve(kCap);
+            size_t filled = 0, filler_admitted = 0;
+            for (int j = 0; j < kSenders && filled < kCap - 2; ++j)
+                for (uint64_t n = 0; n < kPerSender && filled < kCap - 2; ++n) {
+                    chain::Transaction tx = transfer_unsigned(filler[j], n, 1, 5);
+                    if (E->node->admit_tx_for_test(tx)) ++filler_admitted;
+                    filler_hashes.push_back(tx.hash);
+                    ++filled;
+                }
+            check(filled == kCap - 2 && filler_admitted == filled && mempool(*E) == kCap
+                      && resident(*E, d1.hash) && resident(*E, d2.hash),
+                  "setup: 9998 affordable fee-5 fillers admitted — the pool is AT THE CAP with two unaffordable residents");
+
+            // I5 (M4): the floor ignores unaffordable entries — a fee BELOW the
+            // affordable minimum is admitted because an unaffordable one goes.
+            chain::Transaction h3 = transfer(keyR, 0, 1, 3);
+            {
+                std::string why = submit(*E, h3);
+                const int unaff_left = int(resident(*E, d1.hash)) + int(resident(*E, d2.hash));
+                check(why.empty() && mempool(*E) == kCap && resident(*E, h3.hash) && unaff_left == 1,
+                      "I5/I3: at the cap, an affordable fee-3 tx (below the affordable minimum 5) is QUEUED and exactly one UNAFFORDABLE resident made room for it: " + why);
+            }
+            // I3 (M5): eviction never keeps an unaffordable entry over an
+            // affordable one — even when the incoming fee beats the minimum.
+            chain::Transaction h4 = transfer(keyR, 1, 1, 6);
+            {
+                std::string why = submit(*E, h4);
+                size_t fillers_resident = 0;
+                for (auto& fh : filler_hashes) if (resident(*E, fh)) ++fillers_resident;
+                check(why.empty() && mempool(*E) == kCap && resident(*E, h4.hash)
+                          && !resident(*E, d1.hash) && !resident(*E, d2.hash)
+                          && resident(*E, h3.hash) && fillers_resident == filler_hashes.size(),
+                      "I3: a fee-6 tx evicts the REMAINING unaffordable resident, not the minimum-fee affordable one — every filler and the fee-3 entry are still resident");
+            }
+            // With no unaffordable resident left, the shipped fee-priority rule
+            // is intact: the floor is the affordable minimum (3).
+            {
+                std::string why = submit(*E, transfer(keyR, 2, 1, 3));
+                check(has(why, "mempool: full") && has(why, "<= mempool minimum 3") && mempool(*E) == kCap,
+                      "I5: with every resident affordable, fee 3 (== the floor) is rejected: " + why);
+                chain::Transaction h6 = transfer(keyR, 2, 1, 4);
+                why = submit(*E, h6);
+                check(why.empty() && mempool(*E) == kCap && resident(*E, h6.hash) && !resident(*E, h3.hash),
+                      "I5: fee 4 (> the floor) is queued and evicts the fee-3 entry — fee priority over affordable residents is unchanged");
+            }
+        } else {
+            check(false, "I3/I5 arms skipped: no drain block");
+        }
+
+        std::cout << (fail ? "  FAIL: test-mempool-admit-affordability\n"
+                           : "  PASS: test-mempool-admit-affordability all assertions\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-abort-event-canonical") {

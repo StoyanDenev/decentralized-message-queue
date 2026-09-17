@@ -1,5 +1,20 @@
 ----------------------- MODULE BoundedMempoolAdmission -----------------------
 (*
+NOTE 2026-09-16 (S-079, docs/SECURITY.md): the shipped admission gate
+gained an AFFORDABILITY clause this model predates — a tx is admitted
+only if its sender's balance at the head covers its transparent debit
+plus the debits of its other resident txs (Node::mempool_tx_cost /
+mempool_committed_from), and at the cap an UNAFFORDABLE resident is
+evicted FIRST, at any incoming fee (Node::mempool_scan_locked), with
+the fee floor taken over affordable residents only.
+WHAT THIS COSTS THIS MODEL, stated plainly and NOT re-derived here:
+INV_EvictionAlwaysLowest (§7) now describes the shipped code only
+under the added hypothesis "every resident is affordable at the head";
+when one is not, the shipped victim is that resident, whatever its fee.
+INV_CapBound, INV_NonceGated and INV_RBFFeeMonotone are untouched (the
+cap, stale-nonce and RBF rules are unchanged). The falsifier for the
+shipped rule is `determ test-mempool-admit-affordability`.
+
 FB38 — TLA+ specification of the bounded mempool admission state
 machine FOCUSED on the cap-eviction + RBF (replace-by-fee) semantics.
 Companion to `docs/proofs/S008BoundedMempool.md` (R31A3 analytic
