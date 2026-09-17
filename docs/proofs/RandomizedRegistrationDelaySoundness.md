@@ -1,6 +1,10 @@
 # FA-Apply-19 — Randomized registration-delay unbiasability (`derive_delay` anti-grinding)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decision D4, DECISION-LOG 2026-09-16).**
+> RD-1, RD-2, RD-3, RD-5 and RD-6 are unaffected — they are statements about `derive_delay`'s range,
+> unbiasability, grinding cost, immutability and determinism, and consume no consequence. **RD-4 is
+> the exception and is restated at its own heading:** it proved that a deregistering operator cannot
+> shorten "the slashing-evidence window", and since D4 there is no slashing to escape.
 
 This document formalizes a security property of the staking lifecycle that the apply-layer state-machine proof (`StakeLifecycle.md`, FA-Apply-4) names but does not prove: an operator who submits a REGISTER or DEREGISTER transaction has **no exploitable control** over the resulting `active_from` (committee-eligibility onset), `inactive_from` (committee-eligibility offset), or `unlock_height` (stake-release onset). All three lifecycle anchors are computed as `height + derive_delay(b.cumulative_rand, tx.hash)`, and `derive_delay` mixes the block's `cumulative_rand` — a commit-reveal beacon value that is unpredictable at the moment the operator forms the transaction — so the operator can neither pin a chosen delay nor profitably grind the transaction over many candidate forms to bias the delay distribution away from uniform-over-`[1, REGISTRATION_DELAY_WINDOW]`.
 
@@ -131,7 +135,16 @@ In the in-scope (honest-fraction) case, prediction is no better than uniform gue
 
 **Significance.** RD-3 is the registration-side analogue of the `A_seed_grind` adversary that `S020CommitteeSelection.md` (S-020) rules out for committee *selection*: there, an operator cannot grind the committee seed to self-select; here, an operator cannot grind their *registration delay* to time their selection-eligibility onset. The two together close the "operator-controlled selection timing" surface end-to-end.
 
-### RD-4 — DEREGISTER cannot shorten the slashing-evidence window
+### RD-4 — DEREGISTER cannot shorten the deferred-unlock window (RESTATED 2026-09-17)
+
+> **What changed.** RD-4 was stated as "DEREGISTER cannot shorten the *slashing-evidence* window",
+> i.e. the window during which an equivocator's stake could still be taken. **Since D4 (2026-09-16)
+> stake is never taken for equivocation**, so that framing has no referent and the "security-relevant
+> payload" claim below is withdrawn as stated. The *arithmetic* is untouched and still worth having:
+> `inactive_from ≥ h_d + 1` and `unlock_height = inactive_from + unstake_delay_`, so an operator
+> cannot grind its capital free any earlier than the genesis-pinned delay allows. Read RD-4 as a bound
+> on **capital illiquidity** — which is now, per `S010S011SybilEconomics.md` T-4-R, the ONLY cost the
+> protocol imposes on a misbehaving staker — rather than as a bound on an evidence window.
 
 **Statement.** A deregistering operator cannot use `derive_delay`'s randomness to *minimize* the time their stake remains slashable. The slashing-evidence window is `[registered_at, unlock_height)` with `unlock_height = inactive_from + unstake_delay_` and `inactive_from = h_d + derive_delay(...)` for DEREGISTER at height `h_d`. Since `derive_delay ≥ 1`, the minimum achievable `unlock_height` over all transaction forms is `h_d + 1 + unstake_delay_`, and the operator cannot drive it below that floor — in particular cannot make the stake unlockable in the same block as the DEREGISTER, nor skip the `unstake_delay_` cooldown.
 
@@ -139,7 +152,7 @@ In the in-scope (honest-fraction) case, prediction is no better than uniform gue
 
 **Code witness.** `src/chain/chain.cpp:851` (`unlock_height = inactive_from + unstake_delay_`); `chain.cpp:46` (the `1 +` floor); the slashing-window semantics are `StakeForfeitureCascade.md` §1.1 + `StakeLifecycle.md` §4.
 
-**Significance.** This is the security-relevant payload of the whole proof. If the operator could pick `derive_delay = 0` (or grind it toward `0`), an equivocator could DEREGISTER the instant they sense an accusation forming and pull `unlock_height` forward to escape the slash. RD-1's `1 +` floor plus RD-2's unpredictability plus the unconditional `unstake_delay_` add jointly forbid this: the window has a hard floor and a randomized (never operator-shortened) length.
+**Significance (restated).** This is still the load-bearing arithmetic of the proof, but for a different reason than written: it is what makes the `unstake_delay` floor unavoidable, hence what makes T-4-R's opportunity-cost term non-zero. The original reasoning follows and is HISTORICAL — if the operator could pick `derive_delay = 0` (or grind it toward `0`), an equivocator could DEREGISTER the instant they sense an accusation forming and pull `unlock_height` forward to escape the slash. RD-1's `1 +` floor plus RD-2's unpredictability plus the unconditional `unstake_delay_` add jointly forbid this: the window has a hard floor and a randomized (never operator-shortened) length.
 
 ### RD-5 — PARAM_CHANGE of the window does not retro-bias committed anchors
 
@@ -164,7 +177,7 @@ In the in-scope (honest-fraction) case, prediction is no better than uniform gue
 FA3 (`SelectiveAbort.md`) proves the *beacon* is unbiasable. S-020 (`S020CommitteeSelection.md`) proves the *committee seed* cannot be ground to self-select. Neither addresses the *registration delay*: FA3 stops at "`R` is uniform," and S-020 assumes a fixed eligible pool and analyzes selection *within* it. The present proof bridges the two — it shows that the *onset* and *offset* of a validator's membership in the eligible pool are themselves randomized by the same beacon, so an operator cannot manufacture a favorable selection *timing* by controlling when their entry enters or leaves eligibility. Concretely:
 
 - Without RD-2/RD-3, an operator could compute "if I register such that `active_from = h*`, I land in committee `h*`'s pool at the moment the seed favors me." RD-2 denies the operator control over `active_from`, so this composed grind collapses — the operator faces a fresh near-uniform `active_from` regardless of transaction form.
-- Without RD-4, the slashing-window analysis of `StakeForfeitureCascade.md` would have a hole: it assumes the deferred-unlock window has a hard lower bound. RD-4 supplies that bound and proves the operator cannot erode it.
+- Without RD-4, the deferred-unlock analysis of `StakeForfeitureCascade.md` would have a hole: it assumes the window has a hard lower bound. (That document's slashing channel is itself vacuous since D4; the lower bound still matters for the UNSTAKE path.) RD-4 supplies that bound and proves the operator cannot erode it.
 
 The proof is also distinct from `StakeLifecycle.md` (FA-Apply-4), which *states* the deferred-unlock arithmetic and notes parenthetically that "the operator cannot pre-pick" the height, but proves only the apply-time *state-machine* correctness (T-K1..T-K7), not the *unbiasability* of the randomness feeding it. RD-1..RD-6 are the unbiasability theorems FA-Apply-4 defers.
 
@@ -177,7 +190,7 @@ The proof is also distinct from `StakeLifecycle.md` (FA-Apply-4), which *states*
 | `A_op-predict` | Predict realized `active_from` / `inactive_from` to time committee entry | RD-2 (near-uniform over `[1,W]` under A3 + FA3 T-3) | `≤ 1/W + negl` guess probability |
 | `A_op-same-height-grind` | Hash many `τ_j` against one `ρ`, include the best | RD-3 same-height case (one tx per nonce slot; choice fixed before `ρ`) | `negl` advantage |
 | `A_op-cross-height-grind` | Resample across heights for a target delay | RD-3 cross-height case (one fee + one block per retry; full support, no certainty) | economic + latency cost; no deterministic target |
-| `A_op-deregister-race` | DEREGISTER to pull `unlock_height` forward, escape an in-flight slash | RD-4 (`1 +` floor + unconditional `unstake_delay_`; slash ignores `inactive_from`) | none — window has hard floor |
+| `A_op-deregister-race` | DEREGISTER to pull `unlock_height` forward (historically: to escape an in-flight slash; since D4 there is no slash to escape, so the payoff is early liquidity only) | RD-4 (`1 +` floor + unconditional `unstake_delay_`) | none — window has hard floor |
 | `A_op-zero-delay` | Activate / deactivate / unlock in the same block | RD-1 (`derive_delay ≥ 1`) | none |
 | `A_op-governance` | PARAM_CHANGE the window/cooldown to retro-shift a committed anchor | RD-5 (`W` is `constexpr`; `unstake_delay_` captured-at-DEREGISTER) + FA10 N-of-N | none for committed anchors |
 | `A_op-fork-disagree` | Get honest nodes to disagree on the realized anchor | RD-6 (pure function of committed block fields; determinism) | none |
@@ -206,8 +219,8 @@ The two honest residuals (`A_op-cross-height-grind`'s resampling cost, and the a
 | `StakeLifecycle.md` (FA-Apply-4) | T-K3 DEREGISTER deferred-unlock arithmetic; the `derive_delay`-into-`inactive_from` write whose unbiasability RD-2..RD-4 prove (FA-Apply-4 states the "operator cannot pre-pick" claim; this proof discharges it). |
 | `NefPoolDrain.md` (FA-Apply-14) | The REGISTER apply branch (`chain.cpp:801`) that writes `active_from = height + derive_delay(...)`. |
 | `S017UnstakeApplyConsistency.md` | §6.2 PARAM_CHANGE-of-`unstake_delay_` robustness that RD-5 re-states as the anti-grinding corollary; the three-layer gate reads stored `unlock_height`. |
-| `StakeForfeitureCascade.md` (FA-Apply-16) | §1.1 deferred-unlock window as the slashing-evidence window that RD-4 protects with a hard floor. |
-| `EquivocationSlashingApply.md` (FA-Apply-10) | Slashing branch that consumes `stakes_[d].locked` for evidence `< unlock_height` and ignores `inactive_from`'s exact value (RD-4). |
+| `StakeForfeitureCascade.md` (FA-Apply-16) | §1.1 deferred-unlock window, which RD-4 protects with a hard floor. Its "slashing-evidence window" framing is vacuous since D4. |
+| `EquivocationSlashingApply.md` (FA-Apply-10) | T-E0: apply is state-neutral on the event, so no branch consumes `stakes_[d].locked` at all. RD-4 no longer has a slashing branch to be insensitive to. |
 | `S020CommitteeSelection.md` (S-020) | The `A_seed_grind` committee-selection adversary; RD-3 is its registration-side analogue. |
 | `BFTSafety.md` (FA5) / `Safety.md` (FA1) | Honest-fraction bounds ruling out the all-Byzantine-committee case in RD-2 / the adversary table. |
 | `SnapshotEquivalence.md` (FA-Apply-2) | Carries `active_from` / `inactive_from` / `unlock_height` across snapshot restore via the `r:` + `s:` namespaces (RD-6). |
@@ -236,7 +249,7 @@ All six theorems (RD-1 through RD-6) are closed in the current codebase:
 - **RD-1** (future-dated, range-bounded anchors) closed via the `1 + (v % W)` form at `chain.cpp:46`.
 - **RD-2** (unpredictability) closed by reduction to FA3 T-3 (`SelectiveAbort.md`) + A3 + V9 chaining, in the honest-committee-fraction case.
 - **RD-3** (no profitable grinding) closed via the per-`τ` random-oracle independence + the one-tx-per-nonce-slot gate (same-height) + the per-retry economic/latency cost (cross-height).
-- **RD-4** (slashing window not shortenable) closed via the `1 +` floor + the unconditional `unstake_delay_` add + the slash branch's insensitivity to `inactive_from`.
+- **RD-4** (deferred-unlock window not shortenable) closed via the `1 +` floor + the unconditional `unstake_delay_` add. *(Restated 2026-09-17: the third leg, "the slash branch's insensitivity to `inactive_from`", is moot — there is no slash branch.)*
 - **RD-5** (no governance retro-bias) closed via `W` being `static constexpr` + the capture-at-DEREGISTER of `unstake_delay_` into the stored anchor.
 - **RD-6** (determinism) closed via `derive_delay` being a pure function of committed block fields + the `r:` / `s:` state-root binding.
 

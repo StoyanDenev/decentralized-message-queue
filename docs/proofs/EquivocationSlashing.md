@@ -1,8 +1,4 @@
-# FA6 — Equivocation slashing soundness
-
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+# FA6 — Equivocation evidence soundness (no false accusation)
 
 This document proves that Determ's equivocation-slashing mechanism produces no false positives: under EUF-CMA, an **honest** validator is **never** named as the equivocator in a finalized `EquivocationEvent`.
 
@@ -41,9 +37,11 @@ Verify(pk, D(kind, i_b, r_b), σ_b) = 1
 
 Because the derived digests are functions of the asserted indices, `h` is **signature-bound**: an accepted event proves the equivocator signed two distinct bodies *at height h*, in *one* digest family. (Prior to 2026-08-12 the event carried two opaque digests with no index relation whatsoever; §2 Case (b) below records why that was unsound and what changed.)
 
-When an `EquivocationEvent` is baked into a finalized block, `apply_transactions` (Preliminaries §9) zeroes `stakes_[equivocator].locked` and sets `registrants_[equivocator].inactive_from = h + 1`.
+When an `EquivocationEvent` is baked into a finalized block, `apply_transactions` does **nothing with it** — no stake moves, no registrant is deactivated, no counter advances (Preliminaries §9; owner decision D4, DECISION-LOG 2026-09-16, landed as O-1 step 3a; gate `determ test-equivocation-apply`). The event's entire effect is that it is committed, V11-verified, under the block hash, as the declared INPUT to the L2 bond policy (D22).
 
-**Theorem T-6 (Soundness of equivocation slashing).** Under:
+> **RE-DERIVED 2026-09-17 (step 3c).** This document's theorem is a **no-false-accusation** bound and was never a bound on the consequence, so D4 changes nothing in §2 except what the conclusion is *for*. Every occurrence of "slashed" below should be read as "named as the equivocator in a V11-accepted, finalized `EquivocationEvent`". The theorem's value went UP, not down: the record is now an input to an off-chain policy that can act on it, so the false-accusation probability is the quality bound on that input, and the **non-cryptographic** false-accusation path of §2 Case (c) is the residual that matters (it is not bounded by `2⁻¹²⁸`, or by anything).
+
+**Theorem T-6 (No false accusation).** Under:
 
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2): no polynomial-time adversary forges a signature by an honest key with non-negligible probability.
 - **(H2) Honest validator behavior** (Preliminaries §4): an honest validator signs at most one `compute_block_digest` per (height, round) pair AND at most one `make_contrib_commitment` per (height, aborts_gen) tuple (the latter clause is the S-006 closure that brings ContribMsg-level equivocation under the same V11 channel — now `kind`-discriminated rather than digest-agnostic; see §5 cross-reference for both detection paths).
@@ -55,9 +53,9 @@ $$
 \Pr[v_i \text{ is named as equivocator in any finalized } EquivocationEvent] \;\leq\; \mathrm{negl}(\lambda)
 $$
 
-with concrete bound `≤ 2⁻¹²⁸` per attempted forgery. In plain terms: **slashing only catches the guilty**, with cryptographic certainty.
+with concrete bound `≤ 2⁻¹²⁸` per attempted forgery. In plain terms: **a finalized record names only the guilty**, with cryptographic certainty — *provided* the named validator satisfies H3. H3 is an assumption about shipped honest behaviour, and §2 Case (c) plus `RoundStallValveSoundness.md` C-2 (ledger S-095) give the two ways it fails in practice.
 
-**Corollary T-6.1 (Cross-shard slashing soundness).** The theorem extends to cross-chain `EquivocationEvent` (where `shard_id ≠ 0` and `beacon_anchor_height` is set per the `EquivocationEvent` cross-chain fields). The reduction is identical: honest `v_i` never produces two signatures over distinct body roots at the same `(shard, height, round, kind)`. The Case (c) residual carries over unchanged to the cross-shard variant.
+**Corollary T-6.1 (Cross-shard evidence soundness).** The theorem extends to cross-chain `EquivocationEvent` (where `shard_id ≠ 0` and `beacon_anchor_height` is set per the `EquivocationEvent` cross-chain fields). The reduction is identical: honest `v_i` never produces two signatures over distinct body roots at the same `(shard, height, round, kind)`. The Case (c) residual carries over unchanged to the cross-shard variant.
 
 ---
 
@@ -94,15 +92,15 @@ This residual is:
 - **not closed**, and **not claimed closed** anywhere in this corpus;
 - the round / `aborts_gen` IS bound into the opening at HEAD — `D = SHA-256(TAG ‖ i ‖ gen ‖ r)` (v3 tags; `src/node/producer.cpp` `compose_block_digest` / `compose_contrib_commitment`) and the verifier asserts `gen_a == gen_b` (`src/node/validator.cpp`, "(2b) THE ROUND ASSERT") — so a cross-round pair no longer satisfies V11.
 
-**Status 2026-09-14: OPEN — the gen binding is SHIPPED and EVADABLE.** `gen` is signer-chosen off-chain, so a deliberate splitter signs side B at `gen + 1` and is acquitted, while an honest node's two openings are bit-identical to a splitter's (only delivery differs) — DECISION-LOG 2026-08-13 `b5838fb` and the six 2026-08-12 designs "final".."final+9": no predicate over two signed openings is both sound and complete under asynchrony. The consequence is being relocated out of consensus (CLAUDE.md SLASHING block; owner item O-1) and the forfeiture code is still live at HEAD until that lands. No proof in this corpus may assume Case (c) closed; do not re-propose a two-opening predicate.
+**Status 2026-09-17: OPEN as a predicate; DECIDED as a policy.** `gen` is signer-chosen off-chain, so a deliberate splitter signs side B at `gen + 1` and is acquitted by the `gen_a == gen_b` assert, while an honest node's two openings are bit-identical to a splitter's (only delivery differs) — DECISION-LOG 2026-08-13 `b5838fb` and the six 2026-08-12 designs "final".."final+9": no predicate over two signed openings is both sound and complete under asynchrony. **The consequence is gone** (D4, landed 2026-09-16 as O-1 step 3a): an accepted event moves no L1 state, so the residual's HARM on L1 is zero — an honest validator caught by Case (c) loses nothing. R-1 is DECIDED on that basis: a same-height pair, cross-round or not, is L2 EVIDENCE requiring corroboration and never an L1 verdict. What Case (c) still costs is EVIDENCE QUALITY, and that cost is now load-bearing because the record is D22's input. **A third, concrete Case-(c) instance is recorded 2026-09-17:** the S-050 stall valve can restart a round at the same height with an EMPTY abort tail, i.e. at the SAME `gen`, with fresh `dh_input` — an honest same-height same-`gen` pair that passes every V11 clause including the `gen` assert (`RoundStallValveSoundness.md` C-2 as corrected; ledger S-095). That one is not evaded by the `gen` binding at all. No proof in this corpus may assume Case (c) closed; do not re-propose a two-opening predicate.
 
 **Combining cases**: a finalized `EquivocationEvent` falsely accusing honest `v_i` requires either:
 
 - forging a signature by `pk_i` (Case (a)), probability `≤ 2⁻¹²⁸` by EUF-CMA; or
 - breaking SHA-256 to re-open an honest signature at a different height (Case (b)), probability `≤ 2⁻¹²⁸`; or
-- harvesting two honest same-height cross-round signatures (Case (c)) — **not cryptographically excluded**, and the reason T-6 is stated under H3.
+- harvesting two honest same-height signatures from two round instances (Case (c)) — **not cryptographically excluded**, and the reason T-6 is stated under H3.
 
-Therefore, for any honest `v_i` satisfying H3, `Pr[v_i is slashed] ≤ 2⁻¹²⁷`, which is negligible.   ∎
+Therefore, for any honest `v_i` satisfying H3, `Pr[v_i is named in a finalized event] ≤ 2⁻¹²⁷`, which is negligible. For an honest `v_i` that does NOT satisfy H3 the probability is **not negligible and is not bounded here**; that case is Case (c), and under D4 its L1 cost is zero and its L2 cost is D22's problem.   ∎
 
 ### 2.1 Domain separation is load-bearing, not hygiene
 
@@ -112,9 +110,9 @@ Gate: the `test-abort-cert-validation` EQV block carries a `kind = 1` accept con
 
 ---
 
-## 3. Proof of Corollary T-6.1 (cross-shard slashing)
+## 3. Proof of Corollary T-6.1 (cross-shard evidence)
 
-The cross-shard `EquivocationEvent` extension (Preliminaries §9 + `EquivocationEvent.shard_id` and `beacon_anchor_height` fields) routes a slash through the beacon when the equivocation occurred on a shard.
+The cross-shard `EquivocationEvent` extension (Preliminaries §9 + `EquivocationEvent.shard_id` and `beacon_anchor_height` fields) routes a record through the beacon when the equivocation occurred on a shard.
 
 The beacon validates the event by:
 
@@ -122,9 +120,9 @@ The beacon validates the event by:
 2. Confirming `equivocator` was on that committee.
 3. Verifying both `(σ_a, σ_b)` against `pk_equivocator`.
 
-These checks are EXACTLY V11 with the extra step (1). Step (1) doesn't introduce a new false-positive surface: if the beacon's committee derivation differs from the shard's, the equivocator isn't recognized as a member, and the slash doesn't fire. If they agree, the rest of the check is the same as in Theorem T-6.
+These checks are EXACTLY V11 with the extra step (1). Step (1) doesn't introduce a new false-positive surface: if the beacon's committee derivation differs from the shard's, the equivocator isn't recognized as a member, and the event is not accepted. If they agree, the rest of the check is the same as in Theorem T-6.
 
-So the cross-shard slash is sound under the same EUF-CMA bound — `≤ 2⁻¹²⁸` per fabrication attempt — and over polynomially many attempts the probability stays negligible.   ∎
+So the cross-shard record is sound under the same EUF-CMA bound — `≤ 2⁻¹²⁸` per fabrication attempt — and over polynomially many attempts the probability stays negligible. (Note S-089, OPEN: `beacon_anchor_height` and `shard_id` are hashed into the event but compared by nothing, so two honest observers on a SHARD chain can derive different event hashes for one incident. That is an evidence-completeness defect, not a false-accusation one, and it is outside T-6.1.)   ∎
 
 ---
 
@@ -194,8 +192,10 @@ A reviewer can confirm soundness by:
 
 ## 6. Conclusion
 
-T-6 establishes that slashing produces no cryptographic false positives **for an honest validator satisfying H3** (at most one round per height per digest family). The proof is short because the protocol design is clean: V11 strictly verifies both signatures against DERIVED digests, asserts a single height, and discriminates the digest family; EUF-CMA forbids honest-key forgery and SHA-256 preimage resistance forbids re-opening a signature at another height.
+T-6 establishes that the equivocation record produces no cryptographic false positives **for an honest validator satisfying H3** (at most one round instance per height per digest family). The proof is short because the protocol design is clean: V11 strictly verifies both signatures against DERIVED digests, asserts a single height and a single `gen`, and discriminates the digest family; EUF-CMA forbids honest-key forgery and SHA-256 preimage resistance forbids re-opening a signature at another height.
 
-The corollary T-6.1 carries the same property cross-chain. Cross-shard slashing inherits soundness from V11's cryptographic checks; the beacon's committee-derivation step doesn't introduce new false-positive surfaces.
+The corollary T-6.1 carries the same property cross-chain. The beacon's committee-derivation step doesn't introduce new false-positive surfaces.
+
+**What T-6 does not establish, stated plainly (2026-09-17).** It is not a deterrence result and, since D4, there is nothing to deter with: a validator that equivocates loses nothing on L1. It is also not unconditional — H3 fails for the two honest behaviours of §2 Case (c), and for those the false-accusation probability is unbounded by this proof. FA6 is therefore exactly one thing: *if* an event is finalized and the named validator ran one round instance at that height, the named validator really did double-sign. Everything an operator or an L2 policy wants to do with that fact is outside this document and, at L1, unimplemented (D22).
 
 Honest validators bear no cryptographic equivocation-slash risk **within H3**. The H3 boundary — same-height cross-round honest double-signing (Case (c)) — is **OPEN and needs owner review**; it is recorded, not argued away. Suspension slashing (economic, not cryptographic) is a separate concern with its own bounded behavior.

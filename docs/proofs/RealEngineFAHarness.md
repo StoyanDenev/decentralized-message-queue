@@ -1,8 +1,12 @@
 # Real-Engine FA Harness — closing F-1/FA4 over the actual consensus engine
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The §2 harness CONTRACT (real chain, real apply, seeded RNG, per-block assertions, non-vacuity,
+> negative control, determinism) is unchanged and is what this document proves. What changed is the
+> INVARIANT each trace asserts: increment 1's equivocation trace and increment 2's abort trace were
+> INVERTED when the consequences were removed (D4 removed the equivocation forfeiture + deregistration;
+> D13 retired the Phase-1 abort deduction). Both tables below are updated to what the shipped gates
+> assert; the pre-2026-09-16 rows are shown as HISTORICAL so the inversion is legible.
 
 **Status:** increments 1-5 SHIPPED (`test-fa-{equivocation,abort,cross-shard,multi-event,merge}-trace`) — the apply-level event-family sweep is COMPLETE (§4); the FA4 liveness slice OPENED with increment 6, `test-fa-liveness-virtual` (§5) — real multi-node liveness+agreement in process; increment 7 added `test-fa-partition-virtual`. The adversarial-schedule (virtual-time) remainder has since SHIPPED as the DETERMINISTIC scheduler family, [DeterministicSchedulerDesign.md](DeterministicSchedulerDesign.md) increments 1-9 — its OWN numbering, distinct from this doc's — `test-fa-adversarial-deterministic` + `test-fa-crash-deterministic` with per-step FA checkers and fault witnesses. This is the
 **self-contained path** chosen by the owner (AskUserQuestion, 2026-07-07) for the
@@ -28,7 +32,7 @@ PRNG drives a multi-block trace of randomized TRANSFER/STAKE/UNSTAKE txs through
 the **real** `Chain::append` apply path and asserts the A1 economic invariant
 (`expected_total() == live_total_supply()`) after every block. **So the economic
 A1 trace is already covered on the real engine.** The FA harness generalises this
-to the **consensus-Byzantine** invariants (equivocation slashing, abort/escalation,
+to the **consensus-Byzantine** invariants (the equivocation evidence channel, abort/escalation,
 cross-shard receipt conservation) — the genuine F-1/FA4 gap.
 
 ## 2. Harness contract
@@ -45,26 +49,30 @@ Each `test-fa-*` subcommand:
    **negative control** (an event-free block does not move the tracked quantity)
    and a **same-seed determinism** check (identical final `compute_state_root()`).
 
-## 3. Increment 1 — equivocation slashing (`test-fa-equivocation-trace`)
+## 3. Increment 1 — equivocation evidence neutrality (`test-fa-equivocation-trace`)
 
 A never-slashed author + K=6 distinct-stake validators. Over 48 blocks, each block
 injects an `EquivocationEvent` for a randomly-chosen validator (a mix of FRESH
 targets and DUPLICATE re-submissions). Invariants checked after every block:
 
-| Invariant | Assertion |
+| Invariant (at HEAD, since D4) | Assertion |
 |---|---|
-| Fresh-slash forfeit (FA6) | equivocator's `stake()` → 0 |
-| Fresh-slash deregistration (FA6) | `registrant().inactive_from != UINT64_MAX` |
-| Fresh-slash accounting | `accumulated_slashed()` += exactly the pre-slash stake |
-| **Idempotence (slash-once)** | duplicate evidence does NOT change stake or `accumulated_slashed()` (no double-slash) |
-| A1 conservation | `expected_total() == live_total_supply()` |
-| Monotonicity | `accumulated_slashed()` non-decreasing |
-| Exact total | `accumulated_slashed() == Σ` distinct-slashed stakes (no double-count) |
-| Non-vacuity | ≥1 fresh slash AND ≥1 duplicate actually occurred |
-| Negative control | an event-free block leaves `accumulated_slashed()` unchanged |
+| Stake neutrality | no validator's `stake()` moves on equivocation evidence |
+| Registry neutrality | no validator's `registrant()` moves on equivocation evidence |
+| Counter neutrality | `accumulated_slashed()` stays 0 for the whole trace |
+| **Twin equality** | a twin chain applying the SAME blocks WITHOUT the events reaches the same `compute_state_root()` after every block |
+| A1 conservation | `expected_total() == live_total_supply()` after every block |
+| Non-vacuity / positive control | the record really is in the appended block (the trace would otherwise assert neutrality about nothing) |
 | Determinism | same seed ⇒ identical final `compute_state_root()` |
 
-Observed run: **6 fresh slashes + 42 idempotent duplicates over 48 blocks**, all
+**HISTORICAL — what this trace asserted before 2026-09-16.** Fresh-slash forfeit (`stake() → 0`);
+fresh-slash deregistration (`inactive_from != UINT64_MAX`); fresh-slash accounting
+(`accumulated_slashed() +=` the pre-slash stake); idempotence (a duplicate does not double-slash);
+monotonicity and exact total of `accumulated_slashed()`; a negative control that an event-free block
+leaves the counter unchanged. Every one of those is now vacuous by construction — which is precisely
+why the trace was rewritten around a twin chain rather than left asserting `0 == 0`.
+
+Observed run (HISTORICAL, pre-D4): **6 fresh slashes + 42 idempotent duplicates over 48 blocks**, all
 assertions green; full-run output byte-identical across invocations. Gated by
 `tools/test_fa_equivocation_trace.sh` (FAST). No consensus code is modified — the
 harness only READS the real engine through existing public `Chain` APIs.
@@ -77,9 +85,9 @@ each full run is byte-identical across invocations.
 
 | Increment | Subcommand | Trace property (against the REAL apply) | Observed adversarial run |
 |---|---|---|---|
-| 2 — abort / suspension (S-032) | `test-fa-abort-trace` | Phase-1 `AbortEvent` deducts exactly `min(SUSPENSION_SLASH, stake)` with floor-at-0 (a forced schedule drives one small-stake validator through full → PARTIAL → floored-ZERO deducts); `abort_records` cache exact per domain (Phase-2 rounds never recorded); `accumulated_slashed` exact + monotone; A1 per block | 6 fresh + 34 repeat targets, 1 partial, 7 floored-zero deducts, 8 Phase-2 no-ops |
+| 2 — abort / suspension (S-032) | `test-fa-abort-trace` | **Since D13:** a Phase-1 `AbortEvent` moves NO stake — every validator's stake equals its genesis value and `accumulated_slashed == 0` after every block; the `abort_records` cache is exact per domain (Phase-2 rounds never recorded); every non-`b:` state leaf equals an abort-free TWIN chain applied alongside, with the `b:` leaf present only on the aborted chain (the per-block positive control); A1 per block. *HISTORICAL: it used to assert a `min(SUSPENSION_SLASH, stake)` deduction with floor-at-0, driving one small-stake validator full → PARTIAL → floored-ZERO.* | the forced-repeat target keeps its 25 stake (the retired deduction would have drained it to 0) |
 | 3 — cross-shard conservation (FA7) | `test-fa-cross-shard-trace` | TWO real chains (source shard A + dest shard B); real cross-shard TRANSFERs emit outbound receipts on A, B applies inbound receipts including adversarial DUPLICATE re-submissions — no-double-credit (`applied_inbound_receipts` dedup), no-credit-without-debit, two-chain conservation, per-chain A1 analogs, dual-chain state-root determinism | 48 unique credits, 23 duplicate rejects, 27 withheld/in-flight |
-| 4 — multi-event composition (FA-Apply-15) | `test-fa-multi-event-trace` | blocks carrying RANDOM MIXES of TRANSFERs + `EquivocationEvent`s + `AbortEvent`s simultaneously; a shadow model mirrors the real apply rules (fees to creators, BOTH slash kinds into one `accumulated_slashed`, nonce monotonicity, stake never underflows); joint A1 per block | 57 transfers, 16 equivocations (6 fresh / 10 dup), 15 aborts, 21 multi-kind blocks |
+| 4 — multi-event composition (FA-Apply-15) | `test-fa-multi-event-trace` | blocks carrying RANDOM MIXES of TRANSFERs + `EquivocationEvent`s + `AbortEvent`s simultaneously; a shadow model mirrors the real apply rules (fees to creators, nonce monotonicity, stake never underflows — and, since D4/D13, the abort branch increments `abort_records` while moving no stake and the equivocation branch is inert, so `accumulated_slashed` is frozen at 0); joint A1 per block | 57 transfers, 16 equivocations (6 fresh / 10 dup), 15 aborts, 21 multi-kind blocks |
 | 5 — merge-event lifecycle | `test-fa-merge-trace` | `MergeEvent` BEGIN/END lifecycle over randomized topology per the real apply semantics — fresh BEGINs, duplicate BEGINs, valid ENDs, stale ENDs, bad-partner rejects; A1 per block | 14 fresh BEGINs, 5 dup BEGINs, 12 valid ENDs, 9 stale ENDs, 8 bad-partner rejects |
 
 Gated by `tools/test_fa_{abort,cross_shard,multi_event,merge}_trace.sh` (FAST).
@@ -87,7 +95,7 @@ Gated by `tools/test_fa_{abort,cross_shard,multi_event,merge}_trace.sh` (FAST).
 ## 5. What this closes, and what remains
 
 Increments 1-5 close the **apply-level** F-1 slices for every major consensus
-event family: FA6 equivocation slashing, S-032 abort/suspension accounting, FA7
+event family: the FA6 equivocation evidence channel, S-032 abort/suspension accounting, FA7
 cross-shard receipt conservation, FA-Apply-15 multi-event composition (the
 canonical F-1 target alongside FA4), and the merge-event lifecycle — each as a
 seeded randomized-Byzantine multi-block trace over the REAL `Chain::append`

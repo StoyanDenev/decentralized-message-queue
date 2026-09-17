@@ -1,7 +1,5 @@
 # Proof-claim → gate traceability — the verified/aspirational boundary
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
 **Status: AUDIT SHIPPED (register of gaps; remediation increments owner-gated).**
 This document records a systematic answer to one question the SBOM round taught
 us to ask of every claim in this repo:
@@ -84,8 +82,13 @@ re-verified by hand rather than taken on the agents' word:
 
 - `check_abort_certs` (`src/node/validator.cpp:232`) carries ~13 distinct reject
   paths and is the last line of defense against a **forged abort certificate**,
-  whose consequence is consensus-level *false suspension-slashing of an honest
-  validator*.
+  whose consequence was consensus-level *false suspension-slashing of an honest
+  validator*. **Re-derived 2026-09-17 (step 3c):** since D13 (2026-09-16) a Phase-1
+  `AbortEvent` deducts nothing, so a forged abort certificate no longer takes stake.
+  It still forges the S-032 **suspension record**, which excludes the named validator
+  from committee selection for an exponentially-growing window — a liveness attack on
+  an honest validator, at zero stake cost to the forger. The gate is therefore no less
+  load-bearing; only the unit of harm changed, from stake to eligibility.
 - It has **no negative test**. Measured, not asserted: of 31
   `abort_events.push_back` sites in `src/main.cpp`, **zero** have a `validate()`
   call within ±40 lines; of 68 `BlockValidator` sites, **zero** touch
@@ -795,7 +798,11 @@ verifies, (4) sig_b verifies — else the verdict stays **EQUIVOCATION-PROVEN**
 lines 7587-7589) has NO enforcing negative leg: deleting it lets an event with
 **sig_a INVALID but sig_b VALID** (dd=T, sd=T, sig_a_ok=F, sig_b_ok=T) skip clause
 4 (its `!sig_b_ok` is false) and fall through to PROVEN — a forged sig_a reported
-as a proven double-sign, i.e. a false-slashing justification, with no red test.
+as a proven double-sign, i.e. a false accusation carried by a tool that reports a
+verdict, with no red test. (Since D4, 2026-09-16, a false accusation costs the named
+validator nothing on L1 — but this verdict is exactly what the L2 bond policy (D22)
+is meant to consume, so the clause is if anything MORE load-bearing than when the
+audit was written.)
 
 **The false coverage** (why the existing wrapper's four NOT-EQUIVOCATION legs miss
 it): assertion 4 (wrong `--pubkey`) invalidates BOTH sigs, so with clause 3 gone it

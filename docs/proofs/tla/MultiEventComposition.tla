@@ -1,14 +1,12 @@
 --------------------------- MODULE MultiEventComposition ---------------------------
-\* STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032)
-\* and deducts NOTHING; T-A1 and every statement below that rests on the deduction
-\* are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").
-\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
-\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
-\* registry deactivation this model treats as shipped apply-path behaviour were
-\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
-\* evidence record only. This model is pending re-derivation in step 3c of the
-\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
-\* the authority.
+\* STATUS 2026-09-17 (step 3c) — the COMPOSITION structure of this model is current; two of its
+\* event actions are HISTORICAL. Owner decision D4 (DECISION-LOG 2026-09-16, landed as O-1 step 3a)
+\* removed the equivocation forfeiture and registry deactivation — apply reads nothing from
+\* b.equivocation_events — and D13 retired the Phase-1 abort stake deduction, leaving the
+\* abort_records increment alone. So the ApplyEquivocation action is the identity at HEAD and the
+\* abort action writes only the S-032 record; the ordering, disjointness and A1-composability
+\* properties below all survive with those deltas set to zero. See MultiEventComposition.md,
+\* re-derived 2026-09-17.
 (*
 FB20 — TLA+ specification of the COMPOSED apply pipeline at the block
 level. Where the prior FB-track apply specs each isolate one event

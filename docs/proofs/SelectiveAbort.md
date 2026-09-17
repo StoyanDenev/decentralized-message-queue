@@ -1,7 +1,5 @@
 # FA3 — Selective-abort defense (commit-reveal hybrid)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
 This document proves the security property that defines Determ's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**
 
 The defense replaces the iterated-SHA-256 "delay function" approach that Determ used in earlier revisions (closed by S-009; see `docs/SECURITY.md` §M-F). The new defense is **information-theoretic under preimage resistance**, not time-bound. ASIC speedup, quantum compute, and arbitrary parallelism are irrelevant to the security argument.
@@ -192,7 +190,7 @@ T-3 covers the case where `v_i` *does* publish `c_i` but chooses `s_i^*` strateg
 
 - **Censorship resistance (FA2):** if `v_i` abstains and another honest member is on the committee, that member's `s_j` enters `R` and the proof above carries through (with `v_i` removed from the committee for the retry round). For the retry round, `v_i` is again offered the same selective choice; the same theorem applies.
 
-- **Suspension slashing:** repeated abstention by `v_i` triggers suspension (loss of `SUSPENSION_SLASH` stake per abort, exponential backoff). The economic disincentive ensures rational `v_i` only abstains under genuine inability, not strategic preference.
+- **Suspension:** repeated abstention by `v_i` triggers the S-032 exponential-backoff suspension window and NO stake movement (the `SUSPENSION_SLASH` deduction was retired 2026-09-16, D13). The disincentive is therefore the forgone committee income over the window, not a deduction; it is weaker than the deduction it replaced and it does not price a cartel that suspends a peer at zero marginal cost (see `S010S011SybilEconomics.md` §1 T-4 and §6.7).
 
 Both responses are protocol-level and require no assumption beyond §4 (honest behavior) and §3 (network model).
 
@@ -205,7 +203,7 @@ No. The proof's argument depends on at least one *honest* member in `K_h`. With 
 If **every** member of `K_h` is Byzantine and colluding, the coalition knows all `s_j` and can grind `R` arbitrarily. But:
 
 - This is the "fully-Byzantine committee" case (clause 2 of FA1's Theorem T-1).
-- Each member equivocating to produce favorable `R` is detectable as cross-block evidence and slashable (FA6).
+- Each member equivocating to produce favorable `R` is detectable as cross-block evidence and is recorded on-chain (FA6). Since D4 the record carries no L1 consequence, so it is detection, not deterrence; the commit-reveal hiding argument above does not rest on it.
 - The threshold for this attack — full committee corruption — is the same threshold at which all bets are off (FA1's clause 2).
 
 So the proof's "at least one honest" assumption matches the protocol's overall trust assumption.

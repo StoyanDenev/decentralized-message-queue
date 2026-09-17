@@ -1,8 +1,24 @@
 # FA-Apply-16 — Stake forfeiture cascade (slashing × deferred-unstake interaction)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **VACUOUS AT HEAD — restated 2026-09-17 (sequence step 3c; owner decisions D4 + D13,
+> DECISION-LOG 2026-09-16).** This document proves the composition of **two** stake-mutating channels
+> on `stakes_[D].locked`: equivocation forfeiture and the deferred-unlock phase of voluntary
+> deregistration. **The first channel no longer exists.** `Chain::apply_transactions` reads nothing
+> from `b.equivocation_events` (D4, `EquivocationSlashingApply.md` T-E0), and the Phase-1 abort
+> deduction that shared the same accumulator was retired the same day (D13). There is exactly ONE
+> writer to `stakes_[D].locked` at HEAD — the STAKE / UNSTAKE path — so there is no cascade to
+> compose and no ordering to get right.
+>
+> **Consequently: T-C1, T-C2, T-C3, T-C4 and T-C5 are HISTORICAL** (each hypothesises a slash inside
+> or around the unlock window). **T-C6 (A1 invariance under cascade) and T-C7 (determinism) survive
+> trivially**, with the slash deltas identically zero. **The one claim to carry forward is the
+> negative one:** the deferred-unlock window is NO LONGER a "slashing-evidence window" — a validator
+> that deregisters keeps its whole stake regardless of what evidence surfaces before `unlock_height`,
+> so the window's only remaining function is capital illiquidity (`RandomizedRegistrationDelaySoundness.md`
+> RD-4, restated; `S010S011SybilEconomics.md` T-4-R). Documents that cite FA-Apply-16 for a slashing
+> window must cite it for the illiquidity bound instead.
+>
+> The full text is retained as the record of the removed interaction; do not cite T-C1..T-C5.
 
 This document formalizes the **cascade composition** between two stake-mutating channels that can fire on the same domain within overlapping time windows: equivocation slashing (FA-Apply-10) and the deferred-unlock phase of voluntary deregistration (FA-Apply-4 T-K3). The interesting case is a validator `D` that signed STAKE → DEREGISTER (entering `staked-pending-unlock` per `StakeLifecycle.md` §1.2) and then has equivocation evidence surface BEFORE `b.index ≥ stakes_[D].unlock_height`. The chain has two state-mutating mechanisms aimed at the same `stakes_[D].locked` field; their composition must produce a single deterministic answer regardless of the apply-time ordering, must preserve the A1 unitary-supply invariant under every reachable interleaving, and must leave the honest-misclock UX guarantee from T-K4 intact for post-slash UNSTAKE attempts.
 
@@ -14,7 +30,7 @@ The composition is decided structurally by the **Phase ordering** of `apply_tran
 
 ## 1. Setup
 
-### 1.1 The two mechanisms on `stakes_[D].locked`
+### 1.1 The two mechanisms on `stakes_[D].locked` — HISTORICAL; only the UNSTAKE path remains
 
 Two apply-time branches mutate `stakes_[D].locked` for a single domain `D`:
 
@@ -46,7 +62,7 @@ A subtle coupling: Phase 1's UNSTAKE refund branch (T-K4, lines 884–885) resto
 
 ## 2. Theorems
 
-### T-C1 — Equivocation during deferred-unlock window: full stake forfeiture
+### T-C1 — Equivocation during deferred-unlock window: full stake forfeiture (HISTORICAL — no forfeiture since D4)
 
 **Statement.** Let `D` be a domain in the `staked-pending-unlock` state at the start of block `B_e` (`stakes_[D].locked == L > 0`, `stakes_[D].unlock_height == H_u`, `registrants_[D].inactive_from == H_d + δ_reg < H_u`). Assume `B_e` contains an `EquivocationEvent ev` with `ev.equivocator == D` and `b.index == H_e ∈ [H_d + 1, H_u − 1]` (strictly inside the deferred-unlock window, **before** unlock). Then apply produces:
 
@@ -105,7 +121,7 @@ The composed final state has `stakes_[D].locked == 0`, `accounts_[D].balance` un
 
 **Test witness.** `tools/test_unstake_deregister_apply.sh` "UNSTAKE too-early" scenario covers `B_pre`'s refund branch (stake unchanged, balance unchanged, nonce bumped). `tools/test_equivocation_multi.sh` covers `B_e`'s slash. The two scenarios are composed structurally by T-M5's replay determinism — no single test exercises the exact sequence, but the per-block invariants compose by T-M5 + T-M3.
 
-### T-C4 — Slash AFTER UNSTAKE complete: no stake to forfeit (registry deactivation only)
+### T-C4 — Slash AFTER UNSTAKE complete (HISTORICAL — there is neither a forfeit nor a deactivation since D4)
 
 **Statement.** Consider the sequence on domain `D`:
 
@@ -128,7 +144,7 @@ The equivocation event records in the block but produces **zero stake forfeiture
 
 **Test witness.** `tools/test_equivocation_multi.sh` "Equivocator with NO stake" scenario covers the `locked == 0 OR stakes_[D] absent` case — the slash is a no-op on the supply channel, the registry deactivation fires. The post-UNSTAKE setup is the structural analogue (locked is zero by UNSTAKE rather than by prior slash, but the apply-path behavior is identical from Phase 4's perspective).
 
-### T-C5 — Order matters: same-block UNSTAKE + equivocation
+### T-C5 — Order matters: same-block UNSTAKE + equivocation (HISTORICAL — order no longer matters; the equivocation loop writes nothing)
 
 **Statement.** Within a single block `B` at height `H` containing both an UNSTAKE transaction for `D` (in `B.transactions`) AND an `EquivocationEvent ev` for `D` (in `B.equivocation_events`), the apply path's Phase ordering (T-M1) sequences UNSTAKE first (Phase 1) and equivocation second (Phase 4). Two sub-cases:
 
@@ -213,7 +229,7 @@ The cascade's order-dependence is therefore a **bounded-horizon guarantee**, not
 - **DOMAIN_INCLUSION-mode cascade.** When `min_stake_ == 0`, the stake-forfeiture side of the cascade is a no-op (no stake to forfeit), but the registry-deactivation side still fires. T-C4's "balance preserved" property is trivially true (no stake → balance crossing exists). The cascade reduces to "registry-only" deactivation; T-C7's determinism applies unchanged.
 - **Nonce coordination across the cascade.** Each transaction (DEREGISTER, UNSTAKE) consumes one nonce slot via FA-Apply-3's strict-equality gate. The cascade respects the nonce sequence; an operator with concurrent endpoints must coordinate nonces (FA-Apply-3 T-N1). Not specific to the cascade.
 - **Wallet-side UX for the cascade.** The chain's apply-time mechanics preserve `balance` across slash (T-C1) and refund `tx.fee` on failed UNSTAKE (T-K4 / T-C2). The wallet's job is to communicate "your stake has been slashed; subsequent UNSTAKE will not recover it" to the operator. The wallet-side display logic is out of scope; the chain's invariants are well-defined regardless.
-- **AbortEvent × UNSTAKE composition.** AbortEvent (Phase 3) deducts at most `SUSPENSION_SLASH` from `locked` per round-1 abort. The composition with same-block UNSTAKE is structurally identical to T-C5 with Phase 3 substituted for Phase 4 and a bounded deduction substituted for the full forfeit. The analysis is symmetric; covered by `MultiEventComposition.md` T-M6 Case 1 + Case 5 directly without specialization in the present proof.
+- **AbortEvent × UNSTAKE composition — HISTORICAL; empty at HEAD (D13).** AbortEvent (Phase 3) deducted at most `SUSPENSION_SLASH` from `locked` per round-1 abort; it now writes only `abort_records_`. The composition with same-block UNSTAKE is structurally identical to T-C5 with Phase 3 substituted for Phase 4 and a bounded deduction substituted for the full forfeit. The analysis is symmetric; covered by `MultiEventComposition.md` T-M6 Case 1 + Case 5 directly without specialization in the present proof.
 
 ---
 

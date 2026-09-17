@@ -1,7 +1,5 @@
 # S025BFTEscalationSoundness — BFT-mode 4-gate escalation trigger soundness composition
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document is the analytic composition theorem covering the 4-gate predicate that drives Determ's K-of-K → BFT-mode escalation at `src/node/node.cpp:773-780`. The four gates — (1) `cfg_.bft_enabled` (chain-level config from genesis), (2) `total_aborts >= cfg_.bft_escalation_threshold` (sustained abort rate observed within the current height's pre-finalize state), (3) `avail_domains.size() < k_target` (eligible pool is below the genesis-pinned full committee size), and (4) `avail_domains.size() >= k_bft` with `k_bft = (2K + 2) / 3` (eligible pool is at or above the smaller BFT-shrunk committee size) — must all hold simultaneously for `Node::check_if_selected` to flip the round into `ConsensusMode::BFT`. The validator at `src/node/validator.cpp:240-244` (per-event abort-cert reconstruction) and `src/node/validator.cpp:389-401` (block-sig branch) mirrors the same 4-gate semantics so that producer-validator divergence cannot break consensus. The proof composes the four gates against four adversary families — `A_premature` (force escalation early), `A_late` (force escalation late), `A_pool_forge` (forge the pool size to bypass gate 3), `A_quorum_skip` (escalate below the BFT viability floor and bypass R7 under-quorum merge) — and pins the safety + liveness preservation that BFT mode achieves once the predicate fires.
 
 The proof exists because the FA1 K-of-K safety proof (`Safety.md`) and the FA5 BFT-mode conditional-safety proof (`BFTSafety.md`) cover the two endpoints — full-K consensus and BFT-shrunk consensus respectively — but neither formalizes the *transition predicate* itself. The 4-gate trigger is the load-bearing decision that determines which proof's hypotheses are in scope for any given block. Escalating too early collapses unconditional FA1 safety onto conditional FA5 safety without operational necessity; escalating too late collapses FA4 liveness because the chain stalls indefinitely with no recovery. The trigger predicate must reject both modes of failure and steer the chain precisely between the two regions of the operational envelope.
@@ -82,7 +80,7 @@ The byte-for-byte mirror is itself a proof obligation (T-5 below pins it formall
 - FA1 K-of-K safety once K-of-K is in effect (`Safety.md`).
 - FA5 BFT-mode conditional safety once BFT-mode is in effect (`BFTSafety.md`).
 - FA4 liveness across both modes (`Liveness.md`).
-- FA6 equivocation slashing as backing for the FA5 recovery path (`EquivocationSlashing.md`).
+- FA6 equivocation evidence (`EquivocationSlashing.md`). **Corrected 2026-09-17 (step 3c):** there is no "FA5 recovery path" to back — `BFTSafety.md` T-5.1 was withdrawn when D4 removed the L1 consequence (T-5.1-R). FA6 supplies attribution, not backing, and nothing in this document consumes it.
 - FA8 regional-sharding pool composition that feeds `avail_domains` (`RegionalSharding.md`).
 - R7 under-quorum merge as the fallback when gate 4 fails (`S036UnderQuorumMerge.md`).
 - S-020 hybrid Fisher-Yates uniformity inside the K or `k_bft` committee selection (`S020CommitteeSelection.md`).
@@ -178,13 +176,13 @@ Once flipped, FA5's safety hypothesis space is in scope: the block carries `cons
 
 ### T-6 (Safety Preservation)
 
-**Theorem.** When E(h) holds and the round produces a valid BFT-mode block `B` at height `h`, FA5 T-5's safety hypothesis (B1: `f_h < |K_h|/3` within the BFT committee + B2: equivocation slashing enforced) is the precise hypothesis under which safety holds. The 4-gate trigger does not weaken FA5; it only places the chain into FA5's scope.
+**Theorem.** When E(h) holds and the round produces a valid BFT-mode block `B` at height `h`, FA5 T-5's safety hypothesis (B1: `f_h < |K_h|/3` within the BFT committee, plus B2′ honest single-sign at the height) is the precise hypothesis under which safety holds. The 4-gate trigger does not weaken FA5; it only places the chain into FA5's scope. **Corrected 2026-09-17 (step 3c):** the former fourth hypothesis "B2: equivocation slashing enforced" is DELETED from FA5 (D4 — no L1 consequence exists; T-5's proof never consumed it). Deleting it does not change this theorem, because the argument below shows each FA5 hypothesis is *independent of the trigger* and an absent hypothesis is trivially independent. What DOES change is the cost of being in FA5's scope: since T-5.1 is withdrawn, a B1 violation inside that scope has no recovery, so "placing the chain into FA5's scope" is a strictly more consequential act than this section assumed — see `BFTSafety.md` §4.2 and `AbortCascadeLiveness.md` §Safety-check-against-FA5.
 
 **Proof.** Per FA5 / `BFTSafety.md`:
 - A1 (Ed25519 EUF-CMA) is independent of the trigger.
 - A2 (SHA-256 collision resistance) is independent of the trigger.
 - B1 (`f_h < |K_h|/3` within the BFT committee `K_h` of size `k_bft`) depends only on the committee selection, which uses the same S-020 hybrid Fisher-Yates that selects the K-of-K committee in MUTUAL_DISTRUST mode (just with a smaller target size). The honest-validator distribution in the pool transfers to the smaller committee with the same uniformity guarantee (`S020CommitteeSelection.md` T-1).
-- B2 (equivocation slashing) is independent of the trigger; the FA6 slashing pipeline operates regardless of consensus mode.
+- B2′ (honest single-sign at the height) is independent of the trigger — it is a property of honest node behaviour, not of escalation. Note it is not unconditional: an abort re-round or an S-050 valve restart can make an honest member sign two digests at one height (`BFTSafety.md` §4.2). Escalation neither causes nor prevents that. The former B2 (slashing enforced) is deleted; the FA6 EVIDENCE pipeline operates regardless of consensus mode and has no L1 effect in either mode.
 
 The 4-gate trigger therefore preserves FA5's safety surface exactly. There is no path from E(h) to a BFT-mode block under conditions weaker than FA5 expects, because:
 - The validator's BFT branch (`src/node/validator.cpp:395-401`) rechecks gates 1 + 2.
@@ -289,7 +287,7 @@ When all four gates hold, the producer escalates and the validator agrees (per L
 
 When E(h) holds and the round flips to BFT, the resulting block falls under FA5's hypothesis space:
 - B1 (`f_h < |K_h|/3`) is independent of the 4-gate predicate; it depends on the adversary's stake distribution and the committee selection (S-020 uniformity).
-- B2 (slashing enforced) is independent of the 4-gate predicate; it depends on the FA6 pipeline being operational.
+- B2′ (honest single-sign at the height) is independent of the 4-gate predicate; it depends on honest node behaviour. (The former B2, "slashing enforced", is deleted — D4, 2026-09-16.)
 
 The 4-gate trigger does not weaken these hypotheses; it places the chain into the regime where these hypotheses are the operative safety conditions. No additional hypothesis is imported.
 
@@ -305,14 +303,14 @@ Symmetric to L-7: when E(h) holds and the round flips to BFT, FA4's bounded-time
 |---|---|
 | `Preliminaries.md` (F0) | H1–H4 honest-validator assumptions; §2.1 SHA-256; §2.2 ed25519 EUF-CMA; §3 committee-selection contract; §4–§5 validation rule names V7/V8/V9. |
 | `Safety.md` (FA1) | K-of-K unconditional safety under H1. The 4-gate trigger preserves FA1 when E(h) is false (no escalation, K-of-K stays in scope). |
-| `BFTSafety.md` (FA5) | BFT-mode conditional safety theorem under `f_h < |K_h|/3` + slashing. The 4-gate trigger places the chain into FA5's hypothesis space when E(h) is true. |
+| `BFTSafety.md` (FA5) | BFT-mode conditional safety theorem under `f_h < |K_h|/3` (the slashing hypothesis is deleted, step 3c). The 4-gate trigger places the chain into FA5's hypothesis space when E(h) is true — a space that, since T-5.1's withdrawal, has no recovery below the bound. |
 | `Liveness.md` (FA4) | Liveness across both modes; L-4.3 BFT-mode finalize condition. T-7 above is the trigger-side preservation of FA4. |
 | `CommitteeSelection.md` (FA1+FA8) | K-of-K parent proof for the committee selection that the 4-gate trigger does not modify. |
 | `S020CommitteeSelection.md` (S-020) | Hybrid Fisher-Yates uniformity inside the K or `k_bft` committee selection — the smaller `k_bft` committee inherits the same uniformity guarantee. |
 | `S024EpochBlocks.md` (S-024) | Epoch-cadence + PARAM_CHANGE composition. `bft_escalation_threshold` is mutable mid-chain via the same PARAM_CHANGE pipeline that mutates `epoch_blocks`. |
 | `S036UnderQuorumMerge.md` (R7) | Under-quorum merge mechanism. Gate 4 abstains when `|avail_domains| < k_bft`, deferring to R7. |
 | `RegionalSharding.md` (FA8) | Region-aware overlay; the pool composition that feeds `avail_domains`. |
-| `EquivocationSlashing.md` (FA6) | The slashing recovery the FA5 conditional-safety proof leans on. The 4-gate trigger does not alter FA6's hypothesis space. |
+| `EquivocationSlashing.md` (FA6) | The evidence channel. The FA5 conditional-safety proof does NOT lean on it (the B2 hypothesis was deleted in step 3c); the 4-gate trigger does not alter FA6's hypothesis space either way. |
 | `GovernanceParamChange.md` (A5) | PARAM_CHANGE pipeline that staged-activates `bft_escalation_threshold` mutations. The genesis-pinned `bft_enabled` is NOT mutable via PARAM_CHANGE in v1.x. |
 | `docs/PROTOCOL.md` §5.3 | BFT escalation gate wire specification — the four gates are documented at the protocol-spec level. |
 | `docs/SECURITY.md` §S-030, §S-035 | Closure context for the abort-driven escalation surface; the 4-gate trigger is the production code's resolution. |

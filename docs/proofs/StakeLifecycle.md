@@ -1,8 +1,12 @@
 # FA-Apply — Stake lifecycle (STAKE / DEREGISTER / UNSTAKE)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> **T-K1 through T-K7 and the three-state machine of §1.2 are unchanged** — they describe the STAKE /
+> DEREGISTER / UNSTAKE apply branches, which are untouched. **§4 is the exception and is rewritten at
+> its own heading:** both slashing channels it composed with were removed on 2026-09-16 (the
+> equivocation forfeiture by D4, the Phase-1 abort deduction by D13), so `stakes_[d].locked` has
+> exactly ONE writer at HEAD and the `staked-active → unstaked` transition the machine listed as
+> "equivocation slash" is deleted.
 
 This document formalizes the apply-layer state machine governing a validator's stake: the STAKE transaction that locks balance into the `stakes_` map, the DEREGISTER transaction that schedules the registry exit and arms the `unlock_height` countdown, and the UNSTAKE transaction that releases locked value back to balance once the countdown has elapsed. Together these three tx types define a per-domain three-state machine — `(unstaked, staked-active, staked-pending-unlock)` — whose transitions must preserve the A1 unitary-supply invariant, must enforce the `unstake_delay_` waiting window as the slashing-evidence window, and must refund fees to honest users who misclock a too-early UNSTAKE so the cost of misjudging the unlock countdown is bounded at zero.
 
@@ -198,9 +202,47 @@ The strict-equality nonce gate (FA-Apply-3) and the unlock-height refund (this p
 
 ---
 
-## 4. Slashing intersection
+## 4. Slashing intersection — EMPTY SINCE 2026-09-16 (rewritten 2026-09-17)
 
-STAKE-locked balance is subject to two slashing channels (FA6 + suspension):
+**The shipped statement.** `stakes_[d].locked` has exactly one writer: the STAKE / UNSTAKE path of
+§2. No apply path reduces it for misbehaviour. Concretely:
+
+- The **equivocation** channel was removed by owner decision D4 (O-1 step 3a): `Chain::apply_transactions`
+  reads nothing from `b.equivocation_events` — no forfeiture, no `inactive_from` write
+  (`EquivocationSlashingApply.md` T-E0, gate `determ test-equivocation-apply`).
+- The **Phase-1 abort** channel was retired by owner decision D13: the abort loop increments the S-032
+  `abort_records_` entry and moves no stake (`AbortEventApply.md`, restated; gate
+  `determ test-abort-event-apply`). `SUSPENSION_SLASH` is an inert genesis parameter.
+
+**Three consequences for this document.**
+
+1. **The `staked-active → unstaked` (and `staked-pending-unlock → unstaked`) transition by slashing is
+   deleted from the §1.2 state machine.** The only exit from `staked-*` is a successful post-unlock
+   UNSTAKE. Read §1.2 accordingly.
+2. **The deferred-unlock window is NOT a "slashing-evidence window".** That framing — that
+   `unstake_delay_` exists to give the detector time to collect evidence before the operator can
+   recover the locked value — was the load-bearing claim of the old §4 and is **withdrawn**. A
+   deregistering operator keeps its whole stake no matter what evidence surfaces before
+   `unlock_height`. What the window still does is make capital illiquid for a genesis-pinned number of
+   blocks, which is now the ONLY cost the protocol imposes on a misbehaving staker
+   (`S010S011SybilEconomics.md` T-4-R). Documents citing FA-Apply-4 §4 for a slashing window — notably
+   `StakeForfeitureCascade.md` §1.1 and `RandomizedRegistrationDelaySoundness.md` RD-4 — are corrected
+   to cite the illiquidity bound instead.
+3. **The suspension channel still bites, but on eligibility, not on stake.** A Phase-1 abort record
+   arms the exponential S-032 window read through `suspension_active`
+   (`include/determ/chain/eligibility_floor.hpp`), so an aborted domain is excluded from committee
+   selection — subject to the S-051 Option-B floor lift — and earns nothing while excluded. The
+   asymmetry the old §4 drew (suspension is real-time, equivocation is archival) survives in that
+   weaker form: suspension excludes for a window, the equivocation record does nothing at all.
+
+**What is owed.** An economic response to misbehaviour, if there is to be one, is the L2 bond policy
+(D22, v1.1 DApp scope, NOT DESIGNED). Nothing at L1 replaces the two removed channels.
+
+---
+
+### 4.1 HISTORICAL — the slashing intersection as it stood before 2026-09-16
+
+STAKE-locked balance was subject to two slashing channels (FA6 + suspension):
 
 1. **Suspension slash** (`chain.cpp:1782–1797`): each Phase-1 abort event baked into the block deducts `SUSPENSION_SLASH` (= 10 by genesis default; the bounded `deduct = min(suspension_slash_, locked)` at `chain.cpp:1793`) from the aborted domain's `stakes_[d].locked`, bounded by available stake.
 2. **Equivocation slash** (`chain.cpp:1813–1825`): each `EquivocationEvent` baked into the block zeros the equivocator's `stakes_[d].locked` (`1817–1818`) AND sets `registrants_[d].inactive_from = b.index + 1` (`1823`).
@@ -219,7 +261,7 @@ slashable_window                  = [registered_at, unlock_height)
 
 The slashable window strictly contains the selection-eligibility window. Said differently: a deregistering domain has a "tail" period — `[inactive_from, unlock_height)` — during which it is no longer selectable for new committees but its stake remains forfeitable for equivocation evidence that surfaces in this window. The genesis-pinned `unstake_delay_` parameter (default 1000 blocks) gives the slashing detector that much time to collect evidence after the operator has stopped participating but before they can recover the locked value.
 
-**Composition with FA6.** `EquivocationSlashing.md` (FA6) covers the apply-correctness of the slashing branches themselves: only equivocators are slashed (no false positives), the slash deduction is bounded by available stake (no negative balances), the apply path is deterministic. The interaction between FA6 and the present proof is that the stake-lifecycle state machine in §1.2 includes a "still-slashable but deregistering" state (`staked-pending-unlock`) that FA6's invariants must continue to hold over. They do — FA6's analysis depends only on the per-block evidence-event invariant + the apply-side I-3 channel (`Δlocked < 0, Δbalance == 0`), neither of which depends on the registry's active/inactive state.
+**Composition with FA6 (historical).** `EquivocationSlashing.md` (FA6) covered the apply-correctness of the slashing branches themselves: only equivocators are slashed (no false positives), the slash deduction is bounded by available stake (no negative balances), the apply path is deterministic. The interaction between FA6 and the present proof is that the stake-lifecycle state machine in §1.2 includes a "still-slashable but deregistering" state (`staked-pending-unlock`) that FA6's invariants must continue to hold over. They do — FA6's analysis depends only on the per-block evidence-event invariant + the apply-side I-3 channel (`Δlocked < 0, Δbalance == 0`), neither of which depends on the registry's active/inactive state.
 
 **Suspension intersection.** The suspension slash at `chain.cpp:1782–1797` is gated on Phase-1 abort events for the validator's domain. A deregistering domain that has reached `inactive_from` is no longer in any committee (V2 filter), so no new Phase-1 abort events for it can be created — the suspension channel naturally tapers off after deregistration. The equivocation channel, in contrast, can fire on evidence from any earlier block (the validator gathers evidence from observed gossip with no per-block freshness requirement beyond V11), so a deregistering domain's pre-deregistration equivocation can be punished any time before `unlock_height`. This asymmetry is the intended design: suspension is a real-time mechanism for "behaving badly now," equivocation is an archival mechanism for "behaved badly at some past point in the slashable window."
 
@@ -229,7 +271,7 @@ The slashable window strictly contains the selection-eligibility window. Said di
 
 The theorems above target the STAKE / DEREGISTER / UNSTAKE apply branches in isolation. They do not extend to:
 
-- **Apply correctness of equivocation slashing per se.** T-K3's slashing-intersection note describes the window in which slashing is active; the proof that an equivocation-slash actually achieves "only Byzantine validators are slashed" is the scope of `EquivocationSlashing.md` (FA6). FA6's H2 (honest validators sign at most one digest per (height, round, aborts_gen)) is what guarantees no honest domain is slashed; the present proof's T-K3 inherits that guarantee structurally.
+- **Apply correctness of the equivocation channel per se.** *(Restated 2026-09-17: §4 above shows there is no slashing window — the channel moves no stake since D4.)* The proof that an accepted event names only Byzantine validators is the scope of `EquivocationSlashing.md` (FA6), and it is now a bound on the quality of an L2 input rather than on a punishment. FA6's H2 (honest validators sign at most one digest per (height, round, aborts_gen)) is what guarantees no honest domain is slashed; the present proof's T-K3 inherits that guarantee structurally.
 - **EXTENDED-mode sharding edge cases for stake.** A domain registered with `region == X` on shard `S_X` has its stake tracked by `S_X`'s chain, but if shard `S_X` undergoes an R7 under-quorum merge into shard `S_Y`, the refugee-region carry-over rules in `UnderQuorumMerge.md` (FA9) govern how the merged shard's `stakes_` map is reconstructed. The present proof assumes a single-shard or non-merging-shard context; the merge-boundary semantics are FA9's scope.
 - **STAKE / UNSTAKE in DOMAIN_INCLUSION mode.** When the chain's `inclusion_model == DOMAIN` (no stake gate on validator eligibility — `min_stake_ == 0`), STAKE and UNSTAKE still work mechanically but are not the gating mechanism for selection. The lifecycle proof above is mode-agnostic — every theorem (T-K1 through T-K7) holds in both STAKE_INCLUSION and DOMAIN_INCLUSION modes — but the economic significance of stake differs. DOMAIN_INCLUSION still uses equivocation slashing to deregister offenders (the `registrants_[d].inactive_from` mutation at `chain.cpp:1823` is independent of stake state), so the "still-slashable in the unlock window" property is meaningful for both modes.
 - **Apply-failure rollback semantics for stake state.** The A9 atomic-apply property (`AccountStateInvariants.md` §1.2) ensures that any throw inside the apply path (S-007 overflow, A1 violation, S-033 mismatch) rolls back `stakes_` along with `accounts_` and the other maps. The present proof's deltas are stated for **successful applies only**; rollback semantics are inherited from FA-Apply's §1.2 framing, not re-derived here. A regression introducing a path where `stakes_[d]` mutation persists across an apply-time throw would manifest as an FA-Apply I-3 violation (balance/stake leakage), caught by the A1 closure at `chain.cpp:1866-1892`.

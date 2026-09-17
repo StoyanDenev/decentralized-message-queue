@@ -1,7 +1,5 @@
 # S023NodeKeyfileEncryption — node-key passphrase encryption + rotation atomicity composition
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document formalizes the **node-key-at-rest encryption + passphrase rotation** composition for Determ validator signing keys. Where `S004KeyfileAtRest.md` proves the AEAD primitive's at-rest cryptographic soundness for a *single* encrypted keyfile, and `S005PassphraseKeyfile.md` proves the lifecycle commands' end-to-end composition, **S023NodeKeyfileEncryption.md** focuses specifically on the **ROTATION composition** — the cryptographic + filesystem-level safety properties of moving an encrypted keyfile from one passphrase to another while preserving validator identity and never exposing plaintext.
 
 The CLI surface in scope:
@@ -373,7 +371,7 @@ The combined defense posture for a Determ validator's signing key:
 2. **In transit (S-023 T-3)**: channel separation between passphrase and keyfile defeats single-channel interception.
 3. **During rotation (S-023 T-4 + T-5)**: atomic-rename + no-plaintext-on-disk guarantees rotation is crash-safe and confidential.
 4. **At runtime (S-001 RPC HMAC + FA1 Ed25519 EUF-CMA)**: the daemon's running state is protected by authentication + signature unforgeability; the seed in memory is bounded only by OS-level hardening (`mlock`, no swap, etc.).
-5. **At equivocation (FA6 slashing)**: if the seed IS compromised and the adversary tries to sign conflicting blocks, the FA6 evidence-detection layer slashes the validator.
+5. **At equivocation (FA6 evidence)**: if the seed IS compromised and the adversary tries to sign conflicting blocks, the FA6 evidence-detection layer records the double-signing on-chain. Since 2026-09-16 (D4) that record carries NO L1 consequence — no stake moves and the registrant stays active — so it is an input to the L2 bond policy (D22), not a recovery mechanism for the compromised key. Key compromise is contained by rotation, not by the evidence channel.
 
 S-023's specific contribution: closing the **operational** attack surface around rotation (A-K4) and inter-host migration (A-K3), under the cryptographic primitive that S-004 provides at the AEAD layer.
 

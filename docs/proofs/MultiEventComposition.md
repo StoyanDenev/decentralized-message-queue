@@ -1,8 +1,15 @@
 # FA-Apply-15 — Multi-event composition in `apply_transactions`
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> **T-M1 through T-M7 all survive, and the composition they prove got strictly simpler.** The
+> theorems are about ORDER, DISJOINTNESS and COMPOSABILITY of the per-event loops in
+> `Chain::apply_transactions`, and two of the loops lost their writes: the equivocation loop was
+> deleted outright (D4 — apply reads nothing from `b.equivocation_events`) and the abort loop now
+> writes only `abort_records_` (D13 — no stake deduction). So the disjoint-write claim (§1.3) holds
+> with fewer writers to be disjoint, the `block_slashed` accumulator of §1.2 is frozen at 0, and the
+> A1 composability of T-M3 holds with one term identically zero. Every statement below that names a
+> stake write from the abort or equivocation loop is HISTORICAL; nothing else changes, and no
+> theorem weakens.
 
 This document formalizes the **composition property** of the apply path: when a single finalized block carries a heterogeneous mix of state-mutating surfaces — ordinary transactions (`TRANSFER`, `REGISTER`, `STAKE`, `UNSTAKE`, `DEREGISTER`, `PARAM_CHANGE`, `COMPOSABLE_BATCH`, `MERGE_EVENT`, `DAPP_REGISTER`, `DAPP_CALL`), `AbortEvent`s, `EquivocationEvent`s, and `CrossShardReceipt` inbound entries — the apply path consumes them in a strictly serialized, consensus-pinned order, and each surface's per-event invariants (from the corresponding FA-Apply proof) hold independently of the other surfaces' presence or absence in the same block. The composition is not just "no cross-surface interference"; it is the stronger claim that the unitary-supply invariant A1, the state-root commitment S-033, and the snapshot-replay equivalence T-S2 each compose **additively** over the per-surface deltas, with the chain-wide accumulators (`block_inbound`, `block_outbound`, `block_slashed`, `total_fees`, `subsidy_this_block`) acting as the per-block linear-superposition channel that the apply-tail A1 closure consumes as a single ledger equation.
 
@@ -69,7 +76,7 @@ The pairwise intersections that matter:
 
 - Phase 1 `accounts_[*]` ∩ Phase 2 `accounts_[creator_i]`: Phase 2 reads `total_fees` set by Phase 1, but writes only to creator-indexed entries. Sender + recipient balances are stabilized by end of Phase 1.
 - Phase 1 `stakes_[*]` ∩ Phase 3 `stakes_[d].locked`: Phase 3 reads only locked field, Phase 1 might have written locked via STAKE/UNSTAKE earlier this block. **This is intentional** — a STAKE in the same block as an abort against the same domain should let the abort slash the post-STAKE locked value (the chain treats the block as fully committed before slashing).
-- Phase 3 `stakes_[d].locked` ∩ Phase 4 `stakes_[d].locked`: an abort + equivocation on the same domain in the same block sequence the abort-slash first (deduct ≤ `SUSPENSION_SLASH`), then the equivocation-slash full-forfeits whatever remains. The composed effect equals the equivocation full-forfeit (T-E3 idempotence absorbs the abort's contribution).
+- Phase 3 `stakes_[d].locked` ∩ Phase 4 `stakes_[d].locked` — **HISTORICAL; this intersection is EMPTY at HEAD**: Phase 4 writes nothing (D4) and Phase 3 writes only `abort_records_` (D13), so neither phase touches `stakes_` at all. As it stood: an abort + equivocation on the same domain in the same block sequenced the abort-slash first (deduct ≤ `SUSPENSION_SLASH`), then the equivocation-slash full-forfeits whatever remains. The composed effect equals the equivocation full-forfeit (T-E3 idempotence absorbs the abort's contribution).
 - Phase 4 `registrants_[d]` ∩ Phase 1 `registrants_[d]`: a REGISTER + EquivocationEvent on the same domain in the same block — REGISTER's contains-check (`chain.cpp:792–812`) skips if entry exists, so a re-REGISTER is silent; if the domain wasn't registered, Phase 1 creates the entry (with `inactive_from = UINT64_MAX`), and Phase 4 immediately deactivates it (`inactive_from = b.index + 1`). The net effect is "registered + deactivated in the same block" — a transient registration that never participates.
 - Phase 5 `accounts_[r.to].balance` ∩ Phase 1 `accounts_[r.to].balance` ∩ Phase 2 `accounts_[creator].balance`: all three are u64 additions on the same balance field. Commutative; the final value is the sum of the contributions modulo the per-step S-007 overflow check.
 
@@ -129,8 +136,8 @@ The intentional-coupling cases (T-M6) are confined to a small enumeration: STAKE
 ```
 Δlive_total_supply(B) = Σ_{tx ∈ B.transactions} Δ(tx)
                       + Σ_{i ∈ creators} (fee_share + subsidy_share)
-                      + Σ_{ae ∈ B.abort_events, ae.round==1} (−min(SUSPENSION_SLASH, locked₀(ae)))
-                      + Σ_{ev ∈ B.equivocation_events} (−locked₀(ev))
+                      + 0   [HISTORICAL: Σ_{ae ∈ B.abort_events, ae.round==1} (−min(SUSPENSION_SLASH, locked₀(ae))) — retired by D13, 2026-09-16]
+                      + 0   [HISTORICAL: Σ_{ev ∈ B.equivocation_events} (−locked₀(ev))     — removed by D4,  2026-09-16]
                       + Σ_{r ∈ B.inbound_receipts, fresh} (+r.amount)
 ```
 
@@ -174,8 +181,8 @@ where `⊕` denotes the apply-order composition of state mutations on the chain'
 
 - Phase 1 transactions mutate `accounts_` (→ `a:`), `stakes_` (→ `s:`), `registrants_` (→ `r:`), `dapp_registry_` (→ `d:`), `pending_params_` (→ `p:`), `merge_state_` (→ `m:`).
 - Phase 2 fee + subsidy distribution mutates `accounts_` only (→ `a:`).
-- Phase 3 abort-slash mutates `abort_records_` (→ `b:`) + `stakes_` (→ `s:`).
-- Phase 4 equivocation-slash mutates `stakes_` (→ `s:`) + `registrants_` (→ `r:`).
+- Phase 3 abort apply mutates `abort_records_` (→ `b:`) only. *(HISTORICAL: it also mutated `stakes_` (→ `s:`) until D13, 2026-09-16.)*
+- Phase 4 equivocation apply mutates NOTHING. *(HISTORICAL: it mutated `stakes_` (→ `s:`) + `registrants_` (→ `r:`) until D4, 2026-09-16.)* The state-root composability argument holds a fortiori with two fewer writers.
 - Phase 5 inbound receipts mutate `applied_inbound_receipts_` (→ `i:`) + `accounts_` (→ `a:`).
 - Phase 6 mutates chain-wide counters (→ `k:`, `k:c:` namespace).
 - Phase 7 reads everything, writes nothing.
@@ -208,7 +215,7 @@ The snapshot-restore variant (FA-Apply-2 T-S2) composes: a chain restored from s
 
 **Statement.** For any block `B` and any pair of events `e_i, e_j ∈ B.transactions ∪ B.abort_events ∪ B.equivocation_events ∪ B.inbound_receipts` with `i ≠ j`, the apply-time invariant of `e_j` is unchanged by the presence of `e_i` **except** in the following intentional-coupling cases:
 
-1. **Slashing collapses to equivocation**: if `B.abort_events` contains an abort for domain `d` and `B.equivocation_events` also contains an equivocation for `d`, the abort-slash deducts up to `SUSPENSION_SLASH` from `stakes_[d].locked` first (Phase 3), then the equivocation full-forfeits whatever remains to zero (Phase 4). The combined `Δblock_slashed = locked_pre_phase3` (the pre-Phase-3 value), not `min(SUSPENSION_SLASH, locked) + (locked - min(SUSPENSION_SLASH, locked)) = locked` is the same scalar by additive cancellation — this is the consistent answer regardless of ordering, but the explicit ordering is "abort then equivocation" and the slashing branch's T-E1 reads `sit->second.locked` post-Phase-3.
+1. **Slashing collapses to equivocation — HISTORICAL; at HEAD the case is EMPTY.** Since D13 the abort loop writes only `abort_records_` and since D4 the equivocation loop writes nothing, so an abort and an equivocation against the same `d` in one block share no state and the intentional coupling this case describes no longer exists. *(As it stood:)* if `B.abort_events` contains an abort for domain `d` and `B.equivocation_events` also contains an equivocation for `d`, the abort-slash deducts up to `SUSPENSION_SLASH` from `stakes_[d].locked` first (Phase 3), then the equivocation full-forfeits whatever remains to zero (Phase 4). The combined `Δblock_slashed = locked_pre_phase3` (the pre-Phase-3 value), not `min(SUSPENSION_SLASH, locked) + (locked - min(SUSPENSION_SLASH, locked)) = locked` is the same scalar by additive cancellation — this is the consistent answer regardless of ordering, but the explicit ordering is "abort then equivocation" and the slashing branch's T-E1 reads `sit->second.locked` post-Phase-3.
 
 2. **Fee distribution depends on creators**: Phase 2's fee + subsidy credit depends on `b.creators[]` and on `total_fees` aggregated across Phase 1. This is an intra-block dependency, not a cross-event interference — the fee channel is fully determined by Phase 1's tx-set + the block header's creators.
 

@@ -1,7 +1,5 @@
 # S013PerSignerCap — per-signer 2-entry cap on `buffered_block_sigs_` (S-013 closure)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document formalizes the S-013 closure shipped in `src/node/node.cpp::try_buffer_block_sig` (the per-signer admission gate guarding `Node::buffered_block_sigs_`). Pre-closure, the buffer that holds early-arriving `BlockSigMsg` envelopes — those that reach the receive path **before** the local node transitions into the `BLOCK_SIG` consensus phase — admitted an unbounded number of entries per signer. A single Byzantine committee member who survives the receive-side pre-filters (`block_index == chain_.height()`, `signer ∈ current_creator_domains_`, `signer ∈ registry_`) could push arbitrarily many valid-shape, valid-Ed25519-signature `BlockSigMsg` envelopes at the local node and grow `buffered_block_sigs_` without bound. The S-013 closure caps each signer's contribution to **2 entries** in the buffer, which combined with the K-committee pre-filter bounds the total buffer at `2·K` entries — independent of how aggressively any signer pushes.
 
 The proof is short and structural. T-1 establishes the per-signer count invariant (`|{m ∈ buffered_block_sigs_ : m.signer == d}| ≤ 2` after every `try_buffer_block_sig` call). T-2 composes the per-signer invariant with the K-committee pre-filter at `on_block_sig_locked` to yield the aggregate `Σ_d |entries_d| ≤ 2·K` bound. T-3 isolates the no-useful-sig-loss property: the cap silently drops only third-or-later sigs from a given signer, and an honest signer (under H1 of `Preliminaries.md`) produces exactly one well-formed `BlockSigMsg` per round — so the cap never refuses an honest contribution. T-4 establishes equivocation-detection compatibility: when the two admitted entries from a single signer differ (e.g., same `block_index`, different `block_hash`), they remain available as the evidence pair for the FA6 / S-006 equivocation-slashing pipeline; the cap does not suppress the very evidence the slashing path needs. T-5 establishes the multiplicative composition with the S-014 per-IP token-bucket rate limiter: the per-IP cap bounds the **arrival rate**, the per-signer cap bounds the **per-identity storage**, and together memory is bounded both by RATE and by IDENTITY-COUNT.
@@ -65,9 +63,37 @@ The S-013 closure is layer-2 of a three-layer defense:
 
 2. **Layer 2 (per-signer cap at `try_buffer_block_sig`)** — the S-013 closure proper. After the layer-1 pre-filter admits a `BlockSigMsg` from a layer-1-valid signer `d`, the buffer-admission helper scans the existing buffer for a count of entries with `signer == d`, and silently drops the incoming entry if that count is already ≥ 2.
 
-3. **Layer 3 (FA6 / S-006 equivocation slashing)** — when the layer-2 cap admits two sigs from the same `d` that differ in content (different `block_hash` for the same `(block_index, prev_hash)` tuple), the protocol's equivocation-slashing path treats these as evidence and slashes `d`'s stake (per `EquivocationSlashing.md`). The cap at 2 is therefore not just a memory bound but the **evidence-window size** for Phase-2 slashing.
+3. **Layer 3 (FA6 / S-006 equivocation EVIDENCE)** — when the layer-2 cap admits two sigs from the same `d` that differ in content (different `block_hash` for the same `(block_index, prev_hash)` tuple), the equivocation path treats these as evidence and produces a V11-valid `EquivocationEvent` (per `EquivocationSlashing.md`). The cap at 2 is therefore not just a memory bound but the **evidence-window size** for Phase-2 detection.
 
-The three layers compose: layer 1 bounds the signer set at K; layer 2 bounds each signer's contribution at 2; layer 3 makes the second-sig-from-same-signer pay a permanent economic cost (full stake forfeiture). An attacker who pushes a third sig from the same `d` gets dropped at layer 2 with no consequence; an attacker who pushes two **different** sigs from the same `d` to grow the buffer to its cap-2 ceiling instead inadvertently provides slashing evidence that eliminates them from future rounds.
+> **RE-DERIVED 2026-09-17 (step 3c; owner decision D4, DECISION-LOG 2026-09-16).** Layer 3 used to be
+> stated economically: "the second signature costs the signer its stake", so the cap-2 made the attack
+> self-defeating. **That is gone** — `Chain::apply_transactions` reads nothing from
+> `b.equivocation_events`; the second signature costs the signer nothing on L1
+> (`EquivocationSlashingApply.md` T-E0).
+>
+> **What layers 1–2 give, which is the whole of the S-013 closure.** S-013 was a *memory-exhaustion*
+> finding: a flood of valid-shape `BlockSigMsg` in the Phase-1 window grew `buffered_block_sigs_`
+> without bound. The closure is the hard bound `|buffered_block_sigs_| ≤ 2·K` (T-1 per-signer ≤ 2,
+> L-3 distinct signers ≤ K via the layer-1 pre-filter, T-2 the product), plus L-5 (an honest signer's
+> single message is never refused). **Neither lemma consumes an economic term.** They are pure
+> counting arguments over a filter and a cap, they are unchanged by D4 and D13, and they are what
+> closed the OOM. S-013 therefore stands — on layers 1–2 alone, not on three.
+>
+> **The residual, stated.** The cap BOUNDS the attack; it no longer PRICES it. A Byzantine committee
+> member can push exactly 2 entries per height, every height, for free and forever: nothing deducts,
+> nothing excludes, and the second entry — formerly the self-incriminating one — now costs it only the
+> bandwidth. The consequences are bounded and node-local (2·K buffer entries, ≤ 2 Ed25519 verifies per
+> entry at the pre-filter), so this is a *cost-of-doing-business* residual, not a new vulnerability;
+> but "an attacker who pushes two different sigs inadvertently eliminates themselves from future
+> rounds" is false and is withdrawn. Whether repeat Phase-2 equivocation should cost anything is D22
+> (L2 bond policy, not designed); at L1 it costs nothing by decision, not by oversight.
+>
+> **Layer 3's surviving content** is evidence preservation, and it is worth MORE than before: under D4
+> the on-chain record is the L2 policy's only input, so a cap that suppressed the second signature
+> would destroy the input itself. L-6 and T-4 below prove the cap does not suppress it, and they are
+> re-read that way — as an evidence-availability result, not a deterrence result.
+
+The three layers compose: layer 1 bounds the signer set at K; layer 2 bounds each signer's contribution at 2; layer 3 turns the second-sig-from-same-signer into committed evidence. An attacker who pushes a third sig from the same `d` gets dropped at layer 2; an attacker who pushes two **different** sigs from the same `d` to grow the buffer to its cap-2 ceiling instead supplies the evidence pair that the L2 policy (D22) is meant to consume.
 
 ---
 
@@ -324,7 +350,7 @@ By L-2, the first admission (`msg_a`) succeeds with `cnt_d == 1`; the second adm
 
 After the round-replay drain at `on_round_state_transition`, both `msg_a` and `msg_b` flow through `on_block_sig_locked` and through `pending_block_sigs_[d]`. The downstream Phase-2 equivocation-detection path at `apply_block_locked` (per `EquivocationSlashing.md` FA6) compares the sig from `pending_block_sigs_[d]` against any contradicting sig for the same `(block_index, prev_hash)` from `d` and constructs an `EquivocationEvent` with both sigs as the evidence pair (`sig_a` from `msg_a`, `sig_b` from `msg_b`).
 
-The cap-2 capacity is therefore exactly the **minimal-and-sufficient** evidence-window size: any tighter cap (cap-1) would suppress the second sig and prevent the slashing path from seeing the equivocation; any looser cap (cap-3 or more) would not increase the evidentiary value (the second sig already constitutes proof; further sigs are redundant). □
+The cap-2 capacity is therefore exactly the **minimal-and-sufficient** evidence-window size: any tighter cap (cap-1) would suppress the second sig and prevent the detector from seeing the equivocation at all; any looser cap (cap-3 or more) would not increase the evidentiary value *of the V11 event*, which takes exactly two openings. (2026-09-17: "further sigs are redundant" was argued from "the slash is full-forfeit, so one proof suffices". That argument is void under D4. The claim survives on its own terms — `EquivocationEvent` carries exactly two openings, so a third buffered signature cannot enter one — but note the adjacent loss: distinct *incidents* against one `(d, h)` are collapsed by the pool dedup one layer downstream, `S006ContribMsgEquivocation.md` §6.3.) □
 
 ### Lemma L-7 (Composition with S-014 arrival-rate cap)
 
@@ -374,9 +400,9 @@ where `K := cfg_.m_creators` is the round's committee size.
 
 ### Theorem T-4 (Equivocation Detection Compatibility)
 
-**Statement.** When two entries from the same signer differ in their signed content (different `delay_output`, different `ed_sig`, etc.), they remain available in the buffer as the evidence pair `(sig_a, sig_b)` for the FA6 / S-006 equivocation-slashing pipeline. The S-013 cap does not suppress equivocation evidence.
+**Statement.** When two entries from the same signer differ in their signed content (different `delay_output`, different `ed_sig`, etc.), they remain available in the buffer as the evidence pair `(sig_a, sig_b)` for the FA6 / S-006 equivocation-evidence pipeline. The S-013 cap does not suppress equivocation evidence. *(This is an evidence-availability property. It says nothing about what happens to the evidence afterwards — since D4, nothing does, on L1.)*
 
-**Proof.** Direct from L-6. The cap admits the first two entries from any signer (the inductive admission steps at `cnt_d == 0 → 1` and `cnt_d == 1 → 2`). The first entry from a Byzantine signer is `msg_a`; the second is `msg_b`. Both are stored in `buffered_block_sigs_`. The round-replay drain at `on_round_state_transition` line 899–901 reprocesses both via `on_block_sig_locked`, and the downstream Phase-2 path (per `EquivocationSlashing.md` FA6 T-6) constructs an `EquivocationEvent` with both sigs as the evidence pair. The cap-2 size is **the minimal cap** that preserves equivocation evidence; cap-1 would have suppressed `msg_b` and prevented detection. The S-013 closure is therefore co-designed with the FA6 slashing path: the cap is sized to admit exactly the evidence the slashing path needs, no more. ∎
+**Proof.** Direct from L-6. The cap admits the first two entries from any signer (the inductive admission steps at `cnt_d == 0 → 1` and `cnt_d == 1 → 2`). The first entry from a Byzantine signer is `msg_a`; the second is `msg_b`. Both are stored in `buffered_block_sigs_`. The round-replay drain at `on_round_state_transition` line 899–901 reprocesses both via `on_block_sig_locked`, and the downstream Phase-2 path (per `EquivocationSlashing.md` FA6 T-6) constructs an `EquivocationEvent` with both sigs as the evidence pair. The cap-2 size is **the minimal cap** that preserves equivocation evidence; cap-1 would have suppressed `msg_b` and prevented detection. The S-013 closure is therefore co-designed with the FA6 evidence path: the cap is sized to admit exactly the two openings a V11 event carries, no more. ∎
 
 ### Theorem T-5 (Composition with S-014 Rate Limiter)
 
@@ -453,7 +479,7 @@ Effort: ~80 LOC for the harness + a corresponding `cmd_test_block_sig_buffer_cap
 
 ## 7. Test surface citation
 
-As noted in F-3, there is **currently no `tools/test_block_sig_buffer.sh` regression**. The S-013 cap is exercised transitively by the chain-progression and equivocation-slashing test suites:
+As noted in F-3, there is **currently no `tools/test_block_sig_buffer.sh` regression**. The S-013 cap is exercised transitively by the chain-progression and equivocation-evidence test suites:
 
 - `tools/test_equivocation_slashing.sh` — exercises the FA6 evidence-pair construction; transitively exercises the cap-2 admission of the two sigs that constitute the evidence (T-4 surface).
 - `tools/test_round_state_transition.sh` (if present) or any test that drives the `IDLE → CONTRIB → BLOCK_SIG` phase progression — transitively exercises the buffer's replay drain at `on_round_state_transition` line 899–901, validating that admitted buffered sigs flow through to the live receive path.
@@ -493,7 +519,7 @@ The proof's correctness does not depend on the existence of a dedicated regressi
 - `docs/SECURITY.md` §S-013 — the closure-status narrative this proof formalizes.
 - `docs/SECURITY.md` §6 (memory-DoS table row for `buffered_block_sigs_`) — operational-memory bound documented at the audit-summary layer.
 - `docs/proofs/Preliminaries.md` §4 (H1 honest signer hypothesis, H2 Byzantine signer hypothesis) — adversary model underlying T-3.
-- `docs/proofs/EquivocationSlashing.md` (FA6) — the slashing pipeline T-4 composes with; the cap-2 size is co-designed with FA6's evidence-pair semantics.
+- `docs/proofs/EquivocationSlashing.md` (FA6) — the evidence pipeline T-4 composes with; the cap-2 size is co-designed with FA6's evidence-pair semantics. Since D4 (2026-09-16) that pipeline ends in a record, not a penalty (`EquivocationSlashingApply.md` T-E0), which is why layer 3 is stated as evidence preservation in §1.4.
 - `docs/proofs/S006ContribMsgEquivocation.md` — the parallel Phase-1 equivocation surface; the S-013 cap is the Phase-2 dual.
 - `docs/proofs/S014RateLimiterSoundness.md` — the per-peer-IP token-bucket bound T-5 composes with.
 - `docs/proofs/S014ConcurrencyAnalysis.md` — the asio thread-pool concurrency model that the `on_block_sig` write path runs on (relevant to L-1's lock-ordering invariant).

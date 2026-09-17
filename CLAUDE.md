@@ -95,8 +95,10 @@ ACTIVE FRONT (owner, DECISION-LOG 2026-09-16 D1 — supersedes the 2026-07-28 "D
 for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PARALLEL. Work is
 selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
 (1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone —
-LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup -> abort-deduction
-retirement — LANDED 2026-09-16, D13, S-087 closed -> re-derivations; S-102 ADJUDICATED +
+LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup (3b, STILL OPEN) -> abort-deduction
+retirement — LANDED 2026-09-16, D13, S-087 closed -> re-derivations — LANDED 2026-09-17 (3c),
+S-095 closed, S-006/S-011/S-013/S-029 restated, BFTSafety B2 deleted + T-5.1 withdrawn, all 58
+banners removed; S-102 ADJUDICATED +
 CLOSED 2026-09-16: reachable at HEAD by a zero-key state_root relabel, the reorg made
 atomic — test-node-reorg-guard); (4) the joint design gate R-4 + F-c + R-15
 (+R-16); (5) the V-REG-1 companions (join
@@ -387,20 +389,48 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   re-includable — the DoS vector the removal creates; a bound that is a pure function of
   the block's bytes, or none — DECISION-LOG 2026-08-13); [D13 abort-deduction retirement —
   LANDED 2026-09-16, DECISION-LOG entry "D13 LANDED"; T-A1 of AbortEventApply.md is historical];
-  3c S-006's status re-derived (its closure was "route detection into the slashing apply
-  path"); an HONEST S-011 residual (the drafted one was wrong in three places — BFT
-  escalation can seat a zero-honest committee at |pool| == K, and — until D13 landed —
-  abort-driven stake drain below min_stake WAS permanent and S-051 did not lift it; that
-  drain no longer exists, the restatement is on the floor + suspension window); the S-013 / S-029 Level-3 /
-  BFTSafety T-5.1 re-derivations; S-095; and the 51 untiered docs that stated the removed
-  consequence as shipped — each now carries a uniform "STATUS 2026-09-16" banner (list in
-  the log entry) until its re-derivation replaces it. Full 2026-08-13 finding list:
-  DECISION-LOG 2026-08-13.
-  S-011 IS REOPENED IN SUBSTANCE (ledger marker updated 2026-09-16): docs/SECURITY.md
-  states S-011's mitigation as the S-010 stake floor PLUS the FA6 equivocation-slashing
-  economic bound; the slashing half no longer holds. Same flag stands against BFTSafety.md
-  B2 / T-5.1 (DECISION-LOG 2026-08-12 "final+6"), S-029's Level-3 block_hash-grinding
-  closure and S-013's economic leg. Until the re-derivation lands, do NOT cite the old bound.
+  [3c THE RE-DERIVATIONS — LANDED 2026-09-17, DECISION-LOG entry "O-1 step 3c"; all 58
+  banners removed, no banner removed without a re-derivation.] So STILL TO LAND is 3b alone.
+  WHAT 3c SETTLED, and what it did NOT:
+    S-006 stays ✅ Mitigated on a restated closure — detection + on-chain record + L2 input
+      (D22). It is NOT reopened: the defect was that the second contrib's signature vanished
+      at the receiver, and that is fixed. The apply-path half of the old closure is void.
+    S-011 stays ✅ Mitigated but NARROWED, and the answer is partly NEGATIVE: with no
+      forfeiture and no abort deduction the cartel's marginal per-round cost is the
+      opportunity cost of RECOVERABLE capital plus bandwidth (abort claims are unfee'd
+      gossip), while its per-round revenue is its share of block_subsidy + fees — so
+      "per-round cost > chain subsidy ⇒ economic infeasibility" is FALSE at every
+      parameterization with a positive subsidy. What survives is the S-010 ENTRY cost under
+      STAKE_INCLUSION plus Censorship T-2.1 and Safety T-1 clause 1. Residuals, all named:
+      BFT escalation can seat a ZERO-honest committee when the eligible pool equals K (one
+      abort, threshold default 1, k_bft(3) == 2; the S-051 floor cannot lift the node-local
+      current_aborts_ exclusion) — S-086 OPEN, D5a/R-4 authorized-not-landed; the S-032
+      window is renewable at zero cost (stake safe since D13, SEAT not); DOMAIN_INCLUSION
+      zeroes both legs and the row does not apply there.
+    S-013 stays ✅ Mitigated: the 2·K memory bound is layers 1-2 and never used the economic
+      leg. The cap BOUNDS the flood, it no longer PRICES it.
+    S-029's own finding (fork-choice determinism) stays ✅ Mitigated. Its Level-3 grinding
+      hole is OPEN and WORSE than recorded: besides the trailing signer's one-Ed25519-per-
+      trial re-roll over a fixed digest, an unauthenticated RELAYER grinds at one SHA-256
+      per trial because initial_state is inside Block::signing_bytes, OUTSIDE
+      compute_block_digest, ignored by apply above genesis and read by NO validator rule
+      (S-102 adjudication entry). The block hash is RELAYER-malleable, not only signer-
+      malleable — the doctrine block above records only the signer case. Fix is an accept
+      rule (reject non-empty initial_state at index > 0); NOT WRITTEN, no row of its own.
+    S-095 ✅ CLOSED: RoundStallValveSoundness C-2 corrected — with an EMPTY abort tail the
+      valve restarts a round at the same height AND the same gen, so the fresh dh_input
+      makes an honest same-gen pair that passes every V11 clause. L1 harm is zero (D4); the
+      residual is evidence QUALITY and falls to D22 inside R-1's disposition.
+    BFTSafety B2 ("equivocation slashing enforced") is DELETED — T-5's proof never consumed
+      it — and T-5.1 is WITHDRAWN, replaced by T-5.1-R: a B1 violation is exactly classical
+      BFT failure plus an evidence record, with NO recovery. Accountable safety is now
+      evidence-only. Noticed and NOT closed: H2 at HEIGHT granularity is falsified by
+      shipped honest behaviour (an abort re-round, and the S-095 valve restart), so T-5 and
+      FA1's Corollary T-1.1 hold per ROUND INSTANCE; correcting FA1 is its own increment.
+  STILL OWED for the evidence record, each named and none closed by 3c: its CONSUMER
+  (D22 L2 bond policy, v1.1 DApp scope, NOT DESIGNED — until it exists equivocation has no
+  consequence anywhere), its BOUND (3b), its COMPLETENESS (S-090) and one event hash per
+  incident on shards (S-089). Full 2026-08-13 finding list: DECISION-LOG 2026-08-13.
 
 DECISION CLOCK — consensus/wire residuals (DECISION-LOG 2026-08-13, directive 5; rows
 R-4..R-9 added 2026-09-14; R-10..R-16 added 2026-09-15; R-17 added 2026-09-16). ALL ROWS

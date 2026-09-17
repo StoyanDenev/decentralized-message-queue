@@ -1,7 +1,5 @@
 # Stake-Distribution Metrics — Nakamoto + Gini correctness (SD-1..SD-4)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 Arithmetic-correctness and interpretation proof for the decentralization metrics
 computed by `tools/operator_stake_distribution.sh`. This is **not** a cryptographic
 proof: the script reads a validator→stake mapping over read-only RPC and reduces it
@@ -61,7 +59,7 @@ The reason is the K-of-K mutual-distrust model. By `Safety.md` Theorem T-1 (FA1)
 **MD-mode** block is fork-free even if `f = N` — *every* committee member is Byzantine —
 because two distinct finalized digests at one height require *every* committee member to
 have produced two signatures over distinct digests (T-1 clause 2), which leaves a
-slashable forensic trail (FA6) but does not break the at-most-one-finalized-digest
+recorded forensic trail (FA6 — evidence only since D4) but does not break the at-most-one-finalized-digest
 invariant for honest observers (Corollary T-1.1: with `≥ 1` honest member, `B = B'`).
 Safety in MD-mode is therefore **unconditional in `f`** — it does not degrade as stake
 concentrates. A Nakamoto coefficient of 1 (one validator holds `> 1/3` of stake) does
@@ -477,8 +475,9 @@ restate §1.1 precisely and without overclaim:
   metric is computed over **stake**, while committee selection is stake-*weighted* via
   Fisher-Yates (S-020) and the realized committee at any height is a *sample*, so stake
   share is a proxy for expected selection share, not the exact per-round committee
-  composition; and (b) even in BFT mode, equivocation by the colluding set is slashable
-  (FA6 / `EquivocationSlashingApply.md`), so crossing `1/3` enables an *attempt* that
+  composition; and (b) even in BFT mode, equivocation by the colluding set leaves a
+  verifiable on-chain record (FA6 / `EquivocationSlashingApply.md`) — since D4 (2026-09-16)
+  a record with NO L1 consequence, so crossing `1/3` enables an *attempt* that
   leaves a forensic trail and an economic penalty, governed additionally by the
   stake-pricing floor of S-010/S-011.
 
@@ -490,7 +489,7 @@ restate §1.1 precisely and without overclaim:
 
 **Bottom line.** Treat the reported Nakamoto coefficient as a decentralization
 health-indicator. Read it as a (conditional, proxy) safety margin *only* when the chain is
-in BFT-escalation mode, and even then in composition with the slashing + stake-pricing
+in BFT-escalation mode, and even then in composition with the evidence record + stake-pricing
 defenses, never as a standalone bound. The arithmetic (SD-1..SD-3) is exact; the
 *interpretation* is the part that requires the care above.
 
@@ -520,7 +519,10 @@ defenses, never as a standalone bound. The arithmetic (SD-1..SD-3) is exact; the
 - `S010S011SybilEconomics.md` — the stake-pricing floor + cartel-defense the §5
   caveat composes with.
 - `EquivocationSlashingApply.md` (FA-Apply-10) / `EquivocationSlashing.md` (FA6) —
-  the slashing that penalizes a `>1/3` collusion attempt even in BFT mode.
+  the evidence record a `>1/3` collusion attempt leaves even in BFT mode. Since D4 it
+  penalizes nothing on L1; the penalty, if any, is the L2 bond policy (D22). This
+  document's metrics are descriptive (they measure the stake distribution) and consume
+  no penalty term, so nothing here changes with D4.
 
 **External:**
 - B. Srinivasan & L. Lee, "Quantifying Decentralization", 2017 (the Nakamoto-coefficient

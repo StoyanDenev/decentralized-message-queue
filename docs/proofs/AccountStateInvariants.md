@@ -1,8 +1,14 @@
 # FA-Apply — AccountState invariants
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document consolidates the per-account invariants that Determ's apply layer (`Chain::apply_transactions` in `src/chain/chain.cpp`) preserves across every finalized block. The `AccountState` struct is the smallest unit of mutable user-visible state; every value-bearing transaction type mutates it through a small set of well-defined channels. The properties below are the invariants those channels collectively maintain.
 
@@ -92,10 +98,10 @@ Credits are guarded against u64 wrap by the static helper `checked_add_u64` (`ch
 1. **(Disjoint storage.)** `state.accounts_[d].balance` and `state.stakes_[d].locked` live in separate maps (`accounts_` and `stakes_`); no apply path reads from one map and writes to the other except via the explicit channels in (2)–(4).
 2. **(STAKE channel: balance → locked.)** STAKE transactions (`chain.cpp:1317–1336`) read `amount` from the 8-byte payload, decrement `sender.balance` by `amount + fee`, then increment `stakes_[tx.from].locked` by exactly `amount`. The fee is added to `total_fees` and distributed to creators at block-tail (it does not enter stake).
 3. **(UNSTAKE channel: locked → balance, post-unlock.)** UNSTAKE transactions (`chain.cpp:1338–1359`) require `height ≥ stakes_[tx.from].unlock_height` AND `locked ≥ amount`. On success, `sit->second.locked -= amount; sender.balance += amount;`. On failure (early UNSTAKE or insufficient lock), the fee is refunded (`sender.balance += tx.fee; total_fees -= tx.fee;`) and the nonce still bumps. The unlock-height gate prevents the channel from running during the active-registration window.
-4. **(Slashing channel: locked → ∅, no balance change.)** Two apply-path branches decrease `stakes_[d].locked` without touching `accounts_[d].balance`:
-   - Suspension slash for Phase-1 abort events (`chain.cpp:1782–1797`): `deduct = min(suspension_slash_, sit->second.locked); sit->second.locked -= deduct;`.
-   - Full equivocation slash (`chain.cpp:1813–1825`): `sit->second.locked = 0;` plus `rit->second.inactive_from = b.index + 1;`.
-   Both branches add the deducted amount to the per-block `block_slashed` counter, which feeds into the A1 invariant (I-6). Neither writes to `accounts_[d].balance`. The slashed value leaves the live supply for the purpose of A1.
+4. **(Slashing channel: locked → ∅, no balance change.) — EMPTY SINCE 2026-09-16.** Two apply-path branches used to decrease `stakes_[d].locked` without touching `accounts_[d].balance`; **both are gone**, so at HEAD there is NO slashing channel and I-3 holds with one fewer case to check:
+   - HISTORICAL: suspension slash for Phase-1 abort events — `deduct = min(suspension_slash_, sit->second.locked); sit->second.locked -= deduct;` — RETIRED by D13. The abort loop now increments `abort_records_` and moves no stake.
+   - HISTORICAL: full equivocation slash — `sit->second.locked = 0;` plus `rit->second.inactive_from = b.index + 1;` — REMOVED by D4. Apply reads nothing from `b.equivocation_events`.
+   Both branches added the deducted amount to the per-block `block_slashed` counter, which feeds into the A1 invariant (I-6); that counter is now frozen at 0. Neither wrote to `accounts_[d].balance`. The slashed value left the live supply for the purpose of A1.
 
 **Test surface.** `tools/test_stake_accounting.sh` exercises STAKE / UNSTAKE state transitions including the unlock-height gate and the fee-refund path on early UNSTAKE. `tools/test_equivocation_slashing.sh` confirms that equivocation zeros `stakes_[equivocator].locked` without affecting `accounts_[equivocator].balance`. The A1 invariant (I-6) provides a second-order check: if any apply path leaked between balance and stake without crediting `block_slashed` or `block_outbound`, the unitary-balance check would throw at apply tail.
 
@@ -177,7 +183,7 @@ The left-hand side is computed by `Chain::live_total_supply()` (`chain.cpp:699`)
 
 This invariant is the chain-level companion of the per-account view. The full proof is in `EconomicSoundness.md` T-12 (and T-13 for the NEF supply-neutrality subclaim, and T-14 for the E3 / E4 expected-value preservation under lottery + finite pool). The relevance to AccountState is structural: every channel listed in I-5 contributes to exactly one of the first five right-hand-side terms, the §3.22 SHIELD / UNSHIELD / CONFIDENTIAL_TRANSFER branches feed the sixth (`− accumulated_shielded_`) term (zero on shield-free chains), and the equality at apply-tail confirms the per-account deltas closed correctly.
 
-**Test surface.** `tools/test_supply_lifecycle.sh` walks the chain through TRANSFER, STAKE, UNSTAKE, REGISTER (with and without NEF), DEREGISTER, equivocation slash, suspension slash, lottery subsidy, finite-pool exhaustion, and cross-shard inbound/outbound, asserting the A1 closing equality after each block. `tools/test_supply_invariant.sh` exercises the assertion directly with synthetic per-counter deltas. `tools/operator_supply_check.sh` is the operator-facing tool that re-runs the A1 check from snapshot data — useful for offline audit of a downloaded chain.
+**Test surface.** `tools/test_supply_lifecycle.sh` walks the chain through TRANSFER, STAKE, UNSTAKE, REGISTER (with and without NEF), DEREGISTER, an equivocation event and a Phase-1 abort (neither of which moves stake since D4/D13), lottery subsidy, finite-pool exhaustion, and cross-shard inbound/outbound, asserting the A1 closing equality after each block. `tools/test_supply_invariant.sh` exercises the assertion directly with synthetic per-counter deltas. `tools/operator_supply_check.sh` is the operator-facing tool that re-runs the A1 check from snapshot data — useful for offline audit of a downloaded chain.
 
 ---
 
@@ -231,7 +237,7 @@ In every failure mode, the A9 atomic-apply guarantee (try/catch at lines 671 / 1
 | Reference | Role |
 |---|---|
 | `Safety.md` (FA1) | Higher-level fork-freedom property; V15 (transaction apply) consumes the invariants here as one of its preconditions. |
-| `EquivocationSlashing.md` (FA6) | Apply-side stake slash; the slash path is one of the legitimate "decrease `stakes_[d].locked` without changing `accounts_[d].balance`" channels in I-3. |
+| `EquivocationSlashing.md` (FA6) | The equivocation evidence channel. Since D4 it is NOT a stake channel at all — I-3's "decrease `stakes_[d].locked` without changing `accounts_[d].balance`" case list is empty (`EquivocationSlashingApply.md` T-E0). |
 | `CrossShardReceipts.md` (FA7) | Cross-shard inbound credit; the I-4 auto-creation path (2) and the I-5 inbound credit channel. |
 | `EconomicSoundness.md` (FA11) | A1 unitary-balance invariant; I-6 is the bridge between per-account decomposition and chain-wide closure. |
 | `tools/test_account_create_on_credit.sh` | I-4 defense across 11 assertions. |
@@ -239,7 +245,7 @@ In every failure mode, the A9 atomic-apply guarantee (try/catch at lines 671 / 1
 | `tools/test_overflow_paths.sh` | I-1 defense (S-007 throws). |
 | `tools/test_tx_edge_cases.sh` | I-1 + I-2 defenses (skip-vs-success boundary, insufficient-balance no-nonce-bump). |
 | `tools/test_stake_accounting.sh` | I-3 defense (STAKE / UNSTAKE / unlock_height gate). |
-| `tools/test_equivocation_slashing.sh` | I-3 defense (slash path leaves balance untouched). |
+| `tools/test_equivocation_slashing.sh` | I-3 defense — since D4 it asserts the stronger fact that the evidence path leaves BOTH balance and stake untouched. |
 | `tools/test_supply_lifecycle.sh` | I-5 + I-6 defense (channel enumeration via end-to-end A1 closure). |
 | `tools/test_supply_invariant.sh` | I-6 defense (direct A1 assertion). |
 | `tools/operator_supply_check.sh` | Operator-facing offline A1 audit tool. |
@@ -259,7 +265,7 @@ All six invariants (I-1 through I-6) are closed in the current codebase:
 
 - **I-1** closed via S-007 `checked_add_u64` + explicit pre-debit balance checks at every debit channel.
 - **I-2** closed via the strict-equality nonce gate at `chain.cpp:739` + the `sender.next_nonce++` lines on every successful tx-type branch.
-- **I-3** closed via separate-map storage (`accounts_` vs `stakes_`) + explicit STAKE / UNSTAKE / slash transfer channels.
+- **I-3** closed via separate-map storage (`accounts_` vs `stakes_`) + the explicit STAKE / UNSTAKE transfer channels (the slash channels were removed 2026-09-16 by D4 and D13).
 - **I-4** closed via the six legitimate auto-creation paths in §2 I-4 + regression test `test_account_create_on_credit.sh`.
 - **I-5** closed via the exhaustive channel enumeration in §2 I-5 + the A1 invariant as second-order check.
 - **I-6** closed via `EconomicSoundness.md` T-12 (chain-level) + the per-account decomposition here.

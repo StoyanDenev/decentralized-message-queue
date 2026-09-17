@@ -1,6 +1,14 @@
 # S-017 — UNSTAKE apply-consistency: three-layer defense (producer + validator + apply)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document proves the closure of `docs/SECURITY.md` §S-017 (producer/chain UNSTAKE divergence — Medium → Mitigated, Option 2). The pre-fix design had the chain's apply layer doing validator-layer work: the producer admitted UNSTAKE transactions whose `unlock_height` had not yet elapsed, the validator was silent on the gap, and `Chain::apply_transactions` was the only surface that rejected the too-early request (refunding the fee so honest users were not penalized). Post-fix, the producer's admission gate, the validator's block-validation gate, and the apply-time refund all enforce the same `b.index ≥ chain.stake_unlock_height(tx.from)` predicate against the same `stakes_[d].unlock_height` value, with the apply-time refund retained as belt-and-suspenders. The result is three independent code paths — `producer.cpp`, `validator.cpp`, and `chain.cpp` — each of which would have to be compromised simultaneously to admit and commit an UNSTAKE transaction that should not have applied.
 
@@ -317,9 +325,9 @@ A subsequent UNSTAKE before the original `unlock_height` would be gated by T-1/T
 
 The S-017 gate is sound under this re-stake / re-unstake interaction because it consults the persistent `stakes_[d].unlock_height` value, not a derived "currently-deregistered" predicate.
 
-### 6.5 Equivocation-slashing during the unlock window
+### 6.5 Equivocation evidence during the unlock window — VACUOUS SINCE D4
 
-A domain in the `staked-pending-unlock` state (post-DEREGISTER, pre-UNSTAKE) remains slashable for equivocation evidence per FA6 + `StakeLifecycle.md` §4. The S-017 gate does not interact with slashing — if the offender's `stakes_[d].locked` is zeroed by an equivocation slash before they can submit a valid UNSTAKE, the apply-time UNSTAKE branch fails at the second disjunct (`sit->second.locked < amount`) regardless of the height. The honest user (who would not equivocate) is unaffected; the equivocator loses the stake legitimately.
+**Restated 2026-09-17.** A domain in the `staked-pending-unlock` state (post-DEREGISTER, pre-UNSTAKE) used to remain slashable for equivocation evidence per FA6 + `StakeLifecycle.md` §4. **Since owner decision D4 (2026-09-16) it is not slashable at all, in any state**: apply reads nothing from `b.equivocation_events` (`EquivocationSlashingApply.md` T-E0). So the composition this section examined has one live channel instead of two, and the S-017 conclusion holds a fortiori — there is no second writer to `stakes_[d].locked` to interleave with. The original text follows and is HISTORICAL. The S-017 gate does not interact with slashing — if the offender's `stakes_[d].locked` is zeroed by an equivocation slash before they can submit a valid UNSTAKE, the apply-time UNSTAKE branch fails at the second disjunct (`sit->second.locked < amount`) regardless of the height. The honest user (who would not equivocate) is unaffected; the equivocator loses the stake legitimately.
 
 This composition is correct: the three-layer defense gates the unlock_height check; slashing gates the locked-amount check. The two channels are independent.
 

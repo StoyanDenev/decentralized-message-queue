@@ -1,6 +1,14 @@
 # On-chain SHARD_TIP records — closing S-036 (D3 / v2.11)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decision D4, DECISION-LOG 2026-09-16).** The
+> epoch-freeze design, the `cc:` checkpoint semantics and the present-head-vs-frozen analysis are
+> unchanged. One argument in §"what freezing costs" used the equivocation consequence and is corrected
+> in place: it held that freezing committee membership is safe because "an equivocator stays slashable"
+> and is "detected + slashed IMMEDIATELY and independently of committee membership". Detection is still
+> immediate and still membership-independent; **the slash is gone** (apply reads nothing from
+> `b.equivocation_events`), so the safety of freezing rests on detection + record alone, and a frozen
+> equivocator serves out its epoch exactly as before — which was already true, since the removal only
+> deletes a consequence that the freeze argument cited but did not need.
 
 **Status: MECHANISM DECIDED (§9) — implementing. D3.1 + D3.2 + D3.3a SHIPPED; D3.3b next (the `sharding_mode==EXTENDED`-gated selection pin + epoch-rotation fold-in). See §9.2 for the feasibility-verdict corrections (gate on `sharding_mode==EXTENDED` not role; the pin READS the `cc:` checkpoint, not `build_from_chain(anchor)`; the leaf prefix is `cc:` not `c:`).** Owner
 forks F-1…F-4 were decided (see §5); the mandated adversarial design-review (§8)
@@ -1107,7 +1115,7 @@ selection), region-filtered mirroring `eligible_in_region` exactly (empty ⇒ al
 order, so `select_m_creators` indices match); (b) `resolve_committee_member_pubkey` /
 `committee_member_registered` — IDENTITY, **frozen-FIRST then present-head fallback** (a
 mid-epoch-drifted member verifies on its frozen key; a non-committee / cross-epoch
-equivocator stays slashable). Two different sets (pool = frozen-only, identity =
+equivocator stays detectable and recordable; since D4 it is not slashable in any epoch). Two different sets (pool = frozen-only, identity =
 frozen∪present-head) ⇒ a single augmented registry cannot serve both. `test-committee-pin`
 (15 assertions) proves the gate, the no-drift byte-equality with present-head, and the
 DRIFT FIX. Off the pinned path (SINGLE, epoch 0, pruned epoch) everything falls back to
@@ -1147,7 +1155,7 @@ takes effect at the **next epoch boundary (E+1)**, not immediately — the membe
 `checkpoint[E].members` and remains selectable for the rest of epoch E. This is **inherent to
 the per-epoch checkpoint mechanism the owner authorized** (full closure via per-height
 snapshots) and is **not a safety regression**: (1) equivocation — the safety-critical fault —
-is still detected + slashed IMMEDIATELY and independently of committee membership
+is still detected + RECORDED immediately and independently of committee membership
 (`check_equivocation_events` verifies the two conflicting sigs cryptographically;
 `on_equivocation_evidence` gossips it; apply forfeits full stake); (2) a member gone
 unavailable mid-epoch is still excluded PER ROUND via the `current_aborts_` / `b.abort_events`

@@ -1,7 +1,5 @@
 # Determ — Formal-verification Preliminaries
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document fixes the notation, cryptographic assumptions, network model, and protocol-object definitions that the per-property theorems (Safety, Censorship Resistance, Selective-Abort Defense, Liveness, BFT-mode safety, Equivocation Slashing, Cross-shard Receipts, Regional Sharding) reference.
 
 A reader who has not seen the Determ implementation can follow this document to understand what the formal claims are *about*. A reader who has only the code can use the cross-references in §10 to locate the source-level objects.
@@ -123,7 +121,7 @@ A may **not**:
 
 ### 3.3 Honest fraction bounds
 
-For **safety claims** (no two valid blocks at the same height, no false-positive equivocation slashing, etc.), no upper bound on `f` is assumed. Determ's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
+For **safety claims** (no two valid blocks at the same height, no cryptographic false-positive in the equivocation predicate, etc.), no upper bound on `f` is assumed. Determ's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
 
 For **BFT-mode block safety**: `f_h < |K_h|/3` *within the shrunk BFT committee* `|K_h| = ⌈2K/3⌉` is required (standard BFT 1/3 bound applied to the smaller committee). See FA5.
 
@@ -275,17 +273,41 @@ A cross-shard TRANSFER from `A` on shard `S_a` to `B` on shard `S_b` (where `sha
 
 ---
 
-## 9. Equivocation slashing
+## 9. Equivocation evidence (re-derived 2026-09-17, step 3c)
 
 An **equivocation event** is a quadruple `(equivocator, h, σ_a, σ_b)` such that:
 - `equivocator ∈ V` is a registered validator with known `pk`.
 - `σ_a, σ_b` are valid Ed25519 signatures by `pk` over distinct digests `d_a ≠ d_b`, both at height `h`.
 
-Validator V11 enforces these checks. On apply, the chain:
-- Zeroes `stakes_[equivocator].locked`.
-- Sets `registrants_[equivocator].inactive_from = h + 1`.
+Validator V11 enforces these checks (§5, V11). **On apply, the chain does NOTHING.**
+`Chain::apply_transactions` reads no field of `b.equivocation_events`: no stake moves, no
+registrant is deactivated, no counter advances, no abort record is touched. The event's
+ENTIRE effect is that it is inside a block the committee signed and inside the block
+hash — i.e. it is an authenticated, replicated, height-bound RECORD.
 
-Both effects are atomic with the block apply.
+This is owner decision **D4** (DECISION-LOG 2026-09-16; landed as O-1 step 3a, gate
+`determ test-equivocation-apply`): L1 stake is never slashable for equivocation, because
+no predicate over two signed openings is both sound and complete under asynchrony (an
+honest node's openings are bit-identical to a splitter's — only DELIVERY differs), and at
+`|eligible pool| == K` no exclusion is safe either. The record is the INPUT to the L2 bond
+policy (D22, v1.1 DApp scope), which may use evidence L1 provably cannot (off-chain
+corroboration, elapsed time, arbitration, appeal) and whose verdict therefore need not be
+sound-and-complete as a consensus rule.
+
+**The three consequences downstream proofs must respect.**
+1. Any proof step of the form "and therefore the equivocator loses X / is excluded" is
+   VOID. There is no L1 X.
+2. V11's soundness (FA6 T-6: an honest validator is never NAMED by a well-formed event,
+   except with probability ≤ 2⁻¹²⁸ under EUF-CMA) is UNCHANGED and still load-bearing —
+   it is now the quality bound on an L2 input rather than the safety bound on an L1
+   punishment. Its one known counterexample class survives too and is now the residual
+   that matters: a same-height pair produced HONESTLY by a re-round or by the S-050 valve
+   (`EquivocationSlashing.md` §2 Case (c); `RoundStallValveSoundness.md` C-2) names an
+   honest validator. Under D4 that costs nothing on L1 and everything to an L2 policy that
+   treats the record as a verdict.
+3. Because deregistration was the record's only natural limiter, an event is now
+   re-includable at 2 Ed25519 verifies per copy. Bounding that is sequence step 3b (a
+   per-block cap + in-block duplicate rejection) and is NOT closed.
 
 ---
 
@@ -343,7 +365,7 @@ The series:
 | `SelectiveAbort.md` (FA3) | Commit-reveal hybrid argument; no member can bias `R` predictively. |
 | `Liveness.md` (FA4) | Probabilistic liveness under (1-p)^K > 0 and synchrony. |
 | `BFTSafety.md` (FA5) | Conditional safety of BFT-mode blocks under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`). |
-| `EquivocationSlashing.md` (FA6) | Only Byzantine validators are slashed (no false positives). Covers both block-digest equivocation and `on_contrib` same-generation Phase-1 equivocation (S-006 closure). |
+| `EquivocationSlashing.md` (FA6) | Only Byzantine validators are NAMED by a well-formed event (no cryptographic false positives; the honest re-round / valve pair of §2 Case (c) is the stated exception). Covers both block-digest equivocation and `on_contrib` same-generation Phase-1 equivocation (S-006 closure). Since D4 the event carries no L1 consequence — see §9. |
 | `CrossShardReceipts.md` (FA7) | At-most-once + at-least-once (under fairness) credit. |
 | `RegionalSharding.md` (FA8) | Regional-pool corollary of safety + censorship. |
 | `UnderQuorumMerge.md` (FA9) | R7 merge mechanism preserves FA1 + FA7 across BEGIN/END boundaries. |

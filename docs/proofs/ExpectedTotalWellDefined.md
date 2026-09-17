@@ -1,8 +1,14 @@
 # ExpectedTotalWellDefined — totality of the unsigned `expected_total()` ledger (ET-1..ET-4: no-underflow of the A1 RHS)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document proves a property the existing A1 proofs **assert but never establish**: that the right-hand side of the unitary-supply identity — the function `expected_total()` at `include/determ/chain/chain.hpp:590-597` — is **well-defined as a `uint64_t` computation at every reachable chain state**. `expected_total()` performs three *unsigned* subtractions:
 

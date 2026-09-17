@@ -1,7 +1,5 @@
 # Block-Ingress Gate-Gap Audit
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 **Status:** open (2026-07-25, updated 2026-07-26); **3 autonomous gates CLOSED** (the discovery
 sweep's autonomous-safe findings are exhausted). FIFTH code-surface
 register in the falsify-on-mutant series, after [ProofClaimGateTraceability](ProofClaimGateTraceability.md),
@@ -83,7 +81,8 @@ would do with it on the accept path anyway. The pool dedup + gossip + log side-e
 the positive control + negatives stay green. Both platforms.
 
 **Regression gate for the refactor:** `test-fa-equivocation-trace` (the live-engine harness that
-exercises real equivocation detection + slashing) stays green on both platforms — the extraction did
+exercises real equivocation detection and the on-chain evidence record — since D4, 2026-09-16, the
+apply path moves no state for an event) stays green on both platforms — the extraction did
 not change honest detection behavior.
 
 ## 3. CLOSED — equiv-evidence dedup identity (`test-equivocation-dedup-identity`)
@@ -107,21 +106,34 @@ inconsistent with it.
 `pending_equivocation_contains` helper) in producer.hpp, used at **every** dedup / inspect / prune
 site so they cannot drift. Dedup on the equivocator alone bounds the pool to |distinct equivocators|
 (≤ |registrants|, since each insert requires a signature-verified proof against a *registered* key)
-and defeats the replay amplification. Behavior-preserving on honest input: an equivocator is fully
-slashed (full-stake forfeit + deregister) on the FIRST valid proof regardless of height, so a second
-distinct-height proof for the same equivocator is redundant — exactly why the prune already erases by
-equivocator. `rpc_submit_equivocation` now reports `accepted=true` idempotently for an already-pooled
-equivocator (it *will* be slashed), `false` only for an invalid submission.
+and defeats the replay amplification. The DoS bound is unchanged by D4 and stands as proved.
+
+> **Re-derived 2026-09-17 (step 3c).** The ORIGINAL justification for keying on the equivocator alone
+> was "an equivocator is fully slashed (full-stake forfeit + deregister) on the FIRST valid proof
+> regardless of height, so a second distinct-height proof is redundant". That justification is VOID:
+> since D4 (2026-09-16) the first proof produces no consequence, so a second, genuinely distinct
+> incident is NOT redundant — it is additional forensic evidence, and under D4 the on-chain record is
+> the INPUT to the L2 bond policy (D22), not a diagnostic. The dedup is therefore retained on its
+> OTHER, independent ground — it is the pool's memory bound (|pool| ≤ |distinct equivocators| ≤
+> |registrants|) and the only thing that defeats the one-proof replay amplification — at a stated
+> COST: only the first-observed incident per equivocator survives into the pool, so the L2 input is
+> lossy by design at this layer. Whether the L2 policy needs per-incident evidence is a D22 question
+> and is NOT decided here; if it does, the fix is a bounded per-equivocator multiset at the pool, not
+> a relaxation of the dedup key (that would restore the amplification). Recorded against D22; the
+> sibling per-block cap + in-block duplicate rejection is sequence step 3b.
+
+`rpc_submit_equivocation` reports `accepted=true` idempotently for an already-pooled
+equivocator (its evidence is already queued for the record), `false` only for an invalid submission.
 
 **Gate** = `test-equivocation-dedup-identity` (drives the shared predicate directly, no Node needed):
 a replay with a different / far `block_index` is deduped (amplification defeated), a same-equivocator
 different-proof-bytes submission is deduped, but a **different equivocator is NOT deduped** (distinct
-equivocators each keep a pool entry → slashing coverage preserved); the predicate ignores
+equivocators each keep a pool entry → evidence coverage preserved across equivocators); the predicate ignores
 `block_index` and distinguishes equivocators; empty pool contains nothing. **Falsify-on-mutant**
 (restore `&& a.block_index == b.block_index` to the identity): the four replay/ignore-block_index
 asserts flip RED while the over-broadness guard + discriminator + empty-pool stay green — clean
 directional split, both platforms. **Regression:** `test-fa-equivocation-trace` (live-engine
-detection + slashing + pooling) stays green — the honest path is unchanged.
+detection + recording + pooling) stays green — the honest path is unchanged.
 
 ## 4. CLOSED — inbound-receipt-pool cap (`test-inbound-receipt-cap`)
 

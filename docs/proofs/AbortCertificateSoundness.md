@@ -1,8 +1,16 @@
 # FA-Cert — Abort-certificate quorum-verification soundness (V10)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> **T-C1 through T-C7 are unchanged and are the substance of this document.** They prove that V10
+> (`BlockValidator::check_abort_certs`) admits no false accusation against an honest validator; every
+> step is a committee-re-derivation, membership, count or signature-binding argument and none consumes
+> a consequence. What changed is what a V10-admitted `AbortEvent` DOES: since D13 it records the S-032
+> suspension window and **deducts no stake** (`AbortEventApply.md`, restated). Read every
+> "suspension-slash" below as "suspension": the harm a false accusation causes is exclusion from
+> committee selection for an exponentially-growing window, not a stake deduction. The gate is no less
+> load-bearing — exclusion at zero cost to the accuser is the S-011 residual
+> (`S010S011SybilEconomics.md` §6.7). The parallel equivocation channel (FA6) lost its consequence
+> entirely under D4 and is now evidence-only; §3's comparison table is corrected in place.
 
 This document proves that Determ's **abort-certificate verification gate** — `BlockValidator::check_abort_certs` at `src/node/validator.cpp:243–386`, the implementation of validity predicate V10 (Preliminaries §5) — produces no false suspension-slash accusations: a finalized `AbortEvent` can name `aborting_node = d` only when (a) `d` was genuinely selected into the at-event committee under the same deterministic committee re-derivation the producer used, and (b) `M−1` **distinct, registered** committee peers each signed an Ed25519 `AbortClaimMsg` over the canonical `(block_index, round, prev_hash, missing_creator = d)` tuple. Under EUF-CMA, a producer cannot fabricate that quorum against an honest validator without forging at least one honest peer's signature.
 
@@ -131,7 +139,7 @@ Partition the `M−1` claimers into honest `H` and Byzantine `F'`. Each honest c
 
 **Code witness.** `src/node/validator.cpp:328–355` (count check + per-claim binding + distinct-claimer set + EUF-CMA `verify`); `include/determ/node/producer.hpp:112–114` (the domain-separated `make_abort_claim_message` digest each `ed_sig` covers — a preimage the D2-inc3 container swap did not touch).
 
-**Test witness.** `tools/test_abort_event_apply.sh` exercises the apply side that fires only after V10 admits the event; the V10 signature-binding path is structurally pinned by the shared `verify` primitive covered in `S006ContribMsgEquivocation.md` T-4 and `EquivocationSlashing.md` T-6 (both reduce false accusation to A1 over a domain-separated digest).
+**Test witness.** `tools/test_abort_event_apply.sh` exercises the apply side that fires only after V10 admits the event (since D13 it asserts the record lands and nothing moves); the V10 signature-binding path is structurally pinned by the shared `verify` primitive covered in `S006ContribMsgEquivocation.md` T-4 and `EquivocationSlashing.md` T-6 (both reduce false accusation to A1 over a domain-separated digest).
 
 ### T-C4 — Domain separation (abort claims are not replayable as other signatures)
 
@@ -206,7 +214,7 @@ is in the registry by construction, so the branch is unreachable through
 
 ### T-C6 — Phase discrimination preserved through verification
 
-**Statement.** V10 verifies the certificate for `round ∈ {1, 2}` identically (both Phase-1 commit aborts and Phase-2 reveal aborts carry an `M−1` quorum and are validity-checked the same way), but the **apply** consequence is phase-discriminated: only `round == 1` triggers the suspension slash (FA-Apply-11 T-A1), while `round == 2` is verified-but-not-slashed (FA-Apply-11 T-A2). FA-Cert's soundness therefore covers both phases' admission, and the economic asymmetry lives entirely in the apply layer, not the verification gate.
+**Statement.** V10 verifies the certificate for `round ∈ {1, 2}` identically (both Phase-1 commit aborts and Phase-2 reveal aborts carry an `M−1` quorum and are validity-checked the same way), but the **apply** consequence is phase-discriminated: only `round == 1` produces the S-032 suspension record (FA-Apply-11 T-A3, and since D13 that record is the whole consequence — no stake moves), while `round == 2` is verified-but-not-recorded (FA-Apply-11 T-A2). FA-Cert's soundness therefore covers both phases' admission, and the asymmetry lives entirely in the apply layer, not the verification gate. *(Restated 2026-09-17: the asymmetry used to be economic — `round == 1` triggered the suspension slash of T-A1. It is now an eligibility asymmetry.)*
 
 *Proof.* The V10 loop body at `validator.cpp:284–359` does not branch on `ae.round` for any of its five steps — the committee re-derivation, membership, count, per-claim binding (which checks `round ≠ ae.round`, i.e., the claim's round must *match* the event's, whatever it is), and fold all run identically for round 1 and round 2. The only round-gated logic is the apply-side `if (ae.round != 1) continue;` at `chain.cpp:1782` (FA-Apply-11 T-A2). Hence V10 soundly admits a correctly-quorumed abort of either phase, and the "Phase-1 slashes / Phase-2 informational" asymmetry that FA-Apply-11 §3 tabulates is enforced downstream of FA-Cert, not within it. This separation of concerns is what lets FA-Cert state a single soundness theorem covering both phases. ∎
 
@@ -237,7 +245,8 @@ Determ has two on-chain validator-side accusation gates with deliberately differ
 | Soundness root | EUF-CMA over honest claimers' keys + honest-majority committee (FA5/FA1) | EUF-CMA over the accused's own key (FA6 T-6) |
 | Committee binding | Yes — V10 re-derives `domains_at_event` and checks membership (T-C1/T-C2) | No — V11 is committee-agnostic (any registered key suffices) |
 | False-positive risk | `≤ q · 2⁻¹²⁸` (T-C3) — needs forging an honest peer's sig | `≤ q · 2⁻¹²⁸` (FA6 T-6) — needs forging the accused's own sig |
-| Apply consequence | Phase-1: proportional `SUSPENSION_SLASH` (FA-Apply-11 T-A1); Phase-2: none (T-A2) | Full forfeit + immediate deregister (FA-Apply-10 T-E1/T-E2) |
+| Apply consequence (at HEAD) | Phase-1: the S-032 suspension window; NO stake movement (D13). Phase-2: nothing at all (T-A2) | Nothing — apply reads nothing from the event (D4, FA-Apply-10 T-E0). The record is the L2 input (D22) |
+| Apply consequence (HISTORICAL, pre-2026-09-16) | Phase-1: proportional `SUSPENSION_SLASH` (FA-Apply-11 T-A1); Phase-2: none | Full forfeit + immediate deregister (FA-Apply-10 T-E1/T-E2) |
 | Phase discrimination | In apply layer only (T-C6); V10 admits both phases | N/A (equivocation is single-shaped) |
 | Validator function | `check_abort_certs` (`validator.cpp:243–386`) | `check_equivocation_events` (`validator.cpp:372–402`) |
 
@@ -257,10 +266,10 @@ Determ has two on-chain validator-side accusation gates with deliberately differ
 | `A_replay` | Producer reuses an honest claim from another round / height / missing-creator / fork | Per-field binding rejects (`round`, `block_index`, `missing_creator`, `prev_hash`); A2 domain separation | T-C4 |
 | `A_pad` | Producer pads the certificate with duplicate sigs from one colluding peer to reach `M−1` | Exact-count `!=` reject + `seen_claimers` distinct-claimer set | T-C5 |
 | `A_self_claim` | Producer includes the accused's coerced self-signature toward the quorum | `claimer == missing_creator` reject | T-C5 |
-| `A_phase_smuggle` | Producer mislabels a Phase-2 (no-slash) abort as Phase-1 to slash | Claim `round` must match event `round` (T-C4); committee re-derivation uses the event's actual round-state via the fold; apply gate is the only round-discriminator and is sound (FA-Apply-11) | T-C4, T-C6 |
-| `A_full_byzantine_committee` | All `M−1` claimers Byzantine, collude to slash honest `d` | Outside model (needs `f ≥ N/3` or committee grind); inherited from FA5/FA1 + S-020 + FA6 grind-slash | §3 discussion |
+| `A_phase_smuggle` | Producer mislabels a Phase-2 (no-consequence) abort as Phase-1 to suspend | Claim `round` must match event `round` (T-C4); committee re-derivation uses the event's actual round-state via the fold; apply gate is the only round-discriminator and is sound (FA-Apply-11) | T-C4, T-C6 |
+| `A_full_byzantine_committee` | All `M−1` claimers Byzantine, collude to suspend honest `d` | Outside model (needs `f ≥ N/3` or committee grind); inherited from FA5/FA1 + S-020 + FA6 grind-slash | §3 discussion |
 
-Every in-model adversary that could falsely suspension-slash honest `d` reduces to either (a) a committee-selection grind (defeated by the V3-agreement T-C2 + A3 + S-020) or (b) a single EUF-CMA forgery (T-C3, `≤ 2⁻¹²⁸`). The out-of-model `A_full_byzantine_committee` is the abort channel's irreducible trust assumption, identical in strength to the honest-member assumption FA5 already requires for the protocol to be safe at all.
+Every in-model adversary that could falsely suspend honest `d` reduces to either (a) a committee-selection grind (defeated by the V3-agreement T-C2 + A3 + S-020) or (b) a single EUF-CMA forgery (T-C3, `≤ 2⁻¹²⁸`). The out-of-model `A_full_byzantine_committee` is the abort channel's irreducible trust assumption, identical in strength to the honest-member assumption FA5 already requires for the protocol to be safe at all.
 
 ---
 
@@ -269,8 +278,8 @@ Every in-model adversary that could falsely suspension-slash honest `d` reduces 
 - **Completeness (every genuine aborter gets a certificate).** FA-Cert is *one-sided*: it proves V10 admits no false accusation against honest `d`. It does **not** prove that every validator who genuinely aborted is eventually certified and slashed — that is a liveness property of the producer's abort-detection + the gossip propagation of `AbortClaimMsg`s (FA4 territory), out of scope here, exactly as FA6 §4.3 scopes out equivocation-slash completeness.
 - **Producer abort-detection correctness.** Whether the producer correctly identifies the *true* missing creator at a round is `src/node/producer.cpp`'s scope. FA-Cert proves the validator soundly verifies *whatever certificate the producer assembled*; if `M−1` honest peers genuinely (and correctly) attest `d`'s silence, the slash is correct — the upstream "is `d` actually the one who went silent" question is the producer's, and is bounded by the same honest-majority assumption (a majority of honest peers will not all attest a present node's absence).
 - **The `event_hash` pre-image correctness — RESOLVED 2026-09-15 (S-074), and the prior wording here was wrong.** Until S-074, V10 folded `ae.event_hash` (line 383) without recomputing it, and the claim that the binding was "enforced transitively through the seed chain" was false: the producer and the validator both folded whatever value the assembler chose, so the draw was consistent *and* attacker-chosen — any peer holding the `K−1` public claims seated the post-abort committee of its choice. Step 4b now recomputes the identity per event.
-- **Apply-side mechanics.** The proportional `SUSPENSION_SLASH` deduction, the S-032 `abort_records_` cache update, the floor-at-zero arithmetic, the A1 supply contribution, and the no-registry-deactivation property are all FA-Apply-11's scope (T-A1..T-A8). FA-Cert's verdict is the *gate* those mechanics fire behind.
-- **Cross-shard abort propagation.** A validator who aborts on shard `S_X` is certified and slashed on `S_X` by the local V10 + apply. Whether that propagates to `S_Y` is FA8 (`RegionalSharding.md`) + the cross-shard receipt path; FA-Cert assumes local-shard context (the `committee_region_` / `shard_id_` filters in the re-derivation are the shard-local pool).
+- **Apply-side mechanics.** The S-032 `abort_records_` cache update, the A1 supply contribution, and the no-registry-deactivation property are all FA-Apply-11's scope (T-A1..T-A8). FA-Cert's verdict is the *gate* those mechanics fire behind.
+- **Cross-shard abort propagation.** A validator who aborts on shard `S_X` is certified and suspended on `S_X` by the local V10 + apply. Whether that propagates to `S_Y` is FA8 (`RegionalSharding.md`) + the cross-shard receipt path; FA-Cert assumes local-shard context (the `committee_region_` / `shard_id_` filters in the re-derivation are the shard-local pool).
 - **The S-013 evidence-pool bound itself.** FA-Cert assumes the `M−1` claims arrive at the producer; the bound on how many such buffered claims a node retains per signer (the per-signer cap that prevents memory exhaustion) is `S013PerSignerCap.md`. FA-Cert composes with S-013 (the cap does not change which certificates verify, only how many are buffered) but does not re-prove it.
 
 ---
@@ -281,11 +290,11 @@ Every in-model adversary that could falsely suspension-slash honest `d` reduces 
 |---|---|
 | `Preliminaries.md` (F0) | Notation; V10 abort-certificate predicate (§5); V3 creator selection (§6); A1/A2/A3 + H1–H4 assumptions |
 | `EquivocationSlashing.md` (FA6) | The analogous **equivocation**-channel soundness theorem this proof structurally mirrors; §3 contrasts the self-incriminating vs third-party-attestation evidence shapes |
-| `AbortEventApply.md` (FA-Apply-11) | Apply-side proportional-slash mechanics (T-A1..T-A8); §4 explicitly defers V10 soundness — FA-Cert closes exactly that dependency |
+| `AbortEventApply.md` (FA-Apply-11) | Apply-side mechanics: at HEAD the S-032 record alone (T-A1 is historical since D13); §4 explicitly defers V10 soundness — FA-Cert closes exactly that dependency |
 | `SelectiveAbort.md` (FA5) | Abort-defense randomness + the BFT escalation gate setting the per-event committee size; supplies the honest-majority-committee assumption T-C3 leans on |
 | `S020CommitteeSelection.md` (S-020) | `select_m_creators` hybrid Fisher-Yates / rejection-sampling soundness reused unchanged in the at-event re-derivation (T-C1/T-C2) |
 | `S033StateRootNamespaceCoverage.md` (S-033) | State-root coverage of the registry + epoch rand + merge state that the verdict's determinism (T-C7) depends on |
-| `StakeForfeitureCascade.md` (FA-Apply-16) | The cascade interaction when the same offender is both abort-slashed (this channel) and equivocation-slashed |
+| `StakeForfeitureCascade.md` (FA-Apply-16) | The cascade interaction when the same offender was both abort-slashed (this channel) and equivocation-slashed — vacuous since D4/D13; see that document |
 | `S013PerSignerCap.md` (S-013) | The per-signer cap on the buffered evidence pool the certificate draws from |
 | `WireFormatBackwardCompat.md` / `MakeContribCommitmentBackwardCompat.md` | Domain-separation discipline underpinning T-C4 |
 | `docs/SECURITY.md` §S-013 / abort-handling rows | Audit-side record for the abort/equivocation evidence-handling surfaces |
@@ -301,6 +310,6 @@ A reviewer can confirm V10 soundness by:
 
 ## 7. Conclusion
 
-T-C1 through T-C7 establish that V10 (`check_abort_certs`) is a **sound** suspension-slash accusation gate: an honest validator is never named as the aborting node in a finalized block except with probability `≤ q · 2⁻¹²⁸` (one EUF-CMA forgery), under the same honest-majority-committee assumption the protocol already needs to be safe. The soundness rests on two bindings the certificate carries — committee membership (re-derived deterministically and forced to agree with V3) and an `M−1` distinct-registered-claimer Ed25519 quorum over a domain-separated digest — neither of which a single producer (or any sub-honest-majority coalition) can forge.
+T-C1 through T-C7 establish that V10 (`check_abort_certs`) is a **sound** suspension accusation gate: an honest validator is never named as the aborting node in a finalized block except with probability `≤ q · 2⁻¹²⁸` (one EUF-CMA forgery), under the same honest-majority-committee assumption the protocol already needs to be safe. The soundness rests on two bindings the certificate carries — committee membership (re-derived deterministically and forced to agree with V3) and an `M−1` distinct-registered-claimer Ed25519 quorum over a domain-separated digest — neither of which a single producer (or any sub-honest-majority coalition) can forge.
 
-FA-Cert is the verification-side bookend the abort channel needed: FA-Apply-11 proves the slash *applies* correctly once admitted, and FA-Cert proves the admission *is sound*. Together they give the abort channel the same end-to-end soundness story FA6 + FA-Apply-10 give the equivocation channel — with the one principled difference, made explicit in §3, that third-party attestation (abort) requires an honest-majority committee where self-incrimination (equivocation) does not.
+FA-Cert is the verification-side bookend the abort channel needed: FA-Apply-11 proves the record *applies* correctly once admitted, and FA-Cert proves the admission *is sound*. Together they give the abort channel the same end-to-end soundness story FA6 + FA-Apply-10 give the equivocation channel — with the one principled difference, made explicit in §3, that third-party attestation (abort) requires an honest-majority committee where self-incrimination (equivocation) does not.

@@ -1,7 +1,5 @@
 # AbortRecordProofSoundness — trust-minimized `b:`-namespace abort-record read soundness (`determ-light verify-abort-record`)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
 This document formalizes the security of the **trust-minimized abort-record read**: the `determ-light verify-abort-record --domain <D>` command lets an operator learn a node's `(count, last_block)` Phase-1 abort record from a *single untrusted daemon* and verify it locally against a committee-attested `state_root`, so that even a Byzantine daemon can neither inflate nor launder a node's abort history without detection. The read targets the `b:` (abort_records, the S-032 cache) namespace of the S-033 state-commitment surface — the trust-minimized complement to the daemon-trusting `operator_slashing_ledger.sh` for auditing committee instability and suspension slashing.
 
 The trust posture is structural, not cryptographic: like the `s:` stake read (`StakeProofSoundness.md`), the command composes existing primitives — the committee's Ed25519 signature set binds `state_root` to the operator's pinned chain via the successor-block `prev_hash` chain (the S-042 `committee_bound_state_root` binding, `StateRootAnchorSoundness.md` SR-1), the sorted-leaves Merkle inclusion proof binds a single `b:` leaf to that root, and a local recompute of `SHA256(u64_be(count) ‖ u64_be(last_block))` hash-binds the daemon's human-readable `abort_records` cleartext to the proven leaf — into an end-to-end pipeline under a malicious-daemon adversary. No new cryptographic primitive is introduced. The claim is that an honest light client never **acts on** a `(count, last_block)` pair that is inconsistent with the genesis-pinned chain's `b:` leaf for the queried domain. Two properties distinguish this reader within the family and get their own theorems: the **key-bind** (AB-1 — the proof must be for *exactly* `"b:" + D`, the F-6 forge-class defense), and the **negative footing** (AB-3 — `NOT-RECORDED` is a daemon-asserted negative under (H-neg), per `NegativeVerdictSoundness.md`, never re-derived here).
@@ -53,7 +51,7 @@ with `SHA256Builder::append(uint64_t)` serializing big-endian (`src/crypto/sha25
 
 - **Non-membership.** The sorted-leaves tree supports positive membership only (MT-5); `NOT-RECORDED` on `not_found` is the daemon-asserted negative AB-3 characterizes — it is **not** a proof of absence. This document defers entirely to `NegativeVerdictSoundness.md` (NV-2/NV-3) for that analysis.
 - **Stale-state lies across invocations, multi-peer redundancy, transport encryption, RPC auth, genesis-only committee map.** Inherited verbatim from `LightClientThreatModel.md` §6. Within one invocation the stale-height gate + S-042 binding are sound.
-- **How the record got there** — the FA5 abort mechanism, the suspension-slash economics (`chain.cpp:1321-1327`), and snapshot restore of the cache are apply-layer / S-032 / S-037-class concerns; this proof reads the *committed* `b:` leaf and does not re-prove its provenance.
+- **How the record got there** — the FA5 abort mechanism, the suspension window it arms (`Chain::apply_transactions`, the `b.abort_events` loop; since D13, 2026-09-16, that loop increments the record and moves NO stake), and snapshot restore of the cache are apply-layer / S-032 / S-037-class concerns; this proof reads the *committed* `b:` leaf and does not re-prove its provenance.
 
 ---
 
@@ -145,11 +143,11 @@ All of `LightClientThreatModel.md` §6 applies (single daemon, no persistence be
 
 ### 6.1 NOT-RECORDED is not an absence proof
 
-The load-bearing limitation, fully analyzed in `NegativeVerdictSoundness.md` and surfaced here as AB-3 + the `negative_footing` tag. A slashing audit MUST NOT clear a node because its abort record "does not exist" on a single daemon's say-so (NV-6's worked failure mode names exactly this scenario).
+The load-bearing limitation, fully analyzed in `NegativeVerdictSoundness.md` and surfaced here as AB-3 + the `negative_footing` tag. A conduct audit MUST NOT clear a node because its abort record "does not exist" on a single daemon's say-so (NV-6's worked failure mode names exactly this scenario).
 
 ### 6.2 Phase-1-only semantics
 
-A `RECORDED count` is a Phase-1 abort count, and `NOT-RECORDED` says nothing about Phase-2 timing-skew aborts or equivocation (AB-4). Operators auditing total node health must consult the equivocation channel (FA6 / `EquivocationSlashing.md`) separately.
+A `RECORDED count` is a Phase-1 abort count, and `NOT-RECORDED` says nothing about Phase-2 timing-skew aborts or equivocation (AB-4). Operators auditing total node health must consult the equivocation evidence channel (FA6 / `EquivocationSlashing.md`) separately — and note that since D4 (2026-09-16) that channel is a record only: a positive equivocation finding has no on-chain consequence to observe, so its absence from a node's state says nothing either way.
 
 ### 6.3 Verbatim domain key
 

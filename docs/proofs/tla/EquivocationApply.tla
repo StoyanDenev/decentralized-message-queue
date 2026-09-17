@@ -1,11 +1,12 @@
 --------------------------- MODULE EquivocationApply ---------------------------
-\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
-\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
-\* registry deactivation this model treats as shipped apply-path behaviour were
-\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
-\* evidence record only. This model is pending re-derivation in step 3c of the
-\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
-\* the authority.
+\* STATUS 2026-09-17 (step 3c) — HISTORICAL MODEL. It specifies apply-path behaviour that was
+\* REMOVED from the chain on 2026-09-16 by owner decision D4 (DECISION-LOG 2026-09-16, landed as
+\* O-1 step 3a): the full-stake forfeiture and the registry deactivation. At HEAD
+\* Chain::apply_transactions reads NO field of b.equivocation_events, so the shipped apply rule is
+\* state neutrality (EquivocationSlashingApply.md T-E0, gate `determ test-equivocation-apply`,
+\* mutants M1-M8 RED). This module is retained as the record of the removed mechanism and must NOT
+\* be cited as a model of HEAD. It is deliberately not rewritten: the shipped rule is that the
+\* apply action is the identity, which needs no model.
 (*
 FB14 — TLA+ specification of the equivocation-slashing apply state
 machine. Models the apply-layer mechanics by which an EquivocationEvent

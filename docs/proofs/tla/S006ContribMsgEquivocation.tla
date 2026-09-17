@@ -1,11 +1,12 @@
 --------------------------- MODULE S006ContribMsgEquivocation ---------------------------
-\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
-\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
-\* registry deactivation this model treats as shipped apply-path behaviour were
-\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
-\* evidence record only. This model is pending re-derivation in step 3c of the
-\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
-\* the authority.
+\* STATUS 2026-09-17 (step 3c) — THIS MODEL IS CURRENT as a DETECTION model. The receive-time
+\* Phase-1 detection it formalizes (Node::on_contrib: same signer, same generation, different core
+\* commit -> construct an EquivocationEvent) is shipped and unchanged. Owner decision D4
+\* (DECISION-LOG 2026-09-16, landed as O-1 step 3a) removed the apply-side CONSEQUENCE of the
+\* constructed event: Chain::apply_transactions reads nothing from b.equivocation_events — no stake
+\* forfeiture, no registry deactivation. Any action or property below that models a slash or a
+\* deactivation is HISTORICAL; the detection, construction and pool-dedup actions are not.
+\* See S006ContribMsgEquivocation.md, re-derived 2026-09-17, for the restated closure.
 (*
 FB28 — TLA+ companion to R23A7 `S006ContribMsgEquivocation.md` analytic
 proof (Phase-1 same-generation ContribMsg equivocation detection — the

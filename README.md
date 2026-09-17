@@ -706,7 +706,7 @@ The full pipeline:
 6. **Apply** (`apply_transactions`): each `EquivocationEvent` is committed as an on-chain record and nothing else — no stake, registry or counter movement (D4, 2026-09-16; `determ test-equivocation-apply`).
 7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool (no double-baking).
 
-BFT-mode safety claims are conditional on `f_h < k_bft/3` within the BFT committee; the accountable-safety corollary that rested on slashing (T-5.1) is re-derived in step 3c (`docs/proofs/BFTSafety.md`).
+BFT-mode safety claims are conditional on `f_h < k_bft/3` within the BFT committee and on nothing else; the accountable-safety corollary that rested on slashing (T-5.1) was WITHDRAWN on 2026-09-17 — above the bound the offenders are identifiable and nothing removes them, so accountable safety here is evidence-only (`docs/proofs/BFTSafety.md` §4).
 
 ---
 

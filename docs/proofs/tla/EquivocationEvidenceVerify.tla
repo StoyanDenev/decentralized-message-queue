@@ -1,11 +1,13 @@
 --------------------------- MODULE EquivocationEvidenceVerify ---------------------------
-\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
-\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
-\* registry deactivation this model treats as shipped apply-path behaviour were
-\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
-\* evidence record only. This model is pending re-derivation in step 3c of the
-\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
-\* the authority.
+\* STATUS 2026-09-17 (step 3c) — THIS MODEL IS CURRENT. It specifies the V11 accept/reject
+\* PREDICATE (BlockValidator::check_equivocation_events), which owner decision D4 did not touch:
+\* an EquivocationEvent is still verified exactly as modelled here before it may enter a block.
+\* What D4 (DECISION-LOG 2026-09-16, landed as O-1 step 3a) changed is only what an ACCEPTED event
+\* causes afterwards: Chain::apply_transactions reads nothing from b.equivocation_events — no stake
+\* forfeiture, no registry deactivation. The accepted event is an on-chain evidence record and the
+\* declared input to the L2 bond policy (D22). Nothing in this module models that consequence, so
+\* nothing in it needed re-derivation. See EquivocationSlashing.md (FA6) for the no-false-accusation
+\* bound this predicate carries and its H3 boundary.
 (*
 FB48 — TLA+ specification of the OFFLINE equivocation-evidence
 verifier predicate: the four-clause accept/reject decision that

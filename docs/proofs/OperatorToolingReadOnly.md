@@ -1,7 +1,5 @@
 # Operator Tooling Read-Only — `operator_*.sh` diagnostic-family meta-proof
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 **Status:** Survey + argument. Round R40 (agent E7).
 **Scope:** the `tools/operator_*.sh` diagnostic-script family.
 **Companion to:** `RpcInputValidationDefense.md`, `S001RpcAuthSoundness.md`,
@@ -113,7 +111,7 @@ into `tx_store_`, and calls `gossip_.broadcast(net::make_transaction(tx))`.
 `rpc_send` / `rpc_stake` / `rpc_unstake` share that construct-sign-store-
 broadcast shape; `rpc_submit_tx` admits an externally-signed tx (including
 `PARAM_CHANGE`, `DAPP_REGISTER`, `DAPP_CALL`, `TRANSFER`) into the mempool; and
-`rpc_submit_equivocation` admits an `EquivocationEvent` driving FA6 slashing at
+`rpc_submit_equivocation` admits an `EquivocationEvent` driving the FA6 evidence record at
 apply time. Behind the S-001 HMAC gate (`rpc.cpp:179`, before `dispatch` at
 `rpc.cpp:184`), these are the only methods an unauthenticated caller cannot
 reach.

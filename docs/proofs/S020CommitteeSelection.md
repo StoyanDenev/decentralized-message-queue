@@ -1,7 +1,5 @@
 # S-020 — Hybrid Fisher-Yates committee selection: uniformity + bounded runtime + side-channel resistance
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document proves the closure of `docs/SECURITY.md` §S-020 (Rejection sampling O(K²) at K/N → 1 — Medium → Mitigated) shipped at `src/crypto/random.cpp::select_m_creators` (lines 70–100). The pre-fix code used a single rejection-sampling path that ran expected `O(K · N/(N−K))` SHA-256 hashes; as the ratio `K/N` approached 1 the final pick expected ~`N` trials and at `K = N − 1` ~`N` trials *per* committee draw, with the worst-case runtime mathematically unbounded though never a hard hang. That gradual degradation gave a producer-aligned adversary a knob to nudge committee-selection latency in pathological pool sizes, and the resulting variability was a (faint) timing side-channel into which validator-indices landed in the result.
 
 The fix is a hybrid: keep rejection sampling on the `K/N ≤ 0.5` regime (cheap, no allocation, preserves rev.9 output for the existing committee-index fixtures) and switch to a partial Fisher-Yates shuffle when `2K > N` (O(N) setup + exactly K hashes, no rejection spin). Both branches consume the same SHA-256-derived randomness and yield a uniformly-distributed K-subset of `[0, N_pool)` under the random-oracle assumption (ROM) on `random_state`. The branch choice is determined entirely by `(K, N)` — both global, both already inputs — so every honest node lands in the same branch and computes the same committee.
@@ -417,7 +415,7 @@ So A4 is closed by T-3's branch boundary: whenever the pathology would dominate,
 - **`CommitteeSelection.md` (sibling)** covers FA1 + FA8 at the higher protocol level; this proof goes deeper on the specific hybrid algorithm's analytic properties.
 - **`SelectiveAbort.md` (FA3)** covers the information-theoretic selective-abort defense; T-1 / T-2 here compose with FA3 (selective-abort cannot bias the uniform K-subset distribution).
 - **`Liveness.md` (L4)** covers the rotational-eligibility argument that uses the per-domain `K / N` marginal probability; this proof provides T-1.1 / T-2.1 as the structural backing.
-- **`EquivocationSlashing.md` (FA6)** does not directly cite `select_m_creators` but composes with it: a slashed equivocator is removed from the pool (via `inactive_from` flip), which changes `N` for subsequent committee selections; the hybrid algorithm absorbs the `N`-change without recalibration (T-1 / T-2 hold for any `N ≥ K`).
+- **`EquivocationSlashing.md` (FA6)** does not directly cite `select_m_creators` and, since D4 (2026-09-16), does not change `N` either: an `EquivocationEvent` moves no registry state, so an equivocator stays in the eligible pool. The `N`-change this bullet used to describe came from the removed `inactive_from` flip. T-1 / T-2 hold for any `N ≥ K` regardless, so nothing in the S-020 closure depended on it; the surviving `N`-changing channels are REGISTER/DEREGISTER, the stake floor and the S-032 suspension window.
 
 ### 6.3 Test surface
 
@@ -507,7 +505,7 @@ The sister function `select_after_abort_m` (`random.cpp:122–163`) uses the sam
 - `docs/proofs/RegionalSharding.md` (FA8) — region-aware committee selection wrapping `select_m_creators`.
 - `docs/proofs/Censorship.md` (FA2) §3 — K-conjunction censorship bound + `select_after_abort_m` sister-case treatment.
 - `docs/proofs/SelectiveAbort.md` (FA3) — selective-abort defense composing with the uniformity argument here.
-- `docs/proofs/EquivocationSlashing.md` (FA6) — equivocation slashing affecting `N_pool` size (composes via T-1 / T-2 uniformity for any `N ≥ K`).
+- `docs/proofs/EquivocationSlashing.md` (FA6) — the equivocation evidence channel; since D4 it does NOT affect `N_pool` (T-1 / T-2 hold for any `N ≥ K` either way).
 - `docs/proofs/S010S011SybilEconomics.md` — Sybil-cost formula citing the uniformity premise.
 - `docs/proofs/S029ForkChoiceSoundness.md` — fork-choice rule operating on committees produced here.
 - `docs/proofs/SnapshotEquivalence.md` — snapshot replay equivalence supporting T-5 cross-reload determinism.

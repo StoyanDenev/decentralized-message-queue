@@ -1,8 +1,14 @@
 # FA-Apply — Fee accounting (per-tx debit + creator distribution)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document formalizes the apply-layer flow of transaction fees: how `tx.fee` is debited from each sender, accumulated into a per-block `total_fees` counter, and distributed at block-tail across `b.creators[]` together with the per-block subsidy. The flow is the load-bearing intra-supply transfer channel that converts user-paid fees into validator income while keeping the A1 unitary-supply invariant intact. Three structural properties matter: (1) the debit is per-tx and gated on success — silently-skipped txs charge no fee, (2) accumulation is monotone within the block apply (modulo the explicit UNSTAKE refund subtraction, which cancels the immediately-prior charge), and (3) distribution to creators is deterministic, with an explicit empty-creators gate that protects the A1 closure on genesis and on degenerate non-producer blocks.
 

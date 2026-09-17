@@ -1,8 +1,6 @@
 # FA8 — Regional sharding corollary
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
-This document proves that **regional sharding** (EXTENDED mode with `committee_region` pinning per shard) preserves all per-property guarantees of FA1 (Safety), FA4 (Liveness), FA6 (Equivocation Slashing), and FA7 (Cross-shard receipts) without modification to their cryptographic or quorum arguments.
+This document proves that **regional sharding** (EXTENDED mode with `committee_region` pinning per shard) preserves all per-property guarantees of FA1 (Safety), FA4 (Liveness), FA6 (Equivocation evidence — since D4, 2026-09-16, a detection-and-record property with no L1 consequence), and FA7 (Cross-shard receipts) without modification to their cryptographic or quorum arguments.
 
 Regional sharding is a deployment optimization: each shard's committee is drawn only from validators whose `region` tag matches the shard's `committee_region`. This narrows the latency envelope within a committee (intra-region RTTs), allowing faster block times per shard without sacrificing global decentralization. The question the proof answers: **does this filter break any prior soundness or liveness theorem?** Answer: no, provided the pinned pool retains enough honest validators.
 
@@ -49,7 +47,7 @@ every finalized block on shard `s` satisfies FA1's safety property — at most o
 
 shard `s` finalizes at least one block within `R(p_honest_s)` rounds in expectation, where `R(·)` is FA4's geometric bound applied to the regional pool.
 
-**Theorem T-8b (Slashing and cross-shard mechanisms commute with regional pinning).** FA6 (T-6) and FA7 (T-7, T-7') hold for every shard `s` under T-8's hypothesis, without modification to their proofs.
+**Theorem T-8b (The equivocation-evidence and cross-shard mechanisms commute with regional pinning).** FA6 (T-6) and FA7 (T-7, T-7') hold for every shard `s` under T-8's hypothesis, without modification to their proofs.
 
 **Corollary T-8.1 (Latency advantage is free).** Reducing shard `s`'s block timer to the regional RTT envelope does not change T-8 / T-8a / T-8b. The proofs depend on quorum structure and cryptographic assumptions, not on the wall-clock duration of round timers.
 
@@ -81,13 +79,13 @@ FA4's T-4 argument uses three properties of the eligible pool:
 
 Under R-liveness (`|Pool_s| ≥ K_s` and bounded honest fraction), all three hold with `Pool` ← `Pool_s`. The expected-rounds bound is the same; only the constants change to reflect the smaller pool. ∎
 
-**Caveat.** If R-liveness fails — e.g., `Pool_s` shrinks below `K_s` due to deregistrations or slashing — shard `s` stalls. This is a deployment concern, not a soundness regression. The protocol can mitigate via under-quorum merge (R4, pending), regional rebalancing (R5, pending), or operator action.
+**Caveat.** If R-liveness fails — e.g., `Pool_s` shrinks below `K_s` due to deregistrations, stake falling under the floor or S-032 suspensions (the equivocation channel no longer shrinks the pool at all since D4) — shard `s` stalls. This is a deployment concern, not a soundness regression. The protocol can mitigate via under-quorum merge (R4, pending), regional rebalancing (R5, pending), or operator action.
 
-### 3.3 FA6 (Equivocation slashing) survives substitution
+### 3.3 FA6 (Equivocation evidence) survives substitution
 
 T-6's proof is a direct reduction to EUF-CMA: honest validator `v_i ∈ Pool_s \ F_s` cannot have two signatures over distinct digests at the same `(h, round)`. The argument is *per-validator*, not per-pool. Regional pinning narrows which `v_i`s are eligible at `s`; it doesn't weaken the EUF-CMA bound against any individual `v_i`.
 
-Cross-shard slashing (T-6.1) routes through the beacon's committee derivation. The beacon's view of `Pool_s` at the equivocation epoch is reconstructible from beacon-anchored pool state plus the shard manifest's `committee_region` for `s` — exactly what `node.cpp::on_shard_tip` already does (its committee re-derivation block). ∎
+Cross-shard evidence relay (T-6.1) routes through the beacon's committee derivation. The beacon's view of `Pool_s` at the equivocation epoch is reconstructible from beacon-anchored pool state plus the shard manifest's `committee_region` for `s` — exactly what `node.cpp::on_shard_tip` already does (its committee re-derivation block). ∎
 
 ### 3.4 FA7 (Cross-shard receipts) survives substitution
 
@@ -110,7 +108,7 @@ If the receiver mis-identifies `Pool_src` (e.g., uses the wrong region filter), 
 ### 4.2 Dangerous regimes (operator beware)
 
 - **`Pool_s` falls below `K_s`**: shard stalls. The startup gate (A6) catches some cases by refusing to launch with `|Pool_s| < K_s`; runtime erosion through deregistration is not yet handled.
-- **`Pool_s` has high Byzantine fraction**: if `|F_s| / |Pool_s|` exceeds the BFT threshold, FA5 escalation cannot save the shard. The slashing path (FA6) still catches equivocators with cryptographic certainty, but liveness is lost.
+- **`Pool_s` has high Byzantine fraction**: if `|F_s| / |Pool_s|` exceeds the BFT threshold, FA5 escalation cannot save the shard. The FA6 path still NAMES equivocators with cryptographic certainty — and, since D4, does nothing about them — so both safety-above-threshold and liveness are lost with only a record to show for it.
 - **Adversarial region tagging**: if an adversary registers many validators with a fake region tag to dilute `Pool_s` (and `F_s / Pool_s` rises), regional pinning concentrates the attack. Mitigation: require an out-of-band attestation for region claims (R6+ design item; not yet implemented).
 
 ### 4.3 What the proof does NOT cover

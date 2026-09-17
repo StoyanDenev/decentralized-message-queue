@@ -1,7 +1,5 @@
 # Consensus Validator + Apply-Path Gate-Gap Audit
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 **Status: register (a live backlog of ungated code reject-paths), NOT a runtime property.**
 Companion to [ProofClaimGateTraceability.md](ProofClaimGateTraceability.md). That register
 audited the `docs/proofs/` *claim* surface (which documented properties lacked an enforcing
@@ -238,9 +236,18 @@ analysis workflow.
 ### 2f. EQV-sig-verify-forged-slash (equivocation evidence must be a genuine double-sign)
 
 **#5 EQV-sig-verify-forged-slash** — `src/node/validator.cpp:394`, inside `check_equivocation_events`
-(gate at `validate()` `:49`). An `EquivocationEvent` is *evidence* used to SLASH a validator; the gate
+(gate at `validate()` `:49`). An `EquivocationEvent` is *evidence*; the gate
 requires BOTH signatures to genuinely verify against the equivocator's committee key over two distinct
 digests:
+
+> **Re-derived 2026-09-17 (step 3c).** When this audit was written the evidence drove a full-stake
+> forfeit + deregistration at apply, and that is the harm every `Consequence` paragraph in this section
+> measures. Owner decision D4 (2026-09-16, landed as O-1 step 3a) removed it: `Chain::apply_transactions`
+> reads nothing from `b.equivocation_events`. **The gate itself is unchanged and still required** — the
+> event is committed on-chain and is the declared INPUT to the L2 bond policy (D22), so an accepted
+> forgery becomes a permanently recorded false accusation rather than a stake theft. Read every
+> "slash" below as "produce a V11-accepted on-chain accusation"; the *severity ranking* of this section
+> was set against stake theft and is not re-ranked here.
 
 ```cpp
 Hash digest_a = compose(ev.index_a, ev.body_root_a);   // DERIVED, never carried

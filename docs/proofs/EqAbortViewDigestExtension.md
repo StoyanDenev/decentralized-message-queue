@@ -1,8 +1,14 @@
 # EqAbortViewDigestExtension — closing the equivocation/abort dimension of S-030-D2 (v2.7 F2)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).** This
+> document is about the DIGEST: which pool-fed lists are bound into `compute_block_digest` and how the
+> F2 view roots reconcile. **Every claim about the digest, the view roots and the reconciliation is
+> unchanged** — binding is a wire/consensus property and consumes no consequence. Only the sentences
+> describing what the bound events DO afterwards are corrected: an `EquivocationEvent` now moves no L1
+> state (D4, `EquivocationSlashingApply.md` T-E0) and a Phase-1 `AbortEvent` records the S-032
+> suspension without deducting stake (D13). Note for R-8: because apply reads nothing from the
+> equivocation set, a stripped-evidence twin now applies cleanly, which is exactly why the C0 digest
+> demotion became discussable — it is sequenced AFTER the step-3b evidence cap and is NOT landed.
 
 **Status: SHIPPED (commit `48c4b45`).** This document was the implementation-ready
 design spec; the GO recommendation was executed. The equivocation/abort dimension
@@ -43,7 +49,7 @@ digesting. This is the same property that makes the shipped inbound binding safe
 > **Post-ship adversarial review (5 lenses, each confirmed against source; commit
 > `369c3f7`).** Subset-soundness, zero-root producer/validator consistency, the
 > digest-gate edge cases (BFT sentinels, cap truncation, pre-activation), and the
-> apply-time invariants (A1 supply / slashing determinism / abort reselection)
+> apply-time invariants (A1 supply / apply determinism / abort reselection)
 > were all found **sound** — no stall, no divergence, no exploit. Two **LOW**
 > robustness/coverage items were confirmed and fixed: (a) `check_inbound_receipts`
 > now carries the same explicit zero-root v1-sentinel skip as
@@ -51,15 +57,15 @@ digesting. This is the same property that makes the shipped inbound binding safe
 > non-zero roots — a cross-module coupling now made explicit; behavior-preserving);
 > (b) `tools/test_f2_eqabort_snapshot.sh` closes the S-037-class gap (no test had
 > exercised snapshot bootstrap on a chain carrying F2 eq/abort evidence — a donor
-> chain now slashes an equivocator, snapshots, and a bare receiver restores with a
-> matching state_root and the slash intact).
+> chain now records an equivocator, snapshots, and a bare receiver restores with a
+> matching state_root — the RECORD intact; there is no slash to restore since D4).
 
 Companion docs:
 - `docs/proofs/S030-D2-Analysis.md` — the residual D2 gap and the inbound closure (§3.5, §4 item 7).
 - `docs/proofs/F2-SPEC.md` — §Q1 reconciliation rules, §Q4 commit binding, §Q5 Phase-2 semantics.
 - `docs/proofs/F2ViewReconciliationAnalysis.md` — T-1..T-6 (purity/order-independence/idempotence of reconcile_union).
 - `docs/proofs/MakeContribCommitmentBackwardCompat.md` — the DTM-F2-v1 commit shape + v1 short-circuit.
-- `docs/proofs/EquivocationSlashingApply.md` (FA-Apply-10), `docs/proofs/AbortEventApply.md` (FA-Apply-11) — the apply paths these events feed.
+- `docs/proofs/EquivocationSlashingApply.md` (FA-Apply-10 — T-E0, apply is state-neutral on the event), `docs/proofs/AbortEventApply.md` (FA-Apply-11 — the S-032 record, no deduction since D13) — the apply paths these events feed.
 
 ---
 
@@ -390,7 +396,7 @@ S030-D2-Analysis §2 (lines 57-77): the naive patch hashed each member's *local
 tentative pool view* into the digest. Pools are gossip-fed, so members A and B hold
 different `equivocation_events` at their commit instants, compute different
 digests, and K signatures never gather. The round aborts; under recurring gossip
-drift the chain stalls. The equivocation-slashing regression reproduced this.
+drift the chain stalls. The equivocation cluster regression reproduced this.
 
 ### 3.2 Why this design is safe
 
@@ -472,7 +478,7 @@ assembler cannot emit the event. Resolution:
 (`src/node/producer.cpp:368-369`). The same equivocation observed at two provenance points
 hashes differently and both copies land in the union. This is **acceptable and
 intended**: they are independent witnesses to the same misbehavior, and the apply
-path (FA-Apply-10) slashes the equivocator once regardless (the apply keys on the
+path (FA-Apply-10) is state-neutral regardless since D4 — historically it slashed the equivocator once (the apply keyed on the
 equivocator identity, not the event hash). Do **not** zero-normalize the forensic
 fields — that would erase the audit trail and is unnecessary, because union
 inclusion of redundant witnesses is harmless and bounded by `F2_VIEW_LIST_CAP`.
@@ -503,11 +509,11 @@ genesis). Mirrors the inbound reconciliation test and the existing
 1. **Divergent-view convergence (union).** Inject equivocation evidence so node-1
    observes `{e1}`, node-2 observes `{e1,e2}`, node-3 observes `{e2}`. Assert the
    produced block's `equivocation_events == {e1,e2}` (union), the digest binds both,
-   K-of-K signatures gather (no stall), FA-Apply-10 slashes both equivocators, and the
+   K-of-K signatures gather (no stall), both equivocation records land and move nothing (FA-Apply-10 T-E0), and the
    A1 supply invariant closes (`chain.cpp:1395-1399`).
 2. **Abort union.** Same pattern with Phase-1 `AbortEvent`s; assert union inclusion,
-   FA-Apply-11 proportional slash for round-1 aborts, and that round-2 aborts present
-   in the union are carried but **not** slashed (T-A2, `chain.cpp:1314` gate).
+   FA-Apply-11 S-032 record for round-1 aborts (no stake moves since D13), and that round-2 aborts present
+   in the union are carried but **not** recorded (T-A2, the `ae.round != 1` gate in `Chain::apply_transactions`).
 3. **Silent-node tolerance.** Drop node-3; assert the union of node-1+node-2 views is
    still bound and the block finalizes (one honest observer suffices — censorship
    resistance).

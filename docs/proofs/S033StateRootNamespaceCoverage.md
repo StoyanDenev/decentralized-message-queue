@@ -1,8 +1,14 @@
 # S033StateRootNamespaceCoverage — 10-namespace state-root coverage completeness theorem
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document proves the S-033 coverage-completeness theorem: every mutable-state field that `Chain::apply_transactions` (and its companion paths — `serialize_state` / `restore_from_snapshot`) reads from or writes to is committed to by the 32-byte `state_root` field through exactly one of the ten leaf namespaces emitted by `Chain::build_state_leaves`. The closure is structural rather than cryptographic: no field outside the ten namespaces participates in apply-determinism, no two namespaces overlap at the byte level, and producer-side + receiver-side compute paths invoke the same primitive, so the apply-time gate at `src/chain/chain.cpp:1421-1446` is a faithful proxy for cross-node post-apply state equality up to SHA-256 collision resistance.
 
@@ -63,7 +69,7 @@ The `k:` namespace's thirteen members are (in lexicographic order of the `name` 
 
 - Per-tx loop (lines 734-1231): mutates `accounts_`, `stakes_`, `registrants_`, `dapp_registry_`, `pending_param_changes_`, `merge_state_`, and the per-block u64 deltas (`block_outbound`, `total_fees`).
 - Creator subsidy + fee distribution (lines 1234-1305): mutates `accounts_`, `accumulated_subsidy_` (via the `subsidy_this_block` accrual).
-- Suspension slashing (lines 1313-1328): mutates `abort_records_`, `stakes_`, `accumulated_slashed_` (via `block_slashed`).
+- Phase-1 abort apply: mutates `abort_records_` only. (HISTORICAL: until D13, 2026-09-16, it also mutated `stakes_` and `accumulated_slashed_` via `block_slashed`. The namespaces it touches are a subset of what they were, so the coverage argument is unaffected.)
 - Equivocation slashing (lines 1330-1356): mutates `stakes_`, `registrants_`, `accumulated_slashed_`.
 - Inbound cross-shard receipt admission (lines 1358-1381): mutates `accounts_`, `applied_inbound_receipts_`, `accumulated_inbound_` (via `block_inbound`).
 - A1 supply counter rollup (lines 1390-1395): mutates `accumulated_subsidy_`, `accumulated_inbound_`, `accumulated_outbound_`, `accumulated_slashed_`.
@@ -126,7 +132,7 @@ We prove by exhaustive case analysis over the field universe `S`. For each `Chai
 
 - `accounts_` (chain.hpp:540) — `std::map<std::string, AccountState>`. AccountState has fields `{balance, next_nonce}`. Apply sites: TRANSFER (chain.cpp:742-770, 756-761), REGISTER (chain.cpp:824-833 NEF), STAKE / UNSTAKE (chain.cpp:858-894), DAPP_REGISTER (chain.cpp:1051), DAPP_CALL (chain.cpp:1212-1222), creator subsidy + fees (chain.cpp:1290-1305), inbound receipts (chain.cpp:1367-1372), genesis (chain.cpp:688-691). **Namespace: `a:`** — emitted at `chain.cpp:285-290`. Value-hash is `SHA256(balance ‖ next_nonce)` which binds both fields.
 
-- `stakes_` (chain.hpp:541) — `std::map<std::string, StakeEntry>`. StakeEntry has fields `{locked, unlock_height}`. Apply sites: REGISTER initializes (chain.cpp:809-811), STAKE (chain.cpp:866-867), UNSTAKE (chain.cpp:889-892), DEREGISTER sets `unlock_height` (chain.cpp:848-852), suspension slash (chain.cpp:1322-1327), equivocation slash (chain.cpp:1345-1350), genesis (chain.cpp:704-709). **Namespace: `s:`** — emitted at `chain.cpp:292-297`. Value-hash is `SHA256(locked ‖ unlock_height)` which binds both fields.
+- `stakes_` (chain.hpp:541) — `std::map<std::string, StakeEntry>`. StakeEntry has fields `{locked, unlock_height}`. Apply sites: REGISTER initializes (chain.cpp:809-811), STAKE (chain.cpp:866-867), UNSTAKE (chain.cpp:889-892), DEREGISTER sets `unlock_height` (chain.cpp:848-852). *(HISTORICAL apply sites, both removed 2026-09-16: the Phase-1 abort deduction (D13) and the equivocation forfeiture (D4); removing writers only shrinks the set this namespace must cover, so the coverage argument is unaffected.)* suspension slash (chain.cpp:1322-1327), equivocation slash (chain.cpp:1345-1350), genesis (chain.cpp:704-709). **Namespace: `s:`** — emitted at `chain.cpp:292-297`. Value-hash is `SHA256(locked ‖ unlock_height)` which binds both fields.
 
 - `registrants_` (chain.hpp:542) — `std::map<std::string, RegistryEntry>`. RegistryEntry has fields `{ed_pub, registered_at, active_from, inactive_from, region}`. Apply sites: REGISTER (chain.cpp:798-805), DEREGISTER (chain.cpp:841-846), equivocation slash (chain.cpp:1351-1355), genesis (chain.cpp:694-703). **Namespace: `r:`** — emitted at `chain.cpp:299-308`. Value-hash binds `ed_pub ‖ registered_at ‖ active_from ‖ inactive_from ‖ region_len ‖ region_bytes`.
 

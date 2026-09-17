@@ -1,10 +1,45 @@
-# FA-Apply-11 — AbortEvent apply mechanics (suspension slashing + S-032 cache)
+# FA-Apply-11 — AbortEvent apply mechanics (the S-032 suspension record)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+> **RESTATED 2026-09-17 (sequence step 3c; owner decision D13, DECISION-LOG 2026-09-16 "D13 LANDED").**
+> **The shipped apply rule is: a Phase-1 (`round == 1`) `AbortEvent` increments `abort_records_[d]`
+> (`count++`, `last_block = b.index`) and moves NO stake. A Phase-2 event records nothing and moves
+> nothing.** The `min(suspension_slash_, locked)` deduction was retired; `suspension_slash` /
+> `SUSPENSION_SLASH` stay as an inert, genesis-hash-covered parameter that no apply path reads, and
+> `block_slashed` / `c:accumulated_slashed` keep their shapes as frozen counters.
+>
+> **Theorem status.** **T-A1 (Phase-1 abort slashing) and T-A6 (stake exhaustion) are HISTORICAL** —
+> they describe a deduction that no longer exists. **T-A2, T-A3, T-A4, T-A5, T-A7 and T-A8 survive**,
+> most of them strengthened: T-A2 (Phase-2 no-consequence) and T-A4 (no registry deactivation) are now
+> instances of the general fact that the abort loop's ONLY write is `abort_records_`; T-A3 (the S-032
+> cache update) is the whole of the shipped mechanism and is the positive control of the gate; T-A5
+> (zero-stake domains are still recorded) holds because the record is stake-independent; T-A7 (A1
+> invariance) holds trivially with `Δ = 0` on both sides; T-A8 (determinism) is unaffected.
+>
+> **What the mechanism still does.** The record arms the exponential S-032 suspension window read by
+> `NodeRegistry::build_from_chain` and `Chain::freeze_epoch_committee` through the shared
+> `suspension_active` (`include/determ/chain/eligibility_floor.hpp`), so an aborted domain is excluded
+> from committee selection for `min(BASE_SUSPENSION_BLOCKS · 2^min(count−1, MAX_ABORT_EXPONENT),
+> MAX_SUSPENSION_BLOCKS)` blocks, subject to the S-051 Option-B floor lift. **Exclusion is the entire
+> consequence**; the disincentive is forgone committee income, not a deduction.
+>
+> **Why it was retired, and what it cost to keep.** Against the default `min_stake = 1000` a
+> floor-staked validator dropped to 990 at its FIRST abort, failed the eligibility floor, and S-051
+> lifts suspensions but never floor breaches — one abort ejected an honest validator permanently
+> (ledger S-087, High, CLOSED by D13). The deduction also fell on the ACCUSED rather than the
+> claimants and had no role in the S-011 bound.
+>
+> **The residual this creates.** A cartel can fabricate abort claims against an honest member at zero
+> marginal cost and renew the exclusion every time the window lapses; the honest member's stake is now
+> safe but its seat is not. That is the honest S-011 residual and it lives in
+> `S010S011SybilEconomics.md` §6.7, not here.
+>
+> **Gate.** `determ test-abort-event-apply` (31 assertions, with `suspension_slash` deliberately
+> NON-ZERO so "nothing moves" is the retirement and not a zero-configured deduction); mutants M1–M10
+> RED. The historical text below is retained as the record of the removed mechanism.
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+This document formalizes the apply-layer mechanics for the `AbortEvent` baked into a finalized block. **At HEAD the mechanics are one write.** Each Phase-1 (`round == 1`) abort baked into block `B` increments the S-032 `abort_records_` cache for the aborting domain (`count++`, `last_block = b.index`) — the cache `NodeRegistry::build_from_chain` consumes on snapshot replay or fresh-node bootstrap, and through which `suspension_active` (`include/determ/chain/eligibility_floor.hpp`) excludes the domain from committee selection for an exponentially growing window. **No stake moves**, `block_slashed` is not credited, and a Phase-2 event is neither recorded nor acted on.
 
-This document formalizes the apply-layer mechanics for the `AbortEvent` baked into a finalized block. Each Phase-1 abort baked into block `B` triggers the **proportional suspension-slash** code path at `src/chain/chain.cpp:1782–1797`: it deducts a fixed `suspension_slash_` (= 10 by genesis default; see `include/determ/chain/params.hpp:79`) from the aborting domain's `stakes_[d].locked` field (floored at zero — no negative balances), increments the S-032 `abort_records_` cache (count + last_block) for `build_from_chain` to consume on snapshot replay or fresh-node bootstrap, and contributes the deducted amount to the per-block `block_slashed` accumulator that feeds the A1 unitary-supply closure at `chain.cpp:1864 / 1868`. The slashing is **deliberately proportional, not full forfeit** — Determ distinguishes "validator unavailable on Phase-1" (economic-livelihood penalty, bounded at `SUSPENSION_SLASH` per event) from "validator equivocated" (full stake confiscation + immediate deregistration, FA6 territory). This asymmetry is the design's core economic safety claim.
+**HISTORICAL — the mechanics this document was written against, retired 2026-09-16 by D13.** Each Phase-1 abort also triggered a **proportional suspension-slash**: it deducted a fixed `suspension_slash_` (= 10 by genesis default) from the aborting domain's `stakes_[d].locked` (floored at zero — no negative balances) and contributed the deducted amount to the per-block `block_slashed` accumulator feeding the A1 closure. The slash was **deliberately proportional, not full forfeit** — the design distinguished "validator unavailable on Phase-1" (bounded at `SUSPENSION_SLASH` per event) from "validator equivocated" (full stake confiscation + immediate deregistration, FA6 territory), and that asymmetry was called the design's core economic safety claim. **Both halves of the asymmetry were removed within one day of each other** (D13 and D4, 2026-09-16), so the economic safety claim it named no longer has a mechanism; the surviving claim is exclusion-based and is stated in the banner above.
 
 The proof is mechanical: each AbortEvent in `b.abort_events` is consumed by one loop body (`chain.cpp:1782–1797`) gated by `ae.round != 1` (Phase-2 skip), and the slashing arithmetic is a single `std::min(suspension_slash_, locked)` deduction. The present proof's contribution is to enumerate the eight legitimate consequences of Phase-1 abort apply, prove each preserves I-3 (balance ↔ stake independence) and I-6 (A1 contribution) from FA-Apply, document the Phase-1-only gating rationale (round=2 timing-skew aborts on healthy creators are NOT punished), and pin the test surface against regression.
 
@@ -55,7 +90,7 @@ std::map<std::string, AbortRecord>  abort_records_;
 
 The cache exists because `build_from_chain` (the fresh-node bootstrap path that constructs `Chain` state by replaying every block) would otherwise need to walk every block's `abort_events` list per registered domain to compute the suspension-escalation trigger. The S-032 closure replaces that O(blocks · domains) walk with an O(1) map lookup at the cost of one map write per applied AbortEvent. The cache is consulted by `tools/operator_chain_health.sh` and by the producer's selection-eligibility gate (a domain with `abort_records_[d].count ≥ escalation_threshold` is candidate for governance-level intervention; the mechanics are out of scope here).
 
-### 1.3 The Phase-1-only slashing gate
+### 1.3 The Phase-1-only gate (HISTORICAL from the deduction onward)
 
 Per `chain.cpp:1782–1783`:
 
@@ -70,7 +105,7 @@ The gate is the design's economic-fairness primitive. Phase-1 aborts represent a
 
 Phase-2 aborts, by contrast, represent a committee member whose Phase-1 commit was gathered but whose Phase-2 reveal did not arrive in the BFT escalation window. This can be caused by **healthy creator timing skew** (NTP drift, packet loss at the reveal-broadcast moment, brief CPU stall) and is not economically punished — the chain still made progress via BFT, and slashing here would create false-positive risk for legitimate operators with marginal connectivity. The Phase-1 / Phase-2 distinction is also mirrored at the abort-event channel itself (`registry.cpp`'s suspension policy uses the same round-1-only filter for downstream escalation).
 
-### 1.4 The proportional-penalty design
+### 1.4 The proportional-penalty design — HISTORICAL (retired by D13)
 
 `suspension_slash_` is an instance-state field (`chain.hpp:849`) with a build-time default of 10 (`params.hpp:79`). It can be mutated via the A5 PARAM_CHANGE multisig (the `SUSPENSION_SLASH` key is on the whitelist; see `Governance.md` FA10). The genesis default of 10 is calibrated against `MIN_STAKE = 1000` (10 × 100 = 1000): a minimally-staked validator is exited from selection eligibility after exactly 100 Phase-1 aborts. The arithmetic is intentional — the chain's "stake-vs-suspension" relationship is fully observable at any point in time as `count` from the S-032 cache, and a validator can compute their own remaining headroom without RPC roundtrips.
 
@@ -80,7 +115,7 @@ The asymmetry vs. equivocation full-forfeit is the key economic-soundness claim:
 
 ## 2. Theorems
 
-### T-A1 — Phase-1 abort slashing
+### T-A1 — Phase-1 abort slashing (HISTORICAL — the deduction was retired by D13, 2026-09-16)
 
 **Statement.** For every block `B` containing an AbortEvent `ae ∈ B.abort_events` with `ae.round == 1`, let `d := ae.aborting_node`. If `stakes_` contains `d` with `state.stakes_[d].locked > 0`, then apply produces the deltas:
 
@@ -99,7 +134,7 @@ with no other state mutation. Specifically: `accounts_[d].balance` is **unchange
 
 **Test witness.** `tools/test_abort_event_apply.sh` (`determ test-abort-event-apply`) — assertion `Phase-1 abort: alice stake 500 - SUSPENSION_SLASH(10) = 490` at `src/main.cpp:15544` exercises T-A1 directly; assertions `A1: accumulated_slashed bumped by SUSPENSION_SLASH=10` + `A1: live supply decreased by exactly the slash` + `A1 invariant: expected == live after slash` at lines 15671–15676 exercise the A1 closure.
 
-### T-A2 — Phase-2 abort no-slash
+### T-A2 — Phase-2 abort no-consequence (holds; at HEAD a Phase-2 event is not even recorded)
 
 **Statement.** For every block `B` containing an AbortEvent `ae ∈ B.abort_events` with `ae.round == 2`, apply produces NO state mutation for `ae` — no stake debit, no abort_records cache update, no accumulated_slashed contribution. `Δstakes_[d].locked = 0`, `Δabort_records_[d].count = 0`, `Δaccumulated_slashed_ = 0` from this event.
 
@@ -148,7 +183,7 @@ with no other state mutation. The cache update is decoupled from the stake deduc
 
 **Test witness.** `tools/test_abort_event_apply.sh` — assertions `no-stake abort: no stake change (sender has none)` + `no-stake abort: records incremented (S-032 cache contract)` at `src/main.cpp:15616–15619` exercise T-A5 directly with `aborting_node="bogus_no_stake"`.
 
-### T-A6 — Stake exhaustion
+### T-A6 — Stake exhaustion (HISTORICAL — there is no deduction to exhaust a stake)
 
 **Statement.** For every domain `d` and every sequence of `n ≥ 1` Phase-1 AbortEvents at consecutive blocks targeting `d`, if `n ≥ ⌈stake₀ / suspension_slash_⌉` (where `stake₀` is `d`'s `locked` value before the first abort), then after applying all `n` events: `stakes_[d].locked == 0`, `accumulated_slashed_` has been incremented by exactly `stake₀` (the initial locked balance is fully drained), and `abort_records_[d].count == n` (the cache keeps tracking past the exhaustion boundary). Subsequent Phase-1 aborts on `d` produce zero stake deduction (covered by T-A5) but continue to increment `abort_records_[d].count`.
 
@@ -158,9 +193,9 @@ with no other state mutation. The cache update is decoupled from the stake deduc
 
 **Test witness.** `tools/test_abort_event_apply.sh` — the "Stake exhaustion (no negative)" scenario at `src/main.cpp:15627–15650` runs 51 Phase-1 aborts on stake=500 / suspension_slash=10 (51 × 10 = 510 > 500). Assertions `exhausted stake: 51 aborts drains stake to 0 (no negative)` + `exhausted stake: abort_records.count == 51 (cache still tracks)` confirm both the flooring (locked ≥ 0) and the cache-keeps-tracking property (count = 51 after exhaustion).
 
-### T-A7 — A1 invariance per Phase-1 abort
+### T-A7 — A1 invariance per Phase-1 abort (holds trivially: Δ = 0 on both sides)
 
-**Statement.** For every block `B` containing an AbortEvent `ae ∈ B.abort_events` with `ae.round == 1` and `d := ae.aborting_node`, the per-block `block_slashed` accumulator increases by exactly the deducted amount: `Δblock_slashed = min(suspension_slash_, stakes_[d].locked₀)`. The block-tail A1 closure at `chain.cpp:1864 / 1868` then composes this into `accumulated_slashed_ += block_slashed`, and the unitary-supply invariant `actual_total == expected_total` (where the `expected_total()` helper at `include/determ/chain/chain.hpp:590` deducts `accumulated_slashed_` from `genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ − accumulated_outbound_ − accumulated_shielded_`) continues to hold.
+**Statement — AT HEAD: `Δblock_slashed = 0` and `Δlive_total_supply = 0 = Δexpected_total`, so A1 is preserved trivially** (D13, 2026-09-16; gate `determ test-abort-event-apply` asserts the accumulator stays 0 with a NON-ZERO configured `suspension_slash`, so the assertion is the retirement and not a zero-configured deduction). **HISTORICAL statement:** for every block `B` containing an AbortEvent `ae ∈ B.abort_events` with `ae.round == 1` and `d := ae.aborting_node`, the per-block `block_slashed` accumulator increased by exactly the deducted amount: `Δblock_slashed = min(suspension_slash_, stakes_[d].locked₀)`. The block-tail A1 closure at `chain.cpp:1864 / 1868` then composes this into `accumulated_slashed_ += block_slashed`, and the unitary-supply invariant `actual_total == expected_total` (where the `expected_total()` helper at `include/determ/chain/chain.hpp:590` deducts `accumulated_slashed_` from `genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ − accumulated_outbound_ − accumulated_shielded_`) continues to hold.
 
 *Proof sketch.* By inspection of `chain.cpp:1796`: `block_slashed += deduct;`. The deduct value comes from line 1793: `deduct = std::min(suspension_slash_, sit->second.locked)`. The per-block delta booking at lines 1862–1864 then composes per-event slashes into the per-block sum, and line 1864 (`accumulated_slashed_ += block_slashed`) propagates to the chain-wide accumulator. The A1 closure at lines 1866–1868 evaluates `expected = expected_total()` and `actual = live_total_supply()` — the live supply counts balances + stakes (every value not yet slashed), and `expected_total()` (`include/determ/chain/chain.hpp:590`) subtracts `accumulated_slashed_` from the supply ceiling (`genesis_total_ + accumulated_subsidy_ + accumulated_inbound_ − accumulated_outbound_ − accumulated_shielded_`). If the slash arithmetic at line 1795 (which debits `stakes_[d].locked`) matches the accumulator at line 1796, the difference between expected and actual is exactly zero. Any mismatch would throw at line 1887 (the `unitary-balance invariant violated` runtime_error with the diagnostic breakdown). The per-event A1 contribution is thus the slash-deduct amount: `accumulated_slashed_ += min(suspension_slash_, locked₀)` per Phase-1 event, with the boundary case `locked₀ < suspension_slash_` correctly contributing `locked₀` (not `suspension_slash_`) — the `std::min` is the per-event A1-correctness primitive. ∎
 
@@ -180,7 +215,14 @@ with no other state mutation. The cache update is decoupled from the stake deduc
 
 ---
 
-## 3. Abort vs equivocation slashing
+## 3. Abort vs equivocation — both channels, both consequence-free since 2026-09-16
+
+> Since D13 the abort channel records a suspension and moves no stake, and since D4 the equivocation
+> channel moves nothing at all (`EquivocationSlashingApply.md` T-E0). The contrast this section draws —
+> proportional-and-repeatable vs total-and-terminal — is HISTORICAL; at HEAD the real contrast is
+> *exclusion for a bounded window* (abort) vs *nothing* (equivocation).
+
+### 3.1 HISTORICAL — Abort vs equivocation slashing
 
 The chain has two on-chain "slashing" channels with deliberately asymmetric semantics. Pinning the asymmetry explicitly is the core economic-soundness primitive:
 

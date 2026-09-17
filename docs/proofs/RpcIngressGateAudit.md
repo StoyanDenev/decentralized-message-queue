@@ -1,7 +1,5 @@
 # RPC / Peer-Gossip Ingress Gate-Gap Audit
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 **Status:** discovery + adversarial-verification complete (2026-07-23). **Third register** after
 [`ProofClaimGateTraceability.md`](ProofClaimGateTraceability.md) (docs-claim traceability) and
 [`ConsensusValidatorGateAudit.md`](ConsensusValidatorGateAudit.md) (block-acceptance `validate()`/apply,
@@ -67,9 +65,12 @@ digests are same-height**. The digests are opaque `Hash`es; `ev.block_index` (fr
 epoch/dedup, not the digests. Since `compute_block_digest` binds `b.index` (producer.cpp:694), a validator
 V's NORMAL per-height signatures over two DIFFERENT heights are each distinct-and-valid. An attacker harvests
 `(compute_block_digest(block_H1), block_H1.creator_block_sigs[V])` and the H2 pair from public finalized
-blocks and submits them as evidence; the predicate ACCEPTS non-equivocation. At apply
-(`chain.cpp:1813-1819`) V's ENTIRE locked stake is forfeited and V deregistered — a **remote unauthenticated
-forge-a-slash** of an honest validator's full stake. The sibling `on_abort_event` DOES bind
+blocks and submits them as evidence; the predicate ACCEPTS non-equivocation. At apply, AS OF THIS AUDIT (2026-08-12), V's ENTIRE locked stake was
+forfeited and V deregistered — a **remote unauthenticated forge-a-slash** of an honest validator's full stake.
+(That apply-side consequence was REMOVED on 2026-09-16 by owner decision D4 — `Chain::apply_transactions`
+reads nothing from `b.equivocation_events`. The *acceptance* half of this finding was the part the S-052
+fix had to close and did close; the harm the finding measured is separately gone. See the CLOSURE and
+RESIDUAL blocks below.) The sibling `on_abort_event` DOES bind
 `block_index`/`round`/`prev_hash`; the equivocation path is the anomaly. In MUTUAL_DISTRUST every committee
 member signs every block, so every validator's cross-height signatures are harvestable; the
 `(equivocator, block_index)` dedup is bypassed by varying the free-text `ev.block_index`.
@@ -110,8 +111,16 @@ including the cross-height REJECT, an openings-agree-but-≠-`block_index` REJEC
 height assert; weaken it to `index_a == index_b`) each RED on exactly their arm.
 
 **Residual, NOT closed:** same-height cross-round honest double-signing (an abort re-round changes the
-body at one height) still satisfies the predicate. Strictly narrower than the closed hole, still open,
-owner review needed — see `EquivocationSlashing.md` §2 Case (c).
+body at one height) still satisfies the predicate. Strictly narrower than the closed hole, still open —
+see `EquivocationSlashing.md` §2 Case (c). **Re-derived 2026-09-17 (step 3c):** owner decision D4
+(2026-09-16) settles the review this line asked for. No L1 verdict is taken over two signed openings at
+all — a same-height pair, cross-round or not, is L2 EVIDENCE requiring corroboration (R-1, DECIDED). The
+residual's HARM is therefore zero on L1 (an honest validator accepted by the predicate loses nothing) and
+its remaining cost is EVIDENCE QUALITY: the on-chain record can name an honest validator, and that record
+is the input to the L2 bond policy (D22). The obligation this residual now carries is on D22 — the L2
+policy must not treat an L1 record as a verdict — not on the L1 predicate. What is still owed at L1 is
+only the step-3b per-block cap + in-block duplicate rejection, because deregistration was the record's
+only limiter.
 
 ### 2b. INGRESS-beacon-header-empty-committee-vacuous-kofk — ✅ **CLOSED** (S-053) — was value_rank 1
 

@@ -1,8 +1,14 @@
 # FA-Apply-17 — Cross-shard aggregate supply conservation (K-shard unitary-supply identity)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 This document formalizes the **K-shard aggregate supply-conservation theorem**: across a full cross-shard transfer cycle on a set of `K` shards, the total accounted supply is conserved. Concretely, for any reachable multi-shard state,
 
@@ -84,7 +90,7 @@ The complete set of supply-bearing chain-state fields — the fields that contri
 | 3 | `genesis_total_` | `uint64_t` | baseline (Σ initial balances + Σ initial stakes at block 0) | `chain.cpp:910–934`, `chain.hpp:889` |
 | 4 | `accumulated_subsidy_` | `uint64_t` | block-subsidy minted to creators (E1/E3/E4); `+` term | `chain.cpp:1860`, `chain.hpp:890` |
 | 5 | `accumulated_inbound_` | `uint64_t` | cross-shard receipt value credited *into* this shard; `+` term | `chain.cpp:1862`, `chain.hpp:892` |
-| 6 | `accumulated_slashed_` | `uint64_t` | suspension + equivocation forfeiture; `−` term | `chain.cpp:1864`, `chain.hpp:891` |
+| 6 | `accumulated_slashed_` | `uint64_t` | `−` term; **no producer since 2026-09-16** (D4 + D13) — frozen at 0 on any chain built from genesis | `Chain::apply_transactions` (the apply-tail fold), `chain.hpp` |
 | 7 | `accumulated_outbound_` | `uint64_t` | cross-shard `TRANSFER` value that *left* this shard; `−` term | `chain.cpp:1863`, `chain.hpp:893` |
 | 8 | `accumulated_shielded_` | `uint64_t` | §3.22 value moved into the confidential pool (SHIELD `+A` / UNSHIELD `−A` / CONFIDENTIAL_TRANSFER `−fee`); `−` term; **single-shard-local** (§5 lim. 7) | `chain.cpp:1037`/`1081`/`1172`, `chain.hpp:898` |
 
@@ -144,8 +150,10 @@ XS-1 consumes the per-shard A1 invariant as a hypothesis. That hypothesis is FA-
 | Inbound receipt (dest) | `+a` (recipient `+a`) | `accumulated_inbound += a` | `0` (`+in` rises by `a`) | `chain.cpp:1363–1381` |
 | STAKE | `0` (balance → locked, both in `live`) | none | `0` | `chain.cpp` STAKE arm |
 | UNSTAKE (post-unlock) | `0` (locked → balance, both in `live`) | none | `0` | `chain.cpp` UNSTAKE arm |
-| Suspension slash (Phase-1 abort) | `−d` (locked `−d`) | `accumulated_slashed += d` | `0` (`−slashed` rises by `d`) | `chain.cpp:1313–1328` |
-| Equivocation slash | `−L` (locked `−L`, full forfeit) | `accumulated_slashed += L` | `0` | `chain.cpp:1344–1356` |
+| Phase-1 abort — HISTORICAL, retired D13 | `−d` (locked `−d`) | `accumulated_slashed += d` | `0` (`−slashed` rises by `d`) | removed from `Chain::apply_transactions` |
+| Equivocation — HISTORICAL, removed D4 | `−L` (locked `−L`, full forfeit) | `accumulated_slashed += L` | `0` | removed from `Chain::apply_transactions` |
+| Phase-1 abort (at HEAD) | `0` | `0` | `0` | the abort loop writes `abort_records_` only |
+| Equivocation (at HEAD) | `0` | `0` | `0` | apply reads nothing from `b.equivocation_events` |
 | Subsidy mint | `+s` (creators `+s`) | `accumulated_subsidy += s` | `0` (`+subsidy` rises by `s`) | `chain.cpp:1859–1861` |
 | Fee redistribution | `0` (sender `−f` already counted, creator `+f`) | none | `0` | `chain.cpp` creator-distribution arm |
 | SHIELD (§3.22, single-shard) | `−A` (sender `−(A+f)`, fee `→` creators `+f`) | `accumulated_shielded += A` | `0` (`−shielded` drops by `A`) | `chain.cpp:1037` |

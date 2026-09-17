@@ -1,14 +1,10 @@
 # S-010 + S-011 — Sybil economics under operator stake-pricing
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document formalizes the joint closure of two High-severity audit findings — S-010 (Sybil via under-priced `min_stake`) and S-011 (abort-claim cartel via M-1 quorum) — through a single economic argument: the operator-facing stake-pricing formula in `docs/SECURITY.md` §S-010 prices a Sybil majority of `N_pool` at `⌈(N_pool / 2) + 1⌉ × min_stake`, and the FA6 + FA-Apply-10 equivocation-slashing composition bounds the cartel attack against an honest committee member to "per-attempt cost ≥ `(M-1) × min_stake`, full-stake forfeiture on follow-through." For any reasonable choice of `min_stake` relative to the chain's exogenous value-at-risk, the attack costs more than its payoff.
 
 The proof is structural and arithmetic. It does not introduce new code paths — the closure is operator policy plus the registry-eligibility predicate at `src/node/registry.cpp:63` (the `chain.stake(domain) < threshold ⇒ ineligible` gate) plus the equivocation forfeit at `src/chain/chain.cpp:1344-1356`. The threat-model output is a concrete dollar-cost-of-attack function operators can plug into deployment planning.
 
-**Companion documents:** `Preliminaries.md` (F0) for `N`, `K`, `V`, committee-selection notation; `EquivocationSlashing.md` (FA6) for slashing soundness (T-6: honest validators never falsely slashed); `EquivocationSlashingApply.md` (FA-Apply-10) for apply-side full-forfeiture mechanics; `EconomicSoundness.md` (FA11) for the A1 supply invariant under stake-and-slash transitions; `Censorship.md` (FA2) for the K-conjunction censorship bound that survives even a successful cartel; `SECURITY.md` §S-010 and §S-011 for the audit-side closure records and the operator calculator.
+**Companion documents:** `Preliminaries.md` (F0) for `N`, `K`, `V`, committee-selection notation; `EquivocationSlashing.md` (FA6) for the no-false-accusation bound (T-6) and its H3 boundary; `EquivocationSlashingApply.md` (FA-Apply-10) for the apply-side statement that holds at HEAD (T-E0, state neutrality — the full-forfeiture mechanics are historical); `EconomicSoundness.md` (FA11) for the A1 supply invariant under stake-and-slash transitions; `Censorship.md` (FA2) for the K-conjunction censorship bound that survives even a successful cartel; `SECURITY.md` §S-010 and §S-011 for the audit-side closure records and the operator calculator.
 
 ---
 
@@ -16,7 +12,7 @@ The proof is structural and arithmetic. It does not introduce new code paths —
 
 **Setup.** Determ admits validators to the consensus pool via one of two `InclusionModel` values (`include/determ/chain/genesis.hpp:36-39`):
 
-- `STAKE_INCLUSION` (default, `min_stake = 1000` default): a domain enters the eligible pool only when `stakes_[domain].locked ≥ min_stake` (gate at `src/node/registry.cpp:57-63`). Misbehavior is disincentivized by stake forfeit (suspension slash + full-stake forfeit on equivocation).
+- `STAKE_INCLUSION` (default, `min_stake = 1000` default): a domain enters the eligible pool only when `stakes_[domain].locked ≥ min_stake` (gate at `src/node/registry.cpp:57-63`). Misbehavior was disincentivized by stake forfeit (the Phase-1 abort deduction + full-stake forfeit on equivocation); **both were retired on 2026-09-16 (D13 and D4)** and the only surviving on-chain response to misbehaviour is the S-032 suspension WINDOW, which moves no stake. See §6.7.
 - `DOMAIN_INCLUSION` (`min_stake = 0`): the stake gate is skipped; admission is by registering with a domain name (e.g., a DNS-anchored identity, with the genesis-level multisig acting as the trust root over the initial `initial_creators` list). Misbehavior is disincentivized by registry deregistration (equivocator's `inactive_from` is set to the next block per `chain.cpp:1351-1355`; re-entry requires a fresh registration under whatever off-chain Sybil-resistance the operator chose).
 
 Under `STAKE_INCLUSION`, committee selection is uniform-random over the eligible pool: `select_m_creators(random_state, N_pool, K)` in `src/crypto/random.cpp:70-100` returns a uniformly-distributed K-subset of `[0, N_pool)` under the random-oracle assumption on the seed (proven in `Liveness.md` L4 and `Censorship.md` T-2.1). The selection rule is **not** stake-weighted — each eligible domain has identical per-round selection probability `K / N_pool`.
@@ -33,7 +29,9 @@ $$
 
 The value is denominated in chain tokens; under an exogenous market price `p_{token}` (in USD-per-token), the dollar-cost-of-attack is `sybil_cost × p_token`. No additional operational cost (compute, bandwidth, custody overhead) materially raises this floor.
 
-**Theorem T-2 (Per-operator stake cost is unrecoverable on attack).** Each validator pays `min_stake` to lock into `stakes_[v].locked` via the `STAKE` tx (apply branch at `chain.cpp:858-871`). The lock-up source is the validator's account balance, which itself derives from either (a) `GenesisAllocation.balance` at genesis (`chain.cpp:706` initial-stake apply) or (b) subsidy + fee credits earned by being on prior committees. The lock-up is held until either (i) UNSTAKE plus `unstake_delay` (`chain.cpp:851`), or (ii) equivocation slash (`chain.cpp:1344-1356`, full forfeit). Under attack-and-equivocate, path (ii) fires for every cartel member, and `Adv`'s total upfront cost `N_attacker × min_stake` is permanently unrecoverable.
+**Theorem T-2 (Per-operator stake cost) — CORRECTED 2026-09-17: it is RECOVERABLE.** Each validator pays `min_stake` to lock into `stakes_[v].locked` via the `STAKE` tx (`Chain::apply_transactions`, the STAKE arm). The lock-up source is the validator's account balance, which itself derives from either (a) `GenesisAllocation.balance` at genesis or (b) subsidy + fee credits earned by being on prior committees. **There is now exactly ONE exit: UNSTAKE plus `unstake_delay`.** The second exit this theorem was named for — "(ii) equivocation slash, full forfeit" — was removed on 2026-09-16 (D4), and the third — the Phase-1 abort deduction — was retired the same day (D13). No apply path reduces `stakes_[v].locked` below its staked value.
+
+The theorem's title claim ("unrecoverable on attack") is therefore **FALSE at HEAD** and is withdrawn: an attacker that has finished attacking unstakes and walks away whole after `unstake_delay`. What survives is the *timing* half — capital is illiquid for `unstake_delay` blocks — which is a real but much weaker cost and is what T-1 and T-3 should be read as pricing. The consequence for the S-010 formula is in §6.1 and §6.7.
 
 **Theorem T-3 (Sybil-cost-vs-token-value relation).** The Sybil-cost is denominated in tokens. For a chain with exogenous market value, the attack-economics reduce to capital lockup:
 
@@ -49,7 +47,61 @@ $$
 
 A `safety_margin ≥ 1` makes the attack non-profitable in expectation; `≥ 10` is the operator default to absorb modeling slack (estimation error on `VaR`, attacker risk-tolerance, opportunity-cost of the locked capital).
 
-**Theorem T-4 (Cartel defense via slashing, S-011 closure).** Even if `Adv` obtains `M-1` committee members via Sybil (the S-011 attack form), one of three outcomes follows:
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> **T-4 as originally stated is FALSE and is replaced by T-4-R below.** Its three outcomes rested on
+> two L1 costs that no longer exist: the equivocation forfeiture (removed 2026-09-16, D4 — apply reads
+> nothing from `b.equivocation_events`) and the Phase-1 abort stake deduction (retired 2026-09-16,
+> D13 — an abort records the S-032 suspension and moves no stake). **T-1, T-2, T-3, T-5 and T-6 are
+> re-checked and stand** except for the one clause of T-2 identified below; T-1's Sybil floor is a
+> *capital* bound and consumes no penalty term.
+> The honest residual replacing T-4 is §6.7. The drafted residual this re-derivation supersedes was
+> itself wrong in three named places (DECISION-LOG 2026-08-13); each is addressed in §6.7.
+
+**Theorem T-4-R (What an M−1 cartel costs and earns, post-D4/post-D13 — S-011 restated).** Let `Adv`
+control `M−1` committee members at height `h` under `STAKE_INCLUSION`. Over one round, the protocol
+imposes on `Adv`:
+
+| Channel | Pre-2026-09-16 | At HEAD |
+|---|---|---|
+| Fabricated abort claim against the honest member | claimants pay nothing; the ACCUSED loses `min(SUSPENSION_SLASH, locked)` | claimants pay nothing; the accused loses nothing (D13). An `AbortClaim` is a gossip message, not a transaction — **no fee, no nonce, no on-chain cost at all** |
+| Equivocation by a cartel member | entire locked stake forfeited + deregistered | **nothing** (D4). The event is recorded and applied as a no-op (`EquivocationSlashingApply.md` T-E0) |
+| Capital | `(M−1) · min_stake` locked, **destroyed** on either of the above | `(M−1) · min_stake` locked, **recoverable** — UNSTAKE + `unstake_delay` is the only exit and no path zeroes `locked` any more |
+
+so the cartel's **marginal per-round cost is the opportunity cost of held capital plus bandwidth**:
+
+```
+cost_per_round  =  (M−1) · min_stake · r      (r = per-block risk-free rate; no principal is at risk)
+```
+
+Against it, the cartel's **per-round revenue** is the creator payout it collects for being the
+committee. `Chain::apply_transactions` splits `total_distributed = total_fees + subsidy_this_block`
+evenly across `b.creators`, so:
+
+```
+revenue_per_round  =  (|cartel ∩ committee| / K) · (block_subsidy + fees)
+```
+
+(`Chain::apply_transactions` computes `per_creator = total_distributed / m` over `b.creators`, so the
+share is by seat count, not by stake. The extreme case is `N_pool == K`: with the lone honest member
+suspended the committee is the cartel and the share is 1. For a larger pool the share is the cartel's
+expected seat fraction, which is what T-1 prices — but it is positive in every case.)
+
+**Corollary (the claim that fails).** `SECURITY.md` §S-011 concluded "the per-round attack cost
+exceeds the chain's per-round subsidy throughput — economic infeasibility". At HEAD,
+`cost_per_round → 0` while `revenue_per_round > 0` for any chain with a non-zero subsidy or fee
+flow. **The inequality is reversed: the sustained cartel is not merely affordable, it is paid.**
+The "economic infeasibility" claim of the S-011 closure does not hold — in any configuration with
+a positive block subsidy, not only in the weak ones. What remains is T-1's one-time capital barrier
+to *acquiring* `M−1` seats, which is a barrier to entry and not a per-round cost, and is fully
+recoverable on exit.
+
+---
+
+**HISTORICAL — T-4 as it stood before 2026-09-16.** Retained because §4.4 proves it and because the
+three-outcome decomposition is still the right frame; only the costs attached to the outcomes were
+real. Do not cite.
+
+**Theorem T-4 (Cartel defense via slashing, S-011 closure) — HISTORICAL, FALSE AT HEAD.** Even if `Adv` obtains `M-1` committee members via Sybil (the S-011 attack form), one of three outcomes follows:
 
 - **(O1) `Adv` does not equivocate.** The cartel can suspend the lone honest member via fabricated abort claims, but only for a finite suspension window (exponential backoff per `BASE_SUSPENSION_BLOCKS × 2^k` at `registry.cpp:47-50`). The honest member rejoins after the window completes. Per-round cost: opportunity cost of locked stake and the abort-claim broadcast bandwidth; no slashing fires. Damage: bounded to "honest member off-committee for `O(2^k × BASE_SUSPENSION_BLOCKS)` blocks, where `k` is the count of consecutive abort hits."
 - **(O2) `Adv` equivocates.** Signing two distinct `compute_block_digest` (or two distinct `make_contrib_commitment`) under the same registered Ed25519 key, at the same height, satisfies V11 (Preliminaries §5 and `EquivocationSlashing.md` T-6). The next block carrying the resulting `EquivocationEvent` triggers `apply_transactions`'s equivocation branch: every cartel member's `stakes_[v].locked` is zeroed (full forfeit, FA-Apply-10 T-E1) and `registrants_[v].inactive_from = h + 1` (deregistered, T-E2). Total realized loss: `(M-1) × min_stake`. The cartel cannot recover this stake.
@@ -98,7 +150,7 @@ The pre-closure S-011 audit observation was that abort claims advance via `M-1` 
 The composition argument:
 
 - The S-010 stake-pricing formula prices `Adv`'s upfront cost to control `M-1` committee positions at `(M-1) × min_stake`.
-- The equivocation-slashing branch at `chain.cpp:1344-1356` and the V11 validator predicate at `validator.cpp` ensure that if `Adv` follows through with conflicting signatures, the full stake is forfeit per FA-Apply-10 T-E1.
+- **HISTORICAL (removed 2026-09-16, D4 — apply reads nothing from `b.equivocation_events`):** the equivocation-slashing branch and the V11 validator predicate at `validator.cpp` ensured that if `Adv` followed through with conflicting signatures, the full stake is forfeit per FA-Apply-10 T-E1.
 - The censorship bound `Censorship.md` T-2.1 ensures the cartel cannot suppress transactions even with `M-1` control — the K-conjunction guarantee requires `K` consecutive all-attacker committees, which is the same Sybil-cost regime.
 
 ### 2.3 STAKE_INCLUSION vs DOMAIN_INCLUSION
@@ -154,7 +206,12 @@ Five structural properties:
 4. The `at_index >= r.inactive_from` filter excludes deregistered domains (DEREGISTER tx at `chain.cpp:844-846` sets `inactive_from = height + derive_delay(...)`).
 5. `is_suspended(domain)` filters domains under exponential-backoff suspension from prior aborts (`registry.cpp:43-51`).
 
-### 3.2 The stake locking and forfeit paths
+### 3.2 The stake locking and forfeit paths — HISTORICAL from the forfeit half onward
+
+> **2026-09-17.** The STAKE / UNSTAKE listings below are current. **The forfeit listings are not**: the
+> equivocation branch was deleted (D4) and the Phase-1 abort deduction retired (D13) on 2026-09-16, so
+> `stakes_[v].locked` has exactly one exit — UNSTAKE after `unstake_delay`. The code blocks are retained
+> to show what was removed.
 
 ```cpp
 // src/chain/chain.cpp:858-871 (STAKE apply branch)
@@ -189,7 +246,7 @@ for (auto& ev : b.equivocation_events) {
 }
 ```
 
-The STAKE branch debits the sender's balance and credits `stakes_[tx.from].locked`. The forfeit branch zeroes the entire locked amount (`block_slashed += sit->second.locked; sit->second.locked = 0`) — there is no partial-slash, no slash-amount field on `EquivocationEvent`. This is the full-stake-forfeiture property FA-Apply-10 T-E1 formalizes; the S-011 cartel-defense composition leans on it.
+The STAKE branch debits the sender's balance and credits `stakes_[tx.from].locked`. The forfeit branch zeroes the entire locked amount (`block_slashed += sit->second.locked; sit->second.locked = 0`) — there is no partial-slash, no slash-amount field on `EquivocationEvent`. This was the full-stake-forfeiture property FA-Apply-10 T-E1 formalizes; the S-011 cartel-defense composition leans on it.
 
 ### 3.3 Committee selection (uniform-random under ROM)
 
@@ -251,13 +308,13 @@ Each of `Adv`'s `N_attacker` domains must:
 
 The minimum capital lockup per controlled domain is `min_stake`. (Locking more does not buy more selection probability per §3.3.) So `Adv`'s minimum total lockup is `N_attacker × min_stake = ⌈(N_pool/2) + 1⌉ × min_stake`. ∎
 
-### 4.2 Proof of T-2 (per-operator stake cost unrecoverable on attack)
+### 4.2 Proof of T-2 (per-operator stake cost unrecoverable on attack) — HISTORICAL; see the corrected T-2 in §1
 
-Each `Adv`-controlled domain `v` has `stakes_[v].locked ≥ min_stake` (T-1). The locked stake exits via one of three paths:
+Each `Adv`-controlled domain `v` has `stakes_[v].locked ≥ min_stake` (T-1). The locked stake exits via one of three paths — **at HEAD, only path (i) exists**; (ii) was removed by D4 and (iii) retired by D13, both on 2026-09-16:
 
 - **Path (i): UNSTAKE.** Apply branch at `chain.cpp:873-894`. The branch refuses to decrement `locked` if `height < sit->second.unlock_height` (the `unstake_delay` window, default 1000 blocks per `GenesisConfig::unstake_delay`). Successful UNSTAKE returns the locked amount to the sender's account balance.
-- **Path (ii): Equivocation forfeit.** Apply branch at `chain.cpp:1344-1356`. `block_slashed += sit->second.locked; sit->second.locked = 0;` — full forfeit, no refund.
-- **Path (iii): Suspension slash.** A claimed-and-quorum'd Phase-1 abort triggers a `SUSPENSION_SLASH`-sized debit per `AbortEventApply.md` FA-Apply (separate from equivocation forfeit). This is small (default 10 tokens) and does not approach `min_stake` for any non-degenerate `min_stake` choice.
+- **Path (ii): Equivocation forfeit — REMOVED 2026-09-16 (D4).** Was: `block_slashed += sit->second.locked; sit->second.locked = 0;` — full forfeit, no refund. Apply now reads nothing from `b.equivocation_events`.
+- **Path (iii): Suspension slash — RETIRED 2026-09-16 (D13).** Was: a claimed-and-quorum'd Phase-1 abort triggered a `SUSPENSION_SLASH`-sized debit on the ACCUSED (default 10 tokens — enough to push a floor-staked validator under `min_stake` at its first abort, which is why it was retired; ledger S-087). The abort now records the S-032 suspension window and moves no stake.
 
 Under attack-and-equivocate, path (ii) fires. The forfeit is full: `min_stake` for each domain that signed the equivocation. Under attack-without-equivocate (S-011 outcomes (O1)/(O3)), path (i) is the recovery route, but it cannot complete instantaneously — the `unstake_delay` window plus the validator-enforced refusal in `chain.cpp:881` impose a multi-block lag, during which any equivocation detected against `Adv` triggers path (ii) on what was still-locked stake. Thus `Adv`'s `N_attacker × min_stake` is unrecoverable whenever `Adv` follows through on the natural next step of using cartel control (equivocate to fork the chain or double-spend). ∎
 
@@ -273,7 +330,10 @@ $$
 
 The operator-chosen `safety_margin` is the ratio of the two; `safety_margin = 1` is the break-even point; `safety_margin = 10` is the operator default (per `SECURITY.md` §S-010, which justifies it as absorbing modeling slack: `VaR` is estimated, `Adv` may be risk-tolerant, opportunity-cost of locked capital varies). ∎
 
-### 4.4 Proof of T-4 (cartel defense via slashing)
+### 4.4 Proof of T-4 (cartel defense via slashing) — HISTORICAL
+
+> The proof below is sound against the PRE-2026-09-16 apply path and is retained as the record. Every
+> cost it computes is zero at HEAD; see T-4-R in §1 and the residual in §6.7.
 
 Fix `Adv` controlling exactly `M-1` committee members at some height `h` (the S-011 worst case). The cartel's options:
 
@@ -327,7 +387,7 @@ The closure covers four canonical adversary profiles:
 
 **Well-funded attacker.** Owns substantial off-chain capital, willing to lock `⌈(N_pool/2)+1⌉ × min_stake × p_token` USD to take majority control. Defeated by T-1 + T-3 when operator-chosen `min_stake` yields a dollar-cost-of-attack above the chain's `VaR × safety_margin`. The classic example is a well-funded cryptocurrency exchange or whale; the model assumes they pursue rational profit-maximizing strategies, not deterrence-resistant ideological attacks.
 
-**Coordinated cartel.** Multiple distinct entities cooperating to acquire `M-1` committee positions and run S-011 abort-claim attacks. Defeated by T-4: O1 (bounded suspension damage), O2 (full stake forfeiture on equivocation follow-through), O3 (Sybil-cost floor applies for sustained control). Each member's stake is independently slashable; the cartel cannot externalize its capital lockup. Coordination cost (off-chain communication, trust between cartel members not to defect by reporting equivocations) further raises the effective attack barrier.
+**Coordinated cartel.** Multiple distinct entities cooperating to acquire `M-1` committee positions and run S-011 abort-claim attacks. **NOT defeated** — the historical T-4 answer (O1 bounded suspension damage, O2 full stake forfeiture on equivocation follow-through, O3 Sybil-cost floor for sustained control) lost both of its cost terms on 2026-09-16; see T-4-R (§1) and the residual (§6.7). What still holds against this adversary is the S-010 entry barrier plus the censorship and MD-safety bounds, neither of which is economic. Each member's stake is independently slashable; the cartel cannot externalize its capital lockup. Coordination cost (off-chain communication, trust between cartel members not to defect by reporting equivocations) further raises the effective attack barrier.
 
 **Sybil farm.** Single attacker creating thousands of pseudonymously-distinct registered domains. Distinguished from the well-funded attacker only by the lack of overt coordination — the protocol cannot distinguish "one attacker with thousand domains" from "thousand independent operators." T-1 makes them equivalent: the attacker pays `N_attacker × min_stake` to register each domain. The S-010 closure is therefore robust against this profile: Sybil-resistance comes from the per-domain capital lockup, not from any identity-verification step.
 
@@ -379,7 +439,7 @@ The boundary condition: `min_stake_floor = (VaR × safety_margin) / ⌈N_pool/2 
 
 ### 6.5 Equivocation false negatives (FA6 dependency)
 
-T-4's O2 closure depends on FA6 T-6 — the soundness of equivocation slashing — which itself depends on Ed25519 EUF-CMA (cryptographic, holds under standard assumptions) AND H2 (honest validator at most one signature per (height, round) and per (height, aborts_gen)). The contribution of S-006 (`S006ContribMsgEquivocation.md` T-1) is the Phase-1 detection layer; the rev.8 BlockSigMsg detection is the Phase-2 layer. Both must fire for the cartel's full attack surface to be covered.
+**MOOT since D4 (2026-09-17 note): O2 has no closure to depend on — see §6.7.** Historically, T-4's O2 closure depended on FA6 T-6 — the no-false-accusation property — which itself depends on Ed25519 EUF-CMA (cryptographic, holds under standard assumptions) AND H2 (honest validator at most one signature per (height, round) and per (height, aborts_gen)). The contribution of S-006 (`S006ContribMsgEquivocation.md` T-1) is the Phase-1 detection layer; the rev.8 BlockSigMsg detection is the Phase-2 layer. Both must fire for the cartel's full attack surface to be covered.
 
 The boundary condition: if a future protocol change introduces a third signing surface (e.g., a new gossip-control message type signed under the validator key), the equivocation detection coverage must be extended to that surface, or the T-4 O2 argument develops a gap. Currently the two layers (BlockSigMsg + ContribMsg) cover the surfaces V11 needs.
 
@@ -389,6 +449,101 @@ T-5's DOMAIN_INCLUSION argument is only as strong as the off-chain Sybil-resista
 
 The boundary condition: `DOMAIN_INCLUSION` chains MUST publish their off-chain Sybil-resistance assumptions in their deployment documentation. The protocol does not introspect these.
 
+### 6.7 The honest S-011 residual (written 2026-09-17, sequence step 3c)
+
+This section replaces the historical T-4 closure and is the citable statement of where S-011 stands.
+It is written against the shipped mechanism after D4 (no equivocation consequence) and D13 (no abort
+deduction), and it addresses, one by one, the three errors the DECISION-LOG (2026-08-13) recorded in
+the previously drafted residual.
+
+**(0) The bound that fails.** Per T-4-R (§1): the cartel's marginal per-round protocol cost is the
+opportunity cost of recoverable locked capital (`(M−1)·min_stake·r`) plus bandwidth; abort claims are
+unfee'd gossip messages, equivocation costs nothing, and no path reduces `locked`. Its per-round
+revenue is its share of `block_subsidy + fees`, up to the whole of it once the honest member is
+suspended. At the genesis defaults (`min_stake = 1000`, `block_subsidy = 10`) the twenty-six-sybil
+figure of §S-010 pays for itself in 2,600 blocks of subsidy *even if the capital were destroyed*; it
+is not destroyed. **"Per-round cost > chain subsidy" is false at every parameterization with a
+positive subsidy.** S-011's recorded mitigation therefore rests on the S-010 stake floor alone — a
+one-time, refundable barrier to entry.
+
+**(1) Error one: "at K == M structurally unreachable" — FALSE. BFT escalation seats a zero-honest
+committee at `|pool| == K`.** The mechanism, from the shipped code: `Node::check_if_selected` builds
+`avail_domains` as the registry-eligible pool MINUS every domain named in the node's in-flight
+`current_aborts_`. That local exclusion is applied *after* the S-051 Option-B eligibility floor
+(`include/determ/chain/eligibility_floor.hpp`, consumed by `NodeRegistry::build_from_chain`), so the
+floor cannot lift it — the floor only re-admits domains suspended by CHAIN-BAKED abort records.
+Then the escalation gate fires when `avail_domains.size() < k_target && bft_enabled &&
+total_aborts >= bft_escalation_threshold && avail_domains.size() >= bft_committee_size(K)`. With
+`N_pool == K == 3`, `bft_escalation_threshold` defaulting to **1** (`include/determ/node/node.hpp`,
+`Config::bft_escalation_threshold{1}`, S-045) and `bft_committee_size(3) == 2`: **one** fabricated
+abort against the single honest member leaves `avail = 2`, which is `< 3` and `>= 2`, so the round
+escalates to a BFT committee of two drawn from the two cartel members. `f_h = 2` against
+`|K_h| = 2`, i.e. `f_h ≥ |K_h|/3` — `BFTSafety.md` assumption B1 is violated wholesale, and since
+T-5.1 was withdrawn (`BFTSafety.md` §4, T-5.1-R) there is no recovery. The escalation root is ledger
+row **S-086** (OPEN) and the pool bound is owner decision **D5a / R-4** (cap at REGISTER +
+assertion at selection, genesis check `2K > |initial creators|`) with its joint design gate
+**AUTHORIZED but NOT LANDED**. Until D5a lands, a chain whose eligible pool equals K has no
+structural defence here.
+
+**(2) Error two: "abort-driven stake drain below `min_stake` is permanent and S-051 does not lift
+it" — TRUE WHEN RECORDED, and GONE SINCE D13.** That leg was real: `min(SUSPENSION_SLASH, locked)`
+per Phase-1 abort against a floor-staked validator dropped it to 990 at the FIRST abort, the
+eligibility floor excludes on `stake_of < min_stake`, and S-051's Option-B lift re-admits *suspended*
+domains, never floor-breached ones — so one abort ejected a validator permanently (ledger S-087,
+High). **D13 retired the deduction on 2026-09-16 and S-087 is closed**; the leg no longer exists and
+must not be restated. Its replacement, which is weaker but not nothing, is the **suspension window**:
+the S-032 record arms an exclusion of
+`min(BASE_SUSPENSION_BLOCKS · 2^min(count−1, MAX_ABORT_EXPONENT), MAX_SUSPENSION_BLOCKS)` blocks
+(10, doubling, capped at 10,000). Since the cartel pays nothing per claim, it renews that window
+every time it lapses, and the exponent makes each renewal longer — after ~10 hits the honest member
+is excluded in 10,000-block stretches at zero marginal cost. So the historical T-4 (O1) sentence
+"the cartel cannot permanently remove them without continuing to expend stake" is false in its
+premise: continuing costs no stake. The honest member's *stake* is now safe; its *seat* is not.
+The one real brake is the Option-B floor: when the fully-eligible pool would fall below `k`, the
+floor lifts suspensions in ascending `(count, last_block, domain)` order, so a chronically aborted
+honest member IS re-admitted once the cartel has thinned the pool below K — which is exactly the
+configuration that error (1) turns into a zero-honest BFT committee instead. The two failure modes
+are complementary, not redundant.
+
+**(3) Error three: "leg 1 holds unchanged" ignores DOMAIN_INCLUSION, where BOTH legs are zero.**
+Under `InclusionModel::DOMAIN_INCLUSION` the genesis pins `min_stake = 0`, so `domain_eligible`'s
+stake predicate is skipped entirely and T-1's `sybil_cost = ⌈(N_pool/2)+1⌉ × min_stake` is **0**.
+Pre-D4 the deregistration half of the equivocation consequence still bit in that mode — it was, as
+`EquivocationSlashingApply.md` §3 put it, "the *entire* penalty" there — and D4 removed it. So under
+DOMAIN_INCLUSION **both** legs of the historical S-011 closure are now identically zero: no capital
+barrier and no consequence. Everything rests on the operator's off-chain registration cost (§6.6),
+which the protocol does not introspect and cannot bound. A `DOMAIN_INCLUSION` deployment must treat
+S-011 as **not mitigated by this document at all**.
+
+**(4) What actually still bounds an S-011 cartel.** Three things, all mechanism, none economic:
+
+- **Censorship resistance is unaffected.** `Censorship.md` T-2.1's K-conjunction bound and the
+  Phase-1 union tx-root are signature/counting arguments; a single honest committee member forces
+  inclusion. Nothing in D4/D13 touches them. A cartel that holds M−1 seats cannot censor.
+- **MD-mode safety is unaffected.** `Safety.md` T-1 clause 1 needs one honest member in `K_h` and
+  consumes no economic term. The cartel cannot fork an MD-mode height. (It CAN, per (1), arrange for
+  there to be no honest member in `K_h` at all — that is a liveness/escalation defect, not a failure
+  of T-1.)
+- **The suspension window is bounded per hit** by `MAX_SUSPENSION_BLOCKS`, and the Option-B floor
+  re-admits when the pool would starve. Damage per round is bounded; damage *summed over rounds* is
+  not, because renewal is free.
+
+**(5) What is owed, and by whom.** Nothing here is closable by this document.
+
+| Owed | Owner | Status |
+|---|---|---|
+| A per-round cost for a cartel — i.e. the economic layer the closure assumed | **D22**, the L2 bond / arbitration policy | v1.1 DApp scope, NOT DESIGNED. This is the only candidate replacement for the removed L1 penalty, and it is explicitly not a launch blocker for L1. |
+| The `2K > N(h)` pool bound over the ELIGIBLE pool, which removes the `|pool| == K` regime of (1) | **D5a / R-4**, joint design gate with F-c and R-15 | AUTHORIZED, NOT LANDED |
+| The escalation trigger reading a stale/instantaneous abort count | ledger **S-086** | OPEN |
+| A Sybil bound for `DOMAIN_INCLUSION` | operator deployment policy (§6.6) | Outside the protocol by construction |
+
+**(6) Ledger consequence.** S-011 stays **✅ Mitigated** — but on a strictly narrower mitigation than
+recorded: *the S-010 stake floor prices ACQUIRING `M−1` seats under `STAKE_INCLUSION`, and the
+censorship/safety bounds cap what those seats are worth.* The "economic infeasibility via
+per-round cost > subsidy" half is struck. Under `DOMAIN_INCLUSION` the row's mitigation does not
+apply at all. The ⚠ marker is retired in favour of this explicit statement, because "under
+re-derivation" is no longer true — the derivation is here, and its answer is partly negative.
+
 ---
 
 ## 7. Test-suite citation
@@ -397,11 +552,11 @@ The S-010 + S-011 closure is operator-policy + existing-code; the relevant regre
 
 - **`tools/test_anon_address.sh`** — exercises the stake-mechanic on the producer side: REGISTER, STAKE, UNSTAKE, balance accounting through the stake-locked transitions. Indirectly validates that the stake-floor at `registry.cpp:57-63` correctly admits/excludes domains based on `chain.stake(domain) >= min_stake`. Locks the apply-path consistency of stake bookkeeping that T-1 depends on.
 
-- **`tools/test_equivocation_slashing.sh`** — exercises the FA-Apply-10 forfeit branch that T-4 O2 relies on. Confirms `stakes_[equivocator].locked = 0` post-apply and `registrants_[equivocator].inactive_from = h + 1`. Locks the slashing-mechanism composition with the S-006 / FA6 detection layers.
+- **`tools/test_equivocation_slashing.sh`** — exercises the end-to-end evidence path. **Inverted since D4:** it now confirms the accused node's stake is exactly its pre-submission value and its registry entry is untouched. It locks the detection → gossip → bake → apply composition with the S-006 / FA6 layers; there is no forfeit branch left for T-4 O2 to rely on.
 
-- **`tools/test_equivocation_multi.sh`** — multi-validator equivocation scenarios; confirms multiple cartel members all forfeit simultaneously when they jointly produce conflicting signatures (the cartel-coordinated equivocation case underlying T-4 O2's cost calculation).
+- **`tools/test_equivocation_multi.sh`** — multi-validator equivocation scenarios; since D4 it confirms that multiple cartel members jointly producing conflicting signatures lose NOTHING, which is the empirical form of the T-4-R cost table.
 
-- **`tools/test_equivocation_apply.sh`** — focused FA-Apply-10 mechanics (idempotence under replay, A1 invariant preservation under slash + deregistration).
+- **`tools/test_equivocation_apply.sh`** — focused FA-Apply-10 **T-E0**: state neutrality against an event-free twin, A1 preservation, and a positive control that the event is in the applied block; mutants M1–M8 RED.
 
 The four tests together cover the apply-path foundations of both T-2 (per-operator cost unrecoverable on attack) and T-4 (cartel-defense composition). No new regression test is required for the S-010 / S-011 closure; the existing tests + the operator-policy guidance in `SECURITY.md` §S-010 + §S-011 are the full closure.
 
@@ -414,11 +569,11 @@ A speculative future test — a "Sybil-cost worked-example calculator" tool — 
 Both S-010 and S-011 are closed in `SECURITY.md`:
 
 - **S-010** — ✅ Mitigated (Options 1 + 3) per `SECURITY.md` §S-010, §3 status row. Severity reclassified from High (parameter-tuning risk) to Mitigated. Closure mechanism: operator stake-pricing formula + `DOMAIN_INCLUSION` availability.
-- **S-011** — ✅ Mitigated (Option 1) per `SECURITY.md` §S-011, §3 status row. Severity reclassified from High to Mitigated. Closure mechanism: composition of S-010 stake floor + FA6 + FA-Apply-10 equivocation slashing + `Censorship.md` T-2.1 K-conjunction bound.
+- **S-011** — ✅ Mitigated, on the NARROWED closure re-derived 2026-09-17 (§6.7): the S-010 stake floor prices acquiring `M−1` seats under `STAKE_INCLUSION`, and `Censorship.md` T-2.1 plus `Safety.md` T-1 clause 1 cap what those seats are worth. The "FA6 + FA-Apply-10 equivocation slashing" term is struck (D4) and the per-round-cost-exceeds-subsidy claim with it. Under `DOMAIN_INCLUSION` the mitigation does not apply.
 
 Both findings appear in `SECURITY.md` §1's "Mitigated in-session — High" row.
 
-This proof formalizes the closure argument that the audit-side narrative carries. The closure does not require code change; the protocol mechanisms (registry-eligibility predicate, equivocation forfeit, uniform-random committee selection) were already in place. The contribution is the explicit Sybil-cost function and the composition argument that prices the S-011 cartel attack at "per-attempt cost ≥ `(M-1) × min_stake`, full forfeiture on follow-through."
+This proof formalizes the closure argument that the audit-side narrative carries. The closure does not require code change; the protocol mechanisms (registry-eligibility predicate, uniform-random committee selection — and, until 2026-09-16, equivocation forfeit) were already in place. The contribution is the explicit Sybil-cost function and the composition argument that prices the S-011 cartel attack at "per-attempt cost ≥ `(M-1) × min_stake`, full forfeiture on follow-through."
 
 Production-readiness implications:
 

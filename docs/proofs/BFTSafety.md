@@ -1,8 +1,18 @@
 # FA5 — BFT-mode conditional safety
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the condition that has always governed BFT-style protocols: Byzantine fraction less than `|K_h|/3` within the committee.
 
-This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the conditions that have always governed BFT-style protocols: Byzantine fraction less than `|K_h|/3` within the committee, plus equivocation slashing as economic backing.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decision D4, DECISION-LOG 2026-09-16).** This document
+> used to carry a fourth assumption **(B2) "equivocation slashing enforced"** and a Corollary **T-5.1**
+> ("slashing recovery"). Equivocation carries **no L1 consequence**: `Chain::apply_transactions` reads
+> nothing from `b.equivocation_events` — no stake moves, no registrant is deactivated. B2 is therefore
+> FALSE and has been **deleted**; T-5.1 is **WITHDRAWN** and replaced by T-5.1-R (§4), which states what
+> a B1 violation actually produces now. **T-5 itself is unchanged in content**: its proof (§3) consumes
+> L-5.1 (counting) and L-5.2 (honest single-sign + A1/A2) and never consumed B2 at any step, so deleting
+> B2 removes a decorative hypothesis rather than a load-bearing one — the theorem now holds under strictly
+> fewer assumptions. §5.4's concrete-security paragraph and §7's "materially stronger than classical BFT"
+> claim are corrected accordingly. What T-5 needs instead, and did not label, is the honest single-sign
+> assumption made explicit as **(B2′)** below — which is NOT unconditional; see §4.2.
 
 Unlike MD-mode safety (FA1 T-1, unconditional given ≥1 honest in committee), BFT-mode safety is **conditional**. The trade is documented in `docs/PROTOCOL.md` §10.4 and observed per-block via the `consensus_mode` tag.
 
@@ -21,13 +31,11 @@ A BFT-mode block `B` carries `|K_h|` `creator_block_sigs[]` entries; at least `Q
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2).
 - **(A2) SHA-256 collision resistance** (Preliminaries §2.1).
 - **(B1) Byzantine fraction bound**: `f_h < |K_h|/3` (standard BFT bound applied within the smaller BFT committee). Worked examples: K = 3 ⇒ |K_h| = 2 ⇒ f_h < 2/3 ⇒ f_h = 0. K = 6 ⇒ |K_h| = 4 ⇒ f_h < 4/3 ⇒ f_h ≤ 1. K = 9 ⇒ |K_h| = 6 ⇒ f_h < 2 ⇒ f_h ≤ 1.
-- **(B2) Equivocation slashing enforced**: by FA6, honest validators are not slashed; any equivocator's stake is forfeit and registration deregistered. (FA6's bound is `≤ 2⁻¹²⁸` per attempt.)
+- **(B2′) Honest single-sign at height `h`**: every honest member of `K_h` produces at most one `compute_block_digest` signature at height `h` in the execution considered (Preliminaries §4, H2). This is the assumption L-5.2 actually consumes. It replaces the deleted (B2); it is **not unconditional** and §4.2 states exactly when the shipped code satisfies it.
 
-then two valid BFT-mode blocks `B, B'` at the same height `h` against the same chain prefix imply `B = B'`. In plain terms: **BFT-mode blocks are unique under f_h < |K_h|/3 within the BFT committee** — standard BFT safety re-targeted at the shrunk committee.
+then two valid BFT-mode blocks `B, B'` at the same height `h` against the same chain prefix imply `B = B'`. In plain terms: **BFT-mode blocks are unique under f_h < |K_h|/3 within the BFT committee, per round instance** — standard BFT safety re-targeted at the shrunk committee.
 
-**Corollary T-5.1 (Slashing recovery for BFT-mode forks).** If `f_h ≥ |K_h|/3` and two BFT-mode blocks finalize at height `h`, then every committee member appearing as proposer in both has equivocated. By FA6, slashing zeros their stake AND deregisters them. The chain re-organizes around the surviving honest members at height `h+1`'s committee selection.
-
-This is a "fault-tolerant" recovery: even when B1 is violated, the protocol detects + slashes + recovers; it doesn't simply fail.
+**Corollary T-5.1-R (What a B1 violation produces — replaces the withdrawn T-5.1).** If `f_h ≥ |K_h|/3` and two BFT-mode blocks finalize at height `h`, then every committee member that signed both digests has equivocated, and any honest peer that observes both signature sets constructs a V11-valid `EquivocationEvent` which gossips and is baked into a later block. That is the whole of it. Since D4 (2026-09-16) the baked event **moves no L1 state**: the equivocators keep their stake, keep their registration, and remain in the eligible pool, so they may be selected again at height `h+1` and at every height after. **There is no recovery.** What bounds the damage is not removal but `Chain::resolve_fork` (`S029ForkChoiceSoundness.md` T-1/T-2): every honest node ranks the two blocks identically and converges on one, so the chain does not split — it simply accepts a block a Byzantine super-third chose, and can do so again.
 
 ---
 
@@ -100,25 +108,46 @@ For K = 12 (|K_h| = 8, Q = 6):
 
 ---
 
-## 4. Proof of Corollary T-5.1 (Slashing recovery)
+## 4. Corollary T-5.1-R — what a B1 violation produces (replaces the withdrawn T-5.1)
+
+### 4.1 The argument
 
 Suppose B1 is violated (`f_h ≥ |K_h|/3`). Then L-5.2's contrapositive doesn't kick in, and two distinct BFT-mode blocks `B, B'` can co-exist with `f_h` Byzantine members signing both digests.
 
 The intersection `S(B) ∩ S(B')` contains `≥ ⌈|K_h|/3⌉` Byzantine signers (those who signed both digests). For each such signer `v_i ∈ F_h`:
 
 - `v_i` produced `σ_a` on `compute_block_digest(B)` and `σ_b` on `compute_block_digest(B')`, both at height `h`.
-- These two signatures are a valid `EquivocationEvent` by V11.
+- These two signatures are a valid `EquivocationEvent` by V11 (the two openings share `index` and, when the two blocks carry the same abort-event count, `gen`).
 
-By FA6, the equivocation slashing pipeline:
+The evidence pipeline then runs, and stops one step earlier than it used to:
 
-1. Detects the double-signing (peer apply or external submission via `submit_equivocation` RPC).
-2. Gossips the `EquivocationEvent` so all chain replicas converge on the evidence.
-3. Bakes the event into the next finalized block.
-4. Zeroes `stakes_[v_i].locked` AND sets `registrants_[v_i].inactive_from = h+1`.
+1. **Detects** the double-signing (the `apply_block_locked` cross-block check, the `on_contrib` S-006 check, gossip, or external submission via `submit_equivocation`).
+2. **Gossips** the `EquivocationEvent` — one hop only; there is no relay and no re-request (S-090, OPEN), so "all replicas converge on the evidence" is NOT guaranteed.
+3. **Bakes** the event into a later finalized block, where it is V11-verified and committed under the block hash.
+4. **Applies it — as a no-op.** `Chain::apply_transactions` reads no field of the event. `stakes_[v_i].locked` is untouched; `registrants_[v_i].inactive_from` is untouched. Gate: `determ test-equivocation-apply` (state neutrality against an event-free twin, A1, positive control; mutants M1–M8 RED).
 
-After step 4, `v_i` is removed from the eligible pool for all future committee selections (committee_region filter still applies; the deregistration is unconditional). The chain re-organizes at height `h+1` with a smaller, possibly all-honest committee.
+So after step 4 `v_i` is still staked, still registered and still eligible. **The chain does not re-organize.** The height-`h` fork does not propagate — every honest node runs the same deterministic `resolve_fork` comparator and keeps one branch (`S029ForkChoiceSoundness.md` T-1 determinism, T-2 confluence) — but the same super-third can repeat the attack at `h+1`, and nothing at L1 makes the second attempt cost more than the first. The only thing that accumulates is evidence.   ∎
 
-The "fork" at height `h` doesn't propagate because subsequent blocks build on whichever of `B` or `B'` first finalizes consistently across observers (by the resolve_fork heaviest-sig-set rule); the loser branch's ancestry stops at `h`.   ∎
+### 4.2 What T-5 still gives, and what it no longer gives
+
+**Still given (unchanged by D4/D13):**
+
+- **Uniqueness under B1, per round instance.** T-5's proof is L-5.1 (a counting bound on `Q`-sized subsets of `K_h`) plus L-5.2 (an honest member cannot have signed both digests) plus A1/A2. None of those steps mentions stake, forfeiture, deregistration or the abort deduction. Deleting B2 changes no line of §3.
+- **Detectability.** A B1 violation is *provable after the fact* from public bytes: two signatures by one registered key over two derivable digests at one index. That property is cryptographic (FA6 T-6) and survives.
+- **No chain split.** Fork-choice determinism keeps the fleet on one branch.
+
+**No longer given:**
+
+- **Accountable safety in the punitive sense.** "Accountable" now means *evidence-only*: the protocol can name who broke B1, and can do nothing to them. There is no forfeiture, no exclusion, no re-organization around survivors, and no cost that rises with repetition.
+- **Recovery.** The withdrawn T-5.1 was the document's only recovery claim. There is no L1 replacement. The intended replacement is the L2 bond policy (D22, v1.1 DApp scope, NOT designed and NOT a launch blocker for L1); until it exists, a B1 violation has no consequence at all.
+- **The comparison to classical BFT.** See §7.
+
+**The honest status of (B2′).** (B2′) is an assumption, not a shipped invariant, and two shipped honest behaviours falsify it at *height* granularity:
+
+1. **Abort re-round.** `gen` is `b.abort_events.size()` and is bound into `compute_block_digest` (`src/node/producer.cpp::compose_block_digest`). An honest member that signs in round `g` and again, after an abort quorum, in round `g+1` at the same height has signed two distinct digests at height `h` — so (B2′) is false for it, and L-5.2 cannot conclude `d_a = d_b` from that member's honesty. (Whether V11 would ACCEPT the resulting pair as evidence is a separate question with a different answer: `check_equivocation_events` asserts `gen_a == gen_b`, so a cross-gen pair is rejected. The two questions must not be conflated — T-5 needs "an honest member did not sign both", not "the pair is admissible evidence".) The adjacent evidence-side residual is R-1 / `EquivocationSlashing.md` §2 Case (c), DECIDED under D4 as evidence-requiring-corroboration, never an L1 verdict.
+2. **The S-050 stall valve.** The valve clears `current_aborts_` and re-enters selection; with an *empty* abort tail it restarts a round at the same height **and the same `gen`** with fresh randomness (`RoundStallValveSoundness.md` C-2 as corrected 2026-09-17; ledger S-095).
+
+What holds unconditionally is the weaker **(B2′′)**: an honest member signs at most one digest per *round instance*. T-5 should therefore be read as "two blocks of the SAME round instance at height `h` are equal"; two blocks of DIFFERENT round instances at one height are not excluded by T-5 and are handled by fork-choice, not by uniqueness. The same granularity gap applies to FA1's Corollary T-1.1 (`Safety.md`), which invokes the same H2; correcting FA1 is **not** part of this increment and is recorded as OPEN in the step-3c DECISION-LOG entry.
 
 ---
 
@@ -140,7 +169,7 @@ Operators tune via `bft_enabled` (genesis-pinned). Most operators take the defau
 Both MD and BFT mode blocks carry `consensus_mode` in their header. Applications observing the chain:
 
 - See `MD` blocks: rely on FA1 (unconditional under ≥1 honest in committee).
-- See `BFT` blocks: rely on FA5 (conditional under `f_h < |K_h|/3` AND FA6 slashing).
+- See `BFT` blocks: rely on FA5 (conditional under `f_h < |K_h|/3` alone; the FA6 leg is deleted — FA6 gives evidence, not backing).
 
 This is per-block trust granularity. Light clients can apply different confirmation policies to MD vs BFT blocks.
 
@@ -152,11 +181,11 @@ This is per-block trust granularity. Light clients can apply different confirmat
 
 ### 5.4 Concrete-security bound
 
-Per the proof, the conditional safety bound is unconditional in the algebraic sense (no probabilistic gap). It depends only on counting arguments. The cryptographic bound comes from FA1's L-1.2 (signing_bytes injectivity, `2⁻¹²⁸`) and FA6's EUF-CMA (`2⁻¹²⁸`) for the slashing-recovery path.
+Per the proof, the conditional safety bound is unconditional in the algebraic sense (no probabilistic gap). It depends only on counting arguments. The cryptographic bound comes from FA1's L-1.2 (signing_bytes injectivity, `2⁻¹²⁸`).
 
 Together: BFT-mode safety holds with `≤ 2⁻¹²⁸` per height (cryptographic) AND `1 - O(Q · 2⁻¹²⁸)` cumulative under adversarial query budget Q.
 
-When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸` per slash attempt. Total degradation: `≤ K · 2⁻¹²⁸` per height — still negligible.
+**Corrected 2026-09-17 (step 3c).** The former third paragraph priced "an additional `2⁻¹²⁸` per slash attempt" for the T-5.1 recovery path. That path no longer exists (T-5.1-R, §4): when B1 is violated there is no slash and therefore no term to add. The concrete-security accounting for the FA6 EUF-CMA bound now belongs where the evidence is USED — it is the false-naming probability of the record the L2 policy (D22) consumes, not a term in this document's safety bound.
 
 ---
 
@@ -169,28 +198,29 @@ When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸`
 | BFT escalation trigger | `src/node/node.cpp::check_if_selected` (four gates: `bft_enabled`, `total_aborts ≥ bft_escalation_threshold`, available pool < K, available pool ≥ ceil(2K/3)) |
 | `bft_proposer` deterministic election | `proposer_idx` in `src/node/producer.cpp` (called from `node.cpp::Node::current_proposer_domain` for the producer side and `validator.cpp::BlockValidator::check_block_sigs` (BFT branch, ~lines 480–498) for the validator side; full algorithm in PROTOCOL.md §5.3.1; straight-modulo bias `≤ 2⁻⁵⁶` because `committee_size ≤ 256`) |
 | BFT mode opt-out | `Config.bft_enabled` (default true, false disables escalation) |
-| Slashing recovery (T-5.1) | `EquivocationSlashing.md` (FA6) + `src/chain/chain.cpp::apply_transactions` |
+| Evidence record (T-5.1-R) | `EquivocationSlashing.md` (FA6) + `src/node/validator.cpp::check_equivocation_events` (V11). NOT `Chain::apply_transactions` — that function reads nothing from `b.equivocation_events` since D4. |
 
 A reviewer can confirm:
 
 - The 2|K_h|/3 quorum matches V8's BFT branch — note this is the 2/3 of the *BFT committee size*, not 2/3 of the genesis K (the two differ at K ≥ 6).
 - The Byzantine-fraction bound `f_h < |K_h|/3` is enforced by the protocol's design (not at runtime — observers reason about it externally).
-- Slashing recovery operates atomically with the next block's apply; no special-case is needed.
+- The evidence record is committed atomically with the next block's apply and changes no state leaf; the state-neutrality is gated by `determ test-equivocation-apply`.
 
 ---
 
 ## 7. Conclusion
 
-BFT-mode blocks are safe under `f_h < |K_h|/3` within the committee. The trade vs MD-mode is real and observable per-block via `consensus_mode`.
+BFT-mode blocks are safe under `f_h < |K_h|/3` within the committee (per round instance, §4.2). The trade vs MD-mode is real and observable per-block via `consensus_mode`.
 
-When the bound is violated, slashing recovery (T-5.1) repairs the damage by removing the equivocators. This is materially stronger than classical BFT failure modes (where exceeding f<N/3 simply breaks safety with no recovery).
+**When the bound is violated there is no repair.** The former conclusion — "slashing recovery (T-5.1) repairs the damage by removing the equivocators … materially stronger than classical BFT failure modes" — is **WITHDRAWN** (D4, 2026-09-16; re-derived here 2026-09-17). Exceeding `f_h < |K_h|/3` breaks BFT-mode safety exactly as it does in a classical BFT protocol, and, exactly as there, nothing removes the offenders. Determ's two remaining advantages over classical BFT are narrower and should be claimed as such:
 
-> **⚠ 2026-09-14 — T-5.1 is under re-derivation; do not cite it.** The owner decided on 2026-08-13 that the pre-finalization equivocation consequence carries no L1 consequence (relocation to L2; DECISION-LOG 2026-08-13, CLAUDE.md SLASHING block) and the log records T-5.1 as VOID with this paragraph inverting once that lands (`ddf93eb`). The forfeiture code is still live at HEAD (`src/chain/chain.cpp:1819-1825`) because the change failed review and was reverted, so the paragraph matches shipped bytes today — but the argument may no longer be relied on by any other proof until the re-derivation lands.
+1. **MD-mode has no threshold.** FA1 clause 1 needs one honest committee member, not a two-thirds majority, and no BFT protocol offers that. A deployment that sets `bft_enabled = false` never enters the conditional regime at all (it trades liveness for it).
+2. **Failure is attributable.** A B1 violation leaves two signatures by one registered key over two derivable digests, verifiable by anyone from public bytes and committed on-chain. Classical BFT above threshold typically leaves nothing. Attribution is not punishment: on L1 it buys exactly a record, whose consumer is the L2 bond policy (D22) and which does not exist yet.
 
-The proof complements FA1 (MD-mode unconditional) and FA4 (liveness via escalation) to give Determ's full safety/liveness story:
+The proof complements FA1 (MD-mode unconditional) and FA4 (liveness via escalation) to give Determ's safety/liveness story:
 
-- MD: unconditional safety, conditional liveness.
-- BFT: conditional safety, much-stronger liveness.
-- Slashing: recovery for B1-violation cases.
+- MD: unconditional safety (≥ 1 honest member), conditional liveness.
+- BFT: conditional safety (`f_h < |K_h|/3`), much-stronger liveness.
+- Evidence: attribution for B1-violation cases — and, on L1, nothing else.
 
-Operators pick the bft_enabled flag once at genesis based on their threat model.
+Operators pick the bft_enabled flag once at genesis based on their threat model. The flag is the whole of the safety/liveness trade; there is no third mechanism catching the tail.

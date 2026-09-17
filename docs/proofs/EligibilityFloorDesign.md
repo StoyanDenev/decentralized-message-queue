@@ -1,6 +1,15 @@
 # EligibilityFloorDesign — the S-051 suspension-pool-exhaustion halt and the owner decision on a deterministic eligibility floor
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decision D13, DECISION-LOG 2026-09-16).** The
+> Option-B floor, its three-mirror equivalence requirement and the shipped
+> `include/determ/chain/eligibility_floor.hpp` are **unchanged** — the design is a pool computation over
+> `(registrants, stakes, abort_records, at_index, k)` and consumes no stake deduction. What changed is
+> the §1 threat narrative: since D13 a Phase-1 `AbortEvent` records the S-032 suspension and **deducts
+> nothing**, so the "aggravating economics" clause below (a spurious abort also drains an innocent
+> domain's stake) is HISTORICAL. That was S-087 — a floor-staked validator ejected at its FIRST abort
+> with S-051 unable to lift a floor breach — and it is CLOSED by the retirement. The starvation halt
+> the floor exists to prevent is unaffected: suspensions still accumulate and still empty the pool, and
+> the floor is still what makes the halt unreachable while ≥ k domains are base-eligible.
 
 This is the **OWNER-DECISION design document** for **S-051** (`docs/proofs/AdversarialTransportHarness.md` §3.4): round-1 abort suspensions can shrink the eligible creator pool below the committee size K, after which **no committee forms, no round runs, and — because suspension expiry is measured in block index while the height is frozen — no suspension ever expires**: a permanent, uniform-height chain halt. Any fix is protocol surgery on the committee-eligibility rule, which exists in three code surfaces that must stay identical (divergence = state_root / committee fork), so per the one-design-doc-per-decision directive the options are laid out here and the choice is deferred to the owner. **STATUS: DECIDED — Option B (partial floor, fill to K), owner decision 2026-07-17, implemented same day. See §7 for the shipped record.**
 
@@ -46,7 +55,7 @@ On an EXTENDED chain (D3.3b pinned committees) the manifestation shifts to the *
 
 Reproduced repeatedly under CPU-starvation loops (`AdversarialTransportHarness.md` §3.4): twice in 30 pre-mitigation runs of `test-fa-partition-virtual` (majority frozen at uniform heights 5,5,5,5 and 8,8,8,8), and still at roughly 1-in-12 under harsher-than-CI contention with the intermediate 1 s phase timers that were validated before the shipped mitigation (`src/main.cpp:27729-27749`, the harness's own timer comment). The shipped mitigation is **harness-side only** (2 s phase timers, `src/main.cpp:27748-27749`, push the spurious-abort rate into the far tail); it does not close the defect, and the harness self-diagnoses a recurrence by dumping per-node heights (uniform frozen height = S-051).
 
-Note the aggravating economics: each spurious abort also slashes an *innocent* domain (`SUSPENSION_SLASH`, `chain.cpp:1690-1696`), so a starvation storm both empties the pool and drains honest stake toward the `MIN_STAKE` eligibility floor — a second, slower path to the same exhaustion under STAKE_INCLUSION.
+Note the aggravating economics **as they stood when this design was written — RETIRED 2026-09-16 (D13; ledger S-087 closed)**: each spurious abort also deducted `SUSPENSION_SLASH` from an *innocent* domain, so a starvation storm both emptied the pool and drained honest stake toward the `MIN_STAKE` eligibility floor — a second, slower path to the same exhaustion under STAKE_INCLUSION.
 
 ---
 
@@ -149,7 +158,7 @@ Shipped status of each gate is recorded inline (**DONE** = executed and green fo
 | Suspension length + block-index expiry test | `src/node/registry.cpp` (now via the shared `suspension_active`) |
 | Four-predicate eligibility filter (node side) — now calls the shared body + floor lift | `src/node/registry.cpp` (`build_from_chain`) |
 | K pinned onto `Chain` as genesis state (R3), load-param before replay | `include/determ/chain/chain.hpp` (`k_block_sigs()` / `set_k_block_sigs`); `src/chain/chain.cpp` (7th `load` param, all 3 branches); `src/node/node.cpp` (load call + post-convergence setter) |
-| Abort accumulator write (round==1 only) + slash — UNCHANGED (R4) | `src/chain/chain.cpp:1682-1697` |
+| Abort accumulator write (round==1 only) — UNCHANGED (R4); the paired stake deduction was retired by D13 | `Chain::apply_transactions`, the `b.abort_events` loop |
 | `abort_records_` in state root ("b:" leaf) | `include/determ/chain/chain.hpp:244-250`, `:258`, `:303` |
 | D3.3b frozen committee (`freeze_epoch_committee`) — now calls the shared body; drift warning discharged | `src/chain/chain.cpp` |
 | Unit + three-mirror + EXTENDED-fold-replay gate | `test-eligibility-floor` (`src/main.cpp`), `tools/test_eligibility_floor.sh` |

@@ -1,18 +1,25 @@
-# FA-Apply — Equivocation slashing apply-side mechanics
+# FA-Apply-10 — The equivocation-evidence apply path (state-neutral since D4)
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
+> **RESTATED 2026-09-17 (sequence step 3c; owner decision D4, DECISION-LOG 2026-09-16 — landed as O-1 step 3a).**
+> **This document's subject no longer exists.** The forfeiture + deregistration loop was removed from
+> `Chain::apply_transactions`; an `EquivocationEvent` moves NO L1 state. The shipped apply-side
+> theorem is **T-E0 (§2.0)** — state neutrality — and it is the only theorem of this document that
+> describes HEAD. **T-E1 through T-E7 (§2.1) are retained as the HISTORICAL record of the removed
+> mechanism** and are clearly marked as such; they must not be cited as current, and no other proof
+> in this corpus may consume them. The D13 companion applies to §1.3 only: the `block_slashed`
+> accumulator also lost its other producer (the Phase-1 abort deduction), so it is frozen at 0.
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+This document formalizes the apply-layer treatment of an `EquivocationEvent` baked into a finalized block. **At HEAD that treatment is: nothing happens.** `Chain::apply_transactions` contains no loop over `b.equivocation_events` at all — only a comment block recording the decision. No stake is forfeited, no registry entry is deactivated, no counter advances, no abort record is touched. The event is validated upstream by V11 (`src/node/validator.cpp::check_equivocation_events`) and is committed inside the block body and the block hash; that commitment IS its entire effect, and it exists because the record is the declared input to the L2 bond policy (D22).
 
-This document formalizes the apply-layer mechanics of equivocation slashing — the moment the chain consumes an `EquivocationEvent` baked into a finalized block, forfeits the equivocator's entire staked balance, and deactivates the equivocator's registry entry effective on the next block. The mechanism is two paired writes inside a single loop at `src/chain/chain.cpp:1344–1356`: a `stakes_[ev.equivocator].locked := 0` write whose pre-write value is added to the per-block `block_slashed` accumulator (line 1348), and a `registrants_[ev.equivocator].inactive_from := b.index + 1` write that pulls the equivocator out of the eligible-creator pool the very next block (line 1354). The two writes are independent — either map may be absent, and the loop body guards both with a `find(...) != end()` check — so the apply path is robust against ghost equivocators (events naming a domain that never registered) and against same-block double-events (a second event for the same domain re-runs the loop body with `locked == 0` already, contributing nothing).
+The proof is therefore a **neutrality** proof rather than a mechanics proof, and it is one paragraph long (§2.0) backed by a falsify-on-mutant gate. What remains load-bearing is the division of labour with FA6 (`EquivocationSlashing.md`), restated: FA6 proves an accepted event names only the guilty (no false accusation, under EUF-CMA and its H3 boundary); FA-Apply-10 proves the chain does nothing with that fact. The two together are the whole of L1's equivocation handling.
 
-The proof is mechanical: the apply branch is 13 lines, the per-block `block_slashed` accumulator folds into chain-wide `accumulated_slashed_` at apply-tail (`chain.cpp:1395`), and the A1 unitary-supply invariant at `chain.cpp:1399` consumes `accumulated_slashed_` as one of the five terms in `expected_total`. The strength is consolidation: FA6 (`EquivocationSlashing.md`) proves slashing **soundness** (an honest validator is never named as the equivocator in a finalized event, under EUF-CMA); FA-Apply-10 drills into the apply-side **mechanics** that fire conditional on FA6's soundness guarantee. FA6's argument depends on the slash being applied correctly when it does fire; the present proof closes that dependency.
-
-**Companion documents:** `Preliminaries.md` (F0) for notation, the V11 equivocation-proof validator predicate, and the apply-time guarantees; `AccountStateInvariants.md` (FA-Apply) for invariants I-1 through I-6, especially I-3 (balance ↔ stake independence: slashing consumes `stakes_[d].locked` without crossing into `accounts_[d].balance`) and I-6 (A1 closure); `SnapshotEquivalence.md` (FA-Apply-2) for the snapshot ↔ replay equivalence that carries the post-slash `stakes_[d]` (locked = 0) + `registrants_[d]` (inactive_from = h+1) + `accumulated_slashed_` triple across snapshot boundaries; `StakeLifecycle.md` (FA-Apply-4) for the three-state stake machine — equivocation-slash is the `staked-active → unstaked` (and `staked-pending-unlock → unstaked`) transition from §1.2 — and for the slashing-window claim (§4) that the deferred-unlock window is the slashing-evidence window; `CrossShardReceiptDedup.md` (FA-Apply-9) for the structural template of an apply-side primitive whose semantics survive snapshot bootstrap; `EquivocationSlashing.md` (FA6) for slashing **soundness** — the present proof's mechanics fire only when FA6's V11 + EUF-CMA chain has authorized the slash.
+**Companion documents:** `Preliminaries.md` (F0) §9 for what an equivocation event is and does since D4, and for V11; `AccountStateInvariants.md` (FA-Apply) for invariants I-1 through I-6 — note the equivocation channel now touches none of them; `EquivocationSlashing.md` (FA6) for the no-false-accusation bound the record carries; `StakeLifecycle.md` (FA-Apply-4) for the stake machine, from which the equivocation transition has been REMOVED; `StakeForfeitureCascade.md` (FA-Apply-16) for the cascade that is now vacuous on one of its two channels.
 
 ---
 
-## 0. ⚠ Soundness correction (2026-07-28) — registry deactivation is NOT permanent; re-REGISTER re-activates
+## 0. HISTORICAL — ⚠ Soundness correction (2026-07-28): registry deactivation is NOT permanent; re-REGISTER re-activates
+
+> **MOOT since 2026-09-16 (D4).** Equivocation no longer deactivates anything, so there is nothing for a re-REGISTER to undo. This section is retained as the record of a defect in the removed mechanism and of the owner escalation it produced — which D4 answers: no L1 exclusion, ever.
 
 A round-3 adversarial proof-claim audit (`wf_97a30e14`, independently verified) found that the "re-activation closed / the offender must register a fresh domain" claim (T-E2, §3 asymmetry table, §5, §7) is **false**. The REGISTER apply branch (`src/chain/chain.cpp:1231-1296`) has **no `registrants_.contains(d)` skip**: it computes `first_time_register` only to gate the Negative-Entry-Fee pool drain (`:1282`), then **unconditionally** builds a fresh `RegistryEntry` with `inactive_from = UINT64_MAX` + fresh `active_from` and does `registrants_[tx.from] = e` (`:1260-1264`), overwriting the equivocation-deactivated entry (the inline comment `:1249-1253` confirms re-registration is a supported overwrite path for key-rotation/region-update). The validator REGISTER case (`validator.cpp:709-710`) is a bare `break`.
 
@@ -44,9 +51,12 @@ The `equivocator` field names the offending domain. V11 (Preliminaries §5) requ
 
 ### 1.2 The apply branch
 
-Per `src/chain/chain.cpp:1344–1356`:
+**At HEAD there is none.** `Chain::apply_transactions` iterates `b.abort_events` (the S-032 record; D13) and `b.inbound_receipts`, and between them carries only a comment stating that an `EquivocationEvent` is an evidence record with no L1 consequence and naming D4 as the authority. `grep -n equivocation_events src/chain/chain.cpp` returns that comment and nothing else.
+
+**HISTORICAL — the removed branch**, as it stood until 2026-09-16, retained here so the removal can be read against something:
 
 ```cpp
+// REMOVED 2026-09-16 (D4, O-1 step 3a) — retained as the historical record.
 for (auto& ev : b.equivocation_events) {
     auto sit = stakes_.find(ev.equivocator);
     if (sit != stakes_.end()) {
@@ -62,21 +72,22 @@ for (auto& ev : b.equivocation_events) {
 }
 ```
 
-Three structural properties of the branch:
+Three structural properties **of the removed branch** (historical):
 
 1. **Dual mechanism.** A single equivocation triggers TWO writes: stake forfeiture (lines 1346–1350) AND registry deactivation (lines 1351–1355). Either may be a no-op if the corresponding map entry is absent. The dual mechanism unifies STAKE_INCLUSION mode (where the stake-zeroing is the primary disincentive) and DOMAIN_INCLUSION mode (where stake is already 0 and the registry deactivation is what actually removes the offender from selection).
 2. **Independent guards.** The `sit != stakes_.end()` and `rit != registrants_.end()` checks are independent. A domain that has unstaked but is still registered will have its registry deactivated without a stake write (the stake-guard fails). A domain that staked but never registered (an impossible state on an honest chain — STAKE requires REGISTER per `chain.cpp:807–811` — but defensively handled) would have its stake forfeited without a registry write. The all-paths-defensive design is what makes T-E4 (ghost-equivocator robustness) hold without source-side changes.
 3. **`block_slashed` accumulation.** The line-1348 `block_slashed += sit->second.locked` reads the pre-write value of the locked stake, so a subsequent event for the same domain (now with `locked == 0`) contributes zero. This is what makes T-E3 (idempotent re-apply within a block) hold by construction.
 
-### 1.3 The `block_slashed` → `accumulated_slashed_` accumulator
+### 1.3 The `block_slashed` → `accumulated_slashed_` accumulator — now frozen at 0
 
-Per `chain.cpp:725`:
+The declaration survives in `Chain::apply_transactions` and its comment states the fact:
 
 ```cpp
-uint64_t block_slashed  = 0;   // suspension + equivocation forfeit
+uint64_t block_slashed  = 0;   // frozen at 0: no apply path credits it since D13 (abort
+                               // deduction retired) and D4 (equivocation forfeiture removed)
 ```
 
-`block_slashed` is a per-block u64 accumulator declared at the top of `apply_transactions`. It captures both suspension-slash deductions (lines 1313–1328, FA6 not directly; covered by `StakeLifecycle.md` §4.1) and equivocation forfeitures (lines 1344–1356, this proof). At apply-tail per `chain.cpp:1395`:
+`block_slashed` is a per-block u64 accumulator declared at the top of `apply_transactions`. It used to capture the Phase-1 abort deduction (retired by D13, 2026-09-16) and the equivocation forfeiture (removed by D4, 2026-09-16). **Both producers are gone, so it is never incremented and `accumulated_slashed_` never grows.** The variable, the `c:accumulated_slashed` state-root leaf, both snapshot containers and the A1 term are deliberately retained with their shapes unchanged: removing them is a state-format change and there are no migrations. At apply-tail:
 
 ```cpp
 accumulated_slashed_  += block_slashed;
@@ -88,7 +99,60 @@ the per-block accumulator folds into the chain-wide `accumulated_slashed_` count
 
 ## 2. Theorems
 
-### T-E1 — Full stake forfeiture
+### 2.0 T-E0 — Apply is state-neutral on `b.equivocation_events` (THE SHIPPED THEOREM)
+
+**Statement.** Let `S` be the chain state before applying block `B`, and let `B′` be `B` with
+`B′.equivocation_events = []` and every other field unchanged. Then `apply_transactions(S, B)` and
+`apply_transactions(S, B′)` produce **byte-identical state**: every account balance and nonce, every
+`stakes_` entry (`locked` and `unlock_height`), every `registrants_` entry (`active_from` and
+`inactive_from`), every `abort_records_` entry, and all six A1 counters are equal, and the two runs
+reach the same `compute_state_root()`. Blocks `B` and `B′` differ in their own hash (the events are
+inside `signing_bytes` and inside the digest's reconciled eq-root), so the *record* is committed —
+but no state leaf moves.
+
+**Proof.** By inspection: `Chain::apply_transactions` contains no read of any field of
+`b.equivocation_events`. The identifier appears exactly once in `src/chain/chain.cpp`, in the comment
+that records D4. Since the function's output is a deterministic function of `(S, B)` and the only
+part of `B` that differs is a field the function never reads, the outputs coincide. ∎
+
+**Gate (falsify-on-mutant, at the layer where the rule lives).** `determ test-equivocation-apply`:
+the neutrality assertion above against an event-free twin, the A1 unitary-supply assertion, and a
+positive control showing the event really is in the applied block (so the test is not vacuous).
+Mutants M1–M8 each restore some consequence (full forfeit; forfeit without the A1 credit; a partial
+deduction; a deregistration only; a stake-gated variant; …) and each is RED. Recorded in the
+DECISION-LOG entry "O-1 step 3a LANDED" (2026-09-16).
+
+**Corollaries that follow trivially and replace T-E3 / T-E4 / T-E5 / T-E6 / T-E7.**
+
+- *Replay* (was T-E3): re-applying the same event, within a block or across blocks, changes nothing,
+  because one application changes nothing. The pre-D4 argument ("the second apply reads
+  `locked == 0`") is no longer needed. **The residual is not state, it is bytes:** deregistration was
+  the record's only natural limiter, so an event is re-includable at 2 Ed25519 verifies per copy.
+  Bounding that is sequence step 3b (per-block cap + in-block duplicate rejection) and is **OPEN**.
+- *Ghost equivocator* (was T-E4): an event naming an unregistered or unstaked domain is handled
+  because nothing is looked up at all.
+- *A1 invariance* (was T-E5): `Δlive_total_supply = 0 = Δexpected_total`; the identity is preserved
+  on both sides by the absence of any transfer.
+- *Cross-block accumulation* (was T-E6): `accumulated_slashed_` has no producer (§1.3); the
+  accumulation is the empty sum.
+- *Determinism* (was T-E7): two chains applying the same block reach the same root, a fortiori.
+
+**What T-E0 deliberately does NOT claim.** It says nothing about whether the record is *complete*
+(S-090: gossip is one-hop with no relay or re-request — OPEN), whether two honest observers derive the
+same event hash on a SHARD chain (S-089 — OPEN), or whether the record is *bounded* (step 3b — OPEN).
+Under D4 those three are correctness requirements of the L2 design, not merely DoS or hygiene items,
+because the record is D22's input.
+
+---
+
+### 2.1 HISTORICAL — T-E1 through T-E7, the mechanics of the REMOVED branch
+
+> **Everything from here to the end of §2 describes code deleted on 2026-09-16 (D4, O-1 step 3a).**
+> It is retained as the record of what was removed and why the removal is safe to reason about — not
+> as a description of HEAD. Do not cite T-E1..T-E7. The shipped statements are T-E0 and its
+> corollaries above.
+
+### T-E1 — Full stake forfeiture (HISTORICAL)
 
 **Statement.** For every block `B` at height `b.index` containing an `EquivocationEvent ev` with `ev.equivocator == d` and a chain state where `stakes_[d]` exists with `stakes_[d].locked == L` for some `L ≥ 0`, the apply produces exactly the deltas (from the equivocation branch alone):
 
@@ -106,7 +170,7 @@ with no mutation to `stakes_[d].unlock_height`, `accounts_[d].balance`, or any o
 
 **Test witness.** `tools/test_equivocation_apply.sh` (`determ test-equivocation-apply`) — the "Full stake forfeiture" block asserts `stake → 0` after the equivocation event applies. The companion `tools/test_equivocation_slashing.sh` exercises the end-to-end gossip + V11 + apply path through a 3-node cluster; this in-process test pins the apply semantics in <1s.
 
-### T-E2 — Registry deactivation
+### T-E2 — Registry deactivation (HISTORICAL)
 
 **Statement.** For every block `B` at height `b.index` containing an `EquivocationEvent ev` with `ev.equivocator == d` and a chain state where `registrants_[d]` exists with any prior `inactive_from` value (sentinel `UINT64_MAX` or a finite value from a prior DEREGISTER), the apply produces exactly:
 
@@ -126,7 +190,7 @@ The "irrespective of prior value" property is intentional: if the equivocator ha
 
 **Test witness.** `tools/test_equivocation_apply.sh` "Registry deactivation" block — 2 assertions: baseline `inactive_from == UINT64_MAX` (sentinel pre-equivocation), post-apply `inactive_from == b.index + 1`. `tools/test_equivocation_multi.sh` "Pre-deactivated equivocator" scenario asserts the override: a domain whose prior `inactive_from` was a finite future value gets its `inactive_from` reset to `b.index + 1`.
 
-### T-E3 — Idempotent re-apply
+### T-E3 — Idempotent re-apply (HISTORICAL — superseded by T-E0 *Replay*)
 
 **Statement.** For any block `B` containing two `EquivocationEvent`s `ev_1, ev_2 ∈ B.equivocation_events` with `ev_1.equivocator == ev_2.equivocator == d`, OR for two sequential blocks `B_1, B_2` each containing an `EquivocationEvent` for `d`, the cumulative chain-wide `accumulated_slashed_` advances by exactly `stakes_[d].locked` evaluated at the moment of the **first** event's apply iteration. A second event for the same domain — whether intra-block or cross-block — contributes zero to `accumulated_slashed_`. The post-apply state after the second event is byte-identical to the post-apply state after the first event (modulo any other concurrent mutations on `accounts_` / `stakes_` / `registrants_` for other domains).
 
@@ -136,11 +200,11 @@ Cross-block case: after `B_1` applies, the chain has `stakes_[d].locked == 0` an
 
 The construction is robust against legitimate evidence reaching the chain in different blocks (an attacker who equivocated at height H may be denounced at H+5 in one shard and H+50 in another; the apply path treats the second denunciation as a no-op on stake, with the registry deactivation harmlessly re-asserted). ∎
 
-**Code witness.** `src/chain/chain.cpp:1344–1356` (the loop body whose read-then-write pattern on `locked` makes the second iteration contribute zero); `src/chain/chain.cpp:725` (`block_slashed` accumulator); the absence of any side-channel that re-credits the forfeited stake (no UNSTAKE post-slash can re-credit because T-K4's refund-branch fires on `locked < amount`).
+**Code witness (HISTORICAL — the loop was removed by D4; see §1.2).** The loop body whose read-then-write pattern on `locked` made the second iteration contribute zero; the `block_slashed` accumulator; the absence of any side-channel that re-credits the forfeited stake (no UNSTAKE post-slash can re-credit because T-K4's refund-branch fires on `locked < amount`).
 
-**Test witness.** `tools/test_equivocation_multi.sh` "Same equivocator twice in same block" scenario — 2 assertions: first equivocation forfeits the full stake (`accumulated_slashed += L`), second equivocation no-op (`accumulated_slashed` unchanged). The "Pre-deactivated equivocator" scenario covers the cross-block analogue.
+**Test witness (the gate was INVERTED at step 3a).** `tools/test_equivocation_multi.sh` "Same equivocator twice in same block" now asserts that BOTH events move nothing and `accumulated_slashed` stays 0. *(HISTORICAL: it asserted that the first equivocation forfeits the full stake (`accumulated_slashed += L`) and the second is a no-op.)* The "Pre-deactivated equivocator" scenario covers the cross-block analogue.
 
-### T-E4 — Ghost-equivocator robustness
+### T-E4 — Ghost-equivocator robustness (HISTORICAL — superseded by T-E0 *Ghost equivocator*)
 
 **Statement.** For every block `B` containing an `EquivocationEvent ev` with `ev.equivocator == d` and a chain state where `stakes_[d]` does NOT exist AND/OR `registrants_[d]` does NOT exist, the apply iteration on `ev` produces zero state mutation on the absent side(s) and proceeds without throwing. Specifically:
 
@@ -160,7 +224,7 @@ The third case — a forensically-constructed event naming a domain that **never
 
 **Test witness.** `tools/test_equivocation_apply.sh` "Robustness on ghost equivocator" block — 2 assertions: apply succeeds without crashing on an event for a never-registered domain; other domains' state is unaffected. `tools/test_equivocation_multi.sh` "Equivocator with NO stake" scenario covers the DOMAIN_INCLUSION variant (registry deactivated, no stake to forfeit) — the no-stake case is the "absent stake / present registry" half of the ghost-equivocator robustness claim.
 
-### T-E5 — A1 invariance under slashing
+### T-E5 — A1 invariance under slashing (HISTORICAL — superseded by T-E0 *A1 invariance*)
 
 **Statement.** Across any finite sequence of blocks `B_1, B_2, ..., B_n` applied to a Chain `C`, including blocks containing zero or more `EquivocationEvent`s, the A1 unitary-supply invariant `live_total_supply() == expected_total()` holds at every apply-tail (`chain.cpp:1399`). Specifically, for an equivocation event with pre-event `stakes_[d].locked == L`:
 
@@ -182,7 +246,7 @@ The A1 closure at `chain.cpp:1399` catches any apply-path bug that would break t
 
 **Test witness.** `tools/test_equivocation_apply.sh` "A1 supply invariant" block — 3 assertions: `accumulated_slashed` bumped by exactly the full stake amount; `live_total_supply` decreases by exactly the forfeit; `expected_total == live_total_supply` after the forfeit (the A1 closure passes). `tools/test_supply_invariant.sh` cross-checks the A1 closure across composed block sequences including equivocation events.
 
-### T-E6 — Cross-block accumulation
+### T-E6 — Cross-block accumulation (HISTORICAL — superseded by T-E0 *Cross-block accumulation*)
 
 **Statement.** Across any finite sequence of blocks `B_1, B_2, ..., B_n` applied to a Chain `C`, with each block `B_i` containing zero or more `EquivocationEvent`s, the chain-wide `accumulated_slashed_` advances by exactly:
 
@@ -209,7 +273,7 @@ The independence claim — multiple distinct equivocators in the same block each
 
 **Test witness.** `tools/test_equivocation_multi.sh` "Two distinct equivocators in same block" scenario — assertions confirm both forfeitures land independently in `accumulated_slashed_` (the chain-wide counter advances by `L_1 + L_2`). The "Determinism" scenario at the tail of `test_equivocation_multi.sh` exercises the same property across two chains seeing the same multi-equivocation sequence. `tools/test_equivocation_slashing.sh` exercises the multi-block accumulation across a network-level scenario.
 
-### T-E7 — Deterministic apply
+### T-E7 — Deterministic apply (HISTORICAL — superseded by T-E0 *Determinism*)
 
 **Statement.** For any two Chain instances `C₁` and `C₂` with `C₁ ≡_S C₂` (per FA-Apply-2 §1.2 state-equivalence), and any block `B` containing equivocation events, the apply results satisfy `apply_transactions(C₁, B) ≡_S apply_transactions(C₂, B)`. In particular: the final `stakes_[d].locked` values coincide for every `d` named in `B.equivocation_events`, the final `registrants_[d].inactive_from` values coincide, the final `accumulated_slashed_` counters coincide, and the final `compute_state_root` values coincide byte-identically.
 
@@ -227,7 +291,7 @@ The composition of these three components: equivocation-slash apply is a pure fu
 
 ---
 
-## 3. Slashing vs DEREGISTER
+## 3. HISTORICAL — Slashing vs DEREGISTER
 
 Equivocation slashing and DEREGISTER are the two paths that deactivate a registered validator. They share the registry-mutation surface — both write `registrants_[d].inactive_from` to a finite value — but differ structurally on three dimensions:
 
@@ -249,7 +313,7 @@ The asymmetric stake disposition is the central economic distinction. DEREGISTER
 
 ---
 
-## 4. Discussion
+## 4. HISTORICAL — Discussion of the removed mechanism
 
 ### 4.1 `inactive_from` monotonicity claim
 
@@ -273,7 +337,11 @@ The design choice to send the forfeited stake to `accumulated_slashed_` (a count
 
 3. **Aligns with Ethereum-class slashing semantics.** Ethereum's beacon-chain slashing similarly burns the slashed ETH (after a "whistleblower reward" component, which Determ deliberately omits to close the manufacturing-incentive surface in (1)). The "burn, not redistribute" pattern is the established mutually-distrustful approach.
 
-### 4.3 Apply-side vs validator-side division of labor
+### 4.3 Apply-side vs validator-side division of labor (RESTATED 2026-09-17)
+
+**At HEAD the division of labour is total: the validator does all of it.** V11 accepts or rejects the event; apply does nothing either way. There is therefore no longer any path by which a false accusation destroys honest stake — the FA6 §2 Case (c) residual (an honest validator that ran two round instances at one height can be validly accused) costs the accused NOTHING on L1, and lands instead on the L2 policy (D22) as an input-quality obligation. That is the whole of the change to this section; the historical text follows.
+
+**HISTORICAL.**
 
 The apply-side mechanics in this proof fire **conditional on V11 having authorized the slash upstream**. V11 (`check_equivocation_events` at `validator.cpp`) is responsible for:
 
@@ -288,23 +356,25 @@ The apply-side robustness (T-E4 ghost-equivocator handling) is the belt-and-susp
 
 ---
 
-## 5. What this doesn't prove
+## 5. What this doesn't prove (restated 2026-09-17: T-E0 replaces the T-E1..T-E7 references below)
 
 The theorems above target the apply-layer mechanics of equivocation slashing in isolation. They do not extend to:
 
-- **Slashing soundness — the "honest never slashed" property.** This is the scope of `EquivocationSlashing.md` (FA6) Theorem T-6. FA6's argument is cryptographic (EUF-CMA + H2 honest-validator behavior), and the apply-side mechanics fire only when FA6's V11 + EUF-CMA chain authorizes the slash. The present proof's T-E1 through T-E7 are conditional on FA6's soundness: "given that the slash IS authorized, here's what happens."
+- **No-false-accusation — the "honest never named" property.** This is the scope of `EquivocationSlashing.md` (FA6) Theorem T-6, which is cryptographic (EUF-CMA) and bounded by the H3 hypothesis. T-E0 is *unconditional* on it: apply is neutral whether the event is genuine or fabricated, so this document no longer inherits FA6's boundary as a risk. (The historical T-E1..T-E7 did.)
 
 - **Slashing completeness — "every equivocator gets caught."** A separate theorem would prove that every actual equivocation eventually surfaces as a finalized `EquivocationEvent`. This is a liveness property (FA4-adjacent) for the gossip + evidence-pool pipeline; not proven here. In practice the gossip layer's `EQUIVOCATION_EVIDENCE` propagation + the pending-evidence-pool dedup makes most actual equivocations land in some honest committee's block, but the formal completeness claim is out of scope.
 
-- **Suspension slashing (round-1 aborts).** The suspension-slash branch at `chain.cpp:1313–1328` shares the `block_slashed` accumulator with the equivocation branch but operates on a different trigger (abort events instead of equivocation events). Suspension slashing is bounded-magnitude (`SUSPENSION_SLASH = 10` per event, vs. full forfeit for equivocation) and is the "economic, not cryptographic" deterrent for round-1 absence. The suspension-slash analytic is covered by `StakeLifecycle.md` §4 (slashing-intersection note) and is informally addressed in `docs/SECURITY.md` S-008.
+- **The Phase-1 abort channel.** The abort loop in `apply_transactions` used to share the `block_slashed` accumulator with the equivocation branch. Since D13 (2026-09-16) it deducts nothing either: it increments the S-032 `abort_records_` entry, which arms the exponential suspension window, and moves no stake. `SUSPENSION_SLASH` remains a genesis-hash-covered but INERT parameter. Covered by `AbortEventApply.md` (restated) and `EligibilityFloorDesign.md`.
 
 - **EquivocationEvent wire format / V11 validator check.** The struct's serialization, V11's verify-against-pubkey logic, and the consensus-time rejection are PROTOCOL.md §4 / FA6 / validator-side scope. The present proof references `ev.equivocator` as the key for the apply-side mechanics but does not verify the event's authenticity — that is V11's job.
 
-- **Snapshot restore preserves the post-slash state.** The post-slash `stakes_[d].locked = 0`, `registrants_[d].inactive_from = h+1`, and `accumulated_slashed_ += L` triple is carried across snapshot boundaries via the `s:`, `r:`, and `c:` namespaces respectively (FA-Apply-2 T-S3 cross-namespace coverage). The restore equivalence is FA-Apply-2's scope; the present proof's deltas compose through snapshot restore by T-S2 without re-derivation. A regression introducing a path where a post-slash chain failed snapshot serialize/restore for any of the three would manifest as a state-root divergence (G2 gate failure at `chain.cpp:1893–1911`).
+- **Snapshot restore.** There is no post-slash state to preserve any more: T-E0 produces no delta in `s:`, `r:` or `c:`. The three namespaces and the `c:accumulated_slashed` leaf keep their shapes unchanged (no migrations), so every existing snapshot round-trip gate stays green and stays non-vacuous on its other channels; FA-Apply-2 T-S2/T-S3 are unaffected.
 
 - **Cross-shard equivocation propagation.** FA6 Corollary T-6.1 covers cross-shard slashing soundness; the present proof references the `ev.shard_id` and `ev.beacon_anchor_height` fields only as forensic context. The cross-shard apply mechanics are identical to the single-chain branch — the shard fields do not gate the apply-side writes, only the V11 routing. The single-chain proof here is the apply-side claim for both modes.
 
-- **Re-registration after equivocation.** ⚠ **Corrected (see §0) — this is the OWNER-ESCALATED gap.** An earlier version of this proof claimed (Discussion §4 + T-E2 commentary) that the equivocated entry blocks REGISTER from re-creating the same domain, via a "`registrants_.contains(d)` check that skips on hit." **No such check exists** — the REGISTER apply branch (`chain.cpp:1231-1296`) unconditionally overwrites `registrants_[d]`, re-activating a slashed domain after `derive_registration_delay`. Whether a slashed domain should be permanently locked out — vs. the current overwrite semantics that legitimately support key-rotation / region-update re-registration — is a consensus/state-format policy decision. It is OWNER-ESCALATED (the fix must distinguish slash-deactivation from voluntary DEREGISTER, and once decided should be gated falsify-on-mutant: slash-then-re-REGISTER the same domain and assert `inactive_from` stays `== slash_height + 1`). A future GC policy for inactive entries would interact with whatever lockout rule is chosen.
+- **Re-registration after equivocation — MOOT since D4 (2026-09-17 note).** There is no deactivation to undo: `apply_transactions` never sets `inactive_from` for an equivocator, so "can a slashed domain re-register?" has no referent. The §0 correction and the text below are HISTORICAL. The policy question it escalated (should an equivocator be excluded, and how) was answered by D4: not at L1, ever — exclusion at `|eligible pool| == K` is a self-sustaining halt, and no predicate over two signed openings is sound and complete. Exclusion policy, if any, is the L2 bond design (D22).
+
+  **HISTORICAL.** ⚠ **Corrected (see §0) — this was the OWNER-ESCALATED gap.** An earlier version of this proof claimed (Discussion §4 + T-E2 commentary) that the equivocated entry blocks REGISTER from re-creating the same domain, via a "`registrants_.contains(d)` check that skips on hit." **No such check exists** — the REGISTER apply branch (`chain.cpp:1231-1296`) unconditionally overwrites `registrants_[d]`, re-activating a slashed domain after `derive_registration_delay`. Whether a slashed domain should be permanently locked out — vs. the current overwrite semantics that legitimately support key-rotation / region-update re-registration — is a consensus/state-format policy decision. It is OWNER-ESCALATED (the fix must distinguish slash-deactivation from voluntary DEREGISTER, and once decided should be gated falsify-on-mutant: slash-then-re-REGISTER the same domain and assert `inactive_from` stays `== slash_height + 1`). A future GC policy for inactive entries would interact with whatever lockout rule is chosen.
 
 ---
 
@@ -313,7 +383,7 @@ The theorems above target the apply-layer mechanics of equivocation slashing in 
 | Reference | Role |
 |---|---|
 | `Preliminaries.md` (F0) | Validator predicate V11 (equivocation-proof verification) + assumption A1 (Ed25519 EUF-CMA) backing FA6's soundness. |
-| `EquivocationSlashing.md` (FA6) | Slashing soundness theorem T-6 + cross-shard corollary T-6.1; the present proof's mechanics fire only when FA6's V11 + EUF-CMA chain authorizes the slash. |
+| `EquivocationSlashing.md` (FA6) | No-false-accusation theorem T-6 + cross-shard corollary T-6.1. T-E0 does not depend on it (apply is neutral on genuine and fabricated events alike). |
 | `AccountStateInvariants.md` (FA-Apply) | I-3 (balance ↔ stake independence: slashing consumes `stakes_[d].locked` without crossing into `accounts_[d].balance`); I-5 (channel enumeration — equivocation-slash is the `locked → ∅` debit channel); I-6 (A1 closure consuming `accumulated_slashed_`). |
 | `SnapshotEquivalence.md` (FA-Apply-2) | T-S2 + T-S3 — the post-slash state triple (stakes/registrants/accumulated_slashed) is carried across snapshot boundaries via the `s:`, `r:`, and `c:` namespaces respectively. |
 | `StakeLifecycle.md` (FA-Apply-4) | T-K3 (DEREGISTER deferred-unlock) — the alternative deactivation path compared in §3; §4 (slashing intersection — equivocation can fire during the staked-pending-unlock window). |
@@ -326,24 +396,31 @@ The theorems above target the apply-layer mechanics of equivocation slashing in 
 | `include/determ/chain/block.hpp:256–279` | `EquivocationEvent` struct. |
 | `include/determ/chain/chain.hpp:23–30` | `StakeEntry` struct (`locked`, `unlock_height`). |
 | `include/determ/chain/chain.hpp:32–43` | `RegistryEntry` struct (`inactive_from` field). |
-| `src/chain/chain.cpp:725` | `block_slashed` per-block accumulator declaration. |
-| `src/chain/chain.cpp:1313–1328` | Suspension-slash branch (companion mechanism; out of scope per §5). |
-| `src/chain/chain.cpp:1344–1356` | Equivocation-slash apply branch (the central dual-mechanism loop). |
+| `Chain::apply_transactions` (`src/chain/chain.cpp`) | The `block_slashed` declaration (frozen at 0), the `b.abort_events` record loop (D13), and the `b.equivocation_events` comment block that IS the D4 apply path. |
+| `tools/test_equivocation_apply.sh` (`determ test-equivocation-apply`) | **The T-E0 gate**: neutrality against an event-free twin, A1, positive control; mutants M1–M8 RED. |
 | `src/chain/chain.cpp:1395` | Block-tail fold of `block_slashed` into `accumulated_slashed_`. |
 | `src/chain/chain.cpp:1397–1419` | A1 closure assertion + rollback diagnostic. |
 | `src/chain/chain.cpp:1231–1296` | REGISTER apply branch — **unconditionally overwrites** `registrants_[d]` (no contains-skip); re-activates a slashed domain by resetting `inactive_from` to `UINT64_MAX` (see §0 correction, OWNER-ESCALATED). |
 | `src/chain/chain.cpp:331–341` | `s:` + `r:` namespace state-root contribution (T-E7's determinism backstop). |
 | `src/node/validator.cpp::check_equivocation_events` | V11 upstream gate (FA6 scope). |
-| `tools/test_equivocation_apply.sh` | T-E1 + T-E2 + T-E4 + T-E5 + T-E7 (~10 assertions across five blocks — full forfeit, registry deactivation, ghost-equivocator robustness, A1 supply invariant, determinism; see `determ test-equivocation-apply`). |
-| `tools/test_equivocation_multi.sh` | T-E3 + T-E6 + T-E4 DOMAIN_INCLUSION variant + T-E7 multi-event determinism (~14 assertions across five scenarios — two distinct equivocators in same block, same equivocator twice in same block, equivocator with NO stake, pre-deactivated equivocator override, determinism; see `determ test-equivocation-multi`). |
+| `tools/test_equivocation_multi.sh` (`determ test-equivocation-multi`) | The multi-event composition arms, inverted to neutrality: two distinct equivocators in one block, the same equivocator twice, an equivocator with no stake, a pre-deactivated equivocator, determinism — every one now asserting that nothing moves. |
 | `tools/test_equivocation_slashing.sh` | End-to-end network-level scenario (3-node cluster, gossip + V11 + apply). |
 | `tools/test_supply_invariant.sh` | A1 closure across composed block sequences including equivocation events. |
 
 ---
 
-## 7. Status
+## 7. Status (rewritten 2026-09-17, step 3c)
 
-The seven theorem *statements* (T-E1 through T-E7) hold in the current codebase; **the re-activation-permanence corollary asserted in T-E2 / §3 / §4.1 / §5 is OPEN and OWNER-ESCALATED — see §0.**
+**Shipped: T-E0 only.** `Chain::apply_transactions` is state-neutral on `b.equivocation_events`; gate `determ test-equivocation-apply` (neutrality against an event-free twin, A1, positive control), mutants M1–M8 RED (DECISION-LOG 2026-09-16 "O-1 step 3a LANDED"). The T-E0 corollaries (replay, ghost equivocator, A1 invariance, cross-block accumulation, determinism) follow from neutrality and replace T-E3 through T-E7 in every citation.
+
+**Open, and owed elsewhere — not by this document:**
+
+- **Evidence bound (step 3b, OPEN).** Deregistration was the record's only limiter; a per-block cap + in-block duplicate rejection on `equivocation_events` is the next increment of the O-1 chain. Until it lands, one valid proof is re-includable at 2 Ed25519 verifies per copy.
+- **Evidence completeness (S-090, OPEN).** `on_equivocation_evidence` adopts without rebroadcasting; gossip has no relay and no re-request, so the record can be incomplete.
+- **Evidence identity on shards (S-089, OPEN).** `beacon_anchor_height` / `shard_id` are hashed but compared by nothing.
+- **The consumer (D22, v1.1 DApp scope, NOT DESIGNED).** The L2 bond/arbitration policy that is supposed to act on the record does not exist. Until it does, equivocation has no consequence anywhere.
+
+**HISTORICAL — the T-E1..T-E7 status record of the removed mechanism follows.** The re-activation-permanence corollary asserted in T-E2 / §3 / §4.1 / §5 was OPEN and OWNER-ESCALATED (see §0) and is now MOOT.
 
 - **T-E1** (full stake forfeiture) closed via the `block_slashed += sit->second.locked; sit->second.locked = 0;` paired writes at `chain.cpp:1348–1349` + apply-tail fold at `chain.cpp:1395`; regression `test_equivocation_apply.sh` "Full stake forfeiture" assertion.
 - **T-E2** (registry deactivation) — the deactivation *write* is closed via the unconditional `rit->second.inactive_from = b.index + 1;` write at `chain.cpp:1354`; regression `test_equivocation_apply.sh` "Registry deactivation" (2 assertions) + `test_equivocation_multi.sh` "Pre-deactivated equivocator" override case. **⚠ Its re-activation-permanence corollary is OPEN and OWNER-ESCALATED (see §0): the REGISTER apply branch (`chain.cpp:1231-1296`) has no contains-skip, so a re-REGISTER of the same domain resets `inactive_from` to `UINT64_MAX` and re-activates a slashed equivocator.**
@@ -353,6 +430,6 @@ The seven theorem *statements* (T-E1 through T-E7) hold in the current codebase;
 - **T-E6** (cross-block accumulation) closed via the apply-tail fold at `chain.cpp:1395` + the read-then-write idempotence of T-E3 across blocks; regression `test_equivocation_multi.sh` "Two distinct equivocators in same block" + "Determinism" scenarios.
 - **T-E7** (deterministic apply) closed via the apply branch's reliance on only the chain's deterministic state + the block's consensus-pinned `equivocation_events[]` order + `std::map` per-key isolation; regression `test_equivocation_apply.sh` "Determinism" assertion + `test_equivocation_multi.sh` "Determinism" multi-event variant.
 
-The seven theorem *statements* hold, but the **T-E2 / §3 / §4.1 / §5 re-activation-permanence corollary is OPEN and OWNER-ESCALATED (see §0)** — the REGISTER apply path (`chain.cpp:1231-1296`) unconditionally overwrites the registry entry, so equivocation removal is *not* permanent; in DOMAIN_INCLUSION mode a re-REGISTER re-activates the slashed domain at zero lasting cost. The proof rests on a small set of primitives: the dual-mechanism `(stake-forfeit, registry-deactivate)` paired writes guarded by independent `find` checks, the `block_slashed` per-block accumulator that folds into the chain-wide `accumulated_slashed_` at apply-tail, the A1 closure that catches any off-by-one in the accumulator update, and the `std::map` per-key isolation that makes multi-equivocator independence structural. The breadth of consequences — seven theorems plus the slashing-vs-DEREGISTER comparison plus the `inactive_from` monotonicity claim plus the "burn, not redistribute" rationale — is testimony to how few primitives the chain needs to express the slashing mechanism without compromising A1 conservation, replay determinism, or DOMAIN_INCLUSION-mode compatibility.
+**HISTORICAL summary of the removed mechanism.** The seven theorem statements held against the pre-D4 code, but the **T-E2 / §3 / §4.1 / §5 re-activation-permanence corollary was OPEN and OWNER-ESCALATED (see §0)** — the REGISTER apply path unconditionally overwrites the registry entry, so equivocation removal was *not* permanent; in DOMAIN_INCLUSION mode a re-REGISTER re-activated the slashed domain at zero lasting cost. That proof rested on a small set of primitives: the dual-mechanism `(stake-forfeit, registry-deactivate)` paired writes guarded by independent `find` checks, the `block_slashed` per-block accumulator that folds into the chain-wide `accumulated_slashed_` at apply-tail, the A1 closure that catches any off-by-one in the accumulator update, and the `std::map` per-key isolation that makes multi-equivocator independence structural. The breadth of consequences — seven theorems plus the slashing-vs-DEREGISTER comparison plus the `inactive_from` monotonicity claim plus the "burn, not redistribute" rationale — is testimony to how few primitives the chain needs to express the slashing mechanism without compromising A1 conservation, replay determinism, or DOMAIN_INCLUSION-mode compatibility.
 
-The proof's foundation rests on FA6's cryptographic soundness (no honest validator is ever named as the equivocator in a finalized event, under EUF-CMA) and FA-Apply's invariants (I-3 balance/stake independence + I-6 A1 closure). FA-Apply-10's contribution is the apply-side mechanism that, conditional on FA6's soundness, executes the slashing transition correctly: full forfeit, registry deactivation, A1 closure, idempotence, ghost-equivocator robustness, cross-block accumulation, and determinism.
+That proof's foundation rested on FA6's cryptographic soundness and FA-Apply's invariants (I-3 balance/stake independence + I-6 A1 closure). **FA-Apply-10's contribution at HEAD is the opposite and is one line: conditional on nothing at all, the apply path executes no transition.**

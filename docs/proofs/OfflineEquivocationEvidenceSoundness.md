@@ -1,6 +1,14 @@
 # OfflineEquivocationEvidenceSoundness — offline `determ-light` equivocation-evidence verifier
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decision D4, DECISION-LOG 2026-09-16).** T-OE0
+> (total adjudicability), T-OE1 (soundness — no false ACCEPT against an honest signer, ≤ 2⁻¹²⁸ per
+> attempt), T-OE2 (non-triviality) and T-OE4 (context-freedom) are **unchanged**: they are statements
+> about a pure verifier over two signed openings and consume no consequence. **T-OE3 is restated at its
+> own heading** — it was "completeness relative to V11 = a faithful SLASH predictor", and since D4 an
+> on-chain `EquivocationEvent` produces no slash to predict. The verifier's contract is unchanged in
+> code (`determ-light verify-equivocation`, verdicts `EQUIVOCATION-PROVEN` / `NOT-EQUIVOCATION`); what
+> an ACCEPT means has narrowed from "the chain would take this signer's stake" to "the chain would
+> accept this as a record", which is precisely the L2-policy input D22 consumes.
 
 This document formalizes the soundness of an **offline** equivocation-evidence verifier for the `determ-light.exe` light-client binary: a pure-verifier surface that, given two signed messages claimed to originate from the same registered signer at the same `(height, generation)`, and the signer's registered Ed25519 public key, decides **with no network connection and no chain state** whether the pair constitutes a valid `EquivocationEvent` under the V11 predicate. The verifier is the offline forensic dual of the daemon-side detection paths: where `S006ContribMsgEquivocation.md` (Phase-1) and the rev.8 BlockSigMsg path (Phase-2) *detect* equivocation live on the receive path, this verifier *adjudicates* an already-assembled evidence pair offline, so an auditor, a slashed operator, or a governance reviewer can independently confirm an on-chain slash was justified — or refute a fabricated accusation — without trusting any daemon.
 
@@ -98,7 +106,7 @@ Per the two-family coverage of V11 (`S006ContribMsgEquivocation.md` §2.2), the 
 **Out of scope (intentional).**
 
 - **Detection.** The verifier does not *find* equivocation in a stream of messages; it adjudicates an already-assembled pair. Detection is the daemon's job (S-006 + rev.8).
-- **Completeness of the chain's slashing pipeline.** Whether *every* actual equivocation eventually surfaces as a finalized event is FA4-adjacent liveness, out of scope here and in FA6 alike.
+- **Completeness of the chain's evidence pipeline.** Whether *every* actual equivocation eventually surfaces as a finalized event is FA4-adjacent liveness, out of scope here and in FA6 alike (see also S-090, OPEN: evidence gossip has no relay and no re-request, so completeness is not merely unproven but actively doubtful).
 - **Committee-evolution tracking.** As in `LightClientThreatModel.md` §6.5, the verifier trusts the operator-supplied pubkey for the named signer. Whether that pubkey is the *currently-registered* key for the signer at the claimed height is the operator's responsibility (or a future stateful-sync extension). The verifier's claim is conditional on "the supplied pubkey is the signer's registered key at `block_index`" — see §2.2 `A_keymap`.
 - **Cross-shard routing.** The `shard_id` / `beacon_anchor_height` forensic fields are parsed and surfaced but, per `block.hpp:264-275`, are *not consumed by validator correctness checks* — the two-sig proof is independently verifiable against the registered key regardless of where it was first observed. The verifier mirrors this: it adjudicates the cryptographic core and reports the forensic fields without gating on them (§4.5).
 
@@ -111,11 +119,11 @@ Per the two-family coverage of V11 (`S006ContribMsgEquivocation.md` §2.2), the 
 The adversary `A_accuser` is a **fabricating accuser** — the author of the evidence file the verifier consumes. `A_accuser` may:
 
 - **Author arbitrary evidence JSON.** Forge `equivocator`, `block_index`, `kind`, `index_a`, `body_root_a`, `sig_a`, `index_b`, `body_root_b`, `sig_b`, `shard_id`, `beacon_anchor_height` to any values.
-- **Choose the named signer freely**, including naming an honest validator the adversary wishes to see falsely slashed.
+- **Choose the named signer freely**, including naming an honest validator the adversary wishes to see falsely accused.
 - **Replay genuine signatures.** Harvest a real signature by an honest signer (e.g., a legitimately-broadcast `BlockSigMsg` or `ContribMsg`) and attempt to pair it with a fabricated second signature, or with a genuine-but-different-round signature.
 - **Submit the same evidence repeatedly** across invocations (the verifier is stateless, so cross-invocation correlation is the operator's concern, not a soundness surface).
 
-The adversary's **goal** is an over-acceptance: cause the verifier to emit ACCEPT for an evidence pair that names an honest signer `d` who did **not** equivocate, so that a downstream actor (operator, governance) is misled into believing `d` deserves slashing. The symmetric goal — causing a REJECT for a genuine equivocation (a false exoneration) — is the completeness concern (T-OE3).
+The adversary's **goal** is an over-acceptance: cause the verifier to emit ACCEPT for an evidence pair that names an honest signer `d` who did **not** equivocate — which, under D4, is the ONLY harm the equivocation channel can still do, since the record is the L2 policy's input — so that a downstream actor (operator, governance) is misled into believing `d` deserves slashing. The symmetric goal — causing a REJECT for a genuine equivocation (a false exoneration) — is the completeness concern (T-OE3).
 
 ### 2.2 Adversary capability EXPLICITLY OUT of scope
 
@@ -202,7 +210,7 @@ Apply the V11 non-triviality gates:
 - **Kind gate:** `ev.kind ≤ 1`. An unknown digest family has no compose function, so no digest could be
   derived; REJECT fail-closed rather than guessing a tag.
 
-On passing all four steps the verifier emits **ACCEPT** with a verdict record carrying the openings and the values it derived from them: `{equivocator, block_index, kind, index_a, body_root_a, index_b, body_root_b, derived_digest_a, derived_digest_b, would_slash: true}`. Publishing the derived digests is what makes the verdict independently re-checkable — a reader can recompute `D(kind, index, body_root)` with any SHA-256 and confirm the verifier verified the signatures against those exact bytes.
+On passing all four steps the verifier emits **ACCEPT** with a verdict record carrying the openings and the values it derived from them: `{verdict, proven, equivocator, block_index, kind, pubkey, index_a, gen_a, body_root_a, index_b, gen_b, body_root_b, …}` (the shipped `--json` field set; the pre-D4 draft of this document named a `would_slash` field, which the binary does not emit and which would be false since D4). Publishing the derived digests is what makes the verdict independently re-checkable — a reader can recompute `D(kind, index, body_root)` with any SHA-256 and confirm the verifier verified the signatures against those exact bytes.
 
 ### 3.5 Pipeline composition diagram
 
@@ -240,7 +248,7 @@ operator's --evidence <file>          operator's --committee <file>
                                 ▼
                          ┌──────────────┐
                          │  verdict      │  ACCEPT ⇒ exit 0
-                         │  {would_slash}│  REJECT ⇒ exit ≠0 + diagnostic
+                         │  {proven}     │  REJECT ⇒ exit ≠0 + diagnostic
                          └──────────────┘
 ```
 
@@ -292,13 +300,20 @@ The only way to ACCEPT *without* a forgery is for both `σ_a, σ_b` to be genuin
 
 T-OE2 is the offline guard against the two ways a *genuine* honest action could be mistaken for equivocation: byte-identical retry (caught by (i)) and cross-generation retry (caught by (iii)). It complements T-OE1: T-OE1 closes the *forgery* path (fabricated second signature), T-OE2 closes the *harvest* path (genuine-but-non-conflicting signatures repurposed as a fake pair).
 
-### 4.4 Theorem T-OE3 (completeness relative to V11 — faithful slash predictor)
+### 4.4 Theorem T-OE3 (completeness relative to V11 — faithful ADMISSION predictor) — RESTATED 2026-09-17
+
+> **What changed.** T-OE3 was titled "faithful slash predictor" and its value was that an offline
+> ACCEPT let an operator pre-compute the apply-side deltas. Since D4 there are none: a V11-admitted
+> event moves no L1 state (`EquivocationSlashingApply.md` T-E0). The IFF below is untouched — it is a
+> statement about two predicates agreeing — but its consequence clause is replaced: an offline ACCEPT
+> predicts that the chain would ADMIT and COMMIT the record, i.e. that the evidence is well-formed
+> input for the L2 bond policy (D22). It predicts nothing about stake.
 
 **Statement.** In hash-trusting mode (a), the verifier emits ACCEPT if and only if `V11(d, h_a, σ_a, h_b, σ_b, pk)` holds. Consequently, an offline ACCEPT predicts that the chain *would* slash `d` on this evidence (FA-Apply-10 T-E1: full forfeit + registry deactivation), and an offline REJECT guarantees the chain *would not* slash on this evidence.
 
 **Proof.** The verifier's ACCEPT condition is the conjunction of Step 3 (`Verify(pk,h_a,σ_a) ∧ Verify(pk,h_b,σ_b)`) and Step 4 (`h_a ≠ h_b ∧ σ_a ≠ σ_b`), with Step 1 establishing `registered(d)` (the `d ∈ pubkey_of` gate is the offline stand-in for the chain's registry lookup; conditional on ¬A_keymap the supplied map reflects the registry). This conjunction is exactly the V11 predicate restated above. So `ACCEPT ⟺ V11`.
 
-By FA6 / S-006, the chain bakes an `EquivocationEvent` only when V11 holds (`validator.cpp::check_equivocation_events` gates the block), and by FA-Apply-10 T-E1 the apply path slashes `d` on every V11-passing baked event. Therefore `ACCEPT ⟹ (chain would slash d)`. Conversely `REJECT ⟹ ¬V11 ⟹ (chain would reject the event at validate-time) ⟹ (no slash)`. The verifier is a faithful, daemon-independent oracle for the on-chain slash decision. ∎
+By FA6 / S-006, the chain bakes an `EquivocationEvent` only when V11 holds (`validator.cpp::check_equivocation_events` gates the block). **HISTORICAL from here:** by FA-Apply-10 T-E1 the apply path slashed `d` on every V11-passing baked event. Therefore `ACCEPT ⟹ (chain would slash d)`. Conversely `REJECT ⟹ ¬V11 ⟹ (chain would reject the event at validate-time) ⟹ (no slash)`. The verifier is a faithful, daemon-independent oracle for the on-chain slash decision. ∎
 
 **Caveat (mode (b) vs mode (a)).** Completeness is stated for hash-trusting mode (a), which adjudicates the exact bytes the chain stores. In recompute mode (b), the verifier additionally re-derives the digests from raw fields; if the operator's raw-field encoding diverges from the producer's (e.g., a stale `make_contrib_commitment` ordering), mode (b) could recompute a digest that does not match what the signer actually signed, yielding a *false REJECT* (never a false ACCEPT — a wrong recompute only makes a genuine signature fail to verify, never makes a forgery succeed). So mode (b) is sound (T-OE1 holds) but its completeness is conditional on the recompute primitive being byte-faithful to the producer (the `MakeContribCommitmentBackwardCompat.md` L-2 / `LightClientThreatModel.md` L-2 "keep in sync" invariant). Mode (a) is the canonical completeness mode; mode (b) is the forensic convenience whose completeness rests on the same digest-copy discipline the rest of `determ-light` relies on.
 
@@ -308,7 +323,7 @@ By FA6 / S-006, the chain bakes an `EquivocationEvent` only when V11 holds (`val
 
 **Proof.** Steps 1–4 read `shard_id` and `beacon_anchor_height` only for inclusion in the surfaced verdict record; no gate branches on their values. This mirrors the on-chain `block.hpp:264-275` design note: the cross-chain provenance fields are forensic and "not consumed by validator correctness checks (the two-sig proof is independently verifiable against the equivocator's beacon-registered Ed25519 key, regardless of where it was first observed)." The verifier therefore adjudicates the cryptographic core identically for single-chain and shard-detected evidence, and reports the provenance without trusting it. ∎
 
-T-OE4 is what makes the offline verifier usable for *cross-shard* slashing forensics (FA6 Corollary T-6.1): an auditor on shard `S_Y` can adjudicate evidence first observed on shard `S_X` using only `S_X`'s signer key, with no beacon round-trip — the `shard_id`/`beacon_anchor_height` fields document where it came from but do not gate the verdict.
+T-OE4 is what makes the offline verifier usable for *cross-shard* evidence forensics (FA6 Corollary T-6.1): an auditor on shard `S_Y` can adjudicate evidence first observed on shard `S_X` using only `S_X`'s signer key, with no beacon round-trip — the `shard_id`/`beacon_anchor_height` fields document where it came from but do not gate the verdict.
 
 ---
 
@@ -328,9 +343,9 @@ The verifier handles Phase-1 (contrib-commit) and Phase-2 (block-digest) evidenc
 
 ### 5.3 FA-Apply-10 (EquivocationSlashingApply) — what an ACCEPT predicts
 
-T-OE3 ties the offline ACCEPT to FA-Apply-10 T-E1 (full forfeit) + T-E2 (registry deactivation): an offline ACCEPT predicts exactly those apply-side deltas. The verifier does not *perform* the slash (it never touches chain state); it predicts it. The prediction is faithful because ACCEPT ⟺ V11 and the chain slashes on every V11-passing event.
+**Restated 2026-09-17.** T-OE3 ties the offline ACCEPT to FA-Apply-10 **T-E0**: an offline ACCEPT predicts that the chain would admit the event and commit it, and that applying it changes NO state leaf. The pre-D4 text tied it to T-E1 (full forfeit) + T-E2 (registry deactivation) and follows as HISTORICAL — an offline ACCEPT predicted exactly those apply-side deltas. The verifier does not *perform* the slash (it never touches chain state); it predicts it. The prediction is faithful because ACCEPT ⟺ V11 and the chain slashes on every V11-passing event.
 
-**Composition statement.** T-OE3 + FA-Apply-10 give the operator a pre-image of the slash: "if this evidence reaches a producer, `d` loses its entire locked stake and is deactivated next block."
+**Composition statement (restated).** T-OE3 + FA-Apply-10 T-E0 give the operator: "if this evidence reaches a producer, it is admitted and permanently committed, and `d` loses nothing on L1 — what happens next is the L2 bond policy's (D22), which does not exist yet." **HISTORICAL — the pre-D4 composition statement:** "if this evidence reaches a producer, `d` loses its entire locked stake and is deactivated next block."
 
 ### 5.4 LightClientThreatModel — same fail-closed posture, no daemon adversary
 
@@ -366,7 +381,7 @@ As in T-OE3's caveat, recompute mode (b)'s completeness depends on the local `ma
 
 **Surface.** Step 2 (§3.2) trusts the operator-supplied `pubkey_of[d]`. A tampered map (`A_keymap`) makes both-sig-verify vacuous.
 
-**Soundness impact.** T-OE1 + T-OE3 hold conditional on ¬A_keymap. With a tampered map, the offline verdict no longer predicts the on-chain slash (the chain uses the real registry key).
+**Soundness impact.** T-OE1 + T-OE3 hold conditional on ¬A_keymap. With a tampered map, the offline verdict no longer predicts on-chain admission (the chain uses the real registry key).
 
 **Mitigation.** Source the committee map from a trusted committee snapshot (the same path `build_genesis_committee` / a `creators` RPC uses). Operator-visible; clean fail-closed exit if `d` is absent from the map.
 
@@ -400,7 +415,7 @@ Per-theorem citation table for an auditor walking from theorem to the surfaces t
 | T-OE1 | V11 predicate | `Preliminaries.md` §5 | The predicate the verifier evaluates offline. |
 | T-OE2 | body-root/sig distinctness | `src/node/validator.cpp:380 check_equivocation_events` (`body_root_a != body_root_b`, `sig_a != sig_b`, plus `kind <= 1` and `index_a == index_b == block_index`) | Non-triviality gate (replay + self-pair REJECT) + the height assert. |
 | T-OE2 | cross-generation REJECT | `S006ContribMsgEquivocation.md` T-2 | Cross-target pair is not equivocation. |
-| T-OE3 | V11 ⟺ ACCEPT; slash prediction | `EquivocationSlashingApply.md` T-E1/T-E2 | What an ACCEPT predicts (full forfeit + deactivation). |
+| T-OE3 | V11 ⟺ ACCEPT; admission prediction | `EquivocationSlashingApply.md` T-E0 | What an ACCEPT predicts (the chain admits and commits the record; no state moves). |
 | T-OE3 (mode b) | recompute primitives | `light/verify.cpp:57-92` (`light_compute_block_digest`); `src/node/producer.cpp::make_contrib_commitment` | Byte-faithful digest recompute. |
 | T-OE4 | forensic-field independence | `include/determ/chain/block.hpp:264-275` | `shard_id`/`beacon_anchor_height` not consumed by correctness checks. |
 
@@ -412,7 +427,7 @@ Suggested integration tests (one per theorem family), should the Lane-C verifier
 |---|---|
 | `tools/test_light_verify_equivocation.sh` | T-OE1 — genuine two-sig pair → ACCEPT; fabricated second sig under honest key → REJECT. |
 | (same) | T-OE2 — identical digests → REJECT; cross-generation pair → REJECT. |
-| (same) | T-OE3 — ACCEPT verdict matches `determ test-equivocation-apply`'s would-slash outcome on the same pair. |
+| (same) | T-OE3 — the ACCEPT verdict matches the chain's admission of the same pair; `determ test-equivocation-apply` pins that admission moves no state (T-E0). |
 | (same) | T-OE4 — verdict invariant under `shard_id`/`beacon_anchor_height` perturbation. |
 
 These are *suggested* surfaces for the Lane-C verifier owner; this proof's correctness rests on §3's pipeline + §4's theorems and does not depend on a test existing.
@@ -425,7 +440,7 @@ These are *suggested* surfaces for the Lane-C verifier owner; this proof's corre
 - **Implementation.** The offline verifier subcommand is **shipped** (`determ-light verify-equivocation`, `light/main.cpp:7552-7680`) and gated by a 12-assertion FAST test (`tools/test_light_verify_equivocation.sh`) — the earlier "Lane-C, owned separately, should it land" framing was stale. Only hash-trusting mode (a) is implemented; the `--class`/raw-field recompute of mode (b) (§3.2/§3.4/§6.4) is **not shipped**. The verifier reuses existing primitives (`EquivocationEvent::from_json`, `parse_committee`, `crypto::verify`) — no new cryptographic primitive.
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA) for T-OE1; A2 (SHA-256 collision resistance) transitively for the digest-distinctness ⇒ message-distinctness step and for mode-(b) recompute determinism; H1 (honest-signer single-message) for the soundness reduction. A3/A4 are not invoked.
 - **Adversary model.** `A_accuser` (fabricating evidence author). Explicitly out of scope: `A_crypto`, `A_keymap`, `A_local`, `A_net` (no transport at all — pure offline).
-- **Composes with.** FA6 (same predicate, offline site), S-006 (kind-discriminated two-class coverage), FA-Apply-10 (slash prediction), LightClientThreatModel (pure-verifier fail-closed posture). Introduces no new chain-level invariant.
+- **Composes with.** FA6 (same predicate, offline site), S-006 (kind-discriminated two-class coverage), FA-Apply-10 T-E0 (admission prediction; no slash to predict since D4), LightClientThreatModel (pure-verifier fail-closed posture). Introduces no new chain-level invariant.
 - **Theorems.** T-OE0 (total adjudicability), T-OE1 (soundness — no false ACCEPT against honest, `≤ 2⁻¹²⁸`/attempt), T-OE2 (non-triviality — replays/self-pairs/cross-target REJECT), T-OE3 (completeness relative to V11 — faithful slash predictor), T-OE4 (forensic-field independence). **T-OE1 and the T-OE2 "cross-target REJECT" clause do NOT hold for the shipped mode-(a) verifier — see §0** (the shipped predicate is height-unbound, the offline mirror of the owner-gated on-chain `EQV-height-unbound`; they would be restored by shipping mode (b) + the owner-gated on-chain height-bind). T-OE0, T-OE3, T-OE4 hold against the shipped surface.
 - **Concrete-security bound.** `Pr[false ACCEPT against honest d] ≤ 2⁻¹²⁸` per attempt; `≤ Q · 2⁻¹²⁸` over `Q` attempts — identical to FA6 T-6, as the verifier evaluates the same predicate. Under Grover (PQ), the bound degrades to `≤ Q · 2⁻⁶⁴` for Ed25519, still negligible for any operational `Q`; PQ-signature migration is the long-term path (`Preliminaries.md` §2.2 note).
 

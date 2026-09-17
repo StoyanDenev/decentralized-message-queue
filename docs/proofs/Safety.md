@@ -1,10 +1,8 @@
 # FA1 — Safety theorem (fork freedom)
 
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
-
 This document proves that Determ's K-of-K mutual-distrust protocol produces at most one valid block per height, under the cryptographic assumptions of `Preliminaries.md` §2 plus the honest-behavior definition §4.
 
-**Companion documents:** `Preliminaries.md` (notation, model, validator definition); `EquivocationSlashing.md` (FA6, picks up the "fully-Byzantine committee" edge case).
+**Companion documents:** `Preliminaries.md` (notation, model, validator definition — §9 for what an equivocation event does and does not do since D4); `EquivocationSlashing.md` (FA6, picks up the "fully-Byzantine committee" edge case).
 
 ---
 
@@ -24,7 +22,7 @@ then **at least one** of the following holds:
 
 In plain terms: two valid blocks at the same height require the **entire** committee to be Byzantine and to have signed both. With any honest member, the protocol is unconditionally fork-free.
 
-The fully-Byzantine-committee case (T-1 clause 2) leaves a slashable forensic trail — see `EquivocationSlashing.md` (FA6).
+The fully-Byzantine-committee case (T-1 clause 2) leaves a cryptographic forensic trail, recorded on-chain and carrying no L1 consequence since D4 — see `EquivocationSlashing.md` (FA6) and §5.1 below.
 
 **Scope clarification — "block" means "block digest" here.** "Two valid blocks at the same height" is interpreted at the digest level: `compute_block_digest(B) = compute_block_digest(B')`. The K-of-K committee signs over this digest, so two distinct digests passing K-of-K verification is what T-1 rules out. A weaker question — "can two distinct block *instances* share the same digest" — is separately addressed: the digest covers the canonical Phase-1 commit material but excludes Phase-2-reveal-time fields and several evidence/receipt list fields. The `prev_hash` chain (which uses `signing_bytes`, covering everything) closes that residual ambiguity at the next block boundary. The full discussion is §5.3 plus `S030-D2-Analysis.md`. Reading FA1 as proving "at most one block instance per height" is stronger than what's proven here; the chain-level "at most one finalized block instance per height" follows from T-1 *plus* the `prev_hash`-chain argument made elsewhere.
 
@@ -134,13 +132,15 @@ So only case (a) survives: `B = B'`.   ∎
 Determ claims "unconditional fork-freedom" in MD-mode. Reading T-1, this is **slightly informal** but accurate in practice:
 
 - Strict unconditional: would require ruling out clause 2 (fully-Byzantine equivocating committee). T-1 doesn't.
-- Practical unconditional: clause 2 is detectable (every signature is on-chain after gossip), and FA6 (equivocation slashing) makes it economically suicidal for any rational actor — every member loses their entire stake AND their domain registration.
+- Practical unconditional: clause 2 is **detectable** — every signature is on-chain after gossip, and the two signed openings are committed in a block as an `EquivocationEvent` (V11-verified).
 
-The "unconditional" claim is therefore: **fork-freedom holds under any honest-fraction assumption from ≥ 1 honest in `K_h` upward**. A fully-Byzantine committee can technically fork the chain at a height, but every fork-creator gets slashed and re-organizes around the surviving honest member at the next eligible committee selection.
+**Re-derived 2026-09-17 (step 3c).** The second half of that bullet used to read "and FA6 makes it economically suicidal — every member loses their entire stake AND their domain registration". That is **false as of 2026-09-16** (owner decision D4, landed as O-1 step 3a): `Chain::apply_transactions` reads nothing from `b.equivocation_events`, so a fully-Byzantine committee that forks a height loses NOTHING on L1 and stays registered and eligible. The honest statement is therefore:
 
-This is materially stronger than BFT protocols' `f < N/3` safety claim, which fails completely above the threshold (no slashing reorganization).
+- **What T-1 still gives:** fork-freedom holds under any honest-fraction assumption from ≥ 1 honest in `K_h` upward (clause 1, a pigeonhole on K-of-K signatures — it consumes no economic term and is untouched by D4). A fully-Byzantine committee can still technically fork a height (clause 2), and that event is still DETECTABLE and, once an honest peer sees both sides, RECORDED on-chain.
+- **What it no longer gives:** *recovery*. Nothing re-organizes around a surviving honest member, because nothing removes the fork-creators — the `inactive_from` flip is gone. Fork-choice still converges every honest node onto one of the two blocks (`S029ForkChoiceSoundness.md` T-1/T-2), so the chain does not split; but the same committee may be selected again at the next height. Repetition is bounded by nothing at L1.
+- **What replaces the economic leg:** the L2 bond policy (D22, v1.1 DApp scope), which consumes the on-chain record. Its bond, its arbitration and its verdict are NOT specified here and do not exist yet; until they do, clause 2 has detection and no consequence.
 
-> **⚠ 2026-09-14 — the FA6 slashing leg above is under re-derivation; do not cite it.** Owner decision 2026-08-13 relocates the pre-finalization consequence out of L1 (DECISION-LOG 2026-08-13; CLAUDE.md SLASHING block); the forfeiture code is still live at HEAD (`src/chain/chain.cpp:1819-1825`) because the change was reverted after failing review. Until the re-derivation lands, "fork-freedom from ≥ 1 honest member" stands on clause 2's detectability, not on the economic consequence.
+The comparison to BFT that this section used to make ("materially stronger than `f < N/3`, which fails completely above the threshold, with no slashing reorganization") is **WITHDRAWN**. Above its threshold Determ now also fails with no reorganization; what it retains over classical BFT is that MD-mode clause 1 has no threshold at all — one honest committee member suffices, unconditionally — and that the failure leaves cryptographic evidence. Those two are the claim; "slashing reorganization" is not.
 
 ### 5.2 Concrete-security bound
 
@@ -153,7 +153,7 @@ This bound is significantly tighter than the BFT-mode safety claim (FA5), which 
 - **Liveness.** T-1 says nothing about whether *any* block finalizes — only that no two valid blocks can coexist at the same height. See `Liveness.md` (FA4).
 - **Network model variability.** T-1 is independent of synchrony assumptions. It holds in fully asynchronous networks too. Validity is a local predicate.
 - **Cross-shard atomicity.** T-1 is per-chain. Cross-shard safety (atomicity, no double-credit) is in `CrossShardReceipts.md` (FA7).
-- **BFT-mode conditional safety.** When `B` and `B'` are both BFT-mode blocks (consensus_mode = BFT), the BFT committee has only `|K_h| = ⌈2K/3⌉` members and the V8 quorum is `Q = ⌈2|K_h|/3⌉`, so Lemma L-1.3 gives only `2Q − |K_h|` overlap (≥ 2 across the worked K=3/6/9/12 cases), not full K. BFT-mode safety relies on `f_h < |K_h|/3` within that smaller committee plus equivocation slashing; the full BFT-mode argument is in `BFTSafety.md` (FA5).
+- **BFT-mode conditional safety.** When `B` and `B'` are both BFT-mode blocks (consensus_mode = BFT), the BFT committee has only `|K_h| = ⌈2K/3⌉` members and the V8 quorum is `Q = ⌈2|K_h|/3⌉`, so Lemma L-1.3 gives only `2Q − |K_h|` overlap (≥ 2 across the worked K=3/6/9/12 cases), not full K. BFT-mode safety relies on `f_h < |K_h|/3` within that smaller committee — and on nothing else since the B2 slashing assumption was discharged as false (step 3c); the full BFT-mode argument, and what it stopped giving, is in `BFTSafety.md` (FA5).
 - **"≤ 1 block instance per digest" (S-030 D2).** T-1 says "at most one *digest* finalizes per height" — a single Hash value. It does NOT directly say "at most one *block instance* per height." The K-of-K committee signs `compute_block_digest()`, which is narrower than `Block::signing_bytes()` (it excludes Phase-2-reveal-time fields and several evidence/receipt list fields). Two block instances differing only in those excluded fields share the same digest; both pass K-of-K signature verification.
 
   **Apply-layer closure (S-033 + S-038, now belt-and-suspenders beneath the consensus-layer binding below).** `Block::signing_bytes` binds `state_root` (when non-zero), which is the Merkle root over canonical state after apply. The producer's `Node::try_finalize_round` populates `body.state_root` via a tentative-chain dry-run before broadcast (S-038 closure — pre-S-038 fix the field was zero on every gossiped block and the gate short-circuited). The validator re-derives state_root at apply time and rejects on mismatch. Two block instances with differing evidence/receipt lists produce different post-apply states → different state_roots → at most one apply-validates on any honest node. The state-divergence window narrows from "one block wide" (pre-S-033, recovered at N+1 via prev_hash) to "zero blocks (detected at apply with a loud diagnostic)."

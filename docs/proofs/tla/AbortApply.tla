@@ -1,14 +1,13 @@
 --------------------------- MODULE AbortApply ---------------------------
-\* STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032)
-\* and deducts NOTHING; T-A1 and every statement below that rests on the deduction
-\* are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").
-\* STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4,
-\* DECISION-LOG 2026-09-16; landed as O-1 step 3a). The full-stake forfeiture and
-\* registry deactivation this model treats as shipped apply-path behaviour were
-\* removed from Chain::apply_transactions; an EquivocationEvent is an on-chain
-\* evidence record only. This model is pending re-derivation in step 3c of the
-\* recorded sequence and must not be cited as current; the DECISION-LOG entry is
-\* the authority.
+\* STATUS 2026-09-17 (step 3c) — PARTLY HISTORICAL. The abort_records (S-032) half of this model is
+\* CURRENT: a Phase-1 (round == 1) AbortEvent increments the offender's count and stamps last_block,
+\* and a Phase-2 event records nothing. The SUSPENSION_SLASH deduction modelled alongside it was
+\* RETIRED on 2026-09-16 by owner decision D13 (DECISION-LOG 2026-09-16 "D13 LANDED"): an abort
+\* suspends and deducts NOTHING, suspension_slash is an inert genesis parameter, and
+\* accumulated_slashed has no producer. Every action, invariant and property below that moves stake
+\* is HISTORICAL. The equivocation actions in this module are likewise historical — owner decision
+\* D4 removed the forfeiture and the registry deactivation the same day; apply reads nothing from
+\* b.equivocation_events. See AbortEventApply.md, restated 2026-09-17, for the shipped rule.
 (*
 FB16 — TLA+ specification of the AbortEvent apply state machine.
 Models the apply-layer mechanics by which an AbortEvent baked into

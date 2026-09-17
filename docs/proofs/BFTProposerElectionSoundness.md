@@ -1,8 +1,14 @@
 # BFTProposerElectionSoundness — within-BFT-committee deterministic proposer election soundness
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> PE-1, PE-2, PE-3, PE-4 and PE-4.1 are **unchanged in content** — they are determinism, uniformity
+> and bias arguments over `epoch_rand`, the abort mix and the validator's re-derivation, and none
+> consumes a consequence. Two cost clauses in their commentary do, and are corrected in place: the
+> PE-3 phrase "uniform redraws at slashing cost" is wrong — since D13 an induced abort deducts
+> NOTHING from anyone, so the grinder's per-redraw cost is bandwidth plus the accused's suspension
+> window, and the geometric `E ≈ |K_h|` walk is therefore free. And the §Composition claim that FA6
+> "slashes" the residual dishonest-proposer fork is void: FA6 records it (D4) and nothing acts on it,
+> so PE-4.1's residual has no economic backstop. See `S010S011SybilEconomics.md` §6.7.
 
 This document is the analytic soundness proof for the **within-committee proposer election** that fires once a height has escalated to BFT mode: `proposer_idx` at `src/node/producer.cpp:520-533`, driven by the epoch-pinned, shard-salted seed `epoch_committee_seed(epoch_rand, shard_id)` (`src/crypto/random.cpp:169-175`) and the round's accumulated `AbortEvent` list. The election names exactly one of the `|K_h|` BFT-committee members as the round's `bft_proposer`; that member alone finalizes the block (`src/node/node.cpp:1039`), eliminating the silent-fork race in which different peers would otherwise pick different `Q`-subsets of the available signatures. The validator independently re-derives the same index and rejects any block whose `bft_proposer` field disagrees, whose proposer index lands out of range, or whose proposer slot is sentinel-zero (`src/node/validator.cpp:408-426`).
 
@@ -93,7 +99,7 @@ Three structural facts drive the proof:
 - The selection of the committee *set* `K_h` from the validator pool — `S020CommitteeSelection.md`. This proof takes `creators` / `current_creator_domains_` as given and elects *within* it.
 - The quorum-intersection safety of a finalized BFT block — `BFTSafety.md` (FA5). PE-4 supplies the proposer-uniqueness half; FA5 supplies the signature-intersection half.
 - The unpredictability of `epoch_rand` as a random value — `Liveness.md` L4 + `Censorship.md` T-2.1 + `SelectiveAbort.md` (FA3). This proof consumes that unpredictability as a hypothesis (H-rand below), it does not re-derive it.
-- The slashing that punishes a proposer who finalizes two distinct digests at one height — `EquivocationSlashing.md` (FA6). This proof shows the *honest* path is fork-free; FA6 shows the *dishonest* path is detected and slashed.
+- The evidence record left by a proposer that finalizes two distinct digests at one height — `EquivocationSlashing.md` (FA6). Since D4 that record punishes nothing. This proof shows the *honest* path is fork-free; FA6 shows the *dishonest* path is detected and slashed.
 - The straight-modulo choice (vs. rejection-sampled debias) is justified here by the bias bound PE-2; the analogous bias analysis for the committee-set `hash_mod` is in `S020CommitteeSelection.md` §2.
 
 ---
@@ -152,7 +158,7 @@ For the protocol's supported BFT committee sizes `|K_h| ≤ 256 = 2⁸` (a hard 
 
 3. **`|K_h|`** is genesis-pinned (`⌈2K/3⌉` from `cfg.k_block_sigs`) and not adversary-controlled at runtime.
 
-Combining: the only knob with non-negligible effect is abort-induction, which yields uniform redraws at slashing cost, never a chosen index. Hence `Pr[proposer ∈ M] ≤ m/|K_h| + 2⁻⁵⁶` per round for any pre-`epoch_rand` strategy, and any within-epoch deviation above that baseline is paid for in slashed stake. ∎
+Combining: the only knob with non-negligible effect is abort-induction, which yields uniform redraws — **at no stake cost since D13 (2026-09-16)**, only bandwidth and the suspension window it lands on the accused — never a chosen index. The bound below is unaffected (it is a uniformity bound, not a cost bound); what is lost is the claim that redrawing is expensive. Hence `Pr[proposer ∈ M] ≤ m/|K_h| + 2⁻⁵⁶` per round for any pre-`epoch_rand` strategy, and any within-epoch deviation above that baseline is paid for in slashed stake. ∎
 
 **Remark.** PE-3 is the reason epoch-pinning the seed is *safer* than re-seeding per block from the immediately-prior `cumulative_rand`: a per-block reseed would give a producer-aligned adversary a fresh grinding target every height (it could try to influence the next block's `cumulative_rand` to steer the following proposer). Epoch-pinning collapses the grinding surface to one boundary value per epoch (covered by H-rand) plus the abort list (covered by slashing). This is the same hardening rationale S-020 uses for the committee-set seed; the two share `epoch_committee_seed` deliberately.
 
@@ -235,7 +241,7 @@ the out-of-range reject, remains unasserted: `proposer_idx` returns
 
 - **Determinism (PE-1):** exact — zero failure probability; the election is a pure function of agreed inputs.
 - **Bias (PE-2):** `Δ < 2⁻⁵⁸ < 2⁻⁵⁶` over uniform for all `|K_h| ≤ 256`; negligible.
-- **Grinding (PE-3):** pre-seed advantage `0` over the `m/|K_h|` baseline; within-epoch steering bounded by a geometric (`E ≈ |K_h|` aborts to hit a target) random walk at slashing cost — economically infeasible.
+- **Grinding (PE-3):** pre-seed advantage `0` over the `m/|K_h|` baseline; within-epoch steering bounded by a geometric (`E ≈ |K_h|` aborts to hit a target) random walk — free of stake cost since D13, so bounded by patience rather than by price — economically infeasible.
 - **Mirror (PE-4):** exact — any mis-named / out-of-range / unsigned-proposer / MD-smuggled block is rejected with probability `1` (the checks are equality/range tests over byte-identical recomputation), modulo the `≤ 2⁻¹²⁸` SHA-256 collision term inherited from `compute_block_digest` binding (A2).
 
 Net: the within-BFT-committee proposer election contributes **no new non-negligible failure term** beyond the cryptographic floors FA5/FA6 already carry. It converts FA5's "≥ Q signed" into "exactly one canonical block" with exact (probability-1) determinism among honest nodes and exact validator rejection of every adversarial deviation enumerated in §4.
@@ -282,11 +288,11 @@ S-020 (committee-set draw) ──→  K_h ⊂ V, ordered as `creators`
 THIS PROOF (proposer election within K_h) ──→  one canonical proposer per height (PE-1, PE-4)
         │
         ▼
-FA5 (quorum intersection) + FA6 (slashing) ──→  exactly one canonical, safe BFT block
+FA5 (quorum intersection) + FA6 (evidence) ──→  exactly one canonical, safe BFT block
 ```
 
 - **From S-025:** the standing precondition (BFT mode in scope). This proof is vacuous in MD mode (where `bft_proposer` is forbidden, PE-4 final clause).
 - **From S-020:** the committee set `K_h` and its ordering, plus the shared `epoch_committee_seed` infrastructure and its domain-separation discipline (extended here with the second `"bft-proposer"` tag).
 - **To FA5:** the proposer-uniqueness half of "exactly one canonical BFT block per height" (Corollary PE-4.1). FA5 supplies the signature-intersection half; together they give BFT-mode safety under `f_h < |K_h|/3`.
-- **To FA6:** the residual dishonest-proposer fork (a proposer signing two digests) is precisely the equivocation FA6 detects and slashes; this proof shows that is the *only* residual fork once honest nodes agree.
+- **To FA6:** the residual dishonest-proposer fork (a proposer signing two digests) is precisely the equivocation FA6 detects and RECORDS — since D4 it is not punished, and `BFTSafety.md` T-5.1-R replaces the old recovery claim. This proof shows that is the *only* residual fork once honest nodes agree.
 - **To FA4 (Liveness):** the abort-driven proposer rotation (PE-3, step 2) is the within-epoch progress lever — a stalled proposer is rotated off on the next attempt via a fresh near-uniform redraw, which FA4's geometric-bound liveness argument consumes.

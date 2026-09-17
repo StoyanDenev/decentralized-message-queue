@@ -1,8 +1,14 @@
 # F2ApplyComposition — v2.7 F2 view reconciliation + FA-Apply-1..16 composition + state_root binding
 
-> **STATUS 2026-09-16 — D13 landed: a Phase-1 AbortEvent records the abort (S-032) and deducts NOTHING; T-A1 and every statement below that rests on the deduction are historical and are re-derived in step 3c (DECISION-LOG 2026-09-16 "D13 landed").**
-
-> **STATUS 2026-09-16 — equivocation carries NO L1 consequence (owner decision D4, DECISION-LOG 2026-09-16; landed as O-1 step 3a).** The full-stake forfeiture and registry deactivation that this document treats as shipped apply-path behaviour were removed from `Chain::apply_transactions`; an `EquivocationEvent` is now an on-chain evidence record only (gate `determ test-equivocation-apply`). Every statement below that rests on that consequence is pending re-derivation in step 3c of the recorded sequence and must not be cited as current; until then the DECISION-LOG entry is the authority.
+> **RE-DERIVED 2026-09-17 (sequence step 3c; owner decisions D4 + D13, DECISION-LOG 2026-09-16).**
+> The two channels that fed `accumulated_slashed_` are gone: the equivocation forfeiture was removed
+> from `Chain::apply_transactions` (D4, O-1 step 3a — apply reads nothing from `b.equivocation_events`)
+> and the Phase-1 abort stake deduction was retired (D13 — the abort loop records the S-032 suspension
+> and moves no stake). **`block_slashed` is frozen at 0 and `accumulated_slashed_` has no producer.**
+> Every accounting statement below is UNCHANGED and holds a fortiori: the identities are stated over a
+> term whose delta is now identically zero, the `c:accumulated_slashed` leaf keeps its shape (no
+> migrations), and the A1 closure still consumes the counter. Rows and citations describing the two
+> removed channels are marked HISTORICAL inline; nothing else in this document changes.
 
 > **⚠ Implementation status (corrected 2026-06-05).** The S-033 `state_root`
 > apply gate + S-038 producer wiring this proof composes against ARE shipped
@@ -152,22 +158,24 @@ The cryptographic content (a contributor cannot equivocate on `view_inbound_list
 
 ### T-3 — F2 Eq Root → Equivocation Evidence Subset Admission
 
-**Statement.** For every honestly produced block `B`, the `view_eq_root` field in `B.contrib_commitments[]` commits each contributor to a specific finite set of `EquivocationEvent` hashes; the shipped `check_eqabort_reconciliation` check (`src/node/validator.cpp:1554–1629`) enforces that every event key in `B.equivocation_events` lies in the union (per F2-SPEC §Q1) of the K contributors' committed view-lists — a **subset** rule, not exact-cardinality; the apply-layer Phase 4 loop at `src/chain/chain.cpp:1813–1825` consumes exactly the admitted set; and the cascade-interaction with FA-Apply-16 (post-slash zero-stake replay-safety) is preserved across the F2-canonical apply order:
+**Statement.** For every honestly produced block `B`, the `view_eq_root` field in `B.contrib_commitments[]` commits each contributor to a specific finite set of `EquivocationEvent` hashes; the shipped `check_eqabort_reconciliation` check (`src/node/validator.cpp:1554–1629`) enforces that every event key in `B.equivocation_events` lies in the union (per F2-SPEC §Q1) of the K contributors' committed view-lists — a **subset** rule, not exact-cardinality; the apply-layer Phase 4 consumes exactly the admitted set; and the cascade-interaction with FA-Apply-16 is preserved across the F2-canonical apply order. **Restated 2026-09-17 (step 3c, D4): Phase 4 consumes the admitted set by APPLYING NOTHING** — `Chain::apply_transactions` reads no field of `b.equivocation_events` (`EquivocationSlashingApply.md` T-E0). The ADMISSION half of T-3 — the subset rule, the reconciliation check and the digest binding of the admitted set — is untouched and is the substance of this theorem; only its terminal implication changes, from "applies the slash" to "commits the record":
 
 ```
 For all ev ∈ EquivocationEvent(B):
     ev ∈ B.equivocation_events
         ⟹ ∃ k ∈ {1, …, K} : hash_equivocation_event(ev) ∈ contribs[k].view_eq_list   (subset rule — check_eqabort_reconciliation)
-        ⟹ Phase 4 of apply(S, B) applies ev's slashing + deactivation
-            (modulo FA-Apply-10 T-E3 idempotence on already-zeroed stake;
-             FA-Apply-16 T-C1 cascade)
+        ⟹ ev is COMMITTED in B (inside signing_bytes, inside the block hash,
+            inside the digest's reconciled eq-root) and apply(S, B) moves NO state
+            for it (FA-Apply-10 T-E0, D4 2026-09-16)
+            [HISTORICAL: ⟹ Phase 4 applies ev's slashing + deactivation, modulo
+             FA-Apply-10 T-E3 idempotence and the FA-Apply-16 T-C1 cascade]
 
     The converse does NOT hold: an event witnessed by some honest member MAY be omitted from
     B.equivocation_events (an accepted union-persistence liveness relaxation — re-proposed later).
     The digest eq-root binding fixes the ADMITTED set at signature time; it does not force maximality.
 ```
 
-**Proof sketch.** The subset direction rests on `F2ViewReconciliationAnalysis.md` T-5 (UnionCensorshipResistant): a hash appears in `reconcile_union` iff it appears in at least one member's list. The shipped `check_eqabort_reconciliation` (`validator.cpp:1554–1629`) authenticates each per-creator carried view-list against its committed root and rejects any admitted event whose key is not in `reconcile_union` of those views (`validator.cpp:1607–1610`). It is explicitly **subset, not exact-cardinality** (`validator.cpp:1563–1568`: the event hashes carry observer-dependent forensic fields — `shard_id` / `beacon_anchor_height` recorded at detection time — so the union can hold several witnesses for one misbehavior that no single assembler can materialize; requiring exact cardinality would stall). The removal gap is closed by the digest: `compute_block_digest` appends a root over the admitted eq keys when the per-creator eq roots are non-zero (`src/node/producer.cpp:799–804`), binding the admitted set into the K-of-K signature. The implication to Phase 4 application is the apply-path loop body at `chain.cpp:1813–1825`:
+**Proof sketch.** The subset direction rests on `F2ViewReconciliationAnalysis.md` T-5 (UnionCensorshipResistant): a hash appears in `reconcile_union` iff it appears in at least one member's list. The shipped `check_eqabort_reconciliation` (`validator.cpp:1554–1629`) authenticates each per-creator carried view-list against its committed root and rejects any admitted event whose key is not in `reconcile_union` of those views (`validator.cpp:1607–1610`). It is explicitly **subset, not exact-cardinality** (`validator.cpp:1563–1568`: the event hashes carry observer-dependent forensic fields — `shard_id` / `beacon_anchor_height` recorded at detection time — so the union can hold several witnesses for one misbehavior that no single assembler can materialize; requiring exact cardinality would stall). The removal gap is closed by the digest: `compute_block_digest` appends a root over the admitted eq keys when the per-creator eq roots are non-zero (`src/node/producer.cpp:799–804`), binding the admitted set into the K-of-K signature. The implication to Phase 4 is that the event is committed and applied as a no-op. **HISTORICAL — the pre-2026-09-16 loop body this section was written against, removed by D4:**
 
 ```cpp
 for (auto& ev : b.equivocation_events) {
@@ -183,11 +191,11 @@ for (auto& ev : b.equivocation_events) {
 }
 ```
 
-Every equivocation event in `B.equivocation_events` is iterated; first-event-against-domain produces full forfeit + deactivation (FA-Apply-10 T-E1 + T-E2); subsequent events against the same domain produce zero contribution (FA-Apply-10 T-E3 idempotence; FA-Apply-16 T-C1 cascade-safety on zeroed stake). The post-Phase-4 state is uniquely determined by the multi-set of distinct equivocator domains in `B.equivocation_events`, regardless of duplicate evidence per equivocator (because each duplicate after the first is a no-op).
+**At HEAD** there is no loop: the post-Phase-4 state is uniquely determined by the pre-Phase-4 state, independently of `B.equivocation_events` entirely, so the order- and duplicate-insensitivity this theorem needed holds trivially. *(HISTORICAL: every event was iterated; the first against a domain produced full forfeit + deactivation (T-E1 + T-E2) and subsequent ones contributed zero (T-E3 idempotence; FA-Apply-16 T-C1), so the post-Phase-4 state was determined by the SET of distinct equivocator domains.)*
 
-The F2 union rule gives the **censorship-resistance** posture per F2-SPEC §Q1: a single honest committee member's observation is sufficient to land slashing evidence. This is FA2's gossip-layer censorship guarantee lifted to the consensus view (`F2ViewReconciliationAnalysis.md` T-5 + §4.5 "FA2 connection"). The composition with FA-Apply-10's apply-side semantics is structural — the Phase 4 loop body is invariant under the order of equivocators in `B.equivocation_events` (per `MultiEventComposition.md` T-M2 + T-M6 Case 1) because each iteration's read+write is on `stakes_[ev.equivocator]` + `registrants_[ev.equivocator]` (per-equivocator-disjoint state). ∎
+The F2 union rule gives the **censorship-resistance** posture per F2-SPEC §Q1: a single honest committee member's observation is sufficient to land the evidence on-chain. That property is MORE load-bearing since D4, not less — the record is the L2 policy's only input (D22). This is FA2's gossip-layer censorship guarantee lifted to the consensus view (`F2ViewReconciliationAnalysis.md` T-5 + §4.5 "FA2 connection"). The composition with FA-Apply-10's apply-side semantics is structural and now trivial — there is no Phase 4 loop body to order (`MultiEventComposition.md` T-M2 + T-M6 Case 1 hold vacuously on this phase). *(HISTORICAL: it was invariant under the order of equivocators because each iteration's read+write was on the per-equivocator-disjoint `stakes_[ev.equivocator]` + `registrants_[ev.equivocator]`.)* ∎
 
-**Operational consequence.** A Byzantine producer who attempts to include a *spurious* equivocation event (not in the committee-wide union) is rejected by `check_eqabort_reconciliation` at every honest receiver (`validator.cpp:1607–1610` — the event key is not in the union set), and even a union-member entry is separately gated by the per-event V11 cryptographic check (two conflicting signed messages — see `EquivocationSlashing.md` T-6) before apply. **Omission is the relaxed direction.** Because admission is subset-only, a producer that omits an equivocation event witnessed by an honest contributor still produces a *valid* block — the check does not fail. This is the deliberate **union-persistence** posture: the omitted event survives in honest pools and lands in a later block (the slash is deferred, not defeated), while the `compute_block_digest` eq-root (`producer.cpp:799–804`) keeps the *admitted* set immutable post-signature. So the single-honest-observer censorship-resistance is an **eventual**-inclusion guarantee, not a same-block one.
+**Operational consequence.** A Byzantine producer who attempts to include a *spurious* equivocation event (not in the committee-wide union) is rejected by `check_eqabort_reconciliation` at every honest receiver (`validator.cpp:1607–1610` — the event key is not in the union set), and even a union-member entry is separately gated by the per-event V11 cryptographic check (two conflicting signed messages — see `EquivocationSlashing.md` T-6) before apply. **Omission is the relaxed direction.** Because admission is subset-only, a producer that omits an equivocation event witnessed by an honest contributor still produces a *valid* block — the check does not fail. This is the deliberate **union-persistence** posture: the omitted event survives in honest pools and lands in a later block (the RECORD is deferred, not defeated — and note S-090, OPEN: evidence gossip has no relay and no re-request, so "survives in honest pools" is weaker than it sounds), while the `compute_block_digest` eq-root (`producer.cpp:799–804`) keeps the *admitted* set immutable post-signature. So the single-honest-observer censorship-resistance is an **eventual**-inclusion guarantee, not a same-block one.
 
 **Implementation citations.** `F2ViewReconciliationAnalysis.md` T-5; `src/node/validator.cpp:1554–1629` (`check_eqabort_reconciliation` — subset admission, eq dimension); `src/node/producer.cpp:799–804` (eq-set digest binding); `src/chain/chain.cpp:1813–1825` (Phase 4 loop); `EquivocationSlashingApply.md` (FA-Apply-10) T-E1, T-E2, T-E3, T-E7; `StakeForfeitureCascade.md` (FA-Apply-16) T-C1, T-C2; `EquivocationSlashing.md` (FA6) T-6 (V11 cryptographic check, prerequisite to F2 reconciliation).
 
@@ -210,7 +218,7 @@ For all ae ∈ AbortEvent(B):
 
 **Proof sketch.** Same structural argument as T-3, specialized to abort events (the abort dimension shares the `check_eqabort_reconciliation` subset check, `validator.cpp:1554–1629`, and the abort-root digest binding, `producer.cpp:805–810`). The union rule (T-5 UnionCensorshipResistant) means one honest observer's observation suffices for *eventual* inclusion — but, admission being subset-only, not necessarily same-block inclusion. The Phase 3 loop body at `chain.cpp:1782–1797` iterates every admitted entry, applies Round-1 proportional slash (FA-Apply-11 T-A1) or treats Round-2 as informational (FA-Apply-11 T-A2), and bookkeeps `block_slashed` for the A1 closure (FA-Apply-11 T-A7).
 
-The cascade-interaction with Phase 4 (equivocation slash on the same domain) is handled by `MultiEventComposition.md` T-M6 Case 1: Phase 3 deducts up to `SUSPENSION_SLASH` first, Phase 4 zeros whatever remains; the composed effect equals the equivocation full-forfeit (the abort contribution is absorbed). The composition holds because Phase 4 reads the post-Phase-3 `stakes_[d].locked` value.
+The cascade-interaction with Phase 4 (an equivocation on the same domain) is **empty at HEAD**: Phase 3 writes only `abort_records_` (D13) and Phase 4 writes nothing (D4), so the two phases share no state and the ordering question `MultiEventComposition.md` T-M6 Case 1 answers does not arise. *(HISTORICAL: Phase 3 deducted up to `SUSPENSION_SLASH` first, Phase 4 zeroed whatever remained, the composed effect equalled the equivocation full-forfeit, and the composition held because Phase 4 read the post-Phase-3 `stakes_[d].locked` value.)*
 
 The validator-side V10 check (cryptographic well-formedness of the abort evidence — see `Censorship.md` §3) is an independent prerequisite: every *admitted* abort event must both clear V10 (its M-1 claim quorum is valid) and lie in the committee-wide union (the subset check). F2 does not weaken V10; it lifts V10-checked evidence into the consensus view via the union rule, and the digest abort-root fixes whichever V10-valid, union-member subset the assembler admitted. ∎
 
@@ -508,8 +516,8 @@ The full regression suite (`bash tools/run_all.sh`) covers the apply-determinism
 - `src/chain/chain.cpp:267–411` — `Chain::build_state_leaves` (10-namespace canonical leaf set; primary cite for T-5 + L-5).
 - `src/chain/chain.cpp:413–415` — `Chain::compute_state_root` (SHA-256 Merkle root over sorted leaves; primary cite for T-5).
 - `src/chain/chain.cpp:633–1502` — `Chain::apply_transactions` (seven-Phase apply path; primary cite for T-1 + L-3).
-- `src/chain/chain.cpp:1313–1328` — Phase 3 abort-slash loop (cite for T-4).
-- `src/chain/chain.cpp:1344–1356` — Phase 4 equivocation-slash loop (cite for T-3).
+- `Chain::apply_transactions`, the `b.abort_events` loop — Phase 3. Since D13 (2026-09-16) it writes `abort_records_` only and moves no stake (cite for T-4).
+- `Chain::apply_transactions`, the `b.equivocation_events` comment block — Phase 4. Since D4 (2026-09-16) there is no loop; apply reads nothing from the event (cite for T-3).
 - `src/chain/chain.cpp:1363–1381` — Phase 5 inbound-receipt loop (cite for T-2).
 - `src/chain/chain.cpp:1397–1419` — A1 closure (cite for L-6).
 - `src/chain/chain.cpp:1432–1444` — S-033 state_root gate (primary cite for T-5 + L-7).
