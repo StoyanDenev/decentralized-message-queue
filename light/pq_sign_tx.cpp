@@ -11,6 +11,7 @@
 
 #include "pq_sign_tx.hpp"
 #include "sign_tx.hpp"                    // LightTxType, parse_tx_type, compute_signing_bytes
+#include "seed_source.hpp"                // S-110: --*-seed-from + the raw-flag warning
 #include <determ/crypto/pqauth.hpp>
 #include <determ/crypto/pq_address.hpp>   // make_pq_anon_address (pq-transfer / pq-address)
 #include <determ/crypto.hpp>              // determ::c99::mldsa::keygen (derive the PQ pubkey)
@@ -20,12 +21,14 @@
 #include <determ/types.hpp>
 #include <nlohmann/json.hpp>
 #include <array>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace determ::light {
 using nlohmann::json;
@@ -80,15 +83,32 @@ uint64_t parse_u64_arg(const std::string& flag, const std::string& v) {
     }
 }
 
+// The seed-hex validator, shared by the raw `--*-seed` flags and the S-110
+// `--*-seed-from` sources: EXACTLY 32 bytes / 64 hex chars, nothing else. An
+// odd-length or non-hex string reaches here as a from_hex exception whose
+// message ("odd hex length" / stoul's) does not name the offending flag; wrap it
+// so every rejection is a named diagnostic. The accepted set is unchanged.
 std::array<uint8_t, 32> parse_seed32(const std::string& flag, const std::string& hex) {
-    auto v = determ::from_hex(hex);
-    if (v.size() != 32)
+    std::vector<uint8_t> v;
+    try {
+        v = determ::from_hex(hex);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(flag + " is not valid hex (" + std::string(e.what())
+                                 + "); expected 64 hex chars");
+    }
+    if (v.size() != 32) {
+        determ::light::zero_secret_bytes(v.data(), v.size());
         throw std::runtime_error(flag + " must be 32 bytes (64 hex chars); got "
                                  + std::to_string(v.size()) + " bytes");
+    }
     std::array<uint8_t, 32> a{};
     std::copy(v.begin(), v.end(), a.begin());
+    determ::light::zero_secret_bytes(v.data(), v.size());
     return a;
 }
+
+// resolve_seed_hex() + SeedScrub are shared with light/main.cpp's --blind-seed
+// commands and live in light/seed_source.{hpp,cpp}.
 
 const char* tx_type_name(LightTxType t) {
     switch (t) {
@@ -104,27 +124,42 @@ const char* tx_type_name(LightTxType t) {
 } // namespace
 
 int cmd_pq_sign_tx(int argc, char** argv) {
-    std::string type_str, from_str, to_str, scheme_str, mldsa_seed_hex, ed_seed_hex, out_path;
+    std::string type_str, from_str, to_str, scheme_str, out_path;
+    std::string mldsa_seed_raw, mldsa_seed_src, ed_seed_raw, ed_seed_src;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--type"       && i + 1 < argc) type_str       = argv[++i];
-        else if (a == "--from"       && i + 1 < argc) from_str       = argv[++i];
-        else if (a == "--to"         && i + 1 < argc) to_str         = argv[++i];
-        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64_arg("--amount", argv[++i]); have_amount = true; }
-        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64_arg("--fee",    argv[++i]); have_fee    = true; }
-        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64_arg("--nonce",  argv[++i]); have_nonce  = true; }
-        else if (a == "--scheme"     && i + 1 < argc) scheme_str     = argv[++i];
-        else if (a == "--mldsa-seed" && i + 1 < argc) mldsa_seed_hex = argv[++i];
-        else if (a == "--ed-seed"    && i + 1 < argc) ed_seed_hex    = argv[++i];
-        else if (a == "--out"        && i + 1 < argc) out_path       = argv[++i];
+        if      (a == "--type"            && i + 1 < argc) type_str       = argv[++i];
+        else if (a == "--from"            && i + 1 < argc) from_str       = argv[++i];
+        else if (a == "--to"              && i + 1 < argc) to_str         = argv[++i];
+        else if (a == "--amount"          && i + 1 < argc) { amount = parse_u64_arg("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"             && i + 1 < argc) { fee    = parse_u64_arg("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"           && i + 1 < argc) { nonce  = parse_u64_arg("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--scheme"          && i + 1 < argc) scheme_str     = argv[++i];
+        else if (a == "--mldsa-seed"      && i + 1 < argc) mldsa_seed_raw = argv[++i];
+        else if (a == "--mldsa-seed-from" && i + 1 < argc) mldsa_seed_src = argv[++i];
+        else if (a == "--ed-seed"         && i + 1 < argc) ed_seed_raw    = argv[++i];
+        else if (a == "--ed-seed-from"    && i + 1 < argc) ed_seed_src    = argv[++i];
+        else if (a == "--out"             && i + 1 < argc) out_path       = argv[++i];
         else { std::cerr << "pq-sign-tx: unknown arg '" << a << "'\n"; return 1; }
     }
+    // S-110: resolve the seeds BEFORE the required-argument check so
+    // `--mldsa-seed-from` satisfies it exactly as `--mldsa-seed` does.
+    std::string mldsa_seed_hex, ed_seed_hex;
+    SeedScrub scrub_m, scrub_e;
+    if (!resolve_seed_hex("pq-sign-tx", "--mldsa-seed", "--mldsa-seed-from",
+                          mldsa_seed_raw, mldsa_seed_src, mldsa_seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_m, mldsa_seed_hex);
+    if (!resolve_seed_hex("pq-sign-tx", "--ed-seed", "--ed-seed-from",
+                          ed_seed_raw, ed_seed_src, ed_seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_e, ed_seed_hex);
+
     if (type_str.empty() || from_str.empty() || scheme_str.empty() || mldsa_seed_hex.empty()
         || !have_amount || !have_fee || !have_nonce) {
         std::cerr << "pq-sign-tx: --type, --from, --amount, --fee, --nonce, --scheme, "
-                     "--mldsa-seed are required (--to for TRANSFER; --ed-seed for hybrid*)\n";
+                     "--mldsa-seed|--mldsa-seed-from are required (--to for TRANSFER; "
+                     "--ed-seed|--ed-seed-from for hybrid*)\n";
         return 1;
     }
     try {
@@ -135,12 +170,17 @@ int cmd_pq_sign_tx(int argc, char** argv) {
         pqauth::Scheme scheme = parse_pq_scheme(scheme_str);
         const bool hybrid = scheme_is_hybrid(scheme);
         if (hybrid && ed_seed_hex.empty()) {
-            std::cerr << "pq-sign-tx: hybrid scheme requires --ed-seed\n"; return 1;
+            std::cerr << "pq-sign-tx: hybrid scheme requires --ed-seed|--ed-seed-from\n"; return 1;
         }
-        auto mseed = parse_seed32("--mldsa-seed", mldsa_seed_hex);
-        std::array<uint8_t, 32> eseed{};
+        std::array<uint8_t, 32> mseed{}, eseed{};
+        SeedScrub scrub_ms{mseed.data(), mseed.size()};
+        SeedScrub scrub_es{eseed.data(), eseed.size()};
+        // Name the flag the operator actually used in any hex diagnostic.
+        const char* mflag = mldsa_seed_src.empty() ? "--mldsa-seed" : "--mldsa-seed-from";
+        const char* eflag = ed_seed_src.empty()    ? "--ed-seed"    : "--ed-seed-from";
+        mseed = parse_seed32(mflag, mldsa_seed_hex);
         std::optional<std::span<const uint8_t, 32>> edopt;
-        if (hybrid) { eseed = parse_seed32("--ed-seed", ed_seed_hex);
+        if (hybrid) { eseed = parse_seed32(eflag, ed_seed_hex);
                       edopt = std::span<const uint8_t, 32>(eseed); }
 
         // The chain's canonical signed message — byte-for-byte block.cpp.
@@ -260,49 +300,69 @@ int cmd_pq_verify_tx(int argc, char** argv) {
 }
 
 int cmd_pq_address(int argc, char** argv) {
-    std::string scheme_str, mldsa_seed_hex;
+    std::string scheme_str, mldsa_seed_raw, mldsa_seed_src;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--scheme"     && i + 1 < argc) scheme_str     = argv[++i];
-        else if (a == "--mldsa-seed" && i + 1 < argc) mldsa_seed_hex = argv[++i];
+        if      (a == "--scheme"          && i + 1 < argc) scheme_str     = argv[++i];
+        else if (a == "--mldsa-seed"      && i + 1 < argc) mldsa_seed_raw = argv[++i];
+        else if (a == "--mldsa-seed-from" && i + 1 < argc) mldsa_seed_src = argv[++i];
         else { std::cerr << "pq-address: unknown arg '" << a << "'\n"; return 1; }
     }
+    std::string mldsa_seed_hex;
+    SeedScrub scrub_m;
+    if (!resolve_seed_hex("pq-address", "--mldsa-seed", "--mldsa-seed-from",
+                          mldsa_seed_raw, mldsa_seed_src, mldsa_seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_m, mldsa_seed_hex);
     if (scheme_str.empty() || mldsa_seed_hex.empty()) {
-        std::cerr << "pq-address: --scheme {mldsa44|mldsa65|mldsa87} + --mldsa-seed <hex32> required\n";
+        std::cerr << "pq-address: --scheme {mldsa44|mldsa65|mldsa87} + "
+                     "--mldsa-seed <hex32>|--mldsa-seed-from <file:path|env:NAME|prompt> required\n";
         return 1;
     }
     try {
         pqauth::Scheme scheme = parse_pq_scheme(scheme_str);
-        auto mseed = parse_seed32("--mldsa-seed", mldsa_seed_hex);
+        std::array<uint8_t, 32> mseed{};
+        SeedScrub scrub_ms{mseed.data(), mseed.size()};
+        mseed = parse_seed32(mldsa_seed_src.empty() ? "--mldsa-seed" : "--mldsa-seed-from",
+                             mldsa_seed_hex);
         std::cout << derive_pq_from(scheme, mseed) << "\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "pq-address: " << e.what() << "\n"; return 1; }
 }
 
 int cmd_pq_transfer(int argc, char** argv) {
-    std::string to_str, scheme_str, mldsa_seed_hex, out_path;
+    std::string to_str, scheme_str, out_path, mldsa_seed_raw, mldsa_seed_src;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--to"         && i + 1 < argc) to_str         = argv[++i];
-        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64_arg("--amount", argv[++i]); have_amount = true; }
-        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64_arg("--fee",    argv[++i]); have_fee    = true; }
-        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64_arg("--nonce",  argv[++i]); have_nonce  = true; }
-        else if (a == "--scheme"     && i + 1 < argc) scheme_str     = argv[++i];
-        else if (a == "--mldsa-seed" && i + 1 < argc) mldsa_seed_hex = argv[++i];
-        else if (a == "--out"        && i + 1 < argc) out_path       = argv[++i];
+        if      (a == "--to"              && i + 1 < argc) to_str         = argv[++i];
+        else if (a == "--amount"          && i + 1 < argc) { amount = parse_u64_arg("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"             && i + 1 < argc) { fee    = parse_u64_arg("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"           && i + 1 < argc) { nonce  = parse_u64_arg("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--scheme"          && i + 1 < argc) scheme_str     = argv[++i];
+        else if (a == "--mldsa-seed"      && i + 1 < argc) mldsa_seed_raw = argv[++i];
+        else if (a == "--mldsa-seed-from" && i + 1 < argc) mldsa_seed_src = argv[++i];
+        else if (a == "--out"             && i + 1 < argc) out_path       = argv[++i];
         else { std::cerr << "pq-transfer: unknown arg '" << a << "'\n"; return 1; }
     }
+    std::string mldsa_seed_hex;
+    SeedScrub scrub_m;
+    if (!resolve_seed_hex("pq-transfer", "--mldsa-seed", "--mldsa-seed-from",
+                          mldsa_seed_raw, mldsa_seed_src, mldsa_seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_m, mldsa_seed_hex);
     if (to_str.empty() || scheme_str.empty() || mldsa_seed_hex.empty()
         || !have_amount || !have_fee || !have_nonce) {
         std::cerr << "pq-transfer: --to, --amount, --fee, --nonce, --scheme {mldsa44|65|87}, "
-                     "--mldsa-seed <hex32> are required\n";
+                     "--mldsa-seed <hex32>|--mldsa-seed-from <file:path|env:NAME|prompt> "
+                     "are required\n";
         return 1;
     }
     try {
         pqauth::Scheme scheme = parse_pq_scheme(scheme_str);
-        auto mseed = parse_seed32("--mldsa-seed", mldsa_seed_hex);
+        std::array<uint8_t, 32> mseed{};
+        SeedScrub scrub_ms{mseed.data(), mseed.size()};
+        mseed = parse_seed32(mldsa_seed_src.empty() ? "--mldsa-seed" : "--mldsa-seed-from",
+                             mldsa_seed_hex);
         std::string from = derive_pq_from(scheme, mseed);   // PQ-native bearer address
 
         // Canonical PQ_TRANSFER signing_bytes (type=11; layout == src/chain/block.cpp).

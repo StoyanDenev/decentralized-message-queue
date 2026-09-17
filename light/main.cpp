@@ -85,6 +85,7 @@
 #include "verify_ct.hpp"
 #include "persist.hpp"
 #include "outbox_cli.hpp"
+#include "seed_source.hpp"                  // S-110: --blind-seed-from + raw-flag warning
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -381,20 +382,32 @@ void print_usage() {
         "  pq-sign-tx --type {TRANSFER|STAKE|UNSTAKE} --from <addr> --to <addr>\n"
         "             --amount <N> --fee <N> --nonce <N>\n"
         "             --scheme {mldsa44|mldsa65|mldsa87|hybrid44|hybrid65|hybrid87}\n"
-        "             --mldsa-seed <hex32> [--ed-seed <hex32>] [--out <file>]\n"
+        "             {--mldsa-seed <hex32> | --mldsa-seed-from <src>}\n"
+        "             [--ed-seed <hex32> | --ed-seed-from <src>] [--out <file>]\n"
         "      Post-quantum tx authentication (CRYPTO-C99-SPEC §3.21): bind the tx's\n"
         "      canonical signing_bytes with a DPQ1 ML-DSA (optionally +Ed25519 hybrid)\n"
         "      envelope. --ed-seed is required for hybrid*. Client tooling; the\n"
         "      consensus accept-rule for such a tx is a separate, owner-gated step.\n"
         "  pq-verify-tx --file <tx.json>\n"
         "      Offline-verify a DPQ1-authenticated tx (exit 0 verified / 3 invalid).\n"
-        "  pq-address --scheme {mldsa44|mldsa65|mldsa87} --mldsa-seed <hex32>\n"
+        "  pq-address --scheme {mldsa44|mldsa65|mldsa87}\n"
+        "             {--mldsa-seed <hex32> | --mldsa-seed-from <src>}\n"
         "      Print the PQ-native bearer address (the ML-DSA public key) for a seed.\n"
         "  pq-transfer --to <addr> --amount <N> --fee <N> --nonce <N>\n"
-        "              --scheme {mldsa44|mldsa65|mldsa87} --mldsa-seed <hex32> [--out <file>]\n"
+        "              --scheme {mldsa44|mldsa65|mldsa87}\n"
+        "              {--mldsa-seed <hex32> | --mldsa-seed-from <src>} [--out <file>]\n"
         "      Build a canonical, SUBMITTABLE PQ_TRANSFER (§3.21): derives the PQ-native\n"
         "      `from` address, signs a DPQ1 envelope over signing_bytes; feed --out to\n"
         "      submit-tx. Verify a validator would accept it with `determ verify-pq-tx`.\n"
+        "\n"
+        "  SECRET SEEDS (S-110). Every --*-seed flag above has a --*-seed-from <src>\n"
+        "  twin taking file:<path> | env:<NAME> | prompt — the same convention as\n"
+        "  `determ-wallet keyfile-create --passphrase-from`. PREFER IT: a seed passed\n"
+        "  as --*-seed sits in this process's /proc/<pid>/cmdline for any local\n"
+        "  process to read, is printed by `ps` to every user on the host, and is\n"
+        "  written verbatim into your shell history file. The raw flags still work\n"
+        "  (unchanged) but print a WARNING[seed-on-command-line] to stderr; passing\n"
+        "  both forms of the same seed is refused. Bad source / bad hex exits 1.\n"
         "  rotate-audit-key --keyfile <path> {--pubkey <hex32>|--clear}\n"
         "                   --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE ROTATE_AUDIT_KEY (TxType 15): set or clear the\n"
@@ -412,13 +425,16 @@ void print_usage() {
         "      Ed25519-signed, fee-only; anon/bearer payees included. Feed --out\n"
         "      to submit-tx; verify a validator accepts it with\n"
         "      `determ verify-audit-tx`. Then verify-notekey proves it on-chain.\n"
-        "  build-shield --keyfile <path> --blind-seed <hex> --amount <N>\n"
-        "               --fee <N> --nonce <N> [--out <file>]\n"
+        "  build-shield --keyfile <path> {--blind-seed <hex>|--blind-seed-from <src>}\n"
+        "               --amount <N> --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE SHIELD (TxType 12): move PUBLIC amount from your\n"
         "      transparent balance into a confidential note (§3.22). The blinding is\n"
         "      derived from --blind-seed (>= 32 bytes, UNIQUE + high-entropy per note\n"
         "      — reuse leaks the amount) — SAVE the seed + amount to spend it later.\n"
-        "  build-unshield --keyfile <path> --blind-seed <hex> --to <addr>\n"
+        "      --blind-seed-from <file:path|env:NAME|prompt> keeps it off the command\n"
+        "      line (S-110); the raw form warns on stderr.\n"
+        "  build-unshield --keyfile <path> {--blind-seed <hex>|--blind-seed-from <src>}\n"
+        "                 --to <addr>\n"
         "                 --amount <N> --fee <N> --nonce <N> [--out <file>]\n"
         "      Build a SUBMITTABLE UNSHIELD (TxType 13): withdraw the note\n"
         "      (amount, blind-seed) to transparent --to (§3.22b). The balance proof is\n"
@@ -4254,27 +4270,43 @@ int cmd_log_audit_access(int argc, char** argv) {
 // see CRYPTO-C99-SPEC §3.22 / §3.22b + docs/proofs/ (CT balance proofs).
 
 int cmd_build_shield(int argc, char** argv) {
-    std::string keyfile_path, seed_hex, out_path;
+    std::string keyfile_path, seed_raw, seed_src, out_path;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--keyfile"    && i + 1 < argc) keyfile_path = argv[++i];
-        else if (a == "--blind-seed" && i + 1 < argc) seed_hex     = argv[++i];
-        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
-        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
-        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
-        else if (a == "--out"        && i + 1 < argc) out_path     = argv[++i];
+        if      (a == "--keyfile"         && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--blind-seed"      && i + 1 < argc) seed_raw     = argv[++i];
+        else if (a == "--blind-seed-from" && i + 1 < argc) seed_src     = argv[++i];
+        else if (a == "--amount"          && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"             && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"           && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--out"             && i + 1 < argc) out_path     = argv[++i];
         else { std::cerr << "build-shield: unknown arg '" << a << "'\n"; return 1; }
     }
+    std::string seed_hex;                                    // S-110
+    SeedScrub scrub_s;
+    if (!resolve_seed_hex("build-shield", "--blind-seed", "--blind-seed-from",
+                          seed_raw, seed_src, seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_s, seed_hex);
     if (keyfile_path.empty() || seed_hex.empty() || !have_amount || !have_fee || !have_nonce) {
-        std::cerr << "build-shield: --keyfile, --blind-seed <hex>, --amount, --fee, "
-                     "--nonce are required\n";
+        std::cerr << "build-shield: --keyfile, --blind-seed <hex>|--blind-seed-from "
+                     "<file:path|env:NAME|prompt>, --amount, --fee, --nonce are required\n";
         return 1;
     }
     try {
+        std::vector<uint8_t> blind;
+        SeedScrub scrub_b;
+        try { blind = from_hex(seed_hex); }
+        catch (const std::exception& e) {
+            std::cerr << "build-shield: "
+                      << (seed_src.empty() ? "--blind-seed" : "--blind-seed-from")
+                      << " is not valid hex (" << e.what() << ")\n";
+            return 1;
+        }
+        scrub_on_scope_exit(scrub_b, blind);
         auto kf = load_light_keyfile(keyfile_path);
-        auto tx = build_shield_tx(kf, amount, from_hex(seed_hex), fee, nonce);
+        auto tx = build_shield_tx(kf, amount, blind, fee, nonce);
         if (out_path.empty()) std::cout << tx.dump() << "\n";
         else {
             write_json_file(out_path, tx);
@@ -4292,24 +4324,30 @@ int cmd_build_shield(int argc, char** argv) {
 }
 
 int cmd_build_unshield(int argc, char** argv) {
-    std::string keyfile_path, seed_hex, to, out_path;
+    std::string keyfile_path, seed_raw, seed_src, to, out_path;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--keyfile"    && i + 1 < argc) keyfile_path = argv[++i];
-        else if (a == "--blind-seed" && i + 1 < argc) seed_hex     = argv[++i];
-        else if (a == "--to"         && i + 1 < argc) to           = argv[++i];
-        else if (a == "--amount"     && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
-        else if (a == "--fee"        && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
-        else if (a == "--nonce"      && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
-        else if (a == "--out"        && i + 1 < argc) out_path     = argv[++i];
+        if      (a == "--keyfile"         && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--blind-seed"      && i + 1 < argc) seed_raw     = argv[++i];
+        else if (a == "--blind-seed-from" && i + 1 < argc) seed_src     = argv[++i];
+        else if (a == "--to"              && i + 1 < argc) to           = argv[++i];
+        else if (a == "--amount"          && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
+        else if (a == "--fee"             && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
+        else if (a == "--nonce"           && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--out"             && i + 1 < argc) out_path     = argv[++i];
         else { std::cerr << "build-unshield: unknown arg '" << a << "'\n"; return 1; }
     }
+    std::string seed_hex;                                    // S-110
+    SeedScrub scrub_s;
+    if (!resolve_seed_hex("build-unshield", "--blind-seed", "--blind-seed-from",
+                          seed_raw, seed_src, seed_hex)) return 1;
+    scrub_on_scope_exit(scrub_s, seed_hex);
     if (keyfile_path.empty() || seed_hex.empty() || to.empty()
         || !have_amount || !have_fee || !have_nonce) {
-        std::cerr << "build-unshield: --keyfile, --blind-seed <hex>, --to, --amount, "
-                     "--fee, --nonce are required\n";
+        std::cerr << "build-unshield: --keyfile, --blind-seed <hex>|--blind-seed-from "
+                     "<file:path|env:NAME|prompt>, --to, --amount, --fee, --nonce are required\n";
         return 1;
     }
     try {
@@ -4323,8 +4361,18 @@ int cmd_build_unshield(int argc, char** argv) {
                 return 1;
             }
         }
+        std::vector<uint8_t> blind;
+        SeedScrub scrub_b;
+        try { blind = from_hex(seed_hex); }
+        catch (const std::exception& e) {
+            std::cerr << "build-unshield: "
+                      << (seed_src.empty() ? "--blind-seed" : "--blind-seed-from")
+                      << " is not valid hex (" << e.what() << ")\n";
+            return 1;
+        }
+        scrub_on_scope_exit(scrub_b, blind);
         auto kf = load_light_keyfile(keyfile_path);
-        auto tx = build_unshield_tx(kf, amount, from_hex(seed_hex), to, fee, nonce);
+        auto tx = build_unshield_tx(kf, amount, blind, to, fee, nonce);
         if (out_path.empty()) std::cout << tx.dump() << "\n";
         else {
             write_json_file(out_path, tx);

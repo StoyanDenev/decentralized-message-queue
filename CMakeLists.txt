@@ -352,6 +352,7 @@ add_executable(determ-light
   light/verify.cpp
   light/trustless_read.cpp
   light/keyfile.cpp
+  light/seed_source.cpp      # S-110: --*-seed-from (file:/env:/prompt) + the raw-flag warning
   light/sign_tx.cpp
   light/pq_sign_tx.cpp
   light/audit_tx.cpp
