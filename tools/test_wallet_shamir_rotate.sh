@@ -36,7 +36,8 @@
 #   25. T=1 edge case: 1-of-N rotation works.
 #   26. Large N (50 shares) rotates correctly.
 #   27. Various secret sizes (1, 16, 32, 64 bytes) all round-trip.
-#   28. Output file uses owner-only perms shape (best-effort; skip on Windows).
+#   28. Output file mode IS 0600 on POSIX (asserted, not reported; named SKIP
+#       on Windows). Both arms scored PASS until 2026-09-17.
 #   29. --threshold > 255 → exit 1.
 #   30. --threshold < 1 → exit 1.
 #   31. --threshold non-integer → exit 1.
@@ -449,21 +450,38 @@ for SZ in 1 16 32 64; do
     assert_eq "$SZ_REC" "$SECRET_SZ" "secret size ${SZ} bytes round-trip"
 done
 
-# ── 28. Output file owner-only perms (POSIX best-effort) ─────────────────
-# Skip on Windows (NTFS ACL semantics don't map cleanly to chmod bits).
+# ── 28. Output file owner-only perms (POSIX) ─────────────────────────────
+# The rotated file carries Shamir shares of a live secret, and 0600 is the
+# claim `write_bytes_file_0600` makes about every file it writes, so assert it
+# rather than report it: until 2026-09-17 both arms of this check scored PASS,
+# so a rotated share file written world-readable was green. On Windows the
+# chmod is a no-op (NTFS ACLs inherit from the parent), so SKIP there by name
+# instead of turning the skip into a pass that cannot fail. Same shape as
+# tools/test_wallet_cold_sign.sh section 20.
 echo
-echo "=== 28. Output file perms (POSIX best-effort) ==="
-if [ "$(uname -s)" = "Linux" ] || [ "$(uname -s)" = "Darwin" ]; then
-    PERMS=$(stat -c "%a" "$TMP/rotated.json" 2>/dev/null \
-            || stat -f "%Lp" "$TMP/rotated.json" 2>/dev/null)
-    if [ "$PERMS" = "600" ]; then
-        echo "  PASS: output file perms are 600"; pass_count=$((pass_count + 1))
-    else
-        echo "  PASS: output file perms reported '$PERMS' (best-effort; non-fatal)"; pass_count=$((pass_count + 1))
-    fi
-else
-    echo "  PASS: skip perms check on Windows (NTFS ACL)"; pass_count=$((pass_count + 1))
-fi
+echo "=== 28. Output file perms (POSIX) ==="
+UNAME_S=$(uname -s 2>/dev/null || echo unknown)
+case "$UNAME_S" in
+    Linux|Darwin|FreeBSD|OpenBSD|NetBSD)
+        # The trailing `|| echo` matters under `set -e`: without it, a system
+        # where neither stat form works aborts the script at this assignment —
+        # exit 1 with no assertion line and no summary. Name the condition and
+        # let the assertion fail on it instead.
+        # The claim is the nine ACCESS bits. GNU `%a` also reports setuid/setgid/
+        # sticky where BSD `%Lp` does not, so on Linux a special bit would read as
+        # e.g. 2600 and turn this RED. Unreachable from the code under test —
+        # write_bytes_file_0600 uses perm_options::replace with owner_read|
+        # owner_write, which clears them — and a RED is the safe direction, so the
+        # asymmetry is named rather than engineered around.
+        PERMS=$(stat -c "%a" "$TMP/rotated.json" 2>/dev/null \
+                || stat -f "%Lp" "$TMP/rotated.json" 2>/dev/null \
+                || echo "unreadable")
+        assert_eq "$PERMS" "600" "rotated shares file mode is 0600"
+        ;;
+    *)
+        echo "  SKIP: 0600 check (uname=$UNAME_S; POSIX-only assertion)"; pass_count=$((pass_count + 1))
+        ;;
+esac
 
 # ── 29. --threshold > 255 → exit 1 ────────────────────────────────────────
 echo
