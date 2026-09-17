@@ -1016,6 +1016,18 @@ Additional in-process tests:
                                               kills the Phase-1 timer; the last
                                               member's contrib does (completeness,
                                               not map size)
+  determ test-contrib-view-root-admit         S-104 gate — a Phase-1 contrib whose
+                                              view_eq/abort LIST does not hash to its
+                                              SIGNED view root is dropped at ingress
+                                              (the sender is simply missing); a block
+                                              built from such a contrib is rejected by
+                                              the full verifier — the permanent halt
+  determ test-evidence-admit                  S-105 gate — build_body asks the verifier's
+                                              check_equivocation_event (EvAdmit) before
+                                              proposing pooled equivocation evidence and
+                                              EVICTS what it rejects: a record whose
+                                              equivocator stopped resolving is not
+                                              proposed and the chain advances
   determ test-mempool-admit-eviction          S-056/S-059/S-061/S-062 gate (2nd increment)
                                               — a tx the producer-side predicate rejects
                                               is EVICTED (store + (from,nonce) index) and
@@ -49483,6 +49495,525 @@ int main(int argc, char** argv) {
         fs::remove_all(dir, fec);
         std::cout << (fail ? "  FAIL: test-contrib-trigger-membership\n"
                            : "  PASS: test-contrib-trigger-membership\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-contrib-view-root-admit") {
+        // 2026-09-17 — SECURITY.md S-104 (found while designing O-1 step 3b,
+        // /root/audit/par/3b-design DESIGN.md section 0 F-1; pre-existing, not
+        // caused by any 2026-09-16 increment).
+        //
+        // THE HALT. Node::on_contrib verified the Phase-1 signature over
+        // make_contrib_commitment(msg), which binds the view ROOTS — and never
+        // checked that the view LISTS the same message carries actually hash to
+        // those roots. validate_contrib_view_roots (V21..V25) is exactly that
+        // recompute and had ZERO production callers. build_body copies each
+        // member's list into the block verbatim; the verifier's
+        // check_eqabort_reconciliation recomputes compute_view_root(list) and
+        // rejects the WHOLE block ("F2: creator_view_eq_lists[i] does not match
+        // committed root"). So ONE committee member sending ONE contrib per
+        // round whose list does not match its signed root made every honest
+        // assembler build the same block every honest verifier rejects: no
+        // append, the S-050 valve re-rounds with the SAME committee (the member
+        // is present, so nothing aborts and no one is excluded), and the height
+        // never advanced. Cost-free, permanent, one message per round.
+        //
+        // The fix is node-local: call validate_contrib_view_roots at ingress and
+        // DROP (do not store) on failure — the same outcome every other on_contrib
+        // rejection already has, so the member is simply MISSING and the existing
+        // Phase-1 timeout/abort path handles it. No accept rule, wire format,
+        // apply path or digest changes.
+        //
+        // Two layers, because the halt is a producer/verifier composition:
+        //   (a) INGRESS (where the fix lives): on_contrib_for_test +
+        //       round_probe_for_test on a real Node — a root-matching contrib is
+        //       ACCEPTED (positive control), a mismatched one is DROPPED although
+        //       its signature verifies, and the round is not wedged by the drop
+        //       (the member's well-formed retransmission completes Phase 1).
+        //   (b) CONSEQUENCE (where the halt lands): build_body over the same
+        //       contribs + the verifier's check_eqabort_reconciliation — the
+        //       block built from the mismatched contrib is REJECTED, the one
+        //       built from root-matching contribs is ACCEPTED. build_body is fed
+        //       ONLY from pending_contribs_, so a contrib (a) never stores can
+        //       never reach the block (b) shows is fatal.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+        // M == K == 3: the eligible pool IS the committee, so node0 is a
+        // height-1 committee member for every genesis (no chain_id scan).
+        constexpr int kM = 3, kK = 3;
+        std::vector<crypto::NodeKey> keys(kM);
+        std::vector<std::string>     doms;
+        for (int i = 0; i < kM; ++i) {
+            for (int j = 0; j < 32; ++j) keys[i].priv_seed[j] = uint8_t(0x20 + 16 * i + j);
+            determ_ed25519_pubkey_from_seed(keys[i].priv_seed.data(), keys[i].pub.data());
+            doms.push_back("node" + std::to_string(i));
+        }
+
+        fs::path dir = fs::temp_directory_path() / "determ-contrib-view-root";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir / "node0");
+        chain::GenesisConfig g;
+        g.chain_id = "contrib-view-root-admit";
+        g.m_creators = kM; g.k_block_sigs = kK; g.epoch_blocks = 1000;
+        for (int i = 0; i < kM; ++i) {
+            chain::GenesisCreator gc; gc.domain = doms[i]; gc.ed_pub = keys[i].pub;
+            gc.initial_stake = 1000; g.initial_creators.push_back(gc);
+            chain::GenesisAllocation ab; ab.domain = doms[i]; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+        }
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+        cfg.listen_port = 7691; cfg.key_path = (dir / "node0.key").string();
+        cfg.chain_path = (dir / "node0" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = kM; cfg.k_block_sigs = kK;
+        cfg.log_quiet = true;
+        crypto::save_node_key(keys[0], cfg.key_path);
+        determ::time::VirtualClock vclock(1'700'000'000);
+        VirtualNetwork   vnet;
+        VirtualEventLoop loop;
+        loop.enable_virtual_time();
+        VirtualTransport transport(loop, vnet);
+        auto n = std::make_unique<node::Node>(cfg, vclock, &loop, &transport);
+        n->start_external();
+        loop.run_until_idle();
+        loop.advance_to_next_timer();   // startup grace -> IN_SYNC -> CONTRIB
+        loop.run_until_idle();
+
+        auto probe = [&] { return n->round_probe_for_test(); };
+        auto p0 = probe();
+        const bool member = std::find(p0.creators.begin(), p0.creators.end(), "node0")
+                            != p0.creators.end();
+        check(p0.phase == 1 /*CONTRIB*/ && member && p0.creators.size() == size_t(kK)
+              && p0.pending_contribs == 1,
+              "setup: node0 is in CONTRIB as one of the K=3 committee members, its own contrib pending");
+        if (fail) { n->stop(); fs::remove_all(dir, fec);
+                    std::cout << "  FAIL: test-contrib-view-root-admit\n"; return 1; }
+
+        const Hash prev = n->rpc_status()["head_hash"].is_string()
+            ? from_hex_arr<32>(n->rpc_status()["head_hash"].get<std::string>()) : Hash{};
+        // A committed eq-view element (the hash of some equivocation record the
+        // member claims to hold) and the extra element the attacker appends to
+        // the REVEALED list after the root was signed.
+        Hash h_committed{}; for (size_t i = 0; i < h_committed.size(); ++i) h_committed[i] = uint8_t(0x11 + i);
+        Hash h_extra{};     for (size_t i = 0; i < h_extra.size();     ++i) h_extra[i]     = uint8_t(0xA0 + i);
+        auto good_contrib = [&](int idx) {
+            Hash dh{}; for (auto& b : dh) b = uint8_t(0x30 + idx);
+            return node::make_contrib(keys[idx], doms[idx], /*block_index=*/1, prev,
+                                      /*aborts_gen=*/0, /*tx_snapshot=*/{}, dh,
+                                      /*view_eq_list=*/{ h_committed });
+        };
+        // The attack message: a genuinely signed contrib whose REVEALED eq list
+        // no longer hashes to the SIGNED root. Only the roots are in the
+        // commitment, so the signature stays valid — that is the whole defect.
+        auto poison = [&](node::ContribMsg m) {
+            m.view_eq_list.push_back(h_extra);
+            return m;
+        };
+
+        // ── (a) INGRESS — the layer the rule lives at ────────────────────────
+        n->on_contrib_for_test(good_contrib(1));
+        loop.run_until_idle();
+        check(probe().pending_contribs == 2,
+              "CONTROL: a contrib whose view_eq_list hashes to its signed root is ACCEPTED at ingress");
+
+        node::ContribMsg bad = poison(good_contrib(2));
+        {   // The drop must be attributable to the new check, not to the sig gate.
+            Hash commit = node::make_contrib_commitment(bad);
+            check(crypto::verify(keys[2].pub, commit.data(), commit.size(), bad.ed_sig),
+                  "the mismatched contrib's Phase-1 SIGNATURE still verifies (the commitment binds the ROOT, not the list)");
+            std::string why;
+            check(!node::validate_contrib_view_roots(bad, &why)
+                  && why.find("V22") != std::string::npos,
+                  "validate_contrib_view_roots (V22) is what separates it from an honest contrib");
+        }
+        n->on_contrib_for_test(bad);
+        loop.run_until_idle();
+        auto p1 = probe();
+        check(p1.pending_contribs == 2,
+              "S-104: the mismatched contrib is DROPPED at ingress — it never enters pending_contribs_, so no block this node assembles can carry it");
+        check(p1.phase == 1 /*CONTRIB*/ && p1.contrib_timer_armed,
+              "S-104: the round stays in CONTRIB with the Phase-1 timer ARMED — the sender is simply MISSING (the existing abort path), no new exclusion signal");
+
+        {   // Same rule, abort dimension (V23): one shared predicate, not an eq special case.
+            node::ContribMsg bad_ab = good_contrib(2);
+            bad_ab.view_abort_list.push_back(h_extra);
+            n->on_contrib_for_test(bad_ab);
+            loop.run_until_idle();
+            check(probe().pending_contribs == 2,
+                  "S-104: a contrib whose view_ABORT list does not match its signed root is dropped too (V23 — the same predicate)");
+        }
+
+        n->on_contrib_for_test(good_contrib(2));   // the member retransmits, well-formed
+        loop.run_until_idle();
+        auto p2 = probe();
+        check(p2.pending_contribs == 3 && p2.phase == 2 /*BLOCK_SIG*/,
+              "S-104 liveness: the drop does not wedge the round — the member's well-formed contrib completes Phase 1 and the node advances to Phase 2");
+
+        // ── (b) CONSEQUENCE — what the ingress drop prevents ─────────────────
+        // A FULLY-SIGNED K-of-K block assembled from the very same contribs, put
+        // through the complete verifier (BlockValidator::validate, all 17 gates)
+        // — the same call apply_block_locked makes before appending. The block
+        // built from the mismatched contrib is the one every honest assembler
+        // would build and every honest node would refuse to append: the halt.
+        {
+            const chain::Chain& c = n->chain_for_test();
+            const std::vector<std::string> cdoms = p0.creators;   // the node's own derivation
+            auto key_of = [&](const std::string& d) -> const crypto::NodeKey& {
+                for (int i = 0; i < kM; ++i) if (doms[i] == d) return keys[i];
+                return keys[0];
+            };
+            auto idx_of = [&](const std::string& d) {
+                for (int i = 0; i < kM; ++i) if (doms[i] == d) return i;
+                return 0;
+            };
+            std::map<Hash, chain::Transaction> empty_store;
+            node::BlockValidator bv;
+            bv.set_k_block_sigs(uint32_t(kK));
+            bv.set_epoch_blocks(1000);
+            auto reg = node::NodeRegistry::build_from_chain(c, 1);
+            // Assemble the block the committee would assemble, in committee
+            // order, with a real commit-reveal pair and real K-of-K signatures;
+            // `poison_at` names the committee position whose contrib reveals a
+            // list that does not match its signed root (-1 = the honest block).
+            auto assemble = [&](int poison_at) {
+                std::vector<node::ContribMsg> cs;
+                std::vector<Hash>             secrets;
+                for (size_t i = 0; i < cdoms.size(); ++i) {
+                    const int di = idx_of(cdoms[i]);
+                    Hash secret{}; for (size_t j = 0; j < secret.size(); ++j)
+                        secret[j] = uint8_t(0x70 + di * 8 + j);
+                    Hash dh = crypto::SHA256Builder{}
+                        .append(secret)
+                        .append(keys[di].pub.data(), keys[di].pub.size()).finalize();
+                    node::ContribMsg m = node::make_contrib(
+                        keys[di], cdoms[i], /*block_index=*/1, prev, /*aborts_gen=*/0,
+                        /*tx_snapshot=*/{}, dh, /*view_eq_list=*/{ h_committed });
+                    if (int(i) == poison_at) m.view_eq_list.push_back(h_extra);
+                    cs.push_back(std::move(m));
+                    secrets.push_back(secret);
+                }
+                chain::Block b = node::build_body(
+                    empty_store, c, /*aborts=*/{}, cdoms, cs, Hash{}, kM,
+                    chain::ConsensusMode::MUTUAL_DISTRUST, "",
+                    /*equivocation_events=*/{}, /*inbound=*/{}, secrets,
+                    /*eligible_count=*/0, /*shard_tip_candidates=*/{}, /*witnesses=*/{},
+                    [](const chain::Transaction&, uint64_t) { return true; },
+                    [](const chain::EquivocationEvent&) { return true; });
+                Hash digest = node::compute_block_digest(b);
+                for (auto& d : cdoms)
+                    b.creator_block_sigs.push_back(
+                        crypto::sign(key_of(d), digest.data(), digest.size()));
+                return b;
+            };
+            chain::Block honest = assemble(-1);
+            auto rh = bv.validate(honest, c, reg);
+            if (!rh.ok) std::cout << "    got: [" << rh.error << "]\n";
+            check(rh.ok,
+                  "CONTROL: the K-of-K block assembled from root-matching contribs passes the FULL verifier — the chain advances");
+            check(honest.creator_view_eq_lists.size() == size_t(kK)
+                  && honest.creator_view_eq_lists[0] == std::vector<Hash>{ h_committed },
+                  "CONTROL: an accepted contrib's view_eq_list DOES reach the block verbatim");
+            chain::Block poisoned = assemble(0);
+            check(poisoned.creator_view_eq_lists.size() == size_t(kK)
+                  && poisoned.creator_view_eq_lists[0].size() == 2,
+                  "build_body copies the MISMATCHED list into the block verbatim (the producer mirrors no such rule)");
+            auto rp = bv.validate(poisoned, c, reg);
+            check(!rp.ok && rp.error.find("creator_view_eq_lists") != std::string::npos
+                  && rp.error.find("does not match committed root") != std::string::npos,
+                  "THE HALT: the block built from that one contrib is REJECTED by the full verifier on every honest node — no append, and the S-050 re-round rebuilds it identically");
+            if (!rp.ok && rp.error.find("does not match committed root") == std::string::npos)
+                std::cout << "    got: [" << rp.error << "]\n";
+        }
+
+        n->stop(); n.reset();
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-contrib-view-root-admit\n"
+                           : "  PASS: test-contrib-view-root-admit\n");
+        if (!fail) std::cout << "PASS: test-contrib-view-root-admit all assertions\n";
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-evidence-admit") {
+        // 2026-09-17 — SECURITY.md S-105 (found while designing O-1 step 3b,
+        // /root/audit/par/3b-design DESIGN.md section 0 F-2; pre-existing, not
+        // caused by any 2026-09-16 increment).
+        //
+        // THE HALT. build_body's evidence arm included `pool INTERSECT
+        // reconcile_union` with NO admissibility check, while the verifier
+        // rejects a block whose equivocator no longer resolves
+        // (BlockValidator::check_equivocation_events, "equivocator not in
+        // registry"). Cost: one eligible key, two OFFLINE signatures and one
+        // DEREGISTER. The key gossips a self-manufactured record about itself;
+        // every node adopts it (it resolves at that head); its DEREGISTER's
+        // inactive_from arrives; from that height NodeRegistry::build_from_chain
+        // omits the domain, so every honest assembler proposes the record, every
+        // honest verifier rejects the block, apply_block_locked never appends —
+        // and the ONLY prune is POST-inclusion, so nothing ever removes the
+        // record. Permanent. Same S-056 class the 2026-09-14 increments closed
+        // for transactions, on the evidence arm.
+        //
+        // The fix is the tx_admit_locked shape: the per-event core is factored
+        // out of the verifier (BlockValidator::check_equivocation_event — ONE
+        // rule set, like check_transaction), the producer asks it for every
+        // candidate through Node::eq_admit_locked, and a rejected record is
+        // EVICTED. No accept rule, wire format, apply path or digest changes.
+        //
+        // Fixture: a FOLLOWER node ("watch", not a registrant, so it never
+        // produces and the committee is never blocked on it) plus a test-side
+        // miner that assembles real K-of-K blocks from the genesis creators'
+        // keys through the very same build_body the producer uses. Every block
+        // is offered to the follower through apply_block_for_test — the real
+        // ingress: it runs the FULL validator and appends only on success, so
+        // "the block validates and the chain advances" is read off the node's
+        // own height, not off a hand-rolled check.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+        auto det_key = [](const std::string& tag) {
+            crypto::NodeKey k;
+            k.priv_seed = crypto::SHA256Builder{}.append(std::string("s105-") + tag).finalize();
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const crypto::NodeKey keyP = det_key("prod");    // creator
+        const crypto::NodeKey keyE = det_key("evil");    // creator + the equivocator
+        const crypto::NodeKey keyS = det_key("spare");   // third creator: keeps the
+                                                        // pool at >= K once evil leaves
+        const crypto::NodeKey keyW = det_key("watch");   // the follower (NOT registered)
+        const std::vector<std::string> cdoms_all = { "evil", "prod", "spare" };  // domain-sorted
+        auto key_of = [&](const std::string& d) -> const crypto::NodeKey& {
+            return d == "evil" ? keyE : (d == "prod" ? keyP : keyS);
+        };
+        // M = 3, K = 2 satisfies the genesis quorum-intersection band (2K > M) BOTH
+        // before and after `evil` leaves the eligible pool, so the chain keeps
+        // advancing across the very transition under test.
+        constexpr uint32_t kK = 2, kM = 3, kEpoch = 1000;
+
+        fs::path dir = fs::temp_directory_path() / "determ-evidence-admit";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir / "watch");
+        chain::GenesisConfig g;
+        g.chain_id = "evidence-admit"; g.m_creators = kM; g.k_block_sigs = kK;
+        g.epoch_blocks = kEpoch; g.block_subsidy = 10;
+        for (auto& d : cdoms_all) {
+            chain::GenesisCreator gc; gc.domain = d; gc.ed_pub = key_of(d).pub;
+            gc.initial_stake = 1000; g.initial_creators.push_back(gc);
+            chain::GenesisAllocation ga; ga.domain = d; ga.balance = 1000000;
+            g.initial_balances.push_back(ga);
+        }
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+        node::Config cfg;
+        cfg.domain = "watch"; cfg.data_dir = (dir / "watch").string();
+        cfg.listen_port = 7693; cfg.key_path = (dir / "watch.key").string();
+        cfg.chain_path = (dir / "watch" / "chain.json").string();
+        cfg.genesis_path = gpath; cfg.m_creators = kM; cfg.k_block_sigs = kK;
+        cfg.log_quiet = true;
+        crypto::save_node_key(keyW, cfg.key_path);
+        // Deterministic virtual time: every mined contrib commits `kT0` as its
+        // proposer_time, so build_body's lower-median reconciliation makes the
+        // block timestamp exactly kT0 and the validator's +-30s window (which
+        // reads the node's clock) can never drift under load. This is also the
+        // production shape — a real round always commits proposer times.
+        constexpr int64_t kT0 = 1700000000;
+        determ::time::VirtualClock vclock(kT0);
+        VirtualNetwork   vnet;
+        VirtualEventLoop loop;
+        loop.enable_virtual_time();
+        VirtualTransport transport(loop, vnet);
+        auto W = std::make_unique<node::Node>(cfg, vclock, &loop, &transport);
+
+        auto height = [&] { return W->rpc_status()["height"].get<uint64_t>(); };
+        std::map<Hash, chain::Transaction> store;
+
+        // The test-side miner: the honest assembler, using the genesis creators'
+        // keys and the production build_body. `ev_pool` is the candidate evidence
+        // (what a node's pending_equivocation_evidence_ would hold), `views`
+        // the event hashes each committee member commits in Phase 1 (so the
+        // block's evidence can be a SUBSET of the committee-view union), and
+        // `ev_admit` the producer-side admission predicate under test.
+        auto mine = [&](const std::vector<chain::EquivocationEvent>& ev_pool,
+                        const std::vector<Hash>& views,
+                        const node::EvAdmit& ev_admit,
+                        const std::vector<Hash>& txs = {}) {
+            const chain::Chain& c = W->chain_for_test();
+            const uint64_t idx = c.height();
+            auto reg = node::NodeRegistry::build_from_chain(c, idx);
+            // Mirror BlockValidator::check_creator_selection exactly.
+            const EpochIndex epoch = idx / kEpoch;
+            const uint64_t epoch_start = epoch * kEpoch;
+            Hash epoch_rand = (epoch_start == 0 || epoch_start > c.height())
+                ? (c.empty() ? Hash{} : c.head().cumulative_rand)
+                : c.at(epoch_start - 1).cumulative_rand;
+            Hash rand = crypto::epoch_committee_seed(epoch_rand, 0);
+            std::vector<std::string> avail;
+            for (auto& e : node::select_committee_pool(c, reg, epoch, "")) avail.push_back(e.domain);
+            std::vector<std::string> creators;
+            for (auto i : crypto::select_m_creators(rand, avail.size(), kK))
+                creators.push_back(avail[i]);
+            std::vector<node::ContribMsg> cs;
+            std::vector<Hash>             secrets;
+            for (size_t i = 0; i < creators.size(); ++i) {
+                const crypto::NodeKey& k = key_of(creators[i]);
+                Hash secret{};
+                for (size_t j = 0; j < secret.size(); ++j) secret[j] = uint8_t(0xB0 + i * 8 + j + idx);
+                Hash dh = crypto::SHA256Builder{}
+                    .append(secret).append(k.pub.data(), k.pub.size()).finalize();
+                cs.push_back(node::make_contrib(k, creators[i], idx, c.head_hash(),
+                                                /*aborts_gen=*/0, txs, dh, views,
+                                                /*view_abort_list=*/{}, /*view_inbound_list=*/{},
+                                                /*proposer_time=*/uint64_t(kT0)));
+                secrets.push_back(secret);
+            }
+            chain::Block b = node::build_body(
+                store, c, /*aborts=*/{}, creators, cs, Hash{}, kM,
+                chain::ConsensusMode::MUTUAL_DISTRUST, "", ev_pool, /*inbound=*/{},
+                secrets, /*eligible_count=*/0, /*shard_tip_candidates=*/{},
+                /*witnesses=*/{}, [](const chain::Transaction&, uint64_t) { return true; },
+                ev_admit);
+            Hash digest = node::compute_block_digest(b);
+            for (auto& d : creators)
+                b.creator_block_sigs.push_back(
+                    crypto::sign(key_of(d), digest.data(), digest.size()));
+            return b;
+        };
+        // Offer a block to the follower's real ingress; true = appended.
+        auto offer = [&](const chain::Block& b) {
+            const uint64_t before = height();
+            W->apply_block_for_test(b);
+            return height() == before + 1;
+        };
+        // The self-manufactured record: two OFFLINE signatures by `evil` over two
+        // conflicting Phase-1 openings at (height 1, gen 0). V11 asserts nothing
+        // that ties either opening to any real round.
+        chain::EquivocationEvent ev;
+        ev.equivocator = "evil";
+        ev.block_index = 1; ev.kind = chain::EquivocationEvent::KIND_CONTRIB_COMMIT;
+        ev.index_a = 1; ev.gen_a = 0;
+        ev.index_b = 1; ev.gen_b = 0;
+        for (size_t i = 0; i < ev.body_root_a.size(); ++i) ev.body_root_a[i] = uint8_t(0x31 + i);
+        for (size_t i = 0; i < ev.body_root_b.size(); ++i) ev.body_root_b[i] = uint8_t(0x71 + i);
+        {
+            Hash da = node::compose_contrib_commitment(ev.index_a, ev.gen_a, ev.body_root_a);
+            Hash db = node::compose_contrib_commitment(ev.index_b, ev.gen_b, ev.body_root_b);
+            ev.sig_a = crypto::sign(keyE, da.data(), da.size());
+            ev.sig_b = crypto::sign(keyE, db.data(), db.size());
+        }
+        const Hash evh = node::hash_equivocation_event(ev);
+        auto pooled = [&] { return W->evidence_pool_contains_for_test("evil"); };
+        auto adopt  = [&] {
+            return W->rpc_submit_equivocation(ev.to_json()).value("accepted", false);
+        };
+
+        check(height() == 1 && !pooled(),
+              "setup: the follower is at genesis (height 1) with an empty evidence pool");
+
+        // ── CONTROL: a resolvable equivocator's record IS proposed and lands ──
+        check(adopt() && pooled(),
+              "CONTROL: the record is adopted while `evil` still resolves at the head");
+        {
+            chain::Block b = mine({ ev }, { evh }, W->eq_admit_for_test());
+            check(b.equivocation_events.size() == 1
+                  && b.equivocation_events[0].equivocator == "evil",
+                  "CONTROL: the producer's admission predicate ADMITS it — the record is proposed");
+            check(offer(b) && height() == 2,
+                  "CONTROL: the block VALIDATES on the follower and the chain advances");
+            check(!pooled(),
+                  "CONTROL: the post-inclusion prune drops the now-recorded evidence");
+        }
+
+        // ── evil DEREGISTERs; the record is re-pooled while it still resolves ──
+        chain::Transaction dereg;
+        dereg.type = chain::TxType::DEREGISTER; dereg.from = "evil"; dereg.to = "";
+        dereg.amount = 0; dereg.fee = 0; dereg.nonce = 0;
+        {
+            auto sb = dereg.signing_bytes();
+            dereg.sig = crypto::sign(keyE, sb.data(), sb.size());
+            dereg.hash = dereg.compute_hash();
+        }
+        store[dereg.hash] = dereg;
+        check(adopt() && pooled(),
+              "the record is re-pooled (nothing consults the chain at adoption — a resubmission always re-pools)");
+        {   // The DEREGISTER block carries no evidence view, so the pooled record
+            // is NOT included and stays resident — the memo's "gossiped after the
+            // round's Phase-1 snapshot" case, reproduced deterministically.
+            chain::Block b = mine({}, {}, W->eq_admit_for_test(), { dereg.hash });
+            check(b.transactions.size() == 1 && b.transactions[0].type == chain::TxType::DEREGISTER
+                  && offer(b) && height() == 3,
+                  "evil's DEREGISTER is applied at height 2; the chain advances");
+        }
+        const auto& regs = W->chain_for_test().registrants();
+        const uint64_t inactive_from = regs.count("evil") ? regs.at("evil").inactive_from : 0;
+        check(inactive_from > 2 && inactive_from != UINT64_MAX,
+              "apply set evil.inactive_from = " + std::to_string(inactive_from)
+              + " (height + a rand-derived 1..10 delay the deregistrant can compute)");
+        // Idle blocks (no evidence offered, so the predicate is never consulted)
+        // until the head where `evil` stops resolving.
+        int guard = 0;
+        while (height() < inactive_from && guard++ < 24) {
+            chain::Block b = mine({}, {}, W->eq_admit_for_test());
+            if (!offer(b)) break;
+        }
+        check(height() == inactive_from && pooled(),
+              "the head reaches inactive_from with the record STILL POOLED — no path removes it (the only prune is post-inclusion)");
+
+        // ── THE HALT: the pre-fix producer proposes what the verifier rejects ──
+        {
+            chain::Block b = mine({ ev }, { evh },
+                                  [](const chain::EquivocationEvent&) { return true; });
+            check(b.equivocation_events.size() == 1,
+                  "THE HALT (pre-fix producer): the evidence arm proposes the record with no admissibility check");
+            const uint64_t before = height();
+            W->apply_block_for_test(b);
+            check(height() == before,
+                  "THE HALT: every honest node REFUSES to append that block — the height does not move, nothing is evicted, and the next round rebuilds the same body");
+            node::BlockValidator bv;
+            bv.set_k_block_sigs(kK); bv.set_epoch_blocks(kEpoch);
+            auto reg = node::NodeRegistry::build_from_chain(W->chain_for_test(), before);
+            auto r = bv.check_equivocation_events_for_test(b, reg, W->chain_for_test());
+            check(!r.ok && r.error.find("equivocator not in registry") != std::string::npos,
+                  "THE HALT: the reject is V11's key resolution — the equivocator is gone from the registry");
+        }
+
+        // ── THE FIX: the producer asks the verifier, and evicts ───────────────
+        {
+            check(pooled(), "the record is still pooled going into the fixed build");
+            chain::Block b = mine({ ev }, { evh }, W->eq_admit_for_test());
+            check(b.equivocation_events.empty(),
+                  "S-105: the admission predicate REJECTS the unverifiable record — it is NOT proposed");
+            check(!pooled(),
+                  "S-105: and it is EVICTED from the evidence pool — it can never be included again without a state change, and the only other prune is post-inclusion");
+            check(offer(b) && height() == inactive_from + 1,
+                  "S-105: the block VALIDATES on the follower and the chain ADVANCES — the halt is closed");
+        }
+
+        // ── FAIL-SAFE: no predicate admits nothing, never everything ──────────
+        {
+            check(adopt() == false,
+                  "the record can no longer even be adopted at this head (on_equivocation_evidence runs the same key resolution)");
+            chain::Block b = mine({ ev }, { evh }, node::EvAdmit{});
+            check(b.equivocation_events.empty(),
+                  "FAIL-SAFE: a caller that forgets the predicate proposes NO evidence, never unvetted evidence");
+        }
+
+        W->stop(); W.reset();
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-evidence-admit\n"
+                           : "  PASS: test-evidence-admit\n");
+        if (!fail) std::cout << "PASS: test-evidence-admit all assertions\n";
         return fail ? 1 : 0;
     }
     if (cmd == "test-register-create-only") {

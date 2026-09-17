@@ -583,6 +583,24 @@ apply gate and is ADOPTED when it wins the tie-break; and `initial_state` on a n
 is in signing_bytes, outside the digest, ignored by apply and unchecked by the validator — a
 free hash-grinding field, so any clean same-digest twin can be made to win and the block hash
 is relayer-malleable, not only signer-malleable (DECISION-LOG 2026-09-16 S-102 entry).
+FOUND AND CLOSED 2026-09-17 (both found while designing O-1 step 3b — 3b design memo §0 F-1/F-2 —
+re-verified at base; PRE-EXISTING, neither caused by any 2026-09-16 increment; both node-local, no
+accept-rule/wire/apply/digest change): S-104 — `Node::on_contrib` verified the contrib signature,
+which binds the view ROOTS, but never that the carried view LIST hashes to the signed root
+(`validate_contrib_view_roots`, V21-V25, had ZERO production callers), so one committee member's
+one contrib per round made every honest assembler build the block every honest verifier rejects
+("F2: creator_view_eq_lists[i] does not match committed root") with nobody missing and nobody
+excluded — a cost-free permanent halt; on_contrib now calls the validator and DROPS the contrib
+(= does not store it, so the sender is simply missing and the existing abort path applies); gate
+`determ test-contrib-view-root-admit`, mutants F1-M1/F1-M2 RED. S-105 — `build_body`'s evidence arm
+included `pool ∩ reconcile_union` with NO admissibility check while the verifier rejects a block
+whose equivocator no longer resolves, so any eligible key + two OFFLINE signatures + one DEREGISTER
+(`inactive_from = H + d`, d known to the deregistrant) made every honest block invalid from that
+height on, with the only prune being POST-inclusion: permanent; the per-event core is now
+`BlockValidator::check_equivocation_event` (the `check_transaction` extraction, one rule set) and
+`Node::eq_admit_locked` hands it to `build_body` as a fail-safe `EvAdmit` that EVICTS what it
+rejects, memoized per head; gate `determ test-evidence-admit`, mutants F2-M1/F2-M2/F2-M3 RED.
+DECISION-LOG 2026-09-17 entry. The 3b cap/dedup rules themselves are NOT in that commit.
 LANDED 2026-09-16: S-079 (with S-070, the same defect's REGISTER shape) — mempool admission is
 affordability- and quota-gated at the head (`Node::mempool_admit_check` / `mempool_make_room_for` /
 the `tx_admit_locked` predicate; the verifier and apply untouched); gate

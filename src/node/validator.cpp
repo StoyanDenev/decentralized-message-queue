@@ -436,14 +436,31 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 // chain.cpp::apply_transactions).
 BlockValidator::Result BlockValidator::check_equivocation_events(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
+    for (size_t i = 0; i < b.equivocation_events.size(); ++i)
+        if (auto r = check_equivocation_event(b.equivocation_events[i], i, b.index,
+                                              chain, registry); !r.ok) return r;
+    return {true, ""};
+}
+
+// 2026-09-17 (SECURITY.md S-105): the per-EVENT accept rules, moved VERBATIM out
+// of the check_equivocation_events loop — the ONE definition site, the way
+// check_transaction is the one per-transaction rule set. Public so the producer
+// asks the same predicate before an event enters a block
+// (Node::eq_admit_locked -> build_body): the assembler must never include what
+// the verifier rejects, because a rejected self-assembled block evicts nothing
+// and the chain halts. `i` is used only in the reject strings; `block_index` is
+// the index of the block the event is being checked FOR (b.index in the verifier,
+// the index of the block about to be assembled in the producer) and drives the
+// epoch the equivocator's key is resolved in.
+BlockValidator::Result BlockValidator::check_equivocation_event(
+    const chain::EquivocationEvent& ev, size_t i, uint64_t block_index,
+    const Chain& chain, const NodeRegistry& registry) const {
     // D3.3b-read: resolve the equivocator's key frozen-first with present-head
     // fallback — a frozen committee member equivocating this epoch resolves from
     // the checkpoint, and a non-committee / cross-epoch equivocator still
     // resolves present-head (the fallback keeps its evidence verifiable).
-    EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
-    for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
-        const auto& ev = b.equivocation_events[i];
-
+    EpochIndex epoch = epoch_blocks_ ? (block_index / epoch_blocks_) : 0;
+    {
         // (1) Known digest family only — an unknown kind has no compose
         // function, so no digest could be derived; fail closed.
         if (ev.kind > 1)

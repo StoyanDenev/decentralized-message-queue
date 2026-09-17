@@ -21,6 +21,12 @@ namespace determ::node {
 // include this transaction at the next block? Wired to the verifier's
 // BlockValidator::check_transaction by Node::tx_admit_locked.
 using TxAdmit = std::function<bool(const chain::Transaction&, uint64_t expected_nonce)>;
+// 2026-09-17 (SECURITY.md S-105): the producer-side admission predicate for
+// EQUIVOCATION EVIDENCE — may the assembler include this pooled record in the
+// next block? Wired to the verifier's BlockValidator::check_equivocation_event
+// by Node::eq_admit_locked, which also EVICTS what the verifier would reject.
+// Same shape and the same fail-safe discipline as TxAdmit above.
+using EvAdmit = std::function<bool(const chain::EquivocationEvent&)>;
 
 struct ContribMsg {
     uint64_t           block_index{0};
@@ -645,6 +651,20 @@ chain::Block build_body(
     // forgets it builds an empty body, never an unvetted one — visible in any
     // test with transactions). Node passes tx_admit_locked() at all three
     // call sites (pinned by tools/test_producer_admit_wiring_guard.sh).
-    const TxAdmit&                            admit = {});
+    const TxAdmit&                            admit = {},
+    // 2026-09-17 (SECURITY.md S-105): the verifier's own per-equivocation-event
+    // accept rules, asked for every pooled record BEFORE it is included (Node
+    // passes BlockValidator::check_equivocation_event against the head state the
+    // block will be validated against, and EVICTS what it rejects). The evidence
+    // arm previously included `pool INTERSECT reconcile_union` with no
+    // admissibility check at all, so a record whose equivocator stopped
+    // resolving — a DEREGISTER reaching its inactive_from, or an epoch turn —
+    // made every honest block invalid for as long as it stayed pooled, and
+    // nothing ever removed it: a permanent halt. Fail-SAFE like `admit`: the
+    // default / an empty predicate admits NOTHING (a caller that forgets it
+    // proposes no evidence, never unvetted evidence). Node passes
+    // eq_admit_locked() at all three call sites (pinned by
+    // tools/test_producer_admit_wiring_guard.sh).
+    const EvAdmit&                            ev_admit = {});
 
 } // namespace determ::node

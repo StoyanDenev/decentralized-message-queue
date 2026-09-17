@@ -1142,9 +1142,15 @@ Block build_body(
     uint32_t                              eligible_count,
     const std::vector<chain::ShardTipRecord>& shard_tip_candidates,
     const std::map<std::pair<ShardId, uint64_t>, chain::Block>& shard_tip_witnesses,
-    const TxAdmit&                        admit) {
+    const TxAdmit&                        admit,
+    const EvAdmit&                        ev_admit) {
 
     Block b;
+    // 2026-09-17 (S-105): `ev_admit` EVICTS from the caller's evidence pool on a
+    // rejection, and `equivocation_events` IS that pool by reference at every
+    // Node call site — so iterate our own copy, the same discipline the tx arm
+    // already follows (it walks `ordered`, taken before the admission loop).
+    const std::vector<chain::EquivocationEvent> ev_candidates = equivocation_events;
     b.index               = chain.empty() ? 1 : chain.height();
     b.prev_hash           = chain.empty() ? Hash{} : chain.head_hash();
     b.timestamp           = now_unix();
@@ -1223,18 +1229,31 @@ Block build_body(
     // one misbehavior; forcing the assembler to materialize every witness in the
     // union would stall when it lacks a peer's exact struct. The assembler's own
     // committed view covers its own pool, so its evidence is never dropped. See
-    // docs/proofs/EqAbortViewDigestExtension.md. Pre-activation: direct assign.
+    // docs/proofs/EqAbortViewDigestExtension.md.
+    //
+    // 2026-09-17 (SECURITY.md S-105): every candidate — on BOTH branches — is
+    // additionally put to `ev_admit`, the verifier's own per-event predicate at
+    // the head this block will be validated against. Without it the arm included
+    // whatever the pool held, so a record whose equivocator stopped resolving
+    // (DEREGISTER reaching inactive_from, or an epoch turn) made every honest
+    // block invalid while it stayed pooled, and nothing evicted it: a permanent
+    // halt of the S-056 class on the evidence arm. Fail-safe: no predicate ->
+    // no evidence.
     if (b.index >= chain.f2_active_from_height()) {
         std::set<Hash> eq_union, ab_union;
         { auto u = reconcile_union(b.creator_view_eq_lists);    eq_union.insert(u.begin(), u.end()); }
         { auto u = reconcile_union(b.creator_view_abort_lists); ab_union.insert(u.begin(), u.end()); }
-        for (auto& e : equivocation_events)
-            if (eq_union.count(hash_equivocation_event(e))) b.equivocation_events.push_back(e);
+        for (auto& e : ev_candidates) {
+            if (!eq_union.count(hash_equivocation_event(e))) continue;
+            if (!ev_admit || !ev_admit(e)) continue;
+            b.equivocation_events.push_back(e);
+        }
         for (auto& a : aborts)
             if (ab_union.count(hash_abort_event(a))) b.abort_events.push_back(a);
     } else {
         b.abort_events        = aborts;
-        b.equivocation_events = equivocation_events;
+        for (auto& e : ev_candidates)
+            if (ev_admit && ev_admit(e)) b.equivocation_events.push_back(e);
     }
 
     // rev.9 S-009: when ordered_secrets is provided, the block is being

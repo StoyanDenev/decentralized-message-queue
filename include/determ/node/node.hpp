@@ -481,6 +481,26 @@ public:
         return tx_admit_locked();
     }
     uint64_t admit_verifications_for_test() const { return admit_verifications_; }
+    // 2026-09-17 seams for `determ test-evidence-admit` (S-105): the producer-side
+    // evidence-admission predicate, and a read-only residency probe on the
+    // evidence pool so the gate can say WHETHER a rejected record left the pool
+    // (the eviction leg) — the same seam pattern as tx_admit_for_test /
+    // mempool_contains_for_test. Keyed by equivocator, the identity every pool
+    // site uses (same_equivocation_identity).
+    EvAdmit eq_admit_for_test() {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        return eq_admit_locked();
+    }
+    bool evidence_pool_contains_for_test(const std::string& equivocator) const {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        for (const auto& e : pending_equivocation_evidence_)
+            if (e.equivocator == equivocator) return true;
+        return false;
+    }
+    size_t evidence_pool_size_for_test() const {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        return pending_equivocation_evidence_.size();
+    }
     // 2026-09-16 seams for `determ test-mempool-admit-affordability` (S-079):
     // (a) a read-only residency probe, so the eviction-order arms can say
     //     WHICH entry left the pool (rpc_status()["mempool_size"] only counts);
@@ -624,6 +644,18 @@ private:
     // state_mutex_.
     TxAdmit tx_admit_locked();
     void    evict_tx_locked(const chain::Transaction& tx, const std::string& why);
+    // 2026-09-17 (SECURITY.md S-105): the same seam for EQUIVOCATION EVIDENCE —
+    // the verifier's own BlockValidator::check_equivocation_event evaluated
+    // against the head state and registry the tentative block will be validated
+    // against. build_body's evidence arm had no admissibility check at all, so a
+    // pooled record whose equivocator stopped resolving (a DEREGISTER reaching
+    // its inactive_from, an epoch turn) made every honest block invalid for as
+    // long as it stayed pooled — and the only prune is post-inclusion, so it
+    // stayed for ever. A rejected record is EVICTED; verdicts are memoized per
+    // head (eq_admit_memo_). Caller must hold state_mutex_.
+    EvAdmit eq_admit_locked();
+    void    evict_equivocation_evidence_locked(const chain::EquivocationEvent& ev,
+                                               const std::string& why);
     void on_contrib(const ContribMsg& msg);
     // Every current committee member's Phase-1 contrib is in pending_contribs_
     // (S-058: the transition trigger — never the map's size, which counts
@@ -797,6 +829,10 @@ private:
     std::map<std::pair<Hash, uint64_t>, bool>                admit_memo_;
     Hash                                                     admit_memo_head_{};
     uint64_t                                                 admit_verifications_{0};
+    // Per-head memo of eq_admit_locked verdicts, keyed by the event hash;
+    // dropped whenever the head hash changes (append or reorg). S-105.
+    std::map<Hash, bool>                                     eq_admit_memo_;
+    Hash                                                     eq_admit_memo_head_{};
 
     // S-008: count txs in the mempool from a given sender. Iterates
     // tx_by_account_nonce_ in lexicographic order; std::map's ordered

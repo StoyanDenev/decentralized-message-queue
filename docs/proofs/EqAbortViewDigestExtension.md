@@ -440,7 +440,19 @@ assembler cannot emit the event. Resolution:
   fabricates a struct from a bare hash.
 - This is safe because the union is built from `b.creator_view_eq_lists` — the K
   *committed* views. An event reached a committed view only by passing V10/V11 and
-  gossiping to that member; under the protocol's gossip assumptions the assembler
+  gossiping to that member;
+
+  **Correction 2026-09-17 (SECURITY.md S-105).** "Passed V11" holds at the head the
+  record was ADOPTED at, not at the head the block is validated against: V11 resolves
+  the equivocator's key through `NodeRegistry::build_from_chain`, which omits a domain
+  whose DEREGISTER reached `inactive_from` (or that fell below `min_stake`, or is
+  suspended). A pooled record can therefore stop being verifiable while it is still in
+  the pool, and since the ONLY prune is post-inclusion nothing removed it — every
+  honest block carrying it was invalid, permanently. `build_body`'s evidence arm now
+  asks the verifier's own per-event predicate (`BlockValidator::check_equivocation_event`,
+  via `Node::eq_admit_locked`) for every candidate and EVICTS what it rejects; gate
+  `determ test-evidence-admit`.
+ under the protocol's gossip assumptions the assembler
   (itself a committee member) will hold the struct by Phase-2. If, under pathological
   partition, it does not, the assembler's produced block fails its *own* step-6
   cardinality check (it carries fewer events than the union) and is simply not

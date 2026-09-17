@@ -1402,7 +1402,7 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
                                          round_shard_tip_candidates_, round_shard_tip_witnesses_,
-                                         tx_admit_locked());
+                                         tx_admit_locked(), eq_admit_locked());
 
     // v2.1 / S-033 activation: populate state_root from the post-apply
     // state. Dry-run apply on a Chain copy to compute the commitment
@@ -1520,7 +1520,7 @@ void Node::try_finalize_round() {
                                     ordered_secrets,
                                     current_source_eligible_count(),
                                     round_shard_tip_candidates_, round_shard_tip_witnesses_,
-                                    tx_admit_locked());
+                                    tx_admit_locked(), eq_admit_locked());
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     // S-038 closure: populate body.state_root with the post-apply state
@@ -2922,6 +2922,70 @@ TxAdmit Node::tx_admit_locked() {
     };
 }
 
+// 2026-09-17 (SECURITY.md S-105): the producer-side admission predicate for
+// EQUIVOCATION EVIDENCE — the exact twin of tx_admit_locked above, wired to the
+// verifier's own BlockValidator::check_equivocation_event at the head this
+// block will be validated against.
+//
+// The halt it closes: build_body's evidence arm included `pool INTERSECT
+// reconcile_union` with NO admissibility check, while the verifier rejects a
+// block whose equivocator no longer resolves ("equivocator not in registry").
+// An eligible key needs two offline signatures and one DEREGISTER: it gossips a
+// self-manufactured record, every node pools it, and at the height its
+// inactive_from lands NodeRegistry::build_from_chain drops the domain — from
+// then on every honest assembler proposes the record, every honest verifier
+// rejects the block, apply_block_locked never appends, and the only prune is
+// POST-inclusion, so the record is never removed. Permanent, and the same
+// S-056 class the 2026-09-14 increments closed for transactions.
+//
+// A record the predicate rejects is EVICTED, like a rejected transaction:
+// nothing can make it includable again without a state change that would also
+// let it be re-adopted, and keeping it would re-cost the check every build.
+// Verdicts are MEMOIZED per head (eq_admit_memo_) — check_equivocation_event is
+// deterministic in (event, head state) and costs two Ed25519 verifications, and
+// build_body runs three times a round, so without the memo the pool would be
+// re-verified 3x per round under state_mutex_.
+EvAdmit Node::eq_admit_locked() {
+    // Same height + same registry view as apply_block_locked will use for the
+    // block build_body is about to assemble (b.index = height(); registry =
+    // build_from_chain(chain_, b.index)) — identical to tx_admit_locked.
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = std::make_shared<const NodeRegistry>(
+        NodeRegistry::build_from_chain(chain_, at));
+    const Hash head = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (head != eq_admit_memo_head_) { eq_admit_memo_.clear(); eq_admit_memo_head_ = head; }
+    return [this, at, reg](const chain::EquivocationEvent& ev) {
+        const Hash key = hash_equivocation_event(ev);
+        if (auto m = eq_admit_memo_.find(key); m != eq_admit_memo_.end())
+            return m->second;
+        auto r = validator_.check_equivocation_event(ev, 0, at, chain_, *reg);
+        eq_admit_memo_.emplace(key, r.ok);
+        if (!r.ok) evict_equivocation_evidence_locked(ev, r.error);
+        return r.ok;
+    };
+}
+
+// An equivocation record the verifier rejects at this head cannot enter any
+// block until state changes, and the ONLY prune the node has is post-inclusion
+// — so leaving it pooled leaves it un-includable and permanently resident (it
+// would also keep occupying that equivocator's single pool slot and a place in
+// every Phase-1 view list). Safe inside build_body: the assembler iterates its
+// own copy of the pool (`ev_candidates`, taken before the admission loop) and
+// every call site holds state_mutex_ exclusively.
+void Node::evict_equivocation_evidence_locked(const chain::EquivocationEvent& ev,
+                                              const std::string& why) {
+    pending_equivocation_evidence_.erase(
+        std::remove_if(pending_equivocation_evidence_.begin(),
+                        pending_equivocation_evidence_.end(),
+            [&](const chain::EquivocationEvent& e) {
+                return same_equivocation_identity(e, ev);
+            }),
+        pending_equivocation_evidence_.end());
+    if (!cfg_.log_quiet)
+        std::cerr << "[node] evidence pool: evicted record against "
+                  << ev.equivocator << " (" << why << ") (S-105)\n";
+}
+
 // A transaction the verifier rejects at the head — or one the head cannot
 // fund (S-079) — cannot be included until state changes. Keeping it would
 // cost a full re-check per head (and, before the memo, per rebuild) and
@@ -3366,6 +3430,42 @@ void Node::on_contrib(const ContribMsg& msg) {
         return;
     }
 
+    // 2026-09-17 (SECURITY.md S-104): the signature above binds the view ROOTS
+    // (make_contrib_commitment composes view_eq_root / view_abort_root /
+    // view_inbound_root / view_shardtip_root) — it does NOT bind the view
+    // LISTS the same message carries. build_body copies those lists into the
+    // block verbatim, and the verifier's check_eqabort_reconciliation recomputes
+    // compute_view_root(list) and rejects the WHOLE block when it differs from
+    // the committed root ("F2: creator_view_eq_lists[i] does not match committed
+    // root"). So one committee member sending one contrib whose list does not
+    // hash to its signed root made every honest assembler build the same block
+    // that every honest verifier rejects: no append, the S-050 valve re-rounds
+    // with the same committee (the member is PRESENT, so nothing aborts), and
+    // the height never advanced while it kept sending — a cost-free permanent
+    // halt. validate_contrib_view_roots (V21..V25) is exactly that recompute and
+    // had zero production callers; call it here, at ingress.
+    //
+    // DROP = do not store. That is the smallest behaviour that restores
+    // liveness: every earlier `return` on this path (wrong height, wrong
+    // prev_hash, wrong generation, bad signature) already leaves the signer
+    // absent from pending_contribs_, and committee_contribs_complete_locked
+    // then reports the member MISSING, which is what arms the existing Phase-1
+    // timeout / abort path. No new state, no new exclusion signal. It is not a
+    // new exclusion lever either: the only party that can make a contrib fail
+    // this check is one that can already rewrite or withhold the message in
+    // transit (the roots are signed, the lists are not), and withholding
+    // already makes the member missing. An honest member never fails it —
+    // make_contrib computes each list and its root together.
+    //
+    // Placed immediately after the signature check, i.e. before the S-006
+    // duplicate/equivocation detector below, so no evidence is manufactured
+    // and gossiped out of a message this node has decided to discard.
+    if (std::string why; !validate_contrib_view_roots(msg, &why)) {
+        std::cerr << "[node] dropped Contrib from " << msg.signer
+                  << ": " << why << " (S-104)\n";
+        return;
+    }
+
     // S-006 closure: same-signer duplicate at the SAME generation.
     //
     // Pre-fix: any duplicate (existing in pending_contribs_) was silently
@@ -3558,7 +3658,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          /*ordered_secrets=*/{},
                                          current_source_eligible_count(),
                                          round_shard_tip_candidates_, round_shard_tip_witnesses_,
-                                         tx_admit_locked());
+                                         tx_admit_locked(), eq_admit_locked());
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {

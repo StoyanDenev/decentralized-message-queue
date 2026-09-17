@@ -348,7 +348,7 @@ A more subtle case: the receipt appears in two consecutive blocks' `view_inbound
 
 **Statement.** Per `F2ViewReconciliationAnalysis.md` §3.1: `compute_view_root(L)` is a deterministic function of `set(L)` (the underlying set after canonical-sort-and-dedup via `std::set<Hash>` coercion). Two member lists with the same underlying set produce the same root.
 
-**Consequence for this composition.** A contributor cannot equivocate on their view between Phase-1 commit (which binds the root) and Phase-2 reveal (which reveals the list). If they attempt to reveal a list with a different `set(L)`, the validator's V22/V23/V24 check (`validate_contrib_view_roots`) fails. Therefore the F2-committed view roots in `B.contrib_commitments[]` are reliable inputs to the canonical-reconciliation rules.
+**Consequence for this composition.** A contributor cannot equivocate on their view between Phase-1 commit (which binds the root) and Phase-2 reveal (which reveals the list): a revealed list whose `compute_view_root` differs from the committed root makes the containing block invalid. **Correction 2026-09-17 (SECURITY.md S-104) — which check enforces that, and where.** At the BLOCK level the enforcement is `BlockValidator::check_eqabort_reconciliation` (its `check_dim` recomputes `compute_view_root(list)` against the carried root and rejects the whole block); `validate_contrib_view_roots` performs the same recompute but had NO production caller at all until 2026-09-17, when `Node::on_contrib` began calling it at Phase-1 INGRESS and dropping a contrib that fails it. Until then a mismatched list was accepted at ingress, copied into the block by `build_body` and rejected by every verifier — a permanent halt, not a defeat of the attack; the ingress call is what makes the block-level rule non-self-inflicted. Therefore the F2-committed view roots in `B.contrib_commitments[]` are reliable inputs to the canonical-reconciliation rules.
 
 ### L-3 — Apply-loop deterministic order
 
@@ -499,7 +499,7 @@ The full regression suite (`bash tools/run_all.sh`) covers the apply-determinism
 - `src/node/producer.cpp:335–340` — `compute_view_root` (Merkle root over sorted-deduped view list; primary cite for L-2).
 - `src/node/producer.cpp:345–351` — `reconcile_union` (per F2-SPEC §Q1 for eq + abort; primary cite for T-3 + T-4).
 - `src/node/producer.cpp:357–372` — `reconcile_intersection` (per F2-SPEC §Q1 for inbound; primary cite for T-2).
-- `src/node/producer.cpp:391–436` — `validate_contrib_view_roots` (V21..V24 per-contrib well-formedness; primary cite for A2 defeat).
+- `src/node/producer.cpp` — `validate_contrib_view_roots` (V21..V25 per-contrib well-formedness). Called from `Node::on_contrib` since 2026-09-17 (S-104); the block-level enforcement of the same rule is `BlockValidator::check_eqabort_reconciliation` (`check_dim`), which is the primary cite for the A2 defeat.
 - `src/node/producer.cpp:438–456` — `derive_canonical_view_lists` (assembler-side canonical reconciliation).
 - `src/node/producer.cpp:638–676` — `validate_view_reconciliation` (byte-equality V25 + V26 helper; **test-only** — sole caller `src/main.cpp:19489`, NOT on any accept path, so no longer the F-2 cite).
 - `src/node/validator.cpp:55–57` + `:1461–1497` (`check_inbound_receipts`) + `:1554–1629` (`check_eqabort_reconciliation`) — the SHIPPED subset admission on the accept path (primary cite for F-2 + A2 + T-2/T-3/T-4).

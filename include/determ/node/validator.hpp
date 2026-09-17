@@ -424,6 +424,22 @@ public:
     Result check_transaction(const chain::Transaction& tx, uint64_t block_index,
                              const chain::Chain& chain, const NodeRegistry& registry,
                              uint64_t expected_nonce) const;
+
+    // 2026-09-17 (SECURITY.md S-105): the verifier's per-EQUIVOCATION-EVENT
+    // accept rules — the ONE definition site (check_equivocation_events walks a
+    // block's events through it). Public for the same reason check_transaction
+    // is: the producer asks the same predicate before an event enters a block
+    // (Node::eq_admit_locked -> build_body). build_body used to include whatever
+    // the evidence pool held, so a pooled record whose equivocator stopped
+    // resolving (a DEREGISTER reaching its inactive_from, or an epoch turn) made
+    // every honest block invalid for as long as it stayed pooled — the S-056
+    // class on the evidence arm. `i` appears only in the reject strings;
+    // `block_index` is the index of the block the event is checked FOR and picks
+    // the epoch the equivocator's key resolves in. Verifies two Ed25519
+    // signatures.
+    Result check_equivocation_event(const chain::EquivocationEvent& ev, size_t i,
+                                    uint64_t block_index, const chain::Chain& chain,
+                                    const NodeRegistry& registry) const;
 private:
 
     // Resolve the rand source at `epoch_start_height` for committee
