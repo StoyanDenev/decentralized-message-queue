@@ -42,7 +42,8 @@ typedef enum {
     DSSO_E_BINDING          = -8,   /* holder/device/session binding failed      */
     DSSO_E_STATUS           = -9,   /* revoked or suspended by its status list   */
     DSSO_E_ASSURANCE        = -10,  /* evidence below the required level         */
-    DSSO_E_UNAVAILABLE      = -11   /* a dependency could not be consulted       */
+    DSSO_E_UNAVAILABLE      = -11,  /* a dependency could not be consulted       */
+    DSSO_E_RATELIMIT        = -12   /* the aggregate attempt budget is spent     */
 } dsso_status;
 
 /* A bounded, non-owning view of caller memory. `p` may be NULL only when

@@ -15,6 +15,7 @@
 int dsso_selftest_core(void);
 int dsso_selftest_assertion(void);
 int dsso_selftest_pid(void);
+int dsso_selftest_authn(void);
 
 static int usage(void) {
     printf("determ-dsso — DSSO service (Sign-In With Determ), off-chain identity DApp\n\n");
@@ -27,6 +28,8 @@ static int usage(void) {
     printf("                                   selective disclosure, holder binding,\n");
     printf("                                   audience/nonce, freshness, status, assurance,\n");
     printf("                                   and the account-binding rules\n");
+    printf("  determ-dsso selftest-authn       two-factor login, enrolment/recovery/revocation,\n");
+    printf("                                   aggregate attempt limiter (2015/1502 substantial)\n");
     return 1;
 }
 
@@ -35,6 +38,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "selftest-core")) return dsso_selftest_core();
     if (!strcmp(argv[1], "selftest-assertion")) return dsso_selftest_assertion();
     if (!strcmp(argv[1], "selftest-pid"))  return dsso_selftest_pid();
+    if (!strcmp(argv[1], "selftest-authn")) return dsso_selftest_authn();
     return usage();
 }
 

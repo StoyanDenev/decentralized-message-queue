@@ -21,6 +21,7 @@ const char *dsso_status_name(dsso_status s) {
         case DSSO_E_STATUS:      return "DSSO_E_STATUS";
         case DSSO_E_ASSURANCE:   return "DSSO_E_ASSURANCE";
         case DSSO_E_UNAVAILABLE: return "DSSO_E_UNAVAILABLE";
+        case DSSO_E_RATELIMIT:   return "DSSO_E_RATELIMIT";
     }
     return "DSSO_E_UNKNOWN";
 }

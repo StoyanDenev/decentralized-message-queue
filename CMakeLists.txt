@@ -461,6 +461,8 @@ add_executable(determ-dsso
   dapps/dsso/dsso_pid.c
   dapps/dsso/dsso_bind.c
   dapps/dsso/dsso_selftest_pid.c
+  dapps/dsso/authn.c
+  dapps/dsso/authn_selftest.c
   dapps/dsso/dsso_main.c
 )
 target_compile_features(determ-dsso PRIVATE c_std_99)
