@@ -2116,9 +2116,18 @@ static int cmd_init(int argc, char** argv) {
     if (fs::exists(kpath)) {
         std::cout << "Key already exists at " << kpath << " (skipping keygen)\n";
     } else {
-        auto key = crypto::generate_node_key();
-        crypto::save_node_key(key, kpath);
-        std::cout << "Generated node key: pubkey=" << to_hex(key.pub) << "\n";
+        // save_node_key throws when it cannot protect the seed (S-091). cmd_start
+        // has always run its keygen inside a try/catch; this one did not, so the
+        // refusal surfaced as an uncaught exception — SIGABRT, exit 134, with the
+        // terminate handler's text instead of the diagnostic. Measured 2026-09-17.
+        try {
+            auto key = crypto::generate_node_key();
+            crypto::save_node_key(key, kpath);
+            std::cout << "Generated node key: pubkey=" << to_hex(key.pub) << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "determ init: " << e.what() << "\n";
+            return 1;
+        }
     }
 
     node::Config cfg;
@@ -22754,6 +22763,13 @@ int main(int argc, char** argv) {
             check(threw, "fchmod failure: save_node_key THROWS rather than continuing");
             check(slurp(p).find("priv_seed") == std::string::npos,
                   "fchmod failure: no seed was written to the unprotectable file");
+            // Stronger, and the reason this is not just the line above: an EMPTY
+            // leftover also contains no "priv_seed", and both shipped callers
+            // guard keygen with fs::exists(), so a zero-byte file is counted as a
+            // provisioned identity and the next run reports success over it.
+            check(!fs::exists(p),
+                  "fchmod failure: no file is left behind at all (an empty one would"
+                  " be read as a provisioned identity by the callers' exists-guard)");
         }
 
         // 7. Same rule for the directory narrowing.

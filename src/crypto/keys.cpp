@@ -167,6 +167,14 @@ void save_node_key(const NodeKey& key, const std::string& path) {
         if (rc != 0) {
             const int e = errno;
             ::close(fd);
+            // O_TRUNC has already run, so `path` exists and is EMPTY. Remove it
+            // before throwing: both shipped callers guard keygen with
+            // fs::exists(), so a zero-byte leftover is counted as a provisioned
+            // identity — the next `determ init` reports "Key already exists
+            // (skipping keygen)" and exits 0, and the failure resurfaces at
+            // `determ start` as a JSON parse error naming neither this file nor
+            // the permission problem. Measured 2026-09-17 before this line.
+            ::unlink(path.c_str());
             // Throw, do not warn. save_node_key already throws on a write
             // failure, so this is the established shape here; and the choice is
             // not close. A node identity is written ONCE — both shipped callers
@@ -192,19 +200,27 @@ void save_node_key(const NodeKey& key, const std::string& path) {
     size_t left  = blob.size();
     while (left > 0) {
         const ssize_t n = ::write(fd, p, left);
-        if (n < 0) {
-            if (errno == EINTR) continue;
+        // n == 0 for a positive count cannot happen on a regular file, but it
+        // must not become a spin: fail the write instead of looping forever.
+        // wallet/main.cpp's sibling writer guards this; this one did not.
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            if (n == 0) errno = EIO;
             const int e = errno;
             ::close(fd);
+            ::unlink(path.c_str());      // never leave a partial identity behind
             throw std::runtime_error("Cannot write key file: " + path + ": "
                                      + std::strerror(e));
         }
         p    += n;
         left -= static_cast<size_t>(n);
     }
-    if (::close(fd) != 0)
+    if (::close(fd) != 0) {
+        const int e = errno;
+        ::unlink(path.c_str());          // the contents are not trustworthy
         throw std::runtime_error("Cannot write key file: " + path + ": "
-                                 + std::strerror(errno));
+                                 + std::strerror(e));
+    }
 #else
     // Windows: NOTHING here is closed, and it is not papered over. _S_IREAD |
     // _S_IWRITE on _open drives only FILE_ATTRIBUTE_READONLY — it is not a mode

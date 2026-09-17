@@ -169,13 +169,18 @@ CLOSE = re.compile(r'\bclose\(' + fd + r'\)')
 end = next((i for i in range(start + 1, len(lines)) if CLOSE.search(lines[i])), len(lines))
 window = lines[start + 1:end]
 # Mode-setting calls ON THIS DESCRIPTOR, in order, with the mode they set.
-CHMOD = re.compile(r'\bfchmod(?:at2?)?\(' + fd + r'(?:, "[^"]*")?, 0?([0-7]{3,4})[,)]')
+# Descriptor-based AND path-based: a widen done by path between the create and
+# the first write is just as real, and a descriptor-only pattern reports it
+# as "closed" with the window fully open. The sibling gate
+# tools/test_wallet_out_perms.sh counts both; this one did not.
+CHMOD  = re.compile(r'\bfchmod\(' + fd + r', 0?([0-7]{3,4})[,)]')
+PCHMOD = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"[^"]*node_key\.json", 0?([0-7]{3,4})[,)]')
 WRITE = re.compile(r'\bwrite\(' + fd + r',')
 first_write = next((i for i, l in enumerate(window) if WRITE.search(l)), None)
 if first_write is None:
     print("no-write"); sys.exit(0)
 modes = [m.group(1) for i, l in enumerate(window) if i < first_write
-         for m in [CHMOD.search(l)] if m]
+         for m in [CHMOD.search(l) or PCHMOD.search(l)] if m]
 print(("closed" if modes and modes[-1].lstrip("0") == "600" else "open") + " " + ",".join(modes))
 EOF
 )
@@ -187,7 +192,9 @@ EOF
     # as "closed". Re-runs the same parser over the same trace with every fchmod
     # line removed; if it still answered "closed" the assertion above would be
     # vacuous.
-    grep -v -E '\bfchmod(at2?)?\(' "$TR" > "$T/strace_nochmod.txt"
+    # Strip everything the parser counts as a mode-setting call, path-based
+    # included, or the self-check would not be stripping what it claims to.
+    grep -v -E '\bf?chmod(at2?)?\(' "$TR" > "$T/strace_nochmod.txt"
     ORDER2=$($PY - "$T/strace_nochmod.txt" <<'EOF'
 import re, sys
 OPEN = re.compile(r'openat\((?:AT_FDCWD, )?"([^"]*node_key\.json)"[^)]*\)\s*=\s*(\d+)\b')
@@ -203,13 +210,18 @@ start, fd = op
 CLOSE = re.compile(r'\bclose\(' + fd + r'\)')
 end = next((i for i in range(start + 1, len(lines)) if CLOSE.search(lines[i])), len(lines))
 window = lines[start + 1:end]
-CHMOD = re.compile(r'\bfchmod(?:at2?)?\(' + fd + r'(?:, "[^"]*")?, 0?([0-7]{3,4})[,)]')
+# Descriptor-based AND path-based: a widen done by path between the create and
+# the first write is just as real, and a descriptor-only pattern reports it
+# as "closed" with the window fully open. The sibling gate
+# tools/test_wallet_out_perms.sh counts both; this one did not.
+CHMOD  = re.compile(r'\bfchmod\(' + fd + r', 0?([0-7]{3,4})[,)]')
+PCHMOD = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"[^"]*node_key\.json", 0?([0-7]{3,4})[,)]')
 WRITE = re.compile(r'\bwrite\(' + fd + r',')
 first_write = next((i for i, l in enumerate(window) if WRITE.search(l)), None)
 if first_write is None:
     print("no-write"); sys.exit(0)
 modes = [m.group(1) for i, l in enumerate(window) if i < first_write
-         for m in [CHMOD.search(l)] if m]
+         for m in [CHMOD.search(l) or PCHMOD.search(l)] if m]
 print(("closed" if modes and modes[-1].lstrip("0") == "600" else "open") + " " + ",".join(modes))
 EOF
 )

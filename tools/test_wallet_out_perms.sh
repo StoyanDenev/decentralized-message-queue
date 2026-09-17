@@ -52,10 +52,13 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 
 if [ -z "${DETERM_WALLET:-}" ] || [ ! -x "$DETERM_WALLET" ]; then
-    echo "  SKIP: determ-wallet binary not found; build with"
+    # Fail closed. A gate that reports PASS having asserted nothing is the exact
+    # defect the two increments before this one existed to remove; it is not
+    # acceptable in the gate that removes it. The sibling gates fail closed here
+    # too (test_node_key_perms via common.sh, test_light_seed_source by marker).
+    echo "  FAIL: determ-wallet binary not found; build with"
     echo "        cmake --build build --config Release --target determ-wallet"
-    echo "  PASS: determ-wallet output perms (nothing to gate)"
-    exit 0
+    exit 1
 fi
 WALLET="$DETERM_WALLET"
 
@@ -302,7 +305,13 @@ fi
 echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail / $skip_count skipped section(s)"
-if [ "$fail_count" = "0" ]; then
+# fail_count == 0 is NOT sufficient: on a box with neither strace/ptrace nor a C
+# compiler both sections SKIP and 0 pass / 0 fail would have printed PASS. A gate
+# that can report success having checked nothing is what this increment removes.
+if [ "$pass_count" = "0" ]; then
+    echo "  FAIL: test_wallet_out_perms — every section skipped; nothing was asserted"
+    exit 1
+elif [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet output perms (P-1 ordering + P-2 reporting)"; exit 0
 else
     echo "  FAIL: test_wallet_out_perms"; exit 1
