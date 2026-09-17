@@ -56,6 +56,24 @@ typedef struct { const uint8_t *p; size_t n; } dsso_slice;
 #define DSSO_MAX_FIELD       4096   /* one field inside it                       */
 #define DSSO_MAX_CLAIMS        64   /* attributes accepted from one presentation */
 
+/* Bounds for the external-format readers (dsso_jose.*) and the PID presentation
+ * verifier (dsso_pid.*). They are here, beside the token bounds above, because
+ * the rule is the same one: a hostile presentation must not be able to make this
+ * service recurse, allocate or loop past a fixed ceiling. Every one of them is a
+ * REJECT boundary, never a truncation — a document that exceeds a cap returns
+ * DSSO_E_FORMAT with its outputs untouched. */
+#define DSSO_JSON_MAX_DEPTH      8  /* nested [ / { levels; also the recursion   */
+                                    /* depth of the reader, so the C stack       */
+                                    /* footprint is a compile-time constant      */
+#define DSSO_JSON_MAX_KEYS     128  /* object member names recorded per document */
+                                    /* (the duplicate-key detector's working set)*/
+#define DSSO_JSON_MAX_ELEMS    128  /* members of one object / elements of one   */
+                                    /* array                                     */
+#define DSSO_MAX_PARTS          80  /* `~`-separated parts of one SD-JWT VC      */
+                                    /* presentation: issuer JWT + disclosures +  */
+                                    /* KB-JWT, so > DSSO_MAX_CLAIMS + 2          */
+#define DSSO_MAX_STATUS_BYTES 16384 /* inflated status-list bitstring, in bytes  */
+
 /* Constant-time equality. Returns 1 iff the two spans are equal; the running
  * time depends on `n` alone, never on the contents. Used wherever a comparison
  * is over a secret or over a value an attacker can grind against. */

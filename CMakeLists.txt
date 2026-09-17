@@ -453,6 +453,14 @@ endif()
 add_executable(determ-dsso
   dapps/dsso/dsso.c
   dapps/dsso/assertion.c
+  # The wallet-relying-party surface (docs/proofs/DssoPidVerification.md): the
+  # bounded external-format readers, the nine PID verification rules, and the
+  # account-binding rules. Every byte a hostile wallet can reach is parsed in
+  # these three translation units and nowhere else in the tree.
+  dapps/dsso/dsso_jose.c
+  dapps/dsso/dsso_pid.c
+  dapps/dsso/dsso_bind.c
+  dapps/dsso/dsso_selftest_pid.c
   dapps/dsso/dsso_main.c
 )
 target_compile_features(determ-dsso PRIVATE c_std_99)

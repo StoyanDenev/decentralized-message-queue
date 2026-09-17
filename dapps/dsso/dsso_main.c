@@ -14,6 +14,7 @@
 
 int dsso_selftest_core(void);
 int dsso_selftest_assertion(void);
+int dsso_selftest_pid(void);
 
 static int usage(void) {
     printf("determ-dsso — DSSO service (Sign-In With Determ), off-chain identity DApp\n\n");
@@ -21,6 +22,11 @@ static int usage(void) {
     printf("  determ-dsso selftest-assertion   the §5 RP assertion: issue + verify against\n");
     printf("                                   the IdP's own claim, pairwise subjects,\n");
     printf("                                   freshness, bounded single-use nonce cache\n");
+    printf("  determ-dsso selftest-pid         EUDI PID presentations (SD-JWT VC) as a\n");
+    printf("                                   Wallet-Relying Party: trust anchors, ES256,\n");
+    printf("                                   selective disclosure, holder binding,\n");
+    printf("                                   audience/nonce, freshness, status, assurance,\n");
+    printf("                                   and the account-binding rules\n");
     return 1;
 }
 
@@ -28,6 +34,7 @@ int main(int argc, char **argv) {
     if (argc < 2) return usage();
     if (!strcmp(argv[1], "selftest-core")) return dsso_selftest_core();
     if (!strcmp(argv[1], "selftest-assertion")) return dsso_selftest_assertion();
+    if (!strcmp(argv[1], "selftest-pid"))  return dsso_selftest_pid();
     return usage();
 }
 
