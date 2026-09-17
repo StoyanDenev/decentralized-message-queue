@@ -12,6 +12,10 @@
 # Asserts:
 #   * Receiver's chain.height equals the snapshot's block_index after start.
 #   * Receiver's head_hash matches the snapshot's head_hash.
+#   * D2 inc7c: a snapshot pulled over the GOSSIP WIRE (`snapshot fetch
+#     --peer` -> SNAPSHOT_REQUEST / SNAPSHOT_RESPONSE) arrives as a DSN1
+#     record, passes decode_state and its post-load gates, and is what the
+#     receiver bootstraps from — the live exercise of that frame.
 #   * Receiver's account/stake/registrant counts match the snapshot's.
 #
 # Run from repo root: bash tools/test_snapshot_bootstrap.sh
@@ -132,6 +136,45 @@ echo "  snapshot block_index: $SNAP_H"
 echo "  snapshot head_hash:   ${SNAP_HEAD:0:24}..."
 echo "  snapshot accounts:    $SNAP_ACCTS"
 
+echo
+echo "=== 4b. Fetch a snapshot over the GOSSIP WIRE (SNAPSHOT_RESPONSE) ==="
+# D2 inc7c: SNAPSHOT_RESPONSE carries the canonical DSN1 record (the same
+# bytes `snapshot create` writes at rest). This is the ONLY live exercise of
+# that frame — `snapshot fetch --peer` sends SNAPSHOT_REQUEST over the gossip
+# port and decodes the reply with Chain::decode_state, which enforces the
+# magic, the version, every count bound, the head_hash + block_index claims
+# and the S-033 state_root. A frame that lost or corrupted any field fails
+# here, on a real socket, not in a round-trip fixture.
+$DETERM snapshot fetch --peer 127.0.0.1:7771 --out $T/snap_wire.json \
+  --headers 16 > $T/fetch.log 2>&1
+FETCH_RC=$?
+if [ "$FETCH_RC" = "0" ]; then
+  echo "  ok: snapshot fetch --peer returned 0 (SNAPSHOT_RESPONSE decoded)"
+else
+  echo "  bad: snapshot fetch --peer failed (rc=$FETCH_RC)"
+  tail -3 $T/fetch.log 2>/dev/null | sed 's/^/    | /'
+  FAILS=$((FAILS+1))
+fi
+# The delivered file must be the canonical binary container, not text.
+WIRE_MAGIC=$(head -c 4 $T/snap_wire.json 2>/dev/null)
+if [ "$WIRE_MAGIC" = "DSN1" ]; then
+  echo "  ok: the wire-fetched snapshot is a DSN1 record (binary, not JSON)"
+else
+  echo "  bad: wire-fetched snapshot magic is '$WIRE_MAGIC', want DSN1"
+  FAILS=$((FAILS+1))
+fi
+# inspect re-runs decode_state end-to-end (head_hash + block_index + S-033).
+$DETERM snapshot inspect --in $T/snap_wire.json --dump > $T/snap_wire.view.json 2>/dev/null
+WIRE_HEAD=$(python -c "import json
+try: print(json.load(open('$T/snap_wire.view.json'))['head_hash'])
+except Exception: print('')")
+if [[ "$WIRE_HEAD" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "  ok: the wire-fetched snapshot passes decode_state + its post-load gates"
+else
+  echo "  bad: wire-fetched snapshot did not inspect cleanly (head='$WIRE_HEAD')"
+  FAILS=$((FAILS+1))
+fi
+
 # Stop donors so the receiver doesn't sync from them (we want to verify
 # the snapshot ALONE seeds the receiver's state).
 echo
@@ -142,7 +185,7 @@ done
 sleep 2
 
 echo
-echo "=== 6. Configure receiver: snapshot_path set, no genesis ==="
+echo "=== 6. Configure receiver: snapshot_path = the WIRE-fetched snapshot ==="
 $DETERM init --data-dir $T/receiver --profile single_test 2>&1 | tail -1
 python -c "
 import json
@@ -154,7 +197,7 @@ c['bootstrap_peers'] = []
 c['genesis_path'] = ''
 c['genesis_hash'] = ''
 c['chain_path'] = '$TABS/receiver/chain.json'
-c['snapshot_path'] = '$TABS/snap.json'
+c['snapshot_path'] = '$TABS/snap_wire.json'
 c['key_path'] = '$TABS/receiver/node_key.json'
 c['data_dir'] = '$TABS/receiver'
 c['tx_commit_ms'] = 2000
@@ -198,11 +241,15 @@ echo "  receiver head_hash:    ${RECV_HEAD:0:24}..."
 if ! [[ "$SNAP_HEAD" =~ ^[0-9a-f]{64}$ ]]; then
   echo "  bad: snapshot head_hash '$SNAP_HEAD' is not a 64-hex hash (snapshot create failed?)"
   FAILS=$((FAILS+1))
-elif [ "$RECV_HEAD" != "$SNAP_HEAD" ]; then
-  echo "  bad: receiver head_hash doesn't match snapshot head_hash"
+elif ! [[ "$WIRE_HEAD" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "  bad: wire-fetched head_hash '$WIRE_HEAD' is not a 64-hex hash"
+  FAILS=$((FAILS+1))
+elif [ "$RECV_HEAD" != "$WIRE_HEAD" ]; then
+  echo "  bad: receiver head_hash doesn't match the WIRE-fetched snapshot's"
   FAILS=$((FAILS+1))
 else
-  echo "  ok: receiver head_hash matches snapshot head_hash"
+  echo "  ok: receiver head_hash matches the WIRE-fetched snapshot's head_hash"
+  echo "      (SNAPSHOT_RESPONSE -> DSN1 -> disk -> node restore, end to end)"
 fi
 
 # Check restoration log line.

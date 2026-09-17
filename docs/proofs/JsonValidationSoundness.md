@@ -174,7 +174,7 @@ S-018-flavored diagnostic on scalar misuse.
 
 | Consumer | Source | Exposure |
 |---|---|---|
-| ~~`net::Message::deserialize` envelope unwrap~~ — DELETED (D2) | `src/net/messages.cpp:82-116` | the JSON wire envelope + its `json_require<uint8_t>(envelope, "type")` unwrap were deleted 2026-07-28; `deserialize` is binary-only (non-0xB1 bodies rejected `"not a binary envelope"`) and peer JSON lands only at the per-type from_json rows below |
+| ~~`net::Message::deserialize` envelope unwrap~~ — DELETED (D2) | `src/net/messages.cpp:15-49` | the JSON wire envelope + its `json_require<uint8_t>(envelope, "type")` unwrap were deleted 2026-07-28; `deserialize` is binary-only (non-0xB1 bodies rejected `"not a binary envelope"`) and peer JSON lands only at the per-type from_json rows below |
 | `Transaction::from_json` | `src/chain/block.cpp:57-65` | gossip TRANSFER + RPC submit_tx |
 | `AbortEvent::from_json` | `src/chain/block.cpp:110-113` | baked into BLOCK |
 | `EquivocationEvent::from_json` | `src/chain/block.cpp:139-144` | RPC submit_equivocation + gossip evidence |
@@ -257,7 +257,7 @@ the `"S-018: "` prefix and the assertion would fail. The test passes
 By construction across each layer's entry point:
 
 **Wire (gossip).** D2 (2026-07-28): the JSON wire envelope is deleted —
-`net::Message::deserialize` (`src/net/messages.cpp:82-116`) is binary-only
+`net::Message::deserialize` (`src/net/messages.cpp:15-49`) is binary-only
 and rejects any non-0xB1 body fail-closed (`"not a binary envelope"`), so
 the former `json_require<uint8_t>(envelope, "type")` unwrap no longer
 exists. Peer-supplied JSON enters only as the length-prefixed payloads

@@ -824,14 +824,14 @@ void print_usage() {
         "      an external conformance oracle — a producer that drifts from\n"
         "      the documented byte layout is flagged, not trusted. Checks,\n"
         "      fail-closed: 16 MB framing ceiling; magic 0xB1 + version 0x01 +\n"
-        "      zero reserved byte; msg_type in [0,18] (HELLO rejected — it is\n"
-        "      always JSON pre-negotiation); the S-022 per-type body cap\n"
-        "      (max_message_bytes: 1 MB chatter / 4 MB block-class / 16 MB\n"
-        "      snapshot+chain); and payload well-formedness — the TRANSACTION\n"
-        "      4×256-bit frame + trailer (reserved slot zero, exact lengths,\n"
-        "      no trailing bytes), or the [u32 LE json_len][json] wrapper for\n"
-        "      every other type (declared length matches the body exactly and\n"
-        "      parses as JSON). VALID → exit 0; any spec violation → MALFORMED\n"
+        "      zero reserved byte; msg_type in [0,18]; the S-022 per-type body\n"
+        "      cap (max_message_bytes: 1 MB chatter / 4 MB block-class / 16 MB\n"
+        "      snapshot+chain); and payload well-formedness — every one of the\n"
+        "      19 types is a fixed binary frame (D2; the last two, the\n"
+        "      HEADERS_RESPONSE page of DHF1 header records and the DSN1\n"
+        "      SNAPSHOT_RESPONSE record, since inc7c — no JSON payload exists\n"
+        "      on the wire), each consumed exactly with every count proven\n"
+        "      against the remaining bytes. VALID → exit 0; any spec violation → MALFORMED\n"
         "      (exit 3); I/O or usage error → exit 1. --expect-type asserts\n"
         "      the decoded MsgType name (case-insensitive); a mismatch is\n"
         "      MALFORMED. Use to fuzz/triage captured frames or to confirm a\n"
@@ -8714,9 +8714,24 @@ int cmd_committee_at_height(int argc, char** argv) {
 //         frames — every length-prefixed string and fixed slot must fit and
 //         the frame must be consumed exactly; ABORT_CLAIM must carry
 //         EXACTLY one claim in the shared claim-list blob.
-//       - all other types: a [u32 LE json_len][json_bytes] payload whose
-//         declared length matches the remaining body exactly and whose
-//         bytes parse as JSON.
+//       - HEADERS_RESPONSE (18): the D2-inc7c header page — [from u64 LE]
+//         [height u64 LE][count u16 LE] then count x DHF1 records
+//         ([magic 'DHF1'][block_hash 32][frame_len u32 LE][Block frame]);
+//         count <= 256 (kHeadersPageMax) and proven against the remaining
+//         bytes before the walk; every record's Block frame must carry the
+//         four heavy collections (transactions / cross_shard_receipts /
+//         inbound_receipts / initial_state) EMPTY; consumed exactly.
+//       - SNAPSHOT_RESPONSE (16): the D2-inc7c DSN1 snapshot record
+//         (Chain::encode_state) — magic 'DSN1', version u32 = 1, the fixed
+//         194-byte scalar block, 16 counted sections each proven against
+//         the remaining bytes before it is walked, the <= 256 tail-header
+//         cap, exact consumption. Walked structurally; the daemon's decoder
+//         additionally checks the head_hash / block_index / state_root
+//         claims, which need chain state a pure-bytes mirror has no business
+//         recomputing.
+//       There is no other payload shape: the pre-inc7c
+//       [u32 LE json_len][json_bytes] fallback is deleted, so an lp-JSON
+//       body under ANY type is MALFORMED.
 //
 // A clean artifact → VALID (exit 0) and a one-line (or --json) report of
 // the decoded type + sizes (+ tx scalar fields for TRANSACTION). A spec
@@ -9009,8 +9024,13 @@ constexpr size_t kWireMinBlockFrame = 297;
 // Walk one Block frame occupying [off, off+len) of `p`. `allow_witnesses`
 // false = the LEAF rule a shard-tip witness (and a SHARD_TIP tip) must obey:
 // no folded records, no nested witnesses. Bounds decode depth at 2.
+// `header_only` = the D2-inc7c HEADERS_RESPONSE rule: the top-level frame is
+// a header (Node::rpc_headers strips the four heavy collections), so a record
+// carrying ANY of them is a second encoding of the same header and is
+// MALFORMED. It applies to the top level only — a folded beacon header's
+// witnesses are full source tips and legitimately carry transactions.
 void bfw_walk(const uint8_t* p, size_t len, size_t& off, bool allow_witnesses,
-              const std::string& who, json* report) {
+              const std::string& who, json* report, bool header_only = false) {
     const size_t start = off;
     bfw_need(off, 8 + 32 + 8, len, who, "index/prev_hash/timestamp");
     uint64_t index = wire_le_u64(p + off); off += 8;
@@ -9019,6 +9039,9 @@ void bfw_walk(const uint8_t* p, size_t len, size_t& off, bool allow_witnesses,
 
     {   // transactions: [u32 frame_len][frame]; a tx frame is >= 131 bytes
         uint16_t n = bfw_count(p, len, off, 4 + 131, who, "transactions");
+        if (header_only && n != 0)
+            bfw_bad(who, "header frame carries a stripped collection "
+                         "(transactions must be empty)");
         for (uint16_t i = 0; i < n; ++i) {
             bfw_need(off, 4, len, who, "transaction frame length");
             uint32_t flen = wire_le_u32(p + off); off += 4;
@@ -9079,10 +9102,23 @@ void bfw_walk(const uint8_t* p, size_t len, size_t& off, bool allow_witnesses,
                      "equivocation_events fields");
         }
     }
-    bfw_receipts(p, len, off, who, "cross_shard_receipts");
-    bfw_receipts(p, len, off, who, "inbound_receipts");
+    {   // The two receipt lists: a header carries both EMPTY.
+        size_t before = off;
+        bfw_receipts(p, len, off, who, "cross_shard_receipts");
+        if (header_only && off != before + 2)
+            bfw_bad(who, "header frame carries a stripped collection "
+                         "(cross_shard_receipts must be empty)");
+        before = off;
+        bfw_receipts(p, len, off, who, "inbound_receipts");
+        if (header_only && off != before + 2)
+            bfw_bad(who, "header frame carries a stripped collection "
+                         "(inbound_receipts must be empty)");
+    }
     {   // initial_state: [lp domain][32 ed_pub][u64][u64][lp region]
         uint16_t n = bfw_count(p, len, off, 1 + 32 + 8 + 8 + 1, who, "initial_state");
+        if (header_only && n != 0)
+            bfw_bad(who, "header frame carries a stripped collection "
+                         "(initial_state must be empty)");
         for (uint16_t i = 0; i < n; ++i) {
             bfw_lp(p, len, off, who, "initial_state.domain");
             bfw_skip(p, len, off, 32 + 8 + 8, who, "initial_state fields");
@@ -9132,6 +9168,175 @@ void bfw_walk(const uint8_t* p, size_t len, size_t& off, bool allow_witnesses,
         (*report)["block_timestamp"]  = ts;
         (*report)["block_frame_len"]  = off - start;
     }
+}
+
+// ── D2-inc7c: HEADERS_RESPONSE page walker ──────────────────────────────────
+// [from u64][height u64][count u16] then count x DHF1 records, each
+// [magic 'DHF1'][block_hash 32][frame_len u32][Block frame] — mirrors
+// src/net/binary_codec.cpp decode_headers_response_frame: the page cap and
+// the byte-budget proof both run BEFORE any record is walked.
+constexpr uint32_t kWireHeadersPageMax     = 256;                       // kHeadersPageMax
+constexpr size_t   kWireMinHeaderRecord    = 4 + 32 + 4 + kWireMinBlockFrame;   // 337
+
+void hpw_walk(const uint8_t* body, size_t body_len, const std::string& who,
+              json& report) {
+    size_t off = 0;
+    if (body_len < 8 + 8 + 2)
+        throw WireMalformed(who + " truncated (need from u64 + height u64 + "
+                            "count u16)");
+    report["from"]   = wire_le_u64(body + off); off += 8;
+    report["height"] = wire_le_u64(body + off); off += 8;
+    uint16_t n = wire_le_u16(body + off); off += 2;
+    if (n > kWireHeadersPageMax)
+        throw WireMalformed(who + " declares " + std::to_string(n) +
+                            " headers, above kHeadersPageMax " +
+                            std::to_string(kWireHeadersPageMax));
+    if (static_cast<size_t>(n) > (body_len - off) / kWireMinHeaderRecord)
+        throw WireMalformed(who + " headers declares " + std::to_string(n) +
+                            " elements but only " +
+                            std::to_string(body_len - off) + " bytes remain");
+    report["headers"] = n;
+    for (uint16_t i = 0; i < n; ++i) {
+        bfw_need(off, 4, body_len, who, "header record magic");
+        if (std::memcmp(body + off, "DHF1", 4) != 0)
+            throw WireMalformed(who + " bad header frame magic (expected DHF1)");
+        off += 4;
+        bfw_skip(body, body_len, off, 32, who, "header block_hash");
+        bfw_need(off, 4, body_len, who, "header frame length");
+        uint32_t flen = wire_le_u32(body + off); off += 4;
+        if (flen > body_len || off > body_len - flen)
+            throw WireMalformed(who + " truncated header frame body");
+        size_t hoff = off;
+        bfw_walk(body, off + flen, hoff, /*allow_witnesses=*/true, who, nullptr,
+                 /*header_only=*/true);
+        if (hoff != off + flen)
+            throw WireMalformed(who + " header frame has " +
+                                std::to_string(off + flen - hoff) +
+                                " unconsumed byte(s)");
+        off += flen;
+    }
+    if (off != body_len)
+        throw WireMalformed(who + " has " + std::to_string(body_len - off) +
+                            " trailing byte(s) after the last header");
+}
+
+// ── D2-inc7c: DSN1 snapshot record walker ───────────────────────────────────
+// Re-implemented from the published layout (src/chain/chain.cpp, "DSN1: the
+// canonical binary snapshot container"): magic, version u32 = 1, the fixed
+// 194-byte scalar block, then 16 counted sections. Every count is proven
+// against the remaining bytes with the section's smallest entry BEFORE the
+// section is walked (the SnRd::count discipline), the tail-header count is
+// capped at 256, and the record must be consumed exactly.
+constexpr uint32_t kWireSnapshotHeaderMax = 256;                        // Chain::kSnapshotHeaderMax
+
+void snw_walk(const uint8_t* p, size_t len, const std::string& who, json& report) {
+    size_t off = 0;
+    auto need = [&](size_t n, const char* what) {
+        if (n > len || off > len - n)
+            throw WireMalformed(who + " truncated at " + what);
+    };
+    auto u8  = [&](const char* w) { need(1, w); return p[off++]; };
+    auto u16 = [&](const char* w) { need(2, w); uint16_t v = wire_le_u16(p + off); off += 2; return v; };
+    auto u32 = [&](const char* w) { need(4, w); uint32_t v = wire_le_u32(p + off); off += 4; return v; };
+    auto u64 = [&](const char* w) { need(8, w); uint64_t v = wire_le_u64(p + off); off += 8; return v; };
+    auto raw = [&](size_t n, const char* w) { need(n, w); off += n; };
+    auto lp16 = [&](const char* w) { uint16_t L = u16(w); raw(L, w); };
+    auto lp8  = [&](const char* w) { uint8_t  L = u8(w);  raw(L, w); };
+    auto count = [&](const char* w, size_t min_entry) {
+        uint32_t k = u32(w);
+        if (min_entry > 0 && static_cast<uint64_t>(k) * min_entry > (len - off))
+            throw WireMalformed(who + " " + w + " count " + std::to_string(k) +
+                                " exceeds remaining bytes");
+        return k;
+    };
+
+    need(8, "magic/version");
+    if (std::memcmp(p, "DSN1", 4) != 0)
+        throw WireMalformed(who + " bad magic (expected DSN1)");
+    off = 4;
+    uint32_t version = u32("version");
+    if (version != 1)
+        throw WireMalformed(who + " unsupported snapshot version " +
+                            std::to_string(version));
+    report["block_index"] = u64("block_index");
+    raw(32, "head_hash");
+    raw(8 + 8 + 1 + 4, "block_subsidy/subsidy_pool_initial/subsidy_mode/lottery");
+    raw(8, "min_stake");
+    { uint8_t cp = u8("crypto_profile");
+      if (cp > 1) throw WireMalformed(who + " unknown crypto_profile " + std::to_string(cp)); }
+    raw(8 + 8, "suspension_slash/unstake_delay");
+    raw(4 + 4 + 4, "merge thresholds");
+    raw(4 + 4 + 4 + 4, "epoch_blocks/k_block_sigs/shard_count/shard_id");
+    raw(32, "shard_salt");
+    raw(8 * 6, "A1 counters");
+
+    uint32_t n;
+    n = count("accounts", 2 + 16);
+    report["accounts"] = n;
+    for (uint32_t i = 0; i < n; ++i) { lp16("account.domain"); raw(16, "account fields"); }
+    n = count("stakes", 2 + 16);
+    report["stakes"] = n;
+    for (uint32_t i = 0; i < n; ++i) { lp16("stake.domain"); raw(16, "stake fields"); }
+    n = count("registrants", 2 + 32 + 24 + 1);
+    report["registrants"] = n;
+    for (uint32_t i = 0; i < n; ++i) { lp16("registrant.domain"); raw(32 + 24, "registrant fields"); lp8("registrant.region"); }
+    n = count("applied_inbound_receipts", 36);
+    for (uint32_t i = 0; i < n; ++i) raw(36, "applied receipt");
+    n = count("merge_state", 9);
+    for (uint32_t i = 0; i < n; ++i) { raw(8, "merge_state ids"); lp8("merge_state.refugee_region"); }
+    n = count("shard_tip_records", 49);
+    for (uint32_t i = 0; i < n; ++i) { raw(16, "shard_tip fields"); lp8("shard_tip.region"); raw(32, "shard_tip.committee_sig_root"); }
+    n = count("committee_checkpoints", 44);
+    for (uint32_t i = 0; i < n; ++i) {
+        raw(8 + 32, "checkpoint epoch/rand");
+        uint32_t m = count("checkpoint.members", 35);
+        for (uint32_t k = 0; k < m; ++k) { lp16("member.domain"); raw(32, "member.ed_pub"); lp8("member.region"); }
+    }
+    n = count("abort_records", 18);
+    for (uint32_t i = 0; i < n; ++i) { lp16("abort_record.domain"); raw(16, "abort_record fields"); }
+    n = count("dapp_registry", 61);
+    for (uint32_t i = 0; i < n; ++i) {
+        lp16("dapp.domain"); raw(32, "dapp.service_pubkey"); lp16("dapp.endpoint_url");
+        uint16_t t = u16("dapp.topics.count");
+        for (uint16_t k = 0; k < t; ++k) lp16("dapp.topic");
+        raw(1, "dapp.retention"); lp16("dapp.metadata"); raw(24, "dapp heights");
+    }
+    n = count("pending_param_changes", 10);
+    for (uint32_t i = 0; i < n; ++i) {
+        raw(8, "param_change.effective_height");
+        uint16_t e = u16("param_change.entries.count");
+        for (uint16_t k = 0; k < e; ++k) { lp16("param_change.name"); lp16("param_change.value"); }
+    }
+    n = count("shielded_pool", 41);
+    for (uint32_t i = 0; i < n; ++i) raw(41, "shielded_pool entry");
+    n = count("enote_commitments", 65);
+    for (uint32_t i = 0; i < n; ++i) raw(65, "enote entry");
+    n = count("audit_keys", 4);
+    for (uint32_t i = 0; i < n; ++i) { lp16("audit_key.addr"); lp16("audit_key.pk"); }
+    n = count("audit_log_counts", 10);
+    for (uint32_t i = 0; i < n; ++i) { lp16("audit_log_count.addr"); raw(8, "audit_log_count.n"); }
+    n = count("note_keys", 4);
+    for (uint32_t i = 0; i < n; ++i) { lp16("note_key.addr"); lp16("note_key.pk"); }
+    n = count("headers", 4);
+    if (n > kWireSnapshotHeaderMax)
+        throw WireMalformed(who + " headers count " + std::to_string(n) +
+                            " exceeds the tail-header cap " +
+                            std::to_string(kWireSnapshotHeaderMax));
+    report["headers"] = n;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t flen = u32("header.frame_len");
+        need(flen, "header.frame");
+        size_t hoff = off;
+        bfw_walk(p, off + flen, hoff, /*allow_witnesses=*/true, who, nullptr);
+        if (hoff != off + flen)
+            throw WireMalformed(who + " tail header frame has " +
+                                std::to_string(off + flen - hoff) +
+                                " unconsumed byte(s)");
+        off += flen;
+    }
+    if (off != len)
+        throw WireMalformed(who + " has " + std::to_string(len - off) +
+                            " trailing byte(s) after the DSN1 record");
 }
 
 } // namespace
@@ -9466,43 +9671,21 @@ int cmd_decode_wire(int argc, char** argv) {
                     throw WireMalformed(std::string(tname) + " has " +
                                         std::to_string(body_len - off) +
                                         " trailing byte(s)");
+            } else if (msg_type == 18 /* HEADERS_RESPONSE */) {
+                // D2-inc7c header page — re-implemented independently from
+                // the published layout, consumed exactly.
+                report["payload_kind"] = "header_page_frame";
+                hpw_walk(body, body_len, tname, report);
+            } else if (msg_type == 16 /* SNAPSHOT_RESPONSE */) {
+                // D2-inc7c: the DSN1 snapshot record, walked structurally.
+                report["payload_kind"] = "snapshot_frame";
+                snw_walk(body, body_len, tname, report);
             } else {
-                // [u32 LE json_len][json_bytes] — declared length must
-                // match the remaining body EXACTLY and parse as JSON.
-                // After D2-inc7a/inc7b this is SNAPSHOT_RESPONSE and
-                // HEADERS_RESPONSE only; both binarize in inc7c, at which
-                // point this branch (and every JSON parse on the wire path)
-                // is deleted.
-                report["payload_kind"] = "lp_json";
-                if (body_len < 4)
-                    throw WireMalformed(std::string(tname) +
-                                        " truncated payload length header");
-                uint32_t plen = wire_le_u32(body);
-                if (4 + static_cast<size_t>(plen) != body_len)
-                    throw WireMalformed(std::string(tname) +
-                                        " declared json_len=" +
-                                        std::to_string(plen) +
-                                        " does not match body (" +
-                                        std::to_string(body_len - 4) +
-                                        " payload bytes available)");
-                report["json_len"] = plen;
-                try {
-                    json parsed = json::parse(body + 4, body + 4 + plen);
-                    // Echo a shallow shape hint, not the whole payload.
-                    if (parsed.is_object())
-                        report["json_keys"] = static_cast<unsigned>(parsed.size());
-                    report["json_type"] = parsed.is_object()  ? "object"
-                                        : parsed.is_array()   ? "array"
-                                        : parsed.is_string()  ? "string"
-                                        : parsed.is_number()  ? "number"
-                                        : parsed.is_boolean() ? "bool"
-                                        : parsed.is_null()    ? "null"
-                                                              : "other";
-                } catch (const std::exception& e) {
-                    throw WireMalformed(std::string(tname) +
-                                        " payload is not valid JSON: " +
-                                        e.what());
-                }
+                // Every type in [0, kWireMsgTypeMax] has a frame above, so
+                // this is unreachable — kept total (never a silent accept).
+                // The pre-inc7c [u32 json_len][json] fallback is deleted.
+                throw WireMalformed(std::string(tname) +
+                                    " has no payload frame decoder");
             }
 
             // Optional caller-supplied expectation: the decoded type must
@@ -9560,11 +9743,9 @@ int cmd_decode_wire(int argc, char** argv) {
                           << "  from:      " << report["from"].get<std::string>() << "\n"
                           << "  to:        " << report["to"].get<std::string>() << "\n"
                           << "  hash:      " << report["hash"].get<std::string>() << "\n";
-            } else if (kind == "hello_frame" || kind == "req_frame"
-                       || kind == "chatter_frame" || kind == "block_frame"
-                       || kind == "shard_tip_frame" || kind == "bundle_frame"
-                       || kind == "chain_response_frame"
-                       || kind == "contrib_frame") {
+            } else {
+                // Every other kind is a fixed frame (D2; the lp_json kind
+                // died with the fallback in D2-inc7c).
                 std::cout << "  payload:   " << kind << "\n";
                 // Emit whichever decoded scalars this frame carries.
                 for (const char* k : {"domain", "port", "role", "shard_id",
@@ -9578,7 +9759,8 @@ int cmd_decode_wire(int argc, char** argv) {
                                       "block_transactions",
                                       "block_shard_tip_records",
                                       "block_shard_tip_witnesses",
-                                      "block_frame_len"}) {
+                                      "block_frame_len", "accounts", "stakes",
+                                      "registrants"}) {
                     if (!report.contains(k)) continue;
                     std::cout << "  " << k << ": ";
                     if (report[k].is_string())
@@ -9587,10 +9769,6 @@ int cmd_decode_wire(int argc, char** argv) {
                         std::cout << report[k];
                     std::cout << "\n";
                 }
-            } else {
-                std::cout << "  payload:   lp_json (" << report["json_len"]
-                          << " bytes, " << report["json_type"].get<std::string>()
-                          << ")\n";
             }
         }
         return 0;

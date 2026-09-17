@@ -2,7 +2,11 @@
 # D2-inc7a / inc7b — in-process unit test for the WIRE PAYLOAD frames of the
 # five Block-carrying MsgTypes (BLOCK, BEACON_HEADER, SHARD_TIP,
 # CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE) and of CONTRIB
-# (src/net/binary_codec.cpp).
+# (src/net/binary_codec.cpp) — joined in D2-inc7c by HEADERS_RESPONSE (a page
+# of DHF1 header records) and SNAPSHOT_RESPONSE (the DSN1 record verbatim),
+# after which no wire payload is JSON. The inc7c pair ride PF-1 / PF-2 / PF-4
+# here; their exhaustive arms live in tools/test_headers_frame_codec.sh and
+# tools/test_snapshot_response_frame_codec.sh.
 #
 # These six were the last consensus-critical payloads still travelling as
 # length-prefixed JSON INSIDE the binary envelope. All five Block-carrying
@@ -33,7 +37,7 @@
 #
 # Assertions:
 #
-#   PF-1  builder-DOM equivalence for all six types, on a Block exercising
+#   PF-1  builder-DOM equivalence for all eight types, on a Block exercising
 #         every section (transactions, all six creator_view_* collections,
 #         abort + equivocation events, both receipt lists, initial_state,
 #         shard_tip_records and a witness) and a ContribMsg with all four
@@ -55,7 +59,7 @@
 #              those bytes are neither signed nor hashed, so a relayer could
 #              append them and trigger a validator rejection of an otherwise
 #              valid block.
-#   PF-4  HOSTILE BYTES across all six frames: every single-byte corruption
+#   PF-4  HOSTILE BYTES across all eight frames: every single-byte corruption
 #         of a valid frame, 0xFFFF stamps over the header region, valid
 #         frames with adversarial tails, and pure-garbage bodies under each
 #         type's envelope header. Contract: every input either decodes or
@@ -87,7 +91,7 @@
 #
 # Companion gates, deliberately elsewhere:
 #   * both-directions EXACT-LENGTH sweep (pad + truncate + control, per type)
-#     lives in test-binary-codec leg 4d, whose `cases.size() == 17` pin is the
+#     lives in test-binary-codec leg 4d, whose `cases.size() == 19` pin is the
 #     completeness statement — a new fixed frame without a row reds it;
 #   * the Block container's own theorem lives in test-block-binary-codec
 #     (BF-0 pins kMinBlockFrame = 297, which this codec's CHAIN_RESPONSE
@@ -101,7 +105,7 @@ set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-echo "=== Wire payload frames (BLOCK / BEACON_HEADER / SHARD_TIP / BUNDLE / CHAIN_RESPONSE / CONTRIB, D2-inc7a+7b) ==="
+echo "=== Wire payload frames (BLOCK / BEACON_HEADER / SHARD_TIP / BUNDLE / CHAIN_RESPONSE / CONTRIB + HEADERS_RESPONSE / SNAPSHOT_RESPONSE, D2-inc7a+7b+7c) ==="
 OUT=$($DETERM test-wire-payload-frames 2>&1)
 echo "$OUT"
 

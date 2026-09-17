@@ -8,73 +8,6 @@
 
 namespace determ::net {
 
-// S-022 / WIRE-2: allocation-free structural pre-scan. Survives the D2
-// envelope strip because decode_binary still carries length-prefixed JSON
-// payloads for the non-HELLO/non-TRANSACTION types; it retires only when
-// every payload is a true binary frame. See the ceiling
-// commentary in messages.hpp for the threat model, the sizing rationale and
-// the soundness argument. Aborts at the offending byte so a hostile body
-// costs only the bytes scanned before the ceiling trips.
-void json_structural_precheck(const uint8_t* data, size_t len) {
-    size_t depth = 0;
-    size_t nodes = 0;
-    bool   in_string = false;
-    bool   escaped   = false;
-
-    for (size_t i = 0; i < len; ++i) {
-        const uint8_t c = data[i];
-        if (in_string) {
-            // Structural bytes inside a string literal are DATA, not
-            // structure. Track the escape state so a trailing backslash
-            // cannot smuggle the closing quote past us.
-            if (escaped)        escaped = false;
-            else if (c == '\\') escaped = true;
-            else if (c == '"')  in_string = false;
-            continue;
-        }
-        switch (c) {
-        case '"':
-            in_string = true;
-            break;
-        case '[':
-        case '{':
-            if (++depth > kMaxJsonDepth) {
-                throw std::runtime_error(
-                    "S-022/WIRE-2: JSON nesting depth exceeds "
-                    + std::to_string(kMaxJsonDepth)
-                    + " at byte offset " + std::to_string(i)
-                    + " — rejected before parse");
-            }
-            if (++nodes > kMaxJsonNodes) {
-                throw std::runtime_error(
-                    "S-022/WIRE-2: JSON node count exceeds "
-                    + std::to_string(kMaxJsonNodes)
-                    + " at byte offset " + std::to_string(i)
-                    + " — rejected before parse");
-            }
-            break;
-        case ']':
-        case '}':
-            // Underflow (a close with no matching open) is left to the
-            // parser: this scan is a ceiling, not a validator, and must
-            // never be the thing that decides well-formedness.
-            if (depth > 0) --depth;
-            break;
-        case ',':
-            if (++nodes > kMaxJsonNodes) {
-                throw std::runtime_error(
-                    "S-022/WIRE-2: JSON node count exceeds "
-                    + std::to_string(kMaxJsonNodes)
-                    + " at byte offset " + std::to_string(i)
-                    + " — rejected before parse");
-            }
-            break;
-        default:
-            break;
-        }
-    }
-}
-
 // Binary-only deserializer (D2). Every body on the wire is the 0xB1 binary
 // envelope; anything else — including the deleted legacy JSON envelope
 // ('{' 0x7B, wire-version 0) — is rejected fail-closed, and WIRE-3 in
@@ -87,11 +20,11 @@ Message Message::deserialize(const uint8_t* data, size_t len) {
     }
     // S-022 PRE-DECODE cap (WIRE-1). `Peer::read_body` applies
     // max_message_bytes only AFTER this function returns, so without this
-    // check a hostile peer's 16 MB frame is fully DECODED (decode_binary
-    // reaches nlohmann::json::parse over the whole length-prefixed payload,
-    // binary_codec.cpp) before the type-aware ceiling is ever consulted —
-    // i.e. the framing ceiling IS usable as an amplification vector, which
-    // the messages.hpp cap commentary asserts it is not.
+    // check a hostile peer's 16 MB frame is fully DECODED (every payload
+    // frame decoder in binary_codec.cpp walks the whole body) before the
+    // type-aware ceiling is ever consulted — i.e. the framing ceiling IS
+    // usable as an amplification vector, which the messages.hpp cap
+    // commentary asserts it is not.
     //
     // The binary envelope carries its type in the clear at offset 2
     // (magic, version, TYPE, reserved), so the cap is knowable before any

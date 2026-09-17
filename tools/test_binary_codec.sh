@@ -51,23 +51,21 @@
 #     WIRE-1. An OVERSIZE BINARY envelope is rejected BEFORE its
 #        payload is decoded (pre-decode per-type cap). The vector is
 #        well-formed at any size, so only the cap can reject it.
-#     WIRE-2. The structural ceiling (kMaxJsonDepth / kMaxJsonNodes)
-#        bounds the DOM of the length-prefixed JSON payloads still
-#        carried inside the binary envelope. Legs:
-#          * the DEEPEST LEGITIMATE payload (CHAIN_RESPONSE, depth 7)
-#            still deserializes — the anti-over-tightening leg;
-#          * structural bytes past an ESCAPED quote are data, not
-#            structure — pins the scan's string-state tracking against
-#            a false reject;
-#          * a FLAT payload past the node ceiling is rejected — the
-#            shape the depth ceiling cannot see;
-#          * an OBJECT-dense payload past the node ceiling is rejected
-#            — the counter charges for '{', not just for ',';
-#          * a BINARY envelope CLAIMING SNAPSHOT_RESPONSE cannot use
-#            that type's 16 MB cap to bypass the ceiling. The type at
-#            offset 2 is attacker-chosen, so WIRE-1 alone does not
-#            close this; setup legs assert each vector is UNDER its
-#            WIRE-1 cap, proving WIRE-1 is not what rejects it.
+#     BINARY-ONLY (D2 inc7c — the length-prefixed JSON fallback and its
+#        WIRE-2 structural ceiling are DELETED; every one of the 19
+#        types is a fixed frame). Legs:
+#          * an lp-JSON SNAPSHOT_RESPONSE carrying a VALID JSON snapshot
+#            is REJECTED at the DSN1 magic (never parsed), and the same
+#            snapshot round-trips as the DSN1 frame;
+#          * an lp-JSON HEADERS_RESPONSE carrying a VALID envelope is
+#            REJECTED, and the same envelope round-trips as the frame;
+#          * an UNKNOWN MsgType byte (200) is REJECTED by name on decode
+#            ('unknown MsgType 200 ... no length-prefixed JSON fallback')
+#            and refused on encode ('no encoder for MsgType 200');
+#          * a SNAPSHOT_RESPONSE body that is only a 2 GB json_len prefix
+#            is rejected at the DSN1 magic after 8 bytes.
+#        A mutant restoring the fallback reddens these; the 4d exact-length
+#        sweep's `cases.size() == 19` pin is the completeness statement.
 #
 #   (WIRE-3 — a malformed frame CLOSES the peer — lives in
 #    `determ test-net-virtual`, since it needs a real Peer over a

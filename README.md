@@ -569,7 +569,7 @@ One codec is shipped — the p2p envelope is binary-only (D2, DECISION-LOG 2026-
 * every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy JSON envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
 * HELLO still carries a `wire_version` advertisement — with a single shipped version it decides nothing; it is the additive post-genesis upgrade hatch.
 
-Per-type payloads inside the envelope are fixed binary frames for 17 of the 19 message types; SNAPSHOT_RESPONSE and HEADERS_RESPONSE still carry a length-prefixed JSON payload until D2 inc7c lands (PROTOCOL.md §9.1). Binary codec gracefully falls back to JSON serialization for any message type it can't encode.
+Per-type payloads inside the envelope are fixed binary frames for all 19 message types (PROTOCOL.md §9.1): since D2 inc7c (2026-09-16) HEADERS_RESPONSE is a page of DHF1 header records and SNAPSHOT_RESPONSE is the DSN1 snapshot record verbatim, the length-prefixed JSON fallback is deleted, and a message type the codec cannot encode or decode is rejected rather than serialized as JSON.
 
 S-022 per-message-type body caps apply at deserialize time regardless of codec: 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. The 16 MB framing-layer ceiling (`kMaxFrameBytes`) is enforced at read time before the per-type check.
 

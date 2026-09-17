@@ -2377,7 +2377,8 @@ json Chain::serialize_state(uint32_t header_count) const {
     // the ENTIRE chain (to_json per block) under one snapshot request: a
     // per-request-work DoS. The default request is 16 (~16x below the cap), so
     // this never truncates a legitimate snapshot; only an abusive count is bounded.
-    constexpr uint32_t kSnapshotHeaderMax = 256;
+    // (kSnapshotHeaderMax is the class constant — chain.hpp — shared with the
+    // DSN1 encoder/decoder and the SNAPSHOT_RESPONSE wire codec.)
     json hdrs = json::array();
     if (!blocks_.empty() && header_count > 0) {
         if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
@@ -2994,8 +2995,7 @@ std::vector<uint8_t> Chain::encode_state(uint32_t header_count) const {
     }
 
     // Tail headers, with the SAME 256-page anti-DoS clamp serialize_state
-    // applies (RpcIngressGateAudit §3).
-    constexpr uint32_t kSnapshotHeaderMax = 256;
+    // applies (RpcIngressGateAudit §3; kSnapshotHeaderMax, chain.hpp).
     std::vector<size_t> hdr_idx;
     if (!blocks_.empty() && header_count > 0) {
         if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
@@ -3209,6 +3209,16 @@ Chain Chain::decode_state(const uint8_t* data, size_t len,
         }
     }
     {   uint32_t n = r.count("headers", 4);
+        // D2 inc7c: the tail-header page cap is enforced on DECODE too, before
+        // any header frame is parsed. Every encoder clamps to kSnapshotHeaderMax,
+        // so no file or wire frame a conforming producer ever wrote is affected;
+        // what it closes is a hostile 16 MB SNAPSHOT_RESPONSE carrying tens of
+        // thousands of minimal header frames (the byte-budget bound alone would
+        // admit ~50k of them).
+        if (n > kSnapshotHeaderMax)
+            throw std::runtime_error(
+                "snapshot decode: headers count " + std::to_string(n)
+                + " exceeds the tail-header cap " + std::to_string(kSnapshotHeaderMax));
         for (uint32_t i = 0; i < n; ++i) {
             uint32_t flen = r.u32("header.frame_len");
             r.need(flen, "header.frame");

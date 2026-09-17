@@ -169,7 +169,7 @@ the subscriber path in `src/node/node.cpp` established the surface a
 
 **Consumers + patterns.**
 - **Peer** (gossip framing): 4-byte big-endian length prefix baked into
-  `Message::serialize_binary` (`messages.cpp:122-132`; the JSON
+  `Message::serialize_binary` (`messages.cpp:55-65`; the JSON
   `Message::serialize` encoder it survey-listed alongside is deleted — D2
   binary-only wire; `kMaxFrameBytes` 16 MB); exactly ONE `async_read` outstanding (header →
   body → dispatch → loop) and ONE `async_write` pump over a `write_mutex_`-guarded

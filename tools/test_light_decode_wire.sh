@@ -15,10 +15,12 @@
 #   2  msg_type (u8)
 #   3  reserved = 0x00
 #   4+ payload — per msg_type: the D2 fixed frames (HELLO, TRANSACTION, the
-#                request/status set, the consensus-chatter set, and since
-#                D2-inc7a/inc7b the five Block-carrying types + CONTRIB), or
-#                [u32 LE json_len][json_bytes] for the two types still on the
-#                lp-JSON path (SNAPSHOT_RESPONSE / HEADERS_RESPONSE).
+#                request/status set, the consensus-chatter set, since
+#                D2-inc7a/inc7b the five Block-carrying types + CONTRIB, and
+#                since D2-inc7c the HEADERS_RESPONSE page of DHF1 header
+#                records and the DSN1 SNAPSHOT_RESPONSE record). No JSON
+#                payload exists on the wire: the [u32 LE json_len][json]
+#                fallback is deleted and MALFORMED under every type.
 #
 # Verdict / exit contract:
 #   VALID     → exit 0
@@ -37,8 +39,20 @@
 #      decoded domain/port/role/shard_id/wire_version (this leg INVERTED
 #      when D2 gave HELLO a binary frame — pre-D2 binary HELLO was
 #      MALFORMED); truncated fields and trailing bytes → MALFORMED.
-#   8. lp-json declared length != body length → MALFORMED, exit 3.
-#   9. lp-json payload that is not valid JSON → MALFORMED, exit 3.
+#   8. D2-inc7c HEADERS_RESPONSE page: [from u64][height u64][count u16] then
+#      count x DHF1 records assembled HERE from the published layout — an
+#      empty page and a two-record page → VALID with from/height/headers
+#      decoded; the pre-inc7c lp-JSON shape → MALFORMED (the fallback is
+#      gone); a record tagged 'DHF2' / a count of 257 (the page cap, rejected
+#      before any record is walked; 256 → VALID) / a count-lie / a frame_len
+#      past the buffer / a record carrying a transaction / trailing bytes /
+#      truncation → MALFORMED.
+#   9. D2-inc7c SNAPSHOT_RESPONSE: the DSN1 record assembled HERE (magic,
+#      version u32 = 1, the 194-byte scalar block, 16 counted sections) — an
+#      empty chain's 266-byte record → VALID; with one tail header → VALID
+#      with headers=1; bad magic / version 2 / an accounts count-lie / a
+#      headers count of 257 (rejected by the cap before any frame) / a
+#      trailing byte / truncation → MALFORMED; the lp-JSON shape → MALFORMED.
 #  10. Well-formed TRANSACTION frame → VALID with decoded amount/fee/nonce.
 #  11. TRANSACTION with non-zero amount-block reserved slot → MALFORMED.
 #  12. TRANSACTION with stray bytes after sig/hash → MALFORMED via the
@@ -315,30 +329,262 @@ else
 fi
 
 echo
-echo "=== 8. lp-json declared length != body → MALFORMED exit 3 ==="
-# Carried by HEADERS_RESPONSE (18) — after D2-inc7a/inc7b only it and
-# SNAPSHOT_RESPONSE still use the length-prefixed JSON payload (CONTRIB and
-# the five Block-carrying types moved to true binary frames).
-# JSON is 7 bytes; declare 99.
-craft_lp_json "$TMP/lenmis.bin" 0xB1 0x01 18 0x00 '{"x":1}' 99
-run_decode "$TMP/lenmis.bin"
-[ "$RC" = "3" ] && assert "true" "json_len mismatch → exit 3" \
-                 || { echo "$OUT"; assert "false" "json_len mismatch → exit 3 (rc=$RC)"; }
+echo "=== 8. D2-inc7c HEADERS_RESPONSE page (DHF1 header records) ==="
+# craft_headers_page <out> <from> <height> <nrecords> <count_override_or_empty>
+#                    <magic> <flen_delta> <with_tx:0|1> <pad>
+# Writes [0xB1][0x01][18][0x00][from u64][height u64][count u16] then
+# nrecords x [magic 4][block_hash 32][frame_len u32][Block frame]. The Block
+# frame is the independently-assembled 297-byte empty frame (leg 16's
+# derivation); with_tx=1 puts ONE transaction frame inside it (a header must
+# carry the heavy collections EMPTY). flen_delta shifts the declared
+# frame_len; pad appends stray bytes.
+craft_headers_page() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+(out, frm, height, nrec, override, magic, flen_delta, with_tx, pad) = sys.argv[1:10]
+
+def tx_frame():
+    # The 4x256-bit core + trailer: 128 + type 1 + payload_len 2 + from (1+1)
+    # + to (1+1) + sig 64 + hash 32 = 231 bytes.
+    b = bytearray(128)
+    b += bytes([0]) + struct.pack("<H", 0)
+    b += bytes([1]) + b"a" + bytes([1]) + b"b"
+    b += bytes(64) + bytes(32)
+    return bytes(b)
+
+def block_frame(index, with_tx):
+    b = bytearray()
+    b += struct.pack("<Q", index) + bytes(32) + struct.pack("<q", 1234)
+    if with_tx:
+        t = tx_frame()
+        b += struct.pack("<H", 1) + struct.pack("<I", len(t)) + t
+    else:
+        b += struct.pack("<H", 0)
+    for _ in range(14): b += struct.pack("<H", 0)     # creators .. creator_dh_secrets
+    b += bytes(32) * 3 + bytes([0]) + bytes([0]) + struct.pack("<H", 0) + bytes(32)
+    for _ in range(5): b += struct.pack("<H", 0)
+    b += bytes(32) * 2 + bytes([0]) + struct.pack("<I", 0) + struct.pack("<I", 0)
+    b += struct.pack("<H", 0) + struct.pack("<H", 0)
+    return bytes(b)
+
+body = bytearray([0xB1, 0x01, 18, 0x00])
+body += struct.pack("<Q", int(frm)) + struct.pack("<Q", int(height))
+n = int(nrec)
+body += struct.pack("<H", int(override) if override != "" else n)
+for i in range(n):
+    f = block_frame(int(frm) + i, with_tx == "1")
+    body += magic.encode("ascii") + bytes(32)
+    body += struct.pack("<I", len(f) + int(flen_delta)) + f
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_headers_page "$TMP/hp_empty.bin" 0 0 0 "" DHF1 0 0 0
+run_decode "$TMP/hp_empty.bin" --json
+HP=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'),
+        d.get('from'), d.get('height'), d.get('headers')))
+except Exception: print('ERR')
+")
+if [ "$HP" = "VALID/header_page_frame/0/0/0" ]; then
+  assert "true" "HEADERS_RESPONSE: the EMPTY page (22-byte frame) → VALID"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE empty page (got $HP)"
+fi
+craft_headers_page "$TMP/hp2.bin" 5 9 2 "" DHF1 0 0 0
+run_decode "$TMP/hp2.bin" --json
+HP=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s' % (d.get('verdict'), d.get('from'), d.get('height'), d.get('headers')))
+except Exception: print('ERR')
+")
+if [ "$HP" = "VALID/5/9/2" ]; then
+  assert "true" "HEADERS_RESPONSE: a two-record page → VALID with from=5 height=9 headers=2"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE two-record page (got $HP)"
+fi
+# The pre-inc7c lp-JSON shape under type 18 is MALFORMED — the fallback is gone.
+craft_lp_json "$TMP/hp_lpjson.bin" 0xB1 0x01 18 0x00 '{"headers":[],"from":0,"count":0,"height":0}'
+run_decode "$TMP/hp_lpjson.bin"
+[ "$RC" = "3" ] && assert "true" "HEADERS_RESPONSE: the deleted lp-JSON shape → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "lp-JSON HEADERS_RESPONSE → exit 3 (rc=$RC)"; }
+craft_headers_page "$TMP/hp_magic.bin" 0 0 1 "" DHF2 0 0 0
+run_decode "$TMP/hp_magic.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "expected DHF1"; then
+  assert "true" "HEADERS_RESPONSE: a 'DHF2' record → MALFORMED (the tag is the version)"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE bad tag (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_cap.bin" 0 0 257 "" DHF1 0 0 0
+run_decode "$TMP/hp_cap.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "above kHeadersPageMax"; then
+  assert "true" "HEADERS_RESPONSE: 257 records → MALFORMED by the page cap (before any record is walked)"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE page cap (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_256.bin" 0 0 256 "" DHF1 0 0 0
+run_decode "$TMP/hp_256.bin"
+[ "$RC" = "0" ] && assert "true" "HEADERS_RESPONSE: EXACTLY 256 records → VALID (the cap boundary)" \
+                 || { echo "$OUT"; assert "false" "HEADERS_RESPONSE 256 records → exit 0 (rc=$RC)"; }
+craft_headers_page "$TMP/hp_lie.bin" 0 0 1 200 DHF1 0 0 0
+run_decode "$TMP/hp_lie.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "declares 200 elements"; then
+  assert "true" "HEADERS_RESPONSE: a count-lie (200 declared, 1 record) → MALFORMED before any allocation"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE count-lie (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_flen.bin" 0 0 1 "" DHF1 1000 0 0
+run_decode "$TMP/hp_flen.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "truncated header frame body"; then
+  assert "true" "HEADERS_RESPONSE: a frame_len past the buffer → MALFORMED (bounds check before the walk)"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE frame_len bound (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_tx.bin" 0 0 1 "" DHF1 0 1 0
+run_decode "$TMP/hp_tx.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "stripped collection"; then
+  assert "true" "HEADERS_RESPONSE: a record carrying a TRANSACTION → MALFORMED (a header carries the heavy collections empty)"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE heavy collection (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_pad.bin" 0 0 1 "" DHF1 0 0 2
+run_decode "$TMP/hp_pad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
+  assert "true" "HEADERS_RESPONSE: trailing bytes → MALFORMED (exact consumption)"
+else
+  echo "$OUT"; assert "false" "HEADERS_RESPONSE trailing (rc=$RC)"
+fi
+craft_headers_page "$TMP/hp_tr.bin" 0 0 1 "" DHF1 0 0 0
+"$PY" -c "
+d=open('$TMP/hp_tr.bin','rb').read()
+open('$TMP/hp_tr.bin','wb').write(d[:-1])
+"
+run_decode "$TMP/hp_tr.bin"
+[ "$RC" = "3" ] && assert "true" "HEADERS_RESPONSE: a truncated page → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "HEADERS_RESPONSE truncated → exit 3 (rc=$RC)"; }
 
 echo
-echo "=== 9. lp-json payload not valid JSON → MALFORMED exit 3 ==="
-craft_lp_json "$TMP/notjson.bin" 0xB1 0x01 18 0x00 'not-json-at-all'
-run_decode "$TMP/notjson.bin"
-[ "$RC" = "3" ] && assert "true" "invalid JSON payload → exit 3" \
-                 || { echo "$OUT"; assert "false" "invalid JSON payload → exit 3 (rc=$RC)"; }
-# ...and a WELL-FORMED lp-json payload on that same type still decodes, so
-# the two rejects above cannot pass because the branch rejects everything.
-craft_lp_json "$TMP/lpok.bin" 0xB1 0x01 18 0x00 '{"headers":[],"from":0,"count":0,"height":0}'
-run_decode "$TMP/lpok.bin"
-[ "$RC" = "0" ] && assert "true" "lp-json control: a well-formed HEADERS_RESPONSE payload → VALID" \
-                 || { echo "$OUT"; assert "false" "lp-json control → exit 0 (rc=$RC)"; }
+echo "=== 9. D2-inc7c SNAPSHOT_RESPONSE (the DSN1 record) ==="
+# craft_snapshot <out> <magic> <version> <nheaders> <headers_override_or_empty>
+#                <accounts_override_or_empty> <pad>
+# Writes [0xB1][0x01][16][0x00] then the DSN1 record assembled from the
+# published layout: magic, version u32, the 194-byte scalar block (all zero
+# except shard_count = 1), 15 zero u32 section counts, then the headers
+# count and nheaders x [u32 frame_len][297-byte empty Block frame]. The
+# overrides replace the declared counts (count-lies); pad appends bytes.
+craft_snapshot() {
+  "$PY" - "$@" <<'EOF'
+import struct, sys
+(out, magic, version, nhdr, hdr_override, acc_override, pad) = sys.argv[1:8]
 
-echo
+def block_frame(index):
+    b = bytearray()
+    b += struct.pack("<Q", index) + bytes(32) + struct.pack("<q", 1)
+    for _ in range(15): b += struct.pack("<H", 0)
+    b += bytes(32) * 3 + bytes([0]) + bytes([0]) + struct.pack("<H", 0) + bytes(32)
+    for _ in range(5): b += struct.pack("<H", 0)
+    b += bytes(32) * 2 + bytes([0]) + struct.pack("<I", 0) + struct.pack("<I", 0)
+    b += struct.pack("<H", 0) + struct.pack("<H", 0)
+    return bytes(b)
+
+body = bytearray([0xB1, 0x01, 16, 0x00])
+body += magic.encode("ascii") + struct.pack("<I", int(version))
+body += struct.pack("<Q", 0) + bytes(32)                       # block_index, head_hash
+body += struct.pack("<QQBI", 0, 0, 0, 0)                       # subsidy/pool/mode/lottery
+body += struct.pack("<Q", 0) + bytes([0]) + struct.pack("<QQ", 0, 0)   # min_stake/profile/slash/delay
+body += struct.pack("<III", 0, 0, 0)                           # merge thresholds
+body += struct.pack("<IIII", 0, 0, 1, 0)                       # epoch/k/shard_count/shard_id
+body += bytes(32)                                              # shard_salt
+body += struct.pack("<QQQQQQ", 0, 0, 0, 0, 0, 0)               # A1 counters
+assert len(body) == 4 + 8 + 194, len(body)
+body += struct.pack("<I", int(acc_override) if acc_override != "" else 0)   # accounts
+for _ in range(14): body += struct.pack("<I", 0)               # the other 14 state sections
+n = int(nhdr)
+body += struct.pack("<I", int(hdr_override) if hdr_override != "" else n)
+for i in range(n):
+    f = block_frame(i)
+    body += struct.pack("<I", len(f)) + f
+body += bytes(int(pad))
+open(out, "wb").write(bytes(body))
+EOF
+}
+craft_snapshot "$TMP/sn_empty.bin" DSN1 1 0 "" "" 0
+run_decode "$TMP/sn_empty.bin" --json
+SN=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s/%s/%s' % (d.get('verdict'), d.get('payload_kind'), d.get('body_len'), d.get('headers')))
+except Exception: print('ERR')
+")
+if [ "$SN" = "VALID/snapshot_frame/266/0" ]; then
+  assert "true" "SNAPSHOT_RESPONSE: the empty chain's 266-byte DSN1 record → VALID (independently derived size)"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE empty record (got $SN)"
+fi
+craft_snapshot "$TMP/sn_one.bin" DSN1 1 1 "" "" 0
+run_decode "$TMP/sn_one.bin" --json
+SN=$(echo "$OUT" | tail -1 | "$PY" -c "
+import json,sys
+try:
+  d=json.loads(sys.stdin.read())
+  print('%s/%s' % (d.get('verdict'), d.get('headers')))
+except Exception: print('ERR')
+")
+[ "$SN" = "VALID/1" ] && assert "true" "SNAPSHOT_RESPONSE: one tail header → VALID with headers=1" \
+                       || { echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE one header (got $SN)"; }
+craft_snapshot "$TMP/sn_magic.bin" DSN2 1 0 "" "" 0
+run_decode "$TMP/sn_magic.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "expected DSN1"; then
+  assert "true" "SNAPSHOT_RESPONSE: 'DSN2' magic → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE bad magic (rc=$RC)"
+fi
+craft_snapshot "$TMP/sn_ver.bin" DSN1 2 0 "" "" 0
+run_decode "$TMP/sn_ver.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "unsupported snapshot version"; then
+  assert "true" "SNAPSHOT_RESPONSE: version 2 → MALFORMED exit 3"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE version 2 (rc=$RC)"
+fi
+craft_snapshot "$TMP/sn_acc.bin" DSN1 1 0 "" 4294967295 0
+run_decode "$TMP/sn_acc.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "accounts count 4294967295 exceeds remaining"; then
+  assert "true" "SNAPSHOT_RESPONSE: an accounts count-lie → MALFORMED before any entry is walked"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE accounts count-lie (rc=$RC)"
+fi
+craft_snapshot "$TMP/sn_cap.bin" DSN1 1 0 257 "" 1028
+run_decode "$TMP/sn_cap.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "exceeds the tail-header cap"; then
+  assert "true" "SNAPSHOT_RESPONSE: a headers count of 257 (backed by zero bytes) → MALFORMED by the cap, before any frame"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE tail-header cap (rc=$RC)"
+fi
+craft_lp_json "$TMP/sn_lpjson.bin" 0xB1 0x01 16 0x00 '{"version":1,"headers":[]}'
+run_decode "$TMP/sn_lpjson.bin"
+[ "$RC" = "3" ] && assert "true" "SNAPSHOT_RESPONSE: the deleted lp-JSON shape → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "lp-JSON SNAPSHOT_RESPONSE → exit 3 (rc=$RC)"; }
+craft_snapshot "$TMP/sn_pad.bin" DSN1 1 0 "" "" 1
+run_decode "$TMP/sn_pad.bin"
+if [ "$RC" = "3" ] && echo "$OUT" | grep -qi "trailing"; then
+  assert "true" "SNAPSHOT_RESPONSE: a trailing byte → MALFORMED (exact consumption)"
+else
+  echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE trailing (rc=$RC)"
+fi
+"$PY" -c "
+d=open('$TMP/sn_empty.bin','rb').read()
+open('$TMP/sn_tr.bin','wb').write(d[:-1])
+"
+run_decode "$TMP/sn_tr.bin"
+[ "$RC" = "3" ] && assert "true" "SNAPSHOT_RESPONSE: a truncated record → MALFORMED exit 3" \
+                 || { echo "$OUT"; assert "false" "SNAPSHOT_RESPONSE truncated → exit 3 (rc=$RC)"; }
+
 echo "=== 10. Well-formed TRANSACTION → VALID with decoded scalars ==="
 craft_tx "$TMP/tx.bin" 500 3 7 0 0 alice bob 0
 run_decode "$TMP/tx.bin" --json

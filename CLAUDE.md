@@ -123,11 +123,12 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      gates rewritten, mutant-verified, FAST green). PER-TYPE PAYLOAD frames:
      7bcd32d COMPOSABLE_BATCH, c8a63d2+40d61cd abort claims typed,
      ad595bb inc6a (5 request/status), e845b44 inc6b (4 consensus-chatter),
-     2803a13 the both-directions exact-length gate. 11 of the 19 types are now
-     fixed binary frames; 8 still carry length-prefixed JSON PAYLOADS inside
-     the binary envelope (BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER,
-     SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE,
-     HEADERS_RESPONSE) — WIRE-2 stays until those binarize per-type. Next is
+     2803a13 the both-directions exact-length gate. 11 of the 19 types were
+     fixed binary frames at that point; 8 still carried length-prefixed JSON
+     PAYLOADS inside the binary envelope (BLOCK, CONTRIB, CHAIN_RESPONSE,
+     BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, SNAPSHOT_RESPONSE,
+     HEADERS_RESPONSE) — WIRE-2 stayed until those binarized per-type (six at
+     inc7a/7b, the last two at inc7c; all 19 are frames now). Next was
      inc5 (Block frame), the keystone: BLOCK/BEACON_HEADER/SHARD_TIP/
      CROSS_SHARD_RECEIPT_BUNDLE/CHAIN_RESPONSE all carry a Block, and chain
      storage (inc8) has a TOTAL hard dependency on it.
@@ -142,7 +143,7 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      (marked D2-DEFERRED(src) in code); the light export-headers archive waits
      on the binary header frame.
      PROGRESS 2026-08-12 (8a106aa): inc7a/7b + inc8 LANDED. Six of the eight
-     lp-JSON wire payloads are true binary frames now (BLOCK, CONTRIB,
+     lp-JSON wire payloads became true binary frames (BLOCK, CONTRIB,
      CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE), all
      delegating to chain::Block::encode_frame; SHARD_TIP decodes with
      allow_witnesses=false (fail-closes POISON-WITNESS pre-auth). CHAIN STORAGE +
@@ -151,11 +152,32 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      whole legacy chain.json read path DELETED (a chain.json with no manifest
      loads as an EMPTY chain — gate CS-8); GenesisConfig gains DGC1 (hash-neutral,
      GB-3); snapshots gain DSN1 via Chain::encode_state/decode_state.
-     REMAINDER, still open: inc7c — SNAPSHOT_RESPONSE + HEADERS_RESPONSE are the
-     last two lp-JSON payloads, so WIRE-2 + the fallback stay until they binarize;
-     node_key.json (src/crypto/keys.cpp) and DETERM-ACCOUNT-V1 stay src-owned
-     JSON/text (marked D2-DEFERRED(src) in code); the light export-headers archive
-     waits on the binary header frame.
+     PROGRESS 2026-09-16: inc7c LANDED — THE WIRE IS BINARY-ONLY END TO END.
+     The last two lp-JSON payloads are canonical frames: HEADERS_RESPONSE is
+     [from u64][height u64][count u16] + count x DHF1 header records
+     ([magic DHF1][block_hash 32][frame_len u32][Block frame with the four
+     heavy collections EMPTY], count <= kHeadersPageMax = 256, the same
+     constant rpc_headers clamps to), and SNAPSHOT_RESPONSE is the DSN1 record
+     VERBATIM (Chain::encode_state) — one snapshot layout on the wire and at
+     rest, decoded by Chain::decode_state with all its gates (magic, version,
+     count bounds, the new <=256 tail-header cap, head_hash + block_index
+     claims, S-033 state_root). The lp-JSON fallback in encode_binary/
+     decode_binary is DELETED (an unknown MsgType is now rejected on both
+     sides, not JSON-parsed), and WIRE-2 IS RETIRED: json_structural_precheck,
+     kMaxJsonDepth and kMaxJsonNodes are gone from src/net/messages.*. The
+     light mirror gained hpw_walk + snw_walk and lost its lp_json branch.
+     Gates: test-headers-frame-codec (32), test-snapshot-response-frame-codec
+     (30), the binary-only legs + 19/19 exact-length sweep in
+     test-binary-codec, test-wire-payload-frames extended to eight frames;
+     LIVE-verified (test_headers_gossip over a real socket; test_snapshot_
+     bootstrap now fetches over the gossip wire via `snapshot fetch --peer`
+     and bootstraps the receiver from THOSE bytes).
+     REMAINDER, still open (unchanged by inc7c): node_key.json
+     (src/crypto/keys.cpp) and DETERM-ACCOUNT-V1 stay src-owned JSON/text
+     (marked D2-DEFERRED(src) in code); the light export-headers archive still
+     embeds header_json and is not yet binary — the binary header frame it was
+     waiting on now EXISTS (the DHF1 record is designed to be reused at rest),
+     so that archive is unblocked but NOT converted here.
   1b. ENDGAME, before step 2 — Improvements.md §12.1: extract the 237 test/selftest
      subcommands out of src/main.cpp into a determ-selftest binary. Measured at
      53a849d: 237 of 292 `cmd ==` handlers are test-*/selftest-*, spanning lines

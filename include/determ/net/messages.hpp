@@ -106,17 +106,21 @@ inline constexpr uint8_t kWireVersionBinary  = 1;
 //     (WIRE-1) — the type is readable in the clear at offset 2, so the
 //     ceiling is applied before any payload work (the rule the light client
 //     already shipped on this wire format). Gated in test-binary-codec.
-//   * That cap alone does NOT close the path: the type at offset 2 is
-//     ATTACKER-CHOSEN, so a hostile frame claiming SNAPSHOT_RESPONSE (16) or
-//     CHAIN_RESPONSE (6) buys the full 16 MB ceiling and reaches the
-//     unbounded DOM expansion in decode_binary's payload parse. The
-//     per-type cap narrows the vector to the two 16 MB types; it does not
-//     remove it.
-//   The residue is bounded by the STRUCTURAL ceiling below (kMaxJsonDepth /
-//   kMaxJsonNodes, WIRE-2), applied pre-parse on decode_binary's
-//   length-prefixed JSON payloads. Both retire together when every payload
-//   becomes a true binary frame (D2 tail).
+//   * The type at offset 2 is ATTACKER-CHOSEN, so a hostile frame claiming
+//     SNAPSHOT_RESPONSE (16) or CHAIN_RESPONSE (6) buys the full 16 MB
+//     ceiling. Since D2 inc7c every payload is a fixed binary frame whose
+//     decoder proves each count against the bytes that remain BEFORE it
+//     allocates (bf_get_count / wf_get_count / SnRd::count), so the work a
+//     16 MB body can buy is O(16 MB) — there is no DOM expansion left on the
+//     wire. The WIRE-2 structural JSON ceiling that bounded the deleted
+//     length-prefixed JSON payloads retired with them.
 inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
+
+// The server-side page cap of HEADERS_RESPONSE (Node::rpc_headers clamps
+// `count` to it) and the decode-side ceiling of the HEADERS_RESPONSE frame:
+// a frame declaring more headers than this is rejected before any
+// allocation (D2 inc7c). One constant for both so they cannot drift.
+inline constexpr uint32_t kHeadersPageMax = 256;
 
 // S-022: per-message-type body-size cap, applied AFTER `Message::deserialize`
 // in `Peer::read_body`. Messages that exceed their type-specific cap are
@@ -151,8 +155,8 @@ inline constexpr size_t max_message_bytes(MsgType type) {
     case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
     case MsgType::HEADERS_RESPONSE:
         // 4 MB matches BLOCK because a HEADERS_RESPONSE carries
-        // server-capped 256 headers max (rpc_headers's
-        // HEADERS_PAGE_MAX), each header is bounded by the same
+        // server-capped 256 headers max (kHeadersPageMax, the
+        // rpc_headers page cap), each header is bounded by the same
         // committee + sig + commit structure as a Block minus the
         // heavy collections (transactions / receipts /
         // initial_state). At 256 headers × ~16 KB each ≤ 4 MB.
@@ -168,114 +172,6 @@ inline constexpr size_t max_message_bytes(MsgType type) {
         return 1  * 1024 * 1024;        // 1 MB
     }
 }
-
-// S-022 / WIRE-2: pre-parse STRUCTURAL ceiling for every attacker-supplied
-// JSON document on the wire path (round-12 hostile-wire audit, wf_c277c6d1).
-//
-// WHY A BYTE CAP IS NOT ENOUGH. The per-type byte cap above bounds the INPUT,
-// not the DOM the parser builds from it. A 16 MB body of '[' was MEASURED at
-// ~831 MB peak heap (51.9x), 33.5M allocations and ~4.3-4.8 s CPU on a SINGLE
-// connection, pre-auth. And the byte cap cannot be tightened past 16 MB,
-// because SNAPSHOT_RESPONSE / CHAIN_RESPONSE legitimately reach it (see the
-// JSON-reachability note below).
-//
-// ⚠ THE DOM COST MODEL IS NOT "16 BYTES PER VALUE". An earlier draft of this
-// block said nlohmann materialises "one ~16-byte node per value plus a
-// container allocation". `sizeof(nlohmann::json)` is indeed 16 — but the
-// default `object_t` is `std::map` (third_party/nlohmann/json.hpp), so every
-// '{' costs a map allocation PLUS one red-black-tree node per entry: ~144 B
-// per single-entry object, not ~16 B. Measured on the shipped ceilings
-// (g++ -O2, counting global operator new):
-//
-//   shape                                wire      DOM     factor
-//   flat scalars   [0,0,...]            3.8 MB    48 MB     12.6x
-//   objects        [{"":0},...]        13.4 MB   276 MB     20.7x
-//   depth-63 object chain              18.9 MB   482 MB     25.5x
-//   objects + envelope (payload copy)  12.7 MB   525 MB     41.4x
-//
-// The last row includes `m.payload = envelope["payload"]` in
-// Message::deserialize, which deep-copies while the envelope is still alive.
-//
-// For calibration, the DENSEST LEGITIMATE 16 MB snapshot measures 1,597,828
-// units and 129.9 MB of DOM (8.1x) — i.e. a legitimate large message is ALREADY
-// an 8x expansion. That is the number that makes the residual irreducible: no
-// ceiling admitting 1.6M legitimate units can bound an attacker below ~200 MB.
-//
-// The ceiling therefore bounds the DOM directly, in a single allocation-free
-// pass over the raw bytes BEFORE the parser runs:
-//
-//   * kMaxJsonDepth  — nesting depth. Kills the pathological case outright:
-//     the 16 MB '[' flood aborts after reading 65 bytes.
-//     Its LOAD-BEARING justification is not heap, though — it is a CRASH.
-//     nlohmann 3.11.3 parses iteratively and its destructor is stack-safe
-//     (MEASURED: a depth-3,900,000 document parses and destroys cleanly, and
-//     uses only 3.9M nodes, so the node ceiling alone would have admitted it).
-//     But `serializer::dump()` RECURSES, and Message::serialize() calls
-//     `envelope.dump()` — so a node that accepted a deep document and re-emitted
-//     it would die of stack exhaustion on the SEND path. MEASURED on an 8 MB
-//     stack (g++ -O2): depth 50,000 dumps fine, depth 200,000 SEGFAULTS. A cap
-//     of 64 sits ~1000x below that threshold and 8x above the deepest
-//     legitimate document, so it forecloses the crash with wide margin on both
-//     sides. ⚠ Do NOT relax this ceiling on the reasoning that the node ceiling
-//     already bounds the '[' flood — it does, but it does not bound dump().
-//   * kMaxJsonNodes  — a proxy for the node count (container opens + commas).
-//     Bounds the shapes depth alone misses: one flat array of 8M integers, or
-//     millions of sibling empty containers.
-//     ⚠ It is NOT "within ~2x and conservative" (an earlier draft claimed
-//     this). It errs in the UNSAFE direction on objects: `{"":0}` is 1 unit but
-//     costs ~144 B, so measured cost per unit ranges 72 B (shallow objects) to
-//     126 B (depth-63 chains) against ~24 B for flat scalars. Charging ':' as
-//     well was evaluated and REJECTED: it raises the densest legitimate
-//     snapshot from 1.60M to 2.80M units (headroom 2.5x -> 1.4x, too tight to
-//     be safe) while only moving the attacker's best from 276 MB to 195 MB.
-//
-// SIZING. The deepest LEGITIMATE envelope is CHAIN_RESPONSE at depth 8
-// (envelope -> {"blocks":[...]} -> blocks[] -> Block -> shard_tip_witnesses[]
-// -> witness Block -> creator_tx_lists[] -> inner list); witness Blocks are
-// parsed with allow_witnesses=false, so Block nesting cannot recurse further.
-// 64 leaves 8x headroom.
-//
-// For kMaxJsonNodes the binding case is the DENSEST legitimate envelope, which
-// is a snapshot at the 16 MB ceiling. Worst-case density comes from the
-// smallest repeating record the snapshot schema can emit — an account entry
-// with a 1-char domain and single-digit values, which nlohmann dumps with
-// sorted keys as `{"balance":0,"domain":"a","next_nonce":0}` = 41 bytes, plus
-// 1 byte for the array separator. That record costs 4 counter units (1 brace +
-// 2 inner commas + 1 array comma), so the ceiling density is
-//   16 MB / 42 bytes  x  4 units  ~=  1.6M units.
-// 4M therefore leaves ~2.5x headroom over a snapshot no real deployment would
-// produce (real domains are longer and balances larger, both of which lower
-// the density). Mirrors the headroom style of the byte caps above (1 MB over
-// ~64 KB of real traffic). ⚠ If a denser repeating record is ever added to
-// serialize_state, re-run this arithmetic — it is the whole basis for 4M.
-//
-// SOUNDNESS. The scan tracks JSON string state (quote + backslash escape), so
-// structural bytes INSIDE strings are not counted. For any input that parses
-// successfully the string boundaries are unambiguous left-to-right, hence the
-// counts are exact and no valid document is ever rejected by miscounting. For
-// input that does not parse, the scan may be inaccurate — but the parse
-// rejects it anyway, so the composition stays fail-closed either way.
-//
-// ⚠ THIS IS MITIGATION, NOT ELIMINATION. Within the ceilings a 16 MB frame
-// still reaches a MEASURED 482 MB (25.5x), or 525 MB (41.4x) counting the
-// payload copy — against 831 MB (51.9x) unmitigated and 130 MB (8.1x) for the
-// densest LEGITIMATE message. So the ceiling buys roughly 1.7-2x over the
-// unmitigated worst case and leaves the attacker ~3.7x a legitimate sender —
-// it removes the UNBOUNDED cases (16.7M containers, arbitrary depth), which is
-// its real job, not the constant factor. Closing that fully needs the JSON path
-// itself capped at the 1 MB chatter ceiling, which is a PROTOCOL decision (it
-// would break snapshot/chain sync to any wire_version-0 peer, and inside the
-// pre-HELLO window on every connection) — see F-6 in
-// docs/proofs/S022WireFormatCaps.md §6.2 for the options and the send-path
-// evidence, and §2.3 for the structural argument.
-inline constexpr size_t kMaxJsonDepth = 64;
-inline constexpr size_t kMaxJsonNodes = 4000000;
-
-// Throws std::runtime_error if `data[0..len)` exceeds either ceiling above.
-// Allocation-free, single pass, safe on arbitrary (including non-JSON) bytes.
-// Aborts at the offending byte, so a hostile body costs O(bytes scanned before
-// the ceiling trips), not O(len).
-void json_structural_precheck(const uint8_t* data, size_t len);
 
 struct Message {
     MsgType        type{MsgType::HELLO};
@@ -372,6 +268,11 @@ inline Message make_shard_tip(ShardId shard_id, const chain::Block& tip) {
 inline Message make_snapshot_request(uint32_t header_count = 16) {
     return {MsgType::SNAPSHOT_REQUEST, {{"headers", header_count}}};
 }
+// The payload DOM is Chain::serialize_state's JSON view; on the wire it
+// travels as the canonical DSN1 snapshot record (Chain::encode_state) —
+// the encoder rebuilds the Chain from the DOM and the decoder rebuilds the
+// DOM from the decoded Chain (D2 inc7c, one snapshot layout on the wire and
+// at rest). No JSON crosses the wire.
 inline Message make_snapshot_response(const nlohmann::json& snapshot) {
     return {MsgType::SNAPSHOT_RESPONSE, snapshot};
 }
@@ -383,7 +284,10 @@ inline Message make_headers_request(uint64_t from_index = 0, uint32_t count = 16
 }
 // v2.2 HEADERS_RESPONSE wraps the same {headers, from, count, height}
 // shape that Node::rpc_headers produces. The caller passes the RPC
-// result through unchanged — same JSON over gossip vs RPC.
+// result through unchanged — the same DOM over gossip vs RPC. On the wire
+// it is the fixed HEADERS_RESPONSE frame (binary_codec.cpp: from / height /
+// u16 count / count x DHF1 header records, each a Block frame with the four
+// heavy collections empty plus the served block_hash) — D2 inc7c.
 inline Message make_headers_response(const nlohmann::json& headers_envelope) {
     return {MsgType::HEADERS_RESPONSE, headers_envelope};
 }

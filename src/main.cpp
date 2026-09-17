@@ -506,9 +506,11 @@ In-process tests (deterministic, no network):
                                               fixed HELLO frame + the D2 negative
                                               gate (legacy JSON envelope rejected
                                               'not a binary envelope') +
-                                              malformed-input rejection + WIRE-1/
-                                              WIRE-2 legs + S-022 per-MsgType cap
-                                              table golden vectors
+                                              malformed-input rejection + WIRE-1
+                                              + the binary-only legs (no lp-JSON
+                                              fallback, unknown MsgType rejected;
+                                              D2 inc7c) + the 19/19 exact-length
+                                              sweep + S-022 per-MsgType cap table
   determ test-wire-types                      Block-internal wire types JSON
                                               round-trip — CrossShardReceipt +
                                               AbortEvent + EquivocationEvent +
@@ -782,11 +784,30 @@ In-process tests (deterministic, no network):
   determ test-tx-binary-codec                 Transaction binary codec
   determ test-wire-payload-frames             Wire PAYLOAD frames for the five
                                               Block-carrying MsgTypes + CONTRIB
-                                              (D2-inc7a/inc7b) — builder-DOM
-                                              equivalence, canonical fixed
-                                              point, gate mirror, hostile
+                                              (D2-inc7a/inc7b) + HEADERS_RESPONSE
+                                              and SNAPSHOT_RESPONSE (D2-inc7c) —
+                                              builder-DOM equivalence, canonical
+                                              fixed point, gate mirror, hostile
                                               bytes, count-lie, and the
                                               SHARD_TIP poison-witness map
+  determ test-headers-frame-codec             D2 inc7c: the HEADERS_RESPONSE
+                                              frame ([from][height][u16 count] x
+                                              DHF1 header records = Block frame
+                                              with the heavy collections empty +
+                                              block_hash) — round-trip == the
+                                              rpc_headers DOM, fixed point, every
+                                              fail-closed arm (magic / cap 256 /
+                                              count-lie / frame_len / heavy
+                                              collection / trailing / truncation),
+                                              hostile sweep, vector pin
+  determ test-snapshot-response-frame-codec   D2 inc7c: SNAPSHOT_RESPONSE is the
+                                              DSN1 record verbatim — round-trip ==
+                                              the serialize_state DOM, fixed point,
+                                              wire == at-rest bytes, every
+                                              fail-closed arm (magic / version /
+                                              truncation / trailing / count-lie /
+                                              tail-header cap 256 / head_hash +
+                                              state_root claims), vector pin
   determ test-block-binary-codec              Block binary container (D2-inc5)
                                               (encode_tx_frame / decode_tx_frame
                                               via encode_binary / decode_binary)
@@ -4735,12 +4756,13 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
             net::Message m = net::Message::deserialize(body.data(), body.size());
             if (m.type != net::MsgType::SNAPSHOT_RESPONSE) continue;
 
-            // D2 inc8 TRANSITIONAL BRIDGE. SNAPSHOT_RESPONSE still carries a
-            // length-prefixed JSON payload (that binarization is the separate
-            // wire inc, which will reuse the DSN1 layout). At-rest snapshots
-            // are already binary, so decode the wire JSON and re-encode the
-            // canonical container before writing. Delete this bridge — not the
-            // surrounding fetch — when SNAPSHOT_RESPONSE goes binary.
+            // D2 inc7c: the SNAPSHOT_RESPONSE payload on the wire IS the DSN1
+            // record (Chain::encode_state) and deserialize has already run the
+            // full decode_state gates on it. Message::payload is the DOM view
+            // of that record (the Message::payload contract, Q3 Path A), so
+            // rebuild the Chain from the DOM and re-emit the canonical bytes:
+            // by the wire codec's fixed point (test-snapshot-response-frame-
+            // codec SR-2) these are byte-identical to the frame that arrived.
             chain::Chain c = chain::Chain::restore_from_snapshot(m.payload);
             const std::vector<uint8_t> dsn1 = c.encode_state(header_count);
             std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
@@ -10698,6 +10720,15 @@ int main(int argc, char** argv) {
                 cmsg.block_index = 5; cmsg.signer = "n1";
                 cmsg.prev_hash.fill(0x0A); cmsg.dh_input.fill(0x0B);
                 cmsg.ed_sig.fill(0x0D);
+                // D2-inc7c: a one-header page in the rpc_headers shape — the
+                // Block JSON minus the four heavy keys plus block_hash.
+                nlohmann::json hdr = blk.to_json();
+                for (const char* k : {"transactions", "cross_shard_receipts",
+                                      "inbound_receipts", "initial_state"})
+                    hdr.erase(k);
+                hdr["block_hash"] = to_hex(blk.compute_hash());
+                nlohmann::json hdr_env = {{"headers", nlohmann::json::array({hdr})},
+                                          {"from", 5}, {"count", 1}, {"height", 6}};
 
                 std::vector<LenCase> cases = {
                   {"HELLO",
@@ -10780,10 +10811,23 @@ int main(int argc, char** argv) {
                    strip_frame(make_contrib(cmsg).serialize_binary()),
                    "CONTRIB frame trailing bytes",
                    "truncated CONTRIB ed_sig"},
+                  // D2-inc7c: the last two. A HEADERS_RESPONSE ends in its
+                  // last header's Block frame window, so a dropped byte is
+                  // caught by the frame_len bound; SNAPSHOT_RESPONSE is the
+                  // DSN1 record, whose own exact-consumption owns both legs.
+                  {"HEADERS_RESPONSE",
+                   strip_frame(make_headers_response(hdr_env).serialize_binary()),
+                   "HEADERS_RESPONSE frame trailing bytes",
+                   "truncated HEADERS_RESPONSE header frame body"},
+                  {"SNAPSHOT_RESPONSE",
+                   strip_frame(make_snapshot_response(chain::Chain{}.serialize_state())
+                                   .serialize_binary()),
+                   "trailing byte(s) after the DSN1 frame",
+                   "snapshot decode: truncated at headers"},
                 };
-                check(cases.size() == 17,
-                      "exact-length sweep covers all 17 fixed-layout frames "
-                      "(the 19 wire types minus the 2 still on lp-JSON)");
+                check(cases.size() == 19,
+                      "exact-length sweep covers all 19 fixed-layout frames "
+                      "(every wire type — no lp-JSON payload remains, D2 inc7c)");
                 for (auto& c : cases) {
                     // Control: the unmodified body must DECODE. Without this a
                     // builder change that broke the body would make both
@@ -10945,11 +10989,12 @@ int main(int argc, char** argv) {
                   "decode (pre-decode S-022 cap, not a parse error)");
         }
 
-        // Helper for the WIRE-2 legs below: a binary envelope carrying a
-        // length-prefixed JSON payload — after D2-inc7a/inc7b the format is
-        // down to SNAPSHOT_RESPONSE and HEADERS_RESPONSE, the two types
-        // WIRE-2 still protects (they binarize in inc7c, and WIRE-2 retires
-        // with them).
+        // Helper for the binary-only legs below: a binary envelope whose body
+        // is the DELETED length-prefixed JSON shape [u32 LE json_len][json].
+        // Pre-inc7c SNAPSHOT_RESPONSE and HEADERS_RESPONSE (and every unknown
+        // type byte) decoded through it under the WIRE-2 structural ceiling;
+        // since D2 inc7c no type does, so every one of these frames must be
+        // REJECTED — a mutant that restores the fallback reddens 8d/8e/8f.
         auto bin_json_frame = [](MsgType t, const std::string& pay) {
             std::vector<uint8_t> f;
             f.push_back(0xB1);
@@ -10964,157 +11009,93 @@ int main(int argc, char** argv) {
             f.insert(f.end(), pay.begin(), pay.end());
             return f;
         };
+        auto rejects = [&](const std::vector<uint8_t>& b, std::string* what) {
+            try { (void)Message::deserialize(b.data(), b.size()); return false; }
+            catch (const std::exception& e) { if (what) *what = e.what(); return true; }
+        };
 
-        // 8d. WIRE-2 anti-over-tightening. The DEEPEST legitimate payload
-        //     STILL ON THIS PATH is SNAPSHOT_RESPONSE at depth 7:
-        //     {"headers":[..]} -> headers[] -> Block ->
-        //     shard_tip_witnesses[] -> witness Block -> creator_tx_lists[] ->
-        //     inner list. (Block::from_json parses witnesses with
-        //     allow_witnesses=false, so Block nesting cannot recurse past that
-        //     second level.) It must still deserialize — otherwise the ceiling
-        //     is a liveness bug, not a defence. (Pre-inc7a this leg used
-        //     CHAIN_RESPONSE, which now carries a true binary frame; the
-        //     depth-7 shape is identical because both wrap a list of Blocks.)
+        // 8d. BINARY-ONLY: a length-prefixed JSON SNAPSHOT_RESPONSE — the exact
+        //     bytes a pre-inc7c responder emitted, carrying a VALID JSON
+        //     snapshot — is REJECTED, and the reject is the DSN1 magic gate
+        //     (the body is handed to Chain::decode_state, nothing else).
         {
-            std::string pay =
-                "{\"headers\":[{\"shard_tip_witnesses\":"
-                "[{\"creator_tx_lists\":[[\"ab\"]]}]}]}";
+            const std::string pay = chain::Chain{}.serialize_state().dump();
             auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
-            bool ok = false;
-            try {
-                Message m = Message::deserialize(b.data(), b.size());
-                ok = (m.type == MsgType::SNAPSHOT_RESPONSE);
-            } catch (const std::exception&) { ok = false; }
-            check(ok,
-                  "WIRE-2 anti-over-tightening: the DEEPEST legitimate payload "
-                  "(SNAPSHOT_RESPONSE, depth 7) still deserializes");
+            std::string what;
+            bool rej = rejects(b, &what);
+            check(rej && what.find("expected DSN1") != std::string::npos,
+                  "binary-only: an lp-JSON SNAPSHOT_RESPONSE (a valid JSON "
+                  "snapshot) is REJECTED at the DSN1 magic — no JSON parse");
+            // Control: the SAME snapshot travels as the DSN1 frame.
+            Message m = make_snapshot_response(chain::Chain{}.serialize_state());
+            auto body = strip_frame(m.serialize_binary());
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::SNAPSHOT_RESPONSE && back.payload == m.payload
+                      && body.size() >= 8 && std::string(body.begin() + 4,
+                                                         body.begin() + 8) == "DSN1",
+                  "binary-only control: the same snapshot round-trips as the DSN1 "
+                  "frame (payload starts with the DSN1 magic)");
         }
 
-        // 8e. WIRE-2 string-state soundness. Structural bytes inside a string
-        //     literal are DATA, not structure, and an ESCAPED quote does not
-        //     end the string. The payload here is one string whose contents are
-        //     `a"` followed by 256 '[' — if the scan mishandled the \" escape it
-        //     would treat the string as ended and count those 256 brackets as
-        //     nesting, rejecting a perfectly legal message. Pins the escape
-        //     tracking against exactly that false-reject.
+        // 8e. BINARY-ONLY: a length-prefixed JSON HEADERS_RESPONSE carrying the
+        //     VALID rpc_headers envelope is REJECTED (its bytes are read as the
+        //     fixed [from][height][count] header and cannot survive the DHF1
+        //     record checks), while the same DOM round-trips as the frame.
         {
-            std::string pay = "\"a\\\"";
-            pay.append(kMaxJsonDepth * 4, '[');
-            pay += "\"";
-            // Carried by HEADERS_RESPONSE — one of the two types still on the
-            // lp-JSON path after D2-inc7b moved CONTRIB to a fixed frame.
-            auto b = bin_json_frame(MsgType::HEADERS_RESPONSE, pay);
-            bool ok = false;
-            try {
-                Message m = Message::deserialize(b.data(), b.size());
-                ok = (m.type == MsgType::HEADERS_RESPONSE && m.payload.is_string());
-            } catch (const std::exception&) { ok = false; }
-            check(ok,
-                  "WIRE-2 soundness: structural bytes inside a string (past an "
-                  "ESCAPED quote) are data — no false reject");
+            const nlohmann::json env = {{"headers", nlohmann::json::array()},
+                                        {"from", 0}, {"count", 0}, {"height", 0}};
+            auto b = bin_json_frame(MsgType::HEADERS_RESPONSE, env.dump());
+            check(rejects(b, nullptr),
+                  "binary-only: an lp-JSON HEADERS_RESPONSE (a valid envelope) "
+                  "is REJECTED — the fallback is gone");
+            Message m = make_headers_response(env);
+            auto body = strip_frame(m.serialize_binary());
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::HEADERS_RESPONSE && back.payload == m.payload
+                      && body.size() == 4 + 8 + 8 + 2,
+                  "binary-only control: the same envelope round-trips as the "
+                  "22-byte empty-page frame");
         }
 
-        // 8f. WIRE-2 node ceiling. A FLAT array of scalars sits at depth 1, so
-        //     the depth ceiling cannot see it — yet each value still costs a
-        //     DOM node. This is the shape depth alone misses; kMaxJsonNodes is
-        //     what bounds it. Carried by SNAPSHOT_RESPONSE (16 MB tier) and
-        //     asserted UNDER its WIRE-1 cap, so only the structural ceiling
-        //     can be the rejecter. Falsify: raise kMaxJsonNodes past
-        //     the vector (or drop the ',' arm of the scan) and this goes RED.
+        // 8f. BINARY-ONLY: an UNKNOWN MsgType byte with an lp-JSON body is
+        //     REJECTED by name. Pre-inc7c this was the WIRE-2-guarded fallback
+        //     (an unknown type was fully json::parse'd under the 1 MB default
+        //     cap — DECISION-LOG 2026-08-13); now there is no path for it.
         {
-            std::string pay = "[0";
-            pay.reserve(2 * kMaxJsonNodes + 64);
-            for (size_t i = 0; i <= kMaxJsonNodes; ++i) pay += ",0";
-            pay += "]";
-            auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
-            check(b.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
-                  "WIRE-2 setup: the flat-array frame is UNDER its WIRE-1 "
-                  "per-type cap (so WIRE-1 provably is not what rejects it)");
-            bool threw = false;
-            try { Message::deserialize(b.data(), b.size()); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "WIRE-2: a FLAT payload past kMaxJsonNodes is "
-                  "rejected — the node ceiling catches what depth cannot");
+            auto b = bin_json_frame(static_cast<MsgType>(200), "{\"x\":1}");
+            std::string what;
+            bool rej = rejects(b, &what);
+            check(rej && what.find("unknown MsgType 200") != std::string::npos
+                      && what.find("no length-prefixed JSON fallback") != std::string::npos,
+                  "binary-only: an unknown MsgType (200) is REJECTED 'unknown "
+                  "MsgType 200 ... no length-prefixed JSON fallback' — never parsed");
         }
 
-        // 8g. WIRE-2 on the BINARY path — the WIRE-1 BYPASS. The pre-decode cap
-        //     added in b982332 reads the type from offset 2, which is
-        //     ATTACKER-CHOSEN: a frame claiming SNAPSHOT_RESPONSE (16) or
-        //     CHAIN_RESPONSE (6) buys the full 16 MB ceiling, sails past WIRE-1
-        //     and lands in decode_binary's payload parse — reproducing the exact
-        //     amplification WIRE-1 was meant to remove. The setup leg asserts
-        //     the frame is UNDER its per-type cap, so WIRE-1 provably is not
-        //     what rejects it. Falsify: delete json_structural_precheck's call
-        //     in decode_binary and this goes RED while 8b stays green.
+        // 8g. BINARY-ONLY on the ENCODE side: an unknown MsgType has no encoder,
+        //     so it cannot be put on the wire as JSON either.
         {
-            const size_t nest = kMaxJsonDepth + 8;
-            std::string pay;
-            pay.append(nest, '[');
-            pay.append(nest, ']');
-
-            std::vector<uint8_t> frame;
-            frame.push_back(0xB1);                                            // magic
-            frame.push_back(0x01);                                            // version
-            frame.push_back(static_cast<uint8_t>(MsgType::SNAPSHOT_RESPONSE));// type @2
-            frame.push_back(0x00);                                            // reserved
-            uint32_t plen = static_cast<uint32_t>(pay.size());
-            frame.push_back(static_cast<uint8_t>(plen & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
-            frame.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
-            frame.insert(frame.end(), pay.begin(), pay.end());
-
-            check(frame.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
-                  "WIRE-2 setup: the binary frame is UNDER its WIRE-1 per-type "
-                  "cap (so WIRE-1 provably is not what rejects it)");
-            bool threw = false;
-            try { Message::deserialize(frame.data(), frame.size()); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "WIRE-2: a BINARY envelope claiming SNAPSHOT_RESPONSE cannot "
-                  "use its 16 MB cap to bypass the structural ceiling");
+            Message m; m.type = static_cast<MsgType>(200); m.payload = {{"x", 1}};
+            bool threw = false; std::string what;
+            try { (void)encode_binary(m); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("no encoder for MsgType 200") != std::string::npos,
+                  "binary-only: encode_binary REFUSES an unknown MsgType "
+                  "('no encoder for MsgType 200')");
         }
 
-        // 8h. WIRE-2 OBJECT DENSITY. 8f's vector is a flat array of scalars —
-        //     which is exactly the CHEAPEST shape per unit (~24 B of DOM each),
-        //     and the one the original cost model was built on. Objects are the
-        //     expensive shape: nlohmann's default object_t is std::map, so every
-        //     '{' costs a map allocation PLUS a red-black-tree node per entry
-        //     (~144 B for a single-entry object, MEASURED). Without this leg
-        //     nothing pins that the node counter charges for '{' at all, and the
-        //     shape that dominates the residual would be untested.
-        //     Falsify: drop the '[' / '{' arm's ++nodes (leaving only the ','
-        //     arm) and this goes RED while 8f stays green, because 8f's units
-        //     come almost entirely from commas.
+        // 8h. The WIRE-2 symbols are gone from the net layer: this leg pins
+        //     that the fallback's 4-byte json_len prefix is now just payload
+        //     bytes to the frame decoders — a 16 MB-tier type claiming a huge
+        //     json_len is rejected within its own frame's first field reads,
+        //     not after a multi-MB parse.
         {
-            // `[{},{},...]` — 2 units per element (1 open + 1 comma) at 3 bytes
-            // each, so it crosses kMaxJsonNodes in ~6 MB rather than ~14 MB.
-            // Carried by SNAPSHOT_RESPONSE (16 MB tier) so WIRE-1 provably is
-            // not the rejecter.
-            const size_t elems = kMaxJsonNodes / 2 + 16;
-            std::string pay = "[{}";
-            pay.reserve(3 * elems + 64);
-            for (size_t i = 1; i < elems; ++i) pay += ",{}";
-            pay += "]";
-
-            bool valid_json = true;
-            try { (void)nlohmann::json::parse(pay); }
-            catch (const std::exception&) { valid_json = false; }
-            check(valid_json,
-                  "WIRE-2 setup: the object-density vector is VALID, BALANCED "
-                  "JSON (only the ceiling can reject it)");
-
-            auto b = bin_json_frame(MsgType::SNAPSHOT_RESPONSE, pay);
-            check(b.size() <= max_message_bytes(MsgType::SNAPSHOT_RESPONSE),
-                  "WIRE-2 setup: the object-density frame is UNDER its WIRE-1 "
-                  "per-type cap");
-            bool threw = false;
-            try { Message::deserialize(b.data(), b.size()); }
-            catch (const std::exception&) { threw = true; }
-            check(threw,
-                  "WIRE-2: an OBJECT-dense payload past kMaxJsonNodes is "
-                  "rejected — the counter charges for '{', not just for ','");
+            std::vector<uint8_t> f{0xB1, 0x01,
+                static_cast<uint8_t>(MsgType::SNAPSHOT_RESPONSE), 0x00,
+                0xFF, 0xFF, 0xFF, 0x7F};             // "json_len = 2 GB"
+            std::string what;
+            check(rejects(f, &what) && what.find("expected DSN1") != std::string::npos,
+                  "binary-only: a SNAPSHOT_RESPONSE body that is only a 2 GB "
+                  "json_len prefix is rejected at the DSN1 magic (8 bytes read)");
         }
 
         // === S-022 per-message-type cap golden vectors ===
@@ -11375,10 +11356,9 @@ int main(int argc, char** argv) {
             run_msgtype(m, "TRANSACTION (TRANSFER)");
         }
 
-        // ─── BLOCK (JSON-fallback path) ──────────────────────────────────────
+        // ─── BLOCK (the canonical Block frame, D2-inc7a) ─────────────────────
         // Default-constructed Block produces a valid JSON shape that
-        // round-trips through Block::to_json / from_json + the binary
-        // envelope JSON-fallback path.
+        // round-trips through Block::to_json / from_json + Block::encode_frame.
         {
             Block b;
             b.index = 0;
@@ -11466,9 +11446,8 @@ int main(int argc, char** argv) {
         {
             Block b;
             b.index = 21;
-            // Empty receipts vector still produces a valid envelope —
-            // the JSON-fallback path doesn't care that the inner array
-            // is empty.
+            // Empty receipts vector still produces a valid envelope — the
+            // Block frame carries the empty collection as a zero count.
             Message m = make_cross_shard_receipt_bundle(/*src_shard=*/3, b);
             run_msgtype(m, "CROSS_SHARD_RECEIPT_BUNDLE");
         }
@@ -11522,11 +11501,12 @@ int main(int argc, char** argv) {
             run_msgtype(m, "SNAPSHOT_REQUEST");
         }
         {
-            // Minimal snapshot shape — empty object is a valid JSON
-            // payload; deeper schema-validity is the snapshot-restore
-            // surface, not the codec surface.
-            Message m = make_snapshot_response(json::object());
-            run_msgtype(m, "SNAPSHOT_RESPONSE");
+            // D2-inc7c: the payload is the DSN1 record, so the fixture is
+            // BUILDER-SHAPED — the serialize_state view of a (here empty)
+            // Chain; an invented object no producer emits is refused at
+            // encode time (restore_from_snapshot requires version 1).
+            Message m = make_snapshot_response(Chain{}.serialize_state());
+            run_msgtype(m, "SNAPSHOT_RESPONSE (empty chain, DSN1 frame)");
         }
 
         // ─── HEADERS_REQUEST / HEADERS_RESPONSE (v2.2 light-client) ─────────
@@ -11537,7 +11517,19 @@ int main(int argc, char** argv) {
         {
             Message m = make_headers_response(
                 {{"headers", json::array()}, {"from", 0}, {"count", 0}, {"height", 0}});
-            run_msgtype(m, "HEADERS_RESPONSE");
+            run_msgtype(m, "HEADERS_RESPONSE (empty page frame)");
+        }
+        {
+            // D2-inc7c: a one-header page in the rpc_headers shape.
+            Block b; b.index = 9; b.creators = {"n1"};
+            json hdr = b.to_json();
+            for (const char* k : {"transactions", "cross_shard_receipts",
+                                  "inbound_receipts", "initial_state"})
+                hdr.erase(k);
+            hdr["block_hash"] = to_hex(b.compute_hash());
+            Message m = make_headers_response(
+                {{"headers", json::array({hdr})}, {"from", 9}, {"count", 1}, {"height", 10}});
+            run_msgtype(m, "HEADERS_RESPONSE (one DHF1 header record)");
         }
 
         // ─── Malformed header diagnostics ────────────────────────────────────
@@ -11568,27 +11560,16 @@ int main(int argc, char** argv) {
             check(threw, "decode_binary throws on truncated header (< 4 bytes)");
         }
 
-        // ─── Truncated payload diagnostics (JSON-payload path) ──────────────
-        // Build a valid envelope but truncate inside the JSON payload
-        // body. decode_binary should reject (either the length-prefix
-        // bounds check or the inner JSON parser). Uses SNAPSHOT_RESPONSE —
-        // one of the two types that still carry a length-prefixed JSON
-        // payload (STATUS_RESPONSE moved to a fixed frame in D2-inc6a,
-        // CONTRIB in D2-inc7b).
+        // ─── Truncated payload diagnostics (DSN1 frame) ─────────────────────
+        // Build a valid envelope but truncate inside the payload body:
+        // decode_binary must reject (Chain::decode_state's bounds checks).
+        // SNAPSHOT_RESPONSE is the DSN1 record since D2-inc7c.
         {
-            Message m = make_snapshot_response({{"version", 1}});
+            Message m = make_snapshot_response(Chain{}.serialize_state());
             auto bytes = encode_binary(m);
-            // Truncate to header + 6 bytes (less than the JSON payload).
+            // Envelope + the 8-byte DSN1 magic/version + 2 bytes of block_index.
             std::vector<uint8_t> truncated(bytes.begin(),
-                                           bytes.begin() + std::min<size_t>(bytes.size(), 10));
-            // Stomp the length prefix so it claims more bytes than the
-            // truncated buffer actually carries — forces the bounds check.
-            if (truncated.size() >= 8) {
-                truncated[4] = 0xFF;
-                truncated[5] = 0xFF;
-                truncated[6] = 0xFF;
-                truncated[7] = 0x7F;
-            }
+                                           bytes.begin() + std::min<size_t>(bytes.size(), 14));
             bool threw = false;
             try { (void)decode_binary(truncated.data(), truncated.size()); }
             catch (const std::exception&) { threw = true; }
@@ -11602,31 +11583,42 @@ int main(int argc, char** argv) {
         // produces output of corresponding size without error. The
         // framing-layer cap is a wire-side defense, not a codec-side one.
         {
-            // Build a payload that encodes to > 4 MB by stuffing a long
-            // string into a JSON envelope. Use 5 MB string so encoded
-            // form sits between BLOCK's 4 MB type cap and the framing
-            // ceiling — the framing layer would reject; the codec doesn't.
-            std::string fat(5 * 1024 * 1024, 'x');
-            Message m{MsgType::SNAPSHOT_RESPONSE, {{"data", fat}}};
+            // D2-inc7c: the payload is the DSN1 record, so the fat fixture
+            // is a REAL snapshot — 84 DApp entries each carrying the maximum
+            // 65535-byte metadata (~5.5 MB of DSN1), which sits between
+            // BLOCK's 4 MB type cap and the framing ceiling — the framing
+            // layer would reject it; the codec doesn't.
+            json snap = Chain{}.serialize_state();
+            json dapps = json::array();
+            const std::string meta_hex(2 * 65535, 'a');
+            for (int i = 0; i < 84; ++i) {
+                dapps.push_back({{"domain", "dapp" + std::to_string(i)},
+                                 {"service_pubkey", std::string(64, '0')},
+                                 {"endpoint_url", ""}, {"topics", json::array()},
+                                 {"retention", 0}, {"metadata", meta_hex},
+                                 {"registered_at", 0}, {"active_from", 0}});
+            }
+            snap["dapp_registry"] = dapps;
+            Message m = make_snapshot_response(
+                Chain::restore_from_snapshot(snap).serialize_state());
             std::vector<uint8_t> bytes;
             bool encoded = false;
             try {
                 bytes = encode_binary(m);
                 encoded = true;
             } catch (...) {
-                // encode_binary may fail if payload exceeds the u32
-                // length-prefix range (4 GB) — that's a different
-                // limit. 5 MB is well under that, so we expect success.
+                // A DSN1 lp16 field refuses > 65535 bytes — the fixture sits
+                // exactly at that width, so encode must succeed.
             }
             check(encoded,
                   "encode_binary does not enforce 16 MB framing cap (codec is unbounded)");
             check(bytes.size() > 4 * 1024 * 1024,
-                  "encode_binary on 5 MB payload produces > 4 MB encoded bytes");
+                  "encode_binary on a ~5.5 MB snapshot produces > 4 MB encoded bytes");
             // Round-trip still works: the codec itself has no size cap.
             if (encoded) {
                 Message back = decode_binary(bytes.data(), bytes.size());
-                check(back.type == m.type,
-                      "5 MB encoded SNAPSHOT_RESPONSE round-trips through codec");
+                check(back.type == m.type && back.payload == m.payload,
+                      "5.5 MB encoded SNAPSHOT_RESPONSE round-trips through codec");
             }
         }
 
@@ -24643,7 +24635,9 @@ int main(int argc, char** argv) {
     }
     // D2-inc7a / inc7b — the WIRE PAYLOAD frames for the Block-carrying
     // message types (BLOCK, BEACON_HEADER, SHARD_TIP,
-    // CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE) and for CONTRIB.
+    // CROSS_SHARD_RECEIPT_BUNDLE, CHAIN_RESPONSE) and for CONTRIB — joined in
+    // D2-inc7c by the last two, HEADERS_RESPONSE and SNAPSHOT_RESPONSE, after
+    // which no wire payload is JSON.
     //
     // These six were the last consensus-critical payloads still travelling as
     // length-prefixed JSON *inside* the binary envelope. All five
@@ -24651,7 +24645,9 @@ int main(int argc, char** argv) {
     // (chain::Block::encode_frame / decode_frame, D2-inc5) — the S-044
     // shared-codec discipline — and CONTRIB gets an always-present field
     // layout whose decode returns ContribMsg::to_json(), so the emission
-    // gates keep living at their single owning site (producer.cpp).
+    // gates keep living at their single owning site (producer.cpp). The
+    // inc7c pair follow the same rule: HEADERS_RESPONSE wraps Block frames
+    // (DHF1 records) and SNAPSHOT_RESPONSE is the DSN1 record verbatim.
     //
     // THE THEOREM (PF-1) is the wire-level analogue of the Block container's
     // BF-1: for every payload DOM P that a BUILDER produces,
@@ -24810,6 +24806,42 @@ int main(int argc, char** argv) {
 
         auto body_of = [](const Message& m) { return encode_binary(m); };
 
+        // D2-inc7c fixtures: a HEADERS_RESPONSE page in the rpc_headers shape
+        // (Block JSON minus the four heavy keys + block_hash) and a
+        // SNAPSHOT_RESPONSE DOM (serialize_state's view of a small chain with
+        // two tail headers). The exhaustive arms live in
+        // test-headers-frame-codec / test-snapshot-response-frame-codec; here
+        // they join the six earlier frames under the same theorem, fixed point
+        // and hostile sweep.
+        auto strip_header = [](const Block& b) {
+            json h = b.to_json();
+            for (const char* k : {"transactions", "cross_shard_receipts",
+                                  "inbound_receipts", "initial_state"})
+                h.erase(k);
+            h["block_hash"] = to_hex(b.compute_hash());
+            return h;
+        };
+        auto headers_page = [&](const std::vector<Block>& blocks) {
+            json arr = json::array();
+            for (auto& b : blocks) arr.push_back(strip_header(b));
+            return make_headers_response({{"headers", arr}, {"from", 41},
+                                          {"count", arr.size()}, {"height", 43}});
+        };
+        auto snapshot_msg = []() {
+            json snap = Chain{}.serialize_state();
+            snap["accounts"] = json::array({
+                {{"domain", "alice"}, {"balance", 10}, {"next_nonce", 1}}});
+            snap["stakes"] = json::array({
+                {{"domain", "alice"}, {"locked", 5}, {"unlock_height", 9}}});
+            Block h0; h0.index = 0; h0.timestamp = 1; h0.creators = {"alice"};
+            Block h1; h1.index = 1; h1.timestamp = 2; h1.prev_hash = h0.compute_hash();
+            h1.creators = {"alice"};
+            snap["headers"] = json::array({h0.to_json(), h1.to_json()});
+            snap["block_index"] = 1;
+            snap["head_hash"] = to_hex(h1.compute_hash());
+            return make_snapshot_response(Chain::restore_from_snapshot(snap).serialize_state(256));
+        };
+
         // ── PF-1. THE THEOREM: the decoded payload IS the builder's DOM.
         //    Deleting any field write/read, or any DOM key, reddens this.
         {
@@ -24848,6 +24880,12 @@ int main(int argc, char** argv) {
             rt(make_contrib(make_rich_contrib()),
                "PF-1 CONTRIB: decode(encode(payload)) == the builder DOM "
                "(all four view lists + proposer_time)");
+            rt(headers_page({leaf, deep}),
+               "PF-1 HEADERS_RESPONSE: decode(encode(payload)) == the rpc_headers "
+               "DOM (a leaf header + a folded beacon header, D2-inc7c)");
+            rt(snapshot_msg(),
+               "PF-1 SNAPSHOT_RESPONSE: decode(encode(payload)) == the "
+               "serialize_state DOM (the DSN1 record on the wire, D2-inc7c)");
             // An EMPTY chain response is the "peer has nothing more" reply —
             // a real and load-bearing shape (it drives start_sync_if_behind).
             rt(Message{MsgType::CHAIN_RESPONSE,
@@ -24885,6 +24923,8 @@ int main(int argc, char** argv) {
                                           "PF-2 CHAIN_RESPONSE: encode(decode(x)) == x");
             fp(make_contrib(make_rich_contrib()),
                                           "PF-2 CONTRIB: encode(decode(x)) == x");
+            fp(headers_page({leaf, deep}), "PF-2 HEADERS_RESPONSE: encode(decode(x)) == x");
+            fp(snapshot_msg(),             "PF-2 SNAPSHOT_RESPONSE: encode(decode(x)) == x");
         }
 
         // ── PF-3. GATE MIRROR. ContribMsg::to_json elides three blocks of
@@ -24966,6 +25006,8 @@ int main(int argc, char** argv) {
                         {{"blocks", json::array({leaf.to_json()})},
                          {"has_more", false}}},
                 make_contrib(c),
+                headers_page({leaf}),
+                snapshot_msg(),
             };
             uint64_t rng = 0x9E3779B97F4A7C15ull;      // fixed seed: reproducible
             auto next = [&]() {
@@ -25014,7 +25056,7 @@ int main(int argc, char** argv) {
                 }
             }
             checks(decoded + threw > 5000,
-                   "PF-4a hostile-input sweep ran across all six payload frames (" +
+                   "PF-4a hostile-input sweep ran across all eight payload frames (" +
                    std::to_string(decoded) + " decoded, " + std::to_string(threw) +
                    " rejected, " + std::to_string(decoded + threw) + " total)");
             check(true,
@@ -25200,6 +25242,806 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": wire-payload-frames "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // ─── D2 inc7c: HEADERS_RESPONSE is a fixed binary frame ──────────────────
+    //
+    // [from u64][height u64][count u16][count x DHF1 record], each record
+    // [magic 'DHF1'][block_hash 32][frame_len u32][Block frame with the four
+    // heavy collections EMPTY]. The DOM contract is the Node::rpc_headers
+    // envelope: every header is Block::to_json minus transactions /
+    // cross_shard_receipts / inbound_receipts / initial_state plus the served
+    // block_hash. This gate pins the theorem (decode(encode(DOM)) == DOM), the
+    // canonical fixed point, EVERY fail-closed arm of the decoder (each one is
+    // a mutant target: trailing bytes, the 256 page cap, the count-lie bound,
+    // the frame_len bound, the DHF1 magic, the heavy-collection reject), the
+    // encoder's refusals, a hostile-byte sweep and a byte vector.
+    if (cmd == "test-headers-frame-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto checks = [&](bool cond, const std::string& msg) { check(cond, msg.c_str()); };
+
+        // A Block touching every section INCLUDING the four heavy collections,
+        // so (a) the stripped header still exercises every header field and
+        // (b) the un-stripped frame is the 'carries a stripped collection'
+        // negative fixture. `deep` adds folded records + a witness (a beacon
+        // header legitimately carries them — rpc_headers does not strip them).
+        auto make_rich_block = [](uint64_t index, bool deep) {
+            Block b;
+            b.index     = index;
+            b.prev_hash.fill(0x11);
+            b.timestamp = -1234567890;
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER; tx.from = "alice"; tx.to = "bob";
+                tx.amount = 7; tx.fee = 1; tx.nonce = 2;
+                tx.sig.fill(0xA1); tx.hash = tx.compute_hash();
+                b.transactions.push_back(tx);
+            }
+            b.creators = {"n1", "n2"};
+            b.creator_tx_lists = {{Hash{}}, {}};
+            b.creator_tx_lists[0][0].fill(0x21);
+            b.creator_ed_sigs.resize(2);
+            b.creator_ed_sigs[0].fill(0x31); b.creator_ed_sigs[1].fill(0x32);
+            b.creator_dh_inputs.resize(2);
+            b.creator_dh_inputs[0].fill(0x41); b.creator_dh_inputs[1].fill(0x42);
+            b.creator_view_eq_roots.resize(2);      b.creator_view_eq_roots[0].fill(0x51);
+            b.creator_view_abort_roots.resize(2);   b.creator_view_abort_roots[1].fill(0x52);
+            b.creator_view_inbound_roots.resize(2); b.creator_view_inbound_roots[0].fill(0x53);
+            b.creator_view_inbound_lists = {{Hash{}}, {}};
+            b.creator_view_inbound_lists[0][0].fill(0x61);
+            b.creator_view_eq_lists      = {{}, {Hash{}}};
+            b.creator_view_eq_lists[1][0].fill(0x62);
+            b.creator_view_abort_lists   = {{Hash{}}, {}};
+            b.creator_view_abort_lists[0][0].fill(0x63);
+            b.creator_view_shardtip_roots.resize(2);
+            b.creator_view_shardtip_roots[0].fill(0x71);
+            b.creator_view_shardtip_lists = {{Hash{}}, {}};
+            b.creator_view_shardtip_lists[0][0].fill(0x72);
+            b.creator_proposer_times = {100, 200};
+            b.creator_dh_secrets.resize(2);
+            b.creator_dh_secrets[0].fill(0x81); b.creator_dh_secrets[1].fill(0x82);
+            b.tx_root.fill(0x91); b.delay_seed.fill(0x92); b.delay_output.fill(0x93);
+            b.consensus_mode = ConsensusMode::BFT;
+            b.bft_proposer   = "n1";
+            b.creator_block_sigs.resize(2);
+            b.creator_block_sigs[0].fill(0xB3); b.creator_block_sigs[1].fill(0xB4);
+            b.cumulative_rand.fill(0xC1);
+            {
+                AbortEvent ae;
+                ae.round = 2; ae.aborting_node = "n2"; ae.timestamp = -99;
+                ae.event_hash.fill(0xD1);
+                AbortClaim c;
+                c.block_index = index; c.round = 2; c.prev_hash.fill(0xD2);
+                c.missing_creator = "n3"; c.claimer = "n1"; c.ed_sig.fill(0xD3);
+                ae.claims.push_back(c);
+                b.abort_events.push_back(ae);
+            }
+            {
+                EquivocationEvent ev;
+                ev.equivocator = "mallory"; ev.block_index = index; ev.kind = 1;
+                ev.index_a = index; ev.body_root_a.fill(0xE1); ev.sig_a.fill(0xE2);
+                ev.index_b = index; ev.body_root_b.fill(0xE3); ev.sig_b.fill(0xE4);
+                ev.shard_id = 3; ev.beacon_anchor_height = 7;
+                b.equivocation_events.push_back(ev);
+            }
+            {
+                CrossShardReceipt r;
+                r.src_shard = 1; r.dst_shard = 2; r.src_block_index = index;
+                r.src_block_hash.fill(0xF1); r.tx_hash.fill(0xF2);
+                r.from = "alice"; r.to = "bob";
+                r.amount = 5; r.fee = 1; r.nonce = 9;
+                b.cross_shard_receipts.push_back(r);
+                r.src_shard = 2; r.dst_shard = 1;
+                b.inbound_receipts.push_back(r);
+            }
+            {
+                GenesisAlloc a;
+                a.domain = "alice"; a.ed_pub.fill(0x1A);
+                a.balance = 1000; a.stake = 10; a.region = "eu";
+                b.initial_state.push_back(a);
+            }
+            b.state_root.fill(0x2B);
+            b.partner_subset_hash.fill(0x3B);
+            b.signature_form  = 2;
+            b.eligible_count  = 17;
+            b.source_shard_id = 4;
+            if (deep) {
+                ShardTipRecord r;
+                r.source_shard_id = 1; r.height = index - 1;
+                r.eligible_count = 5; r.committee_sig_root.fill(0x4C);
+                r.region = "eu";
+                b.shard_tip_records.push_back(r);
+                Block leaf;
+                leaf.index = index - 1;
+                leaf.prev_hash.fill(0x12);
+                leaf.timestamp = 1000;
+                leaf.creators = {"s1"};
+                leaf.eligible_count  = 5;
+                leaf.source_shard_id = 1;
+                leaf.cumulative_rand.fill(0xC2);
+                b.shard_tip_witnesses.push_back(leaf);
+            }
+            return b;
+        };
+        static const char* kHeavy[4] = {"transactions", "cross_shard_receipts",
+                                        "inbound_receipts", "initial_state"};
+        // Exactly what Node::rpc_headers does to a block.
+        auto strip = [&](const Block& b) {
+            json h = b.to_json();
+            for (const char* k : kHeavy) h.erase(k);
+            h["block_hash"] = to_hex(b.compute_hash());
+            return h;
+        };
+        auto page = [&](const std::vector<Block>& blocks, uint64_t from, uint64_t height) {
+            json arr = json::array();
+            for (auto& b : blocks) arr.push_back(strip(b));
+            return json{{"headers", arr}, {"from", from},
+                        {"count", arr.size()}, {"height", height}};
+        };
+        auto body_of = [](const Message& m) { return encode_binary(m); };
+        auto decodes = [](const std::vector<uint8_t>& b, Message* out) {
+            try { Message m = decode_binary(b.data(), b.size()); if (out) *out = m; return true; }
+            catch (const std::exception&) { return false; }
+        };
+        auto expect_reject = [&](const std::vector<uint8_t>& body, const char* needle,
+                                 const std::string& label) {
+            bool hit = false;
+            try { (void)decode_binary(body.data(), body.size()); }
+            catch (const std::exception& e) {
+                hit = std::string(e.what()).find(needle) != std::string::npos;
+                if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+            }
+            checks(hit, label);
+        };
+
+        // The rich page: a folded BEACON header (records + witness), a genesis-
+        // shaped header (index 0, initial_state stripped) and a leaf header.
+        Block deep = make_rich_block(42, /*deep=*/true);
+        Block gen  = make_rich_block(0,  /*deep=*/false);
+        Block leaf = make_rich_block(41, /*deep=*/false);
+        const json rich_dom = page({gen, leaf, deep}, 0, 43);
+        const Message rich = make_headers_response(rich_dom);
+        const std::vector<uint8_t> rich_bytes = body_of(rich);
+
+        // ── HF-1. THE THEOREM: decode(encode(DOM)) == the rpc_headers DOM.
+        {
+            Message back;
+            check(decodes(rich_bytes, &back)
+                      && back.type == MsgType::HEADERS_RESPONSE
+                      && back.payload == rich_dom,
+                  "HF-1 decode(encode(page)) == the rpc_headers DOM (3 headers incl. "
+                  "a folded beacon header with records + witness, and index 0)");
+            const Message empty = make_headers_response(
+                {{"headers", json::array()}, {"from", 0}, {"count", 0}, {"height", 0}});
+            auto eb = body_of(empty);
+            check(decodes(eb, &back) && back.payload == empty.payload
+                      && eb.size() == 4 + 8 + 8 + 2,
+                  "HF-1 the EMPTY page (out-of-range `from`) round-trips as the "
+                  "22-byte frame");
+            // Every decoded header has exactly the rpc_headers key set: the
+            // four heavy keys are ABSENT and block_hash is PRESENT and equal.
+            (void)decodes(rich_bytes, &back);
+            bool shape = back.payload["headers"].size() == 3;
+            for (size_t i = 0; i < back.payload["headers"].size(); ++i) {
+                const json& h = back.payload["headers"][i];
+                for (const char* k : kHeavy) if (h.contains(k)) shape = false;
+                if (!h.contains("block_hash")
+                    || h["block_hash"] != rich_dom["headers"][i]["block_hash"]) shape = false;
+            }
+            check(shape,
+                  "HF-1 every decoded header carries NO heavy key and the served "
+                  "block_hash verbatim");
+            check(back.payload["count"] == 3 && back.payload["from"] == 0
+                      && back.payload["height"] == 43,
+                  "HF-1 from / count / height are rebuilt from the frame (count is "
+                  "the record count — carried ONCE)");
+        }
+
+        // ── HF-2. Canonical fixed point + determinism.
+        {
+            Message back;
+            (void)decodes(rich_bytes, &back);
+            check(encode_binary(back) == rich_bytes,
+                  "HF-2 encode(decode(x)) == x byte-for-byte (one encoding per page)");
+            check(body_of(rich) == rich_bytes,
+                  "HF-2 two encodes of the same DOM are byte-identical");
+        }
+
+        // ── HF-3. FAIL-CLOSED ARMS — each a mutant target.
+        {
+            // 3a. EVERY proper prefix is rejected (every field read is bounded).
+            bool all_rejected = true;
+            for (size_t n = 4; n < rich_bytes.size(); ++n) {
+                std::vector<uint8_t> t(rich_bytes.begin(), rich_bytes.begin() + n);
+                if (decodes(t, nullptr)) { all_rejected = false; break; }
+            }
+            check(all_rejected,
+                  "HF-3a EVERY proper prefix of a valid page is rejected (no field "
+                  "read runs without a bounds check)");
+            expect_reject({0xB1, 0x01, 18, 0x00, 1, 2, 3},
+                          "truncated HEADERS_RESPONSE frame",
+                          "HF-3a a body shorter than the 18-byte fixed prefix is "
+                          "rejected 'truncated HEADERS_RESPONSE frame'");
+            // 3b. Trailing bytes (M1).
+            { auto t = rich_bytes; t.push_back(0x00);
+              expect_reject(t, "HEADERS_RESPONSE frame trailing bytes",
+                  "HF-3b one trailing byte is rejected 'HEADERS_RESPONSE frame "
+                  "trailing bytes' (exact consumption)"); }
+            // 3c. DHF1 magic (M5): the first record starts at 4 + 18.
+            { auto t = rich_bytes; t[22] = 'X';
+              expect_reject(t, "bad header frame magic (expected DHF1)",
+                  "HF-3c a record whose tag is not DHF1 is rejected"); }
+            { auto t = rich_bytes; t[25] = '2';   // 'DHF2' — a version bump is a new tag
+              expect_reject(t, "bad header frame magic (expected DHF1)",
+                  "HF-3c a 'DHF2' record is rejected (the tag IS the version)"); }
+            // 3d. The page cap (M2), pinned at the exact boundary: 256 minimal
+            //     records DECODE, 257 are REJECTED — with the cap firing BEFORE
+            //     the records are parsed (the setup leg shows the 257 bytes are
+            //     all valid records, so the cap is the only rejecter).
+            {
+                Block minimal; minimal.index = 1;
+                std::vector<uint8_t> rec;
+                rec.insert(rec.end(), {'D','H','F','1'});
+                Hash bh = minimal.compute_hash();
+                rec.insert(rec.end(), bh.begin(), bh.end());
+                std::vector<uint8_t> f; minimal.encode_frame(f);
+                for (int i = 0; i < 4; ++i) rec.push_back(uint8_t((f.size() >> (8 * i)) & 0xFF));
+                rec.insert(rec.end(), f.begin(), f.end());
+                check(rec.size() == 337,
+                      "HF-3d setup: a minimal DHF1 record is exactly 337 bytes "
+                      "(4 + 32 + 4 + the 297-byte BF-0 frame)");
+                auto assemble = [&](uint32_t declared, uint32_t actual) {
+                    std::vector<uint8_t> t{0xB1, 0x01, 18, 0x00};
+                    for (int i = 0; i < 8; ++i) t.push_back(0);       // from
+                    for (int i = 0; i < 8; ++i) t.push_back(0);       // height
+                    t.push_back(uint8_t(declared & 0xFF));
+                    t.push_back(uint8_t((declared >> 8) & 0xFF));
+                    for (uint32_t i = 0; i < actual; ++i) t.insert(t.end(), rec.begin(), rec.end());
+                    return t;
+                };
+                Message back;
+                check(decodes(assemble(256, 256), &back)
+                          && back.payload["count"] == 256
+                          && back.payload["headers"].size() == 256,
+                      "HF-3d control: EXACTLY kHeadersPageMax (256) records decode");
+                expect_reject(assemble(257, 257), "above kHeadersPageMax 256",
+                      "HF-3d 257 records are REJECTED 'above kHeadersPageMax 256' — "
+                      "the cap fires on the count, before any record is parsed");
+                // 3e. Count-lie: the byte budget is proven BEFORE any reserve.
+                expect_reject(assemble(200, 1), "declares 200 elements but only",
+                      "HF-3e a count of 200 backed by ONE record is rejected before "
+                      "any allocation ('declares 200 elements but only ... remain')");
+                expect_reject(assemble(65535, 0), "above kHeadersPageMax 256",
+                      "HF-3e a count of 65535 is rejected by the cap (the cheapest "
+                      "check runs first)");
+                // 3f. frame_len bound (M6): a lied length past the buffer.
+                {
+                    auto t = assemble(1, 1);
+                    // record starts at 22: magic 4, hash 32 -> frame_len at 58.
+                    t[58] = 0xFF; t[59] = 0xFF; t[60] = 0xFF; t[61] = 0x7F;
+                    expect_reject(t, "truncated HEADERS_RESPONSE header frame body",
+                          "HF-3f a frame_len past the buffer is rejected 'truncated "
+                          "HEADERS_RESPONSE header frame body' (bounds check before "
+                          "the Block decode)");
+                    auto s = assemble(1, 1);
+                    s[58] = uint8_t(f.size() - 1);          // one byte short
+                    check(!decodes(s, nullptr),
+                          "HF-3f a frame_len one byte SHORT of the frame is rejected "
+                          "(the Block decoder is exact over its window)");
+                    auto two = assemble(2, 2);
+                    two[58] = uint8_t(f.size() + 1);        // eats the next magic
+                    check(!decodes(two, nullptr),
+                          "HF-3f a frame_len one byte LONG (swallowing the next "
+                          "record's tag) is rejected");
+                }
+            }
+            // 3g. A header record that CARRIES a heavy collection is a second
+            //     encoding of the same header and is refused.
+            {
+                auto heavy_record_frame = [&](const Block& b) {
+                    std::vector<uint8_t> t{0xB1, 0x01, 18, 0x00};
+                    for (int i = 0; i < 8; ++i) t.push_back(0);
+                    for (int i = 0; i < 8; ++i) t.push_back(0);
+                    t.push_back(1); t.push_back(0);
+                    t.insert(t.end(), {'D','H','F','1'});
+                    Hash bh = b.compute_hash();
+                    t.insert(t.end(), bh.begin(), bh.end());
+                    std::vector<uint8_t> f; b.encode_frame(f);
+                    for (int i = 0; i < 4; ++i) t.push_back(uint8_t((f.size() >> (8 * i)) & 0xFF));
+                    t.insert(t.end(), f.begin(), f.end());
+                    return t;
+                };
+                Block with_tx; with_tx.index = 3; with_tx.transactions = leaf.transactions;
+                expect_reject(heavy_record_frame(with_tx),
+                              "carries a stripped collection",
+                      "HF-3g a header frame carrying a TRANSACTION is rejected");
+                Block with_rc; with_rc.index = 3; with_rc.inbound_receipts = leaf.inbound_receipts;
+                expect_reject(heavy_record_frame(with_rc),
+                              "carries a stripped collection",
+                      "HF-3g a header frame carrying an inbound RECEIPT is rejected");
+                Block with_is; with_is.index = 0; with_is.initial_state = gen.initial_state;
+                expect_reject(heavy_record_frame(with_is),
+                              "carries a stripped collection",
+                      "HF-3g a header frame carrying initial_state is rejected");
+                // ...and the SAME block stripped (the control) decodes.
+                Block stripped = with_tx; stripped.transactions.clear();
+                check(decodes(heavy_record_frame(stripped), nullptr),
+                      "HF-3g control: the same block with the collection EMPTY decodes");
+            }
+        }
+
+        // ── HF-4. HOSTILE BYTES: total-or-throw over the rich page.
+        {
+            uint64_t rng = 0x9E3779B97F4A7C15ull;
+            auto next = [&]() { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; };
+            size_t decoded = 0, threw = 0;
+            auto attempt = [&](const std::vector<uint8_t>& v) {
+                if (decodes(v, nullptr)) ++decoded; else ++threw;
+            };
+            for (size_t i = 4; i < rich_bytes.size(); ++i)
+                for (uint8_t delta : {uint8_t{0x01}, uint8_t{0xFF}}) {
+                    auto v = rich_bytes; v[i] = uint8_t(v[i] ^ delta); attempt(v);
+                }
+            for (size_t i = 4; i + 1 < std::min<size_t>(rich_bytes.size(), 200); ++i) {
+                auto v = rich_bytes; v[i] = 0xFF; v[i + 1] = 0xFF; attempt(v);
+            }
+            for (int t = 0; t < 100; ++t) {
+                auto v = rich_bytes;
+                size_t n = size_t(next() % 48) + 1;
+                for (size_t k = 0; k < n; ++k) v.push_back(uint8_t(next() & 0xFF));
+                attempt(v);
+            }
+            for (int t = 0; t < 400; ++t) {
+                std::vector<uint8_t> v{0xB1, 0x01, 18, 0x00};
+                size_t n = size_t(next() % 400);
+                for (size_t k = 0; k < n; ++k) v.push_back(uint8_t(next() & 0xFF));
+                attempt(v);
+            }
+            checks(decoded + threw > 2000,
+                   "HF-4 hostile-input sweep ran (" + std::to_string(decoded) + " decoded, "
+                   + std::to_string(threw) + " rejected) — every input either decoded or "
+                   "threw std::exception; none crashed, hung or read out of bounds");
+        }
+
+        // ── HF-5. VECTOR PIN: a deterministic minimal page, hand-assembled from
+        //    the published layout and SHA-256-pinned. A layout change that keeps
+        //    every other leg green (field order, a widened count, a dropped tag)
+        //    reddens this.
+        {
+            Block b; b.index = 7; b.timestamp = 1234;
+            const json dom = page({b}, 7, 8);
+            const std::vector<uint8_t> got = body_of(make_headers_response(dom));
+            std::vector<uint8_t> want{0xB1, 0x01, 18, 0x00};
+            auto put64 = [&](uint64_t v) { for (int i = 0; i < 8; ++i) want.push_back(uint8_t((v >> (8 * i)) & 0xFF)); };
+            put64(7); put64(8);
+            want.push_back(1); want.push_back(0);
+            want.insert(want.end(), {'D','H','F','1'});
+            Hash bh = b.compute_hash();
+            want.insert(want.end(), bh.begin(), bh.end());
+            std::vector<uint8_t> f; b.encode_frame(f);
+            for (int i = 0; i < 4; ++i) want.push_back(uint8_t((f.size() >> (8 * i)) & 0xFF));
+            want.insert(want.end(), f.begin(), f.end());
+            check(got == want && got.size() == 4 + 18 + 337,
+                  "HF-5 the minimal page equals the hand-assembled layout "
+                  "([from][height][count=1][DHF1][hash][len=297][frame]) — 359 bytes");
+            const std::string digest = to_hex(crypto::sha256(got));
+            checks(digest == "bce86f576d9cec2aee3fc6d2245b94b02c3f6a71277251850ff507f30daf48c9",
+                   "HF-5 vector pin: SHA-256 of the minimal page is " + digest);
+        }
+
+        // ── HF-6. ENCODER REFUSALS (refuse, never clamp).
+        {
+            auto refuses = [&](const json& dom, const char* needle) {
+                try { (void)encode_binary(make_headers_response(dom)); return false; }
+                catch (const std::exception& e) {
+                    return std::string(e.what()).find(needle) != std::string::npos;
+                }
+            };
+            json bad = rich_dom; bad["count"] = 2;
+            check(refuses(bad, "'count' does not equal headers.size()"),
+                  "HF-6 a DOM whose count disagrees with its array is refused");
+            json heavy = rich_dom; heavy["headers"][0]["transactions"] = json::array();
+            check(refuses(heavy, "carries the stripped collection 'transactions'"),
+                  "HF-6 a header DOM carrying a heavy key is refused (even empty)");
+            json nohash = rich_dom; nohash["headers"][1].erase("block_hash");
+            check(refuses(nohash, "block_hash"),
+                  "HF-6 a header DOM without block_hash is refused");
+            json big; big["headers"] = json::array();
+            for (int i = 0; i < 257; ++i) big["headers"].push_back(strip(leaf));
+            big["from"] = 0; big["count"] = 257; big["height"] = 257;
+            check(refuses(big, "above kHeadersPageMax 256"),
+                  "HF-6 a 257-header DOM is refused, not clamped");
+            json notarr = rich_dom; notarr["headers"] = 5;
+            check(refuses(notarr, "must be a JSON array"),
+                  "HF-6 a non-array headers field is refused");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": headers-frame-codec "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // ─── D2 inc7c: SNAPSHOT_RESPONSE is the DSN1 record on the wire ──────────
+    //
+    // The payload is Chain::encode_state verbatim (one snapshot layout on the
+    // wire and at rest); the DOM contract is Chain::serialize_state's view.
+    // This gate pins the theorem (decode(encode(DOM)) == DOM) over a chain
+    // touching every snapshot namespace, the fixed point, wire == at-rest
+    // bytes, EVERY fail-closed arm of the decoder (magic, version,
+    // truncation, trailing bytes, count-lie before allocation, the 256
+    // tail-header cap firing before any header parse, the head_hash /
+    // block_index / S-033 state_root claims), the encoder's refusal to clamp,
+    // the A1 boundary (a node-adoption policy, not a codec rule) and a vector.
+    if (cmd == "test-snapshot-response-frame-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto checks = [&](bool cond, const std::string& msg) { check(cond, msg.c_str()); };
+        auto body_of = [](const Message& m) { return encode_binary(m); };
+        auto decodes = [](const std::vector<uint8_t>& b, Message* out) {
+            try { Message m = decode_binary(b.data(), b.size()); if (out) *out = m; return true; }
+            catch (const std::exception&) { return false; }
+        };
+        auto expect_reject = [&](const std::vector<uint8_t>& body, const char* needle,
+                                 const std::string& label) {
+            bool hit = false;
+            try { (void)decode_binary(body.data(), body.size()); }
+            catch (const std::exception& e) {
+                hit = std::string(e.what()).find(needle) != std::string::npos;
+                if (!hit) std::cout << "    got: [" << e.what() << "]\n";
+            }
+            checks(hit, label);
+        };
+        auto h64 = [](uint8_t v) { return to_hex(std::vector<uint8_t>(32, v).data(), 32); };
+        auto h66 = [](uint8_t v) { return to_hex(std::vector<uint8_t>(33, v).data(), 33); };
+
+        // Fixture A — a CONSISTENT chain (real state_root at the head, so the
+        // S-033 arm is live): the same construction test-snapshot-binary-codec
+        // uses.
+        auto build_consistent = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "snapshot-response-frame";
+            GenesisCreator alice_c, bob_c;
+            alice_c.domain = "alice"; alice_c.initial_stake = 500; alice_c.region = "us-east";
+            bob_c.domain   = "bob";   bob_c.initial_stake   = 700; bob_c.region   = "eu-west";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]   = uint8_t(0x50 + i);
+            }
+            cfg.initial_creators = {alice_c, bob_c};
+            cfg.committee_region = "us-east";
+            GenesisAllocation a1, a2;
+            a1.domain = "alice"; a1.balance = 100000;
+            a2.domain = "bob";   a2.balance = 50000;
+            cfg.initial_balances = {a1, a2};
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(11);
+            c.set_min_stake(250);
+            c.set_epoch_blocks(8);
+            c.set_k_block_sigs(2);
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0xC0 + i);
+            c.set_shard_routing(4, salt, ShardId{1});
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 1234; tx.fee = 3; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            b.state_root = c.compute_state_root();
+            c.revert_head();
+            c.append(b);
+            return c;
+        };
+        const Chain consistent = build_consistent();
+
+        // Fixture B — a DOM reaching EVERY optional snapshot key (the ones
+        // serialize_state emits conditionally: crypto_profile, epoch_blocks,
+        // k_block_sigs, accumulated_shielded, shielded_pool, enote_commitments,
+        // audit_keys, audit_log_counts, note_keys, shard_tip_records,
+        // committee_checkpoints) plus two tail headers with a ZERO state_root
+        // (the S-033 arm is skipped for a pre-S-033 tail, so the collections
+        // need not reconcile with a root). Built through restore_from_snapshot
+        // so the builder DOM is serialize_state's own canonical view.
+        auto build_rich_dom = [&]() {
+            json snap = Chain{}.serialize_state();
+            snap["block_subsidy"] = 5; snap["subsidy_pool_initial"] = 99;
+            snap["subsidy_mode"] = 1; snap["lottery_jackpot_multiplier"] = 3;
+            snap["min_stake"] = 42; snap["crypto_profile"] = 1;
+            snap["suspension_slash"] = 7; snap["unstake_delay"] = 9;
+            snap["merge_threshold_blocks"] = 11; snap["revert_threshold_blocks"] = 12;
+            snap["merge_grace_blocks"] = 2; snap["epoch_blocks"] = 100;
+            snap["k_block_sigs"] = 3; snap["shard_count"] = 4;
+            snap["shard_salt"] = h64(0xAB); snap["shard_id"] = 2;
+            snap["genesis_total"] = 12345; snap["accumulated_subsidy"] = 10;
+            snap["accumulated_slashed"] = 1; snap["accumulated_inbound"] = 2;
+            snap["accumulated_outbound"] = 3; snap["accumulated_shielded"] = 4;
+            snap["accounts"] = json::array({
+                {{"domain", "alice"}, {"balance", 1000}, {"next_nonce", 2}},
+                {{"domain", "bob"},   {"balance", 50},   {"next_nonce", 0}}});
+            snap["stakes"] = json::array({
+                {{"domain", "alice"}, {"locked", 500}, {"unlock_height", 77}}});
+            snap["registrants"] = json::array({
+                {{"domain", "alice"}, {"ed_pub", h64(0x10)}, {"registered_at", 1},
+                 {"active_from", 2}, {"inactive_from", 999}, {"region", "eu"}}});
+            snap["applied_inbound_receipts"] = json::array({
+                {{"src_shard", 1}, {"tx_hash", h64(0xF2)}}});
+            snap["merge_state"] = json::array({
+                {{"shard_id", 2}, {"partner_id", 3}, {"refugee_region", "us"}}});
+            snap["shard_tip_records"] = json::array({
+                {{"source_shard_id", 1}, {"height", 5}, {"eligible_count", 6},
+                 {"region", "eu"}, {"committee_sig_root", h64(0x4C)}}});
+            snap["committee_checkpoints"] = json::array({
+                {{"epoch", 1}, {"epoch_rand", h64(0xE0)},
+                 {"members", json::array({
+                     {{"domain", "bob"},   {"ed_pub", h64(0x50)}, {"region", "eu"}},
+                     {{"domain", "alice"}, {"ed_pub", h64(0x10)}, {"region", "us"}}})}}});
+            snap["abort_records"] = json::array({
+                {{"domain", "bob"}, {"count", 2}, {"last_block", 3}}});
+            snap["dapp_registry"] = json::array({
+                {{"domain", "svc"}, {"service_pubkey", h64(0x5E)},
+                 {"endpoint_url", "https://svc.example"}, {"topics", json::array({"a", "b"})},
+                 {"retention", 1}, {"metadata", "deadbeef"},
+                 {"registered_at", 1}, {"active_from", 2}, {"inactive_from", 3}}});
+            snap["pending_param_changes"] = json::array({
+                {{"effective_height", 10},
+                 {"entries", json::array({{{"name", "min_stake"}, {"value", "0102"}}})}}});
+            snap["shielded_pool"] = json::array({{{"c", h66(0x01)}, {"h", 5}}});
+            snap["enote_commitments"] = json::array({{{"c", h66(0x02)}, {"v", h64(0x03)}}});
+            snap["audit_keys"] = json::array({{{"a", "0xabc"}, {"pk", "pkhex"}}});
+            snap["audit_log_counts"] = json::array({{{"a", "0xabc"}, {"n", 4}}});
+            snap["note_keys"] = json::array({{{"a", "0xdef"}, {"pk", "nk"}}});
+            Block h0; h0.index = 0; h0.timestamp = 1; h0.creators = {"alice"};
+            h0.cumulative_rand.fill(0x0C);
+            Block h1; h1.index = 1; h1.timestamp = 2; h1.prev_hash = h0.compute_hash();
+            h1.creators = {"alice"}; h1.creator_block_sigs.resize(1);
+            h1.creator_block_sigs[0].fill(0xB3);
+            snap["headers"] = json::array({h0.to_json(), h1.to_json()});
+            snap["block_index"] = 1;
+            snap["head_hash"] = to_hex(h1.compute_hash());
+            return Chain::restore_from_snapshot(snap).serialize_state(256);
+        };
+        const json rich_dom = build_rich_dom();
+        const json cons_dom = consistent.serialize_state(256);
+        const std::vector<uint8_t> rich_bytes = body_of(make_snapshot_response(rich_dom));
+        const std::vector<uint8_t> cons_bytes = body_of(make_snapshot_response(cons_dom));
+
+        // ── SR-1. THE THEOREM: decode(encode(DOM)) == the serialize_state DOM.
+        {
+            Message back;
+            check(decodes(rich_bytes, &back) && back.type == MsgType::SNAPSHOT_RESPONSE
+                      && back.payload == rich_dom,
+                  "SR-1 decode(encode(DOM)) == the serialize_state DOM over a chain "
+                  "touching EVERY snapshot namespace + two tail headers");
+            const char* optional_keys[] = {"crypto_profile", "epoch_blocks", "k_block_sigs",
+                "accumulated_shielded", "shielded_pool", "enote_commitments", "audit_keys",
+                "audit_log_counts", "note_keys", "shard_tip_records", "committee_checkpoints"};
+            bool all = true;
+            for (const char* k : optional_keys)
+                if (!rich_dom.contains(k) || !back.payload.contains(k)) all = false;
+            check(all,
+                  "SR-1 every CONDITIONALLY-emitted snapshot key is present in both the "
+                  "builder DOM and the decoded DOM (the container carries the value; "
+                  "serialize_state re-applies the gate)");
+            check(decodes(cons_bytes, &back) && back.payload == cons_dom,
+                  "SR-1 a CONSISTENT chain (real state_root at the head) round-trips");
+            const Message empty = make_snapshot_response(Chain{}.serialize_state());
+            auto eb = body_of(empty);
+            check(decodes(eb, &back) && back.payload == empty.payload,
+                  "SR-1 an EMPTY chain's snapshot round-trips");
+        }
+
+        // ── SR-2. Fixed point, determinism, and ONE snapshot layout: the wire
+        //    frame of a served snapshot IS the at-rest DSN1 of the same chain.
+        {
+            Message back;
+            (void)decodes(rich_bytes, &back);
+            check(encode_binary(back) == rich_bytes,
+                  "SR-2 encode(decode(x)) == x byte-for-byte (rich)");
+            (void)decodes(cons_bytes, &back);
+            check(encode_binary(back) == cons_bytes,
+                  "SR-2 encode(decode(x)) == x byte-for-byte (consistent chain)");
+            std::vector<uint8_t> at_rest = consistent.encode_state(256);
+            check(cons_bytes.size() == 4 + at_rest.size()
+                      && std::equal(at_rest.begin(), at_rest.end(), cons_bytes.begin() + 4),
+                  "SR-2 the wire payload of a served snapshot == the chain's at-rest "
+                  "DSN1 bytes (one snapshot layout)");
+            // A partial tail (header_count = 1) is served exactly as encoded.
+            std::vector<uint8_t> one = body_of(make_snapshot_response(consistent.serialize_state(1)));
+            std::vector<uint8_t> one_rest = consistent.encode_state(1);
+            check(one.size() == 4 + one_rest.size()
+                      && std::equal(one_rest.begin(), one_rest.end(), one.begin() + 4),
+                  "SR-2 a header_count=1 snapshot's wire payload == encode_state(1)");
+            check(cons_bytes.size() >= 12 && cons_bytes[4] == 'D' && cons_bytes[5] == 'S'
+                      && cons_bytes[6] == 'N' && cons_bytes[7] == '1' && cons_bytes[8] == 1
+                      && cons_bytes[9] == 0 && cons_bytes[10] == 0 && cons_bytes[11] == 0,
+                  "SR-2 the payload leads with the DSN1 magic + version u32 = 1");
+        }
+
+        // ── SR-3. FAIL-CLOSED ARMS.
+        {
+            // 3a. Magic (M5) and version.
+            { auto t = cons_bytes; t[7] = '2';
+              expect_reject(t, "expected DSN1",
+                  "SR-3a a 'DSN2' payload is rejected 'bad magic (expected DSN1)'"); }
+            { auto t = cons_bytes; t[8] = 2;
+              expect_reject(t, "unsupported snapshot version: 2",
+                  "SR-3a version u32 = 2 is rejected 'unsupported snapshot version: 2'"); }
+            // 3b. EVERY proper prefix is rejected.
+            {
+                bool all_rejected = true;
+                for (size_t n = 4; n < cons_bytes.size(); ++n) {
+                    std::vector<uint8_t> t(cons_bytes.begin(), cons_bytes.begin() + n);
+                    if (decodes(t, nullptr)) { all_rejected = false; break; }
+                }
+                check(all_rejected,
+                      "SR-3b EVERY proper prefix of a valid snapshot frame is rejected");
+            }
+            // 3c. Trailing byte (M1 analogue).
+            { auto t = cons_bytes; t.push_back(0x00);
+              expect_reject(t, "trailing byte(s) after the DSN1 frame",
+                  "SR-3c one trailing byte is rejected (exact consumption)"); }
+            // 3d. Count-lie BEFORE allocation: the accounts count sits right
+            //     after the fixed 194-byte scalar block (body offset 4 envelope
+            //     + 8 magic/version + 194 = 206).
+            { auto t = cons_bytes;
+              const size_t at = 4 + 8 + 194;
+              t[at] = 0xFF; t[at + 1] = 0xFF; t[at + 2] = 0xFF; t[at + 3] = 0xFF;
+              expect_reject(t, "accounts count 4294967295 exceeds remaining bytes",
+                  "SR-3d an accounts count of 2^32-1 is rejected against the remaining "
+                  "bytes BEFORE any entry is read"); }
+            // 3e. THE TAIL-HEADER CAP (M2), at the exact boundary. The record is
+            //     assembled by hand: an empty chain's DSN1 with its trailing
+            //     headers count replaced. 256 valid frames DECODE; 257 are
+            //     REJECTED by the cap — and the 257 arm carries 257 x 4 ZERO
+            //     bytes instead of frames, so the only way it can be rejected
+            //     with the cap's message is if the cap fires BEFORE any header
+            //     frame is parsed.
+            {
+                std::vector<uint8_t> base = Chain{}.encode_state(0);
+                check(base.size() == 266,
+                      "SR-3e setup: an empty chain's DSN1 record is 266 bytes "
+                      "(8 magic/version + 194 scalar + 16 x u32 zero counts)");
+                Block minimal; minimal.index = 0;
+                std::vector<uint8_t> f; minimal.encode_frame(f);
+                const Hash bh = minimal.compute_hash();
+                auto assemble = [&](uint32_t declared, uint32_t actual_frames, size_t pad_zero) {
+                    std::vector<uint8_t> t{0xB1, 0x01, 16, 0x00};
+                    std::vector<uint8_t> d = base;
+                    // head_hash / block_index claims must match the tail.
+                    if (actual_frames > 0) std::copy(bh.begin(), bh.end(), d.begin() + 16);
+                    d.resize(d.size() - 4);
+                    for (int i = 0; i < 4; ++i) d.push_back(uint8_t((declared >> (8 * i)) & 0xFF));
+                    for (uint32_t i = 0; i < actual_frames; ++i) {
+                        for (int k = 0; k < 4; ++k) d.push_back(uint8_t((f.size() >> (8 * k)) & 0xFF));
+                        d.insert(d.end(), f.begin(), f.end());
+                    }
+                    d.insert(d.end(), pad_zero, 0x00);
+                    t.insert(t.end(), d.begin(), d.end());
+                    return t;
+                };
+                Message back;
+                check(decodes(assemble(256, 256, 0), &back)
+                          && back.payload["headers"].size() == 256,
+                      "SR-3e control: EXACTLY kSnapshotHeaderMax (256) tail headers decode");
+                expect_reject(assemble(257, 0, 257 * 4), "exceeds the tail-header cap 256",
+                      "SR-3e a headers count of 257 (backed by 1028 zero bytes, no frame "
+                      "at all) is rejected by the CAP — before any header is parsed");
+                expect_reject(assemble(4000000, 0, 0), "headers count 4000000 exceeds remaining bytes",
+                      "SR-3e a headers count of 4,000,000 is rejected against the remaining "
+                      "bytes (the byte proof runs first)");
+            }
+            // 3f. The claims: head_hash, block_index, and S-033 state_root.
+            { auto t = cons_bytes; t[4 + 16] ^= 0x01;          // head_hash byte 0
+              expect_reject(t, "snapshot head_hash mismatch",
+                  "SR-3f a head_hash claim that does not match the tail is rejected"); }
+            { auto t = cons_bytes; t[4 + 8] ^= 0x01;           // block_index byte 0
+              expect_reject(t, "snapshot block_index mismatch",
+                  "SR-3f a block_index claim that does not match the tail is rejected"); }
+            {   // Tamper the FIRST account's balance (the header is untouched, so
+                // head_hash still matches): the loaded state no longer hashes to
+                // the head's committed state_root.
+                auto t = cons_bytes;
+                const size_t accounts_at = 4 + 8 + 194;
+                // [u32 count][lp16 domain][balance u64][next_nonce u64]
+                const size_t first_domain_len = t[accounts_at + 4] | (t[accounts_at + 5] << 8);
+                const size_t balance_at = accounts_at + 4 + 2 + first_domain_len;
+                t[balance_at] ^= 0x01;
+                expect_reject(t, "state_root mismatch",
+                      "SR-3f a tampered account balance is rejected by the S-033 "
+                      "state_root gate at the decode boundary"); }
+            // 3g. The deleted fallback shape.
+            {
+                std::vector<uint8_t> t{0xB1, 0x01, 16, 0x00};
+                const std::string pay = cons_dom.dump();
+                uint32_t plen = uint32_t(pay.size());
+                for (int i = 0; i < 4; ++i) t.push_back(uint8_t((plen >> (8 * i)) & 0xFF));
+                t.insert(t.end(), pay.begin(), pay.end());
+                expect_reject(t, "expected DSN1",
+                      "SR-3g the pre-inc7c lp-JSON shape (a VALID JSON snapshot) is "
+                      "rejected at the DSN1 magic — never parsed");
+            }
+            // 3h. Single-byte corruption sweep: total-or-throw (a crash kills the run).
+            {
+                size_t threw = 0, decoded = 0;
+                for (size_t i = 4; i < rich_bytes.size(); ++i)
+                    for (uint8_t mask : {uint8_t(0x01), uint8_t(0xFF)}) {
+                        auto t = rich_bytes; t[i] = uint8_t(t[i] ^ mask);
+                        if (decodes(t, nullptr)) ++decoded; else ++threw;
+                    }
+                checks(threw + decoded == 2 * (rich_bytes.size() - 4),
+                       "SR-3h every single-byte corruption either decoded or threw ("
+                       + std::to_string(decoded) + " decoded, " + std::to_string(threw)
+                       + " rejected) — none crashed, hung or read out of bounds");
+            }
+        }
+
+        // ── SR-4. VECTOR PIN: the empty chain's frame.
+        {
+            const std::vector<uint8_t> got = body_of(make_snapshot_response(Chain{}.serialize_state()));
+            check(got.size() == 4 + 266,
+                  "SR-4 the empty chain's SNAPSHOT_RESPONSE body is 270 bytes "
+                  "(envelope + the 266-byte DSN1 record)");
+            const std::string digest = to_hex(crypto::sha256(got));
+            checks(digest == "5d28a478d640ae01a4762618e92c4b301edcb0b09fb7fe284bdcefcb8a15c873",
+                   "SR-4 vector pin: SHA-256 of the empty chain's frame is " + digest);
+        }
+
+        // ── SR-5. ENCODER REFUSALS + the A1 boundary.
+        {
+            auto refuses = [&](const json& dom, const char* needle) {
+                try { (void)encode_binary(make_snapshot_response(dom)); return false; }
+                catch (const std::exception& e) {
+                    return std::string(e.what()).find(needle) != std::string::npos;
+                }
+            };
+            // 257 identical minimal headers: restore accepts them (it checks
+            // no continuity), encode_state would silently CLAMP to 256 — the
+            // wire encoder must refuse instead.
+            Block minimal; minimal.index = 0;
+            json big = Chain{}.serialize_state();
+            big["headers"] = json::array();
+            for (int i = 0; i < 257; ++i) big["headers"].push_back(minimal.to_json());
+            big["block_index"] = 0; big["head_hash"] = to_hex(minimal.compute_hash());
+            check(refuses(big, "above kSnapshotHeaderMax 256"),
+                  "SR-5 a DOM carrying 257 tail headers is REFUSED, not clamped");
+            check(refuses(json::object(), "unsupported snapshot version"),
+                  "SR-5 a non-snapshot DOM is refused (restore_from_snapshot's version gate)");
+            // The A1 unitary-balance identity is the NODE's adoption policy
+            // (node.cpp passes require_supply_invariant=true on file restore):
+            // the codec is general. The rich DOM's genesis_total (12345) does
+            // not satisfy A1 against its balances — it round-trips anyway.
+            Chain r = Chain::restore_from_snapshot(rich_dom);
+            check(r.expected_total() != r.live_total_supply(),
+                  "SR-5 setup: the rich fixture is A1-INCONSISTENT by construction");
+            Message back;
+            check(decodes(rich_bytes, &back) && back.payload == rich_dom,
+                  "SR-5 the codec does NOT enforce A1 (node adoption does) — the "
+                  "A1-inconsistent snapshot still round-trips through the wire");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-response-frame-codec "
                   << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
@@ -50500,10 +51342,10 @@ int main(int argc, char** argv) {
     //
     // At-rest snapshots are binary: the node bootstrap read, `snapshot
     // create/fetch/inspect/diff/stats`, and the snapshot_save RPC all go
-    // through Chain::encode_state / decode_state. serialize_state /
-    // restore_from_snapshot survive as the RPC text view and as the
-    // still-lp-JSON SNAPSHOT_RESPONSE wire payload until that wire inc lands —
-    // at which point it reuses THESE bytes, so DSN1 is the ONE snapshot layout.
+    // through Chain::encode_state / decode_state, and since D2 inc7c the
+    // SNAPSHOT_RESPONSE wire payload is THESE bytes too, so DSN1 is the ONE
+    // snapshot layout; serialize_state / restore_from_snapshot survive as the
+    // RPC text view and as the Message::payload DOM the wire codec converts.
     //
     // SB-5 is the falsifier that matters: decode_state must run the SAME
     // post-load gates as restore_from_snapshot (head_hash claim, S-033
@@ -52938,9 +53780,10 @@ int main(int argc, char** argv) {
 
         // ── (5) F-10 STRUCTURAL CLOSURE (round-13 hostile-wire audit) ───────
         // The F-10 wedge required a SCHEMA-FREE claims value: an injected
-        // unknown member carrying nesting that the container-relative WIRE-2
-        // ceiling accepted on ingest (BLOCK payload) and rejected on serve
-        // (CHAIN_RESPONSE payload, two levels deeper). The typed claim list
+        // unknown member carrying nesting that the (since-retired, D2 inc7c)
+        // container-relative WIRE-2 ceiling accepted on ingest (BLOCK payload)
+        // and rejected on serve (CHAIN_RESPONSE payload, two levels deeper).
+        // The typed claim list
         // closes the channel at its source: "claims" is ONE hex STRING at
         // every depth — a claim contributes ZERO JSON nesting — and the old
         // attack SHAPE (a JSON array with injected members) is REJECTED at
@@ -63334,12 +64177,12 @@ int main(int argc, char** argv) {
         //
         //     Payload per type: the fixed-frame types are fed a
         //     BUILDER-SHAPED payload (their encoders route through the
-        //     struct's from_json, which requires every field), the
+        //     struct's from_json, which requires every field), and the
         //     request/status frames and HELLO read named fields with
-        //     defaults so an empty object suffices, and the remaining
-        //     JSON-payload types take an empty object. (Pre-D2-inc6b every
+        //     defaults so an empty object suffices. (Pre-D2-inc6b every
         //     type got an empty object; that stopped working the moment a
-        //     struct-backed frame needed real fields.)
+        //     struct-backed frame needed real fields; since D2-inc7c no
+        //     type is JSON-carried at all.)
         {
             const std::string h64(64, '0'), h128(128, '0');
             auto minimal_payload = [&](MsgType t) -> json {
@@ -63387,6 +64230,13 @@ int main(int argc, char** argv) {
                     return {{"block_index", 1}, {"signer", "n1"},
                             {"prev_hash", h64}, {"tx_hashes", json::array()},
                             {"dh_input", h64}, {"ed_sig", h128}};
+                // D2-inc7c: the last two are frames too — the rpc_headers
+                // envelope and the serialize_state view of an empty chain.
+                case MsgType::HEADERS_RESPONSE:
+                    return {{"headers", json::array()}, {"from", 0},
+                            {"count", 0}, {"height", 0}};
+                case MsgType::SNAPSHOT_RESPONSE:
+                    return chain::Chain{}.serialize_state();
                 default:
                     return json::object();
                 }

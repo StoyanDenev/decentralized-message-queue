@@ -103,8 +103,11 @@ its whole premise was that the value was schema-free, and it no longer is.
 
 ### 2.1 F-10 — the wedge that made typing the right closure
 
-[S022WireFormatCaps.md](S022WireFormatCaps.md) **F-10**: the WIRE-2
-`kMaxJsonDepth` ceiling is **envelope-relative** — the same `Block` JSON sits at
+[S022WireFormatCaps.md](S022WireFormatCaps.md) **F-10** (historical — the
+WIRE-2 ceiling was deleted with the last JSON wire payload in D2 inc7c,
+2026-09-16; the typed claim list below is what closed F-10 and it stands
+regardless): the WIRE-2
+`kMaxJsonDepth` ceiling was **envelope-relative** — the same `Block` JSON sits at
 different absolute depths depending on the carrying message (claim object at
 depth 5 under `ABORT_EVENT`, 6 under `BLOCK`, 8 under `CHAIN_RESPONSE`). A claim
 nested L ∈ {`kMaxJsonDepth`−7, `kMaxJsonDepth`−6} levels deep was therefore

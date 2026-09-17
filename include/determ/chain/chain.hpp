@@ -695,14 +695,21 @@ public:
     // field mirror of serialize_state / restore_from_snapshot, with the same
     // post-load gates (head_hash claim, S-033 state_root self-consistency, and
     // the opt-in A1 unitary-balance revalidate). All at-rest snapshot files are
-    // this form — the JSON pair above survives only as the RPC text view and
-    // as the still-lp-JSON SNAPSHOT_RESPONSE wire payload until that wire inc
-    // lands, at which point it reuses THESE bytes (one snapshot layout).
+    // this form, and since D2 inc7c the SNAPSHOT_RESPONSE wire payload IS
+    // these bytes (one snapshot layout) — the JSON pair above survives only
+    // as the RPC text view and as the Message::payload DOM the wire codec
+    // converts to and from.
     //
     // Unlike the JSON view every field is emitted unconditionally, so
     // genesis_total is always present and the JSON path's back-solve has no
     // binary counterpart. decode_state is bounds-checked (counts validated
     // against remaining bytes before allocation) and EXACT-consumption.
+    //
+    // kSnapshotHeaderMax: the tail-header page cap (RpcIngressGateAudit §3).
+    // Every encoder clamps the requested header_count to it, and decode_state
+    // REJECTS a record declaring more tail headers than it before parsing any
+    // of them (D2 inc7c) — accept-narrowing to exactly the producer set.
+    static constexpr uint32_t kSnapshotHeaderMax = 256;
     std::vector<uint8_t> encode_state(uint32_t header_count = 16) const;
     static Chain decode_state(const uint8_t* data, size_t len,
                               bool require_supply_invariant = false);

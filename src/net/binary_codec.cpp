@@ -183,23 +183,49 @@
 //   nothing: decode fills the struct and returns to_json(), which re-applies
 //   the gates at the one site that owns them.
 //
-// PAYLOAD: THE REMAINING TWO MSGTYPES
-//   SNAPSHOT_RESPONSE and HEADERS_RESPONSE still fall back to a
-//   *length-prefixed JSON payload* inside the binary envelope:
+// PAYLOAD: HEADERS_RESPONSE (18) — D2-inc7c
+//     [from u64 LE][height u64 LE][count u16 LE]      count <= kHeadersPageMax
+//     count x DHF1 header record:
+//         [magic 4 = 'D','H','F','1']
+//         [block_hash 32]                 the served Block::compute_hash() —
+//                                         carried DATA (a stripped header
+//                                         cannot recompute it), not a claim
+//                                         the decoder verifies; see the
+//                                         Node::rpc_headers comment on why
+//                                         it is not a trust anchor
+//         [frame_len u32 LE][Block frame] Block::encode_frame with the four
+//                                         heavy collections EMPTY
+//                                         (transactions / cross_shard_receipts
+//                                         / inbound_receipts / initial_state);
+//                                         witnesses allowed
+//   The payload DOM is exactly the Node::rpc_headers envelope
+//   {headers, from, count, height}: each header is Block::to_json minus the
+//   four heavy keys plus `block_hash`. `count` is the ONE count — the frame
+//   carries it once, the DOM key is derived from it on decode, and an
+//   encoder DOM whose `count` disagrees with its array is refused. A header
+//   record whose Block frame carries any heavy collection is REJECTED, so a
+//   header has exactly one encoding. The per-record DHF1 tag makes a header
+//   self-identifying at rest (the light export-headers archive reuses the
+//   record; DBK1 is the same idea for a full Block), and the frame_len
+//   prefix is mandatory because Block::decode_frame is exact-consuming over
+//   whatever window it is handed.
 //
-//     offset  size  field
-//     4       4     json_len: u32 LE
-//     8       N     json_bytes (the per-type JSON payload, no envelope)
+// PAYLOAD: SNAPSHOT_RESPONSE (16) — D2-inc7c
+//     the DSN1 record, verbatim: Chain::encode_state(header_count)
+//   One snapshot layout on the wire and at rest. DSN1 already carries the
+//   block_index + head_hash claims, every state section (u32 counts, each
+//   proven against the remaining bytes before allocation) and the <= 256
+//   tail headers as [u32 frame_len][Block frame] — the whole content of the
+//   former JSON payload. The decoder IS Chain::decode_state, so bad magic,
+//   version != 1, truncation, count lies, trailing bytes, a head_hash /
+//   block_index claim that does not match the tail, and an S-033 state_root
+//   mismatch all reject at the pre-auth decode boundary; the DOM is then
+//   rebuilt with serialize_state. The A1 supply revalidate stays the NODE's
+//   opt-in adoption policy (node.cpp), not a codec rule.
 //
-//   They binarize in D2-inc7c (SNAPSHOT_RESPONSE reuses the DSN1 chain
-//   snapshot layout, so it waits on that container). Until then the wrapper
-//   still buys us:
-//     • Self-describing format byte for clean version detection.
-//     • A stable extension point — the previous increments switched
-//       individual msg_types from "JSON inside binary frame" to true binary
-//       layouts without touching peers, gossip, or the dispatcher.
-//   WIRE-2's structural JSON ceiling (messages.hpp) protects exactly these
-//   two and retires with them.
+//   There is NO other payload encoding: an unknown MsgType byte is rejected
+//   on both encode and decode. The length-prefixed JSON fallback and the
+//   WIRE-2 structural JSON ceiling that guarded it are deleted.
 //
 // ENDIANNESS
 //   All multi-byte integers in the binary envelope and the transaction
@@ -218,6 +244,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <determ/net/messages.hpp>
+#include <determ/chain/chain.hpp>          // D2-inc7c: SNAPSHOT_RESPONSE is DSN1
+#include <determ/util/json_validate.hpp>   // json_require_hex (header block_hash)
 #include <cstring>
 #include <stdexcept>
 
@@ -890,6 +918,168 @@ nlohmann::json decode_contrib_frame(const uint8_t* data, size_t len) {
     return c.to_json();
 }
 
+// ─── HEADERS_RESPONSE frame (D2-inc7c) ───────────────────────────────────────
+//
+// [from u64][height u64][count u16][count x DHF1 record]. The DOM is the
+// Node::rpc_headers envelope; each header is a Block minus the four heavy
+// collections plus the served block_hash (module comment).
+
+constexpr char kHeaderFrameMagic[4] = {'D','H','F','1'};
+
+// The four keys rpc_headers strips. A header DOM must not carry them (the
+// encoder refuses) and a header frame must carry them EMPTY (the decoder
+// refuses) — one encoding per header.
+constexpr const char* kHeaderHeavyKeys[4] = {
+    "transactions", "cross_shard_receipts", "inbound_receipts", "initial_state"};
+
+// Minimum size of one DHF1 record: magic + block_hash + frame_len + the
+// smallest Block frame (kMinBlockFrameWire, BF-0).
+constexpr size_t kMinHeaderRecordWire = 4 + 32 + 4 + kMinBlockFrameWire;   // 337
+
+void encode_headers_response_frame(std::vector<uint8_t>& out, const Message& m) {
+    const nlohmann::json empty = nlohmann::json::array();
+    const nlohmann::json& arr =
+        m.payload.contains("headers") ? m.payload.at("headers") : empty;
+    if (!arr.is_array())
+        throw std::runtime_error(
+            "binary_codec: HEADERS_RESPONSE field 'headers' must be a JSON array");
+    // Refuse, never clamp: the server page cap is the frame's ceiling too.
+    if (arr.size() > kHeadersPageMax)
+        throw std::runtime_error(
+            "binary_codec: HEADERS_RESPONSE carries " + std::to_string(arr.size())
+            + " headers, above kHeadersPageMax " + std::to_string(kHeadersPageMax));
+    // The DOM's `count` is derived from the array on decode; an encoder DOM
+    // that disagrees with itself would be silently "corrected" — refuse it.
+    if (m.payload.contains("count")
+        && m.payload.at("count").get<uint64_t>() != arr.size())
+        throw std::runtime_error(
+            "binary_codec: HEADERS_RESPONSE 'count' does not equal headers.size()");
+    le_put_u64(out, m.payload.value("from",   uint64_t{0}));
+    le_put_u64(out, m.payload.value("height", uint64_t{0}));
+    wf_put_count(out, arr.size(), "HEADERS_RESPONSE headers");
+    for (auto& hj : arr) {
+        if (!hj.is_object())
+            throw std::runtime_error(
+                "binary_codec: HEADERS_RESPONSE header must be a JSON object");
+        for (const char* k : kHeaderHeavyKeys)
+            if (hj.contains(k))
+                throw std::runtime_error(
+                    std::string("binary_codec: HEADERS_RESPONSE header carries the "
+                                "stripped collection '") + k + "'");
+        const Hash block_hash =
+            from_hex_arr<32>(util::json_require_hex(hj, "block_hash", 64));
+        // Block::from_json requires `transactions`; pad the four stripped
+        // collections with the empty value rpc_headers removed.
+        nlohmann::json padded = hj;
+        padded.erase("block_hash");
+        for (const char* k : kHeaderHeavyKeys) padded[k] = nlohmann::json::array();
+        std::vector<uint8_t> f;
+        chain::Block::from_json(padded).encode_frame(f);
+        if (f.size() > 0xFFFFFFFFu)
+            throw std::runtime_error(
+                "binary_codec: HEADERS_RESPONSE header frame exceeds u32 length");
+        out.insert(out.end(), kHeaderFrameMagic, kHeaderFrameMagic + 4);
+        out.insert(out.end(), block_hash.begin(), block_hash.end());
+        le_put_u32(out, static_cast<uint32_t>(f.size()));
+        out.insert(out.end(), f.begin(), f.end());
+    }
+}
+
+nlohmann::json decode_headers_response_frame(const uint8_t* data, size_t len) {
+    size_t off = 0;
+    wf_need(off, 8 + 8 + 2, len, "HEADERS_RESPONSE frame");
+    const uint64_t from   = le_get_u64(data + off); off += 8;
+    const uint64_t height = le_get_u64(data + off); off += 8;
+    // The page cap FIRST (the specific reject), then the byte-budget proof —
+    // both before any allocation. A count above the server's own page cap
+    // cannot come from a conforming responder.
+    const uint16_t n = le_get_u16(data + off); off += 2;
+    if (n > kHeadersPageMax)
+        throw std::runtime_error(
+            "binary_codec: HEADERS_RESPONSE declares " + std::to_string(n)
+            + " headers, above kHeadersPageMax " + std::to_string(kHeadersPageMax));
+    if (static_cast<size_t>(n) > (len - off) / kMinHeaderRecordWire)
+        throw std::runtime_error(
+            "binary_codec: HEADERS_RESPONSE headers declares " + std::to_string(n)
+            + " elements but only " + std::to_string(len - off) + " bytes remain");
+    nlohmann::json headers = nlohmann::json::array();
+    for (uint16_t i = 0; i < n; ++i) {
+        wf_need(off, 4, len, "HEADERS_RESPONSE header magic");
+        if (std::memcmp(data + off, kHeaderFrameMagic, 4) != 0)
+            throw std::runtime_error(
+                "binary_codec: HEADERS_RESPONSE bad header frame magic (expected DHF1)");
+        off += 4;
+        Hash block_hash{};
+        wf_get_hash(data, len, off, block_hash, "HEADERS_RESPONSE block_hash");
+        wf_need(off, 4, len, "HEADERS_RESPONSE header frame length");
+        const uint32_t flen = le_get_u32(data + off); off += 4;
+        // SUBTRACTIVE bound, not `off + flen > len`: flen is a full u32 read
+        // straight off the wire, so on a build where size_t is 32 bits the
+        // additive form wraps (off=26, flen=0xFFFFFFFF sums to 25 <= len) and
+        // hands decode_frame a 4 GB window. The shipped targets are 64-bit so
+        // the additive form is sound there, but a bound on an attacker-chosen
+        // length should not depend on the width of size_t. Matches the
+        // light mirror's bfw_need and Chain::decode_state's SnRd::need.
+        if (flen > len || off > len - flen)
+            throw std::runtime_error(
+                "binary_codec: truncated HEADERS_RESPONSE header frame body");
+        chain::Block b = chain::Block::decode_frame(data + off, flen);
+        off += flen;
+        // A header carries the heavy collections EMPTY — the frame mirrors
+        // exactly what rpc_headers strips, so a record that carries any of
+        // them is a second encoding of the same header and is refused.
+        if (!b.transactions.empty() || !b.cross_shard_receipts.empty()
+            || !b.inbound_receipts.empty() || !b.initial_state.empty())
+            throw std::runtime_error(
+                "binary_codec: HEADERS_RESPONSE header frame carries a stripped "
+                "collection (transactions / receipts / initial_state must be empty)");
+        nlohmann::json h = b.to_json();
+        for (const char* k : kHeaderHeavyKeys) h.erase(k);
+        h["block_hash"] = to_hex(block_hash);
+        headers.push_back(std::move(h));
+    }
+    if (off != len)
+        throw std::runtime_error("binary_codec: HEADERS_RESPONSE frame trailing bytes");
+    nlohmann::json j;
+    j["headers"] = std::move(headers);
+    j["from"]    = from;
+    j["count"]   = static_cast<uint64_t>(n);
+    j["height"]  = height;
+    return j;
+}
+
+// ─── SNAPSHOT_RESPONSE frame (D2-inc7c) ──────────────────────────────────────
+//
+// The payload IS the DSN1 record (Chain::encode_state). The DOM is the
+// serialize_state JSON view, so encode rebuilds the Chain from the DOM and
+// decode rebuilds the DOM from the decoded Chain (module comment).
+
+void encode_snapshot_response_frame(std::vector<uint8_t>& out, const Message& m) {
+    // The A1 revalidate is the node's opt-in adoption policy, not a codec
+    // rule: the codec stays general for round-trip fixtures.
+    chain::Chain c = chain::Chain::restore_from_snapshot(m.payload,
+                                                         /*require_supply_invariant=*/false);
+    // Refuse, never clamp: encode_state would silently drop headers above
+    // the page cap, which would be a lossy (non-round-tripping) encoding.
+    if (c.height() > chain::Chain::kSnapshotHeaderMax)
+        throw std::runtime_error(
+            "binary_codec: SNAPSHOT_RESPONSE carries " + std::to_string(c.height())
+            + " tail headers, above kSnapshotHeaderMax "
+            + std::to_string(chain::Chain::kSnapshotHeaderMax));
+    std::vector<uint8_t> dsn1 = c.encode_state(chain::Chain::kSnapshotHeaderMax);
+    out.insert(out.end(), dsn1.begin(), dsn1.end());
+}
+
+nlohmann::json decode_snapshot_response_frame(const uint8_t* data, size_t len) {
+    // decode_state is fail-closed and exact-consuming (DSN1 magic, version,
+    // every count proven against the remaining bytes before allocation, the
+    // tail-header cap, the head_hash / block_index claims, S-033 state_root).
+    chain::Chain c = chain::Chain::decode_state(data, len,
+                                                /*require_supply_invariant=*/false);
+    // Every decoded tail header is re-emitted (the cap guarantees <= 256).
+    return c.serialize_state(chain::Chain::kSnapshotHeaderMax);
+}
+
 // ─── envelope ────────────────────────────────────────────────────────────────
 
 constexpr uint8_t kBinaryMagic   = 0xB1;
@@ -951,17 +1141,20 @@ std::vector<uint8_t> encode_binary(const Message& m) {
     case MsgType::CHAIN_RESPONSE:   encode_chain_response_frame(out, m);   return out;
     // D2-inc7b: the Phase-1 commit message.
     case MsgType::CONTRIB:          encode_contrib_frame(out, m);          return out;
+    // D2-inc7c: the last two — the header page and the DSN1 snapshot.
+    case MsgType::HEADERS_RESPONSE: encode_headers_response_frame(out, m); return out;
+    case MsgType::SNAPSHOT_RESPONSE:
+                                    encode_snapshot_response_frame(out, m); return out;
     default: break;
     }
 
-    // Remaining types: length-prefixed JSON inside the binary envelope.
-    // Tracked as follow-up: replace per-type with true fixed-layout frames.
-    std::string s = m.payload.dump();
-    if (s.size() > 0xFFFFFFFFu)
-        throw std::runtime_error("binary_codec: payload exceeds u32 length");
-    le_put_u32(out, static_cast<uint32_t>(s.size()));
-    out.insert(out.end(), s.begin(), s.end());
-    return out;
+    // Every declared MsgType has a fixed frame above. There is no other
+    // encoding: the length-prefixed JSON fallback is deleted (D2 inc7c), so
+    // an unknown type cannot be put on the wire at all.
+    throw std::runtime_error(
+        "binary_codec: no encoder for MsgType "
+        + std::to_string(static_cast<int>(m.type))
+        + " — every wire payload is a fixed binary frame (D2 inc7c)");
 }
 
 // Decode a Message from a binary (v1) envelope. Caller has already
@@ -1034,24 +1227,22 @@ Message decode_binary(const uint8_t* data, size_t len) {
     // D2-inc7b.
     case MsgType::CONTRIB:
         m.payload = decode_contrib_frame(body, body_len);          return m;
+    // D2-inc7c: the last two.
+    case MsgType::HEADERS_RESPONSE:
+        m.payload = decode_headers_response_frame(body, body_len); return m;
+    case MsgType::SNAPSHOT_RESPONSE:
+        m.payload = decode_snapshot_response_frame(body, body_len); return m;
     default: break;
     }
 
-    if (body_len < 4)
-        throw std::runtime_error("binary_codec: truncated payload header");
-    uint32_t plen = le_get_u32(body);
-    if (4 + static_cast<size_t>(plen) > body_len)
-        throw std::runtime_error("binary_codec: truncated payload body");
-    // S-022 / WIRE-2: bound the DOM before parsing. The pre-decode per-type
-    // cap in Message::deserialize (WIRE-1) reads the type from offset 2 —
-    // which is ATTACKER-CHOSEN. A hostile frame claiming SNAPSHOT_RESPONSE
-    // (16) or CHAIN_RESPONSE (6) buys the full 16 MB ceiling and lands here,
-    // where an unbounded json::parse reproduces the exact amplification
-    // WIRE-1 was meant to remove (measured ~52x heap on a 16 MB body of '[').
-    // The structural ceiling is what actually closes it, on both wire formats.
-    json_structural_precheck(body + 4, plen);
-    m.payload = nlohmann::json::parse(body + 4, body + 4 + plen);
-    return m;
+    // Binary-only, fail-closed: a type byte outside the 19 declared frames
+    // is REJECTED here. Pre-inc7c this fell through to the length-prefixed
+    // JSON fallback and an unknown type was fully json::parse'd under the
+    // 1 MB default cap; that path and its WIRE-2 ceiling are deleted.
+    throw std::runtime_error(
+        "binary_codec: unknown MsgType "
+        + std::to_string(static_cast<int>(m.type))
+        + " — rejected (no length-prefixed JSON fallback, D2 inc7c)");
 }
 
 } // namespace determ::net

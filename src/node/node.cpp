@@ -3927,7 +3927,10 @@ json Node::rpc_block(uint64_t index) const {
 // `count` is the *actual* number returned (clamped at the chain tail
 // and capped at HEADERS_PAGE_MAX to bound response size).
 json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
-    constexpr uint32_t HEADERS_PAGE_MAX = 256;
+    // The page cap is net::kHeadersPageMax — the SAME constant the
+    // HEADERS_RESPONSE frame decoder rejects above (D2 inc7c), so the
+    // server's clamp and the wire's ceiling cannot drift apart.
+    constexpr uint32_t HEADERS_PAGE_MAX = net::kHeadersPageMax;
     if (count > HEADERS_PAGE_MAX) count = HEADERS_PAGE_MAX;
 
     std::shared_lock<std::shared_mutex> lk(state_mutex_);

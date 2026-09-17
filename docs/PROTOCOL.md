@@ -311,7 +311,7 @@ The final values of every excluded field are bound into the **block hash** via `
 
 ### 4.4 Canonical binary container (D2-inc5)
 
-`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. **As of D2 inc7a/7b + inc8 (commit 8a106aa, 2026-08-12) they ARE the bytes on the wire and on disk:** the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) delegate to `Block::encode_frame`, and chain storage is `<path>.blocks/<i>.blk` DBK1 frames under a fixed 44-byte DMF1 manifest (`Chain::save` and the legacy `chain.json` read path are deleted). `to_json` / `from_json` remain as the non-authoritative human-readable view and for the two payloads not yet binarized (SNAPSHOT_RESPONSE, HEADERS_RESPONSE — §9.1). (Wording corrected 2026-09-14; it described the pre-inc7 state.)
+`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. **As of D2 inc7a/7b + inc8 (commit 8a106aa, 2026-08-12) they ARE the bytes on the wire and on disk:** the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) delegate to `Block::encode_frame`, and chain storage is `<path>.blocks/<i>.blk` DBK1 frames under a fixed 44-byte DMF1 manifest (`Chain::save` and the legacy `chain.json` read path are deleted). Since D2 inc7c (2026-09-16) the HEADERS_RESPONSE page wraps the same frame in DHF1 header records and SNAPSHOT_RESPONSE carries the DSN1 record whose tail headers are Block frames (§9.1), so no wire payload is JSON. `to_json` / `from_json` remain as the non-authoritative human-readable view and as the `Message::payload` DOM the codecs convert to and from. (Wording corrected 2026-09-14 and 2026-09-16.)
 
 **The theorem is information equivalence with the JSON container, not field-for-field round-trip:**
 
@@ -754,39 +754,48 @@ Payload encodings, all fail-closed with exact consumption:
 
   **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests the receiver **derives** from the `(kind, index, body_root)` openings carried in the message (§6.1) — never against a digest the message states. No digest, signature or block hash changed when these types left the JSON path. (The later EQV-height-bind restructure — §4.3/§6, 2026-08-12 — *did* change every block-digest and contrib-commitment value; that is a separate, pre-genesis change to the hash preimages, not to this container.)
 
-* **The remaining two types** — `[u32 LE json_len][json_bytes]` (the per-type JSON payload inside the binary envelope): SNAPSHOT_RESPONSE and HEADERS_RESPONSE (D2 inc7c, open). BLOCK, CONTRIB, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP and CROSS_SHARD_RECEIPT_BUNDLE are true binary frames since inc7a/7b (commit 8a106aa), all delegating to `Block::encode_frame` (§4.4). The WIRE-2 structural ceiling below stays live until the last two are gone. (Wording corrected 2026-09-14; it described the pre-inc7 state.)
+* **Block-carrying frames (D2 inc7a/7b, commit 8a106aa)** — BLOCK and BEACON_HEADER are the `Block::encode_frame` bytes (§4.4) and nothing else; SHARD_TIP is `[shard_id u32 LE][Block frame to end]` (decoded with `allow_witnesses=false` — a tip is a leaf); CROSS_SHARD_RECEIPT_BUNDLE is `[src_shard u32 LE][Block frame to end]`; CHAIN_RESPONSE is `[has_more u8 ∈ {0,1}][count u16 LE][count × [frame_len u32 LE][Block frame]]`; CONTRIB is the always-present field layout of `ContribMsg` (`src/net/binary_codec.cpp`, "PAYLOAD: CONTRIB").
+
+* **The last two (D2 inc7c, 2026-09-16)** — no wire payload is JSON any more; the `[u32 LE json_len][json_bytes]` fallback and the WIRE-2 structural JSON ceiling that guarded it are deleted, and a type byte outside the 19 declared frames is rejected on both encode and decode.
+
+| Type | Frame |
+|---|---|
+| `HEADERS_RESPONSE` | `[from u64 LE][height u64 LE][count u16 LE]` then `count` × DHF1 header record: `[magic 'D','H','F','1'][block_hash 32 B][frame_len u32 LE][Block frame]`. `count ≤ 256` (`kHeadersPageMax`, the same constant `rpc_headers` clamps to) and is proven against the remaining bytes (`count × 337`, the smallest record) before any allocation; the Block frame is `Block::encode_frame` with the four heavy collections (`transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state`) EMPTY — a record carrying any of them is rejected, so a header has exactly one encoding; `block_hash` is the served `compute_hash()` (carried data — a stripped header cannot recompute it; not a trust anchor, §10.2 `headers`). The payload DOM is the `rpc_headers` envelope `{headers, from, count, height}`. |
+| `SNAPSHOT_RESPONSE` | the DSN1 snapshot record verbatim — `Chain::encode_state(header_count)`: magic `'D','S','N','1'`, version u32 = 1, the 194-byte scalar block (block_index, head_hash, the genesis-pinned constants, the A1 counters), 16 counted state sections (u32 counts, each proven against the remaining bytes before allocation) and ≤ 256 tail headers as `[frame_len u32 LE][Block frame]` (`src/chain/chain.cpp`, "DSN1: the canonical binary snapshot container"). One snapshot layout on the wire and at rest: the decoder IS `Chain::decode_state` (bad magic, version ≠ 1, truncation, count lies, trailing bytes, a tail-header count above 256, a head_hash / block_index claim that does not match the tail, and an S-033 state_root mismatch all reject at the pre-auth decode boundary); the A1 supply revalidate stays the node's opt-in adoption policy. The payload DOM is the `serialize_state` view. |
+
+  Both are gated by `determ test-headers-frame-codec` / `test-snapshot-response-frame-codec` (round-trip == the builder DOM, canonical fixed point, every fail-closed arm, vector pins) and mirrored independently by `determ-light decode-wire`.
 
 **Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. A pre-decode per-type cap fires in `Message::deserialize` (WIRE-1 — the type byte is readable in the clear at offset 2), and the same per-type cap is re-applied after deserialize in `Peer::read_body`:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
 * **4 MB** — bulk payload: BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, HEADERS_RESPONSE.
 * **16 MB** — bootstrap-only: SNAPSHOT_RESPONSE, CHAIN_RESPONSE.
-Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table. JSON payloads inside the envelope are additionally bounded pre-parse by the WIRE-2 structural ceiling (`kMaxJsonDepth` / `kMaxJsonNodes`).
+Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table. Every payload is a fixed binary frame whose decoder proves each count against the bytes that remain before it allocates, so the work a body can buy is linear in its size (the WIRE-2 structural JSON ceiling that bounded the deleted length-prefixed JSON payloads retired with them, D2 inc7c).
 
 ### 9.2 Message types
 
-The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. Eleven of the nineteen types travel as fixed binary frames (§9.1) — HELLO, TRANSACTION, the five request/status types and the four consensus-chatter types; the remaining eight currently travel as length-prefixed JSON inside the binary envelope.
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. All nineteen types travel as fixed binary frames (§9.1); the Payload column names the DOM each frame carries for the handlers (the `to_json` view of the struct — a non-authoritative view, never the wire bytes).
 
 | ID | Name | Direction | Body cap | Payload |
 |---|---|---|---|---|
 | 0  | HELLO                     | initial handshake | 1 MB  | fixed binary frame: `{domain, port, role, shard_id, wire_version}` (§9.1); `wire_version` is an advertisement — the additive post-genesis upgrade escape hatch |
-| 1  | BLOCK                     | gossip            | 4 MB  | `Block` JSON |
+| 1  | BLOCK                     | gossip            | 4 MB  | the canonical `Block` frame (§4.4, §9.1) |
 | 2  | TRANSACTION               | gossip            | 1 MB  | binary tx frame (§9.1; optional pq_auth section for PQ_TRANSFER) |
 | 3  | BLOCK_SIG                 | committee         | 1 MB  | fixed binary frame `{block_index, signer, delay_output, dh_secret, ed_sig}` (§9.1; Phase 2: digest sig + dh_secret reveal) |
-| 4  | CONTRIB                   | committee         | 1 MB  | `ContribMsg` JSON (Phase 1: tx_commit + dh_input + ed sig) |
+| 4  | CONTRIB                   | committee         | 1 MB  | fixed binary frame — the always-present `ContribMsg` layout (§9.1; Phase 1: tx_commit + dh_input + ed sig) |
 | 5  | GET_CHAIN                 | sync              | 1 MB  | fixed frame `{from, count}` (§9.1) |
-| 6  | CHAIN_RESPONSE            | sync              | 16 MB | `{blocks, has_more}` (bootstrap-only) |
+| 6  | CHAIN_RESPONSE            | sync              | 16 MB | fixed frame `[has_more][count][count × Block frame]` (§9.1) — DOM `{blocks, has_more}` (bootstrap-only) |
 | 7  | STATUS_REQUEST            | sync              | 1 MB  | fixed frame, zero-length (§9.1) |
 | 8  | STATUS_RESPONSE           | sync              | 1 MB  | fixed frame `{height, genesis}` (§9.1; `genesis` may be empty on an empty chain); peer-discovery only — role/shard_id come from HELLO |
 | 9  | ABORT_CLAIM               | committee         | 1 MB  | fixed binary frame — the shared one-claim `encode_abort_claims` blob (§9.1, §5.4) |
 | 10 | ABORT_EVENT               | gossip            | 1 MB  | fixed binary frame `{block_index, prev_hash, event}` (§9.1; event carries inline signed claims) |
 | 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | fixed binary frame — the `EquivocationEvent` fields (§9.1) |
-| 12 | BEACON_HEADER             | beacon→shard      | 4 MB  | `Block` JSON (beacon block; shard verifies K-of-K from prior-verified pool) |
-| 13 | SHARD_TIP                 | shard→beacon      | 4 MB  | `{shard_id, tip}` where `tip` is a full `Block` JSON |
-| 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `{src_shard, src_block}` (full source block for independent K-of-K verify) |
+| 12 | BEACON_HEADER             | beacon→shard      | 4 MB  | the canonical `Block` frame (beacon block; shard verifies K-of-K from prior-verified pool) |
+| 13 | SHARD_TIP                 | shard→beacon      | 4 MB  | `[shard_id u32][Block frame]` (leaf only) — DOM `{shard_id, tip}` |
+| 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `[src_shard u32][Block frame]` — DOM `{src_shard, src_block}` (full source block for independent K-of-K verify) |
 | 15 | SNAPSHOT_REQUEST          | client→peer       | 1 MB  | fixed frame `{headers}` (§9.1) |
-| 16 | SNAPSHOT_RESPONSE         | peer→client       | 16 MB | serialized chain-state JSON (bootstrap-only) |
+| 16 | SNAPSHOT_RESPONSE         | peer→client       | 16 MB | the DSN1 snapshot record verbatim (§9.1; bootstrap-only) — DOM = the `serialize_state` view |
 | 17 | HEADERS_REQUEST           | client→peer       | 1 MB  | fixed frame `{from, count}` (§9.1) — v2.2 light-client header-slice request |
-| 18 | HEADERS_RESPONSE          | peer→client       | 4 MB  | `{headers, from, count, height}` — same envelope as the `headers` RPC; light clients consume gossip vs RPC interchangeably |
+| 18 | HEADERS_RESPONSE          | peer→client       | 4 MB  | fixed frame `[from][height][count][count × DHF1 header record]` (§9.1) — DOM `{headers, from, count, height}`, the same envelope as the `headers` RPC; light clients consume gossip vs RPC interchangeably |
 
 ### 9.3 Role-based filter
 Cross-role traffic is restricted by the receiving peer:
