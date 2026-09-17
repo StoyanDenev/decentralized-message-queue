@@ -443,6 +443,21 @@ if(DETERM_BUILD_CRYPTOTEST)
   endif()
 endif()
 
+# ── determ-dsso: the DSSO identity service (dapps/dsso) ───────────────────────
+# "Sign-In With Determ" runs OFF the chain: it consumes EUDI Wallet identity
+# presentations, authenticates users and asserts to its own relying parties.
+# Those formats (JSON/base64url, CBOR) are external interop requirements, so the
+# service is a SEPARATE binary linking only determ-crypto-c99 — no chain object
+# is reachable from it, which is what keeps the canonical-binary rule intact for
+# consensus while DSSO speaks what the EUDI specifications mandate.
+add_executable(determ-dsso
+  dapps/dsso/dsso.c
+  dapps/dsso/dsso_main.c
+)
+target_compile_features(determ-dsso PRIVATE c_std_99)
+target_include_directories(determ-dsso PRIVATE include dapps/dsso)
+target_link_libraries(determ-dsso PRIVATE determ-crypto-c99)
+
 # ── d5rp: the D.5 reference-RP producer (dapps/d5-random-selection, BUSL-1.1) ──
 # The orchestrator side of D.5 (the founding MOTIVATION.md use case; dapps
 # catalog first DApp). Produces the three canonical-binary DAPP_CALL streams

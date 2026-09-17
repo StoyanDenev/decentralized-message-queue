@@ -156,6 +156,25 @@ else
     DETERM_DSF=""
 fi
 
+# Test-only fifth binary: the DSSO identity service (dapps/dsso). Off-chain by
+# construction — it links only determ-crypto-c99, so no consensus path is
+# reachable from the code that parses external identity formats.
+if [ -n "${DETERM_DSSO_BIN:-}" ]; then
+    DETERM_DSSO="$DETERM_DSSO_BIN"
+elif [ -x "build/Release/determ-dsso.exe" ]; then
+    DETERM_DSSO="build/Release/determ-dsso.exe"
+elif [ -x "build/determ-dsso.exe" ]; then
+    DETERM_DSSO="build/determ-dsso.exe"
+elif [ -x "build/determ-dsso" ]; then
+    DETERM_DSSO="build/determ-dsso"
+elif [ -x "build-linux/determ-dsso" ]; then
+    DETERM_DSSO="build-linux/determ-dsso"   # tools/ci_local.sh tree (Linux/macOS)
+elif [ -x "build/Release/determ-dsso" ]; then
+    DETERM_DSSO="build/Release/determ-dsso"
+else
+    DETERM_DSSO=""
+fi
+
 # ── Absolutize binary paths (Windows Python-subprocess portability) ────────────
 # The detection above yields paths RELATIVE to the repo root (e.g.
 # build/Release/determ.exe). Bash resolves a relative-with-slash path against

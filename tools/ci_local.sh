@@ -224,9 +224,9 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "=== ci_local: configure ==="
   cmake -B "$BUILD_DIR" -S . -DCMAKE_BUILD_TYPE=Release || {
     echo "FAIL: ci-local configure failed"; exit 1; }
-  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-cryptotest + determ-dsf + d5rp ==="
+  echo "=== ci_local: build determ + determ-wallet + determ-light + determ-cryptotest + determ-dsf + d5rp + determ-dsso ==="
   cmake --build "$BUILD_DIR" --config Release -j "$JOBS" \
-        --target determ determ-wallet determ-light determ-cryptotest determ-dsf d5rp || {
+        --target determ determ-wallet determ-light determ-cryptotest determ-dsf d5rp determ-dsso || {
     echo "FAIL: ci-local build failed"; exit 1; }
 fi
 
@@ -253,7 +253,10 @@ if DETERM_DSF_BIN=$(find_bin determ-dsf); then export DETERM_DSF_BIN; fi
 # d5rp is the D.5 reference-RP producer (dapps/, BUSL). Export the NATIVE build so
 # its FAST selftest wrapper doesn't pick a Windows d5rp.exe via WSL interop.
 if DETERM_D5RP_BIN=$(find_bin d5rp); then export DETERM_D5RP_BIN; fi
-echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} | ${DETERM_D5RP_BIN:-<d5rp: not built>} ==="
+# determ-dsso is the DSSO identity service (dapps/dsso). Same reason: export the
+# NATIVE build so its FAST gates never pick a Windows binary via WSL interop.
+if DETERM_DSSO_BIN=$(find_bin determ-dsso); then export DETERM_DSSO_BIN; fi
+echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} | ${DETERM_D5RP_BIN:-<d5rp: not built>} | ${DETERM_DSSO_BIN:-<dsso: not built>} ==="
 
 echo "=== ci_local: FAST=1 suite ==="
 FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; exit 1; }
