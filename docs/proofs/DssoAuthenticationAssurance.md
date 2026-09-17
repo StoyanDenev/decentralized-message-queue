@@ -164,7 +164,7 @@ The module reads no clock and draws no randomness: `now` is a parameter of every
 
 ## 8. The gate
 
-`determ-dsso selftest-authn` (`tools/test_dsso_authn.sh`, FAST) — **115 assertions**:
+`determ-dsso selftest-authn` (`tools/test_dsso_authn.sh`, FAST) — **114 assertions**:
 
 - **A (16)** state init (an all-zero server-side session secret is refused; the deployment's server set is installed once rather than passed per call) and the possession primitive: two seeds give two keys; the same seed reproduces its key; sign/verify round trip; a proof for another challenge, under another key, with a flipped proof byte or a flipped response byte is rejected; a malformed public key is rejected rather than dereferenced; NULL arguments fail closed.
 - **B (8)** enrolment: fail-closed with no verifier; refused with no presentation; accepted with a verified one; the account reports ACTIVE/SUBSTANTIAL; a presentation cannot be replayed into a second account; an existing account cannot be re-enrolled over.

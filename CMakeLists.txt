@@ -14,12 +14,19 @@ set(CMAKE_C_STANDARD 11)
 option(DETERM_UBSAN "Instrument Determ's own targets with UBSan (GCC/Clang)" OFF)
 
 # ── DETERM_ASAN: the memory-safety companion to DETERM_UBSAN. Same target-scoped
-# discipline (only determ + determ-crypto-c99, vendored deps left uninstrumented
-# so the OpenSSL tree still caches). AddressSanitizer catches the heap/lifetime
-# class UBSan does not — use-after-free, heap-buffer-overflow, and re-entrant
-# container mutation during destruction (e.g. the net/scheduler teardown paths:
-# the VirtualEventLoop timer/closure queues drained under lock at ~dtor). GCC/
-# Clang only; wired into tools/ci_local.sh --asan.
+# discipline (only determ + determ-crypto-c99 + determ-dsso, vendored deps left
+# uninstrumented so the OpenSSL tree still caches). AddressSanitizer catches the
+# heap/lifetime class UBSan does not — use-after-free, heap-buffer-overflow, and
+# re-entrant container mutation during destruction (e.g. the net/scheduler
+# teardown paths: the VirtualEventLoop timer/closure queues drained under lock at
+# ~dtor) — and, for determ-dsso, the STACK class: its bounded external-format
+# readers allocate NOTHING, so every buffer a hostile wallet reaches is an
+# automatic array, and only -fsanitize=address ON THOSE TRANSLATION UNITS makes
+# an overflow of one observable. Instrumenting determ-dsso is therefore not a
+# formality: linking an instrumented determ-crypto-c99 leaves the dapps/dsso
+# parsers invisible. The determ-dsso instrumentation is applied where that target
+# is defined (it does not exist yet at this point in the file). GCC/Clang only;
+# wired into tools/ci_local.sh --asan.
 option(DETERM_ASAN "Instrument Determ's own targets with ASan (GCC/Clang)" OFF)
 
 include(FetchContent)
@@ -468,6 +475,19 @@ add_executable(determ-dsso
 target_compile_features(determ-dsso PRIVATE c_std_99)
 target_include_directories(determ-dsso PRIVATE include dapps/dsso)
 target_link_libraries(determ-dsso PRIVATE determ-crypto-c99)
+
+# ASan over the bounded parsers (see the DETERM_ASAN option at the top of this
+# file). This is the ONE place it can be applied — the option block runs long
+# before this target exists. determ-crypto-c99's INTERFACE link option already
+# pulls the runtime in; what is added here is the COMPILE instrumentation, and
+# without it dapps/dsso's stack buffers (its readers allocate nothing) are not
+# checked at all. -O1 + frame pointers for the same reason as the other two
+# instrumented targets: readable reports at a bounded per-TU compiler cost.
+if(DETERM_ASAN)
+  target_compile_options(determ-dsso PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_link_options(determ-dsso PRIVATE -fsanitize=address)
+  message(STATUS "DETERM_ASAN: determ-dsso instrumented with ASan (-O1)")
+endif()
 
 # ── d5rp: the D.5 reference-RP producer (dapps/d5-random-selection, BUSL-1.1) ──
 # The orchestrator side of D.5 (the founding MOTIVATION.md use case; dapps

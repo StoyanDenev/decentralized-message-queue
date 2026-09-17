@@ -445,9 +445,16 @@ signer agreeing with a C verifier". The generated vectors are committed as
 `dapps/dsso/dsso_pid_vectors.h` rather than under `tools/vectors/`, because
 `determ-dsso` has no file IO and no fixture-path resolution, and because reading a
 JSON corpus in order to test a JSON reader would make the gate depend on the thing
-it tests. **The generator itself lives with the increment's audit record, not in
-the repository**, so the committed vectors are frozen data; regenerating them
-requires that generator.
+it tests. **The generator is committed as
+[`tools/gen_dsso_pid_vectors.py`](../../tools/gen_dsso_pid_vectors.py)** (added
+2026-09-17; the PID increment had left it outside the repository, so the vectors
+were frozen data nobody could regenerate). Running
+`python3 tools/gen_dsso_pid_vectors.py` from the repository root rewrites
+`dapps/dsso/dsso_pid_vectors.h` in place; the run is deterministic — every secret
+scalar, salt and nonce is a fixed constant and ECDSA `k` is RFC 6979 — so an
+empty `git diff` afterwards is the check that the committed vectors are the ones
+that generator produces. The generator re-runs its own RFC 6979 A.2.5 anchor and
+its OpenSSL cross-check before it writes, and fails rather than skipping either.
 
 **Independently of the generator**, the ES256 verifier is asserted directly
 against the RFC 6979 A.2.5 vectors inside the gate, together with the rejections
@@ -461,7 +468,9 @@ scrub; the trust-anchor provenance pair (empty list → `DSSO_E_TRUST`, bent key
 `DSSO_E_CRYPTO`); the binding rules with their rejections; the pseudonym
 properties.
 
-**Fuzz arms — 6900 mutated inputs.**
+**Fuzz arms — 8400 mutated inputs.** (Recorded as 6900 until 2026-09-17: that figure
+omitted the zlib corpus. The four counts below are the loops in
+`dapps/dsso/dsso_selftest_pid.c` and the gate prints each one.)
 
 | Corpus | Count | Property asserted |
 |---|---|---|
@@ -546,12 +555,18 @@ login path's business, not this module's.
    is a configured array; populating it from an ETSI TS 119 612 Trusted List is a
    deployment act with its own (unwritten) code.
 6. **The gate does not prove memory safety, it evidences it.** The fuzz arms show
-   a definite verdict, untouched guard bytes and no crash over 6900 inputs; they
+   a definite verdict, untouched guard bytes and no crash over 8400 inputs; they
    cannot observe an out-of-bounds *read*. That property is argued structurally —
    every loop is bounded by its slice length, recursion by `DSSO_JSON_MAX_DEPTH`,
-   and nothing allocates — and would be caught by a sanitizer build.
-   `tools/ci_local.sh --asan` does **not** currently build `determ-dsso`; wiring
-   it in is a named follow-up, not something this increment did.
+   and nothing allocates. **Since 2026-09-17 a sanitizer build also runs it:**
+   `tools/ci_local.sh --asan` builds `determ-dsso` with `-fsanitize=address` on
+   `dapps/dsso`'s own translation units (the readers allocate nothing, so only
+   compile-side instrumentation makes their stack buffers observable) and runs all
+   four selftests, fuzz corpus included. That is evidence, not proof: ASan reports
+   what the corpus actually executes. The first run found **no defect**; a
+   deliberate one-byte over-read introduced into `dsso_b64url_decode` was reported
+   as `stack-buffer-overflow` while the same mutant passed the uninstrumented gate
+   green — which is what makes the leg worth having.
 7. **The status-list fetch is a callback, not a transport.** Nothing here does
    TLS, caching, retry, or Trusted-List discovery, and the security of the fetch
    path itself is the deployment's problem. What is proved is that every way the

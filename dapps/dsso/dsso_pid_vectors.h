@@ -1,13 +1,21 @@
 /* dsso_pid_vectors.h — GENERATED TEST DATA for `determ-dsso selftest-pid`.
  *
- * DO NOT EDIT. Produced by the fixture generator kept with the increment's
- * audit record (/root/audit/dsso/pid/gen_pid_vectors.py), whose P-256 ECDSA
- * is an INDEPENDENT pure-Python implementation: it is anchored to the
- * RFC 6979 A.2.5 known-answer vectors and every signature emitted here is
- * additionally re-verified against OpenSSL before it is written out. So the
- * accept case in the gate is three implementations agreeing (this one,
- * OpenSSL, and the C verifier under test), not a C signer agreeing with a C
- * verifier.
+ * DO NOT EDIT — REGENERATE. This file is written by
+ *     python3 tools/gen_dsso_pid_vectors.py
+ * run from the repository root; that generator's header states what each
+ * fixture is for and how to check a regeneration (the run is deterministic,
+ * so `git diff` after it must be empty unless the fixtures were meant to
+ * change). Editing this file by hand desynchronizes it from the generator
+ * and from the anchors below.
+ *
+ * ANCHORS. The generator's P-256 ECDSA is an INDEPENDENT pure-Python
+ * implementation: it is anchored to the RFC 6979 A.2.5 known-answer
+ * vectors and every signature emitted here is additionally re-verified
+ * against OpenSSL before it is written out. So the accept case in the gate
+ * is three implementations agreeing (the generator, OpenSSL, and the C
+ * verifier under test), not a C signer agreeing with a C verifier. The gate
+ * ALSO checks dsso_es256_verify against those same published RFC 6979
+ * vectors directly, so the C verifier does not depend on the generator.
  *
  * The data is inline here rather than under tools/vectors/ on purpose: the
  * determ-dsso binary has no file IO and no fixture-path resolution, and

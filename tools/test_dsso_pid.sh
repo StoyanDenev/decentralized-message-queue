@@ -30,7 +30,7 @@
 # plus the account-binding rules (a session alone never authorises a binding; one
 # subject, one account; no reuse of a presentation), a pseudonym derivation that a
 # database leak does not turn into an identity list, and fuzz arms over the three
-# readers a hostile wallet reaches (6900 mutated inputs in total).
+# readers a hostile wallet reaches (8400 mutated inputs in total).
 #
 # PASSING THIS GATE IS NOT A COMPLIANCE CLAIM. The wallet-relying-party ACCESS
 # CERTIFICATE (ARF RPA_01..RPA_06) and registration with a Member State registrar

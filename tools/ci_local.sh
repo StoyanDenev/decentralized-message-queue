@@ -14,9 +14,9 @@
 #   tools/ci_local.sh [--build-dir DIR] [--skip-build] [--jobs N]
 #   tools/ci_local.sh --sanitize [--jobs N]   # UBSan pass over the consensus
 #                                             # surface (Linux/GCC-only, heavier)
-#   tools/ci_local.sh --asan [--jobs N]       # ASan pass over the in-process
-#                                             # net/scheduler surface (memory
-#                                             # safety; Linux/GCC-only, heavier)
+#   tools/ci_local.sh --asan [--jobs N]       # ASan over the in-process net/
+#                                             # scheduler surface + the determ-dsso
+#                                             # parsers (Linux/GCC-only, heavier)
 #   tools/ci_local.sh --help
 #
 # From Windows, run it inside WSL2:
@@ -167,7 +167,10 @@ fi
 # Same target-scoped discipline (-DDETERM_ASAN=ON instruments only Determ's own
 # targets; OpenSSL/asio/json stay uninstrumented and cached). Runs the in-process
 # net/scheduler/consensus subcommands — the ones that build+destroy real Nodes,
-# loops, and transports in-process, where a lifetime bug actually executes.
+# loops, and transports in-process, where a lifetime bug actually executes — AND
+# (added 2026-09-17) the determ-dsso selftests, because that binary holds the only
+# parsers in the tree that face attacker-supplied external formats and no
+# sanitizer had ever been run over them.
 # Linux/GCC-only, OPT-IN (heavier than the fast gate), not part of the default pass.
 if [ "$ASAN" -eq 1 ]; then
   ASAN_DIR="build-linux-asan"
@@ -180,14 +183,27 @@ if [ "$ASAN" -eq 1 ]; then
   # Exit-code gate + logged output (same fix as the UBSan path above — the
   # grep-gate both swallowed real diagnostics and could false-green a failure
   # whose output matched nothing).
-  if ! cmake --build "$ASAN_DIR" --config RelWithDebInfo -j "$ASAN_JOBS" --target determ \
-       >"$ASAN_DIR/build-determ.log" 2>&1; then
-    echo "FAIL: ASan build error — last 30 log lines:"
-    tail -30 "$ASAN_DIR/build-determ.log"
-    exit 1
-  fi
+  # Targets built SEQUENTIALLY (same OOM reason as the --sanitize loop above:
+  # the instrumented main.cpp link peaks several GB and must not overlap another
+  # link). determ-dsso is the SECOND target: it is the binary that parses
+  # attacker-supplied external formats (base64url / JSON / JOSE / DEFLATE, and
+  # the nine PID rules on top of them), and until 2026-09-17 NO sanitizer had
+  # ever run over it — the fuzz arms inside `selftest-pid` observe a definite
+  # status and untouched guard bytes, which cannot see an out-of-bounds READ.
+  # Its readers allocate nothing, so the instrumentation that matters is the
+  # COMPILE-side one applied to the target in CMakeLists.txt.
+  for tgt in determ determ-dsso; do
+    if ! cmake --build "$ASAN_DIR" --config RelWithDebInfo -j "$ASAN_JOBS" --target "$tgt" \
+         >"$ASAN_DIR/build-$tgt.log" 2>&1; then
+      echo "FAIL: ASan build error ($tgt) — last 30 log lines:"
+      tail -30 "$ASAN_DIR/build-$tgt.log"
+      exit 1
+    fi
+  done
   ASANBIN=$(find "$ASAN_DIR" -maxdepth 2 -name determ -type f -perm -u+x | head -1)
   [ -x "$ASANBIN" ] || { echo "FAIL: ASan determ binary not found"; exit 1; }
+  ASANBIN_DSSO=$(find "$ASAN_DIR" -maxdepth 2 -name determ-dsso -type f -perm -u+x | head -1)
+  [ -x "$ASANBIN_DSSO" ] || { echo "FAIL: ASan determ-dsso binary not found"; exit 1; }
   # abort_on_error=1 turns any ASan report into a non-zero exit the loop below
   # catches; detect_leaks=0 (the daemon subcommands intentionally leave some
   # process-lifetime singletons — leaks are out of scope for this teardown gate).
@@ -208,7 +224,21 @@ if [ "$ASAN" -eq 1 ]; then
       asan_fail=1
     fi
   done
-  [ "$asan_fail" -eq 0 ] && { echo ""; echo "PASS: ci-local --asan (ASan) clean over the in-process net/scheduler surface"; exit 0; }
+  # The DSSO service's own selftests, on the instrumented determ-dsso. selftest-pid
+  # carries the 8400-input fuzz corpus over the four readers a hostile wallet
+  # reaches, so running it here is what turns "no crash, guard bytes untouched"
+  # into "no out-of-bounds access"; the other three cover the assertion, the
+  # authentication state machine and the shared core.
+  for cmd in selftest-core selftest-assertion selftest-pid selftest-authn; do
+    if "$ASANBIN_DSSO" "$cmd" >/tmp/asan_out.txt 2>&1; then
+      echo "  PASS(asan): $cmd [determ-dsso]"
+    else
+      echo "  FAIL(asan): $cmd [determ-dsso]"
+      grep -iE "ERROR: AddressSanitizer|stack-buffer-overflow|heap-use-after-free|heap-buffer-overflow|SUMMARY|freed by" /tmp/asan_out.txt | head -5
+      asan_fail=1
+    fi
+  done
+  [ "$asan_fail" -eq 0 ] && { echo ""; echo "PASS: ci-local --asan (ASan) clean over the in-process net/scheduler surface + the determ-dsso external-format readers"; exit 0; }
   echo ""; echo "FAIL: ci-local --asan (ASan) found a memory-safety error"; exit 1
 fi
 
