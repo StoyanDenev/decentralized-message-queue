@@ -104,7 +104,8 @@ rule, exit rule, rotation, small-order rule); (6) pq_auth rule + block-byte cap 
 identity in signing_bytes (the last transaction-frame changes); (7) R-8 C0 demotion -> S-089
 -> S-090 rebroadcast; (8) CT verification off the lock; (9) the EXTENDED closure set;
 (10) D2 inc7c in PARALLEL from step 3, D2 step 1b + step 4 AFTER step 9; (11) the
-node-/client-local backlog interleaved by severity from step 3 (S-078 first); (12) cluster
+node-/client-local backlog interleaved by severity from step 3 (S-078 first — LANDED
+2026-09-16); (12) cluster
 gates + TLA into ci_local, the C2 sweep; (13) B4 DROP execution last; launch predicate.
 Every consensus/apply/wire/genesis increment: design-and-prove -> independent adversarial
 review -> falsify-on-mutant gate at the layer where the rule lives -> ci_local -> review of
@@ -548,7 +549,8 @@ measured evidence and approved by the owner at review (D24):
   G6  The EXTENDED closure set (D16): S-093, S-094, R-3, S-064/B3.4, S-088, S-036, S-081, S-096;
       D19b-ii sharding_mode genesis pin lands with the first genesis-hash-changing increment here.
 NODE-/CLIENT-LOCAL BACKLOG (D19a, no accept-rule change; each its own gate + review), by
-severity: S-078, S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
+severity: S-078 (LANDED 2026-09-16 — Chain::load seeds every genesis parameter before the
+replay via Chain::Params; gate test-chain-load-genesis-params), S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
 S-091 (with the D2 src-side keyfile increment), S-063 (delivery layer, D18a). S-102 was
 ADJUDICATED + CLOSED 2026-09-16 (step 3, before R-8): reachable at HEAD by a relayer's zero-key
 state_root relabel of the head (outside the digest and every validator rule); the depth-1 reorg

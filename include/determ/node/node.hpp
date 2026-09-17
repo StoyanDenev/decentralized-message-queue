@@ -539,6 +539,11 @@ public:
     }
     bool     stalled_resync_for_test() const { return stalled_resync_; }
     uint64_t status_requests_sent_for_test() const { return status_requests_sent_; }
+    // S-078 seam for `determ test-chain-load-genesis-params`: read the chain
+    // the constructor built (store replay via Chain::load with the genesis
+    // parameter set, or genesis bootstrap) so the gate can compare its
+    // parameters and state_root against the producer's. Read-only.
+    const chain::Chain& chain_for_test() const { return chain_; }
     // rev.9 B5: external submission of equivocation evidence. Forensics
     // tools and governance scripts can submit EquivocationEvent JSON
     // assembled off-chain (e.g., from log scraping that observed two

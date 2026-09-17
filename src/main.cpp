@@ -1557,6 +1557,17 @@ Additional in-process tests:
                                               graceful stop, and CS-8 — a valid
                                               legacy chain.json with no manifest
                                               loads EMPTY (no JSON resurrection).
+  determ test-chain-load-genesis-params       S-078: Chain::load seeds EVERY
+                                              genesis parameter (Chain::Params)
+                                              BEFORE the store replay. A chain
+                                              non-default in all 11 economic /
+                                              profile fields + the salt reloads
+                                              (Chain and node::Node paths) with
+                                              equal height / head / state_root /
+                                              getters; per-parameter fault
+                                              injection throws S-033; the
+                                              governance-activated MIN_STAKE
+                                              survives the restart.
   determ test-block-validator-basic           BlockValidator consensus-validation
                                               entry via public validate() —
                                               genesis short-circuits OK; bad
@@ -13024,13 +13035,12 @@ int main(int argc, char** argv) {
             for (auto& b : c.ed_pub) b = fill;
             return c;
         };
-        // Stakes >= the DEFAULT min_stake (1000). We deliberately leave min_stake
-        // at its default so the Chain::load reload path (which does not thread
-        // min_stake and defaults it to 1000) freezes the SAME eligible set the
-        // producer did — modelling the supported EXTENDED config. A non-default
-        // min_stake chain has the same reload constraint as ANY non-default
-        // min_stake chain (the pre-existing min_stake const_leaf, not D3.3b; see
-        // ShardTipMergeDesign.md §9.3).
+        // Stakes >= the DEFAULT min_stake (1000). min_stake is left at its
+        // default here because this test reloads through the six-field
+        // Chain::load convenience overload (every other Params field default),
+        // so the reload freezes the SAME eligible set the producer did. A
+        // non-default min_stake chain reloads through the full Chain::Params
+        // (S-078; gate test-chain-load-genesis-params), which the node uses.
         cfg.initial_creators = { mk_creator("alice", 0x11, 2000),
                                  mk_creator("bob",   0x22, 2000),
                                  mk_creator("carol", 0x33, 2000) };
@@ -50646,6 +50656,408 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-save-load "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-078 (D19a backlog item 1, DECISION-LOG 2026-09-16): Chain::load seeds
+    // EVERY genesis-pinned parameter before the store replay. Before the fix
+    // the replay chain carried the in-class defaults for min_stake,
+    // suspension_slash, unstake_delay, the three merge thresholds,
+    // crypto_profile, subsidy_mode, subsidy_pool_initial and
+    // lottery_jackpot_multiplier — all `k:` state-root leaves — so the first
+    // restart of any chain whose genesis differed from the defaults threw
+    // S-033 on the first replayed block that declared a state_root; the node's
+    // setters ran only AFTER load. The gate builds a chain whose genesis is
+    // non-default in every one of those fields (plus block_subsidy and the
+    // shard salt), applies six blocks with declared state_roots the way the
+    // producer computes them (one carries a governance PARAM_CHANGE that
+    // activates in the next block), saves the store, and then:
+    //   CL-*  reloads it through Chain::load with the SAME Chain::Params the
+    //         node derives from that genesis — no throw, height / head_hash /
+    //         state_root / every parameter getter equal to the producer's, and
+    //         one more valid block appends on the reloaded chain;
+    //   NL-*  constructs a node::Node on the store + the saved genesis file
+    //         (the real restart path: the constructor's Chain::load call) and
+    //         reads the chain back through the chain_for_test seam; a second
+    //         node bootstraps the same genesis with NO store and must seed the
+    //         identical parameter set (the live chain and the replay chain are
+    //         seeded from one struct);
+    //   FI-*  per-parameter fault injection: for EACH leaf parameter, a load
+    //         with that ONE field at its default throws the S-033 message —
+    //         the positive control that each field is a live leaf the replay
+    //         depends on; epoch_blocks / k_block_sigs are NOT leaves and are
+    //         only checked to be seeded (no throw is asserted for them);
+    //   GV-*  the governance-activated MIN_STAKE survives the restart (no
+    //         post-load reset to the genesis value).
+    if (cmd == "test-chain-load-genesis-params") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        const crypto::NodeKey alice_key = mk_key(0x40);
+        const crypto::NodeKey bob_key   = mk_key(0x50);
+        const Chain::Params   dflt{};   // == the in-class Chain defaults
+
+        // The genesis: NON-default in every replay-relevant field.
+        GenesisConfig g;
+        g.chain_id                   = "chain-load-genesis-params";
+        g.m_creators                 = 1;
+        g.k_block_sigs               = 1;
+        g.block_subsidy              = 11;
+        g.subsidy_pool_initial       = 100;   // E4 cap: drains during the fixture
+        g.subsidy_mode               = 1;     // E3 LOTTERY
+        g.lottery_jackpot_multiplier = 3;
+        g.min_stake                  = 250;
+        g.crypto_profile             = CryptoProfile::FIPS;   // the tactical/cluster profiles
+        g.suspension_slash           = 19;
+        g.unstake_delay              = 777;
+        g.merge_threshold_blocks     = 101;
+        g.revert_threshold_blocks    = 202;
+        g.merge_grace_blocks         = 13;
+        for (size_t i = 0; i < g.shard_address_salt.size(); ++i)
+            g.shard_address_salt[i] = uint8_t(0xC0 + i);
+        GenesisCreator ca; ca.domain = "alice"; ca.ed_pub = alice_key.pub; ca.initial_stake = 2500;
+        GenesisCreator cb; cb.domain = "bob";   cb.ed_pub = bob_key.pub;   cb.initial_stake = 300;
+        g.initial_creators = {ca, cb};
+        GenesisAllocation ba; ba.domain = "alice"; ba.balance = 100000;
+        GenesisAllocation bb; bb.domain = "bob";   bb.balance = 5000;
+        g.initial_balances = {ba, bb};
+        g.validate();
+
+        // The parameter set exactly as node.cpp derives it from this genesis
+        // (chain_params): sharding_mode CURRENT (the Config default) hands the
+        // chain epoch_blocks 0; K is the genesis K; routing from the genesis.
+        auto node_params = [](const GenesisConfig& gc) {
+            Chain::Params p;
+            p.block_subsidy              = gc.block_subsidy;
+            p.subsidy_pool_initial       = gc.subsidy_pool_initial;
+            p.subsidy_mode               = gc.subsidy_mode;
+            p.lottery_jackpot_multiplier = gc.lottery_jackpot_multiplier;
+            p.min_stake                  = gc.min_stake;
+            p.crypto_profile             = gc.crypto_profile;
+            p.suspension_slash           = gc.suspension_slash;
+            p.unstake_delay              = gc.unstake_delay;
+            p.merge_threshold_blocks     = gc.merge_threshold_blocks;
+            p.revert_threshold_blocks    = gc.revert_threshold_blocks;
+            p.merge_grace_blocks         = gc.merge_grace_blocks;
+            p.shard_count                = gc.initial_shard_count;
+            p.shard_salt                 = gc.shard_address_salt;
+            p.my_shard_id                = gc.shard_id;
+            p.epoch_blocks               = 0;
+            p.k_block_sigs               = gc.k_block_sigs;
+            return p;
+        };
+        const Chain::Params good = node_params(g);
+
+        auto transfer_tx = [](uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = nonce;
+            return tx;
+        };
+        // A5 PARAM_CHANGE payload: [nlen u8][name][vlen u16 LE][value][eff u64 LE]
+        // (the shape Chain::apply_transactions stages; validation is not the
+        // subject here — the replay runs apply only).
+        auto param_change_tx = [](uint64_t nonce, const std::string& name,
+                                  uint64_t value, uint64_t eff) {
+            Transaction tx;
+            tx.type = TxType::PARAM_CHANGE;
+            tx.from = "alice"; tx.amount = 0; tx.fee = 1; tx.nonce = nonce;
+            tx.payload.push_back(uint8_t(name.size()));
+            tx.payload.insert(tx.payload.end(), name.begin(), name.end());
+            tx.payload.push_back(8); tx.payload.push_back(0);
+            for (int i = 0; i < 8; ++i) tx.payload.push_back(uint8_t((value >> (8 * i)) & 0xff));
+            for (int i = 0; i < 8; ++i) tx.payload.push_back(uint8_t((eff   >> (8 * i)) & 0xff));
+            return tx;
+        };
+        // Append a block carrying a DECLARED state_root, computed the way the
+        // producer does (node.cpp try_finalize_round): apply on a tentative
+        // copy, read the root, then apply for real under the S-033 check.
+        // rand_byte drives the E3 lottery draw (first 8 bytes big-endian:
+        // value % 3 == 0 pays 33, else 0; the E4 pool of 100 caps the draws).
+        auto add_block = [&](Chain& c, Transaction tx, uint8_t rand_byte) {
+            Block b;
+            b.index     = c.height();
+            b.prev_hash = c.head_hash();
+            b.timestamp = 1700000000 + int64_t(b.index);
+            b.creators  = {"alice"};
+            b.cumulative_rand[7]  = rand_byte;
+            b.cumulative_rand[31] = uint8_t(b.index);
+            b.transactions.push_back(std::move(tx));
+            Chain tentative = c;
+            tentative.append(b);
+            b.state_root = tentative.compute_state_root();
+            c.append(b);
+        };
+        // The producer's chain: genesis ctor, then the parameters through the
+        // INDIVIDUAL setters (what every node that produced a store did before
+        // S-078 — and deliberately not set_params, so the store this gate
+        // reloads does not depend on the routine under test), six blocks.
+        auto seed_individually = [&](Chain& c) {
+            c.set_block_subsidy(g.block_subsidy);
+            c.set_subsidy_pool_initial(g.subsidy_pool_initial);
+            c.set_subsidy_mode(g.subsidy_mode);
+            c.set_lottery_jackpot_multiplier(g.lottery_jackpot_multiplier);
+            c.set_min_stake(g.min_stake);
+            c.set_crypto_profile(g.crypto_profile);
+            c.set_suspension_slash(g.suspension_slash);
+            c.set_unstake_delay(g.unstake_delay);
+            c.set_merge_threshold_blocks(g.merge_threshold_blocks);
+            c.set_revert_threshold_blocks(g.revert_threshold_blocks);
+            c.set_merge_grace_blocks(g.merge_grace_blocks);
+            c.set_shard_routing(g.initial_shard_count, g.shard_address_salt, g.shard_id);
+            c.set_epoch_blocks(0);
+            c.set_k_block_sigs(g.k_block_sigs);
+        };
+        auto build = [&]() {
+            Chain c(make_genesis_block(g));
+            seed_individually(c);
+            add_block(c, transfer_tx(0), 0);    // jackpot 33
+            add_block(c, transfer_tx(1), 1);    // 0
+            add_block(c, transfer_tx(2), 3);    // jackpot 33 (66)
+            add_block(c, transfer_tx(3), 6);    // jackpot 33 (99)
+            add_block(c, param_change_tx(4, "MIN_STAKE", 300, /*eff=*/6), 9); // capped 1 (100)
+            add_block(c, transfer_tx(5), 12);   // activates MIN_STAKE=300; pool drained: 0
+            return c;
+        };
+
+        const fs::path base = fs::temp_directory_path() / "determ-test-chain-load-genesis-params";
+        std::error_code ec;
+        fs::remove_all(base, ec);
+        fs::create_directories(base / "node");
+        fs::create_directories(base / "fresh");
+        const std::string path  = (base / "node" / "chain.json").string();
+        const std::string gpath = (base / "genesis.dgc").string();
+        g.save(gpath);
+
+        Chain c = build();
+        c.save_incremental(path);
+
+        // --- Fixture controls (non-vacuity) ---
+        {
+            bool roots_declared = c.height() == 7;
+            for (uint64_t i = 1; i < c.height() && roots_declared; ++i)
+                if (c.at(i).state_root == Hash{}) roots_declared = false;
+            check(roots_declared,
+                  "fixture: 6 blocks after genesis, EVERY one declares a non-zero state_root (the S-033 gate is armed on replay)");
+            check(c.accumulated_subsidy() == 100 && c.subsidy_pool_remaining() == 0,
+                  "fixture: the LOTTERY draws paid 33+0+33+33+1+0 and drained the E4 pool of 100 (lottery + cap + subsidy all exercised)");
+            check(c.min_stake() == 300 && g.min_stake == 250,
+                  "fixture: the PARAM_CHANGE activated MIN_STAKE=300 at block 6 (genesis pinned 250)");
+            check(!c.registrants().empty() && c.stake("alice") == 2500 && c.stake("bob") == 300,
+                  "fixture: non-empty registrant + stake set from the genesis creators");
+        }
+
+        auto params_match = [&](const Chain& r, const Chain& p) {
+            return r.block_subsidy() == p.block_subsidy()
+                && r.subsidy_pool_initial() == p.subsidy_pool_initial()
+                && r.subsidy_mode() == p.subsidy_mode()
+                && r.lottery_jackpot_multiplier() == p.lottery_jackpot_multiplier()
+                && r.min_stake() == p.min_stake()
+                && r.crypto_profile() == p.crypto_profile()
+                && r.suspension_slash() == p.suspension_slash()
+                && r.unstake_delay() == p.unstake_delay()
+                && r.merge_threshold_blocks() == p.merge_threshold_blocks()
+                && r.revert_threshold_blocks() == p.revert_threshold_blocks()
+                && r.merge_grace_blocks() == p.merge_grace_blocks()
+                && r.shard_count() == p.shard_count()
+                && r.shard_salt() == p.shard_salt()
+                && r.my_shard_id() == p.my_shard_id()
+                && r.epoch_blocks() == p.epoch_blocks()
+                && r.k_block_sigs() == p.k_block_sigs();
+        };
+        auto genesis_values = [&](const Chain& r) {
+            return r.block_subsidy() == g.block_subsidy
+                && r.subsidy_pool_initial() == g.subsidy_pool_initial
+                && r.subsidy_mode() == g.subsidy_mode
+                && r.lottery_jackpot_multiplier() == g.lottery_jackpot_multiplier
+                && r.crypto_profile() == g.crypto_profile
+                && r.suspension_slash() == g.suspension_slash
+                && r.unstake_delay() == g.unstake_delay
+                && r.merge_threshold_blocks() == g.merge_threshold_blocks
+                && r.revert_threshold_blocks() == g.revert_threshold_blocks
+                && r.merge_grace_blocks() == g.merge_grace_blocks
+                && r.shard_count() == g.initial_shard_count
+                && r.shard_salt() == g.shard_address_salt
+                && r.my_shard_id() == g.shard_id
+                && r.k_block_sigs() == g.k_block_sigs;
+        };
+        auto s033 = [](const std::exception& e) {
+            const std::string w = e.what();
+            return w.find("state_root mismatch") != std::string::npos
+                && w.find("(S-033)") != std::string::npos;
+        };
+
+        // === CL: Chain::load with the node's parameter set ===
+        {
+            std::string err;
+            std::optional<Chain> r;
+            try { r.emplace(Chain::load(path, good)); }
+            catch (const std::exception& e) { err = e.what(); }
+            check(r.has_value(), "CL-1 Chain::load(path, Params) on the non-default-genesis store does NOT throw" + (err.empty() ? "" : " (threw: " + err + ")"));
+            if (r) {
+                check(r->height() == c.height(), "CL-2 reloaded height == producer height (7)");
+                check(r->head_hash() == c.head_hash(), "CL-3 reloaded head_hash == producer head_hash");
+                check(r->compute_state_root() == c.compute_state_root(), "CL-4 reloaded compute_state_root() == producer's");
+                check(params_match(*r, c), "CL-5 every parameter getter on the reloaded chain equals the producer's (16 fields)");
+                check(genesis_values(*r), "CL-6 every non-governed parameter getter equals the GENESIS value (not the in-class default)");
+                check(r->min_stake() == 300, "GV-1 min_stake() on the reloaded chain is the governance-ACTIVATED 300, not the genesis 250 (the replay's committed value wins)");
+                check(r->balance("alice") == c.balance("alice") && r->balance("bob") == c.balance("bob")
+                      && r->accumulated_subsidy() == 100 && r->expected_total() == r->live_total_supply(),
+                      "CL-7 balances + subsidy counter reproduced; A1 holds on the reloaded chain");
+                // One more valid block appends on the reloaded chain and lands
+                // on the same state as the producer appending the same block.
+                std::string err2;
+                try {
+                    Chain& rr = *r;
+                    add_block(rr, transfer_tx(6), 15);
+                    add_block(c,  transfer_tx(6), 15);
+                } catch (const std::exception& e) { err2 = e.what(); }
+                check(err2.empty() && r->height() == 8 && c.height() == 8
+                      && r->head_hash() == c.head_hash()
+                      && r->compute_state_root() == c.compute_state_root(),
+                      "CL-8 one more block with a declared state_root appends on the RELOADED chain and matches the producer's" + (err2.empty() ? "" : " (threw: " + err2 + ")"));
+            }
+        }
+
+        // === NL: the NODE's restart path (Node ctor -> Chain::load) ===
+        {
+            node::Config ncfg;
+            ncfg.domain = "alice"; ncfg.data_dir = (base / "node").string();
+            ncfg.listen_port = 7690; ncfg.key_path = (base / "alice.key").string();
+            ncfg.chain_path = path;              // the store the producer saved
+            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.log_quiet = true;
+            crypto::save_node_key(alice_key, ncfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            std::unique_ptr<node::Node> n;
+            std::string err;
+            try {
+                n = std::make_unique<node::Node>(ncfg, determ::time::RealClock::instance(),
+                                                 loop.get(), transport.get());
+            } catch (const std::exception& e) { err = e.what(); }
+            check(n != nullptr, "NL-1 node::Node constructed on the store + the saved genesis (the RESTART path) does NOT throw" + (err.empty() ? "" : " (threw: " + err + ")"));
+            if (n) {
+                const Chain& nc = n->chain_for_test();
+                // The producer chain c now has 8 blocks (CL-8); the node loaded the 7-block store.
+                check(nc.height() == 7 && nc.head_hash() == c.at(6).compute_hash(),
+                      "NL-2 the node's chain has the store's height (7) and head_hash");
+                check(nc.compute_state_root() == nc.at(6).state_root,
+                      "NL-3 the node's compute_state_root() equals the head block's declared state_root");
+                check(genesis_values(nc) && nc.epoch_blocks() == 0,
+                      "NL-4 every parameter getter on the node's chain equals the genesis value (epoch_blocks 0 under CURRENT)");
+                check(nc.min_stake() == 300,
+                      "GV-2 the node's chain keeps the governance-activated MIN_STAKE=300 after the restart (no post-load reset to the genesis 250)");
+            }
+            // A node that bootstraps the same genesis with NO store seeds the
+            // identical parameter set: the live chain == the replay chain's seed.
+            node::Config fcfg = ncfg;
+            fcfg.data_dir = (base / "fresh").string();
+            fcfg.chain_path = (base / "fresh" / "chain.json").string();
+            fcfg.listen_port = 7691;
+            VirtualNetwork vnet2;
+            auto loop2 = std::make_unique<VirtualEventLoop>();
+            auto transport2 = std::make_unique<VirtualTransport>(*loop2, vnet2);
+            std::unique_ptr<node::Node> f;
+            std::string ferr;
+            try {
+                f = std::make_unique<node::Node>(fcfg, determ::time::RealClock::instance(),
+                                                 loop2.get(), transport2.get());
+            } catch (const std::exception& e) { ferr = e.what(); }
+            check(f != nullptr, "NL-5 node::Node bootstraps the same genesis with NO store" + (ferr.empty() ? "" : " (threw: " + ferr + ")"));
+            if (f) {
+                const Chain& fc = f->chain_for_test();
+                Chain g0(make_genesis_block(g));
+                seed_individually(g0);
+                check(fc.height() == 1 && genesis_values(fc) && fc.min_stake() == 250 && fc.epoch_blocks() == 0
+                      && fc.compute_state_root() == g0.compute_state_root(),
+                      "NL-6 the bootstrapped chain carries the genesis parameter set and the state_root of a chain seeded field-by-field (the node's one struct seeds what the setters seed)");
+            }
+        }
+
+        // === FI: per-parameter fault injection (positive controls) ===
+        {
+            // The twelve fields the fixture pins NON-default are faulted back
+            // to their default; shard_count / my_shard_id are default on this
+            // SINGLE fixture (routing is not the subject) and are faulted the
+            // other way, to a non-default value — either way exactly ONE field
+            // of the seed differs from the producer's and the load must throw.
+            struct Fault {
+                const char* name;
+                const char* how;
+                std::function<void(Chain::Params&)>     mutate;
+                std::function<uint64_t(const Chain::Params&)> get;
+            };
+            auto salt64 = [](const Chain::Params& p) {
+                uint64_t v = 0;
+                for (int i = 0; i < 8; ++i) v = (v << 8) | p.shard_salt[i];
+                return v;
+            };
+            const char* AT_DEFAULT = "left at its default";
+            const char* NON_DEFAULT = "set to a non-default value";
+            const std::vector<Fault> faults = {
+                {"block_subsidy",              AT_DEFAULT,  [&](Chain::Params& p){ p.block_subsidy = dflt.block_subsidy; },                           [](const Chain::Params& p){ return uint64_t(p.block_subsidy); }},
+                {"subsidy_pool_initial",       AT_DEFAULT,  [&](Chain::Params& p){ p.subsidy_pool_initial = dflt.subsidy_pool_initial; },             [](const Chain::Params& p){ return uint64_t(p.subsidy_pool_initial); }},
+                {"subsidy_mode",               AT_DEFAULT,  [&](Chain::Params& p){ p.subsidy_mode = dflt.subsidy_mode; },                             [](const Chain::Params& p){ return uint64_t(p.subsidy_mode); }},
+                {"lottery_jackpot_multiplier", AT_DEFAULT,  [&](Chain::Params& p){ p.lottery_jackpot_multiplier = dflt.lottery_jackpot_multiplier; }, [](const Chain::Params& p){ return uint64_t(p.lottery_jackpot_multiplier); }},
+                {"min_stake",                  AT_DEFAULT,  [&](Chain::Params& p){ p.min_stake = dflt.min_stake; },                                   [](const Chain::Params& p){ return uint64_t(p.min_stake); }},
+                {"crypto_profile",             AT_DEFAULT,  [&](Chain::Params& p){ p.crypto_profile = dflt.crypto_profile; },                         [](const Chain::Params& p){ return uint64_t(p.crypto_profile); }},
+                {"suspension_slash",           AT_DEFAULT,  [&](Chain::Params& p){ p.suspension_slash = dflt.suspension_slash; },                     [](const Chain::Params& p){ return uint64_t(p.suspension_slash); }},
+                {"unstake_delay",              AT_DEFAULT,  [&](Chain::Params& p){ p.unstake_delay = dflt.unstake_delay; },                           [](const Chain::Params& p){ return uint64_t(p.unstake_delay); }},
+                {"merge_threshold_blocks",     AT_DEFAULT,  [&](Chain::Params& p){ p.merge_threshold_blocks = dflt.merge_threshold_blocks; },         [](const Chain::Params& p){ return uint64_t(p.merge_threshold_blocks); }},
+                {"revert_threshold_blocks",    AT_DEFAULT,  [&](Chain::Params& p){ p.revert_threshold_blocks = dflt.revert_threshold_blocks; },       [](const Chain::Params& p){ return uint64_t(p.revert_threshold_blocks); }},
+                {"merge_grace_blocks",         AT_DEFAULT,  [&](Chain::Params& p){ p.merge_grace_blocks = dflt.merge_grace_blocks; },                 [](const Chain::Params& p){ return uint64_t(p.merge_grace_blocks); }},
+                {"shard_salt",                 AT_DEFAULT,  [&](Chain::Params& p){ p.shard_salt = dflt.shard_salt; },                                 salt64},
+                {"shard_count",                NON_DEFAULT, [ ](Chain::Params& p){ p.shard_count = 4; },                                              [](const Chain::Params& p){ return uint64_t(p.shard_count); }},
+                {"my_shard_id",                NON_DEFAULT, [ ](Chain::Params& p){ p.my_shard_id = 1; },                                              [](const Chain::Params& p){ return uint64_t(p.my_shard_id); }},
+            };
+            bool non_vacuous = true;
+            for (auto& f : faults) {
+                Chain::Params bad = good;
+                f.mutate(bad);
+                if (f.get(bad) == f.get(good)) non_vacuous = false;
+                bool threw_s033 = false; std::string what;
+                try { (void)Chain::load(path, bad); }
+                catch (const std::exception& e) { threw_s033 = s033(e); what = e.what(); }
+                check(threw_s033, std::string("FI-") + f.name + ": load with ONLY this parameter " + f.how + " THROWS the S-033 state_root mismatch (live k: leaf)"
+                                  + (threw_s033 ? "" : " (got: " + (what.empty() ? std::string("no throw") : what) + ")"));
+            }
+            check(non_vacuous, "FI-control: every fault changes exactly its field of the seed away from the producer's value (the loop is not vacuous)");
+            // The six-field convenience overload leaves the other ten at their
+            // defaults — exactly the pre-fix node call shape — and must fail.
+            bool threw_legacy = false;
+            try { (void)Chain::load(path, g.block_subsidy, g.initial_shard_count, g.shard_address_salt, g.shard_id, 0, g.k_block_sigs); }
+            catch (const std::exception& e) { threw_legacy = s033(e); }
+            check(threw_legacy, "FI-legacy: the six-field Chain::load overload (the pre-S-078 node call shape) THROWS S-033 on this store");
+            // epoch_blocks / k_block_sigs: seeded, but NOT state-root leaves, and
+            // the D3.3b fold is gated off on a SINGLE chain — a different value
+            // does not throw here, so no throw is asserted; only the seeding.
+            Chain::Params alt = good; alt.epoch_blocks = 5; alt.k_block_sigs = 2;
+            std::string aerr;
+            std::optional<Chain> ra;
+            try { ra.emplace(Chain::load(path, alt)); } catch (const std::exception& e) { aerr = e.what(); }
+            check(ra && ra->epoch_blocks() == 5 && ra->k_block_sigs() == 2 && ra->height() == 7,
+                  "FI-nonleaf: epoch_blocks / k_block_sigs are seeded through Params (getters 5 / 2) and, not being leaves on a SINGLE chain, do not throw" + (aerr.empty() ? "" : " (threw: " + aerr + ")"));
+        }
+
+        fs::remove_all(base, ec);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-load-genesis-params "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

@@ -706,11 +706,54 @@ public:
     std::vector<uint8_t> encode_state(uint32_t header_count = 16) const;
     static Chain decode_state(const uint8_t* data, size_t len,
                               bool require_supply_invariant = false);
-    // block_subsidy must be passed at load time so replay credits creators
-    // correctly. Caller (Node) loads it from GenesisConfig before this call.
-    // rev.9 B3: shard routing params must also be passed so apply-side
-    // cross-shard semantics replay deterministically. Defaults represent
-    // SINGLE chain (shard_count=1, no cross-shard branches taken).
+    // S-078: EVERY genesis-pinned parameter the block replay depends on, in
+    // one struct, so the replay chain that load() builds and the live chain
+    // the node bootstraps from genesis are seeded from the SAME values. The
+    // defaults equal the in-class member defaults below (a Params{} seeds
+    // exactly what a default-constructed Chain already carries). Fourteen of
+    // these are `k:` state-root leaves (thirteen unconditionally, plus
+    // crypto_profile when FIPS), so a replay seeded with a default where the
+    // producer had a non-default value throws S-033 on the first block that
+    // declares a state_root — which is what made any non-default genesis
+    // unrestartable before every field was threaded through here.
+    // epoch_blocks and k_block_sigs are NOT leaves (see their setters) but
+    // steer the D3.3b `cc:` fold, so they travel here too.
+    // f2_active_from_height is not read by apply and stays a plain
+    // post-construction setter on the node.
+    struct Params {
+        uint64_t      block_subsidy{0};
+        uint64_t      subsidy_pool_initial{0};
+        uint8_t       subsidy_mode{0};
+        uint32_t      lottery_jackpot_multiplier{0};
+        uint64_t      min_stake{1000};
+        CryptoProfile crypto_profile{CryptoProfile::MODERN};
+        uint64_t      suspension_slash{10};
+        uint64_t      unstake_delay{1000};
+        uint32_t      merge_threshold_blocks{100};
+        uint32_t      revert_threshold_blocks{200};
+        uint32_t      merge_grace_blocks{10};
+        uint32_t      shard_count{1};
+        Hash          shard_salt{};
+        ShardId       my_shard_id{0};
+        uint32_t      epoch_blocks{0};
+        uint32_t      k_block_sigs{0};
+    };
+    // Assigns every Params field onto this chain: the ONE seeding routine,
+    // used by load() before its replay and by the node's genesis bootstrap
+    // after the genesis ctor (block 0's apply reads none of these fields and
+    // declares no state_root, so seeding before or after it is equivalent).
+    void set_params(const Params& p);
+
+    // Loads the binary block store at <path> (empty chain when there is no
+    // store) and REPLAYS every stored block through apply_transactions on a
+    // chain seeded with `p` FIRST. The caller (Node) fills `p` from the
+    // GenesisConfig it already parsed; a post-load setter runs too late for
+    // the replay's S-033 recompute (S-078).
+    static Chain load(const std::string& path, const Params& p);
+    // Convenience overload kept for the in-process selftests: the six
+    // routing/fold fields explicitly, every other Params field at its
+    // default (SINGLE chain, default economics, MODERN). Not a production
+    // entry point — the node passes a full Params.
     static Chain load(const std::string& path,
                        uint64_t block_subsidy = 0,
                        uint32_t shard_count = 1,

@@ -170,8 +170,12 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
 
     // Rev. 4: genesis is the source of truth for chain-wide constants
     // (M, K, block_subsidy). Load it FIRST so chain replay during load uses
-    // the correct subsidy when crediting creators.
+    // the correct subsidy when crediting creators — and, since S-078, every
+    // other replay-relevant parameter (the chain_params set below).
     uint64_t genesis_subsidy = 0;
+    uint64_t genesis_subsidy_pool_initial = 0;        // E4 (S-078: replay-relevant)
+    uint8_t  genesis_subsidy_mode = 0;                // E3 (same)
+    uint32_t genesis_lottery_jackpot_multiplier = 0;  // E3 (same)
     uint64_t genesis_min_stake = 1000;
     chain::CryptoProfile genesis_crypto_profile = chain::CryptoProfile::MODERN; // NC-8 profile gating
     uint64_t genesis_suspension_slash = 10;
@@ -200,6 +204,9 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
         // mirror is set immediately below.
         cfg_.committee_region        = gcfg.committee_region;
         genesis_subsidy              = gcfg.block_subsidy;
+        genesis_subsidy_pool_initial = gcfg.subsidy_pool_initial;
+        genesis_subsidy_mode         = gcfg.subsidy_mode;
+        genesis_lottery_jackpot_multiplier = gcfg.lottery_jackpot_multiplier;
         genesis_min_stake            = gcfg.min_stake;
         genesis_crypto_profile       = gcfg.crypto_profile;
         genesis_suspension_slash     = gcfg.suspension_slash;
@@ -561,24 +568,36 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
     // cfg_.epoch_blocks at the node, and the validator keeps its own copy.
     const uint32_t chain_epoch_blocks =
         (cfg_.sharding_mode == ShardingMode::EXTENDED) ? cfg_.epoch_blocks : 0;
-    chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy,
-                                  genesis_shard_count, genesis_shard_salt,
-                                  genesis_my_shard, chain_epoch_blocks,
-                                  cfg_.k_block_sigs);   // S-051 floor K
-    chain_.set_min_stake(genesis_min_stake);
-    chain_.set_crypto_profile(genesis_crypto_profile);  // NC-8 profile gating
-    chain_.set_suspension_slash(genesis_suspension_slash);
-    chain_.set_unstake_delay(genesis_unstake_delay);
-    chain_.set_merge_threshold_blocks(genesis_merge_threshold);
-    chain_.set_revert_threshold_blocks(genesis_revert_threshold);
-    chain_.set_merge_grace_blocks(genesis_merge_grace);
-    // D3.3b: the genesis-pinned epoch length (EXTENDED-only, see chain_epoch_blocks
-    // above). Passed to load() above too so it is present BEFORE the internal
-    // replay's fold-in; re-set here to cover the path where load() returned an
-    // empty chain (no replay ran). CURRENT/NONE hand 0 → fold inert, byte-neutral.
-    chain_.set_epoch_blocks(chain_epoch_blocks);
-    chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
-                              genesis_my_shard);
+    // S-078: ONE parameter set, built from the genesis just parsed (or the
+    // defaults when no genesis_path is configured), handed to Chain::load so
+    // the store REPLAY is seeded with it BEFORE the first block re-applies,
+    // and applied unchanged to the genesis-bootstrap chain below. Every field
+    // here is either a `k:` state-root leaf or a fold/floor input, so a
+    // post-load setter is too late: the replay's S-033 recompute has already
+    // compared each stored block's declared state_root against a chain that
+    // carried the in-class defaults (min_stake 1000, MODERN, FLAT subsidy,
+    // ...), and any non-default genesis threw on its first restart. No setter
+    // for these fields runs after load: the values the replay ends with are
+    // the committed ones (a governance PARAM_CHANGE activated during the
+    // replay must not be reset to the genesis value afterwards).
+    chain::Chain::Params chain_params;
+    chain_params.block_subsidy              = genesis_subsidy;
+    chain_params.subsidy_pool_initial       = genesis_subsidy_pool_initial;
+    chain_params.subsidy_mode               = genesis_subsidy_mode;
+    chain_params.lottery_jackpot_multiplier = genesis_lottery_jackpot_multiplier;
+    chain_params.min_stake                  = genesis_min_stake;
+    chain_params.crypto_profile             = genesis_crypto_profile;  // NC-8 profile gating
+    chain_params.suspension_slash           = genesis_suspension_slash;
+    chain_params.unstake_delay              = genesis_unstake_delay;
+    chain_params.merge_threshold_blocks     = genesis_merge_threshold;
+    chain_params.revert_threshold_blocks    = genesis_revert_threshold;
+    chain_params.merge_grace_blocks         = genesis_merge_grace;
+    chain_params.shard_count                = genesis_shard_count;
+    chain_params.shard_salt                 = genesis_shard_salt;
+    chain_params.my_shard_id                = genesis_my_shard;
+    chain_params.epoch_blocks               = chain_epoch_blocks;  // D3.3b (EXTENDED-only, see above)
+    chain_params.k_block_sigs               = cfg_.k_block_sigs;   // S-051 floor K
+    chain_ = chain::Chain::load(cfg_.chain_path, chain_params);
 
     if (chain_.empty()) {
         // rev.9 B6.basic: prefer snapshot bootstrap when configured.
@@ -641,21 +660,12 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                     "genesis hash mismatch: config pinned " + cfg_.genesis_hash
                   + " but loaded genesis hashes to " + actual_hash);
             chain_ = chain::Chain(std::move(g));
-            chain_.set_block_subsidy(genesis_subsidy);
-            chain_.set_subsidy_pool_initial(gcfg_opt->subsidy_pool_initial);
-            chain_.set_subsidy_mode(gcfg_opt->subsidy_mode);
-            chain_.set_lottery_jackpot_multiplier(gcfg_opt->lottery_jackpot_multiplier);
-            chain_.set_min_stake(genesis_min_stake);
-            chain_.set_crypto_profile(genesis_crypto_profile);  // NC-8 profile gating
-            chain_.set_suspension_slash(genesis_suspension_slash);
-            chain_.set_unstake_delay(genesis_unstake_delay);
-            chain_.set_merge_threshold_blocks(genesis_merge_threshold);
-            chain_.set_revert_threshold_blocks(genesis_revert_threshold);
-            chain_.set_merge_grace_blocks(genesis_merge_grace);
-            chain_.set_epoch_blocks(chain_epoch_blocks);  // D3.3b (EXTENDED-only)
-            chain_.set_shard_routing(genesis_shard_count,
-                                       genesis_shard_salt,
-                                       genesis_my_shard);
+            // S-078: the SAME parameter set the store replay is seeded with
+            // (chain_params above), so a restart replays under exactly the
+            // values this bootstrap produced under. Block 0's apply reads
+            // none of these fields, so seeding after the genesis ctor here
+            // and before the replay in load() are equivalent.
+            chain_.set_params(chain_params);
             const char* mode = (cfg_.k_block_sigs == cfg_.m_creators)
                               ? "strong" : "hybrid";
             std::cout << "[node] genesis loaded from " << cfg_.genesis_path

@@ -3478,6 +3478,25 @@ void Chain::save_incremental(const std::string& path) const {
     persisted_manifest_height_ = blocks_.size();
 }
 
+void Chain::set_params(const Params& p) {
+    block_subsidy_              = p.block_subsidy;
+    subsidy_pool_initial_       = p.subsidy_pool_initial;
+    subsidy_mode_               = p.subsidy_mode;
+    lottery_jackpot_multiplier_ = p.lottery_jackpot_multiplier;
+    min_stake_                  = p.min_stake;
+    crypto_profile_             = p.crypto_profile;
+    suspension_slash_           = p.suspension_slash;
+    unstake_delay_              = p.unstake_delay;
+    merge_threshold_blocks_     = p.merge_threshold_blocks;
+    revert_threshold_blocks_    = p.revert_threshold_blocks;
+    merge_grace_blocks_         = p.merge_grace_blocks;
+    shard_count_                = p.shard_count;
+    shard_salt_                 = p.shard_salt;
+    my_shard_id_                = p.my_shard_id;
+    epoch_blocks_               = p.epoch_blocks;
+    k_block_sigs_               = p.k_block_sigs;
+}
+
 Chain Chain::load(const std::string& path,
                     uint64_t block_subsidy,
                     uint32_t shard_count,
@@ -3485,6 +3504,18 @@ Chain Chain::load(const std::string& path,
                     ShardId my_shard_id,
                     uint32_t epoch_blocks,
                     uint32_t k_block_sigs) {
+    // Selftest convenience: the six explicit fields, everything else default.
+    Params p;
+    p.block_subsidy = block_subsidy;
+    p.shard_count   = shard_count;
+    p.shard_salt    = shard_salt;
+    p.my_shard_id   = my_shard_id;
+    p.epoch_blocks  = epoch_blocks;
+    p.k_block_sigs  = k_block_sigs;
+    return load(path, p);
+}
+
+Chain Chain::load(const std::string& path, const Params& p) {
     // B1 chain-storage-v1 / D2 inc8: the binary block store is the ONLY
     // at-rest chain representation. A present-but-unreadable store is a
     // HARD error, fail-closed (S-021 stance). There is NO text fallback:
@@ -3499,13 +3530,19 @@ Chain Chain::load(const std::string& path,
                             mpath.string());
         const uint64_t height = mrec.height;
 
+        // S-078: seed EVERY genesis-pinned parameter BEFORE the replay. The
+        // replay below recomputes each block's state_root, and fourteen of
+        // these fields are `k:` leaves (block_subsidy, the three subsidy
+        // fields, min_stake, suspension_slash, unstake_delay, the three
+        // merge thresholds, shard_count, shard_salt, my_shard_id, and
+        // crypto_profile when FIPS); epoch_blocks / k_block_sigs steer the
+        // D3.3b fold-in and the S-051 floor verdict. Any of them left at its
+        // default here where the producer had a non-default value makes the
+        // first replayed block with a declared state_root throw S-033 — the
+        // node's post-load setters ran too late for this loop. Gate:
+        // test-chain-load-genesis-params (per-parameter positive controls).
         Chain c;
-        c.block_subsidy_ = block_subsidy;
-        c.shard_count_   = shard_count;
-        c.shard_salt_    = shard_salt;
-        c.my_shard_id_   = my_shard_id;
-        c.epoch_blocks_  = epoch_blocks;  // D3.3b: before replay so the fold-in
-        c.k_block_sigs_  = k_block_sigs;  // S-051: before replay (floor verdict)
+        c.set_params(p);
 
         const fs::path dir = store_dir_for(path);
         for (uint64_t i = 0; i < height; ++i) {
@@ -3560,12 +3597,7 @@ Chain Chain::load(const std::string& path,
     // zeros-genesis here either: that would later collide with a pinned
     // genesis_hash in the operator config.
     Chain c;
-    c.block_subsidy_ = block_subsidy;
-    c.shard_count_   = shard_count;
-    c.shard_salt_    = shard_salt;
-    c.my_shard_id_   = my_shard_id;
-    c.epoch_blocks_  = epoch_blocks;  // D3.3b (empty chain: no replay yet)
-    c.k_block_sigs_  = k_block_sigs;  // S-051 (same)
+    c.set_params(p);   // same seeding as the replay path (no replay ran yet)
     return c;
 }
 
