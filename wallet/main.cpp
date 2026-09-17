@@ -216,11 +216,62 @@ std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
     return out;
 }
 
-// Write raw bytes to a file (binary, truncate) and tighten to 0600 perms.
-// Prints "<cmd_label>: ..." diagnostics on failure.
+// Write raw bytes to a file (binary, truncate) at 0600 from creation.
+// Prints "<cmd_label>: ..." diagnostics on failure. `perms_narrowed_out`, when
+// given, receives false if the 0600 could NOT be established (the write still
+// succeeds and the function still returns true — see P-2 below).
+//
+// P-1 (closed here on POSIX, 2026-09-17). The previous shape was
+// `std::ofstream` -> write -> permissions(0600): the file is created at
+// 0666 & ~umask (0644 under the usual umask 022), the COMPLETE secret is
+// written into it, and only then is the mode narrowed. Measured, plain
+// successful run, nothing injected:
+//     openat(AT_FDCWD, ".../s.json", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3
+//     write(3, "DSS1\3\4\0\0\0\1Rs\231\227...", 24) = 24
+//     fchmodat(AT_FDCWD, ".../s.json", 0600) = 0
+// Any local process that can open(2) the path in that window reads the key
+// material, and NO after-the-fact check can see it: keystore-audit, the
+// mode_not_0600 hazard tag and tools/test_wallet_shamir_rotate.sh section 28
+// all observe the final 0600 and report a correct file. Eight of this helper's
+// ten callers write plaintext key material.
+//
+// The fix needs BOTH calls below, and neither alone is sufficient:
+//   * ::open(..., O_CREAT|O_TRUNC, 0600) applies its mode ONLY when the file is
+//     created. Measured: an existing 0644 file reopened that way and written
+//     STAYS 0644 until something chmods it — so the create mode alone leaves
+//     the entire window open on every overwrite, which is exactly what --force
+//     exists for and what any second run does.
+//   * ::fchmod(fd, 0600) acts on the open descriptor before the first write, so
+//     it covers the create AND the overwrite path with no TOCTOU race against
+//     the path.
+// O_NOFOLLOW is deliberate and independent: without it a pre-existing symlink
+// at the path is followed and the secret is written into whatever file it
+// names. The call sites' fs::exists checks are TOCTOU-racy and are not a
+// substitute. O_CLOEXEC keeps the descriptor out of any child process.
+//
+// WINDOWS: the window is NOT closed and this is not a cross-platform fix. The
+// _S_IREAD|_S_IWRITE mode argument only drives FILE_ATTRIBUTE_READONLY, and the
+// effective ACL comes by inheritance from the parent directory — recorded in
+// docs/proofs/S005PassphraseKeyfile.md F-4. The Windows branch therefore keeps
+// the previous ofstream behaviour verbatim rather than implying a fix.
+//
+// P-2 (closed here, both platforms). The trailing std::filesystem::permissions
+// call is kept as the belt-and-braces step, but its error_code is now CHECKED:
+// it used to be discarded with `(void)perm_ec`, so a filesystem or platform
+// that cannot narrow (FAT/exFAT, some network and FUSE mounts, a path owned by
+// another user) left a world-readable key file behind and the command exited 0
+// with an empty stderr. Failure now emits the diagnostic the daemon already
+// uses (src/main.cpp::cmd_account_create, plaintext --out branch) and reports
+// itself through perms_narrowed_out so a caller with a --json summary can say
+// so. The write is NOT failed and the file is NOT deleted: destroying a
+// keyfile-recover result the operator may be unable to regenerate is a worse
+// outcome than a wide file they were told about.
 bool write_bytes_file_0600(const std::string& cmd_label,
                            const std::string& out_path,
-                           const std::vector<uint8_t>& bytes) {
+                           const std::vector<uint8_t>& bytes,
+                           bool* perms_narrowed_out = nullptr) {
+    bool narrowed = true;
+#ifdef _WIN32
     std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
     if (!f) {
         std::cerr << cmd_label << ": cannot open output file for write: "
@@ -235,15 +286,59 @@ bool write_bytes_file_0600(const std::string& cmd_label,
         std::cerr << cmd_label << ": write failed: " << out_path << "\n";
         return false;
     }
-    // 0600 owner-only perms. Best-effort on Windows (NTFS ACL inherits from
-    // parent); non-fatal on exotic filesystems — operator may chmod manually.
+#else
+    const int fd = ::open(out_path.c_str(),
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                          0600);
+    if (fd < 0) {
+        std::cerr << cmd_label << ": cannot open output file for write: "
+                  << out_path << ": " << std::strerror(errno) << "\n";
+        return false;
+    }
+    // Before the first write, on the descriptor — this is the call that closes
+    // the window on the overwrite path, where the create mode above is ignored.
+    if (::fchmod(fd, 0600) != 0) {
+        std::cerr << cmd_label << ": Warning: could not set 0600 permissions on "
+                  << out_path << " before writing it: "
+                  << std::strerror(errno) << "\n";
+        narrowed = false;
+    }
+    for (size_t off = 0; off < bytes.size(); ) {
+        const ssize_t n = ::write(fd, bytes.data() + off, bytes.size() - off);
+        if (n < 0 && errno == EINTR) continue;
+        // n == 0 for a positive count cannot happen on a regular file, but it
+        // must not become a spin: fail the write instead of looping forever.
+        if (n <= 0) {
+            std::cerr << cmd_label << ": write failed: " << out_path << ": "
+                      << (n < 0 ? std::strerror(errno) : "wrote 0 bytes") << "\n";
+            ::close(fd);
+            return false;
+        }
+        off += static_cast<size_t>(n);
+    }
+    if (::close(fd) != 0) {
+        std::cerr << cmd_label << ": write failed: " << out_path << ": "
+                  << std::strerror(errno) << "\n";
+        return false;
+    }
+#endif
+    // 0600 owner-only perms, belt and braces: the POSIX branch above already
+    // created + fchmod'd the file at 0600, and on Windows this is the only
+    // narrowing there is (best-effort — NTFS ACL inherits from the parent).
     std::error_code perm_ec;
     std::filesystem::permissions(
         out_path,
         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
         std::filesystem::perm_options::replace,
         perm_ec);
-    (void)perm_ec;
+    if (perm_ec) {
+        std::cerr << cmd_label << ": Warning: could not set 0600 permissions on "
+                  << out_path << ": " << perm_ec.message() << "\n";
+        narrowed = false;
+    }
+    if (!narrowed)
+        std::cerr << cmd_label << ": Verify manually (chmod 0600 / icacls).\n";
+    if (perms_narrowed_out) *perms_narrowed_out = narrowed;
     return true;
 }
 
@@ -893,6 +988,7 @@ int cmd_shamir_rotate(int argc, char** argv) {
     }
 
     // ── Write the new share-set (canonical binary DSS1, D2) ──────────────
+    bool perms_narrowed = true;   // false -> the file is not 0600; see the summary
     {
         std::vector<uint8_t> bytes;
         try { bytes = encode_dss1_shares(new_shares); }
@@ -900,7 +996,8 @@ int cmd_shamir_rotate(int argc, char** argv) {
             std::cerr << "shamir-rotate: " << e.what() << "\n";
             return 1;
         }
-        const bool ok = write_bytes_file_0600("shamir-rotate", shares_out, bytes);
+        const bool ok = write_bytes_file_0600("shamir-rotate", shares_out, bytes,
+                                              &perms_narrowed);
         determ_secure_zero(bytes.data(), bytes.size());
         if (!ok) return 1;
     }
@@ -913,6 +1010,10 @@ int cmd_shamir_rotate(int argc, char** argv) {
         r["secret_bytes"]  = secret.size();
         r["shares_file"]   = shares_out;
         r["rotated"]       = true;
+        // Emitted ONLY on failure, so every success summary stays byte-identical
+        // to what it was. `false` means the file is not 0600 and the operator
+        // must narrow it by hand; the stderr warning names the reason.
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         // NEVER emit secret material in the summary. The whole point of
         // rotation is to refresh the polynomial without exposing the
         // secret; leaking it here would defeat the purpose.
@@ -3066,6 +3167,13 @@ int cmd_backup_create(int argc, char** argv) {
     }
 
     // ── Write shares file (canonical binary DSS1, D2) ────────────────────
+    // Routed through write_bytes_file_0600 (2026-09-17): this file is a live
+    // Shamir share-set and it used to be created by ofstream at 0666 & ~umask,
+    // filled, and narrowed only afterwards — the P-1 window, in full, on a
+    // plaintext secret. The helper creates it 0600 and fchmods the descriptor
+    // before the first write; the secure-zero moves after the call because the
+    // helper needs the buffer.
+    bool perms_narrowed = true;   // covers the shares file; see the summary
     {
         std::vector<uint8_t> bytes;
         try { bytes = encode_dss1_shares(shares); }
@@ -3073,31 +3181,10 @@ int cmd_backup_create(int argc, char** argv) {
             std::cerr << "backup-create: " << e.what() << "\n";
             return 1;
         }
-        std::ofstream f(shares_out, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            std::cerr << "backup-create: cannot open --shares-out for write: "
-                      << shares_out << "\n";
-            return 1;
-        }
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-        f.close();
+        const bool ok = write_bytes_file_0600("backup-create", shares_out, bytes,
+                                              &perms_narrowed);
         determ_secure_zero(bytes.data(), bytes.size());
-        if (!f) {
-            std::cerr << "backup-create: write failed on --shares-out: "
-                      << shares_out << "\n";
-            return 1;
-        }
-    }
-    // Owner-only perms on POSIX; no-op on Windows (NTFS ACL inherits).
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            shares_out,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+        if (!ok) return 1;
     }
 
     // ── Write envelopes file (canonical binary DBE1, D2) ─────────────────
@@ -3140,6 +3227,11 @@ int cmd_backup_create(int argc, char** argv) {
         r["threshold"]      = threshold;
         r["shares_file"]    = shares_out;
         r["envelopes_file"] = envs_out;
+        // Failure-only field (see write_bytes_file_0600). It reports the SHARES
+        // file only: the envelopes file below is still on the old
+        // ofstream -> permissions -> (void)perm_ec path and is not covered by
+        // this increment (it holds AEAD-wrapped shares, not plaintext).
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "wrote " << share_count << " shares + "
@@ -3445,7 +3537,9 @@ int cmd_keyfile_create(int argc, char** argv) {
         std::cerr << "keyfile-create: " << e.what() << "\n";
         return 1;
     }
-    const bool wrote = write_bytes_file_0600("keyfile-create", out_path, nk_bytes);
+    bool perms_narrowed = true;   // false -> the file is not 0600; see the summary
+    const bool wrote = write_bytes_file_0600("keyfile-create", out_path, nk_bytes,
+                                             &perms_narrowed);
     determ_secure_zero(pt_bytes.data(), pt_bytes.size());
     determ_secure_zero(seed.data(), seed.size());
     if (!wrote) return 1;
@@ -3456,6 +3550,9 @@ int cmd_keyfile_create(int argc, char** argv) {
         r["out"]         = out_path;
         r["format"]      = "DNK1";
         r["envelope"]    = "DWE2";
+        // Failure-only field (see write_bytes_file_0600): its absence is the
+        // unchanged success summary, `false` means the file is not 0600.
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "wrote encrypted node keyfile to " << out_path << "\n";
@@ -3655,31 +3752,25 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
     };
     std::string out_str = out_json.dump(2);
 
+    // Routed through write_bytes_file_0600 (2026-09-17): this file is the
+    // DECRYPTED node key, and it used to be created by ofstream at
+    // 0666 & ~umask, filled with the plaintext seed, and narrowed only
+    // afterwards — the P-1 window, in full. The helper creates it 0600 and
+    // fchmods the descriptor before the first write.
+    // One Windows-only difference, stated rather than hidden: the helper writes
+    // in BINARY mode, so the LF line endings of the dump are no longer
+    // translated to CRLF as the old text-mode stream did. On POSIX the bytes
+    // are identical; on Windows this output is now LF where save_node_key's
+    // text-mode stream still writes CRLF, which the daemon's JSON parser
+    // accepts either way (the "byte-for-byte" note above is a POSIX statement).
+    bool perms_narrowed = true;   // false -> the file is not 0600
     {
-        std::ofstream f(out_path);
-        if (!f) {
-            std::cerr << "keyfile-decrypt: cannot open --out for write: "
-                      << out_path << "\n";
-            return 1;
-        }
-        f << out_str;
-        f.close();
-        if (!f) {
-            std::cerr << "keyfile-decrypt: write failed on --out: "
-                      << out_path << "\n";
-            return 1;
-        }
-    }
-
-    // 0600 permissions tightening — best-effort on Windows.
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
+        std::vector<uint8_t> buf(out_str.begin(), out_str.end());
+        const bool ok = write_bytes_file_0600("keyfile-decrypt", out_path, buf,
+                                              &perms_narrowed);
+        // The copy holds the plaintext seed; zero it whatever the outcome.
+        if (!buf.empty()) determ_secure_zero(buf.data(), buf.size());
+        if (!ok) return 1;
     }
 
     if (json_out) {
@@ -3688,6 +3779,9 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
         r["out"]      = out_path;
         r["format"]   = "node_key.json";
         r["from"]     = "DNK1";
+        // Failure-only field (see write_bytes_file_0600): its absence is the
+        // unchanged success summary, `false` means the file is not 0600.
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "wrote plaintext node keyfile to " << out_path << "\n";
@@ -4426,7 +4520,9 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
     }
 
     // ── Write the canonical binary DNK1 container ──────────────────────
-    if (!write_bytes_file_0600("keyfile-reencrypt", out_path, nk_bytes)) {
+    bool perms_narrowed = true;   // false -> the file is not 0600; see the summary
+    if (!write_bytes_file_0600("keyfile-reencrypt", out_path, nk_bytes,
+                               &perms_narrowed)) {
         secure_zero_all();
         return 1;
     }
@@ -4445,6 +4541,9 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
         r["out"]                    = out_path;
         r["old_passphrase_env"]     = old_env;
         r["new_passphrase_env"]     = new_env;
+        // Failure-only field (see write_bytes_file_0600): its absence is the
+        // unchanged success summary, `false` means the file is not 0600.
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "keyfile-reencrypt: decrypted --in with old passphrase "
@@ -4806,14 +4905,18 @@ int cmd_keyfile_recover(int argc, char** argv) {
         // D2: the recovered secret lands on disk as RAW BYTES (binary) —
         // the old {"secret_hex"} JSON wrapper is deleted. Text views stay
         // available on stdout (--json / bare hex).
+        bool perms_narrowed = true;  // false -> the file is not 0600
         const bool ok = write_bytes_file_0600("keyfile-recover", out_path,
-                                              *secret_opt);
+                                              *secret_opt, &perms_narrowed);
         if (!ok) return 1;
         if (json_out) {
             // --json + --out: echo the hex view to stdout so the
             // operator's pipe-driven workflow sees the result.
             nlohmann::json doc;
             doc["secret_hex"] = secret_hex;
+            // Failure-only field (see write_bytes_file_0600): its absence is the
+            // unchanged success summary, `false` means the file is not 0600.
+            if (!perms_narrowed) doc["perms_narrowed"] = false;
             std::cout << doc.dump() << "\n";
         } else {
             std::cout << "recovered secret written to " << out_path
@@ -5240,12 +5343,17 @@ int cmd_account_recover(int argc, char** argv) {
             std::cerr << "account-recover: " << e.what() << "\n";
             return 1;
         }
-        const bool ok = write_bytes_file_0600("account-recover", out_path, bytes);
+        bool perms_narrowed = true;  // false -> the file is not 0600
+        const bool ok = write_bytes_file_0600("account-recover", out_path, bytes,
+                                              &perms_narrowed);
         determ_secure_zero(bytes.data(), bytes.size());
         determ_secure_zero(kp.priv_seed.data(), kp.priv_seed.size());
         if (!ok) return 1;
         if (json_out) {
             // --json + --out: also echo to stdout for pipe-driven workflows.
+            // Failure-only field (see write_bytes_file_0600): its absence is the
+            // unchanged success summary, `false` means the file is not 0600.
+            if (!perms_narrowed) record["perms_narrowed"] = false;
             std::cout << record.dump() << "\n";
         } else {
             std::cout << "recovered account written to " << out_path
