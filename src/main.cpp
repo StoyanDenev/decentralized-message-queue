@@ -118,6 +118,10 @@
 #include <intrin.h>    // ct-timing-probe: __rdtsc + _mm_lfence (TimingProbeDesign.md §2.3)
 #define DETERM_HAVE_RDTSC 1
 #endif
+#ifndef _WIN32
+#include <sys/stat.h>  // test-node-key-perms (S-091): ::stat / ::chmod / ::umask
+#include <unistd.h>    // test-node-key-perms (S-091): ::symlink / ::getpid
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -748,6 +752,13 @@ In-process tests (deterministic, no network):
                                               chain_abort_hash +
                                               genesis_random_state (V8
                                               foundation + S5 anti-cartel)
+  determ test-node-key-perms                  S-091 (partial) — node_key.json
+                                              at-rest permissions: 0600 file
+                                              (incl. over an existing 0666
+                                              one), 0700 for a directory
+                                              save_node_key creates, symlink
+                                              refused, failure reported;
+                                              SKIPs on Windows
   determ test-snapshot-defense                S-018 defense-in-depth lock-in
                                               for Chain::restore_from_snapshot
                                               wrong-type collection rejection
@@ -22570,6 +22581,201 @@ int main(int argc, char** argv) {
                   << ": random-state " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
+    }
+    // S-091 (PARTIAL) — crypto::save_node_key at-rest PERMISSIONS, asserted as
+    // OUTCOMES on the filesystem, never as source text.
+    //
+    // Reproduced 2026-09-17 against the unmodified binary: `determ init` left
+    // node_key.json at 0644 (0666 under umask 000) with the 32-byte seed in
+    // plaintext hex, in a 0755 data dir, and user `nobody` read priv_seed out of
+    // it. What follows pins the four separate properties that closed it — the
+    // create mode, the narrowing of an ALREADY-EXISTING file (which the create
+    // mode cannot do), the directory this function creates, and the refusal to
+    // continue when narrowing fails — plus the two that bound the change: a
+    // symlink at the path is refused, and the JSON container is byte-identical
+    // so an existing 0644 key still loads with no migration.
+    //
+    // Deliberately NOT here: the syscall-ORDER property (no window between the
+    // create and the first write). A process cannot observe its own mode-setting
+    // order; that leg lives in tools/test_node_key_perms.sh under strace, behind
+    // a capability probe. A mutant that creates 0600, widens to 0666, writes and
+    // narrows back passes every assertion below and is killed only there.
+    if (cmd == "test-node-key-perms") {
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+#ifdef _WIN32
+        // No pass is banked on a branch that checked nothing (wave doctrine
+        // rule 5): save_node_key sets no permission on Windows by design — the
+        // ACL comes by inheritance and neither _S_IREAD|_S_IWRITE nor
+        // std::filesystem::permissions rewrites it (S005PassphraseKeyfile.md
+        // F-4) — so there is no property here to assert.
+        std::cout << "  SKIP: POSIX file modes do not exist here; the node key's"
+                     " protection on Windows is the parent directory's NTFS ACL,"
+                     " which save_node_key deliberately does not touch\n";
+        std::cout << "\n  PASS: node-key-perms all assertions\n";
+        return 0;
+#else
+        // A fixed umask, because these assertions are only meaningful against a
+        // umask that would otherwise leave the wide bits set: under umask 077 a
+        // plain ofstream already yields 0600 and create_directories already
+        // yields 0700, so every mutant would survive.
+        const mode_t saved_umask = ::umask(022);
+
+        const fs::path T = fs::temp_directory_path() /
+            ("determ-nodekeyperms-" + std::to_string(static_cast<unsigned long>(::getpid())));
+        std::error_code rmec;
+        fs::remove_all(T, rmec);
+        fs::create_directories(T);
+        ::chmod(T.c_str(), 0700);
+
+        auto mode_of = [](const fs::path& p) -> int {
+            struct stat st {};
+            if (::stat(p.c_str(), &st) != 0) return -1;
+            return static_cast<int>(st.st_mode & 07777);
+        };
+        auto slurp = [](const fs::path& p) -> std::string {
+            std::ifstream f(p, std::ios::binary);
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            return ss.str();
+        };
+
+        crypto::NodeKey key{};
+        for (int i = 0; i < 32; ++i) key.priv_seed[i] = static_cast<uint8_t>(i + 1);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        // 1. A path whose parent does not exist: the file is 0600 and the
+        //    directory save_node_key created is 0700, under umask 022 where the
+        //    defaults would have been 0644 and 0755.
+        {
+            const fs::path dir = T / "created" / "deep";
+            const fs::path p   = dir / "node_key.json";
+            crypto::save_node_key(key, p.string());
+            check(fs::exists(p), "created-parent: the key file exists");
+            check(mode_of(p) == 0600,
+                  "created-parent: key file mode is 0600 (was 0644 under this umask)");
+            check(mode_of(dir) == 0700,
+                  "created-parent: the directory save_node_key created is 0700 (was 0755)");
+
+            // The container did not change: exact bytes, 2-space indent, sorted
+            // keys, no trailing newline — what the old std::ofstream writer
+            // emitted. A change here is a migration, and there are none.
+            const std::string expect = std::string("{\n  \"priv_seed\": \"")
+                                     + to_hex(key.priv_seed) + "\",\n  \"pubkey\": \""
+                                     + to_hex(key.pub) + "\"\n}";
+            check(slurp(p) == expect,
+                  "created-parent: on-disk JSON is byte-identical to the pre-change writer");
+            crypto::NodeKey back = crypto::load_node_key(p.string());
+            check(back.pub == key.pub && back.priv_seed == key.priv_seed,
+                  "created-parent: load_node_key round-trips the same key");
+        }
+
+        // 2. A parent the OPERATOR already owns is left exactly as it was — the
+        //    narrowing applies only to a directory this call created.
+        {
+            const fs::path dir = T / "preexisting";
+            fs::create_directories(dir);
+            ::chmod(dir.c_str(), 0755);
+            const fs::path p = dir / "node_key.json";
+            crypto::save_node_key(key, p.string());
+            check(mode_of(dir) == 0755,
+                  "pre-existing parent: mode is UNCHANGED at 0755 (no silent side effect)");
+            check(mode_of(p) == 0600, "pre-existing parent: key file is still 0600");
+        }
+
+        // 3. The case the create mode CANNOT reach: the target already exists and
+        //    is world-writable. O_CREAT|O_TRUNC's mode argument is ignored for an
+        //    existing file (measured), so only the fchmod narrows this.
+        {
+            const fs::path dir = T / "rewrite";
+            fs::create_directories(dir);
+            const fs::path p = dir / "node_key.json";
+            { std::ofstream f(p); f << "stale"; }
+            ::chmod(p.c_str(), 0666);
+            check(mode_of(p) == 0666,
+                  "rewrite: fixture control — the target really is 0666 before the write");
+            crypto::save_node_key(key, p.string());
+            check(mode_of(p) == 0600,
+                  "rewrite: an existing 0666 key file is narrowed to 0600 by the write");
+        }
+
+        // 4. A symlink planted at the path is REFUSED, not followed (O_NOFOLLOW).
+        {
+            const fs::path dir = T / "symlink";
+            fs::create_directories(dir);
+            const fs::path victim = dir / "victim";
+            { std::ofstream f(victim); f << "VICTIM"; }
+            const fs::path p = dir / "node_key.json";
+            check(::symlink("victim", p.c_str()) == 0,
+                  "symlink: fixture control — the symlink was planted");
+            bool threw = false;
+            try { crypto::save_node_key(key, p.string()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "symlink: save_node_key refuses a symlinked path");
+            check(slurp(victim) == "VICTIM",
+                  "symlink: the link target is untouched (the seed did not land in it)");
+        }
+
+        // 5. No migration: a legacy 0644 file written by the old code path still
+        //    loads, and loading does not rewrite or narrow it.
+        {
+            const fs::path dir = T / "legacy";
+            fs::create_directories(dir);
+            const fs::path p = dir / "node_key.json";
+            {
+                std::ofstream f(p);
+                f << "{\n  \"priv_seed\": \"" << to_hex(key.priv_seed)
+                  << "\",\n  \"pubkey\": \"" << to_hex(key.pub) << "\"\n}";
+            }
+            ::chmod(p.c_str(), 0644);
+            crypto::NodeKey back = crypto::load_node_key(p.string());
+            check(back.pub == key.pub && back.priv_seed == key.priv_seed,
+                  "legacy: an existing 0644 node_key.json still loads unchanged");
+            check(mode_of(p) == 0644,
+                  "legacy: loading does not silently rewrite the mode (no migration)");
+        }
+
+        // 6. A narrowing that FAILS is reported, not swallowed. The failure is
+        //    injected (DETERM_NODE_KEY_INJECT) because this process owns the file
+        //    and an owner's fchmod does not fail — without the injection this
+        //    rule would have no gate that can go RED.
+        {
+            const fs::path dir = T / "inject_file";
+            fs::create_directories(dir);
+            const fs::path p = dir / "node_key.json";
+            ::setenv("DETERM_NODE_KEY_INJECT", "fchmod", 1);
+            bool threw = false;
+            try { crypto::save_node_key(key, p.string()); }
+            catch (const std::exception&) { threw = true; }
+            ::unsetenv("DETERM_NODE_KEY_INJECT");
+            check(threw, "fchmod failure: save_node_key THROWS rather than continuing");
+            check(slurp(p).find("priv_seed") == std::string::npos,
+                  "fchmod failure: no seed was written to the unprotectable file");
+        }
+
+        // 7. Same rule for the directory narrowing.
+        {
+            const fs::path p = T / "inject_dir" / "sub" / "node_key.json";
+            ::setenv("DETERM_NODE_KEY_INJECT", "dirchmod", 1);
+            bool threw = false;
+            try { crypto::save_node_key(key, p.string()); }
+            catch (const std::exception&) { threw = true; }
+            ::unsetenv("DETERM_NODE_KEY_INJECT");
+            check(threw, "directory failure: save_node_key THROWS rather than continuing");
+            check(!fs::exists(p),
+                  "directory failure: no key file was created in the unprotectable directory");
+        }
+
+        fs::remove_all(T, rmec);
+        ::umask(saved_umask);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": node-key-perms " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+#endif
     }
     // S-035 Option 1 seed: in-process unit test for the S-018
     // defense-in-depth hardening applied to Chain::restore_from_snapshot
