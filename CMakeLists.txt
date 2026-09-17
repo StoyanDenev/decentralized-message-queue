@@ -452,6 +452,7 @@ endif()
 # consensus while DSSO speaks what the EUDI specifications mandate.
 add_executable(determ-dsso
   dapps/dsso/dsso.c
+  dapps/dsso/assertion.c
   dapps/dsso/dsso_main.c
 )
 target_compile_features(determ-dsso PRIVATE c_std_99)

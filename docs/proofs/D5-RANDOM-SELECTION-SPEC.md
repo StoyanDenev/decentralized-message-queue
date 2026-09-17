@@ -84,9 +84,12 @@ Height ordering, enforced by the verifier (§9), is **`h_r ≤ h_o < H < h_s`** 
    per `case_id` is canonical; any later `case-open` for the same `case_id` is permanent public
    **evidence**, not a valid re-roll (enforced by the verifier, §8/§9, not by consensus).
 3. **DSSO AUTH of the requesting official** (reference-RP integration). t-of-n OPAQUE login yields
-   `sso_key`; the D.5 relying party (its `DAPP_REGISTER` `tenant_key`) accepts the dual-hash token
-   `H2 == H2'` under **ratified Option-A freshness** (`audience == D.5 id`; `now−skew ≤ iat`;
-   `exp > now`; `exp−iat ≤ T_max`; single-use nonce). The `case-open` `DAPP_CALL` carries
+   `sso_key`; the D.5 relying party (its `DAPP_REGISTER` `tenant_key`) accepts under the **rewritten
+   §5 rule of `v2.25-DSSO-DAPP-SPEC.md` (2026-09-17, defect C6)** — it links `dapps/dsso/assertion.h`
+   and calls `dsso_rp_verify`, which recomputes the tag over the PRESENTED claim and binder and
+   accepts only a reference the IdP delivered, then the freshness legs (`audience == D.5 id`;
+   `iat ≤ now+skew`; `exp > now`; `exp−iat ≤ T_max`; single-use nonce). The earlier `H2 == H2'`
+   wording described the accept rule C6 falsified and must not be built. The `case-open` `DAPP_CALL` carries
    `hash(accepted-token ‖ auditor-id)` as a commitment, **never** the bearer token. *(NOTE, §13 D6:
    DSSO is the reference RP integration that drives the later `sdk/rp` extraction — it is NOT the
    public authorization proof; against a compromised RP the token is citizen-opaque. The
@@ -155,8 +158,9 @@ field. **Single-shard only** (cross-shard `DAPP_CALL` rejected via `Chain::is_cr
   completeness re-authenticated by the full-block walk — §8).
 - `LOG_AUDIT_ACCESS=16` (72-byte disclosure record; `al:` monotone-count leaf) /
   `ROTATE_AUDIT_KEY=15` (`ak:` standing key). Client builders shipped in `determ-light`.
-- DSSO t-of-n OPAQUE login → `sso_key`; RP dual-hash token `H2 = HMAC(tenant_key, HMAC(sso_key,
-  challenge))` with Option-A freshness (the `test-dsso-login-e2e` acceptance logic).
+- DSSO t-of-n OPAQUE login → `sso_key`; the RP assertion module `dapps/dsso/assertion.{h,c}`
+  (`binder = HMAC(sso_key, ·)`, `tag = HMAC(tenant_key, DS_TAG ‖ canon(claim) ‖ binder)`) with its
+  freshness legs and bounded nonce cache — `determ-dsso selftest-assertion`, not a test harness.
 - `determ-light` trustless-read: the committee-authenticated **full-block walk** with
   `track_registry` (`light/trustless_read.cpp:113-291`, full-block re-fetch pinned to the chained
   `block_hash` — the completeness-authenticating enumeration §8 needs); `verify-block-sigs`,
@@ -180,7 +184,7 @@ field. **Single-shard only** (cross-shard `DAPP_CALL` rejected via `Chain::is_cr
 4. **Three canonical-binary payload codecs** (`roster`, `case-open`, `result`) — DApp-layer, D2
    (no JSON), KAT-pinned round-trip; the chain never parses them.
 5. **`dapps/d5-random-selection/**`** (BUSL-1.1) — off-chain orchestrator + reference RP: DSSO
-   dual-hash acceptance (Option-A freshness) outside the DSSO test harness; roster/case-open/result
+   assertion acceptance via `dsso_rp_verify` (spec §5, 2026-09-17); roster/case-open/result
    `DAPP_CALL` builders over shipped tx-signing; `LOG_AUDIT_ACCESS` emission. The RP-accept wiring
    is the genuinely new integration that later shapes `sdk/rp`.
 6. **This spec** (`docs/proofs/D5-RANDOM-SELECTION-SPEC.md`).
@@ -463,7 +467,7 @@ live (D1 draw algo + `draw_algo_version`, D3 Δ).
 - No consensus-enforced case-open uniqueness — multi-commit is defeated by verifier-enforced
   first-open-wins + permanent public evidence (D4).
 - No FROST / no signature-based or block-cosigned assertion token — DSSO stays the shipped
-  dual-hash + Option-A freshness design ([[frost-deviation-discipline]]).
+  dual keyed-hash + freshness design ([[frost-deviation-discipline]]).
 - No new randomness primitive / VDF / time-lock / VRF — the MPDH commit-reveal beacon is the sole
   seed source.
 - No JSON on wire/storage — all payloads canonical binary (DECISION-LOG D2), KAT-pinned.

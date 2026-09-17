@@ -586,13 +586,6 @@ In-process tests (deterministic, no network):
                                               DLEQ filter load-bearing (G4-login);
                                               shipped P-256/AEAD/HKDF, zero new
                                               primitive
-  determ test-dsso-assertion                  DSSO Bundle-A G4 assertion layer
-                                              (v2.25-DSSO §5, claim C6): the RP
-                                              dual-hash token H2=HMAC(tenant_key,
-                                              HMAC(sso_key,challenge)) — accept,
-                                              audience/session/claim binding,
-                                              replay + layer separation + forgery
-                                              reject; HMAC-SHA256, zero new primitive
   determ test-dsso-opaque3dh                  DSSO G4 OPAQUE-3DH AKE core
                                               (§3.26 / RFC 9807 §6.4): the login
                                               session-key co-generation — both
@@ -614,15 +607,20 @@ In-process tests (deterministic, no network):
                                               aborts before the AKE, a MITM swap of
                                               cred_response breaks the transcript
                                               MAC, a 1-crash+1-byzantine login still
-                                              succeeds; then the §5-6 RP token bound
-                                              to the login's sso_key is accepted,
-                                              with Option-A freshness (audience +
+                                              succeeds; then a keyed-hash RP token
+                                              bound to the login's sso_key is
+                                              accepted, with freshness (audience +
                                               iat/exp window + single-use nonce) and
                                               session binding enforced (replay /
                                               expired / stale / wrong-audience /
-                                              wrong-session all rejected); composes
-                                              the shipped OPRF/AEAD/HKDF/opaque3dh/
-                                              HMAC, zero new primitive
+                                              wrong-session all rejected). The
+                                              NORMATIVE §5 assertion rule is the
+                                              module dapps/dsso/assertion.c, gated by
+                                              `determ-dsso selftest-assertion`; this
+                                              gate covers the LOGIN composition that
+                                              feeds it. Composes the shipped OPRF/
+                                              AEAD/HKDF/opaque3dh/HMAC, zero new
+                                              primitive
   determ test-pedersen-c99                    §3.19: Pedersen commitment over
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
@@ -15544,9 +15542,10 @@ int main(int argc, char** argv) {
         // AND ONE byzantine (bad DLEQ) in the SAME login — and drives the
         // survivor-SELECTION pipeline (the client does not know a priori which
         // servers are honest), not an a-priori subset. The OPAQUE AKE that
-        // co-generates sso_key and the RP assertion token are the owner-gated
-        // remainder of G4 (the token is gated separately by test-dsso-assertion);
-        // this gates the login's fault tolerance. ZERO new production surface.
+        // co-generates sso_key is gated by test-dsso-opaque3dh, and the RP
+        // assertion token is now a MODULE — dapps/dsso/assertion.c, gated by
+        // `determ-dsso selftest-assertion`; this gates the login's fault
+        // tolerance. ZERO new production surface.
         {
             const int t = 3, n = 5;
             const int CRASHED = 4;         // server 4 sends no response
@@ -15917,16 +15916,25 @@ int main(int argc, char** argv) {
                   "OPAQUE-3DH AKE co-generates a mutually-authenticated sso_key (n=5, t=3, 1 crash + 1 byzantine)");
         }
 
-        // ── E2E-5..E2E-9 (inc.3): the §5-6 dual-hash RP assertion + the four §5
-        //    Option-A freshness legs, BOUND to the login's co-generated sso_key.
-        //    This makes the gate the COMPLETE G4 flow: register -> t-of-n login ->
-        //    OPAQUE-3DH AKE -> RP assertion accepted, with the RP's normative
-        //    freshness enforcement (audience + iat/exp window + single-use nonce).
-        //    Session binding (the paper's mutual-distrust property): the IdP
-        //    independently computes H2' = HMAC(tenant, HMAC(sso_key, challenge))
-        //    from the REAL session key and hands it to the RP; the RP accepts iff
-        //    HMAC(tenant, H1'_client) == H2'. An attacker without the login's
-        //    sso_key produces a different H1' -> a different H2 -> rejected.
+        // ── E2E-5..E2E-9 (inc.3): the login composition feeding the RP token.
+        //    What these legs prove is that the RP-facing token is BOUND to the
+        //    sso_key the AKE above co-generated: the IdP computes a reference
+        //    H2' = HMAC(tenant, HMAC(sso_key, challenge)) from the REAL session
+        //    key and hands it to the RP, and the RP accepts iff
+        //    HMAC(tenant, H1'_client) == H2'. A party without the login's sso_key
+        //    produces a different H1' -> a different H2 -> rejected, and the
+        //    freshness legs (audience + iat/exp window + single-use nonce) hold.
+        //
+        //    THIS IS NOT THE NORMATIVE §5 ACCEPT RULE, and the local rp_verify
+        //    below is not the shipped verifier. The §5 rule is the MODULE
+        //    dapps/dsso/assertion.c (gated by `determ-dsso selftest-assertion`),
+        //    which additionally puts canon(claim) inside the outer MAC so the RP
+        //    cannot act on a claim other than the one the IdP asserted — the
+        //    half of C6 that the reference rule here does NOT close, because its
+        //    accept predicate reads no field of the cleartext claim. Keeping the
+        //    two-key composition legs here is still worth it: they gate that the
+        //    login's key reaches the token at all, which is the part of the flow
+        //    the module takes as a given input.
         if (have_login_sso) {
             struct Claim { std::string iss, sub, aud; uint64_t iat, exp; uint8_t nonce[32]; };
             auto encode = [](const Claim& c) {
@@ -16042,153 +16050,6 @@ int main(int argc, char** argv) {
 
         if (fail == 0) std::cout << "\nPASS: dsso-login-e2e all assertions\n";
         else           std::cout << "\nFAIL: dsso-login-e2e " << fail << " assertion(s)\n";
-        return fail == 0 ? 0 : 1;
-    }
-    if (cmd == "test-dsso-assertion") {
-        // DSSO Bundle-A gate G4 (assertion layer) — v2.25-DSSO-DAPP-SPEC §5,
-        // security claim C6. The RP-facing "Sign-In With Determ" token is the
-        // paper's DUAL-HASH challenge-response over co-generated keys — NO
-        // signature, NO FROST, NO block co-sign:
-        //   H1' = H(sso_key,    challenge)   (keyed by the login-session key)
-        //   H2  = H(tenant_key, H1')         (keyed by the RP's registration key)
-        //   the RP holds tenant_key + receives H1'; accepts iff
-        //   HMAC(tenant_key, H1') == H2. The challenge binds the SIWE-class
-        //   claim (iss, sub, aud, iat, exp, nonce). H = HMAC-SHA256 (the shipped
-        //   keyed hash — zero new primitive).
-        //
-        // SCOPE. This gates the ASSERTION-TOKEN soundness (C6). The t-of-n login
-        // that authenticates the user + unseals the credential is gated by
-        // test-dsso-threshold-oprf (G1/G2/G3); the OPAQUE AKE that co-generates
-        // sso_key is the owner-gated remainder of G4 — here sso_key is a GIVEN
-        // handshake output. Production H1/H2 wire format is pinned at the
-        // ceremony increment (spec §5 "pinned at implementation").
-        int fail = 0;
-        auto check = [&](bool c, const std::string& m) {
-            if (c) std::cout << "  PASS: " << m << "\n";
-            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
-        };
-        struct Claim { std::string iss, sub, aud; uint64_t iat, exp; uint8_t nonce[32]; };
-        auto encode = [](const Claim& c) {
-            std::vector<uint8_t> b;
-            auto put_str = [&](const std::string& s) {
-                for (int i = 7; i >= 0; --i) b.push_back((uint8_t)((uint64_t)s.size() >> (8 * i)));
-                b.insert(b.end(), s.begin(), s.end());
-            };
-            auto put_u64 = [&](uint64_t v) { for (int i = 7; i >= 0; --i) b.push_back((uint8_t)(v >> (8 * i))); };
-            put_str(c.iss); put_str(c.sub); put_str(c.aud);
-            put_u64(c.iat); put_u64(c.exp);
-            b.insert(b.end(), c.nonce, c.nonce + 32);
-            return b;
-        };
-        auto token = [&](const uint8_t sso[32], const uint8_t tenant[32], const Claim& cl,
-                         uint8_t H1p[32], uint8_t H2[32]) {
-            std::vector<uint8_t> ch = encode(cl);
-            determ_hmac_sha256(sso, 32, ch.data(), ch.size(), H1p);
-            determ_hmac_sha256(tenant, 32, H1p, 32, H2);
-        };
-        auto rp_accept = [&](const uint8_t tenant[32], const uint8_t H1p[32], const uint8_t H2[32]) {
-            uint8_t H2p[32]; determ_hmac_sha256(tenant, 32, H1p, 32, H2p);
-            return std::memcmp(H2p, H2, 32) == 0;
-        };
-
-        uint8_t sso[32], sso2[32], tenant[32], tenant2[32];
-        for (int i = 0; i < 32; ++i) {
-            sso[i]     = (uint8_t)(0x11 + i);  sso2[i]    = (uint8_t)(0x40 + i);
-            tenant[i]  = (uint8_t)(0x80 ^ i);  tenant2[i] = (uint8_t)(0xC3 - i);
-        }
-        Claim base; base.iss = "determ-chain-1"; base.sub = "alice"; base.aud = "rp.example";
-        base.iat = 1000; base.exp = 2000;
-        for (int i = 0; i < 32; ++i) base.nonce[i] = (uint8_t)(0x5a ^ i);
-
-        uint8_t H1p[32], H2[32];
-        token(sso, tenant, base, H1p, H2);
-
-        // 1. correctness — the RP (holds tenant_key, receives H1') accepts.
-        check(rp_accept(tenant, H1p, H2),
-              "C6 correctness: honest token -> RP accepts (HMAC(tenant_key, H1') == H2)");
-
-        // 2. audience binding — a token minted under RP-B's tenant_key does not
-        //    verify under RP-A's, and vice versa (an SSO token is RP-scoped).
-        {
-            uint8_t H1p_b[32], H2_b[32];
-            token(sso, tenant2, base, H1p_b, H2_b);
-            bool same_h1 = std::memcmp(H1p, H1p_b, 32) == 0;   // only the tenant layer differs
-            check(same_h1 && !rp_accept(tenant, H1p_b, H2_b) && !rp_accept(tenant2, H1p, H2),
-                  "C6 audience binding: a token bound to tenant_key B is rejected under "
-                  "tenant_key A (RP-scoped, no cross-RP replay)");
-        }
-        // 3. session binding — a token from a different login (sso2) yields a
-        //    different H1', so the RP's recompute over the real H1' won't match.
-        {
-            uint8_t H1p2[32], H2_2[32];
-            token(sso2, tenant, base, H1p2, H2_2);
-            check(std::memcmp(H1p, H1p2, 32) != 0 && !rp_accept(tenant, H1p2, H2),
-                  "C6 session binding: a different sso_key yields a different H1' -> rejected");
-        }
-        // 4. nonce commitment (generation-side) — a fresh nonce yields a
-        //    DISTINCT token, and each H2 is bound to its own H1' (H2 does not
-        //    verify against a different H1', and vice versa). This is the
-        //    token's binding to the nonce; verifier-side REPLAY REJECTION is a
-        //    separate, unmodeled property — see the SCOPE note below.
-        {
-            Claim c2 = base; for (int i = 0; i < 32; ++i) c2.nonce[i] = (uint8_t)(0xa5 + i);
-            uint8_t H1p2[32], H2_2[32];
-            token(sso, tenant, c2, H1p2, H2_2);
-            check(std::memcmp(H2, H2_2, 32) != 0            // fresh nonce -> fresh token
-                  && !rp_accept(tenant, H1p, H2_2)          // new H2 invalid for the old H1'
-                  && !rp_accept(tenant, H1p2, H2),          // ...and old H2 invalid for the new H1'
-                  "C6 nonce commitment: a fresh nonce yields a distinct token, and each "
-                  "H2 is bound to its own H1' (generation-side, not verifier replay-rejection)");
-        }
-        // 5. claim commitment (generation-side) — mutating ANY SIWE field yields
-        //    a DISTINCT token, so no single token is valid for two claims (the
-        //    IdP cannot be made to mint one token that authenticates two claims).
-        {
-            bool all = true; uint8_t h1[32], h2[32];
-            auto diff = [&](const Claim& c) { token(sso, tenant, c, h1, h2); return std::memcmp(h2, H2, 32) != 0; };
-            Claim m;
-            m = base; m.iss = "determ-chain-2"; all = all && diff(m);
-            m = base; m.sub = "bob";            all = all && diff(m);
-            m = base; m.aud = "evil.example";   all = all && diff(m);
-            m = base; m.iat = 1001;             all = all && diff(m);
-            m = base; m.exp = 2001;             all = all && diff(m);
-            check(all, "C6 claim commitment: mutating any of iss/sub/aud/iat/exp yields a "
-                       "distinct token — no single token is valid for two claims (generation-side)");
-        }
-        // 6. layer separation — the inner H1' is NOT the token; presenting H1'
-        //    in place of H2 is rejected, so the tenant_key layer is mandatory
-        //    (an attacker who learns H1' but not tenant_key cannot forge H2).
-        check(!rp_accept(tenant, H1p, H1p) && std::memcmp(H1p, H2, 32) != 0,
-              "C6 layer separation: the bare inner hash H1' is rejected as the token "
-              "(tenant_key layer mandatory)");
-
-        // 7. a forged token (arbitrary bytes) is rejected — the RP's HMAC is a PRF.
-        {
-            uint8_t forged[32]; for (int i = 0; i < 32; ++i) forged[i] = (uint8_t)(0x77 ^ i);
-            check(!rp_accept(tenant, H1p, forged),
-                  "C6: a forged token (not HMAC(tenant_key, H1')) is rejected");
-        }
-
-        // SCOPE (surfaced by the adversarial-verification workflow, 2026-07-21).
-        // The §5 accept rule is STATELESS — `HMAC(tenant_key, H1') == H2` — and
-        // the RP cannot recompute H1' (it has no sso_key). So the token in
-        // ISOLATION does NOT reject a VERBATIM replay of a captured (H1', H2),
-        // nor a claim SUBSTITUTED at presentation. This gate proves the token is
-        // a sound keyed COMMITMENT (unforgeable without the keys; a
-        // collision-resistant binding of keys + claim), NOT verifier-side
-        // freshness. Replay/expiry rejection needs RP session state — an
-        // RP-issued single-use nonce + an `exp`-vs-clock check — which is a
-        // ceremony/topology property, part of the owner-gated G4 end-to-end
-        // flow. Recorded as a residual in DssoThresholdOprfSoundness.md §6 and
-        // flagged for a possible spec §5 clarification.
-        std::cout << "  NOTE: verifier-side replay/expiry rejection is a ceremony "
-                     "property (RP single-use nonce + clock), NOT provided by the "
-                     "stateless §5 token — out of scope here.\n";
-
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL") << ": test-dsso-assertion "
-                  << (fail == 0
-                      ? "(§5 dual-hash RP assertion soundness, claim C6, over HMAC-SHA256)"
-                      : "had assertion failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "ct-timing-probe") {

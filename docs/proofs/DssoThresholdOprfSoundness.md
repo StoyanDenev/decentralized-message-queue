@@ -1,21 +1,24 @@
 # DSSO threshold-OPRF soundness — Bundle-A gates G1 + G2 + G3 (+ the G4 assertion layer + the G4 OPAQUE-3DH AKE core)
 
 **Status: SHIPPED (the math gate + the credential envelope + the RP assertion
-token).** Backs the first three of the six §9 green gates of
+module).** Backs the first three of the six §9 green gates of
 [`v2.25-DSSO-DAPP-SPEC.md`](v2.25-DSSO-DAPP-SPEC.md), plus the assertion (RP-token)
 layer of G4 (§6 below). Two gates:
 - `determ test-dsso-threshold-oprf` (`tools/test_dsso_threshold_oprf.sh`, FAST) —
   G1/G2/G3 (the OPRF math + credential envelope).
-- `determ test-dsso-assertion` (`tools/test_dsso_assertion.sh`, FAST) — the §5
-  dual-hash RP token, security claim **C6** (§6 below).
+- `determ-dsso selftest-assertion` (`tools/test_dsso_assertion_module.sh`, FAST)
+  — the §5 RP assertion, security claim **C6**, as a MODULE
+  (`dapps/dsso/assertion.{h,c}`) since 2026-09-17. It replaces
+  `determ test-dsso-assertion`, which asserted the pre-C6 accept rule and is
+  RETIRED; §6 below records what that gate proved and what it did not.
 
 ## 0.0 ⚠ Soundness corrections (2026-07-28, round-11 post-ship audit `wf_f1ca5dcc`)
 
-Three claims below did **not** hold of shipped code. **Two are now closed** (AKE-2 on 2026-09-17, the `iat` upper bound on 2026-07-28); the §6 pair is still owner-gated. Read property 3 and the §6 residual subject to this.
+Three claims below did **not** hold of shipped code. **All three are now closed**: the `iat` upper bound on 2026-07-28, and AKE-2 (the C2 fix) together with Property 3 and the §6 residual (the C6 fix) on 2026-09-17.
 
 - **AKE-2 (§ "mutual authentication") was FALSE as stated — ✅ CLOSED 2026-09-17.** "`server_mac` … is verifiable only by a party that derived `Km2`, which requires **the server's** private DH contributions" — in fact **any** `(sk_s′, esk_s′)` pair worked, because the client's `pk_s` was an unauthenticated caller argument of `determ_opaque3dh_client`, the transcript (`hash_preamble`) bound **neither** static public key, and the credential envelope was sealed with **AAD = NULL** so it carried no `server_public_key`. An attacker holding only the victim's **public** `pk_c` impersonated the IdP and derived the same `sso_key` — **verified by executing the attack**, and re-executed against the shipped C before the fix. **Closed** by the RFC 9807 §4.1.1 `CleartextCredentials` binding + the removal of the `pk_s`/`pk_c` call arguments + the envelope AAD (v2.25-DSSO-DAPP-SPEC §0.0(2)); AKE-2 is restated below on what now holds, and the `pk_s`-authenticity assumption it always needed is now written down as a trust boundary instead of being silent.
-- **Property 3 ("a token whose `H1'` came from a different `sso_key` does not verify — *(verifier-side)*") is FALSE.** The shipped rule (`main.cpp:14892-14895`) takes **both** `H1'` and `H2` from the presenter and never touches `sso_key`; a complete token minted under a different `sso_key` verifies **by construction**. The parenthetical in this document already states the winning condition ("to accept a chosen `H1'` you need `HMAC(tenant_key, H1')`") and then labels the property verifier-side anyway. **OWNER-GATED** (fix = make the IdP-supplied-`H2'` rule normative).
-- **The §6 residual marked RESOLVED by Option A is NOT resolved.** Option A's four legs are evaluated on a cleartext claim the RP cannot authenticate, so **claim substitution at presentation** — explicitly named as unhandled earlier in that same section — survives all of them (the attacker rewrites `nonce`, `iat`/`exp`, and `sub`). Only the *replay-of-a-verbatim-token* and *expiry* legs are genuinely closed. **OWNER-GATED.**
+- **Property 3 ("a token whose `H1'` came from a different `sso_key` does not verify — *(verifier-side)*") was FALSE — **CLOSED 2026-09-17**.** The rule of the day (the `rp_accept` lambda in the now-retired `test-dsso-assertion`) took **both** `H1'` and `H2` from the presenter and never touched `sso_key`; a complete token minted under a different `sso_key` verified **by construction**. Closed by the rewritten spec §5 and the module `dapps/dsso/assertion.c`: the RP compares its recomputed tag against a reference the IdP delivered, so being accepted requires the IdP's own `binder = HMAC(sso_key, ·)`. Gated by `determ-dsso selftest-assertion`, falsify-proven by mutants M1 (restore the unsound rule) and M2 (drop `sso_key` from the derivation).
+- **The §6 residual marked RESOLVED by Option A was NOT resolved — **CLOSED 2026-09-17**.** Option A's four legs were evaluated on a cleartext claim the RP could not authenticate, so **claim substitution at presentation** survived all of them (the attacker rewrote `nonce`, `iat`/`exp`, and `sub`). Closed by putting `canon(claim)` inside the outer MAC (spec §5.2): the claim the RP acts on is now the claim the IdP asserted. Gated per field — subject, audience, session, nonce, `iat`, `exp`, issuer — by `determ-dsso selftest-assertion`, falsify-proven by mutants M3 (drop the audience from the binding) and M4 (drop the session id).
 - **CLOSED (`e6bad81`):** the §6 "future" leg was listed as gated but the verifier bounded `iat` only from below; the upper bound now ships, gated falsify-on-mutant by **E2E-7b** in `test-dsso-login-e2e`.
 
 ## 1. What this proves, and what it does not
@@ -173,75 +176,58 @@ MSVC + WSL2 GCC. Cross-references
 and [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.8c/§3.9b (the shipped P-256 + OPRF
 stack this composes).
 
-## 6. G4 (assertion layer) — the RP dual-hash token, claim C6
+## 6. G4 (assertion layer) — the RP assertion, claim C6
 
-`determ test-dsso-assertion` (`tools/test_dsso_assertion.sh`, FAST; 7 assertions).
+**Rewritten 2026-09-17.** `determ-dsso selftest-assertion`
+(`tools/test_dsso_assertion_module.sh`, FAST; 61 assertions) over the module
+`dapps/dsso/assertion.{h,c}`. The full normative rule is
+[`v2.25-DSSO-DAPP-SPEC.md`](v2.25-DSSO-DAPP-SPEC.md) §5, which this section does
+not restate; what follows is only what this document owes a reader: what the
+previous section claimed, why it was wrong, and where the claim now rests.
 
-Spec §5 issues the relying-party token by the paper's **dual-hash
-challenge-response** over co-generated keys — no signature, no FROST, no block
-co-sign:
+**What stood here until 2026-09-17.** Seven properties of the accept rule
+`HMAC(tenant_key, H1'_presented) == H2_presented`, gated by the now-retired
+`determ test-dsso-assertion`. Four of them (nonce commitment, claim commitment,
+and the two halves of "audience binding") were *generation-side*: true statements
+that an honest IdP emits distinct tokens for distinct inputs. Three were labelled
+*verifier-side*, and of those, "session binding" was **false** — §0.0 above.
 
-```
-challenge = canonical length-prefixed (iss, sub, aud, iat, exp, nonce)
-H1' = HMAC-SHA256(sso_key,    challenge)   # sso_key: the login-session key (given)
-H2  = HMAC-SHA256(tenant_key, H1')         # tenant_key: the RP's registration key
-RP accepts iff HMAC-SHA256(tenant_key, H1') == H2.
-```
+**Why the section was wrong, in one line.** Its accept rule was a pure function
+of `tenant_key` and bytes the presenter chose, so a `tenant_key` holder could
+satisfy it by running the honest minting algorithm with an `sso_key` of its own
+(C6(a)), and it read no field of the claim, so one honest token authenticated any
+substituted claim (C6(b)). Both were reproduced against the shipped lambda before
+the fix. Generation-side properties cannot close either gap: they constrain the
+honest producer, not the verifier.
 
-`H = HMAC-SHA256` (the shipped, KAT-gated keyed hash — **zero new primitive**;
-`H(key, msg)` maps to HMAC, which avoids the length-extension pitfall of a bare
-`SHA256(key‖msg)`). The seven properties gate security claim **C6** ("keyed-hash
-challenge-response, PRF security of `H`, over PAKE-authenticated keys"):
+**Where the claim rests now.** On spec §5.3: the RP recomputes
+`HMAC(tenant_key, DS_TAG ‖ canon(claim) ‖ binder)` over the PRESENTED claim and
+binder and accepts only if it equals — in constant time, over the full 32 bytes —
+a reference tag the IdP delivered over the registered channel and that has not
+expired; then that the authenticated `sid` is the session this verifier is
+completing, then the three clock legs and the single-use nonce. Because
+`canon(claim)` is inside that MAC, the claim the RP acts on is the claim the IdP
+asserted; because the reference comes from the IdP, being accepted requires the
+IdP's own `binder = HMAC(sso_key, ·)`. Each step is HMAC-SHA-256 — **zero new
+primitive**, and the C6 backing is now PRF + collision resistance of a keyed hash
+applied to an accept rule that actually reads both keys and the claim.
 
-1. **correctness** — an honest token is accepted (verifier-side).
-2. **audience binding** — a token minted under RP-B's `tenant_key` is rejected
-   under RP-A's, and vice versa (both directions): an SSO token is RP-scoped by
-   the `tenant_key` layer, which `rp_accept` checks (verifier-side).
-3. **session binding** — a token whose `H1'` came from a different `sso_key`
-   does not verify (to accept a chosen `H1'` you need `HMAC(tenant_key, H1')`,
-   i.e. `tenant_key`) (verifier-side).
-4. **nonce commitment** *(generation-side)* — a fresh nonce yields a **distinct**
-   token, and each `H2` is bound to its own `H1'` (neither cross-verifies).
-5. **claim commitment** *(generation-side)* — mutating any of
-   `iss/sub/aud/iat/exp` yields a **distinct** token, so no single token is valid
-   for two claims (the IdP cannot be made to mint one token authenticating two
-   claims).
-6. **layer separation** — the bare inner `H1'` presented as the token is
-   rejected: the `tenant_key` layer is mandatory, so an attacker who learns `H1'`
-   but not `tenant_key` cannot forge `H2` (verifier-side).
-7. **forgery** — an arbitrary 32-byte `H2` is rejected (verifier-side).
+*Falsify-on-mutant (executed against a rebuilt binary, source restored after
+each).* M1 restore the unsound rule (verify against a presenter-supplied `H1'`);
+M2 drop `sso_key` from the derivation; M3 drop the audience from the binding;
+M4 drop the session/request id; M5 skip the nonce-cache insert; M6 make the
+pairwise subject a per-user constant; M7 truncate the tag compare. Each turns a
+NAMED leg of the gate RED. The non-constant-time variant of M7 (`memcmp` for
+`dsso_ct_equal`) is behaviourally indistinguishable and is therefore **not**
+falsifiable by a functional gate; it is held by using the `dsso_core`-gated
+`dsso_ct_equal`, and that is a weaker statement than the others here.
 
-**What this proves, precisely.** The token is a sound keyed **commitment**:
-unforgeable without the keys (1, 6, 7 + the HMAC-keying falsify below), and a
-collision-resistant binding of `(sso_key, tenant_key, iss, sub, aud, iat, exp,
-nonce)` (2–5). `sso_key` is a **given** handshake output — the OPAQUE AKE that
-co-generates it is the owner-gated remainder of G4.
-
-**Residual — verifier-side freshness is NOT gated (an adversarial-verification
-finding, 2026-07-21).** The §5 accept rule is **stateless** (`HMAC(tenant_key,
-H1') == H2`) and the RP cannot recompute `H1'` (it holds no `sso_key`). So the
-token **in isolation** does not reject a *verbatim replay* of a captured
-`(H1', H2)`, nor a claim *substituted at presentation* — properties 4/5 are
-**generation-side** (the honest producer emits distinct tokens for distinct
-inputs), not verifier-enforced. Verifier-side replay/expiry rejection needs RP
-session state — an RP-issued **single-use nonce** plus an `exp`-vs-clock check —
-which is a **ceremony/topology** property, part of the owner-gated G4 end-to-end
-flow, not the token. The gate prints this scope explicitly and does not claim
-verifier replay-rejection. **RESOLVED** (owner ratified **Option A**,
-`DssoAssertionFreshness.md`): spec §5 now carries a normative RP-freshness bullet
-(audience + `iat`/`exp` clock + single-use `nonce` cache — the OIDC/JWT/SIWE
-replay+expiry discipline), and G4-end-to-end gates the four legs (replay rejected
-on second use; expired / future / first-use).
-
-*Falsify-on-mutant (executed, reverted via file backup).* This gate adds **zero
-new production surface** (HMAC-SHA256 is shipped + KAT-gated), so the falsify
-targets the shipped keyed hash: neutralizing the key in `determ_hmac_sha256`
-(`src/crypto/sha2/hmac.c`, the short-key copy) flips **exactly** the two
-key-dependent assertions — audience binding and session binding — while the
-message-dependent ones (correctness, replay, claim binding, layer separation,
-forgery) stay green. That directional signature is the point: the two properties
-whose security *is* "the key matters" are the two that break when the key stops
-mattering.
+**Residual, unchanged by this fix.** The `binder` is a bearer secret in transit:
+front-channel confidentiality is the deployment's, and single use + `T_max` + the
+`sid` binding are what bound a stolen one. The IdP→RP reference channel is
+authenticated by the registration, not by this module. A compromised IdP can
+assert anything — the mutual-distrust property is a property of the *login*
+(C1/C3/C4).
 
 ## 7. G4 (AKE core) — the OPAQUE-3DH session-key co-generation
 
@@ -406,15 +392,24 @@ succeeds. *Self-load-bearing:* had the byzantine response been admitted, the com
 would yield a wrong `Zc` → wrong `y` → the envelope unseal FAILS → no login. So the
 DLEQ filter is what makes the fault-tolerant login sound, end-to-end.
 
-**E2E-5..E2E-9 (inc.3) — the RP assertion + Option-A freshness, bound to the login's
-`sso_key`.** The same `test-dsso-login-e2e` gate now closes the whole flow:
-register → login → AKE → **RP dual-hash assertion accepted**. The §6 token is
-`H1' = HMAC(sso_key, challenge)`, `H2 = HMAC(tenant_key, H1')`. The session binding
-(the paper's mutual-distrust property) is realized faithfully: the IdP independently
-computes `H2' = HMAC(tenant_key, HMAC(sso_key_real, challenge))` from the login's
-co-generated key and hands it to the RP; the RP accepts iff `HMAC(tenant_key,
-H1'_client) == H2'` **and** the four §5 Option-A freshness conditions hold (audience
-match; `now − skew ≤ iat`; `exp > now`; `exp − iat ≤ T_max`; single-use nonce cache).
+**E2E-5..E2E-9 (inc.3) — the token is bound to the login's `sso_key`.** The same
+`test-dsso-login-e2e` gate carries the composition through to an RP acceptance:
+register → login → AKE → keyed-hash assertion accepted. Its local rule is the IdP
+reference rule: the IdP computes `H2' = HMAC(tenant_key, HMAC(sso_key_real,
+challenge))` from the login's co-generated key and hands it to the RP, which
+accepts iff `HMAC(tenant_key, H1'_client) == H2'` **and** the freshness conditions
+hold (audience match; `now − skew ≤ iat`; `exp > now`; `exp − iat ≤ T_max`;
+single-use nonce cache).
+
+> **This is NOT the normative §5 accept rule (corrected 2026-09-17).** That rule is
+> the module `dapps/dsso/assertion.c`, gated by `determ-dsso selftest-assertion`
+> (§6 above). The reference rule here closes C6(a) — a party without `sso_key`
+> produces a different `H1'` — but NOT C6(b), because its accept predicate reads
+> no field of the cleartext claim; the harness only appears to close it because it
+> hands the same claim object to the IdP lambda and to the verifier lambda. What
+> E2E-5..9 gate, and what they are kept for, is the LOGIN COMPOSITION: that the
+> AKE's co-generated key reaches the RP-facing token at all. The module takes that
+> key as a given input.
 
 - **E2E-5 (accept):** the honest token minted under the login's real `sso_key`, fresh
   + in-window + audience-matched + unseen-nonce, is accepted.
@@ -430,10 +425,12 @@ match; `now − skew ≤ iat`; `exp > now`; `exp − iat ≤ T_max`; single-use 
   attacker is accepted) while E2E-5 stays green — the clean directional split proves the
   gate rests on the session binding, not on the freshness/audience legs.
 
-So `test-dsso-login-e2e` (18 assertions) is now the COMPLETE G4 end-to-end gate. The
-freshness legs discharge the `DssoAssertionFreshness.md` / §6 verifier-side residual
-that the standalone `test-dsso-assertion` (a stateless token check) could not: here the
-RP is stateful (nonce cache + clock window), so replay/expiry are genuinely rejected.
+So `test-dsso-login-e2e` (18 assertions) gates the login composition end to end, and
+together with `determ-dsso selftest-assertion` (61 assertions, the §5 rule) the G4
+end-to-end gate is complete. The freshness legs discharge the
+`DssoAssertionFreshness.md` verifier-side residual that a stateless token check
+could not: the RP is stateful (nonce cache + clock window), so replay and expiry are
+genuinely rejected — and, since 2026-09-17, over a claim the RP has authenticated.
 **Remaining (owner-gated): only G5 (CT review) + G6 (zeroization)** audit the production
 ceremony's secret handling once a production threshold-combine module exists — the
 functional G4 flow is fully gated. Cross-ref `v2.25-DSSO-DAPP-SPEC.md` §3-6/§9,
