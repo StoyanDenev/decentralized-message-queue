@@ -11,9 +11,9 @@ layer of G4 (§6 below). Two gates:
 
 ## 0.0 ⚠ Soundness corrections (2026-07-28, round-11 post-ship audit `wf_f1ca5dcc`)
 
-Three claims below do **not** hold of shipped code. One is closed; two are owner-gated. Read §§ AKE-2, property 3, and the §6 residual subject to this.
+Three claims below did **not** hold of shipped code. **Two are now closed** (AKE-2 on 2026-09-17, the `iat` upper bound on 2026-07-28); the §6 pair is still owner-gated. Read property 3 and the §6 residual subject to this.
 
-- **AKE-2 (§ "mutual authentication") is FALSE as stated.** "`server_mac` … is verifiable only by a party that derived `Km2`, which requires **the server's** private DH contributions" — in fact **any** `(sk_s′, esk_s′)` pair works, because the client's `pk_s` is an unauthenticated caller argument (`opaque3dh.c:209`, consumed at `:229`), the transcript (`hash_preamble`, `:86-124`) binds **neither** static public key, and the credential envelope is sealed with **AAD = NULL** (`main.cpp:14618`) so it carries no `server_public_key`. An attacker holding only the victim's **public** `pk_c` impersonates the IdP and derives the same `sso_key` — **verified by executing the attack** against `tools/verify_opaque3dh.py`. AKE-2 holds only under an unstated assumption that `pk_s` is authentic, which nothing in the shipped design or spec establishes (no out-of-band / pinning / TLS assumption appears in any DSSO doc). **OWNER-GATED** (fix = RFC 9807 §4.1.1 CleartextCredentials binding; a format change).
+- **AKE-2 (§ "mutual authentication") was FALSE as stated — ✅ CLOSED 2026-09-17.** "`server_mac` … is verifiable only by a party that derived `Km2`, which requires **the server's** private DH contributions" — in fact **any** `(sk_s′, esk_s′)` pair worked, because the client's `pk_s` was an unauthenticated caller argument of `determ_opaque3dh_client`, the transcript (`hash_preamble`) bound **neither** static public key, and the credential envelope was sealed with **AAD = NULL** so it carried no `server_public_key`. An attacker holding only the victim's **public** `pk_c` impersonated the IdP and derived the same `sso_key` — **verified by executing the attack**, and re-executed against the shipped C before the fix. **Closed** by the RFC 9807 §4.1.1 `CleartextCredentials` binding + the removal of the `pk_s`/`pk_c` call arguments + the envelope AAD (v2.25-DSSO-DAPP-SPEC §0.0(2)); AKE-2 is restated below on what now holds, and the `pk_s`-authenticity assumption it always needed is now written down as a trust boundary instead of being silent.
 - **Property 3 ("a token whose `H1'` came from a different `sso_key` does not verify — *(verifier-side)*") is FALSE.** The shipped rule (`main.cpp:14892-14895`) takes **both** `H1'` and `H2` from the presenter and never touches `sso_key`; a complete token minted under a different `sso_key` verifies **by construction**. The parenthetical in this document already states the winning condition ("to accept a chosen `H1'` you need `HMAC(tenant_key, H1')`") and then labels the property verifier-side anyway. **OWNER-GATED** (fix = make the IdP-supplied-`H2'` rule normative).
 - **The §6 residual marked RESOLVED by Option A is NOT resolved.** Option A's four legs are evaluated on a cleartext claim the RP cannot authenticate, so **claim substitution at presentation** — explicitly named as unhandled earlier in that same section — survives all of them (the attacker rewrites `nonce`, `iat`/`exp`, and `sub`). Only the *replay-of-a-verbatim-token* and *expiry* legs are genuinely closed. **OWNER-GATED.**
 - **CLOSED (`e6bad81`):** the §6 "future" leg was listed as gated but the verifier bounded `iat` only from below; the upper bound now ships, gated falsify-on-mutant by **E2E-7b** in `test-dsso-login-e2e`.
@@ -275,38 +275,59 @@ server.session_key`. Both sides compute the same unordered triple of shared poin
 schedule is a pure function of shared inputs. *Gate:* the "both parties derive the
 SAME session_key" assertion.
 
-**AKE-2 (mutual authentication).** ⚠ **FALSE as written — see the finding at the top
-of this document; OWNER-GATED.** The server-authentication half does not hold: the
-claim below reads "the server's private DH contributions", but `Km2` is derived from
-`(dh1, dh2, dh3)`, and **any** `(sk_s′, esk_s′)` reproduces all three against a client
-whose `pk_s` is attacker-supplied — `dh2 = sk_s′·epk_c` and `dh3 = esk_s′·pk_c` need
-only the **public** `pk_c`. The article "**the**" server smuggles in an authenticity
-assumption for `pk_s` that nothing in the design supplies. The CLIENT-authentication
-half (`client_mac`, which does require `sk_c`) is unaffected.
+**AKE-2 (mutual authentication) — restated 2026-09-17 on the v2 transcript.**
+`server_mac = HMAC(Km2, SHA256(preamble))` is verifiable only by a party that derived
+`Km2`, which requires `(dh1, dh2, dh3)` over the **transcript-bound** static keys:
+`dh2` is `esk_c·t->server_public_key` on the client and `sk_s·epk_c` on the server, so
+they agree only if the peer holds `sk_s` for the `server_public_key` the client
+anchored — and the preamble, hence `Km2` itself, commits to that key through the
+RFC 9807 §4.1.1 `CleartextCredentials` block. `client_mac = HMAC(Km3,
+SHA256(preamble‖server_mac))` is symmetric and always required `sk_c`.
 
-~~`server_mac = HMAC(Km2, SHA256(preamble))` is
-verifiable only by a party that derived `Km2`, which requires the server's private
-DH contributions~~; `client_mac = HMAC(Km3, SHA256(preamble‖server_mac))` symmetric.
-The honest client accepts the server MAC and the server's `expected_client_mac`
-equals the client's produced MAC. *Gates:* "client verifies the server MAC" +
-"expected client MAC == client MAC" — note these gate **agreement between two honest
-parties**, not authentication; no gate feeds the client a `pk_s` it was not given.
+What the old text got wrong, and why it matters: **any** `(sk_s′, esk_s′)` reproduced
+all three DH values against a client whose `pk_s` was attacker-supplied (`dh2 =
+sk_s′·epk_c`, `dh3 = esk_s′·pk_c` need only the **public** `pk_c`), and the definite
+article in "**the** server's private DH contributions" smuggled in an authenticity
+assumption for `pk_s` that nothing supplied. Two things changed. (1) The static keys
+are no longer call arguments: a party has exactly **one** slot for a static key and
+that slot is MAC-covered, so there is no longer a way to run the DH over a key the
+transcript does not name. (2) The authenticity assumption is now *discharged*, not
+assumed: the same `CleartextCredentials` bytes are the AAD of the §3-step-3 envelope,
+whose key is `HKDF(OPRF_k(pw))` — so recovering an authentic `pk_s` costs the password
+plus ≥ `t` OPRF responses, the C1/C3 assumption this design already makes. The
+residual (who authenticates `pk_s` at **enrolment**, before any envelope exists) is
+the on-chain DSSO registration record read through the committee-authenticated light
+client, and is written out — with its named gap — in spec §0.0(2).
+
+*Gates:* "client verifies the server MAC" + "expected client MAC == client MAC" gate
+agreement between two honest parties; the **C2-a…C2-g** arms gate the authentication
+proper — an impersonator holding only `pk_c` is rejected, a server that holds the real
+`sk_s` but claims a different static key is rejected although every DH value agrees,
+a substituted `client_public_key` or identity is rejected, and the MAC comparison
+covers all 32 bytes. Mutants M1–M6 each turn one of those arms RED.
 
 **AKE-3 (transcript binding).** Every output is keyed on `SHA256(preamble)`, and
-the preamble streams every wire field (context, both identities, both nonces, both
-ephemerals, both credential blobs). A single changed field ⇒ a different key and a
-server MAC the honest client rejects. *Gate (executed):* flipping `server_nonce`
-yields a DIFFERENT `session_key` AND the honest client, fed that wrong-transcript
-server MAC over the honest transcript, sets `server_mac_ok = 0`.
+the preamble streams every wire field (context, the `CleartextCredentials` block —
+both **static public keys** and both identities — both nonces, both ephemerals, both
+credential blobs). A single changed field ⇒ a different key and a server MAC the
+honest client rejects. *Gate (executed):* flipping `server_nonce` yields a DIFFERENT
+`session_key` AND the honest client, fed that wrong-transcript server MAC over the
+honest transcript, sets `server_mac_ok = 0`.
 
 **AKE-4 (fail-closed).** NULL transcript / NULL nonce / over-length field / identity
 ephemeral ⇒ `-1`, outputs untouched. *Gates:* the two NULL-edge assertions.
 
-**Dual-oracle byte-freeze.** The whole schedule was frozen python-first in
+**Dual-oracle byte-freeze (v2).** The whole schedule was frozen python-first in
 `tools/verify_opaque3dh.py` before any C existed, and the C reproduces the KAT
-byte-for-byte: `session_key = 6d58d64b27a10b95d8fc79a1dce81f5e79ba05aa0089bf515a9be1d8191ede08`,
-`server_mac = 9f85241fe292952202a4520f4aea3eb300f7371cf4daa0600ffd097416ed2bb5`,
-`client_mac = df2fef7f903d40ad45bc564623671863c20c704ca441aa277600a09cb38b6cca`.
+byte-for-byte. The v1 vectors are **retired** with the v1 encoding (no deployment
+existed, so no login transcript had to reproduce, and a retained v1 path would have
+left the impersonable construction compiled in as a downgrade target — spec §0.0(2)
+"Permanence"); the tags moved to `DTM-DSSO-OPAQUEv2-` / `DTM-DSSO-OPAQUE3DH-v2-` /
+`DTM-DSSO-CLEARCRED-v2-` so the encodings can never be confused. The v2 KAT:
+`session_key = 669097b27b88b05eb468d46a00c4fb9b6f06d6d6696ec3b85ea61d1456cfc880`,
+`server_mac = 5a86590c25a05a7c287eaf80ae21b3f11b7b162ec83c9f68425e95ced14381f7`,
+`client_mac = 4de728062ab9344d0691f806fabbace1227c6c24407fedeb703201f90a3f3a35`,
+plus the serialized `CleartextCredentials` block itself.
 Two independent implementations (a from-scratch python P-256 ladder + hashlib HKDF,
 vs the determ::c99 C stack) landing on the identical bytes is the soundness witness
 for the encoding — the same discipline as §3.25 notekey and the Pedersen/OPRF KATs.
@@ -333,8 +354,11 @@ SEPARATE from the on-chain Ed25519 identity (no linkage), and single-curve P-256
 what the OPAQUE-3DH `stat×eph` / `eph×stat` terms require. Spec §3's "Ed25519
 keypair" predated the RFC-9807-standard AKE choice and is clarified to P-256 (spec
 §2/§3, folded this increment; DECISION-LOG 2026-07-21). Registration mints
-`(sk_c, pk_c)`, seals `sk_c` under `HKDF(y_reg)` into the envelope, and the server
-stores `pk_c` + its own static `(sk_s, pk_s)`. Login runs the threshold OPRF → `y` →
+`(sk_c, pk_c)`, seals `sk_c` under `HKDF(y_reg)` into the envelope **with the RFC 9807
+§4.1.1 `CleartextCredentials{pk_s, pk_c, server_identity, client_identity}` as AAD**
+(C2, 2026-09-17 — byte-identical to the block the §7 AKE transcript binds), and the
+server stores `pk_c` + its own static `(sk_s, pk_s)`. Login runs the threshold OPRF →
+`y` → rebuilds the AAD from the `CleartextCredentials` fields the server sent →
 unseals `sk_c` → runs the AKE with `cred_request = the OPRF blind` and
 `cred_response = the combined OPRF evaluation ‖ the envelope`.
 
@@ -359,6 +383,21 @@ differ from the server's, and the client rejects the server MAC (`server_mac_ok 
 `hash_preamble` flips EXACTLY this assertion RED (the swap stops mattering) while
 E2E-1 stays green (both sides omit it identically) — the clean directional split
 proves E2E-3 rests on the binding, not on the AKE running.
+
+**E2E-10 (C2 — the client's `pk_s` is AUTHENTIC, not merely bound).** Transcript
+binding alone cannot create trust in a key the client learned from the attacker, so
+the envelope AAD is where that trust comes from at login time. Substituting
+`server_public_key` (or `client_public_key`, or an identity) in what the server sends
+changes the AAD the client rebuilds, the AEAD tag fails, and the login **aborts
+before the AKE** — the same failure shape as a wrong password, and for the same
+reason: opening the envelope costs `pw` **and** ≥ `t` OPRF responses. *Gates:*
+E2E-10a (substituted `pk_s` → abort), E2E-10b (substituted `pk_c` → abort), E2E-10c
+(the honest pair still opens and authenticates). *Falsify (executed):* re-nulling the
+AAD on both the seal and the open (mutant M7) flips E2E-10a/b RED while E2E-1..9 stay
+green — the directional split proves E2E-10 rests on the AAD, not on the login
+running. The enrolment-time half of the boundary (who authenticates `pk_s` before any
+envelope exists) is the on-chain registration record read through the committee-
+authenticated light client, with its named gap, in spec §0.0(2).
 
 **E2E-4 (fault tolerance, end-to-end).** With `n=5, t=3`, one server crashed and one
 byzantine (bad DLEQ), the client's survivor-selection pipeline (§5, G4-login) admits

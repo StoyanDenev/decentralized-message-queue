@@ -10,14 +10,28 @@
 # the SAME session_key from the three DH values + the transcript, and the two
 # MACs bind the whole transcript (any tamper breaks them).
 #
+# v2 (C2 fix, 2026-09-17) — THE TRANSCRIPT BINDS BOTH STATIC PUBLIC KEYS.
+# v1 bound neither, so an attacker holding only the victim's PUBLIC `pk_c` could
+# pick its own `(sk_s', esk_s')`, run the server half, and be accepted by the
+# honest client (v2.25-DSSO-DAPP-SPEC §0.0(2), claim C2 — reproduced before the
+# fix). v2 carries RFC 9807 §4.1.1 `CleartextCredentials{server_public_key,
+# server_identity, client_identity}` (plus the client's public key) inside the
+# preamble, and the same bytes are the AAD of the credential envelope at the
+# login layer, so the envelope tag and the transcript MAC commit to ONE block.
+# The v1 encoding and its KAT are RETIRED (no deployment existed; keeping the
+# impersonable construction compiled in would be a downgrade target). The tags
+# moved v1 -> v2 so the two encodings can never be confused.
+#
 # NO new hardness assumption / NO new primitive: P-256 scalar-mult (the 3 DH), a
 # TLS-1.3/RFC-9807 HKDF-Expand-Label schedule over HKDF-SHA256, and HMAC-SHA256.
-# All present in determ::c99 (p256.c / hkdf.c / hmac). The C port (inc.1 cont.)
-# reproduces the KAT emitted here byte-for-byte (the dual-oracle discipline).
+# All present in determ::c99 (p256.c / hkdf.c / hmac). The C port reproduces the
+# KAT emitted here byte-for-byte (the dual-oracle discipline). THIS FILE IS THE
+# INDEPENDENT ORACLE: every byte below is re-derived here (its own P-256 ladder,
+# its own HKDF/Expand-Label, its own encoders); no constant is copied from the C.
 #
 # Domain separation: Determ is realizing the OPAQUE-3DH CONSTRUCTION for its own
 # DSSO DApp, not claiming wire-interop with other OPAQUE stacks, so the label
-# prefix is the house "DTM-DSSO-OPAQUE3DH-v1-" tag (RFC 9807 uses "OPAQUE-").
+# prefix is the house "DTM-DSSO-OPAQUE3DH-v2-" tag (RFC 9807 uses "OPAQUE-").
 import hashlib
 import hmac as _hmac
 import sys
@@ -66,7 +80,9 @@ def compress(pt):
 
 # ─── HKDF-SHA256 (RFC 5869) + TLS-1.3/RFC-9807-style Expand-Label ─────────────
 NH = 32  # SHA-256 output length
-LABEL_PREFIX = b"DTM-DSSO-OPAQUE3DH-v1-"
+LABEL_PREFIX = b"DTM-DSSO-OPAQUE3DH-v2-"
+PREAMBLE_TAG = b"DTM-DSSO-OPAQUEv2-"
+CLEARCRED_TAG = b"DTM-DSSO-CLEARCRED-v2-"
 
 
 def i2osp(x, n):
@@ -107,15 +123,28 @@ def mac(key, msg):
 # A party's long-term identity is a P-256 keypair; each session adds an ephemeral
 # keypair. The 3DH combines (client-eph × server-eph), (client-eph × server-stat),
 # (client-stat × server-eph). credential_request / credential_response are opaque
-# transcript blobs (the OPRF/envelope layer, inc.2). client/server_identity are
-# the bound identity strings (empty ⇒ the public key is used, per RFC; here we
-# pass them explicitly for the transcript).
-def preamble(context, client_identity, ke1, server_identity, inner_ke2):
-    return (b"DTM-DSSO-OPAQUEv1-"
-            + i2osp(len(context), 2) + context
-            + i2osp(len(client_identity), 2) + client_identity
-            + ke1
+# transcript blobs (the OPRF/envelope layer, inc.2).
+#
+# CleartextCredentials — RFC 9807 §4.1.1, verbatim in content, with the house tag
+# and the client's public key added. These EXACT BYTES are also the AAD under
+# which the login layer seals the credential envelope, so the envelope tag and
+# the AKE transcript MAC commit to one and the same block.
+def cleartext_credentials(pk_s, pk_c, server_identity, client_identity):
+    return (CLEARCRED_TAG
+            + compress(pk_s)
+            + compress(pk_c)
             + i2osp(len(server_identity), 2) + server_identity
+            + i2osp(len(client_identity), 2) + client_identity)
+
+
+# Transcript preamble. v1 put the two identity strings around `ke1`; v2 folds
+# them into the CleartextCredentials block so the identities and the static keys
+# they belong to travel as ONE authenticated unit.
+def preamble(context, clear_creds, ke1, inner_ke2):
+    return (PREAMBLE_TAG
+            + i2osp(len(context), 2) + context
+            + clear_creds
+            + ke1
             + inner_ke2)
 
 
@@ -136,19 +165,49 @@ def _inner_ke2(cred_response, server_nonce, epk_s):
     return cred_response + server_nonce + compress(epk_s)
 
 
-def server_finalize(context, client_identity, server_identity,
-                    sk_s, pk_c, esk_s, epk_c,
-                    cred_request, cred_response, client_nonce, server_nonce):
-    """Server side: 3DH, key schedule, produce server_mac, expect client_mac."""
-    ke1 = _ke1(cred_request, client_nonce, epk_c)
+# The shared transcript inputs, mirroring `determ_opaque3dh_transcript`. The two
+# static public keys are TRANSCRIPT FIELDS, not call arguments: a party has
+# exactly one slot in which a static key can enter, and that slot is MAC-covered.
+class Transcript(object):
+    def __init__(self, context, client_identity, server_identity,
+                 client_public_key, server_public_key,
+                 cred_request, cred_response, client_nonce, server_nonce):
+        self.context = context
+        self.client_identity = client_identity
+        self.server_identity = server_identity
+        self.client_public_key = client_public_key   # the point pk_c
+        self.server_public_key = server_public_key   # the point pk_s
+        self.cred_request = cred_request
+        self.cred_response = cred_response
+        self.client_nonce = client_nonce
+        self.server_nonce = server_nonce
+
+    def clear_creds(self):
+        return cleartext_credentials(self.server_public_key, self.client_public_key,
+                                     self.server_identity, self.client_identity)
+
+    def replace(self, **kw):
+        t = Transcript(self.context, self.client_identity, self.server_identity,
+                       self.client_public_key, self.server_public_key,
+                       self.cred_request, self.cred_response,
+                       self.client_nonce, self.server_nonce)
+        for k, v in kw.items():
+            setattr(t, k, v)
+        return t
+
+
+def server_finalize(t, sk_s, esk_s, epk_c):
+    """Server side: 3DH, key schedule, produce server_mac, expect client_mac.
+    `pk_c` comes from t.client_public_key (dh3) — NOT from a call argument."""
+    ke1 = _ke1(t.cred_request, t.client_nonce, epk_c)
     epk_s = pt_mul(esk_s, G)
-    inner = _inner_ke2(cred_response, server_nonce, epk_s)
+    inner = _inner_ke2(t.cred_response, t.server_nonce, epk_s)
     # 3DH (server view): dh1 = esk_s·epk_c, dh2 = sk_s·epk_c, dh3 = esk_s·pk_c
     dh1 = compress(pt_mul(esk_s, epk_c))
     dh2 = compress(pt_mul(sk_s, epk_c))
-    dh3 = compress(pt_mul(esk_s, pk_c))
+    dh3 = compress(pt_mul(esk_s, t.client_public_key))
     ikm = dh1 + dh2 + dh3
-    pre = preamble(context, client_identity, ke1, server_identity, inner)
+    pre = preamble(t.context, t.clear_creds(), ke1, inner)
     session_key, km2, km3 = key_schedule(ikm, pre)
     server_mac = mac(km2, hashlib.sha256(pre).digest())
     expected_client_mac = mac(km3, hashlib.sha256(pre + server_mac).digest())
@@ -156,27 +215,26 @@ def server_finalize(context, client_identity, server_identity,
             "session_key": session_key, "expected_client_mac": expected_client_mac}
 
 
-def client_finalize(context, client_identity, server_identity,
-                    sk_c, pk_s, esk_c, epk_s,
-                    cred_request, cred_response, client_nonce, server_nonce,
-                    server_mac):
-    """Client side: 3DH, key schedule, verify server_mac, produce client_mac."""
+def client_finalize(t, sk_c, esk_c, epk_s, server_mac):
+    """Client side: 3DH, key schedule, verify server_mac, produce client_mac.
+    `pk_s` comes from t.server_public_key (dh2) — the key the client ANCHORED,
+    never one the peer handed it."""
     epk_c = pt_mul(esk_c, G)
-    ke1 = _ke1(cred_request, client_nonce, epk_c)
-    inner = _inner_ke2(cred_response, server_nonce, epk_s)
+    ke1 = _ke1(t.cred_request, t.client_nonce, epk_c)
+    inner = _inner_ke2(t.cred_response, t.server_nonce, epk_s)
     # 3DH (client view): dh1 = esk_c·epk_s, dh2 = esk_c·pk_s, dh3 = sk_c·epk_s
     dh1 = compress(pt_mul(esk_c, epk_s))
-    dh2 = compress(pt_mul(esk_c, pk_s))
+    dh2 = compress(pt_mul(esk_c, t.server_public_key))
     dh3 = compress(pt_mul(sk_c, epk_s))
     ikm = dh1 + dh2 + dh3
-    pre = preamble(context, client_identity, ke1, server_identity, inner)
+    pre = preamble(t.context, t.clear_creds(), ke1, inner)
     session_key, km2, km3 = key_schedule(ikm, pre)
     ok = _hmac.compare_digest(server_mac, mac(km2, hashlib.sha256(pre).digest()))
     client_mac = mac(km3, hashlib.sha256(pre + server_mac).digest())
     return {"server_mac_ok": ok, "client_mac": client_mac, "session_key": session_key}
 
 
-# ─── self-test: both sides agree; MACs bind the transcript ───────────────────
+# ─── self-test: both sides agree; MACs bind the transcript AND both keys ─────
 def _fixed(byte):
     return bytes([byte]) * 32
 
@@ -186,19 +244,19 @@ def selftest():
     cid, sid = b"alice@rp", b"determ-idp"
     sk_c, sk_s = _fixed(0x11), _fixed(0x22)
     esk_c, esk_s = _fixed(0x33), _fixed(0x44)
-    pk_c, pk_s = pt_mul(int.from_bytes(sk_c, "big"), G), pt_mul(int.from_bytes(sk_s, "big"), G)
-    epk_c = pt_mul(int.from_bytes(esk_c, "big"), G)
+    ic, ic2 = int.from_bytes(sk_c, "big"), int.from_bytes(esk_c, "big")
+    is_, is2 = int.from_bytes(sk_s, "big"), int.from_bytes(esk_s, "big")
+    pk_c, pk_s = pt_mul(ic, G), pt_mul(is_, G)
+    epk_c = pt_mul(ic2, G)
     cnon, snon = _fixed(0x55), _fixed(0x66)
     creq, cresp = b"CRED-REQ-blob", b"CRED-RESP-blob"
 
-    ic, ic2 = int.from_bytes(sk_c, "big"), int.from_bytes(esk_c, "big")
-    is_, is2 = int.from_bytes(sk_s, "big"), int.from_bytes(esk_s, "big")
-
-    s = server_finalize(ctx, cid, sid, is_, pk_c, is2, epk_c, creq, cresp, cnon, snon)
-    c = client_finalize(ctx, cid, sid, ic, pk_s, ic2, s["epk_s"], creq, cresp, cnon, snon,
-                        s["server_mac"])
+    t = Transcript(ctx, cid, sid, pk_c, pk_s, creq, cresp, cnon, snon)
+    s = server_finalize(t, is_, is2, epk_c)
+    c = client_finalize(t, ic, ic2, s["epk_s"], s["server_mac"])
 
     fails = 0
+
     def chk(cond, msg):
         nonlocal fails
         print(("  PASS: " if cond else "  FAIL: ") + msg)
@@ -214,14 +272,60 @@ def selftest():
         "session_key is 32 non-zero bytes")
 
     # tamper: a different server nonce breaks agreement (transcript-bound)
-    s2 = server_finalize(ctx, cid, sid, is_, pk_c, is2, epk_c, creq, cresp, cnon, _fixed(0x99))
+    s2 = server_finalize(t.replace(server_nonce=_fixed(0x99)), is_, is2, epk_c)
     chk(s2["session_key"] != s["session_key"],
         "a changed server_nonce yields a DIFFERENT session_key (transcript-bound)")
-    c_bad = client_finalize(ctx, cid, sid, ic, pk_s, ic2, s["epk_s"], creq, cresp, cnon, snon,
-                            s2["server_mac"])
+    c_bad = client_finalize(t, ic, ic2, s["epk_s"], s2["server_mac"])
     chk(not c_bad["server_mac_ok"],
         "client REJECTS a server MAC computed over a different transcript")
 
+    # ── C2-a: the reproduced IdP impersonation is now REJECTED ──────────────
+    # The attacker knows ONLY the PUBLIC pk_c. It picks its own (sk_s', esk_s')
+    # and runs the server half. The honest client runs with the pk_s it ANCHORED
+    # (the trust boundary — see the spec §0.0(2) custody note), not the one the
+    # peer offered. Pre-fix this returned server_mac_ok == 1 and an agreeing key.
+    sk_s_atk, esk_s_atk = _fixed(0xa7), _fixed(0xb9)
+    ia, ia2 = int.from_bytes(sk_s_atk, "big"), int.from_bytes(esk_s_atk, "big")
+    pk_s_atk = pt_mul(ia, G)
+    a = server_finalize(t.replace(server_public_key=pk_s_atk), ia, ia2, epk_c)
+    v = client_finalize(t, ic, ic2, a["epk_s"], a["server_mac"])   # t = ANCHORED pk_s
+    chk(not v["server_mac_ok"],
+        "C2-a: an impersonator holding only pk_c is REJECTED by the honest client")
+    chk(v["session_key"] != a["session_key"],
+        "C2-a: the impersonator does NOT share a session_key with the client")
+
+    # ── C2-b: the PURE server_public_key binding ────────────────────────────
+    # A server that DOES hold the real sk_s but CLAIMS a different static key.
+    # All three DH values are identical on both sides (dh2 = sk_s·epk_c on the
+    # server, esk_c·pk_s on the client), so ONLY the preamble differs: this leg
+    # tests the binding itself, and it is the assertion that fails again if pk_s
+    # is ever dropped from the transcript (or the envelope AAD nulled).
+    s_lie = server_finalize(t.replace(server_public_key=pk_s_atk), is_, is2, epk_c)
+    c_lie = client_finalize(t, ic, ic2, s_lie["epk_s"], s_lie["server_mac"])
+    chk(not c_lie["server_mac_ok"],
+        "C2-b: a server that lies about its static key is REJECTED even though "
+        "every DH value agrees (server_public_key is transcript-bound)")
+
+    # ── C2-c: the PURE client_public_key binding ────────────────────────────
+    # The client's own DH never reads t.client_public_key (dh1 = esk_c·epk_s,
+    # dh2 = esk_c·pk_s, dh3 = sk_c·epk_s), so a client whose transcript claims a
+    # different pk_c has identical DH values and differs ONLY in the preamble.
+    pk_other = pt_mul(int.from_bytes(_fixed(0x5c), "big"), G)
+    c_pkc = client_finalize(t.replace(client_public_key=pk_other), ic, ic2,
+                            s["epk_s"], s["server_mac"])
+    chk(not c_pkc["server_mac_ok"],
+        "C2-c: a substituted client_public_key is REJECTED (transcript-bound) "
+        "although the client's own DH values are unchanged")
+
+    # ── C2-d/e: the identities ──────────────────────────────────────────────
+    c_sid = client_finalize(t.replace(server_identity=b"evil-idp"), ic, ic2,
+                            s["epk_s"], s["server_mac"])
+    chk(not c_sid["server_mac_ok"], "C2-d: a substituted server_identity is REJECTED")
+    c_cid = client_finalize(t.replace(client_identity=b"mallory@rp"), ic, ic2,
+                            s["epk_s"], s["server_mac"])
+    chk(not c_cid["server_mac_ok"], "C2-e: a substituted client_identity is REJECTED")
+
+    print("KAT clear_creds = " + t.clear_creds().hex())
     print("KAT session_key =", c["session_key"].hex())
     print("KAT server_mac  =", s["server_mac"].hex())
     print("KAT client_mac  =", c["client_mac"].hex())

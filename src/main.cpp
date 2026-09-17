@@ -15635,6 +15635,11 @@ int main(int argc, char** argv) {
         //         envelope layer is BOUND into the AKE, not merely adjacent).
         //   E2E-4 fault tolerance: n=5,t=3, one crash + one byzantine -> the DLEQ
         //         filter admits the honest t -> the login + AKE still succeed.
+        //   E2E-10 C2 (spec §0.0(2)): the envelope is sealed with AAD = the RFC 9807
+        //         §4.1.1 CleartextCredentials block, so a substituted server (or
+        //         client) static public key in ke2 fails the AEAD tag and the login
+        //         ABORTS before the AKE — this is where the client's pk_s becomes
+        //         AUTHENTIC, which transcript binding alone cannot supply.
         std::cout << "=== DSSO G4 end-to-end (register -> t-of-n login -> OPAQUE-3DH AKE) ===\n";
         int fail = 0;
         auto check = [&](bool c, const std::string& m) {
@@ -15715,10 +15720,29 @@ int main(int argc, char** argv) {
         check(determ_p256_base_mul(pk_s, sk_s) == 0, "registration: pk_s = sk_s*G (server static)");
         uint8_t Kseal[32];
         check(env_key(Kseal, yref), "registration: envelope key = HKDF(y_reg)");
+        // C2 (spec §0.0(2)): the envelope AAD is the RFC 9807 §4.1.1
+        // CleartextCredentials block — {pk_s, pk_c, server_identity, client_identity}
+        // — serialized by the AKE module itself, so the envelope tag and the AKE
+        // transcript MAC commit to the SAME bytes. This is where the client GETS an
+        // authentic pk_s at login: opening the envelope needs the password AND >= t
+        // OPRF responses, so a substituted pk_s fails the AEAD tag and the login
+        // aborts before the AKE (E2E-10). Pre-fix this AAD was NULL and the envelope
+        // carried no server_public_key at all.
+        const std::string ctx = "determ-dsso-login", cid = "alice@rp", sid = "determ-idp";
+        auto make_aad = [&](const uint8_t pks[65], const uint8_t pkc[65],
+                            uint8_t* out, size_t cap, size_t* out_len) {
+            determ_opaque3dh_transcript ta{};
+            ta.client_identity = (const uint8_t*)cid.data(); ta.client_identity_len = cid.size();
+            ta.server_identity = (const uint8_t*)sid.data(); ta.server_identity_len = sid.size();
+            ta.client_public_key = pkc; ta.server_public_key = pks;
+            return determ_opaque3dh_cleartext_credentials(&ta, out, cap, out_len) == 0; };
+        uint8_t aad[DETERM_OPAQUE3DH_CLEARCRED_MAX]; size_t aad_len = 0;
+        check(make_aad(pk_s, pk_c, aad, sizeof aad, &aad_len),
+              "registration: AAD = CleartextCredentials{pk_s, pk_c, server_identity, client_identity}");
         uint8_t env_ct[32], env_tag[16], env_nonce[24];
         std::memset(env_nonce, 0, 24); env_nonce[0] = 0x5e;
-        check(determ_xchacha20_poly1305_encrypt(Kseal, env_nonce, nullptr, 0, sk_c, 32, env_ct, env_tag) == 0,
-              "registration: envelope = AEAD_{HKDF(y_reg)}(sk_c) sealed");
+        check(determ_xchacha20_poly1305_encrypt(Kseal, env_nonce, aad, aad_len, sk_c, 32, env_ct, env_tag) == 0,
+              "registration: envelope = AEAD_{HKDF(y_reg)}(sk_c ; AAD = CleartextCredentials) sealed");
 
         // ── the n server OPRF responses (built once) ──
         const int t = 3, n = 5;
@@ -15736,21 +15760,37 @@ int main(int argc, char** argv) {
         // the client session key, and `authed` = MACs agree + keys agree + the
         // recovered credential equals the sealed one.
         struct LoginOut { int rc; uint8_t sso[32]; int authed; };
-        auto do_login = [&](const int* sub, int m) -> LoginOut {
+        // `pks_wire` / `pkc_wire` model what the SERVER SIDE OF THE WIRE claims the
+        // CleartextCredentials fields are (nullptr = the honest, registered values).
+        // The client rebuilds the AAD from them and the envelope's AEAD tag is what
+        // authenticates them: a substituted pk_s cannot open the envelope, so the
+        // login aborts before the AKE (C2 / E2E-10). That is where the client's
+        // AUTHENTIC pk_s comes from at login time.
+        auto do_login = [&](const int* sub, int m,
+                            const uint8_t* pks_wire = nullptr,
+                            const uint8_t* pkc_wire = nullptr) -> LoginOut {
             LoginOut o; o.rc = -1; o.authed = 0; std::memset(o.sso, 0, 32);
+            const uint8_t* pks = pks_wire ? pks_wire : pk_s;
+            const uint8_t* pkc = pkc_wire ? pkc_wire : pk_c;
             uint8_t Zc33[33]; if (!combine(Zc33, Zi33, xs, sub, m)) return o;
             uint8_t y[32]; if (determ_p256_oprf_finalize(y, pw, pwlen, blind, Zc33) != 0) return o;
             uint8_t Klogin[32]; if (!env_key(Klogin, y)) return o;
+            uint8_t aadl[256]; size_t aadl_len = 0;
+            if (!make_aad(pks, pkc, aadl, sizeof aadl, &aadl_len)) return o;
             uint8_t sk_c_rec[32];
-            if (determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, nullptr, 0, env_ct, 32, env_tag, sk_c_rec) != 0) {
-                o.rc = -2; return o; }               // wrong pw -> abort before AKE
+            if (determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, aadl, aadl_len,
+                                                  env_ct, 32, env_tag, sk_c_rec) != 0) {
+                o.rc = -2; return o; }     // wrong pw OR a substituted pk_s -> abort before AKE
+            uint8_t pkc_chk[65];           // the recovered credential matches the authenticated pk_c
+            if (determ_p256_base_mul(pkc_chk, sk_c_rec) != 0) return o;
+            if (std::memcmp(pkc_chk, pkc, 65) != 0) return o;
             uint8_t cred_resp[81];                    // cred_response = OPRF eval || envelope(ct||tag)
             std::memcpy(cred_resp, Zc33, 33); std::memcpy(cred_resp + 33, env_ct, 32); std::memcpy(cred_resp + 65, env_tag, 16);
-            const std::string ctx = "determ-dsso-login", cid = "alice@rp", sid = "determ-idp";
             determ_opaque3dh_transcript tr{};
             tr.context = (const uint8_t*)ctx.data(); tr.context_len = ctx.size();
             tr.client_identity = (const uint8_t*)cid.data(); tr.client_identity_len = cid.size();
             tr.server_identity = (const uint8_t*)sid.data(); tr.server_identity_len = sid.size();
+            tr.client_public_key = pkc; tr.server_public_key = pks;   // C2: envelope-authenticated
             tr.cred_request = B33; tr.cred_request_len = 33;
             tr.cred_response = cred_resp; tr.cred_response_len = sizeof cred_resp;
             uint8_t cnon[32], snon[32]; std::memset(cnon, 0x51, 32); std::memset(snon, 0x62, 32);
@@ -15758,9 +15798,9 @@ int main(int argc, char** argv) {
             uint8_t esk_c[32], esk_s[32]; std::memset(esk_c, 0x33, 32); std::memset(esk_s, 0x44, 32);
             uint8_t epk_c[65]; if (determ_p256_base_mul(epk_c, esk_c) != 0) return o;
             uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
-            if (determ_opaque3dh_server(&tr, sk_s, pk_c, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac) != 0) return o;
+            if (determ_opaque3dh_server(&tr, sk_s, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac) != 0) return o;
             uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 0;
-            if (determ_opaque3dh_client(&tr, sk_c_rec, pk_s, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok) != 0) return o;
+            if (determ_opaque3dh_client(&tr, sk_c_rec, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok) != 0) return o;
             o.rc = 0; std::memcpy(o.sso, c_sk, 32);
             o.authed = smac_ok && std::memcmp(c_sk, s_sk, 32) == 0
                     && std::memcmp(c_cmac, s_ecmac, 32) == 0
@@ -15786,15 +15826,16 @@ int main(int argc, char** argv) {
             int sub[3] = {0, 1, 2}; uint8_t Zc33[33]; combine(Zc33, Zi33, xs, sub, 3);
             uint8_t y[32]; determ_p256_oprf_finalize(y, pw, pwlen, blind, Zc33);
             uint8_t Klogin[32]; env_key(Klogin, y);
+            uint8_t aadl[256]; size_t aadl_len = 0; make_aad(pk_s, pk_c, aadl, sizeof aadl, &aadl_len);
             uint8_t sk_c_rec[32];
-            determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, nullptr, 0, env_ct, 32, env_tag, sk_c_rec);
+            determ_xchacha20_poly1305_decrypt(Klogin, env_nonce, aadl, aadl_len, env_ct, 32, env_tag, sk_c_rec);
             uint8_t cred_resp[81];
             std::memcpy(cred_resp, Zc33, 33); std::memcpy(cred_resp + 33, env_ct, 32); std::memcpy(cred_resp + 65, env_tag, 16);
-            const std::string ctx = "determ-dsso-login", cid = "alice@rp", sid = "determ-idp";
             determ_opaque3dh_transcript trh{};
             trh.context = (const uint8_t*)ctx.data(); trh.context_len = ctx.size();
             trh.client_identity = (const uint8_t*)cid.data(); trh.client_identity_len = cid.size();
             trh.server_identity = (const uint8_t*)sid.data(); trh.server_identity_len = sid.size();
+            trh.client_public_key = pk_c; trh.server_public_key = pk_s;
             trh.cred_request = B33; trh.cred_request_len = 33;
             trh.cred_response = cred_resp; trh.cred_response_len = 81;
             uint8_t cnon[32], snon[32]; std::memset(cnon, 0x51, 32); std::memset(snon, 0x62, 32);
@@ -15802,11 +15843,11 @@ int main(int argc, char** argv) {
             uint8_t esk_c[32], esk_s[32]; std::memset(esk_c, 0x33, 32); std::memset(esk_s, 0x44, 32);
             uint8_t epk_c[65]; determ_p256_base_mul(epk_c, esk_c);
             uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
-            determ_opaque3dh_server(&trh, sk_s, pk_c, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac);
+            determ_opaque3dh_server(&trh, sk_s, esk_s, epk_c, epk_s, s_sk, s_smac, s_ecmac);
             uint8_t cred_swapped[81]; std::memcpy(cred_swapped, cred_resp, 81); cred_swapped[40] ^= 0x40;
             determ_opaque3dh_transcript trc = trh; trc.cred_response = cred_swapped;
             uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 1;
-            determ_opaque3dh_client(&trc, sk_c_rec, pk_s, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok);
+            determ_opaque3dh_client(&trc, sk_c_rec, esk_c, epk_s, s_smac, c_epk_c, c_sk, c_cmac, &smac_ok);
             check(smac_ok == 0,
                   "E2E-3 credential-transcript binding: a MITM swapping cred_response between server and "
                   "client breaks the transcript MAC (the OPRF/envelope layer is bound into the AKE)");
@@ -15821,11 +15862,40 @@ int main(int argc, char** argv) {
                     && determ_p256_oprf_evaluate(Zw, coeff[0], Bw) == 0
                     && determ_p256_oprf_finalize(yw, pw2, pw2len, bw, Zw) == 0;
             uint8_t Kw[32]; env_key(Kw, yw);
+            uint8_t aadl[256]; size_t aadl_len = 0; make_aad(pk_s, pk_c, aadl, sizeof aadl, &aadl_len);
             uint8_t junk[32];
-            bool unseal_fail = determ_xchacha20_poly1305_decrypt(Kw, env_nonce, nullptr, 0, env_ct, 32, env_tag, junk) != 0;
+            bool unseal_fail = determ_xchacha20_poly1305_decrypt(Kw, env_nonce, aadl, aadl_len, env_ct, 32, env_tag, junk) != 0;
             check(okw && std::memcmp(yw, yref, 32) != 0 && unseal_fail,
                   "E2E-2 password binding: a wrong password's OPRF output fails the envelope AEAD tag -> "
                   "the login aborts before the AKE (no sk_c recovered)");
+        }
+
+        // ── E2E-10 (C2, spec §0.0(2)): the client's pk_s is AUTHENTIC, not merely
+        // bound. The envelope AAD is the CleartextCredentials block, so a network
+        // attacker that substitutes pk_s (or pk_c, or an identity) in ke2 cannot
+        // make the envelope open: the login ABORTS before the AKE, exactly like a
+        // wrong password. Opening it needs the user's password AND >= t OPRF
+        // responses, which is the mutual-distrust assumption the design already
+        // makes (C1/C3). Pre-fix the AAD was NULL, the envelope carried no
+        // server_public_key, and the substituted key was simply used.
+        {
+            int sub[3] = {0, 1, 2};
+            uint8_t sk_atk[32]; std::memset(sk_atk, 0, 32); sk_atk[31] = 0xa7; sk_atk[9] = 0x5b;
+            uint8_t pk_atk[65];
+            check(determ_p256_base_mul(pk_atk, sk_atk) == 0, "E2E-10 setup: the impersonator's pk_s'");
+            LoginOut sub_s = do_login(sub, 3, pk_atk, nullptr);
+            check(sub_s.rc == -2,
+                  "E2E-10a C2: a substituted server_public_key in ke2 fails the envelope AEAD tag -> "
+                  "the login ABORTS before the AKE (the client's pk_s is envelope-authenticated)");
+            uint8_t sk_o[32]; std::memset(sk_o, 0, 32); sk_o[31] = 0x5c; sk_o[17] = 0x2d;
+            uint8_t pk_o[65]; determ_p256_base_mul(pk_o, sk_o);
+            LoginOut sub_c = do_login(sub, 3, nullptr, pk_o);
+            check(sub_c.rc == -2,
+                  "E2E-10b C2: a substituted client_public_key in ke2 fails the envelope AEAD tag -> "
+                  "the login ABORTS before the AKE");
+            LoginOut honest = do_login(sub, 3, pk_s, pk_c);
+            check(honest.rc == 0 && honest.authed != 0,
+                  "E2E-10c: the honest (pk_s, pk_c) still open the envelope and the login authenticates");
         }
 
         // ── E2E-4: fault-tolerant login (1 crash + 1 byzantine) end-to-end ──
@@ -18164,6 +18234,14 @@ int main(int argc, char** argv) {
         // transcript, the two MACs bind that transcript (any tamper flips them), and
         // the KAT matches tools/verify_opaque3dh.py byte-for-byte (the dual-oracle).
         // NO new primitive — three P-256 scalar mults + HKDF-SHA256 + HMAC-SHA256.
+        //
+        // C2 (v2.25-DSSO-DAPP-SPEC §0.0(2), closed 2026-09-17). The v1 transcript
+        // bound NEITHER static public key and `pk_s`/`pk_c` were bare call arguments,
+        // so an attacker holding only the victim's PUBLIC pk_c impersonated the whole
+        // threshold IdP and shared sso_key with her (reproduced end to end). The C2-*
+        // arms below gate the fix: the RFC 9807 §4.1.1 CleartextCredentials block is
+        // in the preamble, the static keys enter ONLY through the transcript, and
+        // C2-b is the arm that fails again if a static key ever becomes unbound.
         std::cout << "=== DSSO G4 OPAQUE-3DH AKE (RFC 9807 3DH) ===\n";
         int fail = 0;
         auto check = [&](bool c, const std::string& m){
@@ -18189,16 +18267,18 @@ int main(int argc, char** argv) {
         t.context = (const uint8_t*)ctx.data();  t.context_len = ctx.size();
         t.client_identity = (const uint8_t*)cid.data(); t.client_identity_len = cid.size();
         t.server_identity = (const uint8_t*)sid.data(); t.server_identity_len = sid.size();
+        t.client_public_key = pk_c;   // C2: the static keys are TRANSCRIPT fields, not
+        t.server_public_key = pk_s;   // call arguments — the MACs cover what the DH uses
         t.cred_request  = (const uint8_t*)creq.data();  t.cred_request_len  = creq.size();
         t.cred_response = (const uint8_t*)cresp.data(); t.cred_response_len = cresp.size();
         t.client_nonce = cnon; t.server_nonce = snon;
 
         uint8_t epk_s[65], s_sk[32], s_smac[32], s_ecmac[32];
-        check(determ_opaque3dh_server(&t, sk_s, pk_c, esk_s, epk_c,
+        check(determ_opaque3dh_server(&t, sk_s, esk_s, epk_c,
                                       epk_s, s_sk, s_smac, s_ecmac) == 0, "server_finalize ok");
 
         uint8_t c_epk_c[65], c_sk[32], c_cmac[32]; int smac_ok = 0;
-        check(determ_opaque3dh_client(&t, sk_c, pk_s, esk_c, epk_s, s_smac,
+        check(determ_opaque3dh_client(&t, sk_c, esk_c, epk_s, s_smac,
                                       c_epk_c, c_sk, c_cmac, &smac_ok) == 0, "client_finalize ok");
 
         // Mutual agreement + authentication.
@@ -18209,12 +18289,26 @@ int main(int argc, char** argv) {
         check(std::memcmp(c_epk_c, epk_c, 65) == 0, "client re-derives the epk_c that fed ke1");
         { uint8_t z[32] = {0}; check(std::memcmp(c_sk, z, 32) != 0, "session_key is non-zero"); }
 
-        // Dual-oracle KAT — byte-for-byte vs tools/verify_opaque3dh.py.
-        check(hx(c_sk, 32)   == "6d58d64b27a10b95d8fc79a1dce81f5e79ba05aa0089bf515a9be1d8191ede08",
+        // Dual-oracle KAT (v2) — byte-for-byte vs tools/verify_opaque3dh.py. The v1
+        // vectors are RETIRED with the v1 encoding (C2; see the PERMANENCE note in
+        // opaque3dh.h): no deployment existed, so no login transcript had to
+        // reproduce, and a retained v1 path would have been a downgrade target.
+        uint8_t cc[DETERM_OPAQUE3DH_CLEARCRED_MAX]; size_t cc_len = 0;
+        check(determ_opaque3dh_cleartext_credentials(&t, cc, sizeof cc, &cc_len) == 0,
+              "CleartextCredentials serializes (the envelope-AAD view of the block)");
+        check(cc_len == 22 + 33 + 33 + 2 + sid.size() + 2 + cid.size(),
+              "CleartextCredentials length = tag || pk_s || pk_c || lp(sid) || lp(cid)");
+        check(hx(cc, cc_len) ==
+              "44544d2d4453534f2d434c454152435245442d76322d"          // "DTM-DSSO-CLEARCRED-v2-"
+              "03d65a93977caa3d1b081852ff57a79e465f1660577304baead505dd3a48589cf3"   // compress(pk_s)
+              "020217e617f0b6443928278f96999e69a23a4f2c152bdf6d6cdf66e5b80282d4ed"   // compress(pk_c)
+              "000a64657465726d2d696470" "0008616c696365407270",
+              "KAT CleartextCredentials byte-equal to the python oracle");
+        check(hx(c_sk, 32)   == "669097b27b88b05eb468d46a00c4fb9b6f06d6d6696ec3b85ea61d1456cfc880",
               "KAT session_key byte-equal to the python oracle");
-        check(hx(s_smac, 32) == "9f85241fe292952202a4520f4aea3eb300f7371cf4daa0600ffd097416ed2bb5",
+        check(hx(s_smac, 32) == "5a86590c25a05a7c287eaf80ae21b3f11b7b162ec83c9f68425e95ced14381f7",
               "KAT server_mac byte-equal to the python oracle");
-        check(hx(c_cmac, 32) == "df2fef7f903d40ad45bc564623671863c20c704ca441aa277600a09cb38b6cca",
+        check(hx(c_cmac, 32) == "4de728062ab9344d0691f806fabbace1227c6c24407fedeb703201f90a3f3a35",
               "KAT client_mac byte-equal to the python oracle");
 
         // Tamper: a different server_nonce yields a different session_key + a MAC the
@@ -18223,22 +18317,153 @@ int main(int argc, char** argv) {
             uint8_t snon2[32]; fill(snon2, 0x99);
             determ_opaque3dh_transcript t2 = t; t2.server_nonce = snon2;
             uint8_t e2[65], sk2[32], smac2[32], ecmac2[32];
-            determ_opaque3dh_server(&t2, sk_s, pk_c, esk_s, epk_c, e2, sk2, smac2, ecmac2);
+            determ_opaque3dh_server(&t2, sk_s, esk_s, epk_c, e2, sk2, smac2, ecmac2);
             check(std::memcmp(sk2, s_sk, 32) != 0,
                   "a changed server_nonce yields a DIFFERENT session_key (transcript-bound)");
             uint8_t ce[65], csk[32], cmc[32]; int ok2 = 1;
-            determ_opaque3dh_client(&t, sk_c, pk_s, esk_c, epk_s, smac2, ce, csk, cmc, &ok2);
+            determ_opaque3dh_client(&t, sk_c, esk_c, epk_s, smac2, ce, csk, cmc, &ok2);
             check(ok2 == 0, "client REJECTS a server MAC computed over a different transcript");
+        }
+
+        // ── C2 (spec §0.0(2)): the transcript binds BOTH static keys + the identities.
+        // Pre-fix, an attacker holding ONLY the victim's PUBLIC pk_c picked its own
+        // (sk_s', esk_s'), ran the server half, and the honest client returned
+        // server_mac_ok == 1 with an agreeing session_key — full IdP impersonation,
+        // reproduced end to end before this fix.
+        uint8_t sk_atk[32], esk_atk[32], pk_atk[65];
+        fill(sk_atk, 0xa7); fill(esk_atk, 0xb9);
+        check(determ_p256_base_mul(pk_atk, sk_atk) == 0, "C2: pk_s' = sk_s'·G (the impersonator's own static key)");
+        {
+            // C2-a — the reproduced attack, now rejected. The client runs with the
+            // pk_s it ANCHORED (envelope AAD / on-chain registration record — the
+            // trust boundary), never the one the peer offered.
+            determ_opaque3dh_transcript ta = t; ta.server_public_key = pk_atk;
+            uint8_t ae[65], ask[32], asm_[32], aec[32];
+            check(determ_opaque3dh_server(&ta, sk_atk, esk_atk, epk_c, ae, ask, asm_, aec) == 0,
+                  "C2-a: the impersonator's server half runs (it holds only pk_c + its own keys)");
+            uint8_t ve[65], vsk[32], vcm[32]; int vok = 1;
+            determ_opaque3dh_client(&t, sk_c, esk_c, ae, asm_, ve, vsk, vcm, &vok);
+            check(vok == 0,
+                  "C2-a: an impersonator holding only the PUBLIC pk_c is REJECTED by the honest "
+                  "client (server_mac_ok == 0) — the IdP impersonation of spec §0.0(2) is closed");
+            check(std::memcmp(vsk, ask, 32) != 0,
+                  "C2-a: the impersonator does NOT share a session_key with the client");
+        }
+        {
+            // C2-b — the PURE server_public_key binding, and the assertion that
+            // specifically catches a future re-introduction of an unbound static key
+            // (or an AAD = NULL envelope). The server here DOES hold the real sk_s and
+            // merely CLAIMS a different static key, so all three DH values are
+            // identical on both sides (dh2 = sk_s·epk_c == esk_c·pk_s); the ONLY
+            // difference is the transcript. b2 and b3 prove that from both ends: the
+            // client's own derivation is byte-identical to the honest run, and the
+            // server's 3DH inputs are byte-identical to the honest server run, yet
+            // the two sides no longer agree — the single changed input is the
+            // transcript's server_public_key.
+            determ_opaque3dh_transcript tl = t; tl.server_public_key = pk_atk;
+            uint8_t le[65], lsk[32], lsm[32], lec[32];
+            check(determ_opaque3dh_server(&tl, sk_s, esk_s, epk_c, le, lsk, lsm, lec) == 0,
+                  "C2-b: a server holding the REAL sk_s but claiming pk_s' runs");
+            uint8_t be[65], bsk[32], bcm[32]; int bok = 1;
+            determ_opaque3dh_client(&t, sk_c, esk_c, le, lsm, be, bsk, bcm, &bok);
+            check(bok == 0,
+                  "C2-b1: a server that lies about its static key is REJECTED although every DH "
+                  "value agrees — server_public_key is transcript-bound");
+            check(std::memcmp(bsk, c_sk, 32) == 0,
+                  "C2-b2: the client's derivation is byte-identical to the honest run — its 3DH "
+                  "triple and its preamble never changed, so b1's rejection is the SERVER's side");
+            check(std::memcmp(lsk, s_sk, 32) != 0,
+                  "C2-b3: and the lying server ran the IDENTICAL 3DH (same sk_s, esk_s, epk_c, "
+                  "client_public_key) yet derived a DIFFERENT session_key — the one changed input "
+                  "is the transcript's server_public_key, which is exactly the C2 binding");
+        }
+        {
+            // C2-c — the PURE client_public_key binding. The client's own 3DH is
+            // (esk_c,epk_s), (esk_c,pk_s), (sk_c,epk_s): none of them reads
+            // t->client_public_key, so a client whose transcript claims a different
+            // pk_c has byte-identical DH inputs and differs ONLY in the preamble.
+            uint8_t sk_o[32], pk_o[65]; fill(sk_o, 0x5c);
+            check(determ_p256_base_mul(pk_o, sk_o) == 0, "C2-c: a second valid client key");
+            determ_opaque3dh_transcript tc = t; tc.client_public_key = pk_o;
+            uint8_t ce[65], csk2[32], ccm[32]; int cok = 1;
+            determ_opaque3dh_client(&tc, sk_c, esk_c, epk_s, s_smac, ce, csk2, ccm, &cok);
+            check(cok == 0,
+                  "C2-c1: a substituted client_public_key is REJECTED although the client's own "
+                  "DH values are unchanged — client_public_key is transcript-bound");
+            check(std::memcmp(csk2, c_sk, 32) != 0,
+                  "C2-c2: and it yields a DIFFERENT session_key, which can only come from the "
+                  "preamble (the client's 3DH never reads client_public_key)");
+        }
+        {
+            // C2-d/e — the identities travel inside the same CleartextCredentials block.
+            determ_opaque3dh_transcript td = t;
+            td.server_identity = (const uint8_t*)"evil-idp"; td.server_identity_len = 8;
+            uint8_t e[65], k[32], m[32]; int o = 1;
+            determ_opaque3dh_client(&td, sk_c, esk_c, epk_s, s_smac, e, k, m, &o);
+            check(o == 0, "C2-d: a substituted server_identity is REJECTED");
+            determ_opaque3dh_transcript te = t;
+            te.client_identity = (const uint8_t*)"mallory@rp"; te.client_identity_len = 10;
+            int o2 = 1;
+            determ_opaque3dh_client(&te, sk_c, esk_c, epk_s, s_smac, e, k, m, &o2);
+            check(o2 == 0, "C2-e: a substituted client_identity is REJECTED");
+        }
+        {
+            // C2-f — the serialized CleartextCredentials (the envelope AAD) is a
+            // function of the static keys and the identities, so an envelope sealed
+            // under one (pk_s, identities) cannot be replayed under another. This is
+            // the login-layer half of the C2 fix, asserted where the bytes are made.
+            determ_opaque3dh_transcript ta = t; ta.server_public_key = pk_atk;
+            uint8_t cc2[256]; size_t n2 = 0;
+            check(determ_opaque3dh_cleartext_credentials(&ta, cc2, sizeof cc2, &n2) == 0 &&
+                  n2 == cc_len && std::memcmp(cc2, cc, cc_len) != 0,
+                  "C2-f: the CleartextCredentials bytes CHANGE with server_public_key — an "
+                  "envelope AAD built from them cannot carry a substituted pk_s");
+            determ_opaque3dh_transcript ti = t;
+            ti.server_identity = (const uint8_t*)"evil-idp"; ti.server_identity_len = 8;
+            size_t n3 = 0;
+            check(determ_opaque3dh_cleartext_credentials(&ti, cc2, sizeof cc2, &n3) == 0 &&
+                  std::memcmp(cc2, cc, cc_len < n3 ? cc_len : n3) != 0,
+                  "C2-f: and with server_identity");
+        }
+        {
+            // C2-g — the server-MAC comparison covers all 32 bytes. A length-0 /
+            // prefix-only / memcmp-shortcut weakening flips one of these.
+            uint8_t bad[32], e[65], k[32], m[32]; int o;
+            std::memcpy(bad, s_smac, 32); bad[31] ^= 0x01; o = 1;
+            determ_opaque3dh_client(&t, sk_c, esk_c, epk_s, bad, e, k, m, &o);
+            check(o == 0, "C2-g: a server_mac differing only in its LAST byte is REJECTED");
+            std::memcpy(bad, s_smac, 32); bad[0] ^= 0x80; o = 1;
+            determ_opaque3dh_client(&t, sk_c, esk_c, epk_s, bad, e, k, m, &o);
+            check(o == 0, "C2-g: a server_mac differing only in its FIRST byte is REJECTED");
         }
 
         // Fail-closed edges.
         {
             uint8_t e[65], sk[32], sm[32], ec[32];
-            check(determ_opaque3dh_server(nullptr, sk_s, pk_c, esk_s, epk_c, e, sk, sm, ec) != 0,
+            check(determ_opaque3dh_server(nullptr, sk_s, esk_s, epk_c, e, sk, sm, ec) != 0,
                   "fail-closed: NULL transcript rejected");
             determ_opaque3dh_transcript tb = t; tb.client_nonce = nullptr;
-            check(determ_opaque3dh_server(&tb, sk_s, pk_c, esk_s, epk_c, e, sk, sm, ec) != 0,
+            check(determ_opaque3dh_server(&tb, sk_s, esk_s, epk_c, e, sk, sm, ec) != 0,
                   "fail-closed: NULL client_nonce rejected");
+            // The two static keys are REQUIRED (C2): there is no "unset" static key
+            // that would silently drop out of the transcript.
+            determ_opaque3dh_transcript tn = t; tn.server_public_key = nullptr;
+            check(determ_opaque3dh_server(&tn, sk_s, esk_s, epk_c, e, sk, sm, ec) != 0,
+                  "fail-closed: NULL server_public_key rejected (server)");
+            int o = 7;                       // sentinel: outputs must stay untouched
+            check(determ_opaque3dh_client(&tn, sk_c, esk_c, epk_s, s_smac, e, sk, sm, &o) != 0 && o == 7,
+                  "fail-closed: NULL server_public_key rejected (client), outputs untouched");
+            determ_opaque3dh_transcript tm = t; tm.client_public_key = nullptr;
+            check(determ_opaque3dh_server(&tm, sk_s, esk_s, epk_c, e, sk, sm, ec) != 0,
+                  "fail-closed: NULL client_public_key rejected (server)");
+            o = 7;
+            check(determ_opaque3dh_client(&tm, sk_c, esk_c, epk_s, s_smac, e, sk, sm, &o) != 0 && o == 7,
+                  "fail-closed: NULL client_public_key rejected (client), outputs untouched");
+            size_t n = 0;
+            check(determ_opaque3dh_cleartext_credentials(&tn, cc, sizeof cc, &n) != 0,
+                  "fail-closed: CleartextCredentials with a NULL static key rejected");
+            check(determ_opaque3dh_cleartext_credentials(&t, cc, 8, &n) != 0,
+                  "fail-closed: CleartextCredentials with too small a buffer rejected");
         }
 
         if (fail == 0) std::cout << "\nPASS: dsso-opaque3dh all assertions\n";

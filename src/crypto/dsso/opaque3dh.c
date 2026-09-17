@@ -1,8 +1,9 @@
 /* DSSO G4 OPAQUE-3DH AKE core — CRYPTO-C99-SPEC §3.26. See opaque3dh.h for the
- * construction, the transcript encoding, and the domain tags. A pure composition
- * of determ::c99 primitives: P-256 scalar mult (the 3DH), HKDF-SHA256 (built on
- * determ_hmac_sha256) with a TLS-1.3/RFC-9807 Expand-Label schedule, and streaming
- * SHA-256 over the transcript preamble. Byte-frozen against tools/verify_opaque3dh.py. */
+ * construction, the transcript encoding, the domain tags and the C2 trust-boundary
+ * note. A pure composition of determ::c99 primitives: P-256 scalar mult (the 3DH),
+ * HKDF-SHA256 (built on determ_hmac_sha256) with a TLS-1.3/RFC-9807 Expand-Label
+ * schedule, and streaming SHA-256 over the transcript preamble. Byte-frozen against
+ * tools/verify_opaque3dh.py. */
 #include <determ/crypto/dsso/opaque3dh.h>
 
 #include <string.h>
@@ -14,8 +15,9 @@
 
 #define NH 32                              /* SHA-256 output length          */
 #define CPT 33                             /* SEC1 compressed P-256 point    */
-static const char LABEL_PREFIX[] = "DTM-DSSO-OPAQUE3DH-v1-"; /* 22 bytes, no NUL */
-static const char PREAMBLE_TAG[] = "DTM-DSSO-OPAQUEv1-";     /* 18 bytes, no NUL */
+static const char LABEL_PREFIX[] = "DTM-DSSO-OPAQUE3DH-v2-"; /* 22 bytes, no NUL */
+static const char PREAMBLE_TAG[] = "DTM-DSSO-OPAQUEv2-";     /* 18 bytes, no NUL */
+static const char CLEARCRED_TAG[] = "DTM-DSSO-CLEARCRED-v2-";/* 22 bytes, no NUL */
 
 /* i2osp(x, 2) big-endian into a 2-byte slot. */
 static void put_u16(uint8_t out[2], size_t x) {
@@ -50,7 +52,7 @@ static int hkdf_expand(const uint8_t prk[32], const uint8_t *info, size_t info_l
 }
 
 /* Expand-Label(secret, label, context, len) — the TLS-1.3/RFC-9807 label wrapper
- * with the house "DTM-DSSO-OPAQUE3DH-v1-" prefix. label/context are short. */
+ * with the house "DTM-DSSO-OPAQUE3DH-v2-" prefix. label/context are short. */
 static int expand_label(const uint8_t secret[32],
                         const char *label, size_t label_len,
                         const uint8_t *context, size_t context_len,
@@ -79,10 +81,65 @@ static int derive_secret(const uint8_t secret[32],
 /* Fail-close if any on-wire field exceeds the cap (bounds the preamble hash work). */
 static int field_ok(size_t len) { return len <= DETERM_OPAQUE3DH_MAX_FIELD; }
 
+/* ── the CleartextCredentials emitter (RFC 9807 §4.1.1) ────────────────────────
+ * ONE emitter, two sinks: a SHA-256 context (the preamble, never materialized) and
+ * a caller buffer (the envelope AAD). Having a single emitter is what guarantees
+ * the envelope tag and the transcript MAC commit to the identical bytes — two
+ * hand-kept copies of an encoding drift, and this one is security-load-bearing. */
+typedef struct {
+    determ_sha256_ctx *h;      /* non-NULL -> stream into this hash            */
+    uint8_t           *buf;    /* non-NULL -> write here                        */
+    size_t             cap;    /* capacity of buf                               */
+    size_t             len;    /* bytes emitted so far                          */
+    int                ovf;    /* 1 once a write would have exceeded cap        */
+} cc_sink;
+
+static void cc_put(cc_sink *s, const uint8_t *p, size_t n) {
+    if (!n) return;
+    if (s->h) determ_sha256_update(s->h, p, n);
+    if (s->buf) {
+        if (s->len + n > s->cap) { s->ovf = 1; return; }
+        memcpy(s->buf + s->len, p, n);
+    }
+    s->len += n;
+}
+
+/* Emit "DTM-DSSO-CLEARCRED-v2-" || compress(pk_s) || compress(pk_c)
+ *      || i2osp(|sid|,2) || sid || i2osp(|cid|,2) || cid.
+ * Returns 0, or -1 fail-closed (NULL static key, over-length identity, an
+ * uncompressible static key, or a buffer sink overflow). */
+static int cc_emit(cc_sink *s, const determ_opaque3dh_transcript *t) {
+    uint8_t cpk_s[CPT], cpk_c[CPT], lp[2];
+    if (!t->server_public_key || !t->client_public_key) return -1;
+    if (!field_ok(t->server_identity_len) || !field_ok(t->client_identity_len)) return -1;
+    if (determ_p256_point_compress(cpk_s, t->server_public_key) != 0) return -1;
+    if (determ_p256_point_compress(cpk_c, t->client_public_key) != 0) return -1;
+
+    cc_put(s, (const uint8_t *)CLEARCRED_TAG, sizeof(CLEARCRED_TAG) - 1);
+    cc_put(s, cpk_s, CPT);
+    cc_put(s, cpk_c, CPT);
+    put_u16(lp, t->server_identity_len); cc_put(s, lp, 2);
+    if (t->server_identity_len) cc_put(s, t->server_identity, t->server_identity_len);
+    put_u16(lp, t->client_identity_len); cc_put(s, lp, 2);
+    if (t->client_identity_len) cc_put(s, t->client_identity, t->client_identity_len);
+    return s->ovf ? -1 : 0;
+}
+
+int determ_opaque3dh_cleartext_credentials(const determ_opaque3dh_transcript *t,
+                                           uint8_t *out, size_t out_cap,
+                                           size_t *out_len) {
+    if (!t || !out || !out_len) return -1;
+    cc_sink s;
+    s.h = NULL; s.buf = out; s.cap = out_cap; s.len = 0; s.ovf = 0;
+    if (cc_emit(&s, t) != 0) return -1;
+    *out_len = s.len;
+    return 0;
+}
+
 /* Stream the transcript preamble into SHA-256 and (optionally) a trailing tail
  * (server_mac for the client_mac hash), producing SHA256(preamble [|| tail]).
  * The preamble is never materialized. Returns 0, or -1 fail-closed on a compress
- * failure (identity ephemeral) or an over-length field. */
+ * failure (identity ephemeral / bad static key) or an over-length field. */
 static int hash_preamble(const determ_opaque3dh_transcript *t,
                          const uint8_t epk_c[65], const uint8_t epk_s[65],
                          const uint8_t *tail, size_t tail_len,
@@ -103,16 +160,19 @@ static int hash_preamble(const determ_opaque3dh_transcript *t,
     /* i2osp(|context|,2) || context */
     put_u16(lp, t->context_len); determ_sha256_update(&h, lp, 2);
     if (t->context_len) determ_sha256_update(&h, t->context, t->context_len);
-    /* i2osp(|client_identity|,2) || client_identity */
-    put_u16(lp, t->client_identity_len); determ_sha256_update(&h, lp, 2);
-    if (t->client_identity_len) determ_sha256_update(&h, t->client_identity, t->client_identity_len);
+    /* CleartextCredentials: both STATIC public keys + both identities (RFC 9807
+     * §4.1.1). This is the C2 binding — without it a party's static key is not in
+     * anything the MACs cover, and a server that does not hold sk_s impersonates
+     * the IdP to a client whose pk_s it also supplied. */
+    {
+        cc_sink s;
+        s.h = &h; s.buf = NULL; s.cap = 0; s.len = 0; s.ovf = 0;
+        if (cc_emit(&s, t) != 0) return -1;
+    }
     /* ke1 = cred_request || client_nonce(32) || compress(epk_c) */
     if (t->cred_request_len) determ_sha256_update(&h, t->cred_request, t->cred_request_len);
     determ_sha256_update(&h, t->client_nonce, DETERM_OPAQUE3DH_NONCE_LEN);
     determ_sha256_update(&h, cepk_c, CPT);
-    /* i2osp(|server_identity|,2) || server_identity */
-    put_u16(lp, t->server_identity_len); determ_sha256_update(&h, lp, 2);
-    if (t->server_identity_len) determ_sha256_update(&h, t->server_identity, t->server_identity_len);
     /* inner_ke2 = cred_response || server_nonce(32) || compress(epk_s) */
     if (t->cred_response_len) determ_sha256_update(&h, t->cred_response, t->cred_response_len);
     determ_sha256_update(&h, t->server_nonce, DETERM_OPAQUE3DH_NONCE_LEN);
@@ -155,26 +215,29 @@ static int dh_compress(uint8_t out33[33], const uint8_t scalar[32], const uint8_
 }
 
 int determ_opaque3dh_server(const determ_opaque3dh_transcript *t,
-                            const uint8_t sk_s[32],  const uint8_t pk_c[65],
+                            const uint8_t sk_s[32],
                             const uint8_t esk_s[32], const uint8_t epk_c[65],
                             uint8_t epk_s_out[65],
                             uint8_t session_key[32],
                             uint8_t server_mac[32],
                             uint8_t expected_client_mac[32]) {
-    if (!t || !sk_s || !pk_c || !esk_s || !epk_c || !epk_s_out ||
+    if (!t || !sk_s || !esk_s || !epk_c || !epk_s_out ||
         !session_key || !server_mac || !expected_client_mac ||
-        !t->client_nonce || !t->server_nonce)
+        !t->client_nonce || !t->server_nonce ||
+        !t->client_public_key || !t->server_public_key)      /* C2: both required */
         return -1;
 
     uint8_t epk_s[65];
     if (determ_p256_base_mul(epk_s, esk_s) != 0) return -1;   /* epk_s = esk_s·G */
 
-    /* 3DH (server view): dh1 = esk_s·epk_c, dh2 = sk_s·epk_c, dh3 = esk_s·pk_c */
+    /* 3DH (server view): dh1 = esk_s·epk_c, dh2 = sk_s·epk_c, dh3 = esk_s·pk_c.
+     * pk_c is the TRANSCRIPT field, so the key the DH uses is the key the MACs
+     * cover — there is no second, unbound way for a static key to enter. */
     uint8_t ikm[99];
     int rc = 0;
     rc |= dh_compress(ikm + 0,  esk_s, epk_c);
     rc |= dh_compress(ikm + 33, sk_s,  epk_c);
-    rc |= dh_compress(ikm + 66, esk_s, pk_c);
+    rc |= dh_compress(ikm + 66, esk_s, t->client_public_key);
     if (rc != 0) { determ_secure_zero(ikm, sizeof ikm); return -1; }
 
     uint8_t pre_hash[32];
@@ -206,27 +269,30 @@ int determ_opaque3dh_server(const determ_opaque3dh_transcript *t,
 }
 
 int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
-                            const uint8_t sk_c[32],  const uint8_t pk_s[65],
+                            const uint8_t sk_c[32],
                             const uint8_t esk_c[32], const uint8_t epk_s[65],
                             const uint8_t server_mac[32],
                             uint8_t epk_c_out[65],
                             uint8_t session_key[32],
                             uint8_t client_mac[32],
                             int *server_mac_ok) {
-    if (!t || !sk_c || !pk_s || !esk_c || !epk_s || !server_mac ||
+    if (!t || !sk_c || !esk_c || !epk_s || !server_mac ||
         !epk_c_out || !session_key || !client_mac || !server_mac_ok ||
-        !t->client_nonce || !t->server_nonce)
+        !t->client_nonce || !t->server_nonce ||
+        !t->client_public_key || !t->server_public_key)      /* C2: both required */
         return -1;
     *server_mac_ok = 0;
 
     uint8_t epk_c[65];
     if (determ_p256_base_mul(epk_c, esk_c) != 0) return -1;   /* epk_c = esk_c·G */
 
-    /* 3DH (client view): dh1 = esk_c·epk_s, dh2 = esk_c·pk_s, dh3 = sk_c·epk_s */
+    /* 3DH (client view): dh1 = esk_c·epk_s, dh2 = esk_c·pk_s, dh3 = sk_c·epk_s.
+     * pk_s is the TRANSCRIPT field — the key the client ANCHORED, which the MACs
+     * also cover. C2: never route a peer-supplied static key here. */
     uint8_t ikm[99];
     int rc = 0;
     rc |= dh_compress(ikm + 0,  esk_c, epk_s);
-    rc |= dh_compress(ikm + 33, esk_c, pk_s);
+    rc |= dh_compress(ikm + 33, esk_c, t->server_public_key);
     rc |= dh_compress(ikm + 66, sk_c,  epk_s);
     if (rc != 0) { determ_secure_zero(ikm, sizeof ikm); return -1; }
 
@@ -243,7 +309,9 @@ int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
     }
     determ_secure_zero(ikm, sizeof ikm);
 
-    /* Verify the server MAC (constant-time), then produce the client MAC. */
+    /* Verify the server MAC over the FULL NH bytes, constant-time. This is the
+     * acceptance decision: it is 1 only if the peer derived Km2, which needs sk_s
+     * for t->server_public_key AND the identical transcript. */
     uint8_t expect_smac[32];
     determ_hmac_sha256(km2, NH, pre_hash, NH, expect_smac);
     *server_mac_ok = (determ_ct_memcmp(server_mac, expect_smac, NH) == 0) ? 1 : 0;
