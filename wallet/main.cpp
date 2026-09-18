@@ -266,34 +266,50 @@ std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
 // so. The write is NOT failed and the file is NOT deleted: destroying a
 // keyfile-recover result the operator may be unable to regenerate is a worse
 // outcome than a wide file they were told about.
+//
+// `err_out` (added 2026-09-17 for account-import-many, the twelfth caller): when
+// non-null it receives the HARD-FAILURE reason instead of stderr, because that
+// caller is a fault-tolerant per-record loop whose documented contract is to put
+// the reason in THAT record's summary entry and keep going — a stderr-only
+// diagnostic would lose the per-record attribution at N=50k. It is the ONLY
+// behavioural knob: the open / fchmod / write / narrow sequence and every
+// guarantee above are identical either way, so this file still holds exactly ONE
+// restricted-write primitive and no site re-implements it. nullptr (the default,
+// and what the other eleven callers pass) leaves their behaviour byte-for-byte
+// unchanged. The P-2 WARNING goes to stderr whatever err_out says: it describes a
+// file that WAS written and that the operator has to go and fix by hand, so it
+// must not be swallowed into a summary field nobody reads.
 bool write_bytes_file_0600(const std::string& cmd_label,
                            const std::string& out_path,
                            const std::vector<uint8_t>& bytes,
-                           bool* perms_narrowed_out = nullptr) {
+                           bool* perms_narrowed_out = nullptr,
+                           std::string* err_out = nullptr) {
     bool narrowed = true;
+    // One place where a hard failure is rendered, so the two shapes cannot drift.
+    auto fail = [&](const std::string& what) -> bool {
+        if (err_out) *err_out = what;
+        else         std::cerr << cmd_label << ": " << what << "\n";
+        return false;
+    };
 #ifdef _WIN32
     std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
     if (!f) {
-        std::cerr << cmd_label << ": cannot open output file for write: "
-                  << out_path << "\n";
-        return false;
+        return fail("cannot open output file for write: " + out_path);
     }
     if (!bytes.empty())
         f.write(reinterpret_cast<const char*>(bytes.data()),
                 static_cast<std::streamsize>(bytes.size()));
     f.close();
     if (!f) {
-        std::cerr << cmd_label << ": write failed: " << out_path << "\n";
-        return false;
+        return fail("write failed: " + out_path);
     }
 #else
     const int fd = ::open(out_path.c_str(),
                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
                           0600);
     if (fd < 0) {
-        std::cerr << cmd_label << ": cannot open output file for write: "
-                  << out_path << ": " << std::strerror(errno) << "\n";
-        return false;
+        return fail("cannot open output file for write: " + out_path + ": "
+                    + std::strerror(errno));
     }
     // Before the first write, on the descriptor — this is the call that closes
     // the window on the overwrite path, where the create mode above is ignored.
@@ -309,17 +325,14 @@ bool write_bytes_file_0600(const std::string& cmd_label,
         // n == 0 for a positive count cannot happen on a regular file, but it
         // must not become a spin: fail the write instead of looping forever.
         if (n <= 0) {
-            std::cerr << cmd_label << ": write failed: " << out_path << ": "
-                      << (n < 0 ? std::strerror(errno) : "wrote 0 bytes") << "\n";
+            const std::string why = (n < 0 ? std::strerror(errno) : "wrote 0 bytes");
             ::close(fd);
-            return false;
+            return fail("write failed: " + out_path + ": " + why);
         }
         off += static_cast<size_t>(n);
     }
     if (::close(fd) != 0) {
-        std::cerr << cmd_label << ": write failed: " << out_path << ": "
-                  << std::strerror(errno) << "\n";
-        return false;
+        return fail("write failed: " + out_path + ": " + std::strerror(errno));
     }
 #endif
     // 0600 owner-only perms, belt and braces: the POSIX branch above already
@@ -1920,8 +1933,13 @@ int cmd_account_import(int argc, char** argv) {
 //                             JSON matching `account-import --out` shape.
 //   --summary <path>        : optional. If set, writes a JSON array of
 //                             {address, keyfile_path, status:
-//                              "ok"|"skipped"|"error", reason?} — one
-//                             record per input element.
+//                              "ok"|"skipped"|"error", reason?,
+//                              perms_narrowed?} — one record per input
+//                             element. `perms_narrowed` is a FAILURE-ONLY
+//                             field: it appears, set to false, only on a
+//                             record whose keyfile could not be put at 0600
+//                             (S-109 P-2), so a fully successful summary is
+//                             byte-identical to the pre-2026-09-17 shape.
 //   --force                 : permit overwriting existing keyfiles in
 //                             --out-dir. Without --force, the first
 //                             collision triggers status="error" on that
@@ -2200,7 +2218,21 @@ int cmd_account_import_many(int argc, char** argv) {
         }
 
         // ── Emit keyfile (encrypted or plaintext per --passphrase-env) ──────
+        // S-109 P-1/P-2, closed here on POSIX 2026-09-17. This loop used to run
+        // its own ofstream -> write -> permissions -> (void)perm_ec sequence,
+        // ONCE PER RECORD: measured under strace on a plain successful run, each
+        // record's file was created at 0666 & ~umask (0644), the COMPLETE 68-byte
+        // DAK1 container went in — bytes 36..68 of which are literally that
+        // customer's private seed — and only then was it narrowed, and a failed
+        // narrowing was discarded. Both branches now go through the single
+        // restricted-write primitive this file already has. Per record, because
+        // each record is its own file and its buffer is zeroed before the next
+        // iteration starts; `err_out` keeps the helper's reason in THIS record's
+        // summary entry instead of aborting the batch (see the fault-tolerance
+        // contract in the header comment — a bad row must not invalidate 49,999
+        // good ones). The Windows window is NOT closed; see the helper.
         bool write_ok = true;
+        bool perms_narrowed = true;
         std::string write_err;
         if (encrypt) {
             // Mirror keyfile-create's canonical DNK1 container (D2): the
@@ -2214,19 +2246,9 @@ int cmd_account_import_many(int argc, char** argv) {
                 auto env       = envelope::encrypt(pt_bytes, passphrase, aad);
                 auto env_bytes = envelope::serialize_bytes(env);
                 auto nk_bytes  = keyfmt::encode_dnk1(pub_arr, env_bytes);
-                std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-                if (!f) {
-                    write_ok = false;
-                    write_err = "cannot open output file for write";
-                } else {
-                    f.write(reinterpret_cast<const char*>(nk_bytes.data()),
-                            static_cast<std::streamsize>(nk_bytes.size()));
-                    f.close();
-                    if (!f) {
-                        write_ok = false;
-                        write_err = "write failed";
-                    }
-                }
+                write_ok = write_bytes_file_0600("account-import-many",
+                                                 out_path.string(), nk_bytes,
+                                                 &perms_narrowed, &write_err);
             } catch (std::exception& e) {
                 write_ok = false;
                 write_err = std::string("envelope encrypt failed: ") + e.what();
@@ -2240,19 +2262,11 @@ int cmd_account_import_many(int argc, char** argv) {
             std::memcpy(kp.priv_seed.data(), seed.data(),        32);
             try {
                 auto bytes = keyfmt::encode_dak1(kp);
-                std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-                if (!f) {
-                    write_ok = false;
-                    write_err = "cannot open output file for write";
-                } else {
-                    f.write(reinterpret_cast<const char*>(bytes.data()),
-                            static_cast<std::streamsize>(bytes.size()));
-                    f.close();
-                    if (!f) {
-                        write_ok = false;
-                        write_err = "write failed";
-                    }
-                }
+                write_ok = write_bytes_file_0600("account-import-many",
+                                                 out_path.string(), bytes,
+                                                 &perms_narrowed, &write_err);
+                // Stays here, per record: the plaintext DAK1 buffer must not
+                // outlive the iteration that produced it.
                 determ_secure_zero(bytes.data(), bytes.size());
             } catch (std::exception& e) {
                 write_ok = false;
@@ -2271,21 +2285,15 @@ int cmd_account_import_many(int argc, char** argv) {
             continue;
         }
 
-        // 0600 permissions tightening — best-effort on Windows (NTFS ACL
-        // inherits from parent; the perms call is a no-op for the bits we
-        // care about there).
-        {
-            std::error_code perm_ec;
-            std::filesystem::permissions(
-                out_path,
-                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                std::filesystem::perm_options::replace,
-                perm_ec);
-            (void)perm_ec;
-        }
-
         out_rec["keyfile_path"] = out_path.string();
         out_rec["status"]       = "ok";
+        // Failure-only field (see write_bytes_file_0600): its ABSENCE is the
+        // success signal, so a fully successful summary is byte-unchanged and
+        // the determinism comparison in tools/test_wallet_account_import_many.sh
+        // keeps holding. The stderr warning is emitted by the helper as well —
+        // this is the machine-readable half, per record, for the operator who
+        // imported 50,000 accounts and is not reading 50,000 stderr lines.
+        if (!perms_narrowed) out_rec["perms_narrowed"] = false;
         summary.push_back(out_rec);
         ++ok_count;
     }
@@ -3844,10 +3852,15 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
 //   9. Self-test round-trip: deserialize + decrypt the freshly-emitted
 //      envelope with the new passphrase. Catches encrypt/decrypt path
 //      drift before any file is touched.
-//  10. Write 2-line file atomically: stage to <out>_tmp.json, fflush,
-//      OS-level commit (fsync on POSIX, _commit on Windows), close,
-//      rename. fs::rename is atomic for same-volume targets on both
-//      POSIX (::rename(2)) and Windows (MoveFileEx implicit replace).
+//  10. Write the file atomically: stage to <out>_tmp.bin through
+//      write_bytes_file_0600 — created 0600 and fchmod'd on its descriptor
+//      before the first byte, so the inode the rename publishes is already
+//      narrow (S-109 P-1; POSIX only, see the helper for the Windows
+//      limitation) — then OS-level commit (fsync on POSIX, _commit on
+//      Windows), then rename. fs::rename is atomic for same-volume targets
+//      on both POSIX (::rename(2)) and Windows (MoveFileEx implicit
+//      replace). A narrowing that could not be performed is reported on
+//      stderr and as "perms_narrowed": false in the --json summary.
 //  11. Zero every plaintext + key buffer via sodium_memzero on every
 //      exit path.
 //
@@ -4108,12 +4121,13 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     }
 
     // ── Atomic file write: stage to <out>_tmp.bin + fsync + rename ─────────
-    // 1. Write the full binary DNK1 container to <out>_tmp.bin.
-    // 2. fflush the C++ stream.
-    // 3. OS-level commit (fsync on POSIX, _commit on Windows) — without
+    // 1. Write the full binary DNK1 container to <out>_tmp.bin through
+    //    write_bytes_file_0600, so the staging inode is 0600 before its first
+    //    byte and the rename below publishes an already-narrow file.
+    // 2. OS-level commit (fsync on POSIX, _commit on Windows) — without
     //    this the rename can complete before bytes hit disk, and a
     //    crash mid-window leaves an empty or torn file.
-    // 4. Atomic rename via std::filesystem::rename (atomic for
+    // 3. Atomic rename via std::filesystem::rename (atomic for
     //    same-volume targets on both POSIX and Windows).
     std::string tmp_path = out_path + "_tmp.bin";
     {
@@ -4122,46 +4136,41 @@ int cmd_keyfile_rotate(int argc, char** argv) {
         std::filesystem::remove(tmp_path, rm_ec);
         (void)rm_ec;
     }
-    {
-        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            secure_zero_all();
-            std::cerr << "keyfile-rotate: cannot open tmp file for write: "
-                      << tmp_path << "\n";
-            return 1;
-        }
-        f.write(reinterpret_cast<const char*>(nk_bytes.data()),
-                static_cast<std::streamsize>(nk_bytes.size()));
-        f.flush();
-        if (!f) {
-            secure_zero_all();
-            std::error_code rm_ec;
-            std::filesystem::remove(tmp_path, rm_ec);
-            (void)rm_ec;
-            std::cerr << "keyfile-rotate: write failed on tmp file: "
-                      << tmp_path << "\n";
-            return 1;
-        }
-        // std::ofstream doesn't expose the underlying FILE* / fd, so we
-        // close the stream and re-open via the C stdio API for the
-        // platform-specific commit. The close flushes the C++ buffer;
-        // the re-open + fsync/_commit drives the OS-level commit.
-        f.close();
-        if (!f) {
-            secure_zero_all();
-            std::error_code rm_ec;
-            std::filesystem::remove(tmp_path, rm_ec);
-            (void)rm_ec;
-            std::cerr << "keyfile-rotate: close failed on tmp file: "
-                      << tmp_path << "\n";
-            return 1;
-        }
+    // S-109 P-1, closed here on POSIX 2026-09-17. The staging file used to be
+    // created by std::ofstream at 0666 & ~umask and narrowed only AFTER the
+    // rename. The mode travels with the INODE, so the wide file existed under
+    // the FINAL name: an atomic publish that publishes a world-readable keyfile.
+    // Measured at HEAD, on a fresh --out and on a pre-existing one alike:
+    //     RENAME <tmp> -> <out> srcmode=0644 size=171 destmode_after=0644
+    //     FCHMODAT <out> want=0600 was=0644 size=171
+    // The content is AEAD-wrapped (DNK1 + DWE2) so the severity is below the
+    // plaintext sites, but the ordering defect is the same one and this is the
+    // only write-then-rename shape in this file. write_bytes_file_0600 creates
+    // the staging file with O_CREAT 0600 AND ::fchmod's the descriptor before
+    // the first byte, so the inode the rename publishes is already narrow —
+    // both calls, because the create mode is ignored when the remove above
+    // could not delete a stale tmp and the open reuses that inode. It also
+    // brings O_NOFOLLOW (a symlink planted at <out>_tmp.bin no longer redirects
+    // the write) and a checked error_code. It does NOT fsync; that stays below.
+    bool perms_narrowed = true;
+    if (!write_bytes_file_0600("keyfile-rotate", tmp_path, nk_bytes,
+                               &perms_narrowed)) {
+        secure_zero_all();
+        std::error_code rm_ec;
+        std::filesystem::remove(tmp_path, rm_ec);
+        (void)rm_ec;
+        std::cerr << "keyfile-rotate: keyfile_rotated=NO "
+                     "(staging write failed; --in and --out are untouched)\n";
+        return 1;
     }
     // Platform-specific commit-to-disk. On Windows _commit forces the
     // file's in-flight writes to be flushed by the kernel; on POSIX
     // fsync is the equivalent. Both are best-effort: failures are
     // logged but don't block the rename (a failed fsync still produces
     // a valid file in the common case; the rename remains atomic).
+    // The helper above closes its descriptor, so the commit re-opens the file
+    // read-only — the same second open the ofstream shape needed, kept as-is
+    // rather than pushing an fsync into a primitive ten other callers share.
     {
 #ifdef _WIN32
         // Re-open in binary R/W mode to obtain an fd suitable for _commit.
@@ -4201,7 +4210,15 @@ int cmd_keyfile_rotate(int argc, char** argv) {
         }
     }
 
-    // 0600 permissions tightening — best-effort on Windows.
+    // 0600 permissions tightening, belt and braces — and the ONLY narrowing on
+    // Windows (where the mode argument drives FILE_ATTRIBUTE_READONLY and the
+    // effective ACL comes by inheritance — docs/proofs/S005PassphraseKeyfile.md
+    // F-4). On POSIX the staging file was already 0600 and rename(2) carries the
+    // mode with the inode, so by here the file is narrow under its final name and
+    // this call changes nothing. Its error_code is now CHECKED: it used to be
+    // discarded with `(void)perm_ec`, so a filesystem or platform that cannot
+    // narrow left a world-readable rotated keyfile behind and the command exited
+    // 0 printing nothing (S-109 P-2, reproduced with an LD_PRELOAD EPERM shim).
     {
         std::error_code perm_ec;
         std::filesystem::permissions(
@@ -4209,7 +4226,12 @@ int cmd_keyfile_rotate(int argc, char** argv) {
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
             std::filesystem::perm_options::replace,
             perm_ec);
-        (void)perm_ec;
+        if (perm_ec) {
+            std::cerr << "keyfile-rotate: Warning: could not set 0600 permissions on "
+                      << out_path << ": " << perm_ec.message() << "\n";
+            std::cerr << "keyfile-rotate: Verify manually (chmod 0600 / icacls).\n";
+            perms_narrowed = false;
+        }
     }
 
     // ── Zero all plaintext + key buffers BEFORE emitting summary ───────────
@@ -4227,6 +4249,9 @@ int cmd_keyfile_rotate(int argc, char** argv) {
         r["in_place"]             = in_place;
         r["old_passphrase_source"] = old_pass_src;
         r["new_passphrase_source"] = new_pass_src;
+        // Failure-only field (see write_bytes_file_0600): its absence is the
+        // success signal, so the success JSON is byte-unchanged.
+        if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
         std::cout << "keyfile-rotate: decrypted --in with old passphrase\n";

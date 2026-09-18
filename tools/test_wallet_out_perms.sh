@@ -41,7 +41,16 @@
 # owned by another user) and asserts BOTH that the harm is real (the resulting
 # mode is NOT 0600) and that the command now says so, on stderr and in --json.
 #
-# Both legs SKIP BY NAME where the capability is absent (no strace / no ptrace /
+# Section C adds the same two legs for the two sites S-109 named as follow-ups
+# and this increment closes: `account-import-many`, which emits one PLAINTEXT
+# DAK1 keyfile PER RECORD inside a loop, and `keyfile-rotate`, the one
+# write-then-rename shape in the file. C asserts the ordering on a NON-FIRST
+# record (a fix that restricts only the first file of the loop goes RED) and,
+# for the rotate, on the STAGED TEMP — because the mode travels with the inode
+# through rename(2), so the file published under the final name IS that inode.
+# Sections B5/B6 add their reporting legs under the same fault-injection shim.
+#
+# All legs SKIP BY NAME where the capability is absent (no strace / no ptrace /
 # an strace that rejects a name the leg needs / no LD_PRELOAD / no C compiler),
 # and a SKIP does NOT increment the pass count — a branch that checked nothing
 # must not score.
@@ -92,6 +101,27 @@ umask 022
 "$WALLET" shamir-split --secret aabbccddeeff00112233445566778899 \
     --threshold 2 --shares 3 --out "$TMP/src.json" >/dev/null 2>&1 \
     || { echo "  FAIL: fixture shamir-split failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+
+# Inputs for the two follow-up sites, built ONCE at top level because section C
+# (strace) and section B (fault injection) each need them and each can skip
+# independently. A failed fixture is a hard RED, never a silent skip.
+"$WALLET" account-create-batch --count 3 --json > "$TMP/aim_batch.json" 2>/dev/null \
+    || { echo "  FAIL: fixture account-create-batch failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+$PY - "$TMP/aim_batch.json" "$TMP/aim_in.json" <<'EOF'
+import json, sys
+src = json.load(open(sys.argv[1]))
+# Names make the per-record filenames predictable: rec1 / rec2 / rec3.keyfile.
+recs = [{'address': a['address'], 'privkey_hex': a['privkey_hex'], 'name': 'rec%d' % (i + 1)}
+        for i, a in enumerate(src['accounts'])]
+json.dump(recs, open(sys.argv[2], 'w'), indent=2)
+EOF
+[ -s "$TMP/aim_in.json" ] \
+    || { echo "  FAIL: fixture account-import-many input not built"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+echo "rotate-old-passphrase" > "$TMP/rot_old.txt"
+echo "rotate-new-passphrase" > "$TMP/rot_new.txt"
+"$WALLET" keyfile-create --priv 2222222222222222222222222222222222222222222222222222222222222222 \
+    --passphrase-from "file:$TMP/rot_old.txt" --out "$TMP/rot_in.dnk1" --force >/dev/null 2>&1 \
+    || { echo "  FAIL: fixture keyfile-create failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
 
 echo "=== A. ordering: the file is 0600 before the secret is written (Linux strace) ==="
 # fchmodat2 (glibc >= 2.39 / Linux >= 6.6) is in the set because a new enough
@@ -184,6 +214,161 @@ EOF
     assert_eq "$GOT" "600" "strace: a mode-setting call sits between the creating open and the first write, and the last one sets 0600 (target pre-existed at 0644)"
     assert_eq "$SELF" "none" "strace: removing the pre-write mode-setting lines turns the same parse RED (that window is load-bearing, not a tautology)"
     assert_eq "$(mode_of "$TGT")" "600" "the overwritten file ends at 0600 as well"
+  fi
+fi
+
+echo
+echo "=== C. ordering at the two follow-up sites S-109 named: account-import-many (per record) and keyfile-rotate (the staged temp) ==="
+# Same capability gate as section A, same strace, same reasons to skip.
+#
+# Both legs run against PRE-EXISTING 0644 targets for the same measured reason
+# section A does. For account-import-many that is decisive: records 2 and 3 have
+# their keyfile already on disk at 0644, so the create mode of the open cannot
+# narrow them and only a call ON THE DESCRIPTOR before the first write can. A fix
+# that set the create mode alone, or that restricted only the first file of the
+# loop, leaves those two records fully exposed and a fresh-create test green.
+#
+# For keyfile-rotate the target of the ordering assertion is the STAGED TEMP,
+# because the mode travels with the inode through rename(2): the file published
+# under the final name IS that inode. The leg therefore asserts, over the trace:
+#   (a) at least one mode-setting call on the temp sits between its creating open
+#       and the first write to that descriptor — the window the defect left open;
+#   (b) the LAST of them sets 0600 — it was narrowed, not widened;
+#   (c) nothing between that first write and the rename sets anything but 0600 —
+#       so the inode was never wider than 0600 while it held the ciphertext;
+#   (d) the rename to the final name actually happened — otherwise (a)-(c) would
+#       be a statement about a file nobody published.
+# Path-based spellings (chmod / fchmodat / fchmodat2 naming the file) count
+# alongside the descriptor-based fchmod, or a mutant that creates 0600, widens
+# the PATH to 0666, writes, and narrows again passes with the window wide open.
+if [ -n "$SKIP_A" ]; then
+  skip "section C ($SKIP_A); the syscall-ordering legs run on Linux only"
+else
+  cat > "$TMP/ordered.py" <<'PYEOF'
+# ordered.py TRACE TARGET [RENAME_TO]
+# line 1: the verdict — "600" when the ordering holds, or the failure in words.
+# line 2: the SAME parse over a trace with every pre-write mode-setting line for
+#         that target removed; it must say "none", or the window the leg claims
+#         to inspect is not load-bearing and the leg is vacuous.
+import re, sys
+
+trace = open(sys.argv[1]).read().splitlines()
+target = sys.argv[2]
+rename_to = sys.argv[3] if len(sys.argv) > 3 else None
+q = re.escape(target)
+
+# The CREATING open of the target: O_CREAT, a mode argument, and a returned fd.
+# The path also appears in non-creating opens (the fsync re-open), and a failed
+# open returns -1 and creates nothing, so neither may be taken for the create.
+OPEN = re.compile(r'\bopenat?\((?:AT_FDCWD, )?"%s", ([^,)]*O_CREAT[^,)]*), 0[0-7]+\)\s*=\s*([0-9]+)\b' % q)
+FCHMOD = re.compile(r'\bfchmod\((\d+), 0?([0-7]+)\)')
+PCHMOD = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"%s", 0?([0-7]+)' % q)
+RENAME = re.compile(r'\brenameat2?\(.*?"%s".*?"%s"|\brename\("%s", "%s"\)'
+                    % (q, re.escape(rename_to or ""), q, re.escape(rename_to or "")))
+
+def modes_between(lines, lo, hi, fd):
+    out = []
+    for i in range(lo + 1, hi):
+        m = FCHMOD.search(lines[i])
+        if m and m.group(1) == fd:
+            out.append(m.group(2).lstrip("0") or "0"); continue
+        m = PCHMOD.search(lines[i])
+        if m:
+            out.append(m.group(1).lstrip("0") or "0")
+    return out
+
+def run(lines):
+    op = next(((i, m) for i, l in enumerate(lines) for m in [OPEN.search(l)] if m), None)
+    if op is None:
+        return "no-create-open"
+    i_open, fd = op[0], op[1].group(2)
+    W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
+    i_write = next((i for i, l in enumerate(lines) if i > i_open and W.search(l)), None)
+    if i_write is None:
+        return "no-write"
+    before = modes_between(lines, i_open, i_write, fd)
+    if not before:
+        return "none"          # nothing narrowed the file before the secret went in
+    if before[-1] != "600":
+        return "last-before-write:" + before[-1]
+    if rename_to is not None:
+        i_ren = next((i for i, l in enumerate(lines) if i > i_write and RENAME.search(l)), None)
+        if i_ren is None:
+            return "no-rename"
+        after = [m for m in modes_between(lines, i_write, i_ren, fd) if m != "600"]
+        if after:
+            return "widened-before-publish:" + after[-1]
+    return "600"
+
+print(run(trace))
+
+# Parser self-check: strip every pre-write mode-setting line for this target —
+# BOTH spellings — and the same parse must answer "none". A parse that had
+# stopped looking at that window would still answer 600 and this line goes RED.
+op = next(((i, m) for i, l in enumerate(trace) for m in [OPEN.search(l)] if m), None)
+if op is None:
+    print("no-create-open")
+else:
+    i_open, fd = op[0], op[1].group(2)
+    W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
+    i_write = next((i for i, l in enumerate(trace) if i > i_open and W.search(l)), None)
+    stripped = [l for i, l in enumerate(trace)
+                if not (i_open < i < (i_write if i_write is not None else 0)
+                        and (FCHMOD.search(l) or PCHMOD.search(l)))]
+    print(run(stripped))
+PYEOF
+
+  # ── C1. account-import-many — one plaintext DAK1 keyfile per record ──────
+  AIMD="$TMP/aim_out"
+  mkdir -p "$AIMD"
+  for r in rec2 rec3; do : > "$AIMD/$r.keyfile"; chmod 644 "$AIMD/$r.keyfile" 2>/dev/null; done
+  echo "  fixture: rec2.keyfile and rec3.keyfile exist at 0644 before the run — non-first records, on the overwrite path"
+  TRA="$TMP/strace_aim.txt"
+  strace -f -e trace="$TRACE_SET" -o "$TRA" \
+      "$WALLET" account-import-many --in "$TMP/aim_in.json" --out-dir "$AIMD" \
+      --summary "$TMP/aim_sum.json" --force >/dev/null 2>&1
+  if [ ! -s "$TRA" ]; then
+    assert false "strace produced no trace for account-import-many (the ordering cannot be judged)"
+  else
+    for r in rec2 rec3; do
+      V=$($PY "$TMP/ordered.py" "$TRA" "$AIMD/$r.keyfile")
+      assert_eq "$(echo "$V" | sed -n 1p)" "600" \
+        "account-import-many/$r (a NON-first record, target pre-existed at 0644): a mode-setting call sits between the creating open and the first write, and the last one sets 0600"
+      assert_eq "$(echo "$V" | sed -n 2p)" "none" \
+        "account-import-many/$r: removing the pre-write mode-setting lines turns the same parse RED (the window is load-bearing)"
+      assert_eq "$(mode_of "$AIMD/$r.keyfile")" "600" "account-import-many/$r ends at 0600 as well"
+    done
+  fi
+
+  # ── C2. keyfile-rotate — the staged temp, whose inode the rename publishes ─
+  ROTT="$TMP/rot_target.dnk1"
+  : > "$ROTT"; chmod 644 "$ROTT" 2>/dev/null
+  echo "  fixture: the rename target exists at 0644 before the run"
+  # Probe the EXTENDED set the same way section A probes its own: an strace that
+  # does not know one of these names exits 1 and creates no -o file, and reading
+  # that as "no trace" would be a hard RED about the strace rather than the code.
+  TRACE_SET_R="$TRACE_SET,rename,renameat,renameat2"
+  for cand in "$TRACE_SET,rename,renameat,renameat2" "$TRACE_SET,rename,renameat" "$TRACE_SET,rename"; do
+    if strace -e trace="$cand" -o /dev/null true >/dev/null 2>&1; then TRACE_SET_R="$cand"; break; fi
+  done
+  TRR="$TMP/strace_rot.txt"
+  strace -f -e trace="$TRACE_SET_R" -o "$TRR" \
+      "$WALLET" keyfile-rotate --in "$TMP/rot_in.dnk1" --out "$ROTT" \
+      --old-passphrase-from "file:$TMP/rot_old.txt" \
+      --new-passphrase-from "file:$TMP/rot_new.txt" --force >/dev/null 2>&1
+  if [ ! -s "$TRR" ]; then
+    assert false "strace produced no trace for keyfile-rotate (the ordering cannot be judged)"
+  else
+    V=$($PY "$TMP/ordered.py" "$TRR" "${ROTT}_tmp.bin" "$ROTT")
+    assert_eq "$(echo "$V" | sed -n 1p)" "600" \
+      "keyfile-rotate: the inode the rename publishes was never wider than 0600 while it held the ciphertext (narrowed before the first write, not widened before the publish, and the rename happened)"
+    assert_eq "$(echo "$V" | sed -n 2p)" "none" \
+      "keyfile-rotate: removing the pre-write mode-setting lines turns the same parse RED (the window is load-bearing)"
+    assert_eq "$(mode_of "$ROTT")" "600" "the rotated keyfile ends at 0600 as well"
+    # The staging temp must not be left behind: a 0600 leftover is still a copy
+    # of the ciphertext under a predictable name.
+    assert_eq "$([ -e "${ROTT}_tmp.bin" ] && echo present || echo absent)" "absent" \
+      "the staging temp is gone after the publish (the rename consumed it)"
   fi
 fi
 
@@ -300,6 +485,92 @@ EOF
   assert_eq "$([ -s "$TMP/ok.err" ] && echo nonempty || echo empty)" "empty" "a successful narrowing prints nothing on stderr"
   OKN=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("perms_narrowed","<absent>"))' "$TMP/ok.out" 2>/dev/null || echo "<unparseable>")
   assert_eq "$OKN" "<absent>" "a successful summary carries no perms_narrowed field (the success JSON is byte-unchanged)"
+
+  # ── B5. account-import-many — the per-record loop S-109 named as a follow-up.
+  # rec2 and rec3 exist at 0644 before the run, so with every chmod denied the
+  # create mode cannot save them: the harm is REAL on a NON-FIRST record, which
+  # is exactly the half that a fix restricting only the first file of the loop
+  # would leave open while a fresh-create test stayed green. rec1 is asserted
+  # too, in the other direction — it is freshly created, so it reaches 0600 from
+  # the open(2) mode even here, and the 644 above is a statement about the
+  # overwrite path rather than about a broken create.
+  AIMP="$TMP/aim_eperm"
+  mkdir -p "$AIMP"
+  for r in rec2 rec3; do : > "$AIMP/$r.keyfile"; chmod 644 "$AIMP/$r.keyfile" 2>/dev/null; done
+  LD_PRELOAD="$SHIM" "$WALLET" account-import-many --in "$TMP/aim_in.json" \
+      --out-dir "$AIMP" --summary "$TMP/aim_sum_eperm.json" --force \
+      >"$TMP/aim.out" 2>"$TMP/aim.err"
+  AIMRC=$?
+  assert_eq "$AIMRC" "0" "account-import-many still exits 0 (one unprotectable mode must not invalidate 49,999 good records)"
+  assert_eq "$(mode_of "$AIMP/rec2.keyfile")" "644" "account-import-many/rec2: the harm is REAL — with narrowing denied a NON-FIRST record's plaintext keyfile is left world-readable"
+  assert_eq "$(mode_of "$AIMP/rec3.keyfile")" "644" "account-import-many/rec3: the harm is REAL on a second non-first record too"
+  assert_eq "$(mode_of "$AIMP/rec1.keyfile")" "600" "account-import-many/rec1: a freshly created record still reaches 0600 from the open(2) mode, chmod denied"
+  grep -qF "could not set 0600 permissions on $AIMP/rec2.keyfile before writing it" "$TMP/aim.err" \
+    && assert true "account-import-many names the failure for a NON-FIRST record on stderr" \
+    || assert false "account-import-many rec2 stderr diagnostic: [$(tr '\n' ' ' < "$TMP/aim.err")]"
+  AIMN=$($PY - "$TMP/aim_sum_eperm.json" <<'EOF'
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("<unparseable>"); raise SystemExit(0)
+bad = [r for r in s if r.get("status") == "ok" and r.get("perms_narrowed") is not False]
+print("all-false" if s and not bad else "missing:%d" % len(bad))
+EOF
+)
+  assert_eq "$AIMN" "all-false" "every ok record in the --summary carries perms_narrowed=false (machine-readable, per record — the operator of a 50,000-account import is not reading 50,000 stderr lines)"
+  # The success path is UNCHANGED: without the shim, the same pre-existing 0644
+  # records end at 0600 and the summary carries no perms_narrowed field at all.
+  # Without this an "always report failure" mutant satisfies everything above.
+  AIMO="$TMP/aim_ok"
+  mkdir -p "$AIMO"
+  for r in rec2 rec3; do : > "$AIMO/$r.keyfile"; chmod 644 "$AIMO/$r.keyfile" 2>/dev/null; done
+  "$WALLET" account-import-many --in "$TMP/aim_in.json" --out-dir "$AIMO" \
+      --summary "$TMP/aim_sum_ok.json" --force >/dev/null 2>"$TMP/aim_ok.err"
+  assert_eq "$(mode_of "$AIMO/rec2.keyfile")" "600" "without the shim a pre-existing 0644 record ends at 0600"
+  AIMOK=$($PY - "$TMP/aim_sum_ok.json" <<'EOF'
+import json, sys
+s = json.load(open(sys.argv[1]))
+print("absent" if all("perms_narrowed" not in r for r in s) else "present")
+EOF
+)
+  assert_eq "$AIMOK" "absent" "a successful --summary carries no perms_narrowed field (the success summary is byte-unchanged)"
+
+  # ── B6. keyfile-rotate — the write-then-rename site. Note what is asserted
+  # and what is NOT: with the staging temp CREATED at 0600 the published file
+  # is 0600 here even though every chmod failed, because the open(2) mode is not
+  # a chmod and the shim cannot touch it. That is the discriminator against the
+  # defect — measured at HEAD this same command left the rotated keyfile at 644
+  # with an empty stderr and exit 0. So the leg asserts the published mode AND
+  # the two diagnostics, the second of which is the `(void)perm_ec` this
+  # increment removes: it names the FINAL path, after the rename, not the temp.
+  ROT2="$TMP/rot_eperm.dnk1"
+  : > "$ROT2"; chmod 644 "$ROT2" 2>/dev/null
+  LD_PRELOAD="$SHIM" "$WALLET" keyfile-rotate --in "$TMP/rot_in.dnk1" --out "$ROT2" \
+      --old-passphrase-from "file:$TMP/rot_old.txt" \
+      --new-passphrase-from "file:$TMP/rot_new.txt" --force --json \
+      >"$TMP/kfrot.out" 2>"$TMP/kfrot.err"
+  ROTRC=$?
+  assert_eq "$ROTRC" "0" "keyfile-rotate still exits 0 (the rotated keyfile is published, not destroyed)"
+  assert_eq "$(mode_of "$ROT2")" "600" "keyfile-rotate publishes a 0600 file even with every chmod denied — the staging temp was CREATED restricted (at HEAD this measured 644)"
+  grep -qF "could not set 0600 permissions on ${ROT2}_tmp.bin before writing it" "$TMP/kfrot.err" \
+    && assert true "keyfile-rotate reports the PRE-WRITE narrowing failure on the STAGING TEMP" \
+    || assert false "keyfile-rotate staging diagnostic: [$(tr '\n' ' ' < "$TMP/kfrot.err")]"
+  grep -qF "could not set 0600 permissions on ${ROT2}: " "$TMP/kfrot.err" \
+    && assert true "keyfile-rotate reports the POST-RENAME narrowing failure on the FINAL path (the discarded perm_ec)" \
+    || assert false "keyfile-rotate post-rename diagnostic: [$(tr '\n' ' ' < "$TMP/kfrot.err")]"
+  RN=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("perms_narrowed","<absent>"))' "$TMP/kfrot.out" 2>/dev/null || echo "<unparseable>")
+  assert_eq "$RN" "False" "keyfile-rotate --json reports perms_narrowed=false"
+  ROT3="$TMP/rot_ok.dnk1"
+  : > "$ROT3"; chmod 644 "$ROT3" 2>/dev/null
+  "$WALLET" keyfile-rotate --in "$TMP/rot_in.dnk1" --out "$ROT3" \
+      --old-passphrase-from "file:$TMP/rot_old.txt" \
+      --new-passphrase-from "file:$TMP/rot_new.txt" --force --json \
+      >"$TMP/rot_ok.out" 2>"$TMP/rot_ok.err"
+  assert_eq "$(mode_of "$ROT3")" "600" "without the shim the rotated keyfile is 0600"
+  assert_eq "$([ -s "$TMP/rot_ok.err" ] && echo nonempty || echo empty)" "empty" "a successful rotation prints nothing on stderr"
+  RON=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("perms_narrowed","<absent>"))' "$TMP/rot_ok.out" 2>/dev/null || echo "<unparseable>")
+  assert_eq "$RON" "<absent>" "a successful rotation --json carries no perms_narrowed field"
 fi
 
 echo
