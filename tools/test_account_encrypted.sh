@@ -21,6 +21,15 @@ source tools/common.sh
 T=test_account_enc
 mkdir -p $T
 rm -f $T/*
+# S-115 (2026-09-18): the raw `--passphrase` warns on stderr now. The first cut
+# of that increment answered it with `2>/dev/null` on the section-2 capture —
+# and that capture is json.load()'d in section 6, so against a shim that is the
+# real binary plus ONE unrelated stderr line this file went from 2 FAIL / rc=1
+# to 0 FAIL / rc=0, fully green on a defect it used to catch. The passphrase
+# comes off argv through the `--passphrase-from` twin the same increment adds
+# instead, and the capture KEEPS `2>&1`.
+PASSFILE=$T/pass.txt
+printf '%s\n' "topsecret-pass-abc123" > $PASSFILE; chmod 600 $PASSFILE
 
 pass_count=0; fail_count=0
 assert() {
@@ -47,7 +56,7 @@ fi
 
 echo
 echo "=== 2. Decrypt with correct passphrase ==="
-$DETERM account decrypt --in $T/enc.acct --passphrase "topsecret-pass-abc123" > $T/dec_correct.json 2>&1
+$DETERM account decrypt --in $T/enc.acct --passphrase-from "file:$PASSFILE" > $T/dec_correct.json 2>&1
 if [ -s $T/dec_correct.json ] && grep -q '"privkey"' $T/dec_correct.json; then
   assert true "decrypt with correct passphrase recovers privkey"
 else

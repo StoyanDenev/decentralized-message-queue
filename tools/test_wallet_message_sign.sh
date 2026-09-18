@@ -94,6 +94,16 @@ PRIV_C=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts']
 ADDR_C=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['accounts'][2]['address'])"     "$TMP/keys.json")
 PUB_C="${ADDR_C#0x}"
 
+# S-114 (2026-09-18): the raw `--priv` warns on stderr now. The first cut of that
+# increment answered it with `2>/dev/null`, which took the whole stream out of
+# five captures that are then json.load()'d — against a shim that is the real
+# binary plus ONE unrelated stderr line this file went from 9 FAIL / rc=1 to
+# 0 FAIL / rc=0, fully green on a defect it used to catch. The key comes off
+# argv through the `--priv-from` twin the same increment adds instead, and every
+# capture KEEPS `2>&1`. 0600 because these files hold private keys.
+PRIVF_A="$TMP/priv_a.hex"; printf '%s\n' "$PRIV_A" > "$PRIVF_A"; chmod 600 "$PRIVF_A"
+PRIVF_B="$TMP/priv_b.hex"; printf '%s\n' "$PRIV_B" > "$PRIVF_B"; chmod 600 "$PRIVF_B"
+
 echo "=== 1. Help text mentions message-sign + message-verify ==="
 H=$("$WALLET" help 2>&1 | tr -d '\r')
 if echo "$H" | grep -q "message-sign"; then
@@ -109,7 +119,7 @@ fi
 
 echo
 echo "=== 2. Round-trip on short inline message ==="
-OUT=$("$WALLET" message-sign --priv "$PRIV_A" --message "hello world" --domain-tag "siwe" --json 2>&1 | tr -d '\r')
+OUT=$("$WALLET" message-sign --priv-from "file:$PRIVF_A" --message "hello world" --domain-tag "siwe" --json 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "sign exits 0"
 SIG=$(echo "$OUT" | $PY -c "import json,sys; print(json.load(sys.stdin)['signature_hex'])")
@@ -135,7 +145,7 @@ assert_eq "$PUBOUT" "$PUB_A" "sign-derived pubkey matches the keypair source"
 echo
 echo "=== 5. Long message (~4KB) round-trip ==="
 LONG=$($PY -c "print('A' * 4096)")
-"$WALLET" message-sign --priv "$PRIV_A" --message "$LONG" --domain-tag "siwe" --json > "$TMP/long.json" 2>&1
+"$WALLET" message-sign --priv-from "file:$PRIVF_A" --message "$LONG" --domain-tag "siwe" --json > "$TMP/long.json" 2>&1
 LONG_SIG=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['signature_hex'])" "$TMP/long.json")
 "$WALLET" message-verify --pubkey "$PUB_A" --message "$LONG" --domain-tag "siwe" --signature "$LONG_SIG" >/dev/null 2>&1
 RC=$?
@@ -143,7 +153,7 @@ assert_eq "$RC" "0" "long message (4KB) verify succeeds"
 
 echo
 echo "=== 6. Empty inline message round-trip ==="
-"$WALLET" message-sign --priv "$PRIV_A" --message "" --domain-tag "siwe" --json > "$TMP/empty.json" 2>&1
+"$WALLET" message-sign --priv-from "file:$PRIVF_A" --message "" --domain-tag "siwe" --json > "$TMP/empty.json" 2>&1
 RC=$?
 # Argparse treats empty string as missing because both --message and the
 # string are present; we rely on the parser to NOT consume the next arg.
@@ -162,7 +172,7 @@ fi
 echo
 echo "=== 7. file:<path> with text content round-trip ==="
 printf "This is a multi-line\nattestation document.\nLine 3.\n" > "$TMP/msg.txt"
-"$WALLET" message-sign --priv "$PRIV_B" --message "file:$TMP/msg.txt" --domain-tag "attestation" --json > "$TMP/file_sign.json" 2>&1
+"$WALLET" message-sign --priv-from "file:$PRIVF_B" --message "file:$TMP/msg.txt" --domain-tag "attestation" --json > "$TMP/file_sign.json" 2>&1
 RC=$?
 assert_eq "$RC" "0" "sign with file: prefix exits 0"
 FILE_SIG=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['signature_hex'])" "$TMP/file_sign.json")
@@ -178,7 +188,7 @@ import sys
 with open(sys.argv[1], "wb") as f:
     f.write(bytes(range(256)))
 PY_EOF
-"$WALLET" message-sign --priv "$PRIV_B" --message "file:$TMP/binary.bin" --domain-tag "op-announcement" --json > "$TMP/bin_sign.json" 2>&1
+"$WALLET" message-sign --priv-from "file:$PRIVF_B" --message "file:$TMP/binary.bin" --domain-tag "op-announcement" --json > "$TMP/bin_sign.json" 2>&1
 RC=$?
 assert_eq "$RC" "0" "sign with binary file exits 0"
 BIN_SIG=$($PY -c "import json,sys; print(json.load(open(sys.argv[1]))['signature_hex'])" "$TMP/bin_sign.json")

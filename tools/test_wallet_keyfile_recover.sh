@@ -56,6 +56,13 @@ SCRATCH="build/test_wallet_keyfile_recover.$$"
 mkdir -p "$SCRATCH"
 TMP="$SCRATCH"
 trap 'rm -rf "$SCRATCH"' EXIT
+# S-114 (2026-09-18): the raw `--password` warns on stderr now. `2>/dev/null`
+# would retire the implicit "stderr is empty" half of the exact equality at the
+# one capture that uses it (measured: 7 FAIL -> 6 against a one-line stderr
+# shim), so the password comes off argv through the `--password-from` twin the
+# same increment adds and the capture KEEPS `2>&1`.
+KH1_PW_FILE="$SCRATCH/kh1_pw.txt"
+printf '%s\n' "keyholder-pw-1" > "$KH1_PW_FILE"; chmod 600 "$KH1_PW_FILE"
 
 pass_count=0
 fail_count=0
@@ -598,7 +605,7 @@ for _ in range(d[4]):
     if idx == 1:
         print(d[off:off+n].hex()); break
     off += n")
-DECRYPTED_Y1=$("$WALLET" envelope decrypt --envelope "$BLOB1" --password "keyholder-pw-1" 2>&1 | tr -d '\r')
+DECRYPTED_Y1=$("$WALLET" envelope decrypt --envelope "$BLOB1" --password-from "file:$KH1_PW_FILE" 2>&1 | tr -d '\r')
 assert_eq "$DECRYPTED_Y1" "$EXPECTED_Y1" "envelope[1] decrypt y_hex matches shares file"
 
 # ── 32. --json + --out together (both written) ────────────────────────────────

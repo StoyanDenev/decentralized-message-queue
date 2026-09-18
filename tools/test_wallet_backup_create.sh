@@ -78,6 +78,15 @@ PY=python
 command -v python >/dev/null 2>&1 || PY=python3
 
 SECRET="deadbeefcafebabe00112233445566778899aabbccddeeff0011223344556677"
+# S-114 (2026-09-18): the raw `--secret` / `--password` warn on stderr now. The
+# first cut of that increment answered it with `2>/dev/null`, which took the
+# whole stream out of a capture that is json.loads()'d and out of an exact
+# equality — against a shim that is the real binary plus ONE unrelated stderr
+# line this file went from 3 FAIL / rc=1 to 0 FAIL / rc=0, fully green on a
+# defect it used to catch. The secrets come off argv through the `-from` twins
+# the same increment adds instead, and those captures KEEP `2>&1`.
+SECRET_FILE="$SCRATCH/secret.hex"; printf '%s\n' "$SECRET" > "$SECRET_FILE"; chmod 600 "$SECRET_FILE"
+KH1_PW_FILE="$SCRATCH/kh1_pw.txt"; printf '%s\n' "keyholder-pw-1" > "$KH1_PW_FILE"; chmod 600 "$KH1_PW_FILE"
 
 # ── 1. Help text mentions backup-create ───────────────────────────────────────
 echo "=== 1. Help text mentions backup-create ==="
@@ -123,7 +132,7 @@ echo
 echo "=== 3. --json summary mode ==="
 rm -f "$TMP/shares_j.json" "$TMP/envelopes_j.json"
 JSON=$("$WALLET" backup-create \
-    --secret "$SECRET" \
+    --secret-from "file:$SECRET_FILE" \
     --threshold 3 \
     --keyholders "$TMP/keyholders.json" \
     --shares-out "$TMP/shares_j.json" \
@@ -768,7 +777,7 @@ assert_eq "$RC" "2" "envelope decrypt fails with wrong passphrase"
 # ── 32. Correct passphrase decrypts envelope[0] ───────────────────────────────
 echo
 echo "=== 32. Correct passphrase decrypts envelope[0] ==="
-DEC=$("$WALLET" envelope decrypt --envelope "$BLOB" --password "keyholder-pw-1" 2>&1 | tr -d '\r')
+DEC=$("$WALLET" envelope decrypt --envelope "$BLOB" --password-from "file:$KH1_PW_FILE" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "envelope decrypt succeeds with correct passphrase"
 EXPECTED_Y=$($PY -c "

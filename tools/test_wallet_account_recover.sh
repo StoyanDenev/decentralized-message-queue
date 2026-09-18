@@ -608,7 +608,15 @@ KFR_SECRET=$("$WALLET" keyfile-recover \
     --backup-shares "$TMP/shares.json" \
     --backup-envelopes "$TMP/envelopes.json" \
     --keyholders "$TMP/kh_sub_135.json" 2>&1 | tr -d '\r')
-REFERENCE_JSON=$("$WALLET" account-import --priv "$KFR_SECRET" --json 2>&1 | tr -d '\r')
+# S-114 (2026-09-18): the raw `--priv` warns on stderr now. `2>/dev/null` would
+# retire the implicit "stderr is empty" half of this capture, which is
+# json.loads()'d below — the assertion would stop seeing any stderr regression
+# on account-import. The key comes off argv through the `--priv-from` twin the
+# same increment adds instead, and the capture KEEPS `2>&1`. 0600 because the
+# file holds a recovered private key.
+KFR_SECRET_FILE="$TMP/kfr_secret.hex"
+printf '%s\n' "$KFR_SECRET" > "$KFR_SECRET_FILE"; chmod 600 "$KFR_SECRET_FILE"
+REFERENCE_JSON=$("$WALLET" account-import --priv-from "file:$KFR_SECRET_FILE" --json 2>&1 | tr -d '\r')
 $PY - <<PY_EOF
 import json
 ref = json.loads('''$REFERENCE_JSON''')

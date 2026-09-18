@@ -11,20 +11,27 @@
 // history file. For the ML-DSA / Ed25519 seeds that IS the private key: whoever
 // reads it signs as that identity.
 //
-// THE CONVENTION. This mirrors `determ-wallet keyfile-create --passphrase-from
-// <file:path|env:NAME|prompt>` (wallet/main.cpp::passphrase_from_source) rather
-// than inventing a second one: same three source forms, same diagnostic shape,
-// same exit code (1) on a bad source. That helper lives in the wallet binary's
-// own translation unit and is NOT reachable from determ-light (separate CMake
-// targets, no shared library between them), so the parsing is re-implemented
-// here instead of dragging wallet/main.cpp across the binary boundary.
+// THE CONVENTION, AND WHERE IT NOW LIVES. `--<flag>-from
+// <file:path|env:NAME|prompt>`, the raw flag kept working but printing
+// `WARNING[seed-on-command-line]`. Written here on 2026-09-17 as a second copy
+// of `determ-wallet keyfile-create --passphrase-from`, because that helper lives
+// in the wallet binary's own translation unit and the two are separate CMake
+// targets with no shared library between them.
 //
-// ONE DELIBERATE DIVERGENCE from the wallet helper: a passphrase may legitimately
-// contain leading/trailing spaces, so the wallet strips only CR/LF; a hex seed
-// never can, so seed_hex_from_source() trims ASCII whitespace at both ends. Every
-// other rejection (empty spec, empty path, unopenable file, empty file, empty
-// first line, empty/unset variable, empty prompt, unknown scheme) mirrors the
-// wallet's wording and returns the same way.
+// On 2026-09-18 the mechanism moved, VERBATIM, into
+// include/determ/util/secret_source.hpp — a header-only primitive all three
+// binaries can include — because S-114 / S-115 needed it in the OTHER two, and
+// a third hand-rolled copy of a primitive that had already been written twice
+// is how this repo's restricted-write loops drifted twice in two days. This
+// file is what remains: the light-client-facing NAMES and the SEED policy
+// (noun "seed", prompt label "Seed (hex): ", whitespace-trimmed values), so no
+// determ-light behaviour, diagnostic string or exit code changes and
+// tools/test_light_seed_source.sh stays green UNCHANGED.
+//
+// ONE DELIBERATE DIVERGENCE from the wallet's passphrase reader, preserved by
+// that policy: a passphrase may legitimately contain leading/trailing spaces,
+// so the wallet strips only CR/LF; a hex seed never can, so the seed sources
+// trim ASCII whitespace at both ends.
 //
 // WHAT THIS DOES NOT CLOSE. The raw `--mldsa-seed` / `--ed-seed` / `--blind-seed`
 // flags still exist and still behave exactly as before (three shipped test
@@ -34,12 +41,31 @@
 #ifndef DETERM_LIGHT_SEED_SOURCE_HPP
 #define DETERM_LIGHT_SEED_SOURCE_HPP
 
+#include <determ/util/secret_source.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace determ::light {
+
+// THREE OF THE FIVE FUNCTIONS BELOW ARE NO LONGER ON ANY CALL PATH INSIDE
+// determ-light, and that is written down here rather than left to be discovered:
+// light/main.cpp and light/pq_sign_tx.cpp reach resolve_seed_hex(),
+// zero_secret_bytes(), SeedScrub and scrub_on_scope_exit(), while
+// seed_hex_from_source(), zero_secret_string() and warn_seed_on_command_line()
+// are now reached only THROUGH the shared primitive — so a change made inside one
+// of those three bodies would be invisible to tools/test_light_seed_source.sh.
+// Measured, not assumed: a mutant aimed at seed_hex_from_source() left that gate
+// GREEN. They are kept because they are the documented S-110 names of these
+// operations and deleting declarations is not part of a behaviour-preserving
+// move, and each is one line that holds no logic of its own. The one place where
+// determ-light's behaviour can still drift is SEED_POLICY, which BOTH live entry
+// points share — the mutant that flips it turns that unchanged gate RED.
+
+// The policy that reproduces every S-110 diagnostic byte-for-byte.
+inline constexpr determ::util::SecretPolicy SEED_POLICY = determ::util::SEED;
 
 // Resolve a `--<flag>-from <source>` specifier to the hex seed text it names:
 //
@@ -102,26 +128,10 @@ bool resolve_seed_hex(const char* cmd, const char* raw_flag, const char* from_fl
 // A guard aimed at a std::string / std::vector holds the CONTAINER, not a
 // pointer into it, so a later reallocation cannot leave it scrubbing freed
 // memory. Declare the guard AFTER the container it protects, so the guard is
-// destroyed first.
-struct SeedScrub {
-    void*                 p   = nullptr;   // fixed-extent buffer (e.g. std::array)
-    std::size_t           n   = 0;
-    std::string*          str = nullptr;   // or a string, scrubbed at its current buffer
-    std::vector<uint8_t>* vec = nullptr;   // or a byte vector
-    SeedScrub() = default;
-    SeedScrub(void* pp, std::size_t nn) : p(pp), n(nn) {}
-    SeedScrub(const SeedScrub&) = delete;
-    SeedScrub& operator=(const SeedScrub&) = delete;
-    ~SeedScrub() {
-        zero_secret_bytes(p, n);
-        if (str) zero_secret_string(*str);
-        if (vec && !vec->empty()) { zero_secret_bytes(vec->data(), vec->size()); vec->clear(); }
-    }
-};
-
-// Aim a SeedScrub at a container holding secret bytes.
-inline void scrub_on_scope_exit(SeedScrub& g, std::string& s)          { g.str = &s; }
-inline void scrub_on_scope_exit(SeedScrub& g, std::vector<uint8_t>& v) { g.vec = &v; }
+// destroyed first. (The type and both aiming overloads are the shared
+// primitive's, under the name light/ has always used for them.)
+using SeedScrub = determ::util::SecretScrub;
+using determ::util::scrub_on_scope_exit;
 
 } // namespace determ::light
 

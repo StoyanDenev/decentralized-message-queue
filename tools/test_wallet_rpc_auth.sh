@@ -84,6 +84,16 @@ PYEOF
 }
 
 SECRET="0011223344556677889900aabbccddeeff00112233445566778899aabbccddee"
+# S-114 (2026-09-18): the raw `--secret` warns on stderr now. The first cut of
+# that increment answered it with `2>/dev/null` on seven captures, six of which
+# are json.loads()'d or grepped for a value — discarding the stream retires the
+# implicit "and stderr is empty" half of each. The secret comes off argv through
+# the `--secret-from` twin the same increment adds instead, and those captures
+# KEEP `2>&1`. The ERR= captures in this file deliberately still merge the two
+# streams and still pass the raw flag: they assert a DIAGNOSTIC, and the raw
+# flag keeping its behaviour is itself the thing under test.
+SECRET_FILE="$SCRATCH/secret.hex"
+printf '%s\n' "$SECRET" > "$SECRET_FILE"; chmod 600 "$SECRET_FILE"
 
 # ── 1. --help text ────────────────────────────────────────────────────────────
 echo
@@ -156,7 +166,7 @@ assert_contains "$(echo "$ERR" | tr -d '\r')" "unknown argument" "diagnostic men
 echo
 echo "=== 7. Compute (no params) auth matches reference ==="
 set +e
-OUT=$("$WALLET" rpc-auth --method head --secret "$SECRET" --json 2>&1 | tr -d '\r'); RC=$?
+OUT=$("$WALLET" rpc-auth --method head --secret-from "file:$SECRET_FILE" --json 2>&1 | tr -d '\r'); RC=$?
 set -e
 assert_eq "$RC" "0" "compute (no params) exits 0"
 WALLET_AUTH=$(echo "$OUT" | $PY -c "import sys,json; print(json.loads(sys.stdin.read())['auth'])")
@@ -170,7 +180,7 @@ echo "=== 8. Compute (params, hand-ordered keys) matches reference ==="
 # Keys deliberately out of alphabetical order — the tool must sort them.
 PARAMS='{"to":"determ1xyz","amount":100,"from":"determ1abc"}'
 set +e
-OUT=$("$WALLET" rpc-auth --method submit_tx --secret "$SECRET" --params "$PARAMS" --json 2>&1 | tr -d '\r'); RC=$?
+OUT=$("$WALLET" rpc-auth --method submit_tx --secret-from "file:$SECRET_FILE" --params "$PARAMS" --json 2>&1 | tr -d '\r'); RC=$?
 set -e
 assert_eq "$RC" "0" "compute (params) exits 0"
 WALLET_AUTH=$(echo "$OUT" | $PY -c "import sys,json; print(json.loads(sys.stdin.read())['auth'])")
@@ -215,7 +225,7 @@ echo "=== 10. --params-file equals inline --params ==="
 PFILE="$SCRATCH/params.json"
 printf '%s' "$PARAMS" > "$PFILE"
 set +e
-OUTF=$("$WALLET" rpc-auth --method submit_tx --secret "$SECRET" --params-file "$PFILE" --json 2>&1 | tr -d '\r'); RC=$?
+OUTF=$("$WALLET" rpc-auth --method submit_tx --secret-from "file:$SECRET_FILE" --params-file "$PFILE" --json 2>&1 | tr -d '\r'); RC=$?
 set -e
 assert_eq "$RC" "0" "--params-file exits 0"
 FILE_AUTH=$(echo "$OUTF" | $PY -c "import sys,json; print(json.loads(sys.stdin.read())['auth'])")
@@ -225,7 +235,7 @@ assert_eq "$FILE_AUTH" "$WALLET_AUTH" "--params-file auth equals inline --params
 echo
 echo "=== 11. Verify MATCH (--verify) → exit 0 ==="
 set +e
-OUT=$("$WALLET" rpc-auth --method submit_tx --secret "$SECRET" --params "$PARAMS" --verify "$REF_AUTH" --json 2>&1 | tr -d '\r'); RC=$?
+OUT=$("$WALLET" rpc-auth --method submit_tx --secret-from "file:$SECRET_FILE" --params "$PARAMS" --verify "$REF_AUTH" --json 2>&1 | tr -d '\r'); RC=$?
 set -e
 assert_eq "$RC" "0" "matching --verify exits 0"
 assert_contains "$OUT" '"valid":true'          "match reports valid=true"
@@ -237,7 +247,7 @@ echo
 echo "=== 12. Verify MISMATCH (--verify) → exit 2 ==="
 BAD_AUTH="0000000000000000000000000000000000000000000000000000000000000000"
 set +e
-OUT=$("$WALLET" rpc-auth --method submit_tx --secret "$SECRET" --params "$PARAMS" --verify "$BAD_AUTH" --json 2>&1); RC=$?
+OUT=$("$WALLET" rpc-auth --method submit_tx --secret-from "file:$SECRET_FILE" --params "$PARAMS" --verify "$BAD_AUTH" --json 2>&1); RC=$?
 set -e
 assert_eq "$RC" "2" "mismatching --verify exits 2"
 assert_contains "$(echo "$OUT" | tr -d '\r')" '"valid":false'             "mismatch reports valid=false"
@@ -251,7 +261,7 @@ REQ="$SCRATCH/req.json"
     | tr -d '\r' \
     | $PY -c "import sys,json; json.dump(json.loads(sys.stdin.read())['request'], open('$REQ','w'))"
 set +e
-OUT=$("$WALLET" rpc-auth --secret "$SECRET" --request "$REQ" --json 2>&1 | tr -d '\r'); RC=$?
+OUT=$("$WALLET" rpc-auth --secret-from "file:$SECRET_FILE" --request "$REQ" --json 2>&1 | tr -d '\r'); RC=$?
 set -e
 assert_eq "$RC" "0" "request round-trip verifies (exit 0)"
 assert_contains "$OUT" '"valid":true' "request round-trip reports valid=true"
@@ -267,7 +277,7 @@ d['auth'] = '0'*64   # forge the tag
 json.dump(d, open('$TAMPER_REQ','w'))
 "
 set +e
-OUT=$("$WALLET" rpc-auth --secret "$SECRET" --request "$TAMPER_REQ" --json 2>&1); RC=$?
+OUT=$("$WALLET" rpc-auth --secret-from "file:$SECRET_FILE" --request "$TAMPER_REQ" --json 2>&1); RC=$?
 set -e
 assert_eq "$RC" "2" "tampered request auth exits 2"
 assert_contains "$(echo "$OUT" | tr -d '\r')" '"valid":false' "tampered request reports valid=false"

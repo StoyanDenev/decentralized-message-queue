@@ -60,7 +60,11 @@ assert_eq "$?" "0" "fixture: keyfile-create (DWE2 node keyfile)"
 
 # DWE1 raw envelope via envelope encrypt --iters (legacy PBKDF2).
 PLAIN="00112233445566778899aabbccddeeff"
-E1=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password "$PW" --iters 10000 2>&1 | tr -d '\r')
+# S-114 (2026-09-18): the raw `--password` warns on stderr now. `2>/dev/null`
+# would retire the implicit "stderr is empty" half of the prefix equality below
+# (measured: 8 FAIL -> 3 against a one-line stderr shim), so the password comes
+# off argv through the `--password-from` twin and the capture KEEPS `2>&1`.
+E1=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password-from "file:$PASS_FILE" --iters 10000 2>&1 | tr -d '\r')
 assert_eq "${E1:0:8}" "44574531" "fixture: --iters envelope is DWE1 (magic 44574531)"
 
 # ── 1. DWE2 node keyfile -> argon2id/OK, all-Argon2id dir exits 0 ─────────────

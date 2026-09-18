@@ -124,6 +124,13 @@ inline int crypto_scalarmult(unsigned char* q, const unsigned char* n, const uns
                          // above; on Linux/POSIX it lives here.
 #endif
 
+// The ONE off-the-command-line secret-input primitive (S-110 / S-114 /
+// S-115): `--<name>-from <file:path|env:NAME|prompt>`, the raw flag kept
+// working but warned about, and the refusals. Included HERE, after the
+// platform block above, because on Windows it pulls in <windows.h> and
+// <winsock2.h> must come first (see the comment on that block).
+#include <determ/util/secret_source.hpp>
+
 using namespace determ::wallet;
 
 namespace {
@@ -536,19 +543,27 @@ int cmd_shamir(int argc, char** argv) {
 // backward compatibility with existing test fixtures + the
 // colon-separated wire format.
 int cmd_shamir_split_raw(int argc, char** argv) {
-    std::string secret_hex, out_path;
+    std::string secret_hex, secret_raw, secret_src, out_path;
     int threshold = -1, shares = -1;
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--secret"    && i + 1 < argc) secret_hex = argv[++i];
+        if      (a == "--secret"      && i + 1 < argc) secret_raw = argv[++i];
+        else if (a == "--secret-from" && i + 1 < argc) secret_src = argv[++i];
         else if (a == "--threshold" && i + 1 < argc) { if (!arg_i32("shamir-split", "--threshold", argv[++i], threshold)) return 1; }
         else if (a == "--shares"    && i + 1 < argc) { if (!arg_i32("shamir-split", "--shares", argv[++i], shares)) return 1; }
         else if (a == "--out"       && i + 1 < argc) out_path   = argv[++i];
         else if (a == "--json")                      json_out   = true;
     }
+    // S-114: the split secret no longer has to travel on this process's
+    // command line. --secret still works and warns; --secret-from does not.
+    if (!determ::util::resolve_secret("shamir-split", "--secret", "--secret-from",
+                                      secret_raw, secret_src,
+                                      determ::util::SECRET, secret_hex))
+        return 1;
     if (secret_hex.empty() || threshold < 0 || shares < 0) {
-        std::cerr << "Usage: determ-wallet shamir-split --secret <hex> "
+        std::cerr << "Usage: determ-wallet shamir-split "
+                     "(--secret <hex> | --secret-from <file:path|env:NAME|prompt>) "
                      "--threshold T --shares N [--out <file>] [--json]\n";
         return 1;
     }
@@ -1051,19 +1066,26 @@ int cmd_shamir_rotate(int argc, char** argv) {
 }
 
 int cmd_envelope_encrypt(int argc, char** argv) {
-    std::string plaintext_hex, password, aad_hex;
+    std::string plaintext_hex, password, password_raw, password_src, aad_hex;
     uint32_t iters = envelope::DEFAULT_PBKDF2_ITERS;
     bool iters_given = false;   // --iters selects the legacy PBKDF2 (DWE1) KDF
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--plaintext" && i + 1 < argc) plaintext_hex = argv[++i];
-        else if (a == "--password"  && i + 1 < argc) password      = argv[++i];
+        else if (a == "--password"  && i + 1 < argc) password_raw  = argv[++i];
+        else if (a == "--password-from" && i + 1 < argc) password_src = argv[++i];
         else if (a == "--aad"       && i + 1 < argc) aad_hex       = argv[++i];
         else if (a == "--iters"     && i + 1 < argc) { if (!arg_u32("envelope encrypt", "--iters", argv[++i], iters)) return 1; iters_given = true; }
     }
+    // S-114: --password-from keeps the envelope password off the command line.
+    if (!determ::util::resolve_secret("envelope encrypt", "--password", "--password-from",
+                                      password_raw, password_src,
+                                      determ::util::PASSWORD, password))
+        return 1;
     if (plaintext_hex.empty() || password.empty()) {
         std::cerr << "Usage: determ-wallet envelope encrypt "
-                     "--plaintext <hex> --password <str> "
+                     "--plaintext <hex> "
+                     "(--password <str> | --password-from <file:path|env:NAME|prompt>) "
                      "[--aad <hex>] [--iters <N>]\n"
                      "  Default KDF is memory-hard Argon2id (DWE2). Passing\n"
                      "  --iters selects the legacy PBKDF2 KDF (DWE1) for interop.\n";
@@ -1088,16 +1110,24 @@ int cmd_envelope_encrypt(int argc, char** argv) {
 }
 
 int cmd_envelope_decrypt(int argc, char** argv) {
-    std::string blob, password, aad_hex;
+    std::string blob, password, password_raw, password_src, aad_hex;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--envelope" && i + 1 < argc) blob     = argv[++i];
-        else if (a == "--password" && i + 1 < argc) password = argv[++i];
+        else if (a == "--password" && i + 1 < argc) password_raw = argv[++i];
+        else if (a == "--password-from" && i + 1 < argc) password_src = argv[++i];
         else if (a == "--aad"      && i + 1 < argc) aad_hex  = argv[++i];
     }
+    // S-114: --password-from keeps the envelope password off the command line.
+    if (!determ::util::resolve_secret("envelope decrypt", "--password", "--password-from",
+                                      password_raw, password_src,
+                                      determ::util::PASSWORD, password))
+        return 1;
     if (blob.empty() || password.empty()) {
         std::cerr << "Usage: determ-wallet envelope decrypt "
-                     "--envelope <blob> --password <str> [--aad <hex>]\n";
+                     "--envelope <blob> "
+                     "(--password <str> | --password-from <file:path|env:NAME|prompt>) "
+                     "[--aad <hex>]\n";
         return 1;
     }
     auto env_opt = envelope::deserialize(blob);
@@ -1492,14 +1522,15 @@ int cmd_account_create_batch(int argc, char** argv) {
 //   0 = success
 //   1 = argument / validation / I/O error
 int cmd_account_derive_batch(int argc, char** argv) {
-    std::string seed_hex;
+    std::string seed_hex, seed_raw, seed_src;
     int count = 0;
     std::string out_path;
     bool json_out = false;
     bool force    = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--seed"  && i + 1 < argc) seed_hex = argv[++i];
+        if      (a == "--seed"      && i + 1 < argc) seed_raw = argv[++i];
+        else if (a == "--seed-from" && i + 1 < argc) seed_src = argv[++i];
         else if (a == "--count" && i + 1 < argc) {
             try { count = std::stoi(argv[++i]); }
             catch (std::exception&) {
@@ -1512,17 +1543,25 @@ int cmd_account_derive_batch(int argc, char** argv) {
         else if (a == "--force")                 force    = true;
         else {
             std::cerr << "account-derive-batch: unknown argument '" << a << "'\n";
-            std::cerr << "Usage: determ-wallet account-derive-batch --seed <hex> "
+            std::cerr << "Usage: determ-wallet account-derive-batch "
+                         "(--seed <hex> | --seed-from <file:path|env:NAME|prompt>) "
                          "--count N [--out <file>] [--json] [--force]\n";
             return 1;
         }
     }
+    // S-114: --seed-from keeps the MASTER seed — every account this command
+    // derives — off this process's command line. --seed still works and warns.
+    if (!determ::util::resolve_secret("account-derive-batch", "--seed", "--seed-from",
+                                      seed_raw, seed_src,
+                                      determ::util::SEED, seed_hex))
+        return 1;
 
     // ── Validate --seed (exactly 64 hex chars = 32 bytes) ───────────────────
     if (seed_hex.empty()) {
         std::cerr << "account-derive-batch: --seed is required (32-byte master "
                      "seed = exactly 64 hex chars)\n";
-        std::cerr << "Usage: determ-wallet account-derive-batch --seed <hex> "
+        std::cerr << "Usage: determ-wallet account-derive-batch "
+                     "(--seed <hex> | --seed-from <file:path|env:NAME|prompt>) "
                      "--count N [--out <file>] [--json] [--force]\n";
         return 1;
     }
@@ -1744,26 +1783,35 @@ int cmd_account_derive_batch(int argc, char** argv) {
 //   0 = success
 //   1 = argument / validation / I/O error (including mismatched 64-byte form)
 int cmd_account_import(int argc, char** argv) {
-    std::string priv_hex, out_path;
+    std::string priv_hex, priv_raw, priv_src, out_path;
     bool force    = false;
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv"  && i + 1 < argc) priv_hex = argv[++i];
+        if      (a == "--priv"      && i + 1 < argc) priv_raw = argv[++i];
+        else if (a == "--priv-from" && i + 1 < argc) priv_src = argv[++i];
         else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
         else if (a == "--force")                 force    = true;
         else if (a == "--json")                  json_out = true;
         else {
             std::cerr << "account-import: unknown argument '" << a << "'\n";
-            std::cerr << "Usage: determ-wallet account-import --priv <hex> "
+            std::cerr << "Usage: determ-wallet account-import "
+                         "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                          "[--out <file>] [--force] [--json]\n";
             return 1;
         }
     }
+    // S-114: --priv-from keeps the imported private key off this process's
+    // command line. --priv still works and warns.
+    if (!determ::util::resolve_secret("account-import", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty()) {
         std::cerr << "account-import: --priv is required (32-byte seed = 64 "
                      "hex chars, or 64-byte keypair = 128 hex chars)\n";
-        std::cerr << "Usage: determ-wallet account-import --priv <hex> "
+        std::cerr << "Usage: determ-wallet account-import "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                      "[--out <file>] [--force] [--json]\n";
         return 1;
     }
@@ -2951,12 +2999,13 @@ int cmd_backup_verify(int argc, char** argv) {
 //   composite-backup case stays AAD-free so plain `envelope decrypt`
 //   on the resulting blob round-trips without an --aad arg.
 int cmd_backup_create(int argc, char** argv) {
-    std::string secret_hex, keyholders_path, shares_out, envs_out;
+    std::string secret_hex, secret_raw, secret_src, keyholders_path, shares_out, envs_out;
     int threshold = -1;
     bool force = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--secret"        && i + 1 < argc) secret_hex      = argv[++i];
+        if      (a == "--secret"        && i + 1 < argc) secret_raw      = argv[++i];
+        else if (a == "--secret-from"   && i + 1 < argc) secret_src      = argv[++i];
         else if (a == "--threshold"     && i + 1 < argc) {
             try { threshold = std::stoi(argv[++i]); }
             catch (std::exception&) {
@@ -2971,16 +3020,24 @@ int cmd_backup_create(int argc, char** argv) {
         else if (a == "--json")                          json_out        = true;
         else {
             std::cerr << "backup-create: unknown argument '" << a << "'\n";
-            std::cerr << "Usage: determ-wallet backup-create --secret <hex> "
+            std::cerr << "Usage: determ-wallet backup-create "
+                         "(--secret <hex> | --secret-from <file:path|env:NAME|prompt>) "
                          "--threshold T --keyholders <file> "
                          "--shares-out <file> --envelopes-out <file> "
                          "[--force] [--json]\n";
             return 1;
         }
     }
+    // S-114: --secret-from keeps the master secret this backup protects off
+    // the command line. --secret still works and warns.
+    if (!determ::util::resolve_secret("backup-create", "--secret", "--secret-from",
+                                      secret_raw, secret_src,
+                                      determ::util::SECRET, secret_hex))
+        return 1;
     if (secret_hex.empty() || threshold < 0 || keyholders_path.empty()
         || shares_out.empty() || envs_out.empty()) {
-        std::cerr << "Usage: determ-wallet backup-create --secret <hex> "
+        std::cerr << "Usage: determ-wallet backup-create "
+                     "(--secret <hex> | --secret-from <file:path|env:NAME|prompt>) "
                      "--threshold T --keyholders <file> "
                      "--shares-out <file> --envelopes-out <file> "
                      "[--force] [--json]\n"
@@ -3322,105 +3379,50 @@ int cmd_backup_create(int argc, char** argv) {
 //
 // Returns the passphrase on success; sets `err` and returns empty on
 // failure. Caller surfaces `err` on stderr.
+//
+// 2026-09-18: this is now a one-line forwarder. The mechanism moved VERBATIM
+// into include/determ/util/secret_source.hpp, which S-114/S-115 need from three
+// binaries; the PASSPHRASE policy there carries this function's three
+// distinguishing choices — the noun in every diagnostic, the "Passphrase: "
+// prompt label, and the rule that a `file:` line loses only its trailing CR/LF
+// while `env:` and `prompt` values are taken VERBATIM, because a passphrase may
+// legitimately begin or end with a space. Every diagnostic string, the return
+// convention and the caller's exit code are unchanged.
 std::string passphrase_from_source(const std::string& spec, std::string& err) {
-    err.clear();
-    if (spec.empty()) {
-        err = "passphrase source is empty";
-        return "";
-    }
-    if (spec.rfind("file:", 0) == 0) {
-        std::string path = spec.substr(5);
-        if (path.empty()) { err = "file: source has empty path"; return ""; }
-        std::ifstream f(path);
-        if (!f) {
-            err = "cannot open passphrase file: " + path;
-            return "";
-        }
-        std::string line;
-        if (!std::getline(f, line)) {
-            err = "passphrase file is empty: " + path;
-            return "";
-        }
-        // Strip trailing CR (Windows-style line endings) but preserve
-        // intentional internal whitespace — the operator may have
-        // chosen a passphrase containing spaces.
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
-            line.pop_back();
-        if (line.empty()) {
-            err = "passphrase file first line is empty: " + path;
-            return "";
-        }
-        return line;
-    }
-    if (spec.rfind("env:", 0) == 0) {
-        std::string name = spec.substr(4);
-        if (name.empty()) { err = "env: source has empty variable name"; return ""; }
-        const char* v = std::getenv(name.c_str());
-        if (!v || !*v) {
-            err = "environment variable not set or empty: " + name;
-            return "";
-        }
-        return std::string(v);
-    }
-    if (spec == "prompt") {
-        // Interactive no-echo read. Best-effort across platforms; if
-        // disabling echo fails we still read the line (operator may be
-        // running in a non-tty context — they're warned via stderr).
-        std::cerr << "Passphrase: " << std::flush;
-#ifdef _WIN32
-        HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-        DWORD orig = 0;
-        bool echo_off = (hStdin != INVALID_HANDLE_VALUE
-                         && GetConsoleMode(hStdin, &orig)
-                         && SetConsoleMode(hStdin, orig & ~ENABLE_ECHO_INPUT));
-        std::string pw;
-        std::getline(std::cin, pw);
-        if (echo_off) SetConsoleMode(hStdin, orig);
-        std::cerr << "\n";
-        if (pw.empty()) { err = "empty passphrase from prompt"; return ""; }
-        return pw;
-#else
-        termios old_t{}, new_t{};
-        bool echo_off = (tcgetattr(STDIN_FILENO, &old_t) == 0);
-        if (echo_off) {
-            new_t = old_t;
-            new_t.c_lflag &= ~ECHO;
-            if (tcsetattr(STDIN_FILENO, TCSANOW, &new_t) != 0) echo_off = false;
-        }
-        std::string pw;
-        std::getline(std::cin, pw);
-        if (echo_off) tcsetattr(STDIN_FILENO, TCSANOW, &old_t);
-        std::cerr << "\n";
-        if (pw.empty()) { err = "empty passphrase from prompt"; return ""; }
-        return pw;
-#endif
-    }
-    err = "unknown passphrase source '" + spec
-        + "'; expected file:<path>, env:<NAME>, or prompt";
-    return "";
+    return determ::util::secret_from_source(spec, determ::util::PASSPHRASE, err);
 }
 
 int cmd_keyfile_create(int argc, char** argv) {
-    std::string priv_hex, pass_src, out_path;
+    std::string priv_hex, priv_raw, priv_src, pass_src, out_path;
     bool force = false;
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv"            && i + 1 < argc) priv_hex = argv[++i];
+        if      (a == "--priv"            && i + 1 < argc) priv_raw = argv[++i];
+        else if (a == "--priv-from"       && i + 1 < argc) priv_src = argv[++i];
         else if (a == "--passphrase-from" && i + 1 < argc) pass_src = argv[++i];
         else if (a == "--out"             && i + 1 < argc) out_path = argv[++i];
         else if (a == "--force")                           force    = true;
         else if (a == "--json")                            json_out = true;
         else {
             std::cerr << "keyfile-create: unknown argument '" << a << "'\n";
-            std::cerr << "Usage: determ-wallet keyfile-create --priv <hex> "
+            std::cerr << "Usage: determ-wallet keyfile-create "
+                         "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                          "--passphrase-from <file:path|env:NAME|prompt> "
                          "--out <file> [--force] [--json]\n";
             return 1;
         }
     }
+    // S-114: the PASSPHRASE has been off the command line here since this
+    // command shipped; the validator PRIVATE KEY it wraps was not. --priv-from
+    // closes that half; --priv still works and warns.
+    if (!determ::util::resolve_secret("keyfile-create", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || pass_src.empty() || out_path.empty()) {
-        std::cerr << "Usage: determ-wallet keyfile-create --priv <hex> "
+        std::cerr << "Usage: determ-wallet keyfile-create "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                      "--passphrase-from <file:path|env:NAME|prompt> "
                      "--out <file> [--force] [--json]\n";
         return 1;
@@ -6015,21 +6017,36 @@ int cmd_account_list(int argc, char** argv) {
 }
 
 int cmd_create_recovery(int argc, char** argv) {
-    std::string seed_hex, password, out_path, scheme = "passphrase";
+    std::string seed_hex, seed_raw, seed_src, password, password_raw, password_src,
+                out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--seed"     && i + 1 < argc) seed_hex    = argv[++i];
-        else if (a == "--password" && i + 1 < argc) password    = argv[++i];
+        if      (a == "--seed"     && i + 1 < argc) seed_raw    = argv[++i];
+        else if (a == "--seed-from"     && i + 1 < argc) seed_src     = argv[++i];
+        else if (a == "--password" && i + 1 < argc) password_raw = argv[++i];
+        else if (a == "--password-from" && i + 1 < argc) password_src = argv[++i];
         else if (a == "--out"      && i + 1 < argc) out_path    = argv[++i];
         else if (a == "--scheme"   && i + 1 < argc) scheme      = argv[++i];
         else if (a == "-t"         && i + 1 < argc) { if (!arg_i32("create-recovery", "-t", argv[++i], threshold)) return 1; }
         else if (a == "-n"         && i + 1 < argc) { if (!arg_i32("create-recovery", "-n", argv[++i], share_count)) return 1; }
     }
+    // S-114: BOTH secrets this command takes — the seed being escrowed and the
+    // passphrase that seals every share — gain an off-the-command-line form.
+    if (!determ::util::resolve_secret("create-recovery", "--seed", "--seed-from",
+                                      seed_raw, seed_src,
+                                      determ::util::SEED, seed_hex))
+        return 1;
+    if (!determ::util::resolve_secret("create-recovery", "--password", "--password-from",
+                                      password_raw, password_src,
+                                      determ::util::PASSWORD, password))
+        return 1;
     if (seed_hex.empty() || password.empty() || out_path.empty()
         || threshold <= 0 || share_count <= 0) {
         std::cerr << "Usage: determ-wallet create-recovery "
-                     "--seed <hex> --password <str> -t T -n N --out <file> "
+                     "(--seed <hex> | --seed-from <file:path|env:NAME|prompt>) "
+                     "(--password <str> | --password-from <file:path|env:NAME|prompt>) "
+                     "-t T -n N --out <file> "
                      "[--scheme passphrase]\n";
         return 1;
     }
@@ -6071,15 +6088,22 @@ int cmd_create_recovery(int argc, char** argv) {
 }
 
 int cmd_recover(int argc, char** argv) {
-    std::string in_path, password, guardians_csv;
+    std::string in_path, password, password_raw, password_src, guardians_csv;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--in"        && i + 1 < argc) in_path        = argv[++i];
-        else if (a == "--password"  && i + 1 < argc) password       = argv[++i];
+        else if (a == "--password"  && i + 1 < argc) password_raw   = argv[++i];
+        else if (a == "--password-from" && i + 1 < argc) password_src = argv[++i];
         else if (a == "--guardians" && i + 1 < argc) guardians_csv  = argv[++i];
     }
+    // S-114: --password-from keeps the recovery passphrase off the command line.
+    if (!determ::util::resolve_secret("recover", "--password", "--password-from",
+                                      password_raw, password_src,
+                                      determ::util::PASSWORD, password))
+        return 1;
     if (in_path.empty() || password.empty()) {
-        std::cerr << "Usage: determ-wallet recover --in <file> --password <str> "
+        std::cerr << "Usage: determ-wallet recover --in <file> "
+                     "(--password <str> | --password-from <file:path|env:NAME|prompt>) "
                      "[--guardians <csv of 0..N-1 indices>]\n";
         return 1;
     }
@@ -6234,23 +6258,31 @@ std::array<uint8_t, 32> domain_commit(const std::string& domain_tag,
 //   0  signature emitted
 //   1  args / parse / libsodium-init error
 int cmd_message_sign(int argc, char** argv) {
-    std::string priv_hex, message_spec, domain_tag;
+    std::string priv_hex, priv_raw, priv_src, message_spec, domain_tag;
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv"       && i + 1 < argc) priv_hex     = argv[++i];
+        if      (a == "--priv"       && i + 1 < argc) priv_raw     = argv[++i];
+        else if (a == "--priv-from"  && i + 1 < argc) priv_src     = argv[++i];
         else if (a == "--message"    && i + 1 < argc) message_spec = argv[++i];
         else if (a == "--domain-tag" && i + 1 < argc) domain_tag   = argv[++i];
         else if (a == "--json")                       json_out     = true;
         else {
             std::cerr << "message-sign: unknown argument '" << a << "'\n";
-            std::cerr << "Usage: determ-wallet message-sign --priv <hex> "
+            std::cerr << "Usage: determ-wallet message-sign "
+                         "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                          "--message <string|file:path> --domain-tag <tag> [--json]\n";
             return 1;
         }
     }
+    // S-114: --priv-from keeps the signing key off this process's command line.
+    if (!determ::util::resolve_secret("message-sign", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || message_spec.empty() || domain_tag.empty()) {
-        std::cerr << "Usage: determ-wallet message-sign --priv <hex> "
+        std::cerr << "Usage: determ-wallet message-sign "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                      "--message <string|file:path> --domain-tag <tag> [--json]\n"
                      "\n"
                      "  Signs message with an Ed25519 private key using a\n"
@@ -23977,8 +24009,8 @@ int cmd_param_change_verify(int argc, char** argv) {
 //      missing required flag, CLI/file method-or-params disagreement)
 //   2  verify MISMATCH (recomputed tag != claimed tag)
 int cmd_rpc_auth(int argc, char** argv) {
-    std::string method, params_str, params_file, secret_hex, verify_hex,
-                request_file;
+    std::string method, params_str, params_file, secret_hex, secret_raw,
+                secret_src, verify_hex, request_file;
     bool have_params = false, have_method = false, json_out = false;
 
     for (int i = 0; i < argc; ++i) {
@@ -23986,7 +24018,8 @@ int cmd_rpc_auth(int argc, char** argv) {
         if      (a == "--method"      && i + 1 < argc) { method = argv[++i]; have_method = true; }
         else if (a == "--params"      && i + 1 < argc) { params_str = argv[++i]; have_params = true; }
         else if (a == "--params-file" && i + 1 < argc) params_file = argv[++i];
-        else if (a == "--secret"      && i + 1 < argc) secret_hex = argv[++i];
+        else if (a == "--secret"      && i + 1 < argc) secret_raw = argv[++i];
+        else if (a == "--secret-from" && i + 1 < argc) secret_src = argv[++i];
         else if (a == "--verify"      && i + 1 < argc) verify_hex = argv[++i];
         else if (a == "--request"     && i + 1 < argc) request_file = argv[++i];
         else if (a == "--json")                        json_out = true;
@@ -23994,7 +24027,7 @@ int cmd_rpc_auth(int argc, char** argv) {
             std::cout <<
                 "Usage: determ-wallet rpc-auth --method <m>\n"
                 "                      [--params <json> | --params-file <file>]\n"
-                "                      --secret <hex>\n"
+                "                      (--secret <hex> | --secret-from <src>)\n"
                 "                      [--verify <hex> | --request <file>] [--json]\n"
                 "\n"
                 "  OFFLINE computor + verifier for the S-001 (v2.16) RPC HMAC-auth\n"
@@ -24023,10 +24056,13 @@ int cmd_rpc_auth(int argc, char** argv) {
                 "      absent), so no-param methods need no --params. Mutually\n"
                 "      exclusive.\n"
                 "\n"
-                "  --secret <hex>\n"
-                "      Required. The rpc_auth_secret as an even-length hex string\n"
-                "      (the daemon hex-decodes it to raw HMAC key bytes). Never\n"
-                "      echoed — only its decoded byte length is reported.\n"
+                "  --secret <hex> | --secret-from <file:path|env:NAME|prompt>\n"
+                "      Required (exactly one). The rpc_auth_secret as an even-length\n"
+                "      hex string (the daemon hex-decodes it to raw HMAC key bytes).\n"
+                "      Never echoed — only its decoded byte length is reported.\n"
+                "      --secret puts the shared HMAC secret in this process's command\n"
+                "      line, where /proc/<pid>/cmdline, `ps` and the shell history file\n"
+                "      all expose it (S-114); --secret-from does not, and is preferred.\n"
                 "\n"
                 "  --verify <hex>\n"
                 "      Verify mode. A claimed auth tag (64 lowercase hex). The tool\n"
@@ -24067,11 +24103,18 @@ int cmd_rpc_auth(int argc, char** argv) {
         else {
             std::cerr << "rpc-auth: unknown argument '" << a << "'\n";
             std::cerr << "Usage: determ-wallet rpc-auth --method <m> "
-                         "[--params <json> | --params-file <file>] --secret <hex> "
+                         "[--params <json> | --params-file <file>] "
+                         "(--secret <hex> | --secret-from <file:path|env:NAME|prompt>) "
                          "[--verify <hex> | --request <file>] [--json]\n";
             return 1;
         }
     }
+    // S-114: --secret-from keeps the RPC HMAC secret off this process's command
+    // line. Refusals below are unchanged and still render through emit_err.
+    if (!determ::util::resolve_secret("rpc-auth", "--secret", "--secret-from",
+                                      secret_raw, secret_src,
+                                      determ::util::SECRET, secret_hex))
+        return 1;
 
     // emit_err: uniform diagnostic for the arg/parse failure family (exit 1).
     auto emit_err = [&](const std::string& reason) -> int {
@@ -25526,6 +25569,31 @@ void print_usage() {
         "  recover --in <file> --password <str>       Reconstruct the secret\n"
         "          [--guardians <i,j,k,...>]\n"
         "  version                                    Print version banner\n"
+        "\n"
+        "Secrets on the command line (S-114):\n"
+        "  Every flag above that takes a private key, a seed, a Shamir secret, an\n"
+        "  RPC HMAC secret or a password has a --<name>-from twin taking\n"
+        "  file:<path> | env:<NAME> | prompt --- --priv-from, --seed-from,\n"
+        "  --secret-from, --password-from, --passphrase-from. The raw forms put the\n"
+        "  secret in this process's /proc/<pid>/cmdline, where any local process\n"
+        "  reads it and `ps` shows it to every user on the host, and your shell\n"
+        "  writes it verbatim into its history file. They still work and warn;\n"
+        "  passing both forms of one secret is refused.\n"
+        "  The three sources are NOT equal. Prefer them in this order:\n"
+        "    1. file:<path> with `chmod 600` --- STRONGEST. Not in the process\n"
+        "       table, not in /proc/<pid>/environ, not in your shell history.\n"
+        "    2. prompt --- read from stdin with terminal echo off.\n"
+        "    3. env:<NAME> --- WEAKEST. The value stays readable in\n"
+        "       /proc/<pid>/environ by the same UID; and\n"
+        "       `SECRET=... determ-wallet account-import --priv-from env:SECRET`\n"
+        "       puts the secret straight back into your shell history file,\n"
+        "       which is one of the three leaks these flags exist to close. Use\n"
+        "       env: only when the variable comes from a parent process, a CI\n"
+        "       secret store or a systemd credential --- not when you type it.\n"
+        "  NOT covered, and still on argv: the LEGACY positional\n"
+        "  `shamir split <secret_hex>` (use `shamir-split --secret-from` instead)\n"
+        "  and `envelope encrypt --plaintext <hex>`, which is the data being\n"
+        "  sealed rather than a key.\n"
         "\n"
         "Pending (Phase 4):\n"
         "  Recovery: Shamir split + OpenSSL AEAD envelopes (passphrase scheme).\n";

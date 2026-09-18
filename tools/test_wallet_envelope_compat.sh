@@ -53,6 +53,20 @@ fi
 
 WALLET="$DETERM_WALLET"
 
+# S-114 (2026-09-18): the raw `--password` now prints WARNING[seed-on-command-line]
+# to stderr, which lands in every capture below. The first cut of that increment
+# answered it with `2>/dev/null` — and MEASURABLY WEAKENED this file: the four
+# format-freeze captures are exact equalities, so merged stderr was an implicit
+# "and stderr is empty" assertion, and against a shim that is the real binary
+# plus ONE unrelated stderr line this wrapper went from 8 FAIL / rc=1 to 0 FAIL /
+# rc=0 — completely green on a defect it used to catch. The fix is to take the
+# password OFF the command line through the `--password-from` twin the same
+# increment adds, and KEEP `2>&1` everywhere. Measured after: 16 pass / 0 fail
+# against the real binary, 7 FAIL / rc=1 against the shim.
+SCRATCH="build/test_wallet_envelope_compat.$$"
+mkdir -p "$SCRATCH"
+trap 'rm -rf "$SCRATCH"' EXIT
+
 pass_count=0
 fail_count=0
 assert_eq() {
@@ -65,6 +79,9 @@ assert_contains() {
 }
 
 PINNED_PW="determ-format-freeze-2026"
+# The same password, off argv. 0600 because it is a password in a file.
+PWF="$SCRATCH/pw.txt"
+printf '%s\n' "$PINNED_PW" > "$PWF"; chmod 600 "$PWF"
 PINNED_PLAIN="44455445524d20656e76656c6f706520666f726d617420667265657a65207631"
 PINNED_AAD="cafebabe"
 
@@ -100,7 +117,7 @@ assert_eq "$RC" "1" "legacy AAD blob exits 1 (parse reject)"
 echo
 echo "=== 3. Pinned binary DWE1 envelope decrypts to pinned payload ==="
 set +e
-DEC=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1" --password "$PINNED_PW" 2>&1)
+DEC=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1" --password-from "file:$PWF" 2>&1)
 RC=$?
 set -e
 DEC=$(echo "$DEC" | tr -d '\r')
@@ -111,7 +128,7 @@ assert_eq "$DEC" "$PINNED_PLAIN" "pinned binary DWE1 payload byte-for-byte"
 echo
 echo "=== 4. Pinned binary DWE1 AAD envelope decrypts to pinned payload ==="
 set +e
-DEC_AAD=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1_AAD" --password "$PINNED_PW" --aad "$PINNED_AAD" 2>&1)
+DEC_AAD=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE1_AAD" --password-from "file:$PWF" --aad "$PINNED_AAD" 2>&1)
 RC=$?
 set -e
 DEC_AAD=$(echo "$DEC_AAD" | tr -d '\r')
@@ -122,7 +139,7 @@ assert_eq "$DEC_AAD" "$PINNED_PLAIN" "pinned binary DWE1 AAD payload byte-for-by
 echo
 echo "=== 5. Pinned binary DWE2 (Argon2id) envelope decrypts ==="
 set +e
-DEC2=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE2" --password "$PINNED_PW" 2>&1)
+DEC2=$("$WALLET" envelope decrypt --envelope "$PINNED_BIN_DWE2" --password-from "file:$PWF" 2>&1)
 RC=$?
 set -e
 DEC2=$(echo "$DEC2" | tr -d '\r')
@@ -144,7 +161,7 @@ assert_contains "$ERR" "AEAD tag failure" "wrong passphrase yields AEAD tag fail
 echo
 echo "=== 7. Fresh encrypt->decrypt round-trip at HEAD (dot-free hex) ==="
 set +e
-FRESH_ENV=$("$WALLET" envelope encrypt --plaintext "$PINNED_PLAIN" --password "$PINNED_PW" --iters 10000 2>&1)
+FRESH_ENV=$("$WALLET" envelope encrypt --plaintext "$PINNED_PLAIN" --password-from "file:$PWF" --iters 10000 2>&1)
 RC=$?
 set -e
 FRESH_ENV=$(echo "$FRESH_ENV" | tr -d '\r')
@@ -161,7 +178,7 @@ case "$FRESH_ENV" in
   *)           echo "  PASS: fresh envelope is lowercase hex only"; pass_count=$((pass_count + 1)) ;;
 esac
 set +e
-FRESH_DEC=$("$WALLET" envelope decrypt --envelope "$FRESH_ENV" --password "$PINNED_PW" 2>&1)
+FRESH_DEC=$("$WALLET" envelope decrypt --envelope "$FRESH_ENV" --password-from "file:$PWF" 2>&1)
 RC=$?
 set -e
 FRESH_DEC=$(echo "$FRESH_DEC" | tr -d '\r')

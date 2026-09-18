@@ -78,13 +78,19 @@ assert_eq "$RSEED" "$PRIV" "round-tripped priv_seed matches"
 echo
 echo "=== 2. envelope KDF selection by magic ==="
 PLAIN="00112233445566778899aabbccddeeff"
-E2=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password "$PW" 2>&1 | tr -d '\r')
+# S-114 (2026-09-18): the raw `--password` warns on stderr now. The first cut of
+# that increment answered it with `2>/dev/null`, which silently retired the
+# implicit "and stderr is empty" half of these exact equalities — against a shim
+# that is the real binary plus ONE unrelated stderr line this file fell from
+# 13 FAIL to 7. The password comes off argv through the `--password-from` twin
+# instead and every capture KEEPS `2>&1`.
+E2=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password-from "file:$PASS_FILE" 2>&1 | tr -d '\r')
 assert_eq "${E2:0:8}" "44574532" "default envelope magic = DWE2"
-D2=$("$WALLET" envelope decrypt --envelope "$E2" --password "$PW" 2>&1 | tr -d '\r')
+D2=$("$WALLET" envelope decrypt --envelope "$E2" --password-from "file:$PASS_FILE" 2>&1 | tr -d '\r')
 assert_eq "$D2" "$PLAIN" "DWE2 envelope round-trips"
-E1=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password "$PW" --iters 10000 2>&1 | tr -d '\r')
+E1=$("$WALLET" envelope encrypt --plaintext "$PLAIN" --password-from "file:$PASS_FILE" --iters 10000 2>&1 | tr -d '\r')
 assert_eq "${E1:0:8}" "44574531" "--iters envelope magic = DWE1"
-D1=$("$WALLET" envelope decrypt --envelope "$E1" --password "$PW" 2>&1 | tr -d '\r')
+D1=$("$WALLET" envelope decrypt --envelope "$E1" --password-from "file:$PASS_FILE" 2>&1 | tr -d '\r')
 assert_eq "$D1" "$PLAIN" "DWE1 envelope round-trips"
 
 # ── 3. D2: the legacy dot-separated DWE1 text form is REJECTED at parse ──────

@@ -68,6 +68,7 @@ command -v python >/dev/null 2>&1 || PY=python3
 PASSPHRASE="correct horse battery staple"
 PASS_FILE="$TMP/passphrase.txt"
 printf '%s\n' "$PASSPHRASE" > "$PASS_FILE"
+chmod 600 "$PASS_FILE"
 
 # ── 1. Help text mentions keyfile-create ──────────────────────────────────────
 echo "=== 1. Help text mentions keyfile-create ==="
@@ -87,6 +88,13 @@ assert_eq "$RC" "0" "account-create-batch produces a keypair"
 PRIV_HEX=$($PY -c "import json,sys; d=json.loads(sys.stdin.read()); print(d['accounts'][0]['privkey_hex'])" <<< "$KEYPAIR")
 ADDR=$($PY -c "import json,sys; d=json.loads(sys.stdin.read()); print(d['accounts'][0]['address'])" <<< "$KEYPAIR")
 assert_eq "${#PRIV_HEX}" "64" "privkey_hex is 64 hex chars (32-byte seed)"
+# S-114 (2026-09-18): the raw `--priv` / `--password` warn on stderr now. The
+# first cut of that increment answered it with `2>/dev/null`, which retired the
+# implicit "stderr is empty" half of an exact equality and of a json.loads()'d
+# capture (measured: 9 FAIL -> 8 against a one-line stderr shim). The key comes
+# off argv through the `--priv-from` twin the same increment adds instead, and
+# those two captures KEEP `2>&1`.
+PRIV_FILE="$TMP/priv.hex"; printf '%s\n' "$PRIV_HEX" > "$PRIV_FILE"; chmod 600 "$PRIV_FILE"
 # Address is 0x + 64 hex chars from anon-addressing.
 if [ "${#ADDR}" = "66" ] && [ "${ADDR:0:2}" = "0x" ]; then
     echo "  PASS: address is 0x-prefixed 32-byte hex"; pass_count=$((pass_count + 1))
@@ -133,7 +141,7 @@ echo "=== 5. Round-trip: envelope decrypt recovers the raw seed (D2) ==="
 AAD_HEX="$EXPECTED_PUB"
 DEC_HEX=$("$WALLET" envelope decrypt \
     --envelope "$BLOB" \
-    --password "$PASSPHRASE" \
+    --password-from "file:$PASS_FILE" \
     --aad "$AAD_HEX" 2>&1 | tr -d '\r')
 RC=$?
 assert_eq "$RC" "0" "envelope decrypt succeeds with correct passphrase + AAD"
@@ -409,7 +417,7 @@ echo
 echo "=== 25. --json summary mode ==="
 rm -f "$TMP/json_out.enc"
 JSON_SUMMARY=$("$WALLET" keyfile-create \
-    --priv "$PRIV_HEX" \
+    --priv-from "file:$PRIV_FILE" \
     --passphrase-from "file:$PASS_FILE" \
     --out "$TMP/json_out.enc" \
     --json 2>&1 | tr -d '\r')

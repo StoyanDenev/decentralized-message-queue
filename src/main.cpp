@@ -138,6 +138,22 @@
                            // leave-nothing-behind rule
 #include <csignal>         // test-account-create-perms: ignore SIGXFSZ across it
 #endif
+// The ONE off-the-command-line secret-input primitive (S-110 / S-114 / S-115):
+// `--<name>-from <file:path|env:NAME|prompt>`, the raw flag kept working but
+// warned about, and the refusals.
+//
+// Its position in this file carries NO ordering requirement, and the comment
+// that used to claim one was wrong: nothing above this line includes
+// <winsock2.h> — the _WIN32 arm above takes <determ/net/iocp_event_loop.hpp>
+// and <determ/net/iocp_transport.hpp>, which keep every Windows handle as an
+// opaque void* and include no platform header, and
+// <determ/net/sync_client.hpp> takes only <cstddef>, <cstdint> and <string>.
+// So on Windows THIS header is the first and only <windows.h> in this
+// translation unit, which is exactly why it must define NOMINMAX itself
+// (it does; see the include block there) — thirteen top-level std::min/std::max
+// call sites follow this line. That is analysis, not execution: nothing here
+// has been built on Windows.
+#include <determ/util/secret_source.hpp>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -322,7 +338,8 @@ Usage:
                                               (writes <cfg>.hash; --json for scripts)
   determ genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
                                               and print the genesis hash.
-  determ account create [--out <file>]       Generate a fresh anonymous account
+  determ account create [--out <file>] [--passphrase-from <file:path|env:NAME|prompt>]
+                                             Generate a fresh anonymous account
                                               keypair (Ed25519). Prints address + privkey.
                                               --out is created 0600 before the key is
                                               written (S-111, POSIX); a --out naming a
@@ -380,6 +397,24 @@ State commitment + light-client (v2.1 + v2.2):
                                               --expected-hash pins against external value;
                                               --json emits machine-readable output.
                                               for BFT-mode threshold = ceil(2K/3).
+
+Secrets on the command line (S-115): every --priv / --passphrase flag below and
+above has a --<name>-from twin taking file:<path> | env:<NAME> | prompt. The raw
+forms put the key in this process's /proc/<pid>/cmdline, where any local process
+reads it and `ps` shows it to every user on the host, and your shell writes it
+verbatim into its history file. They still work and warn.
+  The three sources are NOT equal. Prefer them in this order:
+    1. file:<path> with `chmod 600` --- STRONGEST. Not in the process table,
+       not in /proc/<pid>/environ, not in your shell history.
+    2. prompt --- read from stdin with terminal echo off.
+    3. env:<NAME> --- WEAKEST. The value is readable in /proc/<pid>/environ by
+       the same UID; and note that `SECRET=... determ submit-dapp-call
+       --priv-from env:SECRET` puts the secret straight back into your shell
+       history file, which is one of the three leaks these flags exist to
+       close. Use env: only when the variable comes from a parent process, a
+       CI secret store or a systemd credential --- not when you type it.
+NOT covered: the positional <privkey_hex> of `account address` and `send_anon`,
+and the <idx>:<priv_hex> of --keyholder-sig.
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
   determ submit-dapp-register --priv <hex> --from <domain>
@@ -6028,14 +6063,22 @@ static bool write_account_file_0600(const std::string& out_path,
 // into shell history).
 static int cmd_account_create(int argc, char** argv) {
     std::string out_path;
-    std::string passphrase;
+    std::string passphrase, pass_raw, pass_src;
     bool allow_plaintext_stdout = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--out" && i + 1 < argc) out_path = argv[i + 1];
         else if (a == "--allow-plaintext-stdout") allow_plaintext_stdout = true;
-        else if (a == "--passphrase" && i + 1 < argc) passphrase = argv[i + 1];
+        else if (a == "--passphrase" && i + 1 < argc) pass_raw = argv[i + 1];
+        else if (a == "--passphrase-from" && i + 1 < argc) pass_src = argv[i + 1];
     }
+    // S-115: --passphrase-from <file:path|env:NAME|prompt> keeps the keyfile
+    // passphrase off this process's command line. --passphrase still works and
+    // warns; the DETERM_PASSPHRASE fallback below is unchanged and still last.
+    if (!determ::util::resolve_secret("account create", "--passphrase", "--passphrase-from",
+                                      pass_raw, pass_src,
+                                      determ::util::PASSPHRASE, passphrase))
+        return 1;
     // Env var fallback (avoids CLI leaking into shell history). The
     // CLI flag wins if both are set.
     if (passphrase.empty()) {
@@ -6047,7 +6090,10 @@ static int cmd_account_create(int argc, char** argv) {
             "S-004: refusing to emit privkey to stdout. Either:\n"
             "  determ account create --out <file>     (recommended; "
                                                        "file gets 0600 permissions)\n"
-            "  determ account create --out <file> --passphrase <pw>\n"
+            "  determ account create --out <file> --passphrase-from <src>\n"
+            "                                         (src = file:path|env:NAME|prompt;\n"
+            "                                          --passphrase <pw> also works but\n"
+            "                                          puts it in /proc/<pid>/cmdline)\n"
             "                                         (or DETERM_PASSPHRASE env var;\n"
             "                                          encrypts at rest, S-004 option 2)\n"
             "  determ account create --allow-plaintext-stdout  (opt-in; "
@@ -6127,19 +6173,26 @@ static int cmd_account_create(int argc, char** argv) {
 // JSON to stdout (privkey + address). Requires --passphrase or
 // DETERM_PASSPHRASE env var.
 static int cmd_account_decrypt(int argc, char** argv) {
-    std::string in_path, passphrase;
+    std::string in_path, passphrase, pass_raw, pass_src;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--in"         && i + 1 < argc) in_path    = argv[i + 1];
-        else if (a == "--passphrase" && i + 1 < argc) passphrase = argv[i + 1];
+        else if (a == "--passphrase" && i + 1 < argc) pass_raw   = argv[i + 1];
+        else if (a == "--passphrase-from" && i + 1 < argc) pass_src = argv[i + 1];
     }
+    // S-115: --passphrase-from keeps the passphrase off the command line; the
+    // DETERM_PASSPHRASE fallback below is unchanged and still last.
+    if (!determ::util::resolve_secret("account decrypt", "--passphrase", "--passphrase-from",
+                                      pass_raw, pass_src,
+                                      determ::util::PASSPHRASE, passphrase))
+        return 1;
     if (passphrase.empty()) {
         const char* env = std::getenv("DETERM_PASSPHRASE");
         if (env && *env) passphrase = env;
     }
     if (in_path.empty()) {
         std::cerr << "Usage: determ account decrypt --in <file> "
-                     "[--passphrase <pw>]\n"
+                     "[--passphrase <pw> | --passphrase-from <file:path|env:NAME|prompt>]\n"
                      "  (or set DETERM_PASSPHRASE env var)\n";
         return 1;
     }
@@ -6285,7 +6338,7 @@ static int cmd_send_anon(int argc, char** argv) {
 // one (idx, sig) entry inside the canonical payload. The canonical
 // signing message format mirrors validator.cpp's check.
 static int cmd_submit_param_change(int argc, char** argv) {
-    std::string priv_hex;
+    std::string priv_hex, priv_raw, priv_src;
     std::string from_domain;   // required: registered domain that pays the fee
     std::string name;
     std::string value_hex;
@@ -6295,7 +6348,8 @@ static int cmd_submit_param_change(int argc, char** argv) {
     std::vector<std::pair<uint16_t, std::string>> keyholder_sigs;
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv")             priv_hex = argv[i + 1];
+        if      (a == "--priv")             priv_raw = argv[i + 1];
+        else if (a == "--priv-from")        priv_src = argv[i + 1];
         else if (a == "--from")             from_domain = argv[i + 1];
         else if (a == "--name")             name = argv[i + 1];
         else if (a == "--value-hex")        value_hex = argv[i + 1];
@@ -6312,9 +6366,17 @@ static int cmd_submit_param_change(int argc, char** argv) {
             keyholder_sigs.emplace_back(idx, s.substr(colon + 1));
         }
     }
+    // S-115: --priv-from keeps the sender's private key off the command line.
+    // NOT closed here: each --keyholder-sig still carries a keyholder private
+    // key as <idx>:<priv_hex> on argv — see the S-115 row in docs/SECURITY.md.
+    if (!determ::util::resolve_secret("submit-param-change", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || from_domain.empty() || name.empty()
         || value_hex.empty() || keyholder_sigs.empty()) {
-        std::cerr << "Usage: determ submit-param-change --priv <hex> "
+        std::cerr << "Usage: determ submit-param-change "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
                      "--from <domain> --name <NAME> --value-hex <hex> "
                      "--effective-height <N> "
                      "--keyholder-sig <idx>:<priv_hex> [more...] "
@@ -6418,14 +6480,15 @@ static int cmd_submit_param_change(int argc, char** argv) {
 // driven for v1.x; auto-detection on the beacon (eligible_in_region
 // < 2K observation window) is tracked as v2.11 in docs/V2-DESIGN.md.
 static int cmd_submit_merge_event(int argc, char** argv) {
-    std::string priv_hex, from_domain, event_str, refugee_region;
+    std::string priv_hex, priv_raw, priv_src, from_domain, event_str, refugee_region;
     uint32_t shard_id = 0, partner_id = 0;
     uint64_t effective_height = 0, evidence_window_start = 0;
     uint64_t fee  = 0;
     uint16_t port = get_rpc_port(argc, argv);
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv")              priv_hex = argv[i + 1];
+        if      (a == "--priv")              priv_raw = argv[i + 1];
+        else if (a == "--priv-from")         priv_src = argv[i + 1];
         else if (a == "--from")              from_domain = argv[i + 1];
         else if (a == "--event")             event_str = argv[i + 1];
         else if (a == "--shard-id")          { if (!arg_u32("submit-merge-event", "--shard-id", argv[i + 1], shard_id)) return 1; }
@@ -6436,9 +6499,15 @@ static int cmd_submit_merge_event(int argc, char** argv) {
         else if (a == "--refugee-region")    refugee_region = argv[i + 1];
         else if (a == "--fee")               { if (!arg_u64("submit-merge-event", "--fee", argv[i + 1], fee)) return 1; }
     }
+    // S-115: --priv-from keeps the sender's private key off the command line.
+    if (!determ::util::resolve_secret("submit-merge-event", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || from_domain.empty() || event_str.empty()) {
         std::cerr << "Usage: determ submit-merge-event "
-                     "--priv <hex> --from <domain> --event {begin|end} "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>) "
+                     "--from <domain> --event {begin|end} "
                      "--shard-id <N> --partner-id <N> "
                      "--effective-height <N> --evidence-window-start <N> "
                      "[--refugee-region <region>] "
@@ -6500,15 +6569,16 @@ static int cmd_submit_merge_event(int argc, char** argv) {
 // Determ identity. service_pubkey is generated separately (e.g., via
 // libsodium box-keypair-gen) and provided here in hex.
 static int cmd_submit_dapp_register(int argc, char** argv) {
-    std::string priv_hex, from_domain, service_pubkey_hex, endpoint_url,
-                topics_csv, metadata_hex;
+    std::string priv_hex, priv_raw, priv_src, from_domain, service_pubkey_hex,
+                endpoint_url, topics_csv, metadata_hex;
     uint8_t retention = 0;
     bool deactivate = false;
     uint64_t fee  = 0;
     uint16_t port = get_rpc_port(argc, argv);
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv")            priv_hex = argv[i + 1];
+        if      (a == "--priv")            priv_raw = argv[i + 1];
+        else if (a == "--priv-from")       priv_src = argv[i + 1];
         else if (a == "--from")            from_domain = argv[i + 1];
         else if (a == "--service-pubkey")  service_pubkey_hex = argv[i + 1];
         else if (a == "--endpoint-url")    endpoint_url = argv[i + 1];
@@ -6521,9 +6591,16 @@ static int cmd_submit_dapp_register(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         if (std::string(argv[i]) == "--deactivate") deactivate = true;
     }
+    // S-115: --priv-from keeps the owner's private key off the command line.
+    if (!determ::util::resolve_secret("submit-dapp-register", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || from_domain.empty() ||
         (!deactivate && (service_pubkey_hex.empty() || endpoint_url.empty()))) {
-        std::cerr << "Usage: determ submit-dapp-register --priv <hex> --from <domain>\n"
+        std::cerr << "Usage: determ submit-dapp-register "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>)"
+                     " --from <domain>\n"
                      "  Create/update: --service-pubkey <64hex> --endpoint-url <url>\n"
                      "                 [--topics t1,t2,t3] [--retention 0|1]\n"
                      "                 [--metadata-hex <hex>]\n"
@@ -6629,12 +6706,13 @@ static int cmd_submit_dapp_register(int argc, char** argv) {
 // --to <dapp-domain> --topic <topic> --payload-hex <hex>
 // Optional --amount for atomic payment.
 static int cmd_submit_dapp_call(int argc, char** argv) {
-    std::string priv_hex, from_domain, to_domain, topic, payload_hex;
+    std::string priv_hex, priv_raw, priv_src, from_domain, to_domain, topic, payload_hex;
     uint64_t amount = 0, fee = 0;
     uint16_t port = get_rpc_port(argc, argv);
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
-        if      (a == "--priv")        priv_hex = argv[i + 1];
+        if      (a == "--priv")        priv_raw = argv[i + 1];
+        else if (a == "--priv-from")   priv_src = argv[i + 1];
         else if (a == "--from")        from_domain = argv[i + 1];
         else if (a == "--to")          to_domain = argv[i + 1];
         else if (a == "--topic")       topic = argv[i + 1];
@@ -6642,8 +6720,15 @@ static int cmd_submit_dapp_call(int argc, char** argv) {
         else if (a == "--amount")      { if (!arg_u64("submit-dapp-call", "--amount", argv[i + 1], amount)) return 1; }
         else if (a == "--fee")         { if (!arg_u64("submit-dapp-call", "--fee", argv[i + 1], fee)) return 1; }
     }
+    // S-115: --priv-from keeps the caller's private key off the command line.
+    if (!determ::util::resolve_secret("submit-dapp-call", "--priv", "--priv-from",
+                                      priv_raw, priv_src,
+                                      determ::util::PRIVATE_KEY, priv_hex))
+        return 1;
     if (priv_hex.empty() || from_domain.empty() || to_domain.empty()) {
-        std::cerr << "Usage: determ submit-dapp-call --priv <hex> --from <domain>\n"
+        std::cerr << "Usage: determ submit-dapp-call "
+                     "(--priv <hex> | --priv-from <file:path|env:NAME|prompt>)"
+                     " --from <domain>\n"
                      "  --to <dapp-domain> [--topic <T>] [--payload-hex <hex>]\n"
                      "  [--amount <N>] [--fee <N>] [--rpc-port <P>]\n";
         return 1;
