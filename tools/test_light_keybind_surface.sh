@@ -150,9 +150,14 @@ echo "=== F-6 key-bind surface guard (every state_proof consumer key-binds) ==="
 present=0
 for f in $FILES; do [ -f "$f" ] && present=1; done
 if [ "$present" = "0" ]; then
-  echo "  SKIP: light/ sources absent — nothing to guard (source-light checkout)."
-  echo "  PASS: test_light_keybind_surface (SKIP — targets absent)"
-  exit 0
+  # FAIL CLOSED (2026-09-18). This bail-out printed a terminal PASS: marker and
+  # exited 0, so tools/run_all.sh — and ci_local, which runs this as one of its
+  # 16 doc guards — scored it GREEN having read no source at all. The files it
+  # guards are TRACKED; their absence is a broken checkout, not a platform this
+  # guard declines on, and a guard whose target vanished has not verified
+  # anything. See THE SKIP CONVENTION in tools/common.sh.
+  echo "  FAIL: test_light_keybind_surface — none of the guarded sources is present ($FILES); a guard with no target cannot report green"
+  exit 1
 fi
 
 # Aggregate the scan across all files.

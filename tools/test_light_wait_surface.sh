@@ -227,9 +227,11 @@ fi
 echo "=== S-042 determ-light --wait completeness guard (static; $TARGET) ==="
 
 if [ ! -f "$TARGET" ]; then
-  echo "  SKIP: $TARGET not present — nothing to guard (source-light checkout)."
-  echo "  PASS: test_light_wait_surface (SKIP — target absent)"
-  exit 0
+  # FAIL CLOSED (2026-09-18) — see tools/test_light_keybind_surface.sh.
+  # $TARGET is tracked; its absence is a broken checkout, not an environment
+  # this guard declines on.
+  echo "  FAIL: test_light_wait_surface — $TARGET is absent; a guard with no target cannot report green"
+  exit 1
 fi
 
 check_invariants "$TARGET"

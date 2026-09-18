@@ -68,9 +68,11 @@ no()  { echo "  FAIL: $1" >&2; fail=$((fail+1)); }
 skp() { echo "  SKIP: $1"; skip=$((skip+1)); }
 
 if [ ! -f "$TARGET" ]; then
-    echo "  SKIP: $TARGET absent — nothing to contract (source-light checkout)."
-    echo "  PASS: test_light_negative_footing (SKIP — target absent)"
-    exit 0
+    # FAIL CLOSED (2026-09-18) — see tools/test_light_keybind_surface.sh.
+    # $TARGET is tracked; its absence is a broken checkout, not an environment
+    # this contract declines on.
+    echo "  FAIL: test_light_negative_footing — $TARGET is absent; a source contract with no source cannot report green"
+    exit 1
 fi
 
 echo "=== F-2 negative_footing source contract ($TARGET) ==="
@@ -177,7 +179,13 @@ skp "live negative_footing leg (needs a cluster: tx missing-tx + unstake locked=
 echo
 echo "=== Test summary ==="
 echo "  $pass pass / $fail fail / $skip skip"
-if [ "$fail" = "0" ]; then
+# The floor (wave-doctrine lesson 15): `fail == 0` is not a verdict. The live
+# leg always declines here, so without this a file whose census section stopped
+# matching would report 0 pass / 0 fail / 1 skip and print PASS.
+if [ "$pass" -eq 0 ]; then
+    echo "  FAIL: test_light_negative_footing — every section declined; nothing was asserted"
+    exit 1
+elif [ "$fail" = "0" ]; then
     echo "  PASS: test_light_negative_footing (F-2 source contract; live leg is a CI leg)"
     exit 0
 else

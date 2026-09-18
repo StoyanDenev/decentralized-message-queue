@@ -63,9 +63,12 @@ bad() { echo "  bad: $1" >&2; VIOLATIONS=$((VIOLATIONS + 1)); }
 echo "=== LSP-7 resume head-monotonicity guard (anchored_head gates) ==="
 
 if [ ! -f "$SRC" ]; then
-  echo "  SKIP: $SRC absent — nothing to guard (source-light checkout)."
-  echo "  PASS: test_light_resume_monotonicity_guard (SKIP — target absent)"
-  exit 0
+  # FAIL CLOSED (2026-09-18) — see tools/test_light_keybind_surface.sh for the
+  # reasoning. $SRC is tracked; its absence is a broken checkout, and this
+  # wrapper is one of ci_local's 16 doc guards, so a vacuous PASS here was a
+  # hole in the verdict itself.
+  echo "  FAIL: test_light_resume_monotonicity_guard — $SRC is absent; a guard with no target cannot report green"
+  exit 1
 fi
 
 # extract_anchored_head <file> — the anchored_head function body (definition

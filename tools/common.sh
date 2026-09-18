@@ -206,6 +206,55 @@ DETERM_CRYPTOTEST="$(_dt_abs "$DETERM_CRYPTOTEST")"
 
 export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT DETERM_CRYPTOTEST
 
+# ── THE SKIP CONVENTION (repo-wide, 2026-09-18) ───────────────────────────────
+# Read this before writing a wrapper that can decline a check.
+#
+# A wrapper DECLINES when it cannot run a check here — no strace, no ptrace
+# permission, no C compiler, a POSIX-only assertion on Windows, an optional
+# binary that was not built. The rule, which is wave-doctrine lesson 15:
+#
+#   A SKIP MUST NOT BANK A PASS, and `fail_count == 0` IS NOT A VERDICT.
+#
+# The repo carried three mutually incompatible spellings of this on
+# 2026-09-17 — increment pass_count on skip (test_wallet_shamir_rotate §28,
+# test_wallet_cold_sign §20), skip without incrementing anything
+# (test_light_outbox §C), and print PASS: and exit 0 having asserted nothing
+# (test_wallet_out_perms, since fixed) — so "N pass" did not mean the same
+# thing in two adjacent files and a reader could not tell a checked assertion
+# from a declined one. This is the one spelling. Use it:
+#
+#   pass_count=0; fail_count=0; skip_count=0
+#   skip() { echo "  SKIP: $1"; skip_count=$((skip_count + 1)); }
+#   ...
+#   [ -x "$SOME_BIN" ] || { echo "  FAIL: <name> — binary absent"; exit 1; }
+#   ...
+#   echo "  $pass_count pass / $fail_count fail / $skip_count skip"
+#   if   [ "$pass_count" -eq 0 ]; then
+#       echo "  FAIL: <name> — every section declined; nothing was asserted"; exit 1
+#   elif [ "$fail_count" -eq 0 ]; then
+#       echo "  PASS: <name>"; exit 0
+#   else
+#       echo "  FAIL: <name>"; exit 1
+#   fi
+#
+# Three parts, each load-bearing:
+#   1. the SKIP: line NAMES THE CAUSE, so a green log says what was not run;
+#   2. skip_count is reported in the summary NEXT TO pass_count, so the two are
+#      never confused, and no skip touches pass_count;
+#   3. `pass_count -eq 0` is a HARD FAIL — the floor. Without it a box where
+#      every section declines reports 0 pass / 0 fail and prints PASS.
+# A MISSING BINARY that the wrapper needs is a FAILURE, not a skip: fail closed.
+#
+# tools/run_all.sh counts WRAPPERS, not assertions, so its skip column is
+# derived from the SKIP: markers a wrapper printed; it is additive and changes
+# no verdict. `dt_skip` below is the shared implementation — a wrapper may keep
+# its own `skip()` (eight do) as long as it is this shape.
+skip_count=${skip_count:-0}
+dt_skip() {  # dt_skip "<cause>" — print a named SKIP and count it; bank no pass
+    echo "  SKIP: $1"
+    skip_count=$((skip_count + 1))
+}
+
 # ── macOS/BSD portability shim ────────────────────────────────────────────────
 # Stock macOS ships no `timeout(1)` (GNU coreutils). Homebrew coreutils
 # provides it as `gtimeout`; map it so tests can call `timeout` uniformly.

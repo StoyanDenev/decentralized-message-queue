@@ -74,6 +74,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 pass_count=0
 fail_count=0
+skip_count=0
 assert_eq() {
   if [ "$1" = "$2" ]; then echo "  PASS: $3"; pass_count=$((pass_count + 1))
   else echo "  FAIL: $3"; echo "       expected: $2"; echo "       got:      $1"; fail_count=$((fail_count + 1)); fi
@@ -280,7 +281,12 @@ case "$UNAME" in
         assert_eq "$MODE" "600" "file mode is 0600"
         ;;
     *)
-        echo "  SKIP: 0600 check (uname=$UNAME; POSIX-only assertion)"; pass_count=$((pass_count + 1))
+        # THE SKIP CONVENTION (tools/common.sh): a declined check is counted
+        # as a SKIP, never as a pass. Before 2026-09-18 this arm incremented
+        # pass_count, so on Windows the summary claimed an assertion that was
+        # never made and "N pass" meant something different here than in the
+        # adjacent test_light_outbox.sh.
+        echo "  SKIP: 0600 check (uname=$UNAME; POSIX-only assertion)"; skip_count=$((skip_count + 1))
         ;;
 esac
 
@@ -416,8 +422,13 @@ fi
 
 echo
 echo "=== Test summary ==="
-echo "  $pass_count pass / $fail_count fail"
-if [ "$fail_count" = "0" ]; then
+echo "  $pass_count pass / $fail_count fail / $skip_count skip"
+# The floor (wave-doctrine lesson 15): fail_count == 0 is not a verdict — a
+# run in which every section declined reports 0 pass / 0 fail and would
+# otherwise print PASS having asserted nothing.
+if [ "$pass_count" -eq 0 ]; then
+    echo "  FAIL: test_wallet_cold_sign — every section declined; nothing was asserted"; exit 1
+elif [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet cold-sign"; exit 0
 else
     echo "  FAIL: test_wallet_cold_sign"; exit 1
