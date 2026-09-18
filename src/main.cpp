@@ -63,6 +63,12 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
+// The ONE restricted-write primitive (S-109 follow-up, 2026-09-18): the
+// create-0600 + fchmod-before-the-first-byte + EINTR/short-write/no-spin +
+// checked-close + leave-nothing-behind mechanism that write_account_file_0600
+// below, wallet/main.cpp::write_bytes_file_0600 and
+// src/crypto/keys.cpp::save_node_key each used to hand-roll.
+#include <determ/util/restricted_write.hpp>
 #include <determ/json/json.hpp>                // minix JSON phase 2 inc.1: determ::json (test-determ-json dual-oracle)
 #include <determ/net/rate_limiter.hpp>
 // minix: LoopTimer works over ANY EventLoop (native or virtual) — both
@@ -121,8 +127,16 @@
 #ifndef _WIN32
 #include <sys/stat.h>  // test-node-key-perms (S-091): ::stat / ::chmod / ::umask
 #include <unistd.h>    // test-node-key-perms (S-091): ::symlink / ::getpid
-#include <fcntl.h>     // S-111: ::open + O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW
-#include <cerrno>      // S-111: errno on the account-keyfile write path
+// The account-keyfile write path's own ::open / errno moved into
+// include/determ/util/restricted_write.hpp with the 2026-09-18 extraction; these
+// two are kept because this file's test-* blocks and its POSIX helpers are
+// compiled against the same declarations.
+#include <fcntl.h>
+#include <cerrno>
+#include <sys/resource.h>  // test-account-create-perms: RLIMIT_FSIZE, to make a
+                           // REAL ::write failure for the shared primitive's
+                           // leave-nothing-behind rule
+#include <csignal>         // test-account-create-perms: ignore SIGXFSZ across it
 #endif
 
 namespace fs = std::filesystem;
@@ -5910,71 +5924,68 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
 // primitive in include/determ/ is the remedy, migrating all three spans three
 // binaries and two other tracks' files in this wave, and it is NOT this
 // increment. This copy takes the wallet's shape, which is the newer of the two.
+//
+// DONE 2026-09-18, the increment after that one: the mechanism above now lives
+// exactly once, in `determ::util::write_restricted_0600`
+// (include/determ/util/restricted_write.hpp), and all three sites call it. The
+// open flags, the create mode, the fchmod-on-the-descriptor-before-the-first-
+// byte, the EINTR / short-write / no-spin-on-`write()==0` loop, the checked
+// close and the removal of a truncated file on a failed write or close are the
+// primitive's; every diagnostic string, the decision to WARN AND CONTINUE
+// rather than refuse, the trailing permissions call and its checked error_code,
+// and the Windows TEXT mode that keeps this command's output byte-identical
+// remain this site's and are unchanged.
 static bool write_account_file_0600(const std::string& out_path,
                                     const std::string& data) {
-#ifdef _WIN32
-    std::ofstream f(out_path);
-    if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return false; }
-    f << data;
-    f.close();
-    if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return false; }
-#else
-    const int fd = ::open(out_path.c_str(),
-                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
-                          0600);
-    if (fd < 0) {
-        std::cerr << "Cannot write " << out_path << ": "
-                  << std::strerror(errno) << "\n";
-        return false;
-    }
-    // On the descriptor, before the first byte. This is the call that closes
-    // the window on the OVERWRITE path, where the create mode above is ignored.
-    if (::fchmod(fd, 0600) != 0) {
+    determ::util::RestrictedWriteOptions opts;
+    // Warn and CONTINUE on a failed pre-write narrowing: refusing is an
+    // exit-code change on a shipped command, it is separable, and it is named
+    // as the S-111 remainder (2026-09-18 DECISION-LOG entry). The node-key
+    // writer passes Refuse; that difference is deliberate and stays a parameter.
+    opts.on_narrow_failure = determ::util::OnNarrowFailure::Continue;
+    // Keep the trailing belt-and-braces narrowing and check its error_code:
+    // this is the one site in the tree that always did, and wallet/main.cpp
+    // copied its diagnostic from here.
+    opts.final_narrow = true;
+    // Windows: TEXT mode, so `account create`'s output there stays byte-
+    // identical, CRLF translation included. The sibling wallet increment
+    // switched to binary and changed its Windows bytes knowingly; that is
+    // deliberately not repeated here.
+    opts.windows_binary = false;
+    const auto res = determ::util::write_restricted_0600(
+        out_path, data.data(), data.size(), opts);
+
+    // Emitted FIRST, where it was emitted before — ahead of the write — so on a
+    // failed write the two stderr lines keep the order they always had.
+    if (res.narrow_failed) {
         std::cerr << "Warning: could not set 0600 permissions on "
                   << out_path << " before writing it: "
-                  << std::strerror(errno) << "\n";
+                  << std::strerror(res.narrow_err) << "\n";
         // and continue: the exit code of this command does not change.
     }
-    for (size_t off = 0; off < data.size(); ) {
-        const ssize_t n = ::write(fd, data.data() + off, data.size() - off);
-        if (n < 0 && errno == EINTR) continue;
-        // n == 0 for a positive count cannot happen on a regular file, but it
-        // must not become a spin: fail the write instead of looping forever
-        // (wallet/main.cpp's sibling writer guards this; keys.cpp's does not).
-        if (n <= 0) {
-            std::cerr << "Cannot write " << out_path << ": "
-                      << (n < 0 ? std::strerror(errno) : "wrote 0 bytes") << "\n";
-            ::close(fd);
-            // O_TRUNC has already run, so what is on disk is a FRAGMENT of a
-            // private key under a name an operator reads as a provisioned
-            // account. Remove it: the exit code is 1 either way, as it was
-            // before, and the old ofstream left the fragment behind.
-            ::unlink(out_path.c_str());
-            return false;
-        }
-        off += static_cast<size_t>(n);
-    }
-    if (::close(fd) != 0) {
-        std::cerr << "Cannot write " << out_path << ": "
-                  << std::strerror(errno) << "\n";
-        ::unlink(out_path.c_str());
+    if (!res.ok()) {
+        // The same sentence this site always rendered, on every failure branch:
+        // the open, a failed or zero-length write, and a failed close. `res.err`
+        // is 0 on the Windows arm, which had no errno to print there either.
+        const std::string why =
+            res.wrote_zero ? std::string(": wrote 0 bytes")
+                           : (res.err ? std::string(": ") + std::strerror(res.err)
+                                      : std::string());
+        std::cerr << "Cannot write " << out_path << why << "\n";
+        // O_TRUNC has already run, so what was on disk is a FRAGMENT of a
+        // private key under a name an operator reads as a provisioned account.
+        // The primitive has removed it; the exit code is 1 either way, as it
+        // was before, and the pre-2026-09-18 ofstream left the fragment behind.
         return false;
     }
-#endif
-    // 0600 owner-only perms, belt and braces: the POSIX branch above already
-    // created and fchmod'd the file at 0600 before the first byte, and on
-    // Windows this call is the only narrowing there is (best-effort — the NTFS
-    // ACL inherits from the parent directory). The error_code check and both
-    // lines of the diagnostic are the ones this site already had.
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    if (perm_ec) {
+    // 0600 owner-only perms, belt and braces: the POSIX arm already created and
+    // fchmod'd the file at 0600 before the first byte, and on Windows this call
+    // is the only narrowing there is (best-effort — the NTFS ACL inherits from
+    // the parent directory). The primitive makes the call; the error_code check
+    // and both lines of the diagnostic are the ones this site already had.
+    if (res.final_ec) {
         std::cerr << "Warning: could not set 0600 permissions on "
-                  << out_path << ": " << perm_ec.message() << "\n";
+                  << out_path << ": " << res.final_ec.message() << "\n";
         std::cerr << "         Verify manually (chmod 0600 / icacls).\n";
     }
     return true;
@@ -23202,6 +23213,67 @@ int main(int argc, char** argv) {
         //    makes every chmod flavour return EPERM and asserts both that the
         //    harm is real (the file is left 0644) and that both named
         //    diagnostics — the pre-write one and the perm_ec one — are printed.
+
+        // 7. The SHARED PRIMITIVE's write-failure path (S-109 follow-up,
+        //    2026-09-18): a write that cannot complete leaves NOTHING behind.
+        //
+        //    This is the one behaviour the extraction into
+        //    include/determ/util/restricted_write.hpp CHANGED, and it is here
+        //    because the change is to an error path in shipped code. Before it,
+        //    wallet/main.cpp::write_bytes_file_0600 was the only one of the
+        //    three writers that did not `::unlink` after a failed write or
+        //    close, so a TRUNCATED key container survived under the final name
+        //    — a fragment no decoder will accept, under a name the operator
+        //    reads as their keyfile. Both siblings removed it and said so at
+        //    the locus; the wave doctrine's "never leave a file behind on a
+        //    refusal path" is binding on all three; and the independent review
+        //    of 2026-09-18 reached the same verdict. The rule now lives once,
+        //    in the primitive, so an assertion here is an assertion about all
+        //    three call sites: one header, one `::unlink`, three binaries.
+        //
+        //    The failure is REAL, not injected: RLIMIT_FSIZE is lowered below
+        //    the payload size, so the kernel fails the write with EFBIG. A soft
+        //    limit can always be lowered, SIGXFSZ is ignored across the window
+        //    (its default disposition would kill this process), nothing is
+        //    printed while the limit is in force — stdout may be a regular file
+        //    and would hit the same ceiling — and the limit is restored
+        //    immediately afterwards. No test-only code on the shipped write
+        //    path, and the primitive is called directly because that is the
+        //    layer where this rule now lives.
+        {
+            const fs::path frag = T / "fragment.bin";
+            const std::vector<unsigned char> payload(8192, 'k');
+            determ::util::RestrictedWriteResult wr;
+            bool limited = false;
+            struct rlimit saved_fsize {};
+            if (::getrlimit(RLIMIT_FSIZE, &saved_fsize) == 0) {
+                struct rlimit small = saved_fsize;
+                small.rlim_cur = 64;
+                void (*prev_xfsz)(int) = std::signal(SIGXFSZ, SIG_IGN);
+                if (::setrlimit(RLIMIT_FSIZE, &small) == 0) {
+                    limited = true;
+                    wr = determ::util::write_restricted_0600(
+                        frag.string(), payload.data(), payload.size());
+                    ::setrlimit(RLIMIT_FSIZE, &saved_fsize);
+                }
+                std::signal(SIGXFSZ, prev_xfsz);
+            }
+            check(limited,
+                  "control — RLIMIT_FSIZE was lowered, so a REAL ::write failure was produced (not injected)");
+            check(limited &&
+                      wr.status == determ::util::RestrictedWriteStatus::WriteFailed,
+                  "the shared primitive reports a write it could not complete as a write failure");
+            check(limited && !fs::exists(frag),
+                  "a failed write leaves NOTHING behind: the truncated container is removed, not published under the final name");
+            // Control, and it is what stops the assertion above from being
+            // vacuous: the identical call with no limit DOES create the file,
+            // so "absent" above is the removal and not a failed open.
+            const fs::path frag_ok = T / "fragment_ok.bin";
+            const auto wr_ok = determ::util::write_restricted_0600(
+                frag_ok.string(), payload.data(), payload.size());
+            check(wr_ok.ok() && fs::exists(frag_ok) && mode_of(frag_ok) == 0600,
+                  "control — the same call without the limit writes the file and leaves it 0600 (so the absence above is the removal, not a failed open)");
+        }
 
         fs::remove_all(T, rmec);
         ::umask(saved_umask);

@@ -39,6 +39,12 @@
 #include <determ/crypto/ed25519/ed25519.h>
 #include <determ/crypto/x25519/x25519.h>
 #include <determ/crypto/secure_zero.h>
+// The ONE restricted-write primitive (S-109 follow-up, 2026-09-18): the
+// create-0600 + fchmod-before-the-first-byte + EINTR/short-write/no-spin +
+// checked-close + remove-nothing-behind mechanism that write_bytes_file_0600
+// below, src/crypto/keys.cpp::save_node_key and
+// src/main.cpp::write_account_file_0600 each used to hand-roll.
+#include <determ/util/restricted_write.hpp>
 namespace {
 inline bool init_libsodium() { return true; }   // C99 needs no global init
 constexpr size_t crypto_sign_PUBLICKEYBYTES = 32;
@@ -235,7 +241,8 @@ std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
 // all observe the final 0600 and report a correct file. Eight of this helper's
 // ten callers write plaintext key material.
 //
-// The fix needs BOTH calls below, and neither alone is sufficient:
+// The fix needs BOTH calls, and neither alone is sufficient (they now live in
+// the shared primitive — see the note above the function):
 //   * ::open(..., O_CREAT|O_TRUNC, 0600) applies its mode ONLY when the file is
 //     created. Measured: an existing 0644 file reopened that way and written
 //     STAYS 0644 until something chmods it — so the create mode alone leaves
@@ -273,12 +280,30 @@ std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
 // the reason in THAT record's summary entry and keep going — a stderr-only
 // diagnostic would lose the per-record attribution at N=50k. It is the ONLY
 // behavioural knob: the open / fchmod / write / narrow sequence and every
-// guarantee above are identical either way, so this file still holds exactly ONE
-// restricted-write primitive and no site re-implements it. nullptr (the default,
+// guarantee above are identical either way, so this file still routes every
+// output through exactly ONE writer and no site re-implements it — and since
+// 2026-09-18 that writer is itself one call into the one shared primitive the
+// whole tree uses. nullptr (the default,
 // and what the other eleven callers pass) leaves their behaviour byte-for-byte
 // unchanged. The P-2 WARNING goes to stderr whatever err_out says: it describes a
 // file that WAS written and that the operator has to go and fix by hand, so it
 // must not be swallowed into a summary field nobody reads.
+//
+// EXTRACTED 2026-09-18 (the S-109 follow-up this file's own comment named). The
+// open / fchmod / write / close MECHANISM described above is no longer written
+// here: it is `determ::util::write_restricted_0600`
+// (include/determ/util/restricted_write.hpp), shared with
+// src/crypto/keys.cpp::save_node_key and src/main.cpp::write_account_file_0600
+// — the three hand-rolled copies that had already drifted twice in two days.
+// Every guarantee above is unchanged and so is every diagnostic string. What
+// this function still owns is exactly this site's POLICY: binary mode on
+// Windows, a failed pre-write narrowing warns and the write CONTINUES, the
+// trailing permissions call is kept and its error_code checked, and the
+// reporting shape (stderr / `err_out` / `perms_narrowed_out`). ONE behaviour
+// changed, argued in the DECISION-LOG entry and gated: a failed write or close
+// now REMOVES the truncated file instead of publishing a fragment of a key
+// container under the final name — the rule both siblings already state at
+// their locus and this one alone omitted.
 bool write_bytes_file_0600(const std::string& cmd_label,
                            const std::string& out_path,
                            const std::vector<uint8_t>& bytes,
@@ -291,62 +316,42 @@ bool write_bytes_file_0600(const std::string& cmd_label,
         else         std::cerr << cmd_label << ": " << what << "\n";
         return false;
     };
-#ifdef _WIN32
-    std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        return fail("cannot open output file for write: " + out_path);
-    }
-    if (!bytes.empty())
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-    f.close();
-    if (!f) {
-        return fail("write failed: " + out_path);
-    }
-#else
-    const int fd = ::open(out_path.c_str(),
-                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
-                          0600);
-    if (fd < 0) {
-        return fail("cannot open output file for write: " + out_path + ": "
-                    + std::strerror(errno));
-    }
-    // Before the first write, on the descriptor — this is the call that closes
-    // the window on the overwrite path, where the create mode above is ignored.
-    if (::fchmod(fd, 0600) != 0) {
+
+    determ::util::RestrictedWriteOptions wopts;
+    // The wallet's containers are BINARY (DAK1/DAB1/DNK1/DSS1/DBE1) and this
+    // site switched to a binary stream on Windows knowingly, changing its
+    // Windows bytes there; the two src/ sites deliberately did not. On POSIX
+    // the two modes are the same stream.
+    wopts.windows_binary = true;
+    const auto res = determ::util::write_restricted_0600(
+        out_path, bytes.data(), bytes.size(), wopts);
+
+    // Emitted FIRST, where it was emitted before — ahead of the write — so on a
+    // failed write the two stderr lines keep the order they always had.
+    if (res.narrow_failed) {
         std::cerr << cmd_label << ": Warning: could not set 0600 permissions on "
                   << out_path << " before writing it: "
-                  << std::strerror(errno) << "\n";
+                  << std::strerror(res.narrow_err) << "\n";
         narrowed = false;
     }
-    for (size_t off = 0; off < bytes.size(); ) {
-        const ssize_t n = ::write(fd, bytes.data() + off, bytes.size() - off);
-        if (n < 0 && errno == EINTR) continue;
-        // n == 0 for a positive count cannot happen on a regular file, but it
-        // must not become a spin: fail the write instead of looping forever.
-        if (n <= 0) {
-            const std::string why = (n < 0 ? std::strerror(errno) : "wrote 0 bytes");
-            ::close(fd);
-            return fail("write failed: " + out_path + ": " + why);
-        }
-        off += static_cast<size_t>(n);
+    if (!res.ok()) {
+        // The same two sentences this site always rendered. `res.err` is 0 on
+        // the Windows arm, which had no errno to print there either.
+        const std::string why =
+            res.wrote_zero ? std::string(": wrote 0 bytes")
+                           : (res.err ? std::string(": ") + std::strerror(res.err)
+                                      : std::string());
+        if (res.status == determ::util::RestrictedWriteStatus::OpenFailed)
+            return fail("cannot open output file for write: " + out_path + why);
+        return fail("write failed: " + out_path + why);
     }
-    if (::close(fd) != 0) {
-        return fail("write failed: " + out_path + ": " + std::strerror(errno));
-    }
-#endif
-    // 0600 owner-only perms, belt and braces: the POSIX branch above already
-    // created + fchmod'd the file at 0600, and on Windows this is the only
-    // narrowing there is (best-effort — NTFS ACL inherits from the parent).
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    if (perm_ec) {
+    // 0600 owner-only perms, belt and braces: the POSIX arm already created +
+    // fchmod'd the file at 0600, and on Windows this is the only narrowing
+    // there is (best-effort — NTFS ACL inherits from the parent). The primitive
+    // makes the call; its error_code is CHECKED here, as it has been since P-2.
+    if (res.final_ec) {
         std::cerr << cmd_label << ": Warning: could not set 0600 permissions on "
-                  << out_path << ": " << perm_ec.message() << "\n";
+                  << out_path << ": " << res.final_ec.message() << "\n";
         narrowed = false;
     }
     if (!narrowed)

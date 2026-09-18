@@ -16,6 +16,12 @@
 // forged non-canonical encodings that OpenSSL would tolerate are rejected.
 #include <determ/crypto/keys.hpp>
 #include <determ/util/json_validate.hpp>
+// The ONE restricted-write primitive (S-109 follow-up, 2026-09-18): the
+// create-0600 + fchmod-before-the-first-byte + EINTR/short-write/no-spin +
+// checked-close + leave-nothing-behind mechanism that save_node_key below,
+// wallet/main.cpp::write_bytes_file_0600 and
+// src/main.cpp::write_account_file_0600 each used to hand-roll.
+#include <determ/util/restricted_write.hpp>
 #include <determ/crypto/ed25519/ed25519.h>
 #include <determ/crypto/rng/rng.h>
 #include <nlohmann/json.hpp>
@@ -25,10 +31,10 @@
 #include <cstdlib>
 #include <cstring>
 #ifndef _WIN32
-#  include <fcntl.h>     // S-091: ::open + O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW
-#  include <sys/stat.h>  // S-091: ::fchmod — 0600 on the file, 0700 on the dir
-#  include <unistd.h>    // S-091: ::write, ::close
-#  include <cerrno>
+#  include <fcntl.h>     // S-091: ::open(O_DIRECTORY|O_NOFOLLOW) — the key DIR
+#  include <sys/stat.h>  // S-091: ::fchmod — 0700 on a directory this call made
+#  include <unistd.h>    // S-091: ::close on that directory descriptor
+#  include <cerrno>      // S-091: errno / EPERM on the directory narrowing
 #endif
 
 namespace determ::crypto {
@@ -144,101 +150,95 @@ void save_node_key(const NodeKey& key, const std::string& path) {
         ::close(dfd);
     }
 
-    // Both the create mode and the fchmod are load-bearing and neither implies
-    // the other. Measured 2026-09-17: O_CREAT|O_TRUNC with mode 0600 does NOT
-    // narrow a file that already exists — a rewrite over a 0644 node_key.json
-    // leaves it 0644 — so the create mode alone leaves the window open on every
-    // rewrite; and a ::chmod by PATH after the write is a TOCTOU window plus a
-    // period in which the seed is on disk world-readable. ::fchmod on the
-    // descriptor, before the first write, closes both paths with no window and
-    // nothing to race. O_NOFOLLOW: without it a symlink planted at `path` is
-    // followed, which both redirects the seed into a file of the attacker's
-    // choosing and points the narrowing at the wrong inode. O_CLOEXEC keeps the
-    // descriptor out of any child.
-    const int fd = ::open(path.c_str(),
-                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0)
-        throw std::runtime_error("Cannot write key file: " + path + ": "
-                                 + std::strerror(errno));
-    {
-        int rc;
-        if (inject_fault("fchmod")) { rc = -1; errno = EPERM; }
-        else                        { rc = ::fchmod(fd, 0600); }
-        if (rc != 0) {
-            const int e = errno;
-            ::close(fd);
-            // O_TRUNC has already run, so `path` exists and is EMPTY. Remove it
-            // before throwing: both shipped callers guard keygen with
-            // fs::exists(), so a zero-byte leftover is counted as a provisioned
-            // identity — the next `determ init` reports "Key already exists
-            // (skipping keygen)" and exits 0, and the failure resurfaces at
-            // `determ start` as a JSON parse error naming neither this file nor
-            // the permission problem. Measured 2026-09-17 before this line.
-            ::unlink(path.c_str());
-            // Throw, do not warn. save_node_key already throws on a write
-            // failure, so this is the established shape here; and the choice is
-            // not close. A node identity is written ONCE — both shipped callers
-            // skip keygen when the file exists — and then read on every start for
-            // the life of the deployment, so a stderr warning is seen at most
-            // once, in a provisioning shell that is usually non-interactive, and
-            // never again, while the exposure is permanent. Unlike a wallet
-            // recovery transcript, this file can be REGENERATED at no cost:
-            // refusing costs the operator one re-run after fixing the filesystem,
-            // where continuing costs a world-readable identity that stakes and
-            // signs blocks. The repo already fails closed on the sibling case —
-            // generate_node_key throws when the CSPRNG fails rather than writing
-            // a weak seed. Reachable only at CREATION time, so no provisioned
-            // node can be bricked by it on restart.
-            throw std::runtime_error("Cannot restrict key file " + path + " to 0600: "
-                                     + std::strerror(e)
-                                     + " — refusing to write a node identity seed that"
-                                       " cannot be protected (remove the empty " + path
-                                     + " and retry on a filesystem with POSIX permissions)");
-        }
-    }
-    const char* p = blob.data();
-    size_t left  = blob.size();
-    while (left > 0) {
-        const ssize_t n = ::write(fd, p, left);
-        // n == 0 for a positive count cannot happen on a regular file, but it
-        // must not become a spin: fail the write instead of looping forever.
-        // wallet/main.cpp's sibling writer guards this; this one did not.
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            if (n == 0) errno = EIO;
-            const int e = errno;
-            ::close(fd);
-            ::unlink(path.c_str());      // never leave a partial identity behind
-            throw std::runtime_error("Cannot write key file: " + path + ": "
-                                     + std::strerror(e));
-        }
-        p    += n;
-        left -= static_cast<size_t>(n);
-    }
-    if (::close(fd) != 0) {
-        const int e = errno;
-        ::unlink(path.c_str());          // the contents are not trustworthy
-        throw std::runtime_error("Cannot write key file: " + path + ": "
-                                 + std::strerror(e));
-    }
 #else
-    // Windows: NOTHING here is closed, and it is not papered over. _S_IREAD |
-    // _S_IWRITE on _open drives only FILE_ATTRIBUTE_READONLY — it is not a mode
-    // and grants nobody anything; the file's ACL arrives by inheritance from the
-    // parent directory, and std::filesystem::permissions does not rewrite it
-    // either (docs/proofs/S005PassphraseKeyfile.md F-4 records exactly this for
-    // the wallet's keyfiles: "the actual NTFS ACL after the call is
-    // operator-environment-dependent"). Calling either would look like a fix and
-    // change nothing measurable, so the Windows writer is left byte-for-byte as
-    // it was — including the TEXT-mode ofstream, whose \n -> \r\n translation is
-    // part of the existing on-disk bytes — and the exposure stands: a Windows
-    // operator must set the containing directory's ACL. The gate SKIPs by name
-    // there rather than reporting a pass it did not earn.
-    (void)created_parent;   // the narrowing above is POSIX-only; nothing to do here
-    std::ofstream f(path);
-    if (!f) throw std::runtime_error("Cannot write key file: " + path);
-    f << blob;
+    (void)created_parent;   // the directory narrowing above is POSIX-only
 #endif
+
+    // The file itself goes out through the ONE shared restricted-write
+    // primitive (include/determ/util/restricted_write.hpp), extracted
+    // 2026-09-18 from this function, wallet/main.cpp::write_bytes_file_0600 and
+    // src/main.cpp::write_account_file_0600 — three hand-rolled copies that had
+    // already drifted twice within two days (on `write() == 0`, and on whether
+    // a failed write leaves a truncated key container behind). The primitive
+    // owns the mechanism this function used to spell out here:
+    //
+    //   Both the create mode and the fchmod are load-bearing and neither
+    //   implies the other. Measured 2026-09-17: O_CREAT|O_TRUNC with mode 0600
+    //   does NOT narrow a file that already exists — a rewrite over a 0644
+    //   node_key.json leaves it 0644 — so the create mode alone leaves the
+    //   window open on every rewrite; and a ::chmod by PATH after the write is
+    //   a TOCTOU window plus a period in which the seed is on disk
+    //   world-readable. ::fchmod on the descriptor, before the first write,
+    //   closes both paths with no window and nothing to race. O_NOFOLLOW:
+    //   without it a symlink planted at `path` is followed, which both
+    //   redirects the seed into a file of the attacker's choosing and points
+    //   the narrowing at the wrong inode. O_CLOEXEC keeps the descriptor out of
+    //   any child. A write that fails, or a close that fails, removes the file:
+    //   never leave a partial identity behind, and the contents of a file whose
+    //   close failed are not trustworthy.
+    //
+    // What stays THIS site's policy, and is passed in rather than assumed:
+    determ::util::RestrictedWriteOptions kopts;
+    // Refuse, do not warn. save_node_key already throws on a write failure, so
+    // this is the established shape here; and the choice is not close. A node
+    // identity is written ONCE — both shipped callers skip keygen when the file
+    // exists — and then read on every start for the life of the deployment, so
+    // a stderr warning is seen at most once, in a provisioning shell that is
+    // usually non-interactive, and never again, while the exposure is
+    // permanent. Unlike a wallet recovery transcript, this file can be
+    // REGENERATED at no cost: refusing costs the operator one re-run after
+    // fixing the filesystem, where continuing costs a world-readable identity
+    // that stakes and signs blocks. The repo already fails closed on the
+    // sibling case — generate_node_key throws when the CSPRNG fails rather than
+    // writing a weak seed. Reachable only at CREATION time, so no provisioned
+    // node can be bricked by it on restart. The primitive removes the (empty,
+    // O_TRUNC'd) file before returning, which is what stops a zero-byte
+    // leftover from being counted as a provisioned identity by the callers'
+    // fs::exists() guards.
+    kopts.on_narrow_failure = determ::util::OnNarrowFailure::Refuse;
+    // No trailing std::filesystem::permissions call, exactly as before. On
+    // POSIX the create + fchmod above already did it and a by-path chmod after
+    // close is the TOCTOU shape this function exists not to have; on Windows it
+    // would look like a fix and change nothing measurable (see below).
+    kopts.final_narrow = false;
+    // Windows: TEXT-mode ofstream, whose \n -> \r\n translation is part of the
+    // existing on-disk bytes. NOTHING about the permission window is closed
+    // there and it is not papered over. _S_IREAD | _S_IWRITE on _open drives
+    // only FILE_ATTRIBUTE_READONLY — it is not a mode and grants nobody
+    // anything; the file's ACL arrives by inheritance from the parent
+    // directory, and std::filesystem::permissions does not rewrite it either
+    // (docs/proofs/S005PassphraseKeyfile.md F-4 records exactly this for the
+    // wallet's keyfiles: "the actual NTFS ACL after the call is
+    // operator-environment-dependent"). The exposure stands: a Windows operator
+    // must set the containing directory's ACL. The gate SKIPs by name there
+    // rather than reporting a pass it did not earn.
+    kopts.windows_binary = false;
+#ifndef _WIN32
+    // Test-only, unchanged in intent and in reachability: see inject_fault
+    // above for why a failed narrowing cannot be produced from outside this
+    // process on the platforms this is gated on. The getenv and the decision to
+    // honour it stay here, where they were justified; the primitive only
+    // carries the errno in.
+    if (inject_fault("fchmod")) kopts.simulate_narrow_failure_errno = EPERM;
+#endif
+
+    const auto res = determ::util::write_restricted_0600(
+        path, blob.data(), blob.size(), kopts);
+    if (res.status == determ::util::RestrictedWriteStatus::NarrowRefused) {
+        throw std::runtime_error("Cannot restrict key file " + path + " to 0600: "
+                                 + std::strerror(res.err)
+                                 + " — refusing to write a node identity seed that"
+                                   " cannot be protected (remove the empty " + path
+                                 + " and retry on a filesystem with POSIX permissions)");
+    }
+    if (!res.ok()) {
+        // Every other failure — the open, a short/failed write, a failed close
+        // — kept the wording this function has always used. `res.err` is 0 on
+        // the Windows arm, which had no errno to print there either.
+        throw std::runtime_error("Cannot write key file: " + path
+                                 + (res.err ? ": " + std::string(std::strerror(res.err))
+                                            : std::string()));
+    }
 }
 
 NodeKey load_node_key(const std::string& path) {
