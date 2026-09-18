@@ -30,6 +30,11 @@
 # DETERM_WALLET_BIN / DETERM_LIGHT_BIN overrides tools/common.sh honors.
 #
 # Exit: 0 = build + FAST + guards all green; non-zero otherwise.
+# The green line reports TWO figures read back out of the suite's own summary:
+# how many FAST wrappers asserted, and how many skipped ENTIRELY because the
+# property they gate does not exist on this platform (PLATFORM-SKIP — see
+# tools/run_all.sh). On Linux and macOS the second is 0; on Windows it is not,
+# and the line says so rather than reporting the same green for both.
 # GitHub Actions runs the same content (.github/workflows/ci.yml).
 set -u
 cd "$(dirname "$0")/.."
@@ -289,7 +294,27 @@ if DETERM_DSSO_BIN=$(find_bin determ-dsso); then export DETERM_DSSO_BIN; fi
 echo "=== ci_local: binaries: $DETERM_BIN | $DETERM_WALLET_BIN | $DETERM_LIGHT_BIN | $DETERM_CRYPTOTEST_BIN | ${DETERM_DSF_BIN:-<dsf: not built>} | ${DETERM_D5RP_BIN:-<d5rp: not built>} | ${DETERM_DSSO_BIN:-<dsso: not built>} ==="
 
 echo "=== ci_local: FAST=1 suite ==="
-FAST=1 QUIET=1 bash tools/run_all.sh || { echo "FAIL: ci-local FAST suite RED"; exit 1; }
+# The suite's own summary is TEE'd to a file and the green line at the bottom is
+# built from the figures IT reported, never from a number typed here. Since
+# 2026-09-18 a wrapper has a third outcome — PLATFORM-SKIP, meaning it skipped
+# ENTIRELY because the property it gates does not exist on this platform (see
+# THE WRAPPER-LEVEL SKIP in tools/run_all.sh). A run in which two wrappers
+# skipped entirely is NOT the same run as one in which every wrapper asserted,
+# and a final line that printed the same words for both would be exactly the
+# tidier-summary-that-hides-the-hole this repo keeps finding.
+FAST_LOG="$BUILD_DIR/ci_local_fast.log"
+FAST=1 QUIET=1 bash tools/run_all.sh 2>&1 | tee "$FAST_LOG"
+FAST_RC=${PIPESTATUS[0]}
+[ "$FAST_RC" -eq 0 ] || { echo "FAIL: ci-local FAST suite RED"; exit 1; }
+# Read the columns back out of the suite's own summary. Fail closed if they are
+# not there: a verdict line that invents its own figures is worse than none.
+FAST_PASS=$(sed -n 's/^PASS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$FAST_LOG" | head -1)
+FAST_PSKIP=$(sed -n 's/^PLATFORM-SKIP:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$FAST_LOG" | head -1)
+if [ -z "$FAST_PASS" ] || [ -z "$FAST_PSKIP" ]; then
+  echo "FAIL: ci-local could not read the FAST suite's PASS / PLATFORM-SKIP columns from $FAST_LOG"
+  echo "      (tools/run_all.sh's summary shape changed — re-pin this, do not guess the figures)"
+  exit 1
+fi
 
 echo "=== ci_local: offline doc-coherence guards ==="
 GUARDS_OK=1
@@ -316,4 +341,11 @@ done
 [ "$GUARDS_OK" -eq 1 ] || { echo "FAIL: ci-local doc guards RED"; exit 1; }
 
 echo ""
-echo "PASS: ci-local build + FAST + guards green on $(uname -sm)"
+# Named BEFORE the verdict line, and unconditionally absent when the figure is
+# zero — one terminal marker, carrying both figures, never a per-arm wording.
+if [ "$FAST_PSKIP" -gt 0 ]; then
+  echo "NOTE: $FAST_PSKIP FAST wrapper(s) skipped ENTIRELY on $(uname -s) — the properties they"
+  echo "      gate do not exist here and have NO coverage on this platform. They are named in"
+  echo "      the suite summary above. This run asserted $FAST_PASS wrappers, not $((FAST_PASS + FAST_PSKIP))."
+fi
+echo "PASS: ci-local build + FAST ($FAST_PASS wrappers asserted, $FAST_PSKIP skipped entirely) + guards green on $(uname -sm)"

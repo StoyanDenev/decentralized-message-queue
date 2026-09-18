@@ -55,6 +55,16 @@
 # and a SKIP does NOT increment the pass count — a branch that checked nothing
 # must not score.
 #
+# WINDOWS is the separate case, and since 2026-09-18 it is handled at the
+# WRAPPER level rather than leg by leg: there is no POSIX file mode there, so
+# P-1 and P-2 are not statements that can be true or false and every section
+# declines. The floor below then reported a product failure for a property that
+# does not exist on that platform, which is how the windows-2022 CI job has been
+# red since this gate landed. The wrapper now prints the terminal
+# `PLATFORM-SKIP:` marker tools/run_all.sh counts in its own column — not a
+# pass, not a failure — and says in its own output what is consequently NOT
+# gated there. A MISSING TOOL on a POSIX box is emphatically not this case.
+#
 # Run from repo root: bash tools/test_wallet_out_perms.sh
 set -u
 cd "$(dirname "$0")/.."
@@ -95,6 +105,38 @@ mode_of() {  # nine access bits of $1, or "unreadable"
 }
 
 UNAME_S=$(uname -s 2>/dev/null || echo unknown)
+
+# ── The one platform where this gate's PROPERTY DOES NOT EXIST ────────────────
+# Both properties this wrapper gates are statements about a POSIX file mode:
+# P-1 is "the file is at 0600 before the first secret byte reaches it" and P-2
+# is "a failed NARROWING is reported". Windows has no POSIX mode, so neither is
+# a statement that can be true or false there — sections A, B, C and D would all
+# decline and the `pass_count > 0` floor at the bottom would turn a run that
+# asserted nothing into a FAIL against a wallet that is not broken. This is a
+# FAST member and the CI matrix carries a windows-2022 job, so that failure has
+# been live since the gate landed. The terminal marker below is the outcome
+# tools/run_all.sh scores in its own column: not a pass, not a failure, named in
+# the summary so the absence of coverage is on the record.
+#
+# THE BOUNDARY, and it is the whole point: this is a PURE `uname` TEST, placed
+# AFTER the missing-binary check above so a broken build still fails closed. A
+# Linux or macOS box that merely LACKS A TOOL — no strace, no ptrace permission,
+# no C compiler — does NOT come here: the property exists there, section D
+# asserts the outcome with nothing but `stat`, and the legs that cannot run
+# print a named SKIP. "The property is absent" and "the tool is absent" are
+# different facts; conflating them would make this marker a new way to go
+# quietly green.
+case "$UNAME_S" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  NOT GATED HERE: sections A and C (strace ordering), B (LD_PRELOAD fault"
+    echo "        injection) and D (the final mode of every output) all rest on a POSIX"
+    echo "        file mode, which $UNAME_S does not have. What protects a wallet output"
+    echo "        on that platform is the containing directory's NTFS ACL, and nothing in"
+    echo "        this suite checks it — so P-1 and P-2 have NO coverage there."
+    echo "  PLATFORM-SKIP: test_wallet_out_perms — POSIX file modes do not exist on $UNAME_S; the property this gate observes is absent, so nothing was asserted and no pass is banked"
+    exit 0
+    ;;
+esac
 
 # A share-set to rotate, and a pre-existing 0644 target to overwrite.
 umask 022
@@ -619,12 +661,13 @@ case "$UNAME_S" in
     assert_eq "$(mode_of "$DOUT/rot.dnk1")" "600" "keyfile-rotate publishes at 0600 over a pre-existing 0644 target"
     ;;
   *)
-    # Windows: there is no POSIX mode to assert and the property does not exist
-    # there, so this declines like the others. That leaves the wrapper with
-    # nothing asserted on Windows and therefore RED — named in the DECISION-LOG
-    # as the remaining case, which needs a wrapper-level SKIP outcome in
-    # tools/run_all.sh rather than anything this file can do.
-    skip "section D (uname=$UNAME_S has no POSIX file mode; the outcome property does not exist here)"
+    # Windows never reaches here: it exits at the PLATFORM-SKIP gate near the top
+    # of this file, before the fixtures are even built. This arm is the residual
+    # for a uname this wrapper does not recognise as a POSIX-mode platform —
+    # decline by name, bank nothing, and let the floor below fail closed if that
+    # leaves the run with no assertion at all. An unrecognised platform is a
+    # reason to fail closed, not a reason to claim the property is absent.
+    skip "section D (this wrapper does not know whether POSIX file modes exist on $UNAME_S, so the final modes are not judged here)"
     ;;
 esac
 

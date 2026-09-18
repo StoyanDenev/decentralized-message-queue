@@ -16,9 +16,10 @@
 #   ...
 #
 #   ──────────────────────────────────────────────
-#   RUN:  R wrappers  (= PASS + FAIL)
+#   RUN:  R wrappers  (= PASS + FAIL + PLATFORM-SKIP)
 #   PASS: N tests
 #   FAIL: M tests
+#   PLATFORM-SKIP: P wrappers skipped ENTIRELY
 #   SKIP: D of the N passing wrappers declined at least one section
 #   ──────────────────────────────────────────────
 #   Failed tests:
@@ -26,8 +27,8 @@
 #     - tools/test_FAILED2.sh
 #
 # Per-test outcome detection: the script grep's the last 10 lines of
-# each test's output for a "PASS:" or "FAIL:" line. Every existing
-# test follows the convention of a final-line PASS / FAIL marker, so
+# each test's output for a "PASS:", "FAIL:" or "PLATFORM-SKIP:" line.
+# Every existing test follows the convention of a final-line marker, so
 # this is robust to test-specific output noise above it.
 #
 # ── THE SKIP CONVENTION (repo-wide; 2026-09-18) ────────────────────────
@@ -51,11 +52,41 @@
 # derived from the SKIP: markers a wrapper printed. It is ADDITIVE: a
 # wrapper that declined a section still scores exactly as it did before —
 # the column says how much of the green was declined rather than checked.
-# The arithmetic it reports is self-checked below (PASS + FAIL == RUN,
-# SKIP <= PASS, VACUOUS <= SKIP) and a mismatch is a hard FAIL, because a
-# summary nobody can verify is the same defect class as a gate that
-# cannot fail. `tools/test_gates_can_fail.sh` drives this runner over
-# synthetic wrappers and falsifies every one of those identities.
+#
+# ── THE WRAPPER-LEVEL SKIP: "PLATFORM-SKIP:" (2026-09-18) ──────────────
+# A DECLINED SECTION and a WRAPPER WITH NOTHING TO ASSERT HERE are two
+# different facts and this runner needs both. The first is above: the
+# wrapper asserted something and says how much it did not check. The
+# second is a wrapper whose PROPERTY DOES NOT EXIST ON THIS PLATFORM —
+# `tools/test_wallet_out_perms.sh` and `tools/test_node_key_perms.sh`
+# gate the mode a key file ends at, and Windows has no POSIX file mode
+# at all. Every section declines, the wrapper's (correct) `pass_count > 0`
+# floor calls that a failure, and the windows-2022 CI job goes red for a
+# gate whose subject is absent there. Reporting the product broken is a
+# lie; reporting PASS is a worse one.
+#
+# Such a wrapper prints, as its TERMINAL marker and in place of both
+# PASS: and FAIL:,
+#
+#     PLATFORM-SKIP: <name> — <why the property does not exist here>
+#
+# and exits 0. The cause after the colon is REQUIRED: the detection grep
+# demands a non-blank character after it, so a bare `PLATFORM-SKIP:` is
+# no marker at all and falls through to the markerless (failure) branch.
+# This outcome is for a PROPERTY THAT DOES NOT EXIST, never for a TOOL
+# THAT IS MISSING: no strace on a Linux box, no C compiler, no ptrace
+# permission are all "declined a section" — the property is real there
+# and the wrapper must still assert what it can, or fail closed having
+# asserted nothing. A wrapper that claims this marker while ALSO printing
+# assertion-level `PASS:` lines did assert something and is lying about
+# it; that is scored a FAILURE, not a skip.
+#
+# The arithmetic is self-checked below (PASS + FAIL + PLATFORM-SKIP ==
+# RUN, SKIP <= PASS, VACUOUS <= SKIP) and a mismatch is a hard FAIL,
+# because a summary nobody can verify is the same defect class as a gate
+# that cannot fail. The suite still exits non-zero ONLY when FAIL > 0.
+# `tools/test_gates_can_fail.sh` drives this runner over synthetic
+# wrappers and falsifies every one of those identities.
 #
 # Run from repo root: bash tools/run_all.sh
 #
@@ -124,14 +155,20 @@ echo
 
 PASS_COUNT=0
 FAIL_COUNT=0
+# PSKIP_COUNT is the THIRD per-wrapper outcome: the wrapper skipped ENTIRELY
+# because the property it gates does not exist on this platform (see THE
+# WRAPPER-LEVEL SKIP in the header). It is NOT a pass and NOT a failure, and it
+# is the only other bucket a wrapper that RAN can land in.
+PSKIP_COUNT=0
 # RUN_COUNT is the number of wrappers actually executed; the summary asserts
-# PASS + FAIL == RUN so no wrapper can fall out of the accounting unseen.
+# PASS + FAIL + PSKIP == RUN so no wrapper can fall out of the accounting unseen.
 RUN_COUNT=0
 # SKIP_COUNT / VACUOUS_COUNT are ADDITIVE reporting over the passing wrappers —
 # see THE SKIP CONVENTION in the header. They change no verdict.
 SKIP_COUNT=0
 VACUOUS_COUNT=0
 FAILED_TESTS=()
+PLATFORM_SKIPPED_TESTS=()
 SKIPPED_TESTS=()
 VACUOUS_TESTS=()
 START_TIME=$(date +%s)
@@ -193,6 +230,37 @@ for t in tools/test_*.sh; do
             echo "  ── failing test output (QUIET=1 suppressed the live tee) ──"
             echo "$OUT"
         fi
+    elif echo "$LAST" | grep -qE "^[[:space:]]*PLATFORM-SKIP:[[:space:]]*[^[:space:]]"; then
+        # ── THE WRAPPER-LEVEL SKIP (see the header). Checked AFTER FAIL: so a
+        # wrapper that manages to print both is still fail-closed, and BEFORE
+        # PASS: so the marker is what decides — a wrapper cannot reach this
+        # branch and the PASS branch at once. Spelled with POSIX [[:space:]]
+        # classes, not \s, so test_cluster_output_discipline.sh's D5 fixed-string
+        # search for the two original detection greps still finds those two and
+        # only those, in that order, and keeps pinning the real greps rather
+        # than a comment that happens to quote them.
+        #
+        # The cause is REQUIRED: [[:space:]]*[^[:space:]] after the colon. A bare
+        # `PLATFORM-SKIP:` names nothing, matches nothing here, and lands in the
+        # markerless branch below as a failure — a skip nobody can audit is not a
+        # skip.
+        ASSERTED=$(echo "$OUT" | grep -cE "^[[:space:]]*PASS:")
+        if [ "$ASSERTED" -eq 0 ]; then
+            PSKIP_COUNT=$((PSKIP_COUNT + 1))
+            PLATFORM_SKIPPED_TESTS+=("$t")
+        else
+            # It claimed to have asserted nothing and then printed assertion-level
+            # PASS: lines. One of the two is false and the runner cannot tell
+            # which, so it fails closed: a wrapper allowed to bank the quiet
+            # outcome while actually asserting is a new way to go green.
+            echo "  (PLATFORM-SKIP: claimed, but the wrapper printed assertion-level PASS: lines — counted as failure)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            FAILED_TESTS+=("$t (PLATFORM-SKIP claimed by a wrapper that asserted)")
+            if [ "${QUIET:-0}" = "1" ]; then
+                echo "  ── output of the wrapper that claimed PLATFORM-SKIP (QUIET=1 suppressed the live tee) ──"
+                echo "$OUT"
+            fi
+        fi
     elif echo "$LAST" | grep -qE "^\s*PASS:"; then
         PASS_COUNT=$((PASS_COUNT + 1))
         # ── ADDITIVE skip accounting (see THE SKIP CONVENTION in the header).
@@ -219,7 +287,7 @@ for t in tools/test_*.sh; do
         fi
     else
         # Ambiguous outcome — count as failure for safety.
-        echo "  (no PASS:/FAIL: marker in final 10 lines — counted as failure)"
+        echo "  (no PASS:/FAIL:/PLATFORM-SKIP: marker in final 10 lines — counted as failure)"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$t (no marker)")
         if [ "${QUIET:-0}" = "1" ]; then
@@ -239,12 +307,20 @@ echo "────────────────────────�
 echo "RUN:  $RUN_COUNT wrappers"
 echo "PASS: $PASS_COUNT tests"
 echo "FAIL: $FAIL_COUNT tests"
+echo "PLATFORM-SKIP: $PSKIP_COUNT wrappers skipped ENTIRELY on $(uname -s 2>/dev/null || echo unknown) (the property they gate does not exist here; nothing was asserted and no pass was banked)"
 echo "SKIP: $SKIP_COUNT of the $PASS_COUNT passing wrappers declined at least one section ($VACUOUS_COUNT of those asserted nothing)"
 if [ "$FAIL_COUNT" -gt 0 ]; then
     echo "──────────────────────────────────────────────"
     echo "Failed tests:"
     for ft in "${FAILED_TESTS[@]}"; do
         echo "  - $ft"
+    done
+fi
+if [ "$PSKIP_COUNT" -gt 0 ]; then
+    echo "──────────────────────────────────────────────"
+    echo "Skipped entirely — NOT GATED ON THIS PLATFORM (each named its cause above):"
+    for pt in "${PLATFORM_SKIPPED_TESTS[@]}"; do
+        echo "  - $pt"
     done
 fi
 if [ "$SKIP_COUNT" -gt 0 ] && [ "${SHOW_SKIPPED:-1}" = "1" ]; then
@@ -264,14 +340,17 @@ fi
 # ── Summary arithmetic, self-checked ──────────────────────────────────────
 # A summary a reader cannot verify is the same defect class as a gate that
 # cannot fail, so the runner falsifies its own accounting before it reports:
-#   (i)   every wrapper that RAN landed in exactly one of PASS / FAIL;
+#   (i)   every wrapper that RAN landed in exactly one of PASS / FAIL /
+#         PLATFORM-SKIP. The identity is WIDENED, not dropped: a third outcome
+#         that did not have to balance would be a hole big enough to lose a
+#         wrapper in, which is the whole reason the check exists;
 #   (ii)  the declined set is a SUBSET of the passing set (a declined wrapper
 #         still passed — this column is additive reporting, not a re-tiering);
 #   (iii) the asserted-nothing set is a subset of the declined set.
 # Any mismatch is a hard FAIL with the numbers printed, not a silent skew.
 ARITH_OK=1
-if [ "$((PASS_COUNT + FAIL_COUNT))" -ne "$RUN_COUNT" ]; then
-    echo "  FAIL: run_all summary arithmetic — PASS($PASS_COUNT) + FAIL($FAIL_COUNT) = $((PASS_COUNT + FAIL_COUNT)), but RUN = $RUN_COUNT wrappers"
+if [ "$((PASS_COUNT + FAIL_COUNT + PSKIP_COUNT))" -ne "$RUN_COUNT" ]; then
+    echo "  FAIL: run_all summary arithmetic — PASS($PASS_COUNT) + FAIL($FAIL_COUNT) + PLATFORM-SKIP($PSKIP_COUNT) = $((PASS_COUNT + FAIL_COUNT + PSKIP_COUNT)), but RUN = $RUN_COUNT wrappers"
     ARITH_OK=0
 fi
 if [ "$SKIP_COUNT" -gt "$PASS_COUNT" ]; then
@@ -284,5 +363,7 @@ if [ "$VACUOUS_COUNT" -gt "$SKIP_COUNT" ]; then
 fi
 [ "$ARITH_OK" -eq 1 ] || exit 1
 
-# Exit non-zero if anything failed.
+# Exit non-zero if anything FAILED. A wrapper that skipped entirely is not a
+# failure — it is the absence of a judgement, and the summary above says so by
+# name. This is the ONLY verdict-bearing line in the file.
 [ "$FAIL_COUNT" -eq 0 ] || exit 1

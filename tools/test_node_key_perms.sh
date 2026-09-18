@@ -46,20 +46,22 @@
 # degrades to the set without it rather than losing the leg. Where it cannot run
 # it prints SKIP: with the cause and banks no pass.
 #
-# Windows: nothing is asserted and nothing is claimed. save_node_key sets no
-# permission there by design — _S_IREAD|_S_IWRITE drives only
-# FILE_ATTRIBUTE_READONLY and the ACL arrives by inheritance
-# (docs/proofs/S005PassphraseKeyfile.md F-4) — so legs B and C SKIP by name.
-# Leg A was the exception until 2026-09-18: the in-process test printed
-# `PASS: node-key-perms all assertions` immediately after its own SKIP line
-# there, so leg A banked a pass for a run that asserted nothing. That arm now
-# prints a SKIP marker instead of the PASS marker and exits non-zero
-# (src/main.cpp), which leg A records as a SKIP — not as a pass, and not as a
-# failure. It was briefly RED on Windows between the selftest dropping its banked
-# PASS and leg A learning to read the SKIP marker; this is a FAST member and the
-# CI matrix has a windows-2022 job, so that was a live break, caught at
-# integration. Every platform leg now skips by name and the wrapper fails closed
-# if that leaves nothing asserted.
+# Windows: nothing is asserted and nothing is claimed, and since 2026-09-18 the
+# WRAPPER says so as a whole rather than declining leg by leg into a failure.
+# save_node_key sets no permission there by design — _S_IREAD|_S_IWRITE drives
+# only FILE_ATTRIBUTE_READONLY and the ACL arrives by inheritance
+# (docs/proofs/S005PassphraseKeyfile.md F-4) — so there is no POSIX mode on disk
+# for leg A, B or C to observe and every one of them declined. The `pass_count
+# > 0` floor then correctly called a run that asserted nothing a FAILURE; this
+# is a FAST member and the CI matrix carries a windows-2022 job, so the Windows
+# job went red for a gate whose subject does not exist there. The wrapper now
+# emits, before any leg runs, the terminal `PLATFORM-SKIP:` marker that
+# tools/run_all.sh scores in its own column: not a pass, not a failure, and
+# named in the summary so the ABSENCE OF COVERAGE stays visible instead of being
+# tidied away. Leg A's in-process Windows arm — `determ test-node-key-perms`
+# prints `SKIP: node-key-perms` in place of its PASS marker (src/main.cpp) — is
+# unchanged and is still what a developer running that subcommand by hand there
+# sees; the wrapper simply no longer gets that far.
 #
 # STILL OPEN after this gate, by construction: the seed is PLAINTEXT. Encryption
 # (a KDF + envelope, as the wallet's DWE2 and the light client's DAK1/DNK1 do) is
@@ -72,6 +74,35 @@ source tools/common.sh
 
 PY=python
 command -v python >/dev/null 2>&1 || PY=python3
+
+# ── The one platform where this gate's PROPERTY DOES NOT EXIST ────────────────
+# Windows has no POSIX file mode, so "node_key.json ends at 0600" is not a
+# statement that can be true or false there; see the Windows paragraph in the
+# header for what protects the key on that platform instead. Every leg below
+# would decline and the floor at the bottom would turn that into a FAIL against
+# a product that is not broken.
+#
+# THE BOUNDARY, and it is the whole point: this is a PURE `uname` TEST. A Linux
+# or macOS box that merely LACKS A TOOL — no strace, no ptrace permission, no C
+# compiler — does NOT come here. The property exists on those boxes, legs that
+# can run still run, legs that cannot print a named SKIP, and if that leaves
+# nothing asserted the floor fails closed exactly as before. "The property is
+# absent" and "the tool is absent" are different facts and only the first one
+# may reach this branch; conflating them would make PLATFORM-SKIP a new way to
+# go quietly green.
+UNAME_S=$(uname -s 2>/dev/null || echo unknown)
+case "$UNAME_S" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  NOT GATED HERE: legs A (in-process modes), B (determ init outcome) and"
+    echo "        C (strace ordering) all rest on a POSIX file mode, which $UNAME_S"
+    echo "        does not have. The node key's protection on Windows is the parent"
+    echo "        directory's NTFS ACL, which save_node_key deliberately does not"
+    echo "        touch (docs/proofs/S005PassphraseKeyfile.md F-4) and which nothing"
+    echo "        in this suite checks."
+    echo "  PLATFORM-SKIP: test_node_key_perms — POSIX file modes do not exist on $UNAME_S; the property this gate observes is absent, so nothing was asserted and no pass is banked"
+    exit 0
+    ;;
+esac
 
 pass_count=0
 fail_count=0
@@ -99,7 +130,7 @@ fi
 
 echo
 echo "=== B. outcome of the shipped command (determ init) ==="
-case "$(uname -s)" in
+case "$UNAME_S" in
   Linux|Darwin|*BSD|DragonFly)
     # umask 022 — the default, and the umask under which the defect showed 0644.
     ( umask 022; "$DETERM" init --data-dir "$T/d022" ) >"$T/init022.log" 2>&1
@@ -129,9 +160,14 @@ case "$(uname -s)" in
     # racy for a statement section A already makes.
     ;;
   *)
-    echo "  SKIP: section B (POSIX file modes do not exist on $(uname -s); the node"
-    echo "        key's protection there is the parent directory's NTFS ACL, which"
-    echo "        save_node_key deliberately does not touch — S005PassphraseKeyfile.md F-4)"
+    # Windows never reaches here — it exits at the PLATFORM-SKIP gate near the
+    # top of this file, before any leg runs. This arm is the residual for a
+    # uname this wrapper does not recognise as a POSIX-mode platform: decline by
+    # name, bank nothing, and let the floor at the bottom fail closed if that
+    # leaves the run with no assertion at all. An unrecognised platform is a
+    # reason to fail closed, not a reason to claim the property is absent.
+    echo "  SKIP: section B (this wrapper does not know whether POSIX file modes"
+    echo "        exist on $UNAME_S, so the outcome of determ init is not judged here)"
     ;;
 esac
 
@@ -144,7 +180,7 @@ echo "=== C. syscall order (Linux strace): the narrowing precedes the first writ
 TRACE_SET=openat,fchmod,fchmodat,fchmodat2,chmod,write,close
 SKIP_C=""
 if ! command -v strace >/dev/null 2>&1; then SKIP_C="strace is not installed"
-elif [ "$(uname -s)" != "Linux" ]; then SKIP_C="this is not Linux and strace is Linux-only"
+elif [ "$UNAME_S" != "Linux" ]; then SKIP_C="this is not Linux and strace is Linux-only"
 elif ! strace -o /dev/null true >/dev/null 2>&1; then SKIP_C="ptrace is not permitted here"
 elif ! strace -e trace="$TRACE_SET" -o /dev/null true >/dev/null 2>&1; then
   # An strace that does not know a name in the set exits 1 WITHOUT creating its
