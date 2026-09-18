@@ -54,11 +54,12 @@
 # `PASS: node-key-perms all assertions` immediately after its own SKIP line
 # there, so leg A banked a pass for a run that asserted nothing. That arm now
 # prints a SKIP marker instead of the PASS marker and exits non-zero
-# (src/main.cpp), which leg A's grep below records as a FAIL, not as a skip: on
-# Windows this wrapper is now RED rather than falsely green. Giving leg A a skip
-# arm of its own belongs to whoever next owns this file — it is deliberately not
-# done in the S-111 increment that changed the binary, because tools/*.sh is
-# another track's in that wave.
+# (src/main.cpp), which leg A records as a SKIP — not as a pass, and not as a
+# failure. It was briefly RED on Windows between the selftest dropping its banked
+# PASS and leg A learning to read the SKIP marker; this is a FAST member and the
+# CI matrix has a windows-2022 job, so that was a live break, caught at
+# integration. Every platform leg now skips by name and the wrapper fails closed
+# if that leaves nothing asserted.
 #
 # STILL OPEN after this gate, by construction: the seed is PLAINTEXT. Encryption
 # (a KDF + envelope, as the wallet's DWE2 and the light client's DAK1/DNK1 do) is
@@ -88,8 +89,13 @@ trap 'rm -rf "$T"' EXIT
 echo "=== A. in-process property test (determ test-node-key-perms) ==="
 OUT=$("$DETERM" test-node-key-perms 2>&1) || true
 echo "$OUT" | sed 's/^/  | /'
-assert "$(echo "$OUT" | tail -3 | grep -q "PASS: node-key-perms all assertions" && echo true || echo false)" \
-       "determ test-node-key-perms reports all assertions passing"
+if echo "$OUT" | tail -3 | grep -q "PASS: node-key-perms all assertions"; then
+  assert true "determ test-node-key-perms reports all assertions passing"
+elif echo "$OUT" | tail -3 | grep -q "SKIP: node-key-perms"; then
+  dt_skip "section A (the in-process gate reports a platform SKIP and banks no pass)"
+else
+  assert false "determ test-node-key-perms printed neither its PASS marker nor a SKIP marker"
+fi
 
 echo
 echo "=== B. outcome of the shipped command (determ init) ==="
@@ -245,6 +251,11 @@ fi
 
 echo
 echo "=== summary ==="
-echo "  $pass_count pass / $fail_count fail"
+echo "  $pass_count pass / $fail_count fail / ${skip_count:-0} skipped section(s)"
+# fail_count == 0 is not a verdict: where every section skips this would print
+# PASS having asserted nothing — the defect this gate's own increment removes.
+if [ "$pass_count" = "0" ]; then
+  echo "  FAIL: test_node_key_perms — every section skipped; nothing was asserted"; exit 1
+fi
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_node_key_perms"; exit 0; fi
 echo "  FAIL: test_node_key_perms"; exit 1
