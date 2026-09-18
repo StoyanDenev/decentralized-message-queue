@@ -50,6 +50,15 @@
 # permission there by design — _S_IREAD|_S_IWRITE drives only
 # FILE_ATTRIBUTE_READONLY and the ACL arrives by inheritance
 # (docs/proofs/S005PassphraseKeyfile.md F-4) — so legs B and C SKIP by name.
+# Leg A was the exception until 2026-09-18: the in-process test printed
+# `PASS: node-key-perms all assertions` immediately after its own SKIP line
+# there, so leg A banked a pass for a run that asserted nothing. That arm now
+# prints a SKIP marker instead of the PASS marker and exits non-zero
+# (src/main.cpp), which leg A's grep below records as a FAIL, not as a skip: on
+# Windows this wrapper is now RED rather than falsely green. Giving leg A a skip
+# arm of its own belongs to whoever next owns this file — it is deliberately not
+# done in the S-111 increment that changed the binary, because tools/*.sh is
+# another track's in that wave.
 #
 # STILL OPEN after this gate, by construction: the seed is PLAINTEXT. Encryption
 # (a KDF + envelope, as the wallet's DWE2 and the light client's DAK1/DNK1 do) is

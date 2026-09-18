@@ -121,6 +121,8 @@
 #ifndef _WIN32
 #include <sys/stat.h>  // test-node-key-perms (S-091): ::stat / ::chmod / ::umask
 #include <unistd.h>    // test-node-key-perms (S-091): ::symlink / ::getpid
+#include <fcntl.h>     // S-111: ::open + O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW
+#include <cerrno>      // S-111: errno on the account-keyfile write path
 #endif
 
 namespace fs = std::filesystem;
@@ -308,6 +310,9 @@ Usage:
                                               and print the genesis hash.
   determ account create [--out <file>]       Generate a fresh anonymous account
                                               keypair (Ed25519). Prints address + privkey.
+                                              --out is created 0600 before the key is
+                                              written (S-111, POSIX); a --out naming a
+                                              SYMLINK is refused, not written through.
   determ account address <privkey_hex>       Derive the account address from a hex privkey.
   determ send_anon <to> <amount> <privkey_hex>
                                               Sign a TRANSFER from the anon account
@@ -758,7 +763,16 @@ In-process tests (deterministic, no network):
                                               one), 0700 for a directory
                                               save_node_key creates, symlink
                                               refused, failure reported;
-                                              SKIPs on Windows
+                                              SKIPs on Windows and banks NO
+                                              pass there (exit 1, SKIP marker)
+  determ test-account-create-perms            S-111 — `account create --out`
+                                              at rest: 0600 before the key is
+                                              written (incl. over an existing
+                                              0644 file), on BOTH the plaintext
+                                              and the --passphrase branch,
+                                              symlink refused, containers
+                                              unchanged; SKIPs on Windows and
+                                              banks NO pass there
   determ test-snapshot-defense                S-018 defense-in-depth lock-in
                                               for Chain::restore_from_snapshot
                                               wrong-type collection rejection
@@ -5837,6 +5851,135 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
     }
 }
 
+// ─── S-111: the `account create --out` keyfile writer ───────────────────────
+//
+// P-1, the window. Reproduced 2026-09-18 against the binary built from HEAD,
+// `determ account create --out F` under umask 022, nothing mutated:
+//
+//     openat(AT_FDCWD, ".../plain.json", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3
+//     write(3, "{\n  \"address\": \"0x12019ee1f40ee7"..., 243) = 243
+//     close(3)
+//     fchmodat(AT_FDCWD, ".../plain.json", 0600)                        = 0
+//
+// std::ofstream creates at 0666 & ~umask — 0644 under the usual umask 022 —
+// so the JSON carrying the 32-byte Ed25519 seed as "privkey" in clear went
+// into a world-readable file and only then was narrowed. An LD_PRELOAD
+// observer on the narrowing call measured it directly: *at narrowing time the
+// file is mode 0644 with all 243 bytes already written*, and with the
+// narrowing denied user `nobody` read the privkey straight out of it. The
+// FINAL mode is 0600, so every after-the-fact check in the tree sees a correct
+// file — which is why this survived S-004, S-109, S-110 and S-091.
+//
+// Both calls below are load-bearing and neither implies the other, which is
+// the measured part: O_CREAT|O_TRUNC applies its mode ONLY when the file is
+// created, so the create mode alone leaves the entire window open on every
+// overwrite (any second run over an existing keyfile) while a fresh-create
+// test stays green. ::fchmod on the descriptor, before the first write, closes
+// the create path and the overwrite path with nothing to race. O_NOFOLLOW is
+// deliberate and independent: without it a symlink planted at the path is
+// followed, which both writes the private key into whatever file it names and
+// aims the narrowing at the wrong inode. It is the ONE exit-code change in
+// this increment and it is stated in the usage text: `--out` naming a symlink
+// (including /dev/stdout) now fails ELOOP where it used to succeed. O_CLOEXEC
+// keeps the descriptor out of any child.
+//
+// WINDOWS: the window is NOT closed and this is not a cross-platform fix.
+// _S_IREAD|_S_IWRITE on _open drives only FILE_ATTRIBUTE_READONLY and the
+// effective ACL arrives by inheritance from the parent directory
+// (docs/proofs/S005PassphraseKeyfile.md F-4), so the Windows arm keeps the
+// previous std::ofstream TEXT-mode behaviour verbatim — byte-identical output,
+// CRLF translation included — rather than implying a fix it cannot make.
+//
+// P-2, the reporting, was ALREADY CORRECT at this site and is UNCHANGED. This
+// is the one place in the tree that checked `perm_ec` and printed a named
+// warning — wallet/main.cpp copied its diagnostic from here — so the trailing
+// std::filesystem::permissions call, its error_code check and both warning
+// lines below are the previous ones verbatim. A narrowing that fails BEFORE
+// the write is reported with the wording wallet/main.cpp's sibling writer
+// uses, and the write CONTINUES: no exit code changes on that path, on either
+// branch. REFUSING there instead — the shape src/crypto/keys.cpp::save_node_key
+// uses for the node identity seed, which is regenerable at no cost — is a
+// defensible policy and is deliberately NOT this increment: it is an exit-code
+// change on a shipped command, it is separable from the write window this
+// increment closes, and it is named as the S-111 remainder in docs/SECURITY.md.
+//
+// This is the THIRD hand-rolled restricted-write loop in the tree
+// (wallet/main.cpp::write_bytes_file_0600 and src/crypto/keys.cpp::save_node_key
+// are the other two, and they had already drifted from each other on the
+// `write() == 0` case within a day). It is stated rather than hidden: a shared
+// primitive in include/determ/ is the remedy, migrating all three spans three
+// binaries and two other tracks' files in this wave, and it is NOT this
+// increment. This copy takes the wallet's shape, which is the newer of the two.
+static bool write_account_file_0600(const std::string& out_path,
+                                    const std::string& data) {
+#ifdef _WIN32
+    std::ofstream f(out_path);
+    if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return false; }
+    f << data;
+    f.close();
+    if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return false; }
+#else
+    const int fd = ::open(out_path.c_str(),
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                          0600);
+    if (fd < 0) {
+        std::cerr << "Cannot write " << out_path << ": "
+                  << std::strerror(errno) << "\n";
+        return false;
+    }
+    // On the descriptor, before the first byte. This is the call that closes
+    // the window on the OVERWRITE path, where the create mode above is ignored.
+    if (::fchmod(fd, 0600) != 0) {
+        std::cerr << "Warning: could not set 0600 permissions on "
+                  << out_path << " before writing it: "
+                  << std::strerror(errno) << "\n";
+        // and continue: the exit code of this command does not change.
+    }
+    for (size_t off = 0; off < data.size(); ) {
+        const ssize_t n = ::write(fd, data.data() + off, data.size() - off);
+        if (n < 0 && errno == EINTR) continue;
+        // n == 0 for a positive count cannot happen on a regular file, but it
+        // must not become a spin: fail the write instead of looping forever
+        // (wallet/main.cpp's sibling writer guards this; keys.cpp's does not).
+        if (n <= 0) {
+            std::cerr << "Cannot write " << out_path << ": "
+                      << (n < 0 ? std::strerror(errno) : "wrote 0 bytes") << "\n";
+            ::close(fd);
+            // O_TRUNC has already run, so what is on disk is a FRAGMENT of a
+            // private key under a name an operator reads as a provisioned
+            // account. Remove it: the exit code is 1 either way, as it was
+            // before, and the old ofstream left the fragment behind.
+            ::unlink(out_path.c_str());
+            return false;
+        }
+        off += static_cast<size_t>(n);
+    }
+    if (::close(fd) != 0) {
+        std::cerr << "Cannot write " << out_path << ": "
+                  << std::strerror(errno) << "\n";
+        ::unlink(out_path.c_str());
+        return false;
+    }
+#endif
+    // 0600 owner-only perms, belt and braces: the POSIX branch above already
+    // created and fchmod'd the file at 0600 before the first byte, and on
+    // Windows this call is the only narrowing there is (best-effort — the NTFS
+    // ACL inherits from the parent directory). The error_code check and both
+    // lines of the diagnostic are the ones this site already had.
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    if (perm_ec) {
+        std::cerr << "Warning: could not set 0600 permissions on "
+                  << out_path << ": " << perm_ec.message() << "\n";
+        std::cerr << "         Verify manually (chmod 0600 / icacls).\n";
+    }
+    return true;
+}
+
 // account create --out <file> [--allow-plaintext-stdout] [--passphrase <pw>]
 //
 // S-004 mitigation: refuse stdout output by default. Generating a
@@ -5848,10 +5991,16 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
 // trusted shell history) must set --allow-plaintext-stdout
 // explicitly so the choice is auditable in the invoking script.
 //
-// File permissions: std::filesystem::permissions narrowed to
-// owner_read | owner_write on the freshly-written file. On Unix
-// this is chmod 0600; on Windows the call resolves to a best-effort
-// owner-only ACL via the std::filesystem implementation.
+// File permissions: both output branches go through
+// write_account_file_0600 above. On POSIX the file is created 0600
+// and ::fchmod'd on its descriptor BEFORE the first byte is written
+// (S-111 — it used to be a bare std::ofstream narrowed afterwards,
+// so the key was world-readable for the length of the write); on
+// Windows the trailing std::filesystem::permissions call is the only
+// narrowing there is and it is best-effort, so the window is closed
+// on POSIX only. The POSIX open is O_NOFOLLOW, so a --out that names
+// a SYMLINK is now refused (exit 1) on both branches instead of being
+// written through — the one input whose exit code this changed.
 //
 // v2.17 / S-004 option 2: passphrase-encrypted keyfile at rest. If
 // --passphrase is provided (or DETERM_PASSPHRASE env var is set),
@@ -5912,22 +6061,11 @@ static int cmd_account_create(int argc, char** argv) {
         // --allow-plaintext-stdout was explicitly set.
         std::cout << out.dump(2) << "\n";
     } else if (passphrase.empty()) {
-        // Plaintext file output (S-004 option 1 — 0600 permissions only)
-        std::ofstream f(out_path);
-        if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
-        f << out.dump(2) << "\n";
-        f.close();
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            out_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        if (perm_ec) {
-            std::cerr << "Warning: could not set 0600 permissions on "
-                      << out_path << ": " << perm_ec.message() << "\n";
-            std::cerr << "         Verify manually (chmod 0600 / icacls).\n";
-        }
+        // Plaintext file output (S-004 option 1 — 0600 permissions only).
+        // S-111: byte-for-byte the same content as before, written through the
+        // restricted writer, which narrows the file before the key reaches it.
+        if (!write_account_file_0600(out_path, out.dump(2) + "\n"))
+            return 1;
         std::cout << "Account written to " << out_path << "\n";
         std::cout << "Address: " << addr << "\n";
     } else {
@@ -5945,26 +6083,22 @@ static int cmd_account_create(int argc, char** argv) {
         try {
             auto env = determ::wallet::envelope::encrypt(pt_bytes, passphrase, aad);
             std::string blob = determ::wallet::envelope::serialize(env);
-            std::ofstream f(out_path);
-            if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
             // Header: 1-line magic + address (plaintext metadata) +
             // envelope blob. The address is in AAD so it's
             // tamper-evident, but exposing it in plaintext lets
             // operators identify which account the file belongs to
             // without decrypting.
-            f << "DETERM-ACCOUNT-V1 " << addr << "\n";
-            f << blob << "\n";
-            f.close();
-            std::error_code perm_ec;
-            std::filesystem::permissions(
-                out_path,
-                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                std::filesystem::perm_options::replace,
-                perm_ec);
-            if (perm_ec) {
-                std::cerr << "Warning: could not set 0600 permissions on "
-                          << out_path << ": " << perm_ec.message() << "\n";
-            }
+            //
+            // S-111: byte-for-byte the same two lines, written through the same
+            // restricted writer as the plaintext branch — the ordering defect
+            // was identical here and the code is adjacent, so leaving this one
+            // on std::ofstream would leave two write shapes in one function.
+            // The container is an AES-256-GCM envelope rather than a bare key,
+            // but the write window is the same window and is closed the same
+            // way; `account decrypt` reads the same bytes it always did.
+            if (!write_account_file_0600(out_path,
+                                         "DETERM-ACCOUNT-V1 " + addr + "\n" + blob + "\n"))
+                return 1;
             std::cout << "Encrypted account written to " << out_path << "\n";
             std::cout << "Address: " << addr << "\n";
             std::cout << "  (use `determ account decrypt --in " << out_path
@@ -22615,18 +22749,48 @@ int main(int argc, char** argv) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
+        // The platform-skip arm. Until 2026-09-18 it printed the terminal
+        // marker `PASS: node-key-perms all assertions` right after its own
+        // `SKIP:` line, so on Windows this gate BANKED A PASS for a run that
+        // made zero assertions: tools/test_node_key_perms.sh leg A greps for
+        // exactly that marker, legs B and C already skip on Windows, and the
+        // wrapper's verdict was therefore 1 pass / 0 fail — green, forever,
+        // whatever save_node_key did. That is a gate that cannot fail on that
+        // platform, which is the defect two of the 2026-09-17 increments
+        // existed to remove. It now prints a SKIP marker INSTEAD of the PASS
+        // marker and exits non-zero, so no caller can read success out of it:
+        // on a platform where the property cannot be observed the honest answer
+        // is "no result", and between silently answering yes and loudly
+        // answering no the repo fails closed. This matches the newest sibling
+        // gate, tools/test_wallet_out_perms.sh, which already exits 1 on
+        // Windows because both of its legs skip and pass_count is zero.
+        // tools/test_node_key_perms.sh needs a matching arm that RECORDS a skip
+        // rather than a fail; tools/ is owned by another track in this wave, so
+        // it is not changed here and the hand-back says so.
+        //
+        // DETERM_TEST_FORCE_PLATFORM_SKIP makes that arm reachable on POSIX,
+        // which is the only way a box that cannot build for Windows can hold a
+        // mutant against it: without it "the Windows arm does not bank a pass"
+        // could only be checked by reading the source, which is the kind of
+        // assertion this repo does not accept.
+        auto platform_skip = []() {
+            // save_node_key sets no permission on Windows by design — the ACL
+            // comes by inheritance and neither _S_IREAD|_S_IWRITE nor
+            // std::filesystem::permissions rewrites it
+            // (docs/proofs/S005PassphraseKeyfile.md F-4) — so there is no
+            // property here to assert.
+            std::cout << "  SKIP: POSIX file modes do not exist here; the node key's"
+                         " protection on Windows is the parent directory's NTFS ACL,"
+                         " which save_node_key deliberately does not touch\n";
+            std::cout << "\n  SKIP: node-key-perms — nothing was asserted on this"
+                         " platform; no pass is banked\n";
+            return 1;
+        };
 #ifdef _WIN32
-        // No pass is banked on a branch that checked nothing (wave doctrine
-        // rule 5): save_node_key sets no permission on Windows by design — the
-        // ACL comes by inheritance and neither _S_IREAD|_S_IWRITE nor
-        // std::filesystem::permissions rewrites it (S005PassphraseKeyfile.md
-        // F-4) — so there is no property here to assert.
-        std::cout << "  SKIP: POSIX file modes do not exist here; the node key's"
-                     " protection on Windows is the parent directory's NTFS ACL,"
-                     " which save_node_key deliberately does not touch\n";
-        std::cout << "\n  PASS: node-key-perms all assertions\n";
-        return 0;
+        return platform_skip();
 #else
+        if (std::getenv("DETERM_TEST_FORCE_PLATFORM_SKIP") != nullptr)
+            return platform_skip();
         // A fixed umask, because these assertions are only meaningful against a
         // umask that would otherwise leave the wide bits set: under umask 077 a
         // plain ofstream already yields 0600 and create_directories already
@@ -22790,6 +22954,260 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": node-key-perms " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+#endif
+    }
+    // S-111 — `determ account create --out` at rest. Asserted as OUTCOMES: the
+    // mode on the filesystem, the command's exit code, its diagnostics and the
+    // bytes of the container. Never as source text.
+    //
+    // Reproduced 2026-09-18 against the binary built from HEAD (transcript in
+    // the session's audit directory): the creating `openat` took mode 0666, the
+    // 243-byte JSON carrying "privkey" in clear was written into the resulting
+    // 0644 file, and `fchmodat(..., 0600)` came last. An LD_PRELOAD observer on
+    // the narrowing call reported *mode 0644 with 243 bytes already written*,
+    // and with the narrowing denied user `nobody` read the key out of the file.
+    //
+    // Deliberately NOT here: the syscall ORDER. A process cannot observe its
+    // own mode-setting order, and the only in-process consequence of the whole
+    // defect — the final mode — is 0600 both before and after the fix. That leg
+    // lives in the strace wrapper, behind a capability probe. Nor is a FAILED
+    // narrowing here: this process owns the file it writes, an owner's fchmod
+    // does not fail, and faking it with an injection hook in the production
+    // writer would put test-only code on the shipped key-write path for a
+    // property (P-2) this increment does not change. That leg is the wrapper's
+    // LD_PRELOAD section. What IS here: the pre-existing-0644 case the create
+    // mode provably cannot reach, on BOTH branches; the symlink refusal; the
+    // mode under umask 000, which separates "chosen" from "inherited"; and the
+    // containers being byte-compatible so no reader changes.
+    if (cmd == "test-account-create-perms") {
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        // Same rule as the gate above: a platform where the property does not
+        // exist prints a SKIP marker and banks NO pass. The window is closed on
+        // POSIX only — on Windows the file is still written by std::ofstream
+        // and the ACL arrives by inheritance (S005PassphraseKeyfile.md F-4) —
+        // so there is nothing here to assert there and this must not report a
+        // pass. DETERM_TEST_FORCE_PLATFORM_SKIP makes the arm reachable on
+        // POSIX so a mutant can be held against it.
+        auto platform_skip = []() {
+            std::cout << "  SKIP: POSIX file modes do not exist here; the S-111"
+                         " window is closed on POSIX only and the Windows arm of"
+                         " the writer is the previous std::ofstream verbatim\n";
+            std::cout << "\n  SKIP: account-create-perms — nothing was asserted on"
+                         " this platform; no pass is banked\n";
+            return 1;
+        };
+#ifdef _WIN32
+        return platform_skip();
+#else
+        if (std::getenv("DETERM_TEST_FORCE_PLATFORM_SKIP") != nullptr)
+            return platform_skip();
+        // A fixed umask: under umask 077 a plain ofstream already yields 0600,
+        // so every mutant would survive. 022 is the umask the defect was
+        // measured under.
+        const mode_t saved_umask = ::umask(022);
+        // The command falls back to DETERM_PASSPHRASE when --passphrase is
+        // absent, so an inherited one would silently route the "plaintext"
+        // sections through the envelope branch.
+        ::unsetenv("DETERM_PASSPHRASE");
+
+        const fs::path T = fs::temp_directory_path() /
+            ("determ-acctperms-" + std::to_string(static_cast<unsigned long>(::getpid())));
+        std::error_code rmec;
+        fs::remove_all(T, rmec);
+        fs::create_directories(T);
+        ::chmod(T.c_str(), 0700);
+
+        auto mode_of = [](const fs::path& p) -> int {
+            struct stat st {};
+            if (::stat(p.c_str(), &st) != 0) return -1;
+            return static_cast<int>(st.st_mode & 07777);
+        };
+        auto slurp = [](const fs::path& p) -> std::string {
+            std::ifstream f(p, std::ios::binary);
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            return ss.str();
+        };
+        auto put_stale_0644 = [&](const fs::path& p) {
+            { std::ofstream f(p); f << "stale-content"; }
+            ::chmod(p.c_str(), 0644);
+        };
+        // The REAL command function, with its streams captured so the exit
+        // code AND the operator-visible text are both assertable here. This is
+        // the layer where the rule lives: cmd_account_create is what `determ
+        // account create` dispatches to, one call below.
+        struct RunResult { int rc; std::string out; std::string err; };
+        auto run_create = [&](std::vector<std::string> args) {
+            std::vector<char*> argv;
+            argv.reserve(args.size());
+            for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+            std::ostringstream so, se;
+            std::streambuf* old_out = std::cout.rdbuf(so.rdbuf());
+            std::streambuf* old_err = std::cerr.rdbuf(se.rdbuf());
+            int rc;
+            // generate_node_key throws when the OS CSPRNG fails; restore the
+            // stream buffers on that path too, or the failure would be reported
+            // into the capture buffer and this gate would go silent instead of
+            // RED.
+            try { rc = cmd_account_create(static_cast<int>(argv.size()), argv.data()); }
+            catch (const std::exception& e) { rc = -1; se << "threw: " << e.what(); }
+            catch (...)                     { rc = -1; se << "threw: unknown"; }
+            std::cout.rdbuf(old_out);
+            std::cerr.rdbuf(old_err);
+            return RunResult{rc, so.str(), se.str()};
+        };
+        auto derives_its_own_address = [](const json& j) {
+            if (!j.contains("privkey") || !j.contains("address")) return false;
+            const std::string pk = j["privkey"].get<std::string>();
+            if (pk.size() != 64) return false;
+            crypto::NodeKey k{};
+            k.priv_seed = from_hex_arr<32>(pk);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return make_anon_address(k.pub) == j["address"].get<std::string>();
+        };
+
+        // 1. Plaintext branch, fresh target: 0600 before the key reaches it,
+        //    and everything else about the command unchanged.
+        {
+            const fs::path p = T / "fresh.json";
+            auto r = run_create({"--out", p.string()});
+            check(r.rc == 0, "plaintext fresh: the command exits 0");
+            check(fs::exists(p), "plaintext fresh: the key file exists");
+            const std::string body = slurp(p);
+            // Control. Without it every mode assertion below could be true of a
+            // file that never held a key.
+            check(body.find("\"privkey\"") != std::string::npos,
+                  "plaintext fresh: control — the file really does contain the private key");
+            check(mode_of(p) == 0600,
+                  "plaintext fresh: mode is 0600 (0644 under this umask before the fix)");
+            bool parsed = false, derives = false;
+            try { json j = json::parse(body); parsed = true; derives = derives_its_own_address(j); }
+            catch (const std::exception&) {}
+            check(parsed && body.size() && body.back() == '\n',
+                  "plaintext fresh: the container is unchanged — the same pretty JSON with a trailing newline");
+            check(derives,
+                  "plaintext fresh: the privkey in the file derives the address in the file");
+            check(r.out.find("Account written to " + p.string()) != std::string::npos,
+                  "plaintext fresh: the success line is unchanged");
+            check(r.err.empty(),
+                  "plaintext fresh: a successful run prints NOTHING on stderr (a mutant that always warns dies here)");
+        }
+
+        // 2. The case the create mode CANNOT reach: the target already exists
+        //    at 0644. O_CREAT|O_TRUNC's mode argument is ignored for an existing
+        //    file (measured), so only the fchmod narrows this one.
+        {
+            const fs::path p = T / "pre0644.json";
+            put_stale_0644(p);
+            check(mode_of(p) == 0644,
+                  "overwrite: fixture control — the target really is 0644 before the run");
+            auto r = run_create({"--out", p.string()});
+            check(r.rc == 0, "overwrite: the command exits 0");
+            check(mode_of(p) == 0600,
+                  "overwrite: a PRE-EXISTING 0644 target is narrowed to 0600 (the create mode cannot do this)");
+            const std::string body = slurp(p);
+            check(body.find("stale-content") == std::string::npos
+                      && body.find("\"privkey\"") != std::string::npos,
+                  "overwrite: the stale bytes are gone and the new key is there (O_TRUNC)");
+        }
+
+        // 3. The SECOND branch of the same command — the --passphrase envelope —
+        //    had the identical ordering defect and gets the identical P-1 fix.
+        //    Its container must be byte-compatible or `account decrypt` breaks.
+        {
+            const fs::path p = T / "enc.acct";
+            put_stale_0644(p);
+            auto r = run_create({"--out", p.string(), "--passphrase", "acct-perms-pass-1"});
+            check(r.rc == 0, "envelope: the command exits 0");
+            check(mode_of(p) == 0600,
+                  "envelope: a PRE-EXISTING 0644 target is narrowed to 0600 on the encrypted branch too");
+            const std::string body = slurp(p);
+            std::istringstream is(body);
+            std::string hdr, blob, extra;
+            std::getline(is, hdr);
+            std::getline(is, blob);
+            const bool two_lines = !std::getline(is, extra) || extra.empty();
+            check(hdr.rfind("DETERM-ACCOUNT-V1 ", 0) == 0 && two_lines
+                      && !body.empty() && body.back() == '\n',
+                  "envelope: the on-disk shape is unchanged — 'DETERM-ACCOUNT-V1 <addr>' then the blob, both newline-terminated");
+            const std::string addr = hdr.substr(std::strlen("DETERM-ACCOUNT-V1 "));
+            bool round_trips = false;
+            auto env_opt = determ::wallet::envelope::deserialize(blob);
+            if (env_opt) {
+                std::vector<uint8_t> aad(addr.begin(), addr.end());
+                auto pt = determ::wallet::envelope::decrypt(*env_opt, "acct-perms-pass-1", aad);
+                if (pt) {
+                    try {
+                        json j = json::parse(std::string(pt->begin(), pt->end()));
+                        round_trips = derives_its_own_address(j)
+                                   && j["address"].get<std::string>() == addr;
+                    } catch (const std::exception&) {}
+                }
+            }
+            check(round_trips,
+                  "envelope: the file still decrypts with the address as AAD and yields a key that derives it");
+        }
+
+        // 4. A symlink planted at the path is REFUSED, not followed
+        //    (O_NOFOLLOW). Both branches, because both open the file now.
+        {
+            const fs::path victim = T / "victim";
+            { std::ofstream f(victim); f << "VICTIM"; }
+            const fs::path p1 = T / "link_plain.json";
+            const fs::path p2 = T / "link_enc.acct";
+            check(::symlink("victim", p1.c_str()) == 0 && ::symlink("victim", p2.c_str()) == 0,
+                  "symlink: fixture control — both symlinks were planted");
+            auto r1 = run_create({"--out", p1.string()});
+            auto r2 = run_create({"--out", p2.string(), "--passphrase", "acct-perms-pass-1"});
+            check(r1.rc != 0 && r2.rc != 0,
+                  "symlink: both branches refuse a symlinked --out instead of writing through it");
+            check(slurp(victim) == "VICTIM",
+                  "symlink: the link target is untouched (no key or envelope landed in it)");
+            check(r1.out.find("Account written") == std::string::npos
+                      && r2.out.find("Encrypted account written") == std::string::npos,
+                  "symlink: neither branch reports success");
+        }
+
+        // 5. The mode is SET, not inherited from a lucky umask. Under umask 000
+        //    a std::ofstream create yields 0666 and an `open(..., 0600)` yields
+        //    0600, so this is the assertion that distinguishes "we chose the
+        //    mode" from "the process happened to run under a tight umask" —
+        //    the sibling gate makes the same statement about `determ init`
+        //    (tools/test_node_key_perms.sh section B, umask 000).
+        {
+            const mode_t u = ::umask(000);
+            const fs::path p1 = T / "umask000.json";
+            const fs::path p2 = T / "umask000.acct";
+            auto r1 = run_create({"--out", p1.string()});
+            auto r2 = run_create({"--out", p2.string(), "--passphrase", "acct-perms-pass-1"});
+            ::umask(u);
+            check(r1.rc == 0 && mode_of(p1) == 0600,
+                  "umask 000: the plaintext keyfile is still 0600 (0666 at create before the fix)");
+            check(r2.rc == 0 && mode_of(p2) == 0600,
+                  "umask 000: the encrypted keyfile is still 0600 as well");
+        }
+
+        // 6. A narrowing that genuinely FAILS cannot be produced from inside
+        //    this process — the test owns the file, and an owner's fchmod on a
+        //    local filesystem does not fail. Deliberately NOT faked with an
+        //    injection hook in the production writer: that path is the P-2 half,
+        //    it is unchanged by this increment, and the gate for it belongs
+        //    where the failure can be made real. tools/test_account_create_perms.sh
+        //    section C runs the shipped command under an LD_PRELOAD shim that
+        //    makes every chmod flavour return EPERM and asserts both that the
+        //    harm is real (the file is left 0644) and that both named
+        //    diagnostics — the pre-write one and the perm_ec one — are printed.
+
+        fs::remove_all(T, rmec);
+        ::umask(saved_umask);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": account-create-perms "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
 #endif
     }
