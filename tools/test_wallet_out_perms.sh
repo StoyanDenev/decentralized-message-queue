@@ -574,6 +574,61 @@ EOF
 fi
 
 echo
+echo "=== D. outcome: every key-material output ends at 0600 (POSIX, no strace or LD_PRELOAD needed) ==="
+# Sections A-C need strace or LD_PRELOAD and therefore run on Linux only. That
+# left this wrapper with NOTHING to assert on macOS and the BSDs — where the
+# property it gates is perfectly real and `stat` can see it — so the whole gate
+# declined every section and the pass_count floor (correctly) called that a
+# failure. Observed on the owner's Darwin arm64 box, 2026-09-18, and it is the
+# gate's defect, not the wallet's.
+#
+# WHAT THIS SECTION DOES AND DOES NOT GATE, so a green here is not misread:
+# it asserts the OUTCOME — the mode every one of these outputs ends at — and
+# NOT the window between the create and the first write (section A/C, strace)
+# and NOT the reporting of a failed narrowing (section B, LD_PRELOAD). A mutant
+# that restores the old create-then-narrow shape leaves the final mode 0600 and
+# is GREEN here; that is exactly why sections A-C exist and why this one does
+# not replace them. On a platform without strace this gate covers the contract
+# `write_bytes_file_0600` states, not the window S-109 was opened for.
+case "$UNAME_S" in
+  Linux|Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly)
+    DOUT="$TMP/outcome"; mkdir -p "$DOUT"
+    # 1 — a fresh create.
+    "$WALLET" shamir-split --secret 99887766554433221100ffeeddccbbaa \
+        --threshold 2 --shares 3 --out "$DOUT/fresh.json" >/dev/null 2>&1
+    assert_eq "$(mode_of "$DOUT/fresh.json")" "600" "shamir-split --out lands at 0600"
+    # 2 — over a PRE-EXISTING 0644 target, the path a create-mode-only fix misses.
+    : > "$DOUT/pre.json"; chmod 644 "$DOUT/pre.json"
+    "$WALLET" shamir-rotate --shares "$TMP/src.json" --threshold 2 \
+        --shares-out "$DOUT/pre.json" --force >/dev/null 2>&1
+    assert_eq "$(mode_of "$DOUT/pre.json")" "600" "shamir-rotate over a pre-existing 0644 target ends at 0600"
+    # 3 — EVERY record of the bulk loop, not just the first: the S-109 follow-up
+    #     defect was per-record, and a fix that restricts only record 1 must fail.
+    AIMX="$DOUT/aim"; mkdir -p "$AIMX"
+    for r in 1 2 3; do : > "$AIMX/rec$r.keyfile"; chmod 644 "$AIMX/rec$r.keyfile"; done
+    "$WALLET" account-import-many --in "$TMP/aim_in.json" --out-dir "$AIMX" \
+        --summary "$DOUT/aim_sum.json" --force >/dev/null 2>&1
+    for r in 1 2 3; do
+      assert_eq "$(mode_of "$AIMX/rec$r.keyfile")" "600" "account-import-many record $r ends at 0600 (was a pre-existing 0644 file)"
+    done
+    # 4 — the atomically published rotate target.
+    : > "$DOUT/rot.dnk1"; chmod 644 "$DOUT/rot.dnk1"
+    "$WALLET" keyfile-rotate --in "$TMP/rot_in.dnk1" --out "$DOUT/rot.dnk1" \
+        --old-passphrase-from "file:$TMP/rot_old.txt" \
+        --new-passphrase-from "file:$TMP/rot_new.txt" --force >/dev/null 2>&1
+    assert_eq "$(mode_of "$DOUT/rot.dnk1")" "600" "keyfile-rotate publishes at 0600 over a pre-existing 0644 target"
+    ;;
+  *)
+    # Windows: there is no POSIX mode to assert and the property does not exist
+    # there, so this declines like the others. That leaves the wrapper with
+    # nothing asserted on Windows and therefore RED — named in the DECISION-LOG
+    # as the remaining case, which needs a wrapper-level SKIP outcome in
+    # tools/run_all.sh rather than anything this file can do.
+    skip "section D (uname=$UNAME_S has no POSIX file mode; the outcome property does not exist here)"
+    ;;
+esac
+
+echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail / $skip_count skipped section(s)"
 # fail_count == 0 is NOT sufficient: on a box with neither strace/ptrace nor a C
@@ -583,7 +638,9 @@ if [ "$pass_count" = "0" ]; then
     echo "  FAIL: test_wallet_out_perms — every section skipped; nothing was asserted"
     exit 1
 elif [ "$fail_count" = "0" ]; then
-    echo "  PASS: determ-wallet output perms (P-1 ordering + P-2 reporting)"; exit 0
+    echo "  PASS: determ-wallet output perms — $pass_count assertion(s) checked, $skip_count section(s) declined"
+  echo "        what declined is NOT asserted here (see any SKIP lines above)"
+  exit 0
 else
     echo "  FAIL: test_wallet_out_perms"; exit 1
 fi
