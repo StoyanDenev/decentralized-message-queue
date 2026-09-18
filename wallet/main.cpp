@@ -287,10 +287,14 @@ std::optional<std::vector<uint8_t>> read_bytes_file(const std::string& path) {
 // the reason in THAT record's summary entry and keep going — a stderr-only
 // diagnostic would lose the per-record attribution at N=50k. It is the ONLY
 // behavioural knob: the open / fchmod / write / narrow sequence and every
-// guarantee above are identical either way, so this file still routes every
-// output through exactly ONE writer and no site re-implements it — and since
-// 2026-09-18 that writer is itself one call into the one shared primitive the
-// whole tree uses. nullptr (the default,
+// guarantee above are identical either way, and since 2026-09-18 that sequence
+// is itself one call into the one shared primitive the whole tree uses. From
+// that same date this file has TWO renderers of that primitive, not one — this
+// function and `write_file_0600_quiet` below it — and the reason is POLICY,
+// not mechanism: nine outputs need this site's Windows TEXT mode, their own
+// diagnostic strings and no P-2 reporting, all three of which this function
+// hard-wires. The MECHANISM is still written once, in the primitive, and no
+// site re-implements it. nullptr (the default,
 // and what the other eleven callers pass) leaves their behaviour byte-for-byte
 // unchanged. The P-2 WARNING goes to stderr whatever err_out says: it describes a
 // file that WAS written and that the operator has to go and fix by hand, so it
@@ -365,6 +369,134 @@ bool write_bytes_file_0600(const std::string& cmd_label,
         std::cerr << cmd_label << ": Verify manually (chmod 0600 / icacls).\n";
     if (perms_narrowed_out) *perms_narrowed_out = narrowed;
     return true;
+}
+
+// ── write_file_0600_quiet — the WINDOW-ONLY sibling ──────────────────────────
+//
+// WHY A SECOND ENTRY POINT EXISTS AT ALL (2026-09-18). It is not a second copy
+// of the mechanism: both functions are ONE call into the same shared primitive,
+// determ::util::write_restricted_0600. What differs is POLICY, and the
+// difference is forced by what the nine remaining outputs already do.
+// `write_bytes_file_0600` hard-wires three things its ten callers share and
+// these nine do not:
+//   * BINARY mode on Windows. Six of the nine write through a TEXT-mode
+//     std::ofstream today (`of << json << "\n"`), so routing them through the
+//     binary helper would turn their Windows line endings from CRLF into LF —
+//     an on-disk byte change in files downstream tooling parses, on a platform
+//     the Linux branch cannot execute. That is the reason the S-109 row
+//     recorded for leaving them, and the shared primitive's `windows_binary`
+//     knob is what removes it: passing false reproduces each site's existing
+//     Windows stream EXACTLY.
+//   * its own diagnostic STRINGS ("<cmd>: cannot open output file for write:").
+//     Each of the nine has its own wording, several of them flag-specific
+//     ("cannot open --envelopes-out for write", "cannot open --summary for
+//     write"), and two print nothing at all because their CALLER does.
+//   * the P-2 reporting shape (stderr warning + `perms_narrowed` in --json).
+//
+// SO THIS CLOSES P-1 AND NOT P-2, DELIBERATELY. The permission WINDOW — file
+// created at 0666 & ~umask, payload written into it, mode narrowed only
+// afterwards — is closed on POSIX for every caller below, because the primitive
+// creates at 0600 and fchmods the DESCRIPTOR before the first byte. The
+// REPORTING of a narrowing that FAILS is left exactly as it was: `final_ec` is
+// discarded here the way `(void)perm_ec` discarded it at each site, and a
+// failed pre-write fchmod warns nobody. Adding the reporting is a behaviour
+// change across six commands and four --json contracts — a new stderr line and
+// a new summary field on each — and it stays a separate increment, named in the
+// S-109 row with file:line rather than done silently here.
+//
+// THREE THINGS DO CHANGE at every caller, because they are the primitive's
+// contract and cannot be opted out of. Each is stated rather than discovered
+// later:
+//   * ::close is CHECKED. Six of the nine let the ofstream destructor close the
+//     file, so an ENOSPC/EIO flush failure at close was invisible: exit 0 with
+//     a truncated file. It is now the WriteFailed outcome and the caller's
+//     existing "write failed" diagnostic renders it.
+//   * a failed write or close REMOVES the file instead of publishing a fragment
+//     under the final name (the rule both other restricted writers already
+//     state at their locus, measured 2026-09-17).
+//   * O_NOFOLLOW: a symlink planted at the path fails ELOOP instead of being
+//     followed. The same behaviour change the wallet's other ten outputs took
+//     on 2026-09-17, for the same reason.
+//
+// The caller renders the outcome. This function prints nothing itself, but it
+// does hand back the REASON, because the primitive captured one and throwing it
+// away is how a refusal becomes undiagnosable.
+//
+// `why_out`, when non-null, receives the SUFFIX the caller appends to its own
+// diagnostic — ": " + strerror(errno), or ": wrote 0 bytes" — and is empty when
+// there is nothing to say (the Windows ofstream arm, which has no errno). That
+// is verbatim the shape `write_bytes_file_0600` above renders and the shape
+// include/determ/util/restricted_write.hpp asks every caller for at its `err`
+// field. ADDED 2026-09-18 after review: without it the O_NOFOLLOW refusal this
+// increment ships on nine commands printed a bare "cannot open --out for write:
+// <path>" on a path that `ls -l`, `touch` and `test -w` all say is fine, and an
+// operator could not tell ELOOP from EACCES from ENOSPC. It is a SUFFIX on the
+// line each site already printed, never a new line: no exit code, no stdout and
+// no --json field moves. The one measured consequence for an existing path is
+// that the six sites where a DIRECTORY at the output path drives the
+// open-failure arm now append ": Is a directory".
+enum class QuietWriteOutcome { Ok, OpenFailed, WriteFailed };
+
+QuietWriteOutcome write_file_0600_quiet(const std::string& out_path,
+                                        const void* data, std::size_t len,
+                                        bool windows_binary,
+                                        bool final_narrow,
+                                        std::string* why_out = nullptr) {
+    determ::util::RestrictedWriteOptions wopts;
+    wopts.windows_binary = windows_binary;
+    // `final_narrow` is not a style choice. TRUE reproduces a site that ALREADY
+    // had a trailing std::filesystem::permissions call, so nothing about that
+    // site's Windows behaviour moves. FALSE is for the three outputs that had
+    // NO permission call at all, and the reason is POSIX, not Windows: there the
+    // by-path call is redundant with the `fchmod` the primitive already made on
+    // the DESCRIPTOR, and it is the by-path TOCTOU shape the primitive exists to
+    // avoid. The same reasoning src/crypto/keys.cpp::save_node_key records for
+    // passing false.
+    //   CORRECTED 2026-09-18 after review. The wording here previously claimed
+    //   that passing true would "add a Windows behaviour this site never had
+    //   (FILE_ATTRIBUTE_READONLY on a file that did not carry it)". That is
+    //   backwards. The call the primitive makes is
+    //   std::filesystem::permissions(path, owner_read | owner_write,
+    //   perm_options::replace); the WRITE bit is present, so under the
+    //   documented MSVC mapping that call CLEARS FILE_ATTRIBUTE_READONLY and
+    //   cannot set it. On Windows the trailing call therefore neither restricts
+    //   anything nor adds a hazard — it buys nothing, which is a reason not to
+    //   add it but not the reason that was written here. Asserted from the
+    //   documented mapping and NOT measured: this branch cannot be executed on
+    //   Linux. What is true on Windows at all nine sites, with final_narrow
+    //   either way, is that the effective ACL arrives by inheritance from the
+    //   parent directory and nothing about the window is closed there.
+    wopts.final_narrow = final_narrow;
+    const auto res =
+        determ::util::write_restricted_0600(out_path, data, len, wopts);
+    if (why_out) {
+        *why_out = res.wrote_zero
+                       ? std::string(": wrote 0 bytes")
+                       : (res.err ? std::string(": ") + std::strerror(res.err)
+                                  : std::string());
+    }
+    if (res.status == determ::util::RestrictedWriteStatus::OpenFailed)
+        return QuietWriteOutcome::OpenFailed;
+    if (!res.ok())
+        return QuietWriteOutcome::WriteFailed;
+    // P-2 stays open HERE and only here: discarded exactly as `(void)perm_ec`
+    // discarded it, so no site below gains or loses a diagnostic.
+    (void)res.final_ec;
+    (void)res.narrow_failed;
+    return QuietWriteOutcome::Ok;
+}
+
+QuietWriteOutcome write_text_0600_quiet(const std::string& out_path,
+                                        const std::string& text,
+                                        std::string* why_out = nullptr,
+                                        bool final_narrow = true) {
+    // windows_binary = false: the primitive's Windows arm is then
+    // `std::ofstream f(path, std::ios::trunc)`, which is byte-for-byte the
+    // default-constructed `std::ofstream of(out_path)` these callers used —
+    // CRLF translation included.
+    return write_file_0600_quiet(out_path, text.data(), text.size(),
+                                 /*windows_binary=*/false, final_narrow,
+                                 why_out);
 }
 
 // Read + decode a DAK1 plaintext keyfile. On success fills the 32-byte seed
@@ -2352,29 +2484,36 @@ int cmd_account_import_many(int argc, char** argv) {
     }
 
     // ── Write summary file (if --summary set) ───────────────────────────────
+    // 0600 — the summary references which addresses landed where; not
+    // secret-grade but operator may consider it sensitive. Routed through
+    // write_text_0600_quiet 2026-09-18: this was ofstream -> write ->
+    // permissions -> (void)perm_ec, so the file existed at 0666 & ~umask with
+    // the whole record set in it until the narrowing ran. Both exit codes are
+    // the ones it always had and both diagnostics keep their wording; since
+    // 2026-09-18 each gains a ": <strerror>" SUFFIX naming the reason, which is
+    // what makes the O_NOFOLLOW refusal diagnosable. The trailing permissions
+    // call is still made (final_narrow defaults true) and its error_code is
+    // still discarded, because the P-2 half here is a separate increment.
+    // NOTE for the operator, and it is documented in docs/CLI-REFERENCE.md: this
+    // write happens AFTER every per-record keyfile is on disk, so a --summary
+    // that cannot be opened exits 1 with the keyfiles already written and NOT
+    // removed. That is pre-existing (a --summary naming a directory has always
+    // done it); O_NOFOLLOW only adds a symlinked and a /dev/stdout --summary as
+    // two more ways to reach it.
     if (!summary_path.empty()) {
-        std::ofstream f(summary_path);
-        if (!f) {
-            std::cerr << "account-import-many: cannot open --summary for write: "
-                      << summary_path << "\n";
-            return 1;
+        std::string why;
+        switch (write_text_0600_quiet(summary_path, summary.dump(2) + "\n", &why)) {
+            case QuietWriteOutcome::OpenFailed:
+                std::cerr << "account-import-many: cannot open --summary for write: "
+                          << summary_path << why << "\n";
+                return 1;
+            case QuietWriteOutcome::WriteFailed:
+                std::cerr << "account-import-many: write failed on --summary: "
+                          << summary_path << why << "\n";
+                return 1;
+            case QuietWriteOutcome::Ok:
+                break;
         }
-        f << summary.dump(2) << "\n";
-        f.close();
-        if (!f) {
-            std::cerr << "account-import-many: write failed on --summary: "
-                      << summary_path << "\n";
-            return 1;
-        }
-        // 0600 — the summary references which addresses landed where; not
-        // secret-grade but operator may consider it sensitive.
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            summary_path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
     }
 
     // ── Human-readable stdout summary ───────────────────────────────────────
@@ -3265,29 +3404,29 @@ int cmd_backup_create(int argc, char** argv) {
             std::cerr << "backup-create: " << e.what() << "\n";
             return 1;
         }
-        std::ofstream f(envs_out, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            std::cerr << "backup-create: cannot open --envelopes-out for write: "
-                      << envs_out << "\n";
-            return 1;
+        // Routed through write_file_0600_quiet 2026-09-18: this was
+        // ofstream(binary) -> write -> permissions -> (void)perm_ec, so the
+        // complete DBE1 envelope set was on disk at 0666 & ~umask until the
+        // narrowing ran. Binary mode is preserved (windows_binary=true), both
+        // exit codes are unchanged and both diagnostics keep their wording with
+        // a ": <strerror>" suffix added 2026-09-18, the trailing permissions
+        // call still happens and its error_code is still discarded — the P-2
+        // half at this site is a separate increment.
+        std::string why;
+        switch (write_file_0600_quiet(envs_out, bytes.data(), bytes.size(),
+                                      /*windows_binary=*/true,
+                                      /*final_narrow=*/true, &why)) {
+            case QuietWriteOutcome::OpenFailed:
+                std::cerr << "backup-create: cannot open --envelopes-out for write: "
+                          << envs_out << why << "\n";
+                return 1;
+            case QuietWriteOutcome::WriteFailed:
+                std::cerr << "backup-create: write failed on --envelopes-out: "
+                          << envs_out << why << "\n";
+                return 1;
+            case QuietWriteOutcome::Ok:
+                break;
         }
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-        f.close();
-        if (!f) {
-            std::cerr << "backup-create: write failed on --envelopes-out: "
-                      << envs_out << "\n";
-            return 1;
-        }
-    }
-    {
-        std::error_code perm_ec;
-        std::filesystem::permissions(
-            envs_out,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace,
-            perm_ec);
-        (void)perm_ec;
     }
 
     // ── Summary ──────────────────────────────────────────────────────────
@@ -3298,9 +3437,13 @@ int cmd_backup_create(int argc, char** argv) {
         r["shares_file"]    = shares_out;
         r["envelopes_file"] = envs_out;
         // Failure-only field (see write_bytes_file_0600). It reports the SHARES
-        // file only: the envelopes file below is still on the old
-        // ofstream -> permissions -> (void)perm_ec path and is not covered by
-        // this increment (it holds AEAD-wrapped shares, not plaintext).
+        // file only. The envelopes file's permission WINDOW was closed on
+        // 2026-09-18 (write_file_0600_quiet above), but its narrowing is still
+        // unreported — it keeps the discarded error_code it always had — so it
+        // has nothing to contribute to this field and is deliberately not
+        // folded into it: widening the field's meaning without widening what
+        // sets it would make a `perms_narrowed` absent from this summary a
+        // claim about a file nobody checked.
         if (!perms_narrowed) r["perms_narrowed"] = false;
         std::cout << r.dump() << "\n";
     } else {
@@ -6070,12 +6213,32 @@ int cmd_create_recovery(int argc, char** argv) {
         // D2: the at-rest recovery setup is the canonical binary DRS1
         // container (wallet/recovery.hpp).
         auto bytes = recovery::to_bytes(setup);
-        std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
-        if (!f) { std::cerr << "Cannot open --out for write: " << out_path << "\n"; return 1; }
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-        f.close();
-        if (!f) { std::cerr << "Write failed on --out: " << out_path << "\n"; return 1; }
+        // NARROWED FOR THE FIRST TIME 2026-09-18. This site had no permission
+        // call of ANY kind: the DRS1 container of password-wrapped share
+        // envelopes landed at 0666 & ~umask and stayed there — measured under
+        // `umask 000`, mode 0666, world-WRITABLE as well as world-readable, so
+        // it was not even reachable by the "the final mode is 0600" checks that
+        // covered the P-1 sites. On POSIX it is now created 0600 and fchmod'd
+        // on the descriptor before the first byte. final_narrow=false: on POSIX
+        // the by-path chmod is redundant with the fchmod and is the TOCTOU shape
+        // the primitive exists to avoid, and on Windows it would buy nothing —
+        // see write_file_0600_quiet, whose comment carries the corrected Windows
+        // reasoning. Both exit codes are the ones it always had and both
+        // diagnostics keep their wording, with a ": <strerror>" suffix added
+        // 2026-09-18.
+        std::string why;
+        switch (write_file_0600_quiet(out_path, bytes.data(), bytes.size(),
+                                      /*windows_binary=*/true,
+                                      /*final_narrow=*/false, &why)) {
+            case QuietWriteOutcome::OpenFailed:
+                std::cerr << "Cannot open --out for write: " << out_path << why << "\n";
+                return 1;
+            case QuietWriteOutcome::WriteFailed:
+                std::cerr << "Write failed on --out: " << out_path << why << "\n";
+                return 1;
+            case QuietWriteOutcome::Ok:
+                break;
+        }
         std::cout << "wrote " << out_path << " (DRS1)\n";
         std::cout << "  threshold:     " << int(setup.threshold)   << " of "
                   << int(setup.share_count) << "\n";
@@ -6950,15 +7113,33 @@ std::optional<std::vector<uint8_t>> read_file_bytes(const std::string& path) {
 }
 
 // Write a byte vector to a file, truncating any existing content.
-// Returns true on success.
+// Returns true on success. The two callers — encrypt-message --out and
+// decrypt-message --out — render their own diagnostic on false, so this one
+// stays silent.
+//
+// NARROWED FOR THE FIRST TIME 2026-09-18. This was the second, unhardened byte
+// writer in this file and it had no permission call of ANY kind, so both its
+// outputs landed at 0666 & ~umask and STAYED there — measured under `umask
+// 000`, mode 0666 for both, world-WRITABLE as well as world-readable. One of
+// them, `decrypt-message --out`, is the RECOVERED PLAINTEXT of an off-chain
+// message, so this was not a window at all but a permanent exposure that no
+// final-mode check in the tree could see, because none of them looked here.
+// On POSIX the file is now created 0600 and fchmod'd on its descriptor before
+// the first byte. final_narrow=false: on POSIX the by-path chmod is redundant
+// with the fchmod and is the TOCTOU shape the primitive exists to avoid, and on
+// Windows it would buy nothing — see write_file_0600_quiet, whose comment
+// carries the corrected Windows reasoning. Binary mode is preserved. The `bool`
+// return is unchanged and both callers keep their diagnostic wording, with a
+// ": <strerror>" suffix added 2026-09-18 via the optional `why_out`; a close
+// failure, which the old `out_f.good()` before the destructor's close could not
+// see, now reports false instead of exiting 0 on a truncated file.
 bool write_file_bytes(const std::string& path,
-                       const std::vector<uint8_t>& data) {
-    std::ofstream out_f(path, std::ios::binary | std::ios::trunc);
-    if (!out_f) return false;
-    if (!data.empty())
-        out_f.write(reinterpret_cast<const char*>(data.data()),
-                    static_cast<std::streamsize>(data.size()));
-    return out_f.good();
+                       const std::vector<uint8_t>& data,
+                       std::string* why_out = nullptr) {
+    return write_file_0600_quiet(path, data.data(), data.size(),
+                                 /*windows_binary=*/true,
+                                 /*final_narrow=*/false, why_out)
+           == QuietWriteOutcome::Ok;
 }
 
 // Load the operator's priv_seed from a single-account keyfile — the
@@ -7132,8 +7313,9 @@ int cmd_encrypt_message(int argc, char** argv) {
     wire.insert(wire.end(), nonce.begin(), nonce.end());
     wire.insert(wire.end(), ciphertext.begin(), ciphertext.end());
 
-    if (!write_file_bytes(out_path, wire)) {
-        std::cerr << "encrypt-message: cannot write --out: " << out_path << "\n";
+    std::string why;
+    if (!write_file_bytes(out_path, wire, &why)) {
+        std::cerr << "encrypt-message: cannot write --out: " << out_path << why << "\n";
         return 1;
     }
 
@@ -7298,8 +7480,9 @@ int cmd_decrypt_message(int argc, char** argv) {
         return 2;
     }
 
-    if (!write_file_bytes(out_path, *pt_opt)) {
-        std::cerr << "decrypt-message: cannot write --out: " << out_path << "\n";
+    std::string why;
+    if (!write_file_bytes(out_path, *pt_opt, &why)) {
+        std::cerr << "decrypt-message: cannot write --out: " << out_path << why << "\n";
         return 1;
     }
 
@@ -9815,32 +9998,29 @@ int cmd_cold_sign(int argc, char** argv) {
         return 0;
     }
 
-    // --out path. Write the signed JSON file, then set 0600 perms.
-    {
-        std::ofstream of(out_path);
-        if (!of) {
+    // --out path. 0600 — owner-only read/write — from CREATION, not afterwards.
+    // POSIX semantic; on Windows the read/write bits are a no-op (NTFS ACL
+    // inherits from parent), same convention every other wallet command that
+    // writes secret-derived output follows (account-export, keyfile-create,
+    // etc.). Routed through write_text_0600_quiet 2026-09-18: this was
+    // ofstream -> write -> permissions -> (void)perm_ec, so the signed envelope
+    // was on disk at 0666 & ~umask until the narrowing ran. Text mode, both
+    // exit codes and the trailing permissions call with its discarded
+    // error_code are all exactly as they were; both diagnostics keep their
+    // wording and gained a ": <strerror>" suffix on 2026-09-18.
+    std::string why;
+    switch (write_text_0600_quiet(out_path, signed_text + "\n", &why)) {
+        case QuietWriteOutcome::OpenFailed:
             std::cerr << "cold-sign: cannot open --out for write: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
-        of << signed_text << "\n";
-        if (!of) {
+        case QuietWriteOutcome::WriteFailed:
             std::cerr << "cold-sign: write failed on --out: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
+        case QuietWriteOutcome::Ok:
+            break;
     }
-    // 0600 — owner-only read/write. POSIX semantic; on Windows the
-    // read/write bits are a no-op (NTFS ACL inherits from parent), same
-    // convention every other wallet command that writes secret-derived
-    // output follows (account-export, keyfile-create, etc.).
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    (void)perm_ec;
 
     nlohmann::json status = {
         {"status",      "ok"},
@@ -10201,31 +10381,28 @@ int cmd_sign_anon_tx(int argc, char** argv) {
         return 0;
     }
 
-    // --out path: write the signed JSON file, then 0600 perms.
-    {
-        std::ofstream of(out_path);
-        if (!of) {
+    // --out path: 0600 — owner-only read/write — from CREATION, not afterwards.
+    // POSIX semantic; on Windows the read/write bits are a no-op (NTFS ACL
+    // inherits from parent), same convention every other secret-derived-output
+    // command follows. Routed through write_text_0600_quiet 2026-09-18: this
+    // was ofstream -> write -> permissions -> (void)perm_ec, so the signed
+    // envelope was on disk at 0666 & ~umask until the narrowing ran. Text mode,
+    // both exit codes and the trailing permissions call with its discarded
+    // error_code are all exactly as they were; both diagnostics keep their
+    // wording and gained a ": <strerror>" suffix on 2026-09-18.
+    std::string why;
+    switch (write_text_0600_quiet(out_path, signed_text + "\n", &why)) {
+        case QuietWriteOutcome::OpenFailed:
             std::cerr << "sign-anon-tx: cannot open --out for write: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
-        of << signed_text << "\n";
-        if (!of) {
+        case QuietWriteOutcome::WriteFailed:
             std::cerr << "sign-anon-tx: write failed on --out: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
+        case QuietWriteOutcome::Ok:
+            break;
     }
-    // 0600 — owner-only read/write. POSIX semantic; on Windows the
-    // read/write bits are a no-op (NTFS ACL inherits from parent), same
-    // convention every other secret-derived-output command follows.
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    (void)perm_ec;
 
     nlohmann::json status = {
         {"status",      "ok"},
@@ -10821,28 +10998,26 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     // runs (matches the determinism contract). Operators wanting a
     // pretty-printed copy can pipe through `jq` after the fact.
     const std::string out_text = out_arr.dump();
-    {
-        std::ofstream of(out_path);
-        if (!of) {
+    // 0600 — owner-only read/write (POSIX semantic; Windows ACL inherits) —
+    // from CREATION, not afterwards. Routed through write_text_0600_quiet
+    // 2026-09-18: this was ofstream -> write -> permissions -> (void)perm_ec,
+    // so the whole signed batch was on disk at 0666 & ~umask until the
+    // narrowing ran. Text mode, both exit codes and the trailing permissions
+    // call with its discarded error_code are unchanged; both diagnostics keep
+    // their wording and gained a ": <strerror>" suffix on 2026-09-18.
+    std::string why;
+    switch (write_text_0600_quiet(out_path, out_text + "\n", &why)) {
+        case QuietWriteOutcome::OpenFailed:
             std::cerr << "tx-batch-sign: cannot open --out for write: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
-        of << out_text << "\n";
-        if (!of) {
+        case QuietWriteOutcome::WriteFailed:
             std::cerr << "tx-batch-sign: write failed on --out: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
+        case QuietWriteOutcome::Ok:
+            break;
     }
-    // 0600 — owner-only read/write (POSIX semantic; Windows ACL inherits).
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    (void)perm_ec;
 
     nlohmann::json status = {
         {"status", "ok"},
@@ -23583,29 +23758,27 @@ int cmd_param_change_build(int argc, char** argv) {
         return 0;
     }
 
-    {
-        std::ofstream of(out_path);
-        if (!of) {
+    // 0600 — owner-only, from CREATION rather than afterwards. POSIX semantic;
+    // Windows no-op (same convention as every other file-emitting wallet
+    // command). Routed through write_text_0600_quiet 2026-09-18: this was
+    // ofstream -> write -> permissions -> (void)perm_ec, so the unsigned
+    // governance tx was on disk at 0666 & ~umask until the narrowing ran. Text
+    // mode, both exit codes and the trailing permissions call with its
+    // discarded error_code are unchanged; both diagnostics keep their wording
+    // and gained a ": <strerror>" suffix on 2026-09-18.
+    std::string why;
+    switch (write_text_0600_quiet(out_path, tx_text + "\n", &why)) {
+        case QuietWriteOutcome::OpenFailed:
             std::cerr << "param-change-build: cannot open --out for write: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
-        of << tx_text << "\n";
-        if (!of) {
+        case QuietWriteOutcome::WriteFailed:
             std::cerr << "param-change-build: write failed on --out: "
-                      << out_path << "\n";
+                      << out_path << why << "\n";
             return 1;
-        }
+        case QuietWriteOutcome::Ok:
+            break;
     }
-    // 0600 — owner-only. POSIX semantic; Windows no-op (same convention as
-    // every other file-emitting wallet command).
-    std::error_code perm_ec;
-    std::filesystem::permissions(
-        out_path,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace,
-        perm_ec);
-    (void)perm_ec;
 
     nlohmann::json status = {
         {"status",      "ok"},

@@ -471,6 +471,17 @@ def d4(path, ls):                     # an assertion inside an embedded python
     import ast                        # heredoc that can only ever be true, or
     hits = []                         # whose failure is swallowed
     src = '\n'.join(ls)
+    # A STANDALONE .py file is one whole body. Added 2026-09-18: the ordering
+    # parser used to live in three shell heredocs, which is what this checker
+    # reads; de-duplicating it into tools/strace_order.py moved it out of reach
+    # of a heredoc scan entirely, so the same two shapes could return to a file
+    # that computes a gate verdict and nothing here would see them.
+    if path.endswith('.py'):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            return [(1, 'file does not parse as python; D4 cannot read it')]
+        return _d4_walk(tree, 1)
     for m in HEREDOC.finditer(src):
         body = m.group('body')
         if m.group('q') == '':        # unquoted tag: the shell expanded $vars
@@ -481,24 +492,30 @@ def d4(path, ls):                     # an assertion inside an embedded python
             tree = ast.parse(body)
         except SyntaxError:
             continue                  # not python (awk/perl/sed); D4 reads python only
-        for n in ast.walk(tree):
-            # (a) a comparison whose two operands are syntactically identical:
-            #     the verdict it feeds the shell can only ever take one value.
-            if isinstance(n, ast.Compare) and len(n.comparators) == 1 and \
-                    isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)):
-                try:
-                    same = ast.dump(n.left) == ast.dump(n.comparators[0])
-                except Exception:
-                    same = False
-                if same:
-                    hits.append((base + n.lineno - 1,
-                                 'comparison with two identical operands inside a heredoc'))
-            # (b) a bare `except: pass`: the heredoc crashes and the shell reads
-            #     whatever the pre-set verdict variable held, usually the pass token.
-            if isinstance(n, ast.ExceptHandler) and len(n.body) == 1 and \
-                    isinstance(n.body[0], ast.Pass):
+        hits.extend(_d4_walk(tree, base))
+    return hits
+
+def _d4_walk(tree, base):
+    import ast
+    hits = []
+    for n in ast.walk(tree):
+        # (a) a comparison whose two operands are syntactically identical:
+        #     the verdict it feeds the shell can only ever take one value.
+        if isinstance(n, ast.Compare) and len(n.comparators) == 1 and \
+                isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)):
+            try:
+                same = ast.dump(n.left) == ast.dump(n.comparators[0])
+            except Exception:
+                same = False
+            if same:
                 hits.append((base + n.lineno - 1,
-                             'bare `except: pass` swallows the failure of the assertion it wraps'))
+                             'comparison with two identical operands'))
+        # (b) a bare `except: pass`: the code crashes and the shell reads
+        #     whatever the pre-set verdict variable held, usually the pass token.
+        if isinstance(n, ast.ExceptHandler) and len(n.body) == 1 and \
+                isinstance(n.body[0], ast.Pass):
+            hits.append((base + n.lineno - 1,
+                         'bare `except: pass` swallows the failure of the assertion it wraps'))
     return hits
 
 CHECKS = {'D1': d1, 'D2': d2, 'D3': d3, 'D4': d4}
@@ -563,10 +580,32 @@ else bad "D3: the allowlist is stale — these no longer offend and must be remo
 # wrappers (the gates); tools/operator_*.sh are operator REPORTS whose heredocs
 # produce no suite verdict, and seven of them carry a bare `except: pass` today —
 # listed in the 2026-09-18 log entry with file:line, not gated here.
+#
+# STANDALONE PYTHON, added 2026-09-18 after review. On 2026-09-18 the ordering
+# parser was de-duplicated out of three shell heredocs into ONE standalone file,
+# tools/strace_order.py. `ls tools/test_*.sh` cannot see it and a heredoc scan
+# cannot read it, so the de-duplication silently moved the single shared security
+# parser OUT of this ratchet — the one ratchet that looks for the two shapes
+# that make a python verdict vacuous. It is swept explicitly below, and the
+# checker reads a whole `.py` file as one body.
+#
+# THE BLIND SPOT THIS LEAVES, measured on 2026-09-18 and recorded here rather
+# than only in a report, because this comment is where the next editor looks.
+# Twenty of the twenty-six tools/*.py are invoked by a tools/test_*.sh wrapper,
+# and sweeping ALL of them turns D4 RED today on ELEVEN hits in four files —
+# tools/rpc_tamper_proxy.py:189,:198,:200,:219; tools/verify_d5rp.py:122,:132,
+# :144,:154,:169; tools/verify_enote.py:331; tools/verify_view_key.py:178, all
+# bare `except: pass`. Those are reference verifiers and a tamper proxy, not
+# gate verdict computers, and triaging eleven hits across four unrelated files
+# is its own increment — the same boundary the tools/operator_*.sh exclusion
+# above draws. So the ratchet covers the .py that computes a GATE VERDICT and
+# no other, and the eleven are named here with file:line so the next increment
+# starts from a list rather than a rediscovery.
 D4_SWEEP=$(ls tools/test_*.sh | grep -v '^tools/test_gates_can_fail\.sh$')
-D4_HITS=$($PY "$T/checkers.py" D4 $D4_SWEEP)
+D4_PY="tools/strace_order.py"
+D4_HITS=$($PY "$T/checkers.py" D4 $D4_SWEEP $D4_PY)
 eqq "$(printf '%s' "$D4_HITS" | grep -c . )" "0" \
-    "D4: no python heredoc in a tools/test_*.sh gate carries an always-true comparison or a bare except: pass"
+    "D4: no python heredoc in a tools/test_*.sh gate, and no line of the shared parser tools/strace_order.py, carries an always-true comparison or a bare except: pass"
 [ -z "$D4_HITS" ] || printf '%s\n' "$D4_HITS" | sed 's/^/       /'
 
 # D5 — the WRAPPER-LEVEL skip marker is pinned to an EXACT set. It is the one

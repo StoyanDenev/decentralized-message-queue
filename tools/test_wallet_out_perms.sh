@@ -41,6 +41,22 @@
 # owned by another user) and asserts BOTH that the harm is real (the resulting
 # mode is NOT 0600) and that the command now says so, on stderr and in --json.
 #
+# Section E (2026-09-18) gates the ORDERING PARSER itself, over synthetic traces
+# with known answers, because sections A, C and F all delegate their judgement to
+# it and it existed in THREE copies across tools/ until this increment collapsed
+# them into tools/strace_order.py. It needs no strace, no compiler and no binary,
+# so it runs wherever this wrapper runs.
+#
+# Section F (2026-09-18) adds leg (i) for the NINE further outputs this increment
+# covers: the six independent `std::filesystem::permissions` sites S-109 named
+# (cold-sign, sign-anon-tx, tx-batch-sign, param-change-build --out, the
+# backup-create --envelopes-out file and the account-import-many --summary), all
+# of which kept ofstream -> write -> permissions with a discarded error_code, and
+# the three outputs that narrowed nothing at all (create-recovery --out and the
+# encrypt-message / decrypt-message --out pair, which share one byte writer).
+# Section D gained their OUTCOME assertions under `umask 000`, which is what runs
+# on Darwin, where F cannot.
+#
 # Section C adds the same two legs for the two sites S-109 named as follow-ups
 # and this increment closes: `account-import-many`, which emits one PLAINTEXT
 # DAK1 keyfile PER RECORD inside a loop, and `keyfile-rotate`, the one
@@ -128,16 +144,83 @@ UNAME_S=$(uname -s 2>/dev/null || echo unknown)
 # quietly green.
 case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "  NOT GATED HERE: sections A and C (strace ordering), B (LD_PRELOAD fault"
-    echo "        injection) and D (the final mode of every output) all rest on a POSIX"
-    echo "        file mode, which $UNAME_S does not have. What protects a wallet output"
-    echo "        on that platform is the containing directory's NTFS ACL, and nothing in"
-    echo "        this suite checks it — so P-1 and P-2 have NO coverage there."
+    echo "  NOT GATED HERE: sections A, C and F (strace ordering), B (LD_PRELOAD fault"
+    echo "        injection), D (the final mode of every output) and G (the symlink"
+    echo "        refusal) all rest on a POSIX file mode or a POSIX open flag, which"
+    echo "        $UNAME_S does not have. What protects a wallet output on that platform is"
+    echo "        the containing directory's NTFS ACL, and nothing in this suite checks"
+    echo "        it — so P-1 and P-2 have NO coverage there."
+    echo "  NOT GATED HERE EITHER, and for a DIFFERENT reason: section E. Its property is"
+    echo "        NOT platform-bound — it is pure python over hand-written trace strings,"
+    echo "        needs no strace, no ptrace, no C compiler, no determ binary and no file"
+    echo "        mode, and would run correctly here. It is unreachable only as a side"
+    echo "        effect of this wrapper-level exit, which happens before it. The"
+    echo "        consequence is on the record: tools/strace_order.py — the SINGLE shared"
+    echo "        security parser that sections A, C and F all delegate their judgement"
+    echo "        to — has ZERO gate coverage on $UNAME_S. Moving E above this gate would"
+    echo "        fix that and is a one-section move; it is not done here because it"
+    echo "        changes the per-platform assertion count that docs/SECURITY.md states"
+    echo "        in prose, and that sentence is being edited by another track this wave."
     echo "  PLATFORM-SKIP: test_wallet_out_perms — POSIX file modes do not exist on $UNAME_S; the property this gate observes is absent, so nothing was asserted and no pass is banked"
     exit 0
     ;;
 esac
 
+echo "=== E. the shared ordering parser itself (synthetic traces — no strace, no binary) ==="
+# Sections A, C and F below all delegate their judgement to ONE parser,
+# tools/strace_order.py. Until 2026-09-18 that parser existed in THREE copies
+# across tools/ — this file's section A (an inline heredoc), this file's section
+# C (a generated `ordered.py`) and tools/test_account_create_perms.sh's
+# `order_verdict` — and it had already drifted: a descriptor-only spelling scored
+#     create 0600; fchmod(fd,0600); chmod(path,0666); write; chmod(path,0600)
+# as CLOSED with the window fully open, and every final-mode assertion in this
+# tree (including section D below) passes on that trace. The copies are gone; a
+# parser that nothing gates is a parser that drifts again, so this section feeds
+# the survivor traces whose answers are known.
+#
+# It needs NO strace, NO ptrace, NO C compiler and NO determ binary, so unlike
+# A/C/F it runs wherever this wrapper runs at all — including the Darwin and BSD
+# boxes where those three can only skip.
+ORDER="tools/strace_order.py"
+if [ ! -f "$ORDER" ]; then
+  assert false "the shared ordering parser $ORDER is missing (sections A, C and F cannot be judged)"
+else
+  SELFTEST=$($PY "$ORDER" --self-test 2>&1 | tail -1)
+  assert_eq "$SELFTEST" "self-test: 24 ok / 0 bad" \
+    "strace_order.py --self-test: all 24 synthetic verdicts are the expected ones"
+  # Repeated HERE, over traces written in THIS file, so the wrapper does not hand
+  # its entire judgement to the thing it is judging: a mutant that edits the
+  # parser's own expectation table alongside its code would leave the line above
+  # green and these RED.
+  SK="$TMP/synthetic-target.bin"
+  cat > "$TMP/t_good.tr" <<EOF
+openat(AT_FDCWD, "$SK", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW, 0600) = 3
+fchmod(3, 0600)                   = 0
+write(3, "DAK1", 68)              = 68
+EOF
+  cat > "$TMP/t_defect.tr" <<EOF
+openat(AT_FDCWD, "$SK", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3
+write(3, "DAK1", 68)              = 68
+fchmodat(AT_FDCWD, "$SK", 0600)   = 0
+EOF
+  cat > "$TMP/t_drift.tr" <<EOF
+openat(AT_FDCWD, "$SK", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW, 0600) = 3
+fchmod(3, 0600)                   = 0
+chmod("$SK", 0666)                = 0
+write(3, "DAK1", 68)              = 68
+chmod("$SK", 0600)                = 0
+EOF
+  assert_eq "$($PY "$ORDER" "$TMP/t_good.tr" "$SK" | sed -n 1p)" "600" \
+    "parser: a narrowing on the descriptor before the first write reads as 600"
+  assert_eq "$($PY "$ORDER" "$TMP/t_defect.tr" "$SK" | sed -n 1p)" "none" \
+    "parser: the S-109 P-1 shape (create wide, write the secret, narrow afterwards) reads as 'none', not 600"
+  assert_eq "$($PY "$ORDER" "$TMP/t_drift.tr" "$SK" | sed -n 1p)" "last-before-write:666" \
+    "parser: a widen done BY PATH between the narrowing and the first write is SEEN (a descriptor-only parser calls this closed and the file still ends at 0600)"
+  assert_eq "$($PY "$ORDER" "$TMP/t_good.tr" "$SK" | sed -n 2p)" "none" \
+    "parser: the non-vacuity self-check answers 'none' once the pre-write mode lines are stripped"
+fi
+
+echo
 # A share-set to rotate, and a pre-existing 0644 target to overwrite.
 umask 022
 "$WALLET" shamir-split --secret aabbccddeeff00112233445566778899 \
@@ -164,6 +247,82 @@ echo "rotate-new-passphrase" > "$TMP/rot_new.txt"
 "$WALLET" keyfile-create --priv 2222222222222222222222222222222222222222222222222222222222222222 \
     --passphrase-from "file:$TMP/rot_old.txt" --out "$TMP/rot_in.dnk1" --force >/dev/null 2>&1 \
     || { echo "  FAIL: fixture keyfile-create failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+
+# Inputs for the NINE sites added on 2026-09-18 (six migrated off the
+# ofstream-then-narrow shape, three narrowed for the first time). Built once at
+# top level because section F (strace ordering) and section D (final mode) each
+# need them and each can skip independently. A failed fixture is a hard RED.
+PRIV_A=$($PY -c "import json,sys;print(json.load(open(sys.argv[1]))['accounts'][0]['privkey_hex'])" "$TMP/aim_batch.json" 2>/dev/null)
+PRIV_B=$($PY -c "import json,sys;print(json.load(open(sys.argv[1]))['accounts'][1]['privkey_hex'])" "$TMP/aim_batch.json" 2>/dev/null)
+ADDR_A=$($PY -c "import json,sys;print(json.load(open(sys.argv[1]))['accounts'][0]['address'])" "$TMP/aim_batch.json" 2>/dev/null)
+ADDR_B=$($PY -c "import json,sys;print(json.load(open(sys.argv[1]))['accounts'][1]['address'])" "$TMP/aim_batch.json" 2>/dev/null)
+PUB_A="${ADDR_A#0x}"
+PUB_B="${ADDR_B#0x}"
+[ -n "$PRIV_A" ] && [ -n "$ADDR_B" ] \
+    || { echo "  FAIL: fixture could not read the account batch"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+"$WALLET" account-import --priv "$PRIV_A" --out "$TMP/key_a.json" --force >/dev/null 2>&1 \
+    || { echo "  FAIL: fixture account-import (a) failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+"$WALLET" account-import --priv "$PRIV_B" --out "$TMP/key_b.json" --force >/dev/null 2>&1 \
+    || { echo "  FAIL: fixture account-import (b) failed"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+$PY -c "
+import json,sys
+json.dump({'type':0,'from':sys.argv[1],'to':sys.argv[2],'amount':1000,'fee':5,'nonce':1,'payload':'deadbeef'},
+          open(sys.argv[3],'w'))" "$ADDR_A" "$ADDR_B" "$TMP/unsigned_tx.json"
+$PY -c "
+import json,sys
+json.dump([{'type':'TRANSFER','from':sys.argv[1],'to':sys.argv[2],'amount':1000,'fee':5,'nonce':1}],
+          open(sys.argv[3],'w'))" "$ADDR_A" "$ADDR_B" "$TMP/batch_in.json"
+cat > "$TMP/kh3.json" <<'EOF'
+{"keyholders":[{"share_index":1,"passphrase":"kh-pw-1"},{"share_index":2,"passphrase":"kh-pw-2"},{"share_index":3,"passphrase":"kh-pw-3"}]}
+EOF
+printf 'hello world, off-chain encrypted message' > "$TMP/msg_plain.txt"
+[ -s "$TMP/unsigned_tx.json" ] && [ -s "$TMP/batch_in.json" ] \
+    || { echo "  FAIL: fixture tx inputs not built"; echo "  FAIL: test_wallet_out_perms"; exit 1; }
+
+# ── the nine sites, as a table both section F and section D walk ─────────────
+# Fields: <label>|<overwrite|fresh>|<target>|<command...>
+#   overwrite — a PRE-EXISTING 0644 target, the path where a create-mode-only
+#               fix does nothing. Used wherever the command accepts one.
+#   fresh     — `sign-anon-tx` and `param-change-build` REFUSE an existing --out
+#               and have no --force, so their only path is a fresh create. Under
+#               the wrapper's umask 022 that create takes 0644 without the fix
+#               (measured at the pre-change binary: mode 0666 under umask 000,
+#               world-WRITABLE, with the complete artifact already in the file).
+# `encrypt-message` / `decrypt-message` / `create-recovery` are the three that
+# had NO permission call at all: for them this is not a window but the first
+# narrowing they have ever had.
+site_run() {  # $1 = site key; $2.. = an optional wrapper prefix (e.g. strace …)
+  local k="$1"; shift
+  case "$k" in
+    cold-sign)           "$@" "$WALLET" cold-sign --tx-json "$TMP/unsigned_tx.json" --priv-keyfile "$TMP/key_a.json" --out "$TMP/f_cs.json" --force ;;
+    sign-anon-tx)        "$@" "$WALLET" sign-anon-tx --keyfile "$TMP/key_a.json" --to "$ADDR_B" --amount 1000 --fee 5 --nonce 1 --out "$TMP/f_sa.json" ;;
+    tx-batch-sign)       "$@" "$WALLET" tx-batch-sign --keyfile "$TMP/key_a.json" --in "$TMP/batch_in.json" --out "$TMP/f_tbs.json" --force ;;
+    param-change-build)  "$@" "$WALLET" param-change-build --name tx_commit_ms --value 5000 --effective-height 100 --nonce 0 --from node1 --out "$TMP/f_pcb.json" ;;
+    backup-envelopes)    "$@" "$WALLET" backup-create --secret aabbccddeeff00112233445566778899 --threshold 2 --keyholders "$TMP/kh3.json" --shares-out "$TMP/f_sh.bin" --envelopes-out "$TMP/f_env.bin" --force ;;
+    import-many-summary) "$@" "$WALLET" account-import-many --in "$TMP/aim_in.json" --out-dir "$TMP/f_aimd" --summary "$TMP/f_sum.json" --force ;;
+    create-recovery)     "$@" "$WALLET" create-recovery --seed aabbccddeeff00112233445566778899 --password rec-pw -t 2 -n 3 --out "$TMP/f_rec.bin" ;;
+    encrypt-message)     "$@" "$WALLET" encrypt-message --priv-keyfile "$TMP/key_a.json" --peer-pubkey "$PUB_B" --in "$TMP/msg_plain.txt" --out "$TMP/f_ct.bin" ;;
+    decrypt-message)     "$@" "$WALLET" decrypt-message --priv-keyfile "$TMP/key_b.json" --peer-pubkey "$PUB_A" --in "$TMP/f_ct.bin" --out "$TMP/f_pt.bin" ;;
+  esac
+}
+site_target() {
+  case "$1" in
+    cold-sign)           echo "$TMP/f_cs.json" ;;
+    sign-anon-tx)        echo "$TMP/f_sa.json" ;;
+    tx-batch-sign)       echo "$TMP/f_tbs.json" ;;
+    param-change-build)  echo "$TMP/f_pcb.json" ;;
+    backup-envelopes)    echo "$TMP/f_env.bin" ;;
+    import-many-summary) echo "$TMP/f_sum.json" ;;
+    create-recovery)     echo "$TMP/f_rec.bin" ;;
+    encrypt-message)     echo "$TMP/f_ct.bin" ;;
+    decrypt-message)     echo "$TMP/f_pt.bin" ;;
+  esac
+}
+site_fresh() {  # "yes" when the command refuses a pre-existing --out
+  case "$1" in sign-anon-tx|param-change-build) echo yes ;; *) echo no ;; esac
+}
+SITES="cold-sign sign-anon-tx tx-batch-sign param-change-build backup-envelopes import-many-summary create-recovery encrypt-message decrypt-message"
+mkdir -p "$TMP/f_aimd"
 
 echo "=== A. ordering: the file is 0600 before the secret is written (Linux strace) ==="
 # fchmodat2 (glibc >= 2.39 / Linux >= 6.6) is in the set because a new enough
@@ -202,54 +361,7 @@ else
   if [ ! -s "$TR" ]; then
     assert false "strace produced no trace for the write (the ordering cannot be judged)"
   else
-    VERDICT=$($PY - "$TR" "$TGT" <<'EOF'
-import re, sys
-trace, target = open(sys.argv[1]).read().splitlines(), sys.argv[2]
-q = re.escape(target)
-# The CREATING open of the target: O_CREAT, a mode argument, and a returned fd.
-# The path also appears in non-creating opens, and a failed open returns -1 and
-# creates nothing, so neither may be taken for the create.
-OPEN = re.compile(r'\bopenat?\((?:AT_FDCWD, )?"%s", ([^,)]*O_CREAT[^,)]*), 0[0-7]+\)\s*=\s*([0-9]+)\b' % q)
-# Mode-setting calls that affect that file: on the descriptor, or on the path.
-FCHMOD  = re.compile(r'\bfchmod\((\d+), 0?([0-7]+)\)')
-PCHMOD  = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"%s", 0?([0-7]+)' % q)
-def run(lines):
-    op = next(((i, m) for i, l in enumerate(lines) for m in [OPEN.search(l)] if m), None)
-    if op is None:
-        return "no-create-open"
-    i_open, fd = op[0], op[1].group(2)
-    WRITE = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-    i_write = next((i for i, l in enumerate(lines) if i > i_open and WRITE.search(l)), None)
-    if i_write is None:
-        return "no-write"
-    modes = []
-    for i in range(i_open + 1, i_write):
-        m = FCHMOD.search(lines[i])
-        if m and m.group(1) == fd:
-            modes.append(m.group(2)); continue
-        m = PCHMOD.search(lines[i])
-        if m:
-            modes.append(m.group(1))
-    if not modes:
-        return "none"            # nothing narrowed the file before the secret went in
-    return modes[-1].lstrip("0") or "0"
-print(run(trace))
-# Parser self-check: the SAME parse over a trace with every pre-write
-# mode-setting line removed must answer "none". A parse that stopped looking
-# at the pre-write window would answer 600 here and this line goes RED.
-op = next(((i, m) for i, l in enumerate(trace) for m in [OPEN.search(l)] if m), None)
-if op is None:
-    print("no-create-open")
-else:
-    i_open, fd = op[0], op[1].group(2)
-    W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-    i_write = next((i for i, l in enumerate(trace) if i > i_open and W.search(l)), None)
-    stripped = [l for i, l in enumerate(trace)
-                if not (i_open < i < (i_write if i_write is not None else 0)
-                        and (FCHMOD.search(l) or PCHMOD.search(l)))]
-    print(run(stripped))
-EOF
-)
+    VERDICT=$($PY "$ORDER" "$TR" "$TGT")
     GOT=$(echo "$VERDICT" | sed -n 1p)
     SELF=$(echo "$VERDICT" | sed -n 2p)
     [ "$DEGRADED" = "1" ] && echo "  note: this strace does not know fchmodat2; it was dropped from the trace set"
@@ -286,79 +398,6 @@ echo "=== C. ordering at the two follow-up sites S-109 named: account-import-man
 if [ -n "$SKIP_A" ]; then
   skip "section C ($SKIP_A); the syscall-ordering legs run on Linux only"
 else
-  cat > "$TMP/ordered.py" <<'PYEOF'
-# ordered.py TRACE TARGET [RENAME_TO]
-# line 1: the verdict — "600" when the ordering holds, or the failure in words.
-# line 2: the SAME parse over a trace with every pre-write mode-setting line for
-#         that target removed; it must say "none", or the window the leg claims
-#         to inspect is not load-bearing and the leg is vacuous.
-import re, sys
-
-trace = open(sys.argv[1]).read().splitlines()
-target = sys.argv[2]
-rename_to = sys.argv[3] if len(sys.argv) > 3 else None
-q = re.escape(target)
-
-# The CREATING open of the target: O_CREAT, a mode argument, and a returned fd.
-# The path also appears in non-creating opens (the fsync re-open), and a failed
-# open returns -1 and creates nothing, so neither may be taken for the create.
-OPEN = re.compile(r'\bopenat?\((?:AT_FDCWD, )?"%s", ([^,)]*O_CREAT[^,)]*), 0[0-7]+\)\s*=\s*([0-9]+)\b' % q)
-FCHMOD = re.compile(r'\bfchmod\((\d+), 0?([0-7]+)\)')
-PCHMOD = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"%s", 0?([0-7]+)' % q)
-RENAME = re.compile(r'\brenameat2?\(.*?"%s".*?"%s"|\brename\("%s", "%s"\)'
-                    % (q, re.escape(rename_to or ""), q, re.escape(rename_to or "")))
-
-def modes_between(lines, lo, hi, fd):
-    out = []
-    for i in range(lo + 1, hi):
-        m = FCHMOD.search(lines[i])
-        if m and m.group(1) == fd:
-            out.append(m.group(2).lstrip("0") or "0"); continue
-        m = PCHMOD.search(lines[i])
-        if m:
-            out.append(m.group(1).lstrip("0") or "0")
-    return out
-
-def run(lines):
-    op = next(((i, m) for i, l in enumerate(lines) for m in [OPEN.search(l)] if m), None)
-    if op is None:
-        return "no-create-open"
-    i_open, fd = op[0], op[1].group(2)
-    W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-    i_write = next((i for i, l in enumerate(lines) if i > i_open and W.search(l)), None)
-    if i_write is None:
-        return "no-write"
-    before = modes_between(lines, i_open, i_write, fd)
-    if not before:
-        return "none"          # nothing narrowed the file before the secret went in
-    if before[-1] != "600":
-        return "last-before-write:" + before[-1]
-    if rename_to is not None:
-        i_ren = next((i for i, l in enumerate(lines) if i > i_write and RENAME.search(l)), None)
-        if i_ren is None:
-            return "no-rename"
-        after = [m for m in modes_between(lines, i_write, i_ren, fd) if m != "600"]
-        if after:
-            return "widened-before-publish:" + after[-1]
-    return "600"
-
-print(run(trace))
-
-# Parser self-check: strip every pre-write mode-setting line for this target —
-# BOTH spellings — and the same parse must answer "none". A parse that had
-# stopped looking at that window would still answer 600 and this line goes RED.
-op = next(((i, m) for i, l in enumerate(trace) for m in [OPEN.search(l)] if m), None)
-if op is None:
-    print("no-create-open")
-else:
-    i_open, fd = op[0], op[1].group(2)
-    W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-    i_write = next((i for i, l in enumerate(trace) if i > i_open and W.search(l)), None)
-    stripped = [l for i, l in enumerate(trace)
-                if not (i_open < i < (i_write if i_write is not None else 0)
-                        and (FCHMOD.search(l) or PCHMOD.search(l)))]
-    print(run(stripped))
-PYEOF
 
   # ── C1. account-import-many — one plaintext DAK1 keyfile per record ──────
   AIMD="$TMP/aim_out"
@@ -373,7 +412,7 @@ PYEOF
     assert false "strace produced no trace for account-import-many (the ordering cannot be judged)"
   else
     for r in rec2 rec3; do
-      V=$($PY "$TMP/ordered.py" "$TRA" "$AIMD/$r.keyfile")
+      V=$($PY "$ORDER" "$TRA" "$AIMD/$r.keyfile")
       assert_eq "$(echo "$V" | sed -n 1p)" "600" \
         "account-import-many/$r (a NON-first record, target pre-existed at 0644): a mode-setting call sits between the creating open and the first write, and the last one sets 0600"
       assert_eq "$(echo "$V" | sed -n 2p)" "none" \
@@ -401,7 +440,7 @@ PYEOF
   if [ ! -s "$TRR" ]; then
     assert false "strace produced no trace for keyfile-rotate (the ordering cannot be judged)"
   else
-    V=$($PY "$TMP/ordered.py" "$TRR" "${ROTT}_tmp.bin" "$ROTT")
+    V=$($PY "$ORDER" "$TRR" "${ROTT}_tmp.bin" "$ROTT")
     assert_eq "$(echo "$V" | sed -n 1p)" "600" \
       "keyfile-rotate: the inode the rename publishes was never wider than 0600 while it held the ciphertext (narrowed before the first write, not widened before the publish, and the rename happened)"
     assert_eq "$(echo "$V" | sed -n 2p)" "none" \
@@ -412,6 +451,70 @@ PYEOF
     assert_eq "$([ -e "${ROTT}_tmp.bin" ] && echo present || echo absent)" "absent" \
       "the staging temp is gone after the publish (the rename consumed it)"
   fi
+fi
+
+echo
+echo "=== F. ordering at the nine sites migrated on 2026-09-18 (Linux strace) ==="
+echo "  READ THE COUNT CORRECTLY: 18 assertions here are NINE verdicts about the"
+echo "        wallet (one per site) plus NINE parser non-vacuity self-checks. The"
+echo "        self-checks re-parse the same trace with the pre-write mode-setting"
+echo "        lines removed and require 'none'; they are GREEN against a defective"
+echo "        wallet as well as a fixed one — measured, mutant M1 (one site reverted"
+echo "        to create-then-narrow) fails ONE assertion here, not two. They are what"
+echo "        makes the other nine non-vacuous; they are not nine more checks on"
+echo "        determ-wallet, and this section's contribution to the total must not be"
+echo "        read as eighteen."
+# Same capability gate as sections A and C, same strace, same reasons to skip.
+#
+# WHAT THESE NINE ARE. S-109 named SIX independent `std::filesystem::permissions`
+# sites in wallet/main.cpp that still ran ofstream -> write -> permissions with a
+# DISCARDED error_code, and THREE further outputs that narrowed nothing at all.
+# All nine are REPRODUCED at the pre-change binary, under `umask 000`, with a
+# passive LD_PRELOAD observer that forwards every call to libc unchanged:
+#   cold-sign --out             was=0644 size=425 at the narrowing
+#   sign-anon-tx --out          was=0666 size=432   (world-WRITABLE)
+#   tx-batch-sign --out         was=0644 size=419
+#   param-change-build --out    was=0666 size=567   (world-WRITABLE)
+#   backup-create --envelopes-out was=0644 size=269
+#   account-import-many --summary was=0644 size=351
+#   create-recovery --out / encrypt-message --out / decrypt-message --out
+#                               never narrowed at all: final mode 0666
+# and the final mode of the first six is 0600, which is why every existing check
+# in this tree — including section D below — was green throughout.
+#
+# The two `fresh` sites REFUSE an existing --out and have no --force, so their
+# only path is a fresh create; the other seven run over a PRE-EXISTING 0644
+# target, the path where a create-mode-only fix does nothing. Stated because it
+# bounds what this leg proves: on the two fresh sites a create-mode-only change
+# would also be green here, and it is the `overwrite` sites that discriminate.
+if [ -n "$SKIP_A" ]; then
+  skip "section F ($SKIP_A); the syscall-ordering legs run on Linux only"
+else
+  for s in $SITES; do
+    TGT_F=$(site_target "$s")
+    if [ "$(site_fresh "$s")" = "yes" ]; then
+      rm -f "$TGT_F"
+      FIXNOTE="fresh create (this command refuses an existing --out)"
+    else
+      : > "$TGT_F"; chmod 644 "$TGT_F" 2>/dev/null
+      FIXNOTE="target pre-existed at 0644 (the overwrite path)"
+    fi
+    # decrypt-message needs the ciphertext encrypt-message just produced; the
+    # loop order in $SITES guarantees it, and an empty --in would make the
+    # command exit before any write, which the `no-create-open` verdict shows
+    # as a RED rather than passing quietly.
+    TRF="$TMP/f_$s.strace"
+    site_run "$s" strace -f -e trace="$TRACE_SET" -o "$TRF" >/dev/null 2>&1
+    if [ ! -s "$TRF" ]; then
+      assert false "$s: strace produced no trace (the ordering cannot be judged)"
+      continue
+    fi
+    VF=$($PY "$ORDER" "$TRF" "$TGT_F")
+    assert_eq "$(echo "$VF" | sed -n 1p)" "600" \
+      "$s: a mode-setting call sits between the creating open and the first write, and the last one sets 0600 — $FIXNOTE"
+    assert_eq "$(echo "$VF" | sed -n 2p)" "none" \
+      "$s: removing the pre-write mode-setting lines turns the same parse RED (the window is load-bearing, not a tautology)"
+  done
 fi
 
 echo
@@ -659,6 +762,33 @@ case "$UNAME_S" in
         --old-passphrase-from "file:$TMP/rot_old.txt" \
         --new-passphrase-from "file:$TMP/rot_new.txt" --force >/dev/null 2>&1
     assert_eq "$(mode_of "$DOUT/rot.dnk1")" "600" "keyfile-rotate publishes at 0600 over a pre-existing 0644 target"
+    # 5 — the NINE sites migrated on 2026-09-18. These are the ones that run on
+    #     Darwin and the BSDs, where section F cannot: they need nothing but
+    #     `stat`. Run under `umask 000` DELIBERATELY, in a subshell so nothing
+    #     below inherits it: three of the nine (create-recovery, encrypt-message,
+    #     decrypt-message) had NO permission call at all, so under the wrapper's
+    #     umask 022 the pre-change mode was 0644 and under 000 it is 0666 —
+    #     measured both ways at the pre-change binary. Asserting 0600 under
+    #     umask 000 means the mode was SET, not inherited from a friendly umask,
+    #     which is the difference between a fix and a coincidence.
+    (
+      umask 000
+      for s in $SITES; do
+        TGT_D=$(site_target "$s")
+        if [ "$(site_fresh "$s")" = "yes" ]; then
+          rm -f "$TGT_D"
+        else
+          : > "$TGT_D"; chmod 644 "$TGT_D" 2>/dev/null
+        fi
+        site_run "$s" >/dev/null 2>&1
+        echo "$s $(mode_of "$TGT_D")"
+      done
+    ) > "$TMP/d_modes.txt"
+    while read -r s m; do
+      assert_eq "$m" "600" "$s output ends at 0600 under umask 000 (the mode was SET, not inherited)"
+    done < "$TMP/d_modes.txt"
+    assert_eq "$(wc -l < "$TMP/d_modes.txt" | tr -d ' ')" "9" \
+      "all nine 2026-09-18 sites were actually exercised above (a site that silently stopped running would otherwise bank no assertion and no failure)"
     ;;
   *)
     # Windows never reaches here: it exits at the PLATFORM-SKIP gate near the top
@@ -668,6 +798,74 @@ case "$UNAME_S" in
     # leaves the run with no assertion at all. An unrecognised platform is a
     # reason to fail closed, not a reason to claim the property is absent.
     skip "section D (this wrapper does not know whether POSIX file modes exist on $UNAME_S, so the final modes are not judged here)"
+    ;;
+esac
+
+echo
+echo "=== G. the O_NOFOLLOW refusal: refused AND diagnosable (POSIX, no strace) ==="
+# WHY THIS SECTION EXISTS (added 2026-09-18 after review). The migration of the
+# nine sites brings O_NOFOLLOW with it, and that is an OPERATOR-VISIBLE exit-code
+# change on nine shipped commands: a `--out` naming a symlink — including the
+# legitimate `ln -s dated.json out.json` idiom, and including `/dev/stdout` —
+# now exits 1 where it exited 0 and wrote through the link. Measured PRE vs POST
+# at the two binaries, all nine. Nothing in this tree gated that behaviour, and
+# the first rendering of the refusal printed a bare "cannot open --out for
+# write: <path>" on a path `ls -l`, `touch` and `test -w` all call fine.
+#
+# So this section asserts BOTH halves, as separate clauses, because they are
+# killed by different defects:
+#   (a) the refusal itself — nothing is written through the link. Killed by
+#       dropping O_NOFOLLOW from the primitive.
+#   (b) the diagnostic names the REASON. Killed by dropping the `&why` argument
+#       at a call site, which is exactly the shape the review found.
+# It needs no strace, no ptrace, no C compiler and no LD_PRELOAD — only symlink
+# support — so it runs on Darwin and the BSDs where A, C and F can only skip.
+#
+# A DANGLING symlink is used deliberately: it is the one shape that reaches the
+# open at ALL NINE sites. Five of the nine refuse an `--out` that already
+# exists, and `fs::exists()` is FALSE through a dangling link, so the
+# exists-check does not intercept it — which is also precisely why the idiom
+# breaks for operators and why this is worth gating.
+case "$UNAME_S" in
+  Linux|Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly)
+    GD="$TMP/nofollow"; mkdir -p "$GD"
+    for s in $SITES; do
+      TGT_G=$(site_target "$s")
+      rm -f "$TGT_G"
+      ln -s "$TGT_G.dangling-target" "$TGT_G" 2>/dev/null
+      if [ ! -L "$TGT_G" ]; then
+        assert false "$s: could not create a symlink at the output path (this platform or filesystem has no symlinks; the refusal cannot be judged)"
+        rm -f "$TGT_G"
+        continue
+      fi
+      site_run "$s" >"$GD/$s.out" 2>"$GD/$s.err"
+      RC_G=$?
+      # (a) refused, and NOTHING landed at the link target.
+      if [ "$RC_G" != "0" ] && [ ! -e "$TGT_G.dangling-target" ]; then
+        assert true "$s: a dangling symlink at the output path is REFUSED (exit $RC_G) and nothing was written through it"
+      else
+        assert false "$s: a dangling symlink at the output path was followed — exit=$RC_G, target $( [ -e "$TGT_G.dangling-target" ] && echo "CREATED ($(wc -c < "$TGT_G.dangling-target" | tr -d ' ') bytes)" || echo absent )"
+      fi
+      # (b) the refusal says WHY. The errno text is locale- and libc-dependent,
+      #     so this asserts the SHAPE the primitive's contract promises — the
+      #     site's own message, then ": ", then a non-empty reason — and not one
+      #     particular string. A bare "…: <path>" line fails it.
+      if grep -qE ': .*[A-Za-z]' "$GD/$s.err" && \
+         grep -qiE 'symbolic link|loop|ELOOP' "$GD/$s.err"; then
+        assert true "$s: the refusal names the reason on stderr, not just the path"
+      else
+        assert false "$s: the refusal is undiagnosable — stderr was [$(tr '\n' ' ' < "$GD/$s.err")]"
+      fi
+      rm -f "$TGT_G" "$TGT_G.dangling-target"
+      # encrypt-message's output is decrypt-message's INPUT and the loop order
+      # in $SITES puts it first, so restore the ciphertext before decrypt-message
+      # is asked to read it. Without this, decrypt-message would fail on its
+      # --in and the leg above would pass for the wrong reason.
+      [ "$s" = "encrypt-message" ] && site_run "$s" >/dev/null 2>&1
+    done
+    ;;
+  *)
+    skip "section G (this wrapper does not know whether symlinks and O_NOFOLLOW exist on $UNAME_S, so the refusal is not judged here)"
     ;;
 esac
 

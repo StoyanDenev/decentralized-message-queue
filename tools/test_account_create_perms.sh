@@ -162,56 +162,21 @@ if [ -n "$SKIP_B" ]; then
   skip "section B ($SKIP_B); the syscall-ordering leg runs on Linux only"
 else
   [ "$DEGRADED" = "1" ] && echo "  note: this strace does not know fchmodat2; it was dropped from the trace set"
-  order_verdict() {  # $1 = trace file, $2 = target -> "<last mode before first write>|<self-check>"
-    $PY - "$1" "$2" <<'EOF'
-import re, sys
-trace, target = open(sys.argv[1]).read().splitlines(), sys.argv[2]
-q = re.escape(target)
-# The CREATING open of the target: O_CREAT, a mode argument, and a RETURNED fd.
-# The path also appears in non-creating opens, and a failed open returns -1 and
-# creates nothing, so neither may be taken for the create.
-OPEN   = re.compile(r'\bopenat?\((?:AT_FDCWD, )?"%s", ([^,)]*O_CREAT[^,)]*), 0[0-7]+\)\s*=\s*([0-9]+)\b' % q)
-# Mode-setting calls that affect that file: on the DESCRIPTOR, or on the PATH.
-# Both, because `create 0600; fchmod(fd,0600); chmod(path,0666); write;
-# chmod(path,0600)` leaves the window fully open, ends at the right mode, and a
-# descriptor-only parser calls it closed.
-FCHMOD = re.compile(r'\bfchmod\((\d+), 0?([0-7]+)\)')
-PCHMOD = re.compile(r'\b(?:chmod|fchmodat2?)\((?:AT_FDCWD, )?"%s", 0?([0-7]+)' % q)
-def run(lines):
-    op = next(((i, m) for i, l in enumerate(lines) for m in [OPEN.search(l)] if m), None)
-    if op is None:
-        return "no-create-open"
-    i_open, fd = op[0], op[1].group(2)
-    WRITE = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-    i_write = next((i for i, l in enumerate(lines) if i > i_open and WRITE.search(l)), None)
-    if i_write is None:
-        return "no-write"
-    modes = []
-    for i in range(i_open + 1, i_write):
-        m = FCHMOD.search(lines[i])
-        if m and m.group(1) == fd:
-            modes.append(m.group(2)); continue
-        m = PCHMOD.search(lines[i])
-        if m:
-            modes.append(m.group(1))
-    if not modes:
-        return "none"          # nothing narrowed the file before the key went in
-    return modes[-1].lstrip("0") or "0"
-# Self-check on the PARSE, not on the product: the same parse over the same
-# trace with every pre-write mode-setting line removed — BOTH spellings — must
-# answer "none". A parser that stopped looking inside the pre-write window, or
-# one blind to the path spelling, would answer 600 here and that line goes RED.
-op = next(((i, m) for i, l in enumerate(trace) for m in [OPEN.search(l)] if m), None)
-if op is None:
-    print("no-create-open|no-create-open"); raise SystemExit(0)
-i_open, fd = op[0], op[1].group(2)
-W = re.compile(r'\bwrite\(%s, ' % re.escape(fd))
-i_write = next((i for i, l in enumerate(trace) if i > i_open and W.search(l)), None)
-stripped = [l for i, l in enumerate(trace)
-            if not (i_open < i < (i_write if i_write is not None else 0)
-                    and (FCHMOD.search(l) or PCHMOD.search(l)))]
-print("%s|%s" % (run(trace), run(stripped)))
-EOF
+  # ONE parser, shared with tools/test_wallet_out_perms.sh sections A/C/F.
+  # This was the third of three near-identical copies of it in tools/ until
+  # 2026-09-18; copies of a security parser drift, and this one already had —
+  # a descriptor-only spelling scores `create 0600; fchmod(fd,0600);
+  # chmod(path,0666); write; chmod(path,0600)` as CLOSED with the window fully
+  # open. tools/strace_order.py carries the chmod / fchmod / fchmodat /
+  # fchmodat2 enumeration, both clauses ("at least one exists" AND "the last
+  # sets 0600") and the same strip-and-reparse non-vacuity self-check that was
+  # written here; its verdicts are gated over synthetic traces by
+  # tools/test_wallet_out_perms.sh section E. Equivalence on the two traces
+  # THIS gate feeds it was measured before the copies were removed.
+  ORDER="tools/strace_order.py"
+  order_verdict() {  # $1 = trace file, $2 = target -> "<verdict>|<self-check>"
+    if [ ! -f "$ORDER" ]; then echo "parser-missing|parser-missing"; return; fi
+    $PY "$ORDER" "$1" "$2" | tr '\n' '|' | sed 's/|$//'
   }
 
   # B1. plaintext branch over a PRE-EXISTING 0644 target.
