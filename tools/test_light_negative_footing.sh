@@ -42,9 +42,15 @@
 #      emit `negative_footing`. Two code-derived sets, compared; no number. A NEW
 #      negative-verdict command that forgets the field is RED; a new one that carries it
 #      is GREEN with no edit here. That is the rot this repair removes.
-#   1b FLOOR. At least MIN_CMDS commands carry a footing — a LOWER bound (11 measured
-#      2026-09-18), so additions never trip it; it exists only so that deleting the whole
-#      F-2 surface cannot satisfy set-equality vacuously.
+#   1b MEMBERSHIP RATCHET (was a cardinality floor until 2026-09-18). The pinned SET of
+#      commands that carry a footing must all still carry one. A floor could not see
+#      clone-one-delete-one: delete one pinned command's negative-verdict surface, clone
+#      another, and the COUNT is unchanged, so `>= 11` stayed green while the surface had
+#      moved. Membership makes a removal and a substitution RED and still lets ADDITIONS
+#      through untouched — a new negative-verdict command joins `need` with no edit here,
+#      which is the rot the census pins were removed for. A deliberate RENAME is RED too
+#      and must be re-pinned; that cost is the point, since the pin is what says a human
+#      confirmed the command still owes and carries a footing.
 #   2  GATING. Every emission is gated on a recognized negative-verdict condition, on a
 #      real code line — never emitted for a positive or UNVERIFIABLE verdict. The
 #      recognized set fails CLOSED: an unrecognized gate is RED, not silently allowed.
@@ -113,7 +119,14 @@ set -u
 cd "$(dirname "$0")/.."
 
 LIGHT_DIR="${LIGHT_DIR:-light}"
-MIN_CMDS=11   # invariant 1b floor; 11 measured 2026-09-18. Never an exact count.
+# invariant 1b MEMBERSHIP ratchet; the 11 measured 2026-09-18, in `need`-order. This is
+# a SUBSET pin, never an exact set: an ADDITION is green with no edit here, a removal or
+# a substitution is RED. Replaced a `MIN_CMDS=11` cardinality floor, which clone-one-
+# delete-one walked straight past.
+PINNED_CMDS="cmd_verify_abort_record cmd_verify_account cmd_verify_dapp_registration \
+cmd_verify_enote_inclusion cmd_verify_merge_state cmd_verify_notekey \
+cmd_verify_param_change cmd_verify_receipt_inclusion cmd_verify_registrant \
+cmd_verify_tx_inclusion cmd_verify_unstake_eligibility"
 
 pass=0; fail=0; skip=0
 ok()  { echo "  PASS: $1"; pass=$((pass+1)); }
@@ -129,11 +142,11 @@ fi
 # Runs 1..5 against <light-dir>. Prints PASS/FAIL and updates the counters.
 run_contract() {
   local dir="$1" out rc line
-  out=$(python3 - "$dir" "$MIN_CMDS" <<'PYSCAN'
+  out=$(python3 - "$dir" "$PINNED_CMDS" <<'PYSCAN'
 import os, re, sys
 
 LIGHT_DIR = sys.argv[1]
-MIN_CMDS  = int(sys.argv[2])
+PINNED    = sorted(set(sys.argv[2].split()))
 TARGET    = "main.cpp"
 # Recognized NEGATIVE-verdict enumerators / literal. An emission gated on anything else
 # is RED: the list fails CLOSED, it does not whitelist silently.
@@ -307,12 +320,19 @@ else:
     OK("1 completeness: the %d command(s) with a negative-verdict --json surface are "
        "EXACTLY the %d that emit negative_footing (both sets derived from the source; "
        "no census pin)" % (len(need), len(foot_fns)))
-if len(need) >= MIN_CMDS:
-    OK("1b floor: %d command(s) carry a negative-verdict footing (>= floor %d; a lower "
-       "bound, so adding commands never trips it)" % (len(need), MIN_CMDS))
+gone = [c for c in PINNED if c not in need]
+if not PINNED:
+    BAD("1b the pinned command set is EMPTY — a ratchet with nothing pinned asserts "
+        "nothing about the F-2 surface")
+elif gone:
+    BAD("1b %d pinned command(s) no longer carry a negative-verdict footing: %s — the F-2 "
+        "surface SHRANK or was substituted (a count would not see this: deleting one and "
+        "cloning another keeps it at %d). If the command was deliberately renamed or "
+        "retired, re-pin PINNED_CMDS and say why" % (len(gone), ", ".join(gone), len(need)))
 else:
-    BAD("1b only %d command(s) carry a negative-verdict footing (< floor %d) — the F-2 "
-        "surface shrank" % (len(need), MIN_CMDS))
+    OK("1b membership ratchet: all %d pinned command(s) still carry a negative-verdict "
+       "footing (%d carry one in all — additions are free, removals and substitutions "
+       "are RED)" % (len(PINNED), len(need)))
 
 # ── 2 / 3 / 3b: gating + DERIVED class ──────────────────────────────────────────
 ungated = mism = unknown = 0
@@ -637,9 +657,18 @@ CPPEOF
   perl -0pi -e 's/enum class SupplyVerdict \{ CONSERVED, VIOLATED, UNVERIFIABLE \};/enum class SupplyVerdict { CONSERVED, VIOLATED, NOT_SUPPLIED, UNVERIFIABLE };/' "$n12/main.cpp"
   st_expect_red "N12 a new NOT_ verdict enumerator appears unadjudicated" "$n12"
 
+  # N13 — CLONE-ONE-DELETE-ONE, the shape the old MIN_CMDS cardinality floor could not
+  #       see: a pinned command is renamed, so `need` loses one member and gains one and
+  #       the COUNT is unchanged at 11. Completeness (1) stays satisfied — both sets move
+  #       together — and only the membership ratchet fires. A real removal-plus-addition
+  #       has the identical signature; this is the cheapest faithful way to inject it.
+  n13=$(mk n13)
+  perl -0pi -e 's/\bcmd_verify_notekey\b/cmd_verify_notekey_clone/g' "$n13/main.cpp"
+  st_expect_red "N13 clone-one-delete-one: a pinned command substituted, count unchanged" "$n13"
+
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_negative_footing SELFTEST (12 regressions RED, 2 legitimate changes GREEN)"
+    echo "  PASS: test_light_negative_footing SELFTEST (13 regressions RED, 2 legitimate changes GREEN)"
     exit 0
   else
     echo "  FAIL: test_light_negative_footing SELFTEST ($ST_FAIL self-test failure(s))"

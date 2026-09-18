@@ -1,12 +1,31 @@
 // light/outbox_cli.cpp — `determ-light outbox <verb>` (see outbox.hpp for the
 // contract). Every mutating verb takes the directory lock; `status` is
 // lock-free and never writes.
+//
+// ONE parser serves all seven verbs. That is deliberate — the flags spell the
+// same things everywhere — but it means the parser RECOGNIZES the union of every
+// verb's flags. Until 2026-09-18 it also ACCEPTED that union for every verb, so
+// each verb carried a silent accept-and-ignore surface: `outbox status --wait 30`
+// exited 0 having waited for nothing, and `outbox enqueue --wait 30` was accepted
+// while the wait never reached its head-anchored nonce-hint read (S-112; the class
+// is S-113). A flag a verb cannot act on is now REFUSED with the same fail-closed
+// shape as an unknown argument — see kVerbFlags below, which is the single place
+// the per-verb surface is stated and is what `determ-light help`,
+// docs/CLI-REFERENCE.md and tools/test_light_outbox_flag_surface.sh all track.
+//
+// The same lie had a second, narrower form INSIDE a verb: `enqueue --wait 30`
+// with no `--rpc-port`, or with an explicit `--nonce`, is in enqueue's set and is
+// still read by nothing, because the block that reads it is skipped. Those are
+// refused too, by refuse_inert_flags() below, naming the flag whose presence or
+// absence made the request inert.
 #include "outbox_cli.hpp"
 #include "outbox.hpp"
 #include "trustless_read.hpp"
 #include <determ/chain/params.hpp>
 #include <algorithm>
 #include <iostream>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -41,16 +60,138 @@ struct Args {
     uint64_t amount{0}, fee{0}, nonce{0}, wait{0}, max_messages{DEFAULT_MAX_MESSAGES},
              older_than{DEFAULT_PRUNE_AGE_S};
     uint32_t timeout_ms{DEFAULT_RPC_TIMEOUT_MS};
+    // Every flag the operator actually WROTE. A default is indistinguishable from
+    // a value once it is in a field, and refuse_inert_flags() below must refuse
+    // only what was asked for.
+    std::set<std::string> given;
 };
+
+// The flags each verb ACTS ON. Everything the shared parser recognizes but a
+// verb does not read is refused by that verb — a flag that is accepted and
+// ignored tells the operator a request was honoured when it was not, and no
+// build or test can see it (S-112 / S-113). This table is the contract:
+// `determ-light help` and docs/CLI-REFERENCE.md advertise exactly these sets and
+// tools/test_light_outbox_flag_surface.sh measures the BINARY against both.
+//
+// It is the PER-VERB surface only. A flag listed here can still be read by
+// nothing in a particular invocation; refuse_inert_flags() below is the
+// PER-INVOCATION surface and refuses those, so "listed here" never means
+// "accepted whatever else you wrote".
+//
+// Each entry is justified by a value the verb reads, not by plausibility:
+//   enqueue    --timeout-ms and --wait bound the optional nonce-hint RPC and its
+//              head-anchored read; both need --rpc-port and are refused with an
+//              explicit --nonce, which skips that read entirely.
+//   submit     --now forces every due slot; --timeout-ms bounds the connection.
+//   reconcile  --resume picks the cached anchor and --state names it (refused
+//              without --resume); --wait bounds the successor poll of every
+//              binding it performs.
+//   replace / recover take no --json: neither has a JSON emitter, so accepting
+//              the flag would be the same silent lie in miniature.
+const std::map<std::string, std::set<std::string>>& verb_flags() {
+    static const std::map<std::string, std::set<std::string>> kVerbFlags = {
+        {"enqueue",   {"--outbox", "--genesis", "--keyfile", "--to", "--amount", "--fee",
+                       "--nonce", "--payload-hex", "--idempotency-key", "--rpc-port",
+                       "--max-messages", "--timeout-ms", "--wait", "--json"}},
+        {"submit",    {"--outbox", "--genesis", "--rpc-port", "--timeout-ms", "--now", "--json"}},
+        {"reconcile", {"--outbox", "--genesis", "--rpc-port", "--timeout-ms", "--resume",
+                       "--state", "--wait", "--json"}},
+        {"status",    {"--outbox", "--json"}},
+        {"replace",   {"--outbox", "--genesis", "--keyfile", "--nonce", "--fee", "--to",
+                       "--amount", "--payload-hex"}},
+        {"prune",     {"--outbox", "--older-than", "--include-unlocated", "--json"}},
+        {"recover",   {"--outbox"}},
+    };
+    return kVerbFlags;
+}
+
+// Every flag ANY verb accepts — DERIVED from the table above, never a second
+// hand-kept list, so the two can never disagree. It exists only to tell an
+// operator who used a real flag on the wrong verb ("not accepted by") apart from
+// one who mistyped ("unknown arg"); both are refused.
+bool a_verb_accepts(const std::string& flag) {
+    for (const auto& [v, flags] : verb_flags())
+        if (flags.count(flag)) return true;
+    return false;
+}
+
+// A flag can be in its verb's set above and still be read by NOTHING in the
+// configuration the operator actually gave. `cmd_enqueue`'s nonce-reservation
+// block is the only reader of --rpc-port, --timeout-ms and --wait: it is skipped
+// whole when --nonce is explicit, and opens no socket when --rpc-port is absent.
+// `reconcile`'s cached anchor is loaded only on the --resume path, so --state is
+// never opened without it. Accepting a flag there is the same silent lie as
+// accepting it on the wrong verb, one level down — the operator asked for a wait
+// and got none — so it is refused the same way: fail-closed, before anything is
+// locked or written, naming the flag AND the flag whose presence or absence made
+// it inert, not just the flag.
+//
+// These three rules are MEASURED, not inferred: every accepted (verb, flag) pair
+// was driven through the binary in every configuration its verb admits, two runs
+// differing only in that flag compared on exit code, output, the bytes of the
+// outbox afterwards and wall clock. Six (verb, flag, configuration) triples came
+// back inert and they are exactly the ones below; nothing else did. Adding a flag
+// whose reader sits behind a condition means adding its rule here, and
+// tools/test_light_outbox_flag_surface.sh leg B probes each one in both the inert
+// and the enabling configuration.
+void refuse_inert_flags(const std::string& verb, const Args& a) {
+    auto refuse = [&](std::initializer_list<const char*> flags, const char* why, const char* remedy) {
+        std::string named;
+        for (const char* f : flags)
+            if (a.given.count(f)) { if (!named.empty()) named += " "; named += f; }
+        if (named.empty()) return;
+        throw std::runtime_error(named + ": INERT as `outbox " + verb + "` was invoked — " + why
+                                 + ". Refusing rather than ignoring (S-113): " + remedy);
+    };
+    if (verb == "enqueue") {
+        if (a.have_nonce)
+            refuse({"--rpc-port", "--timeout-ms", "--wait"},
+                   "an explicit --nonce takes the nonce straight from the flag, so the daemon"
+                   " nonce-hint read that --rpc-port, --timeout-ms and --wait bound is never performed",
+                   "drop --nonce to use them, or drop the flag(s) this message names");
+        else if (!a.have_port)
+            refuse({"--timeout-ms", "--wait"},
+                   "without --rpc-port no daemon is contacted, so the nonce-hint RPC that"
+                   " --timeout-ms and --wait bound is never opened and the nonce comes from local"
+                   " reservations alone",
+                   "pass --rpc-port <N> to use them, or drop the flag(s) this message names");
+    } else if (verb == "reconcile") {
+        if (!a.resume)
+            refuse({"--state"},
+                   "the cached anchor is loaded only on the --resume path, so without --resume the"
+                   " file --state names is never opened and every read verifies from genesis",
+                   "pass --resume to use it, or drop --state");
+    }
+}
+
+std::string flag_list(const std::set<std::string>& flags) {
+    std::string s;
+    for (const auto& f : flags) { if (!s.empty()) s += " "; s += f; }
+    return s;
+}
 
 Args parse_args(const char* verb, int argc, char** argv) {
     Args a;
+    const auto it_v = verb_flags().find(verb);
+    if (it_v == verb_flags().end())   // unreachable via cmd_outbox; fail closed rather than accept everything
+        throw std::runtime_error(std::string("outbox ") + verb + ": no flag set is declared for this verb");
+    const std::set<std::string>& accepted = it_v->second;
     for (int i = 0; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&](const char* name) -> std::string {
             if (i + 1 >= argc) throw std::runtime_error(std::string("outbox ") + verb + ": " + name + " needs a value");
             return argv[++i];
         };
+        if (!accepted.count(k)) {
+            // Refused BEFORE the branch that would parse it, so a rejected flag
+            // never consumes its value and never reaches a field this verb reads.
+            if (a_verb_accepts(k))
+                throw std::runtime_error(std::string("outbox ") + verb + ": " + k
+                    + " is not accepted by `outbox " + verb + "` (this verb does not act on it; it would have"
+                      " been silently ignored) — accepted here: " + flag_list(accepted));
+            throw std::runtime_error(std::string("outbox ") + verb + ": unknown arg '" + k + "'");
+        }
+        a.given.insert(k);   // what the operator WROTE, for refuse_inert_flags below
         if      (k == "--outbox")       a.dir = val("--outbox");
         else if (k == "--genesis")      a.genesis_path = val("--genesis");
         else if (k == "--keyfile")      a.keyfile = val("--keyfile");
@@ -70,12 +211,19 @@ Args parse_args(const char* verb, int argc, char** argv) {
         else if (k == "--now")          a.now = true;
         else if (k == "--json")         a.json_out = true;
         else if (k == "--include-unlocated") a.include_unlocated = true;
-        else throw std::runtime_error(std::string("outbox ") + verb + ": unknown arg '" + k + "'");
+        // Unreachable while every flag in the table above has a branch here; a
+        // flag added to the table and not to the chain fails closed rather than
+        // being accepted and dropped, which is the defect this file just closed.
+        else throw std::runtime_error(std::string("outbox ") + verb + ": " + k
+                 + " is declared accepted by this verb but has no parser branch");
     }
     if (a.dir.empty()) {
         if (const char* e = std::getenv("DETERM_LIGHT_OUTBOX"); e && *e) a.dir = e;
         else throw std::runtime_error(std::string("outbox ") + verb + ": --outbox <dir> (or $DETERM_LIGHT_OUTBOX) is required");
     }
+    // Last, and still inside parse_args: every refusal happens before Lock/Outbox,
+    // so a refused invocation creates no directory, no lock and no record.
+    refuse_inert_flags(verb, a);
     return a;
 }
 
@@ -151,7 +299,9 @@ int cmd_enqueue(int argc, char** argv) {
     Args a;
     try { a = parse_args("enqueue", argc, argv); } catch (const std::exception& e) { return fail("enqueue", e.what()); }
     if (a.genesis_path.empty() || a.keyfile.empty() || a.to.empty() || !a.have_amount || !a.have_fee)
-        return fail("enqueue", "--genesis, --keyfile, --to, --amount, --fee are required (--nonce, --rpc-port, --payload-hex, --idempotency-key, --max-messages optional)");
+        return fail("enqueue", "--genesis, --keyfile, --to, --amount, --fee are required "
+                    "(--payload-hex, --idempotency-key, --max-messages, --json optional; the nonce comes "
+                    "from --nonce, or from --rpc-port [--timeout-ms N] [--wait S], or from local reservations)");
     if (a.max_messages == 0 || a.max_messages > HARD_MAX_MESSAGES)
         return fail("enqueue", "--max-messages must be 1.." + std::to_string(HARD_MAX_MESSAGES));
     if (a.idem_key.size() > MAX_IDEMPOTENCY_KEY) return fail("enqueue", "--idempotency-key too long");
@@ -187,6 +337,10 @@ int cmd_enqueue(int argc, char** argv) {
                         + std::to_string(a.max_messages) + "); `outbox prune` or raise --max-messages", EXIT_FULL);
 
         // Nonce reservation: explicit, else max(daemon hint, local reservations).
+        // --rpc-port, --timeout-ms and --wait are read ONLY inside this block, so
+        // parse_args has already refused them if --nonce is set or --rpc-port is
+        // absent — this is the condition refuse_inert_flags() mirrors, and the two
+        // must move together.
         uint64_t nonce = 0;
         if (a.have_nonce) {
             nonce = a.nonce;
@@ -198,14 +352,13 @@ int cmd_enqueue(int argc, char** argv) {
                 if (rpc.open()) {
                     rpc.set_timeout_ms(a.timeout_ms);
                     try {
-                        pin_daemon_genesis(rpc, genesis, ghash);   // a wrong-chain daemon must not steer the reservation
-                        // The hint is the committee-verified next_nonce (A2: no unverified
-                        // daemon positive steers a reservation — a hint above the truth
-                        // would reserve a nonce the chain never reaches).
-                        AccountView v = with_f4_retry([&] {
-                            return read_account_trustless(rpc, build_genesis_committee(genesis), genesis, kf.anon_address);
+                        // The hint read anchors at the chain head, so `--wait` is what
+                        // lets its S-042 successor binding complete; dropping it here was
+                        // S-112 and the wait is now a required argument of the route.
+                        hint = with_f4_retry([&] {
+                            return nonce_hint_trustless(rpc, genesis, ghash, kf.anon_address, a.wait);
                         }, a.json_out);
-                        hint = v.next_nonce; have_hint = true;
+                        have_hint = true;
                     } catch (const std::exception& e) {
                         std::cerr << "outbox enqueue: nonce hint unavailable (" << e.what() << "); using local reservations\n";
                     }
@@ -261,7 +414,7 @@ int cmd_enqueue(int argc, char** argv) {
 int cmd_submit(int argc, char** argv) {
     Args a;
     try { a = parse_args("submit", argc, argv); } catch (const std::exception& e) { return fail("submit", e.what()); }
-    if (a.genesis_path.empty() || !a.have_port) return fail("submit", "--genesis and --rpc-port are required (--now, --json optional)");
+    if (a.genesis_path.empty() || !a.have_port) return fail("submit", "--genesis and --rpc-port are required (--now, --timeout-ms, --json optional)");
     try {
         auto genesis = load_genesis(a.genesis_path);
         Lock lock(a.dir);
@@ -308,7 +461,7 @@ int cmd_submit(int argc, char** argv) {
 int cmd_reconcile(int argc, char** argv) {
     Args a;
     try { a = parse_args("reconcile", argc, argv); } catch (const std::exception& e) { return fail("reconcile", e.what()); }
-    if (a.genesis_path.empty() || !a.have_port) return fail("reconcile", "--genesis and --rpc-port are required (--resume, --state, --wait, --json optional)");
+    if (a.genesis_path.empty() || !a.have_port) return fail("reconcile", "--genesis and --rpc-port are required (--wait, --timeout-ms, --json and --resume [--state <path>] optional)");
     try {
         auto genesis = load_genesis(a.genesis_path);
         auto seed = build_genesis_committee(genesis);

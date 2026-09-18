@@ -457,17 +457,30 @@ void print_usage() {
         "      --wait blocks up to s seconds for the head's successor block so the\n"
         "      embedded nonce read's S-042 successor binding can complete (the read\n"
         "      anchors at the head; default 0 fails closed there, as on the readers).\n"
+        "  outbox — a durable local outbox; seven verbs, ONE parser. Each verb accepts\n"
+        "      ONLY the options listed for it below: a flag another verb takes is REFUSED\n"
+        "      by it (exit 1, named), never accepted and silently ignored. So is a flag\n"
+        "      the verb does read but that nothing reads as you invoked it — `enqueue\n"
+        "      --wait` without --rpc-port or with an explicit --nonce, `reconcile --state`\n"
+        "      without --resume.\n"
         "  outbox enqueue --outbox <dir> --genesis <file> --keyfile <path> --to <addr>\n"
-        "                 --amount <N> --fee <N> [--payload-hex <hex>] [--nonce <N>]\n"
-        "                 [--rpc-port <N>] [--idempotency-key <k>] [--max-messages <N>] [--json]\n"
+        "                 --amount <N> --fee <N> [--payload-hex <hex>] [--json]\n"
+        "                 [--idempotency-key <k>] [--max-messages <N>]\n"
+        "                 [--nonce <N> | --rpc-port <N> [--timeout-ms <N>] [--wait <s>]]\n"
         "      Sign a TRANSFER once and store the signed bytes DURABLY (fsync + atomic\n"
         "      publish) in a per-(sender, chain) outbox before printing 'queued locally'.\n"
         "      Never stores a key. Nonce = --nonce, else max(verified next_nonce, local slots).\n"
-        "  outbox submit --outbox <dir> --genesis <file> --rpc-port <N> [--now] [--json]\n"
+        "      --wait blocks up to s seconds for the head's successor block so the nonce\n"
+        "      hint read's S-042 successor binding can complete (default 0 fails closed at\n"
+        "      the head, i.e. no hint). --rpc-port, --timeout-ms and --wait drive that read\n"
+        "      only: they are REFUSED with an explicit --nonce, and --timeout-ms/--wait are\n"
+        "      refused without --rpc-port, rather than accepted and ignored.\n"
+        "  outbox submit --outbox <dir> --genesis <file> --rpc-port <N> [--now]\n"
+        "                [--timeout-ms <N>] [--json]\n"
         "      Re-send every due slot's SAME bytes (bounded backoff). A daemon 'queued' is\n"
         "      SUBMITTED, a lost reply is UNKNOWN — neither is finality.\n"
-        "  outbox reconcile --outbox <dir> --genesis <file> --rpc-port <N> [--resume]\n"
-        "                   [--state <path>] [--wait <s>] [--json]\n"
+        "  outbox reconcile --outbox <dir> --genesis <file> --rpc-port <N> [--wait <s>]\n"
+        "                   [--timeout-ms <N>] [--json] [--resume [--state <path>]]\n"
         "      Committee-verify inclusion + the successor binding (FINALIZED) and the\n"
         "      sender's nonce (APPLIED vs SKIPPED); detects orphaned inclusions, consumed\n"
         "      nonces, gaps and stuck slots. Exit 3 when a leg is UNVERIFIABLE.\n"
@@ -11195,6 +11208,7 @@ int main(int argc, char** argv) {
         if (cmd == "selftest-outbox-record")   return cmd_selftest_outbox_record(sub_argc, sub_argv);
         if (cmd == "selftest-outbox-classify") return cmd_selftest_outbox_classify(sub_argc, sub_argv);
         if (cmd == "selftest-outbox-core")     return cmd_selftest_outbox_core(sub_argc, sub_argv);
+        if (cmd == "selftest-outbox-hint-wait") return cmd_selftest_outbox_hint_wait(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);

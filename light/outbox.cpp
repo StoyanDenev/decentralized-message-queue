@@ -928,6 +928,24 @@ void pin_daemon_genesis(RpcClient& rpc, const determ::chain::GenesisConfig& gene
                                  + " — refusing to submit to a daemon on another chain");
 }
 
+// ─── the enqueue nonce hint (a head-anchored trust-minimized read) ───────────
+// One named route so the operator's `--wait` has a wait PARAMETER to land in
+// rather than a defaulted argument nobody has to pass (S-112: the wait was
+// omitted here and the read silently ran with 0). `wait_seconds` is deliberately
+// not defaulted — see outbox.hpp.
+uint64_t nonce_hint_trustless(RpcClient& rpc, const determ::chain::GenesisConfig& genesis,
+                              const Hash& genesis_hash, const std::string& sender,
+                              uint64_t wait_seconds) {
+    pin_daemon_genesis(rpc, genesis, genesis_hash);   // a wrong-chain daemon must not steer the reservation
+    // The hint is the committee-verified next_nonce (A2: no unverified daemon
+    // positive steers a reservation — a hint above the chain's truth would
+    // reserve a nonce the chain never reaches).
+    AccountView v = read_account_trustless(rpc, build_genesis_committee(genesis), genesis,
+                                           sender, /*resume=*/false, /*state_path=*/"",
+                                           wait_seconds);
+    return v.next_nonce;
+}
+
 // ─── reconcile ──────────────────────────────────────────────────────────────
 namespace {
 struct Located { size_t alt{0}; uint64_t height{0}; std::string block_hash; };

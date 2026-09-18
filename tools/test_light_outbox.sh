@@ -321,7 +321,10 @@ assert "$([ "$RC" = "1" ] && echo "$OUT" | grep -q "TRANSFER_PAYLOAD_MAX" && ech
 OB2="$T/ob_offline"
 OUT=$(enq "$OB2" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 2>&1); RC=$?
 assert "$([ "$RC" = "1" ] && echo "$OUT" | grep -q "cannot reserve a nonce offline" && echo true || echo false)" "no history + no daemon + no --nonce → refused (never guesses a nonce)"
-OUT=$(enq "$OB2" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --rpc-port 1 --nonce 3 2>&1); RC=$?
+# (--rpc-port used to be passed here as well; with an explicit --nonce it reserves
+# from the flag and never dials, so the port was accepted and read by nothing. The
+# parser refuses that combination since 2026-09-18 — S-113, the per-invocation half.)
+OUT=$(enq "$OB2" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --nonce 3 2>&1); RC=$?
 OUT=$(enq "$OB2" --genesis "$G" --keyfile "$K" --to "$TO" --amount 5 --fee 1 --rpc-port 1 2>&1); RC=$?
 "$L" outbox status --outbox "$OB2" | grep -q "nonce=4 QUEUED" && assert true "with a daemon unreachable the next nonce comes from local reservations (4 after 3)" || assert false "offline nonce continuation"
 OUT=$("$L" outbox submit --outbox "$OB2" --genesis "$G" --rpc-port 1 2>&1); RC=$?

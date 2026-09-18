@@ -110,6 +110,15 @@ public:
     bool        drop_reply{false}; // submit_tx: accept, then "lose" the reply
     bool        auto_mint_includes_mempool{false};   // block minted during a successor wait carries the mempool
     bool        auto_mint_applies{true};
+    // A head poll is a `headers` request for the index one past the tip — what
+    // committee_bound_state_root's hold-and-wait loop issues once per second. The
+    // counter makes the WAIT observable (how many times the reader came back), and
+    // mint_after_head_polls defers the chain's next block to the Nth poll so a read
+    // succeeds only if the caller actually waited. Default 1 = mint on the first
+    // poll, which is the pre-existing behaviour of every other case here.
+    bool        auto_mint_on_query{true};
+    uint64_t    mint_after_head_polls{1};
+    uint64_t    head_polls() const { return head_polls_; }
 
     // A foreign tx from the sender (A1 violation) consumes the next nonce.
     void consume_nonce_externally() {
@@ -161,9 +170,12 @@ public:
         if (method == "headers") {
             uint64_t from = params.value("from", uint64_t{0});
             uint32_t count = params.value("count", uint32_t{1});
-            if (from == blocks_.size() && auto_mint_on_query_) {
-                // "the chain advanced one block while the reader waited"
-                if (auto_mint_includes_mempool) mint_from_mempool(auto_mint_applies); else mint_empty();
+            if (from == blocks_.size()) {
+                ++head_polls_;
+                if (auto_mint_on_query && head_polls_ >= mint_after_head_polls) {
+                    // "the chain advanced one block while the reader waited"
+                    if (auto_mint_includes_mempool) mint_from_mempool(auto_mint_applies); else mint_empty();
+                }
             }
             json arr = json::array();
             for (uint64_t i = from; i < blocks_.size() && i < from + count; ++i) arr.push_back(header_json(i));
@@ -296,7 +308,7 @@ private:
     std::vector<Transaction> mempool_;
     size_t submits_{0};
     std::vector<Hash> submitted_hashes_;
-    bool auto_mint_on_query_{true};
+    uint64_t head_polls_{0};
     Acct proof_acct_; bool proof_acct_valid_{false};
     Block stale_;
 };
@@ -490,13 +502,22 @@ int cmd_selftest_outbox_core(int, char**) {
     auto st = [&](Outbox& ob, uint64_t n) -> const Record& { return ob.slots().at(n).rec; };
     uint64_t t = now_unix();
 
+    // The fixture's daemon mints the successor on the first head poll, so every read
+    // below binds without ever entering the hold-and-wait loop. The zero is NAMED and
+    // passed explicitly rather than left to the parameter default: case 11 makes this
+    // file one that HAS a wait to forward, and tools/test_light_wait_surface.sh's rule
+    // for such a file is that its binding calls forward one — an omitted defaulted wait
+    // argument is precisely the shape of S-112.
+    const uint64_t wait_seconds = 0;
+
     // 0. The fixture chain itself is verifiable by the real readers (non-vacuity).
     {
         auto fx = seed_fixture(1000);
         bool ok = false; std::string err;
         try {
             pin_daemon_genesis(*fx, fx->genesis(), fx->genesis_hash());
-            auto v = read_account_trustless(*fx, fx->committee_seed(), fx->genesis(), kf.anon_address);
+            auto v = read_account_trustless(*fx, fx->committee_seed(), fx->genesis(), kf.anon_address,
+                                            /*resume=*/false, /*state_path=*/"", wait_seconds);
             ok = (v.balance == 1000 && v.next_nonce == 0);
         } catch (const std::exception& e) { err = e.what(); }
         check(ok, "CTRL: the committee-signed fixture chain passes the real genesis pin + trustless account read " + err);
@@ -858,6 +879,76 @@ int cmd_selftest_outbox_core(int, char**) {
 
     for (auto& d : scratch_dirs) { std::error_code ec; std::filesystem::remove_all(d, ec); }
     return check.finish("selftest-outbox-core");
+}
+
+// ─── selftest-outbox-hint-wait ─────────────────────────────────────────────
+// S-112 / S-113: `outbox enqueue`'s nonce hint is a HEAD-ANCHORED trust-minimized
+// read (nonce_hint_trustless -> read_account_trustless -> committee_bound_state_root),
+// so the operator's `--wait` is what lets its S-042 successor binding complete. The
+// wait used to be dropped at that call: it compiled, the flag was accepted, and the
+// read silently ran with 0. Asserted here against the REAL reader over the
+// committee-signed fixture chain, by what the reader DID — how many times it came
+// back for the successor, what it failed closed with, and whether it produced a hint
+// at all. Nothing here greps a source file.
+int cmd_selftest_outbox_hint_wait(int, char**) {
+    Checker check;
+    auto kf = fixture_keyfile(0x42);
+
+    // One probe = one fresh fixture chain whose sender has already spent nonce 0, so a
+    // produced hint is the value 1 and can never be a default-initialized 0.
+    //   wait_seconds  what the operator passed
+    //   auto_mint     whether the fixture's chain advances at all while we poll
+    //   mint_at       the head poll on which it advances (1 = the very first)
+    auto probe = [&](uint64_t wait_seconds, bool auto_mint, uint64_t mint_at,
+                     uint64_t& polls, std::string& err) -> bool {
+        FixtureRpc fx(kf, 1000);
+        fx.auto_mint_on_query = auto_mint;
+        fx.mint_after_head_polls = mint_at;
+        fx.consume_nonce_externally();
+        uint64_t before = fx.head_polls();
+        bool got = false;
+        try {
+            uint64_t h = nonce_hint_trustless(fx, fx.genesis(), fx.genesis_hash(),
+                                              kf.anon_address, wait_seconds);
+            got = (h == 1);
+        } catch (const std::exception& e) { err = e.what(); }
+        polls = fx.head_polls() - before;
+        return got;
+    };
+
+    // 1. The chain never advances. The wait is visible as extra successor polls and in
+    //    the fail-closed diagnostic, and BOTH runs still refuse — WH-SN: a wait changes
+    //    whether a verdict is produced, never which value it carries.
+    uint64_t polls0 = 0, polls2 = 0; std::string e0, e2;
+    bool got0 = probe(0, false, 1, polls0, e0);
+    bool got2 = probe(2, false, 1, polls2, e2);
+    check(polls0 > 0 && polls2 == polls0 + 2,
+          "the hint read polled the successor " + std::to_string(polls2)
+          + " time(s) under --wait 2 against " + std::to_string(polls0)
+          + " under --wait 0 — the operator's wait reaches the head-anchored read");
+    check(!got0 && !got2,
+          "neither run produced a hint against a chain that never advanced (a wait never "
+          "invents a value: WaitHoldAndWaitSoundness WH-SN)");
+    check(e0.find("has NO committee-signed successor") != std::string::npos
+          && e0.find("after waiting") == std::string::npos
+          && e2.find("after waiting 2s for the next block") != std::string::npos,
+          "the fail-closed diagnostic names the wait the operator actually asked for");
+
+    // 2. The chain advances on the one poll a waiting reader makes and a non-waiting one
+    //    never does: the verified next_nonce hint exists ONLY when the wait carried
+    //    through. The poll it advances on is DERIVED from case 1's measurement, not
+    //    guessed, so the fixture's own chain-walk polls cannot make this vacuous.
+    uint64_t pa = 0, pb = 0; std::string ea, eb;
+    bool gota = probe(0, true, polls0 + 1, pa, ea);
+    bool gotb = probe(1, true, polls0 + 1, pb, eb);
+    check(!gota && !ea.empty(),
+          "--wait 0: the successor one poll away is never seen (" + std::to_string(pa)
+          + " poll(s)), and the hint fails closed");
+    check(gotb && eb.empty() && pb == pa + 1,
+          "--wait 1: one more poll (" + std::to_string(pb) + ") on the same chain yields the "
+          "committee-verified next_nonce=1 hint — the flag changed the outcome, which is the "
+          "whole of what --wait may do");
+    return check.finish("selftest-outbox-hint-wait");
 }
 
 } // namespace determ::light

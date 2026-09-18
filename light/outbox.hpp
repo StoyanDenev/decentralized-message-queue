@@ -288,6 +288,24 @@ ReconcileReport reconcile_all(Outbox& ob, RpcClient& rpc,
 void pin_daemon_genesis(RpcClient& rpc, const determ::chain::GenesisConfig& genesis,
                         const Hash& expected);
 
+// The nonce hint `outbox enqueue` reserves against: the sender's next_nonce as
+// proven by the trust-minimized reader, after the daemon's genesis is pinned
+// (a wrong-chain daemon must not steer a reservation). Throws on any failure —
+// the caller falls back to local reservations.
+//
+// `wait_seconds` is the operator's `--wait`, forwarded into
+// read_account_trustless's `max_wait_seconds`. It has NO default ON PURPOSE:
+// S-112 was exactly an omitted defaulted wait argument at this call site, which
+// compiled and silently read with wait 0; a parameter with no default makes that
+// omission a compile error. The read anchors at the chain head
+// (WaitHoldAndWaitSoundness WH-4), so without a wait its successor binding fails
+// closed on a live chain and the hint is simply never available.
+uint64_t nonce_hint_trustless(RpcClient& rpc,
+                              const determ::chain::GenesisConfig& genesis,
+                              const Hash& genesis_hash,
+                              const std::string& sender,
+                              uint64_t wait_seconds);
+
 // ─── status rendering ───────────────────────────────────────────────────────
 nlohmann::json slot_to_json(const Slot& s, uint64_t now);
 std::string    slot_to_line(const Slot& s, uint64_t now);

@@ -88,26 +88,30 @@
 # and no wait parameter to thread, so there is nothing to drop. This is self-
 # invalidating by construction: the moment that file gains a `--wait` or a wait
 # parameter, every binding call in it must forward one or the guard goes RED. Today it
-# covers `verify_state_bundle.cpp` (`export-state-bundle` parses no `--wait` and
+# covers `verify_state_bundle.cpp` only (`export-state-bundle` parses no `--wait` and
 # `ExportStateBundleOptions` has no wait field; the call annotates the slot
-# `/*max_wait_seconds=*/0`) and `outbox_selftest.cpp` (`selftest-outbox-core` drives an
-# in-memory `FixtureRpc`, not a daemon — there is no head to race). No hand-maintained
+# `/*max_wait_seconds=*/0`). `outbox_selftest.cpp` USED to be covered too — it drives an
+# in-memory `FixtureRpc`, not a daemon — but since 2026-09-18 it exercises the wait
+# deliberately (the S-112 case), so it HAS a wait to forward and is no longer excused:
+# every binding call in it now passes a named wait, including the zero the control read
+# uses because the fixture's successor is always one poll away. No hand-maintained
 # exception list, so nothing here rots on a line shift or a rename.
 #
 # CARVE-OUT 2 — KNOWN GAPS (a named, dated, reported product finding, NOT an approval).
-# `light/outbox_cli.cpp::cmd_enqueue` calls `read_account_trustless` for its nonce hint
-# WITHOUT forwarding a wait, while `outbox`'s shared `parse_args` accepts `--wait` for
-# every verb (`:66`) and `outbox reconcile` does forward it (`:324`). So
-# `outbox enqueue --wait N` is accepted and is silently a no-op — the exact S-042
-# symptom class. Found by this repair on 2026-09-18 by extending the guard past
-# main.cpp; it is NOT a soundness defect (WaitHoldAndWaitSoundness WH-SN: `--wait` never
-# changes WHICH value a verdict carries, and the hint is only floored into
-# `max(local, hint)`), it is the liveness/usability gap `--wait` exists to close. It is
-# outside `docs/proofs/WaitHoldAndWaitSoundness.md` WH-6's enumeration, which covers
-# `light/main.cpp` commands only and does not mention the `outbox` verbs at all. The
-# fix belongs to whoever owns `light/`; this guard names it on every run so it cannot
-# rot back into invisibility, and PINS it: the list must match EXACTLY, so a second
-# route-layer drop is RED and a fixed gap is RED until its entry is deleted.
+# The list is EMPTY as of 2026-09-18 and the mechanism is kept, because it is what makes
+# a standing permission impossible to leave behind. Its one entry was S-112:
+# `light/outbox_cli.cpp::cmd_enqueue` called `read_account_trustless` for its nonce hint
+# WITHOUT forwarding a wait, while `outbox`'s shared `parse_args` accepted `--wait` for
+# every verb and only `outbox reconcile` forwarded it — so `outbox enqueue --wait N` was
+# accepted and was silently a no-op, the exact S-042 symptom class. It was found by the
+# 2026-09-18 repair that extended this guard past main.cpp, and CLOSED the same day
+# (S-113): the hint read became `light/outbox.cpp::nonce_hint_trustless`, whose
+# `wait_seconds` parameter has NO default, so omitting it no longer compiles; this guard
+# sees that route as a DERIVED helper and requires `cmd_enqueue` to pass a wait
+# expression into its slot. Because the list is PINNED, deleting the entry was not
+# optional: a fixed gap is RED until its entry goes, exactly as a second route-layer drop
+# is RED for having no entry. Nothing here is an approval; a future increment that needs
+# an entry must name, date and report it, and it goes RED again the day it is fixed.
 #
 # SELFTEST (SELFTEST=1): copies $LIGHT_DIR to a scratch tree, injects one synthetic
 # violation per invariant, and asserts the guard flags each. Proves the checks are live,
@@ -165,13 +169,9 @@ BASE_HELPERS = ["committee_bound_state_root", "verify_state_root_at",
 # CARVE-OUT 2 — KNOWN GAPS. (file, enclosing function, helper) -> why. A named,
 # reported product finding, not an approval; see the header. The list is PINNED:
 # it must match EXACTLY, so a second route-layer drop is RED and a closed gap is
-# RED until its entry is deleted here.
+# RED until its entry is deleted here. EMPTY since 2026-09-18, when its only
+# entry (S-112, outbox_cli.cpp::cmd_enqueue) was fixed and therefore had to go.
 KNOWN_GAP = {
-  ("outbox_cli.cpp", "cmd_enqueue", "read_account_trustless"):
-    "outbox's shared parse_args accepts --wait for every verb (:66) and reconcile "
-    "forwards it (:324), but enqueue's nonce-hint read does not — `outbox enqueue "
-    "--wait N` is accepted and silently a no-op (S-042 symptom class, liveness only; "
-    "outside WaitHoldAndWaitSoundness WH-6, which enumerates main.cpp commands only)",
 }
 
 out = []
@@ -313,7 +313,10 @@ def body_after(b, i):
 # AND reaches a binding call is itself a binding route, so its own callers must forward.
 # Without this an intermediate helper could be introduced and its callers drop the wait
 # while every listed helper still checked out. Today it adds
-# account_history.cpp::verify_header_state_root_at and outbox.cpp::verify_and_bind.
+# account_history.cpp::verify_header_state_root_at, outbox.cpp::verify_and_bind and
+# outbox.cpp::nonce_hint_trustless (the S-112 fix: the enqueue nonce hint became a named
+# route whose wait parameter has no default, so this guard checks cmd_enqueue's call into
+# it exactly as it checks any other route).
 HELPERS = list(BASE_HELPERS)
 for fn, (raw, b) in files.items():
     for m in re.finditer(
@@ -434,6 +437,9 @@ if stale:
 elif KNOWN_GAP:
     OK("C the known-gap list is exact: all %d entr(y/ies) still name a real "
        "non-forwarding call, and no other route-layer call drops the wait" % len(KNOWN_GAP))
+else:
+    NOTE("C the known-gap list is EMPTY — no route-layer call holds a standing permission "
+         "to drop the wait (S-112 closed 2026-09-18 by outbox.cpp::nonce_hint_trustless)")
 
 # ── D: help surface floor ───────────────────────────────────────────────────────
 n_help = files['main.cpp'][0].count('[--wait <seconds>]')
@@ -580,11 +586,20 @@ if [ "${SELFTEST:-}" = "1" ]; then
   perl -0pi -e 's/int run_export_state_bundle\(const ExportStateBundleOptions& opts\) \{/int run_export_state_bundle(const ExportStateBundleOptions& opts) {\n    uint64_t wait_seconds = opts.wait_seconds;/' "$rf/verify_state_bundle.cpp"
   st_expect_red "RF excepted export path gains a wait but still passes a literal" "$rf"
 
-  # RH: the KNOWN GAP is closed in the product but its entry is left behind — the
-  #     standing permission must not silently outlive its cause.
+  # RH: S-112 is RE-OPENED inside the route that closed it — the enqueue nonce hint
+  #     reads with a literal 0 while the operator's wait sits unused in the parameter.
+  #     This is the defect the (now empty) KNOWN_GAP entry used to name; with the entry
+  #     gone, the ordinary invariant-C check is what must see it.
   rh=$(mk rh)
-  perl -0pi -e 's/read_account_trustless\(rpc, build_genesis_committee\(genesis\), genesis, kf\.anon_address\)/read_account_trustless(rpc, build_genesis_committee(genesis), genesis, kf.anon_address, false, "", a.wait)/' "$rh/outbox_cli.cpp"
-  st_expect_red "RH known gap closed but its KNOWN_GAP entry left standing" "$rh"
+  perl -0pi -e 's/(read_account_trustless\(rpc, build_genesis_committee\(genesis\), genesis,\s*\n\s*sender, \/\*resume=\*\/false, \/\*state_path=\*\/"",\s*\n\s*)wait_seconds\)/${1}0)/' "$rh/outbox.cpp"
+  st_expect_red "RH the S-112 route re-opened: nonce_hint_trustless reads with a literal 0" "$rh"
+
+  # RJ: the CALL SITE drops it instead — cmd_enqueue passes a literal 0 into the route's
+  #     wait slot. The route itself still forwards, so only the derived-helper check sees
+  #     this; it is the half of S-112 the in-process runtime gate cannot reach.
+  rj=$(mk rj)
+  perl -0pi -e 's/nonce_hint_trustless\(rpc, genesis, ghash, kf\.anon_address, a\.wait\)/nonce_hint_trustless(rpc, genesis, ghash, kf.anon_address, 0)/' "$rj/outbox_cli.cpp"
+  st_expect_red "RJ cmd_enqueue passes a literal 0 into the nonce-hint route's wait slot" "$rj"
 
   # RI: a NEW intermediate binding route is introduced and one of its callers drops the
   #     wait. The derived helper set is what sees this; a fixed list of four would not.
@@ -608,7 +623,7 @@ CPPEOF
 
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_light_wait_surface SELFTEST (flags all 9 regression classes, GREEN on the signature extension that broke the old pin)"
+    echo "  PASS: test_light_wait_surface SELFTEST (flags all 10 regression classes, GREEN on the signature extension that broke the old pin)"
     exit 0
   else
     echo "  FAIL: test_light_wait_surface SELFTEST ($ST_FAIL self-test failure(s))"

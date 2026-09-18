@@ -9,4 +9,5 @@ int cmd_outbox(int argc, char** argv);
 int cmd_selftest_outbox_record(int argc, char** argv);
 int cmd_selftest_outbox_classify(int argc, char** argv);
 int cmd_selftest_outbox_core(int argc, char** argv);
+int cmd_selftest_outbox_hint_wait(int argc, char** argv);
 } // namespace determ::light
