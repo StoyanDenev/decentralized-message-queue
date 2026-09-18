@@ -146,8 +146,11 @@ struct RestrictedWriteOptions {
     // to use it, and the `getenv` that drives it, stay in
     // `src/crypto/keys.cpp` where they were justified; this is only the
     // parameter that carries it in. It can turn a success into a REPORTED
-    // failure and never the reverse, so it cannot weaken a permission. The
-    // other two sites pass 0 and compile to the unmodified `::fchmod` path.
+    // failure and never the reverse: the real `::fchmod` runs first and only
+    // its RESULT is overridden, so the file is narrowed whether or not the hook
+    // fires. An earlier shape replaced the call and did weaken the permission on
+    // a pre-existing target; the comment said otherwise, which is the trap a
+    // shared primitive must not set for its next caller.
     int simulate_narrow_failure_errno = 0;
 };
 
@@ -234,12 +237,18 @@ write_restricted_0600(const std::string& path,
         return r;
     }
     {
-        int rc;
+        // The real narrowing ALWAYS runs; the hook only overrides the RESULT
+        // afterwards. Replacing the call instead (the first shape of this code)
+        // meant that under `Continue` — the policy at two of the three sites —
+        // a pre-existing file was never narrowed at all, because O_CREAT|O_TRUNC
+        // does not narrow an existing file. Measured against the shipped header:
+        // a 0644 target stayed 0644 through the write. The hook is reachable
+        // only from a site that passes a non-zero errno, but a shared primitive
+        // must not carry a path by which a test aid weakens a real permission.
+        int rc = ::fchmod(fd, 0600);
         if (opts.simulate_narrow_failure_errno != 0) {
             rc = -1;
             errno = opts.simulate_narrow_failure_errno;
-        } else {
-            rc = ::fchmod(fd, 0600);
         }
         if (rc != 0) {
             r.narrow_failed = true;
