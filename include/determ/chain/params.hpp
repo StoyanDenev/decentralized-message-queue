@@ -77,6 +77,10 @@ inline constexpr size_t TRANSFER_PAYLOAD_MAX = 128;
 // ample capacity for genuine committee misbehavior attribution.
 inline constexpr size_t EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16;
 
+// D9 / R-7 / S-057: Consensus block canonical frame byte cap matching wire limit minus envelope.
+// Invariant: a valid block is always relayable over the wire.
+inline constexpr size_t BLOCK_FRAME_CONSENSUS_CAP_BYTES = (4 * 1024 * 1024) - 4; // 4,194,300 bytes
+
 // HISTORICAL (retired 2026-09-16, owner decision D13 — DECISION-LOG
 // 2026-09-16 "OWNER DECISIONS" §C): the rev.8 per-abort stake deduction.
 // No apply path reads this constant any more — a round-1 AbortEvent only

@@ -2858,6 +2858,8 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     // to the PQ-native `from` address — not the Ed25519 `sig`. Same shared
     // accept-rule the block validator uses.
     if (tx.type == TxType::PQ_TRANSFER) return verify_pq_transaction(tx);
+    // D9 / R-7 (S-057) mirror: a non-PQ transaction carrying non-empty pq_auth is invalid.
+    if (!tx.pq_auth.empty()) return false;
     PubKey pk{};
     const bool from_anon = is_anon_address(tx.from);
     // E1 mirror (S-071): the pool's all-zero key is small-order, so a forged

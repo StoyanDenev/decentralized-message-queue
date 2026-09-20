@@ -62314,6 +62314,124 @@ int main(int argc, char** argv) {
                   "validator rejects (some gate fires)");
         }
 
+        // === D9 / S-057: Canonical frame byte cap ===
+        {
+            Chain c = build_chain_single();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            bv.set_k_block_sigs(1);
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            Transaction big_tx;
+            big_tx.type = TxType::TRANSFER;
+            big_tx.from = "alice";
+            big_tx.to = "bob";
+            big_tx.payload.resize(60000);
+            for (size_t i = 0; i < 71; ++i) {
+                b.transactions.push_back(big_tx);
+            }
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok && r.error.find("block canonical frame exceeds consensus cap (S-057/D9)") != std::string::npos,
+                  "D9 / S-057: block exceeding canonical frame consensus cap rejected");
+        }
+
+        // === D9 / S-057: Non-PQ transaction carrying non-empty pq_auth ===
+        {
+            Chain c = build_chain_single();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice";
+            tx.to = "bob";
+            tx.amount = 10;
+            tx.fee = 1;
+            tx.nonce = 1;
+            tx.pq_auth = {0x01, 0x02, 0x03};
+            auto r = bv.check_transaction(tx, 1, c, reg, 1);
+            check(!r.ok && r.error.find("non-PQ transaction carries non-empty pq_auth (S-057/D9)") != std::string::npos,
+                  "D9 / S-057: non-PQ transaction carrying non-empty pq_auth rejected");
+        }
+
+        // === D6 / S-069: sender-rule exception admitting STAKE and TRANSFER from pending registrant ===
+        {
+            NodeKey charlie_key = generate_node_key();
+            GenesisConfig cfg;
+            cfg.chain_id = "d6-open-validator-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            NodeKey alice_key = generate_node_key();
+            alice_c.ed_pub = alice_key.pub;
+            alice_c.initial_stake = 1000;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal, charlie_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 10000;
+            charlie_bal.domain = "charlie"; charlie_bal.balance = 5000;
+            cfg.initial_balances = {alice_bal, charlie_bal};
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head_hash();
+            b1.timestamp = 1;
+            Transaction reg_tx;
+            reg_tx.type = TxType::REGISTER;
+            reg_tx.from = "charlie";
+            reg_tx.payload.assign(charlie_key.pub.begin(), charlie_key.pub.end());
+            reg_tx.nonce = 0;
+            auto sb_reg = reg_tx.signing_bytes();
+            reg_tx.sig = crypto::sign(charlie_key, sb_reg.data(), sb_reg.size());
+            reg_tx.hash = reg_tx.compute_hash();
+            b1.transactions = {reg_tx};
+            c.append(b1);
+
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 1);
+            check(!reg.contains("charlie") && c.registrants().count("charlie") > 0,
+                  "D6: charlie is registered in raw registrants but not yet eligible in registry");
+
+            BlockValidator bv;
+            bv.set_k_block_sigs(1);
+
+            Transaction xfer_tx;
+            xfer_tx.type = TxType::TRANSFER;
+            xfer_tx.from = "charlie";
+            xfer_tx.to = "alice";
+            xfer_tx.amount = 100;
+            xfer_tx.fee = 1;
+            xfer_tx.nonce = 1;
+            auto sb_xfer = xfer_tx.signing_bytes();
+            xfer_tx.sig = crypto::sign(charlie_key, sb_xfer.data(), sb_xfer.size());
+            xfer_tx.hash = xfer_tx.compute_hash();
+            auto rx = bv.check_transaction(xfer_tx, 2, c, reg, 1);
+            check(rx.ok, "D6 / S-069: TRANSFER from registered-but-not-yet-eligible domain admitted");
+
+            Transaction stake_tx;
+            stake_tx.type = TxType::STAKE;
+            stake_tx.from = "charlie";
+            stake_tx.amount = 0;
+            stake_tx.fee = 1;
+            stake_tx.nonce = 1;
+            uint64_t stake_amount = 1000;
+            stake_tx.payload.resize(8);
+            for (int b = 0; b < 8; ++b) stake_tx.payload[b] = uint8_t((stake_amount >> ((7 - b) * 8)) & 0xff);
+            auto sb_stake = stake_tx.signing_bytes();
+            stake_tx.sig = crypto::sign(charlie_key, sb_stake.data(), sb_stake.size());
+            stake_tx.hash = stake_tx.compute_hash();
+
+            // With K=1, 2K=2. Current eligible pool has alice (size 1). Adding charlie would make it 2, reaching 2K bound!
+            auto rs = bv.check_transaction(stake_tx, 2, c, reg, 1);
+            check(!rs.ok && rs.error.find("eligible validator pool would reach 2K bound") != std::string::npos,
+                  "D5a / D6 / S-054: STAKE that would reach 2K bound rejected");
+
+            // With K=2, 2K=4. Current eligible pool size 1 + 1 = 2 < 4. Admitted!
+            bv.set_k_block_sigs(2);
+            auto rs2 = bv.check_transaction(stake_tx, 2, c, reg, 1);
+            check(rs2.ok, "D6 / S-069: STAKE from registered-but-not-yet-eligible domain admitted when within 2K bound");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-validator-extensive "
                   << (fail == 0 ? "all assertions" : "had failures")

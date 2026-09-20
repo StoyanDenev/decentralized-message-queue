@@ -35,6 +35,16 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     // K-of-K, 0xFF forward-compat) and every unknown value rejects BEFORE any
     // signature check runs — a block must never have its sig array verified
     // under a different interpretation than its discriminator declares.
+    // D9 / R-7 / S-057: consensus block canonical frame byte cap matching wire limit minus envelope.
+    // Invariant: a valid block is always relayable over the wire.
+    std::vector<uint8_t> frame;
+    b.encode_frame(frame);
+    if (frame.size() > chain::BLOCK_FRAME_CONSENSUS_CAP_BYTES) {
+        return {false, "block canonical frame exceeds consensus cap (S-057/D9): "
+                     + std::to_string(frame.size()) + " > "
+                     + std::to_string(chain::BLOCK_FRAME_CONSENSUS_CAP_BYTES)};
+    }
+
     if (b.signature_form != SIG_FORM_KK_ED25519)
         return {false, "block.signature_form = "
                      + std::to_string(int(b.signature_form))
@@ -811,6 +821,9 @@ BlockValidator::Result BlockValidator::check_transaction(
             if (!verify_pq_transaction(tx))
                 return {false, "PQ_TRANSFER authentication invalid from: " + tx.from};
         } else {
+            // D9 / R-7 (S-057): a non-PQ transaction carrying non-empty pq_auth is invalid.
+            if (!tx.pq_auth.empty())
+                return {false, "non-PQ transaction carries non-empty pq_auth (S-057/D9): " + tx.from};
         PubKey pk{};
         if (tx.type == TxType::REGISTER) {
             if (from_anon)
@@ -923,6 +936,16 @@ BlockValidator::Result BlockValidator::check_transaction(
                     } else {
                         return {false, "tx sender not in registry: " + tx.from};
                     }
+                } else if (tx.type == TxType::STAKE || tx.type == TxType::TRANSFER) {
+                    // D6 / R-12 (S-069): sender-rule exception admitting STAKE (and the
+                    // TRANSFER that funds it) from a domain present in the raw registrants
+                    // map but not yet eligible.
+                    auto it = chain.registrants().find(tx.from);
+                    if (it != chain.registrants().end() && block_index < it->second.inactive_from) {
+                        pk = it->second.ed_pub;
+                    } else {
+                        return {false, "tx sender not in registry: " + tx.from};
+                    }
                 } else {
                     return {false, "tx sender not in registry: " + tx.from};
                 }
@@ -995,6 +1018,26 @@ BlockValidator::Result BlockValidator::check_transaction(
                             "UNSTAKE before unlock_height: from=" + tx.from
                           + " block_height=" + std::to_string(block_index)
                           + " unlock_height=" + std::to_string(unlock)};
+                }
+            } else if (tx.type == TxType::STAKE) {
+                // D5a / D6 / S-054: Quorum intersection invariant requires 2K > N(h).
+                // Reject a STAKE that would raise the eligible pool size to 2K or more.
+                if (k_block_sigs_ != 0) {
+                    bool already_eligible = registry.find(tx.from).has_value();
+                    if (!already_eligible) {
+                        uint64_t amount = 0;
+                        for (int b = 0; b < 8; ++b) amount = (amount << 8) | tx.payload[b];
+                        if (chain.stake(tx.from) + amount >= chain.min_stake()) {
+                            size_t current_eligible = committee_region_.empty()
+                                ? registry.size()
+                                : registry.eligible_in_region(committee_region_).size();
+                            if (current_eligible + 1 >= 2 * k_block_sigs_) {
+                                return {false, "STAKE rejected: eligible validator pool would reach 2K bound ("
+                                             + std::to_string(current_eligible + 1) + " >= "
+                                             + std::to_string(2 * k_block_sigs_) + ") (D5a/D6/S-054)"};
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -1472,9 +1515,15 @@ BlockValidator::Result BlockValidator::check_transaction(
                 } else if (auto re = registry.find(it.from)) {
                     ipk = re->pubkey;
                 } else {
-                    return {false, "COMPOSABLE_BATCH inner["
-                                 + std::to_string(ii)
-                                 + "] sender not in registry: " + it.from};
+                    auto rit = chain.registrants().find(it.from);
+                    if (rit != chain.registrants().end() && block_index < rit->second.inactive_from
+                        && (it.type == TxType::STAKE || it.type == TxType::TRANSFER)) {
+                        ipk = rit->second.ed_pub;
+                    } else {
+                        return {false, "COMPOSABLE_BATCH inner["
+                                     + std::to_string(ii)
+                                     + "] sender not in registry: " + it.from};
+                    }
                 }
                 auto sb = it.signing_bytes();
                 if (!verify(ipk, sb.data(), sb.size(), it.sig)) {

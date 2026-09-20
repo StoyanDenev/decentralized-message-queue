@@ -1468,6 +1468,15 @@ Block build_body(
         }
         nn++;
         b.transactions.push_back(tx);
+        // D9 / R-7 (S-057): Consensus block canonical frame byte cap.
+        // Invariant: a valid block is always relayable over the wire.
+        std::vector<uint8_t> frame;
+        b.encode_frame(frame);
+        if (frame.size() > chain::BLOCK_FRAME_CONSENSUS_CAP_BYTES) {
+            b.transactions.pop_back();
+            nn--;
+            break;
+        }
     }
 
     // rev.9 B3.4: bake inbound receipts addressed to this shard. Skip
@@ -1492,6 +1501,12 @@ Block build_body(
             && !f2_inbound_intersection.count(hash_cross_shard_receipt(r)))
             continue;
         b.inbound_receipts.push_back(r);
+        std::vector<uint8_t> f;
+        b.encode_frame(f);
+        if (f.size() > chain::BLOCK_FRAME_CONSENSUS_CAP_BYTES) {
+            b.inbound_receipts.pop_back();
+            break;
+        }
     }
 
     // D3.5d-ii / S-036 Layer 1: fold the committee-agreed shard-tip records. Only
@@ -1538,6 +1553,13 @@ Block build_body(
                 continue;                                    // mismatched pair
             b.shard_tip_records.push_back(rec);
             b.shard_tip_witnesses.push_back(w);
+            std::vector<uint8_t> f;
+            b.encode_frame(f);
+            if (f.size() > chain::BLOCK_FRAME_CONSENSUS_CAP_BYTES) {
+                b.shard_tip_records.pop_back();
+                b.shard_tip_witnesses.pop_back();
+                break;
+            }
         }
     }
 

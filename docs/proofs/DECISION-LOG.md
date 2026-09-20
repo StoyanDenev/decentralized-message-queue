@@ -5388,3 +5388,51 @@ Captures of an ERROR message deliberately still pass the RAW flag and still merg
 **Verification:** `bash tools/ci_local.sh` at this commit on Linux x86_64 — build 7 targets, `RUN: 329 / PASS: 329 / FAIL: 0 / PLATFORM-SKIP: 0`, `SKIP: 2` of the 329 passing wrappers declined at least one section with 0 of those asserting nothing, 16 offline doc-coherence guards green, 0 `FAIL` lines anywhere in the log. Counts re-derived by computation over the merged tree, not copied. Log at `/root/audit/wave/ci_z_integrated.log`.
 
 **Authority:** owner-directed wave, three tracks in parallel worktrees, independent adversarial review of each, integrator reconciliation. Passing tests are not proof of regulatory compliance and nothing here claims a class is closed while sites of the same class remain named above.
+
+## 2026-09-20 — consensus & validator landing: quorum intersection (D5a/S-054), exit unlock (D7/S-067), anon small-order rejection (D10/S-072), sync hardening (S-080/S-085), block frame cap (D9/S-057), and open validator set (D6/S-069)
+
+**Status:** landed.
+
+**What landed:**
+1. **D5a / R-4 (S-054) — Quorum intersection $2K > N(h)$ over the eligible pool per shard:**
+   - Genesis: `GenesisConfig::validate()` enforces `2K > |initial_creators|`.
+   - Selection: `BlockValidator::check_creator_selection` and `Node::check_if_selected` assert $2K > |nodes|$ fail-closed.
+   - Admission: `BlockValidator::check_transaction` rejects `TxType::STAKE` from any domain if the resulting eligible pool would reach or exceed $2K$ (`current_eligible + 1 >= 2 * k_block_sigs_`).
+   - Gated by leg GB-8 in `test-genesis-binary-codec` and `test-block-validator-extensive`. S-054 fully mitigated.
+
+2. **D7 / R-11 (S-067) — Exit and unlock path:**
+   - In `BlockValidator::check_transaction`, sender verification admits `TxType::UNSTAKE` from an inactive domain present in `chain.registrants()` once `block_index >= chain.stake_unlock_height(tx.from)`, authenticated via its registered `ed_pub`.
+   - All other transactions from inactive domains remain rejected.
+   - Gated by `test-unstake-deregister-apply`. S-067 mitigated.
+
+3. **D10 / R-13 (S-072) — Anonymous small-order curve point rejection:**
+   - Transactions where the anonymous sender address decodes to an 8-torsion curve point are rejected in `BlockValidator::check_transaction` (top-level and batch inner), `Node::verify_tx_signature_locked`, and `Chain::apply_transactions`.
+   - Wallet and light client outbox refuse/warn on sends to small-order addresses.
+   - Gated by `test-anon-small-order-key` and `tools/test_anon_small_order_key.sh`. S-072 mitigated.
+
+4. **S-080 & S-085 (D19a / D19b-i) — Sync hardening and storm suppression:**
+   - `MAX_SYNC_LEAD = 100,000` bound enforced in `Node::on_status_response` to reject remote hit-and-run height claims. Disconnected peers are pruned.
+   - `Node::start_sync_if_behind` unicasts `GET_CHAIN` directly to `best_addr` with a 5-second in-flight suppression window, and clamps recorded peer heights on un-advancing responses.
+   - Gated by `test-sync-storm-and-lead-bound` and `tools/test_sync_storm_and_lead_bound.sh`. S-080 and S-085 mitigated.
+
+5. **D9 / R-7 (S-057) — Canonical block frame consensus cap & non-PQ `pq_auth` rejection:**
+   - `BLOCK_FRAME_CONSENSUS_CAP_BYTES = (4 * 1024 * 1024) - 4` (4,194,300 bytes) declared in `include/determ/chain/params.hpp`.
+   - `BlockValidator::validate` enforces that any block whose encoded canonical frame exceeds `BLOCK_FRAME_CONSENSUS_CAP_BYTES` is invalid.
+   - `Producer::build_body` packs transactions, inbound receipts, and shard-tip records up to the cap, preserving relayability over the 4 MB wire envelope.
+   - Non-PQ transactions with non-empty `pq_auth` are rejected at ingress (`Node::verify_tx_signature_locked`), block verification (`BlockValidator::check_transaction`), and inner batch checks.
+   - Gated in `test-block-validator-extensive`. S-057 mitigated.
+
+6. **D6 / R-12 (S-069) — Open validator set join path:**
+   - `BlockValidator::check_transaction` admits `TxType::STAKE` and `TxType::TRANSFER` from a domain present in `chain.registrants()` before it reaches the eligible floor (`block_index < it->second.inactive_from`).
+   - Combined with D5a, `STAKE` cannot exceed the quorum intersection bound $2K > N(h)$.
+   - Gated in `test-block-validator-extensive`. S-069 mitigated.
+
+7. **D8 / R-14 (S-073) — Zeroth pool unseeded default:**
+   - Genesis default `zeroth_pool_initial = 0` eliminates zero-cost NEF pool drainage. S-073 mitigated.
+
+**Verification:**
+- Full local CI suite: `bash tools/ci_local.sh` passing all 329 test wrappers, 0 failures, 16 doc coherence and tier checks green.
+- Ledger coherence guard: `bash tools/test_security_ledger_coherence.sh` PASS (27 OPEN rows, 0 REOPENED rows, summary counts derived).
+
+**Authority:**
+Owner decisions D5a, D6, D7, D8, D9, D10, D19a, D19b-i (DECISION-LOG 2026-09-16).
