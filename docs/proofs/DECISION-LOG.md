@@ -5535,3 +5535,40 @@ The write pipeline guarantees crash-durability and atomic replacement:
 
 **Authority:**
 Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
+
+---
+
+## 2026-09-20 — D19a (S-099): Light-client read_account_trustless false-alarm TAMPERED eliminated (finding F-4)
+
+**Status:** IMPLEMENTED and verified. Gate `determ-light selftest-outbox-hint-wait` (and wrapper `tools/test_light_outbox_flag_surface.sh`). Ledger row S-099 moved from OPEN to MITIGATED in `docs/SECURITY.md`.
+
+**Problem:**
+Finding F-4 (outbox review 2026-09-16, `docs/SECURITY.md` row S-099):
+Previously, `read_account_trustless` in `light/trustless_read.cpp` performed operations in the following order:
+1. Checked local state cache against `min_height`.
+2. Fetched the Merkle `state_proof` for `("a:", domain)`.
+3. Verified the proof against local key-bind and Merkle sibling rollup.
+4. Called `committee_bound_state_root` to transitively bind the proof's `state_root` to the committee-signed successor block. If `max_wait_seconds > 0` was specified (e.g. `verify-and-submit --wait` or `outbox reconcile --wait`), this held and polled until a successor block was minted.
+5. AFTER the successor wait completed, called `account` RPC to fetch the cleartext `balance` and `next_nonce`, recomputed the SHA-256 leaf hash, and compared it against `proof["value_hash"]`.
+
+When the chain minted a successor block during the wait that touched the sender's account (e.g., the sender's own transaction landed in that successor block, or incoming funds were credited), the `account` RPC returned post-block state (new nonce/balance) while the `state_proof` was held from the anchor block. The hash recomputation mismatch triggered a false-alarm `TAMPERED` exception on an entirely honest daemon. While `outbox_cli.cpp` had added a band-aid `with_f4_retry` wrapper, the underlying library reader itself remained vulnerable.
+
+**The Change:**
+In `light/trustless_read.cpp::read_account_trustless`:
+- Moved the `account` cleartext RPC call and value-hash verification to run immediately alongside `state_proof` (step 3), BEFORE calling `committee_bound_state_root`.
+- Enclosed the (state_proof, account) dual-read in a bounded 3-attempt retry loop to handle the benign race where a block lands between the individual `state_proof` and `account` RPC calls.
+- Both the Merkle proof and the cleartext fields are guaranteed to match the exact same anchor block view prior to entering `committee_bound_state_root`.
+- When `committee_bound_state_root` polls and discovers the successor block, the successor attests to the anchor block's `state_root` and previous hash. Even if the sender's nonce advanced in the successor block, the anchor block's cleartext is already captured and verified, returning the correct account view without false-alarm `TAMPERED`.
+- Retained strict syntactic key-bind checks (`proof_key_hex != local_key_hex`), stale-read guards (`proof_height < vc.height`), and value-hash cross-checks (`computed_value_hash != proof_value_hash`) to satisfy all invariants in `tools/test_light_keybind_surface.sh`.
+
+**Verification & Test Gate:**
+- Extended `determ-light selftest-outbox-hint-wait`:
+  - Added test leg 3: simulated successor block landing during hold-and-wait with sender nonce advance (`live_node_account_read = true`, `auto_mint_consumes_nonce = true`). Asserts `read_account_trustless` with `--wait 2` completes cleanly without throwing `TAMPERED` and returns the anchor block's state.
+  - Added test leg 4: simulated inter-call race where nonce advances between `state_proof` and `account` calls (`race_account_once = true`). Asserts the reader's bounded retry loop re-reads both calls and succeeds on attempt 2.
+- Re-ran `tools/test_light_outbox_flag_surface.sh` (65 passed, 0 failed, 5 declined).
+- Re-ran `tools/test_light_keybind_surface.sh` (invariants 4-10 exact).
+- Re-ran `tools/test_light_state_root_binding_guard.sh` (invariants 1-3 intact).
+- Verified mutant falsification: reading `account` cleartext after the wait immediately fails leg 3 RED with `TAMPERED`.
+
+**Authority:**
+Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.

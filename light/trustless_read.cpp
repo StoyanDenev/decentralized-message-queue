@@ -783,48 +783,97 @@ AccountView read_account_trustless(
             "without S-033 active.");
     }
 
-    // 3. Fetch the state-proof for ("a:", domain).
-    auto proof = rpc.call("state_proof",
-        {{"namespace", "a"}, {"key", domain}});
-    if (proof.contains("error") && !proof["error"].is_null()) {
-        throw std::runtime_error(
-            "trustless-read: state_proof RPC error: "
-            + proof["error"].dump());
-    }
+    // 3. Fetch the state-proof for ("a:", domain) and cleartext account fields together.
+    //
+    // S-099 (finding F-4): read the cleartext account fields WITH the proof
+    // BEFORE committee_bound_state_root's potential successor wait.
+    // When max_wait_seconds > 0, waiting for a successor block can land the
+    // sender's own transaction (or incoming transfers), advancing the head
+    // account state past the proof's anchor height. Reading cleartext after
+    // the wait threw a false-alarm TAMPERED on an honest daemon (verify-and-submit
+    // --wait and outbox reconcile --wait).
+    //
+    // Reading (proof, cleartext) together before the wait, with a bounded retry
+    // loop against blocks slipping between the two individual RPC calls, ensures
+    // the proof and cleartext reflect the identical block height prior to waiting.
+    json proof;
+    uint64_t bal = 0;
+    uint64_t nn  = 0;
+    Hash computed_value_hash{};
+    Hash proof_value_hash{};
 
-    // 3a. Bind the proof to THIS domain's key. verify_state_proof (step 4)
-    //     Merkle-verifies whatever key_bytes the daemon SUPPLIES — it does
-    //     not know which key we asked for — so without this check a
-    //     Byzantine daemon could serve a valid proof for SOME OTHER `a:`
-    //     leaf and lie consistently in the `account` cleartext (step 5's
-    //     hash-bind compares the cleartext against the SERVED leaf, not
-    //     this domain's), attributing an arbitrary committed
-    //     (balance, next_nonce) to `domain` — e.g. forging a whale's
-    //     balance onto an empty account (the F-6 forge class,
-    //     NegativeVerdictSoundness.md; the same gap was fixed in
-    //     read_stake_trustless and verify-abort-record).
-    //     proof.key_bytes MUST equal the locally-computed canonical key
-    //     ("a:" || domain), byte-for-byte.
-    {
-        std::vector<uint8_t> local_key;
-        local_key.reserve(2 + domain.size());
-        local_key.push_back('a'); local_key.push_back(':');
-        local_key.insert(local_key.end(), domain.begin(), domain.end());
+    // 3a. Precompute the local canonical key ("a:" || domain).
+    std::vector<uint8_t> local_key;
+    local_key.reserve(2 + domain.size());
+    local_key.push_back('a'); local_key.push_back(':');
+    local_key.insert(local_key.end(), domain.begin(), domain.end());
+    std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+
+    constexpr int kMaxAttempts = 3;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        proof = rpc.call("state_proof",
+            {{"namespace", "a"}, {"key", domain}});
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            throw std::runtime_error(
+                "trustless-read: state_proof RPC error: "
+                + proof["error"].dump());
+        }
+
+        // 3a. Bind the proof to THIS domain's key. verify_state_proof (step 4)
+        //     Merkle-verifies whatever key_bytes the daemon SUPPLIES — it does
+        //     not know which key we asked for — so without this check a
+        //     Byzantine daemon could serve a valid proof for SOME OTHER `a:`
+        //     leaf and lie consistently in the `account` cleartext,
+        //     attributing an arbitrary committed (balance, next_nonce) to
+        //     `domain` (the F-6 forge class, NegativeVerdictSoundness.md).
+        //     proof.key_bytes MUST equal the locally-computed canonical key
+        //     ("a:" || domain), byte-for-byte.
         std::string proof_key_hex = proof.value("key_bytes", std::string{});
-        std::string local_key_hex = to_hex(local_key.data(), local_key.size());
         if (proof_key_hex != local_key_hex) {
             throw std::runtime_error(
                 "trustless-read: proof.key_bytes=" + proof_key_hex
                 + " does not match the canonical a: key " + local_key_hex
                 + " — daemon served a proof for a different leaf");
         }
+
+        // 4. Verify the proof self-consistently (the proof's Merkle
+        //    siblings must roll up to the claimed state_root).
+        auto vsp = verify_state_proof(proof, {});
+        if (!vsp.ok) {
+            throw std::runtime_error("trustless-read: " + vsp.detail);
+        }
+
+        // Fetch cleartext account fields via `account` RPC:
+        auto acct = rpc.call("account", {{"address", domain}});
+        if (acct.contains("error") && !acct["error"].is_null()) {
+            throw std::runtime_error(
+                "trustless-read: account RPC error: " + acct["error"].dump());
+        }
+        bal = acct.value("balance",    uint64_t{0});
+        nn  = acct.value("next_nonce", uint64_t{0});
+
+        determ::crypto::SHA256Builder b;
+        b.append(bal);
+        b.append(nn);
+        computed_value_hash = b.finalize();
+
+        proof_value_hash = from_hex_arr<32>(
+            proof["value_hash"].get<std::string>());
+
+        if (computed_value_hash == proof_value_hash) {
+            break;
+        }
     }
 
-    // 4. Verify the proof self-consistently (the proof's Merkle
-    //    siblings must roll up to the claimed state_root).
-    auto vsp = verify_state_proof(proof, {});
-    if (!vsp.ok) {
-        throw std::runtime_error("trustless-read: " + vsp.detail);
+    if (computed_value_hash != proof_value_hash) {
+        throw std::runtime_error(
+            "trustless-read: TAMPERED — daemon's `account` reply "
+            "(balance=" + std::to_string(bal)
+            + ", next_nonce=" + std::to_string(nn)
+            + ") hashes to " + to_hex(computed_value_hash)
+            + " but state-proof's value_hash is "
+            + to_hex(proof_value_hash)
+            + " — daemon is lying about either the cleartext OR the proof");
     }
 
     // 5. Anchor the proof's claimed state_root to a COMMITTEE-BOUND root.
@@ -874,42 +923,6 @@ AccountView read_account_trustless(
     }
     vc.head_state_root = attested;
     vc.height = proof_height;
-
-    // 5. Now fetch the cleartext account fields via the daemon's
-    //    `account` RPC, recompute the leaf hash, and confirm it
-    //    matches the verified value_hash. This is the load-bearing
-    //    cross-check: the daemon could lie about the cleartext while
-    //    serving an honest proof for some OTHER (balance, next_nonce)
-    //    pair; the hash recomputation forces consistency.
-    auto acct = rpc.call("account", {{"address", domain}});
-    if (acct.contains("error") && !acct["error"].is_null()) {
-        throw std::runtime_error(
-            "trustless-read: account RPC error: " + acct["error"].dump());
-    }
-    uint64_t bal = acct.value("balance",    uint64_t{0});
-    uint64_t nn  = acct.value("next_nonce", uint64_t{0});
-
-    determ::crypto::SHA256Builder b;
-    b.append(bal);
-    b.append(nn);
-    Hash computed_value_hash = b.finalize();
-
-    // Re-extract value_hash from the proof reply (we already validated it
-    // via merkle_verify; pull the bytes again rather than threading them
-    // through VerifyResult so the interface stays narrow).
-    Hash proof_value_hash = from_hex_arr<32>(
-        proof["value_hash"].get<std::string>());
-
-    if (computed_value_hash != proof_value_hash) {
-        throw std::runtime_error(
-            "trustless-read: TAMPERED — daemon's `account` reply "
-            "(balance=" + std::to_string(bal)
-            + ", next_nonce=" + std::to_string(nn)
-            + ") hashes to " + to_hex(computed_value_hash)
-            + " but state-proof's value_hash is "
-            + to_hex(proof_value_hash)
-            + " — daemon is lying about either the cleartext OR the proof");
-    }
 
     av.balance = bal;
     av.next_nonce = nn;

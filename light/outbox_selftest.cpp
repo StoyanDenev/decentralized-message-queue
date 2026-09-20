@@ -110,6 +110,9 @@ public:
     bool        drop_reply{false}; // submit_tx: accept, then "lose" the reply
     bool        auto_mint_includes_mempool{false};   // block minted during a successor wait carries the mempool
     bool        auto_mint_applies{true};
+    bool        auto_mint_consumes_nonce{false};     // block minted during successor wait advances sender nonce
+    bool        live_node_account_read{false};       // account RPC reads CURRENT live node view (unpinned)
+    bool        race_account_once{false};            // advances nonce right before answering first account RPC
     // A head poll is a `headers` request for the index one past the tip — what
     // committee_bound_state_root's hold-and-wait loop issues once per second. The
     // counter makes the WAIT observable (how many times the reader came back), and
@@ -174,7 +177,9 @@ public:
                 ++head_polls_;
                 if (auto_mint_on_query && head_polls_ >= mint_after_head_polls) {
                     // "the chain advanced one block while the reader waited"
-                    if (auto_mint_includes_mempool) mint_from_mempool(auto_mint_applies); else mint_empty();
+                    if (auto_mint_consumes_nonce) consume_nonce_externally();
+                    else if (auto_mint_includes_mempool) mint_from_mempool(auto_mint_applies);
+                    else mint_empty();
                 }
             }
             json arr = json::array();
@@ -192,13 +197,14 @@ public:
         if (method == "status") return json{{"height", blocks_.size()}};
         if (method == "nonce") return json{{"domain", sender_}, {"next_nonce", acct_.next_nonce}};
         if (method == "account") {
+            if (race_account_once) {
+                race_account_once = false;
+                consume_nonce_externally();
+            }
             // Served from the same committed view as the last state_proof (a
-            // daemon whose cleartext read is consistent with its proof). The live
-            // node reads the CURRENT view for both, so a block that touches the
-            // account between the two calls makes the real reader throw TAMPERED
-            // (a benign race, recorded as a separate finding); the fixture does
-            // not reproduce that race so the INCLUDED-at-head leg is testable.
-            const Acct& a = proof_acct_valid_ ? proof_acct_ : acct_;
+            // daemon whose cleartext read is consistent with its proof), unless
+            // live_node_account_read is enabled to simulate the unpinned live daemon.
+            const Acct& a = live_node_account_read ? acct_ : (proof_acct_valid_ ? proof_acct_ : acct_);
             return json{{"address", sender_}, {"balance", a.balance}, {"next_nonce", a.next_nonce}};
         }
         if (method == "state_proof") {
@@ -948,6 +954,60 @@ int cmd_selftest_outbox_hint_wait(int, char**) {
           "--wait 1: one more poll (" + std::to_string(pb) + ") on the same chain yields the "
           "committee-verified next_nonce=1 hint — the flag changed the outcome, which is the "
           "whole of what --wait may do");
+
+    // 3. S-099 (finding F-4): cleartext read WITH the proof before the successor wait.
+    //    A block touching the sender lands DURING the successor wait (simulated by
+    //    live_node_account_read = true and auto_mint_consumes_nonce = true).
+    //    Under the old bug, account cleartext was read after the wait and returned the
+    //    new nonce, throwing TAMPERED against the pre-wait proof. With the S-099 fix,
+    //    account cleartext is read with the proof before the wait, so the read succeeds
+    //    and returns next_nonce=0 from the anchor block.
+    {
+        FixtureRpc fx(kf, 1000);
+        fx.auto_mint_on_query = true;
+        fx.mint_after_head_polls = 1;
+        fx.live_node_account_read = true;
+        fx.auto_mint_consumes_nonce = true;
+        std::string err;
+        uint64_t nonce_val = 0;
+        bool ok = false;
+        try {
+            AccountView av = read_account_trustless(
+                fx, fx.committee_seed(), fx.genesis(), kf.anon_address,
+                /*resume=*/false, /*state_path=*/"", /*max_wait_seconds=*/2);
+            nonce_val = av.next_nonce;
+            ok = true;
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        check(ok && nonce_val == 0 && err.empty(),
+              "S-099: block landed during successor wait does NOT throw TAMPERED — cleartext read with proof before wait (nonce=" + std::to_string(nonce_val) + ")");
+    }
+
+    // 4. S-099 bounded retry: if a block lands between state_proof and account RPCs,
+    //    the reader re-reads both and succeeds on attempt 2 instead of failing.
+    {
+        FixtureRpc fx(kf, 1000);
+        fx.auto_mint_on_query = true;
+        fx.mint_after_head_polls = 1;
+        fx.live_node_account_read = true;
+        fx.race_account_once = true; // injects consume_nonce_externally on first account read
+        std::string err;
+        uint64_t nonce_val = 0;
+        bool ok = false;
+        try {
+            AccountView av = read_account_trustless(
+                fx, fx.committee_seed(), fx.genesis(), kf.anon_address,
+                /*resume=*/false, /*state_path=*/"", /*max_wait_seconds=*/2);
+            nonce_val = av.next_nonce;
+            ok = true;
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        check(ok && nonce_val == 1 && err.empty(),
+              "S-099: retry loop recovers from a block landing between state_proof and account RPCs (nonce=" + std::to_string(nonce_val) + ")");
+    }
+
     return check.finish("selftest-outbox-hint-wait");
 }
 
