@@ -50,14 +50,16 @@ static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
 }
 
 Chain::Chain(Block genesis) {
-    apply_transactions(genesis);
+    auto applied = apply_transactions(genesis);
+    tx_applied_.push_back(std::move(applied));
     blocks_.push_back(std::move(genesis));
 }
 
 void Chain::append(Block b) {
     if (!blocks_.empty() && b.prev_hash != head_hash())
         throw std::runtime_error("Block prev_hash mismatch");
-    apply_transactions(b);
+    auto applied = apply_transactions(b);
+    tx_applied_.push_back(std::move(applied));
     blocks_.push_back(std::move(b));
 }
 
@@ -70,6 +72,15 @@ const Block& Chain::at(uint64_t index) const {
     if (index < base_index_ || index >= base_index_ + blocks_.size())
         throw std::out_of_range("Block index out of range");
     return blocks_[static_cast<size_t>(index - base_index_)];
+}
+
+bool Chain::is_tx_applied(uint64_t index, size_t tx_index) const {
+    if (index < base_index_ || index >= base_index_ + tx_applied_.size())
+        return false;
+    size_t rel = static_cast<size_t>(index - base_index_);
+    if (tx_index >= tx_applied_[rel].size())
+        return false;
+    return tx_applied_[rel][tx_index];
 }
 
 Hash Chain::head_hash() const {
@@ -682,6 +693,9 @@ bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
             restore_state_snapshot(std::move(snapshot));
             if (blocks_.size() > blocks_size_at_entry) {
                 blocks_.resize(blocks_size_at_entry);
+            if (tx_applied_.size() > blocks_size_at_entry) {
+                tx_applied_.resize(blocks_size_at_entry);
+            }
             }
             // A4: this rewind moved blocks_ out from under any snapshot an inner
             // append retained; drop it so revert_head() can never restore a
@@ -693,6 +707,9 @@ bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
         restore_state_snapshot(std::move(snapshot));
         if (blocks_.size() > blocks_size_at_entry) {
             blocks_.resize(blocks_size_at_entry);
+            if (tx_applied_.size() > blocks_size_at_entry) {
+                tx_applied_.resize(blocks_size_at_entry);
+            }
         }
         prev_head_snapshot_.reset();   // A4: see the !keep branch above
         throw;
@@ -830,7 +847,8 @@ Chain::freeze_epoch_committee(uint64_t at_index) const {
     return out;
 }
 
-void Chain::apply_transactions(const Block& b) {
+std::vector<bool> Chain::apply_transactions(const Block& b) {
+    std::vector<bool> applied(b.transactions.size(), false);
     // A9 Phase 1: snapshot at entry; restore on any throw before re-raising.
     // Guarantees observers see either the full block applied or no
     // change at all. Cost: one deep-copy of state maps per block (<1ms
@@ -946,7 +964,7 @@ void Chain::apply_transactions(const Block& b) {
         audit_log_count_.clear();
         note_keys_.clear();         // NC-8 §5a (genesis is always note-key-free)
         // Genesis-time invariant trivially holds (live == genesis_total).
-        return;
+        return applied;
     }
 
     uint64_t total_fees    = 0;
@@ -969,7 +987,8 @@ void Chain::apply_transactions(const Block& b) {
         return true;
     };
 
-    for (auto& tx : b.transactions) {
+    for (size_t tx_idx = 0; tx_idx < b.transactions.size(); ++tx_idx) {
+        const auto& tx = b.transactions[tx_idx];
         AccountState& sender = accounts_[tx.from];
 
         // Sequential nonce: skip txs that don't match. Validator should have
@@ -1015,6 +1034,7 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error("S-049: block fee accumulation "
                                          "overflows u64");
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1043,6 +1063,7 @@ void Chain::apply_transactions(const Block& b) {
             shielded_pool_[ckey] = height;                      // add unspent note
             accumulated_shielded_ += A;                         // A left the transparent live sum
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1097,6 +1118,7 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error("S-049: block fee accumulation "
                                          "overflows u64");
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1181,6 +1203,7 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error("S-049: block fee accumulation "
                                          "overflows u64");
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1198,6 +1221,7 @@ void Chain::apply_transactions(const Block& b) {
             else audit_keys_[tx.from] = to_hex(tx.payload.data(),
                                                tx.payload.size());
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1212,6 +1236,7 @@ void Chain::apply_transactions(const Block& b) {
             __ensure_audit_log_count();
             audit_log_count_[tx.from]++;
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1232,6 +1257,7 @@ void Chain::apply_transactions(const Block& b) {
             else note_keys_[tx.from] = to_hex(tx.payload.data(),
                                               tx.payload.size());
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1303,6 +1329,7 @@ void Chain::apply_transactions(const Block& b) {
             }
 
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1322,6 +1349,7 @@ void Chain::apply_transactions(const Block& b) {
             }
 
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1343,6 +1371,7 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error("S-049: block fee accumulation "
                                          "overflows u64");
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
 
@@ -1366,6 +1395,7 @@ void Chain::apply_transactions(const Block& b) {
             sit->second.locked -= amount;
             sender.balance     += amount;
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
         // A5 PARAM_CHANGE: validator has already verified payload shape,
@@ -1400,6 +1430,7 @@ void Chain::apply_transactions(const Block& b) {
                 }
             }
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
         // R4 MERGE_EVENT (Phase 2): validator shape-checked the
@@ -1460,7 +1491,7 @@ void Chain::apply_transactions(const Block& b) {
             // Cross-shard inner TRANSFERs are also rejected in v2.4 —
             // cross-shard atomic semantics belong to v2.5 (2PC). This
             // batch primitive is single-shard.
-            atomic_scope([&](Chain& c) -> bool {
+            bool ok = atomic_scope([&](Chain& c) -> bool {
                 for (auto& inner : inner_txs) {
                     // Inner-type whitelist
                     if (inner.type != TxType::TRANSFER) return false;
@@ -1493,6 +1524,7 @@ void Chain::apply_transactions(const Block& b) {
                 }
                 return true;
             });
+            if (ok) applied[tx_idx] = true;
             break;
         }
 
@@ -1595,6 +1627,7 @@ void Chain::apply_transactions(const Block& b) {
             e.active_from   = height;
             e.inactive_from = UINT64_MAX;
             dapp_registry_[tx.from] = std::move(e);
+            applied[tx_idx] = true;
             break;
         }
         // v2.19 Theme 7 Phase 7.2: DApp message delivery. Outer tx is
@@ -1706,6 +1739,7 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error("S-049: block fee accumulation "
                                          "overflows u64");
             sender.next_nonce++;
+            applied[tx_idx] = true;
             break;
         }
         // rev.9 R1: REGION_CHANGE is rejected by the validator; an
@@ -2024,6 +2058,7 @@ void Chain::apply_transactions(const Block& b) {
     // possible depth-1 head reorg; this overwrites any prior retained snapshot
     // (only the most-recent head is revertible). Cheap: a move, no copy.
     prev_head_snapshot_ = std::move(__snapshot);
+    return applied;
 }
 
 // ─── A4 / S-048: lock-free view publish + depth-1 head reorg ──────────────────
@@ -2065,6 +2100,7 @@ void Chain::revert_head() {
     restore_state_snapshot(std::move(*prev_head_snapshot_));
     prev_head_snapshot_.reset();
     blocks_.pop_back();
+    if (!tx_applied_.empty()) tx_applied_.pop_back();
     // A4.2 (adversarial-review finding 8): keep the append-only block store
     // consistent after a reorg. persisted_count_ counts blocks written to the
     // store; left > blocks_.size() the next save_incremental writes NOTHING
@@ -2627,6 +2663,10 @@ Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invaria
         } else if (snap.contains("block_index")) {
             c.base_index_ = snap["block_index"].get<uint64_t>() + 1;
         }
+    }
+    c.tx_applied_.resize(c.blocks_.size());
+    for (size_t i = 0; i < c.blocks_.size(); ++i) {
+        c.tx_applied_[i].resize(c.blocks_[i].transactions.size(), false);
     }
 
     // Sanity: the head's hash should match the snapshot's stated
@@ -3243,6 +3283,10 @@ Chain Chain::decode_state(const uint8_t* data, size_t len,
             c.base_index_ = block_index_claim + 1;
         }
     }
+    c.tx_applied_.resize(c.blocks_.size());
+    for (size_t i = 0; i < c.blocks_.size(); ++i) {
+        c.tx_applied_[i].resize(c.blocks_[i].transactions.size(), false);
+    }
 
     // EXACT consumption both directions: a trailing byte is as fatal as a
     // missing one.
@@ -3609,7 +3653,8 @@ Chain Chain::load(const std::string& path, const Params& p) {
                 }
             }
             prev_hash = b.compute_hash();
-            c.apply_transactions(b);
+            auto applied = c.apply_transactions(b);
+            c.tx_applied_.push_back(std::move(applied));
             c.blocks_.push_back(std::move(b));
         }
         // The store is already on disk up to `height` — the next

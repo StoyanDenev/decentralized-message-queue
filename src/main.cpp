@@ -447,6 +447,7 @@ In-process tests (deterministic, no network):
   determ test-composable-batch                COMPOSABLE_BATCH all-or-nothing semantics
   determ test-dapp-register                   v2.18 DAPP_REGISTER apply path
   determ test-dapp-call                       v2.19 DAPP_CALL routing + apply path
+  determ test-dapp-delivery-apply-status      S-063 DApp delivery apply reporting / value gating
   determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
   determ test-merkle                          v2.1 Merkle primitives (root, proof, verify,
                                               tampering detection, domain separation)
@@ -7777,6 +7778,332 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": dapp_call " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-dapp-delivery-apply-status") {
+        // S-063 / D18a: DApp delivery layer apply reporting & value gating.
+        // Asserts:
+        // 1. make_dapp_call_frame emits "status": "APPLIED" and includes "amount"
+        //    and "fee" iff applied == true; emits "status": "SKIPPED" and OMITS
+        //    "amount" and "fee" iff applied == false.
+        // 2. Chain::is_tx_applied tracks exact apply success/failure per tx across
+        //    underfunded, funded, and depth-1 reorg (revert_head) scenarios.
+        // 3. Node::rpc_dapp_messages delivers "status": "APPLIED" (with amount/fee)
+        //    for funded txs, and "status": "SKIPPED" (without amount/fee) for underfunded txs.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        // Arm 1: make_dapp_call_frame unit pins
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_CALL;
+            tx.from = "alice";
+            tx.to = "dex.dapp";
+            tx.nonce = 1;
+            tx.amount = 500;
+            tx.fee = 5;
+            tx.payload = {0x04, 'c', 'h', 'a', 't', 0x01, 0x00, 0x00, 0x00, 0xAA};
+            tx.hash = tx.compute_hash();
+
+            auto frame_applied = node::make_dapp_call_frame(10, 0, tx, "chat", true);
+            check(frame_applied["event"] == "dapp_call", "arm1: frame_applied event");
+            check(frame_applied["status"] == "APPLIED", "arm1: frame_applied status == APPLIED");
+            check(frame_applied.contains("amount") && frame_applied["amount"] == 500, "arm1: frame_applied contains amount");
+            check(frame_applied.contains("fee") && frame_applied["fee"] == 5, "arm1: frame_applied contains fee");
+            check(frame_applied["topic"] == "chat", "arm1: frame_applied topic");
+
+            auto frame_skipped = node::make_dapp_call_frame(10, 0, tx, "chat", false);
+            check(frame_skipped["event"] == "dapp_call", "arm1: frame_skipped event");
+            check(frame_skipped["status"] == "SKIPPED", "arm1: frame_skipped status == SKIPPED");
+            check(!frame_skipped.contains("amount"), "arm1: frame_skipped OMITS amount");
+            check(!frame_skipped.contains("fee"), "arm1: frame_skipped OMITS fee");
+            check(frame_skipped["topic"] == "chat", "arm1: frame_skipped topic");
+        }
+
+        // Arm 2: Chain::is_tx_applied tracking across underfunded, funded, and revert_head
+        {
+            Block genesis;
+            genesis.index = 0;
+            genesis.prev_hash = Hash{};
+            genesis.timestamp = 0;
+            genesis.cumulative_rand = Hash{};
+            GenesisAlloc a1;
+            a1.domain = "alice"; a1.balance = 100; a1.stake = 0;
+            for (size_t i = 0; i < a1.ed_pub.size(); ++i) a1.ed_pub[i] = uint8_t(i + 1);
+            genesis.initial_state.push_back(a1);
+            GenesisAlloc d1;
+            d1.domain = "dex.dapp"; d1.balance = 0; d1.stake = 100;
+            for (size_t i = 0; i < d1.ed_pub.size(); ++i) d1.ed_pub[i] = uint8_t(i + 100);
+            genesis.initial_state.push_back(d1);
+            Chain chain(genesis);
+
+            auto pack_register = [](const PubKey& svc_pk,
+                                    const std::string& url,
+                                    const std::vector<std::string>& topics) {
+                std::vector<uint8_t> p;
+                p.push_back(0);
+                p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+                p.push_back(uint8_t(url.size()));
+                p.insert(p.end(), url.begin(), url.end());
+                p.push_back(uint8_t(topics.size()));
+                for (auto& t : topics) {
+                    p.push_back(uint8_t(t.size()));
+                    p.insert(p.end(), t.begin(), t.end());
+                }
+                p.push_back(0);
+                p.push_back(0); p.push_back(0);
+                return p;
+            };
+            auto pack_call = [](const std::string& topic,
+                                const std::vector<uint8_t>& ct) {
+                std::vector<uint8_t> p;
+                p.push_back(uint8_t(topic.size()));
+                p.insert(p.end(), topic.begin(), topic.end());
+                uint32_t l = uint32_t(ct.size());
+                p.push_back(uint8_t(l & 0xFF));
+                p.push_back(uint8_t((l >> 8) & 0xFF));
+                p.push_back(uint8_t((l >> 16) & 0xFF));
+                p.push_back(uint8_t((l >> 24) & 0xFF));
+                p.insert(p.end(), ct.begin(), ct.end());
+                return p;
+            };
+
+            PubKey svc{};
+            svc[0] = 0x42;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = chain.head_hash();
+            b1.timestamp = 1;
+            Transaction tx_reg;
+            tx_reg.type = TxType::DAPP_REGISTER;
+            tx_reg.from = "dex.dapp";
+            tx_reg.nonce = 0;
+            tx_reg.payload = pack_register(svc, "https://dex.example", {"swap", "chat"});
+            tx_reg.hash = tx_reg.compute_hash();
+            b1.transactions.push_back(tx_reg);
+            chain.append(b1);
+            check(chain.is_tx_applied(1, 0) == true, "arm2: DAPP_REGISTER applied");
+
+            // Block 2: underfunded DAPP_CALL from alice (balance 100, cost 1000 + 0)
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = chain.head_hash();
+            b2.timestamp = 2;
+            Transaction tx_underfunded;
+            tx_underfunded.type = TxType::DAPP_CALL;
+            tx_underfunded.from = "alice";
+            tx_underfunded.to = "dex.dapp";
+            tx_underfunded.nonce = 0;
+            tx_underfunded.amount = 1000;
+            tx_underfunded.fee = 0;
+            tx_underfunded.payload = pack_call("swap", {0x01, 0x02});
+            tx_underfunded.hash = tx_underfunded.compute_hash();
+            b2.transactions.push_back(tx_underfunded);
+            chain.append(b2);
+
+            check(chain.is_tx_applied(2, 0) == false, "arm2: underfunded tx is_tx_applied == false");
+            check(chain.balance("alice") == 100, "arm2: alice balance untouched");
+            check(chain.balance("dex.dapp") == 0, "arm2: dex.dapp balance untouched");
+
+            // Block 3: funded DAPP_CALL from alice (balance 100, cost 30 + 0)
+            Block b3;
+            b3.index = 3;
+            b3.prev_hash = chain.head_hash();
+            b3.timestamp = 3;
+            Transaction tx_funded;
+            tx_funded.type = TxType::DAPP_CALL;
+            tx_funded.from = "alice";
+            tx_funded.to = "dex.dapp";
+            tx_funded.nonce = 0;
+            tx_funded.amount = 30;
+            tx_funded.fee = 0;
+            tx_funded.payload = pack_call("swap", {0x03, 0x04});
+            tx_funded.hash = tx_funded.compute_hash();
+            b3.transactions.push_back(tx_funded);
+            chain.append(b3);
+
+            check(chain.is_tx_applied(3, 0) == true, "arm2: funded tx is_tx_applied == true");
+            check(chain.balance("alice") == 70, "arm2: alice debited 30");
+            check(chain.balance("dex.dapp") == 30, "arm2: dex.dapp credited 30");
+
+            // Revert head and verify tx_applied_ popped
+            chain.revert_head();
+            check(chain.height() == 3, "arm2: height after revert_head == 3");
+            check(chain.is_tx_applied(3, 0) == false, "arm2: reverted block index returns false");
+        }
+
+        // Arm 3: Node::rpc_dapp_messages end-to-end delivery reporting & value gating
+        // (exercises disk store save_incremental -> Chain::load replay -> rpc_dapp_messages)
+        {
+            crypto::NodeKey key;
+            for (int i = 0; i < 32; ++i) key.priv_seed[i] = uint8_t(0x60 + i);
+            determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+            fs::path dir = fs::temp_directory_path() / "determ-dapp-s063";
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+
+            chain::GenesisConfig g;
+            g.chain_id = "s063-chain"; g.m_creators = 1; g.k_block_sigs = 1;
+            g.epoch_blocks = 1;
+            chain::GenesisCreator gc;
+            gc.domain = "node0"; gc.ed_pub = key.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+
+            chain::GenesisAllocation a_alice;
+            a_alice.domain = "alice"; a_alice.balance = 100;
+            g.initial_balances.push_back(a_alice);
+
+            chain::GenesisAllocation a_dapp;
+            a_dapp.domain = "dex.dapp"; a_dapp.balance = 0;
+            g.initial_balances.push_back(a_dapp);
+
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+            cfg.listen_port = 7679; cfg.key_path = (dir / "node0.key").string();
+            cfg.chain_path = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+            cfg.log_quiet = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(key, cfg.key_path);
+
+            // Construct blocks on a pre_chain and save to disk
+            Block genesis = make_genesis_block(g);
+            Chain pre_chain(genesis);
+
+            auto pack_register = [](const PubKey& svc_pk,
+                                    const std::string& url,
+                                    const std::vector<std::string>& topics) {
+                std::vector<uint8_t> p;
+                p.push_back(0);
+                p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+                p.push_back(uint8_t(url.size()));
+                p.insert(p.end(), url.begin(), url.end());
+                p.push_back(uint8_t(topics.size()));
+                for (auto& t : topics) {
+                    p.push_back(uint8_t(t.size()));
+                    p.insert(p.end(), t.begin(), t.end());
+                }
+                p.push_back(0);
+                p.push_back(0); p.push_back(0);
+                return p;
+            };
+            auto pack_call = [](const std::string& topic,
+                                const std::vector<uint8_t>& ct) {
+                std::vector<uint8_t> p;
+                p.push_back(uint8_t(topic.size()));
+                p.insert(p.end(), topic.begin(), topic.end());
+                uint32_t l = uint32_t(ct.size());
+                p.push_back(uint8_t(l & 0xFF));
+                p.push_back(uint8_t((l >> 8) & 0xFF));
+                p.push_back(uint8_t((l >> 16) & 0xFF));
+                p.push_back(uint8_t((l >> 24) & 0xFF));
+                p.insert(p.end(), ct.begin(), ct.end());
+                return p;
+            };
+
+            // Block 1: register dex.dapp
+            PubKey svc{};
+            svc[0] = 0x99;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = pre_chain.head_hash();
+            b1.timestamp = 1;
+            b1.creators = {"node0"};
+            Transaction tx_reg;
+            tx_reg.type = TxType::DAPP_REGISTER;
+            tx_reg.from = "dex.dapp";
+            tx_reg.nonce = 0;
+            tx_reg.payload = pack_register(svc, "https://dex.example", {"chat"});
+            tx_reg.hash = tx_reg.compute_hash();
+            b1.transactions.push_back(tx_reg);
+            pre_chain.append(b1);
+
+            // Block 2: underfunded call from alice (balance 100, cost 9999)
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = pre_chain.head_hash();
+            b2.timestamp = 2;
+            b2.creators = {"node0"};
+            Transaction tx_bad;
+            tx_bad.type = TxType::DAPP_CALL;
+            tx_bad.from = "alice";
+            tx_bad.to = "dex.dapp";
+            tx_bad.nonce = 0;
+            tx_bad.amount = 9999;
+            tx_bad.fee = 0;
+            tx_bad.payload = pack_call("chat", {0xDE, 0xAD});
+            tx_bad.hash = tx_bad.compute_hash();
+            b2.transactions.push_back(tx_bad);
+            pre_chain.append(b2);
+
+            // Block 3: funded call from alice (balance 100, cost 25 + 5)
+            Block b3;
+            b3.index = 3;
+            b3.prev_hash = pre_chain.head_hash();
+            b3.timestamp = 3;
+            b3.creators = {"node0"};
+            Transaction tx_good;
+            tx_good.type = TxType::DAPP_CALL;
+            tx_good.from = "alice";
+            tx_good.to = "dex.dapp";
+            tx_good.nonce = 0;
+            tx_good.amount = 25;
+            tx_good.fee = 5;
+            tx_good.payload = pack_call("chat", {0xBE, 0xEF});
+            tx_good.hash = tx_good.compute_hash();
+            b3.transactions.push_back(tx_good);
+pre_chain.append(b3);
+
+            // Persist chain to disk
+            pre_chain.save_incremental(cfg.chain_path);
+
+            // Start Node, which loads pre_chain from cfg.chain_path via Chain::load
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node node(cfg, determ::time::RealClock::instance(),
+                            loop.get(), transport.get());
+
+            // Query rpc_dapp_messages for dex.dapp across blocks 0..4
+            auto msgs = node.rpc_dapp_messages("dex.dapp", 0, 4, "chat");
+            check(msgs.contains("events"), "arm3: msgs response contains events");
+            const auto& arr = msgs["events"];
+            check(arr.size() == 2, "arm3: 2 messages found for dex.dapp topic chat");
+
+            // Event 0 (from b2, underfunded)
+            if (arr.size() >= 2) {
+                const auto& ev_bad = arr[0];
+                check(ev_bad["block_height"] == 2, "arm3: ev_bad height == 2");
+                check(ev_bad["status"] == "SKIPPED", "arm3: ev_bad status == SKIPPED");
+                check(!ev_bad.contains("amount"), "arm3: ev_bad OMITS amount");
+                check(!ev_bad.contains("fee"), "arm3: ev_bad OMITS fee");
+
+                // Event 1 (from b3, funded)
+                const auto& ev_good = arr[1];
+                check(ev_good["block_height"] == 3, "arm3: ev_good height == 3");
+                check(ev_good["status"] == "APPLIED", "arm3: ev_good status == APPLIED");
+                check(ev_good.contains("amount") && ev_good["amount"] == 25, "arm3: ev_good amount == 25");
+                check(ev_good.contains("fee") && ev_good["fee"] == 5, "arm3: ev_good fee == 5");
+            }
+
+            fs::remove_all(dir, fec);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": dapp-delivery-apply-status " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

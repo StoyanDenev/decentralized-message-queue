@@ -4624,28 +4624,36 @@ std::string dapp_payload_topic(const chain::Transaction& tx) {
         reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
 }
 
-// v2.20: the dapp_call frame body shared by catch-up replay and the
+} // namespace
+
+// S-063 / D18a: the dapp_call frame body shared by catch-up replay and the
 // live fan-out hook (seq + sid are stamped by the single writer thread
 // at send time). block_index + tx_index are the client's idempotent
 // dedup key across reconnects.
+// Value fields (amount, fee) are stamped iff applied == true; otherwise
+// omitted so delivery layer cannot vouch for unapplied payments.
 nlohmann::json make_dapp_call_frame(uint64_t block_index, size_t tx_index,
-                                       const chain::Transaction& tx,
-                                       const std::string& tx_topic) {
-    return {
+                                    const chain::Transaction& tx,
+                                    const std::string& tx_topic,
+                                    bool applied) {
+    nlohmann::json f = {
         {"event",       "dapp_call"},
+        {"status",      applied ? "APPLIED" : "SKIPPED"},
         {"block_index", block_index},
         {"tx_index",    tx_index},
         {"tx_hash",     to_hex(tx.hash)},
         {"from",        tx.from},
         {"to",          tx.to},
-        {"amount",      tx.amount},
-        {"fee",         tx.fee},
         {"nonce",       tx.nonce},
         {"topic",       tx_topic},
         {"payload_hex", to_hex(tx.payload.data(), tx.payload.size())},
     };
+    if (applied) {
+        f["amount"] = tx.amount;
+        f["fee"]    = tx.fee;
+    }
+    return f;
 }
-} // namespace
 
 json Node::rpc_dapp_messages(const std::string& domain,
                                 uint64_t           from_height,
@@ -4660,22 +4668,28 @@ json Node::rpc_dapp_messages(const std::string& domain,
     for (uint64_t h = from_height; h < to_height; ++h) {
         if (!chain_.has_block(h)) continue;
         const auto& b = chain_.at(h);
-        for (auto& tx : b.transactions) {
+        for (size_t t = 0; t < b.transactions.size(); ++t) {
+            const auto& tx = b.transactions[t];
             if (tx.type != chain::TxType::DAPP_CALL) continue;
             if (tx.to != domain) continue;
             std::string tx_topic = dapp_payload_topic(tx);
             if (!topic.empty() && tx_topic != topic) continue;
-            events.push_back({
+            bool applied = chain_.is_tx_applied(h, t);
+            nlohmann::json ev = {
                 {"block_height", h},
+                {"status",       applied ? "APPLIED" : "SKIPPED"},
                 {"tx_hash",      to_hex(tx.hash)},
                 {"from",         tx.from},
                 {"to",           tx.to},
-                {"amount",       tx.amount},
-                {"fee",          tx.fee},
                 {"nonce",        tx.nonce},
                 {"topic",        tx_topic},
                 {"payload_hex",  to_hex(tx.payload.data(), tx.payload.size())},
-            });
+            };
+            if (applied) {
+                ev["amount"] = tx.amount;
+                ev["fee"]    = tx.fee;
+            }
+            events.push_back(std::move(ev));
             if (events.size() >= DAPP_MESSAGES_PAGE_LIMIT) {
                 truncated = true;
                 break;
@@ -4860,7 +4874,8 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
                     std::string tx_topic = dapp_payload_topic(tx);
                     if (!sub->topic.empty() && tx_topic != sub->topic)
                         continue;
-                    frames.push_back(make_dapp_call_frame(i, t, tx, tx_topic));
+                    bool applied = chain_.is_tx_applied(i, t);
+                    frames.push_back(make_dapp_call_frame(i, t, tx, tx_topic, applied));
                 }
             }
         }
@@ -4954,7 +4969,8 @@ void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
             if (tx.to != sub->domain) continue;
             std::string tx_topic = dapp_payload_topic(tx);
             if (!sub->topic.empty() && tx_topic != sub->topic) continue;
-            enqueue(make_dapp_call_frame(b.index, t, tx, tx_topic),
+            bool applied = chain_.is_tx_applied(b.index, t);
+            enqueue(make_dapp_call_frame(b.index, t, tx, tx_topic, applied),
                     tx.payload.size() * 2 + 256);
         }
         if (!sub->killed) {

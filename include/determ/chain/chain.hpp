@@ -100,6 +100,10 @@ public:
     bool             has_block(uint64_t index) const {
         return index >= base_index_ && index < base_index_ + blocks_.size();
     }
+    // S-063 / D18a: per-block transaction execution outcomes.
+    // Returns true if block is held and transaction at tx_index was applied
+    // (i.e. not skipped due to underfunding, bad framing, or missing DApp).
+    bool             is_tx_applied(uint64_t index, size_t tx_index) const;
     Hash             head_hash() const;
 
     // A4 / S-048 depth-1 head reorg (BoundedReorgDesign.md). revert_head()
@@ -826,6 +830,8 @@ public:
 private:
     uint64_t                                    base_index_{0};
     std::vector<Block>                          blocks_;
+    // S-063 / D18a: per-block transaction execution outcomes, parallel to blocks_.
+    std::vector<std::vector<bool>>              tx_applied_;
     std::map<std::string, AccountState>         accounts_;
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
@@ -1122,7 +1128,7 @@ private:
     // published view never lags the actual head.
     void publish_committed_view();
 
-    void apply_transactions(const Block& b);
+    std::vector<bool> apply_transactions(const Block& b);
 };
 
 // A4.5 crash-consistency TEST SEAM (not a production API). Arms an internal

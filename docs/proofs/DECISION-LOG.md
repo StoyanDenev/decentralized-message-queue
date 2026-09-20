@@ -5616,3 +5616,36 @@ In `light/trustless_read.cpp::read_account_trustless`:
 
 **Authority:**
 Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
+
+---
+
+## 2026-09-20 — D18a (S-063): DApp delivery layer apply reporting and value gating
+
+**Status:** IMPLEMENTED and verified. Gate `determ test-dapp-delivery-apply-status` (and wrapper `tools/test_dapp_delivery_apply_status.sh`). Ledger row S-063 moved from OPEN to MITIGATED in `docs/SECURITY.md`.
+
+**Problem:**
+Finding S-063 (`docs/SECURITY.md`, log `8b86d39`/`0fe6eda`):
+`make_dapp_call_frame` and `rpc_dapp_messages` stamped `amount` and `fee` from the raw transaction into every delivered frame. The DAPP_CALL block validation arm checks recipient/topic framing only, `build_body` performs no provisional debit, and delivery never consulted the transaction's actual apply result. As a result, an underfunded sender (e.g. zero balance) could submit a transaction that entered a block but skipped execution, while the node's delivery layer erroneously reported that the payment was made.
+
+**The Change:**
+1. **Chain Execution Tracking:**
+   - In `Chain::apply_transactions`, tracked exact per-transaction execution status (`applied[tx_idx] = true` on successful balance/debit/credit apply, `false` on underfunded/skipped).
+   - In `Chain`, stored `tx_applied_` parallel to `blocks_` across all state lifecycles: atomic append, `revert_head()` (depth-1 reorg), snapshot creation and restore (`restore_from_snapshot`, `decode_state`), and store reload (`Chain::load`).
+   - Exposed `bool Chain::is_tx_applied(uint64_t index, size_t tx_index) const` for lockfree and synchronous status queries.
+2. **Delivery Layer Apply Status & Value Gating:**
+   - In `make_dapp_call_frame` (`src/node/node.cpp`), added `bool applied` parameter. Set `"status": applied ? "APPLIED" : "SKIPPED"`.
+   - Gated `"amount"` and `"fee"` fields: stamped into JSON frame iff `applied == true`, and completely omitted iff `applied == false`.
+   - Updated `Node::rpc_dapp_messages`, `rpc_dapp_subscribe` catch-up replay, and `on_block_finalized_for_subscribers` live push to query `chain_.is_tx_applied(h, t)` and pass it into frame construction.
+
+**Verification & Test Gates:**
+- Added CLI gate `determ test-dapp-delivery-apply-status` and wrapper `tools/test_dapp_delivery_apply_status.sh` asserting 28 test conditions across three arms:
+  - Arm 1: `make_dapp_call_frame` JSON framing, status strings, amount/fee presence/omission.
+  - Arm 2: `Chain::is_tx_applied` exact accounting across `DAPP_REGISTER`, underfunded `DAPP_CALL` (skipped), funded `DAPP_CALL` (applied), balance deltas, and `revert_head()` depth-1 reorg behavior.
+  - Arm 3: `Node::rpc_dapp_messages` end-to-end delivery through disk store `save_incremental` and `Chain::load` replay, verifying `SKIPPED` without amount/fee on underfunded tx and `APPLIED` with amount/fee on funded tx.
+- Mutant falsification:
+  - M1: Unconditional inclusion of `amount`/`fee` in `make_dapp_call_frame` turns Arm 1 and Arm 3 RED.
+  - M2: `Chain::is_tx_applied` returning `true` unconditionally turns Arm 2 and Arm 3 RED.
+- Registered in `tools/run_all.sh` `ONLY_PATTERN`.
+
+**Authority:**
+Owner decisions D18a (DECISION-LOG §4151), node-local backlog Step 10.

@@ -1275,4 +1275,12 @@ private:
     void shutdown_subscribers(const std::string& reason);
 };
 
+// S-063 / D18a: the dapp_call frame body shared by catch-up replay and the
+// live fan-out hook. Reports apply result (status: APPLIED / SKIPPED) and
+// omits value fields (amount, fee) when skipped / unvouched.
+nlohmann::json make_dapp_call_frame(uint64_t block_index, size_t tx_index,
+                                    const chain::Transaction& tx,
+                                    const std::string& tx_topic,
+                                    bool applied);
+
 } // namespace determ::node
