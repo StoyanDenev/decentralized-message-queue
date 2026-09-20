@@ -23,6 +23,9 @@
 // src/main.cpp::write_account_file_0600 each used to hand-roll.
 #include <determ/util/restricted_write.hpp>
 #include <determ/crypto/ed25519/ed25519.h>
+#include <determ/crypto/secure_zero.h>
+#include "envelope.hpp"
+#include "keyfmt.hpp" 
 #include <determ/crypto/rng/rng.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -70,7 +73,7 @@ bool inject_fault(const char* which) {
 } // namespace
 #endif
 
-void save_node_key(const NodeKey& key, const std::string& path) {
+void save_node_key(const NodeKey& key, const std::string& path, const std::string& passphrase) {
     // S-091, PARTIAL (2026-09-17). This writes the node identity's 32-byte
     // RFC 8032 SEED. Until today it went out through a bare std::ofstream, which
     // creates at 0666 & ~umask — measured 0644 under the default umask 022, and
@@ -103,10 +106,32 @@ void save_node_key(const NodeKey& key, const std::string& path) {
                                      + ": " + ec.message());
     }
 
-    json j;
-    j["pubkey"]    = to_hex(key.pub);
-    j["priv_seed"] = to_hex(key.priv_seed);
-    const std::string blob = j.dump(2);   // byte-identical to the old writer
+    std::vector<uint8_t> payload_bytes;
+    bool is_binary = false;
+    if (passphrase.empty()) {
+        json j;
+        j["pubkey"]    = to_hex(key.pub);
+        j["priv_seed"] = to_hex(key.priv_seed);
+        const std::string blob = j.dump(2);   // byte-identical to the old writer
+        payload_bytes.assign(blob.begin(), blob.end());
+        is_binary = false;
+    } else {
+        // Canonical DNK1 container wrapping DWE2 (Argon2id + AES-256-GCM) envelope.
+        // Plaintext is the raw 32-byte seed; AAD is the raw 32-byte pubkey.
+        std::vector<uint8_t> pt_bytes(key.priv_seed.begin(), key.priv_seed.end());
+        std::vector<uint8_t> aad(key.pub.begin(), key.pub.end());
+        determ::wallet::envelope::Envelope env;
+        try {
+            env = determ::wallet::envelope::encrypt(pt_bytes, passphrase, aad);
+        } catch (...) {
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
+            throw;
+        }
+        determ_secure_zero(pt_bytes.data(), pt_bytes.size());
+        const std::vector<uint8_t> env_bytes = determ::wallet::envelope::serialize_bytes(env);
+        payload_bytes = determ::wallet::keyfmt::encode_dnk1(key.pub, env_bytes);
+        is_binary = true;
+    }
 
 #ifndef _WIN32
     // Narrow ONLY a directory this call created, and only that one — never a
@@ -212,7 +237,7 @@ void save_node_key(const NodeKey& key, const std::string& path) {
     // operator-environment-dependent"). The exposure stands: a Windows operator
     // must set the containing directory's ACL. The gate SKIPs by name there
     // rather than reporting a pass it did not earn.
-    kopts.windows_binary = false;
+    kopts.windows_binary = is_binary;
 #ifndef _WIN32
     // Test-only, unchanged in intent and in reachability: see inject_fault
     // above for why a failed narrowing cannot be produced from outside this
@@ -223,7 +248,10 @@ void save_node_key(const NodeKey& key, const std::string& path) {
 #endif
 
     const auto res = determ::util::write_restricted_0600(
-        path, blob.data(), blob.size(), kopts);
+        path, payload_bytes.data(), payload_bytes.size(), kopts);
+    if (!payload_bytes.empty()) {
+        determ_secure_zero(payload_bytes.data(), payload_bytes.size());
+    }
     if (res.status == determ::util::RestrictedWriteStatus::NarrowRefused) {
         throw std::runtime_error("Cannot restrict key file " + path + " to 0600: "
                                  + std::strerror(res.err)
@@ -241,25 +269,61 @@ void save_node_key(const NodeKey& key, const std::string& path) {
     }
 }
 
-NodeKey load_node_key(const std::string& path) {
-    // Unchanged by the S-091 permission increment, deliberately: the on-disk
-    // container is the same JSON it always was, so an existing 0644
-    // node_key.json written by any earlier build still loads byte-identically
-    // and there is no migration. It also does NOT warn about a wide mode, and
-    // that is a decision, not an oversight: (a) the advice a warning could give
-    // is wrong — once a 0644 seed has existed on a shared host the remedy is
-    // ROTATION, not chmod, and a line telling the operator to chmod invites
-    // exactly the false comfort of tightening a leaked file; (b) this is a
-    // library entry point on Node's constructor path (src/node/node.cpp), so it
-    // runs on every node start and inside every in-process cluster fixture that
-    // builds Nodes, and the line would become FAST-suite noise; (c) it is a
-    // behavior change on the happy path of every already-provisioned node,
-    // which is a rider on a permissions increment.
-    // The honest place for it is the D2 src-side keyfile increment, which
-    // rewrites this container anyway and can offer a real migration.
-    std::ifstream f(path);
+NodeKey load_node_key(const std::string& path, const std::string& passphrase) {
+    std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open key file: " + path);
-    json j = json::parse(f);
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    // S-091 D2 src-side keyfile increment:
+    // Auto-detect format: if first 4 bytes are 'DNK1', decode canonical binary
+    // container and decrypt DWE envelope. Otherwise, parse as legacy JSON.
+    if (bytes.size() >= 4 && std::memcmp(bytes.data(), "DNK1", 4) == 0) {
+        std::string pass = passphrase;
+        if (pass.empty()) {
+            const char* env = std::getenv("DETERM_PASSPHRASE");
+            if (env && *env) pass = env;
+        }
+        if (pass.empty()) {
+            throw std::runtime_error("Key file " + path + " is encrypted (DNK1); supply passphrase or set DETERM_PASSPHRASE");
+        }
+        auto nk_opt = determ::wallet::keyfmt::decode_dnk1(bytes);
+        if (!nk_opt) {
+            throw std::runtime_error("Corrupted DNK1 key file: " + path);
+        }
+        auto env_opt = determ::wallet::envelope::deserialize_bytes(nk_opt->env_bytes);
+        if (!env_opt) {
+            throw std::runtime_error("Corrupted DWE envelope in key file: " + path);
+        }
+        std::vector<uint8_t> aad(nk_opt->pubkey.begin(), nk_opt->pubkey.end());
+        auto pt_opt = determ::wallet::envelope::decrypt(*env_opt, pass, aad);
+        if (!pass.empty()) {
+            determ_secure_zero(&pass[0], pass.size());
+        }
+        if (!pt_opt) {
+            throw std::runtime_error("Failed to decrypt key file " + path + ": incorrect passphrase or corrupted envelope");
+        }
+        if (pt_opt->size() != 32) {
+            determ_secure_zero(pt_opt->data(), pt_opt->size());
+            throw std::runtime_error("Decrypted seed in " + path + " has invalid size (expected 32 bytes)");
+        }
+        NodeKey key;
+        std::memcpy(key.priv_seed.data(), pt_opt->data(), 32);
+        determ_secure_zero(pt_opt->data(), pt_opt->size());
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+        if (key.pub != nk_opt->pubkey) {
+            determ_secure_zero(key.priv_seed.data(), key.priv_seed.size());
+            throw std::runtime_error("Keyfile pubkey mismatch: header pubkey does not match decrypted seed pubkey");
+        }
+        return key;
+    }
+
+    std::string text(bytes.begin(), bytes.end());
+    json j;
+    try {
+        j = json::parse(text);
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Cannot parse key file " + path + ": " + e.what());
+    }
     // S-018: name the failing field if `pubkey` or `priv_seed` is
     // missing / wrong-typed / wrong-length. Operators occasionally
     // hand-edit node_key.json (e.g., to swap keys between deployments)

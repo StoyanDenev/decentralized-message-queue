@@ -824,6 +824,12 @@ In-process tests (deterministic, no network):
                                               refused, failure reported;
                                               SKIPs on Windows and banks NO
                                               pass there (exit 1, SKIP marker)
+  determ test-node-key-encryption             S-091 (full) — node identity key
+                                              DNK1 encryption at rest: AES-256-GCM
+                                              Argon2id envelope, 0600 permissions,
+                                              AAD header pubkey binding, fail-closed
+                                              tamper rejection, env-var fallback,
+                                              memory zeroing, backward compat
   determ test-account-create-perms            S-111 — `account create --out`
                                               at rest: 0600 before the key is
                                               written (incl. over an existing
@@ -2181,14 +2187,33 @@ static int cmd_init(int argc, char** argv) {
     std::string data_dir     = default_data_dir();
     std::string profile      = "web";
     std::string genesis_path = "";
+    std::string pass_raw, pass_src, passphrase;
+    std::string key_override;
     for (int i = 0; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--data-dir") data_dir     = argv[i + 1];
-        if (std::string(argv[i]) == "--profile")  profile      = argv[i + 1];
-        if (std::string(argv[i]) == "--genesis")  genesis_path = argv[i + 1];
+        if (std::string(argv[i]) == "--data-dir")        data_dir     = argv[i + 1];
+        if (std::string(argv[i]) == "--profile")         profile      = argv[i + 1];
+        if (std::string(argv[i]) == "--genesis")         genesis_path = argv[i + 1];
+        if (std::string(argv[i]) == "--passphrase")      pass_raw     = argv[i + 1];
+        if (std::string(argv[i]) == "--passphrase-from") pass_src     = argv[i + 1];
+        if (std::string(argv[i]) == "--key")             key_override = argv[i + 1];
+    }
+
+    if (!determ::util::resolve_secret("determ init", "--passphrase", "--passphrase-from",
+                                      pass_raw, pass_src,
+                                      determ::util::PASSPHRASE, passphrase))
+        return 1;
+    if (passphrase.empty()) {
+        const char* env = std::getenv("DETERM_PASSPHRASE");
+        if (env && *env) passphrase = env;
     }
 
     fs::create_directories(data_dir);
-    std::string kpath = data_dir + "/node_key.json";
+    std::string kpath;
+    if (!key_override.empty()) {
+        kpath = key_override;
+    } else {
+        kpath = data_dir + (passphrase.empty() ? "/node_key.json" : "/node_key.bin");
+    }
     std::string cpath = config_path(data_dir);
     std::string chain_path = data_dir + "/chain.json";
 
@@ -2201,13 +2226,16 @@ static int cmd_init(int argc, char** argv) {
         // terminate handler's text instead of the diagnostic. Measured 2026-09-17.
         try {
             auto key = crypto::generate_node_key();
-            crypto::save_node_key(key, kpath);
-            std::cout << "Generated node key: pubkey=" << to_hex(key.pub) << "\n";
+            crypto::save_node_key(key, kpath, passphrase);
+            std::cout << "Generated node key: pubkey=" << to_hex(key.pub)
+                      << (passphrase.empty() ? "" : " (encrypted DNK1)") << "\n";
         } catch (const std::exception& e) {
             std::cerr << "determ init: " << e.what() << "\n";
+            determ::util::zero_secret_string(passphrase);
             return 1;
         }
     }
+    determ::util::zero_secret_string(passphrase);
 
     node::Config cfg;
     cfg.data_dir   = data_dir;
@@ -2274,6 +2302,7 @@ static int cmd_init(int argc, char** argv) {
 static int cmd_start(int argc, char** argv) {
     std::string data_dir = default_data_dir();
     std::string cfg_path;
+    std::string pass_raw, pass_src, passphrase;
     // S-046: strict argv. cmd_start historically parsed only --config /
     // --data-dir and SILENTLY IGNORED everything else — so a caller passing
     // e.g. --listen-port/--rpc-port/--genesis/--peer "started" a node with
@@ -2282,27 +2311,49 @@ static int cmd_start(int argc, char** argv) {
     // must fail closed on arguments it does not understand.
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--config" && i + 1 < argc)        { cfg_path = argv[++i]; }
-        else if (a == "--data-dir" && i + 1 < argc) { data_dir = argv[++i]; }
+        if (a == "--config" && i + 1 < argc)               { cfg_path = argv[++i]; }
+        else if (a == "--data-dir" && i + 1 < argc)        { data_dir = argv[++i]; }
+        else if (a == "--passphrase" && i + 1 < argc)      { pass_raw = argv[++i]; }
+        else if (a == "--passphrase-from" && i + 1 < argc) { pass_src = argv[++i]; }
         else {
             std::cerr << "start: unknown argument '" << a << "'\n"
-                      << "  determ start accepts ONLY --config <file> and "
-                         "--data-dir <dir>.\n"
-                      << "  Per-node settings (ports, peers, genesis pin, "
+                      << "  determ start accepts ONLY --config <file>, --data-dir <dir>,\n"
+                         "  and --passphrase / --passphrase-from <file:path|env:NAME|prompt>.\n"
+                         "  Per-node settings (ports, peers, genesis pin, "
                          "timers) live in config.json.\n";
             return 1;
         }
+    }
+    if (!determ::util::resolve_secret("determ start", "--passphrase", "--passphrase-from",
+                                      pass_raw, pass_src,
+                                      determ::util::PASSPHRASE, passphrase))
+        return 1;
+    if (passphrase.empty()) {
+        const char* env = std::getenv("DETERM_PASSPHRASE");
+        if (env && *env) passphrase = env;
     }
     if (cfg_path.empty()) cfg_path = config_path(data_dir);
 
     try {
         auto cfg = node::Config::load(cfg_path);
+        if (!passphrase.empty()) {
+            cfg.key_passphrase = passphrase;
+            determ::util::zero_secret_string(passphrase);
+        }
 
-        if (cfg.key_path.empty()) cfg.key_path = cfg.data_dir + "/node_key.json";
+        if (cfg.key_path.empty()) {
+            if (fs::exists(cfg.data_dir + "/node_key.bin")) {
+                cfg.key_path = cfg.data_dir + "/node_key.bin";
+            } else {
+                cfg.key_path = cfg.data_dir + "/node_key.json";
+            }
+        }
         if (!fs::exists(cfg.key_path)) {
             auto key = crypto::generate_node_key();
-            crypto::save_node_key(key, cfg.key_path);
-            std::cout << "[init] Generated node key\n" << std::flush;
+            crypto::save_node_key(key, cfg.key_path, cfg.key_passphrase);
+            std::cout << "[init] Generated node key"
+                      << (cfg.key_passphrase.empty() ? "" : " (encrypted DNK1)")
+                      << "\n" << std::flush;
         }
         if (cfg.chain_path.empty()) cfg.chain_path = cfg.data_dir + "/chain.json";
 
@@ -5486,16 +5537,34 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     }
 
     std::string kpath = data_dir + "/node_key.json";
+    if (!fs::exists(kpath) && fs::exists(data_dir + "/node_key.bin")) {
+        kpath = data_dir + "/node_key.bin";
+    }
     if (!fs::exists(kpath)) {
-        std::cerr << "Key not found at " << kpath
+        std::cerr << "Key not found at " << data_dir << "/node_key.{json,bin}"
                   << " (run 'determ init --data-dir " << data_dir << "' first)\n";
         return 1;
     }
-    auto key = crypto::load_node_key(kpath);
+    PubKey pub{};
+    bool got_pub = false;
+    std::ifstream kf(kpath, std::ios::binary);
+    if (kf) {
+        char magic[4] = {0};
+        kf.read(magic, 4);
+        if (std::memcmp(magic, "DNK1", 4) == 0) {
+            if (kf.read(reinterpret_cast<char*>(pub.data()), 32)) {
+                got_pub = true;
+            }
+        }
+    }
+    if (!got_pub) {
+        auto key = crypto::load_node_key(kpath);
+        pub = key.pub;
+    }
 
     json entry = {
         {"domain",        domain},
-        {"ed_pub",        to_hex(key.pub)},
+        {"ed_pub",        to_hex(pub)},
         {"initial_stake", stake}
     };
     // Only emit the region field when non-empty. Empty region (the
@@ -23395,6 +23464,175 @@ pre_chain.append(b3);
         return fail == 0 ? 0 : 1;
 #endif
     }
+    if (cmd == "test-node-key-encryption") {
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        const fs::path T = fs::temp_directory_path() /
+            ("determ-testnodekeyenc-" + std::to_string(static_cast<unsigned long>(::getpid())));
+        std::error_code rmec;
+        fs::remove_all(T, rmec);
+        fs::create_directories(T);
+
+        auto slurp_bin = [](const fs::path& p) -> std::vector<uint8_t> {
+            std::ifstream f(p, std::ios::binary);
+            return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+        };
+        auto slurp_str = [](const fs::path& p) -> std::string {
+            std::ifstream f(p);
+            return std::string((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+        };
+
+        crypto::NodeKey original = crypto::generate_node_key();
+        const std::string pass = "test-node-passphrase-alpha-1234!";
+
+        // 1. Plaintext JSON backward compatibility: empty passphrase writes JSON
+        {
+            const fs::path p_json = T / "plain_key.json";
+            crypto::save_node_key(original, p_json.string(), "");
+            std::string s = slurp_str(p_json);
+            check(!s.empty() && s.front() == '{', "plain: save_node_key with empty pass writes JSON");
+            check(s.find("priv_seed") != std::string::npos, "plain: JSON contains priv_seed key");
+            check(s.find(to_hex(original.pub)) != std::string::npos, "plain: JSON contains pubkey");
+
+            crypto::NodeKey loaded = crypto::load_node_key(p_json.string(), "");
+            check(loaded.pub == original.pub, "plain: load_node_key roundtrips pubkey");
+            check(loaded.priv_seed == original.priv_seed, "plain: load_node_key roundtrips priv_seed");
+        }
+
+        // 2. Encrypted DNK1 binary container: save and load with passphrase
+        fs::path p_enc = T / "enc_key.bin";
+        {
+            crypto::save_node_key(original, p_enc.string(), pass);
+            auto bin = slurp_bin(p_enc);
+            check(bin.size() >= 40, "dnk1: container has minimum header size");
+            check(std::memcmp(bin.data(), "DNK1", 4) == 0, "dnk1: container starts with magic 'DNK1'");
+
+            // Pubkey in header matches original.pub
+            check(std::memcmp(bin.data() + 4, original.pub.data(), 32) == 0,
+                  "dnk1: header pubkey at offset 4 matches original pubkey");
+
+            // Raw seed is NOT in the binary file
+            std::string raw_seed_hex = to_hex(original.priv_seed);
+            std::string file_content(bin.begin(), bin.end());
+            check(file_content.find(raw_seed_hex) == std::string::npos,
+                  "dnk1: raw seed hex is not present in binary container");
+
+            // Successful roundtrip
+            crypto::NodeKey loaded = crypto::load_node_key(p_enc.string(), pass);
+            check(loaded.pub == original.pub, "dnk1: load_node_key roundtrips pubkey");
+            check(loaded.priv_seed == original.priv_seed, "dnk1: load_node_key roundtrips priv_seed");
+        }
+
+        // 3. Fallback to DETERM_PASSPHRASE environment variable
+        {
+            ::setenv("DETERM_PASSPHRASE", pass.c_str(), 1);
+            crypto::NodeKey loaded = crypto::load_node_key(p_enc.string(), "");
+            check(loaded.pub == original.pub && loaded.priv_seed == original.priv_seed,
+                  "env: load_node_key succeeds via DETERM_PASSPHRASE fallback");
+            ::unsetenv("DETERM_PASSPHRASE");
+        }
+
+        // 4. Fail-closed: missing passphrase on DNK1 container
+        {
+            ::unsetenv("DETERM_PASSPHRASE");
+            bool threw = false;
+            std::string err;
+            try {
+                crypto::load_node_key(p_enc.string(), "");
+            } catch (const std::exception& e) {
+                threw = true;
+                err = e.what();
+            }
+            check(threw, "missing-pass: load_node_key throws when passphrase missing for DNK1");
+            check(err.find("encrypted (DNK1)") != std::string::npos,
+                  "missing-pass: error message indicates DNK1 encryption");
+        }
+
+        // 5. Fail-closed: wrong passphrase
+        {
+            bool threw = false;
+            std::string err;
+            try {
+                crypto::load_node_key(p_enc.string(), "incorrect-password");
+            } catch (const std::exception& e) {
+                threw = true;
+                err = e.what();
+            }
+            check(threw, "wrong-pass: load_node_key throws on incorrect passphrase");
+            check(err.find("Failed to decrypt") != std::string::npos ||
+                  err.find("incorrect passphrase") != std::string::npos,
+                  "wrong-pass: error message indicates decryption failure");
+        }
+
+        // 6. Fail-closed: AAD tampering (header pubkey mutation)
+        {
+            auto tampered = slurp_bin(p_enc);
+            tampered[4] ^= 0x55; // Flip byte in pubkey header
+            const fs::path p_tampered_pub = T / "tampered_pub.bin";
+            {
+                std::ofstream f(p_tampered_pub, std::ios::binary);
+                f.write(reinterpret_cast<char*>(tampered.data()), tampered.size());
+            }
+            bool threw = false;
+            try {
+                crypto::load_node_key(p_tampered_pub.string(), pass);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            check(threw, "aad-tamper: load_node_key rejects tampered header pubkey (AAD mismatch)");
+        }
+
+        // 7. Fail-closed: ciphertext tampering
+        {
+            auto tampered = slurp_bin(p_enc);
+            if (tampered.size() > 45) {
+                tampered.back() ^= 0xaa; // Flip byte in ciphertext/tag
+            }
+            const fs::path p_tampered_ct = T / "tampered_ct.bin";
+            {
+                std::ofstream f(p_tampered_ct, std::ios::binary);
+                f.write(reinterpret_cast<char*>(tampered.data()), tampered.size());
+            }
+            bool threw = false;
+            try {
+                crypto::load_node_key(p_tampered_ct.string(), pass);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            check(threw, "ct-tamper: load_node_key rejects tampered envelope ciphertext");
+        }
+
+        // 8. Fail-closed: truncated file
+        {
+            auto bin = slurp_bin(p_enc);
+            const fs::path p_trunc = T / "trunc.bin";
+            {
+                std::ofstream f(p_trunc, std::ios::binary);
+                f.write(reinterpret_cast<char*>(bin.data()), std::min<size_t>(bin.size(), 20));
+            }
+            bool threw = false;
+            try {
+                crypto::load_node_key(p_trunc.string(), pass);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+            check(threw, "trunc: load_node_key rejects truncated keyfile");
+        }
+
+        fs::remove_all(T, rmec);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": test-node-key-encryption "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << " (" << fail << " fails)\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     // S-111 — `determ account create --out` at rest. Asserted as OUTCOMES: the
     // mode on the filesystem, the command's exit code, its diagnostics and the
     // bytes of the container. Never as source text.

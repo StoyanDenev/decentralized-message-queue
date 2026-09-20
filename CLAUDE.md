@@ -140,10 +140,14 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      DRS1) + DLS1 for the light anchor cache; the dot-hex envelope, the
      JSON-interior node keyfile and the JSON light state are deleted; DAK1/DNK1
      derive-equality replaces the S-028 address cross-check; ZERO src/ edits.
-     REMAINDER (explicit, still open): node_key.json (src/crypto/keys.cpp) and
-     DETERM-ACCOUNT-V1 stay src-owned JSON/text until the src-side increment
-     (marked D2-DEFERRED(src) in code); the light export-headers archive waits
-     on the binary header frame.
+     REMAINDER: DETERM-ACCOUNT-V1 stays src-owned JSON/text until its src-side increment;
+     the light export-headers archive waits on the binary header frame.
+     PROGRESS 2026-09-20: S-091 / D2 (src-side node identity keyfile encryption) LANDED:
+     `save_node_key` / `load_node_key` support canonical DNK1 binary container wrapping
+     DWE2 (Argon2id + AES-256-GCM) with pubkey AAD binding, 0600 mode, `--passphrase` and
+     `--passphrase-from` in `determ init` and `determ start`, `DETERM_PASSPHRASE` fallback,
+     memory zeroing, and 100% JSON test-fixture backward compatibility.
+     Gate: `determ test-node-key-encryption` (`tools/test_node_key_encryption.sh`).
      PROGRESS 2026-08-12 (8a106aa): inc7a/7b + inc8 LANDED. Six of the eight
      lp-JSON wire payloads became true binary frames (BLOCK, CONTRIB,
      CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE), all

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
+#include <determ/crypto/secure_zero.h>
 #include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL
 #include <determ/node/shardtip_verify.hpp>  // D3.5e-7b: shared shard-tip verify core
 #include <determ/chain/genesis.hpp>
@@ -166,7 +167,11 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
     // identical; a virtual clock keeps stamping + validation consistent).
     validator_.set_clock(clock_);
 
-    key_ = crypto::load_node_key(cfg_.key_path);
+    key_ = crypto::load_node_key(cfg_.key_path, cfg_.key_passphrase);
+    if (!cfg_.key_passphrase.empty()) {
+        determ_secure_zero(&cfg_.key_passphrase[0], cfg_.key_passphrase.size());
+        cfg_.key_passphrase.clear();
+    }
 
     // Rev. 4: genesis is the source of truth for chain-wide constants
     // (M, K, block_subsidy). Load it FIRST so chain replay during load uses

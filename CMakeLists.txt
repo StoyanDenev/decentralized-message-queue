@@ -110,6 +110,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
 # the A2 Phase 1 secret-sharing primitive). Link it into the main
 # binary so the test command can call shamir::split / ::combine.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
+# S-091 / D2 src-side keyfile increment: DNK1 binary container encoding and
+# decoding. Linked into the main determ binary so save_node_key / load_node_key
+# can write and read canonical DNK1 binary keyfiles.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/keyfmt.cpp")
 # ── determ-crypto-c99: the libsodium-free C99 primitive layer as a STATIC
 # library (CRYPTO-C99-SPEC §3.14 seed — "each module compiles as a static
 # lib; top-level libdeterm-crypto aggregates"). One aggregate target today
@@ -384,6 +388,8 @@ add_executable(determ-light
                                  # address-binding the offline pq-verify-tx enforces)
   src/chain/block.cpp
   src/chain/genesis.cpp
+  wallet/envelope.cpp
+  wallet/keyfmt.cpp
 )
 # §3.15 (2026-07-03): determ-light links ZERO OpenSSL. Its whole crypto
 # surface (SHA-256 via src/crypto/sha256.cpp, Ed25519 via src/crypto/keys.cpp
@@ -393,6 +399,7 @@ add_executable(determ-light
 target_include_directories(determ-light PRIVATE
   include
   light
+  wallet
 )
 target_link_libraries(determ-light PRIVATE
   determ-crypto-c99

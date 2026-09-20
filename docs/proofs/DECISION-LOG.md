@@ -5649,3 +5649,47 @@ Finding S-063 (`docs/SECURITY.md`, log `8b86d39`/`0fe6eda`):
 
 **Authority:**
 Owner decisions D18a (DECISION-LOG §4151), node-local backlog Step 10.
+
+---
+
+## 2026-09-20 — S-091 / D2: Node identity key at rest encryption (DNK1 binary container)
+
+**Status:** IMPLEMENTED and verified. Gate `determ test-node-key-encryption` and wrapper `tools/test_node_key_encryption.sh`. Ledger row S-091 moved from OPEN to MITIGATED in `docs/SECURITY.md`.
+
+**Problem:**
+Finding S-091 (`docs/SECURITY.md`):
+While the POSIX permission window was closed on 2026-09-17 (0600 file mode, 0700 dir mode via `write_restricted_0600`), the node identity seed (`priv_seed`) remained in plaintext JSON hex. An attacker obtaining raw filesystem read access (e.g. backup inspection, snapshot extraction, unmounted volume inspection) could read the unencrypted node signing key.
+
+**The Change:**
+1. **Container & Encryption Format:**
+   - Linked `wallet/keyfmt.cpp` and `wallet/envelope.cpp` into `determ` and `determ-light`.
+   - Used canonical `DNK1` binary container: 4 bytes magic (`"DNK1"`), 32 bytes raw public key, 4 bytes envelope length (LE), followed by canonical `DWE2` envelope (Argon2id + AES-256-GCM).
+   - Plaintext is the raw 32-byte Ed25519 seed. AAD is the raw 32-byte public key.
+2. **API & Backward Compatibility:**
+   - In `include/determ/crypto/keys.hpp` and `src/crypto/keys.cpp`:
+     `save_node_key(key, path, passphrase = "")`: if `passphrase` is empty, maintains 100% backward compatibility by writing JSON format; if non-empty, builds `DNK1` container and writes with `kopts.windows_binary = true` under 0600 mode.
+     `load_node_key(path, passphrase = "")`: auto-detects container format via magic bytes. If `"DNK1"`, decrypts using `passphrase` or `DETERM_PASSPHRASE` fallback, verifies derived Ed25519 public key matches header public key, and zeroizes intermediate secret buffers. If JSON, parses legacy JSON format.
+3. **Node & CLI Integration:**
+   - `node::Config` gained `key_passphrase`. Passed into `load_node_key` upon node initialization and scrubbed with `determ_secure_zero`.
+   - `cmd_init` and `cmd_start` support `--passphrase <pw>` and `--passphrase-from <file:path|env:NAME|prompt>` via `determ::util::resolve_secret`.
+   - `cmd_genesis_tool_peer_info` reads `ed_pub` directly from the 32-byte header of `DNK1` containers without requiring the secret passphrase.
+   - Full bidirectional interoperability with `determ-wallet keyfile-decrypt` and `keyfile-create`.
+
+**Verification & Test Gates:**
+- Added in-process gate `determ test-node-key-encryption` asserting 19 properties across 8 scenarios:
+  - Plaintext JSON roundtrip & backward compatibility
+  - Canonical DNK1 binary container encoding, magic, header pubkey, and absence of raw seed hex
+  - DETERM_PASSPHRASE environment variable fallback
+  - Fail-closed on missing passphrase
+  - Fail-closed on incorrect passphrase
+  - Fail-closed on header pubkey AAD tampering
+  - Fail-closed on ciphertext tampering
+  - Fail-closed on truncated file
+- Test script `tools/test_node_key_encryption.sh` verified in-process, CLI commands (`determ init`, `genesis-tool peer-info`), and cross-tool interoperability with `determ-wallet`.
+- Mutant falsification:
+  - M1: Unconditional emission of plaintext JSON in `save_node_key` turns gate hard RED (7 failures).
+  - M2: Dropping header pubkey AAD binding turns gate hard RED.
+- Registered in `tools/run_all.sh` `ONLY_PATTERN`.
+
+**Authority:**
+Owner decisions D2 / D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.

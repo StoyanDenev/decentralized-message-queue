@@ -86,6 +86,7 @@ struct Config {
     std::vector<std::string> beacon_peers;       // shard-role: connect to beacons
     std::vector<std::string> shard_peers;        // beacon-role: connect to shards
     std::string              key_path;
+    std::string              key_passphrase{};
     std::string              chain_path;
     // rev.9 B6.basic: if set and chain_path is empty/missing on
     // startup, the node bootstraps from this snapshot (state +

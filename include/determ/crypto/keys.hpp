@@ -12,8 +12,8 @@ struct NodeKey {
 };
 
 NodeKey   generate_node_key();
-void      save_node_key(const NodeKey& key, const std::string& path);
-NodeKey   load_node_key(const std::string& path);
+void      save_node_key(const NodeKey& key, const std::string& path, const std::string& passphrase = "");
+NodeKey   load_node_key(const std::string& path, const std::string& passphrase = "");
 Signature sign(const NodeKey& key, const uint8_t* data, size_t len);
 bool      verify(const PubKey& pub, const uint8_t* data, size_t len, const Signature& sig);
 
