@@ -971,10 +971,11 @@ int cmd_selftest_outbox_hint_wait(int, char**) {
         std::string err;
         uint64_t nonce_val = 0;
         bool ok = false;
+        uint64_t wait_seconds = 2;
         try {
             AccountView av = read_account_trustless(
                 fx, fx.committee_seed(), fx.genesis(), kf.anon_address,
-                /*resume=*/false, /*state_path=*/"", /*max_wait_seconds=*/2);
+                /*resume=*/false, /*state_path=*/"", wait_seconds);
             nonce_val = av.next_nonce;
             ok = true;
         } catch (const std::exception& e) {
@@ -995,10 +996,11 @@ int cmd_selftest_outbox_hint_wait(int, char**) {
         std::string err;
         uint64_t nonce_val = 0;
         bool ok = false;
+        uint64_t wait_seconds = 2;
         try {
             AccountView av = read_account_trustless(
                 fx, fx.committee_seed(), fx.genesis(), kf.anon_address,
-                /*resume=*/false, /*state_path=*/"", /*max_wait_seconds=*/2);
+                /*resume=*/false, /*state_path=*/"", wait_seconds);
             nonce_val = av.next_nonce;
             ok = true;
         } catch (const std::exception& e) {
