@@ -1004,6 +1004,14 @@ void Node::check_if_selected() {
     }
     size_t k_target = cfg_.k_block_sigs;       // committee size per round (MD)
 
+    // D5a / R-4 (S-054): fail-closed halt if eligible pool violates quorum intersection.
+    if (k_target != 0 && static_cast<uint64_t>(k_target) * 2ull <= static_cast<uint64_t>(nodes.size())) {
+        std::cerr << "[node] quorum intersection violated: 2*K (" << (k_target * 2)
+                  << ") <= eligible pool size N(h) (" << nodes.size()
+                  << ") (S-054/D5a); halting creator selection\n";
+        return;
+    }
+
     // Build the available pool: registry minus any domains already aborted in
     // this height's current_aborts_. This is the local-aborts equivalent of
     // chain-baked suspension — needed because suspension only kicks in once a

@@ -115,6 +115,15 @@ BlockValidator::Result BlockValidator::check_creator_selection(
             if (!dup) nodes.push_back(r);
         }
     }
+    // D5a / R-4 (S-054): Quorum intersection invariant requires 2K > N(h) over the eligible
+    // pool. If 2K <= nodes.size(), two disjoint K-committees could form, producing an
+    // unattributable fork. Fail-closed: reject the block.
+    if (k_block_sigs_ != 0 && static_cast<uint64_t>(k_block_sigs_) * 2ull <= static_cast<uint64_t>(nodes.size())) {
+        return {false, "quorum intersection violated: 2*K (" + std::to_string(k_block_sigs_ * 2)
+                     + ") <= eligible pool size N(h) (" + std::to_string(nodes.size())
+                     + ") (S-054/D5a)"};
+    }
+
     uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
@@ -902,8 +911,24 @@ BlockValidator::Result BlockValidator::check_transaction(
             pk = parse_anon_pubkey(tx.from);
         } else {
             auto e = registry.find(tx.from);
-            if (!e) return {false, "tx sender not in registry: " + tx.from};
-            pk = e->pubkey;
+            if (!e) {
+                // D7 / R-11 (S-067): sender-rule exception scoped to UNSTAKE from a domain
+                // in the raw registrants map at block_index >= unlock_height; every other
+                // type from an ineligible sender stays rejected.
+                if (tx.type == TxType::UNSTAKE) {
+                    auto it = chain.registrants().find(tx.from);
+                    uint64_t unlock = chain.stake_unlock_height(tx.from);
+                    if (it != chain.registrants().end() && block_index >= unlock) {
+                        pk = it->second.ed_pub;
+                    } else {
+                        return {false, "tx sender not in registry: " + tx.from};
+                    }
+                } else {
+                    return {false, "tx sender not in registry: " + tx.from};
+                }
+            } else {
+                pk = e->pubkey;
+            }
         }
 
         auto sb = tx.signing_bytes();

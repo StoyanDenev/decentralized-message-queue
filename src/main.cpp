@@ -38231,6 +38231,175 @@ int main(int argc, char** argv) {
             }
         }
 
+        // === D7 / R-11 (S-067): UNSTAKE after DEREGISTER ===
+        //
+        // Once a validator deregisters, it is removed from active registry at
+        // height >= inactive_from. Before D7, the sender rule unconditionally rejected
+        // any tx from an unregistered domain ("tx sender not in registry: " + tx.from),
+        // preventing UNSTAKE even after unstake_delay elapsed.
+        // D7 provides a scoped exception: UNSTAKE from a domain in chain.registrants()
+        // is admitted if block_index >= unlock_height.
+        {
+            using namespace determ::node;
+            using namespace determ::crypto;
+
+            NodeKey d7key;
+            for (size_t i = 0; i < d7key.priv_seed.size(); ++i)
+                d7key.priv_seed[i] = uint8_t(0x82 + i);
+            determ_ed25519_pubkey_from_seed(d7key.priv_seed.data(), d7key.pub.data());
+
+            GenesisConfig d7cfg;
+            d7cfg.chain_id = "d7-unstake-deregister";
+            GenesisCreator d7c; d7c.domain = "d7node"; d7c.ed_pub = d7key.pub;
+            d7c.initial_stake = 2000;
+            d7cfg.initial_creators = { d7c };
+            GenesisAllocation d7a; d7a.domain = "d7node"; d7a.balance = 500;
+            d7cfg.initial_balances = { d7a };
+
+            Chain c;
+            c.append(make_genesis_block(d7cfg));
+            c.set_unstake_delay(5);
+
+            // Block 1: d7node sends DEREGISTER
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "d7node";
+            dereg.fee  = 1;
+            dereg.nonce = 0;
+            auto sb_dereg = dereg.signing_bytes();
+            dereg.sig = sign(d7key, sb_dereg.data(), sb_dereg.size());
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head_hash();
+            b1.creators = {"d7node"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions = { dereg };
+            c.append(b1);
+
+            uint64_t inactive_from = c.registrants().at("d7node").inactive_from;
+            uint64_t unlock_h = c.stake_unlock_height("d7node");
+            check(unlock_h == inactive_from + 5, "D7: unlock_height is inactive_from + unstake_delay (inactive_from + 5)");
+
+            // Advance chain up to inactive_from
+            for (uint64_t h = 2; h <= inactive_from; ++h) {
+                Block bx;
+                bx.index = h;
+                bx.prev_hash = c.head_hash();
+                bx.creators = {"d7node"};
+                c.append(bx);
+            }
+
+            // At height == inactive_from, d7node is excluded from active registry
+            NodeRegistry reg_inactive = NodeRegistry::build_from_chain(c, inactive_from);
+            check(reg_inactive.find("d7node") == std::nullopt,
+                  "D7: deregistered d7node is dropped from active registry at inactive_from");
+
+            BlockValidator bv;
+
+            // MUTANT 1: Non-UNSTAKE (e.g. TRANSFER) from deregistered domain must still be REJECTED
+            // even at height >= unlock_h.
+            {
+                Transaction xfer;
+                xfer.type = TxType::TRANSFER;
+                xfer.from = "d7node";
+                xfer.to = "d7node";
+                xfer.amount = 10;
+                xfer.fee = 1;
+                xfer.nonce = 1;
+                auto sb = xfer.signing_bytes();
+                xfer.sig = sign(d7key, sb.data(), sb.size());
+
+                Block b;
+                b.index = unlock_h + 1;
+                b.transactions = { xfer };
+                auto r = bv.check_transactions_for_test(b, c, reg_inactive);
+                check(!r.ok && r.error.find("tx sender not in registry: d7node") != std::string::npos,
+                      "D7 Mutant 1: non-UNSTAKE tx from deregistered domain REJECTED with tx sender not in registry");
+            }
+
+            // MUTANT 2: UNSTAKE before unlock_height from deregistered domain must be REJECTED.
+            {
+                Transaction early_unstake;
+                early_unstake.type = TxType::UNSTAKE;
+                early_unstake.from = "d7node";
+                early_unstake.fee = 1;
+                early_unstake.nonce = 1;
+                early_unstake.payload = encode_amount(500);
+                auto sb = early_unstake.signing_bytes();
+                early_unstake.sig = sign(d7key, sb.data(), sb.size());
+
+                Block b;
+                b.index = inactive_from; // < unlock_h
+                b.transactions = { early_unstake };
+                auto r = bv.check_transactions_for_test(b, c, reg_inactive);
+                check(!r.ok && r.error.find("tx sender not in registry: d7node") != std::string::npos,
+                      "D7 Mutant 2: UNSTAKE before unlock_height REJECTED with tx sender not in registry");
+            }
+
+            // MUTANT 3: UNSTAKE from completely unregistered stranger must be REJECTED.
+            {
+                Transaction stranger_tx;
+                stranger_tx.type = TxType::UNSTAKE;
+                stranger_tx.from = "stranger";
+                stranger_tx.fee = 1;
+                stranger_tx.nonce = 0;
+                stranger_tx.payload = encode_amount(100);
+                auto sb = stranger_tx.signing_bytes();
+                stranger_tx.sig = sign(d7key, sb.data(), sb.size());
+
+                Block b;
+                b.index = unlock_h + 1;
+                b.transactions = { stranger_tx };
+                auto r = bv.check_transactions_for_test(b, c, reg_inactive);
+                check(!r.ok && r.error.find("tx sender not in registry: stranger") != std::string::npos,
+                      "D7 Mutant 3: UNSTAKE from unknown domain REJECTED with tx sender not in registry");
+            }
+
+            // CONTROL: Valid UNSTAKE at block_index >= unlock_height is ACCEPTED by validator and applied to chain.
+            {
+                // Advance chain up to unlock_h
+                for (uint64_t h = inactive_from + 1; h < unlock_h; ++h) {
+                    Block bx;
+                    bx.index = h;
+                    bx.prev_hash = c.head_hash();
+                    bx.creators = {"d7node"};
+                    c.append(bx);
+                }
+
+                NodeRegistry reg_at_unlock = NodeRegistry::build_from_chain(c, unlock_h);
+                check(reg_at_unlock.find("d7node") == std::nullopt,
+                      "D7: d7node still inactive in registry at unlock_h");
+
+                Transaction valid_unstake;
+                valid_unstake.type = TxType::UNSTAKE;
+                valid_unstake.from = "d7node";
+                valid_unstake.fee = 1;
+                valid_unstake.nonce = 1;
+                valid_unstake.payload = encode_amount(500);
+                auto sb = valid_unstake.signing_bytes();
+                valid_unstake.sig = sign(d7key, sb.data(), sb.size());
+
+                Block b_unlock;
+                b_unlock.index = unlock_h;
+                b_unlock.prev_hash = c.head_hash();
+                b_unlock.creators = {"d7node"};
+                b_unlock.transactions = { valid_unstake };
+
+                auto r = bv.check_transactions_for_test(b_unlock, c, reg_at_unlock);
+                check(r.ok, "D7 Control: UNSTAKE at unlock_height clears validator check_transactions (S-067/D7)");
+
+                uint64_t bal_before = c.balance("d7node");
+                uint64_t stake_before = c.stake("d7node");
+                c.append(b_unlock);
+                check(c.stake("d7node") == stake_before - 500, "D7 Control: stake decreased by 500 upon UNSTAKE apply");
+                // Note: d7node is the block creator, so the fee paid (1) is credited back as creator reward:
+                // balance = bal_before - 1 (fee) + 500 (unstake) + 1 (creator fee) = bal_before + 500
+                check(c.balance("d7node") == bal_before + 500, "D7 Control: balance increased by 500 upon UNSTAKE apply (fee returned to creator)");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": unstake-deregister-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
@@ -53010,6 +53179,7 @@ int main(int argc, char** argv) {
             auto band = [&](uint32_t M, uint32_t K) {
                 GenesisConfig c = full;
                 c.m_creators = M; c.k_block_sigs = K;
+                if (c.initial_creators.size() > M) c.initial_creators.resize(M);
                 BandVerdict v{true, true, std::string()};
                 try { std::vector<uint8_t> b = c.encode();
                       (void)GenesisConfig::decode(b.data(), b.size()); }
@@ -53078,6 +53248,9 @@ int main(int argc, char** argv) {
                     "GB-8 no-wrap: K=2^31 with M=3 ACCEPTED (2*K is evaluated "
                     "in 64 bits — a uint32 multiply would wrap to 0 and "
                     "reject)");
+
+            // D5a / R-4: 2K <= |initial_creators| rejected
+            rejects_band(3, 1, "GB-8 initial creators: 2K <= |initial_creators| REJECTED (S-054/D5a)");
         }
 
         // GB-7. File round trip through save/load — the actual at-rest path.
@@ -53725,8 +53898,8 @@ int main(int argc, char** argv) {
         // The genesis: NON-default in every replay-relevant field.
         GenesisConfig g;
         g.chain_id                   = "chain-load-genesis-params";
-        g.m_creators                 = 1;
-        g.k_block_sigs               = 1;
+        g.m_creators                 = 2;
+        g.k_block_sigs               = 2;
         g.block_subsidy              = 11;
         g.subsidy_pool_initial       = 100;   // E4 cap: drains during the fixture
         g.subsidy_mode               = 1;     // E3 LOTTERY
@@ -53951,7 +54124,7 @@ int main(int argc, char** argv) {
             ncfg.domain = "alice"; ncfg.data_dir = (base / "node").string();
             ncfg.listen_port = 7690; ncfg.key_path = (base / "alice.key").string();
             ncfg.chain_path = path;              // the store the producer saved
-            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.genesis_path = gpath; ncfg.m_creators = 2; ncfg.k_block_sigs = 2;
             ncfg.log_quiet = true;
             crypto::save_node_key(alice_key, ncfg.key_path);
             VirtualNetwork vnet;
@@ -61778,6 +61951,50 @@ int main(int argc, char** argv) {
             return c;
         };
 
+        auto build_chain_single = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "block-validator-extensive-test-single";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            }
+            alice_c.initial_stake = 1000;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+
+        auto build_chain_3 = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "block-validator-extensive-test-3";
+            GenesisCreator alice_c, bob_c, carol_c;
+            alice_c.domain = "alice"; bob_c.domain = "bob"; carol_c.domain = "carol";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]   = uint8_t(0x20 + i);
+                carol_c.ed_pub[i] = uint8_t(0x30 + i);
+            }
+            alice_c.initial_stake = 1000;
+            bob_c.initial_stake   = 1000;
+            carol_c.initial_stake = 1000;
+            cfg.initial_creators = {alice_c, bob_c, carol_c};
+            GenesisAllocation alice_bal, bob_bal, carol_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+            carol_bal.domain = "carol"; carol_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal, carol_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+
         // === V1: check_prev_hash ===
         //
         // Block with bogus prev_hash on a non-empty chain rejects with
@@ -61843,68 +62060,70 @@ int main(int argc, char** argv) {
 
         // === V3 alt: check_creator_selection -- off-committee creator ===
         //
-        // Committee size of 1 (K=1, m=1). The deterministically-selected
-        // domain is one of {alice, bob}. We probe by trying alice and
-        // bob; whichever the seed did NOT pick is "off-committee" and
-        // must reject with "creator[0] mismatch".
+        // Committee size of 2 (K=2, m=2) drawn from pool of 3 {alice, bob, carol}
+        // (2K = 4 > 3 = N satisfies quorum intersection S-054/D5a).
+        // Deterministic selection picks a canonical 2-committee. Trying different
+        // candidates for creator[0] ensures that a non-canonical pick rejects
+        // with "creator[0] mismatch".
         {
-            Chain c = build_chain();
+            Chain c = build_chain_3();
             NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
             BlockValidator bv;
-            bv.set_k_block_sigs(1);  // K = 1 -> committee size 1
+            bv.set_k_block_sigs(2);  // K = 2 -> committee size 2
 
-            // Determine the canonical selected domain by trying each
-            // candidate. The mismatch diagnostic includes "expected
-            // <domain>" so we can parse out the canonical choice.
             Block probe;
             probe.index     = 1;
             probe.prev_hash = c.head().compute_hash();
-            probe.creators  = {"alice"};
-            auto r_alice = bv.validate(probe, c, reg);
 
-            probe.creators = {"bob"};
-            auto r_bob = bv.validate(probe, c, reg);
-
-            // Exactly one of {alice, bob} is canonical at this height;
-            // the other should reject at check_creator_selection. (Both
-            // will fail later gates, but creator_selection fires before
-            // those; the diagnostic distinguishes the two cases.)
-            bool alice_off = !r_alice.ok &&
-                r_alice.error.find("creator[0] mismatch") != std::string::npos;
-            bool bob_off = !r_bob.ok &&
-                r_bob.error.find("creator[0] mismatch") != std::string::npos;
-            check(alice_off || bob_off,
+            bool found_mismatch = false;
+            bool found_match = false;
+            for (const std::string& first : {"alice", "bob", "carol"}) {
+                probe.creators = {first, "alice"};
+                auto r = bv.validate(probe, c, reg);
+                if (!r.ok && r.error.find("creator[0] mismatch") != std::string::npos) {
+                    found_mismatch = true;
+                } else if (r.error.find("creator[0] mismatch") == std::string::npos) {
+                    found_match = true;
+                }
+            }
+            check(found_mismatch,
                   "V3 check_creator_selection: off-committee creator -> "
-                  "'creator[0] mismatch' (one of alice/bob is canonical pick)");
-            check(!(alice_off && bob_off),
-                  "V3 check_creator_selection: exactly one of {alice, bob} is "
-                  "canonical at this seed/height (not both off-committee)");
+                  "'creator[0] mismatch' (one of alice/bob/carol is canonical pick)");
+            check(found_match,
+                  "V3 check_creator_selection: exactly one of {alice, bob, carol} is "
+                  "canonical at this seed/height (not all off-committee)");
+        }
+
+        // === V3 quorum intersection: 2K <= N(h) rejects fail-closed (S-054/D5a) ===
+        {
+            Chain c = build_chain();  // 2 creators: alice, bob (N=2)
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            bv.set_k_block_sigs(1);  // K=1 -> 2*K=2 <= N=2 violates quorum intersection
+            Block b;
+            b.index     = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators  = {"alice"};
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok && r.error.find("quorum intersection violated") != std::string::npos,
+                  "V3 check_creator_selection: 2K <= N(h) rejects with 'quorum intersection violated' (S-054/D5a)");
         }
 
         // === V4: check_creator_tx_commitments -- size mismatch ===
         //
-        // K=1 with single canonical creator; reach V4 by passing V1..V3.
+        // K=1 with single canonical creator (N=1, 2K=2 > 1); reach V4 by passing V1..V3.
         // Block has creator_tx_lists.size() != creators.size() -> reject
         // with "creator_tx_lists size != creators size".
         {
-            Chain c = build_chain();
+            Chain c = build_chain_single();
             NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
             BlockValidator bv;
             bv.set_k_block_sigs(1);
 
-            // Pick the canonical selected creator at height 1.
-            Block probe;
-            probe.index     = 1;
-            probe.prev_hash = c.head().compute_hash();
-            probe.creators  = {"alice"};
-            auto ra = bv.validate(probe, c, reg);
-            std::string canonical = (ra.error.find("creator[0] mismatch") == std::string::npos)
-                                  ? "alice" : "bob";
-
             Block b;
             b.index     = 1;
             b.prev_hash = c.head().compute_hash();
-            b.creators  = {canonical};
+            b.creators  = {"alice"};
             // creator_tx_lists left empty (size 0) -- mismatched.
             auto r = bv.validate(b, c, reg);
             check(!r.ok && r.error.find("creator_tx_lists size != creators size")
@@ -61920,24 +62139,16 @@ int main(int argc, char** argv) {
         // depending on which subcheck fires first. Pins the V4 substring
         // match — proves V1..V3 passed AND V4 sub-gate fires.
         {
-            Chain c = build_chain();
+            Chain c = build_chain_single();
             NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
             BlockValidator bv;
             bv.set_k_block_sigs(1);
 
             // Single creator block reaching V4 -> sig invalid OR tx_root.
-            Block probe;
-            probe.index     = 1;
-            probe.prev_hash = c.head().compute_hash();
-            probe.creators  = {"alice"};
-            auto ra = bv.validate(probe, c, reg);
-            std::string canonical = (ra.error.find("creator[0] mismatch") == std::string::npos)
-                                  ? "alice" : "bob";
-
             Block b;
             b.index             = 1;
             b.prev_hash         = c.head().compute_hash();
-            b.creators          = {canonical};
+            b.creators          = {"alice"};
             b.creator_tx_lists  = {{}};            // size 1 -- matches
             b.creator_ed_sigs   = {Signature{}};   // size 1 -- garbage sig
             b.creator_dh_inputs = {Hash{}};        // size 1
@@ -62062,10 +62273,10 @@ int main(int argc, char** argv) {
 
         // === Empty creators on non-genesis: hit creator_selection ===
         //
-        // creators.size() == 0 at non-genesis with K=1 -> fails V3
+        // creators.size() == 0 at non-genesis with K=1 (N=1) -> fails V3
         // (size mismatch). Pins the empty-set special case.
         {
-            Chain c = build_chain();
+            Chain c = build_chain_single();
             NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
             BlockValidator bv;
             bv.set_k_block_sigs(1);

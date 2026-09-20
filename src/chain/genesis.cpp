@@ -168,6 +168,18 @@ void GenesisConfig::validate() {
               "(K == M is legal — unanimity, zero liveness margin).");
     }
 
+    // D5a / R-4 (S-054): Genesis validation requires 2K > |initial creators|.
+    if (!c.initial_creators.empty()
+        && static_cast<uint64_t>(c.k_block_sigs) * 2ull
+            <= static_cast<uint64_t>(c.initial_creators.size())) {
+        throw std::runtime_error(
+            "genesis: k_block_sigs=" + std::to_string(c.k_block_sigs)
+            + " with initial_creators=" + std::to_string(c.initial_creators.size())
+            + " violates QUORUM INTERSECTION (2*K must exceed |initial creators|). At 2K <= N "
+              "two DISJOINT K-subsets can each reach the signature threshold and finalize "
+              "CONFLICTING blocks with NO member double-signing (S-054/D5a).");
+    }
+
     if (c.genesis_message.size() > GENESIS_MESSAGE_MAX_BYTES) {
         throw std::runtime_error(
             "genesis: genesis_message exceeds "
