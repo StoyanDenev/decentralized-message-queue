@@ -71,6 +71,12 @@ inline constexpr size_t REGISTER_PAYLOAD_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE;
 // on the wire. Cap is enforced by the validator.
 inline constexpr size_t TRANSFER_PAYLOAD_MAX = 128;
 
+// S-106 / Step 3b: per-block cap on equivocation evidence records in a block.
+// Each event requires two Ed25519 signature verifications (~6 ms CPU).
+// Capping at 16 bounds block verification CPU cost to < 100 ms while providing
+// ample capacity for genuine committee misbehavior attribution.
+inline constexpr size_t EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16;
+
 // HISTORICAL (retired 2026-09-16, owner decision D13 — DECISION-LOG
 // 2026-09-16 "OWNER DECISIONS" §C): the rev.8 per-abort stake deduction.
 // No apply path reads this constant any more — a round-1 AbortEvent only

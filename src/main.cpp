@@ -38933,6 +38933,41 @@ int main(int argc, char** argv) {
                 check(!r.ok && r.error.find("sig_a does not verify against equivocator's key") != std::string::npos,
                       "EQV-sig-verify-forged-slash: an event with a forged sig_a is REJECTED (no forged slash)");
             }
+
+            // 7. Step 3b (R-DUP): in-block duplicate event is REJECTED
+            {
+                auto ev1 = mk_ev(0, 1, 1, 0, rA, 1, 0, rB);
+                Block b; b.index = 1;
+                b.equivocation_events = { ev1, ev1 };
+                auto r = bv.check_equivocation_events_for_test(b, reg, c);
+                check(!r.ok && r.error.find("contains duplicate event") != std::string::npos,
+                      "EQV-dup: duplicate equivocation_event in the same block is REJECTED");
+            }
+
+            // 8. Step 3b (R-CAP): exceeding per-block cap (EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16) is REJECTED
+            {
+                Block b; b.index = 1;
+                for (size_t i = 0; i <= chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX; ++i) {
+                    Hash rA_i = rA; rA_i[0] = static_cast<uint8_t>(i + 1);
+                    Hash rB_i = rB; rB_i[0] = static_cast<uint8_t>(i + 1);
+                    b.equivocation_events.push_back(mk_ev(0, 1, 1, 0, rA_i, 1, 0, rB_i));
+                }
+                auto r = bv.check_equivocation_events_for_test(b, reg, c);
+                check(!r.ok && r.error.find("exceeds 16-event cap") != std::string::npos,
+                      "EQV-cap: exceeding per-block cap (17 > 16) is REJECTED");
+            }
+
+            // 9. Step 3b (R-CAP control): 16 distinct events at cap are ACCEPTED
+            {
+                Block b; b.index = 1;
+                for (size_t i = 0; i < chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX; ++i) {
+                    Hash rA_i = rA; rA_i[0] = static_cast<uint8_t>(i + 1);
+                    Hash rB_i = rB; rB_i[0] = static_cast<uint8_t>(i + 1);
+                    b.equivocation_events.push_back(mk_ev(0, 1, 1, 0, rA_i, 1, 0, rB_i));
+                }
+                auto r = bv.check_equivocation_events_for_test(b, reg, c);
+                check(r.ok, "EQV-cap control: 16 distinct events at cap are ACCEPTED");
+            }
         }
 
         // --- VAL-param-multisig (validator.cpp:820 distinct-keyholder + :827
@@ -50808,6 +50843,11 @@ int main(int argc, char** argv) {
         check(adopt() && pooled(),
               "CONTROL: the record is adopted while `evil` still resolves at the head");
         {
+            // Producer deduplication (R-DUP): duplicate candidates folded to 1
+            chain::Block b_dup = mine({ ev, ev }, { evh }, W->eq_admit_for_test());
+            check(b_dup.equivocation_events.size() == 1,
+                  "Step 3b (R-DUP): build_body deduplicates duplicate equivocation candidates");
+
             chain::Block b = mine({ ev }, { evh }, W->eq_admit_for_test());
             check(b.equivocation_events.size() == 1
                   && b.equivocation_events[0].equivocator == "evil",
@@ -50816,6 +50856,12 @@ int main(int argc, char** argv) {
                   "CONTROL: the block VALIDATES on the follower and the chain advances");
             check(!pooled(),
                   "CONTROL: the post-inclusion prune drops the now-recorded evidence");
+
+            // Step 3b Invariant: apply neutrality (moves no stake, does not alter active registry status)
+            check(W->chain_for_test().stake("evil") == 1000,
+                  "Step 3b: apply neutrality — evil's stake is NOT forfeit on equivocation evidence");
+            check(W->chain_for_test().registrants().at("evil").inactive_from == UINT64_MAX,
+                  "Step 3b: apply neutrality — evil is NOT deregistered on equivocation evidence");
         }
 
         // ── evil DEREGISTERs; the record is re-pooled while it still resolves ──

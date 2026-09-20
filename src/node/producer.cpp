@@ -1256,6 +1256,28 @@ Block build_body(
             if (ev_admit && ev_admit(e)) b.equivocation_events.push_back(e);
     }
 
+    // S-106 / Step 3b (R-DUP, R-ORD, R-CAP):
+    // Deduplicate, sort in canonical total order by hash_equivocation_event, and cap
+    // at EQUIVOCATION_EVENTS_PER_BLOCK_MAX.
+    if (!b.equivocation_events.empty()) {
+        std::vector<chain::EquivocationEvent> deduped;
+        std::set<Hash> seen;
+        for (auto& ev : b.equivocation_events) {
+            Hash h = hash_equivocation_event(ev);
+            if (seen.insert(h).second) {
+                deduped.push_back(std::move(ev));
+            }
+        }
+        std::sort(deduped.begin(), deduped.end(),
+                  [](const chain::EquivocationEvent& x, const chain::EquivocationEvent& y) {
+                      return hash_equivocation_event(x) < hash_equivocation_event(y);
+                  });
+        if (deduped.size() > chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX) {
+            deduped.resize(chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX);
+        }
+        b.equivocation_events = std::move(deduped);
+    }
+
     // rev.9 S-009: when ordered_secrets is provided, the block is being
     // built for finalization (try_finalize_round) — populate
     // creator_dh_secrets and recompute delay_output as

@@ -436,9 +436,21 @@ BlockValidator::Result BlockValidator::check_abort_certs(
 // chain.cpp::apply_transactions).
 BlockValidator::Result BlockValidator::check_equivocation_events(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
-    for (size_t i = 0; i < b.equivocation_events.size(); ++i)
+    if (b.equivocation_events.size() > chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX) {
+        return {false, "equivocation_events count exceeds "
+                       + std::to_string(chain::EQUIVOCATION_EVENTS_PER_BLOCK_MAX)
+                       + "-event cap (got " + std::to_string(b.equivocation_events.size()) + ")"};
+    }
+    std::set<Hash> seen_hashes;
+    for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
+        Hash h = hash_equivocation_event(b.equivocation_events[i]);
+        if (!seen_hashes.insert(h).second) {
+            return {false, "equivocation_events contains duplicate event at index "
+                           + std::to_string(i)};
+        }
         if (auto r = check_equivocation_event(b.equivocation_events[i], i, b.index,
                                               chain, registry); !r.ok) return r;
+    }
     return {true, ""};
 }
 
