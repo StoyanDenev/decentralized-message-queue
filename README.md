@@ -2,7 +2,7 @@
 
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
-> **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
+> **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 >
@@ -134,19 +134,42 @@ The chain's account state is keyed by address, so registered and anonymous accou
 
 ```
 Transaction {
-    type:    uint8         // TRANSFER | REGISTER | DEREGISTER | STAKE | UNSTAKE
-    from:    string        // sender address
-    to:      string        // recipient address (TRANSFER only)
+    type:    uint8         // 0..17 native transaction types (see below)
+    from:    string        // sender address (domain name or anonymous 0x...)
+    to:      string        // recipient address (TRANSFER, DAPP_CALL, UNSHIELD)
     amount:  uint64
     fee:     uint64
     nonce:   uint64        // sequential per-account
-    payload: []byte        // REGISTER: ed_pub[32]; STAKE/UNSTAKE: amount[8]
-    sig:     [64]byte      // Ed25519 over signing_bytes()
+    payload: []byte        // type-specific canonical binary payload
+    sig:     [64]byte      // Ed25519 signature over signing_bytes()
+    pq_auth: []byte        // optional DPQ1 post-quantum auth envelope (PQ_TRANSFER only)
     hash:    [32]byte      // SHA-256 of signing_bytes()
 }
 ```
 
 Nonces are sequential (account state tracks `next_nonce`), preventing replay.
+
+**Native Transaction Types (`TxType`):**
+- `0: TRANSFER` — Direct balance transfer between accounts (domain or anonymous).
+- `1: REGISTER` — Creates a domain identity (create-only, nonce 0). Binds domain name to 32-byte Ed25519 key. Rejects small-order torsion keys (S-068).
+- `2: DEREGISTER` — Deactivates validator eligibility and initiates unbonding delay for staked bond.
+- `3: STAKE` — Deposits validator stake. Post-genesis join path admits STAKE while `block_index < inactive_from` (D6 / S-069), bounded by quorum intersection $N(h) + 1 < 2K$ (D5a / S-054).
+- `4: UNSTAKE` — Unlocks and reclaims stake. Active validators unstake surplus above `min_stake`; deregistered validators withdraw after unbonding delay `block_index >= stake_unlock_height` (D7 / S-067).
+- `5: REGION_CHANGE` — Reserved for epoch-boundary regional rebalancing.
+- `6: PARAM_CHANGE` — Multisig parameter governance under `governed` mode ($M$-of-$N$ threshold signatures over whitelisted parameters).
+- `7: MERGE_EVENT` — Under-quorum shard merge coordination event under `EXTENDED` sharding mode.
+- `8: COMPOSABLE_BATCH` — Serialized batch of inner transactions executed within an atomic scope; inner transactions roll back atomically on any failure while outer submitter pays block space fee.
+- `9: DAPP_REGISTER` — Registers or updates a DApp service entry in `dapp_registry_` (service public key, endpoint URL, routing topics, and metadata).
+- `10: DAPP_CALL` — Sends an authenticated, canonical encrypted payload to a registered DApp with optional direct payment.
+- `11: PQ_TRANSFER` — Post-quantum bearer transfer authenticated by an ML-DSA (FIPS 204) public key committed to by a PQ anonymous address, carried in `pq_auth`. Non-PQ types carrying `pq_auth` are strictly rejected (D9 / S-057).
+- `12: SHIELD` — On-ramp from transparent account into confidential commitment pool, proving value $A$ matches Pedersen commitment $C$.
+- `13: UNSHIELD` — Off-ramp from confidential pool back to transparent account, consuming note commitment $C$ as nullifier with replay protection.
+- `14: CONFIDENTIAL_TRANSFER` — Confidential-to-confidential transfer with hidden amounts, verified via DCT1 Pedersen commitments and Bulletproof range proofs.
+- `15: ROTATE_AUDIT_KEY` — Rotates or revokes the account's standing view-master audit key for regulatory inspection (A2).
+- `16: LOG_AUDIT_ACCESS` — Records on-chain disclosure proof to an auditor ("audit the auditors"), incrementing the account disclosure count.
+- `17: REGISTER_NOTE_KEY` — Publishes the account's P-256 encrypted note public key to allow senders to deliver confidential notes.
+
+**Anonymous Address Validation:** Anonymous addresses (`0x...`) are validated against Ed25519 small-order curve points. Transactions from 8-torsion points are rejected fail-closed under consensus (D10 / S-072).
 
 ### 3.4 ContribMsg (Phase 1)
 
@@ -248,6 +271,11 @@ state_root             [bound only when non-zero — S-033 v2.1 backward-compat]
 
 This is broader than `block_digest` (§7.4), which is what committee members sign in Phase 2. `block_digest` excludes `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; `signing_bytes` includes them so the final block identity uniquely binds the post-reveal randomness output.
 
+### 3.7.2 Block Frame Cap and Storage Integrity
+
+- **Block Frame Consensus Cap (D9 / S-057):** The canonical wire-encoded block frame is bounded at `BLOCK_FRAME_CONSENSUS_CAP_BYTES = 4,194,300` bytes (4 MB gossip buffer minus 4-byte framing). Blocks exceeding this cap are rejected fail-closed during verification (`BlockValidator::check_block`), guaranteeing that valid blocks can never exceed gossip envelope capacity.
+- **Storage Integrity & Continuity (S-084):** During database loading (`Chain::load`) and JSON state export (`Chain::export_store_json`), every block record is verified for sequential height continuity (`b.index == i`) and cryptographic hash linking (`b.prev_hash == prev_hash`). Corrupted or non-linking block files throw immediately and fail closed on startup.
+
 ---
 
 ## 4. Genesis and Chain-Wide Constants
@@ -293,15 +321,21 @@ The choice between modes is operational: which Sybil-resistance medium and disin
 
 ### 5.2 Registration
 
-A node registers by broadcasting a REGISTER transaction whose payload is its 32-byte Ed25519 public key (create-only since V-REG-1, 2026-09-15: one REGISTER per domain name, ever). Under `STAKE_INCLUSION` (the default) registration alone does not make it eligible, and no transaction from an unstaked domain is currently includable — see SECURITY.md S-069 (owner decision pending). The transaction is itself signed with the corresponding private key, proving possession.
+A node registers by broadcasting a REGISTER transaction whose payload is its 32-byte Ed25519 public key (create-only since V-REG-1, 2026-09-15: one REGISTER per domain name, ever). The transaction is itself signed with the corresponding private key, proving possession. Small-order torsion keys are strictly rejected (S-068).
 
 Registration takes effect after a randomized 1–10 block delay derived from `(tx.hash || cumulative_rand)`. This prevents a registrant from timing entry to guarantee selection in a chosen round.
 
+Under `STAKE_INCLUSION` (the default) registration alone does not make a node eligible for committee selection. A post-genesis join path (D6 / S-069) allows a registered domain to submit `STAKE` (and an optional funding `TRANSFER`) while `block_index < inactive_from`. The node activates and becomes eligible once its stake reaches `min_stake`, subject to the strict quorum intersection cap $N(h) + 1 < 2K$ (D5a / S-054).
+
 In `DOMAIN_INCLUSION` chains the convention is that `tx.from` is a real DNS name (e.g., `validator1.example.com`). The protocol does not enforce DNS validity — that's an off-chain concern (operators may verify via DNSSEC TXT records pointing to the on-chain `ed_pub`). Mismatches surface as governance issues, not protocol violations.
 
-### 5.3 Stake
+### 5.3 Stake and Unbonding Exit
 
-Eligibility additionally requires `stake[domain] ≥ chain.min_stake()`. In `STAKE_INCLUSION` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_INCLUSION` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices. STAKE / UNSTAKE transactions still work in both modes (validators may voluntarily lock stake even in `DOMAIN_INCLUSION`); they just don't gate eligibility.
+Eligibility requires `stake[domain] ≥ chain.min_stake()`. In `STAKE_INCLUSION` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_INCLUSION` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices.
+
+**Quorum Intersection Invariant (D5a / S-054):** To preserve fork-freedom and ensure any two $K$-sized committees intersect in at least one honest creator ($2K - N(h) \ge 1$), the total eligible pool $N(h)$ is bounded such that $2K > N(h)$ must hold at genesis and throughout chain life. Any `STAKE` transaction that would expand the eligible validator pool to $N(h) \ge 2K$ is rejected fail-closed by the validator.
+
+**Exit Unlock Path (D7 / S-067):** An active validator may unstake surplus amounts above `min_stake`. A validator that deregisters enters an unbonding lock period; once the unbonding delay passes (`block_index >= stake_unlock_height(domain)`), the inactive domain can submit an `UNSTAKE` transaction authenticated by its registered public key to reclaim its full stake.
 
 ### 5.4 Suspension and equivocation deregistration
 
@@ -338,6 +372,8 @@ committee  = [available[i] : i in indices]
 ```
 
 `select_m_creators` uses a deterministic hybrid (S-020): rejection sampling with a counter when `2K ≤ N` (cheap path, expected `O(K)` hashes, no allocation), or a partial Fisher-Yates shuffle when `2K > N` (bounded `O(N)` setup + exactly `K` hashes, no rejection spin even at `K = N − 1`). Both branches are pure functions of `(random_state, N, K)` so every node picks the same branch and the same indices. Excluding aborted-this-height domains from the local pool ensures committee re-selection after an abort doesn't re-pick the same silent creator before the chain-baked suspension takes effect on the next finalized block. The validator reproduces the same selection given a block's `abort_events` field.
+
+**Quorum intersection enforcement (D5a / S-054):** The selection function verifies that `|available| < 2K`. If the eligible pool ever reaches or exceeds $2K$, creator selection halts with a deterministic validation error, preventing the formation of two disjoint $K$-committees.
 
 ---
 
@@ -580,6 +616,12 @@ All messages broadcast to all directly connected peers. Receiver-side dedup: blo
 ### 12.4 Sync Mode (M12)
 
 A node behind on chain state enters SYNC mode: it does not contribute to consensus, requests `GET_CHAIN` from peers, applies received chunks, and only re-enters `IN_SYNC` once it matches the network's head. This prevents a stale node from acting as a creator and disrupting the live committee.
+
+### 12.5 Egress Bounds and Sync Safety
+
+- **Bounded Peer Egress Queue (S-082):** To defend against memory exhaustion attacks from slow, unresponsive, or stalled peers, each peer's outbound buffer is capped at `MAX_PEER_WRITE_QUEUE = 256` items. If a peer accumulates 256 pending messages without reading, further enqueues are rejected and the TCP connection is closed immediately (`conn_->close()`). Write queues are flushed on I/O disconnects.
+- **Sync Storm Suppression & Lead Bound (S-080 / S-085):** A node caps peer-advertised height claims at `MAX_SYNC_LEAD = 100,000` above local tip to prevent astronomical range-request resource exhaustion. Chain sync requests (`GET_CHAIN`) are directed unicast to the single highest-height peer, and repeated sync queries are rate-limited with a 5-second in-flight dampener to prevent request storms during reorganization or catchup.
+- **Light-Client Quorum Floor on Inclusion Proofs (S-100):** Light clients verifying transaction inclusion (`verify_tx_inclusion_from_block`) enforce the full quorum floor (`k_block_sigs`), rejecting inclusion blocks that fail to demonstrate the required quorum.
 
 ---
 
@@ -849,6 +891,10 @@ Determ's design intent is intentionally narrow: a **fork-free L1 payment + ident
 ### 17.1 What Determ is built for
 
 - **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root — any single non-Byzantine committee member can include any tx. Zero-trust safety (no protocol component trusts any participant).
+- **Composable Atomic Batching.** Atomic multi-transaction scopes (`COMPOSABLE_BATCH`) executing multiple operations in a single block space allocation with all-or-nothing rollback on inner transaction failure.
+- **Canonical Encrypted DApp Messaging.** Lightweight DApp service discovery and encrypted payload delivery (`DAPP_REGISTER`, `DAPP_CALL`) without VM execution overhead.
+- **Post-Quantum Bearer Payments.** Opt-in ML-DSA (FIPS 204) authenticated transfers (`PQ_TRANSFER`) coexisting seamlessly with classical Ed25519 accounts.
+- **Confidential Transfers & Audit Trails.** Amount-private payments via Pedersen commitments and Bulletproofs range proofs (`SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`) coupled with on-chain dual-mode audit key rotation and disclosure logging (`ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS`, `REGISTER_NOTE_KEY`).
 - **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 non-Byzantine validator remains in the registry).
 - **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519-pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
 - **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees.
@@ -988,6 +1034,8 @@ Determ's safety-critical mechanisms are covered by per-property analytic proofs 
 |---|---|
 | **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery. |
 | **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla + CHECK-RESULTS.md. Model-check transcripts pending TLC installation in CI; specs ready for local validation. |
+| **Test suite** (CI regression) | 329 test wrappers in `tools/ci_local.sh`, 0 failures, multi-platform coverage (Linux, macOS, Windows). |
+| **Integrity guards** (docs/ledger) | 16 automated doc, tier, link, and ledger-coherence checks gating every commit. |
 
 Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V15 from F0; V12/V13 are the cross-shard receipt source/destination split, V14 is the timestamp bound, V15 is transaction apply consistency), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
 

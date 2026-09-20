@@ -612,7 +612,7 @@ GenesisConfig {
   chain_id: string                     // operator-chosen unique identifier
   genesis_message: string              // inscribed cultural anchor (≤256B); see §8.6
   m_creators: u32                      // pool size per round
-  k_block_sigs: u32                    // committee size; genesis band M/2 < K <= M (necessary; runtime bound 2K > N(pool) OPEN, SECURITY.md S-054)
+  k_block_sigs: u32                    // committee size; genesis band M/2 < K <= M; runtime bound 2K > N(pool) enforced (D5a, SECURITY.md S-054)
                                        // (quorum intersection — see PROTOCOL.md §12.1)
   block_subsidy: u64                   // page reward per block
   bft_enabled: bool                    // enable per-height BFT escalation

@@ -1042,23 +1042,17 @@ view and the canonical DGC1 binary container (`GenesisConfig::validate()`,
 run). Diagnostic names the rule: `violates QUORUM INTERSECTION (2*K must
 exceed M)`.
 
-The **lower** bound is a safety rule, not a tuning preference — but it is a
-**necessary condition at genesis, not the runtime invariant** (DECISION-LOG
-2026-08-14 `ddfe877`; SECURITY.md S-054 is PARTIAL). At runtime no accept rule
-reads `m_creators`: a block's K-member committee is drawn by
+The **lower** bound is a safety rule, not a tuning preference — and is
+enforced at both genesis and runtime (DECISION-LOG 2026-09-20 D5a; SECURITY.md
+S-054 ✅ Mitigated). At genesis, `GenesisConfig::validate()` strictly enforces
+`2K > M`. At runtime, a block's K-member committee is drawn by
 `check_creator_selection` from the **eligible pool** `N(h)` (the registry minus
-the block's own aborters), and REGISTER leaves that pool uncapped. The quantity
-that decides whether two same-height committees must overlap is therefore
-`N(h)`, not `M`. If `2K <= N(h)`, two **disjoint** K-committees exist; under
-the abort-vs-finalize race each is valid against its own `abort_events`, each
-reaches the threshold, and **both finalize — with no member ever signing
-twice**: a fork that is not merely unpunished but **unattributable**. Two
-K-subsets of an N-set intersect **iff** `2K > N`, so above that floor two
-conflicting finalized blocks *imply* a double-signer — every fork has a name.
-The shipped band `2K > M` delivers this only while `N(h) <= M`, i.e. only
-while the registry never grows past the genesis creator count. The runtime
-bound (`2K > N(h)` asserted where the committee is derived, or a genesis-pinned
-pool cap) is OPEN — DECISION CLOCK R-4, genesis-frozen.
+the block's own aborters). To guarantee that two same-height committees must
+overlap, `Chain::select_creators` and `BlockValidator::check_creator_selection`
+assert `2K > N(h)`, and `BlockValidator::check_transaction` rejects any STAKE
+transaction that would cause `eligible.size() + 1 >= 2K`. Two K-subsets of an
+N-set intersect **iff** `2K > N`, so two conflicting finalized blocks *imply*
+a double-signer — every fork has a name.
 
 `K == M` is the **default** (`k_block_sigs` defaults to `m_creators`) and stays
 legal: unanimity satisfies intersection trivially (`2M > M`). It is the strong
