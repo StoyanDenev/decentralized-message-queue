@@ -5123,6 +5123,16 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error(err);
     }
 
+    // S-097: run BlockValidator::check_transaction before admitting to mempool.
+    // Definitively reject structurally invalid transactions at RPC ingress (e.g.
+    // oversized payload, invalid type, unauthorized registration, etc.) rather
+    // than acknowledging `queued` and silently evicting at block assembly.
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = NodeRegistry::build_from_chain(chain_, at);
+    if (auto val_res = validator_.check_transaction(tx, at, chain_, reg, tx.nonce); !val_res.ok) {
+        throw std::runtime_error("submitted tx rejected by validator (S-097): " + val_res.error);
+    }
+
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
     if (idx != tx_by_account_nonce_.end()) {

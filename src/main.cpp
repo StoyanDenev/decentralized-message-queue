@@ -519,6 +519,11 @@ In-process tests (deterministic, no network):
                                               ingress paths (rpc_submit_tx throws,
                                               on_tx gossip silent-drops); in-proc
                                               Node harness, falsify each path
+  determ test-rpc-validator-precheck          RpcIngress S-097 — BlockValidator precheck
+                                              in rpc_submit_tx definitively rejects
+                                              structurally invalid txs at RPC ingress
+                                              (oversized payload, unauthorized anon
+                                              type, malformed stake payload)
   determ test-chain-summary-cap               RpcIngress #6 — the chain_summary
                                               256-page anti-DoS cap (matching
                                               on_get_chain / rpc_headers); an
@@ -49599,6 +49604,172 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-rpc-tx-sig-admit\n"
                            : "  PASS: test-rpc-tx-sig-admit\n");
+        return fail ? 1 : 0;
+    }
+    if (cmd == "test-rpc-validator-precheck") {
+        // S-097 (outbox finding F-2; docs/SECURITY.md): run BlockValidator::check_transaction
+        // at RPC ingress in Node::rpc_submit_tx so structurally invalid transactions fail loudly
+        // with a definitive rejection to the client rather than returning {"status": "queued"}
+        // and being silently evicted at block assembly time.
+        // In-process Node harness (mirrors test-rpc-tx-sig-admit): a single M=K=1 node "node0"
+        // whose ed_pub is genesis-registered + funded, plus an anonymous account.
+        using namespace determ;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        std::error_code fec;
+
+        crypto::NodeKey key;
+        for (int i = 0; i < 32; ++i) key.priv_seed[i] = uint8_t(0x50 + i);
+        determ_ed25519_pubkey_from_seed(key.priv_seed.data(), key.pub.data());
+
+        crypto::NodeKey anon_key;
+        for (int i = 0; i < 32; ++i) anon_key.priv_seed[i] = uint8_t(0x70 + i);
+        determ_ed25519_pubkey_from_seed(anon_key.priv_seed.data(), anon_key.pub.data());
+        const std::string anon_addr = make_anon_address(anon_key.pub);
+
+        int node_seq = 0;
+        auto with_fresh_node = [&](const std::function<void(node::Node&)>& fn) {
+            fs::path dir = fs::temp_directory_path() /
+                ("determ-rpc-val-precheck-" + std::to_string(node_seq++));
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir);
+            chain::GenesisConfig g;
+            g.chain_id = "rpc-val-precheck"; g.m_creators = 1; g.k_block_sigs = 1;
+            g.epoch_blocks = 1;
+            chain::GenesisCreator gc;
+            gc.domain = "node0"; gc.ed_pub = key.pub; gc.initial_stake = 1000;
+            g.initial_creators.push_back(gc);
+            chain::GenesisAllocation ab; ab.domain = "node0"; ab.balance = 100000;
+            g.initial_balances.push_back(ab);
+            chain::GenesisAllocation aa; aa.domain = anon_addr; aa.balance = 50000;
+            g.initial_balances.push_back(aa);
+            const std::string gpath = (dir / "genesis.json").string();
+            g.save(gpath);
+            node::Config cfg;
+            cfg.domain = "node0"; cfg.data_dir = (dir / "node0").string();
+            cfg.listen_port = 7672; cfg.key_path = (dir / "node0.key").string();
+            cfg.chain_path = (dir / "node0" / "chain.json").string();
+            cfg.genesis_path = gpath; cfg.m_creators = 1; cfg.k_block_sigs = 1;
+            cfg.log_quiet = true;
+            fs::create_directories(cfg.data_dir);
+            crypto::save_node_key(key, cfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node node(cfg, determ::time::RealClock::instance(),
+                            loop.get(), transport.get());
+            fn(node);
+            fs::remove_all(dir, fec);
+        };
+
+        auto signed_tx = [&](uint64_t nonce) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::TRANSFER; tx.from = "node0"; tx.to = "bob";
+            tx.amount = 10; tx.fee = 1; tx.nonce = nonce;
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+        auto mempool = [](node::Node& n) {
+            return n.rpc_status()["mempool_size"].get<size_t>();
+        };
+
+        // 1. CONTROL: valid transfer is admitted
+        with_fresh_node([&](node::Node& n) {
+            check(n.rpc_status()["height"].get<uint64_t>() == 1 && mempool(n) == 0,
+                  "setup: genesis applied (height 1), mempool empty");
+            auto r = n.rpc_submit_tx(signed_tx(0).to_json());
+            check(r.value("status", std::string{}) == "queued" && mempool(n) == 1,
+                  "CONTROL: validly-signed TRANSFER is ADMITTED (queued, mempool == 1)");
+            // Future nonce admission control: tx at nonce 1 queues behind nonce 0
+            auto r2 = n.rpc_submit_tx(signed_tx(1).to_json());
+            check(r2.value("status", std::string{}) == "queued" && mempool(n) == 2,
+                  "CONTROL: future-nonce TRANSFER is ADMITTED (queued, mempool == 2)");
+        });
+
+        // 2. NEGATIVE: TRANSFER with oversized payload (> 128 bytes)
+        with_fresh_node([&](node::Node& n) {
+            chain::Transaction tx = signed_tx(0);
+            tx.payload.resize(chain::TRANSFER_PAYLOAD_MAX + 1, 0xAA);
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            bool threw = false;
+            std::string err;
+            try {
+                n.rpc_submit_tx(tx.to_json());
+            } catch (const std::exception& e) {
+                threw = true;
+                err = e.what();
+            }
+            check(threw && err.find("submitted tx rejected by validator (S-097)") != std::string::npos
+                        && err.find("TRANSFER payload exceeds 128-byte cap") != std::string::npos
+                        && mempool(n) == 0,
+                  "S-097 NEGATIVE 1: oversized TRANSFER payload (> 128 bytes) is REJECTED at RPC ingress");
+        });
+
+        // 3. NEGATIVE: UNSTAKE before unlock_height (validator-rejected type/state predicate)
+        with_fresh_node([&](node::Node& n) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::UNSTAKE;
+            tx.from = "node0";
+            tx.to = "";
+            tx.amount = 100;
+            tx.fee = 1;
+            tx.nonce = 0;
+            tx.payload.resize(8, 0x00);
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            bool threw = false;
+            std::string err;
+            try {
+                n.rpc_submit_tx(tx.to_json());
+            } catch (const std::exception& e) {
+                threw = true;
+                err = e.what();
+            }
+            check(threw && err.find("submitted tx rejected by validator (S-097)") != std::string::npos
+                        && err.find("UNSTAKE before unlock_height") != std::string::npos
+                        && mempool(n) == 0,
+                  "S-097 NEGATIVE 2: UNSTAKE before unlock_height is REJECTED at RPC ingress");
+        });
+
+        // 4. NEGATIVE: STAKE with malformed payload size (4 bytes instead of 8)
+        with_fresh_node([&](node::Node& n) {
+            chain::Transaction tx;
+            tx.type = chain::TxType::STAKE;
+            tx.from = "node0";
+            tx.to = "";
+            tx.amount = 1000;
+            tx.fee = 1;
+            tx.nonce = 0;
+            tx.payload.resize(4, 0x01);
+            auto sb = tx.signing_bytes();
+            tx.sig  = crypto::sign(key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            bool threw = false;
+            std::string err;
+            try {
+                n.rpc_submit_tx(tx.to_json());
+            } catch (const std::exception& e) {
+                threw = true;
+                err = e.what();
+            }
+            check(threw && err.find("submitted tx rejected by validator (S-097)") != std::string::npos
+                        && err.find("STAKE payload must be 8 bytes") != std::string::npos
+                        && mempool(n) == 0,
+                  "S-097 NEGATIVE 3: STAKE with malformed payload size is REJECTED at RPC ingress");
+        });
+
+        std::cout << (fail ? "  FAIL: test-rpc-validator-precheck\n"
+                           : "  PASS: test-rpc-validator-precheck\n");
         return fail ? 1 : 0;
     }
     if (cmd == "test-mempool-admit-eviction") {
