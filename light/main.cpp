@@ -2161,6 +2161,34 @@ int cmd_state(int argc, char** argv) {
             << "\",\"head_state_root\":\"\"}"; }
         check(load_rejects(), "legacy JSON state file is rejected");
 
+        // (9) S-098 durability: atomic replace preserves previous state on injected write failure
+        {
+            save_light_state(tp, in);
+            check(load_light_state(tp).head_height == 12345, "initial anchor established for durability check");
+
+#ifdef _WIN32
+            _putenv_s("DETERM_LIGHT_OUTBOX_INJECT", "write_fail");
+#else
+            ::setenv("DETERM_LIGHT_OUTBOX_INJECT", "write_fail", 1);
+#endif
+            bool write_failed = false;
+            try {
+                LightState mutated = in;
+                mutated.head_height = 99999;
+                save_light_state(tp, mutated);
+            } catch (const std::exception&) {
+                write_failed = true;
+            }
+#ifdef _WIN32
+            _putenv_s("DETERM_LIGHT_OUTBOX_INJECT", "");
+#else
+            ::unsetenv("DETERM_LIGHT_OUTBOX_INJECT");
+#endif
+            check(write_failed, "injected write failure is caught and thrown");
+            check(load_light_state(tp).head_height == 12345,
+                  "durable_write_replace preserves existing anchor intact on write failure (S-098)");
+        }
+
         // cleanup the temp file (only when we used the default temp target)
         if (state_path.empty()) {
             std::error_code ec; std::filesystem::remove(std::filesystem::path(tp), ec);

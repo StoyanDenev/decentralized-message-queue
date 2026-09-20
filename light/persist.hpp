@@ -61,8 +61,9 @@ struct LightState {
 // as a last resort if neither is set).
 std::string default_state_path();
 
-// Write `s` to `path` as the canonical binary DLS1 container, creating
-// parent directories. Throws std::runtime_error on IO failure or when a
+// Write `s` to `path` as the canonical binary DLS1 container via
+// durable_write_replace (temp file -> fsync -> atomic rename -> dir fsync),
+// creating parent directories. Throws std::runtime_error on IO failure or when a
 // hash field is not exactly 64 hex chars (head_state_root may be "").
 void save_light_state(const std::string& path, const LightState& s);
 

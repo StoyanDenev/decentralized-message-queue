@@ -5469,3 +5469,69 @@ Owner decisions D5a, D6, D7, D8, D9, D10, D19a, D19b-i (DECISION-LOG 2026-09-16)
 
 **Authority:**
 Owner decisions D19a (DECISION-LOG 2026-09-16).
+
+---
+
+## 2026-09-20 — D19a (S-097): BlockValidator precheck in rpc_submit_tx landed
+
+**Status:** IMPLEMENTED and verified. Gate `determ test-rpc-validator-precheck` (and wrapper `tools/test_rpc_validator_precheck.sh`). Ledger row S-097 moved from OPEN to MITIGATED in `docs/SECURITY.md`.
+
+**Problem:**
+Previously, `Node::rpc_submit_tx` verified the address canonical format, checked for hash mismatch, verified stale nonces, checked the signature via `verify_tx_signature_locked`, and checked mempool admission policy (`mempool_admit_check`). However, it did not execute `BlockValidator::check_transaction`. As a result, structurally invalid transactions (e.g. `TRANSFER` carrying payload > 128 bytes, anonymous accounts attempting unauthorized transaction types such as `STAKE`, malformed `STAKE`/`UNSTAKE` payloads, or amount + fee arithmetic overflows) were admitted into `tx_store_` and acknowledged to the RPC client as `{"status": "queued"}`. When the block producer later assembled a block via `Node::build_body` / `tx_admit_locked`, `check_transaction` rejected and evicted the transaction silently. From the RPC client's perspective, the transaction appeared accepted/submitted, until the light client outbox later diagnosed it as permanently STUCK.
+
+**The Change:**
+In `src/node/node.cpp::rpc_submit_tx`, immediately after the `mempool_admit_check(tx)` check:
+```cpp
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = NodeRegistry::build_from_chain(chain_, at);
+    if (auto val_res = validator_.check_transaction(tx, at, chain_, reg, tx.nonce); !val_res.ok) {
+        throw std::runtime_error("submitted tx rejected by validator (S-097): " + val_res.error);
+    }
+```
+Passing `expected_nonce = tx.nonce` ensures that future-nonce transactions in the mempool pipeline (`tx.nonce >= chain_.next_nonce(tx.from)`) are NOT falsely rejected by the validator's nonce equality check, preserving mempool pipelining while still enforcing all structural, typing, payload-bound, and cryptographic rules.
+
+**Verification & Test Gate:**
+- Subcommand `test-rpc-validator-precheck` added to `src/main.cpp`.
+- Test wrapper `tools/test_rpc_validator_precheck.sh` added and registered in `tools/run_all.sh` (`ONLY_PATTERN`).
+- Evaluated scenarios:
+  1. Setup: Genesis applied (height 1), mempool empty.
+  2. CONTROL 1: Validly-signed `TRANSFER` from `node0` to `bob` (nonce 0, amount 10, fee 1) -> admitted (`queued`, `mempool == 1`).
+  3. CONTROL 2: Future-nonce `TRANSFER` (nonce 1) -> admitted (`queued`, `mempool == 2`), verifying pipelining works.
+  4. NEGATIVE 1: `TRANSFER` with oversized payload (129 bytes > `TRANSFER_PAYLOAD_MAX` 128) -> throws `runtime_error` containing `"submitted tx rejected by validator (S-097)"` and `"TRANSFER payload exceeds 128-byte cap"`, mempool remains 0.
+  5. NEGATIVE 2: `STAKE` from anonymous account -> throws `runtime_error` containing `"submitted tx rejected by validator (S-097)"` and `"unauthorized tx type for anonymous account"`, mempool remains 0.
+  6. NEGATIVE 3: `STAKE` with malformed payload size (4 bytes instead of 8) -> throws `runtime_error` containing `"submitted tx rejected by validator (S-097)"` and `"STAKE payload must be 8 bytes"`, mempool remains 0.
+- Mutant verification:
+  - Disabling the S-097 validator pre-check in `rpc_submit_tx` causes all three NEGATIVE arms to fail RED (invalid transactions return status `queued` with mempool incremented).
+
+**Authority:**
+Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
+
+---
+
+## 2026-09-20 — D19a (S-098): Light-client state persistence durability via durable_write_replace
+
+**Context & Defect Analysis:**
+Finding F-3 (outbox review 2026-09-16, `docs/SECURITY.md` row S-098):
+`save_light_state` (`light/persist.cpp`) previously opened the destination anchor cache path using a plain truncating `std::ofstream(path, std::ios::binary | std::ios::trunc)`. If a process crash, power loss, or unhandled exception occurred mid-write, the existing cache file was truncated or left in a partial state, resulting in loss of the cached committee-verified anchor (forcing re-sync from genesis on next invocation).
+
+**Remedy (D19a / S-098):**
+Replaced the plain truncating ofstream with `determ::light::outbox::durable_write_replace(path, out)` from `light/outbox.hpp`.
+The write pipeline guarantees crash-durability and atomic replacement:
+1. Data is written to temporary file `path.<pid>.tmp` at mode 0600.
+2. File data and metadata are flushed to stable storage via `full_fsync` (`F_FULLFSYNC` on macOS / `fsync` on POSIX / `FlushFileBuffers` on Windows).
+3. Temporary file is atomically renamed over the destination `path` (`rename(2)` / `MoveFileExW`).
+4. On POSIX, the containing directory descriptor is opened and `full_fsync`'d to persist directory entry linkage.
+5. If any step fails before rename, the temporary file is unlinked and the pre-existing anchor cache at `path` remains completely intact and valid.
+
+**Verification & Test Gates:**
+- In-binary check added to `determ-light state --selftest` (check 9):
+  - Injects write failure via `DETERM_LIGHT_OUTBOX_INJECT=write_fail`.
+  - Asserts `save_light_state` throws error.
+  - Asserts the pre-existing anchor cache file at `tp` is NOT truncated or destroyed and remains readable with its original `head_height`.
+- CLI & pipeline test added to `tools/test_light_state.sh` Section (E):
+  - Asserts full trace event stream (`fsync_file`, `publish`, `fsync_dir`) is produced under `DETERM_LIGHT_OUTBOX_TRACE`.
+- Mutant falsification:
+  - Reverting `save_light_state` to bare `ofstream` fails both gates RED (no trace events emitted and/or pre-existing anchor is truncated on failure).
+
+**Authority:**
+Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.

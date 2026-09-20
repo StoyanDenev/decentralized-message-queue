@@ -229,6 +229,18 @@ if $DETERM_LIGHT help 2>&1 | grep -q -- "--resume"; then
 else echo "  FAIL: --resume not in help"; fail=$((fail+1)); fi
 
 echo ""
+echo "=== (E) S-098 durable_write_replace trace & atomic replace verification ==="
+TRACE="$T/durability_trace.log"
+rm -f "$TRACE"
+DETERM_LIGHT_OUTBOX_TRACE="$TRACE" $DETERM_LIGHT state --selftest >/dev/null 2>&1
+ck $? 0 "state --selftest passes under trace"
+if [ -f "$TRACE" ] && grep -q "fsync_file" "$TRACE" && grep -q "publish" "$TRACE" && grep -q "fsync_dir" "$TRACE"; then
+    echo "  PASS: durable_write_replace executed full fsync+publish+fsync_dir pipeline (S-098)"; pass=$((pass+1))
+else
+    echo "  FAIL: durable write trace events missing from $TRACE"; fail=$((fail+1))
+fi
+
+echo ""
 echo "=== Test summary ==="
 echo "  $pass pass / $fail fail"
 if [ "$fail" -eq 0 ]; then echo "  PASS: test_light_state"; exit 0

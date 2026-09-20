@@ -7,6 +7,7 @@
 // std::filesystem; no dependency on the daemon, libsodium, or asio.
 
 #include "persist.hpp"
+#include "outbox.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -128,11 +129,10 @@ void save_light_state(const std::string& path, const LightState& s) {
         out.insert(out.end(), buf, buf + 32);
     }
 
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) throw std::runtime_error("save_light_state: cannot open '" + path + "' for write");
-    f.write(reinterpret_cast<const char*>(out.data()),
-            static_cast<std::streamsize>(out.size()));
-    if (!f) throw std::runtime_error("save_light_state: write error on '" + path + "'");
+    // S-098 (outbox finding F-3): durable atomic replacement replaces the
+    // plain truncating ofstream write (write temp -> fsync -> rename -> dir fsync)
+    // ensuring anchor cache durability and crash safety.
+    determ::light::outbox::durable_write_replace(path, out);
 }
 
 LightState load_light_state(const std::string& path) {
