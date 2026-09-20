@@ -11001,6 +11001,25 @@ int cmd_selftest_tx_inclusion_height(int argc, char** argv) {
                       && (r.detail.find("committee-sig verification failed") != std::string::npos);
         check(notrip, "CTRL: a matching block index passes the index gate and reaches the committee-sig anchor (non-vacuity)");
     }
+    // S-100: when genesis specifies k_block_sigs > 0, verify_tx_inclusion_from_block
+    // activates the LV-1 quorum downgrade guard via verify_block_sigs(..., expected_k).
+    // A block with fewer creators than expected_k is rejected as UNVERIFIABLE.
+    {
+        determ::chain::GenesisConfig genesis_k{};
+        genesis_k.k_block_sigs = 10;
+        std::map<std::string, PubKey> alice_seed;
+        alice_seed["alice"] = PubKey{};
+        auto blk = mk_block(100);
+        blk["creators"] = {"alice"}; // 1 creator vs expected 10
+        blk["creator_block_sigs"] = {std::string(128, '0')};
+        auto r = verify_tx_inclusion_from_block(
+            blk, alice_seed, genesis_k, /*height=*/100, dummy_hash);
+        bool s100_hit = (r.verdict == InclusionVerdict::UNVERIFIABLE)
+                        && r.detail.find("refusing a quorum downgrade") != std::string::npos
+                        && r.detail.find("genesis k_block_sigs=10") != std::string::npos;
+        check(s100_hit, "S-100: quorum downgrade (creators.size() < expected_k) is rejected as UNVERIFIABLE");
+    }
+
 
     std::cout << "\n  " << pass << " pass / " << fail << " fail\n";
     if (fail == 0) { std::cout << "  PASS: selftest-tx-inclusion-height\n"; return 0; }

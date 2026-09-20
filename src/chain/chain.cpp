@@ -3561,6 +3561,7 @@ Chain Chain::load(const std::string& path, const Params& p) {
         c.set_params(p);
 
         const fs::path dir = store_dir_for(path);
+        Hash prev_hash{};
         for (uint64_t i = 0; i < height; ++i) {
             const fs::path bpath = block_path_for(dir, i);
             if (!fs::exists(bpath)) throw std::runtime_error(
@@ -3578,6 +3579,25 @@ Chain Chain::load(const std::string& path, const Params& p) {
             Block b = Block::decode_frame(
                 reinterpret_cast<const uint8_t*>(data.data()) + 4,
                 data.size() - 4);
+            // S-084: verify block index and hash chain link.
+            if (b.index != i) {
+                throw std::runtime_error(
+                    "chain store: block index mismatch in " + bpath.string()
+                    + "; expected " + std::to_string(i) + " got " + std::to_string(b.index));
+            }
+            if (i == 0) {
+                if (b.prev_hash != Hash{}) {
+                    throw std::runtime_error(
+                        "chain store: genesis block prev_hash non-zero in " + bpath.string());
+                }
+            } else {
+                if (b.prev_hash != prev_hash) {
+                    throw std::runtime_error(
+                        "chain store: block " + std::to_string(i) + " prev_hash mismatch in " + bpath.string()
+                        + "; expected " + to_hex(prev_hash) + " got " + to_hex(b.prev_hash));
+                }
+            }
+            prev_hash = b.compute_hash();
             c.apply_transactions(b);
             c.blocks_.push_back(std::move(b));
         }
@@ -3654,6 +3674,24 @@ nlohmann::json Chain::export_store_json(const std::string& path) {
                 "chain store: bad block magic (expected DBK1) in " + bpath.string());
         Block b = Block::decode_frame(
             reinterpret_cast<const uint8_t*>(data.data()) + 4, data.size() - 4);
+        // S-084: verify block index and hash chain link.
+        if (b.index != i) {
+            throw std::runtime_error(
+                "chain store: block index mismatch in " + bpath.string()
+                + "; expected " + std::to_string(i) + " got " + std::to_string(b.index));
+        }
+        if (i == 0) {
+            if (b.prev_hash != Hash{}) {
+                throw std::runtime_error(
+                    "chain store: genesis block prev_hash non-zero in " + bpath.string());
+            }
+        } else {
+            if (b.prev_hash != last_hash) {
+                throw std::runtime_error(
+                    "chain store: block " + std::to_string(i) + " prev_hash mismatch in " + bpath.string()
+                    + "; expected " + to_hex(last_hash) + " got " + to_hex(b.prev_hash));
+            }
+        }
         last_hash = b.compute_hash();
         out["blocks"].push_back(b.to_json());
     }

@@ -162,11 +162,14 @@ TxInclusionResult verify_tx_inclusion_from_block(
         // binds tx_root AND creator_tx_lists. Every creator must be in
         // our genesis-seeded committee (verify_block_sigs enforces this).
         json committee_json = build_committee_json(committee_seed);
-        auto vbs = verify_block_sigs(blk_json, committee_json, /*bft=*/false);
+        // S-100: enforce LV-1 quorum floor (pass expected_k=genesis.k_block_sigs and bft_enabled)
+        auto vbs = verify_block_sigs(blk_json, committee_json, /*bft=*/false,
+                                     genesis.k_block_sigs, genesis.bft_enabled);
         if (!vbs.ok) {
             // BFT fallback: a BFT-escalated block has up to K - ceil(2K/3)
             // sentinel-zero slots; retry once at the BFT threshold.
-            vbs = verify_block_sigs(blk_json, committee_json, /*bft=*/true);
+            vbs = verify_block_sigs(blk_json, committee_json, /*bft=*/true,
+                                     genesis.k_block_sigs, genesis.bft_enabled);
         }
         if (!vbs.ok) {
             res.verdict = InclusionVerdict::UNVERIFIABLE;

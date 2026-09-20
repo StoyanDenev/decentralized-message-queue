@@ -118,6 +118,12 @@ void Peer::send(const Message& msg) {
     // surface loudly at the call site, never mask itself as legacy traffic.
     std::vector<uint8_t> bytes = msg.serialize_binary();
     std::lock_guard<std::mutex> lock(write_mutex_);
+    // S-082: if write queue exceeds capacity, close the connection to prevent
+    // memory exhaustion on slow/non-reading peers.
+    if (write_queue_.size() >= MAX_PEER_WRITE_QUEUE) {
+        conn_->close();
+        return;
+    }
     bool idle = write_queue_.empty();
     write_queue_.push_back(std::move(bytes));
     if (idle) do_write();
@@ -140,8 +146,12 @@ void Peer::do_write() {
             {
                 std::lock_guard<std::mutex> lock(self->write_mutex_);
                 self->write_queue_.pop_front();
-                if (ec) failed = true;
-                else if (!self->write_queue_.empty()) self->do_write();
+                if (ec) {
+                    failed = true;
+                    self->write_queue_.clear();
+                } else if (!self->write_queue_.empty()) {
+                    self->do_write();
+                }
             }
             if (failed && self->on_close_) self->on_close_(self);
         });

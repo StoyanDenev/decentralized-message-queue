@@ -2877,7 +2877,16 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
         if (chain_.registrants().count(tx.from) || tx.nonce != 0) return false;
         std::copy_n(tx.payload.begin(), 32, pk.begin());
     } else if (from_anon) {
-        if (tx.type != TxType::TRANSFER) return false;
+        // S-065: anonymous accounts may TRANSFER, SHIELD, UNSHIELD,
+        // CONFIDENTIAL_TRANSFER, ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS,
+        // and REGISTER_NOTE_KEY (matching BlockValidator::check_transaction).
+        if (tx.type != TxType::TRANSFER
+            && tx.type != TxType::SHIELD
+            && tx.type != TxType::UNSHIELD
+            && tx.type != TxType::CONFIDENTIAL_TRANSFER
+            && tx.type != TxType::ROTATE_AUDIT_KEY
+            && tx.type != TxType::LOG_AUDIT_ACCESS
+            && tx.type != TxType::REGISTER_NOTE_KEY) return false;
         pk = parse_anon_pubkey(tx.from);
     } else {
         auto& regs = chain_.registrants();

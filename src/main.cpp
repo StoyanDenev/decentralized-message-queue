@@ -51956,6 +51956,34 @@ int main(int argc, char** argv) {
             check(n.rpc_status()["mempool_size"].get<size_t>() == 1,
                   "ingress mirror: honest anon sender tx is ADMITTED to mempool");
 
+            // S-065: anonymous SHIELD / CONFIDENTIAL_TRANSFER / etc. are admitted at ingress
+            Transaction anon_shield;
+            anon_shield.type = TxType::SHIELD;
+            anon_shield.from = honest_anon_addr;
+            anon_shield.to = "";
+            anon_shield.amount = 5;
+            anon_shield.fee = 1;
+            anon_shield.nonce = 1;
+            auto sb_sh = anon_shield.signing_bytes();
+            anon_shield.sig = crypto::sign(honest_anon, sb_sh.data(), sb_sh.size());
+            anon_shield.hash = anon_shield.compute_hash();
+            n.on_tx_for_test(anon_shield);
+            check(n.rpc_status()["mempool_size"].get<size_t>() == 2,
+                  "S-065: honest anon SHIELD tx is ADMITTED at gossip ingress");
+
+            Transaction anon_stake;
+            anon_stake.type = TxType::STAKE;
+            anon_stake.from = honest_anon_addr;
+            anon_stake.amount = 0;
+            anon_stake.fee = 1;
+            anon_stake.nonce = 2;
+            anon_stake.payload = {1, 2, 3, 4, 5, 6, 7, 8};
+            auto sb_st = anon_stake.signing_bytes();
+            anon_stake.sig = crypto::sign(honest_anon, sb_st.data(), sb_st.size());
+            anon_stake.hash = anon_stake.compute_hash();
+            n.on_tx_for_test(anon_stake);
+            check(n.rpc_status()["mempool_size"].get<size_t>() == 2,
+                  "S-065: anon STAKE tx is DROPPED at gossip ingress");
             fs::remove_all(dir, fec);
         }
 
@@ -52066,6 +52094,37 @@ int main(int argc, char** argv) {
         check(n.rpc_status()["sync_state"].get<std::string>() == "in_sync",
               "S-080: empty chain response clamps peer height to local tip and enters IN_SYNC");
 
+        // 4. S-082: Bounded peer egress write queue (MAX_PEER_WRITE_QUEUE = 256)
+        class SlowConn : public Connection {
+        public:
+            bool closed{false};
+            IoCb pending_cb;
+            void async_read(void*, std::size_t, IoCb) override {}
+            void async_write(const void*, std::size_t, IoCb cb) override {
+                pending_cb = std::move(cb);
+            }
+            void close() override { closed = true; }
+            std::string remote_endpoint() const override { return "10.0.0.9:7009"; }
+            void set_keep_alive(bool) override {}
+            bool write_all(const void*, std::size_t) override { return true; }
+            void set_send_timeout(std::chrono::milliseconds) override {}
+            bool read_line(std::string&) override { return false; }
+        };
+
+        auto slow_conn = std::make_shared<SlowConn>();
+        auto slow_peer = std::make_shared<Peer>(slow_conn);
+        Message dummy_msg;
+        dummy_msg.type = MsgType::STATUS_REQUEST;
+        for (size_t idx = 0; idx < Peer::MAX_PEER_WRITE_QUEUE; ++idx) {
+            slow_peer->send(dummy_msg);
+        }
+        check(!slow_conn->closed, "S-082: peer connection remains open while queue <= MAX_PEER_WRITE_QUEUE");
+        check(slow_peer->write_queue_size() == Peer::MAX_PEER_WRITE_QUEUE,
+              "S-082: peer write queue reaches exactly MAX_PEER_WRITE_QUEUE (256)");
+        slow_peer->send(dummy_msg);
+        check(slow_conn->closed, "S-082: peer connection is closed when write queue reaches MAX_PEER_WRITE_QUEUE");
+        check(slow_peer->write_queue_size() == Peer::MAX_PEER_WRITE_QUEUE,
+              "S-082: write queue does not exceed MAX_PEER_WRITE_QUEUE");
         fs::remove_all(dir, fec);
         std::cout << (fail ? "  FAIL: test-sync-storm-and-lead-bound\n"
                            : "  PASS: test-sync-storm-and-lead-bound\n");
@@ -54576,6 +54635,72 @@ int main(int argc, char** argv) {
                   && r.compute_state_root() == c.compute_state_root(),
                   "CS-10 graceful stop: the single store write leaves a chain that "
                   "reloads identically");
+        }
+
+        // CS-11. S-084: Storage integrity — loader validates index & prev_hash continuity.
+        // Tampering with an intermediate block's index or prev_hash must be rejected
+        // by both Chain::load and Chain::export_store_json.
+        {
+            reset();
+            Chain c = build();
+            extend(c, 1); // height 3: block 0 (genesis), block 1, block 2
+            c.save_incremental(path);
+            check(fs::exists(storedir / "1.blk") && fs::exists(storedir / "2.blk"),
+                  "CS-11 setup: blocks 0, 1, 2 exist in store");
+
+            // (1) Tamper block 1's prev_hash (corrupting the hash link)
+            const std::string b1_orig = slurp(storedir / "1.blk");
+            Block b1 = Block::decode_frame(
+                reinterpret_cast<const uint8_t*>(b1_orig.data()) + 4, b1_orig.size() - 4);
+            b1.prev_hash[0] ^= 0xff;
+            std::vector<uint8_t> tampered1_frame; b1.encode_frame(tampered1_frame);
+            std::string tampered1 = std::string("DBK1", 4) +
+                std::string(reinterpret_cast<const char*>(tampered1_frame.data()), tampered1_frame.size());
+            spew(storedir / "1.blk", tampered1);
+
+            bool load_link_rej = false;
+            std::string load_link_err;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception& e) { load_link_rej = true; load_link_err = e.what(); }
+            check(load_link_rej && load_link_err.find("prev_hash mismatch") != std::string::npos,
+                  "CS-11 S-084: Chain::load REJECTS intermediate block with corrupted prev_hash");
+
+            bool export_link_rej = false;
+            std::string export_link_err;
+            try { (void)Chain::export_store_json(path); }
+            catch (const std::exception& e) { export_link_rej = true; export_link_err = e.what(); }
+            check(export_link_rej && export_link_err.find("prev_hash mismatch") != std::string::npos,
+                  "CS-11 S-084: Chain::export_store_json REJECTS intermediate block with corrupted prev_hash");
+
+            // (2) Restore block 1, tamper block 2's index
+            spew(storedir / "1.blk", b1_orig);
+            const std::string b2_orig = slurp(storedir / "2.blk");
+            Block b2 = Block::decode_frame(
+                reinterpret_cast<const uint8_t*>(b2_orig.data()) + 4, b2_orig.size() - 4);
+            b2.index = 999;
+            std::vector<uint8_t> tampered2_frame; b2.encode_frame(tampered2_frame);
+            std::string tampered2 = std::string("DBK1", 4) +
+                std::string(reinterpret_cast<const char*>(tampered2_frame.data()), tampered2_frame.size());
+            spew(storedir / "2.blk", tampered2);
+
+            bool load_idx_rej = false;
+            std::string load_idx_err;
+            try { (void)Chain::load(path, 10); }
+            catch (const std::exception& e) { load_idx_rej = true; load_idx_err = e.what(); }
+            check(load_idx_rej && load_idx_err.find("block index mismatch") != std::string::npos,
+                  "CS-11 S-084: Chain::load REJECTS block with mismatched index");
+
+            bool export_idx_rej = false;
+            std::string export_idx_err;
+            try { (void)Chain::export_store_json(path); }
+            catch (const std::exception& e) { export_idx_rej = true; export_idx_err = e.what(); }
+            check(export_idx_rej && export_idx_err.find("block index mismatch") != std::string::npos,
+                  "CS-11 S-084: Chain::export_store_json REJECTS block with mismatched index");
+
+            // Restore block 2; verify clean load
+            spew(storedir / "2.blk", b2_orig);
+            check(Chain::load(path, 10).height() == 3,
+                  "CS-11: restored store loads cleanly to height 3");
         }
 
         fs::remove_all(base, ec);

@@ -5436,3 +5436,36 @@ Captures of an ERROR message deliberately still pass the RAW flag and still merg
 
 **Authority:**
 Owner decisions D5a, D6, D7, D8, D9, D10, D19a, D19b-i (DECISION-LOG 2026-09-16).
+
+## 2026-09-20 — storage integrity (S-084), light-client quorum floor (S-100), bounded egress (S-082), and anonymous CT ingress parity (S-065)
+
+**Status:** landed.
+
+**What landed:**
+1. **D19a (S-084) — Storage integrity & hash continuity on reload:**
+   - In `src/chain/chain.cpp`, `Chain::load` and `Chain::export_store_json` validate sequential block index continuity (`b.index == i`) and cryptographic hash linking (`b.prev_hash == (i == 0 ? Hash{} : prev_hash)` where `prev_hash` is the recomputed hash of block $i-1$).
+   - Mismatched or non-linking blocks throw `std::runtime_error`, rejecting corrupted block files fail-closed.
+   - Gated by `test-chain-store` (CS-11: corrupted `prev_hash` and corrupted `index` both rejected) and `tools/test_chain_store.sh`. S-084 mitigated.
+
+2. **D19a (S-100) — Light-client quorum downgrade check on inclusion proofs:**
+   - In `light/verify_tx_inclusion.cpp`, `verify_tx_inclusion_from_block` passes `genesis.k_block_sigs` and `genesis.bft_enabled` to `verify_block_sigs`.
+   - Blocks with fewer creators than required by genesis ($K$-of-$K$ in MD mode) are rejected as `InclusionVerdict::UNVERIFIABLE`.
+   - Gated by `determ-light selftest-tx-inclusion-height` and `tools/test_light_verify_tx_inclusion_height.sh`. S-100 mitigated.
+
+3. **D19a (S-082) — Bounded peer egress write queue:**
+   - Declared `MAX_PEER_WRITE_QUEUE = 256` in `include/determ/net/peer.hpp`.
+   - In `src/net/peer.cpp`, `Peer::send` checks write queue backlog: if `write_queue_.size() >= MAX_PEER_WRITE_QUEUE`, it terminates the connection via `conn_->close()` without enqueuing further bytes, preventing unbounded memory growth from slow or non-reading peers.
+   - `Peer::do_write` clears the backlog when an async write completes with an I/O error (`ec != 0`).
+   - Gated by `test-sync-storm-and-lead-bound` (harness saturates queue to 256, verifies 257th message closes peer and halts deque growth) and `tools/test_sync_storm_and_lead_bound.sh`. S-082 mitigated.
+
+4. **S-065 anon ingress arm — Anonymous transaction mempool ingress parity:**
+   - In `src/node/node.cpp`, `Node::verify_tx_signature_locked` admits anonymous `SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`, `ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS`, and `REGISTER_NOTE_KEY` matching `BlockValidator::check_transaction` rules.
+   - Eliminates the client-facing rejection where `determ-light build-shield` submissions were dropped at gossip and RPC ingress.
+   - Gated by `test-anon-small-order-key` (asserts honest anonymous `SHIELD` is admitted to mempool while unpermitted anonymous `STAKE` is dropped) and `tools/test_anon_small_order_key.sh`.
+
+**Verification:**
+- Full local CI suite: `bash tools/ci_local.sh` passing all 329 test wrappers, 0 failures, 16 doc coherence and tier checks green.
+- Ledger coherence guard: `bash tools/test_security_ledger_coherence.sh` PASS (24 OPEN rows, 0 REOPENED rows, summary counts derived).
+
+**Authority:**
+Owner decisions D19a (DECISION-LOG 2026-09-16).

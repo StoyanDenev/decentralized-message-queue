@@ -41,6 +41,15 @@ public:
     bool hello_received() const { return hello_received_; }
     void mark_hello_received()  { hello_received_ = true; }
 
+    // S-082: bound egress write queue per peer to prevent unbounded memory growth
+    // on slow or non-reading peers.
+    static constexpr size_t MAX_PEER_WRITE_QUEUE = 256;
+
+    size_t write_queue_size() {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        return write_queue_.size();
+    }
+
 private:
     void read_header();
     void read_body(uint32_t len);
