@@ -37,6 +37,7 @@
 // Ed25519 layout seed(32)||pubkey(32); the C99 sign/convert primitives take
 // the 32-byte seed, so the shim slices sk[0..31].
 #include <determ/crypto/ed25519/ed25519.h>
+#include <determ/crypto/ed25519/ed25519_group.h>
 #include <determ/crypto/x25519/x25519.h>
 #include <determ/crypto/secure_zero.h>
 // The ONE restricted-write primitive (S-109 follow-up, 2026-09-18): the
@@ -10224,6 +10225,15 @@ int cmd_sign_anon_tx(int argc, char** argv) {
                      "canonical anon addresses on submit)\n";
         return 1;
     }
+    if (is_anon_shape(to_str) && is_canonical_anon(to_str)) {
+        try {
+            auto to_bytes = from_hex(to_str.substr(2));
+            if (to_bytes.size() == 32 && determ_ed25519_point_has_small_order(to_bytes.data()) != 0) {
+                std::cerr << "warning: destination address is a small-order curve point (D10 / S-072): "
+                          << "funds sent to this address are permanently unspendable (burn)\n";
+            }
+        } catch (...) {}
+    }
 
     // ── --out preconditions (mirrors cold-sign behaviour) ────────────────
     // Check BEFORE loading the priv keyfile so a misconfigured operator
@@ -12259,6 +12269,11 @@ int cmd_validate_tx(int argc, char** argv) {
                                             "under from-derived pubkey "
                                             "(sig forged, body modified, "
                                             "or wrong key)";
+                } else if (determ_ed25519_point_has_small_order(pub_bytes.data()) != 0) {
+                    signature_verified = false;
+                    signature_diagnostic = "anonymous sender key is a small-order curve point (S-072/D10); "
+                                           "invalid under consensus";
+                    set_structural_fail("anonymous sender key has small order (S-072/D10)");
                 }
             }
         } else {

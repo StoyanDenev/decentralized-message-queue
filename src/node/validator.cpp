@@ -909,6 +909,10 @@ BlockValidator::Result BlockValidator::check_transaction(
         auto sb = tx.signing_bytes();
         if (!verify(pk, sb.data(), sb.size(), tx.sig))
             return {false, "tx signature invalid from: " + tx.from};
+        // D10 / S-072: an anonymous sender key that is a small-order (torsion)
+        // curve point is invalid (checked AFTER the signature, like S-068).
+        if (from_anon && determ_ed25519_point_has_small_order(pk.data()) != 0)
+            return {false, "anonymous sender key is a small-order curve point (S-072/D10): " + tx.from};
         }  // end non-PQ (Ed25519) signature path (§3.21)
 
         if (tx.nonce != expected_nonce)
@@ -1452,6 +1456,12 @@ BlockValidator::Result BlockValidator::check_transaction(
                     return {false, "COMPOSABLE_BATCH inner["
                                  + std::to_string(ii)
                                  + "] signature invalid from " + it.from};
+                }
+                // D10 / S-072: an anonymous sender key that is a small-order curve point is invalid
+                if (is_anon_address(it.from) && determ_ed25519_point_has_small_order(ipk.data()) != 0) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] anonymous sender key is a small-order curve point (S-072/D10): " + it.from};
                 }
             }
             break;

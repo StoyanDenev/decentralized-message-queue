@@ -321,12 +321,32 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
 }
 
 void GossipNet::handle_peer_closed(std::shared_ptr<Peer> peer) {
-    std::lock_guard<std::mutex> lk(peers_mutex_);
-    peers_.erase(std::remove_if(peers_.begin(), peers_.end(),
-        [&](auto& p) { return p.get() == peer.get(); }), peers_.end());
+    {
+        std::lock_guard<std::mutex> lk(peers_mutex_);
+        peers_.erase(std::remove_if(peers_.begin(), peers_.end(),
+            [&](auto& p) { return p.get() == peer.get(); }), peers_.end());
+    }
     if (!log_quiet_) {
         std::cout << "[gossip] peer disconnected: " << peer->address() << "\n";
     }
+    if (on_peer_disconnected) on_peer_disconnected(peer);
+}
+
+bool GossipNet::send_to_address(const std::string& addr, const Message& msg) {
+    std::shared_ptr<Peer> target;
+    {
+        std::lock_guard<std::mutex> lk(peers_mutex_);
+        for (auto& p : peers_) {
+            if (p->address() == addr) {
+                target = p;
+                break;
+            }
+        }
+    }
+    if (target) {
+        try { target->send(msg); return true; } catch (...) { return false; }
+    }
+    return false;
 }
 
 void GossipNet::broadcast(const Message& msg) {

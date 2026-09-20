@@ -5,7 +5,9 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/crypto/ed25519/ed25519_group.h>
 #include <algorithm>
+#include <iostream>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -758,9 +760,18 @@ Transaction build_transfer(const LightKeyfile& kf, const TransferSpec& spec, uin
     if (spec.to.empty()) throw std::runtime_error("TRANSFER requires --to");
     if (kf.anon_address == determ::chain::ZEROTH_ADDRESS)
         throw std::runtime_error("the Zeroth pool address cannot send (validator.cpp E1 guard)");
+    if (determ_ed25519_point_has_small_order(kf.key.pub.data()) != 0)
+        throw std::runtime_error("anonymous sender key is a small-order curve point (S-072/D10)");
     if (is_anon_address(spec.to) && spec.to != normalize_anon_address(spec.to))
         throw std::runtime_error("--to is anon-shape but not canonical lowercase (S-028); use "
                                  + normalize_anon_address(spec.to));
+    if (is_anon_address(spec.to)) {
+        auto dest_pk = parse_anon_pubkey(spec.to);
+        if (determ_ed25519_point_has_small_order(dest_pk.data()) != 0) {
+            std::cerr << "warning: destination address is a small-order curve point (D10 / S-072): "
+                      << "funds sent to this address are permanently unspendable (burn)\n";
+        }
+    }
     if (spec.payload.size() > determ::chain::TRANSFER_PAYLOAD_MAX)
         throw std::runtime_error("payload exceeds TRANSFER_PAYLOAD_MAX ("
                                  + std::to_string(determ::chain::TRANSFER_PAYLOAD_MAX) + " bytes)");

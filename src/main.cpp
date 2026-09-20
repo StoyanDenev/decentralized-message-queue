@@ -1077,6 +1077,12 @@ Additional in-process tests:
                                               TRANSFER from the Zeroth pool is REJECTED
                                               (verifier) and never applied; demonstrates
                                               the forged signature under the all-zero key
+  determ test-anon-small-order-key            D10 / S-072 gate — an anonymous sender key that
+                                              is a small-order point is REJECTED by verifier
+                                              (outer and inner batch) and ingress mirror
+  determ test-sync-storm-and-lead-bound       S-080 / S-085 gate — peer height plausibility
+                                              lead bound (MAX_SYNC_LEAD) and GET_CHAIN sync
+                                              storm suppression (disconnect pruning + clamp)
   determ test-register-create-only            V-REG-1 / S-060 gate — REGISTER is
                                               create-only: a registered, deregistered
                                               or incumbent domain cannot be re-REGISTERed
@@ -51585,6 +51591,315 @@ int main(int argc, char** argv) {
         fs::remove_all(dir, fec);
         std::cout << (fail ? "  FAIL: test-inbound-receipt-cap\n"
                            : "  PASS: test-inbound-receipt-cap\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-anon-small-order-key") {
+        // D10 / S-072: An anonymous sender key that is a small-order (8-torsion)
+        // curve point is invalid under consensus (checked in BlockValidator and mirrored
+        // at mempool ingress in Node::verify_tx_signature_locked).
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        const char* kSmallOrder[10] = {
+            "0100000000000000000000000000000000000000000000000000000000000000", // O (order 1)
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // y = -1 (order 2)
+            "0000000000000000000000000000000000000000000000000000000000000000", // y = 0 (order 4)
+            "0000000000000000000000000000000000000000000000000000000000000080", // y = 0, other x (order 4)
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", // order 8
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", // order 8
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", // order 8
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", // order 8
+            "0100000000000000000000000000000000000000000000000000000000000080", // O again (sign bit set)
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // y = -1 again (sign bit set)
+        };
+
+        // 1. Precondition: determ_ed25519_point_has_small_order returns 1 for all 10
+        int agreed = 0;
+        for (auto hex : kSmallOrder) {
+            auto p = from_hex_arr<32>(hex);
+            if (determ_ed25519_point_has_small_order(p.data()) == 1) ++agreed;
+        }
+        check(agreed == 10, "precondition: all 10 torsion points detected as small-order");
+
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey alice = mk_key(0x21);
+        crypto::NodeKey honest_anon = mk_key(0x32);
+        std::string honest_anon_addr = "0x" + to_hex(honest_anon.pub);
+
+        GenesisConfig cfg;
+        cfg.chain_id = "anon-small-order-test";
+        GenesisCreator c0; c0.domain = "alice"; c0.ed_pub = alice.pub; c0.initial_stake = 1000;
+        cfg.initial_creators = { c0 };
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 100000;
+        GenesisAllocation ga2; ga2.domain = honest_anon_addr; ga2.balance = 100000;
+        cfg.initial_balances = { ga, ga2 };
+        Chain chain; chain.append(make_genesis_block(cfg));
+        NodeRegistry reg = NodeRegistry::build_from_chain(chain, chain.height());
+        BlockValidator v;
+
+        // 2. Test BlockValidator::check_transaction rejection for all 10 small-order anon senders
+        Signature vacuous{}; vacuous[0] = 0x01;
+        int rejected_validator = 0;
+        for (auto hex : kSmallOrder) {
+            std::string anon_addr = "0x" + std::string(hex);
+            auto p = from_hex_arr<32>(hex);
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = anon_addr;
+            tx.amount = 10;
+            tx.fee = 1;
+            tx.nonce = 0;
+            tx.sig = vacuous;
+            bool found = false;
+            for (int t = 0; t < 4096; ++t) {
+                tx.to = "alice" + std::to_string(t);
+                auto sb = tx.signing_bytes();
+                if (crypto::verify(p, sb.data(), sb.size(), vacuous)) { found = true; break; }
+            }
+            tx.hash = tx.compute_hash();
+            auto res = v.check_transaction(tx, chain.height(), chain, reg, chain.next_nonce(tx.from));
+            if (!res.ok && (res.error.find("small-order curve point (S-072/D10)") != std::string::npos ||
+                            res.error.find("Zeroth pool is a pseudo-account") != std::string::npos)) {
+                ++rejected_validator;
+            }
+        }
+        check(rejected_validator == 10, "BlockValidator rejects all 10 small-order anon senders (S-072/D10 or E1)");
+
+        // Control: honest anon sender with genuine signature passes
+        {
+            Transaction htx;
+            htx.type = TxType::TRANSFER;
+            htx.from = honest_anon_addr;
+            htx.to = "alice";
+            htx.amount = 100;
+            htx.fee = 5;
+            htx.nonce = 0;
+            auto sb = htx.signing_bytes();
+            htx.sig = crypto::sign(honest_anon, sb.data(), sb.size());
+            htx.hash = htx.compute_hash();
+            auto res = v.check_transaction(htx, chain.height(), chain, reg, chain.next_nonce(htx.from));
+            check(res.ok, "BlockValidator admits honest anonymous sender with genuine signature");
+        }
+
+        // 3. Test COMPOSABLE_BATCH inner rejection
+        {
+            auto outer_batch = [&](const std::vector<Transaction>& inners) {
+                Transaction b; b.type = TxType::COMPOSABLE_BATCH; b.from = "alice"; b.to = "";
+                b.amount = 0; b.fee = 10; b.nonce = chain.next_nonce("alice");
+                b.payload = encode_batch_payload(inners);
+                auto sb = b.signing_bytes();
+                b.sig = crypto::sign(alice, sb.data(), sb.size());
+                b.hash = b.compute_hash();
+                return b;
+            };
+
+            Transaction bad_inner;
+            bad_inner.type = TxType::TRANSFER;
+            bad_inner.from = "0x" + std::string(kSmallOrder[0]);
+            bad_inner.amount = 50;
+            bad_inner.fee = 0;
+            bad_inner.nonce = 0;
+            bad_inner.sig = vacuous;
+            auto p2 = from_hex_arr<32>(kSmallOrder[0]);
+            for (int t = 0; t < 4096; ++t) {
+                bad_inner.to = "alice" + std::to_string(t);
+                auto sb = bad_inner.signing_bytes();
+                if (crypto::verify(p2, sb.data(), sb.size(), vacuous)) break;
+            }
+            bad_inner.hash = bad_inner.compute_hash();
+
+            Transaction batch = outer_batch({bad_inner});
+            auto res = v.check_transaction(batch, chain.height(), chain, reg, chain.next_nonce("alice"));
+            check(!res.ok && res.error.find("small-order curve point (S-072/D10)") != std::string::npos,
+                  "BlockValidator rejects COMPOSABLE_BATCH with small-order inner anon sender");
+        }
+
+        // 4. Ingress mirror check in Node (mempool admission)
+        {
+            using namespace determ::net;
+            namespace fs = std::filesystem;
+            std::error_code fec;
+            fs::path dir = fs::temp_directory_path() / "determ-anon-small-order-node";
+            fs::remove_all(dir, fec);
+            fs::create_directories(dir / "node0");
+            const std::string gpath = (dir / "genesis.json").string();
+            cfg.save(gpath);
+            node::Config ncfg;
+            ncfg.domain = "alice"; ncfg.data_dir = (dir / "node0").string();
+            ncfg.listen_port = 7688; ncfg.key_path = (dir / "node0.key").string();
+            ncfg.chain_path = (dir / "node0" / "chain.json").string();
+            ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+            ncfg.log_quiet = true;
+            crypto::save_node_key(alice, ncfg.key_path);
+            VirtualNetwork vnet;
+            auto loop = std::make_unique<VirtualEventLoop>();
+            auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+            node::Node n(ncfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+
+            Transaction bad_tx;
+            bad_tx.type = TxType::TRANSFER;
+            bad_tx.from = "0x" + std::string(kSmallOrder[0]);
+            bad_tx.to = "alice";
+            bad_tx.amount = 10;
+            bad_tx.fee = 1;
+            bad_tx.nonce = 0;
+            bad_tx.sig = vacuous;
+            auto p0 = from_hex_arr<32>(kSmallOrder[0]);
+            for (uint64_t a = 1; a < 100; ++a) {
+                bad_tx.amount = a;
+                auto sb = bad_tx.signing_bytes();
+                if (crypto::verify(p0, sb.data(), sb.size(), vacuous)) break;
+            }
+            bad_tx.hash = bad_tx.compute_hash();
+
+            n.on_tx_for_test(bad_tx);
+            check(n.rpc_status()["mempool_size"].get<size_t>() == 0,
+                  "ingress mirror: small-order anon sender tx is DROPPED at gossip ingress");
+
+            bool rpc_rejected = false;
+            try { n.rpc_submit_tx(bad_tx.to_json()); } catch (...) { rpc_rejected = true; }
+            check(rpc_rejected, "ingress mirror: small-order anon sender tx is REJECTED at RPC submit");
+
+            // Control: valid tx is admitted
+            Transaction ok_tx;
+            ok_tx.type = TxType::TRANSFER;
+            ok_tx.from = honest_anon_addr;
+            ok_tx.to = "alice";
+            ok_tx.amount = 10;
+            ok_tx.fee = 1;
+            ok_tx.nonce = 0;
+            auto sb = ok_tx.signing_bytes();
+            ok_tx.sig = crypto::sign(honest_anon, sb.data(), sb.size());
+            ok_tx.hash = ok_tx.compute_hash();
+            n.on_tx_for_test(ok_tx);
+            check(n.rpc_status()["mempool_size"].get<size_t>() == 1,
+                  "ingress mirror: honest anon sender tx is ADMITTED to mempool");
+
+            fs::remove_all(dir, fec);
+        }
+
+        std::cout << (fail ? "  FAIL: test-anon-small-order-key\n"
+                           : "  PASS: test-anon-small-order-key\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-sync-storm-and-lead-bound") {
+        // S-085: Bounded lead plausibility check (MAX_SYNC_LEAD) on peer-reported height.
+        // S-080: Mitigate GET_CHAIN sync storm: clamp peer_heights_ on unprogressed chunks,
+        // prune disconnected peers from peer_heights_, suppress redundant in-flight sync requests.
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        using namespace determ::net;
+        namespace fs = std::filesystem;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        class TestConn : public Connection {
+            std::string ep_;
+        public:
+            explicit TestConn(std::string ep) : ep_(std::move(ep)) {}
+            void async_read(void*, std::size_t, IoCb) override {}
+            void async_write(const void*, std::size_t, IoCb cb) override {
+                if (cb) cb(std::error_code{}, 0);
+            }
+            void close() override {}
+            std::string remote_endpoint() const override { return ep_; }
+            void set_keep_alive(bool) override {}
+            bool write_all(const void*, std::size_t) override { return true; }
+            void set_send_timeout(std::chrono::milliseconds) override {}
+            bool read_line(std::string&) override { return false; }
+        };
+
+        auto mk_key = [](uint8_t base) {
+            crypto::NodeKey k;
+            for (size_t i = 0; i < k.priv_seed.size(); ++i) k.priv_seed[i] = uint8_t(base + i);
+            determ_ed25519_pubkey_from_seed(k.priv_seed.data(), k.pub.data());
+            return k;
+        };
+        crypto::NodeKey alice = mk_key(0x15);
+
+        std::error_code fec;
+        fs::path dir = fs::temp_directory_path() / "determ-sync-safety-test";
+        fs::remove_all(dir, fec);
+        fs::create_directories(dir / "node0");
+
+        GenesisConfig g;
+        g.chain_id = "sync-safety";
+        GenesisCreator gc; gc.domain = "alice"; gc.ed_pub = alice.pub; gc.initial_stake = 1000;
+        g.initial_creators.push_back(gc);
+        GenesisAllocation ga; ga.domain = "alice"; ga.balance = 100000;
+        g.initial_balances.push_back(ga);
+        const std::string gpath = (dir / "genesis.json").string();
+        g.save(gpath);
+
+        node::Config ncfg;
+        ncfg.domain = "alice"; ncfg.data_dir = (dir / "node0").string();
+        ncfg.listen_port = 7695; ncfg.key_path = (dir / "node0.key").string();
+        ncfg.chain_path = (dir / "node0" / "chain.json").string();
+        ncfg.genesis_path = gpath; ncfg.m_creators = 1; ncfg.k_block_sigs = 1;
+        ncfg.log_quiet = true;
+        crypto::save_node_key(alice, ncfg.key_path);
+
+        VirtualNetwork vnet;
+        auto loop = std::make_unique<VirtualEventLoop>();
+        auto transport = std::make_unique<VirtualTransport>(*loop, vnet);
+        node::Node n(ncfg, determ::time::RealClock::instance(), loop.get(), transport.get());
+
+        check(n.rpc_status()["height"].get<uint64_t>() == 1, "setup: node initialized at height 1");
+
+        auto peer1 = std::make_shared<Peer>(std::make_shared<TestConn>("10.0.0.1:7001"));
+        std::string gh = to_hex(n.chain_for_test().at(0).compute_hash());
+
+        // 1. S-085: Malicious peer reports height exceeding MAX_SYNC_LEAD (e.g. UINT64_MAX)
+        n.on_status_response_for_test(UINT64_MAX, gh, peer1);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "in_sync",
+              "S-085: peer reporting UINT64_MAX is rejected and does not wedge node into SYNCING");
+
+        // Report height > chain.height() + MAX_SYNC_LEAD
+        n.on_status_response_for_test(1 + MAX_SYNC_LEAD + 1, gh, peer1);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "in_sync",
+              "S-085: peer reporting height > height + MAX_SYNC_LEAD is rejected");
+
+        // Legitimate height within lead (e.g. height 20) triggers SYNCING
+        n.on_status_response_for_test(20, gh, peer1);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "syncing",
+              "control: plausible peer height triggers SYNCING");
+
+        // 2. S-085: Peer disconnect prunes peer_heights_ and returns node to IN_SYNC
+        n.on_peer_disconnected_for_test(peer1);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "in_sync",
+              "S-085: disconnecting peer prunes its height and restores IN_SYNC");
+
+        // 3. S-080: Empty chunk clamps peer's recorded height
+        auto peer2 = std::make_shared<Peer>(std::make_shared<TestConn>("10.0.0.2:7002"));
+        n.on_status_response_for_test(20, gh, peer2);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "syncing",
+              "setup for S-080: peer2 reports height 20 -> SYNCING");
+
+        // Empty response from peer2 clamps peer2's height to chain.height() (1)
+        n.on_chain_response_for_test({}, false, peer2);
+        check(n.rpc_status()["sync_state"].get<std::string>() == "in_sync",
+              "S-080: empty chain response clamps peer height to local tip and enters IN_SYNC");
+
+        fs::remove_all(dir, fec);
+        std::cout << (fail ? "  FAIL: test-sync-storm-and-lead-bound\n"
+                           : "  PASS: test-sync-storm-and-lead-bound\n");
         return fail ? 1 : 0;
     }
 

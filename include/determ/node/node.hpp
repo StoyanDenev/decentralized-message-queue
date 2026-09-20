@@ -585,6 +585,17 @@ public:
     // parameter set, or genesis bootstrap) so the gate can compare its
     // parameters and state_root against the producer's. Read-only.
     const chain::Chain& chain_for_test() const { return chain_; }
+    void on_status_response_for_test(uint64_t height, const std::string& genesis_hash,
+                                     std::shared_ptr<net::Peer> peer) {
+        on_status_response(height, genesis_hash, peer);
+    }
+    void on_chain_response_for_test(const std::vector<chain::Block>& blocks,
+                                    bool has_more, std::shared_ptr<net::Peer> peer) {
+        on_chain_response(blocks, has_more, peer);
+    }
+    void on_peer_disconnected_for_test(std::shared_ptr<net::Peer> peer) {
+        on_peer_disconnected(peer);
+    }
     // rev.9 B5: external submission of equivocation evidence. Forensics
     // tools and governance scripts can submit EquivocationEvent JSON
     // assembled off-chain (e.g., from log scraping that observed two
@@ -721,6 +732,7 @@ private:
     void on_status_request(std::shared_ptr<net::Peer> peer);
     void on_status_response(uint64_t height, const std::string& genesis_hash,
                              std::shared_ptr<net::Peer> peer);
+    void on_peer_disconnected(std::shared_ptr<net::Peer> peer);
 
     void start_sync_if_behind();
     void request_next_chunk();
@@ -1067,6 +1079,8 @@ private:
     SyncState                                state_{SyncState::SYNCING};
     std::map<std::string, uint64_t>          peer_heights_;
     std::shared_ptr<net::Peer>               sync_peer_;
+    bool                                     sync_in_flight_{false};
+    std::chrono::steady_clock::time_point    sync_request_time_{};
 
     // S-050 stall valve state. round_stall_ticks_ counts contrib/block-sig
     // timeout expiries since the last APPLIED BLOCK (the only progress

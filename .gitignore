@@ -44,3 +44,4 @@ build-linux/
 build-linux-ubsan/
 build-linux-asan/
 __pycache__/
+.aider*

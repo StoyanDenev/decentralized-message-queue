@@ -332,4 +332,9 @@ inline constexpr TimingProfile PROFILE_TACTICAL_TEST {
     CryptoProfile::FIPS
 };
 
+// S-085 / D19b-i: maximum lead a peer may report ahead of our local tip.
+// Beyond this, the height report is rejected as implausible to prevent hit-and-run
+// liveness pinning in SYNCING state.
+inline constexpr uint64_t MAX_SYNC_LEAD = 100'000;
+
 } // namespace determ::chain

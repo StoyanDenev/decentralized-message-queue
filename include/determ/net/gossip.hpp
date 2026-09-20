@@ -59,6 +59,7 @@ public:
 
     std::vector<std::string> peer_addresses() const;
     size_t peer_count() const;
+    bool send_to_address(const std::string& addr, const Message& msg);
 
     // Callbacks set by Node
     std::function<void(const chain::Block&)>        on_block;
@@ -109,6 +110,7 @@ public:
     std::function<void(uint64_t /*height*/,
                        const std::string& /*genesis_hash*/,
                        std::shared_ptr<Peer>)>      on_status_response;
+    std::function<void(std::shared_ptr<Peer>)>      on_peer_disconnected;
 
 private:
     void accept_loop();

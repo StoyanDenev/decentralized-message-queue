@@ -744,6 +744,8 @@ chain_loaded:
                                   { on_status_request(peer); };
     gossip_.on_status_response = [this](auto h, auto& gh, auto peer)
                                   { on_status_response(h, gh, peer); };
+    gossip_.on_peer_disconnected = [this](auto peer)
+                                  { on_peer_disconnected(peer); };
 }
 
 Node::~Node() {
@@ -2877,8 +2879,12 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     if (!verify(pk, sb.data(), sb.size(), tx.sig)) return false;
     // S-068 mirror (after the signature, like the verifier): a REGISTER whose
     // payload key is small-order never becomes resident either.
-    return tx.type != TxType::REGISTER
-        || determ_ed25519_point_has_small_order(pk.data()) == 0;
+    if (tx.type == TxType::REGISTER)
+        return determ_ed25519_point_has_small_order(pk.data()) == 0;
+    // D10 / S-072 mirror: an anonymous sender key that has small order never becomes resident.
+    if (from_anon)
+        return determ_ed25519_point_has_small_order(pk.data()) == 0;
+    return true;
 }
 
 TxAdmit Node::tx_admit_locked() {
@@ -3716,8 +3722,11 @@ void Node::on_chain_response(const std::vector<chain::Block>& blocks,
                               bool has_more,
                               std::shared_ptr<net::Peer> peer) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    sync_in_flight_ = false;
     if (blocks.empty()) {
-        // Peer reports nothing more — try transitioning to IN_SYNC.
+        // S-080: Peer reports nothing more — clamp its recorded height so it does not
+        // trigger an immediate re-request storm.
+        if (peer) peer_heights_[peer->address()] = std::min(peer_heights_[peer->address()], chain_.height());
         start_sync_if_behind();
         return;
     }
@@ -3754,6 +3763,12 @@ void Node::on_chain_response(const std::vector<chain::Block>& blocks,
         sync_peer_ = peer;
         request_next_chunk();
     } else {
+        if (!progressed && peer) {
+            // S-080: peer responded with blocks that did not advance our chain
+            // (e.g. duplicates or un-applicable fork). Clamp recorded height so
+            // it doesn't trigger an immediate re-request storm.
+            peer_heights_[peer->address()] = std::min(peer_heights_[peer->address()], chain_.height());
+        }
         start_sync_if_behind();
     }
 }
@@ -3768,6 +3783,18 @@ void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
                                std::shared_ptr<net::Peer> peer) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
+    // S-085 / D19b-i: plausibility bound on peer-reported height. A peer reporting
+    // a height far beyond our tip (e.g. UINT64_MAX) would pin this node in
+    // SyncState::SYNCING forever and halt block production.
+    if (height > chain_.height() + chain::MAX_SYNC_LEAD) {
+        std::cerr << "[node] peer " << (peer ? peer->address() : "unknown")
+                  << " reported implausible height " << height
+                  << " (our height " << chain_.height()
+                  << ", MAX_SYNC_LEAD " << chain::MAX_SYNC_LEAD << "); ignoring for sync\n";
+        start_sync_if_behind();
+        return;
+    }
+
     // Reject peers on a different genesis. Their chain is not ours; they will
     // never feed us valid blocks. But STILL fall through to
     // start_sync_if_behind() — without it, a node whose only peers are
@@ -3778,7 +3805,7 @@ void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
     if (!chain_.empty()) {
         std::string ours = to_hex(chain_.at(0).compute_hash());
         if (!genesis_hash.empty() && genesis_hash != ours) {
-            std::cerr << "[node] peer " << peer->address()
+            std::cerr << "[node] peer " << (peer ? peer->address() : "unknown")
                       << " on different genesis (" << genesis_hash
                       << ", ours " << ours << "); ignoring for sync\n";
             start_sync_if_behind();
@@ -3786,7 +3813,19 @@ void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
         }
     }
 
-    peer_heights_[peer->address()] = height;
+    if (peer) peer_heights_[peer->address()] = height;
+    start_sync_if_behind();
+}
+
+void Node::on_peer_disconnected(std::shared_ptr<net::Peer> peer) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    if (peer) {
+        peer_heights_.erase(peer->address());
+        if (sync_peer_ && sync_peer_->address() == peer->address()) {
+            sync_peer_ = nullptr;
+            sync_in_flight_ = false;
+        }
+    }
     start_sync_if_behind();
 }
 
@@ -3801,6 +3840,7 @@ void Node::start_sync_if_behind() {
     // ignore (a block in flight is not "behind"). Cleared on block apply.
     const uint64_t TOLERANCE = stalled_resync_ ? 0 : 5;
     if (chain_.height() + TOLERANCE >= max_h) {
+        sync_in_flight_ = false;
         if (state_ != SyncState::IN_SYNC) {
             state_ = SyncState::IN_SYNC;
             std::cout << "[node] caught up to height " << chain_.height()
@@ -3812,6 +3852,15 @@ void Node::start_sync_if_behind() {
 
     state_ = SyncState::SYNCING;
 
+    // S-080: in-flight suppression with timeout. If a chunk request is already
+    // in flight and has not timed out, do not broadcast another GET_CHAIN.
+    if (sync_in_flight_) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - sync_request_time_).count() < 5) {
+            return;
+        }
+    }
+
     // Pick the highest-reported peer and request the next chunk from them.
     std::string best_addr;
     uint64_t    best_h = 0;
@@ -3820,25 +3869,23 @@ void Node::start_sync_if_behind() {
     }
     if (best_addr.empty()) return;
 
-    // Resolve to the actual peer pointer. (peer_addresses returns the same
-    // string format used as the key; for simplicity we just broadcast and
-    // rely on the chunk responder being the highest peer.)
-    sync_peer_ = nullptr; // we'll just broadcast — first responder wins
-    request_next_chunk();
+    // S-080: unicast GET_CHAIN directly to best_addr rather than flooding
+    // the network with a broadcast to all peers. Fall back to broadcast only
+    // if direct sending fails.
+    sync_peer_ = nullptr;
+    uint64_t from = chain_.height() > 0 ? chain_.height() - 1 : 0;
+    auto msg = net::make_get_chain(from, 64);
+    sync_in_flight_ = true;
+    sync_request_time_ = std::chrono::steady_clock::now();
+    if (!gossip_.send_to_address(best_addr, msg)) {
+        request_next_chunk();
+    }
 }
 
 void Node::request_next_chunk() {
     // state_mutex_ held by caller.
-    // A4.4 (S-048 rejoiner): request from height()-1, NOT height(). A node
-    // restarted holding a minority same-height tail has a head M at index H-1
-    // that differs from the network's winner W at H-1; asking from H would only
-    // ever fetch blocks [H, …] whose prev_hash is hash(W) ≠ hash(M), so every
-    // one fails prev_hash validation forever (the S-048 rejoin wall). Asking
-    // from H-1 delivers W itself; on_chain_response routes a block at
-    // height()-1 into apply_block_locked's same-height branch → maybe_reorg_
-    // to_locked adopts the resolve_fork winner, and the subsequent [H, …] then
-    // apply cleanly. On the no-fork path the H-1 block is a byte-identical
-    // duplicate the reorg check drops (one re-fetched block per chunk — ~1/64).
+    sync_in_flight_ = true;
+    sync_request_time_ = std::chrono::steady_clock::now();
     uint64_t from = chain_.height() > 0 ? chain_.height() - 1 : 0;
     auto msg = net::make_get_chain(from, 64);
     if (sync_peer_) {

@@ -8,6 +8,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/merkle.hpp>
+#include <determ/crypto/ed25519/ed25519_group.h>
 #include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify / determ_unshield_verify
 #include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
 #include <determ/chain/ctx_enote.hpp>           // NC-8 §5 enote-region split/parse (shared mirror)
@@ -1471,6 +1472,11 @@ void Chain::apply_transactions(const Block& b) {
                     if (c.is_cross_shard(inner.to)) return false;
                     // E1 (S-071): the Zeroth pool never spends (validator/apply symmetry)
                     if (inner.from == ZEROTH_ADDRESS) return false;
+                    // D10 / S-072: an anonymous sender key that has small order never spends (validator/apply symmetry)
+                    if (is_anon_address(inner.from)) {
+                        auto ipk = parse_anon_pubkey(inner.from);
+                        if (determ_ed25519_point_has_small_order(ipk.data()) != 0) return false;
+                    }
                     // Inner sender's nonce must match its current chain nonce
                     AccountState& isender = c.accounts_[inner.from];
                     if (inner.nonce != isender.next_nonce) return false;
