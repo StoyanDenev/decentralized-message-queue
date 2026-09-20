@@ -67,8 +67,9 @@ const Block& Chain::head() const {
 }
 
 const Block& Chain::at(uint64_t index) const {
-    if (index >= blocks_.size()) throw std::out_of_range("Block index out of range");
-    return blocks_[static_cast<size_t>(index)];
+    if (index < base_index_ || index >= base_index_ + blocks_.size())
+        throw std::out_of_range("Block index out of range");
+    return blocks_[static_cast<size_t>(index - base_index_)];
 }
 
 Hash Chain::head_hash() const {
@@ -2621,6 +2622,11 @@ Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invaria
         for (auto& bj : json_require_array(snap, "headers")) {
             c.blocks_.push_back(Block::from_json(bj));
         }
+        if (!c.blocks_.empty()) {
+            c.base_index_ = c.blocks_.front().index;
+        } else if (snap.contains("block_index")) {
+            c.base_index_ = snap["block_index"].get<uint64_t>() + 1;
+        }
     }
 
     // Sanity: the head's hash should match the snapshot's stated
@@ -3230,6 +3236,11 @@ Chain Chain::decode_state(const uint8_t* data, size_t len,
             r.need(flen, "header.frame");
             c.blocks_.push_back(Block::decode_frame(data + r.i, flen));
             r.i += flen;
+        }
+        if (!c.blocks_.empty()) {
+            c.base_index_ = c.blocks_.front().index;
+        } else {
+            c.base_index_ = block_index_claim + 1;
         }
     }
 

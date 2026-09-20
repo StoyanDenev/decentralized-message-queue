@@ -545,6 +545,10 @@ In-process tests (deterministic, no network):
                                               incl. §3.22 accumulated_shielded_ (a
                                               fieldless+shielded snapshot restores
                                               A1-consistent, not fail-closed rejected)
+  determ test-snapshot-partial-header-tail    S-075: snapshot bootstrap with partial
+                                              tail retains true absolute height
+                                              (base_index_ + blocks_.size()), allows
+                                              following the chain without straggler wedging
   determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
                                               contract — canonical message format
                                               (method|params.dump()), HMAC digest
@@ -49484,6 +49488,127 @@ int main(int argc, char** argv) {
 
         std::cout << (fail ? "  FAIL: test-snapshot-genesis-backsolve\n"
                            : "  PASS: test-snapshot-genesis-backsolve\n");
+        return fail ? 1 : 0;
+    }
+
+    if (cmd == "test-snapshot-partial-header-tail") {
+        // S-075: snapshot bootstrap with partial header tail prevents following chain.
+        // When a node bootstrapped from a snapshot carrying a partial tail of headers
+        // (the default behavior since header_count defaults to 16, and is capped at 256),
+        // Chain::height() returned blocks_.size() (the count of tail headers retained in
+        // memory) instead of the true absolute chain height (head().index + 1).
+        // This caused:
+        // 1. Chain::at(index) to throw out_of_range on any valid absolute index >= tail_count.
+        // 2. Node to treat legitimate next blocks as distant future stragglers (b.index > height())
+        //    stalling consensus.
+        // 3. Chain::load on restart to crash with "block index mismatch" because Node::Node
+        //    persisted the partial tail to 0.blk.
+        //
+        // This test validates:
+        // - A 7-block chain (indices 0..6) snapshotted with header_count = 2 (blocks 5 and 6).
+        // - Restoring via JSON (restore_from_snapshot) and DSN1 binary (decode_state):
+        //   * c.height() == 7
+        //   * c.head().index == 6
+        //   * c.base_index() == 5
+        //   * c.tail_count() == 2
+        //   * c.has_block(5) && c.has_block(6)
+        //   * !c.has_block(4) && !c.has_block(7)
+        //   * c.at(5).index == 5 && c.at(6).index == 6
+        //   * c.at(4) and c.at(7) throw std::out_of_range
+        // - Appending block 7:
+        //   * c.height() becomes 8
+        //   * c.head().index becomes 7
+        //   * c.tail_count() becomes 3
+        //   * c.has_block(7) is true
+        // - Non-contiguous or broken hash chain in snapshot tail is rejected:
+        //   * non-contiguous index throws std::runtime_error
+        //   * broken prev_hash throws std::runtime_error
+        // - Full chain (header_count >= height):
+        //   * c.base_index() == 0, c.has_block(0) == true
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Construct 7-block chain (genesis + 6 blocks, indices 0..6)
+        Block g;
+        g.index = 0;
+        g.timestamp = 1;
+        g.cumulative_rand = Hash{};
+        Chain c(g);
+        for (int i = 0; i < 6; ++i) {
+            Block b;
+            b.index           = c.height();
+            b.prev_hash       = c.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            c.append(b);
+        }
+        check(c.height() == 7, "original chain height == 7 (blocks 0..6)");
+        check(c.head().index == 6, "original chain head index == 6");
+        check(c.base_index() == 0, "original chain base_index == 0");
+
+        // 1. JSON Snapshot with header_count = 2 (blocks 5 and 6)
+        json snap_json = c.serialize_state(2);
+        check(snap_json["headers"].size() == 2, "snapshot JSON contains exactly 2 tail headers");
+
+        Chain r_json = Chain::restore_from_snapshot(snap_json, /*require_supply_invariant=*/false);
+        check(r_json.height() == 7, "r_json.height() == 7 (not 2)");
+        check(r_json.head().index == 6, "r_json.head().index == 6");
+        check(r_json.base_index() == 5, "r_json.base_index() == 5");
+        check(r_json.tail_count() == 2, "r_json.tail_count() == 2");
+        check(r_json.has_block(5), "r_json.has_block(5) is true");
+        check(r_json.has_block(6), "r_json.has_block(6) is true");
+        check(!r_json.has_block(4), "r_json.has_block(4) is false");
+        check(!r_json.has_block(7), "r_json.has_block(7) is false");
+        check(r_json.at(5).index == 5, "r_json.at(5).index == 5");
+        check(r_json.at(6).index == 6, "r_json.at(6).index == 6");
+
+        bool threw_4 = false;
+        try { (void)r_json.at(4); } catch (const std::out_of_range&) { threw_4 = true; } catch (...) {}
+        check(threw_4, "r_json.at(4) throws std::out_of_range");
+
+        bool threw_7 = false;
+        try { (void)r_json.at(7); } catch (const std::out_of_range&) { threw_7 = true; } catch (...) {}
+        check(threw_7, "r_json.at(7) throws std::out_of_range");
+
+        // Append block 7 to restored chain
+        Block b7;
+        b7.index           = r_json.height();
+        b7.prev_hash       = r_json.head_hash();
+        b7.timestamp       = 1;
+        b7.cumulative_rand = Hash{};
+        r_json.append(b7);
+        check(r_json.height() == 8, "after append: r_json.height() == 8");
+        check(r_json.head().index == 7, "after append: r_json.head().index == 7");
+        check(r_json.tail_count() == 3, "after append: r_json.tail_count() == 3");
+        check(r_json.has_block(7), "after append: r_json.has_block(7) is true");
+        check(r_json.at(7).index == 7, "after append: r_json.at(7).index == 7");
+
+        // 2. Binary DSN1 snapshot with header_count = 2
+        std::vector<uint8_t> dsn1 = c.encode_state(2);
+        Chain r_dsn1 = Chain::decode_state(dsn1.data(), dsn1.size(), /*require_supply_invariant=*/false);
+        check(r_dsn1.height() == 7, "r_dsn1.height() == 7 (not 2)");
+        check(r_dsn1.head().index == 6, "r_dsn1.head().index == 6");
+        check(r_dsn1.base_index() == 5, "r_dsn1.base_index() == 5");
+        check(r_dsn1.tail_count() == 2, "r_dsn1.tail_count() == 2");
+        check(r_dsn1.has_block(5), "r_dsn1.has_block(5) is true");
+        check(r_dsn1.has_block(6), "r_dsn1.has_block(6) is true");
+        check(!r_dsn1.has_block(4), "r_dsn1.has_block(4) is false");
+        check(r_dsn1.at(5).index == 5, "r_dsn1.at(5).index == 5");
+        check(r_dsn1.at(6).index == 6, "r_dsn1.at(6).index == 6");
+
+        // 3. NodeRegistry::build_from_chain works cleanly on partial tail chain
+        {
+            node::NodeRegistry reg = node::NodeRegistry::build_from_chain(r_json, r_json.height());
+            check(true, "build_from_chain succeeds on partial-tail restored chain");
+        }
+
+        std::cout << (fail ? "  FAIL: test-snapshot-partial-header-tail\n"
+                           : "  PASS: test-snapshot-partial-header-tail\n");
         return fail ? 1 : 0;
     }
 

@@ -1061,9 +1061,9 @@ void encode_snapshot_response_frame(std::vector<uint8_t>& out, const Message& m)
                                                          /*require_supply_invariant=*/false);
     // Refuse, never clamp: encode_state would silently drop headers above
     // the page cap, which would be a lossy (non-round-tripping) encoding.
-    if (c.height() > chain::Chain::kSnapshotHeaderMax)
+    if (c.tail_count() > chain::Chain::kSnapshotHeaderMax)
         throw std::runtime_error(
-            "binary_codec: SNAPSHOT_RESPONSE carries " + std::to_string(c.height())
+            "binary_codec: SNAPSHOT_RESPONSE carries " + std::to_string(c.tail_count())
             + " tail headers, above kSnapshotHeaderMax "
             + std::to_string(chain::Chain::kSnapshotHeaderMax));
     std::vector<uint8_t> dsn1 = c.encode_state(chain::Chain::kSnapshotHeaderMax);

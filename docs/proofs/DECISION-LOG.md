@@ -5508,6 +5508,50 @@ Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
 
 ---
 
+## 2026-09-20 — D19a (S-075): Snapshot bootstrap with partial header tail preserves chain following
+
+**Status:** IMPLEMENTED and verified. Gate `determ test-snapshot-partial-header-tail` (wrapper `tools/test_snapshot_partial_header_tail.sh`). Ledger row S-075 moved from OPEN to MITIGATED in `docs/SECURITY.md`.
+
+**Problem:**
+Finding S-075 (pre-existing, reproduced 2026-09-15, `docs/SECURITY.md` row S-075):
+`Chain::height()` was previously defined as `blocks_.size()` and `Chain::at(i)` indexed `blocks_` positionally (`blocks_[index]`). However, snapshots in production carry only a trailing window of headers (`headers` array in JSON / DSN1, defaulting to 16 and capped at 256). When a node bootstrapped from a snapshot with a partial header tail:
+1. `height()` returned `blocks_.size()` (e.g. 2 or 16) instead of the absolute head block index + 1 (e.g. 7 or 1000).
+2. `at(index)` threw `std::out_of_range` on any absolute block index `>= blocks_.size()`.
+3. `start_contrib_phase` initialized with `block_index = chain_.height()` (e.g. 2 instead of 7), and `apply_block_locked` treated legitimate incoming next blocks (index 7) as distant future stragglers (`b.index > height()`), refusing to validate or apply them. The node became permanently stuck and unable to follow consensus.
+4. On node restart, `Node::Node` persisted in-memory blocks starting at index 0 (`0.blk`, `1.blk`), overwriting block files with the partial tail headers. This corrupted the local block store, causing `Chain::load` to fail on subsequent restarts with "block index mismatch".
+
+**The Change:**
+1. In `include/determ/chain/chain.hpp` and `src/chain/chain.cpp`:
+   - Added `base_index_{0}` tracking the absolute block index of the first retained block in `blocks_`.
+   - Updated `height()` to return `base_index_ + blocks_.size()`.
+   - Added `base_index() const`, `tail_count() const`, and `has_block(uint64_t index) const`.
+   - Updated `Chain::at(uint64_t index)` to check `index < base_index_ || index >= base_index_ + blocks_.size()` and return `blocks_[index - base_index_]`.
+   - Updated `Chain::restore_from_snapshot` and `Chain::decode_state` to set `base_index_ = blocks_.front().index` (or `block_index + 1` if tail is empty).
+2. In `src/net/binary_codec.cpp`:
+   - Updated `encode_snapshot_response_frame` to check `tail_count() > kSnapshotHeaderMax` instead of `height() > kSnapshotHeaderMax`.
+3. In `src/node/node.cpp`:
+   - Guarded incremental block persistence (`save_incremental`) to only run if `chain_.base_index() == 0`, preserving the canonical snapshot seed on disk when running with a partial tail.
+   - Updated `current_epoch_rand` to check `chain_.has_block(epoch_start - 1)` and fall back to `committee_checkpoints()` if pruned.
+   - Guarded equivocation checking in `apply_block_locked` with `chain_.has_block(b.index)`.
+   - Guarded RPC handlers (`rpc_status`, `rpc_chain_stats`, `rpc_block`, `rpc_headers`, `rpc_tx`, `rpc_chain_summary`, `rpc_dapp_messages`, and subscriber catch-up) and gossip handler `on_get_chain` with `chain_.has_block(...)`.
+4. In `src/node/validator.cpp` and `src/node/shardtip_verify.cpp`:
+   - Updated `resolve_epoch_rand` and anchor reading to check `chain.has_block(...)` before calling `chain.at(...)`.
+
+**Verification & Test Gate:**
+- Implemented test gate `determ test-snapshot-partial-header-tail` in `src/main.cpp` and bash wrapper `tools/test_snapshot_partial_header_tail.sh`.
+  - Built a 7-block chain (blocks 0..6), serialized with `header_count = 2` (blocks 5 and 6).
+  - Restored via both JSON (`restore_from_snapshot`) and binary DSN1 (`decode_state`).
+  - Verified `height() == 7`, `head().index == 6`, `base_index() == 5`, `tail_count() == 2`.
+  - Verified `at(5)` and `at(6)` resolve correctly, while `at(4)` and `at(7)` throw `out_of_range`.
+  - Appended block 7: verified `height() == 8`, `head().index == 7`, `tail_count() == 3`, `has_block(7) == true`.
+- Mutant falsification: reverting `height()` to `blocks_.size()` caused 7 test assertion failures and exited 1 RED against the rebuilt binary.
+- Full local CI suite `tools/ci_local.sh` clean (359 wrappers asserted, 1 skipped entirely, doc/ledger guards green).
+
+**Authority:**
+Owner decisions D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
+
+---
+
 ## 2026-09-20 — D19a (S-098): Light-client state persistence durability via durable_write_replace
 
 **Context & Defect Analysis:**

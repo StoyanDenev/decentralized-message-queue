@@ -94,8 +94,10 @@ std::optional<Hash> verify_shard_tip_committee_sig_root(
             shard_epoch * (epoch_blocks ? epoch_blocks : 1);
         if (beacon_anchor_height == 0 || beacon_anchor_height > chain.height()) {
             beacon_rand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
-        } else {
+        } else if (chain.has_block(beacon_anchor_height - 1)) {
             beacon_rand = chain.at(beacon_anchor_height - 1).cumulative_rand;
+        } else {
+            beacon_rand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
         }
     }
 

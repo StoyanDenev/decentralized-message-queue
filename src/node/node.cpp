@@ -634,15 +634,13 @@ Node::Node(const Config& cfg, determ::time::Clock& clock,
                           << " stakes=" << chain_.stakes().size()
                           << " registrants=" << chain_.registrants().size()
                           << "\n";
-                // Persist as the working chain.json so subsequent
-                // restarts see a populated chain (they'll re-apply
-                // the tail headers — apply on already-applied state
-                // is a no-op for genesis-skipped paths since there's
-                // no prior state to overwrite). Note: the snapshot
-                // file remains the canonical state seed; do not
-                // delete it. D2 inc8: the block store is the only
-                // at-rest chain form, so one write does it.
-                chain_.save_incremental(cfg_.chain_path);
+                // S-075: only persist to the incremental block store if the
+                // chain includes genesis (base_index_ == 0). A partial header
+                // tail cannot be replayed from genesis by Chain::load; the
+                // snapshot remains the canonical state seed.
+                if (chain_.base_index() == 0) {
+                    chain_.save_incremental(cfg_.chain_path);
+                }
                 goto chain_loaded;
             } catch (std::exception& e) {
                 std::cerr << "[node] snapshot restore failed: " << e.what()
@@ -1368,7 +1366,12 @@ Hash Node::current_epoch_rand() const {
 
     if (epoch_start == 0)        return chain_.head().cumulative_rand;
     if (epoch_start > chain_.height()) return chain_.head().cumulative_rand;
-    return chain_.at(epoch_start - 1).cumulative_rand;
+    if (chain_.has_block(epoch_start - 1))
+        return chain_.at(epoch_start - 1).cumulative_rand;
+    auto it = chain_.committee_checkpoints().find(current_epoch_index());
+    if (it != chain_.committee_checkpoints().end())
+        return it->second.epoch_rand;
+    return chain_.head().cumulative_rand;
 }
 
 std::string Node::current_proposer_domain() const {
@@ -2504,7 +2507,7 @@ void Node::apply_block_locked(const chain::Block& b) {
         // would otherwise drive an out-of-bounds read when the assembler
         // extracted the second signature. The pool dedup + gossip + log
         // (Node-side effects) stay here.
-        if (!b.bft_proposer.empty()) {
+        if (!b.bft_proposer.empty() && chain_.has_block(b.index)) {
             if (auto ev_opt = detect_equivocation(
                     chain_.at(b.index), b,
                     cfg_.chain_role == ChainRole::SHARD,
@@ -3730,8 +3733,10 @@ void Node::on_get_chain(uint64_t from_index, uint16_t count,
 
     uint64_t end = std::min(chain_.height(), from_index + count);
     json blocks = json::array();
-    for (uint64_t i = from_index; i < end; ++i)
-        blocks.push_back(chain_.at(i).to_json());
+    for (uint64_t i = from_index; i < end; ++i) {
+        if (chain_.has_block(i))
+            blocks.push_back(chain_.at(i).to_json());
+    }
     bool has_more = end < chain_.height();
     peer->send({net::MsgType::CHAIN_RESPONSE,
                 {{"blocks", blocks}, {"has_more", has_more}}});
@@ -3794,7 +3799,12 @@ void Node::on_chain_response(const std::vector<chain::Block>& blocks,
 
 void Node::on_status_request(std::shared_ptr<net::Peer> peer) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
-    std::string ghash = chain_.empty() ? std::string{} : to_hex(chain_.at(0).compute_hash());
+    std::string ghash;
+    if (chain_.has_block(0)) {
+        ghash = to_hex(chain_.at(0).compute_hash());
+    } else if (!cfg_.genesis_hash.empty()) {
+        ghash = cfg_.genesis_hash;
+    }
     peer->send(net::make_status_response(chain_.height(), ghash));
 }
 
@@ -3822,8 +3832,13 @@ void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
     // genesis peers simply don't contribute to peer_heights_ so the
     // sync-height comparison correctly ignores them.
     if (!chain_.empty()) {
-        std::string ours = to_hex(chain_.at(0).compute_hash());
-        if (!genesis_hash.empty() && genesis_hash != ours) {
+        std::string ours;
+        if (chain_.has_block(0)) {
+            ours = to_hex(chain_.at(0).compute_hash());
+        } else if (!cfg_.genesis_hash.empty()) {
+            ours = cfg_.genesis_hash;
+        }
+        if (!ours.empty() && !genesis_hash.empty() && genesis_hash != ours) {
             std::cerr << "[node] peer " << (peer ? peer->address() : "unknown")
                       << " on different genesis (" << genesis_hash
                       << ", ours " << ours << "); ignoring for sync\n";
@@ -3927,7 +3942,13 @@ json Node::rpc_status() const {
     j["m_creators"]  = cfg_.m_creators;
     j["k_block_sigs"]= cfg_.k_block_sigs;
     j["sync_state"]  = (state_ == SyncState::IN_SYNC) ? "in_sync" : "syncing";
-    j["genesis"]     = chain_.empty() ? "" : to_hex(chain_.at(0).compute_hash());
+    std::string ghash;
+    if (chain_.has_block(0)) {
+        ghash = to_hex(chain_.at(0).compute_hash());
+    } else if (!cfg_.genesis_hash.empty()) {
+        ghash = cfg_.genesis_hash;
+    }
+    j["genesis"]     = ghash;
     j["chain_role"]  = to_string(cfg_.chain_role);
     j["shard_id"]    = cfg_.shard_id;
     j["epoch_index"] = current_epoch_index();
@@ -3962,6 +3983,7 @@ json Node::rpc_status() const {
     // dashboards and test assertions ("did the chain actually escalate?").
     uint64_t md_blocks = 0, bft_blocks = 0, total_txs = 0;
     for (uint64_t i = 0; i < chain_.height(); ++i) {
+        if (!chain_.has_block(i)) continue;
         const auto& b = chain_.at(i);
         total_txs += b.transactions.size();
         if (b.consensus_mode == chain::ConsensusMode::BFT) ++bft_blocks;
@@ -4078,7 +4100,7 @@ json Node::rpc_abort_records() const {
 
 json Node::rpc_block(uint64_t index) const {
     std::shared_lock<std::shared_mutex> lk(state_mutex_);
-    if (index >= chain_.height()) return nullptr;
+    if (!chain_.has_block(index)) return nullptr;
     return chain_.at(index).to_json();
 }
 
@@ -4106,6 +4128,7 @@ json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
     if (from_index < height) {
         uint64_t end = std::min<uint64_t>(from_index + count, height);
         for (uint64_t i = from_index; i < end; ++i) {
+            if (!chain_.has_block(i)) continue;
             const auto& blk = chain_.at(i);
             json h = blk.to_json();
             // Heavy collections — stripped for header-only sync.
@@ -4247,6 +4270,7 @@ json Node::rpc_tx(const std::string& hash_hex) const {
     // current single-chain volume — a hash-keyed index lives in B6.
     uint64_t total = chain_.height();
     for (uint64_t i = total; i > 0; --i) {
+        if (!chain_.has_block(i - 1)) break;
         const auto& b = chain_.at(i - 1);
         for (const auto& tx : b.transactions) {
             if (tx.hash == target) {
@@ -4330,6 +4354,7 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
         // this read lock — a per-request-work DoS the token bucket cannot bound.
         uint64_t start = chain::chain_summary_start(total, last_n);
         for (uint64_t i = start; i < total; ++i) {
+            if (!chain_.has_block(i)) continue;
             const auto& b = chain_.at(i);
             json e;
             e["index"]          = b.index;
@@ -4633,6 +4658,7 @@ json Node::rpc_dapp_messages(const std::string& domain,
     bool truncated = false;
     uint64_t last_scanned = from_height;
     for (uint64_t h = from_height; h < to_height; ++h) {
+        if (!chain_.has_block(h)) continue;
         const auto& b = chain_.at(h);
         for (auto& tx : b.transactions) {
             if (tx.type != chain::TxType::DAPP_CALL) continue;
@@ -4825,6 +4851,7 @@ void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
         {
             std::shared_lock<std::shared_mutex> lk(state_mutex_);
             for (uint64_t i = h; i < end; ++i) {
+                if (!chain_.has_block(i)) continue;
                 const auto& b = chain_.at(i);
                 for (size_t t = 0; t < b.transactions.size(); ++t) {
                     const auto& tx = b.transactions[t];

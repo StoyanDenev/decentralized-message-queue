@@ -89,8 +89,17 @@ public:
     void             append(Block b);
     const Block&     head() const;
     const Block&     at(uint64_t index) const;
-    uint64_t         height() const { return blocks_.size(); }
+    // S-075: height is absolute (base_index_ + blocks_.size()). For a full chain
+    // from genesis, base_index_ == 0 and height() == blocks_.size(). For a
+    // snapshot bootstrap carrying a partial header tail, base_index_ is the
+    // index of the first retained tail header, so height() == head().index + 1.
+    uint64_t         height() const { return base_index_ + blocks_.size(); }
     bool             empty() const  { return blocks_.empty(); }
+    uint64_t         base_index() const { return base_index_; }
+    size_t           tail_count() const { return blocks_.size(); }
+    bool             has_block(uint64_t index) const {
+        return index >= base_index_ && index < base_index_ + blocks_.size();
+    }
     Hash             head_hash() const;
 
     // A4 / S-048 depth-1 head reorg (BoundedReorgDesign.md). revert_head()
@@ -815,6 +824,7 @@ public:
     bool atomic_scope(std::function<bool(Chain&)> fn);
 
 private:
+    uint64_t                                    base_index_{0};
     std::vector<Block>                          blocks_;
     std::map<std::string, AccountState>         accounts_;
     std::map<std::string, StakeEntry>           stakes_;

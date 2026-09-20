@@ -1708,7 +1708,15 @@ Hash BlockValidator::resolve_epoch_rand(uint64_t epoch_start,
     if (epoch_start == 0 || epoch_start > chain.height()) {
         return chain.empty() ? Hash{} : chain.head().cumulative_rand;
     }
-    return chain.at(epoch_start - 1).cumulative_rand;
+    if (chain.has_block(epoch_start - 1)) {
+        return chain.at(epoch_start - 1).cumulative_rand;
+    }
+    uint64_t ep = chain.epoch_blocks() > 0 ? epoch_start / chain.epoch_blocks() : 0;
+    auto it = chain.committee_checkpoints().find(ep);
+    if (it != chain.committee_checkpoints().end()) {
+        return it->second.epoch_rand;
+    }
+    return chain.empty() ? Hash{} : chain.head().cumulative_rand;
 }
 
 // rev.9 B3.2: receipts must match the cross-shard subset of
