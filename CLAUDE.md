@@ -603,7 +603,7 @@ measured evidence and approved by the owner at review (D24):
 NODE-/CLIENT-LOCAL BACKLOG (D19a, no accept-rule change; each its own gate + review), by
 severity: S-078 (LANDED 2026-09-16 — Chain::load seeds every genesis parameter before the
 replay via Chain::Params; gate test-chain-load-genesis-params), S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
-S-091 (with the D2 src-side keyfile increment), S-063 (delivery layer, D18a). S-102 was
+S-091 (with the D2 src-side keyfile increment), S-063 (LANDED 2026-09-20 — delivery layer apply reporting and value gating, D18a; gate test-dapp-delivery-apply-status). S-102 was
 ADJUDICATED + CLOSED 2026-09-16 (step 3, before R-8): reachable at HEAD by a relayer's zero-key
 state_root relabel of the head (outside the digest and every validator rule); the depth-1 reorg
 is now atomic over an apply throw (node.cpp maybe_reorg_to_locked; gate test-node-reorg-guard,
