@@ -324,6 +324,10 @@ struct Transaction {
     std::vector<uint8_t> payload;
     Signature            sig{};
     Hash                 hash{};
+    // D23 / R-17 (S-103): chain identity binding — genesis hash + shard id.
+    // Included in signing_bytes for replay protection across chains and shards.
+    Hash                 genesis_hash{};
+    uint32_t             shard_id{0};
     // §3.21 PQ_TRANSFER authenticator: a DPQ1 envelope (determ::pqauth) over
     // signing_bytes. Empty for every non-PQ tx type — and, like `sig`/`hash`,
     // it is NOT part of signing_bytes (a signature cannot sign itself) and is

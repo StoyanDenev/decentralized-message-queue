@@ -19,7 +19,10 @@ using json = nlohmann::json;
 
 std::vector<uint8_t> Transaction::signing_bytes() const {
     std::vector<uint8_t> out;
+    out.reserve(1 + genesis_hash.size() + 4 + from.size() + 1 + to.size() + 1 + 24 + payload.size());
     out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
     out.insert(out.end(), from.begin(), from.end());
     out.push_back(0);
     out.insert(out.end(), to.begin(), to.end());
@@ -38,15 +41,17 @@ Hash Transaction::compute_hash() const {
 
 json Transaction::to_json() const {
     json j;
-    j["type"]    = static_cast<int>(type);
-    j["from"]    = from;
-    j["to"]      = to;
-    j["amount"]  = amount;
-    j["fee"]     = fee;
-    j["nonce"]   = nonce;
-    j["payload"] = to_hex(payload.data(), payload.size());
-    j["sig"]     = to_hex(sig);
-    j["hash"]    = to_hex(hash);
+    j["type"]         = static_cast<int>(type);
+    j["genesis_hash"] = to_hex(genesis_hash.data(), genesis_hash.size());
+    j["shard_id"]     = shard_id;
+    j["from"]         = from;
+    j["to"]           = to;
+    j["amount"]       = amount;
+    j["fee"]          = fee;
+    j["nonce"]        = nonce;
+    j["payload"]      = to_hex(payload.data(), payload.size());
+    j["sig"]          = to_hex(sig);
+    j["hash"]         = to_hex(hash);
     // §3.21: the DPQ1 PQ authenticator is emitted ONLY when present, so every
     // non-PQ tx serializes byte-identically to before this field existed.
     if (!pq_auth.empty()) j["pq_auth"] = to_hex(pq_auth.data(), pq_auth.size());
@@ -57,18 +62,25 @@ Transaction Transaction::from_json(const json& j) {
     // S-018: every required field is fetched via json_require<T> /
     // json_require_hex so missing or wrong-type fields throw with
     // clear field-name diagnostics rather than opaque
-    // nlohmann-internal type errors. Optional fields (`fee`) keep the
+    // nlohmann-internal type errors. Optional fields (`fee`, `genesis_hash`, `shard_id`) keep the
     // existing `j.value(...)` defaults.
     Transaction tx;
-    tx.type    = static_cast<TxType>(json_require<int>(j, "type"));
-    tx.from    = json_require<std::string>(j, "from");
-    tx.to      = json_require<std::string>(j, "to");
-    tx.amount  = json_require<uint64_t>(j, "amount");
-    tx.fee     = j.value("fee", uint64_t{0});
-    tx.nonce   = json_require<uint64_t>(j, "nonce");
-    tx.payload = from_hex(json_require<std::string>(j, "payload"));
-    tx.sig     = from_hex_arr<64>(json_require_hex(j, "sig", 128));
-    tx.hash    = from_hex_arr<32>(json_require_hex(j, "hash", 64));
+    tx.type = static_cast<TxType>(json_require<int>(j, "type"));
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            tx.genesis_hash = from_hex_arr<32>(gh_hex);
+        }
+    }
+    tx.shard_id = j.value("shard_id", uint32_t{0});
+    tx.from     = json_require<std::string>(j, "from");
+    tx.to       = json_require<std::string>(j, "to");
+    tx.amount   = json_require<uint64_t>(j, "amount");
+    tx.fee      = j.value("fee", uint64_t{0});
+    tx.nonce    = json_require<uint64_t>(j, "nonce");
+    tx.payload  = from_hex(json_require<std::string>(j, "payload"));
+    tx.sig      = from_hex_arr<64>(json_require_hex(j, "sig", 128));
+    tx.hash     = from_hex_arr<32>(json_require_hex(j, "hash", 64));
     // §3.21: optional DPQ1 PQ authenticator (present only for PQ_TRANSFER).
     // Absent for every legacy tx, so pre-§3.21 JSON round-trips unchanged.
     if (j.contains("pq_auth") && j["pq_auth"].is_string())
@@ -198,6 +210,8 @@ void Transaction::encode_frame(std::vector<uint8_t>& out) const {
     put_lp_str(out, to);
     out.insert(out.end(), sig.begin(),  sig.end());
     out.insert(out.end(), hash.begin(), hash.end());
+    out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+    le_put_u32(out, shard_id);
 
     // §3.21: optional DPQ1 PQ authenticator — appended ONLY when present so
     // every non-PQ tx frame is byte-identical to the pre-§3.21 layout.
@@ -243,10 +257,12 @@ Transaction Transaction::decode_frame(const uint8_t* data, size_t len) {
 
     tx.from = get_lp_str(data, len, off);
     tx.to   = get_lp_str(data, len, off);
-    if (off + 64 + 32 > len)
-        throw std::runtime_error("tx frame: truncated sig/hash");
-    std::memcpy(tx.sig.data(),  data + off, 64); off += 64;
-    std::memcpy(tx.hash.data(), data + off, 32); off += 32;
+    if (off + 64 + 32 + 32 + 4 > len)
+        throw std::runtime_error("tx frame: truncated sig/hash/chain-id");
+    std::memcpy(tx.sig.data(),          data + off, 64); off += 64;
+    std::memcpy(tx.hash.data(),         data + off, 32); off += 32;
+    std::memcpy(tx.genesis_hash.data(), data + off, 32); off += 32;
+    tx.shard_id = le_get_u32(data + off); off += 4;
 
     // §3.21: optional pq_auth section — [u32 LE len][len bytes], consuming
     // the frame EXACTLY. Fail-closed on trailing garbage; a zero-length

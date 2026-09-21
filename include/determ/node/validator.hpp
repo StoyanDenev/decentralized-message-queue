@@ -38,6 +38,9 @@ public:
     // rev.9 (B1): epoch-relative committee derivation parameters.
     void set_epoch_blocks(uint32_t e) { epoch_blocks_ = e; }
     void set_shard_id(ShardId s)      { shard_id_ = s; }
+    ShardId shard_id() const          { return shard_id_; }
+    void set_genesis_hash(const Hash& h) { genesis_hash_ = h; }
+    const Hash& genesis_hash() const     { return genesis_hash_; }
 
     // rev.9 R2: this chain's committee_region (mirrored from genesis).
     // Empty = global pool — check_creator_selection / check_abort_certs
@@ -455,6 +458,7 @@ private:
     uint32_t bft_escalation_threshold_{1};   // S-045: default 1 (was 5)
     uint32_t epoch_blocks_{1000};
     ShardId  shard_id_{0};
+    Hash     genesis_hash_{};
     // rev.9 R2: committee region pin for this chain (empty = global).
     std::string committee_region_{};
     // A6: sharding mode mirrored from the operator's selected

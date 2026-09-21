@@ -742,6 +742,11 @@ BlockValidator::Result BlockValidator::check_transactions(
     // (check_transaction below), simulating each sender's next nonce.
     std::map<std::string, uint64_t> next_nonce;
     for (auto& tx : b.transactions) {
+        // S-101: verify tx content hash integrity fail-closed on block ingress.
+        if (tx.compute_hash() != tx.hash) {
+            return {false, "tx hash mismatch (S-101): computed " + to_hex(tx.compute_hash())
+                           + " != advertised " + to_hex(tx.hash) + " from: " + tx.from};
+        }
         auto it = next_nonce.find(tx.from);
         if (it == next_nonce.end())
             it = next_nonce.emplace(tx.from, chain.next_nonce(tx.from)).first;
@@ -766,6 +771,26 @@ BlockValidator::Result BlockValidator::check_transaction(
     const Transaction& tx, uint64_t block_index, const Chain& chain,
     const NodeRegistry& registry, uint64_t expected_nonce) const {
     {
+        // S-101: verify tx content hash integrity fail-closed if advertised hash is provided.
+        if (tx.hash != Hash{} && tx.compute_hash() != tx.hash) {
+            return {false, "tx hash mismatch (S-101): computed " + to_hex(tx.compute_hash())
+                           + " != advertised " + to_hex(tx.hash) + " from: " + tx.from};
+        }
+
+        // D23 / R-17 (S-103): tx chain and shard binding verification.
+        const Hash& active_genesis = (genesis_hash_ != Hash{}) ? genesis_hash_ : chain.genesis_hash();
+        if (active_genesis != Hash{} && tx.genesis_hash != Hash{} && tx.genesis_hash != active_genesis) {
+            return {false, "tx genesis_hash mismatch (D23/S-103): tx bound to " + to_hex(tx.genesis_hash)
+                           + " but chain is " + to_hex(active_genesis) + " from: " + tx.from};
+        }
+        if (genesis_hash_ != Hash{} && tx.genesis_hash == Hash{}) {
+            return {false, "tx genesis_hash missing on chain with established genesis (D23/S-103) from: " + tx.from};
+        }
+        if (tx.shard_id != shard_id_) {
+            return {false, "tx shard_id mismatch (D23/S-103): tx bound to shard " + std::to_string(tx.shard_id)
+                           + " but validator is shard " + std::to_string(shard_id_) + " from: " + tx.from};
+        }
+
         // Two-tier identity (rev. 4):
         //   - Anonymous accounts (from = "0x" + 64 hex): pubkey is the address
         //     itself. Restricted to TRANSFER (cannot register / stake / etc).

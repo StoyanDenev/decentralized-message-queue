@@ -709,6 +709,7 @@ chain_loaded:
     // guarantees every construction path carries K before the first
     // eligibility read (build_from_chain below) or live fold.
     chain_.set_k_block_sigs(cfg_.k_block_sigs);
+    validator_.set_genesis_hash(chain_.genesis_hash());
     registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);
@@ -3357,6 +3358,11 @@ void Node::on_tx(const chain::Transaction& tx) {
     // halt class through the mempool key. Same rule as rpc_submit_tx.
     if (tx.hash != tx.compute_hash()) return;
 
+    // D23 / R-17 (S-103): gossip admission replay gates.
+    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash != Hash{} && tx.genesis_hash != chain_.genesis_hash()) return;
+    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash == Hash{}) return;
+    if (tx.shard_id != cfg_.shard_id) return;
+
     // Drop stale-nonce txs immediately.
     if (tx.nonce < chain_.next_nonce(tx.from)) return;
 
@@ -5147,6 +5153,19 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error(
             "submitted tx hash mismatch: expected " + to_hex(expected_hash)
           + " got " + to_hex(tx.hash));
+
+    // D23 / R-17 (S-103): RPC submission replay gates.
+    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash != Hash{} && tx.genesis_hash != chain_.genesis_hash()) {
+        throw std::runtime_error("submitted tx genesis_hash mismatch (D23/S-103): tx bound to " + to_hex(tx.genesis_hash)
+                               + " but chain is " + to_hex(chain_.genesis_hash()));
+    }
+    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash == Hash{}) {
+        throw std::runtime_error("submitted tx genesis_hash missing on chain with established genesis (D23/S-103)");
+    }
+    if (tx.shard_id != cfg_.shard_id) {
+        throw std::runtime_error("submitted tx shard_id mismatch (D23/S-103): tx bound to shard " + std::to_string(tx.shard_id)
+                               + " but node is shard " + std::to_string(cfg_.shard_id));
+    }
 
     // Stale-nonce drop here too (mirrors on_tx).
     if (tx.nonce < chain_.next_nonce(tx.from))

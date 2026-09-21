@@ -169,6 +169,16 @@ std::vector<uint8_t> from_hex(const std::string& s) {
     return out;
 }
 
+template <size_t N>
+std::array<uint8_t, N> from_hex_arr(const std::string& s) {
+    if (s.size() != N * 2)
+        throw std::invalid_argument("from_hex_arr: invalid length");
+    auto v = from_hex(s);
+    std::array<uint8_t, N> out{};
+    std::copy(v.begin(), v.end(), out.begin());
+    return out;
+}
+
 // Share wire format: "<x_hex>:<y_hex>", e.g. "01:abcdef" for x=1.
 // Compact and easy to copy/paste between guardians.
 std::string serialize_share(const shamir::Share& s) {
@@ -7687,6 +7697,16 @@ int cmd_tx_sign_verify(int argc, char** argv) {
         return 1;
     }
 
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
+
     // Range-check the type byte. TxType is a u8 in the wire encoding;
     // values outside [0, 255] would corrupt the first byte of
     // signing_bytes silently. Reject them up front with a clean diagnostic.
@@ -7724,8 +7744,10 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     // here would make every wallet-verified tx fail the chain's verify,
     // so the layout below is intentionally simple + reviewable.
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
     sb.push_back(static_cast<uint8_t>(tx_type));
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -9841,6 +9863,15 @@ int cmd_cold_sign(int argc, char** argv) {
         std::cerr << "cold-sign: --tx-json shape error: " << e.what() << "\n";
         return 1;
     }
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
     if (tx_type < 0 || tx_type > 255) {
         std::cerr << "cold-sign: 'type' value " << tx_type
                   << " out of range (expected 0..255 for u8 wire encoding)\n";
@@ -9924,8 +9955,10 @@ int cmd_cold_sign(int argc, char** argv) {
     // rejects, and an inline encoding is easier to review than a
     // helper call.
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
     sb.push_back(static_cast<uint8_t>(tx_type));
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -10075,10 +10108,11 @@ int cmd_cold_sign(int argc, char** argv) {
 //   1 — args / IO / keyfile-shape / validation error
 //   2 — cryptographic failure (init / keygen / sign)
 int cmd_sign_anon_tx(int argc, char** argv) {
-    std::string keyfile_path, to_str, out_path;
+    std::string keyfile_path, to_str, out_path, genesis_hash_str;
     int64_t amount = -1;
     int64_t fee    = -1;
     int64_t nonce  = -1;
+    uint32_t shard_id = 0;
     bool allow_stdout = false;
     bool json_out     = false;  // accepted for parity; output is always JSON
     bool have_amount = false, have_fee = false, have_nonce = false;
@@ -10114,6 +10148,12 @@ int cmd_sign_anon_tx(int argc, char** argv) {
         else if (a == "--amount") { if (!parse_u64("--amount", amount, have_amount)) return 1; }
         else if (a == "--fee")    { if (!parse_u64("--fee",    fee,    have_fee))    return 1; }
         else if (a == "--nonce")  { if (!parse_u64("--nonce",  nonce,  have_nonce))  return 1; }
+        else if (a == "--genesis-hash" && i + 1 < argc) genesis_hash_str = argv[++i];
+        else if (a == "--shard-id") {
+            int64_t sid = 0; bool dummy = false;
+            if (!parse_u64("--shard-id", sid, dummy)) return 1;
+            shard_id = static_cast<uint32_t>(sid);
+        }
         else if (a == "--out"          && i + 1 < argc) out_path     = argv[++i];
         else if (a == "--allow-stdout")                 allow_stdout = true;
         else if (a == "--json")                         json_out     = true;
@@ -10312,12 +10352,23 @@ int cmd_sign_anon_tx(int argc, char** argv) {
                      "match Ed25519 pubkey of the priv seed per S-028)\n";
         return 1;
     }
+    std::array<uint8_t, 32> genesis_hash{};
+    if (!genesis_hash_str.empty()) {
+        try { genesis_hash = from_hex_arr<32>(genesis_hash_str); }
+        catch (std::exception& e) {
+            std::cerr << "sign-anon-tx: invalid 'genesis-hash' hex: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // ── Build canonical signing_bytes (matches src/chain/block.cpp
     //    Transaction::signing_bytes; same encoding as cmd_cold_sign /
     //    cmd_tx_sign_verify / bulk-send) ──────────────────────────────────
     //
     // Layout:
     //   u8(TxType=0 TRANSFER)
+    //   genesis_hash (32 bytes)
+    //   u32_be(shard_id)
     //   from_str || 0x00
     //   to_str   || 0x00
     //   u64_be(amount)
@@ -10325,8 +10376,10 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     //   u64_be(nonce)
     //   payload  (empty for TRANSFER)
     std::vector<uint8_t> sb;
-    sb.reserve(1 + keyfile_address.size() + 1 + to_str.size() + 1 + 24);
+    sb.reserve(1 + genesis_hash.size() + 4 + keyfile_address.size() + 1 + to_str.size() + 1 + 24);
     sb.push_back(static_cast<uint8_t>(0));  // TxType::TRANSFER == 0
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -10364,9 +10417,11 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     // with cmd_tx_sign_verify / cmd_cold_sign / chain Transaction::
     // from_json without any rewrite). hash is SHA-256(signing_bytes) hex.
     nlohmann::json signed_doc = {
-        {"type",      "TRANSFER"},
-        {"from",      keyfile_address},
-        {"to",        to_str},
+        {"type",         "TRANSFER"},
+        {"genesis_hash", to_hex(genesis_hash)},
+        {"shard_id",     shard_id},
+        {"from",         keyfile_address},
+        {"to",           to_str},
         {"amount",    amount_u},
         {"fee",       fee_u},
         {"nonce",     nonce_u},
@@ -10948,11 +11003,23 @@ int cmd_tx_batch_sign(int argc, char** argv) {
             return 1;
         }
 
+        std::array<uint8_t, 32> genesis_hash{};
+        uint32_t shard_id = 0;
+        if (rec.contains("genesis_hash") && rec["genesis_hash"].is_string()) {
+            std::string gh_hex = rec["genesis_hash"].get<std::string>();
+            if (!gh_hex.empty()) {
+                try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+            }
+        }
+        shard_id = rec.value("shard_id", uint32_t{0});
+
         // ── Build canonical signing_bytes — byte-identical to
         //    src/chain/block.cpp Transaction::signing_bytes ──────────────
         std::vector<uint8_t> sb;
-        sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24);
+        sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24);
         sb.push_back(static_cast<uint8_t>(tx_type_int));
+        sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+        for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
         sb.insert(sb.end(), from_str.begin(), from_str.end());
         sb.push_back(0);
         sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -10988,15 +11055,17 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         // Output envelope — Transaction::to_json shape (numeric type,
         // `sig` field name, `hash` field, empty `payload`).
         nlohmann::json envj = {
-            {"type",    tx_type_int},
-            {"from",    from_str},
-            {"to",      to_str},
-            {"amount",  amount},
-            {"fee",     fee},
-            {"nonce",   nonce},
-            {"payload", ""},
-            {"sig",     to_hex(sig)},
-            {"hash",    to_hex(sb_sha)},
+            {"type",         tx_type_int},
+            {"genesis_hash", to_hex(genesis_hash)},
+            {"shard_id",     shard_id},
+            {"from",         from_str},
+            {"to",           to_str},
+            {"amount",       amount},
+            {"fee",          fee},
+            {"nonce",        nonce},
+            {"payload",      ""},
+            {"sig",          to_hex(sig)},
+            {"hash",         to_hex(sb_sha)},
         };
         out_arr.push_back(std::move(envj));
     }
@@ -12098,6 +12167,16 @@ int cmd_validate_tx(int argc, char** argv) {
         }
     }
 
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
+
     // payload: required string (hex). Empty string is valid for TRANSFER.
     if (!j.contains("payload") || !j["payload"].is_string()) {
         set_structural_fail("missing/wrong-typed 'payload' (expected hex string)");
@@ -12167,9 +12246,11 @@ int cmd_validate_tx(int argc, char** argv) {
         // Build signing_bytes — byte-for-byte identical to
         // src/chain/block.cpp Transaction::signing_bytes.
         if (tx_type_int >= 0 && tx_type_int <= 255) {
-            sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+            sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24
                        + payload_bytes.size());
             sb.push_back(static_cast<uint8_t>(tx_type_int));
+            sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+            for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
             sb.insert(sb.end(), from_str.begin(), from_str.end());
             sb.push_back(0);
             sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -12654,6 +12735,16 @@ static bool verify_one_envelope(const nlohmann::json& j,
             : static_cast<uint64_t>(j["fee"].get<int64_t>());
     }
 
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
+
     if (!j.contains("payload") || !j["payload"].is_string()) {
         out_reason = "missing/wrong-typed 'payload' (expected hex string)";
         return false;
@@ -12711,9 +12802,11 @@ static bool verify_one_envelope(const nlohmann::json& j,
     // src/chain/block.cpp Transaction::signing_bytes (same encoder
     // cmd_validate_tx / cmd_tx_batch_sign / derive-tx-hash all share).
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24
                + payload_bytes.size());
     sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -15298,6 +15391,17 @@ int cmd_derive_tx_hash(int argc, char** argv) {
             ? j["fee"].get<uint64_t>()
             : static_cast<uint64_t>(j["fee"].get<int64_t>());
     }
+
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
+
     if (!j.contains("payload") || !j["payload"].is_string()) {
         std::cerr << "derive-tx-hash: missing/wrong-typed 'payload' "
                      "(expected hex string)\n";
@@ -15331,9 +15435,11 @@ int cmd_derive_tx_hash(int argc, char** argv) {
         return 1;
     }
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24
                + payload_bytes.size());
     sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -15630,6 +15736,17 @@ int cmd_inspect_tx(int argc, char** argv) {
             ? j["fee"].get<uint64_t>()
             : static_cast<uint64_t>(j["fee"].get<int64_t>());
     }
+
+    std::array<uint8_t, 32> genesis_hash{};
+    uint32_t shard_id = 0;
+    if (j.contains("genesis_hash") && j["genesis_hash"].is_string()) {
+        std::string gh_hex = j["genesis_hash"].get<std::string>();
+        if (!gh_hex.empty()) {
+            try { genesis_hash = from_hex_arr<32>(gh_hex); } catch (...) {}
+        }
+    }
+    shard_id = j.value("shard_id", uint32_t{0});
+
     if (!j.contains("payload") || !j["payload"].is_string()) {
         std::cerr << "inspect-tx: missing/wrong-typed 'payload' "
                      "(expected hex string)\n";
@@ -16024,9 +16141,11 @@ int cmd_inspect_tx(int argc, char** argv) {
 
     // ── Derived fields: signing_bytes + recomputed hash + match flag ────
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24
                + payload_bytes.size());
     sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -17227,6 +17346,8 @@ int cmd_bulk_send(int argc, char** argv) {
     std::string inbuf;
     uint64_t starting_nonce = 0;
     bool nonce_fetched = false;
+    std::array<uint8_t, 32> bulk_genesis_hash{};
+    uint32_t bulk_shard_id = 0;
     if (rpc_port > 0) {
         std::string conn_err;
         rpc_sock = rpc_connect_localhost(
@@ -17241,6 +17362,16 @@ int cmd_bulk_send(int argc, char** argv) {
                 return 1;
             }
         } else {
+            try {
+                auto st_resp = rpc_call_over_socket(rpc_sock, inbuf, "status", nlohmann::json::object());
+                if (st_resp.contains("genesis") && st_resp["genesis"].is_string()) {
+                    std::string gh_hex = st_resp["genesis"].get<std::string>();
+                    if (!gh_hex.empty()) bulk_genesis_hash = from_hex_arr<32>(gh_hex);
+                }
+                if (st_resp.contains("shard_id") && st_resp["shard_id"].is_number()) {
+                    bulk_shard_id = st_resp["shard_id"].get<uint32_t>();
+                }
+            } catch (...) {}
             try {
                 auto n_resp = rpc_call_over_socket(
                     rpc_sock, inbuf, "nonce", {{"domain", keyfile_address}});
@@ -17293,8 +17424,10 @@ int cmd_bulk_send(int argc, char** argv) {
         // Transaction::signing_bytes; same encoding as cmd_cold_sign /
         // cmd_tx_sign_verify above). TRANSFER has empty payload.
         std::vector<uint8_t> sb;
-        sb.reserve(1 + keyfile_address.size() + 1 + br.to.size() + 1 + 24);
+        sb.reserve(1 + bulk_genesis_hash.size() + 4 + keyfile_address.size() + 1 + br.to.size() + 1 + 24);
         sb.push_back(static_cast<uint8_t>(0));  // TxType::TRANSFER == 0
+        sb.insert(sb.end(), bulk_genesis_hash.begin(), bulk_genesis_hash.end());
+        for (int j = 3; j >= 0; --j) sb.push_back((bulk_shard_id >> (j * 8)) & 0xFF);
         sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
         sb.push_back(0);
         sb.insert(sb.end(), br.to.begin(), br.to.end());
@@ -17325,15 +17458,17 @@ int cmd_bulk_send(int argc, char** argv) {
         // Build the Transaction JSON envelope (matches Transaction::to_json
         // shape exactly so the chain's submit_tx parses it via from_json).
         nlohmann::json tx_json = {
-            {"type",    0},                  // TxType::TRANSFER
-            {"from",    keyfile_address},
-            {"to",      br.to},
-            {"amount",  br.amount},
-            {"fee",     br.fee},
-            {"nonce",   row_nonce},
-            {"payload", ""},                 // empty hex payload
-            {"sig",     to_hex(sig)},
-            {"hash",    to_hex(sb_sha)},
+            {"type",         0},                  // TxType::TRANSFER
+            {"genesis_hash", to_hex(bulk_genesis_hash)},
+            {"shard_id",     bulk_shard_id},
+            {"from",         keyfile_address},
+            {"to",           br.to},
+            {"amount",       br.amount},
+            {"fee",          br.fee},
+            {"nonce",        row_nonce},
+            {"payload",      ""},                 // empty hex payload
+            {"sig",          to_hex(sig)},
+            {"hash",         to_hex(sb_sha)},
         };
 
         row_out["tx_hash"] = to_hex(sb_sha);
@@ -17809,6 +17944,8 @@ int cmd_bulk_stake(int argc, char** argv) {
     std::string inbuf;
     uint64_t starting_nonce = 0;
     bool nonce_fetched = false;
+    std::array<uint8_t, 32> bulk_genesis_hash{};
+    uint32_t bulk_shard_id = 0;
     if (rpc_port > 0) {
         std::string conn_err;
         rpc_sock = rpc_connect_localhost(
@@ -17820,6 +17957,16 @@ int cmd_bulk_stake(int argc, char** argv) {
                 return 1;
             }
         } else {
+            try {
+                auto st_resp = rpc_call_over_socket(rpc_sock, inbuf, "status", nlohmann::json::object());
+                if (st_resp.contains("genesis") && st_resp["genesis"].is_string()) {
+                    std::string gh_hex = st_resp["genesis"].get<std::string>();
+                    if (!gh_hex.empty()) bulk_genesis_hash = from_hex_arr<32>(gh_hex);
+                }
+                if (st_resp.contains("shard_id") && st_resp["shard_id"].is_number()) {
+                    bulk_shard_id = st_resp["shard_id"].get<uint32_t>();
+                }
+            } catch (...) {}
             try {
                 auto n_resp = rpc_call_over_socket(
                     rpc_sock, inbuf, "nonce", {{"domain", keyfile_address}});
@@ -17882,8 +18029,10 @@ int cmd_bulk_stake(int argc, char** argv) {
             payload[j] = static_cast<uint8_t>((sr.amount >> (8 * j)) & 0xFF);
 
         std::vector<uint8_t> sb;
-        sb.reserve(1 + keyfile_address.size() + 1 + 0 + 1 + 24 + 8);
+        sb.reserve(1 + bulk_genesis_hash.size() + 4 + keyfile_address.size() + 1 + 0 + 1 + 24 + 8);
         sb.push_back(static_cast<uint8_t>(3));  // TxType::STAKE == 3
+        sb.insert(sb.end(), bulk_genesis_hash.begin(), bulk_genesis_hash.end());
+        for (int j = 3; j >= 0; --j) sb.push_back((bulk_shard_id >> (j * 8)) & 0xFF);
         sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
         sb.push_back(0);
         // tx.to is empty → just the null terminator.
@@ -17913,15 +18062,17 @@ int cmd_bulk_stake(int argc, char** argv) {
 
         // Transaction JSON envelope (matches Transaction::to_json).
         nlohmann::json tx_json = {
-            {"type",    3},                  // TxType::STAKE
-            {"from",    keyfile_address},
-            {"to",      ""},                 // STAKE convention: empty
-            {"amount",  0},                  // chain ignores; payload carries
-            {"fee",     sr.fee},
-            {"nonce",   row_nonce},
-            {"payload", to_hex(payload)},
-            {"sig",     to_hex(sig)},
-            {"hash",    to_hex(sb_sha)},
+            {"type",         3},                  // TxType::STAKE
+            {"genesis_hash", to_hex(bulk_genesis_hash)},
+            {"shard_id",     bulk_shard_id},
+            {"from",         keyfile_address},
+            {"to",           ""},                 // STAKE convention: empty
+            {"amount",       0},                  // chain ignores; payload carries
+            {"fee",          sr.fee},
+            {"nonce",        row_nonce},
+            {"payload",      to_hex(payload)},
+            {"sig",          to_hex(sig)},
+            {"hash",         to_hex(sb_sha)},
         };
 
         row_out["tx_hash"] = to_hex(sb_sha);
@@ -23412,10 +23563,11 @@ int cmd_verify_stake_unlock(int argc, char** argv) {
 //   1  args / validation error
 //   2  (reserved for crypto failure; none on this path — kept for parity)
 int cmd_param_change_build(int argc, char** argv) {
-    std::string name, value_dec, value_hex, from_str, out_path;
+    std::string name, value_dec, value_hex, from_str, out_path, genesis_hash_str;
     int64_t  eff_height = -1;
     int64_t  nonce      = -1;
     int64_t  fee        = 0;
+    uint32_t shard_id   = 0;
     bool     have_eff   = false, have_nonce = false;
     bool     have_value_dec = false, have_value_hex = false;
     bool     allow_stdout = false;
@@ -23463,6 +23615,12 @@ int cmd_param_change_build(int argc, char** argv) {
         else if (a == "--out"  && i + 1 < argc) out_path = argv[++i];
         else if (a == "--allow-stdout")         allow_stdout = true;
         else if (a == "--json")                 json_out     = true;
+        else if (a == "--genesis-hash" && i + 1 < argc) genesis_hash_str = argv[++i];
+        else if (a == "--shard-id" && i + 1 < argc) {
+            int64_t sid = 0; bool tmp = false;
+            if (!parse_u64("--shard-id", argv[++i], sid, tmp)) return 1;
+            shard_id = static_cast<uint32_t>(sid);
+        }
         else if (a == "--help" || a == "-h") {
             std::cout <<
                 "Usage: determ-wallet param-change-build --name <P>\n"
@@ -23710,8 +23868,19 @@ int cmd_param_change_build(int argc, char** argv) {
     for (int i = 0; i < 8; ++i)
         sig_msg.push_back(static_cast<uint8_t>((eff_u >> (8 * i)) & 0xFF));
 
+    std::array<uint8_t, 32> genesis_hash{};
+    if (!genesis_hash_str.empty()) {
+        try { genesis_hash = from_hex_arr<32>(genesis_hash_str); }
+        catch (std::exception& e) {
+            std::cerr << "param-change-build: invalid 'genesis-hash' hex: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // ── Canonical Transaction::signing_bytes (src/chain/block.cpp) ────────
     //   u8(type=PARAM_CHANGE=6)
+    //   genesis_hash (32 bytes)
+    //   u32_be(shard_id)
     //   from || 0x00
     //   to   || 0x00              (to is empty for governance txs)
     //   u64_be(amount=0)
@@ -23720,8 +23889,10 @@ int cmd_param_change_build(int argc, char** argv) {
     //   payload bytes
     const std::string to_str;  // PARAM_CHANGE carries no recipient
     std::vector<uint8_t> sb;
-    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload.size());
+    sb.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload.size());
     sb.push_back(static_cast<uint8_t>(6));  // TxType::PARAM_CHANGE == 6
+    sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
     sb.insert(sb.end(), from_str.begin(), from_str.end());
     sb.push_back(0);
     sb.insert(sb.end(), to_str.begin(), to_str.end());
@@ -23740,16 +23911,18 @@ int cmd_param_change_build(int argc, char** argv) {
     // envelope round-trips through chain Transaction::from_json once the
     // keyholder sigs are spliced into the payload and the hash re-derived.
     nlohmann::json tx_doc = {
-        {"type",             6},
-        {"type_name",        "PARAM_CHANGE"},
-        {"from",             from_str},
-        {"to",               to_str},
-        {"amount",           0},
-        {"fee",              fee_u},
-        {"nonce",            nonce_u},
-        {"payload",          to_hex(payload)},
-        {"sig",              std::string(128, '0')},
-        {"hash",             to_hex(sb_sha)},
+        {"type",                       6},
+        {"type_name",                  "PARAM_CHANGE"},
+        {"genesis_hash",               to_hex(genesis_hash)},
+        {"shard_id",                   shard_id},
+        {"from",                       from_str},
+        {"to",                         to_str},
+        {"amount",                     0},
+        {"fee",                        fee_u},
+        {"nonce",                      nonce_u},
+        {"payload",                    to_hex(payload)},
+        {"sig",                        std::string(128, '0')},
+        {"hash",                       to_hex(sb_sha)},
         // Decoded-field echo + operator aids:
         {"param_name",                 name},
         {"value_hex",                  to_hex(value)},

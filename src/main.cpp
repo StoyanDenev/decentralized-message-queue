@@ -29387,29 +29387,32 @@ pre_chain.append(b3);
         // === Empty-tx golden vector ===
 
         // 1. Empty Transaction (defaults, no payload): exact byte
-        //    sequence. Type=0 (TRANSFER), empty from + to, amount=
+        //    sequence. Type=0 (TRANSFER), empty genesis_hash (32 zeros),
+        //    shard_id=0 (4 zeros BE), empty from + to, amount=
         //    fee=nonce=0, no payload.
         //
         // Layout:
         //   [0x00]                       type=TRANSFER
+        //   [0x00..0x00] 32 bytes        genesis_hash = 32 zero bytes
+        //   [0x00..0x00] 4 bytes         shard_id = 0 BE
         //   [0x00]                       from = "" + terminator
         //   [0x00]                       to   = "" + terminator
         //   [0x00..0x00] 8 bytes         amount = 0 BE
         //   [0x00..0x00] 8 bytes         fee    = 0 BE
         //   [0x00..0x00] 8 bytes         nonce  = 0 BE
         //
-        // Total: 1 + 1 + 1 + 24 = 27 bytes, all zero.
+        // Total: 1 + 32 + 4 + 1 + 1 + 24 = 63 bytes, all zero.
         {
             Transaction tx;
             auto sb = tx.signing_bytes();
-            check(sb.size() == 27,
-                  "empty tx signing_bytes: 27 bytes (1 type + 1 from-term + 1 to-term + 24 BE u64s)");
+            check(sb.size() == 63,
+                  "empty tx signing_bytes: 63 bytes (1 type + 32 genesis_hash + 4 shard_id + 1 from-term + 1 to-term + 24 BE u64s)");
             bool all_zero = true;
             for (auto b : sb) {
                 if (b != 0) { all_zero = false; break; }
             }
             check(all_zero,
-                  "empty tx signing_bytes: all 27 bytes zero (default-Transaction encoding)");
+                  "empty tx signing_bytes: all 63 bytes zero (default-Transaction encoding)");
         }
 
         // === Type-byte position ===
@@ -29438,18 +29441,39 @@ pre_chain.append(b3);
                   "signing_bytes: only byte 0 differs between TRANSFER/REGISTER (type is at offset 0)");
         }
 
+        // === Genesis hash position (D23 / R-17) ===
+        {
+            Transaction tx;
+            tx.genesis_hash[0] = 0xAA;
+            tx.genesis_hash[31] = 0xBB;
+            auto sb = tx.signing_bytes();
+            check(sb[1] == 0xAA, "genesis_hash[0] at offset 1");
+            check(sb[32] == 0xBB, "genesis_hash[31] at offset 32");
+        }
+
+        // === Shard ID position (D23 / R-17) ===
+        {
+            Transaction tx;
+            tx.shard_id = 0x01020304;
+            auto sb = tx.signing_bytes();
+            check(sb[33] == 0x01, "shard_id BE byte 33 == 0x01");
+            check(sb[34] == 0x02, "shard_id BE byte 34 == 0x02");
+            check(sb[35] == 0x03, "shard_id BE byte 35 == 0x03");
+            check(sb[36] == 0x04, "shard_id BE byte 36 == 0x04");
+        }
+
         // === From string + 0x00 terminator ===
 
-        // 3. From string follows type at offset 1, terminated by
-        //    null byte. Layout: [type][f1, f2, ..., 0x00][...]
+        // 3. From string follows shard_id at offset 37, terminated by
+        //    null byte. Layout: [type][genesis_hash][shard_id][f1, f2, ..., 0x00][...]
         {
             Transaction tx;
             tx.from = "ab";
             auto sb = tx.signing_bytes();
             check(sb[0] == 0x00, "from layout: type at offset 0");
-            check(sb[1] == 'a',  "from layout: 'a' at offset 1");
-            check(sb[2] == 'b',  "from layout: 'b' at offset 2");
-            check(sb[3] == 0x00, "from layout: null terminator at offset 3");
+            check(sb[37] == 'a',  "from layout: 'a' at offset 37");
+            check(sb[38] == 'b',  "from layout: 'b' at offset 38");
+            check(sb[39] == 0x00, "from layout: null terminator at offset 39");
         }
 
         // === To string + 0x00 terminator ===
@@ -29460,11 +29484,11 @@ pre_chain.append(b3);
             tx.from = "x";
             tx.to = "y";
             auto sb = tx.signing_bytes();
-            // Offsets: 0=type, 1='x', 2=0x00, 3='y', 4=0x00
-            check(sb[1] == 'x',  "to layout: from char at offset 1");
-            check(sb[2] == 0x00, "to layout: from terminator at offset 2");
-            check(sb[3] == 'y',  "to layout: to char at offset 3");
-            check(sb[4] == 0x00, "to layout: to terminator at offset 4");
+            // Offsets: 0=type, [1..32]=genesis_hash, [33..36]=shard_id, 37='x', 38=0x00, 39='y', 40=0x00
+            check(sb[37] == 'x',  "to layout: from char at offset 37");
+            check(sb[38] == 0x00, "to layout: from terminator at offset 38");
+            check(sb[39] == 'y',  "to layout: to char at offset 39");
+            check(sb[40] == 0x00, "to layout: to terminator at offset 40");
         }
 
         // === Big-endian u64 encoding for amount/fee/nonce ===
@@ -29480,17 +29504,17 @@ pre_chain.append(b3);
             tx.fee = 0;
             tx.nonce = 0;
             auto sb = tx.signing_bytes();
-            // Offsets: 0=type, 1=from-term, 2=to-term, 3..10=amount BE
-            check(sb[3] == 0x00,
-                  "amount BE: byte 3 (MSB) == 0x00 for value 1");
-            check(sb[4] == 0x00, "amount BE: byte 4 == 0x00");
-            check(sb[5] == 0x00, "amount BE: byte 5 == 0x00");
-            check(sb[6] == 0x00, "amount BE: byte 6 == 0x00");
-            check(sb[7] == 0x00, "amount BE: byte 7 == 0x00");
-            check(sb[8] == 0x00, "amount BE: byte 8 == 0x00");
-            check(sb[9] == 0x00, "amount BE: byte 9 == 0x00");
-            check(sb[10] == 0x01,
-                  "amount BE: byte 10 (LSB) == 0x01 (big-endian convention)");
+            // Offsets: 0=type, [1..32]=genesis_hash, [33..36]=shard_id, 37=from-term, 38=to-term, 39..46=amount BE
+            check(sb[39] == 0x00,
+                  "amount BE: byte 39 (MSB) == 0x00 for value 1");
+            check(sb[40] == 0x00, "amount BE: byte 40 == 0x00");
+            check(sb[41] == 0x00, "amount BE: byte 41 == 0x00");
+            check(sb[42] == 0x00, "amount BE: byte 42 == 0x00");
+            check(sb[43] == 0x00, "amount BE: byte 43 == 0x00");
+            check(sb[44] == 0x00, "amount BE: byte 44 == 0x00");
+            check(sb[45] == 0x00, "amount BE: byte 45 == 0x00");
+            check(sb[46] == 0x01,
+                  "amount BE: byte 46 (LSB) == 0x01 (big-endian convention)");
         }
 
         // 6. amount = 0x0102030405060708 → BE pattern.
@@ -29498,17 +29522,17 @@ pre_chain.append(b3);
             Transaction tx;
             tx.amount = 0x0102030405060708ULL;
             auto sb = tx.signing_bytes();
-            check(sb[3]  == 0x01, "amount BE: byte 3 (MSB) == 0x01");
-            check(sb[4]  == 0x02, "amount BE: byte 4 == 0x02");
-            check(sb[5]  == 0x03, "amount BE: byte 5 == 0x03");
-            check(sb[6]  == 0x04, "amount BE: byte 6 == 0x04");
-            check(sb[7]  == 0x05, "amount BE: byte 7 == 0x05");
-            check(sb[8]  == 0x06, "amount BE: byte 8 == 0x06");
-            check(sb[9]  == 0x07, "amount BE: byte 9 == 0x07");
-            check(sb[10] == 0x08, "amount BE: byte 10 (LSB) == 0x08");
+            check(sb[39] == 0x01, "amount BE: byte 39 (MSB) == 0x01");
+            check(sb[40] == 0x02, "amount BE: byte 40 == 0x02");
+            check(sb[41] == 0x03, "amount BE: byte 41 == 0x03");
+            check(sb[42] == 0x04, "amount BE: byte 42 == 0x04");
+            check(sb[43] == 0x05, "amount BE: byte 43 == 0x05");
+            check(sb[44] == 0x06, "amount BE: byte 44 == 0x06");
+            check(sb[45] == 0x07, "amount BE: byte 45 == 0x07");
+            check(sb[46] == 0x08, "amount BE: byte 46 (LSB) == 0x08");
         }
 
-        // 7. fee follows amount at offsets [11..18]. fee = 0xFF
+        // 7. fee follows amount at offsets [47..54]. fee = 0xFF
         //    → BE bytes = [0,0,0,0,0,0,0,FF].
         {
             Transaction tx;
@@ -29516,13 +29540,13 @@ pre_chain.append(b3);
             tx.fee = 0xFF;
             tx.nonce = 0;
             auto sb = tx.signing_bytes();
-            check(sb[11] == 0x00, "fee BE: byte 11 (MSB) == 0x00");
-            check(sb[12] == 0x00, "fee BE: byte 12 == 0x00");
-            check(sb[18] == 0xFF,
-                  "fee BE: byte 18 (LSB) == 0xFF — fee at offset [11..18]");
+            check(sb[47] == 0x00, "fee BE: byte 47 (MSB) == 0x00");
+            check(sb[48] == 0x00, "fee BE: byte 48 == 0x00");
+            check(sb[54] == 0xFF,
+                  "fee BE: byte 54 (LSB) == 0xFF — fee at offset [47..54]");
         }
 
-        // 8. nonce follows fee at offsets [19..26]. nonce = 0x42
+        // 8. nonce follows fee at offsets [55..62]. nonce = 0x42
         //    → BE bytes.
         {
             Transaction tx;
@@ -29530,28 +29554,28 @@ pre_chain.append(b3);
             tx.fee = 0;
             tx.nonce = 0x42;
             auto sb = tx.signing_bytes();
-            check(sb[19] == 0x00, "nonce BE: byte 19 (MSB) == 0x00");
-            check(sb[26] == 0x42,
-                  "nonce BE: byte 26 (LSB) == 0x42 — nonce at offset [19..26]");
+            check(sb[55] == 0x00, "nonce BE: byte 55 (MSB) == 0x00");
+            check(sb[62] == 0x42,
+                  "nonce BE: byte 62 (LSB) == 0x42 — nonce at offset [55..62]");
         }
 
         // === Payload position ===
 
-        // 9. Payload appended at offset 27 (after 1+1+1+24 = 27 byte
+        // 9. Payload appended at offset 63 (after 1+32+4+1+1+24 = 63 byte
         //    prefix for empty from/to).
         {
             Transaction tx;
             tx.payload = {0xDE, 0xAD, 0xBE, 0xEF};
             auto sb = tx.signing_bytes();
-            check(sb.size() == 27 + 4,
-                  "payload position: empty from/to + 4-byte payload → 31 total bytes");
-            check(sb[27] == 0xDE, "payload[0] at offset 27 == 0xDE");
-            check(sb[28] == 0xAD, "payload[1] at offset 28 == 0xAD");
-            check(sb[29] == 0xBE, "payload[2] at offset 29 == 0xBE");
-            check(sb[30] == 0xEF, "payload[3] at offset 30 == 0xEF");
+            check(sb.size() == 63 + 4,
+                  "payload position: empty from/to + 4-byte payload → 67 total bytes");
+            check(sb[63] == 0xDE, "payload[0] at offset 63 == 0xDE");
+            check(sb[64] == 0xAD, "payload[1] at offset 64 == 0xAD");
+            check(sb[65] == 0xBE, "payload[2] at offset 65 == 0xBE");
+            check(sb[66] == 0xEF, "payload[3] at offset 66 == 0xEF");
         }
 
-        // 10. Empty payload: signing_bytes size is exactly 27 + 0
+        // 10. Empty payload: signing_bytes size is exactly 63 + 0
         //     for empty from/to/payload + extra for from/to strings
         //     beyond zero length.
         {
@@ -29559,10 +29583,10 @@ pre_chain.append(b3);
             tx.from = "alice";   // 5 bytes
             tx.to = "bob";       // 3 bytes
             auto sb = tx.signing_bytes();
-            // 1 (type) + 5 (from) + 1 (from term) + 3 (to) + 1 (to term)
-            // + 24 (BE u64s) = 35 bytes.
-            check(sb.size() == 35,
-                  "size: 'alice'+'bob' no-payload → 1+5+1+3+1+24 = 35 bytes");
+            // 1 (type) + 32 (genesis) + 4 (shard) + 5 (from) + 1 (from term) + 3 (to) + 1 (to term)
+            // + 24 (BE u64s) = 71 bytes.
+            check(sb.size() == 71,
+                  "size: 'alice'+'bob' no-payload → 1+32+4+5+1+3+1+24 = 71 bytes");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
@@ -63416,6 +63440,44 @@ pre_chain.append(b3);
             bv.set_k_block_sigs(2);
             auto rs2 = bv.check_transaction(stake_tx, 2, c, reg, 1);
             check(rs2.ok, "D6 / S-069: STAKE from registered-but-not-yet-eligible domain admitted when within 2K bound");
+
+            // === S-101: Tx content-hash verification ===
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice";
+                tx.to = "bob";
+                tx.amount = 10;
+                tx.fee = 1;
+                tx.nonce = 1;
+                tx.hash = {0x11, 0x22}; // bogus hash != compute_hash
+                auto rb = bv.check_transaction(tx, 2, c, reg, 1);
+                check(!rb.ok && rb.error.find("tx hash mismatch (S-101)") != std::string::npos,
+                      "S-101: tx with bogus advertised hash rejected");
+            }
+
+            // === D23 / R-17 (S-103): Domain-separated replay prevention for transactions across chains and shards ===
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice";
+                tx.to = "bob";
+                tx.amount = 10;
+                tx.fee = 1;
+                tx.nonce = 1;
+                tx.genesis_hash = {0xFF, 0xEE}; // wrong genesis hash
+                tx.hash = tx.compute_hash();
+                auto r_chain = bv.check_transaction(tx, 2, c, reg, 1);
+                check(!r_chain.ok && r_chain.error.find("tx genesis_hash mismatch (D23/S-103)") != std::string::npos,
+                      "D23 / S-103: tx with mismatched genesis_hash rejected by validator");
+
+                tx.genesis_hash = c.genesis_hash();
+                tx.shard_id = bv.shard_id() + 1; // wrong shard id
+                tx.hash = tx.compute_hash();
+                auto r_shard = bv.check_transaction(tx, 2, c, reg, 1);
+                check(!r_shard.ok && r_shard.error.find("tx shard_id mismatch (D23/S-103)") != std::string::npos,
+                      "D23 / S-103: tx with mismatched shard_id rejected by validator");
+            }
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
@@ -64695,8 +64757,8 @@ pre_chain.append(b3);
         // by the smallest representable perturbation, assert
         // signing_bytes CHANGES.
         //
-        // 8 assertions: type mutation, from mutation, to mutation, amount
-        // +1, fee +1, nonce +1, payload[0] flip, payload size change.
+        // 10 assertions: type mutation, genesis_hash mutation, shard_id mutation,
+        // from mutation, to mutation, amount +1, fee +1, nonce +1, payload[0] flip, payload size change.
         {
             Transaction base = make_canonical_transfer();
             auto sb_base = base.signing_bytes();
@@ -64708,6 +64770,22 @@ pre_chain.append(b3);
                 check(t.signing_bytes() != sb_base,
                       "(2) Field binding: mutating tx.type "
                       "(TRANSFER→STAKE) changes signing_bytes");
+            }
+            // genesis_hash: mutating tx.genesis_hash (D23 / R-17)
+            {
+                Transaction t = base;
+                t.genesis_hash[0] ^= 0xFF;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: mutating tx.genesis_hash "
+                      "changes signing_bytes (D23/S-103 cross-chain replay guard)");
+            }
+            // shard_id: mutating tx.shard_id (D23 / R-17)
+            {
+                Transaction t = base;
+                t.shard_id = 999;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: mutating tx.shard_id "
+                      "changes signing_bytes (D23/S-103 cross-shard replay guard)");
             }
             // from: "alice" → "alicE" (last-byte case flip)
             {
@@ -64933,17 +65011,17 @@ pre_chain.append(b3);
         // pre-image even with empty from/to/payload.
         //
         // 3 assertions: empty-payload signing_bytes non-empty (minimum
-        // prefix is 27 bytes); amount=0 produces non-empty signing_bytes
+        // prefix is 63 bytes); amount=0 produces non-empty signing_bytes
         // distinct from amount=1; nonce=UINT64_MAX is well-defined and
         // distinct from nonce=0.
         {
             // Empty payload + zero amount + zero fee + zero nonce + empty
-            // from + empty to: minimal 27-byte pre-image.
+            // from + empty to: minimal 63-byte pre-image.
             Transaction tx_empty;
             auto sb_empty = tx_empty.signing_bytes();
-            check(!sb_empty.empty() && sb_empty.size() >= 27,
+            check(!sb_empty.empty() && sb_empty.size() >= 63,
                   "(6) Boundary: empty-payload Transaction still produces "
-                  "non-empty signing_bytes (fixed prefix ≥ 27 bytes)");
+                  "non-empty signing_bytes (fixed prefix ≥ 63 bytes)");
 
             // amount=0 (vs canonical baseline amount=100): distinct
             // pre-image; locks "zero is a valid distinguishable value"
@@ -64968,9 +65046,9 @@ pre_chain.append(b3);
             tx_zero_nonce.nonce = 0;
             auto sb_max = tx_max_nonce.signing_bytes();
             check(sb_max != tx_zero_nonce.signing_bytes()
-                  && sb_max.size() == 39,
+                  && sb_max.size() == 75,
                   "(6) Boundary: nonce=UINT64_MAX produces well-defined "
-                  "39-byte signing_bytes distinct from nonce=0 (BE u64 "
+                  "75-byte signing_bytes distinct from nonce=0 (BE u64 "
                   "encoding fills all 8 bytes, no saturation)");
         }
 

@@ -223,6 +223,20 @@ else
 fi
 
 echo
+echo "=== D23 / R-17 (S-103) parity (genesis_hash + shard_id bound) ==="
+GH="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"$DETERM_LIGHT" sign-tx --keyfile "$TMP/key_a.json" --type TRANSFER \
+    --to "$ADDR_B" --amount 250 --fee 1 --nonce 4 \
+    --genesis-hash "$GH" --shard-id 7 \
+    --out "$TMP/d23_bound.json" >/dev/null 2>&1
+if [ -s "$TMP/d23_bound.json" ]; then
+    parity_check "D23-BOUND" "$TMP/d23_bound.json"
+else
+    echo "  FAIL: light sign-tx produced no D23 bound envelope"
+    fail_count=$((fail_count + 1))
+fi
+
+echo
 echo "=== Negative control: a hash divergence WOULD be caught ==="
 # Tamper one byte of `amount` AFTER signing but leave the stored `hash`
 # field intact. determ tx-hash recomputes from the (mutated) body, so it

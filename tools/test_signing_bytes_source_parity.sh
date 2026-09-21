@@ -34,6 +34,8 @@
 # collapsing variable-name + whitespace differences (out/sb, from/from_str,
 # to/to_str):
 #       push_back(static_cast<uint8_t>(type/tx_type))   -> TYPE
+#       insert(... genesis_hash ...)                    -> GENESIS_HASH
+#       for(i=3;i>=0;--i) ... shard_id ...              -> SHARD_ID_BE
 #       insert(... from ...)                            -> FROM
 #       push_back(0)                                    -> NUL
 #       insert(... to ...)                              -> TO
@@ -44,7 +46,7 @@
 #       insert(... payload ...)                         -> PAYLOAD
 # The ordered token sequence is built per site. The guard then asserts:
 #   * Sites 1,2,3 each produce EXACTLY:
-#         TYPE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD
+#         TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD
 #   * Site 4 produces that sequence MINUS the trailing PAYLOAD, and the ONLY
 #     difference vs the canonical sequence is that single missing PAYLOAD.
 #
@@ -79,8 +81,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-CANONICAL_SEQ="TYPE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD"
-LIGHT_SEQ="TYPE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE"   # canonical minus trailing PAYLOAD
+CANONICAL_SEQ="TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD"
+LIGHT_SEQ="TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE"   # canonical minus trailing PAYLOAD
 
 VIOLATIONS=0
 ok()  { echo "  ok:  $1"; }
@@ -116,6 +118,15 @@ extract_tokens() {
       # TYPE: push_back(static_cast<uint8_t>(type/tx_type)).
       # Accept the `type` (chain/light) and `tx_type` (wallet) variable names.
       if (line ~ /push_back\(static_cast<uint8_t>\((type|tx_type)\)\)/) print "TYPE"
+
+      # GENESIS_HASH insert: insert(... genesis_hash.begin(), genesis_hash.end()).
+      else if (line ~ /\.insert\(.*\.end\(\), *genesis_hash\.begin/) print "GENESIS_HASH"
+
+      # SHARD_ID BE loop: for(i=3;i>=0;--i) push_back((shard_id >> (i*8)) & 0xFF).
+      else if (line ~ /for *\( *int i *= *3 *; *i *>= *0 *; *(--i|i--) *\)/) {
+        if (line ~ /\( *shard_id *>> *\( *i *\* *8 *\)/) print "SHARD_ID_BE"
+        else print "BE_UNKNOWN"
+      }
 
       # FROM / TO / PAYLOAD inserts: insert(dst.end(), VAR.begin(), VAR.end()).
       # The destination is `out.end()` / `sb.end()`; the src var (immediately
@@ -187,6 +198,8 @@ if [ "${SELFTEST:-}" = "1" ]; then
   #     extractor faithfully parses a correct layout).
   st_case "canonical-sanity" "$CANONICAL_SEQ" <<'EOF'
   out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
   out.insert(out.end(), from.begin(), from.end());
   out.push_back(0);
   out.insert(out.end(), to.begin(), to.end());
@@ -198,8 +211,10 @@ if [ "${SELFTEST:-}" = "1" ]; then
 EOF
 
   # (1) fee/nonce loops SWAPPED -> token order AMOUNT_BE NONCE_BE FEE_BE.
-  st_case "fee-nonce-swap" "TYPE FROM NUL TO NUL AMOUNT_BE NONCE_BE FEE_BE PAYLOAD" <<'EOF'
+  st_case "fee-nonce-swap" "TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL AMOUNT_BE NONCE_BE FEE_BE PAYLOAD" <<'EOF'
   out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
   out.insert(out.end(), from.begin(), from.end());
   out.push_back(0);
   out.insert(out.end(), to.begin(), to.end());
@@ -211,8 +226,10 @@ EOF
 EOF
 
   # (2) amount loop rewritten LITTLE-ENDIAN (i=0;i<8) -> AMOUNT_BE token dropped.
-  st_case "amount-little-endian" "TYPE FROM NUL TO NUL FEE_BE NONCE_BE PAYLOAD" <<'EOF'
+  st_case "amount-little-endian" "TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL FEE_BE NONCE_BE PAYLOAD" <<'EOF'
   out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
   out.insert(out.end(), from.begin(), from.end());
   out.push_back(0);
   out.insert(out.end(), to.begin(), to.end());
@@ -224,8 +241,10 @@ EOF
 EOF
 
   # (3) dropped NUL after FROM -> one fewer NUL, FROM directly followed by TO.
-  st_case "dropped-nul" "TYPE FROM TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD" <<'EOF'
+  st_case "dropped-nul" "TYPE GENESIS_HASH SHARD_ID_BE FROM TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD" <<'EOF'
   out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
   out.insert(out.end(), from.begin(), from.end());
   out.insert(out.end(), to.begin(), to.end());
   out.push_back(0);
@@ -238,13 +257,30 @@ EOF
   # (4) amount shift WIDTH corruption (i*4 not i*8) -> AMOUNT_BE -> BE_UNKNOWN.
   #     Validates the width-binding added to the BE field regex: an i*4 must NOT
   #     silently pass as AMOUNT_BE.
-  st_case "amount-width-i4" "TYPE FROM NUL TO NUL BE_UNKNOWN FEE_BE NONCE_BE PAYLOAD" <<'EOF'
+  st_case "amount-width-i4" "TYPE GENESIS_HASH SHARD_ID_BE FROM NUL TO NUL BE_UNKNOWN FEE_BE NONCE_BE PAYLOAD" <<'EOF'
   out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
   out.insert(out.end(), from.begin(), from.end());
   out.push_back(0);
   out.insert(out.end(), to.begin(), to.end());
   out.push_back(0);
   for (int i = 7; i >= 0; --i) out.push_back((amount >> (i * 4)) & 0xFF);
+  for (int i = 7; i >= 0; --i) out.push_back((fee    >> (i * 8)) & 0xFF);
+  for (int i = 7; i >= 0; --i) out.push_back((nonce  >> (i * 8)) & 0xFF);
+  out.insert(out.end(), payload.begin(), payload.end());
+EOF
+
+  # (5) shard_id loop rewritten LITTLE-ENDIAN -> SHARD_ID_BE token dropped.
+  st_case "shard-id-little-endian" "TYPE GENESIS_HASH FROM NUL TO NUL AMOUNT_BE FEE_BE NONCE_BE PAYLOAD" <<'EOF'
+  out.push_back(static_cast<uint8_t>(type));
+  out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+  for (int i = 0; i < 4; ++i) out.push_back((shard_id >> (i * 8)) & 0xFF);
+  out.insert(out.end(), from.begin(), from.end());
+  out.push_back(0);
+  out.insert(out.end(), to.begin(), to.end());
+  out.push_back(0);
+  for (int i = 7; i >= 0; --i) out.push_back((amount >> (i * 8)) & 0xFF);
   for (int i = 7; i >= 0; --i) out.push_back((fee    >> (i * 8)) & 0xFF);
   for (int i = 7; i >= 0; --i) out.push_back((nonce  >> (i * 8)) & 0xFF);
   out.insert(out.end(), payload.begin(), payload.end());

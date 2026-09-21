@@ -54,6 +54,8 @@ LightTxType parse_tx_type(const std::string& s);
 //   fee       — caller-supplied fee
 //   nonce     — caller-supplied nonce
 //   payload   — "" (empty hex for all light-client types)
+//   genesis_hash — 64-char hex (chain identity binding, D23 / S-103)
+//   shard_id     — integer (chain identity binding, D23 / S-103)
 //   signature — 128-char hex (Ed25519 over signing_bytes)
 //   sig       — alias for signature (wire-compat with chain
 //               Transaction::from_json)
@@ -63,7 +65,9 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
                               const std::string& to_str,
                               uint64_t amount,
                               uint64_t fee,
-                              uint64_t nonce);
+                              uint64_t nonce,
+                              const std::array<uint8_t, 32>& genesis_hash = {},
+                              uint32_t shard_id = 0);
 
 // Construct the canonical signing_bytes that Determ's chain expects
 // (same byte order as src/chain/block.cpp::Transaction::signing_bytes).
@@ -73,6 +77,8 @@ std::vector<uint8_t> compute_signing_bytes(LightTxType type,
                                             const std::string& to_str,
                                             uint64_t amount,
                                             uint64_t fee,
-                                            uint64_t nonce);
+                                            uint64_t nonce,
+                                            const std::array<uint8_t, 32>& genesis_hash = {},
+                                            uint32_t shard_id = 0);
 
 } // namespace determ::light

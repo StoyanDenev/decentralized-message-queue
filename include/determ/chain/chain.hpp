@@ -521,6 +521,8 @@ public:
     uint32_t shard_count()     const { return shard_count_; }
     const Hash& shard_salt()   const { return shard_salt_; }
     ShardId  my_shard_id()     const { return my_shard_id_; }
+    const Hash& genesis_hash() const { return genesis_hash_; }
+    void     set_genesis_hash(const Hash& h) { genesis_hash_ = h; }
     // True iff `to` routes to a different shard than this chain owns.
     // SINGLE chains (shard_count_ <= 1) return false unconditionally.
     bool     is_cross_shard(const std::string& to) const;
@@ -967,6 +969,7 @@ private:
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};
     ShardId                                     my_shard_id_{0};
+    Hash                                        genesis_hash_{};
     // rev.9 B3.4: dedup tracking for delivered inbound receipts.
     // Populated during apply (also during replay via load), consulted
     // by producer + validator to guarantee exactly-once credit.

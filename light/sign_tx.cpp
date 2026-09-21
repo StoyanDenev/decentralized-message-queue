@@ -39,9 +39,13 @@ std::vector<uint8_t> compute_signing_bytes(LightTxType type,
                                             const std::string& to_str,
                                             uint64_t amount,
                                             uint64_t fee,
-                                            uint64_t nonce) {
+                                            uint64_t nonce,
+                                            const std::array<uint8_t, 32>& genesis_hash,
+                                            uint32_t shard_id) {
     // Layout (matches src/chain/block.cpp::Transaction::signing_bytes):
     //   u8(type)
+    //   genesis_hash (32B)
+    //   u32_be(shard_id)
     //   from || 0x00
     //   to   || 0x00
     //   u64_be(amount)
@@ -49,8 +53,10 @@ std::vector<uint8_t> compute_signing_bytes(LightTxType type,
     //   u64_be(nonce)
     //   payload   (empty for all light-client tx types)
     std::vector<uint8_t> out;
-    out.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24);
+    out.reserve(1 + genesis_hash.size() + 4 + from_str.size() + 1 + to_str.size() + 1 + 24);
     out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
     out.insert(out.end(), from_str.begin(), from_str.end());
     out.push_back(0);
     out.insert(out.end(), to_str.begin(), to_str.end());
@@ -66,7 +72,9 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
                               const std::string& to_str,
                               uint64_t amount,
                               uint64_t fee,
-                              uint64_t nonce) {
+                              uint64_t nonce,
+                              const std::array<uint8_t, 32>& genesis_hash,
+                              uint32_t shard_id) {
 
     // The chain rejects TRANSFER with amount==0 (degenerate). STAKE
     // with amount==0 is also degenerate. UNSTAKE with amount==0 is
@@ -86,7 +94,8 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
 
     // Build canonical signing_bytes.
     auto sb = compute_signing_bytes(type, kf.anon_address, to_str,
-                                       amount, fee, nonce);
+                                       amount, fee, nonce,
+                                       genesis_hash, shard_id);
 
     // Ed25519 sign via the project's existing crypto::sign helper
     // (C99 RFC 8032 deterministic sign per src/crypto/keys.cpp — §3.15).
@@ -108,17 +117,19 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
     // `sig` (the chain Transaction::from_json wire shape) so the same
     // envelope is interchangeable with wallet-signed envelopes.
     json out = {
-        {"type",      static_cast<int>(type)},
-        {"type_name", tx_type_name(type)},
-        {"from",      kf.anon_address},
-        {"to",        to_str},
-        {"amount",    amount},
-        {"fee",       fee},
-        {"nonce",     nonce},
-        {"payload",   ""},
-        {"signature", to_hex(sig)},
-        {"sig",       to_hex(sig)},
-        {"hash",      to_hex(tx_hash)},
+        {"type",         static_cast<int>(type)},
+        {"type_name",    tx_type_name(type)},
+        {"genesis_hash", to_hex(genesis_hash.data(), genesis_hash.size())},
+        {"shard_id",     shard_id},
+        {"from",         kf.anon_address},
+        {"to",           to_str},
+        {"amount",       amount},
+        {"fee",          fee},
+        {"nonce",        nonce},
+        {"payload",      ""},
+        {"signature",    to_hex(sig)},
+        {"sig",          to_hex(sig)},
+        {"hash",         to_hex(tx_hash)},
     };
     return out;
 }

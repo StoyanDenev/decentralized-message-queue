@@ -4097,9 +4097,10 @@ int cmd_verify_shardtip_records(int argc, char** argv) {
 // ──────────────────────────── sign-tx ──────────────────────────────────
 
 int cmd_sign_tx(int argc, char** argv) {
-    std::string keyfile_path, type_str, to_str, out_path;
+    std::string keyfile_path, type_str, to_str, out_path, genesis_hash_str;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
+    uint32_t shard_id = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--keyfile" && i + 1 < argc) keyfile_path = argv[++i];
@@ -4108,6 +4109,8 @@ int cmd_sign_tx(int argc, char** argv) {
         else if (a == "--amount"  && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
         else if (a == "--fee"     && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
         else if (a == "--nonce"   && i + 1 < argc) { nonce  = parse_u64("--nonce",  argv[++i]); have_nonce  = true; }
+        else if (a == "--genesis-hash" && i + 1 < argc) genesis_hash_str = argv[++i];
+        else if (a == "--shard-id"     && i + 1 < argc) shard_id = static_cast<uint32_t>(parse_u64("--shard-id", argv[++i]));
         else if (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
         else {
             std::cerr << "sign-tx: unknown arg '" << a << "'\n";
@@ -4136,8 +4139,12 @@ int cmd_sign_tx(int argc, char** argv) {
                 return 1;
             }
         }
+        std::array<uint8_t, 32> gh{};
+        if (!genesis_hash_str.empty()) {
+            gh = determ::from_hex_arr<32>(genesis_hash_str);
+        }
         auto kf = load_light_keyfile(keyfile_path);
-        auto signed_tx = sign_light_tx(kf, type, to_str, amount, fee, nonce);
+        auto signed_tx = sign_light_tx(kf, type, to_str, amount, fee, nonce, gh, shard_id);
         if (out_path.empty()) {
             std::cout << signed_tx.dump() << "\n";
         } else {
@@ -4585,9 +4592,10 @@ int cmd_verify_and_submit(int argc, char** argv) {
                          "canonical lowercase (S-028); got '" << to_str << "'\n";
             return 1;
         }
+        auto gh = determ::chain::compute_genesis_hash(genesis);
         auto signed_tx = sign_light_tx(kf, LightTxType::TRANSFER,
                                          canonical_to, amount, fee,
-                                         view.next_nonce);
+                                         view.next_nonce, gh, genesis.shard_id);
         // 5. Submit (params shape per rpc.cpp:226 is {"tx": <tx-json>}).
         auto submit_reply = rpc.call("submit_tx", {{"tx", signed_tx}});
         json out = {

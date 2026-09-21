@@ -50,14 +50,18 @@ static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
 }
 
 Chain::Chain(Block genesis) {
+    genesis_hash_ = genesis.compute_hash();
     auto applied = apply_transactions(genesis);
     tx_applied_.push_back(std::move(applied));
     blocks_.push_back(std::move(genesis));
 }
 
 void Chain::append(Block b) {
-    if (!blocks_.empty() && b.prev_hash != head_hash())
+    if (blocks_.empty()) {
+        genesis_hash_ = b.compute_hash();
+    } else if (b.prev_hash != head_hash()) {
         throw std::runtime_error("Block prev_hash mismatch");
+    }
     auto applied = apply_transactions(b);
     tx_applied_.push_back(std::move(applied));
     blocks_.push_back(std::move(b));
