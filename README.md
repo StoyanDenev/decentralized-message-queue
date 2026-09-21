@@ -1,5 +1,26 @@
 # Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
+## The Pitch: A C99 Layer-0 Engine for AI & Institutional Settlement
+
+Traditional Byzantine Fault Tolerant (BFT) blockchains cannot scale for machine-to-machine economies, nor can they protect institutional block-trades from Maximum Extractable Value (MEV) front-running. The $O(N^2)$ gossip overhead, liveness halting, and public mempools of legacy consensus models are mathematically incompatible with high-frequency, trustless environments.
+
+**Determ** is a bare-metal C99 Layer-0 consensus engine that abandons BFT entirely in favor of an ultra-lean **$K=2$ VDF (Verifiable Delay Function) Duel**. 
+
+By utilizing two-phase ephemeral Multi-party Diffie-Hellman secret disclosure and strict VDF time-locks (Enforced Blindness), the protocol achieves:
+*   **$O(1)$ Network Complexity:** Sub-second settlement with zero global voting committees.
+*   **Absolute Liveness:** The network mathematically cannot halt due to offline peers; the time-windowed state machine seamlessly executes a 1-of-2 VDF fallback.
+*   **Hardware-Level MEV Prevention:** The time-lock inequality theorem prevents 1-bit bias and transaction reordering, ensuring absolute chronological fairness.
+
+Originally engineered to prevent RNG manipulation and state-desyncs in massive multiplayer game economies (where mutual distrust is absolute), Determ's architecture has evolved into the exact primitive required to power the next generation of decentralized infrastructure:
+
+### 1. Autonomous AI Agent Micro-Settlement (The Crypto x AI Layer)
+AI agents (data scrapers, LLM sub-routines) cannot use legacy financial rails, and traditional BFT blockchains are too expensive and bloated for high-frequency machine-to-machine economies. Determ's $O(1)$ network complexity allows two autonomous corporate AI agents to initiate a $K=2$ time-windowed consensus, exchange thousands of sub-cent micro-transactions, and instantly settle the final state to the distributed triple-entry ledger.
+
+### 2. MEV-Proof Institutional Dark Pools (The Enterprise Layer)
+Traditional Finance demands T+0 settlement but refuses to trade on public networks due to front-running. Determ eliminates MEV at the protocol level. Institutional trades are committed blindly, and the $K=2$ Aggregator feeds the payload into the VDF. By the time the VDF finishes computing and the trade is readable, the block is already finalized. It is mathematically impossible for an HFT bot—or the network nodes themselves—to front-run the trade.
+
+---
+
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
 > **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
