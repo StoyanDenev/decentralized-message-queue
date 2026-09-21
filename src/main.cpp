@@ -85,6 +85,16 @@
 // digest-bound wall time under a chosen virtual value (test-virtual-clock).
 #include <determ/time/virtual_clock.hpp>
 #ifdef _WIN32
+static inline int setenv(const char* name, const char* value, int overwrite) {
+    (void)overwrite;
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#endif
+
+#ifdef _WIN32
 // minix §4.5 increment 1: the native IOCP backend, exercised by
 // test-net-native. Since the §4.5b increment-2 cutover the WINDOWS daemon
 // runs on these too (via net/native.hpp).
@@ -1281,7 +1291,7 @@ Additional in-process tests:
                                               LOSSY-LINKS diagnostic that
                                               reports tip progress and any
                                               loss-induced S-048 fork
-)" R"(  determ test-virtual-clock                   §Q1 clock injection (real
+)" << R"(  determ test-virtual-clock                   §Q1 clock injection (real
                                               engine, in process): RealClock ==
                                               now_unix() byte-invariance, then a
                                               single M=K=1 Node on a VirtualClock
