@@ -27,6 +27,8 @@ CRYPTO_SRCS = \
 	src/crypto/chacha20/xchacha20_poly1305.c \
 	src/crypto/ed25519/ed25519.c \
 	src/crypto/x25519/x25519.c \
+	src/crypto/p256/p256.c \
+	src/crypto/opaque_dsso.c \
 	src/crypto/rng/rng.c
 
 # Core Consensus, Wire, Storage & Networking C99 Sources
@@ -42,7 +44,8 @@ CONSENSUS_SRCS = \
 	src/wire/binary_codec.c \
 	src/rpc/json_rpc.c \
 	src/rpc/http_rpc_server.c \
-	src/storage/block_store.c
+	src/storage/block_store.c \
+	src/ledger/state.c
 
 ALL_CORE_SRCS = $(CRYPTO_SRCS) $(CONSENSUS_SRCS)
 ALL_CORE_OBJS = $(ALL_CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
@@ -55,10 +58,11 @@ TEST_PEER_MESH_BIN = $(BIN_DIR)/test-peer-mesh
 TEST_BLOCK_STORE_BIN = $(BIN_DIR)/test-block-store
 TEST_DDA_BIN = $(BIN_DIR)/test-dda
 TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
+TEST_LEDGER_DSSO_BIN = $(BIN_DIR)/test-ledger-dsso
 
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -96,6 +100,10 @@ $(TEST_HTTP_RPC_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_http_rpc.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(TEST_LEDGER_DSSO_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_ledger_dsso.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
+
 test: all
 	@echo "Running test-k2-duel..."
 	@./$(TEST_DUEL_BIN)
@@ -111,6 +119,8 @@ test: all
 	@./$(TEST_DDA_BIN)
 	@echo "Running test-http-rpc..."
 	@./$(TEST_HTTP_RPC_BIN)
+	@echo "Running test-ledger-dsso..."
+	@./$(TEST_LEDGER_DSSO_BIN)
 
 check: test
 

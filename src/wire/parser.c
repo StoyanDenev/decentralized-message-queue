@@ -1,3 +1,4 @@
+#include <determ/crypto/sha2/sha2.h>
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -210,5 +211,132 @@ wire_status_t wire_bundle_vdf_input(const uint8_t *reveal_a, uint32_t len_a,
     }
 
     *out_written_len = cursor;
+    return WIRE_OK;
+}
+
+
+static inline void write_be64(uint8_t *p, uint64_t val) {
+    p[0] = (uint8_t)((val >> 56) & 0xFF);
+    p[1] = (uint8_t)((val >> 48) & 0xFF);
+    p[2] = (uint8_t)((val >> 40) & 0xFF);
+    p[3] = (uint8_t)((val >> 32) & 0xFF);
+    p[4] = (uint8_t)((val >> 24) & 0xFF);
+    p[5] = (uint8_t)((val >> 16) & 0xFF);
+    p[6] = (uint8_t)((val >> 8)  & 0xFF);
+    p[7] = (uint8_t)(val & 0xFF);
+}
+
+wire_status_t wire_parse_block_header(const uint8_t *data, size_t data_len,
+                                      wire_block_header_t *out_hdr) {
+    if (!data || !out_hdr) {
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (data_len < WIRE_BLOCK_HEADER_LEN) {
+        return ERR_INVALID_TRANSACTION_FORMAT;
+    }
+
+    size_t offset = 0;
+    out_hdr->height = read_be64(&data[offset]);
+    offset += 8;
+
+    memcpy(out_hdr->prev_hash, &data[offset], 32);
+    offset += 32;
+
+    memcpy(out_hdr->tx_root, &data[offset], 32);
+    offset += 32;
+
+    memcpy(out_hdr->dsso_root, &data[offset], 32);
+    offset += 32;
+
+    out_hdr->timestamp = read_be64(&data[offset]);
+    offset += 8;
+
+    memcpy(out_hdr->vrf_aggregator_proof, &data[offset], 32);
+    offset += 32;
+
+    memcpy(out_hdr->vrf_contributor_proof, &data[offset], 32);
+    offset += 32;
+
+    out_hdr->vdf_iterations = read_be32(&data[offset]);
+    offset += 4;
+
+    memcpy(out_hdr->vdf_proof, &data[offset], 32);
+    offset += 32;
+
+    return WIRE_OK;
+}
+
+wire_status_t wire_encode_block_header(const wire_block_header_t *hdr,
+                                       uint8_t *out_buf, size_t max_out_len,
+                                       size_t *out_written_len) {
+    if (!hdr || !out_buf || !out_written_len) {
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (max_out_len < WIRE_BLOCK_HEADER_LEN) {
+        return ERR_BUFFER_OVERFLOW;
+    }
+
+    size_t offset = 0;
+    write_be64(&out_buf[offset], hdr->height);
+    offset += 8;
+
+    memcpy(&out_buf[offset], hdr->prev_hash, 32);
+    offset += 32;
+
+    memcpy(&out_buf[offset], hdr->tx_root, 32);
+    offset += 32;
+
+    memcpy(&out_buf[offset], hdr->dsso_root, 32);
+    offset += 32;
+
+    write_be64(&out_buf[offset], hdr->timestamp);
+    offset += 8;
+
+    memcpy(&out_buf[offset], hdr->vrf_aggregator_proof, 32);
+    offset += 32;
+
+    memcpy(&out_buf[offset], hdr->vrf_contributor_proof, 32);
+    offset += 32;
+
+    write_be32(&out_buf[offset], hdr->vdf_iterations);
+    offset += 4;
+
+    memcpy(&out_buf[offset], hdr->vdf_proof, 32);
+    offset += 32;
+
+    *out_written_len = offset;
+    return WIRE_OK;
+}
+
+wire_status_t wire_bind_consensus_vdf_payload(uint64_t height,
+                                              const uint8_t prev_hash[32],
+                                              const uint8_t tx_root[32],
+                                              const uint8_t dsso_root[32],
+                                              uint64_t timestamp,
+                                              uint8_t out_vdf_payload[32]) {
+    if (!prev_hash || !tx_root || !dsso_root || !out_vdf_payload) {
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    /* Deterministic serialization of consensus state roots: 8 + 32 + 32 + 32 + 8 = 112 bytes */
+    uint8_t pre_image[112];
+    size_t offset = 0;
+
+    write_be64(&pre_image[offset], height);
+    offset += 8;
+
+    memcpy(&pre_image[offset], prev_hash, 32);
+    offset += 32;
+
+    memcpy(&pre_image[offset], tx_root, 32);
+    offset += 32;
+
+    memcpy(&pre_image[offset], dsso_root, 32);
+    offset += 32;
+
+    write_be64(&pre_image[offset], timestamp);
+    offset += 8;
+
+    determ_sha256(pre_image, sizeof(pre_image), out_vdf_payload);
     return WIRE_OK;
 }

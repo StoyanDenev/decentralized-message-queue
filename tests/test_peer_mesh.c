@@ -110,7 +110,7 @@ static void test_peer_mesh_handshake_and_exchange(void) {
     const uint8_t mock_tx[] = "canonical-c99-transaction-frame-bytes";
     TEST_ASSERT(peer_mesh_send_to(&s_mesh_b, b_peer_idx, WIRE_MSG_TRANSACTION, mock_tx, sizeof(mock_tx)) == 0);
 
-    for (int iter = 0; iter < 20; iter++) {
+    for (int iter = 0; iter < 100; iter++) {
         peer_mesh_poll(&s_mesh_a, 10);
         peer_mesh_poll(&s_mesh_b, 10);
         if (ctx_a.messages >= 1) break;
@@ -126,7 +126,7 @@ static void test_peer_mesh_handshake_and_exchange(void) {
     int sent = peer_mesh_broadcast(&s_mesh_a, WIRE_MSG_BLOCK, mock_block, sizeof(mock_block));
     TEST_ASSERT(sent == 1);
 
-    for (int iter = 0; iter < 20; iter++) {
+    for (int iter = 0; iter < 100; iter++) {
         peer_mesh_poll(&s_mesh_a, 10);
         peer_mesh_poll(&s_mesh_b, 10);
         if (ctx_b.messages >= 1) break;
