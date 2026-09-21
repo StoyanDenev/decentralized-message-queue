@@ -49,3 +49,7 @@ __pycache__/
 # Local agent notes and patch archives
 AGENTS.md
 patches-*/
+
+# Local build outputs and legacy backups
+bin/
+legacy_cpp_backup/

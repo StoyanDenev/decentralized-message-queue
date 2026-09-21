@@ -514,3 +514,25 @@ add_executable(d5rp
 target_compile_features(d5rp PRIVATE c_std_99)
 target_include_directories(d5rp PRIVATE include)
 target_link_libraries(d5rp PRIVATE determ-crypto-c99)
+
+# ── test-k2-duel: K=2 Fast-Block VDF Duel Verification Suite & LibFuzzer ──────
+option(ENABLE_LIBFUZZER "Build K=2 Duel target with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
+
+add_executable(test-k2-duel
+  tests/test_k2_duel.c
+  src/consensus/duel_state.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+)
+target_compile_features(test-k2-duel PRIVATE c_std_99)
+target_include_directories(test-k2-duel PRIVATE include src)
+target_link_libraries(test-k2-duel PRIVATE determ-crypto-c99)
+
+if(ENABLE_LIBFUZZER)
+  target_compile_definitions(test-k2-duel PRIVATE LIBFUZZER_ENABLED=1)
+  target_compile_options(test-k2-duel PRIVATE -fsanitize=address,fuzzer -fno-omit-frame-pointer)
+  target_link_options(test-k2-duel PRIVATE -fsanitize=address,fuzzer)
+elseif(DETERM_ASAN)
+  target_compile_options(test-k2-duel PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(test-k2-duel PRIVATE -fsanitize=address,undefined)
+endif()
