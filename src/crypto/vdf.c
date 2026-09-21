@@ -1,3 +1,5 @@
+#include "determ/time/clock.h"
+#include "determ/crypto/sha2/sha2.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -20,21 +22,25 @@
 #include <mach/mach_time.h>
 #endif
 
-static uint64_t vdf_get_monotonic_ns(void) {
-#if defined(__APPLE__)
-    static mach_timebase_info_data_t tb;
-    if (tb.denom == 0) {
-        (void)mach_timebase_info(&tb);
+#if defined(DETERM_DSF_ENABLED)
+static bool s_dsf_vdf_bypass_enabled = false;
+static uint64_t s_dsf_vdf_target_ms = 5000ULL;
+
+void determ_dsf_set_vdf_bypass(bool enabled, uint64_t target_vdf_ms) {
+    s_dsf_vdf_bypass_enabled = enabled;
+    s_dsf_vdf_target_ms = target_vdf_ms;
+}
+
+bool determ_dsf_get_vdf_bypass(uint64_t *out_target_vdf_ms) {
+    if (out_target_vdf_ms) {
+        *out_target_vdf_ms = s_dsf_vdf_target_ms;
     }
-    uint64_t t = mach_absolute_time();
-    return (uint64_t)(((__uint128_t)t * tb.numer) / tb.denom);
-#else
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0ULL;
-    }
-    return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+    return s_dsf_vdf_bypass_enabled;
+}
 #endif
+
+static uint64_t vdf_get_monotonic_ns(void) {
+    return determ_clock_now_ns();
 }
 
 /*
@@ -54,6 +60,12 @@ int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t 
 
     /* Base seed hashing: absorb into 32-byte initial state */
     determ_sha256(seed, seed_len, ctx->state);
+
+#if defined(DETERM_DSF_ENABLED)
+    if (s_dsf_vdf_bypass_enabled) {
+        return 0;
+    }
+#endif
 
     /* Initialize AES key schedule from current state */
     determ_aes256_ctx aes_ctx;
@@ -98,6 +110,20 @@ int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]) {
     if (!ctx || !output) {
         return -1;
     }
+
+#if defined(DETERM_DSF_ENABLED)
+    if (s_dsf_vdf_bypass_enabled) {
+                determ_sha256_ctx sha;
+        determ_sha256_init(&sha);
+        determ_sha256_update(&sha, ctx->state, VDF_OUTPUT_LEN);
+        determ_sha256_update(&sha, (const uint8_t *)&ctx->iterations, sizeof(ctx->iterations));
+        determ_sha256_final(&sha, output);
+
+        ctx->elapsed_ns = s_dsf_vdf_target_ms * 1000000ULL;
+        determ_dsf_clock_advance_ms(s_dsf_vdf_target_ms);
+        return 0;
+    }
+#endif
 
     uint64_t t_start = vdf_get_monotonic_ns();
 
@@ -181,6 +207,19 @@ int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
     }
 
     uint8_t computed[VDF_OUTPUT_LEN];
+#if defined(DETERM_DSF_ENABLED)
+    if (s_dsf_vdf_bypass_enabled) {
+                determ_sha256_ctx sha;
+        determ_sha256_init(&sha);
+        determ_sha256_update(&sha, ctx->state, VDF_OUTPUT_LEN);
+        determ_sha256_update(&sha, (const uint8_t *)&ctx->iterations, sizeof(ctx->iterations));
+        determ_sha256_final(&sha, computed);
+
+        int match = (determ_ct_memcmp(computed, claimed_output, VDF_OUTPUT_LEN) == 0);
+        determ_secure_zero(computed, sizeof(computed));
+        return match ? 1 : 0;
+    }
+#endif
     if (vdf_evaluate(ctx, computed) != 0) {
         return 0;
     }

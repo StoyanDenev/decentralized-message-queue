@@ -368,3 +368,38 @@ DSF with the initial 30-scenario set unlocks:
 ---
 
 *End of specification.*
+
+
+---
+
+## 10. Bare-Metal C99 Alignment ($K=2$ VDF Duel Architecture)
+
+Following the complete eradication of C++ runtimes (`std::chrono`, `boost::asio`, and `nlohmann/json`) in favor of bare-metal C99 unikernel architecture, the DSF has been aligned with native OS event loops (`kqueue`/`epoll`) and the $K=2$ VDF Duel consensus engine.
+
+### 10.1 Clock Injection Seam (`include/determ/time/clock.h`)
+Production builds compile zero-cost inline wrappers directly querying hardware monotonic time (`mach_absolute_time()` on macOS, `clock_gettime(CLOCK_MONOTONIC)` on Linux).
+
+When compiled with `-DDETERM_DSF_ENABLED`:
+- `determ_clock_now_ns()` and `determ_clock_now_ms()` query a virtual nanosecond state variable.
+- Test suites can instantly jump forward (e.g. `determ_dsf_clock_advance_ms(1999)` or `determ_dsf_clock_advance_ms(2001)`) to test the sub-millisecond boundaries of the $W_{reveal} = 2000\text{ ms}$ window without sleeping the host CPU.
+
+### 10.2 Virtual Transport Seam (`include/determ/net/virtual_transport.h`)
+Abstracts the non-blocking socket readiness and I/O layer:
+- In production, `determ_net_recv()` and `determ_net_send()` map with zero overhead directly to POSIX `recv` and `send`.
+- Under `-DDETERM_DSF_ENABLED`:
+  - `determ_dsf_inject_ewouldblock_rx(bool)` simulates `EWOULDBLOCK` / `EAGAIN` to verify non-busy-spin quiescence.
+  - `determ_dsf_inject_drop_bytes(size_t)` forces mid-stream payload drops.
+  - `determ_dsf_queue_rx()` and `determ_dsf_read_tx()` allow deterministic injection and verification of wire frames.
+  - `determ_dsf_poll_hook()` intercepts multiplexer polling to signal simulated socket readiness events without socket descriptors.
+
+### 10.3 VDF Simulation Bypass (`include/determ/crypto/vdf.h`)
+Running the memory-hard VDF hash loop during thousands of unit tests would stall CI/CD pipelines:
+- Under `-DDETERM_DSF_ENABLED`, `determ_dsf_set_vdf_bypass(true, TARGET_VDF_MS)` enables instant evaluation.
+- `vdf_evaluate()` produces a deterministic SHA-256 mock hash in $< 2\ \mu\text{s}$, sets `ctx->elapsed_ns = TARGET_VDF_MS * 1,000,000`, and advances the virtual clock by `TARGET_VDF_MS` (5000 ms).
+- Dynamic Difficulty Adjustment (DDA) receives the exact simulated execution duration and maintains proper difficulty scaling without burning physical CPU cycles.
+
+### 10.4 Acceptance Verification
+The C99 test suite (`bin/test-dsf-k2-duel`) verifies:
+1. Instant 1999ms time-jump accepting boundary-valid reveals.
+2. 2001ms time-jump strictly dropping late Contributor reveals (`DUEL_DROPPED_BUZZER_EXCEEDED`) and executing the 1-of-2 straggler fallback.
+3. Full 10-block simulated $K=2$ Duel finalizing 70,000ms of simulated consensus time in **0.05 ms** of real wall-clock time (strictly $< 50\text{ ms}$).

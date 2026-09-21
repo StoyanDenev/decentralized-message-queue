@@ -1,3 +1,4 @@
+#include <determ/net/virtual_transport.h>
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -146,6 +147,13 @@ int net_event_loop_poll(net_event_loop_t *loop, int timeout_ms,
     if (!loop || loop->poll_fd < 0 || !out_events || max_events <= 0) {
         return -1;
     }
+
+#if defined(DETERM_DSF_ENABLED)
+    int v_count = determ_dsf_poll_hook(loop, out_events, max_events);
+    if (v_count > 0) {
+        return v_count;
+    }
+#endif
 
 #if defined(NET_USE_KQUEUE)
     struct kevent event_list[NET_MAX_EVENTS_PER_POLL];

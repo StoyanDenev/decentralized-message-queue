@@ -1,3 +1,4 @@
+#include "determ/time/clock.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -16,21 +17,7 @@
 #endif
 
 uint64_t duel_clock_monotonic_ns(void) {
-#if defined(__APPLE__)
-    static mach_timebase_info_data_t tb;
-    if (tb.denom == 0) {
-        (void)mach_timebase_info(&tb);
-    }
-    uint64_t t = mach_absolute_time();
-    /* Guard against potential overflow for long runtimes */
-    return (uint64_t)(((__uint128_t)t * tb.numer) / tb.denom);
-#else
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0ULL;
-    }
-    return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
-#endif
+    return determ_clock_now_ns();
 }
 
 duel_status_t duel_state_init(duel_state_machine_t *sm) {

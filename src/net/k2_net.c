@@ -1,3 +1,4 @@
+#include "determ/net/virtual_transport.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -94,7 +95,7 @@ int k2_net_parse_header(const uint8_t *buf, size_t len, k2_net_header_t *out_hdr
 static int send_all(int fd, const uint8_t *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, data + sent, len - sent, 0);
+        ssize_t n = determ_net_send(fd, data + sent, len - sent, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* Non-blocking socket busy: spin brief delay */
@@ -257,7 +258,7 @@ int k2_aggregator_poll(k2_aggregator_t *agg, int timeout_ms) {
             }
 
             if (flags & NET_EV_READ) {
-                ssize_t rc = recv(agg->peer.fd,
+                ssize_t rc = determ_net_recv(agg->peer.fd,
                                   agg->peer.rx_buf + agg->peer.rx_cursor,
                                   sizeof(agg->peer.rx_buf) - agg->peer.rx_cursor, 0);
                 if (rc <= 0) {
@@ -448,7 +449,7 @@ int k2_contributor_poll(k2_contributor_t *cont, int timeout_ms) {
             }
 
             if (flags & NET_EV_READ) {
-                ssize_t rc = recv(cont->conn.fd,
+                ssize_t rc = determ_net_recv(cont->conn.fd,
                                   cont->conn.rx_buf + cont->conn.rx_cursor,
                                   sizeof(cont->conn.rx_buf) - cont->conn.rx_cursor, 0);
                 if (rc <= 0) {

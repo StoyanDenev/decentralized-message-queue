@@ -33,6 +33,8 @@ CRYPTO_SRCS = \
 
 # Core Consensus, Wire, Storage & Networking C99 Sources
 CONSENSUS_SRCS = \
+	src/time/clock.c \
+	src/net/virtual_transport.c \
 	src/consensus/duel_state.c \
 	src/consensus/dda.c \
 	src/crypto/vdf.c \
@@ -62,9 +64,14 @@ TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
 TEST_LEDGER_DSSO_BIN = $(BIN_DIR)/test-ledger-dsso
 TEST_FUZZ_LEDGER_BIN = $(BIN_DIR)/fuzz-ledger
 
+CFLAGS_DSF = $(CFLAGS) -DDETERM_DSF_ENABLED
+BUILD_DIR_DSF = $(BUILD_DIR)/dsf
+ALL_CORE_DSF_OBJS = $(ALL_CORE_SRCS:%.c=$(BUILD_DIR_DSF)/%.o)
+TEST_DSF_K2_DUEL_BIN = $(BIN_DIR)/test-dsf-k2-duel
+
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -110,6 +117,14 @@ $(TEST_FUZZ_LEDGER_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/fuzz_ledger.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(BUILD_DIR_DSF)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_DSF) $(INCLUDES) -c $< -o $@
+
+$(TEST_DSF_K2_DUEL_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_dsf_k2_duel.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_DSF) $^ -o $@
+
 
 test: all
 	@echo "Running test-k2-duel..."
@@ -130,6 +145,8 @@ test: all
 	@./$(TEST_LEDGER_DSSO_BIN)
 	@echo "Running fuzz-ledger..."
 	@./$(TEST_FUZZ_LEDGER_BIN)
+	@echo "Running test-dsf-k2-duel..."
+	@./$(TEST_DSF_K2_DUEL_BIN)
 
 
 check: test

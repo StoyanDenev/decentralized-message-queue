@@ -95,6 +95,17 @@ int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
                uint64_t iterations, const uint8_t claimed_output[VDF_OUTPUT_LEN]);
 
 
+
+#if defined(DETERM_DSF_ENABLED)
+/*
+ * DSF Testing Shim:
+ * Bypasses memory-hard VDF loop during simulations, instantly producing a
+ * deterministic mock hash and advancing the virtual clock by target_vdf_ms.
+ */
+void determ_dsf_set_vdf_bypass(bool enabled, uint64_t target_vdf_ms);
+bool determ_dsf_get_vdf_bypass(uint64_t *out_target_vdf_ms);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
