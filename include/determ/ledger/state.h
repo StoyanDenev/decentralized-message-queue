@@ -99,6 +99,14 @@ void triple_entry_tx_signing_bytes(const triple_entry_tx_t *tx,
  * 6. Verifies the Ed25519 signature over canonical signing bytes.
  * Returns LEDGER_OK (0) on success, or appropriate error code.
  */
+/*
+ * Verify a Triple-Entry Transaction directly against the ledger state.
+ * Finds the sender account in state and verifies the transaction.
+ */
+int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
+                                 const ledger_state_t *state,
+                                 uint64_t min_fee);
+
 int verify_triple_entry_tx(const account_t *sender,
                            const triple_entry_tx_t *tx,
                            uint64_t min_fee);

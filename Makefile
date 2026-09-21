@@ -39,6 +39,7 @@ CONSENSUS_SRCS = \
 	src/net/event_loop.c \
 	src/net/k2_net.c \
 	src/net/peer_mesh.c \
+	src/net/reactor.c \
 	src/wire/parser.c \
 	src/wire/json_token.c \
 	src/wire/binary_codec.c \
@@ -59,10 +60,11 @@ TEST_BLOCK_STORE_BIN = $(BIN_DIR)/test-block-store
 TEST_DDA_BIN = $(BIN_DIR)/test-dda
 TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
 TEST_LEDGER_DSSO_BIN = $(BIN_DIR)/test-ledger-dsso
+TEST_FUZZ_LEDGER_BIN = $(BIN_DIR)/fuzz-ledger
 
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -104,6 +106,11 @@ $(TEST_LEDGER_DSSO_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_ledger_dsso.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(TEST_FUZZ_LEDGER_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/fuzz_ledger.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
+
+
 test: all
 	@echo "Running test-k2-duel..."
 	@./$(TEST_DUEL_BIN)
@@ -121,6 +128,9 @@ test: all
 	@./$(TEST_HTTP_RPC_BIN)
 	@echo "Running test-ledger-dsso..."
 	@./$(TEST_LEDGER_DSSO_BIN)
+	@echo "Running fuzz-ledger..."
+	@./$(TEST_FUZZ_LEDGER_BIN)
+
 
 check: test
 

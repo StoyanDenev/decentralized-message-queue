@@ -244,3 +244,22 @@ int ledger_compute_state_root(const ledger_state_t *state,
     memcpy(out_root, tree[0], 32);
     return 0;
 }
+
+int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
+                                 const ledger_state_t *state,
+                                 uint64_t min_fee) {
+    if (!tx || !state) {
+        return LEDGER_ERR_NULL_ARG;
+    }
+    const account_t *sender = NULL;
+    for (size_t i = 0; i < state->account_count; i++) {
+        if (memcmp(state->accounts[i].pubkey, tx->from, LEDGER_PUBKEY_LEN) == 0) {
+            sender = &state->accounts[i];
+            break;
+        }
+    }
+    if (!sender) {
+        return LEDGER_ERR_ACCOUNT_NOT_FOUND;
+    }
+    return verify_triple_entry_tx(sender, tx, min_fee);
+}
