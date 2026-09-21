@@ -62,7 +62,6 @@ Improvements.md
 PFS_DEPLOYMENT_GUIDANCE.md
 UnitTestCoverageMap.md
 V1.1-PLAN.md
-v2.25-DSSO-DAPP-SPEC.md
 v2.26-ROTATION-SPEC.md
 "
 is_excluded() { printf '%s\n' "$EXCLUDE" | grep -qxF "$1"; }

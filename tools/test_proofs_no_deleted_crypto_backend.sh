@@ -73,7 +73,6 @@ KeyfileArgon2Migration.md
 MakeContribCommitmentBackwardCompat.md
 OfflineEquivocationEvidenceSoundness.md
 ParamChangeVerifySoundness.md
-Preliminaries.md
 RpcAuthHmacSoundness.md
 S001RpcAuthSoundness.md
 S004KeyfileAtRest.md

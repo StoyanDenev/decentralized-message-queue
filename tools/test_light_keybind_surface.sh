@@ -242,7 +242,7 @@ fi
 # comparison so neutering/removing/renaming ONE drops it 14 -> 13 -> RED. (Bump
 # EXPECTED_KEYBIND_CMP when a trustless reader using the proof_key_hex idiom is
 # added — the count is a completeness anchor, exactly the register's prescription.)
-EXPECTED_KEYBIND_CMP=14
+EXPECTED_KEYBIND_CMP=15
 keybind_cmp=$(grep -hoE 'proof_key_hex != local_key_hex' $FILES 2>/dev/null | wc -l | tr -d ' ')
 if [ "$keybind_cmp" = "$EXPECTED_KEYBIND_CMP" ]; then
   ok "invariant-4 (CP-1): $keybind_cmp load-bearing 'proof_key_hex != local_key_hex' key-bind comparison(s) (EXPECTED $EXPECTED_KEYBIND_CMP)"
@@ -256,7 +256,7 @@ fi
 # deletes one such guard so a daemon can serve a stale (pre-head) proof. Pin a
 # POSITIVE count so deleting ONE guard drops it 14 -> 13 -> RED. (Bump
 # EXPECTED_STALEREAD_GUARD when a trustless reader is added.)
-EXPECTED_STALEREAD_GUARD=14
+EXPECTED_STALEREAD_GUARD=15
 staleread_guard=$(grep -hoE 'proof_height < vc\.height' $FILES 2>/dev/null | wc -l | tr -d ' ')
 if [ "$staleread_guard" = "$EXPECTED_STALEREAD_GUARD" ]; then
   ok "invariant-5 (PRW-1): $staleread_guard 'proof_height < vc.height' stale-read race guard(s) (EXPECTED $EXPECTED_STALEREAD_GUARD)"
@@ -279,7 +279,7 @@ fi
 #   * proof_value_hash == expected_value_hash  (CP-2 #15; register mutant -> `= true`)
 # (Bump the EXPECTED_* when a value-hash-binding reader is added.) RI-2 #19's key-bind
 # at light/main.cpp:4796 is already covered by invariant-4's count.
-EXPECTED_VH_NE=9    # proof_value_hash != expected_value_hash
+EXPECTED_VH_NE=10    # proof_value_hash != expected_value_hash
 EXPECTED_CVH_NE=3   # computed_value_hash != proof_value_hash
 EXPECTED_VH_EQ=1    # proof_value_hash == expected_value_hash
 vh_ne=$(grep -hoE 'proof_value_hash != expected_value_hash' $FILES 2>/dev/null | wc -l | tr -d ' ')
