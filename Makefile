@@ -6,7 +6,7 @@
 
 CC ?= cc
 CFLAGS ?= -std=c99 -Wall -Wextra -Werror -pedantic -O3 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -DNDEBUG
-INCLUDES = -Iinclude -Isrc
+INCLUDES = -Iinclude -Isrc -Itests
 
 BUILD_DIR = build
 BIN_DIR = bin
@@ -113,9 +113,9 @@ $(TEST_LEDGER_DSSO_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_ledger_dsso.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(TEST_FUZZ_LEDGER_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/fuzz_ledger.o
+$(TEST_FUZZ_LEDGER_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/fuzz_ledger.o
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS_DSF) $^ -o $@
 
 $(BUILD_DIR_DSF)/%.o: %.c
 	@mkdir -p $(dir $@)
