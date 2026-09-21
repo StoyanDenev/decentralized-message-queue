@@ -572,6 +572,14 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         b.append(pk.data(), pk.size());
         leaves.push_back({k_with_prefix("nk:", addr), hash_bytes(b)});
     }
+    // D15 / R-6 rotated identity keys ("rk:" + domain): value = SHA256(pubkey_bytes).
+    // Emitted only while a key has been rotated, so a rotation-free chain's
+    // state root is byte-identical.
+    for (auto& [domain, pk] : rotated_identity_keys_) {
+        crypto::SHA256Builder b;
+        b.append(pk.data(), pk.size());
+        leaves.push_back({k_with_prefix("rk:", domain), hash_bytes(b)});
+    }
 
     return leaves;
 }
@@ -804,6 +812,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         audit_log_count_        = std::move(*s.audit_log_count); // A2 (lazy)
     if (s.note_keys)
         note_keys_              = std::move(*s.note_keys);       // NC-8 §5a (lazy)
+    if (s.rotated_identity_keys)
+        rotated_identity_keys_  = std::move(*s.rotated_identity_keys); // D15 (lazy)
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
@@ -909,6 +919,10 @@ std::vector<bool> Chain::apply_transactions(const Block& b) {
     auto __ensure_note_keys = [&]() {              // NC-8 §5a (lazy)
         if (!__snapshot.note_keys)
             __snapshot.note_keys = note_keys_;
+    };
+    auto __ensure_rotated_identity_keys = [&]() {  // D15 / R-6 (lazy)
+        if (!__snapshot.rotated_identity_keys)
+            __snapshot.rotated_identity_keys = rotated_identity_keys_;
     };
     auto __ensure_committee_checkpoints = [&]() {  // D3.3b (lazy)
         if (!__snapshot.committee_checkpoints)
@@ -1260,6 +1274,33 @@ std::vector<bool> Chain::apply_transactions(const Block& b) {
             if (tx.payload.empty()) note_keys_.erase(tx.from);
             else note_keys_[tx.from] = to_hex(tx.payload.data(),
                                               tx.payload.size());
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::ROTATE_IDENTITY_KEY: {
+            // D15 / R-6: rotate a registered validator's active Ed25519 identity key.
+            // Incumbent-signed (authenticated by tx.from's current active identity key).
+            // Payload must be exactly 32 bytes (the new Ed25519 public key).
+            // amount must be 0 and to must be empty (fee-only tx).
+            // Updates registrants_[tx.from].ed_pub and rotated_identity_keys_[tx.from].
+            // Eligibility / active_from / stake / unstake are NOT touched, preventing
+            // activation-delay deadlocks by construction.
+            if (tx.payload.size() != IDENTITY_KEY_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            auto it = registrants_.find(tx.from);
+            if (it == registrants_.end()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+
+            __ensure_registrants();
+            __ensure_rotated_identity_keys();
+
+            PubKey new_pk{};
+            std::memcpy(new_pk.data(), tx.payload.data(), 32);
+            it->second.ed_pub = new_pk;
+            rotated_identity_keys_[tx.from] = new_pk;
+
             sender.next_nonce++;
             applied[tx_idx] = true;
             break;
@@ -2303,6 +2344,12 @@ json Chain::serialize_state(uint32_t header_count) const {
         for (auto& [a, pk] : note_keys_) nk.push_back({{"a", a}, {"pk", pk}});
         snap["note_keys"] = nk;
     }
+    if (!rotated_identity_keys_.empty()) {
+        json rk = json::array();
+        for (auto& [d, pk] : rotated_identity_keys_)
+            rk.push_back({{"d", d}, {"pk", to_hex(pk.data(), pk.size())}});
+        snap["rotated_identity_keys"] = rk;
+    }
 
     // S-032 cache: persist the Phase-1 abort accumulator so a
     // snapshot-bootstrapped node doesn't have to rebuild it from the log.
@@ -2510,6 +2557,14 @@ Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invaria
     if (snap.contains("note_keys") && snap["note_keys"].is_array())          // NC-8 §5a
         for (auto& e : snap["note_keys"])
             c.note_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});
+    if (snap.contains("rotated_identity_keys") && snap["rotated_identity_keys"].is_array()) {
+        for (auto& e : snap["rotated_identity_keys"]) {
+            std::string d = e.value("d", std::string{});
+            std::string pk = e.value("pk", std::string{});
+            if (!d.empty() && pk.size() == 64)
+                c.rotated_identity_keys_[d] = from_hex_arr<32>(pk);
+        }
+    }
     // genesis_total deferred until after accounts/stakes load so legacy
     // snapshots (without the field) can fall back to live sum.
 
@@ -3049,6 +3104,10 @@ std::vector<uint8_t> Chain::encode_state(uint32_t header_count) const {
     for (auto& [a, pk] : note_keys_) {
         sn_lp16(o, a, "note_key.addr"); sn_lp16(o, pk, "note_key.pk");
     }
+    sn_count(o, rotated_identity_keys_.size(), "rotated_identity_keys");
+    for (auto& [d, pk] : rotated_identity_keys_) {
+        sn_lp16(o, d, "rotated_key.domain"); sn_raw(o, pk.data(), pk.size());
+    }
 
     // Tail headers, with the SAME 256-page anti-DoS clamp serialize_state
     // applies (RpcIngressGateAudit §3; kSnapshotHeaderMax, chain.hpp).
@@ -3262,6 +3321,14 @@ Chain Chain::decode_state(const uint8_t* data, size_t len,
             std::string a  = r.lp16("note_key.addr");
             std::string pk = r.lp16("note_key.pk");
             c.note_keys_[std::move(a)] = std::move(pk);
+        }
+    }
+    {   uint32_t n = r.count("rotated_identity_keys", 34);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("rotated_key.domain");
+            PubKey pk{};
+            r.raw(pk.data(), pk.size(), "rotated_key.pk");
+            c.rotated_identity_keys_[std::move(d)] = pk;
         }
     }
     {   uint32_t n = r.count("headers", 4);

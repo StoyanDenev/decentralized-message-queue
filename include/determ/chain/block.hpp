@@ -258,6 +258,14 @@ enum class TxType : uint8_t {
     // Profile-agnostic: emitted identically on MODERN and FIPS (neither profile's
     // note_pk is third-party-derivable from any other on-chain value).
     REGISTER_NOTE_KEY = 17,
+    // D15 — R-6: rotate a registered validator's Ed25519 identity key.
+    // Incumbent-signed (authenticated by tx.from's CURRENT active identity key).
+    // payload = the new 32-byte Ed25519 public key.
+    // amount must be 0 and `to` must be empty (fee-only tx).
+    // Updates registrants_[tx.from].ed_pub and emits an "rk:" + domain state leaf.
+    // Eligibility / active_from / stake / unstake are NOT touched, preventing
+    // activation-delay deadlocks by construction.
+    ROTATE_IDENTITY_KEY = 18,
 };
 
 // A6 / §7.5.1 Block.signature_form values. Only SIG_FORM_KK_ED25519 is
@@ -273,6 +281,8 @@ inline constexpr size_t AUDIT_LOG_PAYLOAD_SIZE = 8 + 32 + 32;     // LOG record
 // P-256 note_pk (== DETERM_NOTEKEY_PK_LEN in crypto/notekey/notekey.h); empty
 // payload = clear/revoke. Any other length is rejected.
 inline constexpr size_t NOTE_KEY_PAYLOAD_SIZE = 33;              // REGISTER_NOTE_KEY set-form
+// D15 / R-6: ROTATE_IDENTITY_KEY payload = 32-byte Ed25519 public key.
+inline constexpr size_t IDENTITY_KEY_PAYLOAD_SIZE = 32;
 // LOG_AUDIT_ACCESS epoch sentinel: the disclosure covered the FULL history
 // (view_master_sk / all epochs), not a single epoch window.
 inline constexpr uint64_t AUDIT_EPOCH_ALL = UINT64_MAX;

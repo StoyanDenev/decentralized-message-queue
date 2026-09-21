@@ -37,10 +37,14 @@ constexpr size_t NOTE_KEY_PAYLOAD_SIZE  = 33;            // SEC1-compressed P-25
 // (amount/to are 0/"" for both audit tx types; kept explicit for parity.)
 std::vector<uint8_t> audit_signing_bytes(int type, const std::string& from,
                                          uint64_t fee, uint64_t nonce,
-                                         const std::vector<uint8_t>& payload) {
+                                         const std::vector<uint8_t>& payload,
+                                         const std::array<uint8_t, 32>& genesis_hash = {},
+                                         uint32_t shard_id = 0) {
     std::vector<uint8_t> out;
-    out.reserve(1 + from.size() + 2 + 24 + payload.size());
+    out.reserve(1 + genesis_hash.size() + 4 + from.size() + 2 + 24 + payload.size());
     out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), genesis_hash.begin(), genesis_hash.end());
+    for (int i = 3; i >= 0; --i) out.push_back((shard_id >> (i * 8)) & 0xFF);
     out.insert(out.end(), from.begin(), from.end());
     out.push_back(0);
     // `to` is empty for both audit tx types.
@@ -54,22 +58,26 @@ std::vector<uint8_t> audit_signing_bytes(int type, const std::string& from,
 }
 
 json sign_audit_tx(const LightKeyfile& kf, int type, uint64_t fee, uint64_t nonce,
-                   const std::vector<uint8_t>& payload, const char* type_name) {
-    auto sb = audit_signing_bytes(type, kf.anon_address, fee, nonce, payload);
+                   const std::vector<uint8_t>& payload, const char* type_name,
+                   const std::array<uint8_t, 32>& genesis_hash = {},
+                   uint32_t shard_id = 0) {
+    auto sb = audit_signing_bytes(type, kf.anon_address, fee, nonce, payload, genesis_hash, shard_id);
     Signature sig = determ::crypto::sign(kf.key, sb.data(), sb.size());
     Hash tx_hash  = determ::crypto::sha256(sb.data(), sb.size());
     return json{
-        {"type",      type},
-        {"type_name", type_name},
-        {"from",      kf.anon_address},
-        {"to",        ""},
-        {"amount",    0},
-        {"fee",       fee},
-        {"nonce",     nonce},
-        {"payload",   to_hex(payload.data(), payload.size())},
-        {"signature", to_hex(sig)},
-        {"sig",       to_hex(sig)},
-        {"hash",      to_hex(tx_hash)},
+        {"type",         type},
+        {"type_name",    type_name},
+        {"genesis_hash", to_hex(genesis_hash.data(), genesis_hash.size())},
+        {"shard_id",     shard_id},
+        {"from",         kf.anon_address},
+        {"to",           ""},
+        {"amount",       0},
+        {"fee",          fee},
+        {"nonce",        nonce},
+        {"payload",      to_hex(payload.data(), payload.size())},
+        {"signature",    to_hex(sig)},
+        {"sig",          to_hex(sig)},
+        {"hash",         to_hex(tx_hash)},
     };
 }
 

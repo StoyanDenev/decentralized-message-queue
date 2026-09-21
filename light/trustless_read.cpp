@@ -349,6 +349,15 @@ VerifiedChain verify_chain_walk(
                                           fb.cumulative_rand, tx.hash);
                                 vc.registry_events++;
                             }
+                        } else if (tx.type == determ::chain::TxType::ROTATE_IDENTITY_KEY
+                                   && tx.payload.size() == 32) {
+                            auto rit = registry.find(tx.from);
+                            if (rit != registry.end()) {
+                                PubKey pub{};
+                                std::copy_n(tx.payload.begin(), 32, pub.begin());
+                                rit->second.pub = pub;
+                                vc.registry_events++;
+                            }
                         }
                     }
                 }

@@ -5693,3 +5693,59 @@ While the POSIX permission window was closed on 2026-09-17 (0600 file mode, 0700
 
 **Authority:**
 Owner decisions D2 / D19a (DECISION-LOG 2026-09-16), node-local backlog Step 11.
+
+---
+
+## 2026-09-21 — D15 / R-6: Validator identity key rotation (`ROTATE_IDENTITY_KEY`, TxType 18)
+
+**Status:** IMPLEMENTED and verified. Gate `determ test-rotate-identity-key` and wrapper `tools/test_rotate_identity_key.sh`. Security ledger S-060 residual R-6 closed.
+
+**Problem:**
+Under V-REG-1 (S-060, 2026-09-15), `REGISTER` was made strictly create-only to prevent remote zero-cost identity takeover and `active_from` re-randomization attacks. However, honest validators whose keys may be scheduled for routine rotation, operational migration, or suspected local leakage had no consensus-level mechanism to update their Ed25519 identity key without abandoning their domain, accumulated reputation, and active committee eligibility.
+
+**The Change:**
+1. **Transaction Type & Wire Semantics:**
+   - Added `ROTATE_IDENTITY_KEY = 18` to `enum class TxType : uint8_t` (`include/determ/chain/block.hpp`).
+   - Constant `IDENTITY_KEY_PAYLOAD_SIZE = 32`.
+   - Fee-only semantics: `amount == 0`, `to == ""`, fee debited from sender domain, sequential nonce enforced.
+   - Requires registered domain sender (anonymous senders rejected).
+2. **Consensus & Apply Mechanics:**
+   - In `src/chain/chain.cpp`:
+     - Updates `registrants_[tx.from].ed_pub = new_pubkey`.
+     - Preserves `active_from`, `registered_at`, `inactive_from`, and `region` untouched (zero activation delay, uninterrupted committee eligibility).
+     - Tracks rotations in `rotated_identity_keys_` map.
+     - Emits canonical state leaf `"rk:" + domain -> SHA256(new_ed_pub)` in `build_state_leaves()`. State trees for rotation-free chains emit zero `rk:` leaves, preserving state-root invariance.
+     - Snapshot serde: JSON serialized under `"rotated_identity_keys"` array; DSN1 binary encoded with canonical count + length-prefixed domain + 32-byte public key.
+3. **Validator & Admission Gating:**
+   - In `src/node/validator.cpp`:
+     - Incumbent authentication: must be signed by the currently active key for `tx.from`. Once applied, the old key is immediately invalidated; subsequent transactions must be signed by the new key.
+     - Admitted for registered domains even if not yet in eligible registry (e.g. pending stake or activation) as long as `block_index < inactive_from`.
+     - D10 / S-072 safety: enforces `determ_ed25519_point_has_small_order(payload) == 0`.
+     - Permitted in `COMPOSABLE_BATCH` inner transactions.
+   - In `src/node/node.cpp`:
+     - Ingress mirror in `verify_tx_signature_locked()` enforces incumbent signature, payload size == 32, and non-small-order point.
+     - Mempool cost returns `tx.fee`.
+     - Surfaced `rotated_ed_pub` in `rpc_account()` and added `"rk"` namespace state proof support in `rpc_state_proof()`.
+   - In `src/node/producer.cpp`: fee-only provisional accounting in `build_body`.
+4. **Tooling & Parity:**
+   - `light/trustless_read.cpp`: replayed in `verify_chain_to_head` registry tracking loop.
+   - `light/main.cpp`: added `verify-rotated-key` CLI command.
+   - `wallet/main.cpp`: added mnemonic mapping for types 11..18, extended type range checks to 18, and added inspect-tx payload decoding.
+
+**Verification & Test Gates:**
+- Added test gate `determ test-rotate-identity-key` and wrapper `tools/test_rotate_identity_key.sh`:
+  - Validates rejection of payload size != 32, non-zero amount, non-empty `to`, unregistered domain sender, anon sender, small-order point, and signature by non-incumbent key.
+  - Verifies state transition: `registrants_[val].ed_pub` updated, `rotated_identity_key("val")` populated, fee debited, nonce incremented.
+  - Verifies `rk:val` leaf presence and state root update while preserving A1 live supply identity.
+  - Verifies active registry eligibility is preserved with updated public key.
+  - Verifies old key invalidation: tx signed by old key is rejected; tx signed by new key is accepted.
+  - Verifies successive rotation (key B -> key C).
+  - Verifies JSON and DSN1 canonical binary snapshot roundtrip equivalence and byte-identical re-encoding.
+- All parity and wiring guards pass cleanly:
+  - `tools/test_security_ledger_coherence.sh`
+  - `tools/test_signing_bytes_source_parity.sh`
+  - `tools/test_cross_binary_tx_parity.sh`
+  - `tools/test_producer_admit_wiring_guard.sh`
+
+**Authority:**
+Owner decisions D15 / R-6 (DECISION CLOCK R-6), standing roadmap Step 5.

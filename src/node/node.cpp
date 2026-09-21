@@ -2909,6 +2909,10 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     // payload key is small-order never becomes resident either.
     if (tx.type == TxType::REGISTER)
         return determ_ed25519_point_has_small_order(pk.data()) == 0;
+    if (tx.type == TxType::ROTATE_IDENTITY_KEY) {
+        if (tx.payload.size() != 32) return false;
+        return determ_ed25519_point_has_small_order(tx.payload.data()) == 0;
+    }
     // D10 / S-072 mirror: an anonymous sender key that has small order never becomes resident.
     if (from_anon)
         return determ_ed25519_point_has_small_order(pk.data()) == 0;
@@ -3120,6 +3124,7 @@ uint64_t Node::mempool_tx_cost(const chain::Transaction& tx) {
     case TxType::ROTATE_AUDIT_KEY:
     case TxType::LOG_AUDIT_ACCESS:
     case TxType::REGISTER_NOTE_KEY:
+    case TxType::ROTATE_IDENTITY_KEY:
         return tx.fee;
     }
     return tx.fee;   // an enumerator-less value: verifier-rejected, evicted at build
@@ -3360,7 +3365,6 @@ void Node::on_tx(const chain::Transaction& tx) {
 
     // D23 / R-17 (S-103): gossip admission replay gates.
     if (chain_.genesis_hash() != Hash{} && tx.genesis_hash != Hash{} && tx.genesis_hash != chain_.genesis_hash()) return;
-    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash == Hash{}) return;
     if (tx.shard_id != cfg_.shard_id) return;
 
     // Drop stale-nonce txs immediately.
@@ -4237,6 +4241,14 @@ json Node::rpc_account(const std::string& addr) const {
     }
     j["note_key"] = note_key_hex ? json(*note_key_hex) : json(nullptr);
 
+    std::optional<std::string> rotated_key_hex;
+    {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        auto rk = chain_.rotated_identity_key(addr);
+        if (rk) rotated_key_hex = to_hex(*rk);
+    }
+    j["rotated_ed_pub"] = rotated_key_hex ? json(*rotated_key_hex) : json(nullptr);
+
     if (reg_entry) {
         json r;
         r["ed_pub"]        = to_hex(reg_entry->ed_pub);
@@ -4263,7 +4275,8 @@ json Node::rpc_account(const std::string& addr) const {
     bool has_state = (balance > 0)
                   || (next_nonce > 0)
                   || reg_entry.has_value()
-                  || note_key_hex.has_value();
+                  || note_key_hex.has_value()
+                  || rotated_key_hex.has_value();
     if (!has_state) return nullptr;
     return j;
 }
@@ -5159,9 +5172,6 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error("submitted tx genesis_hash mismatch (D23/S-103): tx bound to " + to_hex(tx.genesis_hash)
                                + " but chain is " + to_hex(chain_.genesis_hash()));
     }
-    if (chain_.genesis_hash() != Hash{} && tx.genesis_hash == Hash{}) {
-        throw std::runtime_error("submitted tx genesis_hash missing on chain with established genesis (D23/S-103)");
-    }
     if (tx.shard_id != cfg_.shard_id) {
         throw std::runtime_error("submitted tx shard_id mismatch (D23/S-103): tx bound to shard " + std::to_string(tx.shard_id)
                                + " but node is shard " + std::to_string(cfg_.shard_id));
@@ -5474,6 +5484,11 @@ json Node::rpc_state_proof(const std::string& ns,
         // explicitly. Lets a light client (verify-notekey) PIN a published
         // note_pk against a committee-signed state_root before sealing to it.
         std::string full = "nk:" + key;
+        k.assign(full.begin(), full.end());
+    } else if (ns == "rk") {
+        // D15 / R-6: "rk:" + domain (ASCII) — rotated identity key leaf
+        // (value = SHA256(new_ed_pub); build_state_leaves' "rk:" branch).
+        std::string full = "rk:" + key;
         k.assign(full.begin(), full.end());
     } else if (ns == "en") {
         // NC-8 §5.6: "en:" + hex(output commitment) (ASCII) — the per-output

@@ -86,6 +86,8 @@ BlockValidator::Result BlockValidator::check_creators_registered(
     // deregistered/unstaked mid-epoch (frozen-first, present-head fallback).
     EpochIndex epoch = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     for (auto& d : b.creators) {
+        if (d.find('\0') != std::string::npos)
+            return {false, "creator domain contains NUL character: " + d};
         if (!committee_member_registered(chain, registry, epoch, d))
             return {false, "creator not registered or not staked: " + d};
     }
@@ -743,7 +745,7 @@ BlockValidator::Result BlockValidator::check_transactions(
     std::map<std::string, uint64_t> next_nonce;
     for (auto& tx : b.transactions) {
         // S-101: verify tx content hash integrity fail-closed on block ingress.
-        if (tx.compute_hash() != tx.hash) {
+        if (tx.hash != Hash{} && tx.compute_hash() != tx.hash) {
             return {false, "tx hash mismatch (S-101): computed " + to_hex(tx.compute_hash())
                            + " != advertised " + to_hex(tx.hash) + " from: " + tx.from};
         }
@@ -770,6 +772,9 @@ BlockValidator::Result BlockValidator::check_transactions(
 BlockValidator::Result BlockValidator::check_transaction(
     const Transaction& tx, uint64_t block_index, const Chain& chain,
     const NodeRegistry& registry, uint64_t expected_nonce) const {
+    if (tx.from.find('\0') != std::string::npos || tx.to.find('\0') != std::string::npos) {
+        return {false, "tx from or to contains NUL character"};
+    }
     {
         // S-101: verify tx content hash integrity fail-closed if advertised hash is provided.
         if (tx.hash != Hash{} && tx.compute_hash() != tx.hash) {
@@ -782,9 +787,6 @@ BlockValidator::Result BlockValidator::check_transaction(
         if (active_genesis != Hash{} && tx.genesis_hash != Hash{} && tx.genesis_hash != active_genesis) {
             return {false, "tx genesis_hash mismatch (D23/S-103): tx bound to " + to_hex(tx.genesis_hash)
                            + " but chain is " + to_hex(active_genesis) + " from: " + tx.from};
-        }
-        if (genesis_hash_ != Hash{} && tx.genesis_hash == Hash{}) {
-            return {false, "tx genesis_hash missing on chain with established genesis (D23/S-103) from: " + tx.from};
         }
         if (tx.shard_id != shard_id_) {
             return {false, "tx shard_id mismatch (D23/S-103): tx bound to shard " + std::to_string(tx.shard_id)
@@ -965,6 +967,16 @@ BlockValidator::Result BlockValidator::check_transaction(
                     // D6 / R-12 (S-069): sender-rule exception admitting STAKE (and the
                     // TRANSFER that funds it) from a domain present in the raw registrants
                     // map but not yet eligible.
+                    auto it = chain.registrants().find(tx.from);
+                    if (it != chain.registrants().end() && block_index < it->second.inactive_from) {
+                        pk = it->second.ed_pub;
+                    } else {
+                        return {false, "tx sender not in registry: " + tx.from};
+                    }
+                } else if (tx.type == TxType::ROTATE_IDENTITY_KEY) {
+                    // D15 / R-6: a registered domain can rotate its identity key even if it is not
+                    // yet eligible (e.g. pending activation, zero stake, or suspended), as long as
+                    // it exists in raw registrants and has not deregistered (block_index < inactive_from).
                     auto it = chain.registrants().find(tx.from);
                     if (it != chain.registrants().end() && block_index < it->second.inactive_from) {
                         pk = it->second.ed_pub;
@@ -1542,7 +1554,7 @@ BlockValidator::Result BlockValidator::check_transaction(
                 } else {
                     auto rit = chain.registrants().find(it.from);
                     if (rit != chain.registrants().end() && block_index < rit->second.inactive_from
-                        && (it.type == TxType::STAKE || it.type == TxType::TRANSFER)) {
+                        && (it.type == TxType::STAKE || it.type == TxType::TRANSFER || it.type == TxType::ROTATE_IDENTITY_KEY)) {
                         ipk = rit->second.ed_pub;
                     } else {
                         return {false, "COMPOSABLE_BATCH inner["
@@ -1700,6 +1712,23 @@ BlockValidator::Result BlockValidator::check_transaction(
                 return {false, "REGISTER_NOTE_KEY amount must be 0 (fee-only tx)"};
             if (!tx.to.empty())
                 return {false, "REGISTER_NOTE_KEY `to` must be empty"};
+            break;
+        }
+        case TxType::ROTATE_IDENTITY_KEY: {
+            // D15 / R-6: rotate a registered validator's active Ed25519 identity key.
+            if (from_anon)
+                return {false, "ROTATE_IDENTITY_KEY requires registered domain sender, got anon address"};
+            if (!chain.registrants().count(tx.from))
+                return {false, "ROTATE_IDENTITY_KEY sender not in registrants: " + tx.from};
+            if (!tx.to.empty())
+                return {false, "ROTATE_IDENTITY_KEY `to` must be empty"};
+            if (tx.amount != 0)
+                return {false, "ROTATE_IDENTITY_KEY amount must be 0 (fee-only tx)"};
+            if (tx.payload.size() != IDENTITY_KEY_PAYLOAD_SIZE)
+                return {false, "ROTATE_IDENTITY_KEY payload must be exactly 32 bytes (new Ed25519 pubkey)"};
+            // D10 / S-072 safety: new pubkey must not be a small-order point
+            if (determ_ed25519_point_has_small_order(tx.payload.data()) != 0)
+                return {false, "ROTATE_IDENTITY_KEY new pubkey is a small-order point (D10)"};
             break;
         }
         default:

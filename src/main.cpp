@@ -1042,6 +1042,11 @@ Additional in-process tests:
                                               tx + nk: state leaf: publish/rotate/
                                               clear note_pk; anon accounts CAN
                                               publish; byte-neutral when unused
+  determ test-rotate-identity-key             D15 / R-6 — ROTATE_IDENTITY_KEY
+                                              tx (TxType 18) + rk: state leaf:
+                                              rotate validator Ed25519 identity key,
+                                              incumbent-authenticated, zero-deadlock
+                                              eligibility, old-key invalidation
   determ test-determ-json                     minix JSON phase 2 inc.1 — determ::json
                                               dual-oracle byte-parity vs vendored
                                               nlohmann on the consensus/HMAC subset
@@ -27394,9 +27399,9 @@ pre_chain.append(b3);
             //     frame is parsed.
             {
                 std::vector<uint8_t> base = Chain{}.encode_state(0);
-                check(base.size() == 266,
-                      "SR-3e setup: an empty chain's DSN1 record is 266 bytes "
-                      "(8 magic/version + 194 scalar + 16 x u32 zero counts)");
+                check(base.size() == 270,
+                      "SR-3e setup: an empty chain's DSN1 record is 270 bytes "
+                      "(8 magic/version + 194 scalar + 17 x u32 zero counts)");
                 Block minimal; minimal.index = 0;
                 std::vector<uint8_t> f; minimal.encode_frame(f);
                 const Hash bh = minimal.compute_hash();
@@ -27474,11 +27479,11 @@ pre_chain.append(b3);
         // ── SR-4. VECTOR PIN: the empty chain's frame.
         {
             const std::vector<uint8_t> got = body_of(make_snapshot_response(Chain{}.serialize_state()));
-            check(got.size() == 4 + 266,
-                  "SR-4 the empty chain's SNAPSHOT_RESPONSE body is 270 bytes "
-                  "(envelope + the 266-byte DSN1 record)");
+            check(got.size() == 4 + 270,
+                  "SR-4 the empty chain's SNAPSHOT_RESPONSE body is 274 bytes "
+                  "(envelope + the 270-byte DSN1 record)");
             const std::string digest = to_hex(crypto::sha256(got));
-            checks(digest == "5d28a478d640ae01a4762618e92c4b301edcb0b09fb7fe284bdcefcb8a15c873",
+            checks(digest == "84105f4117a2d9ab4cc7d71e4b2de5241b015d16de940357adcd7b624d0036ec",
                    "SR-4 vector pin: SHA-256 of the empty chain's frame is " + digest);
         }
 
@@ -57868,6 +57873,256 @@ pre_chain.append(b3);
                            : "  PASS: test-register-note-key\n");
         return fail ? 1 : 0;
     }
+    if (cmd == "test-rotate-identity-key") {
+        // D15 / R-6 CONSENSUS test: ROTATE_IDENTITY_KEY (TxType 18)
+        // Set/successive-rotate lifecycle on the "rk:" leaf, fee-only accounting
+        // (A1 supply preserved), apply-level and validator-level fail-closed gates
+        // for malformed payloads, non-zero amounts, non-empty to, unregistered
+        // senders, anon senders, and small-order points.
+        // Old key invalidation: transactions signed by the old key fail after rotation;
+        // transactions signed by the new key succeed.
+        // Validator eligibility: remains eligible with zero activation delay.
+        // State-root invariance: byte-identical while rotation-free; deterministic
+        // leaf "rk:" + domain -> SHA256(new_ed_pub) once rotated.
+        // Snapshot round-trip: both JSON and DSN1 canonical binary format.
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        auto leaf_key = [](const std::string& k) {
+            return std::vector<uint8_t>(k.begin(), k.end());
+        };
+
+        // Key pairs A, B, C and miner
+        crypto::NodeKey key_a = crypto::generate_node_key();
+        crypto::NodeKey key_b = crypto::generate_node_key();
+        crypto::NodeKey key_c = crypto::generate_node_key();
+        crypto::NodeKey key_m = crypto::generate_node_key();
+
+        const uint64_t kValBal = 10000, kFee = 1;
+        auto make_cfg = [&]() {
+            GenesisConfig cfg;
+            cfg.chain_id = "rotate-id-test";
+            cfg.chain_role = ChainRole::SINGLE;
+            GenesisCreator val_c;
+            val_c.domain = "val";
+            val_c.ed_pub = key_a.pub;
+            val_c.initial_stake = 1000;
+            GenesisCreator min_c;
+            min_c.domain = "miner";
+            min_c.ed_pub = key_m.pub;
+            min_c.initial_stake = 1000;
+            cfg.initial_creators = {val_c, min_c};
+            GenesisAllocation ab, mb;
+            ab.domain = "val";
+            ab.balance = kValBal;
+            mb.domain = "miner";
+            mb.balance = 1000;
+            cfg.initial_balances = {ab, mb};
+            return cfg;
+        };
+
+        Chain c;
+        c.append(make_genesis_block(make_cfg()));
+        Hash r0 = c.compute_state_root();
+        check(c.rotated_identity_key("val") == std::nullopt,
+              "height 0: rotated_identity_key is nullopt");
+        check(c.registrants().at("val").ed_pub == key_a.pub,
+              "height 0: registrants['val'].ed_pub is key_a.pub");
+        check(!c.state_proof(leaf_key("rk:val")).has_value(),
+              "height 0: rk:val leaf is absent prior to rotation");
+
+        // Shape and validator tests
+        node::BlockValidator validator;
+        validator.set_chain_role(ChainRole::SINGLE);
+        node::NodeRegistry reg = node::NodeRegistry::build_from_chain(c, 1);
+
+        auto make_rotate_tx = [&](const std::string& from, const std::string& to,
+                                 uint64_t amount, uint64_t fee, uint64_t nonce,
+                                 const std::vector<uint8_t>& payload,
+                                 const crypto::NodeKey& signer_key) {
+            Transaction tx;
+            tx.type = TxType::ROTATE_IDENTITY_KEY;
+            tx.from = from;
+            tx.to = to;
+            tx.amount = amount;
+            tx.fee = fee;
+            tx.nonce = nonce;
+            tx.payload = payload;
+            auto sb = tx.signing_bytes();
+            tx.sig = crypto::sign(signer_key, sb.data(), sb.size());
+            tx.hash = tx.compute_hash();
+            return tx;
+        };
+
+        // 1. Rejection tests
+        {
+            // Wrong payload length (31 bytes)
+            std::vector<uint8_t> p31(31, 0x42);
+            auto tx1 = make_rotate_tx("val", "", 0, kFee, 0, p31, key_a);
+            Block b1; b1.index = 1; b1.transactions = {tx1};
+            auto v1 = validator.check_transactions_for_test(b1, c, reg);
+            check(!v1.ok, "validator: payload size != 32 rejected");
+
+            // Non-zero amount
+            std::vector<uint8_t> pb(key_b.pub.begin(), key_b.pub.end());
+            auto tx2 = make_rotate_tx("val", "", 10, kFee, 0, pb, key_a);
+            Block b2; b2.index = 1; b2.transactions = {tx2};
+            auto v2 = validator.check_transactions_for_test(b2, c, reg);
+            check(!v2.ok, "validator: non-zero amount rejected");
+
+            // Non-empty `to`
+            auto tx3 = make_rotate_tx("val", "val", 0, kFee, 0, pb, key_a);
+            Block b3; b3.index = 1; b3.transactions = {tx3};
+            auto v3 = validator.check_transactions_for_test(b3, c, reg);
+            check(!v3.ok, "validator: non-empty `to` rejected");
+
+            // Sender not in registrants
+            auto tx4 = make_rotate_tx("bob", "", 0, kFee, 0, pb, key_a);
+            Block b4; b4.index = 1; b4.transactions = {tx4};
+            auto v4 = validator.check_transactions_for_test(b4, c, reg);
+            check(!v4.ok, "validator: unregistered sender rejected");
+
+            // Anon sender
+            std::string anon_addr = make_anon_address(key_a.pub);
+            auto tx5 = make_rotate_tx(anon_addr, "", 0, kFee, 0, pb, key_a);
+            Block b5; b5.index = 1; b5.transactions = {tx5};
+            auto v5 = validator.check_transactions_for_test(b5, c, reg);
+            check(!v5.ok, "validator: anon sender rejected");
+
+            // Small-order point
+            std::vector<uint8_t> small_order(32, 0); // zero point is small-order
+            auto tx6 = make_rotate_tx("val", "", 0, kFee, 0, small_order, key_a);
+            Block b6; b6.index = 1; b6.transactions = {tx6};
+            auto v6 = validator.check_transactions_for_test(b6, c, reg);
+            check(!v6.ok, "validator: small-order point rejected");
+
+            // Bad signature (signed by key_b instead of incumbent key_a)
+            auto tx7 = make_rotate_tx("val", "", 0, kFee, 0, pb, key_b);
+            Block b7; b7.index = 1; b7.transactions = {tx7};
+            auto v7 = validator.check_transactions_for_test(b7, c, reg);
+            check(!v7.ok, "validator: signature by non-incumbent key rejected");
+        }
+
+        // 2. Happy path: rotate from key_a to key_b
+        std::vector<uint8_t> pb(key_b.pub.begin(), key_b.pub.end());
+        auto valid_rotate_tx = make_rotate_tx("val", "", 0, kFee, 0, pb, key_a);
+        {
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"miner"};
+            b.transactions = {valid_rotate_tx};
+            auto vres = validator.check_transactions_for_test(b, c, reg);
+            
+            check(vres.ok, "validator: valid ROTATE_IDENTITY_KEY tx accepted");
+
+            c.append(b);
+            check(c.height() == 2, "chain appended block 1 successfully");
+        }
+
+        // Post-rotation checks
+        check(c.registrants().at("val").ed_pub == key_b.pub,
+              "post-rotation: registrants['val'].ed_pub updated to key_b.pub");
+        check(c.rotated_identity_key("val") == key_b.pub,
+              "post-rotation: rotated_identity_key('val') == key_b.pub");
+        check(c.balance("val") == kValBal - kFee,
+              "post-rotation: fee correctly debited from val");
+        check(c.next_nonce("val") == 1,
+              "post-rotation: nonce advanced to 1");
+
+        // Verify rk: leaf presence and state root change
+        check(c.state_proof(leaf_key("rk:val")).has_value(), "post-rotation: rk:val leaf is provable");
+        check(c.compute_state_root() != r0, "post-rotation: state root changed");
+        check(c.expected_total() == c.live_total_supply(), "post-rotation: A1 supply invariant intact");
+
+        // Check eligibility preservation
+        {
+            node::NodeRegistry reg_after = node::NodeRegistry::build_from_chain(c, 2);
+            auto val_entry = reg_after.find("val");
+            check(val_entry.has_value(), "post-rotation: val remains in active registry");
+            if (val_entry) {
+                check(val_entry->pubkey == key_b.pub, "post-rotation: active registry pubkey is key_b.pub");
+            }
+        }
+
+        // 3. Old key invalidation & new key validation
+        {
+            node::NodeRegistry reg_after = node::NodeRegistry::build_from_chain(c, 2);
+
+            // Transaction signed by OLD key_a -> REJECTED
+            Transaction tx_old;
+            tx_old.type = TxType::TRANSFER;
+            tx_old.from = "val";
+            tx_old.to = "miner";
+            tx_old.amount = 10;
+            tx_old.fee = kFee;
+            tx_old.nonce = 1;
+            auto sb_old = tx_old.signing_bytes();
+            tx_old.sig = crypto::sign(key_a, sb_old.data(), sb_old.size());
+            tx_old.hash = tx_old.compute_hash();
+
+            Block b_old; b_old.index = 2; b_old.transactions = {tx_old};
+            auto v_old = validator.check_transactions_for_test(b_old, c, reg_after);
+            check(!v_old.ok, "post-rotation: tx signed by OLD key_a is REJECTED");
+
+            // Transaction signed by NEW key_b -> ACCEPTED
+            Transaction tx_new = tx_old;
+            auto sb_new = tx_new.signing_bytes();
+            tx_new.sig = crypto::sign(key_b, sb_new.data(), sb_new.size());
+            tx_new.hash = tx_new.compute_hash();
+
+            Block b_new; b_new.index = 2; b_new.transactions = {tx_new};
+            auto v_new = validator.check_transactions_for_test(b_new, c, reg_after);
+            
+            check(v_new.ok, "post-rotation: tx signed by NEW key_b is ACCEPTED");
+        }
+
+        // 4. Successive rotation: from key_b to key_c
+        std::vector<uint8_t> pc(key_c.pub.begin(), key_c.pub.end());
+        auto rotate_tx_2 = make_rotate_tx("val", "", 0, kFee, 1, pc, key_b);
+        {
+            Block b;
+            b.index = 2;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"miner"};
+            b.transactions = {rotate_tx_2};
+            c.append(b);
+            check(c.height() == 3, "successive rotation: appended block 2");
+            check(c.registrants().at("val").ed_pub == key_c.pub,
+                  "successive rotation: registrants['val'].ed_pub updated to key_c.pub");
+            check(c.rotated_identity_key("val") == key_c.pub,
+                  "successive rotation: rotated_identity_key('val') == key_c.pub");
+        }
+
+        // 5. Snapshot roundtrip (both JSON and DSN1 binary)
+        {
+            // JSON snapshot
+            nlohmann::json snap_json = c.serialize_state(0);
+            Chain restored_json = Chain::restore_from_snapshot(snap_json);
+            check(restored_json.rotated_identity_key("val") == key_c.pub,
+                  "JSON snapshot: rotated_identity_key restored correctly");
+            check(restored_json.compute_state_root() == c.compute_state_root(),
+                  "JSON snapshot: restored state_root matches original exactly");
+
+            // Binary DSN1 snapshot
+            std::vector<uint8_t> snap_bin = c.encode_state();
+            Chain restored_bin = Chain::decode_state(snap_bin.data(), snap_bin.size());
+            check(restored_bin.rotated_identity_key("val") == key_c.pub,
+                  "DSN1 binary: rotated_identity_key restored correctly");
+            check(restored_bin.compute_state_root() == c.compute_state_root(),
+                  "DSN1 binary: restored state_root matches original exactly");
+            check(restored_bin.encode_state() == snap_bin,
+                  "DSN1 binary: canonical re-encode is byte-identical");
+        }
+
+        std::cout << (fail ? "  FAIL: test-rotate-identity-key\n"
+                           : "  PASS: test-rotate-identity-key\n");
+        return fail ? 1 : 0;
+    }
     if (cmd == "test-block-signature-form") {
         // A6 / §7.5.1 (pre-launch register A5+A6, 2026-07-09): the
         // Block.signature_form discriminator — zero-skip wire round-trip
@@ -64735,11 +64990,11 @@ pre_chain.append(b3);
                   "identical field values produces byte-identical "
                   "signing_bytes (no object-identity dependence)");
 
-            // Sanity: 1+5+1+3+1+24+4 = 39 bytes for the canonical
-            // TRANSFER (alice->bob, 4-byte payload).
-            check(sb1.size() == 39,
+            // Sanity: 1+32+4+5+1+3+1+24+4 = 75 bytes for the canonical
+            // TRANSFER (alice->bob, 4-byte payload, including D23 genesis_hash and shard_id).
+            check(sb1.size() == 75,
                   "(1) Replay determinism: canonical TRANSFER pre-image "
-                  "is 39 bytes (1 type + 5 'alice' + 1 nul + 3 'bob' + "
+                  "is 75 bytes (1 type + 32 genesis_hash + 4 shard_id + 5 'alice' + 1 nul + 3 'bob' + "
                   "1 nul + 24 BE u64s + 4 payload)");
         }
 

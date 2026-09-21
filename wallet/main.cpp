@@ -11488,6 +11488,14 @@ int cmd_tx_batch_summary(int argc, char** argv) {
             case 8:  return "COMPOSABLE_BATCH";
             case 9:  return "DAPP_REGISTER";
             case 10: return "DAPP_CALL";
+            case 11: return "PQ_TRANSFER";
+            case 12: return "SHIELD";
+            case 13: return "UNSHIELD";
+            case 14: return "CONFIDENTIAL_TRANSFER";
+            case 15: return "ROTATE_AUDIT_KEY";
+            case 16: return "LOG_AUDIT_ACCESS";
+            case 17: return "REGISTER_NOTE_KEY";
+            case 18: return "ROTATE_IDENTITY_KEY";
             default: return "UNKNOWN";
         }
     };
@@ -11503,6 +11511,14 @@ int cmd_tx_batch_summary(int argc, char** argv) {
         if (s == "COMPOSABLE_BATCH") return 8;
         if (s == "DAPP_REGISTER")    return 9;
         if (s == "DAPP_CALL")        return 10;
+        if (s == "PQ_TRANSFER")          return 11;
+        if (s == "SHIELD")               return 12;
+        if (s == "UNSHIELD")             return 13;
+        if (s == "CONFIDENTIAL_TRANSFER") return 14;
+        if (s == "ROTATE_AUDIT_KEY")     return 15;
+        if (s == "LOG_AUDIT_ACCESS")     return 16;
+        if (s == "REGISTER_NOTE_KEY")    return 17;
+        if (s == "ROTATE_IDENTITY_KEY")  return 18;
         return -1;
     };
 
@@ -12074,6 +12090,14 @@ int cmd_validate_tx(int argc, char** argv) {
         if (s == "COMPOSABLE_BATCH") return 8;
         if (s == "DAPP_REGISTER")    return 9;
         if (s == "DAPP_CALL")        return 10;
+        if (s == "PQ_TRANSFER")          return 11;
+        if (s == "SHIELD")               return 12;
+        if (s == "UNSHIELD")             return 13;
+        if (s == "CONFIDENTIAL_TRANSFER") return 14;
+        if (s == "ROTATE_AUDIT_KEY")     return 15;
+        if (s == "LOG_AUDIT_ACCESS")     return 16;
+        if (s == "REGISTER_NOTE_KEY")    return 17;
+        if (s == "ROTATE_IDENTITY_KEY")  return 18;
         return -1;
     };
     auto int_to_type_mnemonic = [](int t) -> const char* {
@@ -12089,6 +12113,14 @@ int cmd_validate_tx(int argc, char** argv) {
             case 8:  return "COMPOSABLE_BATCH";
             case 9:  return "DAPP_REGISTER";
             case 10: return "DAPP_CALL";
+            case 11: return "PQ_TRANSFER";
+            case 12: return "SHIELD";
+            case 13: return "UNSHIELD";
+            case 14: return "CONFIDENTIAL_TRANSFER";
+            case 15: return "ROTATE_AUDIT_KEY";
+            case 16: return "LOG_AUDIT_ACCESS";
+            case 17: return "REGISTER_NOTE_KEY";
+            case 18: return "ROTATE_IDENTITY_KEY";
             default: return nullptr;
         }
     };
@@ -12112,7 +12144,7 @@ int cmd_validate_tx(int argc, char** argv) {
             // reject. Flag as structural failure (the chain would).
             set_structural_fail("unknown 'type' enum value " +
                                  std::to_string(tx_type_int) +
-                                 " (expected 0..10)");
+                                 " (expected 0..18)");
         }
     } else if (j["type"].is_string()) {
         const std::string s = j["type"].get<std::string>();
@@ -12666,6 +12698,14 @@ static bool verify_one_envelope(const nlohmann::json& j,
         if (s == "COMPOSABLE_BATCH") return 8;
         if (s == "DAPP_REGISTER")    return 9;
         if (s == "DAPP_CALL")        return 10;
+        if (s == "PQ_TRANSFER")          return 11;
+        if (s == "SHIELD")               return 12;
+        if (s == "UNSHIELD")             return 13;
+        if (s == "CONFIDENTIAL_TRANSFER") return 14;
+        if (s == "ROTATE_AUDIT_KEY")     return 15;
+        if (s == "LOG_AUDIT_ACCESS")     return 16;
+        if (s == "REGISTER_NOTE_KEY")    return 17;
+        if (s == "ROTATE_IDENTITY_KEY")  return 18;
         return -1;
     };
 
@@ -12679,9 +12719,9 @@ static bool verify_one_envelope(const nlohmann::json& j,
         return false;
     } else if (j["type"].is_number()) {
         tx_type_int = j["type"].get<int>();
-        if (tx_type_int < 0 || tx_type_int > 10) {
+        if (tx_type_int < 0 || tx_type_int > 18) {
             out_reason = "unknown 'type' enum value " +
-                         std::to_string(tx_type_int) + " (expected 0..10)";
+                         std::to_string(tx_type_int) + " (expected 0..18)";
             return false;
         }
     } else if (j["type"].is_string()) {
@@ -15323,6 +15363,14 @@ int cmd_derive_tx_hash(int argc, char** argv) {
         if (s == "COMPOSABLE_BATCH") return 8;
         if (s == "DAPP_REGISTER")    return 9;
         if (s == "DAPP_CALL")        return 10;
+        if (s == "PQ_TRANSFER")          return 11;
+        if (s == "SHIELD")               return 12;
+        if (s == "UNSHIELD")             return 13;
+        if (s == "CONFIDENTIAL_TRANSFER") return 14;
+        if (s == "ROTATE_AUDIT_KEY")     return 15;
+        if (s == "LOG_AUDIT_ACCESS")     return 16;
+        if (s == "REGISTER_NOTE_KEY")    return 17;
+        if (s == "ROTATE_IDENTITY_KEY")  return 18;
         return -1;
     };
 
@@ -15647,6 +15695,14 @@ int cmd_inspect_tx(int argc, char** argv) {
         if (s == "COMPOSABLE_BATCH") return 8;
         if (s == "DAPP_REGISTER")    return 9;
         if (s == "DAPP_CALL")        return 10;
+        if (s == "PQ_TRANSFER")          return 11;
+        if (s == "SHIELD")               return 12;
+        if (s == "UNSHIELD")             return 13;
+        if (s == "CONFIDENTIAL_TRANSFER") return 14;
+        if (s == "ROTATE_AUDIT_KEY")     return 15;
+        if (s == "LOG_AUDIT_ACCESS")     return 16;
+        if (s == "REGISTER_NOTE_KEY")    return 17;
+        if (s == "ROTATE_IDENTITY_KEY")  return 18;
         return -1;
     };
     auto int_to_type_mnemonic = [](int t) -> const char* {
@@ -15662,6 +15718,14 @@ int cmd_inspect_tx(int argc, char** argv) {
             case 8:  return "COMPOSABLE_BATCH";
             case 9:  return "DAPP_REGISTER";
             case 10: return "DAPP_CALL";
+            case 11: return "PQ_TRANSFER";
+            case 12: return "SHIELD";
+            case 13: return "UNSHIELD";
+            case 14: return "CONFIDENTIAL_TRANSFER";
+            case 15: return "ROTATE_AUDIT_KEY";
+            case 16: return "LOG_AUDIT_ACCESS";
+            case 17: return "REGISTER_NOTE_KEY";
+            case 18: return "ROTATE_IDENTITY_KEY";
             default: return "UNKNOWN";
         }
     };
@@ -16129,6 +16193,15 @@ int cmd_inspect_tx(int argc, char** argv) {
                 payload_bytes.begin() + p + std::min<size_t>(ct_len, 16));
             payload_decoded["ciphertext_preview_hex"] = to_hex(ct_preview);
             payload_decode_known = true;
+            break;
+        }
+        case 18: { // ROTATE_IDENTITY_KEY
+            payload_decode_known = true;
+            if (payload_bytes.size() != 32) {
+                payload_decode_note = "ROTATE_IDENTITY_KEY payload != 32 bytes (expected 32-byte new Ed25519 pubkey)";
+                break;
+            }
+            payload_decoded["new_ed_pub_hex"] = to_hex(payload_bytes);
             break;
         }
         default: {
@@ -19513,6 +19586,14 @@ int cmd_tx_history_export(int argc, char** argv) {
             case 8:  return "COMPOSABLE_BATCH";
             case 9:  return "DAPP_REGISTER";
             case 10: return "DAPP_CALL";
+            case 11: return "PQ_TRANSFER";
+            case 12: return "SHIELD";
+            case 13: return "UNSHIELD";
+            case 14: return "CONFIDENTIAL_TRANSFER";
+            case 15: return "ROTATE_AUDIT_KEY";
+            case 16: return "LOG_AUDIT_ACCESS";
+            case 17: return "REGISTER_NOTE_KEY";
+            case 18: return "ROTATE_IDENTITY_KEY";
             default: return "UNKNOWN_" + std::to_string(t);
         }
     };

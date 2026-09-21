@@ -604,6 +604,17 @@ public:
         return it->second;
     }
     size_t   note_key_count() const { return note_keys_.size(); }
+    // D15 / R-6: rotated identity keys. domain -> 32-byte Ed25519 PubKey.
+    // Query interface for rotated identity keys.
+    std::optional<PubKey> rotated_identity_key(const std::string& domain) const {
+        auto it = rotated_identity_keys_.find(domain);
+        if (it == rotated_identity_keys_.end()) return std::nullopt;
+        return it->second;
+    }
+    const std::map<std::string, PubKey>& rotated_identity_keys() const {
+        return rotated_identity_keys_;
+    }
+    size_t rotated_identity_key_count() const { return rotated_identity_keys_.size(); }
     // expected_total = the value the TRANSPARENT live sum must equal post-apply.
     // §3.22: value moved into the confidential pool (accumulated_shielded_) leaves
     // the transparent live sum, so it is subtracted here. Total real supply =
@@ -885,6 +896,11 @@ private:
     // (MODERN + FIPS alike). Lazy-snapshotted.
     std::map<std::string, std::string>          note_keys_;
 
+    // D15 (R-6) identity key rotation layer. rotated_identity_keys_: domain -> 32B new Ed25519 PubKey.
+    // Emitted only while a key has been rotated (additive: zero state-root leaves while unset).
+    // Lazy-snapshotted.
+    std::map<std::string, PubKey>               rotated_identity_keys_;
+
     // A9 Phase 2C: single lock-free committed view bundling accounts,
     // stakes, and registrants. Published at every successful apply
     // via std::atomic_store on the shared_ptr. Readers atomic_load
@@ -1085,6 +1101,7 @@ private:
         std::optional<std::map<std::string, std::string>>   audit_keys;      // A2 (lazy)
         std::optional<std::map<std::string, uint64_t>>      audit_log_count; // A2 (lazy)
         std::optional<std::map<std::string, std::string>>   note_keys;       // NC-8 §5a (lazy)
+        std::optional<std::map<std::string, PubKey>>        rotated_identity_keys; // D15 (lazy)
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>

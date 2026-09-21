@@ -45,3 +45,7 @@ build-linux-ubsan/
 build-linux-asan/
 __pycache__/
 .aider*
+
+# Local agent notes and patch archives
+AGENTS.md
+patches-*/

@@ -1457,7 +1457,8 @@ Block build_body(
             break;
         case TxType::ROTATE_AUDIT_KEY:
         case TxType::LOG_AUDIT_ACCESS:
-        case TxType::REGISTER_NOTE_KEY: {
+        case TxType::REGISTER_NOTE_KEY:
+        case TxType::ROTATE_IDENTITY_KEY: {
             // A2 audit txs + NC-8 §5a REGISTER_NOTE_KEY are fee-only (validator
             // enforces amount==0/to empty); provisional accounting debits just
             // the fee.
@@ -1465,6 +1466,8 @@ Block build_body(
             sb -= tx.fee;
             break;
         }
+        default:
+            break;
         }
         nn++;
         b.transactions.push_back(tx);

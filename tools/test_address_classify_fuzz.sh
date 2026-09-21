@@ -95,8 +95,8 @@ N=24   # >= 20 cases required.
 echo "=== address-classify fuzz: deriving $N known-anon base addresses ==="
 # Ground-truth anon addresses (canonical, lowercase "0x"+64hex) BY
 # CONSTRUCTION — account-derive-batch only emits valid anon addresses.
-"$WALLET" account-derive-batch --seed "$SEED_HEX" --count "$N" \
-    --out "$T/accounts.json" --force >/dev/null 2>&1
+# Use --json stdout redirection since --out writes binary DAB1 container.
+"$WALLET" account-derive-batch --seed "$SEED_HEX" --count "$N" --json > "$T/accounts.json" 2>/dev/null
 if [ ! -s "$T/accounts.json" ]; then
   echo "  FAIL: account-derive-batch produced no output file"
   echo "Total: PASS=$pass_count FAIL=1"
@@ -104,8 +104,12 @@ if [ ! -s "$T/accounts.json" ]; then
 fi
 
 # Pull the N base addresses into a bash array. Python on Windows emits
-# CRLF on stdout, so strip \r before mapfile to keep the strings clean.
-mapfile -t BASE_ADDRS < <("$PY" - "$T/accounts.json" <<'PYEOF' | tr -d '\r'
+# CRLF on stdout, so strip \r before populating to keep the strings clean.
+# Portable under both Bash 3.2 (macOS) and Bash 4+ (Linux/Windows).
+BASE_ADDRS=()
+while IFS= read -r line; do
+    [ -n "$line" ] && BASE_ADDRS+=("$line")
+done < <("$PY" - "$T/accounts.json" <<'PYEOF' | tr -d '\r'
 import json, sys
 d = json.load(open(sys.argv[1]))
 for a in d["accounts"]:

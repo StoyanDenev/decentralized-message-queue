@@ -330,9 +330,10 @@ int cmd_pq_address(int argc, char** argv) {
 }
 
 int cmd_pq_transfer(int argc, char** argv) {
-    std::string to_str, scheme_str, out_path, mldsa_seed_raw, mldsa_seed_src;
+    std::string to_str, scheme_str, out_path, mldsa_seed_raw, mldsa_seed_src, genesis_hash_hex;
     bool have_amount = false, have_fee = false, have_nonce = false;
     uint64_t amount = 0, fee = 0, nonce = 0;
+    uint32_t shard_id = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--to"              && i + 1 < argc) to_str         = argv[++i];
@@ -342,6 +343,8 @@ int cmd_pq_transfer(int argc, char** argv) {
         else if (a == "--scheme"          && i + 1 < argc) scheme_str     = argv[++i];
         else if (a == "--mldsa-seed"      && i + 1 < argc) mldsa_seed_raw = argv[++i];
         else if (a == "--mldsa-seed-from" && i + 1 < argc) mldsa_seed_src = argv[++i];
+        else if (a == "--genesis-hash"    && i + 1 < argc) genesis_hash_hex = argv[++i];
+        else if (a == "--shard-id"        && i + 1 < argc) shard_id       = static_cast<uint32_t>(parse_u64_arg("--shard-id", argv[++i]));
         else if (a == "--out"             && i + 1 < argc) out_path       = argv[++i];
         else { std::cerr << "pq-transfer: unknown arg '" << a << "'\n"; return 1; }
     }
@@ -365,9 +368,20 @@ int cmd_pq_transfer(int argc, char** argv) {
                              mldsa_seed_hex);
         std::string from = derive_pq_from(scheme, mseed);   // PQ-native bearer address
 
-        // Canonical PQ_TRANSFER signing_bytes (type=11; layout == src/chain/block.cpp).
+        std::array<uint8_t, 32> genesis_hash{};
+        if (!genesis_hash_hex.empty()) {
+            if (genesis_hash_hex.rfind("0x", 0) == 0) genesis_hash_hex = genesis_hash_hex.substr(2);
+            if (genesis_hash_hex.size() == 64) {
+                auto v = determ::from_hex(genesis_hash_hex);
+                std::copy(v.begin(), v.end(), genesis_hash.begin());
+            }
+        }
+
+        // Canonical PQ_TRANSFER signing_bytes (type=11; layout == src/chain/block.cpp, D23 / R-17 S-103).
         std::vector<uint8_t> sb;
         sb.push_back(11);
+        sb.insert(sb.end(), genesis_hash.begin(), genesis_hash.end());
+        for (int i = 3; i >= 0; --i) sb.push_back((shard_id >> (i * 8)) & 0xFF);
         sb.insert(sb.end(), from.begin(), from.end()); sb.push_back(0);
         sb.insert(sb.end(), to_str.begin(), to_str.end()); sb.push_back(0);
         for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
@@ -381,16 +395,18 @@ int cmd_pq_transfer(int argc, char** argv) {
         // 64-zero-byte placeholder — a PQ account has no Ed25519 key; pq_auth carries
         // the real authenticator).
         json out = {
-            {"type",    11},
-            {"from",    from},
-            {"to",      to_str},
-            {"amount",  amount},
-            {"fee",     fee},
-            {"nonce",   nonce},
-            {"payload", ""},
-            {"sig",     std::string(128, '0')},
-            {"hash",    to_hex(h)},
-            {"pq_auth", to_hex(env.data(), env.size())},
+            {"type",         11},
+            {"genesis_hash", to_hex(genesis_hash.data(), genesis_hash.size())},
+            {"shard_id",     shard_id},
+            {"from",         from},
+            {"to",           to_str},
+            {"amount",       amount},
+            {"fee",          fee},
+            {"nonce",        nonce},
+            {"payload",      ""},
+            {"sig",          std::string(128, '0')},
+            {"hash",         to_hex(h)},
+            {"pq_auth",      to_hex(env.data(), env.size())},
         };
         if (out_path.empty()) {
             std::cout << out.dump() << "\n";

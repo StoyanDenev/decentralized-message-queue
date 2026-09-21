@@ -42,6 +42,7 @@
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
 //   verify-registrant        Prove domain D is a registered validator (r:)
 //   verify-notekey           Prove an account's standing recipient note_pk (nk:)
+//   verify-rotated-key       Prove a validator's rotated identity key (rk:)
 //   verify-enote-inclusion   Prove a scanned (commitment, ciphertext) enote is
 //                            the committed on-chain delivery (en:, MODERN)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
@@ -6720,6 +6721,210 @@ int cmd_verify_notekey(int argc, char** argv) {
     }
 }
 
+// ─────────────────────────── verify-rotated-key ───────────────────────────
+// D15 / R-6: prove a validator domain has rotated its active identity key (rk:).
+// The leaf commits value = SHA256(new_ed_pub), keyed by "rk:" + domain.
+// Merkle-verifies against a committee-signed state_root.
+int cmd_verify_rotated_key(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    uint64_t wait_seconds = 0;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"  && i + 1 < argc) {
+            genesis_path = argv[++i];
+        } else if (a == "--domain"   && i + 1 < argc) {
+            domain = argv[++i];
+        } else if (a == "--wait"     && i + 1 < argc) {
+            wait_seconds = parse_u64("--wait", argv[++i]);
+        } else if (a == "--json") {
+            json_out = true;
+        } else {
+            std::cerr << "verify-rotated-key: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-rotated-key: usage --rpc-port <N> --genesis <file> "
+                     "--domain <D> [--wait <S>] [--json]\n";
+        return 1;
+    }
+
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-rotated-key: " << rpc.last_error() << "\n";
+            return 1;
+        }
+
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+        std::vector<uint8_t> local_key = {'r', 'k', ':'};
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex, /*track_registry=*/false, genesis.k_block_sigs, genesis.bft_enabled);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `rk:` state-proofs cannot be anchored");
+        }
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "rk"}, {"key", domain}});
+
+        InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+        std::string detail, ed_pub_hex, state_root_used;
+        uint64_t anchored_height = 0;
+
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `rk:` leaf for '" + domain
+                        + "' — identity key has not been rotated at the verified head";
+                auto acc = rpc.call("account", {{"address", domain}});
+                bool rk_null = !acc.contains("rotated_ed_pub") || acc["rotated_ed_pub"].is_null();
+                if (!rk_null) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "state_proof returned not_found for `rk:" + domain
+                            + "` but the `account` RPC returns a non-null rotated_ed_pub — "
+                              "inconsistent daemon";
+                }
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `rk:` state-proof: " + err;
+            }
+        } else {
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match canonical rk: key " + local_key_hex;
+            } else {
+                auto acc = rpc.call("account", {{"address", domain}});
+                if (acc.contains("error") && !acc["error"].is_null()) {
+                    throw std::runtime_error(
+                        "state_proof served an `rk:` leaf for '" + domain
+                        + "' but the account RPC refused it: "
+                        + acc["error"].dump() + " (inconsistent daemon)");
+                }
+                if (!acc.contains("rotated_ed_pub") || acc["rotated_ed_pub"].is_null()) {
+                    throw std::runtime_error(
+                        "state_proof served an `rk:` leaf for '" + domain
+                        + "' but the account RPC returns a null rotated_ed_pub "
+                          "(inconsistent daemon)");
+                }
+                ed_pub_hex = acc.value("rotated_ed_pub", std::string{});
+                std::vector<uint8_t> ed_pub = from_hex(ed_pub_hex);
+                if (ed_pub.size() != 32) {
+                    throw std::runtime_error(
+                        "account rotated_ed_pub is not 32 bytes (got "
+                        + std::to_string(ed_pub.size()) + ")");
+                }
+
+                determ::crypto::SHA256Builder hb;
+                hb.append(ed_pub.data(), ed_pub.size());
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash does not match SHA256(rotated_ed_pub)";
+                } else {
+                    uint64_t proof_height = proof.value("height", uint64_t{0});
+                    std::string proof_root = proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        std::string attested =
+                            determ::light::committee_bound_state_root(rpc, committee_json, anchor_index, wait_seconds, genesis.k_block_sigs, genesis.bft_enabled);
+                        if (attested != proof_root) {
+                            throw std::runtime_error(
+                                "verify-rotated-key: committee-attested state_root mismatch");
+                        }
+                        vc.head_state_root = attested;
+                        vc.height = proof_height;
+                        anchor_root = attested;
+                        anchor_at   = proof_height;
+                    }
+
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",  included},
+                {"verdict",   verdict_str(verdict)},
+                {"domain",    domain},
+                {"namespace", "rk"},
+            };
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
+            if (included) out["rotated_ed_pub"] = ed_pub_hex;
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << "INCLUSION: " << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         rk (rotated identity key)\n"
+                      << "  domain:            " << domain << "\n";
+            if (included) {
+                std::cout << "  rotated_ed_pub:    " << ed_pub_hex << "\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-rotated-key: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ─────────────────────── verify-enote-inclusion ──────────────────────────
 // NC-8 §5.6 (the final NC-8 increment): the light-client enote scan. A wallet
 // pulls candidate (commitment, ciphertext) pairs from a full node's scan_enotes
@@ -11277,6 +11482,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
         if (cmd == "verify-registrant")     return cmd_verify_registrant(sub_argc, sub_argv);
         if (cmd == "verify-notekey")        return cmd_verify_notekey(sub_argc, sub_argv);
+        if (cmd == "verify-rotated-key")    return cmd_verify_rotated_key(sub_argc, sub_argv);
         if (cmd == "verify-enote-inclusion") return cmd_verify_enote_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
