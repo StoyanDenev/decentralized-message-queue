@@ -1,3 +1,5 @@
+> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+
 # FA4 — Liveness theorem (probabilistic)
 
 This document proves Determ's chain-progress guarantee: under partial synchrony, bounded per-validator unavailability, and BFT escalation enabled, the chain produces blocks with probability 1, and the expected number of round retries per height is bounded.

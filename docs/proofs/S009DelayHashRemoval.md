@@ -201,7 +201,7 @@ An attacker controls (K-1) of K committee members at height `h`. They attempt to
 
 **Defeats.**
 
-- **(a)** Defeated by SHA-256 preimage resistance (T-2). The honest member's `s_{K-1}` is uniformly random and the attacker has no information beyond `SHA256(s_{K-1} || pk_{K-1})`. Timing side-channels are bounded because the honest committee member computes `s_{K-1}` once at the start of Phase-1 and stores it in `current_round_secret_` — there is no timing-sensitive comparison or branching on `s_{K-1}` before reveal. The RNG is the deterministic CSPRNG seeded from per-round entropy (Preliminaries §2.3 — A3); cryptographic weakness in the CSPRNG is out of scope for this proof and tracked separately.
+- **(a)** Defeated by SHA-256 preimage resistance (T-2). The honest member's `s_{K-1}` is uniformly random and the attacker has no information beyond `SHA256(s_{K-1} || pk_{K-1})`. Timing side-channels are bounded because the honest committee member computes `s_{K-1}` once at the start of Phase-1 and stores it in `current_round_secret_` — there is no timing-sensitive comparison or branching on `s_{K-1}` before reveal. The RNG is the deterministic CSPRNG seeded from per-round entropy (Preliminaries §2.3 — A4); cryptographic weakness in the CSPRNG is out of scope for this proof and tracked separately.
 - **(b)** Defeated by the Ed25519 signature on the ContribMsg envelope. The attacker's `v_i` is Byzantine, so they could in principle sign two contradicting ContribMsgs with different `dh_input`. This is exactly the equivocation case S-006 detects: the receive path's same-generation duplicate scan at `on_contrib` catches the two signatures over different envelopes and surfaces them via the `EquivocationEvent` channel. The producer's apply path slashes `v_i`'s stake. The attacker pays the slashing cost for at most one Phase-1 swap attempt; the second attempt is rejected at admission.
 - **(c)** Defeated by S-006 same-generation equivocation detection (subsumed in (b)).
 
@@ -213,7 +213,7 @@ An attacker observes the honest committee member's Phase-2 `BlockSigMsg` envelop
 
 **Defeat.** The attacker's Phase-2 envelope is also Ed25519-signed. Once published, swapping requires equivocation, caught by FA6 / S-006 (T-3 composition above). The Phase-2 reveal window is additionally bounded by the S-003 validator wall-clock window (`block_timestamp` is checked against the validator's local clock within a `±30s` skew; envelopes outside the window are rejected). So even if the attacker tried to delay their Phase-2 publication to maximize information about other reveals, they cannot delay beyond the S-003 window without their `BlockSigMsg` being rejected as stale.
 
-Defeat is from the composition of (Ed25519 sig binding) + (S-006 equivocation detection) + (S-003 wall-clock bound). The pre-removal delay-hash defense was *not* relevant to A2 — it sat between Phase-1 and Phase-2, so it didn't protect the Phase-2 reveal interval at all. Post-removal status is no worse.
+Defeat is from the composition of (Ed25519 sig binding) + (S-006 equivocation detection) + (S-003 wall-clock bound). The pre-removal delay-hash defense was *not* relevant to $Adv_{timing}$ — it sat between Phase-1 and Phase-2, so it didn't protect the Phase-2 reveal interval at all. Post-removal status is no worse.
 
 ### $Adv_{resurrection}$ (Resurrection of delay-hash bug class — defeated by structural removal)
 
@@ -317,7 +317,7 @@ The audit confirms zero functional dependencies on the deleted delay-hash module
 ### 5.2 Commit-reveal randomness binding
 
 - **`SelectiveAbort.md`** — FA3 selective-abort defense. The proof of FA3 was previously stated in delay-hash terms (compute-time bound); post-removal it is stated in commit-reveal terms (information-theoretic bound under A2). The conclusion is strengthened.
-- **`S006ContribMsgEquivocation.md`** — S-006 closure detects Phase-1 commit swap attempts. T-2's defeat of A1(b) and A1(c) composes with this.
+- **`S006ContribMsgEquivocation.md`** — S-006 closure detects Phase-1 commit swap attempts. T-2's defeat of $Adv_{randomness}(b)$ and $Adv_{randomness}(c)$ composes with this.
 - **`S030-D2-Analysis.md`** — analyzes the D1/D2 attack family on `compute_block_digest`'s field set. The post-removal field set (with `delay_output` excluded from digest) is documented there. T-3 of this proof composes with S030-D2-Analysis's intersection arguments.
 
 ### 5.3 State_root binding (T-2 composition)

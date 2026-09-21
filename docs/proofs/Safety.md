@@ -1,3 +1,5 @@
+> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+
 # FA1 — Safety theorem (fork freedom)
 
 This document proves that Determ's K-of-K mutual-distrust protocol produces at most one valid block per height, under the cryptographic assumptions of `Preliminaries.md` §2 plus the honest-behavior definition §4.

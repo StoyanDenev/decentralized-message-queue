@@ -1,3 +1,5 @@
+> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+
 # FA3 — Selective-abort defense (commit-reveal hybrid)
 
 This document proves the security property that defines Determ's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**

@@ -201,6 +201,31 @@ From T-1..T-4, for any `T` (with the light leg restricted to its empty-payload d
 2. **Signature interop (A1).** Ed25519 signs/verifies the *message bytes* directly (the wallet's own comment at `wallet/main.cpp:8256-8262` notes both `crypto_sign_verify_detached` and the chain's `EVP_DigestVerify` path operate on the raw `signing_bytes`, not a pre-hashed digest). Since every binary recomputes the *same* message `SB(T)`, a signature produced over `SB(T)` by one binary verifies under the other's recomputed `SB(T)`.
 3. **Identical `tx_root` leaf.** `compute_tx_root` hashes the set of `Transaction::compute_hash()` values (`TxInclusionProofSoundness.md` §3.3, citing `src/node/producer.cpp:262-270` + `block.cpp:31-34`). Equal `tx_hash` ⇒ identical leaves ⇒ identical `tx_root` regardless of which binary produced the tx. ∎
 
+### 4.6 Theorem T-6 (Subspace Injectivity & Immunity to NUL-Byte Manipulation)
+
+**Statement.** Let $\mathcal{T}_{\mathrm{valid}}$ denote the transaction universe admitted by the C99 validity layer (`src/wire/parser.c` / `verify_triple_entry_tx`). For all $T \in \mathcal{T}_{\mathrm{valid}}$, the fields $T.\mathrm{from}$, $T.\mathrm{to}$, and $T.\mathrm{domain}$ belong strictly to the NUL-free subspace:
+$$\forall b \in T.\mathrm{from} \cup T.\mathrm{to} \cup T.\mathrm{domain}, \quad b \ne 0\mathrm{x}00$$
+Under this restriction, the serialization mapping $\mathrm{SB}: \mathcal{T}_{\mathrm{valid}} \to \{0,1\}^*$ is strictly injective:
+$$\forall T_1, T_2 \in \mathcal{T}_{\mathrm{valid}}, \quad \mathrm{SB}(T_1) = \mathrm{SB}(T_2) \implies T_1 = T_2$$
+Consequently, shifting a NUL byte across boundaries to produce self-ambiguous transaction pre-images or identical transaction hashes for distinct transactions is mathematically impossible.
+
+**Proof.**
+Let $S = \mathrm{SB}(T)$ be the canonical serialization:
+$$S = \mathrm{type} \parallel \mathrm{from} \parallel 0\mathrm{x}00 \parallel \mathrm{to} \parallel 0\mathrm{x}00 \parallel \mathrm{amount}_{\mathrm{BE}} \parallel \mathrm{fee}_{\mathrm{BE}} \parallel \mathrm{nonce}_{\mathrm{BE}} \parallel \mathrm{payload}$$
+1. The prefix $\mathrm{type}$ is fixed to 1 byte at index 0.
+2. Because $T \in \mathcal{T}_{\mathrm{valid}}$, $T.\mathrm{from}$ contains no $0\mathrm{x}00$ byte. Therefore, the first occurrence of $0\mathrm{x}00$ in $S[1..]$ occurs at index $1 + |T.\mathrm{from}|$. The position of the first $0\mathrm{x}00$ delimiter uniquely and deterministically defines $|T.\mathrm{from}|$ and the exact sequence of bytes in $T.\mathrm{from}$.
+3. Similarly, because $T.\mathrm{to}$ contains no $0\mathrm{x}00$ byte, the second occurrence of $0\mathrm{x}00$ in $S$ occurs at index $2 + |T.\mathrm{from}| + |T.\mathrm{to}|$. This second delimiter uniquely and deterministically defines $|T.\mathrm{to}|$ and the exact sequence of bytes in $T.\mathrm{to}$.
+4. The fields $\mathrm{amount}$, $\mathrm{fee}$, and $\mathrm{nonce}$ are fixed-width 8-byte big-endian integers occupying exactly indices:
+   - $\mathrm{amount}$: $[2 + |T.\mathrm{from}| + |T.\mathrm{to}| \dots 9 + |T.\mathrm{from}| + |T.\.to|]$
+   - $\mathrm{fee}$: $[10 + |T.\mathrm{from}| + |T.\mathrm{to}| \dots 17 + |T.\mathrm{from}| + |T.\mathrm{to}|]$
+   - $\mathrm{nonce}$: $[18 + |T.\mathrm{from}| + |T.\mathrm{to}| \dots 25 + |T.\mathrm{from}| + |T.\mathrm{to}|]$
+   Since big-endian integer encoding is bijective over $\{0, \dots, 2^{64}-1\}$, $\mathrm{amount}$, $\mathrm{fee}$, and $\mathrm{nonce}$ are uniquely and deterministically recovered.
+5. Any remaining bytes in $S$ from index $26 + |T.\mathrm{from}| + |T.\mathrm{to}|$ to $|S|-1$ uniquely constitute $T.\mathrm{payload}$.
+
+Therefore, given $S = \mathrm{SB}(T)$, every field of $T$ is uniquely and unambiguously reconstructed.
+If an adversary attempts to craft $T' \ne T$ such that $\mathrm{SB}(T') = \mathrm{SB}(T)$ by shifting a NUL byte (e.g. appending $0\mathrm{x}00$ to $\mathrm{from}$ while shifting $\mathrm{to}$), the C99 parser rejects $T'$ at admission because $0\mathrm{x}00 \in T'.\mathrm{from}$. Thus $T' \notin \mathcal{T}_{\mathrm{valid}}$.
+We conclude that on the subspace $\mathcal{T}_{\mathrm{valid}}$, canonical signing byte serialization is unconditionally injective. $\blacksquare$
+
 ---
 
 ## 5. Mechanized witnesses

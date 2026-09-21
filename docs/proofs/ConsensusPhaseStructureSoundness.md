@@ -1,3 +1,5 @@
+> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+
 # FA-Phase — Two-phase per-block consensus structure soundness
 
 This document proves the **structural soundness** of Determ's two-phase per-block consensus: the Phase-1 commit (`ContribMsg.dh_input`) / Phase-2 reveal (`BlockSigMsg.dh_secret`) construction, considered as a *deterministic, binding state machine* rather than as a randomness beacon. Four properties are pinned:

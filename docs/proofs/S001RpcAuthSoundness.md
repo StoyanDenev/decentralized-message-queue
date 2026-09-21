@@ -93,7 +93,7 @@ $$
 
 per attempt by `RpcAuthHmacSoundness.md` T-1 — the auth gate alone gives this bound regardless of the input-validation gate's downstream behavior.
 
-Under `A_inside`, the auth gate is a no-op (the attacker has the secret), so the bound reduces to whatever the input-validation gates establish. By `RpcInputValidationDefense.md` T-1 (Layered Defense Completeness — see L-3 there), every adversary class A1..A5 is rejected by at least one of the five layers; the relevant arm for `A_inside` is Layers B + C, which are deterministic gates with no probabilistic failure mode (they reject or accept by predicate, no cryptographic randomness involved).
+Under `A_inside`, the auth gate is a no-op (the attacker has the secret), so the bound reduces to whatever the input-validation gates establish. By `RpcInputValidationDefense.md` T-1 (Layered Defense Completeness — see L-3 there), every adversary class $Adv_{oversize}..Adv_{exhaust}$ is rejected by at least one of the five layers; the relevant arm for `A_inside` is Layers B + C, which are deterministic gates with no probabilistic failure mode (they reject or accept by predicate, no cryptographic randomness involved).
 
 The composition gives an end-to-end pipeline soundness statement: under either adversary model, no out-of-contract request mutates state. The argument is by case analysis over the two adversary models in §5 below.
 

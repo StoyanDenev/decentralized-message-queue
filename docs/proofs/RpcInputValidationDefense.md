@@ -119,12 +119,12 @@ the method handler is the last-line semantic gate.
 **Theorem T-1 (Layered Defense Completeness).** Let `R` denote any
 adversarial request byte string. Define the adversary classes:
 
-- **A1: oversize body.** `|R| > LINE_LIMIT` where `LINE_LIMIT` is the
+- **$Adv_{oversize}$: oversize body.** `|R| > LINE_LIMIT` where `LINE_LIMIT` is the
   framing-layer ceiling.
-- **A2: malformed JSON.** `R` is a line that `json::parse` cannot parse,
+- **$Adv_{malformed}$: malformed JSON.** `R` is a line that `json::parse` cannot parse,
   OR `R` parses but a required field has wrong type / wrong hex length /
   is missing.
-- **A3: semantically invalid.** `R` parses and authenticates, but its
+- **$Adv_{invalid}$: semantically invalid.** `R` parses and authenticates, but its
   per-method semantics violate the method's contract (e.g., a `submit_tx`
   with stale nonce, an `unstake` on a non-staked account, a `state_proof`
   on an unsupported namespace).
@@ -134,15 +134,15 @@ adversarial request byte string. Define the adversary classes:
   valid, but lacks `req["auth"]` or carries a wrong HMAC value when
   Layer E is enabled.
 
-For each adversary class `Aᵢ ∈ {A1, A2, A3, A4, A5}` there exists at
+For each adversary class `Aᵢ ∈ {$Adv_{oversize}, $Adv_{malformed}, $Adv_{invalid}, $Adv_{unauth}, $Adv_{exhaust}}` there exists at
 least one layer `Lⱼ ∈ {A, B, C, D, E}` that rejects `R` before Layer C's
 state-mutating method handler executes. Specifically:
 
 | Class | Primary layer | Reject behavior |
 |---|---|---|
-| A1   | Layer A | TCP framing drops; no JSON parse occurs |
-| A2   | Layer B | `std::runtime_error` with `"S-018: "` diagnostic returned to client as `{"error": "..."}` |
-| A3   | Layer C | per-method `std::runtime_error` returned to client (e.g., `"stale nonce"`, `"insufficient balance"`, `"unsupported namespace"`) |
+| $Adv_{oversize}$ | Layer A | TCP framing drops; no JSON parse occurs |
+| $Adv_{malformed}$ | Layer B | `std::runtime_error` with `"S-018: "` diagnostic returned to client as `{"error": "..."}` |
+| $Adv_{invalid}$ | Layer C | per-method `std::runtime_error` returned to client (e.g., `"stale nonce"`, `"insufficient balance"`, `"unsupported namespace"`) |
 | A4   | Layer D | `{"error": "rate_limited"}` returned to client; no parse / auth / dispatch |
 | A5   | Layer E | `{"error": "auth_required: missing 'auth' field"}` or `{"error": "auth_failed"}` |
 
@@ -803,7 +803,7 @@ gets dropped at apply time; the apply layer is the correctness gate.   □
 
 By case analysis over the five adversary classes:
 
-**A1 (oversize body).** The framing layer's TCP `read_until('\n', ec)`
+**$Adv_{oversize}$ (oversize body).** The framing layer's TCP `read_until('\n', ec)`
 bounds one line. For a request of size larger than the OS TCP receive
 buffer + the streambuf accumulator, the session either consumes memory
 proportional to the line size (bounded above by the per-IP rate
@@ -818,21 +818,21 @@ RPC request approaches this size) and gets dropped by the JSON parser
 or the OS TCP back-pressure before reaching dispatch.
 
 For attacks where Layer A admits the request but the line is
-adversarial JSON, Layer B catches.   ∎ (A1 covered by Layer A + Layer B
+adversarial JSON, Layer B catches.   ∎ ($Adv_{oversize}$ covered by Layer A + Layer B
 in composition)
 
-**A2 (malformed JSON).** By L-2, every malformed-JSON variant —
+**$Adv_{malformed}$ (malformed JSON).** By L-2, every malformed-JSON variant —
 syntactic parse error, missing required field, wrong-type required
 field, wrong-hex-length field — produces a `std::runtime_error` caught
 at line 188. The response carries the S-018 diagnostic or the
 `nlohmann::json::parse_error::what()` message. No state mutation
-occurs.   ∎ (A2 covered by Layer B)
+occurs.   ∎ ($Adv_{malformed}$ covered by Layer B)
 
-**A3 (semantically invalid).** By L-3, every state-mutating method's
+**$Adv_{invalid}$ (semantically invalid).** By L-3, every state-mutating method's
 semantic gates reject inputs that pass Layer B but fail method-
 specific semantics. Read-only methods return `nullptr` /
 `{"error": "..."}` for queries about non-existent state. No state
-mutation occurs in either case.   ∎ (A3 covered by Layer C)
+mutation occurs in either case.   ∎ ($Adv_{invalid}$ covered by Layer C)
 
 **A4 (high-rate flood).** By L-4, the per-IP token-bucket enforces
 `A_k([t, t+Δ]) ≤ ⌊C + r·Δ⌋`. Flooders exceeding the budget receive

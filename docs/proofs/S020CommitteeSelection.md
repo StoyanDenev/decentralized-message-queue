@@ -351,7 +351,7 @@ So the output space has exactly `N! / (N − K)!` K-permutations, each with prob
 
 ## 5. Adversary model
 
-### 5.1 Adversary A1: seed-prediction attempts
+### 5.1 Adversary $Adv_{seed}$: seed-prediction attempts
 
 **Setup.** Adversary `Adv` attempts to predict or influence `random_state` at some future height `h*` to gain control over the committee selection at `h*`. Predicting `random_state` would let `Adv` pre-compute the committee and either (a) bias their own validators into it, or (b) front-run by submitting transactions targeting the known committee.
 
@@ -361,7 +361,7 @@ The closure here is structural: `select_m_creators` does not introduce any predi
 
 **Residual signal.** `Adv` knows `(K, N)` from the public registry state. `Adv` therefore knows which branch fires. Under the rejection branch, `Adv` does not learn the SHA-256 stream's content; under the F-Y branch, `Adv` does not learn the swap sequence. So `Adv` has zero information about the committee beyond what the public registry permits.
 
-### 5.2 Adversary A2: timing-side-channel against identity bias
+### 5.2 Adversary $Adv_{timing}$: timing-side-channel against identity bias
 
 **Setup.** Adversary `Adv` observes wall-clock measurements of `select_m_creators` on a target node (e.g., via network-side latency profiling, RPC-response timing, or co-tenancy on the same hardware). `Adv` wants to learn which validators were selected for the committee at height `h*` *before* the block is finalized and broadcast.
 
@@ -373,7 +373,7 @@ In the F-Y branch, the runtime is deterministic in `(K, N)` and independent of t
 
 **Implementation discipline.** The current implementation honors T-6 because every conditional / loop in `random.cpp:70–100` is on integer indices or `(K, N)`. A future change that branches on a validator-specific signal (reputation, stake amount, region) would weaken T-6; any such change should be reviewed against T-6 explicitly.
 
-### 5.3 Adversary A3: committee-selection grinding via beacon manipulation
+### 5.3 Adversary $Adv_{grind}$: committee-selection grinding via beacon manipulation
 
 **Setup.** Adversary `Adv` controls a fraction of the validator pool and attempts to manipulate `random_state` to bias the future committee in their favor. The attack is: `Adv` selectively withholds Phase-2 reveals (per the selective-abort defense `SelectiveAbort.md` FA3) to influence the next round's `random_state` derivation, hoping to bias the committee at some future height.
 
@@ -383,9 +383,9 @@ In the F-Y branch, the runtime is deterministic in `(K, N)` and independent of t
 - S-029 proves the fork-choice rule (`Chain::resolve_fork`) is deterministic on (sig_count, abort_count, block_hash). `Adv`'s grinding to produce a specific committee at height `h+1` does *not* let them produce a specific fork-choice winner at `h+1` — the fork-choice rule operates on the published block contents, not on the committee selection method.
 - `select_m_creators`'s contribution is the uniformity property (T-1 / T-2): even if `Adv` could grind 100 random_state candidates and pick the most favorable, each candidate yields a uniformly-distributed K-subset. The "best" candidate gives `Adv` a marginally better committee at the cost of `100 ×` the work — and per FA3 + S-029, that work is wasted because (a) committee selection is per-height, not per-fork, and (b) the next height's committee is re-randomized regardless.
 
-So A3 is closed by composition with FA3 (selective-abort) + S-029 (fork-choice) + T-1 / T-2 (uniformity here). `select_m_creators` itself is not vulnerable to grinding; the hybrid algorithm produces a uniform K-subset regardless of `random_state` choice.
+So $Adv_{grind}$ is closed by composition with FA3 (selective-abort) + S-029 (fork-choice) + T-1 / T-2 (uniformity here). `select_m_creators` itself is not vulnerable to grinding; the hybrid algorithm produces a uniform K-subset regardless of `random_state` choice.
 
-### 5.4 Adversary A4: rejection-sampling resource-exhaustion via crafted pool
+### 5.4 Adversary $Adv_{exhaust}$: rejection-sampling resource-exhaustion via crafted pool
 
 **Setup.** Adversary `Adv` causes the eligible pool to shrink to the size where rejection sampling pathology dominates (e.g., `K = N − 1`), then uses the resulting long wall-clock runtime to mount a DoS against honest validators trying to compute the committee in time for the round.
 
@@ -395,7 +395,7 @@ Concretely: at `K = N − 1`, the condition `2K = 2(N−1) > N` (for `N ≥ 3`) 
 
 **Worked example.** If `Adv` could shrink the pool to `N = 4, K = 3` (the smallest `2K > N` case), the F-Y branch fires and the runtime is `4` array initializations + `3` SHA-256 hashes + `3` swaps — negligible. Compared to the rejection branch at the same parameters: `T_0 = 4/4 = 1`, `T_1 = 4/3 ≈ 1.33`, `T_2 = 4/2 = 2` — total expected `4.33` hashes, only slightly more. But at `N = 1000, K = 999`, rejection sampling's `T_{998} = 1000 / 2 ≈ 500` makes the algorithm cost spiral; the F-Y branch's `1000 + 999 ≈ 2000` operations is unambiguously better.
 
-So A4 is closed by T-3's branch boundary: whenever the pathology would dominate, the F-Y branch absorbs it. `Adv` cannot DoS the honest validators by gaming the pool size.
+So $Adv_{exhaust}$ is closed by T-3's branch boundary: whenever the pathology would dominate, the F-Y branch absorbs it. `Adv` cannot DoS the honest validators by gaming the pool size.
 
 ---
 

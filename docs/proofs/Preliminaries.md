@@ -60,7 +60,7 @@ The proof series references the base cryptographic assumptions defined in this s
 | **A2** | SHA-256 collision resistance | §2.1 |
 | **A3** | SHA-256 preimage / second-preimage resistance | §2.1 |
 | **A4** | CSPRNG uniform secret sampling (`determ_rng_bytes`) | §2.3 |
-| **A5** | ML-DSA (Post-Quantum) EUF-CMA | §2.4 |
+| **A5** | ML-DSA-44/65/87 (Post-Quantum) EUF-CMA | §2.4 |
 
 **Derived / out-of-band labels (NOT base primitives of this section, retained where already in use):**
 - **A6** — HMAC-SHA-256 PRF assumption. Used only by the RPC-auth + keyfile-at-rest proofs (`S001RpcAuthSoundness.md`, `S004KeyfileAtRest.md`, `S023NodeKeyfileEncryption.md`). HMAC's PRF security reduces to SHA-256's compression-function properties but is cited separately as `A6` for clarity; it is not renumbered.
@@ -92,13 +92,14 @@ Phase-1 secrets `s_i ∈ {0,1}²⁵⁶` are drawn from a CSPRNG that is computat
 
 ### 2.4 ML-DSA (Post-Quantum)
 
-**EUF-CMA.** No polynomial-time adversary can forge a valid signature on an unqueried message under ML-DSA (Dilithium / FIPS 204).
+**EUF-CMA.** No polynomial-time adversary can forge a valid signature on an unqueried message under ML-DSA-44, ML-DSA-65, or ML-DSA-87 signature schemes (FIPS 204 / Dilithium) used in the post-quantum accept-rule. Formally, for parameter set $\kappa \in \{44, 65, 87\}$:
+$$\mathbf{Adv}^{\mathrm{EUF\text{-}CMA}}_{\mathrm{ML\text{-}DSA\text{-}}\kappa}(\mathcal{A}) \le \mathrm{negl}(\lambda)$$
 
-### 2.5 What we do not assume
+### 2.5 Consensus & Time-Lock Model
 
-- We do **not** assume hash-based VDFs, iterated SHA-256 sequentiality, or any compute-time bounds on the adversary's hash rate. The protocol's selective-abort defense is information-theoretic under preimage resistance, not compute-time-bound (see Safety theorem and Selective-Abort theorem).
-- We do **not** assume a trusted third party, secure clock, or VRF beacon.
-- We do **not** assume any honest majority, honest minority, or `f < N/3` bound for **safety** properties (those hold unconditionally). For **liveness** properties, see §4.
+- The consensus engine operates under the $K=2$ VDF Duel architecture (`K2_VDF_Soundness.md`). Cryptographic sequentiality of the Verifiable Delay Function is governed by the Time-Lock Inequality Theorem:
+$$T_{vdf} > W_{reveal} + \Delta_{max}$$
+- We do **not** assume a trusted third party, absolute synchronized wall-clocks, or Byzantine quorum intersections ($K$-of-$K$ agreement or voting quorums). Absolute liveness and progress are guaranteed via the 1-of-2 straggler fallback state transition under asynchronous network conditions.
 
 ---
 

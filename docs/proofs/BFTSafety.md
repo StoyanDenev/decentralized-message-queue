@@ -1,3 +1,5 @@
+> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+
 # FA5 — BFT-mode conditional safety
 
 This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the condition that has always governed BFT-style protocols: Byzantine fraction less than `|K_h|/3` within the committee.
