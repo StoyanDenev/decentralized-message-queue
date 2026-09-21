@@ -5749,3 +5749,28 @@ Under V-REG-1 (S-060, 2026-09-15), `REGISTER` was made strictly create-only to p
 
 **Authority:**
 Owner decisions D15 / R-6 (DECISION CLOCK R-6), standing roadmap Step 5.
+
+
+---
+
+# Decision Record: Migration to K=2 VDF Duel, OPAQUE DSSO, and Zero-Dependency C99
+**Date:** September 22, 2026
+**Status:** ACCEPTED & IMPLEMENTED (Ratifies post-Sept 21 commits)
+**Authorizer:** Core Architecture Team
+
+## Context & Rationale
+Following the September 21 key-rotation updates, extensive mathematical modeling and security analysis of the legacy architecture ($K$-of-$K$ unanimous BFT, legacy SRP, and C++ ASIO/OpenSSL dependencies) revealed fatal flaws in environments of mutual distrust:
+1. **Consensus (Liveness & Fairness):** $K$-of-$K$ unanimity guarantees network paralysis if a single node drops offline (the "Straggler Problem"). Furthermore, without strict time-locks, the last revealer can pre-compute parallel realities and selectively abort to manipulate entropy (1-bit bias / Subset Trap).
+2. **Networking (Bandwidth Bloat):** Leaderless BFT requires $O(N^2)$ gossip, preventing the sub-second latency required for MMO and AI-agent settlement.
+3. **Identity:** Legacy SRP verifiers left the network vulnerable to offline dictionary attacks if a node was compromised.
+4. **Dependencies:** ASIO, OpenSSL, and JSON parsers introduced non-deterministic latency spikes via dynamic memory allocation (`malloc`), breaking the strict timing required for cryptographic time-locks.
+
+## Decision & Authorization
+We formally authorize a complete architectural refactor to align with the original provisional patent goals ("Secure Distributed Random Number Generator"):
+1. **Consensus:** Abandon BFT and $K$-of-$K$ unanimity. Implement a **$K=2$ VDF Duel** (Designated Aggregator and Contributor) enforcing a strict Time-Windowed State Machine. Security is now anchored by the **Time-Lock Inequality Theorem** ($T_{vdf} > W_{reveal} + \Delta$), ensuring Enforced Blindness and a 1-of-2 straggler fallback.
+2. **Identity & State:** Adopt the IETF standard **OPAQUE aPAKE (DSSO)** to mathematically prevent offline dictionary attacks. Implement a zero-allocation C99 **Triple-Entry Bookkeeping Ledger** to prevent float and overspend errors.
+3. **Tech Stack:** Execute a total dependency purge. Migrate the codebase to a statically linked, bare-metal **C99 Unikernel** utilizing native OS event loops (`epoll`/`kqueue`/`IOCP`) and the custom `determ::c99` cryptographic suite.
+
+## Consequences & Supersession
+* **Positive:** Network message complexity drops to $O(1)$. MEV front-running is physically eradicated. The node is a mathematically provable, memory-safe, zero-allocation binary.
+* **Superseded Material:** This decision officially supersedes all prior proofs, whitepapers, and decision records relating to ASIO, OpenSSL, and $K$-of-$K$ consensus. The new C99 implementation and `K2_VDF_Soundness.md` proofs are declared canonical.
