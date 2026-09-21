@@ -6,7 +6,7 @@
  *
  * Guarantees:
  *   - Zero dynamic heap memory allocation (no malloc/free).
- *   - Strictly flat, cache-conscious array structures (__attribute__((packed))).
+ *   - Strictly flat, cache-conscious array structures.
  *   - Cryptographically enforced balance invariants: no integer overflow or underflow.
  *   - Ed25519 signature authentication on all state transitions.
  */
@@ -33,6 +33,8 @@ extern "C" {
 #define LEDGER_PACKED
 #endif
 
+#pragma pack(push, 1)
+
 /*
  * Packed C99 Account structure:
  * Contains the Ed25519 public key (32 bytes), 64-bit unsigned balance,
@@ -58,6 +60,8 @@ typedef struct LEDGER_PACKED {
     uint64_t nonce;
     uint8_t  sig[LEDGER_SIG_LEN];
 } triple_entry_tx_t;
+
+#pragma pack(pop)
 
 typedef enum {
     LEDGER_OK                        =  0,
@@ -90,26 +94,18 @@ void triple_entry_tx_signing_bytes(const triple_entry_tx_t *tx,
                                    uint8_t out_signing_bytes[LEDGER_TX_SIGNING_BYTES]);
 
 /*
- * Verify a Triple-Entry Transaction against the sender's account:
- * 1. Verifies the sender pubkey matches tx->from.
- * 2. Ensures the nonce strictly increments (tx->nonce == sender->nonce + 1).
- * 3. Verifies the fee meets min_fee.
- * 4. Ensures amount + fee does not integer-overflow UINT64_MAX.
- * 5. Ensures sender->balance >= amount + fee (rejects overspend / underflow).
- * 6. Verifies the Ed25519 signature over canonical signing bytes.
- * Returns LEDGER_OK (0) on success, or appropriate error code.
+ * Verify a Triple-Entry Transaction against the sender's account.
  */
+int verify_triple_entry_tx(const account_t *sender,
+                           const triple_entry_tx_t *tx,
+                           uint64_t min_fee);
+
 /*
  * Verify a Triple-Entry Transaction directly against the ledger state.
- * Finds the sender account in state and verifies the transaction.
  */
 int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
                                  const ledger_state_t *state,
                                  uint64_t min_fee);
-
-int verify_triple_entry_tx(const account_t *sender,
-                           const triple_entry_tx_t *tx,
-                           uint64_t min_fee);
 
 /*
  * Initialize the ledger state in static/stack memory.

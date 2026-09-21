@@ -11,7 +11,21 @@
 #include <determ/crypto/secure_zero.h>
 #include <string.h>
 
-static inline void write_be64(uint8_t *dest, uint64_t val) {
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
+static inline uint64_t safe_read_uint64_be(const uint8_t *src) {
+    return ((uint64_t)src[0] << 56) |
+           ((uint64_t)src[1] << 48) |
+           ((uint64_t)src[2] << 40) |
+           ((uint64_t)src[3] << 32) |
+           ((uint64_t)src[4] << 24) |
+           ((uint64_t)src[5] << 16) |
+           ((uint64_t)src[6] << 8)  |
+           ((uint64_t)src[7]);
+}
+
+static inline void safe_write_uint64_be(uint8_t *dest, uint64_t val) {
     dest[0] = (uint8_t)((val >> 56) & 0xFF);
     dest[1] = (uint8_t)((val >> 48) & 0xFF);
     dest[2] = (uint8_t)((val >> 40) & 0xFF);
@@ -33,13 +47,18 @@ void triple_entry_tx_signing_bytes(const triple_entry_tx_t *tx,
     memcpy(&out_signing_bytes[offset], tx->to, LEDGER_PUBKEY_LEN);
     offset += LEDGER_PUBKEY_LEN;
 
-    write_be64(&out_signing_bytes[offset], tx->amount);
+    uint64_t amount, fee, nonce;
+    memcpy(&amount, &tx->amount, sizeof(uint64_t));
+    memcpy(&fee, &tx->fee, sizeof(uint64_t));
+    memcpy(&nonce, &tx->nonce, sizeof(uint64_t));
+
+    safe_write_uint64_be(&out_signing_bytes[offset], amount);
     offset += 8;
 
-    write_be64(&out_signing_bytes[offset], tx->fee);
+    safe_write_uint64_be(&out_signing_bytes[offset], fee);
     offset += 8;
 
-    write_be64(&out_signing_bytes[offset], tx->nonce);
+    safe_write_uint64_be(&out_signing_bytes[offset], nonce);
 }
 
 int verify_triple_entry_tx(const account_t *sender,
@@ -54,25 +73,32 @@ int verify_triple_entry_tx(const account_t *sender,
         return LEDGER_ERR_PUBKEY_MISMATCH;
     }
 
+    uint64_t tx_amount, tx_fee, tx_nonce, sender_nonce, sender_balance;
+    memcpy(&tx_amount, &tx->amount, sizeof(uint64_t));
+    memcpy(&tx_fee, &tx->fee, sizeof(uint64_t));
+    memcpy(&tx_nonce, &tx->nonce, sizeof(uint64_t));
+    memcpy(&sender_nonce, &sender->nonce, sizeof(uint64_t));
+    memcpy(&sender_balance, &sender->balance, sizeof(uint64_t));
+
     /* 2. Strictly incrementing nonce defense against replay attacks */
-    if (tx->nonce != sender->nonce + 1) {
+    if (tx_nonce != sender_nonce + 1) {
         return LEDGER_ERR_INVALID_NONCE;
     }
 
     /* 3. Fee validity check */
-    if (tx->fee < min_fee) {
+    if (tx_fee < min_fee) {
         return LEDGER_ERR_FEE_TOO_LOW;
     }
 
     /* 4. Integer overflow guard: amount + fee */
-    if (UINT64_MAX - tx->amount < tx->fee) {
+    if (UINT64_MAX - tx_amount < tx_fee) {
         return LEDGER_ERR_OVERFLOW;
     }
 
-    uint64_t total_debit = tx->amount + tx->fee;
+    uint64_t total_debit = tx_amount + tx_fee;
 
     /* 5. Overspend / integer underflow defense */
-    if (sender->balance < total_debit) {
+    if (sender_balance < total_debit) {
         return LEDGER_ERR_OVERSPEND;
     }
 
@@ -112,8 +138,9 @@ account_t* ledger_register_account(ledger_state_t *state,
 
     account_t *acc = &state->accounts[state->account_count++];
     memcpy(acc->pubkey, pubkey, LEDGER_PUBKEY_LEN);
-    acc->balance = initial_balance;
-    acc->nonce = 0;
+    uint64_t zero_nonce = 0;
+    memcpy(&acc->balance, &initial_balance, sizeof(uint64_t));
+    memcpy(&acc->nonce, &zero_nonce, sizeof(uint64_t));
     return acc;
 }
 
@@ -157,18 +184,29 @@ ledger_status_t ledger_apply_tx(ledger_state_t *state,
         }
     }
 
+    uint64_t tx_amount, tx_fee, tx_nonce, sender_nonce, sender_balance, receiver_balance;
+    memcpy(&tx_amount, &tx->amount, sizeof(uint64_t));
+    memcpy(&tx_fee, &tx->fee, sizeof(uint64_t));
+    memcpy(&tx_nonce, &tx->nonce, sizeof(uint64_t));
+    memcpy(&sender_balance, &sender->balance, sizeof(uint64_t));
+    memcpy(&receiver_balance, &receiver->balance, sizeof(uint64_t));
+
     /* Guard receiver balance overflow */
-    if (UINT64_MAX - receiver->balance < tx->amount) {
+    if (UINT64_MAX - receiver_balance < tx_amount) {
         return LEDGER_ERR_OVERFLOW;
     }
 
     /* State transitions: pure stack execution, zero heap allocation */
-    uint64_t total_debit = tx->amount + tx->fee;
-    sender->balance -= total_debit;
-    sender->nonce = tx->nonce;
+    uint64_t total_debit = tx_amount + tx_fee;
+    sender_balance -= total_debit;
+    sender_nonce = tx_nonce;
 
-    receiver->balance += tx->amount;
-    state->total_fees += tx->fee;
+    receiver_balance += tx_amount;
+    state->total_fees += tx_fee;
+
+    memcpy(&sender->balance, &sender_balance, sizeof(uint64_t));
+    memcpy(&sender->nonce, &sender_nonce, sizeof(uint64_t));
+    memcpy(&receiver->balance, &receiver_balance, sizeof(uint64_t));
 
     return LEDGER_OK;
 }

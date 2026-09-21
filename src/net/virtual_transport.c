@@ -10,8 +10,23 @@
 #if defined(DETERM_DSF_ENABLED)
 
 #include <string.h>
-#include <errno.h>
+
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/socket.h>
+#include <errno.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#define EAGAIN WSAEWOULDBLOCK
+#define ENOBUFS WSAENOBUFS
+#define errno WSAGetLastError()
+typedef int ssize_t;
+#else
+#include <sys/socket.h>
+#include <errno.h>
+#endif
 
 #define MAX_VIRTUAL_SLOTS 8
 
@@ -171,7 +186,7 @@ ssize_t determ_net_recv(int fd, void *buf, size_t len, int flags) {
     }
 
     /* If no virtual buffer queued for this fd, fall back to native recv */
-    return recv(fd, buf, len, flags);
+    return recv(fd, (char *)buf, len, flags);
 }
 
 ssize_t determ_net_send(int fd, const void *buf, size_t len, int flags) {
@@ -198,7 +213,7 @@ ssize_t determ_net_send(int fd, const void *buf, size_t len, int flags) {
         return -1;
     }
 
-    return send(fd, buf, len, flags);
+    return send(fd, (const char *)buf, len, flags);
 }
 
 #else

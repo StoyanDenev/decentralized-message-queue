@@ -41,6 +41,8 @@ extern "C" {
 #define OPAQUE_PACKED
 #endif
 
+#pragma pack(push, 1)
+
 /*
  * ── 1. The OPRF Handshake Structures ────────────────────────────────────────
  */
@@ -76,6 +78,8 @@ typedef struct OPAQUE_PACKED {
     uint8_t account_id[OPAQUE_ID_LEN];
     uint8_t client_identity_proof[32]; /* Client AKE MAC proof */
 } opaque_auth_request_t;
+
+#pragma pack(pop)
 
 /*
  * ── 4. OPRF Handshake API ───────────────────────────────────────────────────

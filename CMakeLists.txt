@@ -1,9 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 project(determ CXX C)
+if(WIN32)
+  link_libraries(ws2_32 wsock32 crypt32)
+endif()
 
+if(UNIX AND NOT APPLE)
+  link_libraries(rt pthread)
+endif()
+
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 11)
 
 # ── DETERM_UBSAN: instrument ONLY Determ's own targets (determ +
 # determ-crypto-c99) with -fsanitize=undefined, NOT the vendored FetchContent
@@ -422,7 +431,7 @@ endif()
 # full virtual-network + consensus-engine coupling + 30-scenario set land in
 # later increments. Excluded from install/production targets.
 add_executable(determ-dsf sim/dsf_main.cpp)
-target_compile_features(determ-dsf PRIVATE cxx_std_20)
+target_compile_features(determ-dsf PRIVATE cxx_std_17)
 target_include_directories(determ-dsf PRIVATE ${CMAKE_SOURCE_DIR}/sim)
 
 # ── determ-cryptotest: OpenSSL dual-oracle test binary (minix §6 split) ──────
@@ -521,8 +530,11 @@ option(ENABLE_LIBFUZZER "Build K=2 Duel target with LLVM LibFuzzer (-fsanitize=a
 add_executable(test-k2-duel
   tests/test_k2_duel.c
   src/consensus/duel_state.c
+  src/consensus/dda.c
   src/crypto/vdf.c
   src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
 )
 target_compile_features(test-k2-duel PRIVATE c_std_99)
 target_include_directories(test-k2-duel PRIVATE include src)
@@ -536,3 +548,38 @@ elseif(DETERM_ASAN)
   target_compile_options(test-k2-duel PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
   target_link_options(test-k2-duel PRIVATE -fsanitize=address,undefined)
 endif()
+
+# ── test-dsf-k2-duel: DSF Simulation Benchmark (<50ms Wall-Clock) ───────────
+add_executable(test-dsf-k2-duel
+  tests/test_dsf_k2_duel.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+  src/net/event_loop.c
+)
+target_compile_features(test-dsf-k2-duel PRIVATE c_std_99)
+target_compile_definitions(test-dsf-k2-duel PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-dsf-k2-duel PRIVATE include src tests)
+target_link_libraries(test-dsf-k2-duel PRIVATE determ-crypto-c99)
+
+# ── fuzz-ledger: Memory Safety & libFuzzer Harness ───────────────────────────
+add_executable(fuzz-ledger
+  tests/fuzz_ledger.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/crypto/opaque_dsso.c
+  src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+  src/net/event_loop.c
+  src/net/reactor.c
+  src/ledger/state.c
+)
+target_compile_features(fuzz-ledger PRIVATE c_std_99)
+target_compile_definitions(fuzz-ledger PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(fuzz-ledger PRIVATE include src tests)
+target_link_libraries(fuzz-ledger PRIVATE determ-crypto-c99)

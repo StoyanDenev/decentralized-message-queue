@@ -48,6 +48,20 @@ static inline uint64_t determ_clock_now_ns(void) {
     uint64_t t = mach_absolute_time();
     return (uint64_t)(((__uint128_t)t * tb.numer) / tb.denom);
 }
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static inline uint64_t determ_clock_now_ns(void) {
+    static LARGE_INTEGER freq;
+    static int init = 0;
+    if (!init) {
+        QueryPerformanceFrequency(&freq);
+        init = 1;
+    }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000000000ULL) / freq.QuadPart);
+}
 #else
 #include <time.h>
 static inline uint64_t determ_clock_now_ns(void) {

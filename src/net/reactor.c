@@ -3,19 +3,61 @@
  * Copyright 2026 Determ Contributors
  *
  * Core Zero-Dependency C99 Native Event Loop Reactor Implementation.
- * Single-threaded I/O multiplexer using native OS interfaces (kqueue / epoll).
+ * Single-threaded I/O multiplexer using native OS interfaces (kqueue / epoll / winsock).
  *
  * Zero dynamic memory allocations.
  */
 
 #include "determ/net/reactor.h"
+
+#if defined(__linux__)
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#elif defined(__APPLE__)
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <io.h>
+#define close(s) closesocket(s)
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#define EAGAIN WSAEWOULDBLOCK
+#define EINTR WSAEINTR
+#define errno WSAGetLastError()
+typedef int socklen_t;
+typedef int ssize_t;
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#endif
+
 #include <string.h>
 #include <stdio.h>
 
@@ -44,37 +86,31 @@ static reactor_socket_t* allocate_slot(reactor_t *reactor) {
 
 int reactor_init(reactor_t *reactor) {
     if (!reactor) return -1;
-    memset(reactor, 0, sizeof(reactor_t));
+    memset(reactor, 0, sizeof(*reactor));
+    if (net_event_loop_init(&reactor->loop) != 0) {
+        return -1;
+    }
     for (size_t i = 0; i < REACTOR_MAX_SOCKETS; i++) {
         reactor->slots[i].fd = -1;
         reactor->slots[i].state = REACTOR_SLOT_UNUSED;
     }
-    reactor->running = false;
     reactor->active_count = 0;
-    return net_event_loop_init(&reactor->loop);
+    reactor->running = false;
+    return 0;
 }
 
 int reactor_listen(reactor_t *reactor,
                    uint16_t port,
                    reactor_accept_fn on_accept,
                    void *user_data) {
-    if (!reactor) return -1;
-
-    reactor_socket_t *slot = allocate_slot(reactor);
-    if (!slot) return -1;
+    if (!reactor || !on_accept) return -1;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        slot->state = REACTOR_SLOT_UNUSED;
-        reactor->active_count--;
-        return -1;
-    }
+    if (fd < 0) return -1;
 
-    if (net_socket_set_reuseaddr(fd) != 0 ||
-        net_socket_set_nonblocking(fd) != 0) {
+    if (net_socket_set_nonblocking(fd) != 0 ||
+        net_socket_set_reuseaddr(fd) != 0) {
         close(fd);
-        slot->state = REACTOR_SLOT_UNUSED;
-        reactor->active_count--;
         return -1;
     }
 
@@ -86,15 +122,17 @@ int reactor_listen(reactor_t *reactor,
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
-        slot->state = REACTOR_SLOT_UNUSED;
-        reactor->active_count--;
         return -1;
     }
 
     if (listen(fd, 128) != 0) {
         close(fd);
-        slot->state = REACTOR_SLOT_UNUSED;
-        reactor->active_count--;
+        return -1;
+    }
+
+    reactor_socket_t *slot = allocate_slot(reactor);
+    if (!slot) {
+        close(fd);
         return -1;
     }
 
@@ -162,7 +200,7 @@ int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len) {
     }
 
     /* Otherwise, attempt direct non-blocking write */
-    ssize_t written = send(fd, data, len, 0);
+    ssize_t written = send(fd, (const char *)data, len, 0);
     if (written < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             /* Socket buffer is full; queue entire message in static tx_buf */
@@ -217,7 +255,7 @@ static void handle_listener_read(reactor_t *reactor, reactor_socket_t *slot) {
 
 static void handle_client_read(reactor_t *reactor, reactor_socket_t *slot) {
     while (1) {
-        ssize_t n = recv(slot->fd, slot->rx_buf, sizeof(slot->rx_buf), 0);
+        ssize_t n = recv(slot->fd, (char *)slot->rx_buf, sizeof(slot->rx_buf), 0);
         if (n > 0) {
             if (slot->on_read) {
                 slot->on_read(slot->fd, slot->rx_buf, (size_t)n, slot->user_data);
@@ -250,7 +288,7 @@ static void handle_client_write(reactor_t *reactor, reactor_socket_t *slot) {
     }
 
     while (slot->tx_len > 0) {
-        ssize_t n = send(slot->fd, slot->tx_buf, slot->tx_len, 0);
+        ssize_t n = send(slot->fd, (const char *)slot->tx_buf, slot->tx_len, 0);
         if (n > 0) {
             if ((size_t)n >= slot->tx_len) {
                 slot->tx_len = 0;

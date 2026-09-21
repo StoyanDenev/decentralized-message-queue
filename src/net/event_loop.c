@@ -7,34 +7,62 @@
  * Strictly zero dynamic memory allocations.
  */
 
+#if defined(__linux__)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-#ifndef _DARWIN_C_SOURCE
-#define _DARWIN_C_SOURCE
-#endif
-
-#include <determ/net/event_loop.h>
-
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#define NET_USE_EPOLL 1
+#include <sys/epoll.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 #define NET_USE_KQUEUE 1
 #include <sys/event.h>
 #include <sys/time.h>
-#elif defined(__linux__)
-#define NET_USE_EPOLL 1
-#include <sys/epoll.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string.h>
+#define NET_USE_POLL 1
+#define close(s) closesocket(s)
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#define EAGAIN WSAEWOULDBLOCK
+#define EINTR WSAEINTR
+#define errno WSAGetLastError()
+typedef int socklen_t;
 #else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 #define NET_USE_POLL 1
 #include <poll.h>
 #endif
+
+#include <determ/net/event_loop.h>
 
 int net_event_loop_init(net_event_loop_t *loop) {
     if (!loop) {
@@ -232,7 +260,11 @@ void net_event_loop_stop(net_event_loop_t *loop) {
 
 void net_event_loop_close(net_event_loop_t *loop) {
     if (loop && loop->poll_fd >= 0) {
+#if defined(_WIN32)
+        closesocket((SOCKET)loop->poll_fd);
+#else
         close(loop->poll_fd);
+#endif
         loop->poll_fd = -1;
         loop->running = false;
     }
@@ -240,19 +272,32 @@ void net_event_loop_close(net_event_loop_t *loop) {
 
 int net_socket_set_nonblocking(int fd) {
     if (fd < 0) return -1;
+#if defined(_WIN32)
+    u_long mode = 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 }
 
 int net_socket_set_reuseaddr(int fd) {
     if (fd < 0) return -1;
     int opt = 1;
+#if defined(_WIN32)
+    return setsockopt((SOCKET)fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+#else
     return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, (socklen_t)sizeof(opt));
+#endif
 }
 
 int net_socket_set_nodelay(int fd) {
     if (fd < 0) return -1;
     int opt = 1;
+#if defined(_WIN32)
+    return setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
+#else
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, (socklen_t)sizeof(opt));
+#endif
 }
