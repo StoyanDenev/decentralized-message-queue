@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> NOTICE: The protocol's security is no longer derived from Byzantine fault tolerance or unanimous honesty assumptions. Security is now formally anchored to the Time-Lock Inequality Theorem ($T_{vdf} > W_{reveal} + \Delta$) via Enforced Blindness.
+
 > **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
 
 # Determ — Formal proofs index

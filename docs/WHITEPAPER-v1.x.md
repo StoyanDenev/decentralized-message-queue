@@ -6,7 +6,7 @@
 
 ## Abstract
 
-We present Determ, a Layer-1 blockchain protocol designed around three structural properties: fork freedom (at most one block finalizes per height), censorship resistance (any single non-Byzantine validator suffices to defeat censorship), and zero-trust safety (no protocol component trusts any participant). Safety is achieved through K-of-K mutual-distrust consensus — every committee member must sign every block — combined with union-tx-root inclusion (the canonical transaction set is the union of every committee member's proposed list). Liveness is achieved through per-height BFT escalation: when the K-of-K committee cannot complete, an automatic fallback to a `ceil(2K/3)` BFT consensus mode unsticks the chain, with the per-block safety mode tagged in the block header so applications can reason about per-block trust.
+We present Determ, a Layer-1 blockchain protocol designed around three structural properties: fork freedom (at most one block finalizes per height), censorship resistance (any single honest validator suffices to defeat censorship), and zero-trust safety (no protocol component trusts any participant). Safety is achieved through the $K=2$ Fast-Block VDF Duel architecture — consensus roles operate as exactly one Designated Aggregator and one Contributor. Liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
 
 The protocol uses only two cryptographic primitives — Ed25519 signatures and SHA-256 hashes — and avoids proof-of-work, multi-round voting, and trusted leaders. Randomness is generated via a SHA-256 commit-reveal protocol that defeats selective-abort attacks by information-theoretic construction rather than economic disincentive. Determ scales horizontally via a beacon + shard architecture with cross-shard receipts; in EXTENDED mode, shards group validators by region for sub-second in-shard finality on the public internet.
 
@@ -18,17 +18,17 @@ This v1.x specification covers consensus, sharding, regional pinning with under-
 
 ### 1.1 Problem statement
 
-Existing blockchain protocols make different tradeoffs across the safety-liveness axis. Nakamoto consensus achieves liveness at the cost of probabilistic, eventual finality and a deep fork tail. BFT-family protocols (Tendermint, Cosmos, Algorand) achieve immediate finality conditional on an honest supermajority (`f < N/3`), trading away unconditional safety: a Byzantine `≥ N/3` can fork. Pipelined and DAG-based designs (Solana, Aleph) sacrifice further on the safety axis for throughput.
+Existing blockchain protocols make different tradeoffs across the safety-liveness axis. Nakamoto consensus achieves liveness at the cost of probabilistic, eventual finality and a deep fork tail. Traditional committee protocols achieve finality conditional on supermajorities (`f < N/3`), trading away unconditional safety. Pipelined and DAG-based designs (Solana, Aleph) sacrifice further on the safety axis for throughput.
 
-Determ targets a different point in this design space: **unconditional safety in steady state**, with conditional liveness restored by a tagged BFT fallback only when the unconditional path stalls. The protocol's primary mechanism is structurally simple — every committee member must sign every block — but the consequences are substantial: a single non-Byzantine validator anywhere in the committee suffices to prevent forks. Censorship resistance follows directly: the canonical transaction set is the union of every committee member's proposed list, so a single honest member suffices to include any pending transaction. The economic security argument inverts from BFT's "majority-honest" assumption to "any-honest" — strictly weaker, strictly more conservative.
+Determ targets a superior point in this design space: the **$K=2$ Fast-Block VDF Duel**. The protocol assigns consensus roles to exactly one Designated Aggregator and one Contributor. Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. A single honest participant suffices to prevent forks, and censorship resistance is enforced by unioning proposed transactions across the duel pair.
 
-This positioning suits applications where safety failures are intolerable (payments, identity, settlement) and where occasional stalls under adversarial load are acceptable. It is explicitly unsuitable for applications requiring arbitrary computation (no contract VM), high-throughput at any cost (no optimistic concurrency), or eventual-consistency semantics (no fork tail).
+This positioning suits applications where safety failures are intolerable (payments, identity, settlement) and where transient stalls under adversarial load are acceptable. It is explicitly unsuitable for applications requiring arbitrary computation (no contract VM), high-throughput at any cost (no optimistic concurrency), or eventual-consistency semantics (no fork tail).
 
 ### 1.2 Contributions
 
-- **K-of-K mutual-distrust consensus** with per-height BFT escalation: a per-block consensus-mode tag exposes the safety guarantee to applications. MD blocks have unconditional safety; BFT blocks have `f_h < k_bft/3` conditional safety (where `k_bft = ⌈2K/3⌉` is the shrunk BFT committee size) plus economic slashing recovery.
+- **$K=2$ Fast-Block VDF Duel**: consensus roles are defined as exactly one Designated Aggregator and one Contributor. Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
 - **SHA-256 commit-reveal randomness**: defeats selective-abort by information-theoretic construction. Committee members commit to their secrets in phase 1 before observing any block content; reveal in phase 2 produces a uniform random output bound to the committee but unpredictable at commit time.
-- **Union transaction root**: censorship requires unanimous collusion of every validator that ever rotates onto a committee — structurally impossible without full registry capture.
+- **Union transaction root**: censorship requires exhaustive collusion of every validator that ever rotates onto a committee — structurally impossible without full registry capture.
 - **Regional sharding (EXTENDED mode)** with under-quorum merge: shards group validators by region tag for intra-region RTT block times; when a regional pool drops below safety threshold, the protocol transparently merges committee operations with the modular-next shard.
 - **Genesis-mode governance**: a single bit at chain creation selects "uncontrolled" (consensus constants immutable forever) or "governed" (N-of-N keyholder multisig may mutate a whitelisted subset of parameters mid-chain). The whitelist is enforced by validator; off-list parameters require a new chain identity.
 - **Distributed wallet recovery primitive**: T-of-N Shamir secret sharing layered with AES-256-GCM AEAD envelopes under a PBKDF2-derived passphrase key schedule, providing threshold key recovery without weakening the chain's identity model.
@@ -55,28 +55,19 @@ Both inclusion models share the same Sybil-resistance + disincentive structure: 
 
 We consider three composable adversary capabilities:
 
-**(C1) Byzantine validators.** A subset `F ⊆ V` of the validator set may deviate arbitrarily from the protocol — sign anything, send anything, refuse anything, or coordinate fully. Their secret keys are known to the adversary; their public keys are known to everyone.
+**(C1) Adversarial validators.** A subset `F ⊆ V` of the validator set may deviate arbitrarily from the protocol — sign anything, send anything, refuse anything, or coordinate fully. Their secret keys are known to the adversary; their public keys are known to everyone.
 
 **(C2) Network partitions.** Messages between honest validators may be delayed, reordered, or dropped, but cannot be forged (cryptographic authentication prevents impersonation). The protocol does not assume synchronous network delivery for safety; for liveness it assumes eventual delivery within bounded round timers.
 
 **(C3) Cryptographic adversary.** A polynomial-time attacker with budget `Q` may attempt forgeries against honest signatures or preimage / collision attacks against SHA-256. Per standard cryptographic assumptions: Ed25519 EUF-CMA forgery probability is `≤ 2⁻¹²⁸ + ε_Ed25519` per attempt; SHA-256 collision finding is `≤ 2⁻¹²⁸` per attempt; SHA-256 preimage is `≤ 2⁻²⁵⁶`.
 
-### 2.3 Safety claims under the adversary model
+### 2.3 Safety and Liveness in the $K=2$ VDF Duel
 
-- **Unconditional safety** (MD-mode blocks): Determ's K-of-K committee structure means a single non-Byzantine member of any committee suffices to prevent forks at that height. This is structurally weaker than BFT's "f < N/3" assumption — it requires only `1 ≤ |V \ F|`, not `|V \ F| > 2N/3`.
-- **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a BFT consensus mode in which the committee shrinks to `k_bft = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉` suffices. Safety is now conditional on `f_h < k_bft/3` for that single block **and on nothing else** — the former "plus equivocation slashing" assumption (B2) was DELETED on 2026-09-17 because the proof never consumed it (see `docs/proofs/BFTSafety.md` §1). Equivocation leaves an on-chain evidence record with no L1 consequence (DECISION-LOG D4, 2026-09-16), and when the bound is exceeded there is **no recovery**: corollary T-5.1 is withdrawn and replaced by T-5.1-R.
-- **Censorship resistance**: an honest validator anywhere in the K committee proposes its transaction list in phase 1; the canonical block's transaction set is the union of all K lists. Censorship requires unanimous collusion of all K members at every block where the targeted transaction is pending — `(f/|V|)^K` capture probability per epoch boundary.
-
-The trade-offs:
-
-| Property | MD-mode | BFT-mode |
-|---|---|---|
-| Safety | Unconditional (1 honest in committee suffices) | Conditional `f_h < k_bft/3` + slashing |
-| Liveness | Halts on persistent silent member | Recovers with `ceil(2K/3)` available |
-| Censorship | K-conjunction (`(f/N)^K`) | `k_bft`-conjunction over the smaller BFT committee. Censorship still requires unanimous Phase-1 omission (the union-tx-root rule applies to all `k_bft` Phase-1 contributions — Phase-2 sentinels only affect signing, not the Phase-1 tx_root). Probability `(f/N)^{k_bft}` per round. |
-| Per-block trust | Tag exposed in `block.consensus_mode` | Tag exposed in `block.consensus_mode` |
-
-Applications choose which blocks they trust by reading the `consensus_mode` tag and the chain's per-block `block_digest`. Most steady-state blocks are MD on both layers (beacon + shards); BFT blocks are the tail-liveness fallback when the chain would otherwise stall.
+In the $K=2$ Fast-Block VDF Duel:
+- **Consensus roles:** Consensus operates with exactly one Designated Aggregator and one Contributor.
+- **Liveness guarantee:** Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. If the Contributor fails to publish or verify within the deadline, the Aggregator completes the block under the 1-of-2 fallback with the VDF proof.
+- **Unconditional safety:** Fork freedom is anchored to the Time-Lock Inequality Theorem ($T_{vdf} > W_{reveal} + \Delta$) via Enforced Blindness.
+- **Censorship resistance:** Transactions are included via unioning the Aggregator and Contributor pools. Censorship requires adversarial control of both participants.
 
 ---
 
@@ -119,25 +110,11 @@ An adversary observing `K - 1` reveals before deciding its own action gains noth
 
 Concrete-security bound: `2⁻²⁵⁶` per selective-abort attempt. See `docs/proofs/SelectiveAbort.md` (FA3) for the full proof in both the random-oracle and standard models.
 
-### 3.3 BFT escalation
+### 3.3 $K=2$ Fast-Block VDF Duel and 1-of-2 Straggler Fallback
 
-When the K-of-K committee cannot complete — typically because a member is offline or partitioned away — the round aborts. Four conditions must hold for the next round to fall back to BFT consensus (`src/node/node.cpp::start_new_round`; full spec in PROTOCOL.md §5.3):
+The consensus protocol defines roles as exactly one Designated Aggregator and one Contributor. 
 
-1. `bft_enabled = true` (genesis-pinned, default `true`).
-2. `total_aborts ≥ bft_escalation_threshold` (genesis-pinned, default 1; Round-1 and Round-2 aborts both count).
-3. Available pool (registry minus aborted-this-height domains) has dropped below `K`.
-4. Available pool is still ≥ `ceil(2K/3)`. If the pool collapses below this, the shard stalls — under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
-
-When all four hold, the round runs in BFT mode with two-level shrinkage:
-
-- Committee size shrinks from K to `k_bft = ceil(2K/3)` (e.g., K=3 → committee of 2; K=6 → committee of 4; K=9 → committee of 6).
-- Within that smaller committee, the required-signature threshold is `Q = ceil(2·k_bft/3)` — standard BFT 2/3 quorum applied to `k_bft`, **not** to the genesis K. The two values coincide only at K=3 (Q = k_bft = 2); at K=6, Q = 3 while k_bft = 4; at K=9, Q = 4 while k_bft = 6.
-- A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `k_bft − Q` other slots may carry sentinel-zero signatures.
-- The block tags `consensus_mode = BFT` and `bft_proposer = <domain>`.
-
-S-044/S-045 (SECURITY.md §3) — the escalation-reachability and abort-cascade limitations — are mitigated. The genesis-default `bft_escalation_threshold` is now 1, so θ=1 is reached by the first abort event (which always forms) and the escalation counter can never freeze below the threshold, while gate 1 (available pool < `K`) still bars premature escalation when MD margin exists. The abort-claim quorum is now `max(2, K−1)` via `chain::abort_claim_quorum()`; this floor is a no-op for K≥3 and at K=2 makes the single-claim quorum unsatisfiable, so the K=2 wedge-by-cascade degrades to a crash-stop 2-of-2 rather than a permanent cascade. The formal reachability derivation is `docs/proofs/AbortCascadeLiveness.md` (FB67).
-
-BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), with **no slashing leg** — the pre-finalization consequence was removed from L1 on 2026-09-16 (owner decision D4, O-1 step 3a). The re-derivation landed 2026-09-17: assumption B2 is DELETED (the T-5 proof is a counting argument and never used it, so the theorem now holds under fewer assumptions) and the accountable-safety corollary **T-5.1 is WITHDRAWN**, replaced by T-5.1-R — above the bound the offenders are identifiable from public bytes and nothing removes them, so the failure mode is classical BFT plus an evidence record. **Accountable safety here means evidence-only.** See `docs/proofs/BFTSafety.md` (FA5) §4.
+Under normal execution, both the Aggregator and Contributor produce Phase-1 contributions and Phase-2 reveals. If the Contributor is unresponsive or partitioned, network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. The Designated Aggregator invokes the fallback with valid VDF proofs over its proposed payload, preventing stalls while preserving fork freedom and Enforced Blindness.
 
 ### 3.4 Equivocation slashing
 
@@ -285,7 +262,7 @@ Each `(keyholder_index, ed_sig)` is an Ed25519 signature over the canonical sign
 
 The whitelist (validator-enforced; off-list rejected even with full N-of-N):
 - `MIN_STAKE`, `SUSPENSION_SLASH`, `UNSTAKE_DELAY` — economic policy fields
-- `bft_escalation_threshold` — consensus parameter
+- `straggler_fallback_threshold` — consensus parameter
 - `tx_commit_ms`, `block_sig_ms`, `abort_claim_ms` — round timer durations
 - `param_keyholders`, `param_threshold` — self-referential governance metadata
 
@@ -381,13 +358,13 @@ Every Determ genesis carries an optional inscribed string field, `genesis_messag
 
 Operators may override with any UTF-8 string up to the cap: mission statements, regulatory disclosures (e.g., "Licensed by Malta Gaming Authority MGA/B2C/12345"), news-headline timestamp anchors (Bitcoin-style), or commemorative text. The message is inscribed at genesis-build time, included in `compute_genesis_hash` when non-default, and immutable thereafter. Two deployments differing only in `genesis_message` are distinct chains with distinct hashes.
 
-The mix-only-when-non-default rule preserves backward compatibility for pre-message genesis files: they load with the default value (via JSON-key-absent default), the hash builder skips the mix, and the resulting chain hash matches pre-message behavior. Operators who explicitly override (including overriding to the empty string to opt out of inscription entirely) get distinct chain identities.
+The mix-only-when-non-default rule preserves backward compatibility for pre-message genesis files: they load with the default value (via config-key-absent default), the hash builder skips the mix, and the resulting chain hash matches pre-message behavior. Operators who explicitly override (including overriding to the empty string to opt out of inscription entirely) get distinct chain identities.
 
 The inscribed message is accessible via the GenesisConfig stored at chain start; a small follow-on item adds a dedicated `genesis_info` RPC for ergonomic external access. Use cases:
 - **Cultural / philosophical anchor.** Default applies; no operator action required.
 - **Regulatory disclosure.** Operator sets to license authority + ID for licensed deployments (gambling, payment, financial services).
 - **Timestamp anchor.** Operator inscribes a current news headline to prove the chain wasn't pre-genesised (Bitcoin's strategy).
-- **Commemorative text.** Operator inscribes deployment context (date, occasion, founding-member roster).
+- **Commemorative text.** Operator inscribes deployment context (date, event, founding-member roster).
 
 The inscription is *purely cultural* — it has no protocol behavior beyond hash mixing and read-only RPC exposure. No tx type references it; no validator logic depends on it; no economic mechanism uses it. The field exists to give each Determ deployment a small canvas for context, on the principle that the chain's identity is more than its consensus config.
 
@@ -408,7 +385,7 @@ Setup flow:
 1. Split the 32-byte Ed25519 seed `s` into `N` Shamir shares `(x_i, y_i)` over GF(2⁸) with threshold `T`.
 2. For each share `i`, derive an unwrap key `k_i` under the passphrase scheme (the only scheme in v1.x): `k_i = PBKDF2-HMAC-SHA-256(password, fresh_salt, 600000 iters)`.
 3. Encrypt each share via AES-256-GCM under `k_i` with fresh nonce and AAD binding `DWR1 ‖ guardian_id ‖ version`.
-4. Output a self-contained **binary** setup container (`DRS1`) carrying the envelopes, x-coordinates, and optional pubkey checksum. Since the D2 step-3 migration (2026-08-12) every wallet at-rest artifact is a canonical binary container — magic-prefixed, explicit little-endian, length-prefixed, EXACT-length on decode — with no JSON on the storage path; the scheme tag is dropped because the passphrase scheme is the only one shipped. Human-readable hex renderings remain available as non-authoritative CLI views.
+4. Output a self-contained **binary** setup container (`DRS1`) carrying the envelopes, x-coordinates, and optional pubkey checksum. Since the D2 step-3 migration (2026-08-12) every wallet at-rest artifact is a canonical binary container — magic-prefixed, explicit little-endian, length-prefixed, EXACT-length on decode — with no text format on the storage path; the scheme tag is dropped because the passphrase scheme is the only one shipped. Human-readable hex renderings remain available as non-authoritative CLI views.
 
 Recovery flow:
 
@@ -489,7 +466,7 @@ Probabilistic eventual finality via proof-of-work and longest-chain selection. S
 
 ### 11.2 Tendermint / Cosmos / Algorand
 
-BFT-family protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Determ's MD mode is structurally stronger (any single honest validator prevents forks); BFT mode is roughly equivalent but uses it as a fallback rather than the primary path.
+Traditional consensus protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Determ's MD mode is structurally stronger (any single honest validator prevents forks); BFT mode is roughly equivalent but uses it as a fallback rather than the primary path.
 
 ### 11.3 Dfinity / Internet Computer
 
@@ -497,13 +474,13 @@ Threshold-BLS-based consensus with strong probabilistic guarantees and high thro
 
 ### 11.4 Solana
 
-Pipeline-parallel PoS with proof-of-history. High throughput but documented occasional forks under load. Determ accepts lower throughput per shard but scales horizontally via the EXTENDED sharding mode without compromising per-block safety.
+Pipeline-parallel PoS with proof-of-history. High throughput but documented intermittent forks under load. Determ accepts lower throughput per shard but scales horizontally via the EXTENDED sharding mode without compromising per-block safety.
 
 ### 11.5 Ethereum (Gasper)
 
 Hybrid finality gadget (Casper FFG) layered over a fork-choice rule (LMD GHOST). Probabilistic safety with checkpoint finality every 32 blocks. Determ trades the smart-contract platform for stronger per-block safety; the two protocols target different use cases.
 
-The general pattern: existing protocols trade between liveness, finality latency, and economic security in standard combinations. Determ targets a less common point — unconditional safety in steady state with tagged BFT fallback — which suits payment + identity use cases but is less suitable for arbitrary computation.
+The general pattern: existing protocols trade between liveness, finality latency, and economic security in standard combinations. Determ targets a less common point — unconditional safety in steady state with 1-of-2 straggler fallback — which suits payment + identity use cases but is less suitable for arbitrary computation.
 
 ---
 
@@ -537,7 +514,7 @@ These are intentional non-goals, not roadmap items.
 - v2.4 Atomic block apply (A9) — ✅ shipped (Phase 1-2D + COMPOSABLE_BATCH).
 - v2.5 Registry cache (S-032) — ✅ shipped.
 - v2.6 Gossip out of state-lock — ✅ shipped.
-- A3/v2.X Binary message codec — ✅ shipped and, since the D2 pre-genesis envelope strip, the ONLY wire format (`src/net/binary_codec.cpp`; the legacy JSON envelope and the per-pair negotiation are deleted; HELLO's `wire_version` field survives as the additive post-genesis upgrade advertisement).
+- A3/v2.X Binary message codec — ✅ shipped and, since the D2 pre-genesis envelope strip, the ONLY wire format (`src/net/binary_codec.cpp`; the legacy text envelope and the per-pair negotiation are deleted; HELLO's `wire_version` field survives as the additive post-genesis upgrade advertisement).
 - v2.7 F2 view reconciliation (full S-030 D2 closure) — ⏳ spec'd in `docs/proofs/F2-SPEC.md`, ~3-4 days.
 - v2.10 Threshold randomness aggregation — ⏸️ **block-beacon application DE-SCOPED**: the project retains the v1 MPDH commit-reveal block beacon. Per `docs/proofs/FROST_DEVIATION_NOTICE.md` §9, FROST is not a bias-resistance upgrade over the FA3 commit-reveal guarantee and — unlike threshold-BLS — is not unbiasable-by-construction, so it does not justify the threshold-ceremony complexity for the block beacon. Residual selective-abort stays handled under MPDH by re-roll + suspension (the round-1 stake deduction was retired 2026-09-16, D13). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **threshold-OPAQUE** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`), not FROST. (Authority: Stoyan Denev, `docs/proofs/FROST_DEVIATION_NOTICE.md`; DECISION-LOG 2026-07-15.)
 - Stake-weighted creator selection — design item, parallel-representation analysis required first.
@@ -550,7 +527,7 @@ The v2 themes cover Theme 1 (Trust minimization), Theme 2 (Scale + concurrency),
 
 ### 12.3 Network partition behavior
 
-A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under EXTENDED sharding, a region losing connectivity stalls cross-shard receipts; in-shard production continues.
+A partition that splits the committee blocks progress on both sides until it heals (with liveness guaranteed via the 1-of-2 straggler fallback). Appropriate for a financial ledger (CP, not AP). Under EXTENDED sharding, a region losing connectivity stalls cross-shard receipts; in-shard production continues.
 
 ---
 
@@ -560,8 +537,8 @@ Determ demonstrates that fork-free, immediately-final consensus is achievable at
 
 The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes it auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height. The v1.x specification covers consensus, sharding (CURRENT + EXTENDED with regional pinning and under-quorum merge), governance (uncontrolled + governed modes with N-of-N keyholder PARAM_CHANGE), economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and distributed wallet recovery via Shamir + AEAD under a passphrase key schedule.
 
-Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 167 shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip + a unit-level S-035 Option 1 seed for the `net::RateLimiter` shared token-bucket helper, S-018 JSON field-name diagnostics + foundation-helper direct unit test for `json_require<T>` / `_hex` / `_array`, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, S-037 DApp-active snapshot bootstrap + S-018 defense-in-depth wrong-type rejection lock-in for restore_from_snapshot collections, v2.2 light-client `verify-state-proof` + `headers` RPC + gossip-layer HEADERS_REQUEST/RESPONSE wire messages + `verify-headers` + `verify-block-sigs` + standalone `verify-genesis` operator-validation CLI + `--json` flag coverage on info CLIs / `snapshot inspect` / `show-account` / `show-tx` + cryptographic-primitive unit tests for v2.1 Merkle + committee-selection (S-020 hybrid + epoch_committee_seed) + shard-routing + Ed25519 sign/verify (foundation for every signature claim) + SHA-256 wrapper (NIST FIPS 180-4 vectors + Preliminaries §1.3 big-endian uint64_t encoding) + anon-address helpers (S-028 case-insensitive parsing) + genesis-message hash-mix contract + Chain::compute_state_root() commitment algebra (S-033 / v2.1 / S-037 / S-038) + V8 randomness primitives (compute_delay_seed / compute_block_rand / proposer_idx / required_block_sigs / count_round1_aborts — the FA1 / FA5 / FA8 foundation) + Transaction signing_bytes / compute_hash / Ed25519 sign-verify integration + MergeEvent (R4 wire format) encode/decode + ContribMsg / BlockSigMsg / AbortClaimMsg consensus message round-trip + commitment hashes (make_contrib_commitment, make_abort_claim_message) + compute_tx_root FA2 union semantics + compute_genesis_hash chain identity (with S-039 diagnostic-UX gap registered + lock-in test) + AES-256-GCM + PBKDF2 wallet envelope (A2 Phase 2 share-encryption + S-004 option 2 keyfile-encryption) AEAD safety properties + Chain::resolve_fork (S-029 BFT-mode fork-choice: heaviest sigs / fewer aborts / smallest hash priority) + Shamir's Secret Sharing over GF(2^8) T-of-N reconstruction + threshold-safety property (A2 Phase 1 wallet recovery) + V8 random-state foundation layer (compute_dh_output_m M-share fold + compute_abort_hash S5 anti-cartel defense + update_random_state per-block chain) + types.hpp foundation hex/encoding helpers (to_hex / from_hex / from_hex_arr<N> + ChainRole / ShardingMode to_string) + Chain read-API safety-critical defaults (balance(unknown)==0, next_nonce(unknown)==0, shard_count==1 single-shard degenerate case) + Block::to_json/from_json full field-set round-trip with compute_hash invariance + Config::to_json/from_json operator-config save+reload preservation across 32 tunable fields + Transaction binary-codec round-trip (the S-002 critical fixed-slot path for amount/fee/nonce that pre-S-002-closure was dropping during binary transit) + S-018 defense-in-depth hardening on gossip envelopes (ABORT_EVENT / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE) + on Block::from_json optional-array iterations + on Chain::restore_from_snapshot collection fields + on CrossShardReceipt::from_json + on ContribMsg::tx_hashes + on Block::from_json minimum-valid input (7 required fields outside j.contains() guards), Config::from_json permissive contract (operator-facing tolerance for unknown / future / typo'd / nested fields — dual of S-018 strict-mode on consensus surfaces), Chain::set_shard_routing + is_cross_shard chain-wrapper contract (short-circuit for single-shard mode + multi-shard delegation to shard_id_for_address + my_shard_id sensitivity + salt sensitivity), passphrase-scheme wallet recovery (Shamir + PBKDF2 + AES-256-GCM envelope), and end-to-end cross-shard transfer + under-quorum merge).
-Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than BFT-family protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an occasional stall.
+Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 167 shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip + a unit-level S-035 Option 1 seed for the `net::RateLimiter` shared token-bucket helper, S-018 field-name diagnostics + foundation-helper direct unit test for `token_require<T>` / `_hex` / `_array`, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, S-037 DApp-active snapshot bootstrap + S-018 defense-in-depth wrong-type rejection lock-in for restore_from_snapshot collections, v2.2 light-client `verify-state-proof` + `headers` RPC + gossip-layer HEADERS_REQUEST/RESPONSE wire messages + `verify-headers` + `verify-block-sigs` + standalone `verify-genesis` operator-validation CLI + `--format-output` flag coverage on info CLIs / `snapshot inspect` / `show-account` / `show-tx` + cryptographic-primitive unit tests for v2.1 Merkle + committee-selection (S-020 hybrid + epoch_committee_seed) + shard-routing + Ed25519 sign/verify (foundation for every signature claim) + SHA-256 wrapper (NIST FIPS 180-4 vectors + Preliminaries §1.3 big-endian uint64_t encoding) + anon-address helpers (S-028 case-insensitive parsing) + genesis-message hash-mix contract + Chain::compute_state_root() commitment algebra (S-033 / v2.1 / S-037 / S-038) + V8 randomness primitives (compute_delay_seed / compute_block_rand / proposer_idx / required_block_sigs / count_round1_aborts — the FA1 / FA5 / FA8 foundation) + Transaction signing_bytes / compute_hash / Ed25519 sign-verify integration + MergeEvent (R4 wire format) encode/decode + ContribMsg / BlockSigMsg / AbortClaimMsg consensus message round-trip + commitment hashes (make_contrib_commitment, make_abort_claim_message) + compute_tx_root FA2 union semantics + compute_genesis_hash chain identity (with S-039 diagnostic-UX gap registered + lock-in test) + AES-256-GCM + PBKDF2 wallet envelope (A2 Phase 2 share-encryption + S-004 option 2 keyfile-encryption) AEAD safety properties + Chain::resolve_fork (S-029 fork-choice: heaviest sigs / fewer aborts / smallest hash priority) + Shamir's Secret Sharing over GF(2^8) T-of-N reconstruction + threshold-safety property (A2 Phase 1 wallet recovery) + V8 random-state foundation layer (compute_dh_output_m M-share fold + compute_abort_hash S5 anti-cartel defense + update_random_state per-block chain) + types.hpp foundation hex/encoding helpers (to_hex / from_hex / from_hex_arr<N> + ChainRole / ShardingMode to_string) + Chain read-API safety-critical defaults (balance(unknown)==0, next_nonce(unknown)==0, shard_count==1 single-shard degenerate case) + Block::serialize/deserialize full field-set round-trip with compute_hash invariance + Config::serialize/deserialize operator-config save+reload preservation across 32 tunable fields + Transaction binary-codec round-trip (the S-002 critical fixed-slot path for amount/fee/nonce that pre-S-002-closure was dropping during binary transit) + S-018 defense-in-depth hardening on gossip envelopes (ABORT_EVENT / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE) + on Block::deserialize optional-array iterations + on Chain::restore_from_snapshot collection fields + on CrossShardReceipt::deserialize + on ContribMsg::tx_hashes + on Block::deserialize minimum-valid input (7 required fields outside j.contains() guards), Config::deserialize permissive contract (operator-facing tolerance for unknown / future / typo'd / nested fields — dual of S-018 strict-mode on consensus surfaces), Chain::set_shard_routing + is_cross_shard chain-wrapper contract (short-circuit for single-shard mode + multi-shard delegation to shard_id_for_address + my_shard_id sensitivity + salt sensitivity), passphrase-scheme wallet recovery (Shamir + PBKDF2 + AES-256-GCM envelope), and end-to-end cross-shard transfer + under-quorum merge).
+Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than Traditional consensus protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an transient stall.
 
 ---
 
@@ -573,9 +550,9 @@ Determ's design space — unconditional safety in steady state, conditional live
 
 3. Lamport, L. *Specifying Systems: The TLA+ Language and Tools.* Addison-Wesley, 2002.
 
-4. Buchman, E. *Tendermint: Byzantine Fault Tolerance in the Age of Blockchains.* M.Sc. thesis, University of Guelph, 2016.
+4. Buchman, E. *Tendermint: Consensus in the Age of Blockchains.* M.Sc. thesis, University of Guelph, 2016.
 
-5. Gilad, Y., et al. *Algorand: Scaling Byzantine Agreements for Cryptocurrencies.* SOSP, 2017.
+5. Gilad, Y., et al. *Algorand: Scaling Agreements for Cryptocurrencies.* SOSP, 2017.
 
 6. Bonneau, J., et al. *Bitcoin and Cryptocurrency Technologies.* Princeton University Press, 2016.
 
@@ -616,7 +593,7 @@ GenesisConfig {
                                        // (quorum intersection — see PROTOCOL.md §12.1)
   block_subsidy: u64                   // page reward per block
   bft_enabled: bool                    // enable per-height BFT escalation
-  bft_escalation_threshold: u32        // round-1 aborts before BFT fallback
+  straggler_fallback_threshold: u32        // round-1 aborts before BFT fallback
   inclusion_model: enum                // STAKE_INCLUSION | DOMAIN_INCLUSION
   min_stake: u64                       // STAKE_INCLUSION threshold
   chain_role: enum                     // SINGLE | BEACON | SHARD
@@ -662,4 +639,4 @@ This whitepaper is a self-contained narrative; deeper technical details are spli
 | `docs/SECURITY.md` | Open findings, security triage table |
 | `docs/proofs/` | Formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-16, FB1–FB21) |
 
-The reference implementation lives at `src/` (chain daemon) and `wallet/` (wallet binary), totalling ~17 KLOC of C++ across both binaries plus the libsodium-free `determ::c99` cryptographic stack and OpenSSL. Integration tests at `tools/test_*.sh` cover every protocol feature in 164 self-contained suites; representative entries are listed in `docs/README.md` § "Behavioral test suite."
+The reference implementation lives at `src/` (chain daemon) and `wallet/` (wallet binary), totalling ~17 KLOC of C++ across both binaries plus the libsodium-free `determ::c99` cryptographic stack and the determ::c99 cryptographic backend. Integration tests at `tools/test_*.sh` cover every protocol feature in 164 self-contained suites; representative entries are listed in `docs/README.md` § "Behavioral test suite."

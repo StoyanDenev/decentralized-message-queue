@@ -59,7 +59,8 @@ The proof series references the base cryptographic assumptions defined in this s
 | **A1** | Ed25519 EUF-CMA | §2.2 |
 | **A2** | SHA-256 collision resistance | §2.1 |
 | **A3** | SHA-256 preimage / second-preimage resistance | §2.1 |
-| **A4** | CSPRNG uniform secret sampling (`RAND_bytes`) | §2.3 |
+| **A4** | CSPRNG uniform secret sampling (`determ_rng_bytes`) | §2.3 |
+| **A5** | ML-DSA (Post-Quantum) EUF-CMA | §2.4 |
 
 **Derived / out-of-band labels (NOT base primitives of this section, retained where already in use):**
 - **A6** — HMAC-SHA-256 PRF assumption. Used only by the RPC-auth + keyfile-at-rest proofs (`S001RpcAuthSoundness.md`, `S004KeyfileAtRest.md`, `S023NodeKeyfileEncryption.md`). HMAC's PRF security reduces to SHA-256's compression-function properties but is cited separately as `A6` for clarity; it is not renumbered.
@@ -87,9 +88,13 @@ We assume Ed25519 implementations reject low-order points (libsodium / OpenSSL b
 
 ### 2.3 Uniform secret sampling
 
-Phase-1 secrets `s_i ∈ {0,1}²⁵⁶` are drawn from a CSPRNG that is computationally indistinguishable from a true uniform source. In practice, OpenSSL `RAND_bytes`. Min-entropy of the underlying OS source is assumed to be `≥ 256` bits per draw.
+Phase-1 secrets `s_i ∈ {0,1}²⁵⁶` are drawn from a CSPRNG that is computationally indistinguishable from a true uniform source. In practice, the shipped C99 function `determ_rng_bytes`. Min-entropy of the underlying OS source is assumed to be `≥ 256` bits per draw.
 
-### 2.4 What we do not assume
+### 2.4 ML-DSA (Post-Quantum)
+
+**EUF-CMA.** No polynomial-time adversary can forge a valid signature on an unqueried message under ML-DSA (Dilithium / FIPS 204).
+
+### 2.5 What we do not assume
 
 - We do **not** assume hash-based VDFs, iterated SHA-256 sequentiality, or any compute-time bounds on the adversary's hash rate. The protocol's selective-abort defense is information-theoretic under preimage resistance, not compute-time-bound (see Safety theorem and Selective-Abort theorem).
 - We do **not** assume a trusted third party, secure clock, or VRF beacon.

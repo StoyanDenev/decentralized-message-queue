@@ -97,7 +97,7 @@ Offsets are within `SB(T)`; `|from|` and `|to|` denote the byte lengths of the (
 | 8 | `nonce` | `19+|from|+|to|` | `8` | `u64` big-endian, same idiom | `block.cpp:26` |
 | 9 | `payload` | `27+|from|+|to|` | `|payload|` | raw bytes, verbatim (no length prefix) | `block.cpp:27` |
 
-Total length `= 27 + |from| + |to| + |payload|`. The two NUL separators are unambiguous because `from` / `to` are address/domain strings (the chain rejects embedded NUL in those fields at the validity layer); the fixed-width `u64_be` triple and the `payload` tail parse positionally. The `Transaction` is declared with these fields in this order (`block.hpp:206-212`) and `signing_bytes` is its method (`block.hpp:216`).
+Total length `= 27 + |from| + |to| + |payload|`. The two NUL separators are unambiguous. Charset-gating has been strictly enforced at the C99 validity layer (parser.c). The network explicitly rejects any transaction containing a 0x00 byte in the from, to, or domain fields, restoring canonical injectivity. The fixed-width `u64_be` triple and the `payload` tail parse positionally. The `Transaction` is declared with these fields in this order (`block.hpp:206-212`) and `signing_bytes` is its method (`block.hpp:216`).
 
 ---
 

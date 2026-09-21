@@ -18,10 +18,7 @@ You may obtain a copy of the License at
 Third-party components vendored or referenced
 ──────────────────────────────────────────────────────────────────────
 
-Following the zero-dependency C99 architectural consolidation:
-  * OpenSSL: Purged. Cryptographic primitives migrated to in-tree determ::c99.
-  * Asio 1.30.2: Purged. Replaced with native zero-dependency POSIX/kqueue/epoll sockets (<sys/socket.h>).
-  * nlohmann/json: Purged. Consensus networking relies strictly on canonical Big-Endian binary wire format; RPC utilizes in-place, zero-allocation C99 token parsing.
+As of the C99 migration phase, all C++ networking, cryptography, and serialization dependencies have been eradicated in favor of native POSIX/Windows kernel APIs and the determ::c99 cryptographic suite.
 
 All core consensus, networking, and cryptographic primitives execute
 under bare-metal C99 with zero dynamic third-party library dependencies.

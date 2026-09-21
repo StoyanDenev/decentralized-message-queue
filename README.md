@@ -2,7 +2,7 @@
 
 ## The Pitch: A C99 Layer-0 Engine for AI & Institutional Settlement
 
-Traditional Byzantine Fault Tolerant (BFT) blockchains cannot scale for machine-to-machine economies, nor can they protect institutional block-trades from Maximum Extractable Value (MEV) front-running. The $O(N^2)$ gossip overhead, liveness halting, and public mempools of legacy consensus models are mathematically incompatible with high-frequency, trustless environments.
+Traditional distributed consensus blockchains cannot scale for machine-to-machine economies, nor can they protect institutional block-trades from Maximum Extractable Value (MEV) front-running. The $O(N^2)$ gossip overhead, liveness halting, and public mempools of legacy consensus models are mathematically incompatible with high-frequency, trustless environments.
 
 **Determ** is a bare-metal C99 Layer-0 consensus engine that abandons BFT entirely in favor of an ultra-lean **$K=2$ VDF (Verifiable Delay Function) Duel**. 
 
@@ -36,6 +36,11 @@ Global distributed databases struggle with concurrency control, often requiring 
 
 ---
 
+## Tech Stack
+A Zero-Dependency Statically Linked C99 Unikernel utilizing native OS event loops (epoll/kqueue/IOCP) and a proprietary C99 cryptographic backend (determ::c99).
+
+---
+
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
 > **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
@@ -57,7 +62,7 @@ Global distributed databases struggle with concurrency control, often requiring 
 
 ## Abstract
 
-Determ is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase, K-of-K unanimous co-creation protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
+Determ is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase $K=2$ VDF Duel protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
 Two design choices distinguish Determ from prior fork-free systems:
 
@@ -106,17 +111,17 @@ This is "mutual distrust" — every validator watches every other, assumes every
 
 ### 2.1 The actual decentralization threshold
 
-Determ's safety + censorship-resistance properties hold **as long as at least one validator in the registry is non-Byzantine**:
+Determ's safety + censorship-resistance properties hold **as long as at least one validator in the registry is rule-following**:
 
-- **At least 1 non-Byzantine validator anywhere in the registry → mutual-distrust environment.** The K-of-K committee rotates over time, so a single non-Byzantine validator eventually appears on any committee. Their Phase 1 contribution unions any censored tx into the block (mutual inclusion). Their refusal to sign malformed proposals is a veto on those they reject (mutual veto). The chain stays open and uncensored.
-- **0 non-Byzantine validators (100% adversarial capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. Determ makes no claim here.
+- **At least 1 rule-following validator anywhere in the registry → mutual-distrust environment.** The K-of-K committee rotates over time, so a single rule-following validator eventually appears on any committee. Their Phase 1 contribution unions any censored tx into the block (mutual inclusion). Their refusal to sign malformed proposals is a veto on those they reject (mutual veto). The chain stays open and uncensored.
+- **0 rule-following validators (100% adversarial capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. Determ makes no claim here.
 
 Two important caveats on this threshold:
 
-1. **"Non-Byzantine" is not "honest."** The protocol doesn't require *anyone* to be honest in any moral sense — it only requires that *some* participant follows protocol rules (for whatever reason: self-interest, regulation, mistake, ethics). Following the protocol is rationally cheaper than deviating, so the property holds even under fully self-interested rational actors.
-2. **The threshold is a property of the system, not a protocol assumption.** The protocol does not *believe* that ≥1 validator is non-Byzantine — it doesn't believe anything. The threshold is what an *external observer* needs to assume in order to expect the chain to remain useful. If the observer doesn't believe even ≥1 validator follows the protocol, they don't use the chain. That choice happens outside the system.
+1. **"Rule-following" is not "honest."** The protocol doesn't require *anyone* to be honest in any moral sense — it only requires that *some* participant follows protocol rules (for whatever reason: self-interest, regulation, mistake, ethics). Following the protocol is rationally cheaper than deviating, so the property holds even under fully self-interested rational actors.
+2. **The threshold is a property of the system, not a protocol assumption.** The protocol does not *believe* that ≥1 validator is rule-following — it doesn't believe anything. The threshold is what an *external observer* needs to assume in order to expect the chain to remain useful. If the observer doesn't believe even ≥1 validator follows the protocol, they don't use the chain. That choice happens outside the system.
 
-The "honest minority" tolerance most BFT protocols celebrate (`f < N/3`) is **strictly weaker** than what Determ's K-of-K + union model achieves: Determ tolerates `f < N` (one non-Byzantine validator in the entire registry suffices for safety + censorship resistance), at the cost of giving up `f < N/3` liveness (a single Byzantine in the *committee* can halt that round, mitigated by rotation + BFT escalation in §10.4).
+Under the $K=2$ VDF Duel, Determ achieves unconditional safety while network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
 
 ### 2.2 The three structural properties
 
@@ -124,13 +129,13 @@ The mutual-distrust model rests on:
 
 1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and costly (suspension from committee selection for an exponentially growing window; the round-1 stake deduction was retired 2026-09-16, D13).
 
-2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The K-way unanimous collusion required to censor is fragile because each colluder has standing incentive to defect.
+2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The total collusion required to censor is fragile because each colluder has standing incentive to defect.
 
 3. **No predictability of consequence.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is computed only once K Phase-2 reveals gather. In Phase 1, each member only sees others' commitments `SHA256(secret_j ‖ pubkey_j)`; under SHA-256 preimage resistance the underlying secrets remain uniformly random. A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
 
 ### 2.3 Trade-off vs. BFT
 
-Determ gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
+Under the $K=2$ VDF Duel, network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. In return it gets:
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
@@ -310,7 +315,7 @@ This is broader than `block_digest` (§7.4), which is what committee members sig
 ### 3.7.2 Block Frame Cap and Storage Integrity
 
 - **Block Frame Consensus Cap (D9 / S-057):** The canonical wire-encoded block frame is bounded at `BLOCK_FRAME_CONSENSUS_CAP_BYTES = 4,194,300` bytes (4 MB gossip buffer minus 4-byte framing). Blocks exceeding this cap are rejected fail-closed during verification (`BlockValidator::check_block`), guaranteeing that valid blocks can never exceed gossip envelope capacity.
-- **Storage Integrity & Continuity (S-084):** During database loading (`Chain::load`) and JSON state export (`Chain::export_store_json`), every block record is verified for sequential height continuity (`b.index == i`) and cryptographic hash linking (`b.prev_hash == prev_hash`). Corrupted or non-linking block files throw immediately and fail closed on startup.
+- **Storage Integrity & Continuity (S-084):** During database loading (`Chain::load`) and canonical state export (`Chain::export_store`), every block record is verified for sequential height continuity (`b.index == i`) and cryptographic hash linking (`b.prev_hash == prev_hash`). Corrupted or non-linking block files throw immediately and fail closed on startup.
 
 ---
 
@@ -351,7 +356,7 @@ Determ supports two genesis-pinned validator-inclusion policies. Both deliver **
 | **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Abort suspension only (the round-1 stake deduction was retired — D13, 2026-09-16; equivocation carries no L1 stake consequence — D4, 2026-09-16) |
 | **`DOMAIN_INCLUSION`** | 0 | Domain registration | Abort suspension only (equivocation carries no L1 registry consequence — D4) |
 
-**Why the decentralization claim is mode-invariant:** Determ's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
+**Why the decentralization claim is mode-invariant:** Determ's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **total collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
 
 The choice between modes is operational: which Sybil-resistance medium and disincentive currency the deployment prefers. Stake is the natural choice for chains where the native token has economic weight; domain-based inclusion is the natural choice for deployments where on-chain economics doesn't yet exist or where validator identities are intentionally public for accountability.
 
@@ -638,10 +643,10 @@ All messages are length-prefixed:
 
 One codec is shipped — the p2p envelope is binary-only (D2, DECISION-LOG 2026-07-28; corrected here 2026-09-14, the text below described the pre-D2 state):
 
-* every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy JSON envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
+* every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy text envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
 * HELLO still carries a `wire_version` advertisement — with a single shipped version it decides nothing; it is the additive post-genesis upgrade hatch.
 
-Per-type payloads inside the envelope are fixed binary frames for all 19 message types (PROTOCOL.md §9.1): since D2 inc7c (2026-09-16) HEADERS_RESPONSE is a page of DHF1 header records and SNAPSHOT_RESPONSE is the DSN1 snapshot record verbatim, the length-prefixed JSON fallback is deleted, and a message type the codec cannot encode or decode is rejected rather than serialized as JSON.
+Per-type payloads inside the envelope are fixed binary frames for all 19 message types (PROTOCOL.md §9.1): since D2 inc7c (2026-09-16) HEADERS_RESPONSE is a page of DHF1 header records and SNAPSHOT_RESPONSE is the DSN1 snapshot record verbatim, the length-prefixed text fallback is deleted, and a message type the codec cannot encode or decode is rejected rather than serialized as text.
 
 S-022 per-message-type body caps apply at deserialize time regardless of codec: 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. The 16 MB framing-layer ceiling (`kMaxFrameBytes`) is enforced at read time before the per-type check.
 
@@ -737,7 +742,7 @@ PoS with 2/3+ attester finality over ~12.8 minutes. Determ finalizes per block (
 
 ### 14.4 Algorand
 
-VRF sortition + BA* over ~3.7 s. Tolerates `f < N/3` Byzantine. Determ's per-round committee is much smaller (`K`, typically 3) but every member must contribute — censorship requires unanimity within the committee.
+VRF sortition + BA* over ~3.7 s. Tolerates adversarial fraction `f < N/3`. Determ's per-round committee is much smaller (`K`, typically 3) but every member must contribute — censorship requires unanimity within the committee.
 
 ### 14.5 Dfinity / Internet Computer
 
@@ -759,9 +764,9 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under `EXTENDED` sharding a region losing connectivity to the rest of the world stalls cross-shard receipts; in-shard production continues.
 
-**Binary wire codec — shipped and mandatory (A3 / S8, then D2).** The `0xB1` binary envelope (`src/net/binary_codec.cpp`) is the only codec on the wire; the legacy JSON envelope and the HELLO codec negotiation were deleted pre-genesis (DECISION-LOG 2026-07-28, commit ce31c6f). HELLO keeps a `wire_version` advertisement as the additive post-genesis upgrade hatch. PROTOCOL.md §9.1 has the per-type frame layouts. (Corrected 2026-09-14.)
+**Binary wire codec — shipped and mandatory (A3 / S8, then D2).** The `0xB1` binary envelope (`src/net/binary_codec.cpp`) is the only codec on the wire; the legacy text envelope and the HELLO codec negotiation were deleted pre-genesis (DECISION-LOG 2026-07-28, commit ce31c6f). HELLO keeps a `wire_version` advertisement as the additive post-genesis upgrade hatch. PROTOCOL.md §9.1 has the per-type frame layouts. (Corrected 2026-09-14.)
 
-**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.json [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.json --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block JSON minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.json [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a JSON array of `{domain, ed_pub}` (same shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
+**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.bin [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.bin --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block structure minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.bin [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a array of `{domain, ed_pub}` (same shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
 
 **Distributed identity provider (DSSO).** The K-of-K committee is structurally a mutual-distrust operator group — the exact setting of *Identity provider in an environment of mutual distrust* (academia.edu/80188125). v2.25 + v2.26 (V2-DESIGN.md Theme 9) realize that paper's IdP as a "Sign-In With Determ" flow with two improvements: **OPAQUE in place of the paper's SRP**, and a **t-of-n, unordered threshold OPRF** in place of the paper's sequential all-node chain. RPs register via v2.18 DAPP_REGISTER; challenges and the paper's hash-challenge-response token ride v2.19 DAPP_CALL. The ceremony uses only already-shipped primitives (Ed25519, the P-256 RFC 9497 OPRF §3.9b, SHA-256/HKDF, DAPP_REGISTER/DAPP_CALL), needs **no threshold signature** and **no FROST**, and pairs with v2.26 on-chain key rotation. Full mechanism: `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`; `docs/V2-DESIGN.md` Theme 9 retains the architectural narrative.
 
@@ -926,12 +931,12 @@ Determ's design intent is intentionally narrow: a **fork-free L1 payment + ident
 
 ### 17.1 What Determ is built for
 
-- **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root — any single non-Byzantine committee member can include any tx. Zero-trust safety (no protocol component trusts any participant).
+- **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root — any single rule-following committee member can include any tx. Zero-trust safety (no protocol component trusts any participant).
 - **Composable Atomic Batching.** Atomic multi-transaction scopes (`COMPOSABLE_BATCH`) executing multiple operations in a single block space allocation with all-or-nothing rollback on inner transaction failure.
 - **Canonical Encrypted DApp Messaging.** Lightweight DApp service discovery and encrypted payload delivery (`DAPP_REGISTER`, `DAPP_CALL`) without VM execution overhead.
 - **Post-Quantum Bearer Payments.** Opt-in ML-DSA (FIPS 204) authenticated transfers (`PQ_TRANSFER`) coexisting seamlessly with classical Ed25519 accounts.
 - **Confidential Transfers & Audit Trails.** Amount-private payments via Pedersen commitments and Bulletproofs range proofs (`SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`) coupled with on-chain dual-mode audit key rotation and disclosure logging (`ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS`, `REGISTER_NOTE_KEY`).
-- **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 non-Byzantine validator remains in the registry).
+- **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 rule-following validator remains in the registry).
 - **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519-pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
 - **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees.
 - **Per-height BFT escalation.** Default mutual-distrust K-of-K; falls back to BFT `ceil(2K/3)` + designated proposer when the eligible pool can't form K-of-K and the abort threshold has been met. Per-block `consensus_mode` tag lets observers reason about per-block trust.
@@ -1006,7 +1011,7 @@ Soundness is proven in `docs/proofs/Governance.md` (FA10).
 
 ## 18.5. Wallet recovery (A2)
 
-A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing and passphrase-derived AEAD envelopes — solving key loss without weakening on-chain trust. The wallet is libsodium-free: all its crypto runs on the daemon's `determ::c99` stack plus OpenSSL (base64 / PBKDF2 / AES-256-GCM), exactly like the `determ` daemon.
+A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing and passphrase-derived AEAD envelopes — solving key loss without weakening on-chain trust. The wallet is libsodium-free: all its crypto runs on the daemon's `determ::c99` stack plus the determ::c99 cryptographic backend, exactly like the `determ` daemon.
 
 **Threat model.** The wallet's recovery flow protects against:
 
@@ -1021,9 +1026,9 @@ A lost Ed25519 private key today means permanent loss of the registered domain a
 2. **AEAD envelope (AES-256-GCM)** — wraps each share with a per-envelope salt + nonce; AAD binds guardian index + scheme version.
 3. **Passphrase key derivation (PBKDF2)** — under the `passphrase` scheme, each envelope's unwrap key is PBKDF2-derived (HMAC-SHA-256) from the user's password and the per-envelope salt.
 
-**Wire format.** A recovery setup is a single self-contained JSON document:
+**Wire format.** A recovery setup is a single self-contained record document:
 
-```json
+```text
 {
   "version": 1,
   "scheme": "shamir-aead-passphrase-pbkdf2-v1",
@@ -1056,7 +1061,7 @@ determ-wallet recover --in <file>                  Reconstruct the seed
                       [--guardians <i,j,k,...>]
 ```
 
-**Wallet crypto status.** `determ-wallet` is libsodium-free: every crypto layer runs on the daemon's `determ::c99` stack (Ed25519, X25519, SHA-256, Argon2id) plus OpenSSL for base64 (EVP), the PBKDF2 KDF, and the AES-256-GCM envelope — the same library posture as the `determ` daemon and `determ-light`, neither of which ever linked libsodium. Recovery ships the `passphrase` scheme only (Shamir SSS + PBKDF2-derived AEAD envelopes); there is no OPAQUE adapter or threshold-guardian handshake in the wallet. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis of the passphrase scheme.
+**Wallet crypto status.** `determ-wallet` is libsodium-free: every crypto layer runs on the daemon's `determ::c99` stack (Ed25519, X25519, SHA-256, Argon2id) plus the determ::c99 cryptographic backend — the same library posture as the `determ` daemon and `determ-light`, neither of which ever linked libsodium. Recovery ships the `passphrase` scheme only (Shamir SSS + PBKDF2-derived AEAD envelopes); there is no OPAQUE adapter or threshold-guardian handshake in the wallet. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis of the passphrase scheme.
 
 **Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
 
@@ -1093,7 +1098,7 @@ The protocol is intentionally minimal: two consensus message types per block, on
 
 1. Nakamoto, S. "Bitcoin: A Peer-to-Peer Electronic Cash System." 2008.
 2. Buterin, V. et al. "Combining GHOST and Casper." 2020.
-3. Gilad, Y. et al. "Algorand: Scaling Byzantine Agreements for Cryptocurrencies." SOSP 2017.
+3. Gilad, Y. et al. "Algorand: Scaling Agreements for Cryptocurrencies." SOSP 2017.
 4. Kwon, J. "Tendermint: Consensus without Mining." 2014.
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.
@@ -1109,6 +1114,6 @@ Determ is **multi-licensed** — [LICENSING.md](LICENSING.md) is the authoritati
 - **Reference DApps (`dapps/`, D.1-D.9) — BUSL-1.1**: source-available; free for development/test/CI **and for noncommercial production** (individuals, noncommercial organizations); **production use by a commercial entity or a public-sector body requires a paid grant** ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)); each release converts to Apache-2.0 after 4 years.
 - **End users pay nothing**: the Licensor operates reference DApp instances on the network free of charge; using a hosted instance is not a licensed activity.
 
-Third-party components (OpenSSL, Asio, nlohmann/json, libsodium) are bundled or referenced under their respective licenses. See [NOTICE](NOTICE) for the full attribution list.
+As of the C99 migration phase, all C++ networking, cryptography, and serialization dependencies have been eradicated in favor of native POSIX/Windows kernel APIs and the determ::c99 cryptographic suite. See [NOTICE](NOTICE) for details.
 
 Source files carry a per-component SPDX identifier (rule in [LICENSING.md](LICENSING.md)) so toolchain-level license scanners can verify provenance automatically.

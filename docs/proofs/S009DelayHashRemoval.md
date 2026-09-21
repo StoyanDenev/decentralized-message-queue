@@ -189,9 +189,9 @@ The composition is strictly stronger than the pre-removal stack (which had delay
 
 ---
 
-## 3. Adversary model A1..A3
+## 3. Adversary model $Adv_{randomness}..Adv_{resurrection}$
 
-### A1 (Randomness-manipulation attempt — defeated by K-of-K commit-reveal binding)
+### $Adv_{randomness}$ (Randomness-manipulation attempt — defeated by K-of-K commit-reveal binding)
 
 An attacker controls (K-1) of K committee members at height `h`. They attempt to bias `delay_output = compute_block_rand(delay_seed, ordered_secrets)` by:
 
@@ -205,9 +205,9 @@ An attacker controls (K-1) of K committee members at height `h`. They attempt to
 - **(b)** Defeated by the Ed25519 signature on the ContribMsg envelope. The attacker's `v_i` is Byzantine, so they could in principle sign two contradicting ContribMsgs with different `dh_input`. This is exactly the equivocation case S-006 detects: the receive path's same-generation duplicate scan at `on_contrib` catches the two signatures over different envelopes and surfaces them via the `EquivocationEvent` channel. The producer's apply path slashes `v_i`'s stake. The attacker pays the slashing cost for at most one Phase-1 swap attempt; the second attempt is rejected at admission.
 - **(c)** Defeated by S-006 same-generation equivocation detection (subsumed in (b)).
 
-The K-of-K commit-reveal defense is information-theoretically tight against A1 — the attacker has zero net advantage beyond what they had pre-protocol.
+The K-of-K commit-reveal defense is information-theoretically tight against $Adv_{randomness}$ — the attacker has zero net advantage beyond what they had pre-protocol.
 
-### A2 (Timing attack on Phase 2 reveal — bounded by S-003 validator wall-clock window)
+### $Adv_{timing}$ (Timing attack on Phase 2 reveal — bounded by S-003 validator wall-clock window)
 
 An attacker observes the honest committee member's Phase-2 `BlockSigMsg` envelope (containing the revealed `dh_secret`) and attempts to retroactively swap their own published `dh_secret_i` to produce a different `delay_output`.
 
@@ -215,7 +215,7 @@ An attacker observes the honest committee member's Phase-2 `BlockSigMsg` envelop
 
 Defeat is from the composition of (Ed25519 sig binding) + (S-006 equivocation detection) + (S-003 wall-clock bound). The pre-removal delay-hash defense was *not* relevant to A2 — it sat between Phase-1 and Phase-2, so it didn't protect the Phase-2 reveal interval at all. Post-removal status is no worse.
 
-### A3 (Resurrection of delay-hash bug class — defeated by structural removal)
+### $Adv_{resurrection}$ (Resurrection of delay-hash bug class — defeated by structural removal)
 
 A future contributor, unfamiliar with the S-009 closure rationale, attempts to re-introduce a delay-hash variant to the codebase — e.g., to "improve" the randomness defense or to add a VDF for some adjacent protocol feature (governance time-locks, etc.).
 
