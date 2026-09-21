@@ -50751,9 +50751,10 @@ pre_chain.append(b3);
             VirtualNetwork                    vnet;
             std::unique_ptr<VirtualEventLoop> loop;
             std::unique_ptr<VirtualTransport> tr;
-            determ::time::VirtualClock        clock{kT0};
-            crypto::SeededRng                 rng{42};
+            determ::time::VirtualClock        clock;
+            crypto::SeededRng                 rng;
             std::unique_ptr<node::Node>       node;
+            explicit Harness(int64_t t0 = 1700000000) : clock(t0), rng(42) {}
             ~Harness() {
                 if (node) { node->stop(); node.reset(); }
                 tr.reset(); loop.reset();
@@ -50762,7 +50763,7 @@ pre_chain.append(b3);
         };
         int seq = 0;
         auto make_node = [&](const std::string& tag) {
-            auto h = std::make_unique<Harness>();
+            auto h = std::make_unique<Harness>(kT0);
             h->dir = fs::temp_directory_path() /
                 ("determ-s079-" + tag + "-" + std::to_string(seq++) + "-" +
                  std::to_string(static_cast<unsigned long long>(
