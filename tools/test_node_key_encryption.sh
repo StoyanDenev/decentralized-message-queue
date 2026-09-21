@@ -64,7 +64,7 @@ if [ "$MAGIC" != "DNK1" ]; then
 fi
 
 if [ "$UNAME_S" != "Windows_NT" ]; then
-  MODE=$(stat -f "%Lp" "$D1/node_key.bin" 2>/dev/null || stat -c "%a" "$D1/node_key.bin" 2>/dev/null || echo "unknown")
+  MODE=$(stat -c "%a" "$D1/node_key.bin" 2>/dev/null || stat -f "%Lp" "$D1/node_key.bin" 2>/dev/null || echo "unknown")
   if [ "$MODE" != "600" ]; then
     echo "  FAIL: node_key.bin mode is not 0600 (got $MODE)"
     exit 1
