@@ -41,6 +41,10 @@ TEST_DDA_BIN = $(BIN_DIR)/test-dda
 TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
 TEST_LEDGER_DSSO_BIN = $(BIN_DIR)/test-ledger-dsso
 TEST_FUZZ_LEDGER_BIN = $(BIN_DIR)/fuzz-ledger
+TEST_K2_DUEL_FALLBACK_BIN = $(BIN_DIR)/test-k2-duel-fallback
+TEST_OPAQUE_DSSO_BIN = $(BIN_DIR)/test-opaque-dsso
+TEST_TRIPLE_ENTRY_LEDGER_BIN = $(BIN_DIR)/test-triple-entry-ledger
+TEST_FUZZER_PARSER_BIN = $(BIN_DIR)/fuzzer-parser
 
 CFLAGS_DSF = $(CFLAGS) -DDETERM_DSF_ENABLED
 BUILD_DIR_DSF = $(BUILD_DIR)/dsf
@@ -49,7 +53,7 @@ TEST_DSF_K2_DUEL_BIN = $(BIN_DIR)/test-dsf-k2-duel
 
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN) $(TEST_K2_DUEL_FALLBACK_BIN) $(TEST_OPAQUE_DSSO_BIN) $(TEST_TRIPLE_ENTRY_LEDGER_BIN) $(TEST_FUZZER_PARSER_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -103,6 +107,26 @@ $(TEST_DSF_K2_DUEL_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_dsf_k2
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS_DSF) $^ -o $@ $(LDLIBS)
 
+$(TEST_K2_DUEL_FALLBACK_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_k2_duel_fallback.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_DSF) $^ -o $@ $(LDLIBS)
+
+$(TEST_OPAQUE_DSSO_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_opaque_dsso.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_DSF) $^ -o $@ $(LDLIBS)
+
+$(TEST_TRIPLE_ENTRY_LEDGER_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_triple_entry_ledger.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_DSF) $^ -o $@ $(LDLIBS)
+
+$(TEST_FUZZER_PARSER_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/fuzzer_parser.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+fuzzer-parser-llvm: $(ALL_CORE_SRCS) tests/fuzzer_parser.c
+	@mkdir -p $(BIN_DIR)
+	clang -std=c99 -Wall -Wextra -fsanitize=address,fuzzer -fno-omit-frame-pointer -DLIBFUZZER_ENABLED=1 $(INCLUDES) $^ -o $(BIN_DIR)/fuzzer-parser-llvm $(LDLIBS)
+
 test: all
 	@echo "Running test-k2-duel..."
 	@./$(TEST_DUEL_BIN)
@@ -124,6 +148,14 @@ test: all
 	@./$(TEST_FUZZ_LEDGER_BIN)
 	@echo "Running test-dsf-k2-duel..."
 	@./$(TEST_DSF_K2_DUEL_BIN)
+	@echo "Running test-k2-duel-fallback..."
+	@./$(TEST_K2_DUEL_FALLBACK_BIN)
+	@echo "Running test-opaque-dsso..."
+	@./$(TEST_OPAQUE_DSSO_BIN)
+	@echo "Running test-triple-entry-ledger..."
+	@./$(TEST_TRIPLE_ENTRY_LEDGER_BIN)
+	@echo "Running fuzzer-parser..."
+	@./$(TEST_FUZZER_PARSER_BIN)
 
 check: test
 

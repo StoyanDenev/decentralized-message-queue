@@ -583,3 +583,59 @@ target_compile_features(fuzz-ledger PRIVATE c_std_99)
 target_compile_definitions(fuzz-ledger PRIVATE DETERM_DSF_ENABLED=1)
 target_include_directories(fuzz-ledger PRIVATE include src tests)
 target_link_libraries(fuzz-ledger PRIVATE determ-crypto-c99)
+
+# ── test-k2-duel-fallback: Liveness Proof under DSF ───────────────────────────
+add_executable(test-k2-duel-fallback
+  tests/test_k2_duel_fallback.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+)
+target_compile_features(test-k2-duel-fallback PRIVATE c_std_99)
+target_compile_definitions(test-k2-duel-fallback PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-k2-duel-fallback PRIVATE include src tests)
+target_link_libraries(test-k2-duel-fallback PRIVATE determ-crypto-c99)
+
+# ── test-opaque-dsso: Identity Proof (OPRF Handshake) ─────────────────────────
+add_executable(test-opaque-dsso
+  tests/test_opaque_dsso.c
+  src/crypto/opaque_dsso.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+)
+target_compile_features(test-opaque-dsso PRIVATE c_std_99)
+target_compile_definitions(test-opaque-dsso PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-opaque-dsso PRIVATE include src tests)
+target_link_libraries(test-opaque-dsso PRIVATE determ-crypto-c99)
+
+# ── test-triple-entry-ledger: Economic Proof (Overflow & Overspend) ───────────
+add_executable(test-triple-entry-ledger
+  tests/test_triple_entry_ledger.c
+  src/ledger/state.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+)
+target_compile_features(test-triple-entry-ledger PRIVATE c_std_99)
+target_compile_definitions(test-triple-entry-ledger PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-triple-entry-ledger PRIVATE include src tests)
+target_link_libraries(test-triple-entry-ledger PRIVATE determ-crypto-c99)
+
+# ── fuzzer-parser: LLVM libFuzzer Target for Wire Deserializer ───────────────
+option(ENABLE_PARSER_LIBFUZZER "Build fuzzer-parser with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
+
+add_executable(fuzzer-parser
+  tests/fuzzer_parser.c
+  src/wire/parser.c
+)
+target_compile_features(fuzzer-parser PRIVATE c_std_99)
+target_include_directories(fuzzer-parser PRIVATE include src tests)
+target_link_libraries(fuzzer-parser PRIVATE determ-crypto-c99)
+
+if(ENABLE_PARSER_LIBFUZZER)
+  target_compile_definitions(fuzzer-parser PRIVATE LIBFUZZER_ENABLED=1)
+  target_compile_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer -fno-omit-frame-pointer)
+  target_link_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer)
+endif()
