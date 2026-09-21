@@ -18,6 +18,23 @@
 extern "C" {
 #endif
 
+/*
+ * Mathematically Safe QPC Conversion Helper:
+ * Prevents 64-bit unsigned integer overflow when ticks * 1,000,000,000ULL > UINT64_MAX.
+ */
+static inline uint64_t determ_qpc_to_ns(uint64_t ticks, uint64_t freq) {
+    if (freq == 0ULL) {
+        return 0ULL;
+    }
+#if defined(__SIZEOF_INT128__) || defined(__GNUC__) || defined(__clang__)
+    return (uint64_t)(((__uint128_t)ticks * 1000000000ULL) / freq);
+#else
+    // Split to avoid overflow: (ticks / freq) * 1B + ((ticks % freq) * 1B) / freq
+    uint64_t ns = (ticks / freq) * 1000000000ULL + ((ticks % freq) * 1000000000ULL) / freq;
+    return ns;
+#endif
+}
+
 #if defined(DETERM_DSF_ENABLED)
 
 /*
@@ -60,7 +77,10 @@ static inline uint64_t determ_clock_now_ns(void) {
     }
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000000000ULL) / freq.QuadPart);
+    uint64_t ticks = counter.QuadPart;
+    uint64_t f = freq.QuadPart;
+    // Split division prevents 64-bit overflow on massive QPC counters
+    return (ticks / f) * 1000000000ULL + ((ticks % f) * 1000000000ULL) / f;
 }
 #else
 #include <time.h>

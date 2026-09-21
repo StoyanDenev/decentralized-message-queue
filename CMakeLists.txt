@@ -599,6 +599,26 @@ target_compile_definitions(test-k2-duel-fallback PRIVATE DETERM_DSF_ENABLED=1)
 target_include_directories(test-k2-duel-fallback PRIVATE include src tests)
 target_link_libraries(test-k2-duel-fallback PRIVATE determ-crypto-c99)
 
+# ── test-qpc-clock-overflow: Windows QPC Scaled Arithmetic Overflow Test ────────
+add_executable(test-qpc-clock-overflow
+  tests/test_qpc_clock_overflow.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+)
+target_compile_features(test-qpc-clock-overflow PRIVATE c_std_99)
+target_compile_definitions(test-qpc-clock-overflow PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-qpc-clock-overflow PRIVATE include src tests)
+
+# ── test-dda: Dynamic Difficulty Adjustment Suite ────────────────────────────
+add_executable(test-dda
+  tests/test_dda.c
+  src/consensus/dda.c
+)
+target_compile_features(test-dda PRIVATE c_std_99)
+target_include_directories(test-dda PRIVATE include src tests)
+
+
+
 # ── test-opaque-dsso: Identity Proof (OPRF Handshake) ─────────────────────────
 add_executable(test-opaque-dsso
   tests/test_opaque_dsso.c

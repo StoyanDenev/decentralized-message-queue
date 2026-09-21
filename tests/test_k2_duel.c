@@ -2,26 +2,21 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Exhaustive Verification & LibFuzzer Harness for K=2 Fast-Block VDF Duel
- *
- * Test Surface:
- *   1. The Liveness Proof Test (2001ms arrival dropped -> 1-of-2 fallback -> valid block).
- *   2. The Time-Lock Inequality Test (T_vdf > W_reveal + Delta theorem enforcement).
- *   3. Strict Canonicalization Defenses (NUL-byte ghost rejection, length-prefix limits).
- *   4. LibFuzzer Target (LLVMFuzzerTestOneInput).
+ * Determ K=2 Fast-Block VDF Duel Verification Suite (Phase 4: C99 Bare-Metal)
+ * Tests strict 2-of-2 skipping, time-lock inequality, and wire bounds defenses.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include <determ/consensus/duel_state.h>
-#include <determ/crypto/vdf.h>
 #include <determ/consensus/dda.h>
+#include <determ/crypto/vdf.h>
 #include <determ/wire/parser.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
+
 #define TEST_ASSERT(cond) do { \
     if (!(cond)) { \
         fprintf(stderr, "FATAL: Assertion failed: %s at %s:%d\n", #cond, __FILE__, __LINE__); \
@@ -39,15 +34,16 @@
 static vdf_context_t s_vdf_ctx;
 
 /*
- * ── 1. The Liveness Proof Test ───────────────────────────────────────────────
- * Simulates a network drop where the Contributor's payload arrives at 2001ms.
+ * ── 1. The Strict 2-of-2 Epoch Skipping Test ────────────────────────────────
+ * Simulates a network drop where Contributor's payload arrives at 2001ms.
  * Asserts:
  *   - Contributor reveal is explicitly dropped (DUEL_DROPPED_BUZZER_EXCEEDED).
- *   - The Aggregator locks reveal buffer at buzzer and activates 1-of-2 fallback.
- *   - VDF executes over Aggregator payload producing a valid block without error.
+ *   - The Aggregator locks reveal buffer at buzzer and aborts with ERR_EPOCH_SKIPPED_INCOMPLETE.
+ *   - Zero VDF evaluation on 1-of-2 payload.
+ *   - Followed by successful dual 2-of-2 execution when both reveal timely.
  */
 static void test_liveness_proof_fallback(void) {
-    printf("[TEST] 1. Liveness Proof & 1-of-2 Straggler Fallback...\n");
+    printf("[TEST] 1. Strict 2-of-2 Epoch Skipping & Dual Execution...\n");
 
     duel_state_machine_t sm;
     TEST_ASSERT(duel_state_init(&sm) == DUEL_SUCCESS);
@@ -61,9 +57,10 @@ static void test_liveness_proof_fallback(void) {
     TEST_ASSERT(sm.aggregator_reveal.present == true);
 
     /*
-     * Simulate network drop / delay: Contributor's packet arrives at t=2001ms.
-     * Artificially shift reveal_start_ns backward by 2001ms.
+     * Simulate network drop: Contributor's packet arrives at t=2001ms.
+     * Shift reveal_start_ns backward by 2001ms.
      */
+    sm.epoch_start_time -= 2001000000ULL;
     sm.reveal_start_ns -= 2001000000ULL;
     sm.reveal_end_ns = sm.reveal_start_ns + DUEL_REVEAL_WINDOW_NS;
 
@@ -75,21 +72,35 @@ static void test_liveness_proof_fallback(void) {
     TEST_ASSERT(cont_status == DUEL_DROPPED_BUZZER_EXCEEDED);
     TEST_ASSERT(sm.contributor_reveal.present == false);
 
-    /* Poll buzzer: non-blocking transition */
-    TEST_ASSERT(duel_state_poll_buzzer(&sm) == DUEL_SUCCESS);
+    /* Poll buzzer: Strict 2-of-2 rule must abort epoch and increment VRF */
+    TEST_ASSERT(duel_state_poll_buzzer(&sm) == ERR_EPOCH_SKIPPED_INCOMPLETE);
     TEST_ASSERT(sm.reveal_buffer_locked == true);
-    TEST_ASSERT(sm.straggler_fallback_active == true);
-    TEST_ASSERT(sm.state == DUEL_STATE_VDF_EVALUATION);
+    TEST_ASSERT(sm.straggler_fallback_active == false);
+    TEST_ASSERT(sm.state == DUEL_STATE_ABORTED);
+    TEST_ASSERT(sm.vrf_round == 1);
 
-    /* Execute VDF on assembled 1-of-2 payload */
-    TEST_ASSERT(sm.vdf_input_len > 0);
+    /* Now verify 2-of-2 Dual Collaboration */
+    duel_state_machine_t sm2;
+    TEST_ASSERT(duel_state_init(&sm2) == DUEL_SUCCESS);
+    TEST_ASSERT(duel_state_start_commitment_phase(&sm2) == DUEL_SUCCESS);
+    TEST_ASSERT(duel_state_start_reveal_window(&sm2) == DUEL_SUCCESS);
+
+    TEST_ASSERT(duel_submit_aggregator_reveal(&sm2, agg_reveal, (uint32_t)sizeof(agg_reveal) - 1) == DUEL_SUCCESS);
+    const uint8_t timely_cont[] = "contributor_timely_block_tx_payload";
+    TEST_ASSERT(duel_submit_contributor_reveal(&sm2, timely_cont, (uint32_t)sizeof(timely_cont) - 1, true) == DUEL_SUCCESS);
+
+    TEST_ASSERT(duel_state_poll_buzzer(&sm2) == DUEL_SUCCESS);
+    TEST_ASSERT(sm2.state == DUEL_STATE_VDF_EVALUATION);
+
+    /* Execute VDF on assembled 2-of-2 payload */
+    TEST_ASSERT(sm2.vdf_input_len > 0);
     uint8_t vdf_output[VDF_OUTPUT_LEN];
 
-    TEST_ASSERT(vdf_init(&s_vdf_ctx, sm.vdf_input_buffer, sm.vdf_input_len, 2000) == 0);
+    TEST_ASSERT(vdf_init(&s_vdf_ctx, sm2.vdf_input_buffer, sm2.vdf_input_len, 2000) == 0);
     TEST_ASSERT(vdf_evaluate(&s_vdf_ctx, vdf_output) == 0);
-    TEST_ASSERT(vdf_verify(&s_vdf_ctx, sm.vdf_input_buffer, sm.vdf_input_len, 2000, vdf_output) == 1);
+    TEST_ASSERT(vdf_verify(&s_vdf_ctx, sm2.vdf_input_buffer, sm2.vdf_input_len, 2000, vdf_output) == 1);
 
-    printf("  -> PASS: Late payload dropped, 1-of-2 fallback executed, valid block produced.\n");
+    printf("  -> PASS: Late reveal aborted epoch; timely 2-of-2 dual payload finalized cleanly.\n");
 }
 
 /*
@@ -106,7 +117,7 @@ static void test_timelock_inequality(void) {
 
     /*
      * Run benchmark calibration:
-     * Measure nanoseconds per 1,000 VDF iterations to establish execution rate.
+     * Measure nanoseconds per 2,000 VDF iterations.
      */
     const uint8_t mock_payload[] = "determ-timelock-inequality-benchmark-vector";
     TEST_ASSERT(vdf_init(&s_vdf_ctx, mock_payload, sizeof(mock_payload) - 1, 2000) == 0);
@@ -116,18 +127,14 @@ static void test_timelock_inequality(void) {
     uint64_t ns_per_2k = s_vdf_ctx.elapsed_ns;
     TEST_ASSERT(ns_per_2k > 0);
 
-    /*
-     * Calculate calibrated iterations required to mathematically exceed
-     * W_reveal + Delta (2200ms).
-     */
     double ns_per_iter = (double)ns_per_2k / 2000.0;
     uint64_t required_iters = (uint64_t)((double)lower_bound_ns / ns_per_iter) + 5000;
 
-    /* Verify DDA auto-calibration responds correctly when block times drop */
-    uint64_t adjusted_iters = calibrate_vdf_iterations(required_iters, 1000); /* 1000ms (1.0s) vs 5000ms target */
-    TEST_ASSERT(adjusted_iters > required_iters);
+    /* Verify DDA auto-calibration responds aggressively when block time is < 3000ms target */
+    uint64_t adjusted_iters = calibrate_vdf_iterations(required_iters, 1000);
+    TEST_ASSERT(adjusted_iters == required_iters + required_iters / 2);
 
-    printf("  -> PASS: VDF scale rate: %.2f ns/iter. DDA calibrator scaled %llu -> %llu.\n",
+    printf("  -> PASS: VDF scale rate: %.2f ns/iter. DDA calibrator scaled %llu -> %llu (+50%% boost).\n",
            ns_per_iter, (unsigned long long)required_iters, (unsigned long long)adjusted_iters);
 }
 
@@ -164,8 +171,6 @@ static void test_canonicalization_defenses(void) {
 
 /*
  * ── 4. LibFuzzer Target ──────────────────────────────────────────────────────
- * Feeds arbitrary randomized and malformed byte streams to deserialization
- * and wire bundler.
  */
 static wire_tx_t s_fuzz_tx;
 static uint8_t   s_fuzz_out_buf[WIRE_MAX_VDF_BUNDLE_LEN];
@@ -201,6 +206,60 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
 }
 
+/*
+ * ── 5. Nakamoto PoSW Heaviest-Chain Fork Choice ──────────────────────────────
+ */
+static void test_nakamoto_posw_fork_choice(void) {
+    printf("[TEST] 5. Nakamoto PoSW Heaviest-Chain Fork Choice Rule...\n");
+
+    duel_state_machine_t sm;
+    TEST_ASSERT(duel_state_init(&sm) == DUEL_SUCCESS);
+    TEST_ASSERT(duel_state_get_cumulative_work(&sm) == 0ULL);
+
+    duel_block_header_t branch_a[2];
+    memset(branch_a, 0, sizeof(branch_a));
+    branch_a[0].height = 9;
+    branch_a[0].vdf_iterations = 2500000ULL;
+    branch_a[1].height = 10;
+    branch_a[1].vdf_iterations = 2500000ULL;
+    memset(branch_a[1].block_hash, 0x11, 32);
+
+    duel_block_header_t branch_b[2];
+    memset(branch_b, 0, sizeof(branch_b));
+    branch_b[0].height = 9;
+    branch_b[0].vdf_iterations = 2500000ULL;
+    branch_b[1].height = 10;
+    branch_b[1].vdf_iterations = 3500000ULL;
+    memset(branch_b[1].block_hash, 0x22, 32);
+
+    const duel_block_header_t *tip = NULL;
+    int res = duel_resolve_fork_choice(&sm, branch_a, 2, branch_b, 2, &tip);
+
+    TEST_ASSERT(res == 1);
+    TEST_ASSERT(tip == &branch_b[1]);
+    TEST_ASSERT(duel_state_get_cumulative_work(&sm) == 6000000ULL);
+
+    duel_block_header_t head_light;
+    memset(&head_light, 0, sizeof(head_light));
+    head_light.height = 10;
+    head_light.vdf_iterations = 100000ULL;
+    head_light.cumulative_vdf_iterations = 500000ULL;
+
+    duel_block_header_t head_heavy;
+    memset(&head_heavy, 0, sizeof(head_heavy));
+    head_heavy.height = 10;
+    head_heavy.vdf_iterations = 200000ULL;
+    head_heavy.cumulative_vdf_iterations = 700000ULL;
+
+    const duel_block_header_t *win_hdr = NULL;
+    int hres = duel_resolve_fork_headers(&sm, &head_light, &head_heavy, &win_hdr);
+    TEST_ASSERT(hres == 1);
+    TEST_ASSERT(win_hdr == &head_heavy);
+    TEST_ASSERT(duel_state_get_cumulative_work(&sm) == 700000ULL);
+
+    printf("  -> PASS: Heaviest branch selected by PoSW cumulative sequential work.\n");
+}
+
 #ifndef LIBFUZZER_ENABLED
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -211,6 +270,7 @@ int main(void) {
     test_liveness_proof_fallback();
     test_timelock_inequality();
     test_canonicalization_defenses();
+    test_nakamoto_posw_fork_choice();
 
     /* Simulated in-process fuzz sweep */
     printf("[TEST] 4. Fuzzing Simulation Sweep (1,000 malformed mutations)...\n");

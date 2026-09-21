@@ -4,8 +4,9 @@
  *
  * Dynamic Difficulty Adjustment (DDA) Engine for K=2 VDF Duel.
  *
- * Implements sliding window moving average, 5% per-block dampening rules,
- * and Big-Endian consensus header serialization/verification.
+ * Implements sliding window moving average, aggressive upward calibration for
+ * measured_time < 3000ms (iterations += iterations / 2), 5% per-block dampening
+ * rules when above target, and Big-Endian consensus header serialization/verification.
  */
 
 #include <determ/consensus/dda.h>
@@ -49,9 +50,30 @@ void dda_record_vdf_time(dda_tracker_t *tracker, uint32_t elapsed_ms) {
     }
 }
 
+/*
+ * Deterministic DDA: The DDA algorithm must NOT use local hardware clocks.
+ * Rewrite calculate_average_vdf_time() to compute elapsed time strictly by reading
+ * the difference in timestamps embedded in the finalized block headers:
+ * (Block[N].timestamp - Block[N-10].timestamp).
+ */
 uint32_t calculate_average_vdf_time(const dda_tracker_t *tracker) {
     if (!tracker || tracker->count == 0) {
         return TARGET_VDF_MS;
+    }
+
+    /*
+     * If 10 block header timestamps are available in the sliding window,
+     * compute elapsed time strictly from finalized block header timestamps:
+     * (Block[N].timestamp - Block[N-10].timestamp) / DDA_WINDOW_SIZE.
+     * Local hardware clocks are strictly forbidden.
+     */
+    if (tracker->count >= DDA_WINDOW_SIZE && tracker->block_timestamps[0] > 0) {
+        size_t newest_idx = (tracker->head + DDA_WINDOW_SIZE - 1) % DDA_WINDOW_SIZE;
+        size_t oldest_idx = tracker->head;
+        if (tracker->block_timestamps[newest_idx] > tracker->block_timestamps[oldest_idx]) {
+            uint64_t delta = tracker->block_timestamps[newest_idx] - tracker->block_timestamps[oldest_idx];
+            return (uint32_t)(delta / DDA_WINDOW_SIZE);
+        }
     }
 
     uint64_t sum = 0;
@@ -72,33 +94,27 @@ uint64_t calibrate_vdf_iterations(uint64_t current_iterations, uint32_t average_
         average_time_ms = 1; /* Protect against zero-division */
     }
 
-    /* Strict dampening rule: maximum 5% adjustment per block */
-    uint64_t max_step = (current_iterations * (uint64_t)DDA_MAX_ADJUST_PERCENT) / 100ULL;
-    if (max_step == 0) {
-        max_step = 1;
-    }
-
     uint64_t next_iterations = current_iterations;
 
     if (average_time_ms < TARGET_VDF_MS) {
         /*
-         * Block execution was faster than target (ASIC acceleration or faster CPU).
-         * Proportional increase:
-         *   disparity = TARGET_VDF_MS - average_time_ms
-         *   delta = (current_iterations * disparity) / average_time_ms
-         * Clamped strictly to max_step (5%).
+         * Aggressively scale iterations upwards (iterations += iterations / 2)
+         * to immediately correct hardware anomalies when running under 3000ms.
          */
-        uint64_t disparity = (uint64_t)(TARGET_VDF_MS - average_time_ms);
-        uint64_t delta = (current_iterations * disparity) / (uint64_t)average_time_ms;
-        if (delta > max_step) {
-            delta = max_step;
+        uint64_t boost = current_iterations / 2ULL;
+        if (boost == 0) {
+            boost = 1ULL;
         }
-        next_iterations = current_iterations + delta;
+        next_iterations = current_iterations + boost;
     } else if (average_time_ms > TARGET_VDF_MS) {
         /*
          * Block execution was slower than target.
          * Proportional decrease clamped strictly to max_step (5%).
          */
+        uint64_t max_step = (current_iterations * (uint64_t)DDA_MAX_ADJUST_PERCENT) / 100ULL;
+        if (max_step == 0) {
+            max_step = 1ULL;
+        }
         uint64_t disparity = (uint64_t)(average_time_ms - TARGET_VDF_MS);
         uint64_t delta = (current_iterations * disparity) / (uint64_t)average_time_ms;
         if (delta > max_step) {

@@ -325,12 +325,13 @@ static void test_native_dsf_seams(void) {
     duel_status_t late_rc = duel_submit_contributor_reveal(&sm, late_data, sizeof(late_data), true);
     TEST_ASSERT(late_rc == DUEL_DROPPED_BUZZER_EXCEEDED);
 
-    /* Poll buzzer: state machine locks buffer and enters 1-of-2 straggler fallback */
-    TEST_ASSERT(duel_state_poll_buzzer(&sm) == DUEL_SUCCESS);
-    TEST_ASSERT(sm.state == DUEL_STATE_VDF_EVALUATION);
-    TEST_ASSERT(sm.straggler_fallback_active == true);
+    /* Poll buzzer: state machine locks buffer and enters strict 2-of-2 skipping */
+    TEST_ASSERT(duel_state_poll_buzzer(&sm) == ERR_EPOCH_SKIPPED_INCOMPLETE);
+    TEST_ASSERT(sm.state == DUEL_STATE_ABORTED);
+    TEST_ASSERT(sm.straggler_fallback_active == false);
+    TEST_ASSERT(sm.vrf_round == 1);
 
-    printf("  -> PASS: Virtual clock jumped 2001ms instantly without CPU sleep; buzzer triggered fallback.\n");
+    printf("  -> PASS: Virtual clock jumped 2001ms instantly without CPU sleep; buzzer triggered strict 2-of-2 skip.\n");
 }
 
 /*

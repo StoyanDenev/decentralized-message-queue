@@ -207,7 +207,7 @@ static void test_http_json_rpc_status_and_difficulty(void) {
     close(c_fd);
 
     TEST_ASSERT(strstr(resp2, "HTTP/1.1 200 OK") != NULL);
-    TEST_ASSERT(strstr(resp2, "\"target_vdf_ms\":5000") != NULL);
+    TEST_ASSERT(strstr(resp2, "\"target_vdf_ms\":3000") != NULL);
     TEST_ASSERT(strstr(resp2, "\"current_iterations\":125000") != NULL);
     TEST_ASSERT(strstr(resp2, "\"max_dampening_percent\":5") != NULL);
 

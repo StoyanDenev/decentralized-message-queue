@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define TARGET_VDF_MS           5000U  /* 5000ms (5.0 seconds) target execution time */
+#define TARGET_VDF_MS           3000U  /* 3000ms target execution time strictly enforced */
 #define DDA_WINDOW_SIZE         10U    /* 10-block sliding window */
 #define DDA_MAX_ADJUST_PERCENT  5U     /* Strict 5% max adjustment per block (dampening) */
 #define DDA_MIN_ITERATIONS      1000ULL
@@ -34,6 +34,7 @@ extern "C" {
  */
 typedef struct {
     uint32_t block_times_ms[DDA_WINDOW_SIZE];
+    uint64_t block_timestamps[DDA_WINDOW_SIZE];
     size_t   count;                /* Number of recorded blocks in window (<= DDA_WINDOW_SIZE) */
     size_t   head;                 /* Ring buffer write head */
     uint64_t current_iterations;   /* Currently calibrated iteration parameter */
@@ -74,7 +75,8 @@ uint32_t calculate_average_vdf_time(const dda_tracker_t *tracker);
 /*
  * Core calibration algorithm:
  * Adjusts current_iterations based on average_time compared to TARGET_VDF_MS.
- * Enforces strict 5% max change per block (dampening) and sanity clamps.
+ * If measured_time < 3000ms, aggressively scales iterations upwards (iterations += iterations / 2).
+ * Enforces strict 5% max change per block (dampening) when above target, and sanity clamps.
  */
 uint64_t calibrate_vdf_iterations(uint64_t current_iterations, uint32_t average_time_ms);
 

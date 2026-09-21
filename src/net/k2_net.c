@@ -20,6 +20,7 @@
 
 #include <determ/net/k2_net.h>
 #include <determ/crypto/secure_zero.h>
+#include <determ/time/clock.h>
 
 #include <unistd.h>
 #include <errno.h>
@@ -184,6 +185,24 @@ int k2_aggregator_start_duel(k2_aggregator_t *agg, const uint8_t *agg_reveal, ui
 
 int k2_aggregator_poll(k2_aggregator_t *agg, int timeout_ms) {
     if (!agg || agg->listen_fd < 0) return -1;
+
+    /* AWAITING_COMMITS: 1000ms timeout for Contributor silence */
+    if (agg->duel_sm.state == DUEL_STATE_COMMITMENT_PHASE || agg->duel_sm.state == DUEL_STATE_AWAITING_COMMITS) {
+        uint64_t epoch_start = agg->duel_sm.epoch_start_time;
+        if (epoch_start > 0 && (determ_clock_now() - epoch_start > 1000000000ULL)) {
+            if (!agg->duel_sm.contributor_commit.present) {
+                if (agg->peer.connected && agg->peer.fd >= 0) {
+                    net_event_loop_del(&agg->loop, agg->peer.fd);
+                    close(agg->peer.fd);
+                    agg->peer.connected = false;
+                    agg->peer.fd = -1;
+                }
+                agg->duel_sm.vrf_round++;
+                agg->duel_sm.state = DUEL_STATE_ABORTED;
+                return ERR_EPOCH_SKIPPED_SILENCE;
+            }
+        }
+    }
 
     /* If reveal window is running, poll monotonic clock for buzzer expiration */
     if (agg->duel_sm.state == DUEL_STATE_AWAITING_REVEALS) {

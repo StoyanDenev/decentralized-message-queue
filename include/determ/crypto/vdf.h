@@ -29,9 +29,16 @@ extern "C" {
 #define VDF_BLOCK_SIZE          16U
 #define VDF_ARENA_BLOCKS        4096U
 #define VDF_ARENA_SIZE          (VDF_ARENA_BLOCKS * VDF_BLOCK_SIZE) /* 64 KB */
-#define VDF_DEFAULT_TARGET_SEC  5.0
+#define VDF_DEFAULT_TARGET_SEC  3.0
 #define VDF_MIN_ITERATIONS      1000ULL
 #define VDF_MAX_ITERATIONS      1000000000ULL
+
+/*
+ * BASE_VDF_ITERATIONS:
+ * Scaled upwards by 50x (2,500,000 iterations) to guarantee a baseline
+ * execution duration >2500ms on modern multicore/superscalar hardware.
+ */
+#define BASE_VDF_ITERATIONS     2500000ULL
 
 /*
  * Strictly aligned, tightly packed VDF state buffer
@@ -93,8 +100,6 @@ int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]);
  */
 int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
                uint64_t iterations, const uint8_t claimed_output[VDF_OUTPUT_LEN]);
-
-
 
 #if defined(DETERM_DSF_ENABLED)
 /*

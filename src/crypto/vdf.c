@@ -1,5 +1,3 @@
-#include "determ/time/clock.h"
-#include "determ/crypto/sha2/sha2.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -9,6 +7,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "determ/time/clock.h"
 #include <determ/crypto/vdf.h>
 #include <determ/crypto/sha2/sha2.h>
 #include <determ/crypto/aes/aes.h>
@@ -22,9 +21,13 @@
 #include <mach/mach_time.h>
 #endif
 
+#ifndef BASE_VDF_ITERATIONS
+#define BASE_VDF_ITERATIONS 2500000ULL
+#endif
+
 #if defined(DETERM_DSF_ENABLED)
 static bool s_dsf_vdf_bypass_enabled = false;
-static uint64_t s_dsf_vdf_target_ms = 5000ULL;
+static uint64_t s_dsf_vdf_target_ms = 3000ULL;
 
 void determ_dsf_set_vdf_bypass(bool enabled, uint64_t target_vdf_ms) {
     s_dsf_vdf_bypass_enabled = enabled;
@@ -50,6 +53,9 @@ static uint64_t vdf_get_monotonic_ns(void) {
 int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t iterations) {
     if (!ctx || (!seed && seed_len > 0)) {
         return -1;
+    }
+    if (iterations == 0) {
+        iterations = BASE_VDF_ITERATIONS;
     }
     if (iterations < VDF_MIN_ITERATIONS || iterations > VDF_MAX_ITERATIONS) {
         return -1;
@@ -113,7 +119,7 @@ int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]) {
 
 #if defined(DETERM_DSF_ENABLED)
     if (s_dsf_vdf_bypass_enabled) {
-                determ_sha256_ctx sha;
+        determ_sha256_ctx sha;
         determ_sha256_init(&sha);
         determ_sha256_update(&sha, ctx->state, VDF_OUTPUT_LEN);
         determ_sha256_update(&sha, (const uint8_t *)&ctx->iterations, sizeof(ctx->iterations));
@@ -209,7 +215,7 @@ int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
     uint8_t computed[VDF_OUTPUT_LEN];
 #if defined(DETERM_DSF_ENABLED)
     if (s_dsf_vdf_bypass_enabled) {
-                determ_sha256_ctx sha;
+        determ_sha256_ctx sha;
         determ_sha256_init(&sha);
         determ_sha256_update(&sha, ctx->state, VDF_OUTPUT_LEN);
         determ_sha256_update(&sha, (const uint8_t *)&ctx->iterations, sizeof(ctx->iterations));
@@ -228,4 +234,3 @@ int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
     determ_secure_zero(computed, sizeof(computed));
     return match ? 1 : 0;
 }
-
