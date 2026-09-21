@@ -248,7 +248,7 @@ FMTS=()
 KDFS=()
 STATUSES=()
 
-for f in "${FILES[@]}"; do
+for f in ${FILES[@]+"${FILES[@]}"}; do
   res=$(classify_one "$f")
   fmt=$(printf '%s' "$res" | cut -f1)
   kdf=$(printf '%s' "$res" | cut -f2)

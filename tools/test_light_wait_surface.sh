@@ -197,7 +197,7 @@ def blank(src):
                 i += 1
             if i < n: o[i] = o[i+1] = ' '; i += 2
             continue
-        if c in '"\'':
+        if c in (chr(34), chr(39)):
             q = c; j = i + 1
             while j < n:
                 if src[j] == '\\': j += 2; continue
