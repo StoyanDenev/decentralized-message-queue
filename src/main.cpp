@@ -274,7 +274,7 @@ Usage:
                                               fork-detection diff scripts.
                                               Allowed: index | prev_hash |
                                               state_root | block_hash | timestamp.
-  determ check-fork --node-a h:p             Automated cross-node divergence
+)" << R"(  determ check-fork --node-a h:p             Automated cross-node divergence
                   --node-b h:p               detection. Fetches the range from
                   --from N --to M            BOTH nodes via headers RPC and
                   [--field NAME] [--json]    reports the FIRST height where they
@@ -399,7 +399,7 @@ State commitment + light-client (v2.1 + v2.2):
                                               envelope. --committee is a JSON array of
                                               {domain, ed_pub} entries (or {members: [...]}
                                               shape). --bft allows sentinel-zero slots
-  determ verify-genesis --in genesis.json   Standalone genesis.json validator. Loads,
+)" << R"(  determ verify-genesis --in genesis.json   Standalone genesis.json validator. Loads,
                           [--expected-hash  applies sane-bounds checks, computes
                            <hex64>] [--json] compute_genesis_hash, prints a structured
                                               summary (incl. operational params now bound
@@ -530,7 +530,7 @@ In-process tests (deterministic, no network):
                                               ingress paths (rpc_submit_tx throws,
                                               on_tx gossip silent-drops); in-proc
                                               Node harness, falsify each path
-  determ test-rpc-validator-precheck          RpcIngress S-097 — BlockValidator precheck
+)" << R"(  determ test-rpc-validator-precheck          RpcIngress S-097 — BlockValidator precheck
                                               in rpc_submit_tx definitively rejects
                                               structurally invalid txs at RPC ingress
                                               (oversized payload, unauthorized anon
@@ -703,7 +703,7 @@ In-process tests (deterministic, no network):
                                               P-256 (C = v*G + r*H) — H KAT +
                                               additive homomorphism + open/
                                               verify + reject gates (§3.13)
-  determ test-bp-ipa-c99                      §3.19 inc.4: Bulletproofs inner-
+)" << R"(  determ test-bp-ipa-c99                      §3.19 inc.4: Bulletproofs inner-
                                               product argument over P-256 —
                                               round-trip + soundness + byte-exact
                                               proof KAT vs python (§3.13)
@@ -848,7 +848,7 @@ In-process tests (deterministic, no network):
                                               symlink refused, containers
                                               unchanged; SKIPs on Windows and
                                               banks NO pass there
-  determ test-snapshot-defense                S-018 defense-in-depth lock-in
+)" << R"(  determ test-snapshot-defense                S-018 defense-in-depth lock-in
                                               for Chain::restore_from_snapshot
                                               wrong-type collection rejection
                                               (every collection throws clean
@@ -936,7 +936,7 @@ In-process tests (deterministic, no network):
                                               UNSTAKE_DELAY / SUSPENSION_SLASH /
                                               REGISTER payload geometry /
                                               TRANSFER memo cap / ZEROTH_ADDRESS
-  determ test-supply-invariant                Chain A1 unitary supply read API
+)" << R"(  determ test-supply-invariant                Chain A1 unitary supply read API
                                               + expected_total formula shape
                                               (genesis + subsidy + inbound -
                                               slashed - outbound) — formula
@@ -1068,7 +1068,7 @@ Additional in-process tests:
                                               AbortEvent/snapshot/RPC): parses
                                               nlohmann's own dump + re-emits it
                                               byte-identically (swap-readiness)
-  determ test-determ-json-fuzz [--iters N]    minix JSON phase 2 inc.3 — determ::djson
+)" << R"(  determ test-determ-json-fuzz [--iters N]    minix JSON phase 2 inc.3 — determ::djson
                                               DIFFERENTIAL FUZZ vs nlohmann:
                                               thousands of random in-scope values,
                                               both BUILD+dump and PARSE+dump
@@ -1160,7 +1160,7 @@ Additional in-process tests:
                                               (receiver recomputes ρ; control: a
                                               correctly-routed receipt is accepted);
                                               via check_cross_shard_receipts_for_test
-  determ test-abort-claims-canonical          abort-event digest canonicalization —
+)" << R"(  determ test-abort-claims-canonical          abort-event digest canonicalization —
                                               hash the six consensus-bound claim
                                               fields (strip attacker-injected
                                               unknown members); byte-neutral for
@@ -1246,7 +1246,7 @@ Additional in-process tests:
                                               inc.8 per-step FA monitor (rejoiner
                                               re-adopts canonical settled bytes),
                                               plus replay-twice byte-identity
-  determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
+)" << R"(  determ test-node-reorg-s048                 A4/S-048 A4.2+A4.3: resolve_fork
                                               wiring + depth-1 head reorg. A
                                               non-producing follower is fed a
                                               producer block + a same-height
@@ -1378,7 +1378,7 @@ Additional in-process tests:
                                               one block, activate at
                                               effective_height; chain field
                                               mutation + hook invocation
-  determ test-governance-param-determinism    FA-Apply-8 PARAM_CHANGE
+)" << R"(  determ test-governance-param-determinism    FA-Apply-8 PARAM_CHANGE
                                               determinism — insertion-order
                                               resolution, validator-config
                                               forwarding, snapshot-restore
@@ -1652,7 +1652,7 @@ Additional in-process tests:
                                               creator_proposer_times). See
                                               test-timestamp-reconciliation for
                                               the reconciled-block binding.
-  determ test-timestamp-reconciliation        S-030-D2 timestamp dimension:
+)" << R"(  determ test-timestamp-reconciliation        S-030-D2 timestamp dimension:
                                               reconcile_median_time (lower-median,
                                               Byzantine-robust) + compute_block_
                                               digest binds timestamp iff
@@ -1887,7 +1887,7 @@ Additional in-process tests:
                                               gate (validator.cpp::check_
                                               timestamp) as the ONLY enforced
                                               bound.
-  determ test-chain-prev-hash-link            prev_hash chain-link contract —
+)" << R"(  determ test-chain-prev-hash-link            prev_hash chain-link contract —
                                               every block's prev_hash equals
                                               prior.compute_hash() (happy path
                                               + reload via Chain::save/load);
@@ -2062,7 +2062,7 @@ Additional in-process tests:
                                               contract sanity (valid +
                                               unknown fields side-by-side
                                               load cleanly).
-  determ test-fee-edge-cases                  Per-tx fee handling at the apply
+)" << R"(  determ test-fee-edge-cases                  Per-tx fee handling at the apply
                                               layer — companion to test-fee-
                                               distribution-edge on the input
                                               side. Zero-fee TRANSFER legal
@@ -2140,7 +2140,7 @@ Additional in-process tests:
                                               transition; and c:-namespace
                                               state_root sensitivity to the
                                               clamped accumulated_subsidy.
-  determ test-wire-caps-discriminator         S-022 framing/cap layering +
+)" << R"(  determ test-wire-caps-discriminator         S-022 framing/cap layering +
                                               discriminator contract for the D2
                                               binary-only wire (was test-wire-
                                               negotiation; the v0/v1 negotiation
