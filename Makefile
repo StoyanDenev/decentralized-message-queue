@@ -41,6 +41,7 @@ CONSENSUS_SRCS = \
 	src/wire/json_token.c \
 	src/wire/binary_codec.c \
 	src/rpc/json_rpc.c \
+	src/rpc/http_rpc_server.c \
 	src/storage/block_store.c
 
 ALL_CORE_SRCS = $(CRYPTO_SRCS) $(CONSENSUS_SRCS)
@@ -53,10 +54,11 @@ TEST_BINARY_CODEC_BIN = $(BIN_DIR)/test-binary-codec
 TEST_PEER_MESH_BIN = $(BIN_DIR)/test-peer-mesh
 TEST_BLOCK_STORE_BIN = $(BIN_DIR)/test-block-store
 TEST_DDA_BIN = $(BIN_DIR)/test-dda
+TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
 
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -90,6 +92,10 @@ $(TEST_DDA_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_dda.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(TEST_HTTP_RPC_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_http_rpc.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
+
 test: all
 	@echo "Running test-k2-duel..."
 	@./$(TEST_DUEL_BIN)
@@ -103,6 +109,8 @@ test: all
 	@./$(TEST_BLOCK_STORE_BIN)
 	@echo "Running test-dda..."
 	@./$(TEST_DDA_BIN)
+	@echo "Running test-http-rpc..."
+	@./$(TEST_HTTP_RPC_BIN)
 
 check: test
 

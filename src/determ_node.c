@@ -2,25 +2,20 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Determ Zero-Dependency C99 Bare-Metal Consensus Node.
- *
- * Implements:
- *   - K=2 Fast-Block Monotonic VDF Duel over raw POSIX sockets
- *   - Non-blocking Peer Mesh & Gossip Engine (peer_mesh)
- *   - Canonical On-Disk Block & Manifest Persistence (DBK1 / DMF1)
- *   - Zero-allocation in-place JSON-RPC diagnostics
- *
- * Zero third-party dynamic libraries. Zero heap allocations.
+ * Determ Full Consensus Node Daemon (Bare-Metal C99).
+ * Strictly zero-dependency: Zero Asio, Zero nlohmann/json, Zero OpenSSL.
  */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
 #endif
 
 #include <determ/consensus/duel_state.h>
+#include <determ/consensus/dda.h>
 #include <determ/crypto/vdf.h>
 #include <determ/net/k2_net.h>
 #include <determ/net/peer_mesh.h>
@@ -28,6 +23,7 @@
 #include <determ/wire/parser.h>
 #include <determ/wire/json_token.h>
 #include <determ/rpc/json_rpc.h>
+#include <determ/rpc/http_rpc_server.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,10 +32,12 @@
 #include <signal.h>
 
 /* BSS-allocated node contexts to prevent stack exhaustion */
-static peer_mesh_t    g_mesh;
-static block_store_t  g_store;
-static k2_aggregator_t g_agg;
-static k2_contributor_t g_cont;
+static peer_mesh_t       g_mesh;
+static block_store_t     g_store;
+static k2_aggregator_t   g_agg;
+static k2_contributor_t  g_cont;
+static http_rpc_server_t g_rpc;
+static dda_tracker_t     g_dda;
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -61,6 +59,8 @@ static void print_usage(const char *prog) {
     printf("  --peer <ip:port>          Outbound peer to connect\n");
     printf("  --data-dir <path>         Directory for persistent block storage (.blocks)\n");
     printf("  --domain <name>           Node domain advertisement (default: node.local)\n\n");
+    printf("HTTP JSON-RPC Server:\n");
+    printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n\n");
     printf("Diagnostics & Calibration:\n");
     printf("  --benchmark               Run ASIC-resistant AES-256 VDF hardware benchmark\n");
     printf("  --version                 Print version and architectural info\n");
@@ -88,30 +88,31 @@ static int run_benchmark(void) {
            (double)ctx.elapsed_ns / 1000000.0, ns_per_iter);
 
     uint64_t w_reveal_ns = DUEL_REVEAL_WINDOW_NS;
-    uint64_t delta_ns = 200000000ULL; /* 200ms network propagation */
-    uint64_t target_bound_ns = w_reveal_ns + delta_ns;
-    uint64_t req_iters = (uint64_t)((double)target_bound_ns / ns_per_iter) + 1000;
+    uint64_t delta_ns = 200000000ULL; /* 200ms network propagation grace Delta */
+    uint64_t lower_bound_ns = w_reveal_ns + delta_ns;
+    uint64_t required_iters = (uint64_t)((double)lower_bound_ns / ns_per_iter) + 5000;
 
-    printf("[VDF Benchmark] Calibrated iterations for T_vdf > W_reveal + Delta (2200ms): %llu iters\n",
-           (unsigned long long)req_iters);
+    printf("[VDF Benchmark] Lower bound (W_reveal + Delta): %llu ms\n",
+           (unsigned long long)(lower_bound_ns / 1000000ULL));
+    printf("[VDF Benchmark] Minimum VDF iterations for Enforced Blindness: %llu\n",
+           (unsigned long long)required_iters);
     return 0;
 }
 
-static void on_p2p_message(peer_mesh_t *mesh, int peer_idx, const wire_envelope_t *env, void *user_data) {
+static void on_p2p_message(peer_mesh_t *mesh, int peer_idx, const wire_envelope_t *env, void *ud) {
     (void)mesh;
-    (void)user_data;
-    printf("[P2P Ingress] Peer #%d sent msg_type=0x%02X (%zu bytes)\n",
-           peer_idx, env->msg_type, env->payload_len);
+    (void)ud;
+    printf("[P2P Mesh] Received message 0x%02X (%zu bytes) from peer #%d\n",
+           env->msg_type, env->payload_len, peer_idx);
 }
 
-static void on_p2p_connect(peer_mesh_t *mesh, int peer_idx, void *user_data) {
-    (void)user_data;
-    printf("[P2P Mesh] Peer #%d connected: domain='%s' role=%u shard=%u\n",
-           peer_idx, mesh->peers[peer_idx].domain,
-           mesh->peers[peer_idx].role, mesh->peers[peer_idx].shard_id);
+static void on_p2p_connect(peer_mesh_t *mesh, int peer_idx, void *ud) {
+    (void)mesh;
+    (void)ud;
+    printf("[P2P Mesh] Peer #%d connected successfully.\n", peer_idx);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char *argv[]) {
     bool is_aggregator = false;
     bool is_contributor = false;
     bool do_benchmark = false;
@@ -119,6 +120,7 @@ int main(int argc, char **argv) {
     const char *connect_ip = "127.0.0.1";
 
     uint16_t p2p_port = 0;
+    uint16_t rpc_port = 0;
     const char *peer_target = NULL;
     const char *data_dir = NULL;
     const char *domain = "node.local";
@@ -134,6 +136,8 @@ int main(int argc, char **argv) {
             connect_ip = argv[++i];
         } else if (strcmp(argv[i], "--p2p-port") == 0 && i + 1 < argc) {
             p2p_port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--rpc-port") == 0 && i + 1 < argc) {
+            rpc_port = (uint16_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--peer") == 0 && i + 1 < argc) {
             peer_target = argv[++i];
         } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
@@ -144,10 +148,10 @@ int main(int argc, char **argv) {
             do_benchmark = true;
         } else if (strcmp(argv[i], "--version") == 0) {
             printf("Determ Node v2.18 (Strict Zero-Dependency C99 Architecture)\n");
-            printf("Consensus: K=2 Fast-Block Monotonic VDF Duel\n");
+            printf("Consensus: K=2 Fast-Block Monotonic VDF Duel with DDA\n");
             printf("Networking: Native POSIX non-blocking kqueue/epoll (Zero Asio)\n");
             printf("Storage: Canonical DMF1 Manifest & DBK1 Block Records\n");
-            printf("Wire/RPC: Big-Endian Binary Wire & In-Place C99 Token Parser (Zero nlohmann/json)\n");
+            printf("RPC: Bare-Metal HTTP/1.1 In-Place JSON-RPC Transport\n");
             return 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -161,6 +165,9 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+
+    /* Initialize DDA tracker baseline */
+    dda_init(&g_dda, 100000ULL);
 
     /* 1. Initialize persistent storage engine if requested */
     bool store_active = false;
@@ -181,6 +188,7 @@ int main(int argc, char **argv) {
     bool mesh_active = false;
     if (p2p_port > 0 || peer_target != NULL) {
         peer_mesh_config_t mcfg = {
+            .domain = "",
             .listen_port = p2p_port,
             .role = CHAIN_ROLE_SINGLE,
             .shard_id = 0,
@@ -223,29 +231,49 @@ int main(int argc, char **argv) {
         mesh_active = true;
     }
 
-    /* 3. Run Duel consensus state machine if specified */
+    /* 3. Initialize HTTP JSON-RPC Server if requested */
+    bool rpc_active = false;
+    if (rpc_port > 0) {
+        http_rpc_config_t rcfg;
+        memset(&rcfg, 0, sizeof(rcfg));
+        rcfg.port = rpc_port;
+        rcfg.rpc_ctx.store = store_active ? &g_store : NULL;
+        rcfg.rpc_ctx.mesh = mesh_active ? &g_mesh : NULL;
+        rcfg.rpc_ctx.dda = &g_dda;
+        rcfg.rpc_ctx.node_version = "v2.18-c99";
+
+        if (http_rpc_server_init(&g_rpc, &rcfg) != 0 || http_rpc_server_start(&g_rpc) != 0) {
+            fprintf(stderr, "Error: Failed to start HTTP JSON-RPC server on port %u\n", rpc_port);
+            if (mesh_active) peer_mesh_close(&g_mesh);
+            if (store_active) block_store_close(&g_store);
+            return 1;
+        }
+        printf("[HTTP RPC] Server listening on http://127.0.0.1:%u (JSON-RPC 2.0)\n", rpc_port);
+        rpc_active = true;
+    }
+
+    /* 4. Execution Mode */
     if (is_aggregator) {
-        printf("[Aggregator] Starting node on port %u...\n", duel_port);
+        printf("[Aggregator] Starting K=2 duel server on port %u...\n", duel_port);
         if (k2_aggregator_init(&g_agg, duel_port) != 0) {
-            fprintf(stderr, "Failed to bind Aggregator on port %u\n", duel_port);
+            fprintf(stderr, "Failed to start Aggregator on port %u\n", duel_port);
+            if (rpc_active) http_rpc_server_close(&g_rpc);
             if (mesh_active) peer_mesh_close(&g_mesh);
             if (store_active) block_store_close(&g_store);
             return 1;
         }
 
-        const uint8_t agg_reveal[] = "aggregator-genesis-payload";
-        if (k2_aggregator_start_duel(&g_agg, agg_reveal, sizeof(agg_reveal) - 1) != 0) {
-            fprintf(stderr, "Failed to start duel state machine\n");
-            k2_aggregator_close(&g_agg);
-            if (mesh_active) peer_mesh_close(&g_mesh);
-            if (store_active) block_store_close(&g_store);
-            return 1;
+        if (rpc_active) {
+            rpc_context_t ctx = g_rpc.rpc_ctx;
+            ctx.sm = &g_agg.duel_sm;
+            http_rpc_server_set_context(&g_rpc, &ctx);
         }
 
         printf("[Aggregator] Listening for Contributor connection...\n");
         while (g_running && !g_agg.duel_completed) {
             k2_aggregator_poll(&g_agg, 20);
             if (mesh_active) peer_mesh_poll(&g_mesh, 10);
+            if (rpc_active) http_rpc_server_poll(&g_rpc, 10);
         }
 
         if (g_agg.duel_completed) {
@@ -264,6 +292,7 @@ int main(int argc, char **argv) {
         printf("[Contributor] Connecting to Aggregator at %s:%u...\n", connect_ip, duel_port);
         if (k2_contributor_init(&g_cont) != 0) {
             fprintf(stderr, "Failed to initialize Contributor\n");
+            if (rpc_active) http_rpc_server_close(&g_rpc);
             if (mesh_active) peer_mesh_close(&g_mesh);
             if (store_active) block_store_close(&g_store);
             return 1;
@@ -272,6 +301,7 @@ int main(int argc, char **argv) {
         if (k2_contributor_connect(&g_cont, connect_ip, duel_port) != 0) {
             fprintf(stderr, "Failed to connect to %s:%u\n", connect_ip, duel_port);
             k2_contributor_close(&g_cont);
+            if (rpc_active) http_rpc_server_close(&g_rpc);
             if (mesh_active) peer_mesh_close(&g_mesh);
             if (store_active) block_store_close(&g_store);
             return 1;
@@ -282,6 +312,7 @@ int main(int argc, char **argv) {
         if (k2_contributor_send_commitment(&g_cont, commitment) != 0) {
             fprintf(stderr, "Failed to send commitment\n");
             k2_contributor_close(&g_cont);
+            if (rpc_active) http_rpc_server_close(&g_rpc);
             if (mesh_active) peer_mesh_close(&g_mesh);
             if (store_active) block_store_close(&g_store);
             return 1;
@@ -295,22 +326,26 @@ int main(int argc, char **argv) {
         while (g_running && !g_cont.result_received) {
             k2_contributor_poll(&g_cont, 20);
             if (mesh_active) peer_mesh_poll(&g_mesh, 10);
+            if (rpc_active) http_rpc_server_poll(&g_rpc, 10);
         }
 
         if (g_cont.result_received) {
             printf("[Contributor] Received VDF block result from Aggregator!\n");
         }
         k2_contributor_close(&g_cont);
-    } else if (mesh_active) {
-        printf("[Node] Running in P2P mesh mode (press Ctrl+C to exit)...\n");
+    } else if (mesh_active || rpc_active) {
+        printf("[Node] Running active services (press Ctrl+C to exit)...\n");
         while (g_running) {
-            peer_mesh_poll(&g_mesh, 50);
+            if (mesh_active) peer_mesh_poll(&g_mesh, 20);
+            if (rpc_active) http_rpc_server_poll(&g_rpc, 20);
+            if (!mesh_active && !rpc_active) usleep(20000);
         }
     } else {
         printf("Determ Node: No mode specified. Running verification benchmark by default.\n");
         run_benchmark();
     }
 
+    if (rpc_active) http_rpc_server_close(&g_rpc);
     if (mesh_active) peer_mesh_close(&g_mesh);
     if (store_active) block_store_close(&g_store);
 
