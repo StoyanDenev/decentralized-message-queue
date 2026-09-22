@@ -523,7 +523,9 @@ which = sys.argv[1]
 for p in sorted(sys.argv[2:]):
     ls = open(p, encoding='utf-8', errors='replace').read().split('\n')
     for ln, ev in CHECKS[which](p, ls):
-        print('%s|%s:%d|%s' % (which, os.path.normpath(p), ln, ev))
+        # Finding identities use repository slash spelling on every host;
+        # opening the file and all detection predicates still use the input.
+        print('%s|%s:%d|%s' % (which, os.path.normpath(p).replace(os.sep, '/'), ln, ev))
 PYEOF
 
 # THIS FILE IS EXCLUDED FROM THE SWEEP. It carries, as heredoc fixtures, verbatim
@@ -683,6 +685,20 @@ eqq "$($PY "$T/checkers.py" D2 "$T/sel/test_e2_skipbanks.sh" | grep -c .)" "1" \
     "E2: a SKIP that increments pass_count is flagged by D2"
 eqq "$($PY "$T/checkers.py" D3 "$T/sel/test_e3_vacuous.sh" | grep -c .)" "1" \
     "E3: the vacuous PASS bail-out over a missing binary is flagged by D3"
+# Exercise the actual emitter under Windows path semantics on every host.
+# This changes only the checker's path formatter, not file I/O or detection.
+WINDOWS_D3=$($PY - "$T/checkers.py" "$T" <<'PYEOF'
+import glob, ntpath, os, re, sys
+checker = compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')
+os.chdir(sys.argv[2])
+sys.argv = ['checkers.py', 'D3', 'sel/test_e3_vacuous.sh']
+os.path = ntpath
+os.sep = '\\'
+exec(checker, {'__name__': '__main__'})
+PYEOF
+)
+eqq "$(printf '%s' "$WINDOWS_D3" | cut -d'|' -f2)" "sel/test_e3_vacuous.sh:5" \
+    "E3: Windows path formatting preserves the exact slash-form finding identity and line"
 eqq "$($PY "$T/checkers.py" D1 "$T/sel/test_e0_clean.sh" | grep -c .)$($PY "$T/checkers.py" D2 "$T/sel/test_e0_clean.sh" | grep -c .)$($PY "$T/checkers.py" D3 "$T/sel/test_e0_clean.sh" | grep -c .)" "000" \
     "E0: the corrected shape (assert on one arm, counted skip on the other, a floor) is flagged by none of the three"
 # E5 — the two heredoc shapes D4 exists for, and a falsifiable heredoc control.

@@ -6409,3 +6409,21 @@ Independent diff review approved the correction. A fresh shared Darwin arm64
 `ci_local --jobs 4` run passes 333 FAST wrappers, zero entire-wrapper skips, and
 all 16 documentation guards. Actual Windows execution remains for the hosted
 rerun; a POSIX pass is not claimed as evidence about native Windows permissions.
+
+## 2026-09-22 — Canonical scanner finding paths across platforms
+
+The Windows D3 gate reported all five existing allowlisted files as both new
+findings and stale entries: `os.path.normpath` emitted backslashes while the exact
+allowlist uses repository slash spelling. Normalize only the emitted path identity
+to slashes. File opening, detection predicates, line numbers and both allowlists
+are unchanged. An added E3 assertion executes the actual generated checker under
+Windows `ntpath` formatting and pins the exact path plus line on every host. The
+security ledger's gate row now describes the current 53 assertions and scope.
+
+A fresh Darwin arm64 `ci_local --jobs 4` baseline passes all 333 wrappers and 16
+documentation guards. Removing only the emitter normalization, then running the
+same entry point after a successful build, yields 332 passing wrappers and one
+failure: E3 reports `sel\test_e3_vacuous.sh:5` instead of the required slash path,
+with 52 assertions passing and one failing. The reviewed script is restored
+byte-for-byte after that run. Independent diff review approved the gate; the
+final documentation guards pass. Native Windows confirmation remains hosted.
