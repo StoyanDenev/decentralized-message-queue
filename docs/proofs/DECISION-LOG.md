@@ -6441,3 +6441,17 @@ checkout filter their bytes now equal their committed blobs, including SHA-256;
 no golden, emitter or comparison changes. Independent review approved the diff.
 The shared Darwin `ci_local --jobs 4` baseline passes all 333 wrappers and 16
 documentation guards. Hosted Windows confirmation remains for the rerun.
+
+## 2026-09-22 — Native paths for secret-source fixtures
+
+Hosted Windows rejected `file:` secret sources whose test fixture paths contained
+MSYS `/d/...` spelling; environment and piped-prompt sources passed. Construct the
+fixture root from `common.sh`'s existing platform-aware `PROJECT_ROOT`, rather than
+`PWD`, so native executables receive `D:/...` spelling inside those arguments.
+The fixture contents, functional/refusal assertions and explicit Linux-only
+kernel observations are unchanged; no production source changes.
+
+Independent review approved this one-line correction. The shared Darwin
+`ci_local --jobs 4` baseline passes all 333 wrappers, zero entire-wrapper skips,
+and 16 documentation guards. Native Windows verification remains for the hosted
+rerun; the previous platform failures are not recorded as passes.

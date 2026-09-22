@@ -94,7 +94,8 @@ D="$DETERM"
 unset DETERM_PASSPHRASE
 
 TMP="build/test_secret_on_argv.$$"; mkdir -p "$TMP"
-TMP_ABS="$PWD/$TMP"
+# Native Windows executables need the platform path supplied by common.sh.
+TMP_ABS="$PROJECT_ROOT/$TMP"
 trap 'rm -rf "$TMP"' EXIT
 rc=0; npass=0
 pass(){ echo "  PASS: $1"; npass=$((npass+1)); }
