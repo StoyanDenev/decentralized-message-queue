@@ -5980,3 +5980,33 @@ and PROPOSED. Verification and independent review are recorded below after compl
 `git diff --check` passed. Independent review found no actionable issues in the
 recorded preference, later correction requirement or DSF eligibility constraints.
 This documentation-only increment built no binaries and ran no new simulations.
+
+## 2026-09-22 — Modulus routing clarification and existing mapping baseline
+
+**Owner clarification:** "Sharding is based on modulus so every node knows its
+shard." Repository inspection also confirms an existing canonical account-routing
+map in `src/crypto/random.cpp::shard_id_for_address`, `PROTOCOL.md` §7.2 and
+`ShardRoutingSoundness.md`: the first eight bytes of
+`SHA256(salt || "shard-route" || addr)`, interpreted big-endian, modulo S. For
+valid S >= 1 this maps each address to one shard; S = 1 yields zero. The existing
+definition pins salt and shard count at genesis.
+
+The assistant's statement that a new canonical account mapping must be selected
+was incorrect. ADR-005 now identifies the existing mapping as its routing baseline.
+The remaining C99 work is integration with the canonical account representation and
+receiver/apply enforcement, not a request to decide the mapping again. Routing
+alone neither selects the co-creator pair nor implements cross-shard state changes.
+This entry does not infer a new validator-membership or election rule from the
+account-routing function.
+
+**Documentation correction.** The whitepaper's routing formula omitted the literal
+`"shard-route"` tag already present in the implementation and PROTOCOL. It now
+includes that tag. No hash, genesis field, wire byte, transaction or execution rule
+changes. No C99 routing implementation or new test ships in this documentation
+increment. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review confirmed the formula against the
+implementation, including raw salt/tag/address concatenation and big-endian folding,
+and found no actionable issues. No binaries or new simulations were built or run.

@@ -38,7 +38,7 @@ is mandated or ruled out by this proposal.
 | `src/ledger/mempool.c` | Does not exist. C99 state is in `src/ledger/state.c`; the C++ mempool and chain are separate. Neither an arena allocation nor a transaction shard field establishes state isolation. |
 | Transaction shard identity | Existing C99 binary transaction/container codecs already use u32 shard identifiers in `include/determ/wire/binary_codec.h`. The prototype parser has another transaction shape. Define the authoritative format and signing coverage; do not append a conflicting u16 field blindly. |
 | PoSW fork choice | C99 `determ-node` performs a local pair computation only. Validated block ingestion, work accumulation, branch adoption and durable rollback are missing. Raw work-comparison helpers were removed because they did not implement these rules. |
-| Existing sharding | C++ beacon, shard and receipt paths exist. A text search cannot establish that their structs or discriminators are unused. No deletion is authorized by this proposal. |
+| Existing sharding | C++ beacon, shard and receipt paths exist, as does canonical account-to-shard modulus routing in `src/crypto/random.cpp`. A text search cannot establish that their structs or discriminators are unused. No deletion is authorized by this proposal. |
 
 The [C99 contract](../proofs/K2_VDF_Soundness.md) and
 [ADR-004](ADR-004-Fault-Model.md) define the current limitations. Tests for isolated
@@ -111,9 +111,25 @@ formats cannot be silently migrated.
 
 ### 3.3 State ownership and settlement
 
-Define canonical ownership for accounts, contracts, nonces and spent receipts.
+The owner clarifies that shard assignment uses modulus. Account routing already
+has a canonical definition in [PROTOCOL §7.2](../PROTOCOL.md#72-address-to-shard-routing)
+and `src/crypto/random.cpp::shard_id_for_address`:
+
+```
+shard_id(addr) = BE64(SHA256(salt || "shard-route" || addr)[0:8]) mod S
+```
+
+For a valid fixed topology, S >= 1; S = 1 routes every address to shard 0. The
+existing definition pins salt and S at genesis. See
+[ShardRoutingSoundness.md](../proofs/ShardRoutingSoundness.md) for the mapping's
+contract and scope. This mapping is the account-routing baseline, not a new owner
+decision still to be made. It does not itself select the two block co-creators.
+
+The C99 path still needs to integrate that mapping with its canonical account
+representation and enforce ownership at transaction admission and state application,
+including account nonces and the effects of transactions involving other shards.
 A client-requested target shard must match derived ownership. Splitting queues into
-arenas does not prevent two shards from concurrently spending the same account.
+arenas alone does not enforce these checks.
 Specify hard limits, admission/backpressure, per-shard arena ownership and reclamation,
 execution scheduling and all shared-state access. Fixed capacity and no malloc do not
 by themselves make the execution path lock-free or race-free.

@@ -188,7 +188,7 @@ Beacon block times run at the wide-area RTT envelope (~1.5s on the global timing
 Account routing uses a salted SHA-256 over the address:
 
 ```
-shard_id(addr) = first_8_bytes_be(SHA-256(shard_address_salt ‖ addr)) mod S
+shard_id(addr) = first_8_bytes_be(SHA-256(shard_address_salt ‖ "shard-route" ‖ addr)) mod S
 ```
 
 The `shard_address_salt` is 32 random bytes pinned at genesis. The assignment is deterministic and stable for the chain's lifetime. Users who care about latency can grind addresses for a target shard; this is application-level concern, not protocol-level.
