@@ -13,7 +13,7 @@
 #      - Fail-closed on ciphertext tampering
 #      - Fail-closed on truncated file
 #   B. Shipped CLI integration:
-#      - `determ init --passphrase <pw>` creates node_key.bin (DNK1 magic, 0600 mode)
+#      - `determ init --passphrase <pw>` creates node_key.bin (DNK1 magic, POSIX 0600 mode)
 #      - `determ init --passphrase-from file:<path>` creates valid DNK1 container
 #      - `determ genesis-tool peer-info` extracts pubkey from encrypted DNK1 header without passphrase
 #   C. Cross-tool compatibility with determ-wallet:
@@ -33,10 +33,14 @@ source tools/common.sh
 
 UNAME_S=$(uname -s 2>/dev/null || echo "unknown")
 T=$(mktemp -d 2>/dev/null || mktemp -d -t 'test_node_key_enc')
+# MSYS does not translate paths embedded in file:<path> for native executables.
+case "$UNAME_S" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) T=$(cygpath -m "$T") ;;
+esac
 trap 'rm -rf "$T"' EXIT
 
 echo "=== A. in-process property test (determ test-node-key-encryption) ==="
-OUT=$($DETERM test-node-key-encryption 2>&1)
+OUT=$("$DETERM" test-node-key-encryption 2>&1)
 echo "$OUT"
 
 if ! echo "$OUT" | grep -q "PASS: test-node-key-encryption all assertions"; then
@@ -50,7 +54,7 @@ echo "=== B. shipped CLI integration (determ init + genesis-tool peer-info) ==="
 # 1. determ init with --passphrase
 D1="$T/node_pass"
 mkdir -p "$D1"
-$DETERM init --data-dir "$D1" --passphrase "test-secret-node-pass-1!" >/dev/null
+"$DETERM" init --data-dir "$D1" --passphrase "test-secret-node-pass-1!" >/dev/null
 
 if [ ! -f "$D1/node_key.bin" ]; then
   echo "  FAIL: determ init with --passphrase did not produce node_key.bin"
@@ -63,16 +67,21 @@ if [ "$MAGIC" != "DNK1" ]; then
   exit 1
 fi
 
-if [ "$UNAME_S" != "Windows_NT" ]; then
+case "$UNAME_S" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    echo "  SKIP: POSIX 0600 mode assertion (Windows ACLs are not checked here)"
+    ;;
+  *)
   MODE=$(stat -c "%a" "$D1/node_key.bin" 2>/dev/null || stat -f "%Lp" "$D1/node_key.bin" 2>/dev/null || echo "unknown")
   if [ "$MODE" != "600" ]; then
     echo "  FAIL: node_key.bin mode is not 0600 (got $MODE)"
     exit 1
   fi
-fi
+    ;;
+esac
 
 # 2. Extract pubkey via genesis-tool peer-info without passphrase
-INFO=$($DETERM genesis-tool peer-info "test.determ" --data-dir "$D1")
+INFO=$("$DETERM" genesis-tool peer-info "test.determ" --data-dir "$D1")
 PUB_HEX=$(echo "$INFO" | grep '"ed_pub"' | sed -E 's/.*"ed_pub": "([0-9a-f]+)".*/\1/')
 if [ -z "$PUB_HEX" ] || [ "${#PUB_HEX}" -ne 64 ]; then
   echo "  FAIL: genesis-tool peer-info did not extract valid 64-hex ed_pub from DNK1 file"
@@ -85,7 +94,7 @@ D2="$T/node_file"
 mkdir -p "$D2"
 PWFILE="$T/pw.txt"
 echo -n "node-secret-from-file-42!" > "$PWFILE"
-$DETERM init --data-dir "$D2" --passphrase-from "file:$PWFILE" >/dev/null
+"$DETERM" init --data-dir "$D2" --passphrase-from "file:$PWFILE" >/dev/null
 
 if [ ! -f "$D2/node_key.bin" ]; then
   echo "  FAIL: determ init with --passphrase-from file did not produce node_key.bin"
@@ -95,11 +104,11 @@ echo "  PASS: determ init --passphrase-from file produced node_key.bin"
 
 echo
 echo "=== C. cross-tool compatibility with determ-wallet ==="
-WALLET="${DETERM}-wallet"
+WALLET="${DETERM_WALLET:-}"
 if [ -x "$WALLET" ]; then
   # Decrypt node_key.bin with determ-wallet keyfile-decrypt
   export DEC_PW="test-secret-node-pass-1!"
-  $WALLET keyfile-decrypt --in "$D1/node_key.bin" --passphrase-from "env:DEC_PW" --out "$T/decrypted.json" >/dev/null
+  "$WALLET" keyfile-decrypt --in "$D1/node_key.bin" --passphrase-from "env:DEC_PW" --out "$T/decrypted.json" >/dev/null
   if [ ! -f "$T/decrypted.json" ]; then
     echo "  FAIL: determ-wallet keyfile-decrypt failed to decrypt determ-created node_key.bin"
     exit 1
@@ -116,8 +125,8 @@ if [ -x "$WALLET" ]; then
   mkdir -p "$D3"
   export CREAT_PW="wallet-created-key-pass!"
   export SEED_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  $WALLET keyfile-create --priv-from "env:SEED_HEX" --passphrase-from "env:CREAT_PW" --out "$D3/node_key.bin" >/dev/null
-  W_INFO=$($DETERM genesis-tool peer-info "wallet.determ" --data-dir "$D3")
+  "$WALLET" keyfile-create --priv-from "env:SEED_HEX" --passphrase-from "env:CREAT_PW" --out "$D3/node_key.bin" >/dev/null
+  W_INFO=$("$DETERM" genesis-tool peer-info "wallet.determ" --data-dir "$D3")
   W_PUB=$(echo "$W_INFO" | grep '"ed_pub"' | sed -E 's/.*"ed_pub": "([0-9a-f]+)".*/\1/')
   if [ -z "$W_PUB" ] || [ "${#W_PUB}" -ne 64 ]; then
     echo "  FAIL: determ peer-info could not read pubkey from wallet-created DNK1 container"

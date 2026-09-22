@@ -6389,3 +6389,23 @@ arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero entire-wrappe
 skips, and all 16 documentation guards. Partial kernel-observation skips remain
 explicit. Hosted verification of the updated guards will be recorded in the pull
 request after execution; this increment makes no Windows kernel-observation claim.
+
+## 2026-09-22 — Preserve node-key encryption coverage on Windows
+
+Hosted Windows completed the FAST suite and exposed six wrapper failures. The
+node-key encryption wrapper rejected the emulated 0644 mode on Git Bash because
+its platform check recognized only `Windows_NT`. Scope the 0600 assertion to
+POSIX and explicitly report its partial skip on Windows-family shells. Encryption
+and wallet interoperability checks remain active; no Windows ACL property is
+claimed. The security ledger states the same boundary.
+
+Convert the temporary directory with `cygpath -m` on Windows before constructing
+`file:` source arguments, which MSYS does not translate for native executables.
+Resolve the wallet through `common.sh`'s `DETERM_WALLET` rather than appending
+`-wallet` after a possible `.exe` suffix; quote executable paths. No production
+key handling or encryption rule changes.
+
+Independent diff review approved the correction. A fresh shared Darwin arm64
+`ci_local --jobs 4` run passes 333 FAST wrappers, zero entire-wrapper skips, and
+all 16 documentation guards. Actual Windows execution remains for the hosted
+rerun; a POSIX pass is not claimed as evidence about native Windows permissions.
