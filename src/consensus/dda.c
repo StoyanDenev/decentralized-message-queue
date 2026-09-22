@@ -2,11 +2,9 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Dynamic Difficulty Adjustment (DDA) Engine for K=2 VDF Duel.
- *
- * Implements sliding window moving average, aggressive upward calibration for
- * measured_time < 3000ms (iterations += iterations / 2), 5% per-block dampening
- * rules when above target, and Big-Endian consensus header serialization/verification.
+ * Experimental deterministic difficulty arithmetic and header codec.
+ * All interval inputs come from the supplied timestamp history, not a local
+ * elapsed-time measurement. See dda.h for validation and integration limits.
  */
 
 #include <determ/consensus/dda.h>
@@ -41,46 +39,15 @@ void dda_init(dda_tracker_t *tracker, uint64_t initial_iterations) {
     tracker->current_iterations = initial_iterations;
 }
 
-void dda_record_vdf_time(dda_tracker_t *tracker, uint32_t elapsed_ms) {
-    if (!tracker) return;
-    tracker->block_times_ms[tracker->head] = elapsed_ms;
-    tracker->head = (tracker->head + 1) % DDA_WINDOW_SIZE;
-    if (tracker->count < DDA_WINDOW_SIZE) {
-        tracker->count++;
-    }
-}
-
-/*
- * Deterministic DDA: The DDA algorithm must NOT use local hardware clocks.
- * Rewrite calculate_average_vdf_time() to compute elapsed time strictly by reading
- * the difference in timestamps embedded in the finalized block headers:
- * (Block[N].timestamp - Block[N-10].timestamp).
- */
 uint32_t calculate_average_vdf_time(const dda_tracker_t *tracker) {
-    if (!tracker || tracker->count == 0) {
+    if (!tracker || tracker->count < 2) {
         return TARGET_VDF_MS;
     }
-
-    /*
-     * If 10 block header timestamps are available in the sliding window,
-     * compute elapsed time strictly from finalized block header timestamps:
-     * (Block[N].timestamp - Block[N-10].timestamp) / DDA_WINDOW_SIZE.
-     * Local hardware clocks are strictly forbidden.
-     */
-    if (tracker->count >= DDA_WINDOW_SIZE && tracker->block_timestamps[0] > 0) {
-        size_t newest_idx = (tracker->head + DDA_WINDOW_SIZE - 1) % DDA_WINDOW_SIZE;
-        size_t oldest_idx = tracker->head;
-        if (tracker->block_timestamps[newest_idx] > tracker->block_timestamps[oldest_idx]) {
-            uint64_t delta = tracker->block_timestamps[newest_idx] - tracker->block_timestamps[oldest_idx];
-            return (uint32_t)(delta / DDA_WINDOW_SIZE);
-        }
-    }
-
-    uint64_t sum = 0;
-    for (size_t i = 0; i < tracker->count; i++) {
-        sum += tracker->block_times_ms[i];
-    }
-    return (uint32_t)(sum / tracker->count);
+    size_t newest_idx = (tracker->head + DDA_TIMESTAMP_CAPACITY - 1) % DDA_TIMESTAMP_CAPACITY;
+    size_t oldest_idx = (tracker->head + DDA_TIMESTAMP_CAPACITY - tracker->count) % DDA_TIMESTAMP_CAPACITY;
+    uint64_t delta = tracker->block_timestamps[newest_idx] - tracker->block_timestamps[oldest_idx];
+    uint64_t average = delta / (tracker->count - 1);
+    return average > UINT32_MAX ? UINT32_MAX : (uint32_t)average;
 }
 
 uint64_t calibrate_vdf_iterations(uint64_t current_iterations, uint32_t average_time_ms) {
@@ -98,8 +65,7 @@ uint64_t calibrate_vdf_iterations(uint64_t current_iterations, uint32_t average_
 
     if (average_time_ms < TARGET_VDF_MS) {
         /*
-         * Aggressively scale iterations upwards (iterations += iterations / 2)
-         * to immediately correct hardware anomalies when running under 3000ms.
+         * Increase work by 50% when the supplied average is below target.
          */
         uint64_t boost = current_iterations / 2ULL;
         if (boost == 0) {
@@ -108,7 +74,7 @@ uint64_t calibrate_vdf_iterations(uint64_t current_iterations, uint32_t average_
         next_iterations = current_iterations + boost;
     } else if (average_time_ms > TARGET_VDF_MS) {
         /*
-         * Block execution was slower than target.
+         * The supplied timestamp interval exceeds the target.
          * Proportional decrease clamped strictly to max_step (5%).
          */
         uint64_t max_step = (current_iterations * (uint64_t)DDA_MAX_ADJUST_PERCENT) / 100ULL;
@@ -143,10 +109,26 @@ uint64_t dda_get_next_iterations(const dda_tracker_t *tracker) {
     return calibrate_vdf_iterations(tracker->current_iterations, avg_ms);
 }
 
-void dda_commit_block(dda_tracker_t *tracker, uint32_t elapsed_ms) {
-    if (!tracker) return;
-    tracker->current_iterations = dda_get_next_iterations(tracker);
-    dda_record_vdf_time(tracker, elapsed_ms);
+bool dda_commit_block(dda_tracker_t *tracker, uint64_t timestamp_ms,
+                      uint64_t iterations) {
+    if (!tracker || !dda_verify_block_iterations(tracker, iterations)) {
+        return false;
+    }
+    if (tracker->count > 0) {
+        size_t newest_idx = (tracker->head + DDA_TIMESTAMP_CAPACITY - 1) % DDA_TIMESTAMP_CAPACITY;
+        if (timestamp_ms <= tracker->block_timestamps[newest_idx]) {
+            return false;
+        }
+    }
+
+    /* No mutation until both predecessor-work and timestamp checks pass. */
+    tracker->block_timestamps[tracker->head] = timestamp_ms;
+    tracker->head = (tracker->head + 1) % DDA_TIMESTAMP_CAPACITY;
+    if (tracker->count < DDA_TIMESTAMP_CAPACITY) {
+        tracker->count++;
+    }
+    tracker->current_iterations = iterations;
+    return true;
 }
 
 bool dda_verify_block_iterations(const dda_tracker_t *tracker, uint64_t block_iterations) {

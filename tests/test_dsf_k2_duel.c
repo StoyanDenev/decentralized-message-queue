@@ -163,7 +163,9 @@ static void test_vdf_simulation_bypass_and_dda(void) {
     /* Verify DDA integration with simulated time */
     dda_tracker_t dda;
     dda_init(&dda, 100000ULL);
-    dda_record_vdf_time(&dda, (uint32_t)(ctx.elapsed_ns / 1000000ULL));
+    /* Synthetic timestamp history; not local hardware duration admission. */
+    TEST_ASSERT(dda_commit_block(&dda, 0, 100000ULL));
+    TEST_ASSERT(dda_commit_block(&dda, TARGET_VDF_MS, 100000ULL));
     uint32_t avg = calculate_average_vdf_time(&dda);
     TEST_ASSERT(avg == TARGET_VDF_MS);
 
@@ -230,7 +232,7 @@ static void test_10_block_simulated_duel_benchmark(void) {
         TEST_ASSERT(vdf_evaluate(&vdf, vdf_out) == 0);
 
         /* Update DDA and block chain link */
-        dda_commit_block(&dda, (uint32_t)(vdf.elapsed_ns / 1000000ULL));
+        TEST_ASSERT(dda_commit_block(&dda, determ_clock_now_ms(), iters));
         memcpy(prev_hash, vdf_out, 32);
         blocks_finalized++;
     }
