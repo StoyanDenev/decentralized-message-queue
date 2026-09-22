@@ -3,7 +3,7 @@
 # ADR 005: Temporal Sharding — Design Gate
 
 **Date:** 2026-09-22
-**Status:** PROPOSED; bounded model and routing-query increments implemented; production consensus and settlement incomplete.
+**Status:** PROPOSED; bounded model, routing query and signed pending inbox implemented; production consensus and settlement incomplete.
 **Owner constraint (2026-09-22):** One elected pair per shard, with a separately
 proved timeout and replacement rule. Competing pairs are not the selected path.
 Each shard is provisioned with a large eligible population; initial and subsequent
@@ -37,7 +37,7 @@ is mandated or ruled out by this proposal.
 |---|---|
 | `include/determ/wire/block.h` | Does not exist. C99 `wire_block_header_t` in `include/determ/wire/parser.h` has a 212-byte codec. `consensus_block_header_t` in `include/determ/consensus/dda.h` has a separate 120-byte codec. Neither is production C99 block admission. They disagree on work width (u32 versus u64); choose one canonical format before extension. |
 | `src/crypto/vrf.c`, `vrf_elect_nodes()` | Do not exist. No C99 authenticated validator registry, frozen eligibility snapshot, seed rule or verifiable election is integrated. Hashing public seed bytes is deterministic sampling, not by itself a VRF protocol. |
-| `src/ledger/mempool.c` | Does not exist. C99 state is in `src/ledger/state.c`; the C++ mempool and chain are separate. Neither an arena allocation nor a transaction shard field establishes state isolation. |
+| `src/ledger/mempool.c` | Does not exist. The C99 `src/ledger/pending_transfer.c` now provides a bounded opt-in signed inbox with submit/list RPCs. It checks the existing transaction format and intra-shard routing, without ledger-state validation or production execution. C99 state is in `src/ledger/state.c`; the C++ mempool and chain are separate. |
 | Transaction shard identity | Existing C99 binary transaction/container codecs already use u32 shard identifiers in `include/determ/wire/binary_codec.h`. The prototype parser has another transaction shape. Define the authoritative format and signing coverage; do not append a conflicting u16 field blindly. |
 | PoSW fork choice | C99 `determ-node` performs a local pair computation only. Validated block ingestion, work accumulation, branch adoption and durable rollback are missing. Raw work-comparison helpers were removed because they did not implement these rules. |
 | Existing sharding | C++ beacon, shard and receipt paths exist, as does canonical account-to-shard modulus routing in `src/crypto/random.cpp`. A text search cannot establish that their structs or discriminators are unused. No deletion is authorized by this proposal. |

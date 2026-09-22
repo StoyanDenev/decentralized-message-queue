@@ -193,11 +193,13 @@ static int routing_id(routing_reader_t *r, char id[35]) {
     return 0;
 }
 
-static int routing_request(const char *json, size_t len, uint8_t key[32], char id[35]) {
+/* Closed envelopes shared by the routing query and opt-in pending inbox. The
+ * method-specific parser still owns its request bound and exact params grammar. */
+static int closed_request(const char *json, size_t len, const char *method,
+                          routing_reader_t *params, char id[35]) {
     routing_reader_t r = { json, len, 0 };
     unsigned seen = 0;
-    int invalid_params = 0;
-    if (len > RPC_ROUTING_MAX_REQUEST_LEN || routing_take(&r, '{') != 0) return -32600;
+    if (routing_take(&r, '{') != 0) return -32600;
     for (;;) {
         char name[8], value[RPC_MAX_METHOD_LEN];
         unsigned bit;
@@ -211,12 +213,13 @@ static int routing_request(const char *json, size_t len, uint8_t key[32], char i
         seen |= bit;
         if (bit == 1 || bit == 2) {
             if (routing_string(&r, value, sizeof(value)) != 0 ||
-                strcmp(value, bit == 1 ? "2.0" : "get_shard_for_pubkey") != 0) return -32600;
+                strcmp(value, bit == 1 ? "2.0" : method) != 0) return -32600;
         } else if (bit == 4) {
             size_t start = r.pos;
             if (routing_skip_value(&r, 0) != 0) return -32600;
-            routing_reader_t params = { json, r.pos, start };
-            invalid_params = routing_params(&params, key) != 0 || params.pos != params.len;
+            params->text = json;
+            params->pos = start;
+            params->len = r.pos;
         } else if (routing_id(&r, id) != 0) return -32600;
         routing_space(&r);
         if (r.pos < r.len && r.text[r.pos] == '}') { ++r.pos; break; }
@@ -224,7 +227,16 @@ static int routing_request(const char *json, size_t len, uint8_t key[32], char i
     }
     routing_space(&r);
     if (r.pos != r.len || (seen & 3) != 3) return -32600;
-    return (seen & 4) && !invalid_params ? 0 : -32602;
+    return seen & 4 ? 0 : -32602;
+}
+
+static int routing_request(const char *json, size_t len, uint8_t key[32], char id[35]) {
+    routing_reader_t params;
+    int error;
+    if (len > RPC_ROUTING_MAX_REQUEST_LEN) return -32600;
+    error = closed_request(json, len, "get_shard_for_pubkey", &params, id);
+    if (error) return error;
+    return routing_params(&params, key) == 0 && params.pos == params.len ? 0 : -32602;
 }
 
 static int routing_dispatch(const char *request, size_t len, const rpc_context_t *ctx,
@@ -251,6 +263,94 @@ static int routing_dispatch(const char *request, size_t len, const rpc_context_t
             address, (unsigned)shard, (unsigned)ctx->routing->shard_count, salt, id);
     }
     return written < 0 || (size_t)written >= cap ? -1 : written;
+}
+
+static int pending_params(routing_reader_t *r, int submit,
+                          uint8_t frame[PENDING_TRANSFER_FRAME_SIZE], uint32_t *shard) {
+    char name[9];
+    if (routing_take(r, '{') != 0 || routing_string(r, name, sizeof(name)) != 0 ||
+        strcmp(name, submit ? "frame" : "shard_id") != 0 || routing_take(r, ':') != 0) return -1;
+    if (submit) {
+        char hex[PENDING_TRANSFER_FRAME_SIZE * 2 + 1];
+        if (routing_string(r, hex, sizeof(hex)) != 0 || strlen(hex) != sizeof(hex) - 1) return -1;
+        for (size_t i = 0; i < PENDING_TRANSFER_FRAME_SIZE; ++i) {
+            int hi = routing_hex_value(hex[2 * i]), lo = routing_hex_value(hex[2 * i + 1]);
+            if (hi < 0 || lo < 0) return -1;
+            frame[i] = (uint8_t)((hi << 4) | lo);
+        }
+    } else {
+        uint32_t value = 0;
+        size_t start;
+        routing_space(r);
+        start = r->pos;
+        while (r->pos < r->len && r->text[r->pos] >= '0' && r->text[r->pos] <= '9') {
+            uint32_t digit = (uint32_t)(r->text[r->pos++] - '0');
+            if (value > (UINT32_MAX - digit) / 10) return -1;
+            value = value * 10 + digit;
+        }
+        if (r->pos == start || (r->pos - start > 1 && r->text[start] == '0')) return -1;
+        *shard = value;
+    }
+    return routing_take(r, '}') == 0 && r->pos == r->len ? 0 : -1;
+}
+
+static int pending_dispatch(const char *request, size_t len, const char *method,
+                            const rpc_context_t *ctx, char *out, size_t cap) {
+    routing_reader_t params;
+    uint8_t frame[PENDING_TRANSFER_FRAME_SIZE];
+    uint32_t shard = 0;
+    char id[35] = "null", genesis[65], salt[65], hash[65];
+    int submit = strcmp(method, "submit_pending_transfer") == 0;
+    int error = len > RPC_PENDING_MAX_REQUEST_LEN ? -32600 :
+                closed_request(request, len, method, &params, id);
+    if (!error && pending_params(&params, submit, frame, &shard) != 0) error = -32602;
+    if (error) return rpc_error_response(out, cap,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"Invalid pending request\"},\"id\":%s}\n",
+        error, error == -32602 ? id : "null");
+    if (!ctx || !ctx->pending) return rpc_error_response(out, cap,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32001,\"message\":\"Pending inbox disabled\"},\"id\":%s}\n", id);
+    const pending_transfer_pool_t *pool = ctx->pending;
+    bytes_to_hex(pool->genesis_hash, 32, genesis, sizeof(genesis));
+    bytes_to_hex(pool->routing.salt, 32, salt, sizeof(salt));
+    if (submit) {
+        pending_transfer_result_t result;
+        /* Longest successful response is 481 bytes plus NUL: 32-character ID,
+         * two 10-digit u32 fields, three 64-character hex strings and the
+         * nine-character status. Preflight BEFORE the only mutating call. */
+        if (cap < RPC_PENDING_SUBMIT_RESPONSE_LEN) return -1;
+        pending_transfer_status_t status = pending_transfer_submit(ctx->pending, frame, sizeof(frame), &result);
+        if (status < 0) return rpc_error_response(out, cap,
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32002,\"message\":\"Pending transfer rejected\",\"data\":%d},\"id\":%s}\n",
+            (int)status, id);
+        bytes_to_hex(result.hash, 32, hash, sizeof(hash));
+        return rpc_error_response(out, cap,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"scope\":\"pending-signature-and-routing\","
+            "\"state_validated\":false,\"config_source\":\"local\",\"genesis_hash\":\"%s\","
+            "\"routing_salt\":\"%s\",\"shard_count\":%u,\"status\":\"%s\",\"shard_id\":%u,"
+            "\"pending_count\":%u,\"hash\":\"%s\"},\"id\":%s}\n", genesis, salt,
+            (unsigned)pool->routing.shard_count,
+            status == PENDING_TRANSFER_INSERTED ? "inserted" : status == PENDING_TRANSFER_REPLACED ? "replaced" : "duplicate",
+            (unsigned)result.shard_id, (unsigned)result.pending_count, hash, id);
+    }
+    pending_transfer_snapshot_t snapshot;
+    if (pending_transfer_list(pool, shard, &snapshot) != 0) return rpc_error_response(out, cap,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid shard\"},\"id\":%s}\n", id);
+    int written = rpc_error_response(out, cap,
+        "{\"jsonrpc\":\"2.0\",\"result\":{\"scope\":\"pending-signature-and-routing\","
+        "\"state_validated\":false,\"config_source\":\"local\",\"genesis_hash\":\"%s\","
+        "\"routing_salt\":\"%s\",\"shard_count\":%u,\"shard_id\":%u,\"frames\":[",
+        genesis, salt, (unsigned)pool->routing.shard_count, (unsigned)shard);
+    if (written < 0) return -1;
+    size_t used = (size_t)written;
+    for (uint32_t i = 0; i < snapshot.count; ++i) {
+        char hex[PENDING_TRANSFER_FRAME_SIZE * 2 + 1];
+        bytes_to_hex(snapshot.frames[i], PENDING_TRANSFER_FRAME_SIZE, hex, sizeof(hex));
+        written = rpc_error_response(out + used, cap - used, "%s\"%s\"", i ? "," : "", hex);
+        if (written < 0) return -1;
+        used += (size_t)written;
+    }
+    written = rpc_error_response(out + used, cap - used, "]},\"id\":%s}\n", id);
+    return written < 0 ? -1 : (int)(used + (size_t)written);
 }
 
 /* Select from actual root key/value pairs. A string value such as id:"method"
@@ -310,6 +410,8 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
 
     if (strcmp(method, "get_shard_for_pubkey") == 0)
         return routing_dispatch(request_json, req_len, ctx, out_resp, max_resp);
+    if (strcmp(method, "submit_pending_transfer") == 0 || strcmp(method, "get_pending_transfers") == 0)
+        return pending_dispatch(request_json, req_len, method, ctx, out_resp, max_resp);
 
     const duel_state_machine_t *sm = ctx ? ctx->sm : NULL;
     const block_store_t *store = ctx ? ctx->store : NULL;

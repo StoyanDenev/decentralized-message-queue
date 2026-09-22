@@ -39,6 +39,8 @@ static k2_aggregator_t   g_agg;
 static k2_contributor_t  g_cont;
 static http_rpc_server_t g_rpc;
 static dda_tracker_t     g_dda;
+static pending_transfer_pool_t    g_pending;
+static pending_shard_t   g_pending_shards[PENDING_TRANSFER_MAX_SHARDS];
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -62,9 +64,10 @@ static void print_usage(const char *prog) {
     printf("  --domain <name>           Node domain advertisement (default: node.local)\n\n");
     printf("HTTP JSON-RPC Server:\n");
     printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n");
-    printf("  --routing-shards <S>      Query-only shard count, 1..4294967295 (default: 1)\n");
-    printf("  --routing-salt <hex64>    Query-only 32-byte salt (default: all zero)\n");
-    printf("                           Fixed at startup; not authenticated genesis configuration\n\n");
+    printf("  --routing-shards <S>      Local routing shard count, 1..4294967295 (default: 1)\n");
+    printf("  --routing-salt <hex64>    Local routing 32-byte salt (default: all zero)\n");
+    printf("  --pending-genesis <hex64> Enable bounded signed-transfer inbox for this chain identity\n");
+    printf("                           Fixed local settings; no genesis authentication or state validation\n\n");
     printf("Diagnostics & Calibration:\n");
     printf("  --benchmark               Measure this machine's AES evaluation rate\n");
     printf("  --version                 Print version and architectural info\n");
@@ -162,11 +165,13 @@ int main(int argc, char *argv[]) {
     const char *data_dir = NULL;
     const char *domain = "node.local";
     /* These match GenesisConfig field defaults, not an authenticated chain's
-     * configuration. They configure only the read-only routing RPC query. */
+     * configuration. They configure the routing query and optional inbox. */
     uint32_t routing_count = 1;
     uint8_t routing_salt[32] = {0};
     bool have_routing_count = false, have_routing_salt = false;
     shard_routing_config_t routing;
+    uint8_t pending_genesis[32] = {0};
+    bool have_pending_genesis = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--aggregator") == 0) {
@@ -193,6 +198,12 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             have_routing_salt = true;
+        } else if (strcmp(argv[i], "--pending-genesis") == 0) {
+            if (have_pending_genesis || i + 1 >= argc || routing_salt_arg(argv[++i], pending_genesis) != 0) {
+                fprintf(stderr, "--pending-genesis requires one 64-character hexadecimal chain identity\n");
+                return 1;
+            }
+            have_pending_genesis = true;
         } else if (strcmp(argv[i], "--peer") == 0 && i + 1 < argc) {
             peer_target = argv[++i];
         } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
@@ -215,7 +226,14 @@ int main(int argc, char *argv[]) {
     }
 
     if (shard_routing_init(&routing, routing_count, routing_salt) != 0) {
-        fprintf(stderr, "Invalid read-only routing configuration\n");
+        fprintf(stderr, "Invalid local routing configuration\n");
+        return 1;
+    }
+
+    if (have_pending_genesis && (rpc_port == 0 ||
+        pending_transfer_init(&g_pending, g_pending_shards, PENDING_TRANSFER_MAX_SHARDS,
+                          &routing, pending_genesis) != 0)) {
+        fprintf(stderr, "--pending-genesis requires an RPC port and valid local configuration\n");
         return 1;
     }
 
@@ -311,6 +329,7 @@ int main(int argc, char *argv[]) {
         rcfg.rpc_ctx.dda = &g_dda;
         rcfg.rpc_ctx.node_version = "v2.18-c99";
         rcfg.rpc_ctx.routing = &routing; /* main's lifetime exceeds all server use */
+        rcfg.rpc_ctx.pending = have_pending_genesis ? &g_pending : NULL;
 
         if (http_rpc_server_init(&g_rpc, &rcfg) != 0 || http_rpc_server_start(&g_rpc) != 0) {
             fprintf(stderr, "Error: Failed to start HTTP JSON-RPC server on port %u\n", rpc_port);

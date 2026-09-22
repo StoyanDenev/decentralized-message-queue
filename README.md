@@ -17,6 +17,15 @@ inputs with `--routing-shards` and `--routing-salt`; defaults are one shard and 
 zero salt. Responses identify these as local settings, not authenticated genesis
 or enforced transaction ownership. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
 
+An optional bounded inbox now accepts signed, intra-shard anonymous transfers via
+`submit_pending_transfer` and lists their canonical binary frames with
+`get_pending_transfers`. Enable it with `--pending-genesis <64 hex>` alongside
+`--rpc-port`; routing uses the same local count/salt. It checks signatures and
+context before retaining up to four transactions per occupied shard, eight shards
+per node. Responses say `state_validated:false`: balances, nonce readiness,
+execution, persistence and gossip are not implemented by this inbox. See the
+[pending contract](docs/proofs/ShardRoutingSoundness.md#c99-signed-pending-inbox-2026-09-22).
+
 `test-dsf-k2-recovery` separately tests finite sibling selection and state replay,
 including late smaller-header correction and descendant revalidation. Its fixed
 eligibility/receipt fixtures are model assumptions; it does not implement production

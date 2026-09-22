@@ -250,7 +250,7 @@ invalid configuration without modifying its destination.
 
 `determ-node` parses `--routing-shards` as a nonzero u32 decimal and
 `--routing-salt` as exactly 64 hexadecimal digits once, before starting services.
-Defaults are one shard and 32 zero bytes. These settings are **local query inputs**,
+Defaults are one shard and 32 zero bytes. These settings are **local inputs** to the query and optional inbox below,
 not an authenticated genesis or a new consensus configuration mechanism. RPC cannot
 change them. `get_shard_for_pubkey` takes exactly `params:{"pubkey":"<64 hex>"}`
 and returns the normalized address, shard ID, count, salt, `scope:"routing-query"`,
@@ -271,5 +271,95 @@ and ID correlation. The `determ-node` CI smoke starts actual local HTTP servers
 with default and configured inputs and checks their replies and immutable settings.
 Isolated mutations target the domain, salt, folding width, zero count, key length,
 request bounds/duplicates, error correlation and the node's routing-context wiring.
-This is a useful routing consumer; C99 signed transaction admission, ownership at
-apply, election and cross-shard execution remain unimplemented.
+This is a useful routing consumer. The signed pending inbox below is a separate
+receiver; ownership at apply, election and cross-shard execution remain unimplemented.
+
+
+## C99 signed pending inbox (2026-09-22)
+
+**Scope.** `pending_transfer_submit` and the node's opt-in
+`submit_pending_transfer` RPC retain signature- and routing-checked messages for
+local inspection. They do not check balances, nonce readiness, aggregate spending,
+fees, block eligibility or inclusion. The inbox has no persistence, gossip,
+expiration or drain-to-execution path. It is not a production mempool or a ledger
+acceptance rule. The event loop serializes access; separate buckets establish a
+storage boundary, not parallel execution or freedom from cross-shard locks.
+
+**Format and verification.** The supported subset is exactly the existing
+397-byte anonymous, payload-empty, PQ-empty TRANSFER frame. Both addresses are
+66-byte `0x` plus lowercase hex. The first and third 32-byte core slots hold ASCII
+address prefixes, as in C++ `Transaction::encode_frame`, despite the C99 codec's
+`sender_pubkey` / `recipient_pubkey` field names. Full decode/reencode equality
+rejects alternate padding/reserved bytes; exact length rejects optional trailers.
+Raw account keys are derived from the addresses. The verified 195-byte preimage is
+`type_u8 || genesis32 || shard_BE32 || from66 || 0 || to66 || 0 || amount_BE64 ||
+fee_BE64 || nonce_BE64`, matching C++ `Transaction::signing_bytes`. Its SHA-256 must
+equal the supplied hash exactly, including when that supplied hash is zero.
+Ed25519 verification and a separate sender small-order rejection are mandatory.
+
+The pool copies a nonzero u32 shard count, full salt and exact genesis identity at
+initialization. The sender's computed route must equal the transaction's signed
+shard ID; the destination route must be the same. Cross-shard transactions return
+unsupported here rather than inventing a settlement rule. Zero genesis is a literal
+identity, never a wildcard. These are local pinned inputs; no authenticated genesis
+loader or membership proof is inferred. Signatures cover chain and shard; the
+standalone ledger's different 88-byte preimage is not substituted for them.
+
+**State invariant and proof.** Initialization creates empty caller-owned buckets.
+Every insertion/replacement first validates the complete frame, hash, signature,
+sender key and context/routing against the copied configuration. Thus, by induction,
+every retained entry passed those checks under that same configuration. Authentication
+also precedes duplicate lookup, so a forged known hash cannot acknowledge or displace
+an incumbent. Entries own their complete frame; caller buffer reuse cannot change it.
+The caller keeps pool/configuration/buckets unmodified, supplies disjoint buffers
+and serializes access, as stated by the API contract.
+
+For a resident `(sender, nonce)`, a valid lower data hash replaces the entry; an
+equal hash leaves its existing signature bytes, and a greater hash refuses. This
+applies only to pending alternatives and does not rank blocks. The hash omits the
+signature; no signature uniqueness or identical-frame convergence is claimed.
+A lower-hash signed alternative can be stale or unaffordable and still displace an
+incumbent here. This inbox therefore does not yet implement the assembly/requeue
+rule among state-valid alternatives; any future execution consumer must revalidate
+and define recovery of discarded alternatives.
+The bucket is sorted by raw sender bytes and unsigned nonce. Different nonce slots
+are not asserted to be jointly executable. At most four entries occupy a bucket,
+and at most eight caller-supplied buckets exist, independently of configured S.
+Capacity rejects a new slot or shard before mutation; lower-hash replacement of a
+resident slot remains possible when full. Every negative return leaves the pool,
+buckets and result/snapshot output unchanged. This is bounded memory, not fair
+admission: unfunded signing keys can fill it. With a finite capacity, arrival order
+can determine which distinct slots/shards are retained.
+
+**Consumer.** `--pending-genesis <64 hex>` explicitly enables the inbox and requires
+an RPC port. Count/salt come from the existing startup routing flags. Without the
+flag both pending methods return disabled. Submit takes only
+`params:{"frame":"<794 hex>"}`; list takes only `params:{"shard_id":<u32>}` and
+returns up to four complete frame hex strings. Hex is a human-readable RPC view;
+owned transaction bytes and checked-in signed fixtures are canonical binary.
+Both methods use a closed 1024-byte envelope, with the routing query's bounded ID
+forms and duplicate/unknown-key rejection. Successful replies identify
+`scope:"pending-signature-and-routing"`, `config_source:"local"`,
+`state_validated:false` and the copied chain/routing configuration. Submit requires
+a 512-byte response capacity before calling the mutating function. The largest
+successful reply is 481 bytes plus NUL (32-character string ID, two maximum u32s,
+three 64-character hex strings, nine-character status); errors are shorter. Thus an
+insufficient output buffer cannot admit a transaction and then lose its response.
+List is read-only and refuses truncated output.
+
+The core adds no dynamic allocation. Ed25519 verification of this fixed 195-byte
+preimage uses the bounded automatic buffer documented in
+[K2_VDF_Soundness.md](K2_VDF_Soundness.md); generic longer-message crypto callers
+retain their existing allocation fallback. This does not claim an allocation-free
+runtime for arbitrary unrelated node features or C library internals.
+
+**Verification contract.** `test-pending-transfer` exercises the receiving library
+with independently signed binary fixtures, strict encoding/signing/context checks,
+small-order forgery, authenticated duplicate/conflict decisions, full-capacity
+replacement, sparse large shard counts, owned input lifetime and rejection neutrality.
+`test-rpc-pending-transfer` checks the actual dispatch grammar, configuration
+isolation, signature checks on duplicate submissions and output preflight. The node
+smoke submits and retrieves exact signed frames over HTTP with default/non-default
+configuration and verifies disabled-by-default behavior. Independent review and the
+fresh-build mutation results are recorded in the decision log; tests establish the
+stated code obligations, not missing ledger or consensus properties.

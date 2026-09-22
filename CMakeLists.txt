@@ -683,6 +683,13 @@ target_compile_features(test-shard-routing PRIVATE c_std_99)
 target_include_directories(test-shard-routing PRIVATE include)
 target_link_libraries(test-shard-routing PRIVATE determ-crypto-c99)
 
+add_executable(test-pending-transfer tests/test_pending_transfer.c
+  src/ledger/pending_transfer.c src/ledger/shard_routing.c src/wire/binary_codec.c)
+target_compile_features(test-pending-transfer PRIVATE c_std_99)
+target_include_directories(test-pending-transfer PRIVATE include)
+target_compile_definitions(test-pending-transfer PRIVATE DETERM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+target_link_libraries(test-pending-transfer PRIVATE determ-crypto-c99)
+
 add_executable(test-binary-codec tests/test_binary_codec.c src/wire/binary_codec.c)
 target_compile_features(test-binary-codec PRIVATE c_std_99)
 target_include_directories(test-binary-codec PRIVATE include src)
@@ -709,16 +716,18 @@ if(UNIX)
     src/storage/block_store.c
     src/ledger/state.c
     src/ledger/shard_routing.c
+    src/ledger/pending_transfer.c
   )
   target_compile_features(determ-c99-node-core PUBLIC c_std_99)
   target_compile_definitions(determ-c99-node-core PRIVATE _POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
   target_include_directories(determ-c99-node-core PUBLIC include src)
   target_link_libraries(determ-c99-node-core PUBLIC determ-crypto-c99)
-  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-dsso rpc-shard-routing)
+  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-dsso rpc-shard-routing rpc-pending-transfer)
     string(REPLACE "-" "_" c99_test_source "${c99_test}")
     add_executable(test-${c99_test} tests/test_${c99_test_source}.c)
     target_link_libraries(test-${c99_test} PRIVATE determ-c99-node-core)
   endforeach()
+  target_compile_definitions(test-rpc-pending-transfer PRIVATE DETERM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
   add_executable(determ-node src/determ_node.c)
   target_link_libraries(determ-node PRIVATE determ-c99-node-core)
 endif()

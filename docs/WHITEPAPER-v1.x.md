@@ -12,10 +12,12 @@
 > supersede the previous K=2 finality, zero-bias and unconditional-liveness claims.
 > Temporal sharding remains [proposed](decisions/ADR-005-Temporal-Sharding.md).
 
-The C99 foundation includes a read-only modulus-routing query and a bounded
+The C99 foundation includes a read-only modulus-routing query, an opt-in bounded
+inbox for signed intra-shard transfers, and a bounded
 [recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model). The query uses local
-configuration; the model assumes a finite candidate set and fixed eligibility and
-receipt facts. Neither establishes production shard execution or settlement.
+configuration; the inbox checks signatures/context/routing but not balances or
+nonce readiness. The model assumes a finite candidate set and fixed eligibility and
+receipt facts. These increments do not establish production shard execution or settlement.
 
 ## Abstract
 

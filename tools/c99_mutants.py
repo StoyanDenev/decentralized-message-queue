@@ -43,6 +43,20 @@ REJECT_CONFLICTING_ROOTS = """for(size_t i=0;i<n->record_count;i++) if(n->record
             }
     /* This model does not select between competing complete histories. */"""
 MUTANTS = [
+    ('pending-signature', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_verify(sender, signing, sizeof(signing), tx.sig) != 0)', 'if (0)'),
+    ('pending-small-order', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_point_has_small_order(sender) != 0)', 'if (0)'),
+    ('pending-genesis', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(tx.genesis_hash, pool->genesis_hash, 32) != 0)', 'if (0)'),
+    ('pending-source-route', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'tx.shard_id >= pool->routing.shard_count || tx.shard_id != source_shard', 'tx.shard_id >= pool->routing.shard_count'),
+    ('pending-destination-route', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'destination_shard != source_shard', '0'),
+    ('pending-data-hash', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(hash, tx.hash, sizeof(hash)) != 0) return PENDING_TRANSFER_ERR_HASH;', '/* mutant: trust advertised hash */'),
+    ('pending-canonical-frame', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'written != len || memcmp(canonical, frame, len) != 0', 'written != len'),
+    ('pending-core-prefix', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(tx.sender_pubkey, tx.from, 32) != 0 || memcmp(tx.recipient_pubkey, tx.to, 32) != 0)', 'if (0)'),
+    ('pending-conflict-preference', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'int order = memcmp(candidate.hash, incumbent->hash, sizeof(candidate.hash));', 'int order = -memcmp(candidate.hash, incumbent->hash, sizeof(candidate.hash));'),
+    ('pending-bucket-isolation', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'else if (at->shard_id == shard_id) { bucket = at; break; }', 'else { bucket = at; break; }'),
+    ('pending-owned-frame', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'memcpy(entry->frame, frame, len);', 'memcpy(entry->frame, frame, len - 64);'),
+    ('pending-rpc-output-preflight', 'test-rpc-pending-transfer', 'src/rpc/json_rpc.c', 'if (cap < RPC_PENDING_SUBMIT_RESPONSE_LEN) return -1;', '/* mutant: mutate before discovering short response buffer */'),
+    ('pending-rpc-request-bound', 'test-rpc-pending-transfer', 'src/rpc/json_rpc.c', 'len > RPC_PENDING_MAX_REQUEST_LEN', 'len > RPC_PENDING_MAX_REQUEST_LEN + 1'),
+    ('pending-node-context', 'determ-node', 'src/determ_node.c', 'rcfg.rpc_ctx.pending = have_pending_genesis ? &g_pending : NULL;', 'rcfg.rpc_ctx.pending = NULL;'),
     ("ed25519-sign-small-heap", "test-ed25519-bounded", "src/crypto/ed25519/ed25519.c",
      "buf = msglen <= sizeof sign_buf - 64u ? sign_buf : (u8 *)malloc(64 + msglen);",
      "buf = (u8 *)malloc(64 + msglen);"),
@@ -114,7 +128,7 @@ MUTANTS = [
     ("routing-rpc-request-bound", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
      "len > RPC_ROUTING_MAX_REQUEST_LEN", "len > RPC_ROUTING_MAX_REQUEST_LEN + 1"),
     ("routing-rpc-error-id", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
-     'error == -32602 ? id : "null"', '"null"'),
+     '\n            error == -32602 ? id : "null"', '\n            "null"'),
     ("routing-node-context", "determ-node", "src/determ_node.c",
      "rcfg.rpc_ctx.routing = &routing;", "rcfg.rpc_ctx.routing = NULL;"),
     ("ledger-fee-wrap", "test-triple-entry-ledger", "src/ledger/state.c",
@@ -214,7 +228,7 @@ def main():
     if sys.platform in ("win32", "cygwin", "msys"):
         cases = [case for case in MUTANTS if case[1] not in
                  ("determ-node", "test-k2-net-rpc", "test-rpc-shard-routing",
-                  "test-triple-entry-ledger")]
+                  "test-triple-entry-ledger", "test-rpc-pending-transfer")]
         for case in MUTANTS:
             if case not in cases:
                 print("PLATFORM-SKIP(mutant): " + case[0] + " (POSIX prototype)", flush=True)

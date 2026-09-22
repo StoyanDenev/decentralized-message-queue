@@ -22,7 +22,7 @@ def rpc_query(port, request):
         connection.close()
 
 
-def check_live_routing(binary, arguments, salt, count, key, expected):
+def check_live_routing(binary, arguments, salt, count, key, expected, pending_fixture=None):
     # Reserve a kernel-selected port. The close/start gap can lose a race; retry
     # only a reported listener startup failure, never a query assertion failure.
     for attempt in range(3):
@@ -67,6 +67,40 @@ def check_live_routing(binary, arguments, salt, count, key, expected):
                 raise AssertionError("routing accepted per-request configuration")
             if rpc_query(port, request) != expected_reply:
                 raise AssertionError("routing configuration changed after request")
+            pending_list = {"jsonrpc": "2.0", "method": "get_pending_transfers",
+                            "params": {"shard_id": expected}, "id": "pending-list"}
+            pending = rpc_query(port, pending_list)
+            if pending_fixture is None:
+                if pending.get("error", {}).get("code") != -32001:
+                    raise AssertionError("pending inbox must be disabled by default")
+            else:
+                data = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / pending_fixture).read_bytes()
+                if len(data) != 397:
+                    raise AssertionError("invalid pending test fixture")
+                genesis = data[361:393].hex()
+                metadata = {"scope": "pending-signature-and-routing", "state_validated": False,
+                            "config_source": "local", "genesis_hash": genesis,
+                            "routing_salt": salt, "shard_count": count, "shard_id": expected}
+                if pending != {"jsonrpc": "2.0", "id": "pending-list", "result": dict(metadata, frames=[])}:
+                    raise AssertionError("pending initial configuration mismatch: " + repr(pending))
+                submit = {"jsonrpc": "2.0", "method": "submit_pending_transfer",
+                          "params": {"frame": data.hex()}, "id": "method"}
+                for status in ("inserted", "duplicate"):
+                    admitted = rpc_query(port, submit)
+                    if admitted != {"jsonrpc": "2.0", "id": "method", "result": dict(
+                            metadata, status=status, pending_count=1, hash=data[329:361].hex())}:
+                        raise AssertionError("pending submit mismatch: " + repr(admitted))
+                # Signed bytes remain canonical through actual HTTP receive/store/list.
+                expected_list = {"jsonrpc": "2.0", "id": "pending-list", "result": dict(metadata, frames=[data.hex()])}
+                if rpc_query(port, pending_list) != expected_list:
+                    raise AssertionError("pending frame/configuration not retained")
+                altered = bytearray(data); altered[265] ^= 1
+                submit["params"]["frame"] = altered.hex()
+                invalid_sig = rpc_query(port, submit)
+                if invalid_sig.get("error", {}).get("code") != -32002:
+                    raise AssertionError("pending accepted forged duplicate")
+                if rpc_query(port, pending_list) != expected_list:
+                    raise AssertionError("pending rejection changed stored bytes")
             return
         finally:
             if process.poll() is None:
@@ -99,6 +133,8 @@ def main():
         for flag, values in (
             ("--routing-shards", [[], ["0"], ["-1"], ["+1"], ["4294967296"],
                                   ["1x"], [" 1"], [""], ["7", "--routing-shards", "3"]]),
+            ("--pending-genesis", [[], ["0" * 63], ["0" * 65], ["g" * 64],
+                                   ["0" * 64, "--pending-genesis", "f" * 64]]),
             ("--routing-salt", [[], ["0" * 63], ["0" * 65], ["g" * 64],
                                 ["0" * 64, "--routing-salt", "f" * 64]]),
         ):
@@ -107,12 +143,23 @@ def main():
                                         text=True, timeout=5)
                 if result.returncode != 1 or flag + " requires one" not in result.stderr:
                     raise AssertionError("invalid routing flag was not rejected: " + repr([flag] + value))
+        no_port = subprocess.run([binary, "--pending-genesis", "0" * 64],
+                                 capture_output=True, text=True, timeout=5)
+        if no_port.returncode != 1 or "requires an RPC port" not in no_port.stderr:
+            raise AssertionError("pending inbox without RPC port was not rejected")
         check_live_routing(binary, [], "0" * 64, 1, "0" * 64, 0)
         ramp_salt = bytes(range(32)).hex()
         check_live_routing(binary, ["--routing-shards", "7", "--routing-salt", ramp_salt],
                            ramp_salt, 7, "0" * 64, 5)
         check_live_routing(binary, ["--routing-shards", "4294967295", "--routing-salt", "F" * 64],
                            "f" * 64, 4294967295, "F" * 64, 1711102701)
+        check_live_routing(binary, ["--pending-genesis", "0" * 64], "0" * 64, 1,
+                           "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c", 0,
+                           "pending_transfer_default.bin")
+        check_live_routing(binary, ["--routing-shards", "7", "--routing-salt", ramp_salt,
+                                   "--pending-genesis", ramp_salt], ramp_salt, 7,
+                           "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c", 6,
+                           "pending_transfer_routed.bin")
     except subprocess.TimeoutExpired:
         print("FAIL(timeout): determ-node CLI", file=sys.stderr)
         return 124
@@ -125,7 +172,7 @@ def main():
     except AssertionError as error:
         print("FAIL: " + str(error), file=sys.stderr)
         return 1
-    print("PASS: node help, duel persistence refusals, routing flags and live configured RPC")
+    print("PASS: node help, duel persistence refusals, routing/pending flags and live configured RPC")
     return 0
 
 

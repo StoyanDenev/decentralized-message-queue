@@ -6238,3 +6238,51 @@ snapshot. The ordinary `ci_local.sh --jobs 4` freshly builds shared C++ consumer
 and passes 333 FAST wrappers, zero platform skips, and all 16 documentation guards
 on Darwin arm64. No Linux/Windows runtime result is claimed. The crypto prerequisite
 is kept separate from the subsequent signed-pending-inbox increment.
+
+## 2026-09-22 — Signed intra-shard pending inbox
+
+**Implemented increment.** The C99 node has an opt-in bounded pending inbox with
+`submit_pending_transfer` and `get_pending_transfers`. `--pending-genesis` pins an
+exact local chain identity; the existing startup count/salt configure routing.
+The inbox accepts the existing 397-byte canonical anonymous payload/PQ-empty
+TRANSFER subset and verifies the exact 195-byte C++ signing preimage, advertised
+hash, signature, sender non-small-order check, chain identity and source/destination
+routing before any duplicate/conflict/capacity decision. ASCII address-prefix core
+slots are preserved; no incompatible transaction format or extra shard field is
+introduced. Full owned frames occupy at most eight sparse shard buckets, four slots
+each, independently of configured S. No new heap allocation is introduced.
+
+**Meaning and limits.** Successful replies explicitly say `state_validated:false`
+and `config_source:local`. This is local inspection storage, with no balance/nonce
+readiness, combined-spend validation, persistence, gossip or block-assembly consumer.
+Cross-shard transfers are refused. Same-sender/nonce pending alternatives prefer
+the smaller recomputed data hash, but a signed stale or unaffordable alternative
+can displace an incumbent here. The owner's assembly/requeue rule among state-valid
+alternatives therefore still requires a state-validating consumer. Block ranking
+is unchanged. Finite bounds do not prove fair admission or DoS resistance; arbitrary
+signing keys can occupy slots. Neither bucket separation nor this single-threaded
+RPC loop claims parallel shard execution.
+
+**Receiver and proof boundary.** Every retained entry passed complete authentication
+under the copied configuration; induction over insert/replace preserves that
+invariant. No rejection mutates caller storage or output objects. RPC validates its
+closed bounded envelope, obtains metadata from the pool's copied configuration and
+preflights a 512-byte response capacity before mutation (maximum success is 481
+bytes plus NUL). The contract and limits extend `ShardRoutingSoundness.md`, and the
+README, protocol, whitepaper, security ledger and proposed ADR-005 track that scope.
+
+**Review and verification.** Independent adversarial design and final-diff review
+found no remaining actionable finding within this increment. Review strengthened
+two masked test cases: wrong-shard admission is tested against an empty queue, and
+RPC output failure uses a genuinely too-small buffer before first admission.
+Independently signed binary fixtures pin the shipped transaction format.
+`ci_local --c99 --jobs 4` passes all 22 targets; live HTTP submits and retrieves
+exact signed frames under default and non-default configuration. A final focused
+node run also checks that opt-in without an RPC port refuses startup. The complete
+mutation run rejects 71/71 isolated mutants after fresh successful builds, including
+14 pending-library/RPC/node cases. An earlier run stopped at an ambiguous existing
+routing mutation anchor after the parser refactor; that infrastructure stop was not
+counted, the anchor was narrowed, and the full suite was rerun. Documentation guards
+pass 16/16; the strict C99 Makefile build passes. Runtime evidence is Darwin arm64;
+shared C++ validation is recorded in the preceding prerequisite entry. This is a
+mergeable experimental foundation, not completed production sharding or settlement.

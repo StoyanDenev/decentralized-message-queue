@@ -9,7 +9,10 @@
 
 The separate C99 node now exposes a local `get_shard_for_pubkey` routing query
 matching §7.2 for canonical anonymous addresses. Its startup count/salt are not
-genesis-authenticated and it performs no transaction admission. The bounded
+genesis-authenticated. Its opt-in `submit_pending_transfer` inbox additionally
+checks the existing anonymous TRANSFER signature/context and intra-shard routing,
+without checking balances or nonce readiness. See the separately scoped
+[pending contract](proofs/ShardRoutingSoundness.md#c99-signed-pending-inbox-2026-09-22). The bounded
 [C99 recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model) is a test target,
 not a replacement for this specification's chain rules.
 

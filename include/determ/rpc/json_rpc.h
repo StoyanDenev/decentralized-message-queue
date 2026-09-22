@@ -17,6 +17,7 @@
 #include <determ/storage/block_store.h>
 #include <determ/net/peer_mesh.h>
 #include <determ/ledger/shard_routing.h>
+#include <determ/ledger/pending_transfer.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -29,6 +30,8 @@ extern "C" {
 #define RPC_MAX_METHOD_LEN 64
 #define RPC_MAX_RESPONSE_LEN 8192
 #define RPC_ROUTING_MAX_REQUEST_LEN 512
+#define RPC_PENDING_MAX_REQUEST_LEN 1024
+#define RPC_PENDING_SUBMIT_RESPONSE_LEN 512
 
 /*
  * Unified node RPC dispatch context
@@ -41,6 +44,8 @@ typedef struct {
     const char                 *node_version;
     /* Immutable for the server lifetime; absent means routing unavailable. */
     const shard_routing_config_t *routing;
+    /* Optional local inbox; the event loop serializes submit/list access. */
+    pending_transfer_pool_t *pending;
 } rpc_context_t;
 
 /*
@@ -49,6 +54,9 @@ typedef struct {
  * get_shard_for_pubkey is a read-only mapping query, not transaction admission.
  * Its request is bounded to RPC_ROUTING_MAX_REQUEST_LEN bytes and accepts only
  * jsonrpc="2.0", method, params={"pubkey":64 hex chars}, and an optional id.
+ * Opt-in submit_pending_transfer/get_pending_transfers use the same envelope
+ * with a 1024-byte bound. Submit requires at least 512 response bytes BEFORE any
+ * mutation; smaller buffers return -1 without admitting a transaction.
  * ID forms: null, JSON integer (<=20 characters), or unescaped printable ASCII
  * string (<=32 characters). Other keys, escapes and duplicate keys are rejected.
  */
