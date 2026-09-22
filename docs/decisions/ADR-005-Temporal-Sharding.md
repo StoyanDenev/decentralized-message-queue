@@ -140,9 +140,10 @@ existing modulus formula. The read-only `get_shard_for_pubkey` RPC uses local
 `config_source: "local"`, `consensus_enforced: false`. It does not authenticate a
 genesis configuration, assign producers, admit transactions or execute a shard.
 
-The C99 path still needs ownership enforcement at transaction admission and state
-application, including account nonces and the effects of transactions involving
-other shards.
+The opt-in C99 pending inbox enforces source/destination routing under its copied
+local configuration and refuses cross-shard transfers. Production admission and
+state application still need ownership enforcement against authenticated chain
+state, including account nonces and effects involving other shards.
 A client-requested target shard must match derived ownership. Splitting queues into
 arenas alone does not enforce these checks.
 Specify hard limits, admission/backpressure, per-shard arena ownership and reclamation,
