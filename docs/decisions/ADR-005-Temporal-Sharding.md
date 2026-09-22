@@ -165,6 +165,13 @@ discussion, not shipped C99 consensus behavior or a completed convergence proof:
   Define precisely how these rules compose with ADR-004's intended validated-work
   ordering, transaction dependencies and comparison of complete histories before
   implementing the comparator. A header value is not interchangeable with its hash.
+- The owner explicitly adopts the same-body case: among valid competing blocks at
+  the same height with an identical message body, prefer the smaller header interpreted
+  as a number. A node that received only the larger-header candidate may temporarily
+  follow it; later receipt of the preferred candidate triggers local history correction
+  and revalidation of affected descendants. This tie-break is decided. Its canonical
+  header representation and the recovery transitions still need implementation and
+  verification; no additional tie-break is required for this case.
 - Senders attach their known-history hash to messages so differing views can be
   discovered and reconciled through gossip coordinated by co-creators. A difference
   may indicate lag as well as competing histories; retrieve and validate the relevant
@@ -217,6 +224,11 @@ availability assumptions. Include two conflicting candidates from the same elect
 pair, different local receipt schedules, shared versus one-sided message receipt,
 the stated message/header selection cases, and a transaction whose validity depends
 on the initially selected history. Witness a temporary split and a local correction.
+Include the adopted same-height, identical-body case with different header values:
+deliver the larger-header candidate first to one node, then the preferred candidate,
+and verify selection and correction of any affected descendants. Every candidate
+and descendant used by the scenario must satisfy the model's admission and producer
+eligibility rules; do not assume an isolated branch may advance without checking them.
 Then heal the partition, deliver/retransmit the missing eligible data and drive
 recovery to a specified quiescent observation point. The harness controls delivery;
 it must not tell nodes which history wins or copy one node's state into another.

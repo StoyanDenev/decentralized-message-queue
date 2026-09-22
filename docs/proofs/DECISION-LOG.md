@@ -5952,3 +5952,31 @@ are recorded below after completion.
 record keeps sender verification noninteractive, treats public derivation evidence
 as a requirement awaiting a concrete construction, and introduces neither sender
 voting nor private-key disclosure. No binaries or new simulations were built or run.
+
+## 2026-09-22 — Same-body numeric-header preference and local correction
+
+**Owner decision:** "if the message body is the same then the block with the
+smaller(as big number) header is the preffered one." The owner explicitly adopts
+the clarification: same height and identical message body imply preference for
+the smaller numeric header among valid competing blocks; a node receiving it later
+corrects its local history and revalidates affected descendants. This is the header
+itself represented as a number, not a substitution of its hash. The other recorded
+message-selection rules remain in place.
+
+ADR-005 now states this case explicitly and includes it in the proposed DSF recovery
+scenario. A temporary difference before both candidates have been delivered is
+permitted. The assistant's earlier two-block branch illustration did not establish
+reachability under the intended producer-eligibility rules and is not a counterexample
+to the adopted same-body tie-break. A simulation must validate the eligibility of
+its candidates and descendants rather than assuming either branch can advance.
+
+**Scope.** This decides the preference and recovery requirement for this case. It
+does not claim that a canonical header encoding, complete history comparator,
+production recovery path or new DSF scenario has shipped. ADR-005 remains future-tier
+and PROPOSED. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues in the
+recorded preference, later correction requirement or DSF eligibility constraints.
+This documentation-only increment built no binaries and ran no new simulations.
