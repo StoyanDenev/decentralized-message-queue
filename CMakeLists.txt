@@ -90,7 +90,7 @@ target_compile_definitions(determ_core_dsf PUBLIC DETERM_DSF_ENABLED)
 # Target Platform Link Libraries
 set(EXTRA_LIBS "")
 if(WIN32)
-    list(APPEND EXTRA_LIBS ws2_32)
+    list(APPEND EXTRA_LIBS ws2_32 bcrypt)
 elseif(UNIX AND NOT APPLE)
     list(APPEND EXTRA_LIBS rt pthread)
 endif()
